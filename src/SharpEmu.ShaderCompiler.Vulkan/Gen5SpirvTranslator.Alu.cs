@@ -2603,7 +2603,6 @@ public static partial class Gen5SpirvTranslator
                     {
                         immediate = instruction.Words[0] & 0xFFFF;
                     }
-
                     return TryEmitScalarCompareK(instruction, destination, immediate, out error);
                 }
 
