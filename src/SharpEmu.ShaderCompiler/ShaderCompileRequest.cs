@@ -89,6 +89,7 @@ public sealed class ShaderCompileRequest
         Bindings = bindings;
         UserDataBase = plan.UserDataBase;
         UserDataCount = plan.UserDataCount;
+        ExcludedUserDataRegisters = plan.Graph.ExcludedUserDataRegisters;
         UsesFlattenedTable = RequiresFlattenedTable(plan, resources);
         UsesGlobalDataShare = BindingLayout.UsesGlobalDataShare(Program);
         ReadsShaderBase = BindingLayout.ReadsShaderBase(Program);
@@ -145,6 +146,7 @@ public sealed class ShaderCompileRequest
     public BindingLayout Bindings { get; }
     public uint UserDataBase { get; }
     public uint UserDataCount { get; }
+    public ulong ExcludedUserDataRegisters { get; }
     public bool UsesFlattenedTable { get; }
     public bool UsesGlobalDataShare { get; }
     public bool ReadsShaderBase { get; }
