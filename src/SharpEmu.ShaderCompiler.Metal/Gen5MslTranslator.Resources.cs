@@ -1255,7 +1255,7 @@ public static partial class Gen5MslTranslator
             }
 
             var classElements = imageClass.Resources.ToList();
-            var element = classElements.IndexOf((uint)resourceIndex);
+            var element = classElements.IndexOf(info.GetCanonicalImageBinding((uint)resourceIndex));
             if (element < 0)
             {
                 return false;
@@ -1360,7 +1360,7 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
-            var element = imageClass.Resources.ToList().IndexOf((uint)resourceIndex);
+            var element = imageClass.Resources.ToList().IndexOf(info.GetCanonicalImageBinding((uint)resourceIndex));
             if (element < 0)
             {
                 error = $"image {resourceIndex} is not an element of {bindingKind.Value}";
@@ -1406,7 +1406,9 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
-                samplerName = Temp("sampler", $"{ResourcesName}.samplers[{samplerIndex}]");
+                var samplerElement = request.Bindings.Find(DescriptorBindingKind.Samplers)!.Resources.ToList()
+                    .IndexOf(info.SamplerBinding(samplerIndex));
+                samplerName = Temp("sampler", $"{ResourcesName}.samplers[{samplerElement}]");
             }
 
             dstSelect = imageInfo.ShaderSwizzle;
