@@ -127,6 +127,7 @@ public sealed class ShaderCodeCapture
 
 public sealed class ComputePrewarmRecord
 {
+    public ulong ContinuationAddressOffset { get; init; }
     public required ulong Hash { get; init; }
     public required uint CodeSize { get; init; }
     public required ulong Address { get; init; }
@@ -137,7 +138,8 @@ public sealed class ComputePrewarmRecord
     public Gen5ComputeSystemRegisters? SystemRegisters { get; init; }
     public required ResourceSpecialization Specialization { get; init; }
 
-    public (ulong Hash, uint CodeSize, ulong Address) CodeKey => (Hash, CodeSize, Address);
+    public (ulong Hash, uint CodeSize, ulong Address, ulong ContinuationAddressOffset) CodeKey =>
+        (Hash, CodeSize, Address, ContinuationAddressOffset);
 }
 
 public sealed class ShaderPrewarmList : IDisposable

@@ -637,10 +637,12 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         // Register before sampler/shader-data/binding/pipeline preparation can
         // fail. Submitted work retains a separate lease before scope disposal.
         preparation.OwnTextureSources(prepared.Textures);
-        var samplers = new GuestSampler[info.Samplers.Count];
+        var samplerResources = program.Bindings!.Find(DescriptorBindingKind.Samplers)?.Resources ?? [];
+        var samplers = new GuestSampler[samplerResources.Count];
         for (var index = 0; index < samplers.Length; index++)
         {
-            samplers[index] = ResolveSampler(info.Samplers[index], snapshot.Samplers[index], program, index);
+            var resource = (int)samplerResources[index];
+            samplers[index] = ResolveSampler(info.Samplers[resource], snapshot.Samplers[resource], program, resource);
         }
 
         prepared.Samplers = samplers;
