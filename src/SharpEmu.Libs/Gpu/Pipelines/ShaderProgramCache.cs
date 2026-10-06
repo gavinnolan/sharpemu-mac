@@ -365,6 +365,13 @@ internal sealed class ShaderProgramCache
                 break;
             case ShaderStage.Pixel:
                 StageStaticKey.Build(options.PixelInfo ?? throw new ArgumentException("The pixel lookup has no pixel input info."), _staticState);
+                foreach (var output in options.PixelOutputs)
+                {
+                    _staticState.Add(output.GuestSlot);
+                    _staticState.Add(output.HostLocation);
+                    _staticState.Add(output.ExportTarget);
+                    _staticState.Add(output.BlendSourceIndex);
+                }
                 break;
             default:
                 StageStaticKey.Build(options.ComputeInfo ?? throw new ArgumentException("The compute lookup has no compute input info."), _staticState);
