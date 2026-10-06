@@ -118,7 +118,8 @@ public static partial class Gen5MslTranslator
             for (var other = index + 1; other < outputs.Count; other++)
             {
                 if (outputs[other].GuestSlot == outputs[index].GuestSlot ||
-                    outputs[other].HostLocation == outputs[index].HostLocation)
+                    (outputs[other].HostLocation == outputs[index].HostLocation &&
+                     outputs[other].BlendSourceIndex == outputs[index].BlendSourceIndex))
                 {
                     error = "pixel output guest slots and host locations must be unique";
                     return false;
