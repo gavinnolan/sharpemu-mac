@@ -1,16 +1,16 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
-using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
 
-public readonly record struct StencilOperations(StencilOp FailOperation, StencilOp PassOperation, StencilOp DepthFailOperation, CompareOp Compare)
+public readonly record struct StencilOperations(GpuStencilOp FailOperation, GpuStencilOp PassOperation, GpuStencilOp DepthFailOperation, GpuCompareOp Compare)
 {
-    public static StencilOperations Default { get; } = new(StencilOp.Keep, StencilOp.Keep, StencilOp.Keep, CompareOp.Never);
+    public static StencilOperations Default { get; } = new(GpuStencilOp.Keep, GpuStencilOp.Keep, GpuStencilOp.Keep, GpuCompareOp.Never);
 }
 
 public readonly record struct StencilMasks(uint CompareMask, uint WriteMask, uint Reference);
@@ -21,7 +21,7 @@ public readonly record struct DepthStencilState(
     float DepthClearValue,
     bool DepthTestEnabled,
     bool DepthWriteEnabled,
-    CompareOp DepthCompare,
+    GpuCompareOp DepthCompare,
     bool DepthBoundsTestEnabled,
     float DepthMinBounds,
     float DepthMaxBounds,
@@ -34,77 +34,77 @@ public readonly record struct DepthStencilState(
     StencilMasks BackMasks)
 {
     // The aspects the draw can write; a clear counts, a test without a possible write does not.
-    public ImageAspectFlags AttachmentWriteAspects(Format format)
+    public GpuImageAspect AttachmentWriteAspects(GpuFormat format)
     {
-        if (format == Format.Undefined)
+        if (format == GpuFormat.Undefined)
         {
-            return ImageAspectFlags.None;
+            return GpuImageAspect.None;
         }
 
         var available = ViewFormatRules.DepthAspects(format);
-        var writes = ImageAspectFlags.None;
-        if ((available & ImageAspectFlags.DepthBit) != 0 && (DepthClearEnabled || (DepthTestEnabled && DepthWriteEnabled)))
+        var writes = GpuImageAspect.None;
+        if ((available & GpuImageAspect.DepthBit) != 0 && (DepthClearEnabled || (DepthTestEnabled && DepthWriteEnabled)))
         {
-            writes |= ImageAspectFlags.DepthBit;
+            writes |= GpuImageAspect.DepthBit;
         }
 
-        if ((available & ImageAspectFlags.StencilBit) == 0)
+        if ((available & GpuImageAspect.StencilBit) == 0)
         {
             return writes;
         }
 
         if (StencilClearEnabled || (StencilTestEnabled && (FaceWrites(FrontOperations, FrontMasks) || FaceWrites(BackOperations, BackMasks))))
         {
-            writes |= ImageAspectFlags.StencilBit;
+            writes |= GpuImageAspect.StencilBit;
         }
 
         return writes;
     }
 
-    public bool IsReadOnly(Format format) => AttachmentWriteAspects(format) == ImageAspectFlags.None;
+    public bool IsReadOnly(GpuFormat format) => AttachmentWriteAspects(format) == GpuImageAspect.None;
 
     // The layout for an attachment the draw does not also sample: writable in every aspect the
     // format has, so draws that toggle depth or stencil writes keep one layout (and one rendering
     // scope). Only a sampled attachment needs the read-only layouts of AttachmentLayout.
-    public static ImageLayout WritableAttachmentLayout(Format format)
+    public static GpuImageLayout WritableAttachmentLayout(GpuFormat format)
     {
         var available = ViewFormatRules.DepthAspects(format);
-        var hasDepth = (available & ImageAspectFlags.DepthBit) != 0;
-        var hasStencil = (available & ImageAspectFlags.StencilBit) != 0;
-        return hasDepth && hasStencil ? ImageLayout.DepthStencilAttachmentOptimal
-            : hasStencil ? ImageLayout.StencilAttachmentOptimal
-            : ImageLayout.DepthAttachmentOptimal;
+        var hasDepth = (available & GpuImageAspect.DepthBit) != 0;
+        var hasStencil = (available & GpuImageAspect.StencilBit) != 0;
+        return hasDepth && hasStencil ? GpuImageLayout.DepthStencilAttachmentOptimal
+            : hasStencil ? GpuImageLayout.StencilAttachmentOptimal
+            : GpuImageLayout.DepthAttachmentOptimal;
     }
 
-    public ImageLayout AttachmentLayout(Format format)
+    public GpuImageLayout AttachmentLayout(GpuFormat format)
     {
         var available = ViewFormatRules.DepthAspects(format);
         var writes = AttachmentWriteAspects(format);
-        var hasDepth = (available & ImageAspectFlags.DepthBit) != 0;
-        var hasStencil = (available & ImageAspectFlags.StencilBit) != 0;
-        var depthWrite = (writes & ImageAspectFlags.DepthBit) != 0;
-        var stencilWrite = (writes & ImageAspectFlags.StencilBit) != 0;
+        var hasDepth = (available & GpuImageAspect.DepthBit) != 0;
+        var hasStencil = (available & GpuImageAspect.StencilBit) != 0;
+        var depthWrite = (writes & GpuImageAspect.DepthBit) != 0;
+        var stencilWrite = (writes & GpuImageAspect.StencilBit) != 0;
         if (!hasStencil)
         {
-            return depthWrite ? ImageLayout.DepthAttachmentOptimal : ImageLayout.DepthReadOnlyOptimal;
+            return depthWrite ? GpuImageLayout.DepthAttachmentOptimal : GpuImageLayout.DepthReadOnlyOptimal;
         }
 
         if (!hasDepth)
         {
-            return stencilWrite ? ImageLayout.StencilAttachmentOptimal : ImageLayout.StencilReadOnlyOptimal;
+            return stencilWrite ? GpuImageLayout.StencilAttachmentOptimal : GpuImageLayout.StencilReadOnlyOptimal;
         }
 
         if (depthWrite && stencilWrite)
         {
-            return ImageLayout.DepthStencilAttachmentOptimal;
+            return GpuImageLayout.DepthStencilAttachmentOptimal;
         }
 
         if (depthWrite)
         {
-            return ImageLayout.DepthAttachmentStencilReadOnlyOptimal;
+            return GpuImageLayout.DepthAttachmentStencilReadOnlyOptimal;
         }
 
-        return stencilWrite ? ImageLayout.DepthReadOnlyStencilAttachmentOptimal : ImageLayout.DepthStencilReadOnlyOptimal;
+        return stencilWrite ? GpuImageLayout.DepthReadOnlyStencilAttachmentOptimal : GpuImageLayout.DepthStencilReadOnlyOptimal;
     }
 
     private bool FaceWrites(in StencilOperations operations, in StencilMasks masks)
@@ -114,34 +114,34 @@ public readonly record struct DepthStencilState(
             return false;
         }
 
-        var canPass = operations.Compare != CompareOp.Never;
-        var canFail = operations.Compare != CompareOp.Always;
+        var canPass = operations.Compare != GpuCompareOp.Never;
+        var canFail = operations.Compare != GpuCompareOp.Always;
         if (masks.CompareMask == 0)
         {
             switch (operations.Compare)
             {
-                case CompareOp.Equal:
-                case CompareOp.LessOrEqual:
-                case CompareOp.GreaterOrEqual:
-                case CompareOp.Always:
+                case GpuCompareOp.Equal:
+                case GpuCompareOp.LessOrEqual:
+                case GpuCompareOp.GreaterOrEqual:
+                case GpuCompareOp.Always:
                     canPass = true;
                     canFail = false;
                     break;
-                case CompareOp.Never:
-                case CompareOp.Less:
-                case CompareOp.Greater:
-                case CompareOp.NotEqual:
+                case GpuCompareOp.Never:
+                case GpuCompareOp.Less:
+                case GpuCompareOp.Greater:
+                case GpuCompareOp.NotEqual:
                     canPass = false;
                     canFail = true;
                     break;
             }
         }
 
-        var depthPass = !DepthTestEnabled || DepthCompare != CompareOp.Never;
-        var depthFail = DepthTestEnabled && DepthCompare != CompareOp.Always;
-        return (canFail && operations.FailOperation != StencilOp.Keep) ||
-               (canPass && depthPass && operations.PassOperation != StencilOp.Keep) ||
-               (canPass && depthFail && operations.DepthFailOperation != StencilOp.Keep);
+        var depthPass = !DepthTestEnabled || DepthCompare != GpuCompareOp.Never;
+        var depthFail = DepthTestEnabled && DepthCompare != GpuCompareOp.Always;
+        return (canFail && operations.FailOperation != GpuStencilOp.Keep) ||
+               (canPass && depthPass && operations.PassOperation != GpuStencilOp.Keep) ||
+               (canPass && depthFail && operations.DepthFailOperation != GpuStencilOp.Keep);
     }
 }
 
@@ -180,8 +180,8 @@ public static class DepthTargetResolver
             var operationsDisabled = depth.StencilClearEnabled || depth.StencilWriteDisabled;
             var frontWriteMask = operationsDisabled ? (byte)0 : masks.WriteMask;
             var backWriteMask = operationsDisabled ? (byte)0 : masks.WriteMaskBack;
-            if (depth.StencilCompare > (uint)CompareOp.Always ||
-                (depth.BackFaceEnabled && depth.StencilCompareBack > (uint)CompareOp.Always))
+            if (depth.StencilCompare > (uint)GpuCompareOp.Always ||
+                (depth.BackFaceEnabled && depth.StencilCompareBack > (uint)GpuCompareOp.Always))
             {
                 throw fatal(
                     $"The stencil compare or replacement state is not supported: depthControl=0x{depth.DepthControl:X8} " +
@@ -191,12 +191,12 @@ public static class DepthTargetResolver
 
             frontMasks = new StencilMasks(masks.Mask, frontWriteMask, masks.TestValue);
             front = ConvertFace(control.Fail, control.Pass, control.DepthFail,
-                (CompareOp)depth.StencilCompare, masks.OperationValue, ref frontMasks, fatal);
+                (GpuCompareOp)depth.StencilCompare, masks.OperationValue, ref frontMasks, fatal);
             if (depth.BackFaceEnabled)
             {
                 backMasks = new StencilMasks(masks.MaskBack, backWriteMask, masks.TestValueBack);
                 back = ConvertFace(control.FailBack, control.PassBack, control.DepthFailBack,
-                    (CompareOp)depth.StencilCompareBack, masks.OperationValueBack, ref backMasks, fatal);
+                    (GpuCompareOp)depth.StencilCompareBack, masks.OperationValueBack, ref backMasks, fatal);
             }
             else
             {
@@ -210,7 +210,7 @@ public static class DepthTargetResolver
             context.DepthClearValue,
             depth.DepthTestEnabled,
             depth.DepthWriteEnabled && !depth.DepthWriteDisabled,
-            (CompareOp)depth.DepthCompare,
+            (GpuCompareOp)depth.DepthCompare,
             depth.DepthBoundsEnabled,
             context.DepthBoundsMin,
             context.DepthBoundsMax,
@@ -223,17 +223,17 @@ public static class DepthTargetResolver
             backMasks);
     }
 
-    private static StencilOperations ConvertFace(byte fail, byte pass, byte depthFail, CompareOp compare,
+    private static StencilOperations ConvertFace(byte fail, byte pass, byte depthFail, GpuCompareOp compare,
         byte operationValue, ref StencilMasks masks, Func<string, Exception> fatal)
     {
         ReadOnlySpan<byte> operations = [fail, pass, depthFail];
-        Span<StencilOp> converted = stackalloc StencilOp[3];
+        Span<GpuStencilOp> converted = stackalloc GpuStencilOp[3];
         var reference = masks.Reference;
-        var requiredBits = compare is CompareOp.Always or CompareOp.Never ? 0u : masks.CompareMask;
+        var requiredBits = compare is GpuCompareOp.Always or GpuCompareOp.Never ? 0u : masks.CompareMask;
         for (var index = 0; index < operations.Length; index++)
         {
             converted[index] = ConvertOperation(operations[index], (byte)masks.WriteMask, operationValue, fatal);
-            if (converted[index] != StencilOp.Replace)
+            if (converted[index] != GpuStencilOp.Replace)
             {
                 continue;
             }
@@ -255,37 +255,37 @@ public static class DepthTargetResolver
     }
 
     // A zero write mask makes every operation a keep; XOR maps to invert only over the written bits.
-    private static StencilOp ConvertOperation(byte operation, byte writeMask, byte operationValue, Func<string, Exception> fatal)
+    private static GpuStencilOp ConvertOperation(byte operation, byte writeMask, byte operationValue, Func<string, Exception> fatal)
     {
         if (writeMask == 0)
         {
-            return StencilOp.Keep;
+            return GpuStencilOp.Keep;
         }
 
         switch (operation)
         {
             case 0x00:
-                return StencilOp.Keep;
+                return GpuStencilOp.Keep;
             case 0x01:
-                return StencilOp.Zero;
+                return GpuStencilOp.Zero;
             case 0x03:
-                return StencilOp.Replace;
+                return GpuStencilOp.Replace;
             case ReplaceWithOperationValue:
-                return (operationValue & writeMask) == 0 ? StencilOp.Zero : StencilOp.Replace;
+                return (operationValue & writeMask) == 0 ? GpuStencilOp.Zero : GpuStencilOp.Replace;
             case 0x05:
-                return StencilOp.IncrementAndClamp;
+                return GpuStencilOp.IncrementAndClamp;
             case 0x06:
-                return StencilOp.DecrementAndClamp;
+                return GpuStencilOp.DecrementAndClamp;
             case 0x07:
-                return StencilOp.Invert;
+                return GpuStencilOp.Invert;
             case 0x08:
-                return StencilOp.IncrementAndWrap;
+                return GpuStencilOp.IncrementAndWrap;
             case 0x09:
-                return StencilOp.DecrementAndWrap;
+                return GpuStencilOp.DecrementAndWrap;
             case ExclusiveOr:
                 if ((writeMask & operationValue) == 0)
                 {
-                    return StencilOp.Keep;
+                    return GpuStencilOp.Keep;
                 }
 
                 if ((writeMask & ~operationValue) != 0)
@@ -293,7 +293,7 @@ public static class DepthTargetResolver
                     throw fatal($"The stencil XOR operands are not supported: writeMask=0x{writeMask:X2} operationValue=0x{operationValue:X2}.");
                 }
 
-                return StencilOp.Invert;
+                return GpuStencilOp.Invert;
             default:
                 throw fatal($"The stencil operation is not supported: operation=0x{operation:X2}.");
         }

@@ -1,10 +1,10 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.VideoOut;
-using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
 
@@ -175,8 +175,8 @@ public sealed partial class RenderExecutor
             readRequest.View.LevelCount,
             readRequest.View.BaseLayer,
             readRequest.View.LayerCount);
-        var extent = new Extent3D(write.Width, write.Height, 1);
-        var aspects = (depthCopy ? ImageAspectFlags.DepthBit : 0) | (stencilCopy ? ImageAspectFlags.StencilBit : 0);
+        var extent = new GpuExtent3D(write.Width, write.Height, 1);
+        var aspects = (depthCopy ? GpuImageAspect.DepthBit : 0) | (stencilCopy ? GpuImageAspect.StencilBit : 0);
         _host.MarkGpuWritten(destination);
         _host.CopyDepthStencilImage(source, destination, in range, in extent, aspects);
         return true;
@@ -328,9 +328,9 @@ public sealed partial class RenderExecutor
                 0,
                 0,
                 IsClear: false,
-                HasDepth: (aspects & ImageAspectFlags.DepthBit) != 0,
+                HasDepth: (aspects & GpuImageAspect.DepthBit) != 0,
                 DepthClear: depth.LoadClear,
-                HasStencil: (aspects & ImageAspectFlags.StencilBit) != 0,
+                HasStencil: (aspects & GpuImageAspect.StencilBit) != 0,
                 StencilClear: depth.Target.State.StencilClearEnabled);
         }
 

@@ -79,7 +79,7 @@ public sealed unsafe class DescriptorHeap : IDisposable
     {
         if (layout.Handle == 0)
         {
-            throw SubmissionScheduler.Fatal("The descriptor heap needs a set layout.");
+            throw GpuFatal.Fatal("The descriptor heap needs a set layout.");
         }
 
         if (!_sets.TryGetValue(layout.Handle, out var batch))
@@ -108,7 +108,7 @@ public sealed unsafe class DescriptorHeap : IDisposable
             var reset = _device.Vk.ResetDescriptorPool(_device.Device, _currentPool, 0);
             if (reset != Result.Success)
             {
-                throw SubmissionScheduler.Fatal($"vkResetDescriptorPool failed: result={reset}.");
+                throw GpuFatal.Fatal($"vkResetDescriptorPool failed: result={reset}.");
             }
 
             _remaining = PoolCapacity;
@@ -124,7 +124,7 @@ public sealed unsafe class DescriptorHeap : IDisposable
         _sets.Add(layout.Handle, freshBatch);
         if (!Allocate(layout, in demand, freshBatch))
         {
-            throw SubmissionScheduler.Fatal(
+            throw GpuFatal.Fatal(
                 $"The descriptor heap cannot allocate a set from a fresh pool: buffers={demand.StorageBuffers} sampled={demand.SampledImages} storage={demand.StorageImages} samplers={demand.Samplers}.");
         }
 
@@ -176,7 +176,7 @@ public sealed unsafe class DescriptorHeap : IDisposable
 
             if (result != Result.ErrorOutOfPoolMemory && result != Result.ErrorFragmentedPool)
             {
-                throw SubmissionScheduler.Fatal($"vkAllocateDescriptorSets failed: result={result}.");
+                throw GpuFatal.Fatal($"vkAllocateDescriptorSets failed: result={result}.");
             }
 
             if (batch.Allocation == 1)
@@ -202,7 +202,7 @@ public sealed unsafe class DescriptorHeap : IDisposable
             var result = _device.Vk.CreateDescriptorPool(_device.Device, &create, null, out var pool);
             if (result != Result.Success)
             {
-                throw SubmissionScheduler.Fatal($"vkCreateDescriptorPool failed: result={result}.");
+                throw GpuFatal.Fatal($"vkCreateDescriptorPool failed: result={result}.");
             }
 
             _remaining = PoolCapacity;

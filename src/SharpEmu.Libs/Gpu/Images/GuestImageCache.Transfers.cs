@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Gpu.Vulkan;
@@ -328,7 +329,7 @@ public sealed unsafe partial class GuestImageCache
             }
 
             var widened = _tiler.GetScratchBuffer(transferSlice * layers);
-            _tiler.ConvertDepth16(depthLinear, widened, DepthConversionDirection.Widen, info.PixelFormat == Format.D32SfloatS8Uint, new DepthConversionLayout
+            _tiler.ConvertDepth16(depthLinear, widened, DepthConversionDirection.Widen, info.PixelFormat == GpuFormat.D32SfloatS8Uint, new DepthConversionLayout
             {
                 Width = info.Extent.Width,
                 Height = info.Extent.Height,
@@ -519,7 +520,7 @@ public sealed unsafe partial class GuestImageCache
         image.DownloadToBuffer(copies, hostLinear.Buffer, 0, hostLinear.Size);
         var tiled = info.IsTiled;
         var guestLinear = tiled ? _tiler.GetScratchBuffer(info.Data.Size) : new TilerBufferSpan(destination.Handle, destinationOffset, destination.Size - destinationOffset);
-        _tiler.ConvertDepth16(hostLinear, guestLinear, DepthConversionDirection.Narrow, DepthFormatRule.AspectTransferFormat(info.PixelFormat) == Format.D32Sfloat, new DepthConversionLayout
+        _tiler.ConvertDepth16(hostLinear, guestLinear, DepthConversionDirection.Narrow, DepthFormatRule.AspectTransferFormat(info.PixelFormat) == GpuFormat.D32Sfloat, new DepthConversionLayout
         {
             Width = info.Extent.Width,
             Height = info.Extent.Height,
@@ -828,7 +829,7 @@ public sealed unsafe partial class GuestImageCache
         }
 
         var image = _slots[selected];
-        var colorClear = default(ClearColorValue);
+        var colorClear = default(GpuClearColor);
         var depthClear = 0.0f;
         byte stencilClear = 0;
         if (aspect == ImageAspectFlags.ColorBit)
@@ -864,7 +865,8 @@ public sealed unsafe partial class GuestImageCache
         var range = new ImageSubresourceRange(aspect, 0, Vk.RemainingMipLevels, 0, image.Backing.Layers);
         if (aspect == ImageAspectFlags.ColorBit)
         {
-            _device.Vk.CmdClearColorImage(native, image.Backing.Handle, ImageLayout.TransferDstOptimal, &colorClear, 1, &range);
+            var nativeColorClear = colorClear.ToVk();
+            _device.Vk.CmdClearColorImage(native, image.Backing.Handle, ImageLayout.TransferDstOptimal, &nativeColorClear, 1, &range);
         }
         else
         {

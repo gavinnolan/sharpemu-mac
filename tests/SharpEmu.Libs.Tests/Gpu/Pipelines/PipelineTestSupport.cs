@@ -4,9 +4,11 @@
 using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.Libs.Gpu.Vulkan;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
 using Silk.NET.Vulkan;
@@ -36,7 +38,7 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
 
     public List<ComputePipelineDescription> ComputePipelines { get; } = new();
 
-    public SampleCountFlags NoAttachmentSampleCounts { get; set; } = SampleCountFlags.Count1Bit | SampleCountFlags.Count4Bit;
+    public GpuSampleCount NoAttachmentSampleCounts { get; set; } = GpuSampleCount.Count1Bit | GpuSampleCount.Count4Bit;
 
     public uint MaxPushDescriptors => 32;
 

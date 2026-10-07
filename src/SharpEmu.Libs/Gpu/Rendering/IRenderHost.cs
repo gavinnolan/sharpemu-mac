@@ -1,10 +1,10 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
-using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
 
@@ -18,13 +18,13 @@ public readonly record struct RenderHostLimits(uint MaxFramebufferWidth, uint Ma
 
 public readonly record struct ColorAttachmentAcquisition(
     ResourceSlotIdentifier Image,
-    ImageView View,
-    ImageLayout Layout,
+    GpuImageHandle View,
+    GpuImageLayout Layout,
     uint Samples,
     bool MetadataClear,
-    ClearColorValue MetadataClearValue);
+    GpuClearColor MetadataClearValue);
 
-public readonly record struct DepthAttachmentAcquisition(ImageView View, uint Samples, bool MetadataClear);
+public readonly record struct DepthAttachmentAcquisition(GpuImageHandle View, uint Samples, bool MetadataClear);
 
 public readonly record struct ScissorRectangle(int Left, int Top, int Right, int Bottom)
 {
@@ -54,7 +54,7 @@ public readonly record struct DynamicDrawState(
     float BlendAlpha,
     bool DepthTestEnabled,
     bool DepthWriteEnabled,
-    CompareOp DepthCompare,
+    GpuCompareOp DepthCompare,
     bool DepthBiasEnabled,
     float DepthBiasConstantFactor,
     float DepthBiasClamp,
@@ -107,7 +107,7 @@ public interface IRenderHost
     // Makes the view and consumes the metadata clear state; the layout follows in a second call.
     DepthAttachmentAcquisition AcquireDepthAttachment(in DepthAttachmentState depth);
 
-    void TransitionDepthAttachment(in DepthAttachmentState depth, ImageLayout layout, ImageAspectFlags writeAspects);
+    void TransitionDepthAttachment(in DepthAttachmentState depth, GpuImageLayout layout, GpuImageAspect writeAspects);
 
     BufferBinding NullBuffer { get; }
 
@@ -118,7 +118,7 @@ public interface IRenderHost
 
     void BindVertexBuffers(ReadOnlySpan<BufferBinding> bindings, VertexInputInfo input);
 
-    void BindIndexBuffer(BufferBinding binding, IndexType type);
+    void BindIndexBuffer(BufferBinding binding, GpuIndexType type);
 
     // Opens the preparation scope; a ring wrap inside it is refused, and disposal releases it on every path.
     IResourcePreparation BeginPreparation();
@@ -129,7 +129,7 @@ public interface IRenderHost
 
     void BindResources(IPreparedBindings prepared);
 
-    void CommitBindings(PipelineBindPoint bindPoint, in PipelineHandle pipeline, ReadOnlySpan<IPreparedBindings> stages);
+    void CommitBindings(GpuBindPoint bindPoint, in PipelineHandle pipeline, ReadOnlySpan<IPreparedBindings> stages);
 
     void SetDynamicState(in DynamicDrawState state);
 
@@ -143,7 +143,7 @@ public interface IRenderHost
     // The next draw stores to buffers or storage images; called before its BeginRendering.
     void PrepareMemoryWritingDraw() { }
 
-    void BindPipeline(PipelineBindPoint bindPoint, in PipelineHandle pipeline);
+    void BindPipeline(GpuBindPoint bindPoint, in PipelineHandle pipeline);
 
     void Draw(uint vertexCount, uint instanceCount, uint firstVertex, uint firstInstance);
 
@@ -160,7 +160,7 @@ public interface IRenderHost
     bool TryDispatchIndirect(ulong argumentsAddress);
 
     // Orders the buffer writes of the given shader stages before every later access.
-    void ShaderWriteBarrier(PipelineStageFlags sourceStages);
+    void ShaderWriteBarrier(GpuPipelineStage sourceStages);
 
     void ShaderWriteHazardBarrier();
 
@@ -176,7 +176,7 @@ public interface IRenderHost
 
     void ResolveImage(ResourceSlotIdentifier source, uint sourceMip, uint sourceLayer, ResourceSlotIdentifier destination, uint destinationMip, uint destinationLayer);
 
-    void CopyDepthStencilImage(ResourceSlotIdentifier source, ResourceSlotIdentifier destination, in SubresourceRange range, in Extent3D extent, ImageAspectFlags aspects);
+    void CopyDepthStencilImage(ResourceSlotIdentifier source, ResourceSlotIdentifier destination, in SubresourceRange range, in GpuExtent3D extent, GpuImageAspect aspects);
 
     bool IsMetadata(ulong address);
 

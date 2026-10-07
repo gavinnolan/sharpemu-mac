@@ -85,7 +85,7 @@ public readonly record struct ShaderStageResources(ShaderProgramInfo? Program, R
         if (Program?.Bindings is not { UsesDispatchThreadLimits: true } layout) return;
         if (ThreadLimits is not { } limits || shaderData.Length != layout.ShaderDataDwordCount)
         {
-            throw SubmissionScheduler.Fatal("The compute dispatch has missing thread limits or invalid shader data.");
+            throw GpuFatal.Fatal("The compute dispatch has missing thread limits or invalid shader data.");
         }
 
         var offset = (int)layout.DispatchThreadLimitsDword;

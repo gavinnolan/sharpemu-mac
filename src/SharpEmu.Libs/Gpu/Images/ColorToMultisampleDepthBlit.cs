@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Runtime.InteropServices;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.Gpu.Vulkan;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Vulkan;
 
@@ -159,7 +161,7 @@ public sealed unsafe class ColorToMultisampleDepthBlit : IDisposable
             throw SubmissionScheduler.Fatal($"The blit pipeline key is invalid: samples={key.Samples} format={(int)key.Format}.");
         }
 
-        var renderPass = CreateRenderPass(key, samples);
+        var renderPass = CreateRenderPass(key, samples.ToVk());
         var entry = (byte*)Marshal.StringToHGlobalAnsi("main");
         Pipeline pipeline;
         Result created;
@@ -178,7 +180,7 @@ public sealed unsafe class ColorToMultisampleDepthBlit : IDisposable
                 CullMode = CullModeFlags.None,
                 LineWidth = 1.0f,
             };
-            var multisample = new PipelineMultisampleStateCreateInfo { SType = StructureType.PipelineMultisampleStateCreateInfo, RasterizationSamples = samples };
+            var multisample = new PipelineMultisampleStateCreateInfo { SType = StructureType.PipelineMultisampleStateCreateInfo, RasterizationSamples = samples.ToVk() };
             var depth = new PipelineDepthStencilStateCreateInfo
             {
                 SType = StructureType.PipelineDepthStencilStateCreateInfo,
@@ -228,8 +230,8 @@ public sealed unsafe class ColorToMultisampleDepthBlit : IDisposable
     {
         ref readonly var sourceInfo = ref source.Description;
         ref readonly var destinationInfo = ref destination.Description;
-        if (DepthFormatRule.AspectTransferFormat(sourceInfo.PixelFormat) != Format.Undefined ||
-            DepthFormatRule.AspectTransferFormat(destinationInfo.PixelFormat) == Format.Undefined ||
+        if (DepthFormatRule.AspectTransferFormat(sourceInfo.PixelFormat) != GpuFormat.Undefined ||
+            DepthFormatRule.AspectTransferFormat(destinationInfo.PixelFormat) == GpuFormat.Undefined ||
             sourceInfo.Samples != 1 || destinationInfo.Samples <= 1 || destinationInfo.Samples > 4 ||
             source.Backing.ImageType != ImageType.Type2D || destination.Backing.ImageType != ImageType.Type2D ||
             sourceInfo.Extent.Width != destinationInfo.Extent.Width || sourceInfo.Extent.Height != destinationInfo.Extent.Height ||
@@ -245,16 +247,16 @@ public sealed unsafe class ColorToMultisampleDepthBlit : IDisposable
         var sourceView = source.GetOrCreateView(ImageViewDescription.Default with
         {
             Format = sourceInfo.PixelFormat,
-            Type = ImageViewType.Type2D,
-            Aspect = ImageAspectFlags.ColorBit,
-            Usage = ImageUsageFlags.SampledBit,
+            Type = GpuImageViewType.Type2D,
+            Aspect = GpuImageAspect.ColorBit,
+            Usage = GpuImageUsage.SampledBit,
         });
         var destinationView = destination.GetOrCreateView(ImageViewDescription.Default with
         {
             Format = destinationInfo.PixelFormat,
-            Type = ImageViewType.Type2D,
-            Aspect = ImageAspectFlags.DepthBit,
-            Usage = ImageUsageFlags.DepthStencilAttachmentBit,
+            Type = GpuImageViewType.Type2D,
+            Aspect = GpuImageAspect.DepthBit,
+            Usage = GpuImageUsage.DepthStencilAttachmentBit,
         });
 
         var vk = _device.Vk;
@@ -262,7 +264,7 @@ public sealed unsafe class ColorToMultisampleDepthBlit : IDisposable
         source.Transition(ImageLayout.ShaderReadOnlyOptimal, AccessFlags.ShaderReadBit, null, command);
         destination.Transition(DestinationLayout, AccessFlags.DepthStencilAttachmentWriteBit, null, command);
 
-        var cached = GetPipeline(new PipelineKey(destinationInfo.Samples, destinationInfo.PixelFormat));
+        var cached = GetPipeline(new PipelineKey(destinationInfo.Samples, destinationInfo.PixelFormat.ToVk()));
         var extent = new Extent2D(destinationInfo.Extent.Width, destinationInfo.Extent.Height);
         var framebufferInfo = new FramebufferCreateInfo
         {

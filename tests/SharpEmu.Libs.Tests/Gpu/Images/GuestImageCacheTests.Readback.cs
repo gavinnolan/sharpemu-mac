@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Vulkan;
 using SharpEmu.Libs.Tests.Gpu.Buffers;
 using Silk.NET.Vulkan;
 using Xunit;
@@ -178,12 +180,12 @@ public sealed partial class GuestImageCacheTests
         byte[] stencil = [0x91, 0x82, 0x73, 0x64, 0x55, 0x46, 0x37, 0x28];
         harness.Write(depthAddress, Bytes(guest));
         harness.Write(stencilAddress, stencil);
-        var request = LinearRequest(depthAddress, words * 4, Format.D32SfloatS8Uint, GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new Extent3D(width, height, 1), layers, 4, 1);
-        request = AsDepthTarget(request, Format.D32SfloatS8Uint);
+        var request = LinearRequest(depthAddress, words * 4, GpuFormat.D32SfloatS8Uint, GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new GpuExtent3D(width, height, 1), layers, 4, 1);
+        request = AsDepthTarget(request, GpuFormat.D32SfloatS8Uint);
         request.Description.Pitch = pitch;
         request.Description.Stencil = new GuestSpan(stencilAddress, 8);
         request.Description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = words * 4, Pitch = pitch, Height = height };
-        request.View = request.View with { Aspect = ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit };
+        request.View = request.View with { Aspect = GpuImageAspect.DepthBit | GpuImageAspect.StencilBit };
         var imageIdentifier = harness.Find(ref request);
         Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(depthAddress, words * 4, clear)));
         harness.Images.SetLinearReadback(true);
@@ -227,8 +229,8 @@ public sealed partial class GuestImageCacheTests
         var address = harness.MapBacked(0x40000, ReadWrite);
         var depthAddress = address + 0x20000;
         harness.Write(depthAddress, Bytes(Enumerable.Repeat(stale, (int)(size / 4)).ToArray()));
-        var request = LinearRequest(depthAddress, size, Format.D32Sfloat, GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new Extent3D(width, height, 1), layers, 4, 1);
-        request = AsDepthTarget(request, Format.D32Sfloat);
+        var request = LinearRequest(depthAddress, size, GpuFormat.D32Sfloat, GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new GpuExtent3D(width, height, 1), layers, 4, 1);
+        request = AsDepthTarget(request, GpuFormat.D32Sfloat);
         request.Description.Pitch = pitch;
         request.Description.TileMode = GuestTileMode.Depth;
         request.Description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = size, Pitch = pitch, Height = height };
@@ -315,13 +317,13 @@ public sealed partial class GuestImageCacheTests
         byte[] stencil = [0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87, 0x98, 0xa9, 0xba, 0xcb, 0xdc, 0xed, 0xfe, 0x0f];
         harness.Write(depthAddress, Bytes(Enumerable.Repeat(stale, (int)(size / 2)).ToArray()));
         harness.Write(stencilAddress, stencil);
-        var request = LinearRequest(depthAddress, size, Format.D32SfloatS8Uint, GuestPixelFormat.Bits16UNorm, GuestImageType.Color2D, new Extent3D(width, height, 1), layers, 2, 1);
-        request = AsDepthTarget(request, Format.D32SfloatS8Uint);
+        var request = LinearRequest(depthAddress, size, GpuFormat.D32SfloatS8Uint, GuestPixelFormat.Bits16UNorm, GuestImageType.Color2D, new GpuExtent3D(width, height, 1), layers, 2, 1);
+        request = AsDepthTarget(request, GpuFormat.D32SfloatS8Uint);
         request.Description.Pitch = pitch;
         request.Description.TileMode = GuestTileMode.Depth;
         request.Description.Stencil = new GuestSpan(stencilAddress, 16);
         request.Description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = size, Pitch = pitch, Height = height };
-        request.View = request.View with { Aspect = ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit };
+        request.View = request.View with { Aspect = GpuImageAspect.DepthBit | GpuImageAspect.StencilBit };
         var imageIdentifier = harness.Find(ref request);
         Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(depthAddress, size, DepthFormatRule.EncodeD16AsD32(clear))));
         Assert.True(harness.Worker.Run(() => harness.Images.TryDownloadForTest(imageIdentifier)));
@@ -391,10 +393,10 @@ public sealed partial class GuestImageCacheTests
         for (var index = 0; index < pairs; index++)
         {
             var depthAddress = address + 0x10000 + (ulong)index * 0x1000;
-            var depth = LinearRequest(depthAddress, 4, Format.D32SfloatS8Uint, GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
-            depth = AsDepthTarget(depth, Format.D32SfloatS8Uint);
+            var depth = LinearRequest(depthAddress, 4, GpuFormat.D32SfloatS8Uint, GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, 4, 1);
+            depth = AsDepthTarget(depth, GpuFormat.D32SfloatS8Uint);
             depth.Description.Stencil = new GuestSpan(depthAddress + 0x800, 4);
-            depth.View = depth.View with { Aspect = ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit };
+            depth.View = depth.View with { Aspect = GpuImageAspect.DepthBit | GpuImageAspect.StencilBit };
             depths[index] = harness.Find(ref depth);
             var local = depth;
             var depthId = depths[index];
@@ -432,7 +434,7 @@ public sealed partial class GuestImageCacheTests
         var size = (ulong)width * height * 4;
         using var harness = new CacheHarness(_vulkan, backingBytes: size + 8UL * 1024 * 1024);
         var address = harness.MapBacked(size, ReadWrite);
-        var request = LinearRequest(address, size, Format.R8G8B8A8Unorm, GuestPixelFormat.Bits8_8_8_8UNorm, GuestImageType.Color2D, new Extent3D(width, height, 1), 1, 4, 1);
+        var request = LinearRequest(address, size, GpuFormat.R8G8B8A8Unorm, GuestPixelFormat.Bits8_8_8_8UNorm, GuestImageType.Color2D, new GpuExtent3D(width, height, 1), 1, 4, 1);
         ulong[] samples = [0, size / 2, size - 4];
         var download = harness.Cache.GetUtilityBuffer(GpuBufferUsage.Download);
         foreach (var clearValue in new[] { 0xa5a5a5a5u, 0x5a5a5a5au })

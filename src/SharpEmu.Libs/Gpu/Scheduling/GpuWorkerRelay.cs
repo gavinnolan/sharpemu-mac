@@ -78,7 +78,7 @@ public sealed class GpuWorkerRelay : IGpuQueueRelay
     {
         if (!TryPost(work))
         {
-            throw SubmissionScheduler.Fatal("The GPU worker relay is closed.");
+            throw GpuFatal.Fatal("The GPU worker relay is closed.");
         }
     }
 
@@ -109,7 +109,7 @@ public sealed class GpuWorkerRelay : IGpuQueueRelay
     {
         if (!IsGpuQueueThread)
         {
-            throw SubmissionScheduler.Fatal("Only the GPU worker can run relay commands.");
+            throw GpuFatal.Fatal("Only the GPU worker can run relay commands.");
         }
 
         while (HasPendingCommands)
@@ -129,7 +129,7 @@ public sealed class GpuWorkerRelay : IGpuQueueRelay
     {
         if (!TryRunOnGpuQueue(work))
         {
-            throw SubmissionScheduler.Fatal("The GPU worker relay is closed.");
+            throw GpuFatal.Fatal("The GPU worker relay is closed.");
         }
     }
 

@@ -52,7 +52,7 @@ public static class ShaderIdentity
     {
         if (!TryReadDeclaredHash(memory, codeAddress, out var declaredHash))
         {
-            throw Scheduling.SubmissionScheduler.Fatal($"The shader code is unreadable: label={label} shader=0x{codeAddress:X16}.");
+            throw Scheduling.GpuFatal.Fatal($"The shader code is unreadable: label={label} shader=0x{codeAddress:X16}.");
         }
 
         if (declaredHash != 0)
@@ -75,7 +75,7 @@ public static class ShaderIdentity
             var code = buffer.AsSpan(0, (int)sizeBytes);
             if (!memory.TryRead(address, code))
             {
-                throw Scheduling.SubmissionScheduler.Fatal($"The shader code is unreadable: label={label} shader=0x{address:X16} size=0x{sizeBytes:X8}.");
+                throw Scheduling.GpuFatal.Fatal($"The shader code is unreadable: label={label} shader=0x{address:X16} size=0x{sizeBytes:X8}.");
             }
 
             hash.Append(code);

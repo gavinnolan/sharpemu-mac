@@ -3,8 +3,10 @@
 
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.Gpu.Vulkan;
 using Silk.NET.Vulkan;
 
 using SharpEmu.Libs.VideoOut;
@@ -202,13 +204,13 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             else if (!resolved.SupportsViewType(request.View) &&
                      resolved.Description.Extent.Height == 1 && resolved.Description.Extent.Depth == 1 &&
                      ((resolved.Backing.ImageType == ImageType.Type1D &&
-                       request.View.Type is ImageViewType.Type2D or ImageViewType.Type2DArray) ||
+                       request.View.Type is GpuImageViewType.Type2D or GpuImageViewType.Type2DArray) ||
                       (resolved.Backing.ImageType == ImageType.Type2D &&
-                       request.View.Type is ImageViewType.Type1D or ImageViewType.Type1DArray)))
+                       request.View.Type is GpuImageViewType.Type1D or GpuImageViewType.Type1DArray)))
             {
                 // Keep all cached subresources when an overlap needs a different dimensional type.
                 var replacement = resolved.Description;
-                replacement.Type = request.View.Type is ImageViewType.Type1D or ImageViewType.Type1DArray
+                replacement.Type = request.View.Type is GpuImageViewType.Type1D or GpuImageViewType.Type1DArray
                     ? GuestImageType.Color1D : GuestImageType.Color2D;
                 result = GrowImage(replacement, result);
             }
@@ -550,7 +552,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         request.Description.Validate();
         ref readonly var description = ref request.Description;
         var view = request.View;
-        if (view.Format == Format.Undefined || view.LevelCount == 0 || view.LayerCount == 0 ||
+        if (view.Format == GpuFormat.Undefined || view.LevelCount == 0 || view.LayerCount == 0 ||
             view.BaseLevel >= description.Resources.Levels || view.LevelCount > description.Resources.Levels - view.BaseLevel ||
             (!description.IsVolume && (view.BaseLayer >= description.Resources.Layers || view.LayerCount > description.Resources.Layers - view.BaseLayer)))
         {
@@ -577,7 +579,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
     private ResourceSlotIdentifier GetNullImage(in ImageRequest request)
     {
         var format = request.Description.PixelFormat;
-        if (_nullImages.TryGetValue(format, out var found))
+        if (_nullImages.TryGetValue(format.ToVk(), out var found))
         {
             return found;
         }
@@ -586,7 +588,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         description.PixelFormat = request.Description.PixelFormat;
         description.GuestFormat = request.Description.GuestFormat;
         description.Type = GuestImageType.Color2D;
-        description.Extent = new Extent3D(1, 1, 1);
+        description.Extent = new GpuExtent3D(1, 1, 1);
         description.Resources = SubresourceCount.Single;
         description.Pitch = 1;
         description.BytesPerBlock = Math.Max(request.Description.BytesPerBlock, 1);
@@ -594,7 +596,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         description.TileMode = GuestTileMode.Linear;
         description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = description.BytesPerBlock, Pitch = 1, Height = 1 };
         var imageIdentifier = InsertImage(description);
-        _nullImages.Add(format, imageIdentifier);
+        _nullImages.Add(format.ToVk(), imageIdentifier);
         return imageIdentifier;
     }
 

@@ -1,9 +1,9 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.VideoOut;
-using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
 
@@ -12,7 +12,7 @@ public sealed partial class RenderExecutor
     private const uint MaxViewportDimension = 16384;
 
     // A guest bias for a fixed-point depth format scales by the host depth bits.
-    public static float DepthBiasConstantFactor(float guestFactor, in PolygonOffsetRegisters offset, Format hostDepthFormat)
+    public static float DepthBiasConstantFactor(float guestFactor, in PolygonOffsetRegisters offset, GpuFormat hostDepthFormat)
     {
         if (offset.DepthIsFloat)
         {
@@ -21,8 +21,8 @@ public sealed partial class RenderExecutor
 
         var hostDepthBits = hostDepthFormat switch
         {
-            Format.D16Unorm or Format.D16UnormS8Uint => 16,
-            Format.D24UnormS8Uint => 24,
+            GpuFormat.D16Unorm or GpuFormat.D16UnormS8Uint => 16,
+            GpuFormat.D24UnormS8Uint => 24,
             _ => 0,
         };
         return hostDepthBits == 0 ? guestFactor : MathF.ScaleB(guestFactor, hostDepthBits + offset.NegativeDepthBits);
