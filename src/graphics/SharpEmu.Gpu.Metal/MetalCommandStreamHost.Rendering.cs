@@ -438,7 +438,31 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
             bindingElements.Add(element);
         }
 
-        var snapshots = MetalTextureSnapshots.CreateTextureSnapshots(_context, bindings, out _);
+        IReadOnlyList<GuestDrawTexture> snapshots;
+        try
+        {
+            snapshots = MetalTextureSnapshots.CreateTextureSnapshots(_context, bindings, out _);
+        }
+        catch (NotSupportedException exception) when (exception.GetType() == typeof(NotSupportedException))
+        {
+            throw new NotSupportedException($"{exception.Message} {DescribeSnapshotBindings()}", exception);
+        }
+        catch (InvalidOperationException exception) when (exception.GetType() == typeof(InvalidOperationException))
+        {
+            throw new InvalidOperationException($"{exception.Message} {DescribeSnapshotBindings()}", exception);
+        }
+
+        string DescribeSnapshotBindings()
+        {
+            // Preserve bounded raw descriptor evidence at the frontend boundary;
+            // decoded dimensions alone cannot establish compression or XOR bits.
+            var resources = bindings.Take(32).Select((binding, index) =>
+                $"image={bindingElements[index]} addr=0x{binding.Descriptor.Address:X} " +
+                $"resource_words=[{string.Join(',', (binding.ResourceDescriptor ?? []).Take(8).Select(static word => word.ToString("X8")))}]");
+            return $"stage={program.Stage} hash=0x{program.Hash:X16} bindings={bindings.Count} " +
+                $"descriptor_evidence=[{string.Join(';', resources)}]" +
+                (bindings.Count > 32 ? " (remaining bindings omitted)" : string.Empty);
+        }
         if (snapshots.Count != bindings.Count)
         {
             throw Fatal($"A stage image has no snapshot: stage={program.Stage} images={bindings.Count} snapshots={snapshots.Count} hash=0x{program.Hash:X16}.");
