@@ -123,3 +123,34 @@ versioning work. Their synthetic lifetime tests are useful contract checks, but
 are not native writer/copy/completion proof. The separate storage layout review
 also leaves address-current image reuse explicitly unqualified until captured
 source, CPU generation and mapping ownership are enforced.
+
+## Integrated bounded checkpoint
+
+Clean source `87d7fbb` integrates storage texture-format/row validation and the
+schema-2 final POSIX bridge disposition recorder. Its selected x64 suite passes
+150/150 with no skips; the existing AVX2 capability-gated fixture is not evidence
+of AVX2 guest execution. The exact clean-source native Metal texture
+materialization suite passes 33/33 with `SHARPEMU_TEST_REQUIRE_DEVICE=1`, including
+both storage row readbacks. The offline parser passes 6/6 and retains schema-1
+compatibility. Windows/Linux CLI Release cross-builds both pass with zero errors
+(9/3 warnings); neither is native Windows/Linux runtime qualification.
+
+The signed native app builds successfully with embedded clean source `87d7fbb`.
+Its frozen Poppy run stops after 21 seconds with a Metal storage-view rejection
+at compute sequence 8, `dcb.graphics`, submission 12, before the earlier streaming
+store fault. The schema-2 file publishes 30 startup/protection records, zero
+drops and no game signal or VMOVNTDQ entry. No screenshot, positive guest-frame
+period, menu, gameplay or final game-fault recovery is established. This is an
+earlier failure and must not be presented as CPU recovery improvement.
+
+That result prompted a selected-view audit: the backing resource's
+`ResourceMipLevels` determines its layout and is not the native selected view's
+mip count. A faithful static base-zero single-level view should not be rejected
+solely because its allocation contains a larger mip chain. Nonzero selected mip,
+arrays and volumes still require separate support and native proof. The exact
+Poppy descriptor still needs the more precise rejection diagnostic.
+
+Evidence: `bounded-87d7fbb-x64`, `storage-native-87d7fbb-x64`,
+`app-87d7fbb-build` logs in the W13 directory; `cross-platform-final/87d7fbb/`
+and `game-poppy-disposition-87d7fbb/` under the integrated evidence directory.
+Both `c78e8ad` and `87d7fbb` applications retain archives and manifests for replay.
