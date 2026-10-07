@@ -306,3 +306,18 @@ assert exact native retirement; negative cases discard the uncommitted batch and
 require unchanged sentinel output plus released pins/handles. Both sampled and
 read-only storage cases end with explicit shutdown owner/registry assertions.
 These four new lifetime cases are not device-qualified yet.
+
+Clean b038acd precommit lifetime proof now passes four required-device cases on
+ARM64 and four on Rosetta x64 with identical neutral assembly hashes (Apple M4;
+262ms /344ms, zero skips). The actual no-writeback compute consumer remains
+uncommitted while preparation and queued ownership are released: references0,
+native pin1, immutable old texture survives pruning. Commit cases read every
+byte of all16red texels; discard cases remain unsubmitted with all64sentinel
+bytes intact. Completion/discard releases the exact old native texture/pins,
+and explicit shutdown verifies source byte budget0, no source-native batches
+and no matching guest-image/extent registry owner. Evidence lives in
+`immutable-pin-b038acd-arm` /`immutable-pin-b038acd-x64` with source, architecture,
+assembly hashes, commands, log, TRX and parsed actual-execution markers.
+This closes the precompletion owner-release test gap. Work owner release is
+manual in the fixture; production Drain writer/error/shutdown integration and
+CPU backing/copy leases remain unqualified, and the application graph stays off.
