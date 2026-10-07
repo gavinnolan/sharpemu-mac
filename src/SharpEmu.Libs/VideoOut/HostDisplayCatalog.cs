@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Platform.MacOS;
 using SDL;
 using static SDL.SDL3;
 
@@ -20,6 +21,24 @@ public static unsafe class HostDisplayCatalog
 
     public static IReadOnlyList<HostDisplayInfo> Query()
     {
+        // macOS is fully native: CoreGraphics/AppKit answer this, so an SDL
+        // video subsystem is never spun up in a macOS process just to list modes.
+        if (OperatingSystem.IsMacOS())
+        {
+            var native = MacDisplayCatalog.TryQuery();
+            if (native is { Count: > 0 })
+            {
+                return native
+                    .Select(display => display.Modes.Count == 0
+                        ? new HostDisplayInfo(display.Index, display.Name, CreateFallbackModes())
+                        : display)
+                    .ToArray();
+            }
+
+            LogQueryFailure("CoreGraphics reported no displays");
+            return CreateFallback();
+        }
+
         var initializedHere = false;
         var videoReady = false;
         try
