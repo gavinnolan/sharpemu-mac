@@ -4,6 +4,11 @@
 using System.Collections;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Runtime.CompilerServices;
+using SharpEmu.HLE;
+using SharpEmu.Libs.Agc;
+using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.Gpu.Images;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -229,6 +234,8 @@ public sealed partial class MetalTextureMaterializationTests(ITestOutputHelper o
         {
             ["Address"] = address, ["Width"] = width, ["Pitch"] = pitch,
             ["Format"] = format, ["NumberType"] = number, ["IsStorage"] = true,
+            ["Shape"] = new ShaderImageShape(false, false, true, false,
+                number == 4 ? TextureNumericClass.Uint : number == 5 ? TextureNumericClass.Sint : TextureNumericClass.Float),
         });
         var image = Presenter.GetMethod("EnsureStorageImage", Methods)!.Invoke(null, [Device.Value, guest])!;
         var texture = (nint)image.GetType().GetField("Texture")!.GetValue(image)!;
@@ -249,6 +256,68 @@ public sealed partial class MetalTextureMaterializationTests(ITestOutputHelper o
             ((IDictionary)Presenter.GetField("_guestImageExtents", Methods)!.GetValue(null)!).Remove(address);
             SendVoid(texture, Selector("release"));
         }
+    }
+
+    [Fact]
+    public void ProductionStorageSnapshotOfBaseMipInLargerResourceChainUploadsItsFaithfulOwnedRows()
+    {
+        if (!RequireDevice()) return;
+        const ulong address = 0x71F3_1000_00;
+        const uint width = 3, height = 2, bytesPerTexel = 2;
+        var bytes = new byte[1024];
+        Array.Fill(bytes, (byte)0xCC);
+        byte[] expected = [0x00, 0x3C, 0x00, 0x40, 0x00, 0x42, 0x00, 0x44, 0x00, 0x45, 0x00, 0x46];
+        expected.AsSpan(0, 6).CopyTo(bytes.AsSpan(0, 6));
+        expected.AsSpan(6, 6).CopyTo(bytes.AsSpan(256, 6));
+        // Any later mip/padding content is observably different from base rows.
+        Array.Fill(bytes, (byte)0xEE, 512, 512);
+        var field = typeof(GuestGpu).GetField("_instance", Methods)!;
+        var previous = field.GetValue(null);
+        var backendType = Presenter.Assembly.GetTypes().Single(static type => type.Name == "MetalGuestGpuBackend");
+        field.SetValue(null, RuntimeHelpers.GetUninitializedObject(backendType));
+        nint texture = 0;
+        try
+        {
+            var descriptor = new AgcExports.TextureDescriptor(address, width, height, 2, 7, 0, 9, 0, 0, width, 0xFAC,
+                MaxMip: 1, HasExtendedDescriptor: true);
+            var binding = new AgcExports.TranslatedImageBinding(descriptor, true, 0, [],
+                Shape: new ShaderImageShape(false, false, true, false, TextureNumericClass.Float),
+                Access: GuestImageAccess.Read | GuestImageAccess.Write);
+            var snapshotsType = Presenter.Assembly.GetTypes().Single(static type => type.Name == "MetalTextureSnapshots");
+            var arguments = new object?[] { new CpuContext(new SnapshotMemory(address, bytes), Generation.Gen5), new[] { binding }, 0 };
+            var snapshots = (IReadOnlyList<GuestDrawTexture>)snapshotsType.GetMethod("CreateTextureSnapshots", Methods)!.Invoke(null, arguments)!;
+            var snapshot = Assert.Single(snapshots);
+            Assert.Equal(2u, snapshot.ResourceMipLevels);
+            Assert.Equal(1u, snapshot.MipLevels);
+            Assert.Equal(0u, snapshot.BaseMipLevel);
+            Assert.Equal(0u, snapshot.MipLevel);
+            Assert.Equal(128u, snapshot.Pitch);
+            Array.Fill(bytes, (byte)0x99); // Native upload must consume owned snapshot, never read again.
+            var image = Presenter.GetMethod("EnsureStorageImage", Methods)!.Invoke(null, [Device.Value, snapshot])!;
+            texture = (nint)image.GetType().GetField("Texture")!.GetValue(image)!;
+            Assert.Equal(1UL, ReadInteger(texture, Selector("mipmapLevelCount")));
+            Assert.Equal(expected, ReadNativeRows(texture, width, height, bytesPerTexel));
+            output.WriteLine("Actual snapshot -> R16 native base0 readback: resource chain2, selected view1, padded128 texels; owned rows preserved after CPU source mutation.");
+        }
+        finally
+        {
+            ((IDictionary)Presenter.GetField("_guestImages", Methods)!.GetValue(null)!).Remove(address);
+            ((IDictionary)Presenter.GetField("_guestImageExtents", Methods)!.GetValue(null)!).Remove(address);
+            GuestImageWriteTracker.Untrack(address);
+            field.SetValue(null, previous);
+            if (texture != 0) SendVoid(texture, Selector("release"));
+        }
+    }
+
+    private sealed class SnapshotMemory(ulong address, byte[] bytes) : ICpuMemory
+    {
+        public bool TryRead(ulong target, Span<byte> destination)
+        {
+            if (target < address || target - address > (ulong)bytes.Length || (ulong)destination.Length > (ulong)bytes.Length - (target - address)) return false;
+            bytes.AsSpan(checked((int)(target - address)), destination.Length).CopyTo(destination);
+            return true;
+        }
+        public bool TryWrite(ulong target, ReadOnlySpan<byte> source) => false;
     }
 
     private static unsafe byte[] ReadNativeRows(nint texture, uint width, uint height, uint bytesPerTexel)

@@ -3,6 +3,10 @@
 
 using System.Collections;
 using System.Reflection;
+using System.Runtime.CompilerServices;
+using SharpEmu.HLE;
+using SharpEmu.Libs.Agc;
+using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Gpu.Metal;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
@@ -109,9 +113,64 @@ public sealed class MetalStorageTextureFormatTests
         finally { images.Remove(descriptor.Address); }
     }
 
+    [Fact]
+    public void ActualStorageSnapshotKeepsOnlySelectedBaseMipWhileResourceHasMoreLevels()
+    {
+        const ulong address = 0x71F2_1000_00;
+        var backendField = typeof(GuestGpu).GetField("_instance", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var previous = backendField.GetValue(null);
+        using var state = new MetalGuestFailureTests.PresenterState();
+        backendField.SetValue(null, RuntimeHelpers.GetUninitializedObject(typeof(MetalGuestGpuBackend)));
+        try
+        {
+            var bytes = Enumerable.Range(0, 512).Select(static index => (byte)(index * 7 + 17)).ToArray();
+            var descriptor = new AgcExports.TextureDescriptor(address, 3, 2, 2, 7, 0, 9, 0, 0, 3, 0xFAC,
+                MaxMip: 1, HasExtendedDescriptor: true);
+            var shape = new ShaderImageShape(false, false, true, false, TextureNumericClass.Float);
+            var binding = new AgcExports.TranslatedImageBinding(descriptor, true, 0, [], Shape: shape, Access: GuestImageAccess.Read | GuestImageAccess.Write);
+            var snapshot = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(
+                new CpuContext(new SourceMemory(address, bytes), Generation.Gen5), [binding], out _));
+            Assert.Equal(2u, snapshot.ResourceMipLevels);
+            Assert.Equal(1u, snapshot.MipLevels);
+            Assert.Equal(0u, snapshot.BaseMipLevel);
+            Assert.Equal(0u, snapshot.MipLevel);
+            Assert.Equal(128u, snapshot.Pitch);
+            Assert.Equal(bytes, snapshot.RgbaPixels);
+            var native = MetalVideoPresenter.StorageTextureFormat(snapshot);
+            Assert.Equal(MtlPixelFormat.R16Float, native.Format);
+            Assert.Equal((128u, 262UL), MetalVideoPresenter.StorageTextureSeedLayout(snapshot, native));
+            Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.StorageTextureFormat(snapshot with { BaseMipLevel = 1 }));
+            Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.StorageTextureFormat(snapshot with { MipLevel = 1 }));
+            Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.StorageTextureFormat(snapshot with { Shape = shape with { DynamicMip = true } }));
+        }
+        finally { GuestImageWriteTracker.Untrack(address); backendField.SetValue(null, previous); }
+    }
+
+    [Fact]
+    public void UnknownOrMismatchedCompiledNumericShapeCannotClaimTypedStorageSupport()
+    {
+        var descriptor = Texture(2, 4, 16);
+        Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.StorageTextureFormat(descriptor with { Shape = default }));
+        Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.StorageTextureFormat(descriptor with
+        { Shape = descriptor.Shape with { NumericClass = TextureNumericClass.Float } }));
+    }
+
+    private sealed class SourceMemory(ulong address, byte[] bytes) : ICpuMemory
+    {
+        public bool TryRead(ulong target, Span<byte> destination)
+        {
+            if (target < address || target - address > (ulong)bytes.Length || (ulong)destination.Length > (ulong)bytes.Length - (target - address)) return false;
+            bytes.AsSpan(checked((int)(target - address)), destination.Length).CopyTo(destination);
+            return true;
+        }
+        public bool TryWrite(ulong target, ReadOnlySpan<byte> source) => false;
+    }
+
     private static object? Ensure(GuestDrawTexture descriptor) => typeof(MetalVideoPresenter)
         .GetMethod("EnsureStorageImage", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, [(nint)0, descriptor]);
 
     private static GuestDrawTexture Texture(uint format, uint number, int bytes) =>
-        new(0x71F2_0000_00, 3, 2, format, number, new byte[bytes], false, true, Pitch: 5, Access: GuestImageAccess.Write);
+        new(0x71F2_0000_00, 3, 2, format, number, new byte[bytes], false, true, Pitch: 5, Access: GuestImageAccess.Write,
+            Shape: new ShaderImageShape(false, false, true, false,
+                number == 4 ? TextureNumericClass.Uint : number == 5 ? TextureNumericClass.Sint : TextureNumericClass.Float));
 }

@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.VideoOut;
 
 
@@ -130,7 +131,7 @@ internal static partial class MetalVideoPresenter
             var descriptor = dispatch.Textures[index];
             if (descriptor.IsStorage && descriptor.Address != 0)
             {
-                textureHandles[index] = EnsureStorageImage(device, descriptor)?.Texture ?? 0;
+                textureHandles[index] = EnsureStorageImage(device, descriptor).Texture;
                 textureOwned[index] = false;
             }
             else
@@ -220,7 +221,7 @@ internal static partial class MetalVideoPresenter
 
     /// <summary>The live, shared storage image for a guest address: dispatches,
     /// draws, blits, and flips of the same address all see one texture.</summary>
-    private static GuestImage? EnsureStorageImage(nint device, GuestDrawTexture descriptor)
+    private static GuestImage EnsureStorageImage(nint device, GuestDrawTexture descriptor)
     {
         // Decode texture descriptor semantics before looking up a live image.
         // Render-target codes are a different namespace; substituting RGBA8
@@ -316,8 +317,29 @@ internal static partial class MetalVideoPresenter
         // This materializer creates a single-mip 2D texture. Reject resource
         // classes it cannot represent rather than binding a differently typed image.
         if (descriptor.Type != 9 || descriptor.ArrayedView || descriptor.ArrayLayers != 1 || descriptor.Depth != 1 ||
-            descriptor.MipLevels != 1 || descriptor.ResourceMipLevels != 1 || descriptor.BaseMipLevel != 0 || descriptor.MipLevel != 0)
-            throw new NotSupportedException("Metal storage image materialization supports only a single-mip, non-array 2D view.");
+            descriptor.MipLevels != 1 || descriptor.BaseMipLevel != 0 || descriptor.MipLevel != 0 ||
+            !descriptor.Shape.Storage || descriptor.Shape.NumericClass == TextureNumericClass.Unsupported ||
+            descriptor.Shape.DynamicMip || descriptor.Shape.Volume || descriptor.Shape.Arrayed || descriptor.Shape.Cube ||
+            descriptor.Shape.OneDimensional || descriptor.Shape.Multisampled || descriptor.Shape.DepthCompare || descriptor.Shape.R128 || descriptor.Shape.Atomic)
+            throw new NotSupportedException(
+                "Metal storage image materialization supports only a single selected base mip, non-array 2D view: " +
+                $"addr=0x{descriptor.Address:X} type={descriptor.Type} size={descriptor.Width}x{descriptor.Height} " +
+                $"arrayed={descriptor.ArrayedView} layers={descriptor.ArrayLayers} depth={descriptor.Depth} " +
+                $"view_mips={descriptor.MipLevels} base_mip={descriptor.BaseMipLevel} selected_mip={descriptor.MipLevel} " +
+                $"resource_mips={descriptor.ResourceMipLevels} fmt={descriptor.Format}/{descriptor.NumberType} " +
+                $"pitch={descriptor.Pitch} tile={descriptor.TileMode} shape={descriptor.Shape} access={descriptor.Access}.");
+        var numeric = format.Format switch
+        {
+            MtlPixelFormat.R8Uint or MtlPixelFormat.R16Uint or MtlPixelFormat.R32Uint or
+                MtlPixelFormat.Rg8Uint or MtlPixelFormat.Rg16Uint or MtlPixelFormat.Rg32Uint or
+                MtlPixelFormat.Rgba8Uint or MtlPixelFormat.Rgba16Uint or MtlPixelFormat.Rgba32Uint => TextureNumericClass.Uint,
+            MtlPixelFormat.R8Sint or MtlPixelFormat.R16Sint or MtlPixelFormat.R32Sint or
+                MtlPixelFormat.Rg8Sint or MtlPixelFormat.Rg16Sint or MtlPixelFormat.Rg32Sint or
+                MtlPixelFormat.Rgba8Sint or MtlPixelFormat.Rgba16Sint or MtlPixelFormat.Rgba32Sint => TextureNumericClass.Sint,
+            _ => TextureNumericClass.Float,
+        };
+        if (descriptor.Shape.NumericClass != numeric)
+            throw new NotSupportedException($"Metal storage image numeric binding mismatch at 0x{descriptor.Address:X}: shader={descriptor.Shape.NumericClass} native={numeric} fmt={descriptor.Format}/{descriptor.NumberType}.");
         return format;
     }
 
