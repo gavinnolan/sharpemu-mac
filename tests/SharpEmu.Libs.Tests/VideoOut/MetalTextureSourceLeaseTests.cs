@@ -64,6 +64,100 @@ public sealed class MetalTextureSourceLeaseTests
         Assert.Equal(0UL, MetalVideoPresenter.TextureSourceState(read).ReservedBytes);
     }
 
+    [Fact]
+    public void DuplicateCaptureCannotLeakAReservationOrAnotherReference()
+    {
+        using var state = new State();
+        var read = PublishAndCapture();
+        var before = MetalVideoPresenter.TextureSourceState(read);
+        Assert.Throws<InvalidOperationException>(() => MetalVideoPresenter.TryCaptureTextureSource(read, 64, false));
+        Assert.Equal(before, MetalVideoPresenter.TextureSourceState(read));
+        MetalVideoPresenter.ReleasePreparedTextureSources([read]);
+        Assert.Equal(0UL, MetalVideoPresenter.TextureSourceState(read).ReservedBytes);
+    }
+
+    [Fact]
+    public void FailedMultiLeaseRetainDoesNotAcquireEarlierOwners()
+    {
+        using var state = new State();
+        var read = PublishAndCapture();
+        var second = Texture(false) with { Sampler = new GuestSampler(1, 2, 3, 4) };
+        Assert.True(MetalVideoPresenter.TryCaptureTextureSource(second, 64, false));
+        MetalVideoPresenter.ReleasePreparedTextureSources([second]);
+        var work = QueuedWork(read, second);
+        var failure = Assert.Throws<TargetInvocationException>(() => Call("RetainQueuedTextureSourcesLocked", work));
+        Assert.IsType<InvalidOperationException>(failure.InnerException);
+        Assert.Equal(1, MetalVideoPresenter.TextureSourceState(read).References);
+        Assert.Equal(0, MetalVideoPresenter.TextureSourceState(second).References);
+        // No work owner was acquired, so cancellation cannot steal prep ownership.
+        Call("ReleaseQueuedTextureSourcesLocked", work);
+        Assert.Equal(1, MetalVideoPresenter.TextureSourceState(read).References);
+        MetalVideoPresenter.ReleasePreparedTextureSources([read]);
+        Assert.Equal(0UL, MetalVideoPresenter.TextureSourceState(read).ReservedBytes);
+    }
+
+    [Fact]
+    public void ReleasingOneWorkTwiceCannotStealAnotherAdmittedWorkReference()
+    {
+        using var state = new State();
+        var read = PublishAndCapture();
+        var first = QueuedWork(read); var second = QueuedWork(read);
+        Call("RetainQueuedTextureSourcesLocked", first); Call("RetainQueuedTextureSourcesLocked", second);
+        MetalVideoPresenter.ReleasePreparedTextureSources([read]);
+        Assert.Equal(2, MetalVideoPresenter.TextureSourceState(read).References);
+        Call("ReleaseQueuedTextureSourcesLocked", first); Call("ReleaseQueuedTextureSourcesLocked", first);
+        Assert.Equal(1, MetalVideoPresenter.TextureSourceState(read).References);
+        Call("ReleaseQueuedTextureSourcesLocked", second);
+        Assert.Equal(0, MetalVideoPresenter.TextureSourceState(read).References);
+        Assert.Equal(0UL, MetalVideoPresenter.TextureSourceState(read).ReservedBytes);
+    }
+
+    [Fact]
+    public void CapturedAssociationCannotBeCopiedToAForgedViewOrReleasedPreparation()
+    {
+        using var state = new State();
+        var read = PublishAndCapture();
+        Assert.Throws<InvalidOperationException>(() => MetalVideoPresenter.CopyCapturedTextureSource(read, read with { Width = 2 }));
+        Assert.Throws<InvalidOperationException>(() => MetalVideoPresenter.CopyCapturedTextureSource(read, read with { Access = GuestImageAccess.Write }));
+        MetalVideoPresenter.ReleasePreparedTextureSources([read]);
+        Assert.Throws<InvalidOperationException>(() => MetalVideoPresenter.CopyCapturedTextureSource(read, read with { Sampler = new GuestSampler(1, 2, 3, 4) }));
+    }
+
+    [Theory]
+    [InlineData((GuestImageAccess)8, 10u, 0u)]
+    [InlineData(GuestImageAccess.Read, 10u, 4u)]
+    public void UndefinedIntentOrIntegerNativeFormatCannotReserveAFloatCompiledSource(GuestImageAccess access, uint format, uint number)
+    {
+        using var state = new State();
+        var read = PublishAndCapture();
+        Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.TryCaptureTextureSource(Texture(false) with
+            { Access = access, Format = format, NumberType = number }, 64, false));
+        Assert.Equal(1, MetalVideoPresenter.TextureSourceState(read).References);
+        MetalVideoPresenter.ReleasePreparedTextureSources([read]);
+    }
+
+    [Fact]
+    public void SelectionFailureInvalidatesEveryCapturedVersionWithoutClaimingNativeCleanup()
+    {
+        using var state = new State();
+        var read = PublishAndCapture();
+        Call("InvalidateTextureSourceVersionsLocked");
+        Assert.True(MetalVideoPresenter.TextureSourceState(read).Failed);
+        Assert.Throws<InvalidOperationException>(() => MetalVideoPresenter.TryCaptureTextureSource(Texture(false), 64, false));
+        MetalVideoPresenter.ReleasePreparedTextureSources([read]);
+        Assert.Equal(0UL, MetalVideoPresenter.TextureSourceState(read).ReservedBytes);
+    }
+
+    private static object QueuedWork(params GuestDrawTexture[] textures)
+    {
+        var shader = new MetalCompiledGuestShader(new Gen5MslShader("", "owner_test", Gen5MslStage.Compute, 0));
+        Assert.True(MetalVideoPresenter.SubmitComputeDispatch(0, shader, textures, [], 1, 1, 1, 0, 0, 0, true, null) > 0);
+        var queue = ((IDictionary)Field("_pendingGuestWorkByQueue").GetValue(null)!).Values.Cast<object>().Single();
+        var last = queue.GetType().GetProperty("Last")!.GetValue(queue)!;
+        var pending = last.GetType().GetProperty("Value")!.GetValue(last)!;
+        return pending.GetType().GetProperty("Work")!.GetValue(pending)!;
+    }
+
     internal static GuestDrawTexture PublishAndCapture()
     {
         var seed = Texture(true) with { RgbaPixels = new byte[64], Access = GuestImageAccess.Write };

@@ -65,6 +65,7 @@ public sealed partial class MetalRenderHostTests
         preparation.Dispose();
         Assert.Equal(2, MetalVideoPresenter.TextureSourceState(source).References);
         SourceMethod("ReleaseQueuedTextureSourcesLocked", first);
+        SourceMethod("ReleaseQueuedTextureSourcesLocked", first);
         Assert.Equal(1, MetalVideoPresenter.TextureSourceState(source).References);
         SourceMethod("ReleaseQueuedTextureSourcesLocked", second);
         Assert.Equal(0, MetalVideoPresenter.TextureSourceState(source).References);

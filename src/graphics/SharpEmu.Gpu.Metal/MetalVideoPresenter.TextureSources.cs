@@ -19,6 +19,7 @@ internal static partial class MetalVideoPresenter
     private static readonly Dictionary<ulong, TextureSourceVersion> _latestTextureSources = new();
     private static readonly List<TextureSourceVersion> _textureSourceVersions = [];
     private static readonly ConditionalWeakTable<GuestDrawTexture, TextureSourceLease> _textureSourceLeases = new();
+    private static readonly ConditionalWeakTable<object, QueuedTextureSourceOwner> _queuedTextureSourceOwners = new();
 
     private readonly record struct TextureSourceView(
         ulong Address, uint Width, uint Height, uint Format, uint NumberType,
@@ -68,6 +69,12 @@ internal static partial class MetalVideoPresenter
         public bool PreparationReleased;
     }
 
+    private sealed class QueuedTextureSourceOwner(TextureSourceLease[] leases)
+    {
+        public TextureSourceLease[] Leases { get; } = leases;
+        public bool Released;
+    }
+
     internal static void ReleasePreparedTextureSources(IReadOnlyList<GuestDrawTexture> textures)
     {
         lock (_gate)
@@ -94,10 +101,17 @@ internal static partial class MetalVideoPresenter
     {
         // Enumerating/deduplicating can allocate or fail. Do it and validate
         // every owner before changing any counters so admission is atomic.
+        if (_queuedTextureSourceOwners.TryGetValue(work, out _))
+            throw new InvalidOperationException("Metal guest work already owns texture source leases.");
         var leases = TextureSourcesOf(work).ToArray();
         foreach (var lease in leases)
             if (lease.References <= 0 || lease.PreparationReleased)
                 throw new InvalidOperationException("Metal texture source preparation has already been released.");
+        if (leases.Length == 0) return;
+        // Establish a distinct owner before acquiring references. Allocation or
+        // duplicate-key failure cannot leak partial retains, and release is
+        // idempotent per work rather than stealing another work's reference.
+        _queuedTextureSourceOwners.Add(work, new QueuedTextureSourceOwner(leases));
         foreach (var lease in leases)
         {
             lease.References++;
@@ -107,7 +121,9 @@ internal static partial class MetalVideoPresenter
 
     private static void ReleaseQueuedTextureSourcesLocked(object work)
     {
-        foreach (var lease in TextureSourcesOf(work)) ReleaseTextureSourceLeaseLocked(lease);
+        if (!_queuedTextureSourceOwners.TryGetValue(work, out var owner) || owner.Released) return;
+        owner.Released = true;
+        foreach (var lease in owner.Leases) ReleaseTextureSourceLeaseLocked(lease);
     }
 
     private static IEnumerable<TextureSourceLease> TextureSourcesOf(object work)
@@ -128,13 +144,26 @@ internal static partial class MetalVideoPresenter
         if (ReferenceEquals(source, copy)) return;
         lock (_gate)
             if (_textureSourceLeases.TryGetValue(source, out var lease))
+            {
+                if (lease.PreparationReleased || lease.References <= 0 ||
+                    TextureSourceView.Of(copy) != TextureSourceView.Of(source) || copy.Shape != source.Shape || copy.Access != source.Access)
+                    throw new InvalidOperationException("Metal captured texture source copy must preserve its live preparation, view, shape and access.");
                 _textureSourceLeases.Add(copy, lease);
+            }
     }
 
     private static long CurrentTextureWriteGeneration(ulong address) =>
         GuestImageWriteTracker.TryGetWriteGeneration(address, out var generation) ? generation : -1;
 
+    private static bool SupportedFloatTextureSourceFormat(GuestDrawTexture texture)
+    {
+        if (texture.NumberType is not (0 or 1 or 7 or 9)) return false;
+        var format = MetalGuestFormats.DecodeTextureFormat(texture.Format, texture.NumberType);
+        return !format.IsBlockCompressed && !(texture.IsStorage && format.Format == MtlPixelFormat.Rgba8UnormSrgb);
+    }
+
     private static bool SupportedTextureSourceView(GuestDrawTexture texture) =>
+        SupportedFloatTextureSourceFormat(texture) &&
         texture.Type == 9 && !texture.ArrayedView && texture.ArrayLayers == 1 && texture.Depth == 1 &&
         texture.MipLevels == 1 && texture.ResourceMipLevels == 1 && texture.BaseMipLevel == 0 && texture.MipLevel == 0 &&
         texture.DstSelect is 0 or 0xFAC && texture.Shape.NumericClass == TextureNumericClass.Float &&

@@ -27,3 +27,5 @@ scope rejection, and exception unwinding. They do not qualify production
 snapshot capture, queue admission rollback, native version preservation, GPU
 completion, or game behavior. Those paths require the alias integration and
 its separate acceptance tests.
+
+Private registry refinement (inactive source graph): each explicitly retained work now owns a materialized immutable lease array and releases that owner once. Duplicate work release cannot decrement a different work's reference; failed multi-lease acquisition changes no counters. Captured record copies must preserve view/shape/access and live preparation ownership; undefined intent or an integer native format cannot authorize a float source. ARM64 managed46/46 passed (10 registry cases +36 host/preparation cases), log `/tmp/sharpemu-metal-source-owner-atomic-arm.log`. Admission/capture integration and native command completion remain unqualified and inactive.
