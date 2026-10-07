@@ -481,6 +481,18 @@ internal static class MetalTextureSnapshots
 
         if (isStorage)
         {
+            if (descriptor.Type == Gen5TextureType3D &&
+                (!descriptor.HasExtendedDescriptor || descriptor.MetadataAddress != 0 || descriptor.DescriptorFlags != 0 || descriptor.BcSwizzle != 0))
+                throw new NotSupportedException(
+                    $"Metal volume storage snapshot requires a complete uncompressed descriptor with zero metadata/flags/BC swizzle: " +
+                    $"addr=0x{descriptor.Address:X} metadata=0x{descriptor.MetadataAddress:X} flags=0x{descriptor.DescriptorFlags:X} bc_swizzle={descriptor.BcSwizzle} extended={descriptor.HasExtendedDescriptor}.");
+            if (descriptor.Type == Gen5TextureType3D && descriptor.TileMode != 0 &&
+                (descriptor.Width != 1 || descriptor.Height != 1 || descriptor.Depth != 1 ||
+                 descriptor.TileMode != 27 || descriptor.ResourceMipLevels != 1 ||
+                 (descriptor.Address & 0xFFFFUL) != 0))
+                throw new NotSupportedException(
+                    $"Metal tiled volume snapshots support only an aligned mode27 single-mip 1x1x1 origin texel: " +
+                    $"addr=0x{descriptor.Address:X} depth={descriptor.Depth} tile={descriptor.TileMode}.");
             var initialPixels = Array.Empty<byte>();
             var uploadKnownStart = TexturePreparationProfile.Begin();
             var uploadKnown = descriptor.Address != 0 &&
@@ -504,16 +516,24 @@ internal static class MetalTextureSnapshots
                 if (context.Memory.TryRead(descriptor.Address + baseMipByteOffset, storageSource))
                 {
                     readSucceeded = true;
-                    var linearStorage = TryDetileTextureSource(
+                    // The bounded singleton proof uses only the aligned, uncompressed
+                    // resource origin. Do not qualify a 3D volume using the XY-only
+                    // 2D equation, even when its depth happens to be one.
+                    var linearStorage = descriptor.Type == Gen5TextureType3D && descriptor.TileMode != 0
+                        ? storageSource.AsSpan(0, checked((int)sourceByteCount)).ToArray()
+                        : TryDetileTextureSource(
                         descriptor,
                         sourceWidth,
                         checked((int)sourceByteCount),
                         storageSource,
                         baseMipInTail,
                         mipTailElementX,
-                        mipTailElementY) ?? storageSource
-                            .AsSpan(0, checked((int)sourceByteCount))
-                            .ToArray();
+                        mipTailElementY);
+                    if (linearStorage is null && descriptor.Type == Gen5TextureType3D && descriptor.TileMode != 0)
+                        throw new NotSupportedException(
+                            $"Metal volume snapshot cannot reinterpret failed detiling as linear data: " +
+                            $"addr=0x{descriptor.Address:X} depth={descriptor.Depth} tile={descriptor.TileMode}.");
+                    linearStorage ??= storageSource.AsSpan(0, checked((int)sourceByteCount)).ToArray();
                     linearNonzero = linearStorage.AsSpan().IndexOfAnyExcept((byte)0) >= 0;
                     // A successful zero-filled read is still a complete snapshot.
                     // Dropping it sends the resource through base-slice cache recovery.

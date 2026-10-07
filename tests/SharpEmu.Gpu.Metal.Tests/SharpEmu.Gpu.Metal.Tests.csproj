@@ -7,6 +7,12 @@
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
   <ItemGroup>
+    <!-- Compile the existing synthetic guest-program and device helpers in this
+         test assembly; no production friend or dependency on another test assembly. -->
+    <Compile Include="../SharpEmu.ShaderCompiler.Metal.Tests/Gen5ImageFixtures.cs" Link="Fixtures/Gen5ImageFixtures.cs" />
+    <Compile Include="../SharpEmu.ShaderCompiler.Metal.Tests/Gen5ComputeFixtures.cs" Link="Fixtures/Gen5ComputeFixtures.cs" />
+    <Compile Include="../SharpEmu.ShaderCompiler.Metal.Tests/FakeGuestMemory.cs" Link="Fixtures/FakeGuestMemory.cs" />
+    <Compile Include="../SharpEmu.ShaderCompiler.Metal.Tests/MetalNative.cs" Link="Fixtures/MetalNative.cs" />
     <ProjectReference Include="../../src/graphics/SharpEmu.Gpu.Metal/SharpEmu.Gpu.Metal.csproj" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="xunit" />

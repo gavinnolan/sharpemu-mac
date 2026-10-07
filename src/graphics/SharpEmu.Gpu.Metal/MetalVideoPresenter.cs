@@ -495,6 +495,7 @@ internal static partial class MetalVideoPresenter
                     if (_guestImages.TryGetValue(_presentGuestAddress, out var borrowed) &&
                         borrowed.Initialized)
                     {
+                        Require2DGuestImage(borrowed, "per-frame guest presentation");
                         _presentTexture = borrowed.Texture;
                         _presentTextureWidth = borrowed.Width;
                         _presentTextureHeight = borrowed.Height;

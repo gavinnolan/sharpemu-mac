@@ -56,6 +56,8 @@ internal static partial class MetalVideoPresenter
         public nint Texture;
         public uint Width;
         public uint Height;
+        public uint TextureType = MtlTextureType2D;
+        public uint Depth = 1;
         public MtlPixelFormat Format;
         public bool Initialized;
 
@@ -91,6 +93,13 @@ internal static partial class MetalVideoPresenter
                 SnapshotTexture = 0;
             }
         }
+    }
+
+    private static void Require2DGuestImage(GuestImage image, string operation)
+    {
+        if (image.TextureType != MtlTextureType2D || image.Depth != 1)
+            throw new NotSupportedException(
+                $"Metal {operation} requires a 2D guest image; native_type={image.TextureType} depth={image.Depth}.");
     }
 
     // PS5 exposes independent graphics and asynchronous-compute queues; keep FIFO
@@ -537,6 +546,8 @@ internal static partial class MetalVideoPresenter
                 return false;
             }
 
+            Require2DGuestImage(source, "guest image blit admission source");
+            Require2DGuestImage(destination, "guest image blit admission destination");
             _guestImageWorkSequences[destinationAddress] = EnqueueGuestWorkLocked(
                 new GuestImageBlit(sourceAddress, destinationAddress));
             return true;
@@ -881,6 +892,7 @@ internal static partial class MetalVideoPresenter
             return;
         }
 
+        Require2DGuestImage(image, "CPU image write/clear");
         if (write.Pixels is { } pixels)
         {
             var bytesPerPixel = MetalRenderTargetFormat.GetBytesPerPixel(image.Format);
@@ -932,6 +944,7 @@ internal static partial class MetalVideoPresenter
             return;
         }
 
+        Require2DGuestImage(image, "VideoOut flip");
         // Capture the mutable image into an immutable generation at this exact
         // queue position; later work cannot change the frame this flip selected.
         var captured = new GuestImage
@@ -1008,6 +1021,8 @@ internal static partial class MetalVideoPresenter
             return;
         }
 
+        Require2DGuestImage(source, "guest image blit source");
+        Require2DGuestImage(destination, "guest image blit destination");
         CopyTexture(queue, source.Texture, destination.Texture);
         destination.MarkContentChanged();
     }
@@ -1022,6 +1037,7 @@ internal static partial class MetalVideoPresenter
     private static GuestImage? FindGuestImageForFlipLocked(ulong address, uint width, uint height)
     {
         _guestImages.TryGetValue(address, out var exact);
+        if (exact is not null) Require2DGuestImage(exact, "VideoOut exact image");
         if (exact is { Initialized: true, GpuWritten: true })
         {
             return exact;
@@ -1042,6 +1058,7 @@ internal static partial class MetalVideoPresenter
                 delta < bestDelta &&
                 entry.Value.Width == width &&
                 entry.Value.Height == height &&
+                entry.Value.TextureType == MtlTextureType2D && entry.Value.Depth == 1 &&
                 entry.Value is { Initialized: true, GpuWritten: true })
             {
                 best = entry.Value;
@@ -1081,6 +1098,7 @@ internal static partial class MetalVideoPresenter
         {
             if (_guestImages.TryGetValue(address, out var existing))
             {
+                Require2DGuestImage(existing, "display image materialization");
                 return existing;
             }
 
@@ -1274,6 +1292,7 @@ internal static partial class MetalVideoPresenter
             return false;
         }
 
+        Require2DGuestImage(image, "VideoOut presentation");
         texture = image.Texture;
         width = image.Width;
         height = image.Height;

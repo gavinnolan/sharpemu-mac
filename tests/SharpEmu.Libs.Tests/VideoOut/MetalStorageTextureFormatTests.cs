@@ -155,10 +155,160 @@ public sealed class MetalStorageTextureFormatTests
         { Shape = descriptor.Shape with { NumericClass = TextureNumericClass.Float } }));
     }
 
+    [Theory]
+    [InlineData(1u)]
+    [InlineData(3u)]
+    public void VolumeSeedRequiresEveryPaddedDepthSliceAndRetainsNativeType(uint depth)
+    {
+        var descriptor = Volume(depth, checked((int)(5 * 2 * depth * 4)));
+        var native = MetalVideoPresenter.StorageTextureFormat(descriptor);
+        Assert.Equal(MtlPixelFormat.Rgba8Uint, native.Format);
+        Assert.Equal((7u, 1u, depth), MetalVideoPresenter.GuestTextureShape(descriptor));
+        var layout = MetalVideoPresenter.StorageTextureSeedLayout(descriptor, native);
+        Assert.Equal((5u, 40UL * depth), layout);
+        Assert.Throws<InvalidOperationException>(() => MetalVideoPresenter.StorageTextureSeedLayout(
+            descriptor with { RgbaPixels = new byte[checked((int)layout.RequiredBytes - 1)] }, native));
+        Assert.Throws<InvalidOperationException>(() => MetalVideoPresenter.StorageTextureSeedLayout(
+            descriptor with { CpuSnapshotStable = false }, native));
+    }
+
+    [Theory]
+    [InlineData(0u)]
+    [InlineData(2049u)]
+    public void VolumeNativeExtentIsBoundedBeforeAllocation(uint depth)
+    {
+        Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.StorageTextureFormat(Volume(depth, 0)));
+        Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.StorageTextureFormat(Volume(1, 0) with { Width = 2049 }));
+        Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.StorageTextureFormat(Volume(1, 0) with { Height = 2049 }));
+    }
+
+    [Fact]
+    public void TiledVolumeDepthAndUnknownEquationNeverClaimTwoDimensionalSliceSupport()
+    {
+        Assert.Equal(MtlPixelFormat.Rgba8Uint,
+            MetalVideoPresenter.StorageTextureFormat(Volume(1, 4) with { Width = 1, Height = 1, Pitch = 1, TileMode = 27, Descriptor = VolumeRaw(0x71F2000000, 1, 1, 1, 27) }).Format);
+        Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.StorageTextureFormat(Volume(1, 40) with { TileMode = 27, Descriptor = VolumeRaw(0x71F2000000, 3, 2, 1, 27) })); // WxHx1 is not a 3D-equation proof
+        Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.StorageTextureFormat(Volume(3, 120) with { TileMode = 27, Descriptor = VolumeRaw(0x71F2000000, 3, 2, 3, 27) }));
+        Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.StorageTextureFormat(Volume(1, 4) with
+        { Width = 1, Height = 1, Pitch = 1, TileMode = 27, Address = 0x71F2000100, Descriptor = VolumeRaw(0x71F2000100, 1, 1, 1, 27) })); // possible embedded bank/pipe XOR
+        Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.StorageTextureFormat(Volume(1, 40) with { TileMode = 6, Descriptor = VolumeRaw(0x71F2000000, 3, 2, 1, 6) }));
+        Assert.Throws<OverflowException>(() => MetalVideoPresenter.StorageTextureSeedLayout(
+            Volume(uint.MaxValue, 0) with { Height = uint.MaxValue, Pitch = uint.MaxValue },
+            MetalVideoPresenter.StorageTextureFormat(Volume(1, 40))));
+    }
+
+    [Theory]
+    [InlineData(0UL)]
+    [InlineData(0x100UL)]
+    [InlineData(0xAB00UL)]
+    public void VolumeDescriptorDecoderRetainsEmbeddedPipeBankXorAddressBits(ulong xorBits)
+    {
+        const ulong aligned = 0x90073C0000;
+        var address = aligned | xorBits;
+        uint[] words = [(uint)(address >> 8), (uint)(address >> 40) | (60u << 20), 0, (10u << 28) | (27u << 20) | 0xFAC, 0, 0, 0, 0];
+        object?[] args = [words, null];
+        Assert.True((bool)typeof(AgcExports).GetMethod("TryDecodeTextureDescriptor", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, args)!);
+        var descriptor = Assert.IsType<AgcExports.TextureDescriptor>(args[1]);
+        Assert.Equal(address, descriptor.Address);
+        Assert.Equal(xorBits, descriptor.Address & 0xFFFFUL);
+        Assert.Equal(27u, descriptor.TileMode);
+        Assert.Equal(1u, descriptor.ResourceMipLevels);
+        Assert.Equal(0UL, descriptor.MetadataAddress);
+        Assert.Equal(0u, descriptor.DescriptorFlags);
+    }
+
+    [Fact]
+    public void VolumeStorageRejectsUnknownMetadataAndIncompleteRawDescriptors()
+    {
+        foreach (var raw in new uint[][] { [], new uint[7] })
+            Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.StorageTextureFormat(Volume(1, 40) with { Descriptor = raw }));
+        foreach (var (word, flag) in new[] { (6, 1u), (6, 1u << 24), (7, 1u), (3, 1u << 25) })
+        {
+            var raw = VolumeRaw(0x71F2000000, 3, 2, 1, 0);
+            raw[word] |= flag;
+            Assert.True(AgcBackendServices.TryDecodeTextureDescriptor(raw, out _)); // reach the metadata check
+            Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.StorageTextureFormat(Volume(1, 40) with { Descriptor = raw }));
+        }
+        Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.StorageTextureFormat(Volume(1, 40) with { Descriptor = null }));
+    }
+
+    [Fact]
+    public void LiveVolumeViewCannotReuseTwoDimensionalOrDifferentDepthImages()
+    {
+        using var state = new MetalGuestFailureTests.PresenterState();
+        var images = (IDictionary)typeof(MetalVideoPresenter).GetField("_guestImages", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+        var imageType = typeof(MetalVideoPresenter).GetNestedType("GuestImage", BindingFlags.NonPublic)!;
+        var image = Activator.CreateInstance(imageType, nonPublic: true)!;
+        var descriptor = Volume(3, 0);
+        imageType.GetField("Width")!.SetValue(image, descriptor.Width);
+        imageType.GetField("Height")!.SetValue(image, descriptor.Height);
+        imageType.GetField("Format")!.SetValue(image, MtlPixelFormat.Rgba8Uint);
+        imageType.GetField("Initialized")!.SetValue(image, true);
+        images.Add(descriptor.Address, image);
+        try
+        {
+            Assert.IsType<NotSupportedException>(Assert.Throws<TargetInvocationException>(() => Ensure(descriptor)).InnerException);
+            imageType.GetField("TextureType")!.SetValue(image, 7u);
+            imageType.GetField("Depth")!.SetValue(image, 3u);
+            Assert.Same(image, Ensure(descriptor));
+            Assert.IsType<NotSupportedException>(Assert.Throws<TargetInvocationException>(() => Ensure(descriptor with { Depth = 1, Descriptor = VolumeRaw(descriptor.Address, 3, 2, 1, 0) })).InnerException);
+            var guard = typeof(MetalVideoPresenter).GetMethod("Require2DGuestImage", BindingFlags.Static | BindingFlags.NonPublic)!;
+            Assert.IsType<NotSupportedException>(Assert.Throws<TargetInvocationException>(() => guard.Invoke(null, [image, "fixture"])).InnerException);
+        }
+        finally { images.Remove(descriptor.Address); }
+    }
+
+    [Theory]
+    [InlineData(1u, 6u)] // unknown/untrusted tiled equation cannot become raw seed
+    [InlineData(2u, 27u)] // no Z-aware equation: reject before reading slices
+    public void StorageSnapshotRejectsUnqualifiedVolumeTiling(uint depth, uint tile)
+    {
+        const ulong address = 0x71F2_2000_00;
+        var backendField = typeof(GuestGpu).GetField("_instance", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var previous = backendField.GetValue(null);
+        using var state = new MetalGuestFailureTests.PresenterState();
+        backendField.SetValue(null, RuntimeHelpers.GetUninitializedObject(typeof(MetalGuestGpuBackend)));
+        try
+        {
+            var descriptor = new AgcExports.TextureDescriptor(address, 1, 1, 10, 4, tile, 10, 0, 0, 1, 0xFAC, Depth: depth, HasExtendedDescriptor: true);
+            var binding = new AgcExports.TranslatedImageBinding(descriptor, true, 0, [],
+                Shape: new ShaderImageShape(true, false, true, false, TextureNumericClass.Uint), Access: GuestImageAccess.Write);
+            Assert.Throws<NotSupportedException>(() => MetalTextureSnapshots.CreateTextureSnapshots(
+                new CpuContext(new SourceMemory(address, new byte[131072]), Generation.Gen5), [binding], out _));
+        }
+        finally { GuestImageWriteTracker.Untrack(address); backendField.SetValue(null, previous); }
+    }
+
+    [Fact]
+    public void VolumeSnapshotRejectsMetadataUnknownFlagsAndBcSwizzleBeforeReadingMemory()
+    {
+        const ulong address = 0x71F2_2000_00;
+        var baseline = new AgcExports.TextureDescriptor(address, 1, 1, 10, 4, 27, 10, 0, 0, 1, 0xFAC, Depth: 1, HasExtendedDescriptor: true);
+        var memory = new SourceMemory(address, new byte[65536]);
+        foreach (var descriptor in new[] { baseline with { MetadataAddress = 0x10000 }, baseline with { DescriptorFlags = 1 },
+            baseline with { BcSwizzle = 1 }, baseline with { HasExtendedDescriptor = false } })
+        {
+            var binding = new AgcExports.TranslatedImageBinding(descriptor, true, 0, VolumeRaw(address, 1, 1, 1, 27),
+                Shape: new ShaderImageShape(true, false, true, false, TextureNumericClass.Uint), Access: GuestImageAccess.Write);
+            Assert.Throws<NotSupportedException>(() => MetalTextureSnapshots.CreateTextureSnapshots(
+                new CpuContext(memory, Generation.Gen5), [binding], out _));
+        }
+        Assert.Equal(0, memory.Reads);
+    }
+
+    private static GuestDrawTexture Volume(uint depth, int bytes) => Texture(10, 4, bytes) with
+    { Type = 10, Depth = depth, Descriptor = VolumeRaw(0x71F2000000, 3, 2, depth, 0), Shape = new ShaderImageShape(true, false, true, false, TextureNumericClass.Uint) };
+
+    private static uint[] VolumeRaw(ulong address, uint width, uint height, uint depth, uint tile) =>
+        [(uint)(address >> 8), (uint)(address >> 40) | (60u << 20) | (((width - 1) & 3) << 30),
+         ((width - 1) >> 2) | ((height - 1) << 14), (10u << 28) | (tile << 20) | 0xFAC, depth - 1, 0, 0, 0];
+
     private sealed class SourceMemory(ulong address, byte[] bytes) : ICpuMemory
     {
+        public int Reads { get; private set; }
         public bool TryRead(ulong target, Span<byte> destination)
         {
+            Reads++;
             if (target < address || target - address > (ulong)bytes.Length || (ulong)destination.Length > (ulong)bytes.Length - (target - address)) return false;
             bytes.AsSpan(checked((int)(target - address)), destination.Length).CopyTo(destination);
             return true;
