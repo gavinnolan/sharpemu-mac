@@ -17,6 +17,8 @@ namespace SharpEmu.Libs.Tests.VideoOut;
 public sealed class MetalGraphDisabledSnapshotTests
 {
     private const ulong Address = 0x71F0_0000_00;
+    // Production linear snapshots retain four256-byte padded rows.
+    private const ulong Footprint = 1024;
 
     [Theory]
     [InlineData(false, false, false)]
@@ -38,8 +40,8 @@ public sealed class MetalGraphDisabledSnapshotTests
             GuestImageWriteTracker.Configure(tracking);
             if (tracking)
             {
-                if (managedWriter) GuestImageWriteTracker.TrackManagedWriter(Address, 64);
-                else GuestImageWriteTracker.Track(Address, 64, protect: false);
+                if (managedWriter) GuestImageWriteTracker.TrackManagedWriter(Address, Footprint);
+                else GuestImageWriteTracker.Track(Address, Footprint, protect: false);
             }
             Assert.True(AgcBackendServices.TryDecodeTextureDescriptor(MetalTextureSourceLeaseTests.ResourceWords(), out var descriptor));
             var binding = new AgcExports.TranslatedImageBinding(descriptor, storage, 0, [],
@@ -52,21 +54,21 @@ public sealed class MetalGraphDisabledSnapshotTests
             Assert.Equal(0, fallbacks);
             Assert.False(copied.IsFallback);
             Assert.True(copied.CpuSnapshotStable);
-            Assert.Equal(Enumerable.Repeat((byte)0x37, 64), copied.RgbaPixels);
+            Assert.Equal(Enumerable.Repeat((byte)0x37, (int)Footprint), copied.RgbaPixels);
             Assert.Equal(1, memory.Reads);
             // The fake guest address has no kernel-backed protection owner.
             // Ordinary watches cannot certify a graph source, but graph-false
             // owned CPU uploads preserve their existing generation-only path.
             Assert.Equal(tracking && managedWriter,
-                GuestImageWriteTracker.TryGetObservedContentToken(Address, 64, out _));
+                GuestImageWriteTracker.TryGetObservedContentToken(Address, Footprint, out _));
 
             GuestImageWriteTracker.Untrack(Address);
             GuestImageWriteTracker.Configure(true);
-            GuestImageWriteTracker.TrackManagedWriter(Address, 64);
-            GuestImageWriteTracker.NotifyManagedWrite(Address, 64);
+            GuestImageWriteTracker.TrackManagedWriter(Address, Footprint);
+            GuestImageWriteTracker.NotifyManagedWrite(Address, Footprint);
             memory.Value = 0xA5;
             var upload = MetalVideoPresenter.PrepareDrawTextureUpload(copied);
-            Assert.Equal(Enumerable.Repeat((byte)0x37, 64), upload.RgbaPixels);
+            Assert.Equal(Enumerable.Repeat((byte)0x37, (int)Footprint), upload.RgbaPixels);
             Assert.Equal(1, memory.Reads); // No re-read or fresh-token requirement at consumption.
             Assert.False(MetalVideoPresenter.TextureSourceGraphEnabled);
         }
@@ -77,7 +79,7 @@ public sealed class MetalGraphDisabledSnapshotTests
     {
         public int Reads;
         public byte Value = 0x37;
-        public bool CanRead(ulong address, ulong size) => address >= Address && address - Address + size <= 64;
+        public bool CanRead(ulong address, ulong size) => address >= Address && address - Address + size <= Footprint;
         public bool TryRead(ulong address, Span<byte> bytes)
         {
             Assert.True(CanRead(address, (ulong)bytes.Length));
