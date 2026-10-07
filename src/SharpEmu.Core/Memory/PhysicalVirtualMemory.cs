@@ -1331,6 +1331,20 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 }
 
                 start = candidate + GuestMemoryLayout.GuestPage;
+
+                // Stepping one guest page per failure is hopeless on hosts that
+                // keep a very large span of the low address space to themselves:
+                // Apple Silicon refuses fixed placement for every address below
+                // the kernel's own allocation base, hundreds of gigabytes up, so
+                // a page-by-page walk needs tens of millions of iterations to
+                // reach the first address it can take. Ask the host where its
+                // mappings end and jump there when it knows.
+                var unmapped = _backedSpace!.FindUnmappedHostRange(start, size, limit);
+                if (unmapped > start)
+                {
+                    start = unmapped;
+                }
+
                 if (OperatingSystem.IsWindows() && _hostMemory.Query(candidate, out var info) &&
                     info.BaseAddress <= candidate && info.BaseAddress < limit &&
                     info.RegionSize <= limit - info.BaseAddress)
