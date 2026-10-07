@@ -221,6 +221,75 @@ public sealed class MetalTextureSourceRuntimeDrainTests
         Assert.Equal(before, GuestDataPool.DiagnosticStats().LeaseCount);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CleanupFailurePreservesOriginalGpuCauseAndWakesActualGateWaiter(bool finalFlush)
+    {
+        using var state = new State();
+        var reports = new List<string>(); GpuFatal.OnFatal = reports.Add;
+        var before = GuestDataPool.DiagnosticStats().LeaseCount;
+        var first = GuestDataPool.Shared.Rent(64); var second = GuestDataPool.Shared.Rent(128);
+        var primary = new InvalidOperationException("original GPU work failure");
+        var cleanup = new InvalidOperationException("controlled failure after actual canceled pool return");
+        var oldReturnHook = Field("_textureSourceAfterCanceledPayloadReturn").GetValue(null);
+        var oldCommitHook = Field("_textureSourceBeforeNativeCommit").GetValue(null);
+        var oldCleanup = Field("_textureSourceCleanupFailure").GetValue(null);
+        using var entered = new ManualResetEventSlim();
+        var gate = Field("_gate").GetValue(null)!;
+        Task<(bool signaled, object?)>? awakened = null;
+        try
+        {
+            MetalVideoPresenter.SubmitOrderedGuestAction(() =>
+            {
+                if (!finalFlush) throw primary;
+                Field("_batchOpen").SetValue(null, true);
+                Field("_batchCommandBuffer").SetValue(null, (nint)0);
+            }, "controlled original fatal with pending pool payload");
+            state.AdmitComputePayload([new GuestMemoryBuffer(0, first, 64, 64, true), new GuestMemoryBuffer(0, second, 128, 128, true)]);
+            awakened = Task.Run(() =>
+            {
+                lock (gate)
+                {
+                    entered.Set();
+                    var deadline = Environment.TickCount64 + 5000;
+                    while (Field("_guestWorkFailure").GetValue(null) is null)
+                    {
+                        var remaining = deadline - Environment.TickCount64;
+                        if (remaining <= 0 || !Monitor.Wait(gate, TimeSpan.FromMilliseconds(remaining)))
+                            return (false, (object?)null);
+                    }
+                    return (true, Field("_guestWorkFailure").GetValue(null));
+                }
+            });
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(2)));
+            // The waiter holds gate until Wait releases it. Drain's gate
+            // acquisition proves it entered Wait after admission's pulses.
+            var returns = 0;
+            Field("_textureSourceAfterCanceledPayloadReturn").SetValue(null, (Action)(() => { if (++returns == 1) throw cleanup; }));
+            if (finalFlush) Field("_textureSourceBeforeNativeCommit").SetValue(null, (Action)(() => throw primary));
+            var failure = Assert.Throws<TargetInvocationException>(() => Call("DrainGuestWorkCore", (nint)0, (nint)0, 0L));
+            Assert.Same(primary, Assert.IsType<GpuFatalException>(failure.InnerException).InnerException);
+            Assert.Single(reports);
+            Assert.Same(primary, Field("_guestWorkFailure").GetValue(null));
+            Assert.Same(cleanup, Field("_textureSourceCleanupFailure").GetValue(null));
+            Assert.True(awakened.Wait(TimeSpan.FromSeconds(2)));
+            Assert.True(awakened.Result.signaled); Assert.Same(primary, awakened.Result.Item2);
+            Assert.Equal(2, returns); Assert.Equal(before, GuestDataPool.DiagnosticStats().LeaseCount);
+            Assert.False((bool)Field("_batchOpen").GetValue(null)!);
+            Assert.Equal(0, Field("_pendingGuestWorkCount").GetValue(null));
+        }
+        finally
+        {
+            Field("_textureSourceAfterCanceledPayloadReturn").SetValue(null, oldReturnHook);
+            Field("_textureSourceBeforeNativeCommit").SetValue(null, oldCommitHook);
+            Field("_textureSourceCleanupFailure").SetValue(null, oldCleanup);
+            lock (gate) Monitor.PulseAll(gate);
+            awakened?.Wait(TimeSpan.FromSeconds(2));
+            GuestDataPool.Shared.Return(first); GuestDataPool.Shared.Return(second);
+        }
+    }
+
     private sealed class State : IDisposable
     {
         private readonly MetalTextureSourceLeaseTests.State sourceState = new();

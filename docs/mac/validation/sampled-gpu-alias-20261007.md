@@ -379,7 +379,11 @@ Graph-enabled drain now latches final-flush failures and cancels source/queue
 ownership. Native batches already marked committed keep their pins; only
 uncommitted batches are discarded. A private default-null before-commit failure
 hook permits a real encoded consumer to fail before commit without inventing
-hardware completion. The new device fixture is compiled but not yet executed.
+hardware completion. Clean `2192f71d757e6d014084ee931ffc81c6755c077f`
+passed that actual required-device fixture on ARM64 1/1 (156 ms) and x64 1/1
+(305 ms), Apple M4, no skips. Both runs retain matching DLL hashes, exact
+commands/log/TRX/runner and all64A5/zeroCPUread markers under
+`artifacts/validation/metal-agent/immutable-flush-2192f71-{arm,x64}`.
 
 Cancellation inventories only still-queued unexecuted compute/draw payloads,
 deduplicates pooled global/vertex arrays across the canceled queues, and returns
@@ -390,3 +394,14 @@ actual pool lease count/rerent paths, including cross-work duplicates, foreign
 nonpooled data, index late copies and a completed work's newer array lease.
 In-flight partial pool returns, presentation-carried payload ownership and broad
 CPU producer/copy serialization remain separate qualification work.
+
+A followup fatal-only cleanup guard preserves the original GPU exception, retains
+any secondary cleanup exception separately, and clears the borrowed batch plus
+wakes gate waiters in `finally`. Two CPU-only actual Drain cases inject a failure
+after a real canceled pool return; both execution and final-flush paths preserve
+the original cause, return remaining arrays, latch the cleanup diagnostic, and
+wake a real condition-variable waiter. This followup does not invent GPU
+completion or change the graphfalse path. The matching source/queue/frontend
+selection passes 116 managed cases on each architecture. The device executions
+above qualify their exact earlier source revisions, not this later exception
+bookkeeping revision. Source graph activation remains off.

@@ -7,6 +7,24 @@ namespace SharpEmu.Gpu.Metal;
 
 internal static partial class MetalVideoPresenter
 {
+    // Fatal-only secondary diagnostic. Cleanup cannot replace the GPU cause or
+    // keep blocked admission waiters asleep; no healthy continuation is allowed.
+    private static Exception? _textureSourceCleanupFailure;
+    private static Action? _textureSourceAfterCanceledPayloadReturn;
+
+    private static void LatchTextureSourceDrainFailureLocked(Exception failure)
+    {
+        _guestWorkFailure = failure;
+        try { AbortQueuedTextureSourceWorkLocked(); }
+        catch (Exception cleanupFailure) { _textureSourceCleanupFailure = cleanupFailure; }
+        finally
+        {
+            _batchOpen = false;
+            _batchCommandBuffer = 0;
+            Monitor.PulseAll(_gate);
+        }
+    }
+
     private static void RequireQualifiedTextureSourceConsumerWork(object work)
     {
         lock (_gate)
@@ -98,9 +116,9 @@ internal static partial class MetalVideoPresenter
         // allocation failure must not permit retry to return a newer lease.
         Exception? failure = null;
         foreach (var index in indices)
-            try { index.TryReturn(); } catch (Exception exception) { failure ??= exception; }
+            try { index.TryReturn(); _textureSourceAfterCanceledPayloadReturn?.Invoke(); } catch (Exception exception) { failure ??= exception; }
         foreach (var array in arrays)
-            try { GuestDataPool.Shared.Return(array); } catch (Exception exception) { failure ??= exception; }
+            try { GuestDataPool.Shared.Return(array); _textureSourceAfterCanceledPayloadReturn?.Invoke(); } catch (Exception exception) { failure ??= exception; }
         if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
 }

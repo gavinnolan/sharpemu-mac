@@ -827,11 +827,7 @@ internal static partial class MetalVideoPresenter
         {
             lock (_gate)
             {
-                _guestWorkFailure = exception;
-                AbortQueuedTextureSourceWorkLocked();
-                _batchOpen = false;
-                _batchCommandBuffer = 0;
-                Monitor.PulseAll(_gate);
+                LatchTextureSourceDrainFailureLocked(exception);
             }
             if (exception is GpuFatalException) throw;
             throw GpuFatal.Fatal("Metal guest drain preparation failed.", exception);
@@ -897,9 +893,12 @@ internal static partial class MetalVideoPresenter
                 {
                     lock (_gate)
                     {
-                        _guestWorkFailure = exception;
-                        AbortQueuedTextureSourceWorkLocked();
-                        Monitor.PulseAll(_gate);
+                        if (_textureSourceGraphEnabled) LatchTextureSourceDrainFailureLocked(exception);
+                        else
+                        {
+                            _guestWorkFailure = exception;
+                            Monitor.PulseAll(_gate);
+                        }
                     }
 
                     // commandBuffer is autoreleased by its creating pool. Drop
@@ -933,11 +932,7 @@ internal static partial class MetalVideoPresenter
         {
             lock (_gate)
             {
-                _guestWorkFailure = exception;
-                AbortQueuedTextureSourceWorkLocked();
-                _batchOpen = false;
-                _batchCommandBuffer = 0;
-                Monitor.PulseAll(_gate);
+                LatchTextureSourceDrainFailureLocked(exception);
             }
             if (exception is GpuFatalException) throw;
             throw GpuFatal.Fatal("Metal guest drain completion failed.", exception);
@@ -953,11 +948,7 @@ internal static partial class MetalVideoPresenter
                 {
                     lock (_gate)
                     {
-                        _guestWorkFailure = exception;
-                        AbortQueuedTextureSourceWorkLocked();
-                        _batchOpen = false;
-                        _batchCommandBuffer = 0;
-                        Monitor.PulseAll(_gate);
+                        LatchTextureSourceDrainFailureLocked(exception);
                     }
                     if (exception is GpuFatalException) throw;
                     throw GpuFatal.Fatal("Metal guest drain final flush failed.", exception);
