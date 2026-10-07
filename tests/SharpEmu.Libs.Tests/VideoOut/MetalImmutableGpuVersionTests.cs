@@ -186,7 +186,7 @@ public sealed partial class MetalImmutableGpuVersionTests(ITestOutputHelper outp
         private readonly nint pool;
         private readonly nint device;
         private readonly nint queue;
-        private readonly UploadArenaScope uploadArena = new();
+        private readonly UploadArenaScope uploadArena;
         private readonly List<nint> buffers = [];
         private readonly List<GuestDrawTexture> captures = [];
         private readonly Dictionary<object, object> workByVersion = new(ReferenceEqualityComparer.Instance);
@@ -199,6 +199,7 @@ public sealed partial class MetalImmutableGpuVersionTests(ITestOutputHelper outp
             pool = MetalNative.Send(MetalNative.Send(MetalNative.Class("NSAutoreleasePool"), MetalNative.Selector("alloc")), MetalNative.Selector("init"));
             device = MetalNative.MTLCreateSystemDefaultDevice(); Assert.NotEqual((nint)0, device);
             queue = MetalNative.Send(device, MetalNative.Selector("newCommandQueue")); Assert.NotEqual((nint)0, queue);
+            uploadArena = new UploadArenaScope();
             Field("_textureSourceGraphEnabled").SetValue(null, true);
         }
         public nint Buffer()
