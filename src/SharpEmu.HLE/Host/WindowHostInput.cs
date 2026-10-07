@@ -36,8 +36,10 @@ internal sealed class WindowHostInput : IHostInput
     public void ResetLightbar() => HostWindowInputSource.Current?.ResetLightbar();
 
     public bool IsHostWindowFocused() =>
-        HostWindowInputSource.Current?.HasKeyboardFocus ?? false;
+        (HostWindowInputSource.Current?.HasKeyboardFocus ?? false) ||
+        (ScriptedKeyInput.IsEnabled && ScriptedKeyInput.AnyHeld);
 
     public bool IsKeyDown(int virtualKey) =>
-        HostWindowInputSource.Current?.IsKeyDown(virtualKey) ?? false;
+        (ScriptedKeyInput.IsEnabled && ScriptedKeyInput.IsHeld(virtualKey)) ||
+        (HostWindowInputSource.Current?.IsKeyDown(virtualKey) ?? false);
 }
