@@ -25,38 +25,6 @@ public static partial class Gen5SpirvTranslator
         uint numberType) =>
         CompilationContext.DecodeStorageImageFormat(dataFormat, numberType);
 
-    // Vulkan only guarantees maxComputeWorkGroupSize >= (1024, 1024, 64) and
-    // maxComputeWorkGroupInvocations >= 1024, but a GNM NUM_THREAD layout can put its
-    // largest axis on Z (real PS5 hardware has no such asymmetry between axes). Remap
-    // logical GNM axes onto physical SPIR-V/dispatch axes so the largest logical size
-    // always lands on the physical axis with the most headroom (X), and the smallest
-    // lands on Z, which is the only axis with a tight guaranteed limit. This is a pure
-    // function of the three thread-group sizes so the host dispatch path (which permutes
-    // vkCmdDispatch's group counts the same way) can recompute it independently without
-    // any shader-compiler metadata plumbing.
-    //
-    // Returns physicalAxisOfLogical: physicalAxisOfLogical[logical 0=X/1=Y/2=Z] is the
-    // physical axis (0=X/1=Y/2=Z) that logical axis is remapped onto.
-    public static int[] ComputeWorkgroupAxisOrder(uint sizeX, uint sizeY, uint sizeZ)
-    {
-        if (sizeZ <= 64)
-        {
-            return [0, 1, 2];
-        }
-
-        var sizes = new[] { sizeX, sizeY, sizeZ };
-        var byDescendingSize = new[] { 0, 1, 2 };
-        Array.Sort(byDescendingSize, (a, b) => sizes[b].CompareTo(sizes[a]));
-
-        var physicalAxisOfLogical = new int[3];
-        for (var physical = 0; physical < 3; physical++)
-        {
-            physicalAxisOfLogical[byDescendingSize[physical]] = physical;
-        }
-
-        return physicalAxisOfLogical;
-    }
-
     private sealed partial class CompilationContext
     {
         private const int ScalarRegisterCount = 128;
@@ -1264,7 +1232,7 @@ public static partial class Gen5SpirvTranslator
                     // gl_LocalInvocationId/gl_WorkGroupId are indexed by the physical SPIR-V
                     // axis, which can differ from the logical GNM axis when the workgroup was
                     // remapped to respect the device's tighter Z-axis limit (see
-                    // ComputeWorkgroupAxisOrder).
+                    // Gen5WorkgroupAxisOrder.Compute).
                     var physicalComponent = (uint)_physicalAxisOfLogical[component];
                     var localComponent = _module.AddInstruction(
                         SpirvOp.CompositeExtract,

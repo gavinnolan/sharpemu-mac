@@ -3,7 +3,7 @@
 
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Scheduling;
-using SharpEmu.ShaderCompiler.Vulkan;
+using SharpEmu.ShaderCompiler;
 using Silk.NET.Vulkan;
 using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
 
@@ -180,11 +180,11 @@ public sealed partial class RenderExecutor
 
             _host.BindPipeline(PipelineBindPoint.Compute, in pipeline);
             // The shader's local workgroup axes may have been remapped at compile time
-            // (see Gen5SpirvTranslator.ComputeWorkgroupAxisOrder) so the largest NUM_THREAD
+            // (see Gen5WorkgroupAxisOrder.Compute) so the largest NUM_THREAD
             // axis lands on a physical axis Vulkan actually allows it on. The dispatch group
             // counts must be permuted the same way, or vkCmdDispatch would hand group counts
             // for the wrong physical axis to the pipeline it built with the remapped sizes.
-            var axisOrder = Gen5SpirvTranslator.ComputeWorkgroupAxisOrder(
+            var axisOrder = Gen5WorkgroupAxisOrder.Compute(
                 input.ThreadsX,
                 input.ThreadsY,
                 input.ThreadsZ);
