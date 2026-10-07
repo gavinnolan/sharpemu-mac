@@ -24,12 +24,20 @@ public sealed partial class MetalTextureMaterializationTests
             Read = true,
         };
         var guest = host.GetMethod("CreateUndecodableNullImage", Methods)!.Invoke(null, [new uint[8], resource])!;
-        const string shader = """
+        var shader = storage ? """
             #include <metal_stdlib>
             using namespace metal;
             kernel void read_null(texture2d<float, access::read> source [[texture(0)]],
                                   device float4* result [[buffer(0)]]) {
                 result[0] = source.read(uint2(0, 0));
+            }
+            """ : """
+            #include <metal_stdlib>
+            using namespace metal;
+            kernel void read_null(texture2d<float, access::sample> source [[texture(0)]],
+                                  device float4* result [[buffer(0)]]) {
+                constexpr sampler sampling(coord::normalized, address::clamp_to_edge, filter::nearest);
+                result[0] = source.sample(sampling, float2(0.5, 0.5));
             }
             """;
         var pool = NullSend(NullSend(NullClass("NSAutoreleasePool"), Selector("alloc")), Selector("init"));
