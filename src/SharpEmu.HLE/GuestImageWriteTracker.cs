@@ -516,6 +516,48 @@ public static unsafe partial class GuestImageWriteTracker
     }
 
     /// <summary>
+    /// Observes owner identities/counters only when tracker metadata describes
+    /// complete armed protection or an explicitly managed-writer footprint.
+    /// Ordinary watch-only registrations and incomplete or transitional native
+    /// owners do not qualify. Call only from ordinary managed execution.
+    /// This is not a kernel permission receipt, copy-serialization protocol or
+    /// backing lease: notification precedes managed copies, and fault handling
+    /// precedes the resumed store. Compare observations around a separately
+    /// qualified copy; neither a true result nor equality excludes later writes.
+    /// </summary>
+    public static bool TryGetObservedContentToken(ulong address, ulong byteCount, out ContentToken token)
+    {
+        token = new ContentToken(0, -1, 0, -1, 0, 0);
+        if (!_enabled || address == 0 || byteCount == 0 || address > ulong.MaxValue - byteCount)
+            return false;
+
+        lock (_gate)
+        {
+            if (!_enabled) return false;
+            _rangesByAddress.TryGetValue(address, out var protectedRange);
+            _watchRangesByAddress.TryGetValue(address, out var watchRange);
+            var managedCoverage = watchRange is { ManagedWriter: true } && watchRange.ByteCount >= byteCount;
+            var protectedCoverage = protectedRange is { Protect: true } && protectedRange.ByteCount >= byteCount &&
+                Volatile.Read(ref protectedRange.Armed) == RangeArmed;
+            if (!managedCoverage && !protectedCoverage) return false;
+
+            var observed = new ContentToken(
+                protectedRange?.DiagnosticIdentity ?? 0,
+                protectedRange is null ? -1 : Volatile.Read(ref protectedRange.WriteGeneration),
+                watchRange?.DiagnosticIdentity ?? 0,
+                watchRange is null ? -1 : Volatile.Read(ref watchRange.WriteGeneration),
+                protectedRange?.ByteCount ?? 0,
+                watchRange?.ByteCount ?? 0);
+            // A signal handler can start invalidating without taking this gate.
+            // It cannot rearm while the safe-side registry gate is held.
+            if (!managedCoverage && Volatile.Read(ref protectedRange!.Armed) != RangeArmed)
+                return false;
+            token = observed;
+            return true;
+        }
+    }
+
+    /// <summary>
     /// Returns the monotonic first-write generation for a tracked allocation.
     /// Unlike the consuming dirty flag, this remains changed after another
     /// cache owner consumes and re-arms the range.
