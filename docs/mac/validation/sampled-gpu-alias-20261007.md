@@ -283,3 +283,16 @@ a completed real flushed command buffer before the pixel oracle. Failed source,
 assembly hashes, log and TRX remain in `immutable-consumer-839ec71-arm`; the
 consumer shader did not execute in that failed run. Corrected device execution
 is pending a new exclusive grant. No production ABI change is implied.
+
+Clean fe7c727 consumer proof now passes four actual required-device cases on
+ARM64 and four on Rosetta x64 using identical neutral DLL hashes (Apple M4;
+232ms /363ms, zero skips). Both complete through the real compiled pipeline and
+completed native command buffer; every byte of all16old/red and new/green texels
+passes through production argument-buffer binding and guest writeback. Evidence:
+`immutable-consumer-fe7c727-arm` and `immutable-consumer-fe7c727-x64`, each with
+exact clean source, architecture, assembly hashes, commands, log, TRX and parsed
+execution markers. This closes the native shader-consumer gap from bfe518d.
+Queued ownership is still released after writeback wait in those cases. Gen5 ISA
+translation, runtime Drain writer/error/shutdown hooks, CPU seed/backing leases
+and graph activation remain unqualified. The preexisting new-function ownership
+in `GetShaderFunction`/`TryGetComputePipeline` needs separate cleanup review.
