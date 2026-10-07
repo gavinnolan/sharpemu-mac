@@ -22,7 +22,15 @@ public static unsafe class HostMemory
     // query result until the address space changes.
     public static long MappingGeneration => Volatile.Read(ref _mappingGeneration);
 
-    internal static void OnMappingChanged() => Interlocked.Increment(ref _mappingGeneration);
+    /// <summary>
+    /// Invalidates every cached <see cref="MappingGeneration"/> observation.
+    /// </summary>
+    /// <remarks>
+    /// Host-package contract: the per-OS <c>SharpEmu.Host.*</c> backends own the
+    /// syscalls that create, resize, protect and release mappings, so they are
+    /// the only callers that know when the address space changed.
+    /// </remarks>
+    public static void OnMappingChanged() => Interlocked.Increment(ref _mappingGeneration);
 
     public const uint MEM_COMMIT = 0x1000;
     public const uint MEM_RESERVE = 0x2000;

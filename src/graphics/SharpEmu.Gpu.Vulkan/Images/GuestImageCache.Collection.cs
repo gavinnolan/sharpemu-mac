@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.Buffers;
+using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Gpu.Vulkan.Buffers;
 
-namespace SharpEmu.Libs.Gpu.Images;
+namespace SharpEmu.Gpu.Vulkan.Images;
 
 // Garbage collection by recency and memory pressure, and the scheduled readback flush.
 public sealed partial class GuestImageCache

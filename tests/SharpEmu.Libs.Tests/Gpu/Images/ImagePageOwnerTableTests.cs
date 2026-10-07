@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.Buffers;
-using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Gpu.Vulkan.Images;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using Xunit;
 

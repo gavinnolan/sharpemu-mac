@@ -3,7 +3,8 @@
 
 namespace SharpEmu.Libs.Diagnostics;
 
-internal static class GpuReadTrace
+/// <summary>Shared guest-resource diagnostics for backend reads and writes.</summary>
+public static class GpuReadTrace
 {
     private const int MaxReports = 64;
 
@@ -11,10 +12,10 @@ internal static class GpuReadTrace
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GPU_READS") == "1";
 
     [ThreadStatic]
-    public static ulong CurrentShader;
+    internal static ulong CurrentShader;
 
     [ThreadStatic]
-    public static string? CurrentStage;
+    internal static string? CurrentStage;
 
     private static readonly HashSet<(ulong Shader, ulong Page, bool Table)> _reported = new();
     private static readonly Dictionary<ulong, (long Reads, long Changes, uint Last, uint First, ulong Shader)> _values = new();

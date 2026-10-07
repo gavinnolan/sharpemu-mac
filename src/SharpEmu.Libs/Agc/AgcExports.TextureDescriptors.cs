@@ -17,7 +17,7 @@ public static partial class AgcExports
         _ => 0,
     };
 
-    internal readonly record struct TextureDescriptor(
+    public readonly record struct TextureDescriptor(
         ulong Address,
         uint Width,
         uint Height,
@@ -91,7 +91,7 @@ public static partial class AgcExports
         }
     }
 
-    internal sealed record TranslatedImageBinding(
+    public sealed record TranslatedImageBinding(
         TextureDescriptor Descriptor,
         bool IsStorage,
         uint MipLevel,

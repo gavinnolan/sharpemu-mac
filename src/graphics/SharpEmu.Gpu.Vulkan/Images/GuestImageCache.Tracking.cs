@@ -3,11 +3,13 @@
 
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Buffers;
-using SharpEmu.Libs.Gpu.Scheduling;
 
 using SharpEmu.Libs.VideoOut;
+using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Gpu.Vulkan.Buffers;
+using SharpEmu.Gpu.Vulkan.Scheduling;
 
-namespace SharpEmu.Libs.Gpu.Images;
+namespace SharpEmu.Gpu.Vulkan.Images;
 
 // Registration in the page owner index, page watches, CPU-write invalidation and unmapping.
 public sealed partial class GuestImageCache

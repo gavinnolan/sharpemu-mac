@@ -4,7 +4,7 @@
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu.GpuCommands;
-using SharpEmu.Libs.VideoOut;
+using SharpEmu.Gpu.Vulkan.Presentation;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;

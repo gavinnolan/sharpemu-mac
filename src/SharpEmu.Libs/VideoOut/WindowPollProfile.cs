@@ -5,8 +5,16 @@ using System.Diagnostics;
 
 namespace SharpEmu.Libs.VideoOut;
 
-// Keep the longest polls in each report interval without logging on the event path.
-internal static class WindowPollProfile
+/// <summary>
+/// Keeps the longest window-event polls in each report interval without logging
+/// on the event path.
+/// </summary>
+/// <remarks>
+/// Platform contract: only the host window package calls the OS event poll, so
+/// <see cref="Enabled"/> and <see cref="Record"/> are public here and everything
+/// that formats the report stays internal.
+/// </remarks>
+public static class WindowPollProfile
 {
     internal readonly record struct Sample(long StartedAt, long ElapsedTicks, bool ReturnedEvent, uint EventType);
 
@@ -44,10 +52,14 @@ internal static class WindowPollProfile
 
     [ThreadStatic] private static Counters? _counters;
 
-    internal static bool Enabled =>
+    /// <summary>Whether <see cref="Record"/> would keep the sample.</summary>
+    /// <remarks>Platform contract: lets the window skip timestamping when nothing is recorded.</remarks>
+    public static bool Enabled =>
         RenderPhaseProfile.FrameTraceEnabled && RenderPhaseProfile.DetailMeasurementsEnabled;
 
-    internal static void Record(long startedAt, long finishedAt, bool returnedEvent, uint eventType)
+    /// <summary>Records one window-event poll.</summary>
+    /// <remarks>Platform contract.</remarks>
+    public static void Record(long startedAt, long finishedAt, bool returnedEvent, uint eventType)
     {
         if (!Enabled) return;
         (_counters ??= new Counters()).Record(startedAt, finishedAt, returnedEvent, eventType);

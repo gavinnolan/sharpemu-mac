@@ -6,7 +6,15 @@ using System.IO.Compression;
 
 namespace SharpEmu.Libs.VideoOut;
 
-internal static class PngSplashLoader
+/// <summary>
+/// Decodes the title's <c>pic0.png</c> splash and <c>icon0.png</c> icon from the
+/// mounted game image, without a graphics library.
+/// </summary>
+/// <remarks>
+/// Platform/backend contract: the splash is uploaded by the graphics backend and
+/// the icon is handed to the window, so both packages read it from here.
+/// </remarks>
+public static class PngSplashLoader
 {
     private const uint CrcPolynomial = 0xEDB88320;
     private static readonly uint[] CrcTable = BuildCrcTable();
@@ -16,9 +24,11 @@ internal static class PngSplashLoader
         0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
     ];
 
+    /// <summary>Decodes the title's splash image, if the mounted image has one.</summary>
     public static bool TryLoad(out byte[] pixels, out uint width, out uint height)
         => TryLoad("pic0.png", requestRgba: false, out pixels, out width, out height);
 
+    /// <summary>Decodes the title's icon as RGBA, if the mounted image has one.</summary>
     public static bool TryLoadIcon(out byte[] pixels, out uint width, out uint height)
         => TryLoad("icon0.png", requestRgba: true, out pixels, out width, out height);
 

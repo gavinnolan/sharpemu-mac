@@ -69,7 +69,7 @@ public sealed record HostVideoOptions
     // reporting HDR would move titles onto render paths it cannot present.
     internal static bool AutoHdrAllowed => HostVideoHost.AutoHdrAllowed;
 
-    internal bool CanUseHdr(bool displayHdrEnabled, bool surfaceSupportsHdr) =>
+    public bool CanUseHdr(bool displayHdrEnabled, bool surfaceSupportsHdr) =>
         CanUseHdr(displayHdrEnabled, surfaceSupportsHdr, AutoHdrAllowed);
 
     internal bool CanUseHdr(bool displayHdrEnabled, bool surfaceSupportsHdr, bool autoAllowed) =>

@@ -141,7 +141,7 @@ public static partial class AgcExports
         new(memory, host);
 
     // Translates the draws, dispatches, resets and flips of one interpreter host thread.
-    internal sealed class CommandStreamTranslation
+    public sealed class CommandStreamTranslation
     {
         private readonly ICommandStreamHost _host;
         private readonly CpuContext _context;
@@ -164,9 +164,9 @@ public static partial class AgcExports
         }
 
         // The context bank of the queue whose slice runs now; the Metal host rebuilds its records from it.
-        internal ContextRegisters? CurrentContextRegisters => _current?.TypedRegisters?.Context;
+        public ContextRegisters? CurrentContextRegisters => _current?.TypedRegisters?.Context;
 
-        internal SubmittedVertexData? FindSubmittedVertexData(VertexInputInfo input)
+        public SubmittedVertexData? FindSubmittedVertexData(VertexInputInfo input)
         {
             var snapshot = _current?.CurrentVertexSnapshot;
             if (snapshot?.Data is not { } data || snapshot.ExportShaderAddress != input.Stage.ShaderBase || !data.Matches(input))
@@ -230,7 +230,7 @@ public static partial class AgcExports
         }
 
         // Keeps the banks the draw was issued under; the flip replays it into the display buffer.
-        internal void RetainTargetlessDraw(RegisterBanks banks, in TargetlessDrawArguments arguments)
+        public void RetainTargetlessDraw(RegisterBanks banks, in TargetlessDrawArguments arguments)
         {
             var state = RequireCurrent();
             if (RenderTrace.Enabled)
@@ -476,8 +476,8 @@ public static partial class AgcExports
         state.FrameDispatchCount = 0;
     }
 
-    // A host without a GPU: managed transfers, immediate completions, video-out flip requests.
-    internal class TranslatingCommandStreamHost : ManagedCommandStreamHost
+    // Shared AGC translation host; backends override native draw/dispatch and presentation operations.
+    public class TranslatingCommandStreamHost : ManagedCommandStreamHost
     {
         private CommandStreamTranslation? _translation;
         private CommandStreamQueue? _queue;
@@ -520,7 +520,7 @@ public static partial class AgcExports
     }
 
     // The inline command stream of a backend without a presenter thread (test and startup path).
-    internal sealed class HeadlessCommandStream
+    internal sealed class HeadlessCommandStream : IGuestCommandStream
     {
         // Command-state tests record packet state; render tests use the executor's recording host.
         private sealed class CommandStateHost(ICpuMemory memory) : TranslatingCommandStreamHost(memory)
@@ -573,6 +573,8 @@ public static partial class AgcExports
                 RunRunnable();
             }
         }
+
+        public BlockedSnapshot SnapshotBlocked() => Queue.SnapshotBlocked();
 
         public IdleOutcome Done()
         {

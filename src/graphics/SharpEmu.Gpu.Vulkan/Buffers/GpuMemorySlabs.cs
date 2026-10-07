@@ -4,7 +4,7 @@
 using System.Numerics;
 using Silk.NET.Vulkan;
 
-namespace SharpEmu.Libs.Gpu.Buffers;
+namespace SharpEmu.Gpu.Vulkan.Buffers;
 
 // Small buffers take a power-of-two block out of a shared, persistently mapped chunk
 // instead of a dedicated allocation. Games stream constants through fresh ranges every

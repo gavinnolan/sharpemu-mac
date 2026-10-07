@@ -3,7 +3,7 @@
 
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
-using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Gpu.Vulkan.Scheduling;
 using SharpEmu.Libs.Tests.Memory.GpuMemory;
 using Xunit;
 using static SharpEmu.Libs.Tests.Gpu.Scheduling.SchedulingTestSupport;

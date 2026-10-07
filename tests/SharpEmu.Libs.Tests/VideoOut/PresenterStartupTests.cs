@@ -6,7 +6,7 @@ using System.Runtime.CompilerServices;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Tests.Gpu.GpuCommands;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
-using SharpEmu.Libs.VideoOut;
+using SharpEmu.Gpu.Vulkan.Presentation;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.VideoOut;
@@ -19,7 +19,7 @@ public sealed class PresenterStartupTests
         private static readonly Type PresenterType = typeof(VulkanVideoPresenter);
         private readonly Dictionary<FieldInfo, object?> _saved = new();
         private readonly object _gate = Read("_gate")!;
-        private readonly Func<SharpEmu.HLE.ICpuMemory, SharpEmu.Libs.Agc.AgcExports.HeadlessCommandStream>? _factory =
+        private readonly Func<SharpEmu.HLE.ICpuMemory, IGuestCommandStream>? _factory =
             VulkanVideoPresenter.TestCommandStreamFactory;
 
         public StartupState()

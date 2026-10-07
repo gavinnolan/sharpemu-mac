@@ -4,6 +4,7 @@
 using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Gpu.Vulkan.Scheduling;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.Tests.Agc;
 using Xunit;

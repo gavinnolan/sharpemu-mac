@@ -4,7 +4,6 @@
 using System.Reflection;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu;
-using SharpEmu.Libs.Gpu.Images;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;

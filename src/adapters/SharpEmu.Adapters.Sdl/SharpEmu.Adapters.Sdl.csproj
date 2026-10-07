@@ -35,8 +35,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
   <ItemGroup>
     <InternalsVisibleTo Include="SharpEmu.Libs.Tests" />
-    <!-- The Vulkan presenter owns the SDL window and its render loop. -->
-    <InternalsVisibleTo Include="SharpEmu.Gpu.Vulkan" />
   </ItemGroup>
 
   <ItemGroup>

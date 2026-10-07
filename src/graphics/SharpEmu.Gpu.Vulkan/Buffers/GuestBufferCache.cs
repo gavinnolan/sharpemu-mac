@@ -5,13 +5,14 @@ using System.Runtime.InteropServices;
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.HLE.GuestMemory;
-using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
-using SharpEmu.Libs.Gpu.Vulkan;
 using Silk.NET.Vulkan;
+using SharpEmu.Libs.Gpu.Buffers;
+using SharpEmu.Gpu.Vulkan.Scheduling;
+using SharpEmu.Libs.Diagnostics;
 
-namespace SharpEmu.Libs.Gpu.Buffers;
+namespace SharpEmu.Gpu.Vulkan.Buffers;
 
 public readonly record struct DownloadPiece(GpuBuffer Buffer, ulong SourceOffset, ulong Address, ulong Size);
 
@@ -241,10 +242,10 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         if (isWritten)
         {
             buffer.NoteGpuWrite();
-            if (Diagnostics.DccWriterTrace.Enabled)
+            if (DccWriterTrace.Enabled)
             {
                 var images = RequireImageCache();
-                Diagnostics.DccWriterTrace.Record(images.OverlapsDccMetadata, guestAddress, size);
+                DccWriterTrace.Record(images.OverlapsDccMetadata, guestAddress, size);
             }
 
             if (!_gpuModifiedRanges.Contains(guestAddress, size))
@@ -299,7 +300,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 $"Cannot reserve image staging space: address=0x{guestAddress:X16} size=0x{size:X16} capacity=0x{_staging.Size:X16} tick={_scheduler.CurrentTick}.");
         }
         if (!_backing.TryReadBacking(guestAddress, _staging.Mapped.Slice((int)stageOffset, (int)size)) &&
-            !KernelMemoryCompatExports.TryReadPrtBacking(_backing, guestAddress,
+            !SharpEmu.Libs.Gpu.GuestBackingServices.TryReadPrtBacking(_backing, guestAddress,
                 _staging.Mapped.Slice((int)stageOffset, (int)size)))
         {
             throw SubmissionScheduler.Fatal(

@@ -74,7 +74,12 @@ public static class PerfOverlay
     public static int DisplayWidth => DisplayState.DisplayWidth;
     public static int DisplayHeight => DisplayState.DisplayHeight;
 
-    internal static void Configure(HostVideoOptions options)
+    /// <summary>Applies the video options and starts the GPU-usage sampler.</summary>
+    /// <remarks>
+    /// Platform contract: the host window owns the overlay's lifetime, so the
+    /// window package calls this once when it opens.
+    /// </remarks>
+    public static void Configure(HostVideoOptions options)
     {
         _gpuUsage?.Dispose();
         _gpuUsage = new WindowsGpuUsage();
@@ -83,7 +88,9 @@ public static class PerfOverlay
         _sessionStartTimestamp = Stopwatch.GetTimestamp();
     }
 
-    internal static void Shutdown()
+    /// <summary>Releases the GPU-usage sampler.</summary>
+    /// <remarks>Platform contract; the host window calls this when it closes.</remarks>
+    public static void Shutdown()
     {
         _gpuUsage?.Dispose();
         _gpuUsage = null;
@@ -92,9 +99,16 @@ public static class PerfOverlay
     public static void Toggle() => DisplayState.Toggle();
     public static void CycleCorner() => DisplayState.CycleCorner();
 
-    internal static OverlayRectangle GetRectangle(int width, int height) => DisplayState.GetRectangle(width, height);
+    /// <summary>Where the overlay should be drawn on a surface of the given size.</summary>
+    /// <remarks>
+    /// Backend contract: the graphics backend owns the blit, so it asks for the
+    /// placement rather than being told.
+    /// </remarks>
+    public static OverlayRectangle GetRectangle(int width, int height) => DisplayState.GetRectangle(width, height);
 
-    internal static string GetTitleBarSummary()
+    /// <summary>The one-line summary for the window title, or an empty string when the overlay is off or drawn on screen.</summary>
+    /// <remarks>Platform contract: only the host window package can set a title.</remarks>
+    public static string GetTitleBarSummary()
     {
         if (!Enabled || DisplayState.Mode != PerformanceOverlayMode.TitleBar)
         {

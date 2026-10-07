@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.Buffers;
-using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Gpu.Vulkan.Scheduling;
 
-namespace SharpEmu.Libs.Gpu.Images;
+namespace SharpEmu.Gpu.Vulkan.Images;
 
 // The images that own one 1 MiB page; the first sixteen stay inline, more move to a list.
 public sealed class PageOwnerList

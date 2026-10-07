@@ -4,7 +4,8 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
-using SharpEmu.Libs.Platform.MacOS;
+using SharpEmu.Platform.MacOS;
+using SharpEmu.Platform.MacOS.Windowing;
 using SharpEmu.Libs.VideoOut;
 
 namespace SharpEmu.Tools.MacWindowSmoke;

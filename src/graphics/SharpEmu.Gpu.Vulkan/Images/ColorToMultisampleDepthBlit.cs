@@ -3,13 +3,13 @@
 
 using System.Runtime.InteropServices;
 using SharpEmu.Libs.Gpu.Abstractions;
-using SharpEmu.Libs.Gpu.Buffers;
-using SharpEmu.Libs.Gpu.Scheduling;
-using SharpEmu.Libs.Gpu.Vulkan;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Vulkan;
+using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Gpu.Vulkan.Buffers;
+using SharpEmu.Gpu.Vulkan.Scheduling;
 
-namespace SharpEmu.Libs.Gpu.Images;
+namespace SharpEmu.Gpu.Vulkan.Images;
 
 // Writes each channel of a single-sample color image into one sample of a multisample depth image.
 public sealed unsafe class ColorToMultisampleDepthBlit : IDisposable

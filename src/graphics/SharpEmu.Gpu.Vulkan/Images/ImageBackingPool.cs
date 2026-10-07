@@ -1,10 +1,10 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using SharpEmu.Libs.Gpu.Buffers;
 using Silk.NET.Vulkan;
+using SharpEmu.Gpu.Vulkan.Buffers;
 
-namespace SharpEmu.Libs.Gpu.Images;
+namespace SharpEmu.Gpu.Vulkan.Images;
 
 // Keeps the Vulkan image and memory of retired cached images so an image created with the
 // same parameters reuses them instead of calling vkCreateImage and vkAllocateMemory again.

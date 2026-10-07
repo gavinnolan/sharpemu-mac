@@ -1,11 +1,12 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using SharpEmu.Libs.Gpu.Buffers;
-using SharpEmu.Libs.Gpu.Scheduling;
 using Silk.NET.Vulkan;
+using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Gpu.Vulkan.Buffers;
+using SharpEmu.Gpu.Vulkan.Scheduling;
 
-namespace SharpEmu.Libs.Gpu.Images;
+namespace SharpEmu.Gpu.Vulkan.Images;
 
 public enum SamplerClampMode : uint
 {

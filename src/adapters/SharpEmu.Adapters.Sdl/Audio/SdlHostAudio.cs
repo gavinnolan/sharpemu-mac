@@ -7,7 +7,7 @@ using SDL;
 using static SDL.SDL3;
 using SharpEmu.HLE.Host;
 
-namespace SharpEmu.Adapters.Sdl;
+namespace SharpEmu.Adapters.Sdl.Audio;
 
 public sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
 {

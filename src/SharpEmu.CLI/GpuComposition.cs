@@ -27,12 +27,12 @@ internal static class GpuComposition
         // throw PlatformNotSupportedException if the process somehow is not on macOS, so a
         // duplicate OperatingSystem.IsMacOS() here would only hide the real guard.
 #pragma warning disable CA1416
-        SharpEmu.Libs.Platform.MacOS.MacPlatform.Register();
-        SharpEmu.Libs.Gpu.Metal.MetalGpuBackend.Register();
+        SharpEmu.Platform.MacOS.MacPlatform.Register();
+        SharpEmu.Gpu.Metal.MetalGpuBackend.Register();
 #pragma warning restore CA1416
 #elif SHARPEMU_GPU_VULKAN
-        SharpEmu.Libs.VideoOut.SdlPlatform.Register();
-        SharpEmu.Libs.Gpu.Vulkan.VulkanGpuBackend.Register();
+        SharpEmu.Adapters.Sdl.SdlPlatform.Register();
+        SharpEmu.Gpu.Vulkan.VulkanGpuBackend.Register();
         // RenderDoc needs its layer allowed through the Vulkan loader before the first
         // instance is created; the Metal build has no loader to configure.
         SharpEmu.Libs.VideoOut.RenderDocCapture.ApplyGraphicsLoaderEnvironment();

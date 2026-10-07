@@ -3,7 +3,7 @@
 
 using Silk.NET.Vulkan;
 
-namespace SharpEmu.Libs.Gpu.Scheduling;
+namespace SharpEmu.Gpu.Vulkan.Scheduling;
 
 public interface IRenderingState
 {

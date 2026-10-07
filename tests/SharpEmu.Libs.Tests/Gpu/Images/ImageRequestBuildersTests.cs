@@ -3,8 +3,6 @@
 
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Images;
-using SharpEmu.Libs.Gpu.Scheduling;
-using SharpEmu.Libs.Gpu.Vulkan;
 using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;

@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.Host;
-using SharpEmu.Libs.Platform.MacOS;
+using SharpEmu.Platform.MacOS.Input;
+using SharpEmu.Platform.MacOS.Windowing;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Platform;

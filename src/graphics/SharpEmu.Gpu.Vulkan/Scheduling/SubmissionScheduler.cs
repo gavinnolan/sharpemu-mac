@@ -3,19 +3,14 @@
 
 using SharpEmu.HLE.GpuMemory;
 using Silk.NET.Vulkan;
+using SharpEmu.Libs.Gpu.Scheduling;
 
-namespace SharpEmu.Libs.Gpu.Scheduling;
+namespace SharpEmu.Gpu.Vulkan.Scheduling;
 
 public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
 {
     // The fatal reporter lives in the backend-neutral GpuFatal so shared engine code can
     // give up without reaching into the Vulkan submission scheduler.
-    internal static Action<string> OnFatal
-    {
-        get => GpuFatal.OnFatal;
-        set => GpuFatal.OnFatal = value;
-    }
-
     [ThreadStatic]
     private static SubmissionScheduler? _callbackOwner;
 

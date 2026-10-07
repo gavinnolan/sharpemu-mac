@@ -1,9 +1,9 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Gpu.Vulkan.Scheduling;
 
-namespace SharpEmu.Libs.Gpu.Buffers;
+namespace SharpEmu.Gpu.Vulkan.Buffers;
 
 internal readonly record struct BufferDownloadPlacement(
     ulong SourceOffset, ulong TransferSize, ulong DestinationOffset, ulong DataOffset, ulong DataSize);

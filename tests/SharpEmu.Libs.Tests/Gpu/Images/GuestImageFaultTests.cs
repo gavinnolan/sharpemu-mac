@@ -3,7 +3,6 @@
 
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.HLE.Host;
-using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Tests.Gpu.Buffers;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Vulkan;

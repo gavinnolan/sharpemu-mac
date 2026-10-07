@@ -5,8 +5,9 @@ using System.IO.Hashing;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Kernel;
 using Silk.NET.Vulkan;
+using SharpEmu.Libs.Gpu.Images;
 
-namespace SharpEmu.Libs.Gpu.Images;
+namespace SharpEmu.Gpu.Vulkan.Images;
 
 // Large layered textures are pools the game streams into one slot at a time. One CPU write
 // makes the whole image dirty, and re-uploading a 256-layer BC3 array (~350 MB) cost
@@ -58,7 +59,7 @@ public sealed partial class GuestImageCache
                     var length = (int)Math.Min((ulong)chunk.Length, tile.TiledSize - done);
                     var span = chunk.AsSpan(0, length);
                     var pieceAddress = address + tile.TiledOffset + done;
-                    if (!_backing.TryReadBacking(pieceAddress, span) && !KernelMemoryCompatExports.TryReadPrtBacking(_backing, pieceAddress, span))
+                    if (!_backing.TryReadBacking(pieceAddress, span) && !SharpEmu.Libs.Gpu.GuestBackingServices.TryReadPrtBacking(_backing, pieceAddress, span))
                     {
                         Interlocked.Exchange(ref failed, 1);
                         state.Stop();

@@ -2,12 +2,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Numerics;
-using SharpEmu.Libs.Gpu.Scheduling;
-using SharpEmu.Libs.Gpu.Vulkan;
 using Silk.NET.Vulkan;
 using VkBuffer = Silk.NET.Vulkan.Buffer;
+using SharpEmu.Gpu.Vulkan.Scheduling;
 
-namespace SharpEmu.Libs.Gpu.Buffers;
+namespace SharpEmu.Gpu.Vulkan.Buffers;
 
 // One Vulkan buffer, mapped when host-visible. Small buffers share slab chunks (GpuMemorySlabs);
 // larger ones get a dedicated allocation.

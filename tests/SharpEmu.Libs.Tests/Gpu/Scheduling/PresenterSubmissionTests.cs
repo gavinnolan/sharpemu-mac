@@ -7,9 +7,10 @@ using System.Runtime.CompilerServices;
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.GpuCommands;
-using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Gpu.Vulkan.Scheduling;
 using SharpEmu.Libs.Tests.Memory.GpuMemory;
 using SharpEmu.Libs.VideoOut;
+using SharpEmu.Gpu.Vulkan.Presentation;
 using Silk.NET.Vulkan;
 using Xunit;
 

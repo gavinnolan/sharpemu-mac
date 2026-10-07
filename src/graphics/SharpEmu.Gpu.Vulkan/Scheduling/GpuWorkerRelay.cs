@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.Libs.Gpu.Scheduling;
 
-namespace SharpEmu.Libs.Gpu.Scheduling;
+namespace SharpEmu.Gpu.Vulkan.Scheduling;
 
 // Run queued commands on the GPU worker before submissions. The relay does not wait for GPU completion.
 public sealed class GpuWorkerRelay : IGpuQueueRelay

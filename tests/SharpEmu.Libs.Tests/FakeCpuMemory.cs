@@ -27,7 +27,7 @@ internal sealed class FakeCpuMemory : ICpuMemory, IGuestMemoryAllocator
         // Command streams run inline whichever backend the host OS provides.
         SharpEmu.Libs.Gpu.GuestGpu.HeadlessCommandStreamFactory =
             SharpEmu.Libs.Agc.AgcExports.GetHeadlessCommandStreamForTests;
-        SharpEmu.Libs.VideoOut.VulkanVideoPresenter.TestCommandStreamFactory =
+        SharpEmu.Gpu.Vulkan.Presentation.VulkanVideoPresenter.TestCommandStreamFactory =
             SharpEmu.Libs.Agc.AgcExports.GetHeadlessCommandStreamForTests;
 
         // Unlike the shipped applications, the test assembly references every backend
@@ -37,13 +37,13 @@ internal sealed class FakeCpuMemory : ICpuMemory, IGuestMemoryAllocator
         // old OS check used to do implicitly.
         if (OperatingSystem.IsMacOS())
         {
-            SharpEmu.Libs.Platform.MacOS.MacPlatform.Register();
-            SharpEmu.Libs.Gpu.Metal.MetalGpuBackend.Register();
+            SharpEmu.Platform.MacOS.MacPlatform.Register();
+            SharpEmu.Gpu.Metal.MetalGpuBackend.Register();
         }
         else
         {
-            SharpEmu.Libs.VideoOut.SdlPlatform.Register();
-            SharpEmu.Libs.Gpu.Vulkan.VulkanGpuBackend.Register();
+            SharpEmu.Adapters.Sdl.SdlPlatform.Register();
+            SharpEmu.Gpu.Vulkan.VulkanGpuBackend.Register();
         }
     }
 

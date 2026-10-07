@@ -193,7 +193,7 @@ public static class ViewFormatRules
     }
 
     // The image must permit block views before a view can use an uncompressed format.
-    internal static bool AreImageViewFormatsCompatible(GpuFormat baseFormat, GpuFormat viewFormat, GpuImageCreateFlags flags)
+    public static bool AreImageViewFormatsCompatible(GpuFormat baseFormat, GpuFormat viewFormat, GpuImageCreateFlags flags)
     {
         const uint compressedClasses = Bc1Rgb | Bc1Rgba | Bc2 | Bc3 | Bc4 | Bc5 | Bc6h | Bc7;
         var reinterpretsBlocks = (FormatClass(baseFormat) & compressedClasses) != 0 &&

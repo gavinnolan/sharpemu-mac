@@ -1,7 +1,9 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
+using SharpEmu.Libs.Gpu.Scheduling;
 
-namespace SharpEmu.Libs.Gpu.Scheduling;
+
+namespace SharpEmu.Gpu.Vulkan.Scheduling;
 
 public sealed class TickTimeline
 {

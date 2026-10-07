@@ -3,8 +3,9 @@
 
 using System.Runtime.InteropServices;
 using SharpEmu.Libs.Gpu.Buffers;
+using SharpEmu.Libs.Gpu.Images;
 
-namespace SharpEmu.Libs.Gpu.Images;
+namespace SharpEmu.Gpu.Vulkan.Images;
 
 public sealed partial class GuestImageCache
 {

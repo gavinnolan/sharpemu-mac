@@ -3,10 +3,11 @@
 
 using System.Runtime.InteropServices;
 using SharpEmu.Libs.Gpu.Abstractions;
-using SharpEmu.Libs.Gpu.Buffers;
+using SharpEmu.Gpu.Vulkan.Buffers;
 using SharpEmu.Libs.Gpu.Images;
-using SharpEmu.Libs.Gpu.Scheduling;
-using SharpEmu.Libs.Gpu.Vulkan;
+using SharpEmu.Gpu.Vulkan.Images;
+using SharpEmu.Gpu.Vulkan.Scheduling;
+using SharpEmu.Gpu.Vulkan;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Vulkan;
 using SharpEmu.ShaderCompiler.Vulkan;

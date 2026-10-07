@@ -8,7 +8,6 @@ using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
-using SharpEmu.Libs.Gpu.Vulkan;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
 using Silk.NET.Vulkan;

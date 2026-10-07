@@ -1,7 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using SharpEmu.Libs.Platform.MacOS;
+using SharpEmu.Platform.MacOS.Display;
 using SharpEmu.Libs.VideoOut;
 using Xunit;
 

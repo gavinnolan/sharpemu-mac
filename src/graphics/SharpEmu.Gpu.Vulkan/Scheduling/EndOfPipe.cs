@@ -3,8 +3,9 @@
 
 using System.Runtime.InteropServices;
 using SharpEmu.Libs.Kernel;
+using SharpEmu.Libs.Gpu.Scheduling;
 
-namespace SharpEmu.Libs.Gpu.Scheduling;
+namespace SharpEmu.Gpu.Vulkan.Scheduling;
 
 public enum EndOfPipeCompletion
 {

@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.Abstractions;
-using SharpEmu.Libs.Gpu.Buffers;
-using SharpEmu.Libs.Gpu.Scheduling;
-using SharpEmu.Libs.Gpu.Vulkan;
 using Silk.NET.Vulkan;
 using VkBuffer = Silk.NET.Vulkan.Buffer;
+using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Gpu.Vulkan.Buffers;
+using SharpEmu.Gpu.Vulkan.Scheduling;
 
-namespace SharpEmu.Libs.Gpu.Images;
+namespace SharpEmu.Gpu.Vulkan.Images;
 
 // Layout transitions and the buffer/image copies the image cache records.
 public sealed unsafe partial class CachedImage

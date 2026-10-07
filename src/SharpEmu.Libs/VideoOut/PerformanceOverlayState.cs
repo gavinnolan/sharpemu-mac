@@ -3,7 +3,9 @@
 
 namespace SharpEmu.Libs.VideoOut;
 
-internal readonly record struct OverlayRectangle(int Left, int Top, int Width, int Height);
+/// <summary>Where <see cref="PerfOverlay.GetRectangle"/> wants the overlay drawn, in surface pixels.</summary>
+/// <remarks>Backend contract.</remarks>
+public readonly record struct OverlayRectangle(int Left, int Top, int Width, int Height);
 
 internal sealed class PerformanceOverlayState
 {

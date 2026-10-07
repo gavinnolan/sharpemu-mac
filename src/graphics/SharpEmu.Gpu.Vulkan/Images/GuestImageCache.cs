@@ -5,13 +5,15 @@ using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
-using SharpEmu.Libs.Gpu.Scheduling;
-using SharpEmu.Libs.Gpu.Vulkan;
 using Silk.NET.Vulkan;
 
 using SharpEmu.Libs.VideoOut;
+using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Gpu.Vulkan.Buffers;
+using SharpEmu.Gpu.Vulkan.Scheduling;
+using SharpEmu.Libs.Agc;
 
-namespace SharpEmu.Libs.Gpu.Images;
+namespace SharpEmu.Gpu.Vulkan.Images;
 
 // The host image store: images registered by guest range, page-watched, uploaded on use,
 // downloaded back when scheduled, with metadata tracking and overlap resolution.
@@ -442,7 +444,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         ref var description = ref chain.Description;
         if (description.Resources.Levels <= 1 || description.IsBlock || description.IsDepth || description.Samples > 1 ||
             description.Resources.Layers != 1 || description.IsVolume ||
-            !Agc.GnmTiling.TryGetBlockElementDimensions((uint)description.TileMode, (int)description.BytesPerBlock, out var blockWidth, out var blockHeight))
+            !GnmTiling.TryGetBlockElementDimensions((uint)description.TileMode, (int)description.BytesPerBlock, out var blockWidth, out var blockHeight))
         {
             return;
         }
@@ -460,7 +462,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
                 continue;
             }
 
-            if (!Agc.GnmTiling.TryGetMipChainPlacement(
+            if (!GnmTiling.TryGetMipChainPlacement(
                     (uint)description.TileMode,
                     (int)description.Extent.Width,
                     (int)description.Extent.Height,
