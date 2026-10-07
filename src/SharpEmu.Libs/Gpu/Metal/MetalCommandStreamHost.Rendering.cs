@@ -369,7 +369,7 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         ShaderStageKind.Vertex => GuestStageKind.Vertex,
         ShaderStageKind.Pixel => GuestStageKind.Pixel,
         ShaderStageKind.Compute => GuestStageKind.Compute,
-        _ => throw SubmissionScheduler.Fatal($"The stage kind is unknown: stage={program.Stage} hash=0x{program.Hash:X16}."),
+        _ => throw GpuFatal.Fatal($"The stage kind is unknown: stage={program.Stage} hash=0x{program.Hash:X16}."),
     };
 
     // One snapshot per layout element; a dynamic-mip storage image gets one element per mip.

@@ -55,7 +55,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         if (count > UserScalarRegisters.Capacity)
         {
-            throw SubmissionScheduler.Fatal($"The shader declares more user registers than the bank holds: label={label} shader=0x{shaderAddress:X16} count={count}.");
+            throw GpuFatal.Fatal($"The shader declares more user registers than the bank holds: label={label} shader=0x{shaderAddress:X16} count={count}.");
         }
 
         return registers.Values.AsSpan(0, (int)count).ToArray();
@@ -107,7 +107,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
             if (inputCount > MaxPixelInputs)
             {
-                throw SubmissionScheduler.Fatal($"The pixel program declares too many interpolators: shader=0x{pixel.Address:X16} count={inputCount}.");
+                throw GpuFatal.Fatal($"The pixel program declares too many interpolators: shader=0x{pixel.Address:X16} count={inputCount}.");
             }
 
             pixelOutputs = ResolveBoundTargets(context, targetExportMapping, depthBound ? pixelProgram.PixelColorExportMasks : null,
@@ -281,7 +281,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             var words = context.ColorTargets[slot];
             if (!_host.TryResolveColorOutput((uint)words.Layout, (uint)words.NumberType, (uint)words.Order, out var kind, out var mapping))
             {
-                throw SubmissionScheduler.Fatal($"The color target format has no pixel output kind: slot={slot} layout={(uint)words.Layout} numberType={(uint)words.NumberType} order={(uint)words.Order}.");
+                throw GpuFatal.Fatal($"The color target format has no pixel output kind: slot={slot} layout={(uint)words.Layout} numberType={(uint)words.NumberType} order={(uint)words.Order}.");
             }
 
             // A bound slot that no export reaches keeps its contents: its color write mask is zero.
@@ -460,22 +460,22 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     {
         if (colors.Length > PipelineStaticParameters.ColorAttachmentCount)
         {
-            throw SubmissionScheduler.Fatal($"The draw binds more color attachments than a pipeline holds: count={colors.Length}.");
+            throw GpuFatal.Fatal($"The draw binds more color attachments than a pipeline holds: count={colors.Length}.");
         }
 
         if (!vertexProgram.IsValid)
         {
-            throw SubmissionScheduler.Fatal("The draw has no vertex program.");
+            throw GpuFatal.Fatal("The draw has no vertex program.");
         }
 
         var pixelActive = pixelInput is not null;
         if (pixelActive && !pixelProgram.IsValid)
         {
-            throw SubmissionScheduler.Fatal("The draw has an active pixel stage without a pixel program.");
+            throw GpuFatal.Fatal("The draw has an active pixel stage without a pixel program.");
         }
 
-        var vertexStage = vertexInput.Stage.Program ?? throw SubmissionScheduler.Fatal("The vertex stage has no program.");
-        var pixelStage = pixelActive ? pixelInput!.Stage.Program ?? throw SubmissionScheduler.Fatal("The pixel stage has no program.") : null;
+        var vertexStage = vertexInput.Stage.Program ?? throw GpuFatal.Fatal("The vertex stage has no program.");
+        var pixelStage = pixelActive ? pixelInput!.Stage.Program ?? throw GpuFatal.Fatal("The pixel stage has no program.") : null;
         var colorCount = (uint)colors.Length;
         var parameters = new PipelineStaticParameters { ColorCount = colorCount };
         var renderingState = new PipelineRenderingState { ColorCount = colorCount };
@@ -485,7 +485,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             var format = rendering.ColorAttachments[index].Format;
             if (!color.Image.IsValid || format == Format.Undefined)
             {
-                throw SubmissionScheduler.Fatal($"A color attachment has no image or format: slot={color.Slot} format={format}.");
+                throw GpuFatal.Fatal($"A color attachment has no image or format: slot={color.Slot} format={format}.");
             }
 
             renderingState.ColorFormats[index] = format;
@@ -521,13 +521,13 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             var flag = ImageDescription.VulkanSampleCount(samples);
             if (flag == 0 || (noAttachmentSampleCounts & flag) == 0)
             {
-                throw SubmissionScheduler.Fatal($"The device cannot rasterize without attachments at the draw's sample count: samples={samples}.");
+                throw GpuFatal.Fatal($"The device cannot rasterize without attachments at the draw's sample count: samples={samples}.");
             }
         }
 
         if (samples == 0 || ImageDescription.VulkanSampleCount(samples) == 0)
         {
-            throw SubmissionScheduler.Fatal($"The draw's sample count is invalid: samples={samples}.");
+            throw GpuFatal.Fatal($"The draw's sample count is invalid: samples={samples}.");
         }
 
         var depthState = withDepth ? depth.Target.State : default;
@@ -591,7 +591,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     {
         if (info.Buffers.Length > VertexInputInfo.MaxBuffers || info.Attributes.Length > VertexInputInfo.MaxBuffers)
         {
-            throw SubmissionScheduler.Fatal($"The vertex input is too large: buffers={info.Buffers.Length} attributes={info.Attributes.Length}.");
+            throw GpuFatal.Fatal($"The vertex input is too large: buffers={info.Buffers.Length} attributes={info.Attributes.Length}.");
         }
 
         var state = new PipelineVertexInputState
@@ -610,7 +610,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             var attribute = info.Attributes[index];
             if (attribute.BufferIndex < 0 || attribute.BufferIndex >= info.Buffers.Length)
             {
-                throw SubmissionScheduler.Fatal($"The vertex attribute names a buffer outside the input: attribute={index} buffer={attribute.BufferIndex} buffers={info.Buffers.Length}.");
+                throw GpuFatal.Fatal($"The vertex attribute names a buffer outside the input: attribute={index} buffer={attribute.BufferIndex} buffers={info.Buffers.Length}.");
             }
 
             state.Attributes[index] = new PipelineVertexAttribute(attribute.OffsetBytes, (byte)attribute.BufferIndex);
@@ -624,10 +624,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PipelineCreation);
         if (!program.IsValid)
         {
-            throw SubmissionScheduler.Fatal("The dispatch has no compute program.");
+            throw GpuFatal.Fatal("The dispatch has no compute program.");
         }
 
-        var stage = input.Stage.Program ?? throw SubmissionScheduler.Fatal("The compute stage has no program.");
+        var stage = input.Stage.Program ?? throw GpuFatal.Fatal("The compute stage has no program.");
         var key = new ComputePipelineKey(program.Id);
         lock (_gate)
         {
@@ -654,10 +654,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         handle = default;
         if (!program.IsValid)
         {
-            throw SubmissionScheduler.Fatal("The dispatch has no compute program.");
+            throw GpuFatal.Fatal("The dispatch has no compute program.");
         }
 
-        var stage = input.Stage.Program ?? throw SubmissionScheduler.Fatal("The compute stage has no program.");
+        var stage = input.Stage.Program ?? throw GpuFatal.Fatal("The compute stage has no program.");
         var key = new ComputePipelineKey(program.Id);
         lock (_gate)
         {

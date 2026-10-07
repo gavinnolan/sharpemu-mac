@@ -153,7 +153,7 @@ internal sealed class ShaderProgramCache
         var context = recording is null ? _context : new CpuContext(recording, _context.TargetGeneration);
         if (!Gen5ShaderTranslator.TryDecodeProgram(context, source.Address, out program, out var error))
         {
-            throw SubmissionScheduler.Fatal($"The shader program cannot be decoded: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} error={error}.");
+            throw GpuFatal.Fatal($"The shader program cannot be decoded: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} error={error}.");
         }
 
         _decoded.Add(key, program);
@@ -184,7 +184,7 @@ internal sealed class ShaderProgramCache
         }
         catch (ShaderProgramRejectedException exception)
         {
-            throw SubmissionScheduler.Fatal(exception.Message);
+            throw GpuFatal.Fatal(exception.Message);
         }
     }
 
@@ -272,7 +272,7 @@ internal sealed class ShaderProgramCache
                 var message = $"The shader resources could not be materialized: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} reason={materializationFailure}.";
                 if (materializationFailure is ResourceMaterializationFailure.IncompatibleImageCandidates or ResourceMaterializationFailure.ImageCapacityExceeded)
                     throw new ShaderProgramRejectedException(message);
-                throw SubmissionScheduler.Fatal(message);
+                throw GpuFatal.Fatal(message);
             }
         }
 
@@ -431,7 +431,7 @@ internal sealed class ShaderProgramCache
 
             if (location < 0)
             {
-                throw SubmissionScheduler.Fatal(
+                throw GpuFatal.Fatal(
                     $"The vertex program fetches an attribute the tables do not declare: hash=0x{source.Hash:X16} shader=0x{source.Address:X16} attribute={load.AttributeId} pc=0x{load.Pc:X}.");
             }
 
@@ -458,13 +458,13 @@ internal sealed class ShaderProgramCache
                     continue;
                 }
 
-                throw SubmissionScheduler.Fatal(
+                throw GpuFatal.Fatal(
                     $"The vertex program uses an unsupported attribute destination selector: hash=0x{source.Hash:X16} shader=0x{source.Address:X16} attribute={load.AttributeId} pc=0x{load.Pc:X} component={component} selector={selector}.");
             }
 
             if (requiredComponents == 0)
             {
-                throw SubmissionScheduler.Fatal(
+                throw GpuFatal.Fatal(
                     $"The vertex program fetches an attribute without a memory component: hash=0x{source.Hash:X16} shader=0x{source.Address:X16} attribute={load.AttributeId} pc=0x{load.Pc:X}.");
             }
 
@@ -517,7 +517,7 @@ internal sealed class ShaderProgramCache
         }
         catch (ResourcePlanException exception)
         {
-            throw SubmissionScheduler.Fatal($"The shader binding layout is invalid: stage={source.Label} hash=0x{source.Hash:X16} error={exception.Message}.");
+            throw GpuFatal.Fatal($"The shader binding layout is invalid: stage={source.Label} hash=0x{source.Hash:X16} error={exception.Message}.");
         }
 
         var request = BuildRequest(source, options, entry, resources, layout);

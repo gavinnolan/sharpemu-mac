@@ -52,7 +52,7 @@ public sealed class TickTimeline
 
         if (!_device.TryWaitTimeline(tick, out var failure))
         {
-            throw SubmissionScheduler.Fatal($"vkWaitSemaphores failed: {failure}, tick={tick}");
+            throw GpuFatal.Fatal($"vkWaitSemaphores failed: {failure}, tick={tick}");
         }
 
         RefreshCompletedTick();

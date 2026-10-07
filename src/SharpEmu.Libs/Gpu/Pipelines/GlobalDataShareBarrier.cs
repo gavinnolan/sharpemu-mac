@@ -17,7 +17,7 @@ public static class GlobalDataShareBarrier
     {
         if (buffer.Handle == 0)
         {
-            throw SubmissionScheduler.Fatal("The global data share buffer is missing.");
+            throw GpuFatal.Fatal("The global data share buffer is missing.");
         }
 
         return new BufferMemoryBarrier2

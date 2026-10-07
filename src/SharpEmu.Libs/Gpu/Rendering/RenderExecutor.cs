@@ -462,7 +462,7 @@ public sealed partial class RenderExecutor
             return (int)indexOffset;
         }
 
-        var program = vertexInput.Stage.Program ?? throw SubmissionScheduler.Fatal("The embedded fetch vertex input has no program.");
+        var program = vertexInput.Stage.Program ?? throw GpuFatal.Fatal("The embedded fetch vertex input has no program.");
         return (int)ReadUserDataScalar(program, vertexInput.Stage.Resources, program.VertexOffsetScalarRegister);
     }
 
@@ -473,7 +473,7 @@ public sealed partial class RenderExecutor
             return 0;
         }
 
-        var program = vertexInput.Stage.Program ?? throw SubmissionScheduler.Fatal("The embedded fetch vertex input has no program.");
+        var program = vertexInput.Stage.Program ?? throw GpuFatal.Fatal("The embedded fetch vertex input has no program.");
         return ReadUserDataScalar(program, vertexInput.Stage.Resources, program.InstanceOffsetScalarRegister);
     }
 
