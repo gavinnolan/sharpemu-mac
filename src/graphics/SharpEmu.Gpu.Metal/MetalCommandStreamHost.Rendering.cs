@@ -458,6 +458,7 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
             // decoded dimensions alone cannot establish compression or XOR bits.
             var resources = bindings.Take(32).Select((binding, index) =>
                 $"image={bindingElements[index]} addr=0x{binding.Descriptor.Address:X} " +
+                $"shape={binding.Shape} access={binding.Access} storage={binding.IsStorage} " +
                 $"resource_words=[{string.Join(',', (binding.ResourceDescriptor ?? []).Take(8).Select(static word => word.ToString("X8")))}]");
             return $"stage={program.Stage} hash=0x{program.Hash:X16} bindings={bindings.Count} " +
                 $"descriptor_evidence=[{string.Join(';', resources)}]" +
