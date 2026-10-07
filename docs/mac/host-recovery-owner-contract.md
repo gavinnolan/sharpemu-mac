@@ -33,16 +33,18 @@ surface is already protected by the scaffold.
 ## Narrow seam implemented
 
 Safe-side construction preallocates a bounded pin-slot array, validates a
-nonwrapping range of complete native pages and fixes its arm epoch. A domain has
+nonwrapping range of complete native pages and fixes its domain epoch. A domain has
 a monotonic distinct identity, an immutable retained owner reference, and one
 atomic word containing closed state and active pin count. Domains never reopen;
 rearm/remap requires a new identity and safe publication after the old drain.
 
 The caller supplies a normalized address, write classification, positive entry
-invocation and expected arm epoch. The scalar method checks these values and
+invocation and expected domain epoch. The scalar method checks these values and
 whole-native-page coverage, reserves one slot by generation/state CAS and makes
 one count CAS. It cannot establish that the supplied scalars describe the real
-frame, that the mapping is current, or that backing still exists. No syscall,
+frame, that the mapping is current, or that backing still exists. Tracker
+arm/page epochs are a separate future receipt contract; DomainEpoch never
+substitutes for them. No syscall,
 mapping query, TLS, logging, allocation, event wake or waiting enters this path.
 One slot is attempted; contention declines even if another slot is free.
 

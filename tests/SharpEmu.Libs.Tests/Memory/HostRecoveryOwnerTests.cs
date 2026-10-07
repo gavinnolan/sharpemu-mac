@@ -22,7 +22,7 @@ public sealed class HostRecoveryOwnerTests
         Assert.Equal(Base + nativePage + 17, pin.FaultAddress);
         Assert.Equal(Base + nativePage, pin.PageAddress);
         Assert.Equal(23, pin.Invocation);
-        Assert.Equal(7UL, pin.ArmEpoch);
+        Assert.Equal(7UL, pin.DomainEpoch);
         Assert.Equal(owner.Identity, pin.OwnerIdentity);
         Assert.True(owner.Release(pin));
         Assert.Throws<ArgumentOutOfRangeException>(() => new HostRecoveryOwner(new object(), Base + 4096,

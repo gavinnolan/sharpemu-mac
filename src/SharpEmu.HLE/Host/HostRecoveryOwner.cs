@@ -25,7 +25,7 @@ public sealed class HostRecoveryOwner
     private struct Slot { public long Token; } // generation plus low2 lifecycle bits
 
     public HostRecoveryOwner(object retainedOwner, ulong address, ulong size,
-        ulong nativePageSize, ulong armEpoch, int pinCapacity = 64)
+        ulong nativePageSize, ulong domainEpoch, int pinCapacity = 64)
     {
         ArgumentNullException.ThrowIfNull(retainedOwner);
         if (nativePageSize == 0 || (nativePageSize & (nativePageSize - 1)) != 0)
@@ -34,7 +34,7 @@ public sealed class HostRecoveryOwner
             throw new ArgumentOutOfRangeException(nameof(address));
         if (size == 0 || size % nativePageSize != 0 || size > ulong.MaxValue - address)
             throw new ArgumentOutOfRangeException(nameof(size));
-        if (armEpoch == 0) throw new ArgumentOutOfRangeException(nameof(armEpoch));
+        if (domainEpoch == 0) throw new ArgumentOutOfRangeException(nameof(domainEpoch));
         if (pinCapacity is < 1 or > 4096 || (pinCapacity & (pinCapacity - 1)) != 0)
             throw new ArgumentOutOfRangeException(nameof(pinCapacity));
         _slots = new Slot[pinCapacity];
@@ -42,7 +42,7 @@ public sealed class HostRecoveryOwner
         Address = address;
         Size = size;
         NativePageSize = nativePageSize;
-        ArmEpoch = armEpoch;
+        DomainEpoch = domainEpoch;
         // Safe-side setup may retry; neither signal-facing method has a loop.
         while (true)
         {
@@ -58,7 +58,7 @@ public sealed class HostRecoveryOwner
     public ulong Address { get; }
     public ulong Size { get; }
     public ulong NativePageSize { get; }
-    public ulong ArmEpoch { get; }
+    public ulong DomainEpoch { get; }
     public bool IsClosed => (Volatile.Read(ref _state) & ClosedBit) != 0;
     public int ActivePins => (int)Volatile.Read(ref _state);
 
@@ -68,10 +68,10 @@ public sealed class HostRecoveryOwner
     /// Contention, capacity exhaustion or closure conservatively decline.
     /// </summary>
     public bool TryAcquireWritePin(ulong normalizedAddress, HostRecoveryAccess access,
-        long invocation, ulong expectedArmEpoch, out HostRecoveryPin pin)
+        long invocation, ulong expectedDomainEpoch, out HostRecoveryPin pin)
     {
         pin = default;
-        if (access != HostRecoveryAccess.Write || invocation <= 0 || expectedArmEpoch != ArmEpoch ||
+        if (access != HostRecoveryAccess.Write || invocation <= 0 || expectedDomainEpoch != DomainEpoch ||
             normalizedAddress < Address || normalizedAddress - Address >= Size)
             return false;
         var page = normalizedAddress & ~(NativePageSize - 1);
@@ -163,5 +163,5 @@ public readonly struct HostRecoveryPin
     public ulong PageAddress { get; }
     public long Invocation { get; }
     public long OwnerIdentity => Owner?.Identity ?? 0;
-    public ulong ArmEpoch => Owner?.ArmEpoch ?? 0;
+    public ulong DomainEpoch => Owner?.DomainEpoch ?? 0;
 }
