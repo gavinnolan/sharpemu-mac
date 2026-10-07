@@ -418,7 +418,8 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
                     throw Fatal($"An image descriptor cannot be decoded: image={imageIndex} word1=0x{words[1]:X8} word3=0x{words[3]:X8} hash=0x{program.Hash:X16}.");
                 }
 
-                textures[element] = new GuestDrawTexture(0, 1, 1, 0, 0, [0, 0, 0, 255], IsFallback: true, IsStorage: storage);
+                textures[element] = new GuestDrawTexture(0, 1, 1, 0, 0, [0, 0, 0, 255], IsFallback: true, IsStorage: storage,
+                    Descriptor: words.ToArray(), Shape: ImageShapeOf(image), Access: ImageAccessOf(image));
                 continue;
             }
 
@@ -431,7 +432,9 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
                 arrayed,
                 words,
                 image.MipMode == ImageMipMode.DynamicStorage,
-                image.Dimension == ImageDimension.Dim3D ? 2u : 1u));
+                image.Dimension == ImageDimension.Dim3D ? 2u : 1u,
+                ImageShapeOf(image),
+                ImageAccessOf(image)));
             bindingElements.Add(element);
         }
 
@@ -448,6 +451,30 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
 
         return textures;
     }
+
+    internal static GuestImageAccess ImageAccessOf(ImageResource image) =>
+        (image.Read || image.Atomic ? GuestImageAccess.Read : GuestImageAccess.Unknown) |
+        (image.Written || image.Atomic ? GuestImageAccess.Write : GuestImageAccess.Unknown) |
+        (image.Atomic ? GuestImageAccess.Atomic : GuestImageAccess.Unknown);
+
+    internal static ShaderImageShape ImageShapeOf(ImageResource image) => new(
+        Volume: image.Dimension == ImageDimension.Dim3D,
+        Arrayed: image.Cube || image.Dimension is ImageDimension.Dim1DArray or ImageDimension.Dim2DArray or ImageDimension.Dim2DMsaaArray,
+        Cube: image.Cube,
+        Storage: image.ResourceClass == ImageResourceClass.Storage,
+        DynamicMip: image.MipMode == ImageMipMode.DynamicStorage,
+        NumericClass: image.NumericClass switch
+        {
+            ImageNumericClass.Float => TextureNumericClass.Float,
+            ImageNumericClass.Uint => TextureNumericClass.Uint,
+            ImageNumericClass.Sint => TextureNumericClass.Sint,
+            _ => TextureNumericClass.Unsupported,
+        },
+        OneDimensional: image.Dimension is ImageDimension.Dim1D or ImageDimension.Dim1DArray,
+        R128: image.R128,
+        Multisampled: image.Dimension is ImageDimension.Dim2DMsaa or ImageDimension.Dim2DMsaaArray,
+        DepthCompare: image.DepthCompare,
+        Atomic: image.Atomic);
 
     private static uint[] PadWords(uint[] words)
     {

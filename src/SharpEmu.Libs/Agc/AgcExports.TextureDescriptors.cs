@@ -99,7 +99,9 @@ public static partial class AgcExports
         bool IsArrayed = false,
         IReadOnlyList<uint>? ResourceDescriptor = null,
         bool DynamicMip = false,
-        uint Dimension = 1);
+        uint Dimension = 1,
+        SharpEmu.Libs.Gpu.Images.ShaderImageShape Shape = default,
+        SharpEmu.Libs.Gpu.GuestImageAccess Access = SharpEmu.Libs.Gpu.GuestImageAccess.Unknown);
 
     internal static GuestSampler ToGuestSampler(IReadOnlyList<uint> descriptor) =>
         descriptor.Count >= 4

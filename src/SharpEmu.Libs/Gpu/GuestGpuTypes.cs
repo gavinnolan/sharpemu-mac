@@ -56,7 +56,19 @@ public sealed record GuestDrawTexture(
     bool CpuSnapshotStable = true,
     // The raw resource descriptor dwords and the shape the shader module was compiled with.
     uint[]? Descriptor = null,
-    ShaderImageShape Shape = default);
+    ShaderImageShape Shape = default,
+    GuestImageAccess Access = GuestImageAccess.Unknown);
+
+/// <summary>Instruction-derived image intent. Unknown is distinct from a
+/// read-only storage binding; resource class alone never establishes a write.</summary>
+[Flags]
+public enum GuestImageAccess : byte
+{
+    Unknown = 0,
+    Read = 1,
+    Write = 2,
+    Atomic = 4,
+}
 
 /// <summary>One linear mip range in a texture staging buffer.</summary>
 public readonly record struct GuestTextureMipUpload(

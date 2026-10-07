@@ -125,6 +125,12 @@ internal static class MetalTextureSnapshots
                 continue;
             }
 
+            texture = texture with
+            {
+                Descriptor = binding.ResourceDescriptor?.ToArray(),
+                Shape = binding.Shape,
+                Access = binding.Access,
+            };
             textures.Add(texture);
             if (texture.IsFallback)
             {
