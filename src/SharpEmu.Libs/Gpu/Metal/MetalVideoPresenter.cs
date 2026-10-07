@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.Libs.Platform.MacOS;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Metal;
@@ -9,9 +10,10 @@ using SharpEmu.ShaderCompiler.Metal;
 namespace SharpEmu.Libs.Gpu.Metal;
 
 /// <summary>
-/// The Metal presenter uses SDL for its host window, events and input, then renders
-/// into the CAMetalLayer owned by SDL's Metal view. Windowing and input therefore
-/// share the Vulkan path while all Metal command encoding remains native.
+/// The Metal presenter renders into the CAMetalLayer of a native AppKit window
+/// (<see cref="IMetalHostWindow"/>, implemented by
+/// <c>SharpEmu.Libs.Platform.MacOS.MacHostWindow</c>), which also owns keyboard
+/// events and GameController gamepads. Nothing on this path touches SDL.
 /// </summary>
 internal static partial class MetalVideoPresenter
 {
@@ -51,13 +53,13 @@ internal static partial class MetalVideoPresenter
     private static readonly byte[] _overlayPixels =
         new byte[PerfOverlay.PixelBufferWidth * PerfOverlay.PixelBufferHeight * 4];
 
-    // Presenter objects and per-frame present state, all used on the SDL host thread.
+    // Presenter objects and per-frame present state, all used on the host window thread.
     private static nint _device;
     private static nint _commandQueue;
     private static nint _metalLayer;
     private static nint _presentPipeline;
     private static nint _presentSampler;
-    private static SdlHostWindow? _hostWindow;
+    private static IMetalHostWindow? _hostWindow;
     private static HostVideoOptions _videoOptions = HostVideoOptions.Default;
     private static double _drawableWidth;
     private static double _drawableHeight;
@@ -246,11 +248,7 @@ internal static partial class MetalVideoPresenter
             videoOptions = _videoOptions;
         }
 
-        using var hostWindow = new SdlHostWindow(
-            VideoOutExports.GetWindowTitle(),
-            videoOptions,
-            SdlGraphicsApi.Metal,
-            ToggleMetalPerformanceHud);
+        using var hostWindow = CreateHostWindow(VideoOutExports.GetWindowTitle(), videoOptions);
         Volatile.Write(ref _hostWindow, hostWindow);
         var setupPool = MetalNative.objc_autoreleasePoolPush();
         try
@@ -300,6 +298,22 @@ internal static partial class MetalVideoPresenter
         }
     }
 
+    /// <summary>
+    /// Metal presentation is a macOS-only path (see
+    /// <c>HostVideoHost.TryConfigureVideo</c>), and on macOS the window is always
+    /// the native AppKit one — there is no SDL fallback to fall back to.
+    /// </summary>
+    private static IMetalHostWindow CreateHostWindow(string title, HostVideoOptions options)
+    {
+        if (!OperatingSystem.IsMacOS())
+        {
+            throw new PlatformNotSupportedException(
+                "The Metal presenter requires macOS; other platforms use the Vulkan presenter.");
+        }
+
+        return new MacHostWindow(title, options, ToggleMetalPerformanceHud);
+    }
+
     private static bool _metalHudVisible;
 
     /// <summary>
@@ -309,7 +323,7 @@ internal static partial class MetalVideoPresenter
     /// mode=default|disabled and logging=default, plus any MTL_HUD_* environment
     /// keys directly in the dictionary — all three HUD flags (enabled, per-frame
     /// logging, shader-compile logging) ride in one property set. Runs on the
-    /// SDL host thread, the same thread as the render loop.
+    /// AppKit main thread, the same thread as the render loop.
     /// </summary>
     private static void ToggleMetalPerformanceHud()
     {
@@ -638,7 +652,7 @@ internal static partial class MetalVideoPresenter
         }
     }
 
-    /// <summary>Keeps the SDL-owned CAMetalLayer drawable in host pixels as the
+    /// <summary>Keeps the host window's CAMetalLayer drawable in host pixels as the
     /// window resizes or moves between displays with different scale factors.</summary>
     private static void SyncDrawableSizeToLayer()
     {
