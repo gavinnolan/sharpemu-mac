@@ -186,12 +186,15 @@ public sealed partial class MetalImmutableGpuVersionTests(ITestOutputHelper outp
         private readonly nint pool;
         private readonly nint device;
         private readonly nint queue;
+        private readonly UploadArenaScope uploadArena = new();
         private readonly List<nint> buffers = [];
         private readonly List<GuestDrawTexture> captures = [];
         private readonly Dictionary<object, object> workByVersion = new(ReferenceEqualityComparer.Instance);
         public ulong NativeBytes => (ulong)Field("_immutableTextureSourceBytes").GetValue(null)!;
         public NativeState()
         {
+            Assert.False((bool)Field("_batchOpen").GetValue(null)!);
+            Assert.Equal((nint)0, Field("_batchCommandBuffer").GetValue(null));
             Assert.Empty((IDictionary)Field("_textureSourceNativeBatches").GetValue(null)!);
             pool = MetalNative.Send(MetalNative.Send(MetalNative.Class("NSAutoreleasePool"), MetalNative.Selector("alloc")), MetalNative.Selector("init"));
             device = MetalNative.MTLCreateSystemDefaultDevice(); Assert.NotEqual((nint)0, device);
@@ -248,8 +251,11 @@ public sealed partial class MetalImmutableGpuVersionTests(ITestOutputHelper outp
         public void Recycle() => Call("RecycleTextureSourceNativeBatches");
         public void Dispose()
         {
+            AbortBorrowedConsumerBatch();
             MetalVideoPresenter.ReleasePreparedTextureSources(captures);
             Call("ShutdownTextureSourceNativeOwners");
+            uploadArena.Dispose();
+            ReleaseConsumerShaderResources();
             Field("_executingTextureSourceWork").SetValue(null, null);
             Field("_textureSourceGraphEnabled").SetValue(null, oldGraph);
             foreach (var buffer in buffers) MetalNative.SendVoid(buffer, MetalNative.Selector("release"));

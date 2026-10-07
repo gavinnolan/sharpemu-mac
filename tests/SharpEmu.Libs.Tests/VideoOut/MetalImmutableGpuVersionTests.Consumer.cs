@@ -49,6 +49,7 @@ public sealed partial class MetalImmutableGpuVersionTests
     private sealed partial class NativeState
     {
         public string? DeviceName => MetalNative.ReadNsString(MetalNative.Send(device, MetalNative.Selector("name")));
+        private readonly List<MetalCompiledGuestShader> consumerShaders = [];
         private const ulong OutputAddress = 0x71F1_0000_00;
         private static MetalCompiledGuestShader ConsumerShader(bool storage)
         {
@@ -90,6 +91,7 @@ public sealed partial class MetalImmutableGpuVersionTests
         public object AdmitConsumer(GuestDrawTexture texture)
         {
             var shader = ConsumerShader(texture.IsStorage);
+            consumerShaders.Add(shader);
             var destination = new GuestMemoryBuffer(OutputAddress, Enumerable.Repeat((byte)0xA5, 64).ToArray(), 64, 64, false, Writable: true);
             var binding = new GuestStageBindings(GuestStageKind.Compute, [0], [0], [], [], null, [], [], false, false, 0);
             var sequence = MetalVideoPresenter.SubmitComputeDispatch(0, shader, [texture], [destination], 4, 4, 1, 0, 0, 0, true, binding);
@@ -116,10 +118,90 @@ public sealed partial class MetalImmutableGpuVersionTests
             }
             finally
             {
+                AbortBorrowedConsumerBatch();
                 Field("_guestMemory").SetValue(null, oldMemory);
                 var last = (nint)Field("_lastFlushedCommandBuffer").GetValue(null)!;
                 if (last != 0) MetalNative.SendVoid(last, MetalNative.Selector("release"));
                 Field("_lastFlushedCommandBuffer").SetValue(null, (nint)0);
+            }
+        }
+        // Test harness teardown, not a production cancellation implementation.
+        private static void AbortBorrowedConsumerBatch()
+        {
+            var buffer = (nint)Field("_batchCommandBuffer").GetValue(null)!;
+            if ((bool)Field("_batchOpen").GetValue(null)! && buffer != 0)
+            {
+                var batches = (IDictionary)Field("_textureSourceNativeBatches").GetValue(null)!;
+                var batch = batches[buffer];
+                // Flush clears these fields before commit. If a future path
+                // leaves a committed batch here, preserve it for shutdown wait.
+                if (batch is null || !(bool)Get(batch, "Committed")!)
+                    Call("AbortTextureSourceNativeBatch", buffer);
+            }
+            Field("_batchOpen").SetValue(null, false);
+            Field("_batchCommandBuffer").SetValue(null, (nint)0);
+            ((IList)Field("_touchedUploadPages").GetValue(null)!).Clear();
+            Field("_uploadTouchStamp").SetValue(null, (int)Field("_uploadTouchStamp").GetValue(null)! + 1);
+        }
+
+        private sealed class UploadArenaScope : IDisposable
+        {
+            private readonly object? current = Field("_currentUploadPage").GetValue(null);
+            private readonly int stamp = (int)Field("_uploadTouchStamp").GetValue(null)!;
+            private readonly IList retired = (IList)Field("_retiredUploadPages").GetValue(null)!;
+            private readonly IList touched = (IList)Field("_touchedUploadPages").GetValue(null)!;
+            private readonly object free = Field("_freeUploadPages").GetValue(null)!;
+            private readonly object[] savedRetired;
+            private readonly object[] savedFree;
+            public UploadArenaScope()
+            {
+                Assert.Empty(touched);
+                savedRetired = retired.Cast<object>().ToArray();
+                savedFree = ((IEnumerable)free).Cast<object>().ToArray();
+                retired.Clear(); free.GetType().GetMethod("Clear")!.Invoke(free, []);
+                Field("_currentUploadPage").SetValue(null, null);
+                // New page TouchStamp defaults0, so first allocation must differ.
+                Field("_uploadTouchStamp").SetValue(null, 1);
+            }
+            public void Dispose()
+            {
+                var pages = retired.Cast<object>().Concat(((IEnumerable)free).Cast<object>())
+                    .Append(Field("_currentUploadPage").GetValue(null)).OfType<object>()
+                    .Distinct(ReferenceEqualityComparer.Instance).ToArray();
+                foreach (var page in pages)
+                {
+                    var last = (nint)Get(page, "LastCommandBuffer")!;
+                    if (last != 0)
+                    {
+                        MetalNative.SendVoid(last, MetalNative.Selector("waitUntilCompleted"));
+                        MetalNative.SendVoid(last, MetalNative.Selector("release"));
+                    }
+                    MetalNative.SendVoid((nint)Get(page, "Buffer")!, MetalNative.Selector("release"));
+                }
+                retired.Clear(); touched.Clear(); free.GetType().GetMethod("Clear")!.Invoke(free, []);
+                foreach (var page in savedRetired) retired.Add(page);
+                foreach (var page in savedFree.Reverse()) free.GetType().GetMethod("Push")!.Invoke(free, [page]);
+                Field("_currentUploadPage").SetValue(null, current);
+                Field("_uploadTouchStamp").SetValue(null, stamp);
+            }
+        }
+
+        private void ReleaseConsumerShaderResources()
+        {
+            var cache = (IDictionary)Field("_computePipelineCache").GetValue(null)!;
+            foreach (var shader in consumerShaders)
+            {
+                if (cache.Contains(shader))
+                {
+                    var pipeline = (nint)cache[shader]!;
+                    cache.Remove(shader);
+                    if (pipeline != 0) MetalNative.SendVoid(pipeline, MetalNative.Selector("release"));
+                }
+                if (shader.CachedLibrary != 0)
+                {
+                    MetalNative.SendVoid(shader.CachedLibrary, MetalNative.Selector("release"));
+                    shader.CachedLibrary = 0;
+                }
             }
         }
     }

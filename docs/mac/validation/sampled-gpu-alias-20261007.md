@@ -263,3 +263,12 @@ The ARM64 no-device106-case regression selection passes, including pending-copy
 and unassociated-GPU-address rejection before native materialization access.
 The four new GPU consumer cases have not run yet. Drain writer/lifecycle hooks,
 CPU backing/copy ownership, all mutation paths and graph activation remain open.
+
+The consumer fixture teardown now aborts only uncommitted borrowed source batches,
+clears open-batch fields and isolates/restores the global upload arena. Fixture
+upload pages wait for their tagged committed buffers before release; only the
+fixture's pipeline/library cache entries are removed. Fixture construction
+requires no open batch. These are test-harness cleanup guards, not runtime Drain
+cancellation qualification. Queued consumer ownership is released after the
+production writeback completion wait, so these cases do not prove owner release
+before native completion.
