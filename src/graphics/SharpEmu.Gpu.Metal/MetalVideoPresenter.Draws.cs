@@ -1557,10 +1557,24 @@ internal static partial class MetalVideoPresenter
                 return cachedSkip;
             }
 
-            // A miss on skipped texels is an invalidation race (the entry
-            // was evicted after the submit thread checked). Self-heal by
-            // reading the texels directly rather than rendering a fallback.
-            var refreshed = TryReadGuestDrawTexturePixels(texture);
+            // An empty payload may promise a live GPU image, or originate from
+            // an older cache-skipping producer. Recovery must still reject
+            // layouts for which a late guest-memory read cannot be faithful.
+            byte[]? refreshed;
+            try
+            {
+                refreshed = TryReadGuestDrawTexturePixels(texture);
+            }
+            catch (NotSupportedException exception) when (exception.GetType() == typeof(NotSupportedException))
+            {
+                throw new NotSupportedException(
+                    exception.Message + " " + DescribeUnresolvedGuestTexture(texture), exception);
+            }
+            catch (InvalidOperationException exception) when (exception.GetType() == typeof(InvalidOperationException))
+            {
+                throw new InvalidOperationException(
+                    exception.Message + " " + DescribeUnresolvedGuestTexture(texture), exception);
+            }
             if (refreshed is null)
             {
                 if (_missingTextureTraces < 16)
@@ -1573,8 +1587,8 @@ internal static partial class MetalVideoPresenter
                 }
 
                 throw new InvalidOperationException(
-                    $"Metal cannot resolve required texture 0x{texture.Address:X}: " +
-                    $"type={texture.Type} size={texture.Width}x{texture.Height} tile={texture.TileMode}.");
+                    $"Metal cannot resolve required texture 0x{texture.Address:X}. " +
+                    DescribeUnresolvedGuestTexture(texture));
             }
 
             texture = texture with { RgbaPixels = refreshed };
@@ -2044,6 +2058,58 @@ internal static partial class MetalVideoPresenter
         }
 
         return best;
+    }
+
+    // Failure-only managed inspection. These are current registry observations,
+    // not a captured ownership reservation or proof of the producer at prepare time.
+    internal static string DescribeUnresolvedGuestTexture(GuestDrawTexture texture)
+    {
+        lock (_gate)
+        {
+            var advertised = _availableGuestImages.TryGetValue(texture.Address, out var advertisedFormat);
+            _guestImages.TryGetValue(texture.Address, out var active);
+            var selected = ResolveGuestImageAlias(texture);
+            var variantCount = _guestImageVariants.Keys.Count(key => key.Address == texture.Address);
+            var producerKnown = _guestImageWorkSequences.TryGetValue(texture.Address, out var producerSequence);
+            string producerQueue = "not-retained";
+            ulong producerSubmission = 0;
+            if (producerKnown)
+            {
+                if (producerSequence == _executingGuestWorkSequence && _submittingGuestQueue is { } executingQueue)
+                {
+                    producerQueue = executingQueue.Name;
+                    producerSubmission = executingQueue.SubmissionId;
+                }
+                foreach (var pendingQueue in _pendingGuestWorkByQueue.Values)
+                {
+                    foreach (var pending in pendingQueue)
+                    {
+                        if (pending.Sequence != producerSequence) continue;
+                        producerQueue = pending.Queue.Name;
+                        producerSubmission = pending.Queue.SubmissionId;
+                    }
+                }
+            }
+
+            static string Image(GuestImage? image) => image is null ? "absent" :
+                $"{image.Width}x{image.Height}/format={image.Format}/initialized={image.Initialized}/" +
+                $"gpu_written={image.GpuWritten}/version={image.ContentVersion}";
+
+            return $"unresolved_alias addr=0x{texture.Address:X} type={texture.Type} " +
+                $"shape={texture.Shape} size={texture.Width}x{texture.Height} depth={texture.Depth} " +
+                $"arrayed={texture.ArrayedView} layers={texture.ArrayLayers} " +
+                $"format={texture.Format}/{texture.NumberType} tile={texture.TileMode} pitch={texture.Pitch} " +
+                $"mips={texture.MipLevels} mip={texture.MipLevel} base_mip={texture.BaseMipLevel} " +
+                $"resource_mips={texture.ResourceMipLevels} generation={texture.WriteGeneration} " +
+                $"stable={texture.CpuSnapshotStable} " +
+                $"current_advertised={advertised}/format=0x{advertisedFormat:X} " +
+                $"current_active=[{Image(active)}] current_selected=[{Image(selected)}] variants={variantCount} " +
+                $"current_producer_known={producerKnown} current_producer_sequence={producerSequence} " +
+                $"current_producer_completed={producerKnown && IsGuestWorkCompletedLocked(producerSequence)} " +
+                $"current_producer_executing={producerKnown && producerSequence == _executingGuestWorkSequence} " +
+                $"current_producer_queue='{producerQueue}' current_producer_submission={producerSubmission} " +
+                $"executing_sequence={_executingGuestWorkSequence} captured_alias_provenance=unavailable.";
+        }
     }
 
     /// <summary>Snapshots a guest depth image for sampling when the texture
