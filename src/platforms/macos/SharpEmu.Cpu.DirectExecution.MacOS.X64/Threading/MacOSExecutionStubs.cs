@@ -4,16 +4,36 @@
 using System.Runtime.InteropServices;
 using SharpEmu.HLE;
 
-namespace SharpEmu.Core.Cpu.Native;
+namespace SharpEmu.Cpu.DirectExecution.MacOS;
 
 /// <summary>
-/// POSIX replacements for the kernel32 helpers the native backend embeds in
-/// emitted x86-64 code. Every stub exposed here follows the Win64 calling
-/// convention the emitted call sites were written for (first argument in
-/// ECX, result in RAX, Win64 non-volatile registers preserved), so the
-/// emission code stays identical across platforms.
+/// Darwin replacements for the kernel32 helpers the direct-execution backend
+/// embeds in emitted x86-64 code, plus the Darwin pthread TLS keys and worker
+/// events it uses from managed code.
 /// </summary>
-internal static unsafe class PosixHostStubs
+/// <remarks>
+/// Every stub exposed here follows the Win64 calling convention the emitted
+/// call sites were written for (first argument in ECX, result in RAX, Win64
+/// non-volatile registers preserved), so the emission code in SharpEmu.Core
+/// stays identical across platforms.
+///
+/// <para>Moved verbatim out of <c>SharpEmu.Core/Cpu/Native/PosixHostStubs.cs</c>
+/// by W10, keeping only the Darwin arm of each branch: pthread keys are
+/// <c>nuint</c>-wide here and 32-bit on Linux, unnamed <c>sem_init</c> is
+/// unsupported so worker events are dispatch semaphores, and x86-64 pthread TLS
+/// reads collapse to a single gs-relative load.</para>
+///
+/// <para>This overlaps <c>SharpEmu.Host.MacOS</c>'s <c>MacHostStubs</c>, which
+/// emits the same four stub bodies byte for byte (and three more for the host
+/// contract's worker loop) behind <c>IHostSymbolResolver</c>. They are kept
+/// separate deliberately: W10 was a mechanical move of the execution backend's
+/// own code, and collapsing the two would change which implementation the
+/// emitted guest stubs call. Retiring this copy in favour of
+/// <c>HostPlatform.Current.Symbols</c> is tracked as W10 follow-up work and
+/// needs its own launch/stop evidence, not a drive-by edit to a page the guest
+/// executes.</para>
+/// </remarks>
+internal static unsafe class MacOSExecutionStubs
 {
     private static readonly object Gate = new();
     private static bool _initialized;
@@ -42,68 +62,23 @@ internal static unsafe class PosixHostStubs
         get { EnsureInitialized(); return _sleepStub; }
     }
 
-    public static nint CreateWorkerEvent()
-    {
-        if (OperatingSystem.IsMacOS())
-        {
-            return dispatch_semaphore_create(0);
-        }
-
-        var semaphore = Marshal.AllocHGlobal(64);
-        if (sem_init(semaphore, 0, 0) != 0)
-        {
-            Marshal.FreeHGlobal(semaphore);
-            return 0;
-        }
-
-        return semaphore;
-    }
+    public static nint CreateWorkerEvent() => dispatch_semaphore_create(0);
 
     public static bool SignalWorkerEvent(nint handle)
     {
-        if (OperatingSystem.IsMacOS())
-        {
-            _ = dispatch_semaphore_signal(handle);
-            return true;
-        }
-
-        return sem_post(handle) == 0;
+        _ = dispatch_semaphore_signal(handle);
+        return true;
     }
 
     public static bool WaitWorkerEvent(nint handle, int timeoutMilliseconds)
     {
-        if (OperatingSystem.IsMacOS())
-        {
-            if (timeoutMilliseconds < 0)
-            {
-                return dispatch_semaphore_wait(handle, ulong.MaxValue) == 0;
-            }
-
-            var deadline = dispatch_time(0, timeoutMilliseconds * 1_000_000L);
-            return dispatch_semaphore_wait(handle, deadline) == 0;
-        }
-
         if (timeoutMilliseconds < 0)
         {
-            while (sem_wait(handle) != 0)
-            {
-            }
-
-            return true;
+            return dispatch_semaphore_wait(handle, ulong.MaxValue) == 0;
         }
 
-        var deadlineTicks = Environment.TickCount64 + timeoutMilliseconds;
-        while (sem_trywait(handle) != 0)
-        {
-            if (Environment.TickCount64 >= deadlineTicks)
-            {
-                return false;
-            }
-
-            Thread.Sleep(1);
-        }
-
-        return true;
+        var deadline = dispatch_time(0, timeoutMilliseconds * 1_000_000L);
+        return dispatch_semaphore_wait(handle, deadline) == 0;
     }
 
     public static void DestroyWorkerEvent(nint handle)
@@ -113,60 +88,27 @@ internal static unsafe class PosixHostStubs
             return;
         }
 
-        if (OperatingSystem.IsMacOS())
-        {
-            dispatch_release(handle);
-            return;
-        }
-
-        _ = sem_destroy(handle);
-        Marshal.FreeHGlobal(handle);
+        dispatch_release(handle);
     }
 
     /// <summary>Allocates a pthread TLS key, mirroring kernel32!TlsAlloc.</summary>
     public static uint TlsAlloc()
     {
-        if (OperatingSystem.IsMacOS())
-        {
-            nuint key;
-            return pthread_key_create_mac(&key, 0) == 0 ? (uint)key : uint.MaxValue;
-        }
-
-        uint key32;
-        return pthread_key_create_linux(&key32, 0) == 0 ? key32 : uint.MaxValue;
+        nuint key;
+        return pthread_key_create(&key, 0) == 0 ? (uint)key : uint.MaxValue;
     }
 
-    public static bool TlsFree(uint key)
-    {
-        return OperatingSystem.IsMacOS()
-            ? pthread_key_delete_mac((nuint)key) == 0
-            : pthread_key_delete_linux(key) == 0;
-    }
+    public static bool TlsFree(uint key) => pthread_key_delete((nuint)key) == 0;
 
-    public static bool TlsSetValue(uint key, nint value)
-    {
-        return OperatingSystem.IsMacOS()
-            ? pthread_setspecific_mac((nuint)key, value) == 0
-            : pthread_setspecific_linux(key, value) == 0;
-    }
+    public static bool TlsSetValue(uint key, nint value) => pthread_setspecific((nuint)key, value) == 0;
 
-    public static nint TlsGetValue(uint key)
-    {
-        return OperatingSystem.IsMacOS()
-            ? pthread_getspecific_mac((nuint)key)
-            : pthread_getspecific_linux(key);
-    }
+    public static nint TlsGetValue(uint key) => pthread_getspecific((nuint)key);
 
     /// <summary>Stable numeric id of the calling thread (kernel32!GetCurrentThreadId).</summary>
     public static uint GetCurrentThreadId()
     {
-        if (OperatingSystem.IsMacOS())
-        {
-            ulong tid;
-            return pthread_threadid_np(0, &tid) == 0 ? unchecked((uint)tid) : 0u;
-        }
-
-        return unchecked((uint)gettid());
+        ulong tid;
+        return pthread_threadid_np(0, &tid) == 0 ? unchecked((uint)tid) : 0u;
     }
 
     /// <summary>
@@ -241,7 +183,7 @@ internal static unsafe class PosixHostStubs
             HostMemory.PAGE_EXECUTE_READWRITE);
         if (page == null)
         {
-            throw new OutOfMemoryException("Failed to allocate POSIX host helper stub page");
+            throw new OutOfMemoryException("Failed to allocate macOS execution helper stub page");
         }
 
         var offset = 0;
@@ -252,7 +194,7 @@ internal static unsafe class PosixHostStubs
 
         if (!HostMemory.Protect(page, 4096, HostMemory.PAGE_EXECUTE_READ, out _))
         {
-            throw new InvalidOperationException("Failed to protect POSIX host helper stub page");
+            throw new InvalidOperationException("Failed to protect macOS execution helper stub page");
         }
 
         HostMemory.FlushInstructionCache(page, (nuint)offset);
@@ -260,31 +202,13 @@ internal static unsafe class PosixHostStubs
 
     private static nint EmitTlsGetValue(byte* page, ref int offset)
     {
+        // On macOS x86-64 pthread keys index the gs-based thread specific
+        // data array directly, so TlsGetValue(index in ecx) collapses to a
+        // single load that clobbers nothing but RAX.
         var start = (nint)(page + offset);
-        if (OperatingSystem.IsMacOS())
-        {
-            // On macOS x86-64 pthread keys index the gs-based thread specific
-            // data array directly, so TlsGetValue(index in ecx) collapses to a
-            // single load that clobbers nothing but RAX.
-            Emit(page, ref offset, 0x89, 0xC8);                                     // mov eax, ecx
-            Emit(page, ref offset, 0x65, 0x48, 0x8B, 0x04, 0xC5, 0, 0, 0, 0);       // mov rax, gs:[rax*8]
-            Emit(page, ref offset, 0xC3);                                           // ret
-            return start;
-        }
-
-        // Linux: call pthread_getspecific, preserving the registers that are
-        // volatile in SysV but non-volatile in Win64 (rsi, rdi).
-        var pthreadGetSpecific = NativeLibrary.GetExport(NativeLibrary.Load("libpthread.so.0"), "pthread_getspecific");
-        Emit(page, ref offset, 0x56);                                               // push rsi
-        Emit(page, ref offset, 0x57);                                               // push rdi
-        Emit(page, ref offset, 0x48, 0x83, 0xEC, 0x08);                             // sub rsp, 8
-        Emit(page, ref offset, 0x89, 0xCF);                                         // mov edi, ecx
-        EmitMovRaxImm64(page, ref offset, pthreadGetSpecific);                      // mov rax, imm64
-        Emit(page, ref offset, 0xFF, 0xD0);                                         // call rax
-        Emit(page, ref offset, 0x48, 0x83, 0xC4, 0x08);                             // add rsp, 8
-        Emit(page, ref offset, 0x5F);                                               // pop rdi
-        Emit(page, ref offset, 0x5E);                                               // pop rsi
-        Emit(page, ref offset, 0xC3);                                               // ret
+        Emit(page, ref offset, 0x89, 0xC8);                                     // mov eax, ecx
+        Emit(page, ref offset, 0x65, 0x48, 0x8B, 0x04, 0xC5, 0, 0, 0, 0);       // mov rax, gs:[rax*8]
+        Emit(page, ref offset, 0xC3);                                           // ret
         return start;
     }
 
@@ -342,11 +266,8 @@ internal static unsafe class PosixHostStubs
         return start;
     }
 
-    private static nint ResolveLibcExport(string name)
-    {
-        var libc = NativeLibrary.Load(OperatingSystem.IsMacOS() ? "libSystem.dylib" : "libc.so.6");
-        return NativeLibrary.GetExport(libc, name);
-    }
+    private static nint ResolveLibcExport(string name) =>
+        NativeLibrary.GetExport(NativeLibrary.Load("libSystem.dylib"), name);
 
     private static void Emit(byte* page, ref int offset, params byte[] bytes)
     {
@@ -364,34 +285,19 @@ internal static unsafe class PosixHostStubs
     }
 
     [DllImport("libc", EntryPoint = "pthread_key_create", SetLastError = true)]
-    private static extern int pthread_key_create_mac(nuint* key, nint destructor);
-
-    [DllImport("libpthread.so.0", EntryPoint = "pthread_key_create", SetLastError = true)]
-    private static extern int pthread_key_create_linux(uint* key, nint destructor);
+    private static extern int pthread_key_create(nuint* key, nint destructor);
 
     [DllImport("libc", EntryPoint = "pthread_key_delete")]
-    private static extern int pthread_key_delete_mac(nuint key);
-
-    [DllImport("libpthread.so.0", EntryPoint = "pthread_key_delete")]
-    private static extern int pthread_key_delete_linux(uint key);
+    private static extern int pthread_key_delete(nuint key);
 
     [DllImport("libc", EntryPoint = "pthread_setspecific")]
-    private static extern int pthread_setspecific_mac(nuint key, nint value);
-
-    [DllImport("libpthread.so.0", EntryPoint = "pthread_setspecific")]
-    private static extern int pthread_setspecific_linux(uint key, nint value);
+    private static extern int pthread_setspecific(nuint key, nint value);
 
     [DllImport("libc", EntryPoint = "pthread_getspecific")]
-    private static extern nint pthread_getspecific_mac(nuint key);
-
-    [DllImport("libpthread.so.0", EntryPoint = "pthread_getspecific")]
-    private static extern nint pthread_getspecific_linux(uint key);
+    private static extern nint pthread_getspecific(nuint key);
 
     [DllImport("libc")]
     private static extern int pthread_threadid_np(nint thread, ulong* threadId);
-
-    [DllImport("libc")]
-    private static extern int gettid();
 
     [DllImport("libc")]
     private static extern nint dispatch_semaphore_create(long value);
@@ -407,19 +313,4 @@ internal static unsafe class PosixHostStubs
 
     [DllImport("libc")]
     private static extern void dispatch_release(nint handle);
-
-    [DllImport("libc")]
-    private static extern int sem_init(nint semaphore, int shared, uint value);
-
-    [DllImport("libc")]
-    private static extern int sem_post(nint semaphore);
-
-    [DllImport("libc")]
-    private static extern int sem_wait(nint semaphore);
-
-    [DllImport("libc")]
-    private static extern int sem_trywait(nint semaphore);
-
-    [DllImport("libc")]
-    private static extern int sem_destroy(nint semaphore);
 }

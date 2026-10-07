@@ -7,6 +7,8 @@ using System.Threading;
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 
+using SharpEmu.Core.Cpu.Native.Platform;
+
 namespace SharpEmu.Core.Cpu.Native;
 
 public sealed unsafe partial class DirectExecutionBackend
@@ -91,11 +93,6 @@ public sealed unsafe partial class DirectExecutionBackend
 	[ThreadStatic]
 	private static int _posixSignalHandlerDepth;
 
-	// True when the signal context contains the current vector register values.
-	// Copy changes back to these registers before the guest continues.
-	[ThreadStatic]
-	private static bool _posixXmmContextBridged;
-
 	private void SetupPosixExceptionHandler()
 	{
 		if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_POSIX_SIGNALS"), "1", StringComparison.Ordinal))
@@ -156,9 +153,10 @@ public sealed unsafe partial class DirectExecutionBackend
 		{
 			*(byte**)(testUserContext + DarwinUcontextMcontextOffset) = testMachineContext;
 			*(ulong*)(testUserContext + DarwinUserContextMachineContextSizeOffset) = 1024;
-			// Load the Mach memory functions before the first signal uses them.
+			// Load the platform's kernel memory read before the first signal
+			// uses it: binding a lazy P/Invoke inside a signal frame needs the JIT.
 			byte readProbe = 0;
-			_ = TryReadMacOsMemory((ulong)testMachineContext, &readProbe, 1);
+			_ = ExecutionPlatform.TryReadHostMemory((ulong)testMachineContext, &readProbe, 1);
 		}
 
 		_posixSignalWarmup = true;
@@ -330,7 +328,8 @@ public sealed unsafe partial class DirectExecutionBackend
 				XmmBlockSize,
 				XmmBlockSize);
 		}
-		_posixXmmContextBridged = vectorRegisters != null;
+		// Tell the shared recovery chain whether it may change vector registers.
+		DirectExecutionFaultContext.VectorRegistersBridged = vectorRegisters != null;
 
 		EXCEPTION_RECORD record = default;
 		record.ExceptionAddress = (void*)ReadCtxU64(contextRecord, CTX_RIP);

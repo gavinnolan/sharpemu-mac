@@ -6,11 +6,20 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
+using SharpEmu.Core.Cpu.Native.Platform;
+
 namespace SharpEmu.Core.Cpu.Native;
 
 public sealed unsafe partial class DirectExecutionBackend
 {
     private SafeWaitHandle? _mainExecutionThreadHandle;
+
+    // Suspending another thread and snapshotting its registers is a platform
+    // capability, not an operating system. The kernel32 declarations below are
+    // still here pending the rest of the Windows fault integration move; see
+    // docs/mac/platform-packages.md section 11.
+    private static bool SupportsThreadContextCapture =>
+        (DirectExecutionPlatform.Current.Capabilities & DirectExecutionCapabilities.ThreadContextCapture) != 0;
     // One immutable code page serves all diagnostic samples for the process lifetime.
     private static readonly Lazy<ThreadContextCaptureCode> ThreadCaptureCode = new(() => new());
 
@@ -43,7 +52,7 @@ public sealed unsafe partial class DirectExecutionBackend
 
     private static SafeWaitHandle? OpenThreadForContext(uint threadId)
     {
-        if (!OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64 || threadId == 0)
+        if (!SupportsThreadContextCapture || RuntimeInformation.ProcessArchitecture != Architecture.X64 || threadId == 0)
             return null;
 
         const uint queryLimitedInformation = 0x0800;
@@ -60,7 +69,7 @@ public sealed unsafe partial class DirectExecutionBackend
     private static bool TryCaptureThreadContext(SafeWaitHandle? threadHandle, out HostThreadContextSnapshot snapshot)
     {
         snapshot = default;
-        if (threadHandle is null || !OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
+        if (threadHandle is null || !SupportsThreadContextCapture || RuntimeInformation.ProcessArchitecture != Architecture.X64)
             return false;
 
         var handleReferenced = false;

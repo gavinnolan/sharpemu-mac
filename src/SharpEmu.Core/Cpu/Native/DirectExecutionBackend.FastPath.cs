@@ -6,6 +6,8 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using SharpEmu.HLE;
 
+using SharpEmu.Core.Cpu.Native.Platform;
+
 namespace SharpEmu.Core.Cpu.Native;
 
 /// <summary>
@@ -58,9 +60,10 @@ public sealed unsafe partial class DirectExecutionBackend
 		_guestFastPathEnabled = false;
 		_guestFastPathStubCount = 0;
 
-		// Emission uses the macOS pthread gs-indexed key array. Windows and
-		// Linux keep the managed gateway until their TLS read is emitted too.
-		if (!OperatingSystem.IsMacOS() ||
+		// Emission needs a TLS read the platform can express as inline code
+		// (the Darwin pthread gs-indexed key array). Platforms whose TLS read is
+		// a real call keep the managed gateway.
+		if ((ExecutionPlatform.Capabilities & DirectExecutionCapabilities.EmittedTlsFastPath) == 0 ||
 			RuntimeInformation.ProcessArchitecture != Architecture.X64)
 		{
 			return;

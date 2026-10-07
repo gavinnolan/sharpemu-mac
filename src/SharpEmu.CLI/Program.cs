@@ -48,6 +48,9 @@ internal static partial class Program
         // Must precede anything that can touch HostPlatform/HostViewMemory.
         HostComposition.Register();
 
+        // Must precede any guest execution; registration itself is lazy.
+        CpuComposition.Register();
+
         ConfigureManagedPluginResolution();
 
         if (args.Length > 0 && args[0] == SharpEmu.Core.Diagnostics.WindowsCrashCapture.HelperArgument)

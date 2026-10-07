@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Core.Cpu.Native;
+using SharpEmu.Core.Cpu.Native.Platform;
 using SharpEmu.HLE;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -359,9 +360,10 @@ public sealed unsafe class GuestFastPathStubTests
 
         private static uint EnableFastPath()
         {
-            var key = PosixHostStubs.TlsAlloc();
+            var platform = DirectExecutionPlatform.Current;
+            var key = platform.AllocateTlsSlot();
             Assert.NotEqual(uint.MaxValue, key);
-            GuestFastPath.Enable(block => PosixHostStubs.TlsSetValue(key, block));
+            GuestFastPath.Enable(block => platform.SetTlsValue(key, block));
             return key;
         }
 

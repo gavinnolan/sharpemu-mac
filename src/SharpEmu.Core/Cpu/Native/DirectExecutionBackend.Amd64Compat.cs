@@ -5,6 +5,8 @@ using System.Threading;
 using Iced.Intel;
 using SharpEmu.Core.Cpu.Emulation;
 
+using SharpEmu.Core.Cpu.Native.Platform;
+
 namespace SharpEmu.Core.Cpu.Native;
 
 // Recover supported instructions only after an illegal-instruction fault.
@@ -33,7 +35,7 @@ public sealed partial class DirectExecutionBackend
 
         // EXTRQ and INSERTQ need the current vector register values.
         // Use recovery only when the signal context contains these values.
-        return (OperatingSystem.IsWindows() || _posixXmmContextBridged) &&
+        return FaultContextHasVectorRegisters &&
             TryRecoverSse4aExtractInsert(contextRecord, rip);
     }
 
@@ -75,7 +77,7 @@ public sealed partial class DirectExecutionBackend
 
     private unsafe bool TryRecoverSse4aExtractInsert(void* contextRecord, ulong rip)
     {
-        if (!OperatingSystem.IsWindows() && !_posixXmmContextBridged ||
+        if (!FaultContextHasVectorRegisters ||
             !TryReadFaultingInstruction(rip, out var instruction))
         {
             return false;

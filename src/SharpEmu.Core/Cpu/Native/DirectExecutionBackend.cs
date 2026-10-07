@@ -14,6 +14,8 @@ using SharpEmu.Core.Cpu.Debugging;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
+using SharpEmu.Core.Cpu.Native.Platform;
+using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Diagnostics;
 
 namespace SharpEmu.Core.Cpu.Native;
@@ -149,11 +151,14 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 
 
-	// See CpuDispatcher: the 0x7FFx window is Windows-only; POSIX hosts
-	// (dyld shared cache, Rosetta 2 runtime) use 0x6FFx instead.
-	private static readonly ulong GuestThreadStackBaseAddress = OperatingSystem.IsWindows() ? 0x7FFF_E000_0000UL : 0x6FFF_E000_0000UL;
+	// See CpuDispatcher: which window is free differs by OS (the dyld shared
+	// cache and the Rosetta 2 runtime sit where Windows leaves 0x7FFx free),
+	// so the registered execution platform owns both bases. Read through a
+	// property, not a static initializer: creating the platform must not be
+	// forced by this type being loaded.
+	private static ulong GuestThreadStackBaseAddress => ExecutionPlatform.GuestThreadStackBaseAddress;
 
-	private static readonly ulong GuestThreadTlsBaseAddress = OperatingSystem.IsWindows() ? 0x7FFE_0000_0000UL : 0x6FFE_0000_0000UL;
+	private static ulong GuestThreadTlsBaseAddress => ExecutionPlatform.GuestThreadTlsBaseAddress;
 
 	private const ulong GuestThreadStackSize = 0x0020_0000UL;
 	private const ulong GuestThreadStackHeadroom = 0x0010_0000UL;
@@ -806,7 +811,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	// Windows the runtime already compiles them that way; on POSIX .NET they
 	// are SysV, so route through a Win64->SysV thunk.
 	private static nint ResolveWin64CallbackPtr(nint sysvPtr) =>
-		OperatingSystem.IsWindows() ? sysvPtr : PosixHostStubs.CreateWin64ToSysVThunk(sysvPtr);
+		ExecutionPlatform.ResolveWin64CallbackAddress(sysvPtr);
 
 	private static readonly nint RawVectoredHandlerPtrManaged =
 		Marshal.GetFunctionPointerForDelegate(RawVectoredHandlerDelegateInstance);
@@ -814,6 +819,29 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private static readonly nint RawUnhandledFilterPtrManaged =
 		Marshal.GetFunctionPointerForDelegate(RawUnhandledFilterDelegateInstance);
 
+
+	/// <summary>
+	/// The process's registered OS execution integration (W10 seam). Every OS
+	/// primitive the engine needs — native TLS, the Win64 helper routines the
+	/// emitted stubs call, fault interception, stack bounds — comes from here,
+	/// so this assembly carries no per-OS declaration or OS check for them.
+	/// </summary>
+	private static IDirectExecutionPlatform ExecutionPlatform => DirectExecutionPlatform.Current;
+
+	/// <summary>
+	/// Whether emitted code can swap the thread's stack bounds so the runtime
+	/// sees the guest stack a thread is actually running on.
+	/// </summary>
+	private static bool SupportsSwappableStackBounds =>
+		(ExecutionPlatform.Capabilities & DirectExecutionCapabilities.SwappableThreadStackBounds) != 0;
+
+	/// <summary>
+	/// Whether the fault context the recovery chain is looking at carries the
+	/// faulting thread's live vector registers, so instruction recovery may
+	/// change them.
+	/// </summary>
+	private static bool FaultContextHasVectorRegisters =>
+		DirectExecutionFaultContext.HasVectorRegisters(ExecutionPlatform.Capabilities);
 
 	private const int CTX_RAX = 120;
 
@@ -1095,42 +1123,38 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		_selfHandlePtr = GCHandle.ToIntPtr(_selfHandle);
 		_guestTlsBaseTlsIndex = TlsAlloc();
 		_hostRspSlotTlsIndex = TlsAlloc();
-		_workerDoneEventTlsIndex = OperatingSystem.IsWindows() ? TlsAlloc() : uint.MaxValue;
-		_tbbAbortEligibleTlsIndex = OperatingSystem.IsWindows() ? TlsAlloc() : uint.MaxValue;
+		// Only the native guest worker loop reads these two, so platforms that
+		// do not run it never spend a TLS slot on them.
+		var nativeWorkers = (ExecutionPlatform.Capabilities & DirectExecutionCapabilities.NativeGuestWorkers) != 0;
+		_workerDoneEventTlsIndex = nativeWorkers ? TlsAlloc() : uint.MaxValue;
+		_tbbAbortEligibleTlsIndex = nativeWorkers ? TlsAlloc() : uint.MaxValue;
 		if (_guestTlsBaseTlsIndex == uint.MaxValue || _hostRspSlotTlsIndex == uint.MaxValue)
 		{
 			throw new OutOfMemoryException("Failed to allocate native TLS slots");
 		}
-		if (OperatingSystem.IsWindows())
+		// Win64-ABI helper routines the emitted call sites call. The platform
+		// returns the kernel32 export where there is one and an equivalent
+		// stub where there is not, so the emission code is identical everywhere.
+		_tlsGetValueAddress = ExecutionPlatform.GetRuntimeRoutine(HostRuntimeFunction.TlsGetValue);
+		if (_tlsGetValueAddress == 0)
 		{
-			nint kernel32 = GetModuleHandle("kernel32.dll");
-			_tlsGetValueAddress = kernel32 != 0 ? GetProcAddress(kernel32, "TlsGetValue") : 0;
-			if (_tlsGetValueAddress == 0)
-			{
-				throw new InvalidOperationException("Failed to resolve kernel32!TlsGetValue");
-			}
-			_queryPerformanceCounterAddress = kernel32 != 0 ? GetProcAddress(kernel32, "QueryPerformanceCounter") : 0;
-			if (_queryPerformanceCounterAddress == 0)
-			{
-				throw new InvalidOperationException("Failed to resolve kernel32!QueryPerformanceCounter");
-			}
-			_switchToThreadAddress = kernel32 != 0 ? GetProcAddress(kernel32, "SwitchToThread") : 0;
-			_sleepAddress = kernel32 != 0 ? GetProcAddress(kernel32, "Sleep") : 0;
-			if (_switchToThreadAddress == 0 || _sleepAddress == 0)
-			{
-				throw new InvalidOperationException("Failed to resolve kernel32 thread timing functions");
-			}
-			_setEventAddress = kernel32 != 0 ? GetProcAddress(kernel32, "SetEvent") : 0;
+			throw new InvalidOperationException(
+				$"The {ExecutionPlatform.Name} execution platform provides no Win64 TlsGetValue routine.");
 		}
-		else
+		_queryPerformanceCounterAddress = ExecutionPlatform.GetRuntimeRoutine(HostRuntimeFunction.QueryPerformanceCounter);
+		if (_queryPerformanceCounterAddress == 0)
 		{
-			// Win64-ABI-compatible helper stubs so the emitted call sites do
-			// not need to change per platform.
-			_tlsGetValueAddress = PosixHostStubs.TlsGetValueStubAddress;
-			_queryPerformanceCounterAddress = PosixHostStubs.QueryPerformanceCounterStubAddress;
-			_switchToThreadAddress = PosixHostStubs.SwitchToThreadStubAddress;
-			_sleepAddress = PosixHostStubs.SleepStubAddress;
+			throw new InvalidOperationException(
+				$"The {ExecutionPlatform.Name} execution platform provides no Win64 QueryPerformanceCounter routine.");
 		}
+		_switchToThreadAddress = ExecutionPlatform.GetRuntimeRoutine(HostRuntimeFunction.SwitchToThread);
+		_sleepAddress = ExecutionPlatform.GetRuntimeRoutine(HostRuntimeFunction.Sleep);
+		if (_switchToThreadAddress == 0 || _sleepAddress == 0)
+		{
+			throw new InvalidOperationException(
+				$"The {ExecutionPlatform.Name} execution platform provides no Win64 thread timing routines.");
+		}
+		_setEventAddress = ExecutionPlatform.GetRuntimeRoutine(HostRuntimeFunction.SetEvent);
 		_tlsBaseAddress = (nint)VirtualAlloc(null, 4096u, 12288u, 4u);
 		if (_tlsBaseAddress == 0)
 		{
@@ -1151,7 +1175,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			throw new OutOfMemoryException("Failed to allocate guest return stub");
 		}
 		_workerAbortStub = CreateWorkerAbortStub();
-		if (_workerAbortStub == 0 && OperatingSystem.IsWindows())
+		if (_workerAbortStub == 0 &&
+			(ExecutionPlatform.Capabilities & DirectExecutionCapabilities.NativeGuestWorkers) != 0)
 		{
 			Console.Error.WriteLine(
 				"[LOADER][WARN] Worker abort stub unavailable; TBB execute-fault recover will use host_exit");
@@ -1240,7 +1265,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		_patchedEa020eLookupCall = false;
 		MarkExecutionProgress();
 		BindTlsBase(context);
-		RouteGuestAccessFaultsToSignals();
+		ExecutionPlatform.RouteGuestFaultsOnCurrentThread();
 		var previousGuestThreadScheduler = GuestThreadExecution.Scheduler;
 		GuestThreadExecution.Scheduler = this;
 		try
@@ -2185,7 +2210,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 		ulong stackBottom = 0;
 		ulong stackTop = 0;
-		if (OperatingSystem.IsWindows() && !TryGetGuestStackBounds(target.Rsp, out stackBottom, out stackTop))
+		if (SupportsSwappableStackBounds && !TryGetGuestStackBounds(target.Rsp, out stackBottom, out stackTop))
 		{
 			error = $"guest context transfer target rsp=0x{target.Rsp:X16} has no committed host stack mapping";
 			return false;
@@ -2780,7 +2805,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	/// </summary>
 	private unsafe nint CreateWorkerAbortStub()
 	{
-		if (!OperatingSystem.IsWindows() ||
+		if ((ExecutionPlatform.Capabilities & DirectExecutionCapabilities.NativeGuestWorkers) == 0 ||
 			_workerDoneEventTlsIndex == uint.MaxValue ||
 			_tlsGetValueAddress == 0 ||
 			_setEventAddress == 0)
@@ -6186,7 +6211,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			_activeGuestThreadYieldRequested = false;
 			_activeGuestThreadYieldReason = null;
 			BindTlsBase(context);
-			RouteGuestAccessFaultsToSignals();
+			ExecutionPlatform.RouteGuestFaultsOnCurrentThread();
 			byte* ptr2 = (byte*)ptr;
 			// Rosetta does not reliably permit a generated x86 thunk to write data
 			// in the same page from which it is currently executing, even when the
@@ -6413,7 +6438,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			_activeGuestThreadYieldRequested = false;
 			_activeGuestThreadYieldReason = null;
 			BindTlsBase(context);
-			RouteGuestAccessFaultsToSignals();
+			ExecutionPlatform.RouteGuestFaultsOnCurrentThread();
 			byte* ptr2 = (byte*)ptr;
 			ulong hostRspSlot = (ulong)hostRspStorage;
 			var emitter = new NativeCodeEmitter(ptr2);
@@ -6687,7 +6712,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			_activeGuestThreadYieldRequested = false;
 			_activeGuestThreadYieldReason = null;
 			BindTlsBase(context);
-			RouteGuestAccessFaultsToSignals();
+			ExecutionPlatform.RouteGuestFaultsOnCurrentThread();
 			byte* ptr2 = (byte*)ptr;
 			ulong num2 = (ulong)hostRspStorage;
 			int num3 = 0;
@@ -7391,18 +7416,30 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	}
 
 
-	private static uint TlsAlloc() =>
-		OperatingSystem.IsWindows() ? Win32TlsAlloc() : PosixHostStubs.TlsAlloc();
+	// Native TLS and raw thread primitives come from the registered execution
+	// platform (W10): kernel32 on Windows, pthread keys on POSIX. The engine
+	// itself holds no OS declaration for them.
+	private static uint TlsAlloc() => ExecutionPlatform.AllocateTlsSlot();
 
-	private static bool TlsFree(uint dwTlsIndex) =>
-		OperatingSystem.IsWindows() ? Win32TlsFree(dwTlsIndex) : PosixHostStubs.TlsFree(dwTlsIndex);
+	private static bool TlsFree(uint dwTlsIndex) => ExecutionPlatform.FreeTlsSlot(dwTlsIndex);
 
 	private static bool TlsSetValue(uint dwTlsIndex, nint lpTlsValue) =>
-		OperatingSystem.IsWindows() ? Win32TlsSetValue(dwTlsIndex, lpTlsValue) : PosixHostStubs.TlsSetValue(dwTlsIndex, lpTlsValue);
+		ExecutionPlatform.SetTlsValue(dwTlsIndex, lpTlsValue);
 
-	private static nint TlsGetValue(uint dwTlsIndex) =>
-		OperatingSystem.IsWindows() ? Win32TlsGetValue(dwTlsIndex) : PosixHostStubs.TlsGetValue(dwTlsIndex);
+	private static nint TlsGetValue(uint dwTlsIndex) => ExecutionPlatform.GetTlsValue(dwTlsIndex);
 
+	private static uint GetCurrentThreadId() => ExecutionPlatform.CurrentThreadId;
+
+	private static nint GetCurrentThread() => ExecutionPlatform.CurrentThreadHandle;
+
+	private static nuint SetThreadAffinityMask(nint hThread, nuint dwThreadAffinityMask) =>
+		ExecutionPlatform.TrySetThreadAffinity(hThread, dwThreadAffinityMask);
+
+	// Still shared: vectored exception registration, thread handles for the
+	// stall sampler and the kernel32 export lookups the Windows-only fault
+	// thunk, native guest worker loop and thread-context capture make. Those
+	// three move to SharpEmu.Cpu.DirectExecution.Windows.X64 with the rest of
+	// the Windows fault integration; until then they stay no-ops off Windows.
 	private unsafe static void* AddVectoredExceptionHandler(uint first, IntPtr handler) =>
 		OperatingSystem.IsWindows() ? Win32AddVectoredExceptionHandler(first, handler) : null;
 
@@ -7412,32 +7449,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private static IntPtr SetUnhandledExceptionFilter(IntPtr lpTopLevelExceptionFilter) =>
 		OperatingSystem.IsWindows() ? Win32SetUnhandledExceptionFilter(lpTopLevelExceptionFilter) : IntPtr.Zero;
 
-	private static uint GetCurrentThreadId() =>
-		OperatingSystem.IsWindows() ? Win32GetCurrentThreadId() : PosixHostStubs.GetCurrentThreadId();
-
-	private static nint GetCurrentThread() =>
-		OperatingSystem.IsWindows() ? Win32GetCurrentThread() : 0;
-
-	private static nuint SetThreadAffinityMask(nint hThread, nuint dwThreadAffinityMask) =>
-		OperatingSystem.IsWindows() ? Win32SetThreadAffinityMask(hThread, dwThreadAffinityMask) : 1;
-
 	private static nint OpenThread(uint dwDesiredAccess, bool bInheritHandle, uint dwThreadId) =>
 		OperatingSystem.IsWindows() ? Win32OpenThread(dwDesiredAccess, bInheritHandle, dwThreadId) : 0;
 
 	private static bool CloseHandle(nint hObject) =>
 		OperatingSystem.IsWindows() && Win32CloseHandle(hObject);
-
-	[DllImport("kernel32.dll", EntryPoint = "TlsAlloc")]
-	private static extern uint Win32TlsAlloc();
-
-	[DllImport("kernel32.dll", EntryPoint = "TlsFree")]
-	private static extern bool Win32TlsFree(uint dwTlsIndex);
-
-	[DllImport("kernel32.dll", EntryPoint = "TlsSetValue")]
-	private static extern bool Win32TlsSetValue(uint dwTlsIndex, nint lpTlsValue);
-
-	[DllImport("kernel32.dll", EntryPoint = "TlsGetValue")]
-	private static extern nint Win32TlsGetValue(uint dwTlsIndex);
 
 	[DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
 	private static extern nint GetModuleHandle(string lpModuleName);
@@ -7453,15 +7469,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	[DllImport("kernel32.dll", EntryPoint = "SetUnhandledExceptionFilter")]
 	private static extern IntPtr Win32SetUnhandledExceptionFilter(IntPtr lpTopLevelExceptionFilter);
-
-	[DllImport("kernel32.dll", EntryPoint = "GetCurrentThreadId")]
-	private static extern uint Win32GetCurrentThreadId();
-
-	[DllImport("kernel32.dll", EntryPoint = "GetCurrentThread")]
-	private static extern nint Win32GetCurrentThread();
-
-	[DllImport("kernel32.dll", EntryPoint = "SetThreadAffinityMask", SetLastError = true)]
-	private static extern nuint Win32SetThreadAffinityMask(nint hThread, nuint dwThreadAffinityMask);
 
 	[DllImport("kernel32.dll", EntryPoint = "OpenThread", SetLastError = true)]
 	private static extern nint Win32OpenThread(uint dwDesiredAccess, [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle, uint dwThreadId);

@@ -12,6 +12,8 @@ using SharpEmu.Core.Cpu.Disasm;
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 
+using SharpEmu.Core.Cpu.Native.Platform;
+
 namespace SharpEmu.Core.Cpu.Native;
 
 public sealed partial class DirectExecutionBackend
@@ -118,7 +120,7 @@ public sealed partial class DirectExecutionBackend
 			{
 				return -1;
 			}
-			if (!OperatingSystem.IsWindows() &&
+			if ((ExecutionPlatform.Capabilities & DirectExecutionCapabilities.VectoredFaultDispatch) == 0 &&
 				exceptionCode == 3221225477u &&
 				exceptionRecord->NumberParameters >= 2 &&
 				exceptionRecord->ExceptionInformation[0] == 1uL &&
@@ -625,7 +627,7 @@ public sealed partial class DirectExecutionBackend
 	// thousands of times per frame, so skip the opcode probe (a VirtualQuery and a
 	// read of the faulting instruction) for them.
 	private static unsafe bool MayBeGuestInt41(EXCEPTION_RECORD* exceptionRecord) =>
-		!OperatingSystem.IsWindows() ||
+		(ExecutionPlatform.Capabilities & DirectExecutionCapabilities.GeneralProtectionFaultsReportAllOnesAddress) == 0 ||
 		exceptionRecord->NumberParameters < 2 ||
 		exceptionRecord->ExceptionInformation[1] == ulong.MaxValue;
 
@@ -1286,7 +1288,7 @@ public sealed partial class DirectExecutionBackend
 		{
 			return false;
 		}
-		if (!OperatingSystem.IsWindows())
+		if ((ExecutionPlatform.Capabilities & DirectExecutionCapabilities.StrayReadsSurfaceAsManagedExceptions) == 0)
 		{
 			// A stray read inside the signal handler would raise a nested
 			// SIGSEGV and kill the process before diagnostics finish, so
@@ -1305,184 +1307,37 @@ public sealed partial class DirectExecutionBackend
 		}
 	}
 
+	// Diagnostic host reads go through the execution platform: each OS reads
+	// through the kernel (mach_vm_read_overwrite, process_vm_readv,
+	// ReadProcessMemory) so an unmapped or inaccessible page cannot fault the
+	// reader, which inside a fault handler would kill the process before the
+	// diagnostics finish.
 	private unsafe static bool TryReadDiagnosticHostQword(ulong address, out ulong value)
 	{
-		if (OperatingSystem.IsLinux())
-		{
-			ulong result = 0;
-			bool success = TryReadLinuxMemory(address, (byte*)&result, sizeof(ulong));
-			value = success ? result : 0;
-			return success;
-		}
-
-		if (OperatingSystem.IsMacOS())
-		{
-			ulong result = 0;
-			bool success = TryReadMacOsMemory(address, (byte*)&result, sizeof(ulong));
-			value = success ? result : 0;
-			return success;
-		}
-
-		if (!OperatingSystem.IsWindows())
-		{
-			return TryReadStackU64(address, out value);
-		}
-
-		value = 0;
-		if (!IsReadableHostRange(address, sizeof(ulong)))
-		{
-			return false;
-		}
-
-		ulong readValue = 0;
-		if (ReadProcessMemory(
-				(nint)(-1),
-				(nint)address,
-				&readValue,
-				sizeof(ulong),
-				out var bytesRead) == 0 ||
-			bytesRead != sizeof(ulong))
-		{
-			return false;
-		}
-
-		value = readValue;
-		return true;
+		ulong result = 0;
+		var success = ExecutionPlatform.TryReadHostMemory(address, (byte*)&result, sizeof(ulong));
+		value = success ? result : 0;
+		return success;
 	}
 
 	private unsafe static bool TryReadHostBytes(ulong address, byte[] buffer)
 	{
-		if (OperatingSystem.IsLinux())
+		fixed (byte* destination = buffer)
 		{
-			fixed (byte* destination = buffer)
-			{
-				return TryReadLinuxMemory(address, destination, buffer.Length);
-			}
-		}
-
-		if (OperatingSystem.IsMacOS())
-		{
-			fixed (byte* destination = buffer)
-			{
-				return TryReadMacOsMemory(address, destination, buffer.Length);
-			}
-		}
-
-		if (!IsReadableHostRange(address, buffer.Length))
-		{
-			return false;
-		}
-
-		if (buffer.Length == 0)
-		{
-			return true;
-		}
-
-		if (OperatingSystem.IsWindows())
-		{
-			fixed (byte* destination = buffer)
-			{
-				return ReadProcessMemory(
-					(nint)(-1),
-					(nint)address,
-					destination,
-					(nuint)buffer.Length,
-					out var bytesRead) != 0 &&
-					bytesRead == (nuint)buffer.Length;
-			}
-		}
-
-		try
-		{
-			Marshal.Copy((nint)address, buffer, 0, buffer.Length);
-			return true;
-		}
-		catch
-		{
-			return false;
+			return ExecutionPlatform.TryReadHostMemory(address, destination, buffer.Length);
 		}
 	}
 
-	private unsafe static bool TryReadLinuxMemory(ulong address, byte* destination, int byteCount)
-	{
-		if (byteCount < 0 || !IsCanonicalUserAddress(address) ||
-			address > 0x0000_8000_0000_0000UL - (ulong)byteCount)
-		{
-			return false;
-		}
-
-		if (byteCount == 0) return true;
-
-		// Read through the kernel so untracked or inaccessible pages cannot fault the reader.
-		var local = new DiagnosticMemoryVector { Address = (nint)destination, Length = (nuint)byteCount };
-		var remote = new DiagnosticMemoryVector { Address = (nint)address, Length = (nuint)byteCount };
-		return ReadLinuxProcessMemory(Environment.ProcessId, &local, 1, &remote, 1, 0) == byteCount;
-	}
-
-	[StructLayout(LayoutKind.Sequential)]
-	private struct DiagnosticMemoryVector
-	{
-		public nint Address;
-		public nuint Length;
-	}
-
-	[DllImport("libc", EntryPoint = "process_vm_readv")]
-	private unsafe static extern nint ReadLinuxProcessMemory(
-		int processId, DiagnosticMemoryVector* local, nuint localCount,
-		DiagnosticMemoryVector* remote, nuint remoteCount, nuint flags);
-
-	private unsafe static bool TryReadMacOsMemory(ulong address, byte* destination, int byteCount)
-	{
-		if (byteCount < 0 || !IsCanonicalUserAddress(address) ||
-			address > 0x0000_8000_0000_0000UL - (ulong)byteCount)
-		{
-			return false;
-		}
-
-		if (byteCount == 0)
-		{
-			return true;
-		}
-
-		// The host memory table does not contain all guest code mappings.
-		// Use Mach to read the memory and report access errors without another fault.
-		return ReadMachVirtualMemory(GetCurrentMachTask(), address, (ulong)byteCount,
-			(ulong)destination, out var bytesRead) == 0 && bytesRead == (ulong)byteCount;
-	}
-
-	[DllImport("libSystem.B.dylib", EntryPoint = "mach_task_self")]
-	private static extern uint GetCurrentMachTask();
-
-	[DllImport("libSystem.B.dylib", EntryPoint = "mach_vm_read_overwrite")]
-	private static extern int ReadMachVirtualMemory(
-		uint taskHandle, ulong sourceAddress, ulong byteCount, ulong destinationAddress, out ulong bytesRead);
-
+	// Faulting x64 code can have execute-only protection, which a plain data
+	// probe cannot touch on every platform.
 	private unsafe static bool TryReadExecutableBytes(ulong address, byte[] buffer)
 	{
-		if (!OperatingSystem.IsWindows())
+		fixed (byte* destination = buffer)
 		{
-			return TryReadHostBytes(address, buffer);
+			return ExecutionPlatform.TryReadExecutableHostMemory(address, destination, buffer.Length);
 		}
-
-		// Faulting x64 code can have execute-only protection. Data probes still require read access.
-		if (!IsReadableHostRange(address, buffer.Length, allowExecuteOnly: true))
-		{
-			return false;
-		}
-
-		if (buffer.Length == 0)
-		{
-			return true;
-		}
-
-		// RIP identifies code that Windows was already executing when the
-		// exception occurred. These mappings are stable for the duration of
-		// dispatch, so read them directly. Arbitrary diagnostic and operand
-		// addresses continue to use ReadProcessMemory above because they can
-		// become invalid while an exception is being reported.
-		new ReadOnlySpan<byte>((void*)address, buffer.Length).CopyTo(buffer);
-		return true;
 	}
+
 
 	/// <summary>
 	/// Reads guest bytes for a crash report, preferring the guest memory view
@@ -1522,7 +1377,13 @@ public sealed partial class DirectExecutionBackend
 			$"state=0x{mbi.State:X08} protect=0x{mbi.Protect:X08} type=0x{mbi.Type:X08}");
 	}
 
-	private unsafe static bool IsReadableHostRange(ulong address, int byteCount, bool allowExecuteOnly = false)
+
+	/// <summary>
+	/// Whether the whole range is committed and readable, from the neutral host
+	/// region table rather than any OS call. Visible to the per-OS execution
+	/// integrations, whose host-memory probes pre-check with it.
+	/// </summary>
+	internal unsafe static bool IsReadableHostRange(ulong address, int byteCount, bool allowExecuteOnly = false)
 	{
 		if (byteCount < 0 || !IsCanonicalUserAddress(address))
 		{

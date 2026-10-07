@@ -11,7 +11,7 @@ public sealed partial class DirectExecutionBackend
 
     internal static unsafe bool TryGetGuestStackBounds(ulong stackPointer, out ulong bottom, out ulong top)
     {
-        if (OperatingSystem.IsWindows() &&
+        if (SupportsSwappableStackBounds &&
             QueryVirtualMemoryInformation(-1, (void*)stackPointer, 0, out var allocation,
                 (nuint)sizeof(StackMemoryRegionInformation), null) != 0 &&
             ((allocation.Flags & 1) == 0 || allocation.CommitSize == allocation.RegionSize) &&
@@ -54,7 +54,7 @@ public sealed partial class DirectExecutionBackend
     // crashed reading it (Demon's Souls, about 10 s into boot).
     private static unsafe void EmitFiberStackBounds(byte* code, ref int offset)
     {
-        if (!OperatingSystem.IsWindows()) return;
+        if (!SupportsSwappableStackBounds) return;
         ReadOnlySpan<byte> loadTop = [0x4D, 0x8B, 0x93, 160, 0, 0, 0];     // mov r10, [r11+160]
         foreach (var value in loadTop) EmitByte(code, ref offset, value);
         EmitStackBound(code, ref offset, 10, 8, store: true);
@@ -79,7 +79,7 @@ public sealed partial class DirectExecutionBackend
     // R10 points to the entry state. R11 is scratch; RAX remains unchanged.
     private static unsafe void EmitHostStackBounds(byte* code, ref int offset, bool save)
     {
-        if (!OperatingSystem.IsWindows()) return;
+        if (!SupportsSwappableStackBounds) return;
         for (byte field = 8; field <= 16; field += 8)
         {
             if (save) EmitStackBound(code, ref offset, 11, field, store: false);
@@ -93,7 +93,7 @@ public sealed partial class DirectExecutionBackend
 
     private static unsafe void EmitGuestStackBounds(byte* code, ref int offset, ulong stackPointer)
     {
-        if (!OperatingSystem.IsWindows()) return;
+        if (!SupportsSwappableStackBounds) return;
         if (!TryGetGuestStackBounds(stackPointer, out var bottom, out var top))
         {
             throw new InvalidOperationException("Guest stack has no committed host mapping.");
@@ -112,7 +112,7 @@ public sealed partial class DirectExecutionBackend
 
     private static unsafe void EmitSavedStackBounds(byte* code, ref int offset, bool restore)
     {
-        if (!OperatingSystem.IsWindows()) return;
+        if (!SupportsSwappableStackBounds) return;
         EmitStackBound(code, ref offset, 14, 8, restore);
         EmitStackBound(code, ref offset, 15, 16, restore);
     }

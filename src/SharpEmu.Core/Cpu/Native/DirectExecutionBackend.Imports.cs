@@ -15,6 +15,8 @@ using SharpEmu.Core.Cpu;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Kernel;
 
+using SharpEmu.Core.Cpu.Native.Platform;
+
 namespace SharpEmu.Core.Cpu.Native;
 
 public sealed partial class DirectExecutionBackend
@@ -1239,7 +1241,7 @@ public sealed partial class DirectExecutionBackend
 
 	private unsafe static bool TryReadImportStackU64(ulong address, out ulong value)
 	{
-		if (OperatingSystem.IsWindows())
+		if ((ExecutionPlatform.Capabilities & DirectExecutionCapabilities.CheapHostRegionQueries) != 0)
 		{
 			return TryReadHostQword(address, out value);
 		}

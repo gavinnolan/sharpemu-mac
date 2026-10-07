@@ -49,6 +49,35 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </ItemGroup>
 
   <!-- ===================================================================== -->
+  <!-- Direct-execution OS integration selection (W10, CpuComposition.cs).   -->
+  <!--                                                                       -->
+  <!-- Exactly one SharpEmu.Cpu.DirectExecution.<OS>.X64 project is          -->
+  <!-- referenced, reusing the $(_SharpEmuHostOS) RID mapping above, so an    -->
+  <!-- osx-* build never carries the Windows vectored exception handler or    -->
+  <!-- the Linux signal context layouts. Kept in its own block so the         -->
+  <!-- concurrent namespace/IVT work merges cleanly.                          -->
+  <!-- ===================================================================== -->
+  <PropertyGroup Condition="'$(_SharpEmuHostOS)' == 'macos'">
+    <DefineConstants>$(DefineConstants);SHARPEMU_CPU_MACOS_X64</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(_SharpEmuHostOS)' == 'linux'">
+    <DefineConstants>$(DefineConstants);SHARPEMU_CPU_LINUX_X64</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(_SharpEmuHostOS)' == 'windows'">
+    <DefineConstants>$(DefineConstants);SHARPEMU_CPU_WINDOWS_X64</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(_SharpEmuHostOS)' == 'macos'">
+    <ProjectReference Include="..\platforms\macos\SharpEmu.Cpu.DirectExecution.MacOS.X64\SharpEmu.Cpu.DirectExecution.MacOS.X64.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(_SharpEmuHostOS)' == 'linux'">
+    <ProjectReference Include="..\platforms\linux\SharpEmu.Cpu.DirectExecution.Linux.X64\SharpEmu.Cpu.DirectExecution.Linux.X64.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(_SharpEmuHostOS)' == 'windows'">
+    <ProjectReference Include="..\platforms\windows\SharpEmu.Cpu.DirectExecution.Windows.X64\SharpEmu.Cpu.DirectExecution.Windows.X64.csproj" />
+  </ItemGroup>
+
+  <!-- ===================================================================== -->
   <!-- Graphics backend composition (GpuComposition.cs).                     -->
   <!--                                                                       -->
   <!-- The target RID picks the graphics backend and the host platform        -->

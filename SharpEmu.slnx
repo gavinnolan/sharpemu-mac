@@ -27,9 +27,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <Project Path="src/adapters/SharpEmu.Adapters.Sdl/SharpEmu.Adapters.Sdl.csproj" />
   </Folder>
   <Folder Name="/src/platforms/">
+    <Project Path="src/platforms/linux/SharpEmu.Cpu.DirectExecution.Linux.X64/SharpEmu.Cpu.DirectExecution.Linux.X64.csproj" />
     <Project Path="src/platforms/linux/SharpEmu.Host.Linux/SharpEmu.Host.Linux.csproj" />
+    <Project Path="src/platforms/macos/SharpEmu.Cpu.DirectExecution.MacOS.X64/SharpEmu.Cpu.DirectExecution.MacOS.X64.csproj" />
     <Project Path="src/platforms/macos/SharpEmu.Host.MacOS/SharpEmu.Host.MacOS.csproj" />
     <Project Path="src/platforms/macos/SharpEmu.Platform.MacOS/SharpEmu.Platform.MacOS.csproj" />
+    <Project Path="src/platforms/windows/SharpEmu.Cpu.DirectExecution.Windows.X64/SharpEmu.Cpu.DirectExecution.Windows.X64.csproj" />
     <Project Path="src/platforms/windows/SharpEmu.Host.Windows/SharpEmu.Host.Windows.csproj" />
   </Folder>
   <Folder Name="/tests/">

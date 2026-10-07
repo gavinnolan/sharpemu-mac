@@ -1,0 +1,21 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- macOS x86-64 direct-execution integration (W10): Mach exception-port
+       routing, the Darwin signal fault bridge and its ucontext/mcontext
+       layouts, Darwin pthread TLS keys and the Win64-ABI helper stubs the
+       emitted guest code calls. Referenced only by osx-* builds; see the
+       conditional ProjectReference in SharpEmu.CLI.csproj. Contains no
+       Windows or Linux declaration, layout or OS check. -->
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\SharpEmu.Core\SharpEmu.Core.csproj" />
+  </ItemGroup>
+</Project>
