@@ -77,6 +77,7 @@ internal static partial class MetalVideoPresenter
     {
         var failure = cause ?? new InvalidOperationException(reason);
         _guestWorkFailure = failure;
+        AbortQueuedTextureSourceWorkLocked();
         Monitor.PulseAll(_gate);
         // The creating autorelease pool owns this borrowed command buffer.
         // A failed selection must not commit commands encoded before failure.

@@ -217,14 +217,7 @@ internal static partial class MetalVideoPresenter
         }
         finally
         {
-            lock (_gate)
-            {
-                _closed = true;
-                _thread = null;
-                // Wake guest-work waiters and backpressured producers so close
-                // never strands a blocked guest thread.
-                Monitor.PulseAll(_gate);
-            }
+            CompletePresenterShutdown();
         }
     }
 

@@ -23,6 +23,9 @@ internal static partial class MetalVideoPresenter
         public TextureSourceVersion[] Predecessors { get; } = predecessors;
         public bool Released;
         public bool PredecessorsRetained;
+        // Diagnostic receipt only: exact work/pin batch, never resource policy.
+        public long NativeUseBatchIdentity;
+        public bool ReleasedWithUncommittedNativeUse;
     }
 
     private static GuestDrawTexture DescribeColorTextureSource(GuestRenderTarget target)
@@ -141,6 +144,12 @@ internal static partial class MetalVideoPresenter
     private static void ReleaseTextureSourceWorkOwnerLocked(object work)
     {
         if (!_textureSourceWorkOwners.TryGetValue(work, out var owner) || owner.Released) return;
+        foreach (var batch in _textureSourceNativeBatches.Values)
+            if (batch.Identity == owner.NativeUseBatchIdentity && !batch.Committed)
+            {
+                owner.ReleasedWithUncommittedNativeUse = owner.NativeUseBatchIdentity != 0;
+                break;
+            }
         owner.Released = true;
         ReleaseTextureSourcePredecessorsLocked(owner);
         ReleaseQueuedTextureSourcesLocked(work);
