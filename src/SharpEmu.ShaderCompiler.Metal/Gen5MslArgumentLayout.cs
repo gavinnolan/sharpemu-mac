@@ -139,9 +139,16 @@ public sealed class Gen5MslArgumentLayout
     };
 
     // The Metal texture type of an image class with the given component and access.
-    public static string TextureType(ImageDimension dimension, string componentType, string? access, bool cube = false)
+    //
+    // Guest cube maps are not declared as texturecube. Gen5 shaders resolve the cube
+    // face themselves (V_CUBEID/V_CUBESC/V_CUBETC/V_CUBEMA) and then address the image
+    // as a 2D array with the face in the layer coordinate, so ImageDescriptorBinding
+    // describes every cube binding as Dim2DArray and the host binds a 2D-array view.
+    // A texturecube declaration would instead demand a float3 direction vector. This
+    // mirrors the SPIR-V backend, which likewise declares cube bindings Dim2D+Arrayed.
+    public static string TextureType(ImageDimension dimension, string componentType, string? access)
     {
-        var typeName = cube ? "texturecube" : dimension switch
+        var typeName = dimension switch
         {
             ImageDimension.Dim1D => "texture1d",
             ImageDimension.Dim1DArray => "texture1d_array",

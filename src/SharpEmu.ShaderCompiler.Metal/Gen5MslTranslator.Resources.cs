@@ -68,8 +68,55 @@ public static partial class Gen5MslTranslator
             string ComponentKind,
             bool IsStorage,
             bool Multisampled,
+            bool Arrayed,
+            bool Cube,
             ImageDimension Dimension,
-            IReadOnlyList<uint> Resources);
+            IReadOnlyList<uint> Resources)
+        {
+            /// <summary>Spatial coordinate components, excluding any array layer.</summary>
+            public int SpatialComponents => Dimension switch
+            {
+                ImageDimension.Dim1D or ImageDimension.Dim1DArray => 1,
+                ImageDimension.Dim3D => 3,
+                _ => 2,
+            };
+
+            /// <summary>Address components one access consumes for its coordinates.</summary>
+            public int CoordinateComponents => SpatialComponents + (Arrayed ? 1 : 0);
+
+            /// <summary>Metal spatial coordinate vector type for integer addressing.</summary>
+            public string IntegerCoordinateType => SpatialComponents switch
+            {
+                1 => "uint",
+                3 => "uint3",
+                _ => "uint2",
+            };
+
+            /// <summary>Metal spatial coordinate vector type for normalized addressing.</summary>
+            public string FloatCoordinateType => SpatialComponents switch
+            {
+                1 => "float",
+                3 => "float3",
+                _ => "float2",
+            };
+
+            /// <summary>Metal only mipmaps 2D and 3D textures; 1D sampling takes no LOD.</summary>
+            public bool SupportsSampleLod => Dimension
+                is not (ImageDimension.Dim1D or ImageDimension.Dim1DArray);
+
+            /// <summary>
+            /// Whether a level operand may be passed at all. Metal 1D textures carry a
+            /// single level and constrain every LOD argument to a compile-time constant,
+            /// and a multisampled texture has no mip chain, so both take none.
+            /// </summary>
+            public bool SupportsMipLevels => Dimension is not (
+                ImageDimension.Dim1D or ImageDimension.Dim1DArray or
+                ImageDimension.Dim2DMsaa or ImageDimension.Dim2DMsaaArray);
+
+            /// <summary>Metal exposes gather on 2D and 2D-array textures only.</summary>
+            public bool SupportsGather => Dimension
+                is ImageDimension.Dim2D or ImageDimension.Dim2DArray;
+        }
 
         public CompilationContext(ShaderCompileRequest request)
         {
@@ -176,12 +223,15 @@ public static partial class Gen5MslTranslator
             }
 
             var multisampled = dimension is ImageDimension.Dim2DMsaa or ImageDimension.Dim2DMsaaArray;
+            var arrayed = dimension is ImageDimension.Dim1DArray or ImageDimension.Dim2DArray or ImageDimension.Dim2DMsaaArray;
             _imageClasses[binding.Kind] = new MslImageClass(
                 Gen5MslArgumentLayout.ImageClassName(binding.Kind),
-                Gen5MslArgumentLayout.TextureType(dimension, componentKind, access, cube),
+                Gen5MslArgumentLayout.TextureType(dimension, componentKind, access),
                 componentKind,
                 isStorage,
                 multisampled,
+                arrayed,
+                cube,
                 dimension,
                 binding.Resources);
         }
@@ -713,14 +763,15 @@ public static partial class Gen5MslTranslator
         }
 
         // Resolves the image an instruction reads through its class array into a texture local,
-        // with its sampler for sampling operations. Only two-dimensional images are accessible.
+        // with its sampler for sampling operations. Every image dimension the binding layout
+        // can describe is accessible; the resolved class carries the shape the caller needs
+        // to build coordinates with.
         private bool TryResolveLayoutImage(
             Gen5ShaderInstruction instruction,
             Gen5ImageControl image,
             out string texture,
             out string samplerName,
-            out string kind,
-            out bool isStorage,
+            out MslImageClass resolved,
             out uint dstSelect,
             out string mipLevel,
             out string error,
@@ -729,8 +780,7 @@ public static partial class Gen5MslTranslator
             error = string.Empty;
             texture = string.Empty;
             samplerName = string.Empty;
-            kind = "float";
-            isStorage = false;
+            resolved = default;
             dstSelect = DescriptorConstants.IdentityImageSwizzle;
             mipLevel = "0u";
             var request = _request;
@@ -757,15 +807,12 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
-            if (imageClass.Multisampled)
+            // Metal multisampled textures expose read() with a sample index and nothing
+            // else: no sampling, no writes. The binding layout already refuses storage
+            // MSAA classes, so only the sampled fetch paths can reach one.
+            if (imageClass.Multisampled && instruction.Opcode is not ("ImageLoad" or "ImageLoadMip" or "ImageGetResinfo"))
             {
-                error = "multisampled image access is not supported";
-                return false;
-            }
-
-            if (imageClass.Dimension != ImageDimension.Dim2D)
-            {
-                error = $"image dimension {imageClass.Dimension} is not supported on Metal";
+                error = $"multisampled image opcode {instruction.Opcode} is not supported on Metal";
                 return false;
             }
 
@@ -787,14 +834,15 @@ public static partial class Gen5MslTranslator
             }
 
             // A sampled mip load keeps its mip operand; a storage case is already its own mip view.
+            // The mip is the address component right after the coordinates, so it moves with
+            // the dimension (2 for 2D, 3 for a 2D array or a volume, 1 for 1D).
             if (!imageClass.IsStorage && instruction.Opcode == "ImageLoadMip")
             {
-                mipLevel = Temp("uint", ImageIntegerAddress(image, 2));
+                mipLevel = Temp("uint", ImageIntegerAddress(image, imageClass.CoordinateComponents));
             }
 
             texture = Temp(imageClass.TextureType, $"{ResourcesName}.{imageClass.Field}[{fixedElement?.Element ?? (uint)element}u]");
-            kind = imageClass.ComponentKind;
-            isStorage = imageClass.IsStorage;
+            resolved = imageClass;
             if (UsesSampler(instruction.Opcode))
             {
                 if (!_hasSamplers)

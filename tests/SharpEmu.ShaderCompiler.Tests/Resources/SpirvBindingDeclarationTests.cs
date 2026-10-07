@@ -363,8 +363,14 @@ public sealed class SpirvBindingDeclarationTests
         Assert.Equal(secondImageType, snapshot.Images[2][3] >> 28);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
         Assert.Contains((ushort)SpirvOp.Select, new SpirvModuleInspector(shader.Spirv).Opcodes);
-        Assert.False(SharpEmu.ShaderCompiler.Metal.Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError));
-        Assert.False(string.IsNullOrWhiteSpace(metalError));
+
+        // The Metal backend declares a texture type per dimension too, so candidates
+        // spread across two binding classes translate there as well.
+        Assert.True(
+            SharpEmu.ShaderCompiler.Metal.Gen5MslTranslator.TryCompileProgram(request, out var metal, out var metalError),
+            metalError);
+        Assert.Contains("texture2d<float>", metal.Source);
+        Assert.Contains("texture2d_array<float>", metal.Source);
     }
 
     [Theory]
