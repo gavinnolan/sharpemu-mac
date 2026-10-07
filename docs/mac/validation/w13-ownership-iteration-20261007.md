@@ -195,3 +195,20 @@ but the log records forced guest unwind and a not-implemented dispatch result;
 clean guest shutdown remains unqualified. No emulator process remains. Hashes,
 visual evidence and scope are in `game-sarah-dd19db6/REPORT.md` and `index.json`
 under the integrated evidence directory.
+
+## Tracker content observation
+
+Source `2c5ab39f0f16d6d534b5d327070bee2507c1230b` adds a neutral safe-context
+content token containing separate protected/watch owner identities, generations
+and byte extents. This closes an observation ambiguity: untrack/retrack can
+reset the old scalar write generation to zero. The token exposes that owner
+replacement without changing legacy read snapshots, signal handling or retry.
+It is not a mapping lease; full-footprint observation and before/after equality
+remain the caller's responsibility. Its use by the source graph stays isolated.
+
+The integrated Rosetta content-token/tracker selection passes 24/24 without
+skips (`content-token-integration-x64` in W13 evidence). Standalone token checks
+pass 7/7 on ARM64 and Rosetta. Exact clean-source Windows/Linux CLI cross-builds
+pass with zero errors and 9/3 warnings, recorded under
+`cross-platform-final/2c5ab39/`. These are cross-builds, not native non-Mac runtime
+verification. The game-qualified archived application still embeds `dd19db6`.
