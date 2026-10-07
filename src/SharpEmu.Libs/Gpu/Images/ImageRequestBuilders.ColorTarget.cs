@@ -177,7 +177,7 @@ public static partial class ImageRequestBuilders
 
         var width = words.Width + 1;
         var height = words.Height + 1;
-        var targetFormat = TextureTransferLayout.RenderTargetFormat(words.Layout, words.NumberType, words.Order);
+        var targetFormat = GuestSurfaceFormats.RenderTargetFormat(words.Layout, words.NumberType, words.Order);
         var bytesPerElement = targetFormat.BytesPerElement;
         if (bytesPerElement == 0)
         {

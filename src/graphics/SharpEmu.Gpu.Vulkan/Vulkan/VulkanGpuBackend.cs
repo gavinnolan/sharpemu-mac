@@ -27,6 +27,9 @@ public static class VulkanGpuBackend
         LoadProgressDiagnostics.RegisterBlockedCommandStreamProbe(
             VulkanVideoPresenter.SnapshotBlockedCommandStream);
         RenderDocCapture.RegisterLoaderEnvironment(VulkanLoaderEnvironment.Apply);
+        // Guest threads reach Silk.NET's marshalling stubs through the flip path, so the
+        // bindings have to be JIT-warmed before a guest stack can enter them.
+        SharpEmu.HLE.ModuleManager.RegisterGuestReachableInterop("Silk.NET");
         // The resource caches behind the Vulkan presenter add their counters to the
         // shared per-window render report.
         RenderPhaseProfile.RegisterReportProvider(GuestBufferCache.TakeAsyncReadbackReport);

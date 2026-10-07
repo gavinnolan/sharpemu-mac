@@ -5,14 +5,6 @@ using SharpEmu.Libs.Gpu.Scheduling;
 
 namespace SharpEmu.Libs.Gpu.Buffers;
 
-// Generation 0 never identifies a live slot, so the default slot identifier is invalid.
-public readonly record struct ResourceSlotIdentifier(uint Index, uint Generation)
-{
-    public static ResourceSlotIdentifier Invalid => default;
-
-    public bool IsValid => Generation != 0;
-}
-
 // An erased slot disposes its value and increases its generation.
 public sealed class SlotTable<TResource> where TResource : class, IDisposable
 {

@@ -241,7 +241,7 @@ public static partial class ImageRequestBuilders
         var viewLevels = multisampled ? 1 : viewLastLevel - baseLevel + 1;
         var depth = descriptor.Depth + 1;
         var format = descriptor.Format;
-        var surfaceFormat = TextureTransferLayout.SurfaceFormat(format);
+        var surfaceFormat = GuestSurfaceFormats.SurfaceFormat(format);
         var shaderConversion = surfaceFormat.ConversionFormat != GuestPixelFormat.Invalid;
         var volume = type == GuestImageType.Color3D;
         var layered = type is GuestImageType.Color1DArray or GuestImageType.Color2DArray or GuestImageType.Color2DMsaaArray;
@@ -322,32 +322,38 @@ public static partial class ImageRequestBuilders
         return new TextureRequestResolution(request, shaderConversion, pixelFormat, DestinationSwizzle(descriptor));
     }
 
-    // After the lookup: a stencil association redirects to its depth owner; the view rules run on the owner.
-    public static ResourceSlotIdentifier ValidateTextureOwner(GuestImageCache cache, ResourceSlotIdentifier imageIdentifier, in TextureRequestResolution resolution)
+    // After the lookup: a stencil association redirects to its depth owner; the view rules run
+    // on the owner. The found image is passed in as its description plus depth owner rather than
+    // as a cache handle, so the view rules stay in the shared engine while the image cache that
+    // resolved the handle stays in the graphics backend.
+    public static ResourceSlotIdentifier ValidateTextureOwner(
+        in ImageDescription description,
+        ResourceSlotIdentifier depthOwner,
+        ResourceSlotIdentifier imageIdentifier,
+        in TextureRequestResolution resolution)
     {
-        var image = cache.GetImage(imageIdentifier);
-        if (image.DepthOwner.IsValid)
+        if (depthOwner.IsValid)
         {
-            return image.DepthOwner;
+            return depthOwner;
         }
 
         var storage = resolution.Request.Role == ImageRole.StorageImage;
-        if (image.Description.IsDepth)
+        if (description.IsDepth)
         {
             if (storage)
             {
-                throw GpuFatal.Fatal($"A depth target cannot be bound as a storage image: address=0x{image.Description.Data.Address:X16}.");
+                throw GpuFatal.Fatal($"A depth target cannot be bound as a storage image: address=0x{description.Data.Address:X16}.");
             }
 
-            _ = ViewFormatRules.SelectSampledDepthView(image.Description.PixelFormat, resolution.ViewFormat, resolution.Swizzle);
+            _ = ViewFormatRules.SelectSampledDepthView(description.PixelFormat, resolution.ViewFormat, resolution.Swizzle);
         }
         else if (storage)
         {
-            ViewFormatRules.ValidateStorageColorView(image.Description.PixelFormat, resolution.Request.View.Format, resolution.Swizzle);
+            ViewFormatRules.ValidateStorageColorView(description.PixelFormat, resolution.Request.View.Format, resolution.Swizzle);
         }
         else
         {
-            _ = ViewFormatRules.SelectSampledColorView(image.Description.PixelFormat, resolution.ViewFormat, resolution.Swizzle);
+            _ = ViewFormatRules.SelectSampledColorView(description.PixelFormat, resolution.ViewFormat, resolution.Swizzle);
         }
 
         return imageIdentifier;

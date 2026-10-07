@@ -42,6 +42,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <ProjectReference Include="..\platforms\macos\SharpEmu.Platform.MacOS\SharpEmu.Platform.MacOS.csproj" />
   </ItemGroup>
 
+  <ItemGroup Condition="'$(_SharpEmuTargetsMac)' != 'true'">
+    <ProjectReference Include="..\graphics\SharpEmu.Gpu.Vulkan\SharpEmu.Gpu.Vulkan.csproj" />
+    <ProjectReference Include="..\adapters\SharpEmu.Adapters.Sdl\SharpEmu.Adapters.Sdl.csproj" />
+  </ItemGroup>
+
   <PropertyGroup>
     <!-- GUI subsystem so starting without arguments opens the frontend with no
          console window; CLI mode re-attaches to the parent terminal's console. -->

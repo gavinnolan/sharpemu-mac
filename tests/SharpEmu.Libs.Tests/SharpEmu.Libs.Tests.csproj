@@ -26,6 +26,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <ItemGroup>
     <ProjectReference Include="..\..\src\graphics\SharpEmu.Gpu.Metal\SharpEmu.Gpu.Metal.csproj" />
     <ProjectReference Include="..\..\src\platforms\macos\SharpEmu.Platform.MacOS\SharpEmu.Platform.MacOS.csproj" />
+    <ProjectReference Include="..\..\src\graphics\SharpEmu.Gpu.Vulkan\SharpEmu.Gpu.Vulkan.csproj" />
+    <ProjectReference Include="..\..\src\adapters\SharpEmu.Adapters.Sdl\SharpEmu.Adapters.Sdl.csproj" />
   </ItemGroup>
 
   <ItemGroup>

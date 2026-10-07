@@ -9,10 +9,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <ProjectReference Include="..\SharpEmu.HLE\SharpEmu.HLE.csproj" />
     <ProjectReference Include="..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
     <ProjectReference Include="..\SharpEmu.ShaderCompiler\SharpEmu.ShaderCompiler.csproj" />
-    <!-- The MSL emitter moved out with the Metal backend; only
-         SharpEmu.Gpu.Metal references it now. SharpEmu.ShaderCompiler.Vulkan
-         follows the same way with SharpEmu.Gpu.Vulkan. -->
-    <ProjectReference Include="..\SharpEmu.ShaderCompiler.Vulkan\SharpEmu.ShaderCompiler.Vulkan.csproj" />
+    <!-- The backend emitters moved out with their backends: the MSL emitter is
+         referenced only by SharpEmu.Gpu.Metal and the SPIR-V emitter only by
+         SharpEmu.Gpu.Vulkan. The shared engine keeps the guest-facing
+         SharpEmu.ShaderCompiler above and nothing else. -->
     <!-- SysAbi export generator + analyzers (compile-time registry, NID validation). -->
     <ProjectReference Include="..\SharpEmu.SourceGenerators\SharpEmu.SourceGenerators.csproj"
                       OutputItemType="Analyzer"
@@ -55,10 +55,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <ItemGroup>
     <PackageReference Include="FFmpeg.AutoGen" />
     <PackageReference Include="NLayer" />
-    <PackageReference Include="ppy.SDL3-CS" />
-    <PackageReference Include="Silk.NET.Vulkan" />
-    <PackageReference Include="Silk.NET.Vulkan.Extensions.EXT" />
-    <PackageReference Include="Silk.NET.Vulkan.Extensions.KHR" />
     <PackageReference Include="SkiaSharp" />
     <PackageReference Include="System.IO.Hashing" />
   </ItemGroup>
