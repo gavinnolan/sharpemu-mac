@@ -157,9 +157,6 @@ internal static partial class MacObjC
     public static partial nint SendIndex(nint receiver, nint selector, nuint index);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
-    public static partial nint SendError(nint receiver, nint selector, ref nint error);
-
-    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint SendObjectError(nint receiver, nint selector, nint argument, ref nint error);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
@@ -229,9 +226,6 @@ internal static partial class MacObjC
     public static partial void SendVoidUInt(nint receiver, nint selector, nuint argument);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
-    public static partial void SendVoidInt(nint receiver, nint selector, nint argument);
-
-    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendVoidDouble(nint receiver, nint selector, double argument);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
@@ -239,13 +233,6 @@ internal static partial class MacObjC
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendVoidRect(nint receiver, nint selector, MacRect rect);
-
-    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
-    public static partial void SendVoidRectBool(
-        nint receiver,
-        nint selector,
-        MacRect rect,
-        [MarshalAs(UnmanagedType.I1)] bool display);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendVoidFloat2(nint receiver, nint selector, float first, float second);
