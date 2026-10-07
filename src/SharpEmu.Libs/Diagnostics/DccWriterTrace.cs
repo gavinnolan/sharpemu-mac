@@ -44,9 +44,8 @@ internal static class DccWriterTrace
         return ulong.TryParse(text, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var parsed) ? parsed : 0;
     }
 
-    /// <param name="overlapsDccMetadata">Whether the range touches DCC metadata. Passed as a
-    /// predicate rather than an image cache because the cache that answers it belongs to the
-    /// graphics backend, while this trace is shared.</param>
+    // Takes an overlaps-DCC-metadata predicate rather than the image cache that answers it:
+    // the cache belongs to the graphics backend, while this trace is shared.
     public static void Record(Func<ulong, ulong, bool> overlapsDccMetadata, ulong address, ulong size)
     {
         var targeted = TargetAddresses.Any(target => target >= address && target - address < size);
