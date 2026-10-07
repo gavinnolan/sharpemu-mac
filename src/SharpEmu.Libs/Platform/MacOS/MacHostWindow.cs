@@ -464,10 +464,13 @@ public sealed class MacHostWindow : IMetalHostWindow
             return new MacRect(0, 0, width, height);
         }
 
+        // Whole-point origins only: a half-point frame makes AppKit round the
+        // content view up by a point, which shows up as an off-by-one drawable
+        // (1442 instead of 1440 rows at 2x).
         var visible = MacObjC.SendRect(screen, MacObjC.Selector("visibleFrame"));
         return new MacRect(
-            visible.Origin.X + Math.Max(0, (visible.Size.Width - width) / 2),
-            visible.Origin.Y + Math.Max(0, (visible.Size.Height - height) / 2),
+            Math.Round(visible.Origin.X + Math.Max(0, (visible.Size.Width - width) / 2)),
+            Math.Round(visible.Origin.Y + Math.Max(0, (visible.Size.Height - height) / 2)),
             width,
             height);
     }
@@ -485,8 +488,12 @@ public sealed class MacHostWindow : IMetalHostWindow
             return;
         }
 
+        // -[NSWindow isVisible] also reports NO while the window is in the Dock
+        // or the whole app is hidden (Cmd+H), neither of which is a close; only
+        // a genuinely gone window ends the session.
         if (!MacObjC.SendBool(_window, MacObjC.Selector("isVisible")) &&
-            !MacObjC.SendBool(_window, MacObjC.Selector("isMiniaturized")))
+            !MacObjC.SendBool(_window, MacObjC.Selector("isMiniaturized")) &&
+            !MacObjC.SendBool(_application, MacObjC.Selector("isHidden")))
         {
             RequestUserClose();
             return;

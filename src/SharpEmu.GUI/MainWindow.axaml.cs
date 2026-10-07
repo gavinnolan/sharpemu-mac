@@ -376,7 +376,7 @@ public partial class MainWindow : Window
         Closing += (_, _) => BeginWindowClosing();
         Closed += (_, _) => CompleteWindowClosing();
 
-        SdlLauncherGamepad.EnsureStarted();
+        LauncherGamepad.EnsureStarted();
         _gamepadTimer = new DispatcherTimer
         {
             Interval = TimeSpan.FromMilliseconds(50),
@@ -409,7 +409,7 @@ public partial class MainWindow : Window
         Closing += (_, _) => BeginWindowClosing();
         Closed += (_, _) => CompleteWindowClosing();
 
-        SdlLauncherGamepad.EnsureStarted();
+        LauncherGamepad.EnsureStarted();
         _gamepadTimer = new DispatcherTimer
         {
             Interval = TimeSpan.FromMilliseconds(50),
@@ -804,7 +804,7 @@ public partial class MainWindow : Window
 
     private void PollGamepad()
     {
-        if (!SdlLauncherGamepad.TryGetState(out var pad))
+        if (!LauncherGamepad.TryGetState(out var pad))
         {
             _previousPadButtons = HostGamepadButtons.None;
             return;
@@ -1141,7 +1141,7 @@ public partial class MainWindow : Window
         RunShutdownStep("library watcher", _libraryWatcher.Dispose);
         RememberEmbeddedConsoleHeight();
         RunShutdownStep("settings", _settings.Save);
-        RunShutdownStep("SDL gamepad", SdlLauncherGamepad.Shutdown);
+        RunShutdownStep("launcher gamepad", LauncherGamepad.Shutdown);
         RunShutdownStep("title music", _sndPreview.Stop);
         RunShutdownStep("Discord Rich Presence", () => _discord?.Dispose());
         RunShutdownStep("console window", () => _consoleWindow?.Close());

@@ -57,14 +57,56 @@ internal sealed class MacGameControllerGamepad : IHostGamepadOutput, IDisposable
     private bool _effectsDirty;
     private bool _disposed;
 
-    public MacGameControllerGamepad()
+    private readonly bool _outputEnabled;
+
+    /// <param name="outputEnabled">
+    /// False for read-only consumers such as the launcher's menu navigation,
+    /// which must not build CoreHaptics engines or drive a running game's pad.
+    /// </param>
+    public MacGameControllerGamepad(bool outputEnabled = true)
     {
+        _outputEnabled = outputEnabled;
         // Loading the framework is what makes +[GCController controllers] and the
         // GC* classes resolvable through objc_getClass.
         NativeLibrary.TryLoad(MacObjC.GameControllerFramework, out _);
     }
 
     public bool IsConnected => _controller != 0;
+
+    /// <summary>
+    /// Reconciles the connected pad and reads one snapshot without publishing it
+    /// to <see cref="HostWindowInput"/> or applying any output. Main thread only.
+    /// </summary>
+    public bool TryReadState(out HostGamepadState state)
+    {
+        state = default;
+        if (_disposed)
+        {
+            return false;
+        }
+
+        var pool = MacObjC.objc_autoreleasePoolPush();
+        try
+        {
+            SyncConnectedController();
+            if (_controller == 0)
+            {
+                return false;
+            }
+
+            state = ReadState();
+            return true;
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"[PAD][WARN] GameController read failed: {exception.Message}");
+            return false;
+        }
+        finally
+        {
+            MacObjC.objc_autoreleasePoolPop(pool);
+        }
+    }
 
     /// <summary>
     /// One tick of the window loop: reconciles the connected controller, applies
@@ -88,7 +130,11 @@ internal sealed class MacGameControllerGamepad : IHostGamepadOutput, IDisposable
                 return;
             }
 
-            ApplyPendingOutput();
+            if (_outputEnabled)
+            {
+                ApplyPendingOutput();
+            }
+
             HostWindowInput.SetGamepad(_name, ReadState());
         }
         catch (Exception exception)
@@ -210,6 +256,11 @@ internal sealed class MacGameControllerGamepad : IHostGamepadOutput, IDisposable
 
     private void CreateHaptics()
     {
+        if (!_outputEnabled)
+        {
+            return;
+        }
+
         var haptics = MacObjC.Send(_controller, MacObjC.Selector("haptics"));
         if (haptics == 0)
         {

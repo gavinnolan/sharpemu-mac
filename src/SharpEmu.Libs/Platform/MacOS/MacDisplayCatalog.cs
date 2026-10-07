@@ -177,6 +177,14 @@ internal static partial class MacDisplayCatalog
     private static Dictionary<uint, string> ReadScreenNames()
     {
         var names = new Dictionary<uint, string>();
+        // The caller may be the launcher, which has not touched AppKit through
+        // this path yet; without the framework loaded objc_getClass("NSScreen")
+        // returns nil and every display silently degrades to "Display N".
+        if (!NativeLibrary.TryLoad(MacObjC.AppKitFramework, out _))
+        {
+            return names;
+        }
+
         var threadClass = MacObjC.Class("NSThread");
         if (threadClass == 0 ||
             !MacObjC.SendBool(threadClass, MacObjC.Selector("isMainThread")))
