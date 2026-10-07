@@ -11,6 +11,7 @@ for the work packages, prerequisites and acceptance gates.
 
 - [Architecture decision](decisions/0001-platform-packages.md): choices and tradeoffs.
 - [Native macOS, no fallbacks](decisions/0002-native-macos-no-fallbacks.md): supersedes Mac Vulkan/SDL fallbacks.
+- [Rosetta sunset](decisions/0003-rosetta-sunset.md): native ARM64 guest execution required before macOS 28.
 - [Expanded improvement roadmap](architecture-roadmap.md): all 18 improvement areas.
 - [Evidence audit](evidence-audit.md): measured findings and limits of earlier runs.
 - [Initial Mac proposal](macos-development-plan.md): branch/sync policy and original scope.
