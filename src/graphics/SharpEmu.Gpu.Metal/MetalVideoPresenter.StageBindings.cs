@@ -5,8 +5,9 @@ using System.Buffers.Binary;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.ShaderCompiler.Metal;
 using SharpEmu.ShaderCompiler.Resources;
+using SharpEmu.Libs.Gpu;
 
-namespace SharpEmu.Libs.Gpu.Metal;
+namespace SharpEmu.Gpu.Metal;
 
 // One argument buffer per stage, filled field by field in the layout's order, bound at slot 0;
 // the push block at slot 1. Every referenced buffer and texture is made resident for the encoder.

@@ -28,7 +28,7 @@ internal static class GpuComposition
         // duplicate OperatingSystem.IsMacOS() here would only hide the real guard.
 #pragma warning disable CA1416
         SharpEmu.Libs.Platform.MacOS.MacPlatform.Register();
-        SharpEmu.Libs.Gpu.Metal.MetalGpuBackend.Register();
+        SharpEmu.Gpu.Metal.MetalGpuBackend.Register();
 #pragma warning restore CA1416
 #elif SHARPEMU_GPU_VULKAN
         SharpEmu.Libs.VideoOut.SdlPlatform.Register();

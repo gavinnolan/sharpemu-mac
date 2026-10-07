@@ -14,8 +14,10 @@ using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Metal;
 using SharpEmu.ShaderCompiler.Resources;
 using ImageResourceClass = SharpEmu.ShaderCompiler.Resources.ImageResourceClass;
+using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.VideoOut;
 
-namespace SharpEmu.Libs.Gpu.Metal;
+namespace SharpEmu.Gpu.Metal;
 
 // The render host over the Metal seam: the executor's resolved state becomes one copied draw record per draw.
 internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipelineHost
@@ -485,7 +487,7 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
 
     IPreparedBindings IRenderHost.PrepareBindings(ShaderStageResources stage)
     {
-        using var profileScope = VideoOut.RenderPhaseProfile.MeasureDetail(VideoOut.RenderPhaseProfile.Phase.DescriptorPreparation);
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DescriptorPreparation);
         _ = RequirePreparation();
         var program = RequireProgram(stage);
         var prepared = new PreparedStage(stage, program);
@@ -682,7 +684,7 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
 
     void IRenderHost.BindResources(IPreparedBindings prepared)
     {
-        using var profileScope = VideoOut.RenderPhaseProfile.MeasureDetail(VideoOut.RenderPhaseProfile.Phase.DescriptorPreparation);
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DescriptorPreparation);
         var preparation = RequirePreparation();
         var stage = (PreparedStage)prepared;
         stage.Buffers = CopyStorageBuffers(stage);

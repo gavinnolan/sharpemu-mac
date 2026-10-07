@@ -6,8 +6,10 @@ using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Metal;
+using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.VideoOut;
 
-namespace SharpEmu.Libs.Gpu.Metal;
+namespace SharpEmu.Gpu.Metal;
 
 /// <summary>
 /// Metal backend for the guest-GPU seam: MSL codegen via
@@ -79,7 +81,7 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend, IGuestImageSnapsh
         var submitted = MetalVideoPresenter.TrySubmitGuestImage(address, width, height, pitchInPixel);
         if (submitted)
         {
-            VideoOut.VideoOutExports.MarkFlipPresented(flipRequestId);
+            VideoOutExports.MarkFlipPresented(flipRequestId);
         }
 
         return submitted;

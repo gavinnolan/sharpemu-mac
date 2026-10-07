@@ -3,8 +3,9 @@
 
 using System.Collections.Concurrent;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu;
 
-namespace SharpEmu.Libs.Gpu.Metal;
+namespace SharpEmu.Gpu.Metal;
 
 // Draw textures decoded from guest memory are cached across draws keyed by
 // their content identity, mirroring the Vulkan presenter's texture

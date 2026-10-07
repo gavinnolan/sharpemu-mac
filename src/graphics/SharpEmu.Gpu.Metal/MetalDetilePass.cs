@@ -4,8 +4,9 @@
 using System.Numerics;
 using SharpEmu.Libs.Agc;
 using SharpEmu.ShaderCompiler.Metal;
+using SharpEmu.Libs.Gpu;
 
-namespace SharpEmu.Libs.Gpu.Metal;
+namespace SharpEmu.Gpu.Metal;
 
 /// <summary>Converts four-byte ExactXor surfaces into sampled textures.
 /// Keep temporary buffers until the recorded commands complete.</summary>

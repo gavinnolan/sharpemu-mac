@@ -38,7 +38,7 @@ internal sealed class FakeCpuMemory : ICpuMemory, IGuestMemoryAllocator
         if (OperatingSystem.IsMacOS())
         {
             SharpEmu.Libs.Platform.MacOS.MacPlatform.Register();
-            SharpEmu.Libs.Gpu.Metal.MetalGpuBackend.Register();
+            SharpEmu.Gpu.Metal.MetalGpuBackend.Register();
         }
         else
         {

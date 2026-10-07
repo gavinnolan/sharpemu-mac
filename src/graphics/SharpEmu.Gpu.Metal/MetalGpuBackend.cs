@@ -3,8 +3,9 @@
 
 using System.Runtime.Versioning;
 using SharpEmu.Libs.VideoOut;
+using SharpEmu.Libs.Gpu;
 
-namespace SharpEmu.Libs.Gpu.Metal;
+namespace SharpEmu.Gpu.Metal;
 
 /// <summary>
 /// Composition root of the Metal backend package. The application calls <see cref="Register"/>

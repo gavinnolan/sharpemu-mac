@@ -1,7 +1,9 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
+using SharpEmu.Libs.Gpu;
 
-namespace SharpEmu.Libs.Gpu.Metal;
+
+namespace SharpEmu.Gpu.Metal;
 
 // Guest draws and compute dispatches batch into one command buffer per drain
 // instead of one per work item, mirroring the Vulkan presenter's batched guest

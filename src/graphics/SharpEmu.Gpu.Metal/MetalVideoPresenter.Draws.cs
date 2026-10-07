@@ -5,8 +5,10 @@ using System.Buffers.Binary;
 using SharpEmu.Libs.Agc;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Metal;
+using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.VideoOut;
 
-namespace SharpEmu.Libs.Gpu.Metal;
+namespace SharpEmu.Gpu.Metal;
 
 // Translated guest draws. Submission mirrors the Vulkan presenter (offscreen and
 // depth-only draws are ordered guest work publishing into guest images; onscreen
@@ -441,7 +443,7 @@ internal static partial class MetalVideoPresenter
     {
         var perfStart = System.Diagnostics.Stopwatch.GetTimestamp();
         Interlocked.Increment(ref _perfDrawCount);
-        VideoOut.PerfOverlay.RecordDraw();
+        PerfOverlay.RecordDraw();
         try
         {
             ExecuteOffscreenDrawCore(device, queue, work);

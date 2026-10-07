@@ -4,8 +4,9 @@
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.ShaderCompiler.Resources;
+using SharpEmu.Libs.Gpu;
 
-namespace SharpEmu.Libs.Gpu.Metal;
+namespace SharpEmu.Gpu.Metal;
 
 // The one authoritative global data share on Metal: a shared buffer every transfer and shader
 // touches in queue order. The fault bitmap of device-address programs lives beside it.

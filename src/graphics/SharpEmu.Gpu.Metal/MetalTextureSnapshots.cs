@@ -12,7 +12,7 @@ using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
 using static SharpEmu.Libs.Agc.AgcExports;
 
-namespace SharpEmu.Libs.Gpu.Metal;
+namespace SharpEmu.Gpu.Metal;
 
 internal static class MetalTextureSnapshots
 {

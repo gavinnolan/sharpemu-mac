@@ -6,8 +6,9 @@ using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.VideoOut;
+using SharpEmu.Libs.Gpu;
 
-namespace SharpEmu.Libs.Gpu.Metal;
+namespace SharpEmu.Gpu.Metal;
 
 // The command interpreter host of the Metal backend: managed transfers mirrored into the
 // snapshot images, draws and completions posted to the presenter's ordered queue in stream order.

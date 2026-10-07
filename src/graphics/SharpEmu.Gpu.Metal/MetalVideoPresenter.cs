@@ -6,8 +6,9 @@ using SharpEmu.Libs.Platform.MacOS;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Metal;
+using SharpEmu.Libs.Gpu;
 
-namespace SharpEmu.Libs.Gpu.Metal;
+namespace SharpEmu.Gpu.Metal;
 
 /// <summary>
 /// The Metal presenter renders into the CAMetalLayer of a native AppKit window

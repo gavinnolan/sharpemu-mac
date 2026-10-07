@@ -1,7 +1,9 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
+using SharpEmu.Libs.Gpu;
 
-namespace SharpEmu.Libs.Gpu.Metal;
+
+namespace SharpEmu.Gpu.Metal;
 
 // Feedback reads (draws sampling a live guest render target or depth image)
 // need a fresh ordered snapshot per draw. Creating and destroying an MTLTexture

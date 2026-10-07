@@ -3,8 +3,9 @@
 
 using SharpEmu.HLE;
 using SharpEmu.ShaderCompiler;
+using SharpEmu.Libs.Gpu;
 
-namespace SharpEmu.Libs.Gpu.Metal;
+namespace SharpEmu.Gpu.Metal;
 
 // Guest work ordering and guest images, mirroring the Vulkan presenter's model:
 // AGC submissions become queued work items consumed in logical-guest-queue order

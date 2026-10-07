@@ -3,8 +3,9 @@
 
 using System.Text;
 using SharpEmu.ShaderCompiler.Metal;
+using SharpEmu.Libs.Gpu;
 
-namespace SharpEmu.Libs.Gpu.Metal;
+namespace SharpEmu.Gpu.Metal;
 
 /// <summary>
 /// The Metal backend's compiled shader: MSL source plus the reflection data

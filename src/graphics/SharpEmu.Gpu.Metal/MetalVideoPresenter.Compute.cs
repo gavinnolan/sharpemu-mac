@@ -1,7 +1,10 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
+using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.VideoOut;
 
-namespace SharpEmu.Libs.Gpu.Metal;
+
+namespace SharpEmu.Gpu.Metal;
 
 // Guest compute dispatches: ordered guest work like draws, with two contracts to
 // honor. Storage images are shared live through the guest-image registry so a
@@ -114,7 +117,7 @@ internal static partial class MetalVideoPresenter
             return;
         }
 
-        VideoOut.PerfOverlay.RecordDraw();
+        PerfOverlay.RecordDraw();
 
         if ((dispatch.BaseGroupX | dispatch.BaseGroupY | dispatch.BaseGroupZ) != 0 &&
             !_tracedDispatchBase)

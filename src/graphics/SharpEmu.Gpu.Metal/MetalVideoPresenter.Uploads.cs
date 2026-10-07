@@ -1,7 +1,9 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
+using SharpEmu.Libs.Gpu;
 
-namespace SharpEmu.Libs.Gpu.Metal;
+
+namespace SharpEmu.Gpu.Metal;
 
 // Per-draw upload data (guest global buffers, uniforms, vertex and index
 // bytes) bump-allocates from shared-storage arena pages bound by offset,
