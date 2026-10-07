@@ -184,3 +184,14 @@ signal or streaming-store entries. No screenshot or positive presentation sample
 was captured, and no emulator process remained after collection. CPU final game
 disposition, menu and gameplay remain unqualified. Evidence is under
 `artifacts/validation/integrated-20261007/game-poppy-disposition-followup/`.
+
+The same frozen `dd19db6` app runs Dreaming Sarah for 150 seconds at peak
+RSS1137MiB. Screenshots verify coherent opening/title rendering, right movement
+into a new area, left movement back toward the opening platform and a jump.
+The 72 presentation periods average 59.84 reported guest frames/s; concurrent
+CPU-only development means this is compatibility evidence, not a controlled
+performance comparison. TERM stops the process in two seconds without KILL,
+but the log records forced guest unwind and a not-implemented dispatch result;
+clean guest shutdown remains unqualified. No emulator process remains. Hashes,
+visual evidence and scope are in `game-sarah-dd19db6/REPORT.md` and `index.json`
+under the integrated evidence directory.
