@@ -1568,7 +1568,9 @@ internal static partial class MetalVideoPresenter
                         $"init={live?.Initialized ?? false}");
                 }
 
-                return 0;
+                throw new InvalidOperationException(
+                    $"Metal cannot resolve required texture 0x{texture.Address:X}: " +
+                    $"type={texture.Type} size={texture.Width}x{texture.Height} tile={texture.TileMode}.");
             }
 
             texture = texture with { RgbaPixels = refreshed };
@@ -1635,7 +1637,9 @@ internal static partial class MetalVideoPresenter
                     $"bytes={texture.RgbaPixels.Length} expected={expectedBytes}");
             }
 
-            return 0;
+            throw new InvalidOperationException(
+                $"Metal texture 0x{texture.Address:X} has incomplete base data: " +
+                $"type={texture.Type} source_bytes={texture.RgbaPixels.Length} required_bytes={expectedBytes}.");
         }
 
         var descriptor = MetalNative.SendTextureDescriptor(

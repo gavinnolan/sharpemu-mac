@@ -21,6 +21,33 @@ public sealed partial class MetalTextureMaterializationTests(ITestOutputHelper o
     private const BindingFlags Methods = BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public;
 
     [Theory]
+    [InlineData(10u, 0u, 70u)]
+    [InlineData(14u, 7u, 125u)]
+    [InlineData(14u, 4u, 123u)]
+    [InlineData(169u, 0u, 130u)]
+    [InlineData(175u, 1u, 141u)]
+    public void KnownFormatsPreserveTheirNativePixelInterpretation(uint format, uint numberType, uint expected)
+    {
+        var formats = Presenter.Assembly.GetTypes().Single(static type => type.Name == "MetalGuestFormats");
+        var value = formats.GetMethod("DecodeTextureFormat", Methods)!.Invoke(null, [format, numberType])!;
+        Assert.Equal(expected, Convert.ToUInt32(value.GetType().GetProperty("Format")!.GetValue(value)));
+    }
+
+    [Theory]
+    [InlineData(0u, 0u)]
+    [InlineData(999u, 0u)]
+    [InlineData(10u, 2u)]
+    [InlineData(13u, 7u)]
+    public void UnsupportedRealFormatsFailRatherThanReinterpretingBytes(uint format, uint numberType)
+    {
+        var formats = Presenter.Assembly.GetTypes().Single(static type => type.Name == "MetalGuestFormats");
+        var exception = Assert.Throws<TargetInvocationException>(() =>
+            formats.GetMethod("DecodeTextureFormat", Methods)!.Invoke(null, [format, numberType]));
+        Assert.IsType<NotSupportedException>(exception.InnerException);
+        Assert.Contains($"{format}/{numberType}", exception.InnerException!.Message);
+    }
+
+    [Theory]
     [InlineData(8u, 1u, 1u, false, 2u)]
     [InlineData(12u, 1u, 1u, true, 3u)]
     [InlineData(13u, 1u, 1u, true, 3u)]
@@ -83,6 +110,15 @@ public sealed partial class MetalTextureMaterializationTests(ITestOutputHelper o
         Assert.Contains("per-sample", exception.InnerException!.Message);
     }
 
+    [Fact]
+    public void UndersizedRequiredTextureFailsBeforeNativeAllocation()
+    {
+        var guest = Guest(9, 1, 1, false, 4, [1, 2, 3]);
+        var exception = Assert.Throws<TargetInvocationException>(() => Create(guest, device: 0));
+        Assert.IsType<InvalidOperationException>(exception.InnerException);
+        Assert.Contains("source_bytes=3 required_bytes=256", exception.InnerException!.Message);
+    }
+
     [Theory]
     [InlineData(1u)]
     [InlineData(3u)]
@@ -128,17 +164,7 @@ public sealed partial class MetalTextureMaterializationTests(ITestOutputHelper o
     public void NullResourceAllocatesZeroBytesForItsActualFormatAndShape(uint type,
         uint depth, bool arrayed, int expectedBytes)
     {
-        var snapshots = Presenter.Assembly.GetTypes().Single(static candidate => candidate.Name == "MetalTextureSnapshots");
-        var descriptorType = Contracts.GetTypes().Single(static candidate => candidate.Name == "TextureDescriptor");
-        var constructor = descriptorType.GetConstructors().Single(static candidate => candidate.GetParameters().Length > 10);
-        var values = new Dictionary<string, object?> { ["Address"] = 0UL, ["Width"] = 1u,
-            ["Height"] = 1u, ["Format"] = 14u, ["NumberType"] = 7u, ["Type"] = type, ["Depth"] = depth };
-        var arguments = constructor.GetParameters().Select(parameter => values.TryGetValue(parameter.Name!, out var value)
-            ? value : parameter.HasDefaultValue ? parameter.DefaultValue
-                : Activator.CreateInstance(parameter.ParameterType)).ToArray();
-        var descriptor = constructor.Invoke(arguments);
-        var guest = snapshots.GetMethod("CreateNullGuestDrawTexture", Methods)!.Invoke(null,
-            [false, descriptor, arrayed, depth])!;
+        var guest = NullGuest(type, depth, arrayed, 14, 7);
         var data = (byte[])TextureType.GetProperty("RgbaPixels")!.GetValue(guest)!;
         Assert.Equal(expectedBytes, data.Length);
         Assert.All(data, static value => Assert.Equal(0, value));
@@ -150,6 +176,40 @@ public sealed partial class MetalTextureMaterializationTests(ITestOutputHelper o
             Assert.Equal(data, read);
         }
         finally { SendVoid(handle, Selector("release")); }
+    }
+
+    [Fact]
+    public void AllZeroResourceUsesTheExplicitRgba8NullContract()
+    {
+        var guest = NullGuest(0, 1, false, 0, 0);
+        Assert.Equal(10u, TextureType.GetProperty("Format")!.GetValue(guest));
+        Assert.Equal(0u, TextureType.GetProperty("NumberType")!.GetValue(guest));
+        Assert.Equal(9u, TextureType.GetProperty("Type")!.GetValue(guest));
+        Assert.Equal(new byte[4], TextureType.GetProperty("RgbaPixels")!.GetValue(guest));
+    }
+
+    [Fact]
+    public void RealInvalidResourceCannotBeTurnedIntoAFabricatedNullImage()
+    {
+        var exception = Assert.Throws<TargetInvocationException>(() => NullGuest(9, 1, false, 0, 0, 0x1000));
+        Assert.IsType<NotSupportedException>(exception.InnerException);
+        Assert.Contains("addr=0x1000", exception.InnerException!.Message);
+    }
+
+    private static object NullGuest(uint type, uint depth, bool arrayed, uint format,
+        uint numberType, ulong address = 0)
+    {
+        var snapshots = Presenter.Assembly.GetTypes().Single(static candidate => candidate.Name == "MetalTextureSnapshots");
+        var descriptorType = Contracts.GetTypes().Single(static candidate => candidate.Name == "TextureDescriptor");
+        var constructor = descriptorType.GetConstructors().Single(static candidate => candidate.GetParameters().Length > 10);
+        var values = new Dictionary<string, object?> { ["Address"] = address, ["Width"] = 1u,
+            ["Height"] = 1u, ["Format"] = format, ["NumberType"] = numberType, ["Type"] = type, ["Depth"] = depth };
+        var arguments = constructor.GetParameters().Select(parameter => values.TryGetValue(parameter.Name!, out var value)
+            ? value : parameter.HasDefaultValue ? parameter.DefaultValue
+                : Activator.CreateInstance(parameter.ParameterType)).ToArray();
+        var descriptor = constructor.Invoke(arguments);
+        return snapshots.GetMethod("CreateNullGuestDrawTexture", Methods)!.Invoke(null,
+            [false, descriptor, arrayed, depth])!;
     }
 
     private bool RequireDevice()

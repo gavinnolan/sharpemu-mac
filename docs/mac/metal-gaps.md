@@ -59,6 +59,9 @@ All **19/19** production materialization cases passed with
 native allocation/upload or allocation rejection checks; two check early
 MSAA rejection without touching a native device. This verifies the synthetic
 host fixtures, not arbitrary game textures.
+The subsequent managed suite passed **31/31** after adding known-format,
+unsupported-format, real-invalid-resource, all-zero/null-contract and
+undersized-source checks. Those additional checks do not execute on a GPU.
 
 ## Explicit unsupported cases and unqualified behavior
 
@@ -79,9 +82,13 @@ host fixtures, not arbitrary game textures.
 - The native upload fixtures qualify synthetic linear/block-permuted source
   layouts. They do not establish every guest tiling equation, volume tiling,
   mip-tail placement, compressed texture edge case or array base view offset.
-- Several inherited unknown guest format mappings still select RGBA8. That
-  is not format parity and should be replaced with validated format support or
-  explicit rejection in a later bounded change.
+- Unknown real guest texture formats now fail explicitly, including format
+  zero. Only an explicitly null guest resource converts format zero to guest
+  RGBA8/UNORM (format 10/number type 0) to create its zero image. Known mappings
+  have managed regression coverage; every numeric interpretation and compressed
+  format still needs native format-specific qualification.
+- Guest RGB32 (format 13, 12 bytes per texel) is rejected until an explicit
+  conversion to Metal RGBA32's 16-byte storage exists.
 
 ## Frame timing and game evidence
 
@@ -113,7 +120,8 @@ use the same exclusive `sharpemu-compat/.gamelock`. Do not run device tests
 concurrently with a game. Without the environment gate the suites run managed
 checks and must not be reported as native GPU qualification.
 
-Evidence logs: `/tmp/sharpemu-metal-device3.log` (351 shader tests) and
-`/tmp/sharpemu-metal-production-device.log` (production texture readbacks).
-These local paths are transient; the runtime audit should preserve the logs
-with its final evidence artifacts.
+Evidence logs are preserved in
+`artifacts/validation/20261007-metal-conformance/`: `sharpemu-metal-device3.log`
+(351 shader tests), `sharpemu-metal-production-device.log` (19 production
+texture cases with the required-device gate), and
+`sharpemu-metal-production-managed-final4.log` (31 subsequent managed cases).

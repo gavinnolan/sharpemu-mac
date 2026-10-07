@@ -118,9 +118,9 @@ internal readonly record struct MetalRenderTargetFormat(
 internal static class MetalGuestFormats
 {
     /// <summary>Guest sampled-texture format to Metal, mirroring the Vulkan
-    /// backend's GetTextureFormat case for case (including its RGBA8 fallback
-    /// for unmapped codes, so unknown formats render something rather than
-    /// nothing). BC formats upload raw blocks — Mac-family GPUs decode them
+    /// backend's implemented mappings. Unknown codes fail explicitly instead
+    /// of reinterpreting unrelated source bytes as RGBA8. BC formats upload
+    /// raw blocks — Mac-family GPUs decode them
     /// natively.</summary>
     public static MetalTextureFormat DecodeTextureFormat(uint dataFormat, uint numberType)
     {
@@ -148,6 +148,7 @@ internal static class MetalGuestFormats
             (5, 7) => MtlPixelFormat.Rg16Float,
             (6, 7) or (7, 7) => MtlPixelFormat.Rg11B10Float,
             (8, _) or (9, _) => MtlPixelFormat.Bgr10A2Unorm,
+            (10, 0) => MtlPixelFormat.Rgba8Unorm,
             (10, 4) => MtlPixelFormat.Rgba8Uint,
             (10, 5) => MtlPixelFormat.Rgba8Sint,
             (10, 9) => MtlPixelFormat.Rgba8UnormSrgb,
@@ -158,9 +159,11 @@ internal static class MetalGuestFormats
             (12, 4) => MtlPixelFormat.Rgba16Uint,
             (12, 5) => MtlPixelFormat.Rgba16Sint,
             (12, 7) => MtlPixelFormat.Rgba16Float,
-            (13, 4) or (14, 4) => MtlPixelFormat.Rgba32Uint,
-            (13, 5) or (14, 5) => MtlPixelFormat.Rgba32Sint,
-            (13, _) or (14, _) => MtlPixelFormat.Rgba32Float,
+            // Guest RGB32 is 12 bytes, not Metal RGBA32's 16. It requires
+            // an explicit repack before a native upload can preserve pixels.
+            (14, 4) => MtlPixelFormat.Rgba32Uint,
+            (14, 5) => MtlPixelFormat.Rgba32Sint,
+            (14, _) => MtlPixelFormat.Rgba32Float,
             (16, 0) => MtlPixelFormat.B5G6R5Unorm,
             (34, 7) => MtlPixelFormat.Rgb9E5Float,
             (169, _) => MtlPixelFormat.Bc1Rgba,
@@ -177,7 +180,7 @@ internal static class MetalGuestFormats
             (180, _) => MtlPixelFormat.Bc6HRgbFloat,
             (181, _) => MtlPixelFormat.Bc7RgbaUnorm,
             (182, _) => MtlPixelFormat.Bc7RgbaUnormSrgb,
-            _ => MtlPixelFormat.Rgba8Unorm,
+            _ => throw new NotSupportedException($"Metal guest texture format {dataFormat}/{numberType} is unsupported."),
         };
 
         var blockBytes = format switch

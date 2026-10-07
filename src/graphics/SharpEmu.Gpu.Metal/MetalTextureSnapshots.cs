@@ -1264,12 +1264,13 @@ internal static class MetalTextureSnapshots
             throw new NotSupportedException("Metal cannot materialize per-sample null MSAA snapshots.");
         var type = descriptor.Type is >= 8 and <= 13 ? descriptor.Type : Gen5TextureType2D;
         var format = descriptor.Format == 0 ? 10u : descriptor.Format;
+        var numberType = descriptor.Format == 0 ? 0u : descriptor.NumberType;
         var layers = type == Gen5TextureTypeCube ? 6u : 1u;
         var volumeDepth = GetTextureVolumeDepth(type, depth);
-        var nativeFormat = MetalGuestFormats.DecodeTextureFormat(format, descriptor.NumberType);
+        var nativeFormat = MetalGuestFormats.DecodeTextureFormat(format, numberType);
         var bytes = checked(MetalGuestFormats.GetTextureByteCount(nativeFormat, 1, 1) *
             Math.Max(layers, volumeDepth));
-        return new(0, 1, 1, format, descriptor.NumberType, new byte[checked((int)bytes)],
+        return new(0, 1, 1, format, numberType, new byte[checked((int)bytes)],
             IsFallback: true, IsStorage: isStorage, Pitch: 1,
             ArrayedView: isArrayed, ArrayLayers: layers, Type: type, Depth: volumeDepth);
     }
