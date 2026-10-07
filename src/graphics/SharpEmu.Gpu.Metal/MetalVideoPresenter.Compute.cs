@@ -198,8 +198,9 @@ internal static partial class MetalVideoPresenter
     internal static bool StorageImageWrites(GuestDrawTexture texture)
     {
         if (!texture.IsStorage) return false;
-        if (texture.Access == GuestImageAccess.Unknown)
-            throw new NotSupportedException($"Metal storage image 0x{texture.Address:X} has unknown instruction access intent.");
+        if (texture.Access == GuestImageAccess.Unknown ||
+            (texture.Access & ~(GuestImageAccess.Read | GuestImageAccess.Write | GuestImageAccess.Atomic)) != 0)
+            throw new NotSupportedException($"Metal storage image 0x{texture.Address:X} has unknown or undefined instruction access intent.");
         if ((texture.Access & GuestImageAccess.Atomic) != 0 &&
             (texture.Access & (GuestImageAccess.Read | GuestImageAccess.Write)) != (GuestImageAccess.Read | GuestImageAccess.Write))
             throw new NotSupportedException("Metal atomic image intent must include read and write.");
