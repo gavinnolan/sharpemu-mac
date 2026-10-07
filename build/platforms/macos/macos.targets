@@ -1,0 +1,64 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<!--
+  macOS output policy, imported by Directory.Build.targets for every project
+  whose target RuntimeIdentifier starts with "osx".
+
+  The macOS fork is Metal-only and osx-x64-only. A Vulkan loader, an ICD
+  manifest, a MoltenVK dylib or a sibling-OS native in the publish output means
+  something re-introduced a dependency this fork removed, or that a native asset
+  package was not scoped to its RID. This guard turns that into a failed
+  publish instead of a larger download that misbehaves on a user's machine.
+
+  The matching itself lives in check-macos-output.sh next to this file, not in
+  MSBuild item globs: MSBuild's glob engine silently matches nothing for
+  patterns such as "**/*SDL3*.dylib", which would leave a policy that always
+  reports success. The script is also what scripts/macos/build-app.sh runs
+  against the finished .app, so bundle and plain publish are held to one
+  definition.
+
+  SDL3 is still on the macOS runtime path until the native AppKit window/input
+  backend lands, so it is allowed by default. Flip SharpEmuMacForbidSdl to true
+  (here, or with -p:SharpEmuMacForbidSdl=true) once that workstream merges.
+-->
+<Project>
+
+  <PropertyGroup>
+    <!-- Flip to true once the native macOS window/input backend replaces SDL
+         on the macOS runtime path. Kept false for now so the current
+         SDL-backed build still publishes. -->
+    <SharpEmuMacForbidSdl Condition="'$(SharpEmuMacForbidSdl)' == ''">false</SharpEmuMacForbidSdl>
+    <!-- The strip hook, for the SDL-removal workstream and for any transitive
+         package that insists on shipping a forbidden native. Off by default on
+         purpose: a forbidden file is a dependency bug to fix where it
+         originates, and deleting it quietly hides that. -->
+    <SharpEmuMacStripForbiddenAssets Condition="'$(SharpEmuMacStripForbiddenAssets)' == ''">false</SharpEmuMacStripForbiddenAssets>
+    <!-- Escape hatch for bisecting a packaging problem; never set in CI. -->
+    <SharpEmuMacSkipOutputGuard Condition="'$(SharpEmuMacSkipOutputGuard)' == ''">false</SharpEmuMacSkipOutputGuard>
+
+    <SharpEmuMacOutputCheckScript>$(RepoRoot)build/platforms/macos/check-macos-output.sh</SharpEmuMacOutputCheckScript>
+    <_SharpEmuMacCheckFlags Condition="'$(SharpEmuMacStripForbiddenAssets)' == 'true'">$(_SharpEmuMacCheckFlags) --strip</_SharpEmuMacCheckFlags>
+    <_SharpEmuMacCheckFlags Condition="'$(SharpEmuMacForbidSdl)' == 'true'">$(_SharpEmuMacCheckFlags) --forbid-sdl</_SharpEmuMacCheckFlags>
+  </PropertyGroup>
+
+  <!-- Runs after the publish copy and after this project's own
+       PublishFfmpegRuntime/RemoveNativeDebugSymbols post-publish steps, so it
+       sees the artifact exactly as it ships. The script's non-zero exit is an
+       MSBuild error, which fails the publish. -->
+  <Target Name="SharpEmuMacValidatePublishOutput"
+    AfterTargets="Publish"
+    Condition="'$(SharpEmuMacSkipOutputGuard)' != 'true' And '$(PublishDir)' != '' And Exists('$(PublishDir)')">
+    <Exec Command="&quot;$(SharpEmuMacOutputCheckScript)&quot; &quot;$(PublishDir)&quot;$(_SharpEmuMacCheckFlags)"
+      StandardOutputImportance="high" />
+  </Target>
+
+  <!-- Deliberately not hooked to `Build`. The incremental build directory is a
+       developer convenience, not a shippable artifact, and it cannot be
+       stripped safely — deleting a file there makes the next build consider it
+       up to date and skip re-copying it. Only the publish output and the
+       assembled .app are held to this policy. -->
+
+</Project>
