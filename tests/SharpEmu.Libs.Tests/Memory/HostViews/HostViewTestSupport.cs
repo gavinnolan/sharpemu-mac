@@ -23,15 +23,18 @@ internal static class HostViewTestSupport
     // Keep search tests below the guest address limit (0xFC_0000_0000) and
     // outside reserved graphics memory.
     //
-    // Two constraints fix where this window sits. It may not start at the
+    // Three constraints fix where this window sits. It may not sit at the
     // address the host hands out for an "anywhere" mapping - 0x70_0000_0000 on
-    // macOS/arm64 - because a probe frees its range before the caller reserves
-    // it again, so a background thread allocating anything at all could take
-    // the range in between. And it has to stay narrow and low, because
-    // LargeVirtualReservationFallsBackToSparseGuestRange needs a contiguous
-    // 512 GiB hole above it.
-    private const ulong ProbeWindowStart = 0x72_0000_0000UL;
-    private const ulong ProbeWindowEnd = 0x78_0000_0000UL;
+    // macOS - because a probe frees its range before the caller reserves it
+    // again, so a background thread allocating anything at all could take the
+    // range in between. It has to be roomy, because the whole-lock-coverage
+    // cases in GuestSpaceOwnerTests probe for just over 1 GiB at a time. And it
+    // has to stay clear of the lowest 512 GiB that
+    // LargeVirtualReservationFallsBackToSparseGuestRange reserves, since the
+    // guest address search hands out the lowest free range it finds. The top
+    // 48 GiB of the guest range satisfies all three.
+    private const ulong ProbeWindowStart = 0xF0_0000_0000UL;
+    private const ulong ProbeWindowEnd = 0xFC_0000_0000UL;
 
     // Slot size for a small probe. A larger probe rounds up to a multiple of
     // this, so the window holds many small slots and few large ones.
