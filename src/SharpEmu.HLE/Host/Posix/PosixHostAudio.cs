@@ -4,18 +4,16 @@
 namespace SharpEmu.HLE.Host.Posix;
 
 /// <summary>
-/// POSIX audio output: CoreAudio (AudioQueue) on macOS, ALSA on Linux. Both
-/// streams accept the seam's interleaved stereo PCM16 and pace the guest via
-/// device-queue backpressure.
+/// ALSA audio output for Linux. The stream accepts the seam's interleaved
+/// stereo PCM16 and paces the guest via device-queue backpressure.
+///
+/// macOS no longer comes through here: it has a native CoreAudio backend under
+/// Host/MacOS, which <see cref="PosixHostPlatform"/> selects directly.
 /// </summary>
 internal sealed class PosixHostAudio : IHostAudioOutput
 {
-    public string BackendName => OperatingSystem.IsMacOS() ? "coreaudio" : "alsa";
+    public string BackendName => "alsa";
 
     public IHostAudioStream OpenStereoPcm16Stream(uint sampleRate, int maxQueuedPcmBytes = 32 * 1024)
-    {
-        return OperatingSystem.IsMacOS()
-            ? new PosixCoreAudioStream(sampleRate, maxQueuedPcmBytes)
-            : new PosixAlsaAudioStream(sampleRate, maxQueuedPcmBytes);
-    }
+        => new PosixAlsaAudioStream(sampleRate, maxQueuedPcmBytes);
 }

@@ -17,9 +17,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
          console window; CLI mode re-attaches to the parent terminal's console. -->
     <OutputType>WinExe</OutputType>
     <AssemblyName>SharpEmu</AssemblyName>
-    <!-- osx-x64 is the macOS target: the CPU backend executes guest x86-64
-         natively, so on Apple Silicon it runs under Rosetta 2. -->
-    <RuntimeIdentifiers>win-x64;linux-x64;osx-x64;osx-arm64</RuntimeIdentifiers>
+    <!-- osx-x64 is the only macOS target: the CPU backend executes guest
+         x86-64 natively, so on Apple Silicon it runs under Rosetta 2.
+         osx-arm64 is deliberately absent — the process architecture check in
+         Program.cs rejects a non-x64 process, so an osx-arm64 build is not a
+         runnable target. It comes back once native ARM64 guest execution
+         exists; see RejectUnrunnableMacRuntimeIdentifier below. -->
+    <RuntimeIdentifiers>win-x64;linux-x64;osx-x64</RuntimeIdentifiers>
     <!-- A plain "dotnet publish" with no -r defaults $(RuntimeIdentifier) to
          the host's own RID; see Directory.Build.props, which is where that
          default actually has to live (PublishDir's RID suffix is decided
@@ -49,6 +53,15 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <PropertyGroup Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('osx'))">
     <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
   </PropertyGroup>
+
+  <!-- Building osx-arm64 is a mistake, not a configuration: the result cannot
+       execute guest code and exits with code 5 on launch. Fail loudly at build
+       time instead of shipping a binary that only fails once a user runs it. -->
+  <Target Name="RejectUnrunnableMacRuntimeIdentifier"
+    BeforeTargets="BeforeBuild;CollectPackageReferences;Publish"
+    Condition="'$(RuntimeIdentifier)' == 'osx-arm64'">
+    <Error Text="osx-arm64 is not a supported SharpEmu target: guest x86-64 code executes natively, so the host process must be x86-64. Build osx-x64 and run it under Rosetta 2 on Apple Silicon. This restriction lifts when native ARM64 guest execution is implemented." />
+  </Target>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
@@ -123,8 +136,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
       $(BaseIntermediateOutputPath)ffmpeg-runtime/$(FfmpegRuntimeTag)/$(RuntimeIdentifier)</FfmpegRuntimeDir>
     <FfmpegRuntimePackage Condition="'$(RuntimeIdentifier)' == 'win-x64'">ffmpeg-windows-x64.zip</FfmpegRuntimePackage>
     <FfmpegRuntimePackage Condition="'$(RuntimeIdentifier)' == 'linux-x64'">ffmpeg-linux-x64.zip</FfmpegRuntimePackage>
+    <!-- No osx-arm64 entry: that RID is not a runnable target (see
+         RejectUnrunnableMacRuntimeIdentifier). ffmpeg-core still publishes a
+         macos-arm64 package, so the mapping returns together with native
+         ARM64 guest execution. -->
     <FfmpegRuntimePackage Condition="'$(RuntimeIdentifier)' == 'osx-x64'">ffmpeg-macos-x64.zip</FfmpegRuntimePackage>
-    <FfmpegRuntimePackage Condition="'$(RuntimeIdentifier)' == 'osx-arm64'">ffmpeg-macos-arm64.zip</FfmpegRuntimePackage>
     <FfmpegRuntimeArchive>$(FfmpegRuntimeDir)/$(FfmpegRuntimePackage)</FfmpegRuntimeArchive>
     <FfmpegRuntimeExtractDir>$(FfmpegRuntimeDir)/extracted</FfmpegRuntimeExtractDir>
   </PropertyGroup>

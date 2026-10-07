@@ -5,6 +5,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text;
+using SharpEmu.Logging;
 
 namespace SharpEmu.Libs.Ampr;
 
@@ -462,7 +463,7 @@ internal static class AmprFileRegistry
             // Sandboxed launches and mitigated child processes can lose access
             // to the profile AppData directory. Keep the index beside the
             // executable so the next launch can still reuse it.
-            cacheDir = Path.Combine(AppContext.BaseDirectory, "user", "ampr-index");
+            cacheDir = SharpEmuPaths.UserPath("ampr-index");
             Directory.CreateDirectory(cacheDir);
             Console.Error.WriteLine(
                 $"[LOADER][WARN] ampr.app0_index_cache_fallback path={cacheDir}: {exception.Message}");

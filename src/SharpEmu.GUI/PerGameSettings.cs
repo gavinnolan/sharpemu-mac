@@ -3,6 +3,7 @@
 
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using SharpEmu.Logging;
 
 namespace SharpEmu.GUI;
 
@@ -64,7 +65,7 @@ public sealed class PerGameSettings
         CustomEnvironmentVariables is null;
 
     public static string DirectoryPath =>
-        Path.Combine(AppContext.BaseDirectory, "user", "custom_configs");
+        SharpEmuPaths.UserPath("custom_configs");
 
     public static string PathFor(string titleId) =>
         Path.Combine(DirectoryPath, SanitizeTitleId(titleId) + ".json");

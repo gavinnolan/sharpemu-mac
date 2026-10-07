@@ -2,16 +2,16 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
-using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Images;
 
 // A resolved depth target: the request plus the planes, sizes and clear enables of the attachment.
 public readonly record struct DepthTargetResolution(
     ImageRequest Request,
-    Format Format,
+    GpuFormat Format,
     uint Width,
     uint Height,
     uint Samples,
@@ -30,21 +30,21 @@ public readonly record struct DepthTargetResolution(
 
 public static partial class ImageRequestBuilders
 {
-    public static ImageUsageFlags DepthTargetUsage =>
-        ImageUsageFlags.DepthStencilAttachmentBit | ImageUsageFlags.SampledBit | ImageUsageFlags.TransferSrcBit | ImageUsageFlags.TransferDstBit;
+    public static GpuImageUsage DepthTargetUsage =>
+        GpuImageUsage.DepthStencilAttachmentBit | GpuImageUsage.SampledBit | GpuImageUsage.TransferSrcBit | GpuImageUsage.TransferDstBit;
 
     // The first host format of the rule the device supports at the sample count, or Undefined.
-    private static Format HostDepthAttachmentFormat(IImageFormatSupport device, DepthFormatRule rule, bool hasStencil, uint samples)
+    private static GpuFormat HostDepthAttachmentFormat(IImageFormatSupport device, DepthFormatRule rule, bool hasStencil, uint samples)
     {
         var required = ImageDescription.VulkanSampleCount(samples);
-        bool Supports(Format format) =>
-            format != Format.Undefined &&
-            device.TryGetImageFormatProperties(format, ImageType.Type2D, ImageTiling.Optimal, DepthTargetUsage, 0, out var properties) &&
+        bool Supports(GpuFormat format) =>
+            format != GpuFormat.Undefined &&
+            device.TryGetImageFormatProperties(format, GpuImageType.Type2D, GpuImageTiling.Optimal, DepthTargetUsage, 0, out var properties) &&
             (properties.SampleCounts & required) != 0;
 
         if (!hasStencil)
         {
-            return Supports(rule.DepthAttachmentFormat) ? rule.DepthAttachmentFormat : Format.Undefined;
+            return Supports(rule.DepthAttachmentFormat) ? rule.DepthAttachmentFormat : GpuFormat.Undefined;
         }
 
         foreach (var format in rule.StencilAttachmentFormats)
@@ -55,7 +55,7 @@ public static partial class ImageRequestBuilders
             }
         }
 
-        return Format.Undefined;
+        return GpuFormat.Undefined;
     }
 
     // Builds the request for the bound depth target. Null when no depth or stencil state is active.
@@ -164,7 +164,7 @@ public static partial class ImageRequestBuilders
 
         var rule = DepthFormatRule.Find(depthWords.DepthFormat) ?? throw SubmissionScheduler.Fatal($"The depth/stencil format pair is not supported: zFormat={(uint)depthWords.DepthFormat} stencil={hasStencil}.");
         var format = HostDepthAttachmentFormat(device, rule, hasStencil, samples);
-        if (format == Format.Undefined)
+        if (format == GpuFormat.Undefined)
         {
             throw SubmissionScheduler.Fatal($"No host depth/stencil format supports the required usage: ideal={(int)rule.AttachmentFormat(hasStencil)} samples={samples}.");
         }
@@ -206,7 +206,7 @@ public static partial class ImageRequestBuilders
         description.PixelFormat = format;
         description.GuestFormat = rule.GuestFormat;
         description.Type = GuestImageType.Color2D;
-        description.Extent = new Extent3D(width, height, 1);
+        description.Extent = new GpuExtent3D(width, height, 1);
         description.Resources = new SubresourceCount(1, view.ImageLayers);
         description.Pitch = pitch;
         description.BytesPerBlock = bytes;
@@ -217,8 +217,8 @@ public static partial class ImageRequestBuilders
         description.Metadata.Kind = hasHtile ? MetadataKind.Htile : MetadataKind.None;
         description.Metadata.StencilCompressed = hasStencil && hasHtile && !depthWords.HtileStencilDisabled;
         var viewDescription = new ImageViewDescription(
-            format, view.LayerCount == 1 ? ImageViewType.Type2D : ImageViewType.Type2DArray, ViewFormatRules.DepthAspects(format),
-            0, 1, view.BaseLayer, view.LayerCount, default, ImageUsageFlags.DepthStencilAttachmentBit);
+            format, view.LayerCount == 1 ? GpuImageViewType.Type2D : GpuImageViewType.Type2DArray, ViewFormatRules.DepthAspects(format),
+            0, 1, view.BaseLayer, view.LayerCount, default, GpuImageUsage.DepthStencilAttachmentBit);
         var request = new ImageRequest(description, viewDescription, ImageRole.DepthTarget);
         return new DepthTargetResolution(
             request, format, width, height, samples, hasStencil, hasHtile,
@@ -258,7 +258,7 @@ public static partial class ImageRequestBuilders
         description.PixelFormat = pixelFormat.HostFormat;
         description.GuestFormat = pixelFormat.GuestFormat;
         description.Type = GuestImageType.Color2D;
-        description.Extent = new Extent3D(surface.Width, surface.Height, 1);
+        description.Extent = new GpuExtent3D(surface.Width, surface.Height, 1);
         description.Resources = SubresourceCount.Single;
         description.Pitch = pitch;
         description.BytesPerBlock = pixelFormat.BytesPerElement;
@@ -281,7 +281,7 @@ public static partial class ImageRequestBuilders
         }
 
         var view = new ImageViewDescription(
-            description.PixelFormat, ImageViewType.Type2D, ImageAspectFlags.ColorBit, 0, 1, 0, 1, default, ImageUsageFlags.TransferSrcBit);
+            description.PixelFormat, GpuImageViewType.Type2D, GpuImageAspect.ColorBit, 0, 1, 0, 1, default, GpuImageUsage.TransferSrcBit);
         return new ImageRequest(description, view, ImageRole.DisplaySurface);
     }
 }

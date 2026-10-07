@@ -6,6 +6,7 @@ using SharpEmu.HLE.GpuMemory;
 using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
@@ -216,7 +217,7 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
             PixelInputInfo? pixelInput,
             ContextRegisters context,
             in RenderingState rendering,
-            PrimitiveTopology topology,
+            GpuPrimitiveTopology topology,
             bool primitiveRestartEnabled,
             bool disableBlending,
             ShaderProgram vertexProgram,
@@ -379,14 +380,14 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
             description.Type = GuestImageType.Color1D;
             var identifier = harness.Images.InsertImageForTest(description);
             var image = harness.Images.GetImage(identifier);
-            Assert.Equal(ImageType.Type1D, image.Backing.ImageType);
-            Assert.Equal(ImageViewType.Type2D, request.View.Type);
+            Assert.Equal(GpuImageType.Type1D, image.Backing.ImageType.ToNeutral());
+            Assert.Equal(GpuImageViewType.Type2D, request.View.Type);
             Assert.False(image.SupportsViewType(request.View));
             var prepared = presenter.RenderHost.PrepareBindings(new ShaderStageResources(program, snapshot));
             presenter.RenderHost.BindResources(prepared);
             var replacementIdentifier = harness.Images.FindImage(ref request);
             Assert.NotEqual(identifier, replacementIdentifier);
-            Assert.Equal(ImageType.Type2D, harness.Images.GetImage(replacementIdentifier).Backing.ImageType);
+            Assert.Equal(GpuImageType.Type2D, harness.Images.GetImage(replacementIdentifier).Backing.ImageType.ToNeutral());
             Assert.True(harness.Images.GetImage(replacementIdentifier).SupportsViewType(request.View));
         });
         presenter.Run(presenter.RenderHost.ResetBindings);

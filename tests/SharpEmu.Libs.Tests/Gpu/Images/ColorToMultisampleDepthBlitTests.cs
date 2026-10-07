@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Runtime.InteropServices;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
@@ -108,7 +109,7 @@ internal sealed unsafe class MultisampleDepthSampleReader : IDisposable
             output.Fill(0, output.Size, 0xFFFFFFFF);
             var command = new CommandBuffer(_scheduler.Current.Handle);
             depth.Transition(ImageLayout.ShaderReadOnlyOptimal, AccessFlags.ShaderReadBit, null, command);
-            var view = depth.GetOrCreateView(ImageViewDescription.Default with { Format = depth.Backing.Format, Aspect = ImageAspectFlags.DepthBit, Usage = ImageUsageFlags.SampledBit });
+            var view = depth.GetOrCreateView(ImageViewDescription.Default with { Format = depth.Backing.Format.ToNeutral(), Aspect = GpuImageAspect.DepthBit, Usage = GpuImageUsage.SampledBit });
             var setLayout = _setLayout;
             var allocateInfo = new DescriptorSetAllocateInfo { SType = StructureType.DescriptorSetAllocateInfo, DescriptorPool = _pool, DescriptorSetCount = 1, PSetLayouts = &setLayout };
             Require(vk.AllocateDescriptorSets(device, &allocateInfo, out var set));
@@ -171,9 +172,9 @@ public sealed class ColorToMultisampleDepthBlitTests : IClassFixture<HeadlessVul
     {
         var description = ImageDescription.Create();
         description.Data = new SharpEmu.HLE.GpuMemory.GuestSpan(ArrayBackedSpace.Base, (ulong)width * height * 16);
-        description.PixelFormat = Format.R32G32B32A32Sfloat;
+        description.PixelFormat = GpuFormat.R32G32B32A32Sfloat;
         description.GuestFormat = GuestPixelFormat.Bits32_32_32_32Float;
-        description.Extent = new Extent3D(width, height, 1);
+        description.Extent = new GpuExtent3D(width, height, 1);
         description.Pitch = width;
         description.BytesPerBlock = 16;
         return description;
@@ -183,9 +184,9 @@ public sealed class ColorToMultisampleDepthBlitTests : IClassFixture<HeadlessVul
     {
         var description = ImageDescription.Create();
         description.Data = new SharpEmu.HLE.GpuMemory.GuestSpan(ArrayBackedSpace.Base + 0x100000, (ulong)width * height * 4 * samples);
-        description.PixelFormat = Format.D32Sfloat;
+        description.PixelFormat = GpuFormat.D32Sfloat;
         description.GuestFormat = GuestPixelFormat.Bits32Float;
-        description.Extent = new Extent3D(width, height, 1);
+        description.Extent = new GpuExtent3D(width, height, 1);
         description.Pitch = width;
         description.BytesPerBlock = 4;
         description.Samples = samples;

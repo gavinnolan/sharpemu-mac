@@ -37,7 +37,7 @@ public sealed class SubmitBundle
     {
         if (semaphore == 0 || WaitCount >= MaxSemaphores)
         {
-            throw SubmissionScheduler.Fatal($"Cannot add the submission wait: semaphore=0x{semaphore:X} count={WaitCount}");
+            throw GpuFatal.Fatal($"Cannot add the submission wait: semaphore=0x{semaphore:X} count={WaitCount}");
         }
 
         WaitSemaphores[WaitCount] = semaphore;
@@ -49,7 +49,7 @@ public sealed class SubmitBundle
     {
         if (semaphore == 0 || SignalCount >= MaxSemaphores)
         {
-            throw SubmissionScheduler.Fatal($"Cannot add the submission signal: semaphore=0x{semaphore:X} count={SignalCount}");
+            throw GpuFatal.Fatal($"Cannot add the submission signal: semaphore=0x{semaphore:X} count={SignalCount}");
         }
 
         SignalSemaphores[SignalCount] = semaphore;

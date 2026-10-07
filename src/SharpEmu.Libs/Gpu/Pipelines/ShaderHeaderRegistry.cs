@@ -55,7 +55,7 @@ public sealed class ShaderHeaderRegistry
         var headerAddress = _headerOf(codeAddress);
         if (headerAddress == 0)
         {
-            throw SubmissionScheduler.Fatal($"The shader has no registered header: label={label} shader=0x{codeAddress:X16}.");
+            throw GpuFatal.Fatal($"The shader has no registered header: label={label} shader=0x{codeAddress:X16}.");
         }
 
         var codeSize = RequireCodeSize(headerAddress, codeAddress, label);
@@ -64,7 +64,7 @@ public sealed class ShaderHeaderRegistry
             !_context.TryReadUInt64(headerAddress + InputSemanticsOffset, out var inputSemanticsAddress) ||
             !_context.TryReadUInt32(headerAddress + InputSemanticsCountOffset, out var inputSemanticsCount))
         {
-            throw SubmissionScheduler.Fatal($"The shader header is unreadable: label={label} shader=0x{codeAddress:X16} header=0x{headerAddress:X16}.");
+            throw GpuFatal.Fatal($"The shader header is unreadable: label={label} shader=0x{codeAddress:X16} header=0x{headerAddress:X16}.");
         }
 
         var continuationAddress = 0ul;
@@ -91,12 +91,12 @@ public sealed class ShaderHeaderRegistry
     {
         if (!_context.TryReadUInt32(headerAddress + ShaderSizeOffset, out var codeSize))
         {
-            throw SubmissionScheduler.Fatal($"The shader header is unreadable: label={label} shader=0x{codeAddress:X16} header=0x{headerAddress:X16}.");
+            throw GpuFatal.Fatal($"The shader header is unreadable: label={label} shader=0x{codeAddress:X16} header=0x{headerAddress:X16}.");
         }
 
         if (codeSize == 0 || codeSize % sizeof(uint) != 0)
         {
-            throw SubmissionScheduler.Fatal($"The shader header carries an invalid code size: label={label} shader=0x{codeAddress:X16} size=0x{codeSize:X8}.");
+            throw GpuFatal.Fatal($"The shader header carries an invalid code size: label={label} shader=0x{codeAddress:X16} size=0x{codeSize:X8}.");
         }
 
         return codeSize;

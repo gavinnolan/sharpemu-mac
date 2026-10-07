@@ -6,14 +6,15 @@ namespace SharpEmu.Libs.VideoOut;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.Gpu.Vulkan;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
-using SharpEmu.Libs.Gpu.Vulkan;
 using Silk.NET.Vulkan;
 using VkBuffer = Silk.NET.Vulkan.Buffer;
 
@@ -331,7 +332,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 if (!image.SupportsViewType(view))
                 {
                     throw new DrawImageTypeMismatchException(
-                        prepared.Program.Hash, binding.Address, image.Backing.ImageType, view.Type);
+                        prepared.Program.Hash, binding.Address, image.Backing.ImageType.ToNeutral(), view.Type);
                 }
             }
         }
@@ -656,7 +657,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 {
                     image = AcquireStencilStorage(binding, image);
                     binding.Request = binding.Request with { View = view with { LevelCount = 1 } };
-                    binding.View = image.GetOrCreateView(binding.Request.View with { Aspect = ImageAspectFlags.ColorBit });
+                    binding.View = image.GetOrCreateView(binding.Request.View with { Aspect = GpuImageAspect.ColorBit });
                     binding.MipViews = [];
                 }
                 else if (resource.MipMode == ImageMipMode.DynamicStorage)
@@ -736,7 +737,7 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         // Joins every stage's writes, records the image work and binds the set by push or from the heap.
-        public void CommitBindings(PipelineBindPoint bindPoint, in PipelineHandle pipeline, ReadOnlySpan<IPreparedBindings> stages)
+        public void CommitBindings(GpuBindPoint bindPoint, in PipelineHandle pipeline, ReadOnlySpan<IPreparedBindings> stages)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DescriptorCommit);
             var preparation = RequirePreparation();
@@ -752,8 +753,8 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 var stage = (PreparedStageBindings)prepared;
                 var stageFlag = DescriptorWriter.ShaderStageFlag(StageOf(stage.Program));
-                if ((bindPoint == PipelineBindPoint.Graphics && (stageFlag & (ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit)) == 0) ||
-                    (bindPoint == PipelineBindPoint.Compute && stageFlag != ShaderStageFlags.ComputeBit))
+                if ((bindPoint == GpuBindPoint.Graphics && (stageFlag & (ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit)) == 0) ||
+                    (bindPoint == GpuBindPoint.Compute && stageFlag != ShaderStageFlags.ComputeBit))
                 {
                     throw SubmissionScheduler.Fatal($"A stage does not belong to the bind point: stage={stage.Program.Stage} bindPoint={bindPoint}.");
                 }
@@ -788,7 +789,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         {
                             texture.CachedImage = storage;
                             texture.Image = storage.Backing.Handle;
-                            texture.View = storage.GetOrCreateView(texture.Request.View with { Aspect = ImageAspectFlags.ColorBit });
+                            texture.View = storage.GetOrCreateView(texture.Request.View with { Aspect = GpuImageAspect.ColorBit });
                             texture.MipViews = [];
                         }
                     }
@@ -812,7 +813,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var bufferIndex = 0;
             var imageIndex = 0;
             var writeIndex = 0;
-            var uploadStage = bindPoint == PipelineBindPoint.Compute ? PipelineStageFlags.ComputeShaderBit : PipelineStageFlags.FragmentShaderBit;
+            var uploadStage = bindPoint == GpuBindPoint.Compute ? PipelineStageFlags.ComputeShaderBit : PipelineStageFlags.FragmentShaderBit;
             TextureResource[] textures = textureCount == 0 ? [] : new TextureResource[textureCount];
             var textureIndex = 0;
             fixed (DescriptorBufferInfo* bufferInfoPointer = bufferInfos)
@@ -972,7 +973,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
                 if (hasPushData)
                 {
-                    var pushStages = bindPoint == PipelineBindPoint.Graphics ? ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit : ShaderStageFlags.ComputeBit;
+                    var pushStages = bindPoint == GpuBindPoint.Graphics ? ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit : ShaderStageFlags.ComputeBit;
                     _vk.CmdPushConstants(command, entry.Layout, pushStages, 0, PushData.ByteSize, pushData);
                 }
 
@@ -982,7 +983,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     {
                         if (entry.UsesPushDescriptors)
                         {
-                            _pushDescriptorApi.CmdPushDescriptorSet(command, bindPoint, entry.Layout, 0, (uint)writeIndex, writePointer);
+                            _pushDescriptorApi.CmdPushDescriptorSet(command, bindPoint.ToVk(), entry.Layout, 0, (uint)writeIndex, writePointer);
                             ShaderCacheCounters.CountPushSet();
                         }
                         else
@@ -994,7 +995,7 @@ internal static unsafe partial class VulkanVideoPresenter
                             }
 
                             _vk.UpdateDescriptorSets(_device, (uint)writeIndex, writePointer, 0, null);
-                            _vk.CmdBindDescriptorSets(command, bindPoint, entry.Layout, 0, 1, &set, 0, null);
+                            _vk.CmdBindDescriptorSets(command, bindPoint.ToVk(), entry.Layout, 0, 1, &set, 0, null);
                             ShaderCacheCounters.CountHeapSet();
                         }
                     }
@@ -1003,7 +1004,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             _batchResources.Add(new SubmissionUploadResources
             {
-                DebugName = bindPoint == PipelineBindPoint.Compute ? "SharpEmu dispatch" : "SharpEmu draw",
+                DebugName = bindPoint == GpuBindPoint.Compute ? "SharpEmu dispatch" : "SharpEmu draw",
                 Textures = textures,
                 FeedbackSnapshots = preparation.FeedbackSnapshots?.ToArray() ?? [],
                 OverflowBuffers = preparation.OverflowBuffers.Count == 0 ? null : preparation.OverflowBuffers.ToArray(),

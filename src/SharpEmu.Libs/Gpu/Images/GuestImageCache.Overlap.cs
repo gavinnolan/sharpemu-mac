@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.Gpu.Vulkan;
 using Silk.NET.Vulkan;
 
 using SharpEmu.Libs.VideoOut;
@@ -15,7 +17,7 @@ public sealed partial class GuestImageCache
 {
     private readonly record struct OverlapResolution(ResourceSlotIdentifier Image, int Mip = -1, int Layer = -1);
 
-    private static bool SameExtent(in Extent3D left, in Extent3D right) => left.Width == right.Width && left.Height == right.Height && left.Depth == right.Depth;
+    private static bool SameExtent(in GpuExtent3D left, in GpuExtent3D right) => left.Width == right.Width && left.Height == right.Height && left.Depth == right.Depth;
 
     private static bool HasSameBacking(in ImageDescription cached, in ImageDescription requested, bool exactFormat)
     {
@@ -27,7 +29,7 @@ public sealed partial class GuestImageCache
             return false;
         }
 
-        if (cached.Type != requested.Type && !SameExtent(requested.Extent, new Extent3D(1, 1, 1)))
+        if (cached.Type != requested.Type && !SameExtent(requested.Extent, new GpuExtent3D(1, 1, 1)))
         {
             return false;
         }
@@ -96,7 +98,7 @@ public sealed partial class GuestImageCache
 
         var depth = sourceDepth ? source : destination;
         var color = sourceDepth ? destination : source;
-        var transferBytes = DepthFormatRule.AspectTransferBytes(depth.Backing.Format);
+        var transferBytes = DepthFormatRule.AspectTransferBytes(depth.Backing.Format.ToNeutral());
         if (depth.Description.BytesPerBlock != sizeof(ushort) || color.Description.BytesPerBlock != sizeof(ushort) || transferBytes != sizeof(uint))
         {
             return false;
@@ -132,7 +134,7 @@ public sealed partial class GuestImageCache
                 BufferRowLength = depth.Description.Pitch,
                 BufferImageHeight = depth.Description.Extent.Height,
                 ImageSubresource = new ImageSubresourceLayers(ImageAspectFlags.DepthBit, 0, layer, 1),
-                ImageExtent = depth.Description.Extent,
+                ImageExtent = depth.Description.Extent.ToVk(),
             };
             colorCopies[layer] = new BufferImageCopy
             {
@@ -140,7 +142,7 @@ public sealed partial class GuestImageCache
                 BufferRowLength = color.Description.Pitch,
                 BufferImageHeight = color.Description.Extent.Height,
                 ImageSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, 0, layer, 1),
-                ImageExtent = color.Description.Extent,
+                ImageExtent = color.Description.Extent.ToVk(),
             };
         }
 
@@ -156,7 +158,7 @@ public sealed partial class GuestImageCache
             SourceSliceStride = colorSlice,
             TargetSliceStride = depthSlice,
         };
-        var useFloat32Depth = DepthFormatRule.AspectTransferFormat(depth.Backing.Format) == Format.D32Sfloat;
+        var useFloat32Depth = DepthFormatRule.AspectTransferFormat(depth.Backing.Format.ToNeutral()) == GpuFormat.D32Sfloat;
         if (sourceDepth)
         {
             source.DownloadToBuffer(depthCopies, depthBuffer.Buffer, depthBuffer.Offset, depthBuffer.Size);
@@ -213,7 +215,7 @@ public sealed partial class GuestImageCache
                               (sourceType == ImageType.Type3D && destinationType == ImageType.Type2D);
         var directCopy = compatibleTypes &&
                          (source.Backing.Format == destination.Backing.Format ||
-                          (!sourceDepth && !destinationDepth && ViewFormatRules.BlockBytes(source.Backing.Format) == ViewFormatRules.BlockBytes(destination.Backing.Format)));
+                          (!sourceDepth && !destinationDepth && ViewFormatRules.BlockBytes(source.Backing.Format.ToNeutral()) == ViewFormatRules.BlockBytes(destination.Backing.Format.ToNeutral())));
         if (directCopy)
         {
             destination.CopyFrom(source);
@@ -323,7 +325,7 @@ public sealed partial class GuestImageCache
         var rawD16Texture =
             role == ImageRole.Texture && cachedInfo.IsDepth &&
             cachedInfo.GuestFormat == GuestPixelFormat.Bits16UNorm && requested.GuestFormat == GuestPixelFormat.Bits16UInt &&
-            requested.PixelFormat == Format.R16Uint && cached.Backing.Samples == 1 && requested.Samples == 1 &&
+            requested.PixelFormat == GpuFormat.R16Uint && cached.Backing.Samples == 1 && requested.Samples == 1 &&
             requested.Data == cachedInfo.Data && SameExtent(requested.Extent, cachedInfo.Extent) && requested.Resources == cachedInfo.Resources &&
             requested.Type == cachedInfo.Type && requested.Pitch == cachedInfo.Pitch && requested.TileMode == cachedInfo.TileMode &&
             !requested.HasStencil && !cachedInfo.HasStencil && !requested.HasMetadata && !cachedInfo.HasMetadata;
@@ -402,7 +404,7 @@ public sealed partial class GuestImageCache
         if (cached.Backing.Samples == replacement.Backing.Samples)
         {
             var copySupported = cached.Backing.Samples == 1 || cached.Backing.Format == replacement.Backing.Format ||
-                                (!cachedInfo.IsDepth && !replacement.Description.IsDepth && ViewFormatRules.AreCompatible(cached.Backing.Format, replacement.Backing.Format));
+                                (!cachedInfo.IsDepth && !replacement.Description.IsDepth && ViewFormatRules.AreCompatible(cached.Backing.Format.ToNeutral(), replacement.Backing.Format.ToNeutral()));
             if (copySupported)
             {
                 CopyWholeImage(replacementImageIdentifier, cachedImageIdentifier);

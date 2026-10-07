@@ -41,7 +41,7 @@ public static class PixelStageInputResolver
         var address = shaderInterface.PixelInputAddress;
         if ((enable & ~SupportedInputBits) != 0 || (address & ~SupportedInputBits) != 0 || enable != address)
         {
-            throw SubmissionScheduler.Fatal(
+            throw GpuFatal.Fatal(
                 $"The pixel input registers are not supported: shader=0x{shaderAddress:X16} enable=0x{enable:X8} address=0x{address:X8}.");
         }
 
@@ -72,7 +72,7 @@ public static class PixelStageInputResolver
         {
             if (!context.TryReadUInt32(shader.InputSemanticsAddress + index * sizeof(uint), out var word))
             {
-                throw SubmissionScheduler.Fatal($"The pixel input semantics are unreadable: shader=0x{shader.CodeAddress:X16} index={index}.");
+                throw GpuFatal.Fatal($"The pixel input semantics are unreadable: shader=0x{shader.CodeAddress:X16} index={index}.");
             }
 
             var semantic = new ShaderInputSemantic(word);

@@ -6,6 +6,7 @@ using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Ampr;
 using SharpEmu.Libs.Media;
+using SharpEmu.Logging;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
@@ -5350,9 +5351,7 @@ public static partial class KernelMemoryCompatExports
     }
 
     private static string ResolveGameLogRoot() =>
-        Path.GetFullPath(Path.Combine(
-            AppContext.BaseDirectory,
-            "user",
+        Path.GetFullPath(SharpEmuPaths.UserPath(
             "game_logs",
             Volatile.Read(ref _applicationTitleId)));
 
@@ -5369,7 +5368,7 @@ public static partial class KernelMemoryCompatExports
 
         var invalidChars = Path.GetInvalidFileNameChars();
         appName = new string(appName.Select(ch => invalidChars.Contains(ch) ? '_' : ch).ToArray());
-        return Path.Combine(AppContext.BaseDirectory, "user", "temp", appName);
+        return SharpEmuPaths.UserPath("temp", appName);
     }
 
     private static void EnsureOpenParentDirectoryExists(string guestPath, string hostPath, int flags)

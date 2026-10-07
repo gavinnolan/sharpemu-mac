@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Vulkan;
 using SharpEmu.Libs.Tests.Gpu.Buffers;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Vulkan;
@@ -23,7 +25,7 @@ public sealed partial class GuestImageCacheTests : IClassFixture<HeadlessVulkanF
 
     private static ImageRequest Sampled(ulong address)
     {
-        var request = LinearRequest(address, 4, Format.R8G8B8A8Srgb, GuestPixelFormat.Bits8_8_8_8Srgb, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
+        var request = LinearRequest(address, 4, GpuFormat.R8G8B8A8Srgb, GuestPixelFormat.Bits8_8_8_8Srgb, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, 4, 1);
         return request;
     }
 
@@ -31,7 +33,7 @@ public sealed partial class GuestImageCacheTests : IClassFixture<HeadlessVulkanF
     {
         var description = ImageDescription.Create();
         description.Data = new GuestSpan(address, size);
-        description.Extent = new Extent3D(1, 1, 1);
+        description.Extent = new GpuExtent3D(1, 1, 1);
         return description;
     }
 
@@ -48,14 +50,14 @@ public sealed partial class GuestImageCacheTests : IClassFixture<HeadlessVulkanF
         var repeated = Sampled(address);
         var repeatedId = harness.Find(ref repeated);
         var compatible = Sampled(address);
-        compatible.Description.PixelFormat = Format.R8G8B8A8Uint;
+        compatible.Description.PixelFormat = GpuFormat.R8G8B8A8Uint;
         compatible.Description.GuestFormat = GuestPixelFormat.Bits8_8_8_8UInt;
-        compatible.View = compatible.View with { Format = Format.R8G8B8A8Uint };
+        compatible.View = compatible.View with { Format = GpuFormat.R8G8B8A8Uint };
         var compatibleId = harness.Find(ref compatible);
         Assert.True(firstId.IsValid);
         Assert.Equal(firstId, repeatedId);
         Assert.Equal(firstId, compatibleId);
-        Assert.Equal(Format.R8G8B8A8Srgb, harness.Image(firstId).Description.PixelFormat);
+        Assert.Equal(GpuFormat.R8G8B8A8Srgb, harness.Image(firstId).Description.PixelFormat);
 
         Assert.Empty(harness.ImagesInRange(address + 8, 1));
         Assert.Equal(new[] { firstId }, harness.ImagesInRange(address + 8, 1, pageOverlap: true));
@@ -75,8 +77,8 @@ public sealed partial class GuestImageCacheTests : IClassFixture<HeadlessVulkanF
         Assert.True(exactId.IsValid);
         Assert.NotEqual(firstId, exactId);
         Assert.True(harness.Images.Contains(firstId));
-        Assert.Equal(Format.R8G8B8A8Srgb, harness.Image(firstId).Description.PixelFormat);
-        Assert.Equal(Format.R8G8B8A8Uint, harness.Image(exactId).Description.PixelFormat);
+        Assert.Equal(GpuFormat.R8G8B8A8Srgb, harness.Image(firstId).Description.PixelFormat);
+        Assert.Equal(GpuFormat.R8G8B8A8Uint, harness.Image(exactId).Description.PixelFormat);
         var compatibleAgain = compatible;
         Assert.Equal(exactId, harness.Find(ref compatibleAgain));
 
@@ -151,7 +153,7 @@ public sealed partial class GuestImageCacheTests : IClassFixture<HeadlessVulkanF
         {
             var first = harness.Images.AcquireTextureView(imageIdentifier, local);
             var repeated = harness.Images.AcquireTextureView(imageIdentifier, local);
-            var mapped = image.GetOrCreateView(local.View with { Mapping = new ComponentMapping(ComponentSwizzle.B, ComponentSwizzle.Identity, ComponentSwizzle.R, ComponentSwizzle.Identity) });
+            var mapped = image.GetOrCreateView(local.View with { Mapping = new GpuComponentMapping(GpuComponentSwizzle.B, GpuComponentSwizzle.Identity, GpuComponentSwizzle.R, GpuComponentSwizzle.Identity) });
             return (first, repeated, mapped);
         });
         Assert.NotEqual(0UL, firstView.Handle);
@@ -173,7 +175,7 @@ public sealed partial class GuestImageCacheTests : IClassFixture<HeadlessVulkanF
         using var harness = new CacheHarness(_vulkan);
         var address = harness.MapBacked(0x10000, ReadWrite);
         harness.Write(address, Bytes(0x01020304u, 0x11121314u, 0x21222324u));
-        var underspecified = LinearRequest(address, 12, Format.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D, new Extent3D(2, 1, 1), 1, 4, 1);
+        var underspecified = LinearRequest(address, 12, GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D, new GpuExtent3D(2, 1, 1), 1, 4, 1);
         underspecified.Description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = 8, Pitch = 2, Height = 1 };
         underspecified.Description.MipLayout[1] = new MipLevelLayout { Offset = 8, Size = 4, Pitch = 1, Height = 1 };
         var underspecifiedId = harness.Acquire(ref underspecified);
@@ -201,7 +203,7 @@ public sealed partial class GuestImageCacheTests : IClassFixture<HeadlessVulkanF
         if (!GatePrerequisites.Ready(_vulkan)) return;
         using var harness = new CacheHarness(_vulkan);
         var address = harness.MapBacked(0x20000, ReadWrite);
-        var narrow = LinearRequest(address, 0x10000, Format.R16G16B16A16Sfloat, GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 8, 1);
+        var narrow = LinearRequest(address, 0x10000, GpuFormat.R16G16B16A16Sfloat, GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, 8, 1);
         narrow = AsColorTarget(narrow);
         narrow.Description.Pitch = 128;
         narrow.Description.TileMode = GuestTileMode.RenderTarget;
@@ -209,7 +211,7 @@ public sealed partial class GuestImageCacheTests : IClassFixture<HeadlessVulkanF
         var narrowId = harness.Acquire(ref narrow);
 
         var wide = narrow;
-        wide.Description.Extent = new Extent3D(9, 1, 1);
+        wide.Description.Extent = new GpuExtent3D(9, 1, 1);
         var wideId = harness.Acquire(ref wide);
         var wideOwner = harness.Images.Owner(wideId);
         Assert.NotEqual(narrowId, wideId);
@@ -235,7 +237,7 @@ public sealed partial class GuestImageCacheTests : IClassFixture<HeadlessVulkanF
         const ulong slice = 256;
         harness.Write(address + 0x1000, Bytes(0x10203040u));
         harness.Write(address + 0x1000 + slice, Bytes(0x50607080u));
-        var array = LinearRequest(address + 0x1000, 2 * slice, Format.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D, new Extent3D(1, 1, 1), 2, 4, 1);
+        var array = LinearRequest(address + 0x1000, 2 * slice, GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 2, 4, 1);
         var arrayId = harness.Acquire(ref array);
         Assert.Equal(Bytes(0x10203040u, 0x50607080u), harness.ReadImageBytes(harness.Image(arrayId)));
         Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(address + 0x1000, 2 * slice, 0x0a0b0c0du)));
@@ -243,13 +245,13 @@ public sealed partial class GuestImageCacheTests : IClassFixture<HeadlessVulkanF
 
         var volume = array;
         volume.Description.Type = GuestImageType.Color3D;
-        volume.Description.Extent = new Extent3D(1, 1, 2);
+        volume.Description.Extent = new GpuExtent3D(1, 1, 2);
         volume.Description.Resources = SubresourceCount.Single;
-        volume.View = volume.View with { Type = ImageViewType.Type3D, LayerCount = 1 };
+        volume.View = volume.View with { Type = GpuImageViewType.Type3D, LayerCount = 1 };
         var volumeId = harness.Find(ref volume);
         Assert.True(volumeId.IsValid);
         Assert.NotEqual(arrayId, volumeId);
-        Assert.Equal(ImageType.Type3D, harness.Image(volumeId).Backing.ImageType);
+        Assert.Equal(GpuImageType.Type3D, harness.Image(volumeId).Backing.ImageType.ToNeutral());
         Assert.True(harness.Image(volumeId).IsGpuModified);
         Assert.Equal(Bytes(0x0a0b0c0du, 0x0a0b0c0du), harness.ReadImageBytes(harness.Image(volumeId)));
         Assert.Equal(Bytes(0x10203040u), harness.Read(address + 0x1000, 4));
@@ -265,7 +267,7 @@ public sealed partial class GuestImageCacheTests : IClassFixture<HeadlessVulkanF
         const uint extent = 256;
         const ulong size = extent * extent * 4;
         var address = harness.MapBacked(size, ReadWrite);
-        var renderTarget = LinearRequest(address, size, Format.R8G8B8A8Unorm, GuestPixelFormat.Bits8_8_8_8UNorm, GuestImageType.Color2D, new Extent3D(extent, extent, 1), 1, 4, 1);
+        var renderTarget = LinearRequest(address, size, GpuFormat.R8G8B8A8Unorm, GuestPixelFormat.Bits8_8_8_8UNorm, GuestImageType.Color2D, new GpuExtent3D(extent, extent, 1), 1, 4, 1);
         renderTarget = AsStorage(renderTarget);
         renderTarget.Description.TileMode = GuestTileMode.RenderTarget;
         var renderTargetId = harness.Find(ref renderTarget);
@@ -273,7 +275,7 @@ public sealed partial class GuestImageCacheTests : IClassFixture<HeadlessVulkanF
         var standard = renderTarget;
         standard.Role = ImageRole.Texture;
         standard.Description.TileMode = GuestTileMode.Standard4KB;
-        standard.View = standard.View with { Usage = ImageUsageFlags.SampledBit };
+        standard.View = standard.View with { Usage = GpuImageUsage.SampledBit };
         var standardId = harness.Find(ref standard);
         var repeated = standard;
         var repeatedId = harness.Find(ref repeated);
@@ -293,17 +295,17 @@ public sealed partial class GuestImageCacheTests : IClassFixture<HeadlessVulkanF
         var address = harness.MapBacked(0x10000, ReadWrite);
         var data = Bytes(0x01234567u, 0x89abcdefu, 0xfedcba98u, 0x76543210u);
         harness.Write(address, data);
-        var uncompressed = LinearRequest(address, 16, Format.R32G32B32A32Uint, GuestPixelFormat.Bits32_32_32_32UInt, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 16, 1);
+        var uncompressed = LinearRequest(address, 16, GpuFormat.R32G32B32A32Uint, GuestPixelFormat.Bits32_32_32_32UInt, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, 16, 1);
         var uncompressedId = harness.Acquire(ref uncompressed);
         harness.MarkGpuWritten(uncompressedId);
 
-        var compressed = LinearRequest(address, 16, Format.BC3UnormBlock, GuestPixelFormat.Bc3UNorm, GuestImageType.Color2D, new Extent3D(4, 4, 1), 1, 16, 1);
+        var compressed = LinearRequest(address, 16, GpuFormat.BC3UnormBlock, GuestPixelFormat.Bc3UNorm, GuestImageType.Color2D, new GpuExtent3D(4, 4, 1), 1, 16, 1);
         var compressedId = harness.Find(ref compressed);
         var downloaded = harness.Worker.Run(() => harness.Images.TryDownloadForTest(compressedId));
         harness.Finish();
         Assert.True(compressedId.IsValid);
         Assert.NotEqual(uncompressedId, compressedId);
-        Assert.Equal(Format.BC3UnormBlock, harness.Image(compressedId).Backing.Format);
+        Assert.Equal(GpuFormat.BC3UnormBlock, harness.Image(compressedId).Backing.Format.ToNeutral());
         Assert.True(downloaded);
         Assert.Equal(data, harness.Read(address, 16));
         harness.Shutdown();
