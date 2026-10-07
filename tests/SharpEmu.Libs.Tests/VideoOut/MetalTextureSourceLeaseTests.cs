@@ -271,6 +271,38 @@ public sealed class MetalTextureSourceLeaseTests
         return read;
     }
 
+    [Fact]
+    public void OrdinaryWatchIdentityCannotCertifyOwnedCpuSeed()
+    {
+        using var state = new State();
+        GuestImageWriteTracker.Untrack(Address);
+        GuestImageWriteTracker.Track(Address, 64, protect: false);
+        Assert.True(GuestImageWriteTracker.TryGetContentToken(Address, out var identity));
+        Assert.NotEqual(0, identity.WatchIdentity);
+        var observation = MetalVideoPresenter.ObserveCpuTextureSnapshot(Address, 64, HostMemory.MappingGeneration);
+        Assert.False(observation.Observed);
+        var seed = Texture(true) with { RgbaPixels = new byte[64], WriteGeneration = 0, Access = GuestImageAccess.Write };
+        MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(seed, observation);
+        var queueType = typeof(MetalVideoPresenter).GetNestedType("GuestQueueIdentity", BindingFlags.NonPublic)!;
+        var queue = Activator.CreateInstance(queueType, ["host.default", 0UL])!;
+        var exception = Assert.Throws<TargetInvocationException>(() => Call("PublishAdmittedTextureSourceLocked", seed, 1L, queue, false));
+        Assert.IsType<InvalidOperationException>(exception.InnerException);
+        Assert.Contains("seed provenance", exception.InnerException!.Message);
+    }
+
+    [Fact]
+    public void FullRawZeroComponentSelectionCannotBeCertifiedAsIdentitySwizzle()
+    {
+        using var state = new State();
+        var seed = Texture(true) with { RgbaPixels = new byte[64], WriteGeneration = 0, Access = GuestImageAccess.Write, DstSelect = 0 };
+        var words = seed.Descriptor!.ToArray(); words[3] &= ~0xFFFu;
+        seed = seed with { Descriptor = words };
+        var queueType = typeof(MetalVideoPresenter).GetNestedType("GuestQueueIdentity", BindingFlags.NonPublic)!;
+        var queue = Activator.CreateInstance(queueType, ["host.default", 0UL])!;
+        var exception = Assert.Throws<TargetInvocationException>(() => Call("PublishAdmittedTextureSourceLocked", seed, 1L, queue, false));
+        Assert.IsType<NotSupportedException>(exception.InnerException);
+    }
+
     private static GuestDrawTexture Texture(bool storage) => new(Address, 4, 4, 10, 0, [], false, storage,
         Pitch: 4, Descriptor: ResourceWords(), Shape: new ShaderImageShape(false, false, storage, false, TextureNumericClass.Float),
         Access: GuestImageAccess.Read);

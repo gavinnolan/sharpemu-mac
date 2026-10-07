@@ -33,17 +33,14 @@ internal static partial class MetalVideoPresenter
     internal static CpuTextureSnapshotObservation ObserveCpuTextureSnapshot(
         ulong address, ulong byteCount, long beforeMappingEpoch)
     {
-        var exists = GuestImageWriteTracker.TryGetContentToken(address, out var token);
-        var observed = GuestImageWriteTracker.Enabled && exists &&
-            (token.ProtectedIdentity != 0 && token.ProtectedByteCount >= byteCount ||
-             token.WatchIdentity != 0 && token.WatchByteCount >= byteCount);
+        var observed = GuestImageWriteTracker.TryGetObservedContentToken(address, byteCount, out var token);
         return new(beforeMappingEpoch, token, observed, byteCount);
     }
 
     internal static bool IsCpuTextureSnapshotObservationStable(
         ulong address, in CpuTextureSnapshotObservation observation) =>
         observation.MappingEpoch == HostMemory.MappingGeneration &&
-        (!observation.Observed || GuestImageWriteTracker.TryGetContentToken(address, out var current) &&
+        (!observation.Observed || GuestImageWriteTracker.TryGetObservedContentToken(address, observation.ByteCount, out var current) &&
             current == observation.Token);
 
     internal static void RegisterCpuTextureSnapshotProvenance(
@@ -62,7 +59,7 @@ internal static partial class MetalVideoPresenter
         ulong Address, uint Width, uint Height, uint Format, uint NumberType,
         uint TileMode, uint Pitch, uint Type, uint MipLevels,
         uint BaseMipLevel, uint MipLevel, uint ResourceMipLevels,
-        bool Arrayed, uint Layers, uint Depth)
+        bool Arrayed, uint Layers, uint Depth, uint DstSelect)
     {
         public static TextureSourceView Of(GuestDrawTexture texture, bool verifiedColorProducer = false)
         {
@@ -88,7 +85,7 @@ internal static partial class MetalVideoPresenter
                 throw new NotSupportedException("Metal ordered texture sources require all eight owned resource descriptor words.");
             return new(texture.Address, texture.Width, texture.Height, texture.Format, texture.NumberType,
                 texture.TileMode, pitch, texture.Type, texture.MipLevels, texture.BaseMipLevel, texture.MipLevel,
-                texture.ResourceMipLevels, texture.ArrayedView, texture.ArrayLayers, texture.Depth);
+                texture.ResourceMipLevels, texture.ArrayedView, texture.ArrayLayers, texture.Depth, texture.DstSelect);
         }
     }
 
@@ -252,7 +249,7 @@ internal static partial class MetalVideoPresenter
         SupportedFloatTextureSourceFormat(texture) &&
         texture.Type == 9 && !texture.ArrayedView && texture.ArrayLayers == 1 && texture.Depth == 1 &&
         texture.MipLevels == 1 && texture.ResourceMipLevels >= 1 && texture.BaseMipLevel == 0 && texture.MipLevel == 0 &&
-        texture.DstSelect is 0 or 0xFAC && texture.Shape.NumericClass == TextureNumericClass.Float &&
+        texture.DstSelect == 0xFAC && texture.Shape.NumericClass == TextureNumericClass.Float &&
         !texture.Shape.Volume && !texture.Shape.Arrayed && !texture.Shape.Cube && !texture.Shape.OneDimensional &&
         !texture.Shape.Multisampled && !texture.Shape.DepthCompare && !texture.Shape.DynamicMip &&
         !texture.Shape.R128 && !texture.Shape.Atomic && (texture.Access & GuestImageAccess.Atomic) == 0 &&
@@ -280,7 +277,7 @@ internal static partial class MetalVideoPresenter
                 throw new NotSupportedException($"Metal GPU texture source view mismatch at 0x{texture.Address:X}: requested={TextureSourceView.Of(texture)} producer={source.View}.");
             if (source.Failed || source.Retired || source.MutationStarted && source.ImmutableTexture == 0 ||
                 source.MappingEpoch != HostMemory.MappingGeneration || source.WriteGeneration != CurrentTextureWriteGeneration(texture.Address) ||
-                !source.ContentObserved || !GuestImageWriteTracker.TryGetContentToken(texture.Address, out var currentToken) ||
+                !source.ContentObserved || !GuestImageWriteTracker.TryGetObservedContentToken(texture.Address, source.ObservedGuestByteCount, out var currentToken) ||
                 currentToken != source.ContentToken)
                 throw new InvalidOperationException($"Metal GPU texture source invalidated at 0x{texture.Address:X}: producer={source.ProducerSequence} identity={source.Identity}.");
             if (sourceBytes > source.ObservedGuestByteCount)
@@ -291,7 +288,7 @@ internal static partial class MetalVideoPresenter
                 source.ObservedGuestByteCount = sourceBytes;
                 if (CurrentTextureWriteGeneration(texture.Address) != source.WriteGeneration ||
                     source.MappingEpoch != HostMemory.MappingGeneration ||
-                    !GuestImageWriteTracker.TryGetContentToken(texture.Address, out var widenedToken) || widenedToken != source.ContentToken)
+                    !GuestImageWriteTracker.TryGetObservedContentToken(texture.Address, source.ObservedGuestByteCount, out var widenedToken) || widenedToken != source.ContentToken)
                     throw new InvalidOperationException("Metal GPU texture source CPU generation changed while observing its view.");
             }
             if (source.References == 0)
@@ -334,7 +331,7 @@ internal static partial class MetalVideoPresenter
         var hasPrevious = previous is { Failed: false, Retired: false } && previous.View == view &&
             previous.MappingEpoch == HostMemory.MappingGeneration &&
             previous.WriteGeneration == CurrentTextureWriteGeneration(descriptor.Address) &&
-            previous.ContentObserved && GuestImageWriteTracker.TryGetContentToken(descriptor.Address, out var previousToken) &&
+            previous.ContentObserved && GuestImageWriteTracker.TryGetObservedContentToken(descriptor.Address, previous.ObservedGuestByteCount, out var previousToken) &&
             previousToken == previous.ContentToken;
         var hasSeed = descriptor.CpuSnapshotStable &&
             (descriptor.RgbaPixels.Length != 0 || descriptor.TiledSource is { Length: > 0 });
@@ -355,7 +352,7 @@ internal static partial class MetalVideoPresenter
             captured.Version.View == view &&
             captured.Version.MappingEpoch == HostMemory.MappingGeneration &&
             captured.Version.WriteGeneration == CurrentTextureWriteGeneration(descriptor.Address) &&
-            captured.Version.ContentObserved && GuestImageWriteTracker.TryGetContentToken(descriptor.Address, out var capturedToken) &&
+            captured.Version.ContentObserved && GuestImageWriteTracker.TryGetObservedContentToken(descriptor.Address, captured.Version.ObservedGuestByteCount, out var capturedToken) &&
             capturedToken == captured.Version.ContentToken;
         if (hasSeed && hasPrevious && !hasCaptured)
             throw new InvalidOperationException("Metal CPU seed cannot overwrite a current GPU producer without a captured source choice.");
@@ -366,10 +363,7 @@ internal static partial class MetalVideoPresenter
         var observedBytes = Math.Max(byteCount, descriptor.SourceByteCount);
         var observed = GuestImageWriteTracker.BeginReadSnapshot(descriptor.Address, observedBytes,
             sequence, "metal.gpu-source-producer");
-        var hasObservedToken = GuestImageWriteTracker.TryGetContentToken(descriptor.Address, out var observedContentToken);
-        var contentObserved = GuestImageWriteTracker.Enabled && hasObservedToken &&
-            (observedContentToken.ProtectedIdentity != 0 && observedContentToken.ProtectedByteCount >= observedBytes ||
-             observedContentToken.WatchIdentity != 0 && observedContentToken.WatchByteCount >= observedBytes);
+        var contentObserved = GuestImageWriteTracker.TryGetObservedContentToken(descriptor.Address, observedBytes, out var observedContentToken);
         if (!contentObserved)
             throw new InvalidOperationException("Metal ordered producer has no complete content observation.");
         // Observation may register a previously absent range at generation0;
@@ -380,11 +374,11 @@ internal static partial class MetalVideoPresenter
             throw new InvalidOperationException("Metal storage seed provenance changed while publishing its producer.");
         if (hasPrevious && (previous!.MappingEpoch != HostMemory.MappingGeneration ||
             previous.WriteGeneration != (observed.Active ? observed.Generation : -1) ||
-            !GuestImageWriteTracker.TryGetContentToken(descriptor.Address, out var observedPrevious) || observedPrevious != previous.ContentToken))
+            !GuestImageWriteTracker.TryGetObservedContentToken(descriptor.Address, previous.ObservedGuestByteCount, out var observedPrevious) || observedPrevious != previous.ContentToken))
             throw new InvalidOperationException("Metal previous storage producer changed while publishing its successor.");
         if (hasCaptured && (captured!.Version.MappingEpoch != HostMemory.MappingGeneration ||
             captured.Version.WriteGeneration != (observed.Active ? observed.Generation : -1) ||
-            !GuestImageWriteTracker.TryGetContentToken(descriptor.Address, out var observedCaptured) || observedCaptured != captured.Version.ContentToken))
+            !GuestImageWriteTracker.TryGetObservedContentToken(descriptor.Address, captured.Version.ObservedGuestByteCount, out var observedCaptured) || observedCaptured != captured.Version.ContentToken))
             throw new InvalidOperationException("Metal captured storage initializer changed while publishing its producer.");
         var contentToken = hasSeed ? provenance!.Observation.Token :
             hasCaptured ? captured!.Version.ContentToken :

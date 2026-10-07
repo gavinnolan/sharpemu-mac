@@ -181,3 +181,20 @@ outstanding; these tests do not establish the DS219 source or fix its format/vie
 compatibility. Content identity plus extents also does not prove successful page
 protection or serialize against an in-flight managed write. That observation
 contract is a separate activation blocker, never a mapping lease.
+
+### Observation qualification refinement
+
+Before-copy and subsequent selection/publication token checks now use the
+additive observed-content API. Ordinary watch-only owners and failed/disarmed
+native protection can no longer qualify a CPU initializer merely because an
+identity and extent exist. Full raw descriptors require identity component
+selection FAC; raw selection0 is not certified as the legacy identity convention.
+The related ARM64 managed102-case selection passes, including a real private
+seed-publication rejection from an ordinary watch owner and a raw-zero selection
+rejection. These are metadata/selection tests, not kernel or game tests.
+
+Successfully armed observation is still not a mapping/backing lease. Managed
+writer notification precedes the actual write and is not a copy exclusion
+protocol. Native graph materialization will therefore begin with GPU-only
+immutable initialization/fresh clear output; CPU seed admission remains a dormant
+transaction fixture until a backing/copy lifetime contract is qualified.
