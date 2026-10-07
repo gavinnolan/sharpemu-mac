@@ -50,8 +50,10 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
     }
 
     // One stage of a draw: its snapshots, samplers and shader data, then the copied buffers once bound.
-    private sealed class PreparedStage(ShaderStageResources stage, ShaderProgramInfo program) : IPreparedBindings
+    private sealed class PreparedStage(ShaderStageResources stage, ShaderProgramInfo program, Preparation preparation) : IPreparedBindings
     {
+        public Preparation SourcePreparation => preparation;
+
         public ShaderStageResources Stage => stage;
 
         public ShaderProgramInfo Program => program;
@@ -77,14 +79,37 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
 
     private sealed class Preparation(MetalCommandStreamHost owner) : IResourcePreparation
     {
+        private readonly List<GuestDrawTexture[]> textureSources = [];
+        public bool Disposed { get; private set; }
         public bool DeviceAddressesPrepared { get; set; }
+
+        public void OwnTextureSources(GuestDrawTexture[] textures)
+        {
+            try
+            {
+                ObjectDisposedException.ThrowIf(Disposed, this);
+                textureSources.Add(textures);
+            }
+            catch
+            {
+                // Snapshot creation transferred preparation leases to this array.
+                // Even failure to register that array must relinquish them.
+                MetalVideoPresenter.ReleasePreparedTextureSources(textures);
+                throw;
+            }
+        }
 
         public void Dispose()
         {
+            if (Disposed) return;
+            Disposed = true;
             if (ReferenceEquals(owner._preparation, this))
             {
                 owner._preparation = null;
             }
+            foreach (var textures in textureSources)
+                MetalVideoPresenter.ReleasePreparedTextureSources(textures);
+            textureSources.Clear();
         }
     }
 
@@ -355,6 +380,12 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
 
     private Preparation RequirePreparation() => _preparation ?? throw Fatal("No resource preparation is open.");
 
+    private void ValidatePreparedSources(PreparedStage stage)
+    {
+        if (stage.SourcePreparation.Disposed || !ReferenceEquals(_preparation, stage.SourcePreparation))
+            throw Fatal("Prepared image sources do not belong to the current live preparation.");
+    }
+
     private ShaderProgramInfo RequireProgram(ShaderStageResources stage)
     {
         var program = stage.Program ?? throw Fatal("The stage has no program.");
@@ -466,6 +497,7 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         }
         if (snapshots.Count != bindings.Count)
         {
+            MetalVideoPresenter.ReleasePreparedTextureSources(snapshots);
             throw Fatal($"A stage image has no snapshot: stage={program.Stage} images={bindings.Count} snapshots={snapshots.Count} hash=0x{program.Hash:X16}.");
         }
 
@@ -567,9 +599,9 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
     IPreparedBindings IRenderHost.PrepareBindings(ShaderStageResources stage)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DescriptorPreparation);
-        _ = RequirePreparation();
+        var preparation = RequirePreparation();
         var program = RequireProgram(stage);
-        var prepared = new PreparedStage(stage, program);
+        var prepared = new PreparedStage(stage, program, preparation);
         var info = prepared.Resources.Info;
         var layout = prepared.Layout;
         var snapshot = stage.Resources;
@@ -581,6 +613,9 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         }
 
         prepared.Textures = SnapshotImages(program, prepared);
+        // Register before sampler/shader-data/binding/pipeline preparation can
+        // fail. Submitted work retains a separate lease before scope disposal.
+        preparation.OwnTextureSources(prepared.Textures);
         var samplers = new GuestSampler[info.Samplers.Count];
         for (var index = 0; index < samplers.Length; index++)
         {
@@ -766,6 +801,7 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DescriptorPreparation);
         var preparation = RequirePreparation();
         var stage = (PreparedStage)prepared;
+        ValidatePreparedSources(stage);
         stage.Buffers = CopyStorageBuffers(stage);
         if (stage.Resources.Info.UsesDeviceAddresses)
         {
@@ -787,6 +823,7 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         foreach (var stage in stages)
         {
             var prepared = (PreparedStage)stage;
+            ValidatePreparedSources(prepared);
             if (!prepared.Bound)
             {
                 throw Fatal($"A stage commits before its resources are bound: stage={prepared.Program.Stage} hash=0x{prepared.Program.Hash:X16}.");
@@ -1041,6 +1078,7 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         for (var stageIndex = 0; stageIndex < stages.Count; stageIndex++)
         {
             var stage = stages[stageIndex];
+            ValidatePreparedSources(stage);
             var layout = stage.Layout;
             var bufferIndices = new int[stage.Buffers.Length];
             for (var index = 0; index < bufferIndices.Length; index++)

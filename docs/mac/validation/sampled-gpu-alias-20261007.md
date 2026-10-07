@@ -122,3 +122,124 @@ TRX/log evidence is copied to
 `artifacts/validation/integrated-20261007/package-agent/sampled-gpu-alias/`.
 No device suite or game was run for this patch. The root app remained frozen at
 `b557990`; later integration and runtime diagnostics require separate evidence.
+
+### Isolated CPU provenance refinement
+
+The dormant private source registry now keeps the mapping epoch and CPU write
+counter observed for owned snapshot bytes through record copies, rather than
+stamping a later counter during synthetic publication. Producer initialization
+rechecks both before and after widening read observation. A partial snapshot
+batch owns each returned source immediately and releases its captures on failure.
+Managed fixtures cover copied generation0 followed by CPU generation1 and reject
+stale previous-producer initialization without changing the latest registry.
+The related ARM64 no-device selection passes76/76.
+
+This does not activate capture, queue ownership, native version copies or producer
+publication. Address counters can restart after tracker untrack/retrack; a neutral
+tracking identity token is still required before active selection. Mapping epochs
+are conservative vetoes, not mapping lifetime reservations. Native version budget,
+transactional admission, fatal/close cleanup and actual command-completion pins
+remain required; no game or device acceptance follows from these fixtures.
+
+### Tracker identity observation before copying
+
+The isolated graph branch captures the neutral content token only after
+`BeginReadSnapshot` establishes observation and before the actual CPU copy.
+Both storage and sampled producers compare that original identity/generation/
+extent tuple after copying; copied metadata and per-work reuse preserve it.
+Repeated storage instability now fails after three attempts rather than returning
+an empty seed. Native source selection/publication compares the original token
+again and rejects unobserved CPU initialization. Owner retirement can no longer
+be hidden by resetting an address counter to0 in these paths.
+
+The ARM64 managed105-case selection passes, including actual producer callbacks
+that write, untrack and recreate a watch during every sampled/storage copy.
+Scheduler stage fixtures remain synthetic and do not certify native copies.
+No global CPU-pixel reuse remains in this producer; the separate native texture
+cache still needs token qualification or disabling under the eventual active
+graph. Detached immutable native versions need independent lifetime ownership,
+not indiscriminate mapping-epoch checks at consumption. Source activation and
+native old/new-version readbacks remain outstanding.
+
+### Dormant transactional admission boundary
+
+The isolated branch now plans every output and initialization/WAW dependency
+before queue mutation. Admission publishes queue sequence, schedule, pending
+count/bytes, explicit input/work owners and latest producer versions together;
+rollback restores all of them. Native budgeting reserves both the fresh writer
+image and immutable copy, including latest versions without read references.
+An incomplete resource descriptor, conflicting same-address initialization,
+released preparation or budget rejection cannot manufacture a producer.
+Color views come from validated real color-target registers; a texture binding
+requires all eight owned descriptor words and matching decoded view fields.
+
+The ARM64 no-device89-case selection includes twelve actual production admission
+cases alongside lease, scheduler, metadata and frontend ownership cases. The
+private activation boundary stays disabled. Native allocation/copy, actual
+command-completion retention, pruning, cancellation and shutdown hooks remain
+outstanding; these tests do not establish the DS219 source or fix its format/view
+compatibility. Content identity plus extents also does not prove successful page
+protection or serialize against an in-flight managed write. That observation
+contract is a separate activation blocker, never a mapping lease.
+
+### Observation qualification refinement
+
+Before-copy and subsequent selection/publication token checks now use the
+additive observed-content API. Ordinary watch-only owners and failed/disarmed
+native protection can no longer qualify a CPU initializer merely because an
+identity and extent exist. Full raw descriptors require identity component
+selection FAC; raw selection0 is not certified as the legacy identity convention.
+The related ARM64 managed102-case selection passes, including a real private
+seed-publication rejection from an ordinary watch owner and a raw-zero selection
+rejection. These are metadata/selection tests, not kernel or game tests.
+
+Successfully armed observation is still not a mapping/backing lease. Managed
+writer notification precedes the actual write and is not a copy exclusion
+protocol. Native graph materialization will therefore begin with GPU-only
+immutable initialization/fresh clear output; CPU seed admission remains a dormant
+transaction fixture until a backing/copy lifetime contract is qualified.
+
+### GPU-only native lifecycle qualification boundary
+
+The isolated branch now has private native materialization and eager-copy helpers.
+Each supported producer receives a fresh exact2D image; only fresh clear outputs
+or retained immutable GPU initializers are accepted by native materialization.
+CPU-only seed materialization explicitly rejects the missing backing/copy lease.
+The copy's producing batch identity is retained. Same-buffer consumption is
+ordered after the copy; another buffer needs the actual native commit operation
+first. Read-use completion cannot mark a producing copy completed. Explicit
+version pins survive until actual Metal command-buffer completion/error.
+
+The native helpers implement whole-uncommitted-batch invalidation, exact registry
+retain removal, committed-close waiting outside the presenter gate and pruning.
+Soft-budget retirement keeps bounded GPU-address tombstones; source preparation
+cannot recover retired GPU content from old guest bytes or mutable registry
+aliases. The actual snapshot path captures pending source metadata before any
+guest-byte read and rolls back unreturned multi-image captures.
+
+The ARM64 managed104-case selection passes. Six hardware fixtures compile but
+are not executed yet: real GPU clear→immutable old/new copies in one/two buffers,
+uncommitted cross-buffer rejection, whole-batch discard, committed close and
+native eviction→production preparation with zero guest reads. Their render-pass
+clear is the actual GPU writer; they do not yet qualify translated draw/compute,
+a GPU shader consumer, full Drain hooks, shutdown hooks or game behavior.
+Graph activation remains disabled and no whole-graph root integration is implied.
+
+### Exact hardware results and exception-safety followup
+
+Clean bfe518db58140eba47f50f76fc435152c97b1b3b passed all six hardware
+fixtures on ARM64 and Rosetta x64, require-device1 under the exclusive machine
+game lock:6/6 each, no skipped cases or bypassed device gates. Old/red and
+new/green or blue readbacks compare every byte of all16RGBA8texels. The clear
+pattern is uniform; no coordinate permutation or additional format is qualified.
+Commands, exact source status, architecture drivers, neutral assembly hashes,
+TRX outputs and actual execution markers are retained under
+`artifacts/validation/metal-agent/immutable-gpu-bfe518d-{arm,x64}`.
+
+The next isolated refinement builds error context before changing pin ownership,
+and preflights live-registry capacity before acquiring its extra native retain.
+Registry publication restores both dictionaries and releases that retain if a
+publication fails. The related managed104-case selection remains green. No
+artificial OOM or native command-buffer error was injected; ordering/ownership
+for those failures is reviewed source evidence, not hardware-fault qualification.
+Hardware proof belongs to clean bfe518d, not this later exception-path revision.
