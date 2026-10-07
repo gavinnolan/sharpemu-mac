@@ -4,6 +4,7 @@
 using SharpEmu.HLE;
 using SharpEmu.Platform.MacOS.Windowing;
 using SharpEmu.Libs.VideoOut;
+using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Metal;
 
@@ -381,21 +382,25 @@ internal static partial class MetalVideoPresenter
             $"[LOADER][INFO] Metal Performance HUD {(_metalHudVisible ? "shown" : "hidden")} (Cmd+F1).");
     }
 
-    /// <summary>The SDL host loop drains guest work continuously. The method
+    /// <summary>The native host loop drains guest work continuously. The method
     /// remains as the enqueue-side hook used by guest image synchronization.</summary>
     internal static void ScheduleGuestWorkDrain()
     {
     }
 
-    private static void RenderFrameSafely()
+    private static void RenderFrameSafely() => RenderFrameSafely(RenderFrame);
+
+    internal static void RenderFrameSafely(Action renderFrame)
     {
         try
         {
-            RenderFrame();
+            renderFrame();
         }
-        catch (Exception exception)
+        catch (Exception exception) when (_guestWorkFailure is null && exception is not GpuFatalException)
         {
-            Console.Error.WriteLine($"[LOADER][ERROR] Metal render frame failed: {exception}");
+            // Minimized windows and unavailable drawables return normally.
+            // An exception means execution failed, not a retryable frame miss.
+            throw GpuFatal.Fatal("Metal render frame failed.", exception);
         }
     }
 

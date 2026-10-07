@@ -4,6 +4,7 @@
 using SharpEmu.HLE;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.Gpu.Scheduling;
 
 namespace SharpEmu.Gpu.Metal;
 
@@ -107,6 +108,7 @@ internal static partial class MetalVideoPresenter
     private static readonly Dictionary<string, long> _lastEnqueuedGuestWorkByQueue =
         new(StringComparer.Ordinal);
     private static long _executingGuestWorkSequence;
+    private static Exception? _guestWorkFailure;
     [ThreadStatic]
     private static GuestQueueIdentity? _submittingGuestQueue;
     [ThreadStatic]
@@ -197,7 +199,7 @@ internal static partial class MetalVideoPresenter
             : Environment.TickCount64 + Math.Max(timeoutMilliseconds, 1);
         lock (_gate)
         {
-            while (!_closed && !IsGuestWorkCompletedLocked(workSequence))
+            while (!_closed && _guestWorkFailure is null && !IsGuestWorkCompletedLocked(workSequence))
             {
                 var remaining = waitIndefinitely ? 1_000 : deadline - Environment.TickCount64;
                 if (remaining <= 0)
@@ -554,6 +556,7 @@ internal static partial class MetalVideoPresenter
         // would deadlock a full queue, so follow-ups are always admitted.
         while (!_enqueueAsImmediateQueueFollowup &&
                !_closed &&
+               _guestWorkFailure is null &&
                _thread is not null &&
                (_pendingGuestWorkCount >= MaxPendingGuestWork ||
                 // Always admit one item when no payload is outstanding, even
@@ -570,7 +573,7 @@ internal static partial class MetalVideoPresenter
             Monitor.Wait(_gate);
         }
 
-        if (_closed)
+        if (_closed || _guestWorkFailure is not null)
         {
             return 0;
         }
@@ -687,8 +690,13 @@ internal static partial class MetalVideoPresenter
 
     /// <summary>Drains queued guest work on the render loop, bounded by count and a
     /// wall-clock budget so a backlog cannot starve the event pump or the present.</summary>
-    private static void DrainGuestWork(nint device, nint queue)
+    internal static void DrainGuestWork(nint device, nint queue)
     {
+        if (_guestWorkFailure is { } previousFailure)
+        {
+            throw new GpuFatalException("Metal guest execution has already failed.", previousFailure);
+        }
+
         var deadline = System.Diagnostics.Stopwatch.GetTimestamp() + _renderWorkBudgetTicks;
         var completedWork = 0;
         RecycleCompletedUploadPages();
@@ -752,18 +760,31 @@ internal static partial class MetalVideoPresenter
                 }
                 catch (Exception exception)
                 {
-                    Console.Error.WriteLine(
-                        $"[LOADER][ERROR] Metal guest work failed " +
-                        $"({pendingGuestWork.Work.GetType().Name}): {exception.Message}");
+                    lock (_gate)
+                    {
+                        _guestWorkFailure = exception;
+                        Monitor.PulseAll(_gate);
+                    }
+
+                    // commandBuffer is autoreleased by its creating pool. Drop
+                    // the borrowed batch handle; never commit partial work.
+                    _batchOpen = false;
+                    _batchCommandBuffer = 0;
+                    var actionName = pendingGuestWork.Work is OrderedGuestAction ordered
+                        ? $" action='{ordered.DebugName}'" : string.Empty;
+                    throw GpuFatal.Fatal(
+                        $"Metal guest work failed: kind={pendingGuestWork.Work.GetType().Name}" +
+                        $" sequence={pendingGuestWork.Sequence} queue='{pendingGuestWork.Queue.Name}'" +
+                        $" submission={pendingGuestWork.Queue.SubmissionId}{actionName}.", exception);
                 }
                 finally
                 {
-                    CompleteGuestWork(pendingGuestWork);
                     _enqueueAsImmediateQueueFollowup = false;
                     _immediateFollowupTail = null;
                     Volatile.Write(ref _executingGuestWorkSequence, 0);
                 }
 
+                CompleteGuestWork(pendingGuestWork);
                 completedWork++;
                 if (System.Diagnostics.Stopwatch.GetTimestamp() >= deadline)
                 {
@@ -773,25 +794,16 @@ internal static partial class MetalVideoPresenter
         }
         finally
         {
-            // Whatever path exits the drain, batched work must reach the queue:
-            // the present pass and the next drain's recyclers both assume every
-            // encoded command buffer has been committed.
-            _ = FlushBatchedGuestCommands();
+            // Successful drains commit their encoded work. A failed item must
+            // never issue partially encoded commands or acknowledge success.
+            if (_guestWorkFailure is null)
+            {
+                _ = FlushBatchedGuestCommands();
+            }
         }
     }
 
-    private static void ExecuteOrderedGuestAction(OrderedGuestAction ordered)
-    {
-        try
-        {
-            ordered.Action();
-        }
-        catch (Exception exception)
-        {
-            Console.Error.WriteLine(
-                $"[LOADER][WARN] Metal ordered guest action '{ordered.DebugName}' failed: {exception.Message}");
-        }
-    }
+    private static void ExecuteOrderedGuestAction(OrderedGuestAction ordered) => ordered.Action();
 
     private static void ExecuteGuestImageWrite(nint device, nint queue, GuestImageWrite write)
     {

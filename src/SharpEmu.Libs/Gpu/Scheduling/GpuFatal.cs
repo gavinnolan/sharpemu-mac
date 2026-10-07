@@ -3,6 +3,10 @@
 
 namespace SharpEmu.Libs.Gpu.Scheduling;
 
+/// <summary>A reported GPU failure; callers must let it terminate execution.</summary>
+public sealed class GpuFatalException(string message, Exception? innerException = null)
+    : InvalidOperationException(message, innerException);
+
 /// <summary>
 /// How the GPU engine gives up. Every backend and every layer of the shared
 /// engine reports a fatal error the same way, so the helper carries no backend
@@ -18,10 +22,14 @@ public static class GpuFatal
     /// throw so control stops there.
     /// </summary>
     /// <remarks>Backend contract.</remarks>
-    public static Exception Fatal(string message)
+    public static Exception Fatal(string message) => Fatal(message, null);
+
+    /// <summary>Reports a GPU failure without losing its original cause.</summary>
+    public static Exception Fatal(string message, Exception? innerException)
     {
-        Console.Error.WriteLine($"[GPU][FATAL] {message}");
-        OnFatal(message);
-        return new InvalidOperationException(message);
+        var diagnostic = innerException is null ? message : $"{message}{Environment.NewLine}{innerException}";
+        Console.Error.WriteLine($"[GPU][FATAL] {diagnostic}");
+        OnFatal(diagnostic);
+        return new GpuFatalException(message, innerException);
     }
 }
