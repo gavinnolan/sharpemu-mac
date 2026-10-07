@@ -2542,11 +2542,11 @@ public partial class MainWindow : Window
             _appliedEnvironmentVariables.Add(name);
         }
 
-        if (RenderDocCapture.ApplyVulkanLoaderEnvironment())
+        // Whether a graphics loader needs configuring at all, and which variables that takes,
+        // is the composed backend's business; the GUI only has to undo what was set.
+        foreach (var name in RenderDocCapture.ApplyGraphicsLoaderEnvironment())
         {
-            _appliedEnvironmentVariables.Add("VK_LOADER_DEBUG");
-            _appliedEnvironmentVariables.Add("VK_LOADER_LAYERS_DISABLE");
-            _appliedEnvironmentVariables.Add("VK_LOADER_LAYERS_ALLOW");
+            _appliedEnvironmentVariables.Add(name);
         }
 
         Environment.SetEnvironmentVariable(

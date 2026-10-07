@@ -4,6 +4,7 @@
 using System.Diagnostics;
 using System.Threading;
 using SharpEmu.Libs.Agc;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.VideoOut;
 
 namespace SharpEmu.Libs.Diagnostics;
@@ -17,6 +18,18 @@ public static class LoadProgressDiagnostics
 {
     // Keep probes live long enough to cover a stuck Yankton session.
     private const long ActiveWindowMs = 120_000;
+
+    // The blocked command-stream heads are a backend-internal view, so the graphics backend
+    // package supplies the probe instead of this trace naming a concrete presenter.
+    private static Func<SharpEmu.HLE.ICpuMemory?, BlockedSnapshot?>? _blockedCommandStreamProbe;
+
+    /// <summary>Installs the GPU-wait probe; called from the graphics backend's composition root.</summary>
+    public static void RegisterBlockedCommandStreamProbe(
+        Func<SharpEmu.HLE.ICpuMemory?, BlockedSnapshot?> probe)
+    {
+        ArgumentNullException.ThrowIfNull(probe);
+        _blockedCommandStreamProbe = probe;
+    }
 
     private static long _armedTicks;
     private static long _flipSubmitTraceCount;
@@ -140,7 +153,7 @@ public static class LoadProgressDiagnostics
         }
 
         // Blocked command-stream heads replaced the wait registry; the trace keeps its shape.
-        var snapshot = VulkanVideoPresenter.SnapshotBlockedCommandStream(memory as SharpEmu.HLE.ICpuMemory);
+        var snapshot = _blockedCommandStreamProbe?.Invoke(memory as SharpEmu.HLE.ICpuMemory);
         Console.Error.WriteLine(
             $"[LOADER][TRACE] load_progress.gpu_waits count={count} " +
             $"outstanding={snapshot?.Outstanding ?? 0} latched=0 " +
