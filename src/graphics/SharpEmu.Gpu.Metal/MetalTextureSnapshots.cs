@@ -75,6 +75,13 @@ internal static class MetalTextureSnapshots
         {
             foreach (var binding in bindings)
             {
+                // Preserve the shared block-write rejection before the narrower
+                // mode5 descriptor gate and before any captured-source shortcut.
+                if (binding.IsStorage && binding.Descriptor.Address != 0 &&
+                    GetBlockCompressedBlockBytes(binding.Descriptor.Format) != 0)
+                    throw new NotSupportedException(
+                        $"Metal compressed storage images require explicit guest block-write semantics: " +
+                        $"addr=0x{binding.Descriptor.Address:X} type={binding.Descriptor.Type} format={binding.Descriptor.Format}/{binding.Descriptor.NumberType} tile={binding.Descriptor.TileMode}.");
                 if (binding.IsStorage && binding.Descriptor.Type == Gen5TextureType3D && binding.Descriptor.TileMode == 5)
                 {
                     var d = binding.Descriptor;
