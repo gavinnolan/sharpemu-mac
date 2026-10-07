@@ -9,7 +9,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <ProjectReference Include="../SharpEmu.Application/SharpEmu.Application.csproj" />
     <ProjectReference Include="..\SharpEmu.Core\SharpEmu.Core.csproj" />
     <ProjectReference Include="..\SharpEmu.Debugger\SharpEmu.Debugger.csproj" />
-    <ProjectReference Include="..\SharpEmu.GUI\SharpEmu.GUI.csproj" />
     <ProjectReference Include="..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
   </ItemGroup>
 
@@ -40,6 +39,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </PropertyGroup>
 
   <ItemGroup Condition="'$(_SharpEmuHostOS)' == 'macos'">
+    <ProjectReference Include="../platforms/macos/SharpEmu.Launcher.MacOS/SharpEmu.Launcher.MacOS.csproj" />
     <ProjectReference Include="..\platforms\macos\SharpEmu.Host.MacOS\SharpEmu.Host.MacOS.csproj" />
     <ProjectReference Include="..\platforms\macos\SharpEmu.Fonts.CoreTextMac\SharpEmu.Fonts.CoreTextMac.csproj" />
   </ItemGroup>
@@ -51,6 +51,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </ItemGroup>
 
   <ItemGroup Condition="'$(_SharpEmuHostOS)' == 'linux' Or '$(_SharpEmuHostOS)' == 'windows'">
+    <ProjectReference Include="../SharpEmu.GUI/SharpEmu.GUI.csproj" />
     <ProjectReference Include="..\adapters\SharpEmu.Fonts.Skia\SharpEmu.Fonts.Skia.csproj" />
   </ItemGroup>
 

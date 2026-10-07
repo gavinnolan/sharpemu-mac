@@ -3,7 +3,6 @@
 
 using SharpEmu.Core.Runtime;
 using SharpEmu.Core.Cpu;
-using SharpEmu.GUI;
 using SharpEmu.Application;
 using SharpEmu.HLE;
 using SharpEmu.Libs.VideoOut;
@@ -103,7 +102,7 @@ internal static partial class Program
 
         if (args.Length == 0)
         {
-            return GuiLauncher.Run();
+            return LauncherComposition.Run();
         }
 
         // The executable uses the GUI subsystem, so CLI mode has to connect
