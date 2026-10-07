@@ -5,8 +5,9 @@ portions are implemented; the gates below describe the complete target and do
 not imply that each workstream is accepted. See [current implementation status](README.md)
 and the [ownership/runtime journal](validation/w13-ownership-iteration-20261007.md)
 for implemented portions, exact evidence and remaining failures.
-The user asked for deeper platform packages and a complete plan; source import,
-runtime experiments, publication and package implementation have not started.
+Full-history import, platform packages, native host/Metal execution and runtime
+experiments are implemented locally in part. Publication and full acceptance
+remain pending; the linked status/evidence records distinguish those stages.
 
 Design: [platform-packages.md](platform-packages.md). Improvement areas and their
 evidence: [architecture-roadmap.md](architecture-roadmap.md),
