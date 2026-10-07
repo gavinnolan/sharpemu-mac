@@ -293,7 +293,14 @@ internal static partial class MetalVideoPresenter
             ? Math.Max(texture.Pitch, width)
             : width;
         var format = MetalGuestFormats.DecodeTextureFormat(texture.Format, texture.NumberType);
-        var byteCount = MetalGuestFormats.GetTextureByteCount(format, rowLength, height);
+        // Recovery reads linear base-level resources only. Reading raw tiled
+        // bytes as linear texels or ignoring a mip offset corrupts the image.
+        if (texture.TileMode != 0 || texture.BaseMipLevel != 0 || texture.MipLevel != 0 ||
+            texture.MipUploads is { Length: > 0 })
+            throw new NotSupportedException($"Metal cannot recover skipped texture 0x{texture.Address:X}: tiled or mip-range snapshot required.");
+        var shape = GuestTextureShape(texture);
+        var byteCount = checked(MetalGuestFormats.GetTextureByteCount(format, rowLength, height) *
+            Math.Max(shape.ArrayLength, shape.Depth));
         if (byteCount == 0 || byteCount > int.MaxValue)
         {
             return null;

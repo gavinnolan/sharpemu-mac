@@ -305,6 +305,11 @@ internal static class MetalTextureSnapshots
         var textureDepth = GetTextureVolumeDepth(
             descriptor.Type,
             descriptor.Depth);
+        if (descriptor.Address == 0)
+        {
+            texture = CreateNullGuestDrawTexture(isStorage, descriptor, isArrayed, textureDepth);
+            return true;
+        }
         if ((descriptor.Type != Gen5TextureType1D &&
              descriptor.Type != Gen5TextureType2D &&
              descriptor.Type != Gen5TextureType3D &&
@@ -317,12 +322,10 @@ internal static class MetalTextureSnapshots
             descriptor.Height > 8192)
         {
             TraceTextureFallback(descriptor, "invalid-descriptor");
-            texture = CreateFallbackGuestDrawTexture(
+            texture = CreateNullGuestDrawTexture(
                 isStorage,
-                descriptor.Format,
-                descriptor.NumberType,
+                descriptor,
                 isArrayed,
-                descriptor.Type,
                 textureDepth);
             return true;
         }
@@ -363,12 +366,10 @@ internal static class MetalTextureSnapshots
             TraceTextureFallback(
                 descriptor,
                 $"invalid-byte-count:{sourceByteCount}");
-            texture = CreateFallbackGuestDrawTexture(
+            texture = CreateNullGuestDrawTexture(
                 isStorage,
-                descriptor.Format,
-                descriptor.NumberType,
+                descriptor,
                 isArrayed,
-                descriptor.Type,
                 textureDepth);
             return true;
         }
@@ -423,12 +424,10 @@ internal static class MetalTextureSnapshots
         if (physicalSourceByteCount > MaximumSnapshotBytes ||
             physicalSourceByteCount > int.MaxValue)
         {
-            texture = CreateFallbackGuestDrawTexture(
+            texture = CreateNullGuestDrawTexture(
                 isStorage,
-                descriptor.Format,
-                descriptor.NumberType,
+                descriptor,
                 isArrayed,
-                descriptor.Type,
                 textureDepth);
             return true;
         }
@@ -521,11 +520,10 @@ internal static class MetalTextureSnapshots
                         mipTailElementY) ?? storageSource
                             .AsSpan(0, checked((int)sourceByteCount))
                             .ToArray();
-                    if (linearStorage.AsSpan().IndexOfAnyExcept((byte)0) >= 0)
-                    {
-                        linearNonzero = true;
-                        initialPixels = linearStorage;
-                    }
+                    linearNonzero = linearStorage.AsSpan().IndexOfAnyExcept((byte)0) >= 0;
+                    // A successful zero-filled read is still a complete snapshot.
+                    // Dropping it sends the resource through base-slice cache recovery.
+                    initialPixels = linearStorage;
                 }
 
                 if (readSucceeded &&
@@ -842,12 +840,10 @@ internal static class MetalTextureSnapshots
             TraceTextureFallback(
                 descriptor,
                 $"guest-read-failed:{sourceByteCount}");
-            texture = CreateFallbackGuestDrawTexture(
+            texture = CreateNullGuestDrawTexture(
                 isStorage,
-                descriptor.Format,
-                descriptor.NumberType,
+                descriptor,
                 isArrayed,
-                descriptor.Type,
                 textureDepth);
             return true;
         }
@@ -1251,30 +1247,31 @@ internal static class MetalTextureSnapshots
         }
     }
 
-    private static GuestDrawTexture CreateFallbackGuestDrawTexture(
+    private static GuestDrawTexture CreateNullGuestDrawTexture(
         bool isStorage,
-        uint format,
-        uint numberType,
-        bool isArrayed = false,
-        uint type = Gen5TextureType2D,
-        uint depth = 1)
+        TextureDescriptor descriptor,
+        bool isArrayed,
+        uint depth)
     {
-        var fallbackFormat = format == 0 ? 10u : format;
-        var fallbackNumberType = numberType;
-        return new(
-            0,
-            1,
-            1,
-            fallbackFormat,
-            fallbackNumberType,
-            [0, 0, 0, 255],
-            IsFallback: true,
-            IsStorage: isStorage,
-            MipLevels: 1,
-            MipLevel: 0,
-            ArrayedView: isArrayed,
-            Type: type,
-            Depth: GetTextureVolumeDepth(type, depth));
+        // A null guest resource can bind a typed zero image. A failed read of a
+        // real allocation must never be replaced with fabricated texels.
+        if (descriptor.Address != 0)
+            throw new NotSupportedException(
+                $"Metal cannot snapshot guest texture addr=0x{descriptor.Address:X} " +
+                $"type={descriptor.Type} size={descriptor.Width}x{descriptor.Height} " +
+                $"depth={descriptor.Depth} format={descriptor.Format}/{descriptor.NumberType} tile={descriptor.TileMode}.");
+        if (descriptor.Type is 14 or 15)
+            throw new NotSupportedException("Metal cannot materialize per-sample null MSAA snapshots.");
+        var type = descriptor.Type is >= 8 and <= 13 ? descriptor.Type : Gen5TextureType2D;
+        var format = descriptor.Format == 0 ? 10u : descriptor.Format;
+        var layers = type == Gen5TextureTypeCube ? 6u : 1u;
+        var volumeDepth = GetTextureVolumeDepth(type, depth);
+        var nativeFormat = MetalGuestFormats.DecodeTextureFormat(format, descriptor.NumberType);
+        var bytes = checked(MetalGuestFormats.GetTextureByteCount(nativeFormat, 1, 1) *
+            Math.Max(layers, volumeDepth));
+        return new(0, 1, 1, format, descriptor.NumberType, new byte[checked((int)bytes)],
+            IsFallback: true, IsStorage: isStorage, Pitch: 1,
+            ArrayedView: isArrayed, ArrayLayers: layers, Type: type, Depth: volumeDepth);
     }
 
     private static byte[] ConvertRgba16FloatToRgba8(ReadOnlySpan<byte> source, uint width, uint height)

@@ -1510,7 +1510,7 @@ internal static partial class MetalVideoPresenter
         // snapshot, resolved like the Vulkan presenter: a guest depth image
         // first (shadow-style depth sampling), then the current image or a
         // retired variant at the same address, scored by descriptor match.
-        if (texture.RgbaPixels.Length == 0 && texture.Address != 0)
+        if (texture.RgbaPixels.Length == 0 && texture.TiledSource is null && texture.Address != 0)
         {
             if (TryCreateDepthSampleTexture(device, blitCommandBuffer, texture, out var depthSample))
             {
@@ -1588,10 +1588,16 @@ internal static partial class MetalVideoPresenter
             // detile each into its layer-major linear region so the reconstructed
             // pixels match what the CPU array-upload path produced pre-GPU-detile.
             // A plain 2D texture is just one layer.
-            var layers = Math.Max((int)texture.ArrayLayers, 1);
+            var deferredShape = GuestTextureShape(texture);
+            var layers = checked((int)Math.Max(deferredShape.ArrayLength, deferredShape.Depth));
             var sliceLinearBytes =
                 detileParameters.ElementsWide * detileParameters.ElementsHigh * detileParameters.BytesPerElement;
             var sliceTiledBytes = tiledSource.Length / layers;
+            var requiredTiledBytes = checked((long)detileParameters.BlocksPerRow *
+                ((detileParameters.ElementsHigh + detileParameters.BlockHeight - 1) / detileParameters.BlockHeight) *
+                detileParameters.BlockBytes);
+            if (tiledSource.Length % layers != 0 || sliceTiledBytes < requiredTiledBytes)
+                throw new InvalidOperationException($"Metal tiled snapshot 0x{texture.Address:X} does not cover every source block.");
             var linear = new byte[sliceLinearBytes * layers];
             var detiledAll = true;
             for (var layer = 0; layer < layers; layer++)
@@ -1606,10 +1612,9 @@ internal static partial class MetalVideoPresenter
                 }
             }
 
-            if (detiledAll)
-            {
-                texture = texture with { RgbaPixels = linear };
-            }
+            if (!detiledAll)
+                throw new NotSupportedException($"Metal cannot detile texture 0x{texture.Address:X} type={texture.Type} tile={texture.TileMode}.");
+            texture = texture with { RgbaPixels = linear };
         }
 
         // AGC ships the raw (detiled) source texels; create the texture in the
@@ -1888,7 +1893,12 @@ internal static partial class MetalVideoPresenter
         var available = (ulong)texture.RgbaPixels.Length / bytesPerImage;
         if (available < Math.Max(shape.Depth, shape.ArrayLength))
         {
-            throw new InvalidOperationException("Metal layered texture snapshot does not cover every layer/depth slice.");
+            throw new InvalidOperationException(
+                $"Metal layered texture snapshot does not cover every layer/depth slice: " +
+                $"addr=0x{texture.Address:X} type={texture.Type} size={texture.Width}x{texture.Height} " +
+                $"layers={shape.ArrayLength} depth={shape.Depth} pitch={pitch} " +
+                $"format={texture.Format}/{texture.NumberType} tile={texture.TileMode} " +
+                $"source_bytes={texture.RgbaPixels.Length} slice_bytes={bytesPerImage} fallback={texture.IsFallback}.");
         }
 
         var selector = MetalNative.Selector("replaceRegion:mipmapLevel:slice:withBytes:bytesPerRow:bytesPerImage:");
