@@ -1,0 +1,27 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Windows x86-64 direct-execution integration (W10): vectored exception
+       handling and the unhandled filter, the emitted fault pre-filter thunk,
+       TEB stack-bounds swapping, Win32 TLS/thread primitives and suspended
+       thread-context capture. Referenced only by win-* builds; see the
+       conditional ProjectReference in SharpEmu.CLI.csproj. Contains no Darwin
+       or Linux declaration, layout or OS check. -->
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\SharpEmu.Core\SharpEmu.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The fault pre-filter thunk and its exception-code filter are covered
+         by tests that only run on Windows; see tests/SharpEmu.Libs.Tests/Cpu. -->
+    <InternalsVisibleTo Include="SharpEmu.Libs.Tests" />
+  </ItemGroup>
+</Project>

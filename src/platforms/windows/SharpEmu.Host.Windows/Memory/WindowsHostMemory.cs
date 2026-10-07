@@ -1,0 +1,201 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+using System.Runtime.InteropServices;
+
+using SharpEmu.HLE;
+using SharpEmu.HLE.GuestMemory;
+using SharpEmu.HLE.Host;
+
+namespace SharpEmu.Host.Windows;
+
+/// <summary>
+/// Windows implementation over VirtualAlloc/VirtualFree/VirtualProtect/VirtualQuery.
+/// Sealed so the JIT can devirtualize interface calls on fault-handling hot paths.
+/// </summary>
+internal sealed unsafe partial class WindowsHostMemory : IHostMemoryRaw
+{
+    private const uint MEM_COMMIT = 0x1000;
+    private const uint MEM_RESERVE = 0x2000;
+    private const uint MEM_RELEASE = 0x8000;
+    private const uint MEM_FREE = 0x10000;
+
+    private const uint PAGE_NOACCESS = 0x01;
+    private const uint PAGE_READONLY = 0x02;
+    private const uint PAGE_READWRITE = 0x04;
+    private const uint PAGE_WRITECOPY = 0x08;
+    private const uint PAGE_EXECUTE = 0x10;
+    private const uint PAGE_EXECUTE_READ = 0x20;
+    private const uint PAGE_EXECUTE_READWRITE = 0x40;
+    private const uint PAGE_EXECUTE_WRITECOPY = 0x80;
+
+    public ulong AllocateRaw(ulong desiredAddress, ulong size, uint allocationType, uint rawProtection) =>
+        (ulong)VirtualAlloc((void*)desiredAddress, (nuint)size, allocationType, rawProtection);
+
+    public bool FreeRaw(ulong address, ulong size, uint freeType) =>
+        VirtualFree((void*)address, (nuint)size, freeType);
+
+    public nuint QueryRaw(ulong address, out HostMemory.BasicInfo info)
+    {
+        info = default;
+        fixed (HostMemory.BasicInfo* buffer = &info)
+            return VirtualQuery((void*)address, buffer, (nuint)sizeof(HostMemory.BasicInfo));
+    }
+
+    public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection)
+    {
+        return (ulong)VirtualAlloc((void*)desiredAddress, (nuint)size, MEM_COMMIT | MEM_RESERVE, ToNativeProtection(protection));
+    }
+
+    public ulong Reserve(ulong desiredAddress, ulong size, HostPageProtection protection)
+    {
+        return (ulong)VirtualAlloc((void*)desiredAddress, (nuint)size, MEM_RESERVE, ToNativeProtection(protection));
+    }
+
+    public bool Commit(ulong address, ulong size, HostPageProtection protection)
+    {
+        return VirtualAlloc((void*)address, (nuint)size, MEM_COMMIT, ToNativeProtection(protection)) != null;
+    }
+
+    public bool Free(ulong address)
+    {
+        return VirtualFree((void*)address, 0, MEM_RELEASE);
+    }
+
+    public bool Protect(ulong address, ulong size, HostPageProtection protection, out uint rawOldProtection)
+    {
+        return VirtualProtect((void*)address, (nuint)size, ToNativeProtection(protection), out rawOldProtection);
+    }
+
+    public bool ProtectRaw(ulong address, ulong size, uint rawProtection, out uint rawOldProtection)
+    {
+        return VirtualProtect((void*)address, (nuint)size, rawProtection, out rawOldProtection);
+    }
+
+    public bool Query(ulong address, out HostRegionInfo info)
+    {
+        var started = ReservationDiagnostics.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+        if (QueryRaw(address, out var mbi) == 0)
+        {
+            ReservationDiagnostics.Record("page-query-failed", address, started: started);
+            info = default;
+            return false;
+        }
+
+        info = new HostRegionInfo(
+            mbi.BaseAddress,
+            mbi.AllocationBase,
+            mbi.RegionSize,
+            ToRegionState(mbi.State),
+            mbi.State,
+            ToHostProtection(mbi.Protect),
+            mbi.Protect,
+            mbi.AllocationProtect);
+        ReservationDiagnostics.Record("page-query", address, regionBase: mbi.BaseAddress,
+            regionSize: mbi.RegionSize, state: mbi.State, success: true, started: started);
+        return true;
+    }
+
+    public void FlushInstructionCache(ulong address, ulong size)
+    {
+        FlushInstructionCache(GetCurrentProcess(), (void*)address, (nuint)size);
+    }
+
+    public bool TryQueryAllocation(ulong address, out HostAddressRange range)
+    {
+        range = default;
+        try
+        {
+            var started = ReservationDiagnostics.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+            var success = QueryVirtualMemoryInformation(GetCurrentProcess(), (void*)address, 0,
+                out var info, (nuint)sizeof(MemoryRegionInformation), null);
+            var error = success ? 0 : Marshal.GetLastPInvokeError();
+            ReservationDiagnostics.Record(success ? "allocation-query-success" : "allocation-query-failed", address, regionBase: info.AllocationBase,
+                regionSize: info.RegionSize, error: error, success: success, started: started);
+            if (!success ||
+                info.RegionSize == 0 || info.AllocationBase > address ||
+                info.RegionSize > ulong.MaxValue - info.AllocationBase ||
+                address - info.AllocationBase >= info.RegionSize)
+                return false;
+            range = new HostAddressRange(info.AllocationBase, info.RegionSize);
+            return true;
+        }
+        catch (EntryPointNotFoundException)
+        {
+            ReservationDiagnostics.Record("allocation-query-unavailable", address, error: 127);
+            return false;
+        }
+    }
+
+    private static uint ToNativeProtection(HostPageProtection protection) => protection switch
+    {
+        HostPageProtection.NoAccess => PAGE_NOACCESS,
+        HostPageProtection.ReadOnly => PAGE_READONLY,
+        HostPageProtection.ReadWrite => PAGE_READWRITE,
+        HostPageProtection.Execute => PAGE_EXECUTE,
+        HostPageProtection.ReadExecute => PAGE_EXECUTE_READ,
+        HostPageProtection.ReadWriteExecute => PAGE_EXECUTE_READWRITE,
+        HostPageProtection.ExecuteWriteCopy => PAGE_EXECUTE_WRITECOPY,
+        _ => throw new ArgumentOutOfRangeException(nameof(protection), protection, null),
+    };
+
+    private static HostRegionState ToRegionState(uint state) => state switch
+    {
+        MEM_COMMIT => HostRegionState.Committed,
+        MEM_RESERVE => HostRegionState.Reserved,
+        MEM_FREE => HostRegionState.Free,
+        _ => HostRegionState.Free,
+    };
+
+    private static HostPageProtection ToHostProtection(uint rawProtection)
+    {
+        // Strip PAGE_GUARD/PAGE_NOCACHE/PAGE_WRITECOMBINE modifiers; callers needing
+        // them compare HostRegionInfo.RawProtection directly.
+        return (rawProtection & 0xFF) switch
+        {
+            PAGE_READONLY => HostPageProtection.ReadOnly,
+            PAGE_READWRITE => HostPageProtection.ReadWrite,
+            PAGE_WRITECOPY => HostPageProtection.ReadWrite,
+            PAGE_EXECUTE => HostPageProtection.Execute,
+            PAGE_EXECUTE_READ => HostPageProtection.ReadExecute,
+            PAGE_EXECUTE_READWRITE => HostPageProtection.ReadWriteExecute,
+            PAGE_EXECUTE_WRITECOPY => HostPageProtection.ExecuteWriteCopy,
+            _ => HostPageProtection.NoAccess,
+        };
+    }
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial void* VirtualAlloc(void* lpAddress, nuint dwSize, uint flAllocationType, uint flProtect);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool VirtualFree(void* lpAddress, nuint dwSize, uint dwFreeType);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool VirtualProtect(void* lpAddress, nuint dwSize, uint flNewProtect, out uint lpflOldProtect);
+
+    [LibraryImport("kernel32.dll")]
+    private static partial nuint VirtualQuery(void* lpAddress, HostMemory.BasicInfo* lpBuffer, nuint dwLength);
+
+    [LibraryImport("kernel32.dll")]
+    private static partial void* GetCurrentProcess();
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool FlushInstructionCache(void* hProcess, void* lpBaseAddress, nuint dwSize);
+
+    [LibraryImport("kernelbase.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool QueryVirtualMemoryInformation(void* process, void* address,
+        int informationClass, out MemoryRegionInformation info, nuint size, nuint* returned);
+
+    private struct MemoryRegionInformation
+    {
+        public ulong AllocationBase;
+        public uint AllocationProtect;
+        public uint Flags;
+        public ulong RegionSize;
+        public ulong CommitSize;
+    }
+}
