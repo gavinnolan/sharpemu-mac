@@ -4,9 +4,9 @@
 using System.Text.Json;
 using SharpEmu.Logging;
 
-namespace SharpEmu.GUI;
+namespace SharpEmu.Application;
 
-public sealed class GuiSettings
+public sealed class ApplicationSettings
 {
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
@@ -106,7 +106,7 @@ public sealed class GuiSettings
     // ~/Library/Application Support/SharpEmu there.
     public static string SettingsPath => SharpEmuPaths.DataPath("gui-settings.json");
 
-    public static GuiSettings Load()
+    public static ApplicationSettings Load()
     {
         try
         {
@@ -121,16 +121,16 @@ public sealed class GuiSettings
             // Corrupt or unreadable settings fall back to defaults.
         }
 
-        return new GuiSettings();
+        return new ApplicationSettings();
     }
 
     /// <summary>
     /// Deserializes settings and normalizes null references and null or empty list
     /// entries introduced by JSON. Empty scalar strings remain unchanged.
     /// </summary>
-    internal static GuiSettings NormalizeFromJson(string json)
+    public static ApplicationSettings NormalizeFromJson(string json)
     {
-        var settings = JsonSerializer.Deserialize<GuiSettings>(json, SerializerOptions) ?? new GuiSettings();
+        var settings = JsonSerializer.Deserialize<ApplicationSettings>(json, SerializerOptions) ?? new ApplicationSettings();
 
         settings.GameFolders = FilterNullOrEmpty(settings.GameFolders);
         settings.ExcludedGames = FilterNullOrEmpty(settings.ExcludedGames);
@@ -226,7 +226,7 @@ public sealed class GuiSettings
 
     private static string NormalizeResolution(string? value)
     {
-        if (!HostDisplayOptions.TryParseResolution(value, out var width, out var height))
+        if (!DisplayResolution.TryParse(value, out var width, out var height))
         {
             return "1920x1080";
         }
@@ -234,7 +234,7 @@ public sealed class GuiSettings
         return $"{width}x{height}";
     }
 
-    internal static string NormalizeDefaultProfile(string? value)
+    public static string NormalizeDefaultProfile(string? value)
     {
         var trimmed = value?.Trim();
         return string.IsNullOrEmpty(trimmed) ? "Sharp" : trimmed;

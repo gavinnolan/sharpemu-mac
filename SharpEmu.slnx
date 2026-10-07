@@ -5,6 +5,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/SharpEmu.Application/SharpEmu.Application.csproj" />
     <Project Path="src/SharpEmu.Fonts.Abstractions/SharpEmu.Fonts.Abstractions.csproj" />
     <Project Path="src/SharpEmu.LibAtrac9/SharpEmu.LibAtrac9.csproj" />
     <Project Path="src/SharpEmu.CLI/SharpEmu.CLI.csproj" />
@@ -39,6 +40,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <Project Path="src/platforms/windows/SharpEmu.Host.Windows/SharpEmu.Host.Windows.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/SharpEmu.Application.Tests/SharpEmu.Application.Tests.csproj" />
     <Project Path="tests/SharpEmu.Fonts.Tests/SharpEmu.Fonts.Tests.csproj" />
     <Project Path="tests/SharpEmu.Gpu.Metal.Tests/SharpEmu.Gpu.Metal.Tests.csproj" />
     <Project Path="tests/SharpEmu.Libs.Tests/SharpEmu.Libs.Tests.csproj" />

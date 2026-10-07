@@ -12,7 +12,7 @@ using System.Text.RegularExpressions;
 using System.Reflection;
 using SharpEmu.Logging;
 
-namespace SharpEmu.GUI;
+namespace SharpEmu.Application;
 
 /// <summary>Self-contained updater; the emulator layers do not depend on it.</summary>
 public static class Updater

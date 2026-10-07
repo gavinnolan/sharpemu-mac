@@ -6,6 +6,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <ProjectReference Include="../SharpEmu.Application/SharpEmu.Application.csproj" />
     <ProjectReference Include="..\SharpEmu.Core\SharpEmu.Core.csproj" />
     <ProjectReference Include="..\SharpEmu.Debugger\SharpEmu.Debugger.csproj" />
     <ProjectReference Include="..\SharpEmu.GUI\SharpEmu.GUI.csproj" />
@@ -190,7 +191,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <TargetPath>LICENSE.txt</TargetPath>
       <Visible>False</Visible>
     </Content>
-    <Content Include="..\SharpEmu.GUI\Languages\*.json" Condition="'$(Configuration)' != 'Release'">
+    <Content Include="..\SharpEmu.Application\Languages\*.json" Condition="'$(Configuration)' != 'Release'">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <TargetPath>Languages\%(Filename)%(Extension)</TargetPath>
       <Visible>False</Visible>

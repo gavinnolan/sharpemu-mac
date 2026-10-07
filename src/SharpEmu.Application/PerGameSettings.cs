@@ -5,7 +5,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using SharpEmu.Logging;
 
-namespace SharpEmu.GUI;
+namespace SharpEmu.Application;
 
 public sealed class PerGameSettings
 {
@@ -93,7 +93,7 @@ public sealed class PerGameSettings
     }
 
     // A null list inherits global settings; only entries in a present list are sanitized.
-    internal static PerGameSettings? NormalizeFromJson(string json)
+    public static PerGameSettings? NormalizeFromJson(string json)
     {
         var settings = JsonSerializer.Deserialize<PerGameSettings>(json, SerializerOptions);
         if (settings?.EnvironmentToggles is { } toggles)
@@ -114,7 +114,7 @@ public sealed class PerGameSettings
     /// Removes values that already match the global configuration so the
     /// remaining object contains only effective per-game overrides.
     /// </summary>
-    internal void RemoveInheritedValues(GuiSettings global)
+    public void RemoveInheritedValues(ApplicationSettings global)
     {
         if (string.Equals(LogLevel, global.LogLevel, StringComparison.OrdinalIgnoreCase))
         {
@@ -283,7 +283,7 @@ public sealed record EffectiveLaunchSettings(
     string OverlayMode,
     IReadOnlyList<string> EnvironmentToggles)
 {
-    public static EffectiveLaunchSettings Resolve(GuiSettings global, PerGameSettings? perGame) => new(
+    public static EffectiveLaunchSettings Resolve(ApplicationSettings global, PerGameSettings? perGame) => new(
         perGame?.LogLevel ?? global.LogLevel,
         perGame?.ImportTraceLimit ?? global.ImportTraceLimit,
         perGame?.StrictDynlibResolution ?? global.StrictDynlibResolution,

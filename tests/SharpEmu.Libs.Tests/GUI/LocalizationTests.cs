@@ -104,7 +104,7 @@ public sealed class LocalizationTests : IDisposable
     [Fact]
     public void EmbeddedLanguagesProvideDiscordButtonLabels()
     {
-        var assembly = typeof(Localization).Assembly;
+        var assembly = typeof(LauncherLocalization).Assembly;
         var resourceNames = assembly.GetManifestResourceNames()
             .Where(name =>
                 name.StartsWith("Languages.", StringComparison.Ordinal) &&
@@ -149,7 +149,7 @@ public sealed class LocalizationTests : IDisposable
     [Fact]
     public void EmbeddedLanguages_ContainEveryEnglishOptionsKey()
     {
-        var assembly = typeof(Localization).Assembly;
+        var assembly = typeof(LauncherLocalization).Assembly;
         var resourceNames = assembly.GetManifestResourceNames()
             .Where(name =>
                 name.StartsWith("Languages.", StringComparison.Ordinal) &&

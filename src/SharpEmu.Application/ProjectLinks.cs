@@ -3,7 +3,7 @@
 
 using System.Reflection;
 
-namespace SharpEmu.GUI;
+namespace SharpEmu.Application;
 
 /// <summary>
 /// Every GitHub URL the GUI uses, derived from one build-time repository
@@ -18,7 +18,7 @@ namespace SharpEmu.GUI;
 /// that is not upstream, replacing this fork's binaries with ones that lack
 /// its changes.
 /// </remarks>
-internal static class ProjectLinks
+public static class ProjectLinks
 {
     private const string MetadataKey = "SharpEmu.RepositorySlug";
 

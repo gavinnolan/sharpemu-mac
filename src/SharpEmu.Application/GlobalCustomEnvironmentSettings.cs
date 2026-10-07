@@ -4,9 +4,9 @@
 using System.Text.Json;
 using SharpEmu.Logging;
 
-namespace SharpEmu.GUI;
+namespace SharpEmu.Application;
 
-internal sealed class GlobalCustomEnvironmentSettings
+public sealed class GlobalCustomEnvironmentSettings
 {
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {

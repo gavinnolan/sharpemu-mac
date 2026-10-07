@@ -4,6 +4,7 @@
 using SharpEmu.Core.Runtime;
 using SharpEmu.Core.Cpu;
 using SharpEmu.GUI;
+using SharpEmu.Application;
 using SharpEmu.HLE;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.Logging;
@@ -1354,7 +1355,7 @@ internal static partial class Program
         try
         {
             var effective = EffectiveLaunchSettings.Resolve(
-                GuiSettings.Load(),
+                ApplicationSettings.Load(),
                 PerGameSettings.Load(TryReadTitleId(ebootPath)));
 
             var windowMode = TryParseWindowMode(effective.WindowMode, out var parsedWindowMode)

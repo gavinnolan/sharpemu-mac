@@ -1,13 +1,13 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-namespace SharpEmu.GUI;
+namespace SharpEmu.Application;
 
 /// <summary>
 /// Watches configured game folders and collapses filesystem bursts into one
 /// library refresh request
 /// </summary>
-internal sealed class GameLibraryWatcher : IDisposable
+public sealed class GameLibraryWatcher : IDisposable
 {
     private static readonly TimeSpan DefaultDebounceInterval = TimeSpan.FromMilliseconds(600);
 
@@ -17,7 +17,7 @@ internal sealed class GameLibraryWatcher : IDisposable
     private Timer? _debounceTimer;
     private bool _disposed;
 
-    internal GameLibraryWatcher(TimeSpan? debounceInterval = null)
+    public GameLibraryWatcher(TimeSpan? debounceInterval = null)
     {
         _debounceInterval = debounceInterval ?? DefaultDebounceInterval;
     }

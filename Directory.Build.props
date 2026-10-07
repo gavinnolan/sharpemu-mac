@@ -16,7 +16,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
          check, release download, latest-commit banner, "view source" links —
          is derived from this one slug, surfaced to the app as
          [AssemblyMetadata("SharpEmu.RepositorySlug")] and read by
-         SharpEmu.GUI.ProjectLinks. It must name the repository this binary
+         SharpEmu.Application.ProjectLinks. It must name the repository this binary
          was built from: a fork that queries upstream's releases would offer
          upstream archives as an in-place update and overwrite itself with
          binaries that do not contain its own changes. -->

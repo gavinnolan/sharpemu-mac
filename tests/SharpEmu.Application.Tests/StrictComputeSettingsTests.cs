@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Text.Json;
-using SharpEmu.GUI;
+using SharpEmu.Application;
+using GuiSettings = SharpEmu.Application.ApplicationSettings;
 using Xunit;
 
-namespace SharpEmu.Libs.Tests.GUI;
+namespace SharpEmu.Application.Tests;
 
 public sealed class StrictComputeSettingsTests
 {

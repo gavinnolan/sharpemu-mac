@@ -1,9 +1,9 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-namespace SharpEmu.GUI;
+namespace SharpEmu.Application;
 
-internal static class GameLibraryPath
+public static class GameLibraryPath
 {
     public static StringComparer Comparer { get; } =
         OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()
