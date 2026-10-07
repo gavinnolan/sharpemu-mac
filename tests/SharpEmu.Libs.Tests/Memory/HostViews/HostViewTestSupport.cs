@@ -21,16 +21,21 @@ internal static class HostViewTestSupport
     public static ulong HoleSize(IHostViewMemory views) => AlignUp(4 * Segment, views.Granularity);
 
     // Keep search tests below the guest address limit (0xFC_0000_0000) and
-    // outside reserved graphics memory. Stay well above the address the host
-    // hands out for an "anywhere" mapping too: on macOS/arm64 that is
-    // 0x70_0000_0000, which is exactly where this window used to start, so a
-    // background thread allocating anything at all landed on the range a probe
-    // had just freed for its caller to reserve.
-    private const ulong ProbeWindowStart = 0xA0_0000_0000UL;
-    private const ulong ProbeWindowEnd = 0xF0_0000_0000UL;
+    // outside reserved graphics memory.
+    //
+    // Two constraints fix where this window sits. It may not start at the
+    // address the host hands out for an "anywhere" mapping - 0x70_0000_0000 on
+    // macOS/arm64 - because a probe frees its range before the caller reserves
+    // it again, so a background thread allocating anything at all could take
+    // the range in between. And it has to stay narrow and low, because
+    // LargeVirtualReservationFallsBackToSparseGuestRange needs a contiguous
+    // 512 GiB hole above it.
+    private const ulong ProbeWindowStart = 0x72_0000_0000UL;
+    private const ulong ProbeWindowEnd = 0x78_0000_0000UL;
 
-    // One slot has to hold the largest range any caller probes for.
-    private const ulong ProbeSlot = 0x400_0000UL;
+    // Slot size for a small probe. A larger probe rounds up to a multiple of
+    // this, so the window holds many small slots and few large ones.
+    private const ulong ProbeSlotUnit = 0x100_0000UL;
 
     private static ulong _probeSlotCursor;
 
@@ -46,17 +51,19 @@ internal static class HostViewTestSupport
     public static ulong ProbeGuestAddress(IHostViewMemory views, ulong size)
     {
         size = AlignUp(size, views.Granularity);
-        Assert.True(size <= ProbeSlot, $"A probe of 0x{size:X} bytes does not fit one slot.");
-        var step = AlignUp(Math.Max(size, 0x1000000UL), views.Granularity);
-        var slots = (ProbeWindowEnd - ProbeWindowStart) / ProbeSlot;
+        var slot = AlignUp(Math.Max(size, ProbeSlotUnit), ProbeSlotUnit);
+        Assert.True(slot <= ProbeWindowEnd - ProbeWindowStart,
+            $"A probe of 0x{size:X} bytes does not fit the probe window.");
+        var step = AlignUp(Math.Max(size, ProbeSlotUnit), views.Granularity);
+        var slots = (ProbeWindowEnd - ProbeWindowStart) / slot;
         var firstSlot = Interlocked.Increment(ref _probeSlotCursor) - 1;
 
         // Walk every slot once, starting from this call's own, so a host mapping
         // that happens to sit in one slot does not fail the test.
         for (var attempt = 0UL; attempt < slots; attempt++)
         {
-            var slotBase = ProbeWindowStart + (firstSlot + attempt) % slots * ProbeSlot;
-            for (var candidate = slotBase; candidate + size <= slotBase + ProbeSlot; candidate += step)
+            var slotBase = ProbeWindowStart + (firstSlot + attempt) % slots * slot;
+            for (var candidate = slotBase; candidate + size <= slotBase + slot; candidate += step)
             {
                 if (views.ReserveHole(candidate, size) != candidate) continue;
                 Assert.True(views.FreeHole(candidate, size));
