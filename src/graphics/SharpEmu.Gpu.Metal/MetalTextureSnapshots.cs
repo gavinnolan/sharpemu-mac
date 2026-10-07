@@ -82,10 +82,14 @@ internal static class MetalTextureSnapshots
                     throw new NotSupportedException(
                         $"Metal compressed storage images require explicit guest block-write semantics: " +
                         $"addr=0x{binding.Descriptor.Address:X} type={binding.Descriptor.Type} format={binding.Descriptor.Format}/{binding.Descriptor.NumberType} tile={binding.Descriptor.TileMode}.");
-                if (binding.IsStorage && binding.Descriptor.Type == Gen5TextureType3D && binding.Descriptor.TileMode == 5)
+                // No general XYZ sampled-volume path is qualified. In particular,
+                // cached/known upload shortcuts cannot authorize an XY-only decode.
+                if (!binding.IsStorage && binding.Descriptor.Type == Gen5TextureType3D && binding.Descriptor.TileMode != 0)
+                    throw new NotSupportedException("Metal sampled tiled volumes require a qualified 3D source and sampled-view consumer; XY detiling is unsupported.");
+                if (binding.Descriptor.Type == Gen5TextureType3D && binding.Descriptor.TileMode == 5)
                 {
                     var d = binding.Descriptor;
-                    if (binding.MipLevel != 0 || binding.IsArrayed ||
+                    if (!binding.IsStorage || binding.MipLevel != 0 || binding.IsArrayed ||
                         !binding.Shape.Volume || !binding.Shape.Storage || binding.Shape.NumericClass != TextureNumericClass.Uint ||
                         binding.Shape.Arrayed || binding.Shape.Cube || binding.Shape.DynamicMip || binding.Shape.OneDimensional ||
                         binding.Shape.Multisampled || binding.Shape.DepthCompare || binding.Shape.R128 || binding.Shape.Atomic ||

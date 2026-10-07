@@ -371,11 +371,28 @@ public sealed class MetalStorageTextureFormatTests
         }
         var acceptedBinding = new AgcExports.TranslatedImageBinding(valid, true, 0, [], ResourceDescriptor: baseline,
             Shape: new ShaderImageShape(true, false, true, false, TextureNumericClass.Uint), Access: GuestImageAccess.Write);
-        foreach (var binding in new[] { acceptedBinding with { MipLevel = 1 }, acceptedBinding with { IsArrayed = true },
+        foreach (var binding in new[] { acceptedBinding with { IsStorage = false }, acceptedBinding with { MipLevel = 1 }, acceptedBinding with { IsArrayed = true },
             acceptedBinding with { Shape = acceptedBinding.Shape with { NumericClass = TextureNumericClass.Float } },
             acceptedBinding with { Shape = acceptedBinding.Shape with { Atomic = true } } })
             Assert.Throws<NotSupportedException>(() => MetalTextureSnapshots.CreateTextureSnapshots(
                 new CpuContext(memory, Generation.Gen5), [binding], out _));
+        Assert.Equal(0, memory.Reads);
+    }
+
+    [Theory]
+    [InlineData(5u)]
+    [InlineData(9u)]
+    [InlineData(27u)]
+    public void SampledTiledVolumeCannotReachKnownUploadOrXyDecodeBeforeQualification(uint tile)
+    {
+        var raw = SharpEmu.Tests.Fixtures.Tile5VolumeOracle.Raw;
+        raw[3] = (raw[3] & ~(31u << 20)) | (tile << 20);
+        Assert.True(AgcBackendServices.TryDecodeTextureDescriptor(raw, out var descriptor));
+        var memory = new SourceMemory(descriptor.Address, new byte[131072]);
+        var binding = new AgcExports.TranslatedImageBinding(descriptor, false, 0, [], ResourceDescriptor: raw,
+            Shape: new ShaderImageShape(true, false, false, false, TextureNumericClass.Uint), Access: GuestImageAccess.Read);
+        Assert.Throws<NotSupportedException>(() => MetalTextureSnapshots.CreateTextureSnapshots(
+            new CpuContext(memory, Generation.Gen5), [binding], out _));
         Assert.Equal(0, memory.Reads);
     }
 
