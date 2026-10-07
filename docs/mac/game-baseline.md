@@ -48,3 +48,37 @@ alone does not establish the provenance of an older preexisting bundle.
 
 These runs overlap compilation in other worktrees. They are compatibility and
 failure checks, not quiet-host performance measurements.
+
+## 2026-10-07, source-linked nine-title corpus at 9498713
+
+The [integrated validation report](validation/integration-20261007.md) records
+the final native bundle, required-device test results, cross-builds, game phases,
+per-title failure causes and shutdown limits. Each run includes source metadata
+and actual binary hashes.
+
+Sarah now has screenshot-verified directional movement in the outdoor scene.
+Void's title menu is readable instead of the older broad striping, but New Game
+fails. Quake reaches its warning screen and Superliminal its title/loading room.
+The remaining titles have no verified gameplay. Failures include a missing buffer
+atomic instruction, skipped tiled/mip snapshots, an unsupported real texture
+snapshot and an unrecovered Poppy guest write fault. These are explicit follow-up
+items rather than whole-game success or matched performance comparisons.
+
+## 2026-10-07, source-linked follow-up at b557990
+
+Eight follow-up runs retain matching app payload hashes and separate
+`game-followup-b557990/REPORT.md` evidence under the integrated validation artifacts.
+The atomic abort no longer occurs in Silent Hill, Octopath or Oregon during
+90-second runs. Oregon reaches welcome/legal UI, Octopath an animated loading
+crest, and Silent Hill remains a black guest window. These do not establish
+gameplay. Superliminal reaches menu labels against an almost white background
+and later stalls; SIGTERM times out and requires SIGKILL. Its visual correctness
+is unqualified. Void reaches a readable menu and then a near-black transition;
+its former New Game FailFast does not recur within 90 seconds.
+
+Sarah repeats verified Right/D and Left/A movement in a coherent scene during
+150 seconds. Poppy still exits on SIGBUS. Demon's Souls still has zero guest
+frames and aborts on a skipped tiled/mip texture alias. Quake is not rerun;
+its unchanged 256 MiB snapshot remains above the 128 MiB per-texture cap.
+Reported FPS periods describe these phases, not a gameplay performance comparison.
+Host process stop and clean guest exit remain separate checks.

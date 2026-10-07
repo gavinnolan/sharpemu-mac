@@ -90,9 +90,7 @@ undersized-source checks. Those additional checks do not execute on a GPU.
 - Guest RGB32 (format 13, 12 bytes per texel) is rejected until an explicit
   conversion to Metal RGBA32's 16-byte storage exists.
 
-## Frame timing and game evidence
-
-### Dense buffer atomics (follow-up to the integrated corpus)
+## Dense buffer atomics (follow-up to the integrated corpus)
 
 The clean `9498713` Silent Hill corpus stopped at compute shader
 `0xED96FD5D77F7BBD3`, PC `0x05D8`, with unsupported `BufferAtomicSwap`.
@@ -131,6 +129,8 @@ this bounded SWAP change does not enable or correct it. Evidence and exact
 source/test provenance are preserved in
 `artifacts/validation/integrated-20261007/metal-atomics/`.
 
+## Frame timing and game evidence
+
 The Metal headline FPS counts unique guest frames encoded into committed
 presentation command buffers. `[METAL-PRESENT]` separately reports guest frame
 cadence and host redraw cadence. This avoids measuring host timer redraws or
@@ -140,15 +140,29 @@ scanout or GPU completion time.
 The preserved Void Terrarium baseline at
 `artifacts/runs/20261007-182951-void-base` has severe horizontal striping,
 including text; no successful gameplay is established by that screenshot.
-The deferred-detile ordering bug is a concrete candidate, not a verified
-explanation for that run. Fresh raw/linear texture captures and integrated
-screenshots must establish any improvement.
+The integrated 9498713 menu capture at
+`artifacts/runs/20261007-201452-void-final9498713-corpus/shot-0025.png` has
+readable text and coherent artwork, but New Game still failed on a skipped
+tiled/mip snapshot. Twenty raw/linear captures are retained for follow-up.
+Unknown provenance of the older bundle prevents attributing the visual
+difference to a single commit.
 
-Integrated Sarah startup/menu/intro and Demon's Souls main-loop results are
-tracked by the parent runtime audit. A shader opcode no longer aborting is
-separate from progression, nonzero guest FPS, or correct rendering. The
-Demon's Souls integrated run still reported incomplete layered snapshots;
-the resource descriptor is now included in that error to diagnose the source.
+The [integrated runtime audit](validation/integration-20261007.md) records
+Sarah's verified outdoor movement and the remaining eight-title blockers.
+A shader opcode no longer aborting is separate from progression, nonzero
+guest FPS, or correct rendering. Demon's Souls still produced zero counted
+guest frames before its skipped tiled/mip snapshot failure.
+
+The b557990 follow-up's 365 required-device shader tests and 31 production
+resource cases pass without framework skips. Eight serialized game reruns show
+the former atomic abort cleared in Silent Hill, Octopath and Oregon. Faithful
+queued snapshots clear the earlier cache-loss abort in Superliminal and Void,
+but their visual/progression and stop outcomes remain incomplete. Demon's Souls
+still aborts on an empty sampled GPU alias: an address advertised as available
+is not a lease on a compatible initialized producer. Current-state diagnostics
+are added separately; they do not change alias policy. See the
+[ownership acceptance specification](validation/sampled-gpu-alias-20261007.md)
+and source-linked outcomes in the integrated audit.
 
 ## Reproducing conformance
 

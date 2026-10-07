@@ -79,5 +79,8 @@ also hide legitimate readonly/unmapped faults.
 
 Prototype patch, hash and logs are preserved in
 `artifacts/validation/integrated-20261007/write-fault-claims/`. They are diagnostic
-evidence, not an integration patch. No additional game or GPU run was performed
-for this change, and this work does not establish that Poppy progresses.
+evidence, not an integration patch. The isolated fixtures did not launch a game
+or Metal device. Root integration at 382bc5e subsequently reran Poppy: it still
+exits SIGBUS after 23 seconds, without a captured visual phase. Arm/disarm/rearm
+logs remain deferred and raw signal fields are uncaptured, so that rerun does
+not isolate the fault cause. See the [integrated audit](validation/integration-20261007.md).

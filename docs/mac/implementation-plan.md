@@ -304,6 +304,30 @@ Done when: alias/overlap/remap/CPU-GPU visibility/atomics cases pass on hardware
 with explicit retirement; guest unmap cannot free in-flight physical backing;
 mirrored fallback agrees with supported direct paths. Keep unsafe imports gated.
 
+The 2026-10-07 native fault probe adds a concrete retirement requirement:
+partially unmapping a read-only watched span can make whole-span `mprotect`
+fail while a surviving page stays read-only. The current tracker can discard
+watch ownership despite that restoration failure. Retire watchers transactionally
+with mapped-backing ownership; retain diagnosable ownership until restoration
+succeeds, and verify page-local handling of surviving/unmapped/shared pages.
+Do not repair this by resetting only the range's armed flag or refcount.
+Include controlled restoration failure, overlapping owners, partial rollback,
+remap/reuse and signal-safe retry fixtures. Repeated writes within one dirty epoch
+also need explicit snapshot-version semantics. The Poppy runtime fault has not
+been attributed to this mechanism; preserve that distinction. Reproducer and
+review: `artifacts/validation/integrated-20261007/game-corpus/POPPY-REVIEW.md`.
+
+Sampled GPU images need an explicit producer/source lease, not an address-only
+advertisement. Specify CPU snapshot versus ordered GPU producer, typed shape,
+format, mip and layer identity, retained initialization data, read/write intent,
+queue dependencies and backing retirement before changing alias recovery.
+The [GPU image ownership acceptance specification](validation/sampled-gpu-alias-20261007.md)
+records the concrete DS failure and the positive/negative/runtime gates.
+The [write-fault ownership review](write-fault-ownership.md) records the bounded
+normalized write-only guard and the withheld retry prototype. A retry requires
+an owner-lifetime reservation spanning tracker restoration and host mutation;
+post-syscall epoch checks cannot undo a write-protection change to reused backing.
+
 ### W14 — Session lifecycle and shared-core extraction
 
 Depends on: W06, W10-W13. Priority: P1. Destination: Core, Application.

@@ -49,8 +49,13 @@ Done on `main`:
   readbacks. Guest presentation cadence is measured separately from host redraws.
 
 Real-game results and screenshots are retained under `artifacts/runs/`; see
-[game baseline](game-baseline.md). Dreaming Sarah renders and accepts Enter input;
-this is limited runtime evidence, not qualification of the game corpus. Physical
+[game baseline](game-baseline.md) and the [integrated validation](validation/integration-20261007.md).
+Dreaming Sarah renders outdoor gameplay and responds to directional input;
+Void Terrarium reaches a readable menu, then a near-black transition without
+verified gameplay. The b557990 follow-up clears the former atomic abort in
+Silent Hill, Octopath and Oregon, and the texture-cache abort in Superliminal
+and Void. Loading/progression and visual issues remain; Poppy and Demon's Souls
+retain concrete CPU-fault and GPU alias failures. Physical
 DualSense features and native Windows/Linux fault handling remain unverified.
 Open: W13+ memory/lifecycle work, further contract/package extraction, shader/resource
 coverage and ARM64 execution (deferred, ADR 0003). Process shutdown and clean guest
