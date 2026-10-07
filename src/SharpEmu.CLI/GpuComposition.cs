@@ -32,7 +32,7 @@ internal static class GpuComposition
 #pragma warning restore CA1416
 #elif SHARPEMU_GPU_VULKAN
         SharpEmu.Adapters.Sdl.SdlPlatform.Register();
-        SharpEmu.Libs.Gpu.Vulkan.VulkanGpuBackend.Register();
+        SharpEmu.Gpu.Vulkan.VulkanGpuBackend.Register();
         // RenderDoc needs its layer allowed through the Vulkan loader before the first
         // instance is created; the Metal build has no loader to configure.
         SharpEmu.Libs.VideoOut.RenderDocCapture.ApplyGraphicsLoaderEnvironment();
