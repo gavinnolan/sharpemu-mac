@@ -312,6 +312,10 @@ internal static class MetalTextureSnapshots
             texture = CreateNullGuestDrawTexture(isStorage, descriptor, isArrayed, textureDepth);
             return true;
         }
+        if (isStorage && GetBlockCompressedBlockBytes(descriptor.Format) != 0)
+            throw new NotSupportedException(
+                $"Metal compressed storage images require explicit guest block-write semantics: " +
+                $"addr=0x{descriptor.Address:X} type={descriptor.Type} format={descriptor.Format}/{descriptor.NumberType} tile={descriptor.TileMode}.");
         if ((descriptor.Type != Gen5TextureType1D &&
              descriptor.Type != Gen5TextureType2D &&
              descriptor.Type != Gen5TextureType3D &&

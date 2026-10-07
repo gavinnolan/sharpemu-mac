@@ -153,6 +153,24 @@ public sealed class MetalQueuedTextureSnapshotTests
     }
 
     [Theory]
+    [InlineData(9u, 0u, 1u, 169u, 0u)]
+    [InlineData(10u, 0u, 1u, 176u, 1u)]
+    [InlineData(10u, 27u, 1u, 176u, 1u)]
+    [InlineData(10u, 5u, 16u, 176u, 1u)]
+    public void CompressedStorageRejectsBeforeReadingGuestBacking(uint type, uint tile, uint depth, uint format, uint number)
+    {
+        using var state = new SnapshotState();
+        var memory = new CountingMemory();
+        var descriptor = new AgcExports.TextureDescriptor(Address, 16, 16, format, number, tile,
+            type, 0, 0, 16, 0xFAC, Depth: depth, HasExtendedDescriptor: true);
+        var binding = new AgcExports.TranslatedImageBinding(descriptor, true, 0, []);
+        var error = Assert.Throws<NotSupportedException>(() => MetalTextureSnapshots.CreateTextureSnapshots(
+            new CpuContext(memory, Generation.Gen5), [binding], out _));
+        Assert.Contains("compressed storage images require explicit guest block-write semantics", error.Message);
+        Assert.Equal(0, memory.Reads);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void DrawAndDispatchBudgetsCountBackingAllocationsOncePerWork(bool compute)
