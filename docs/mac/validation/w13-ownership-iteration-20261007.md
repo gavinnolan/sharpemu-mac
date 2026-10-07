@@ -249,10 +249,10 @@ Poppy exits with SIGABRT/code134 after21s, peak1390MiB. It rejects a different
 larger tiled volume during Compute binding preparation: shader
 `DB87BCC8ED30AD37`, address `0x7AC109C000`, depth16, tile5. Raw resource words
 are `7AC109C0 C0B00000 0003C003 A0500004 0000000F 00700000 00000000 00000000`.
-Local decoding identifies a 16x16x16 signed BC4 resource (8-byte compressed
-4x4 blocks), so an uncompressed storage-volume extension would not by itself
-qualify it. This capture does not print the shader's sampled/storage access
-metadata or an exact admitted work sequence.
+The resource is 16x16x16 R16Uint: `(0xC0B00000 >> 20) & 0x1FF` is format11,
+not format176. An initial investigation misread the nibble position as BC4;
+the exact raw words remain authoritative. This capture does not print the
+shader's sampled/storage access metadata or an exact admitted work sequence.
 This run does not prove the previous exact singleton binding was reached.
 There are no screenshots or positive presentation periods. Schema2 records26
 entries with zero drops, but no actual game fault or prior VMOVNTDQ callback;
@@ -279,3 +279,33 @@ The integrated Rosetta token/tracker selection passes 35/35 with zero skips
 existing token selection passes 18/18 on ARM64 and Rosetta under
 `package-agent/observed-token-2d25589/`. Fabricated protected-owner state tests
 are metadata checks, not native arming or kernel permission verification.
+
+Exact clean `6248d0f508f92596d6b6284421ebab3dadfc9807` Windows/Linux CLI
+cross-builds pass with zero errors and 9/3 warnings; commands and output hashes
+are under `cross-platform-final/6248d0f/`. No non-Mac native execution is claimed.
+
+## Poppy typed-volume metadata followup
+
+Clean diagnostic app `34fc6d752350b8bcf0210f50b97e47f26a48e84e` adds only
+shader shape/access fields to snapshot failure evidence relative to the reviewed
+tracker checkpoint. Its Release Metal build and signed app assembly pass.
+The hash-filtered shader capture confirms Volume/Storage=true, NumericClass=Uint,
+access=Write and an actual guest ImageStore at pc0xB4. Both the raw format11
+R16Uint descriptor and compiled unsigned 3D store agree. The earlier BC4
+investigation was a nibble extraction mistake, not a cache defect established
+by this capture.
+
+The run exits SIGABRT/code134 after22s, peak1447MiB, before any screenshot or
+guest presentation period. Eight shader evidence files total127785 bytes;
+schema2 again contains26 published records with zero drops and no actual game
+fault or prior VMOVNTDQ callback. Indexed evidence is
+`game-poppy-bc4-metadata-34fc6d7/`; its retained folder name reflects the initial
+hypothesis. The app archive SHA256 is
+`fb3ae8ce85574c344be972df96934d2f133c7b01803164e1f45957c55c8b4bfb`.
+No shader semantics, tiling support or CPU retry policy changed in this build.
+
+A separate snapshot admission correction rejects unsupported compressed storage
+formats before any guest memory read, including linear 2D/3D and tiled volume
+shapes. The affected snapshot/storage selection passes45/45 without skips
+(`compressed-storage-snapshot-x64` log/TRX), including four no-read regressions.
+This guard does not affect Poppy's R16Uint resource and does not qualify tile5.
