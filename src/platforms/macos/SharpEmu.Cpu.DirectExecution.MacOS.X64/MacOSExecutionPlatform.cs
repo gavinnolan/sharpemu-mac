@@ -104,8 +104,11 @@ public sealed unsafe class MacOSExecutionPlatform : IDirectExecutionPlatform
 
     public void DestroyWorkerEvent(nint handle) => MacOSExecutionStubs.DestroyWorkerEvent(handle);
 
-    public void InstallFaultHandling(in DirectExecutionFaultHandlers handlers) =>
+    public void InstallFaultHandling(in DirectExecutionFaultHandlers handlers)
+    {
+        PosixFaultBridge.WarmUpPlatformEntries(this);
         PosixFaultBridge.Install(handlers);
+    }
 
     public void RemoveFaultHandling() => PosixFaultBridge.Remove();
 

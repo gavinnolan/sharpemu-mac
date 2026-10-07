@@ -91,3 +91,49 @@ The public seam still resides in Core; extracting a smaller CPU contracts
 assembly can be a later dependency-graph change after shared engine ownership is
 settled. Shared Win64-shaped guest/fault context vocabulary is intentional ABI
 compatibility, not a Windows host implementation leak.
+
+## Follow-up: concrete probe warm-up and real POSIX faults
+
+The HLE warm-up's seed set is the assemblies that contributed exports. Its
+`WithGuestReachableDependencies` visits their direct matching references; it does
+not walk outward from the CLI's registered CPU integration. Thus the new concrete
+`TryReadHostMemory` and `TryReadExecutableHostMemory` interface implementations
+are not guaranteed to be in that sweep. The old fabricated-frame path warmed the
+Mach/Linux probe directly, which also bypassed those new interface entry methods.
+This is a source/ownership coverage gap; no game deadlock has been attributed to
+it.
+
+The POSIX integration now executes just those two interface entries and the
+capability getter on a normal host stack before installing fault interception.
+The helper disables inlining/optimization so the dispatch cannot disappear into
+an inlined substitute. It reads one stack byte; it does not add a global type
+sweep, change GC defaults or add work inside a fault callback. Captured x64 JIT
+assembly confirms three actual interface calls:
+`/tmp/sharpemu-cpu-posix-preflight-disasm.log`.
+
+Two new fixtures use the existing isolated native-return harness, with a
+30-second child timeout and a dedicated completion report written only after all
+native assertions pass. Both execute on x64/Rosetta with no graphics device:
+
+- A guest store into a tracker-armed protected page returns to its host caller,
+  publishes changed bytes and dirty state, and disarms protection. No managed
+  write helper performs the tested store. The mapped-view region query caches
+  allocation protection metadata, so it is not used as a kernel protection
+  measurement in this fixture.
+- A minimal SSE2/SSE4a guest sequence triggers real SIGILL for unsupported EXTRQ,
+  recovers through the normalized frame/native probe path, preserves its full
+  return value and increments the instruction recovery counter exactly once.
+  It does not depend on AVX2. An AMD host with native SSE4a returns before this
+  unsupported-instruction fixture; that does not apply to the verified Rosetta
+  run.
+
+The two isolated fixtures passed. A separate direct bounded SIGILL worker also
+exited 0 and wrote its completion evidence to
+`/tmp/sharpemu-cpu-real-sigill-evidence.txt`. These results exercise real OS fault
+entry and guest-stack return, beyond the earlier fabricated-frame fixtures. They
+still do not prove GPU fault coherence, game compatibility, Windows/Linux native
+fault handling or signal safety under arbitrary GC/runtime interruptions.
+
+Final follow-up x64/Rosetta CPU + architecture selection: **321 passed, 0 failed,
+0 runner-reported skipped**. Results: `/tmp/sharpemu-cpu-tests/cpu-x64-followup.trx`.
+The previously listed Windows early-return limitations still apply.

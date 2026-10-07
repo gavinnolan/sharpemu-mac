@@ -105,8 +105,11 @@ public sealed unsafe class LinuxExecutionPlatform : IDirectExecutionPlatform
     /// Nothing to do: Linux delivers access faults straight to the installed
     /// signal handler. Only macOS has a Mach exception port ahead of signals.
     /// </remarks>
-    public void InstallFaultHandling(in DirectExecutionFaultHandlers handlers) =>
+    public void InstallFaultHandling(in DirectExecutionFaultHandlers handlers)
+    {
+        PosixFaultBridge.WarmUpPlatformEntries(this);
         PosixFaultBridge.Install(handlers);
+    }
 
     public void RemoveFaultHandling() => PosixFaultBridge.Remove();
 

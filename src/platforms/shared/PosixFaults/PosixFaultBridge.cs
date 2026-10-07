@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Iced.Intel;
 using SharpEmu.Core.Cpu.Native.Platform;
@@ -87,6 +88,20 @@ internal static unsafe class PosixFaultBridge
 
     private static readonly bool PosixGpuFaultFastPath =
         Environment.GetEnvironmentVariable("SHARPEMU_POSIX_GPU_FAULT_FAST_PATH") != "0";
+
+    // CPU packages are registered outward by the application and are not a
+    // dependency of the HLE export assemblies ModuleManager walks. Calling the
+    // native probe directly warms the kernel routine but misses these newly
+    // extracted concrete interface entries. Execute their dispatch once on a
+    // normal host stack, before a signal can cause their first JIT/translation.
+    [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.NoOptimization)]
+    internal static void WarmUpPlatformEntries(IDirectExecutionPlatform platform)
+    {
+        byte source = 0x53, destination = 0;
+        _ = platform.Capabilities;
+        _ = platform.TryReadHostMemory((ulong)(&source), &destination, 1);
+        _ = platform.TryReadExecutableHostMemory((ulong)(&source), &destination, 1);
+    }
 
     internal static void Install(in DirectExecutionFaultHandlers handlers)
     {

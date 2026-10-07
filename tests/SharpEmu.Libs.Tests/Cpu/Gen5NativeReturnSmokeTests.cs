@@ -20,6 +20,7 @@ public sealed class Gen5NativeReturnSmokeTests
     private const ulong CallbackReturnValue = 0xFEDC_BA98_7654_3210UL;
     private const string WorkerEnvironmentVariable = "SHARPEMU_NATIVE_RETURN_SMOKE_WORKER";
     private static readonly TimeSpan WorkerTimeout = TimeSpan.FromSeconds(30);
+    private const string FaultWorkerReportVariable = "SHARPEMU_NATIVE_FAULT_SMOKE_REPORT";
 
     [Fact]
     public async Task SyntheticGen5Entry_ReturnsToHost()
@@ -46,6 +47,51 @@ public sealed class Gen5NativeReturnSmokeTests
         Assert.True(
             result.ExitCode == 0,
             $"native return worker exited with code {result.ExitCode}\n{result.Output}");
+    }
+
+    [Fact]
+    public async Task PosixUnsupportedSse4a_RecoversThroughPlatformProbeAndReturnsToHost()
+    {
+        if (!IsSupportedHost || (!OperatingSystem.IsMacOS() && !OperatingSystem.IsLinux())) return;
+        // AMD hosts can execute SSE4a directly. This fixture requires the
+        // actual SIGILL path, which Rosetta's Intel-compatible CPU uses.
+        if ((X86Base.CpuId(unchecked((int)0x80000001), 0).Ecx & (1 << 6)) != 0) return;
+        const string completed = "[CPU-FAULT] unsupported SSE4a recovered through platform probe and returned";
+        if (Environment.GetEnvironmentVariable(WorkerEnvironmentVariable) != "1")
+        {
+            await RunIsolatedFaultWorker(nameof(PosixUnsupportedSse4a_RecoversThroughPlatformProbeAndReturnsToHost), completed);
+            return;
+        }
+
+        ExecuteSyntheticGuest([
+            0x48, 0xB8, 0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE, // mov rax, callback value
+            0x66, 0x48, 0x0F, 0x6E, 0xC0,                               // movq xmm0, rax
+            0x66, 0x0F, 0x78, 0xC0, 0x40, 0x00,                         // extrq xmm0, 64, 0
+            0x66, 0x48, 0x0F, 0x7E, 0xC0,                               // movq rax, xmm0
+            0xC3
+        ]);
+        // ExecuteSyntheticGuest asserts exactly one instruction recovery.
+        File.WriteAllText(Environment.GetEnvironmentVariable(FaultWorkerReportVariable)!, completed);
+    }
+
+    [Fact]
+    public async Task PosixProtectedPageWrite_RecoversOnGuestStackAndReturnsToHost()
+    {
+        if (!IsSupportedHost || (!OperatingSystem.IsMacOS() && !OperatingSystem.IsLinux())) return;
+        const string completed = "[CPU-FAULT] protected-page guest write recovered and returned";
+        if (Environment.GetEnvironmentVariable(WorkerEnvironmentVariable) != "1")
+        {
+            await RunIsolatedFaultWorker(nameof(PosixProtectedPageWrite_RecoversOnGuestStackAndReturnsToHost), completed);
+            return;
+        }
+
+        ExecuteSyntheticGuest([
+            0x48, 0xB8, 0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE, // mov rax, callback value
+            0x48, 0x89, 0x47, 0x10,                                      // mov [rdi+16], rax (RO page)
+            0x48, 0x8B, 0x47, 0x10,                                      // mov rax, [rdi+16]
+            0xC3
+        ], protectData: true);
+        File.WriteAllText(Environment.GetEnvironmentVariable(FaultWorkerReportVariable)!, completed);
     }
 
     private static bool IsSupportedHost =>
@@ -99,7 +145,7 @@ public sealed class Gen5NativeReturnSmokeTests
         ExecuteSyntheticGuest(continuation: true);
     }
 
-    private static void ExecuteSyntheticGuest(byte[]? callbackInstructions = null, bool continuation = false)
+    private static void ExecuteSyntheticGuest(byte[]? callbackInstructions = null, bool continuation = false, bool protectData = false)
     {
         using var memory = new PhysicalVirtualMemory();
         var image = new SelfLoader().Load(BuildSyntheticElf(callbackInstructions), memory);
@@ -161,24 +207,56 @@ public sealed class Gen5NativeReturnSmokeTests
             Assert.True(memory.TryRead(image.EntryPoint + 3, loadedInstructions));
             Assert.Equal(callbackInstructions, loadedInstructions);
             Assert.True(memory.TryAllocateAtOrAbove(0x1_0000_0000, 0x4000, false, 0x4000, out dataAddress));
-            Assert.True(memory.TryWriteUInt64(dataAddress + 16, CallbackReturnValue));
+            Assert.True(memory.TryWriteUInt64(dataAddress + 16, protectData ? 0 : CallbackReturnValue));
         }
 
-        Assert.True(
-            backend.TryCallGuestFunction(
-                callerContext,
-                image.EntryPoint + 3,
-                dataAddress,
-                0,
-                callbackInstructions is not null ? 0x00FF9300UL : 0,
-                0,
-                0,
-                "synthetic-native-callback-return",
-                out var callbackReturn,
-                out var callbackError),
-            callbackError);
-        Assert.Equal(CallbackReturnValue, callbackReturn);
-        if (callbackInstructions is not null)
+        var trackingWasEnabled = GuestImageWriteTracker.Enabled;
+        try
+        {
+            if (protectData)
+            {
+                GuestImageWriteTracker.Configure(true);
+                GuestImageWriteTracker.Track(dataAddress, (ulong)Environment.SystemPageSize,
+                    source: "cpu-platform-fault-fixture");
+                Assert.True(GuestImageWriteTracker.TryGetProtectionState(dataAddress, out var protectedRange, out var armed));
+                Assert.True(protectedRange && armed);
+            }
+            Assert.True(
+                backend.TryCallGuestFunction(
+                    callerContext,
+                    image.EntryPoint + 3,
+                    dataAddress,
+                    0,
+                    callbackInstructions is not null ? 0x00FF9300UL : 0,
+                    0,
+                    0,
+                    "synthetic-native-callback-return",
+                    out var callbackReturn,
+                    out var callbackError),
+                callbackError);
+            Assert.Equal(CallbackReturnValue, callbackReturn);
+
+            if (protectData)
+            {
+                Assert.True(GuestImageWriteTracker.ConsumeDirty(dataAddress), "the native write did not reach fault recovery");
+                Span<byte> written = stackalloc byte[8];
+                Assert.True(memory.TryRead(dataAddress + 16, written));
+                Assert.Equal(CallbackReturnValue, BinaryPrimitives.ReadUInt64LittleEndian(written));
+                Assert.True(GuestImageWriteTracker.TryGetProtectionState(dataAddress, out var protectedRange, out var armed));
+                Assert.True(protectedRange);
+                Assert.False(armed);
+            }
+        }
+        finally
+        {
+            if (protectData)
+            {
+                GuestImageWriteTracker.Untrack(dataAddress);
+                GuestImageWriteTracker.Configure(trackingWasEnabled);
+            }
+        }
+
+        if (callbackInstructions is not null && !protectData)
         {
             var recoveriesAfter = (long)recoveryCounter.GetValue(null)!;
             var supportsSse4a = (X86Base.CpuId(unchecked((int)0x80000001), 0).Ecx & (1 << 6)) != 0;
@@ -186,7 +264,23 @@ public sealed class Gen5NativeReturnSmokeTests
         }
     }
 
-    private static async Task<WorkerResult> RunIsolatedWorker(string testMethod)
+    private static async Task RunIsolatedFaultWorker(string testMethod, string completionEvidence)
+    {
+        var report = Path.GetTempFileName();
+        try
+        {
+            var result = await RunIsolatedWorker(testMethod, report);
+            Assert.True(result.Completed, result.Output);
+            Assert.True(result.ExitCode == 0, result.Output);
+            Assert.Equal(completionEvidence, File.ReadAllText(report));
+        }
+        finally
+        {
+            File.Delete(report);
+        }
+    }
+
+    private static async Task<WorkerResult> RunIsolatedWorker(string testMethod, string? faultReport = null)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -202,6 +296,7 @@ public sealed class Gen5NativeReturnSmokeTests
         startInfo.ArgumentList.Add(
             $"FullyQualifiedName={typeof(Gen5NativeReturnSmokeTests).FullName}.{testMethod}");
         startInfo.Environment[WorkerEnvironmentVariable] = "1";
+        startInfo.Environment[FaultWorkerReportVariable] = faultReport;
         startInfo.Environment["SHARPEMU_SENTINEL_PROBE"] = null;
 
         using var process = Process.Start(startInfo) ??
