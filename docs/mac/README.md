@@ -80,9 +80,14 @@ not current acceptance. Snapshot diagnosis/fix and fresh game verification are
 required before claiming the current build improves compatibility. See the
 [ownership/runtime journal](validation/w13-ownership-iteration-20261007.md).
 
-Guest font isolation/CoreText rendering is in progress. The Avalonia launcher
-still carries Skia; a native launcher/settings extraction is a separate remaining
-dependency, even after guest fonts stop using Skia on macOS.
+Guest font isolation is integrated at `d231b6d`: shared font contracts, native
+CoreText/CoreGraphics on macOS, and a separate Skia adapter for Windows/Linux.
+Combined checks pass220/220 on ARM64 and Rosetta; the13 font checks include8
+actual CoreText CPU cases. The Avalonia launcher still carries Skia; native
+AppKit launcher/settings extraction remains in progress. A fresh signed Sarah
+run stays alive150s with coherent scene and right/left movement, peak1169MiB.
+Dense captures still do not verify an airborne jump; clean guest exit remains
+unfinished. Guest-font ABI calls are verified separately from that title run.
 
 The snapshot regression is corrected at `ba83361`. Graph-disabled owned copies
 retain generation/content-identity checks; strict mapping checks still govern

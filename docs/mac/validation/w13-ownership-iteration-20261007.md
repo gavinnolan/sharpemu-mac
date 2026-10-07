@@ -442,3 +442,39 @@ prep/work references drop to0 before commit while native pin1 survives pruning,
 actual shader output remains old red after completion, and uncommitted discard
 leaves the A5 sentinel while releasing all native/registry ownership. This is
 controlled execution, not actual runtime Drain or producer-pipeline activation.
+
+## Guest fonts integrated and fresh d231b6d app
+
+Reviewed font source9f69c2e and combined candidate1d882ef integrate as d231b6d.
+CoreText/CoreGraphics owns guest fonts on macOS; Fonts.Skia remains a separate
+Windows/Linux adapter. Shared Libs no longer references Skia. GUI/Avalonia still
+adds Skia to the Mac launcher closure; native launcher extraction is pending.
+
+Combined candidate220/220 passes on each CLR architecture, with integrated
+source/tests matching that candidate. Root font build has0warnings/errors;
+13/13 Rosetta checks pass including8 actual CoreText CPU cases and the packed
+guest font ABI lifecycle. Native CPU raster proof is not GPU/device proof.
+The signed app verifies and is archived with SHA256
+`1728869b8c1c098b02c1ec21580c15786178f118e774708c73da632f71b43ae3`.
+
+Fresh Sarah150s remains alive, peak1169MiB. Inspected105s scene,120s new area
+after right movement and139s return after left movement are coherent. Z input
+at141s is logged; reviewed139/141/142/143/144s captures remain grounded, so
+airborne jump verification is still open. Reported7748guest frames over142.450s
+give54.39/s weighted cadence; concurrent build/tests prevent a controlled
+performance comparison. TERM stops in2s without KILL but repeating-import
+forced unwind/NOT_IMPLEMENTED persists. This title does not establish use of
+the guest CoreText exports. Source/app were frozen through the run.
+Evidence: `game-sarah-coretext-d231b6d/`, archive manifest
+`sharpemu-d231b6d-manifest.json`, and `w13-20261007/font-integrated-*`.
+
+## Test-only restoration bookkeeping
+
+Reviewed b0647d7 integrates as131f674. Eleven x64/Rosetta cases pass: seven
+actual native page operations and four scalar CAS/ABA/exhaustion/allocation
+controls. Failed harness attempts are preserved. The helper is test-only; it
+does not reserve backing, certify fault-frame ownership or authorize retry.
+Production mapping/fault/recovery behavior is unchanged. Native cases return
+early outside macOS and do not establish portable runtime qualification.
+See [prototype scope](../page-restoration-bookkeeping-prototype.md) and
+`cpu-page-restoration-prototype-b0647d7/` for exact source/results/hashes.
