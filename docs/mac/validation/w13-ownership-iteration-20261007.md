@@ -1,5 +1,9 @@
 # W13 ownership iteration — 2026-10-07
 
+Latest bounded integration: clean source `dd19db69f386d2d5d7b7fa0cc0891241416d38f9`.
+The source version graph remains isolated and inactive; its ownership and native
+completion work is not covered by the bounded integration results below.
+
 Starting application source: `382bc5eda671c338b781bce400fdf39b62f4c020`.
 Documentation head: `43525de`. The prior source-linked two-title report is
 `artifacts/validation/integrated-20261007/game-final-382bc5e/REPORT.md`.
@@ -154,3 +158,29 @@ Evidence: `bounded-87d7fbb-x64`, `storage-native-87d7fbb-x64`,
 `app-87d7fbb-build` logs in the W13 directory; `cross-platform-final/87d7fbb/`
 and `game-poppy-disposition-87d7fbb/` under the integrated evidence directory.
 Both `c78e8ad` and `87d7fbb` applications retain archives and manifests for replay.
+
+## Selected mip, native null reads and exact Poppy shape
+
+Source `dd19db6` integrates the base-zero selected-mip distinction and the strict
+readonly null policy. Required-device native checks pass 36/36 for materializer,
+layout and null coverage. This includes faithful owned R16 base-mip bytes from a
+two-mip allocation after the original source is mutated. Two additional native
+kernel checks distinguish sampled `.sample` from storage `.read`; both read four
+zeros from the production normalized null textures. The affected integrated
+managed selection passes 91/91. The signed app embeds clean `dd19db6` provenance.
+See `native-mip-null-integration-x64`, `native-null-modes-x64`,
+`mip-null-managed-integration-x64` and `app-dd19db6-build` in the W13 directory.
+
+Its frozen Poppy followup exits with code134 after20s, peak RSS1412MiB, at the
+same compute sequence8 / graphics submission12. The precise descriptor is type10,
+1x1, depth1, one layer, non-array, base/selected mip0 and one view/resource mip;
+format10/4, pitch1, tile27. Actual shader metadata is volume storage, unsigned
+integer, write access. This is a native 3D binding requirement even though depth
+is one; the 2D materializer correctly rejects it. The earlier Poppy rejection is
+therefore not explained by a larger backing mip chain.
+
+The trace again contains30 startup/protection records, zero drops and no game
+signal or streaming-store entries. No screenshot or positive presentation sample
+was captured, and no emulator process remained after collection. CPU final game
+disposition, menu and gameplay remain unqualified. Evidence is under
+`artifacts/validation/integrated-20261007/game-poppy-disposition-followup/`.
