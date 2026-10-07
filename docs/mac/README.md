@@ -22,3 +22,26 @@ for the work packages, prerequisites and acceptance gates.
 The platform package proposal refines the earlier project sketches. Read source
 and PR status at their recorded snapshots; recheck changing upstream/candidate
 state before implementation. Existing review-only work remains review-only.
+
+## Implementation status (2026-10-07)
+
+Done on `main`:
+
+- W01 bootstrap: full upstream history, `upstream` mirror branch, sync script and daily
+  sync workflow ([upstream-sync.md](upstream-sync.md)).
+- W03 build: osx-x64 default, osx-arm64 rejected, per-RID native assets, publish guard
+  that fails macOS outputs containing Vulkan, MoltenVK or SDL, signed `.app` bundle
+  (`scripts/macos/build-app.sh`), fork update identity.
+- W05 Metal-only macOS: no MoltenVK, no backend fallback.
+- W06-W08 host packages: `SharpEmu.Host.MacOS/Linux/Windows`, registered at startup;
+  CoreAudio output on macOS.
+- W11 (structure): backend-neutral GPU vocabulary; `SharpEmu.Gpu.Metal`,
+  `SharpEmu.Gpu.Vulkan`, `SharpEmu.Platform.MacOS`, `SharpEmu.Adapters.Sdl`.
+- W12 (macOS): AppKit window + CAMetalLayer, native keyboard, GameController pads with
+  haptics/lightbar/adaptive triggers, CoreGraphics display catalog.
+- Architecture tests enforce the package boundaries; the full test suite completes on
+  macOS after fixing exact guest-address reservation (`mach_vm_allocate`).
+
+Not yet verified: running real games on the native stack, physical DualSense features
+and keyboard input at runtime. Open: W10 CPU/fault split, W13+ memory/lifecycle work,
+narrowing transitional `InternalsVisibleTo`, ARM64 execution (deferred, ADR 0003).
