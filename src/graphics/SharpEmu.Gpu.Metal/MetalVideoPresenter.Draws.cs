@@ -1315,11 +1315,11 @@ internal static partial class MetalVideoPresenter
     {
         lock (_gate)
         {
-            if (_guestImages.TryGetValue(target.Address, out var existing) &&
-                existing.Width == target.Width &&
-                existing.Height == target.Height)
+            if (_guestImages.TryGetValue(target.Address, out var existing))
             {
-                return existing;
+                Require2DGuestImage(existing, "render target");
+                if (existing.Width == target.Width && existing.Height == target.Height)
+                    return existing;
             }
         }
 
@@ -1517,6 +1517,7 @@ internal static partial class MetalVideoPresenter
             var live = ResolveGuestImageAlias(texture);
             if (live is { Initialized: true } && blitCommandBuffer != 0)
             {
+                Require2DGuestImage(live, "feedback snapshot");
                 // One snapshot per content version: draws sampling the same
                 // unchanged image share it, so the blit happens per content
                 // change instead of per draw — compositing games otherwise
@@ -1989,8 +1990,10 @@ internal static partial class MetalVideoPresenter
         GuestImage? best = null;
         var bestScore = int.MinValue;
 
+        var nativeShape = GuestTextureShape(texture);
         void Consider(GuestImage candidate, bool isActive)
         {
+            if (candidate.TextureType != nativeShape.TextureType || candidate.Depth != nativeShape.Depth) return;
             // Exact extent always qualifies; a larger image qualifies only for
             // tiled descriptors, mirroring IsCompatibleGuestImageAlias.
             var sizeMatch = candidate.Width == texture.Width &&

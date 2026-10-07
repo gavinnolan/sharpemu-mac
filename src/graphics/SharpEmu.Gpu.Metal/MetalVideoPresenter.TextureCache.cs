@@ -146,6 +146,7 @@ internal static partial class MetalVideoPresenter
                     continue;
                 }
 
+                Require2DGuestImage(image, "CPU dirty image synchronization");
                 var pixels = new byte[byteCount];
                 if (!memory.TryRead(address, pixels) ||
                     pixels.AsSpan().IndexOfAnyExcept((byte)0) < 0)
