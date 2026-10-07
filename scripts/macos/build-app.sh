@@ -22,7 +22,7 @@
 #   SHARPEMU_BUNDLE_ID            CFBundleIdentifier (default io.github.sharpemu.mac)
 #   SHARPEMU_MIN_MACOS            LSMinimumSystemVersion (default 15.0)
 #   SHARPEMU_CODESIGN_IDENTITY    signing identity; unset means ad-hoc ("-")
-#   SHARPEMU_MAC_FORBID_SDL       pass "1" to fail the build if SDL3 is present
+#   SHARPEMU_MAC_FORBID_SDL       "1" (default) fails the build on SDL3; "0" to bisect
 #   SHARPEMU_MAC_KEEP_UNIVERSAL   pass "1" to keep arm64 slices in fat dylibs
 #   SHARPEMU_MAC_DMG              pass "1" to also produce a .dmg
 #   SHARPEMU_OUTPUT_DIR           where SharpEmu.app is written
@@ -74,7 +74,7 @@ publish_args=(
     -p:PublishSingleFile=false
     -p:PublishDir="${publish_dir}/"
 )
-if [ "${SHARPEMU_MAC_FORBID_SDL:-0}" = "1" ]; then
+if [ "${SHARPEMU_MAC_FORBID_SDL:-1}" = "1" ]; then
     publish_args+=(-p:SharpEmuMacForbidSdl=true)
 fi
 
@@ -149,7 +149,7 @@ fi
 # --------------------------------------------------------------- policy ------
 
 check_args=("${app_dir}")
-if [ "${SHARPEMU_MAC_FORBID_SDL:-0}" = "1" ]; then
+if [ "${SHARPEMU_MAC_FORBID_SDL:-1}" = "1" ]; then
     check_args+=(--forbid-sdl)
 fi
 "${platform_dir}/check-macos-output.sh" "${check_args[@]}"
