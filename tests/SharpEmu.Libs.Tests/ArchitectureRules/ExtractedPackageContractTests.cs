@@ -74,8 +74,11 @@ public sealed class ExtractedPackageContractTests
     public void ExtractedPackagesGrantInternalAccessOnlyToTests(string directory, string assembly)
     {
         var project = XDocument.Load(RepoPath($"{directory}/{assembly}.csproj"));
+        var allowedTests = assembly == "SharpEmu.Gpu.Metal"
+            ? new[] { "SharpEmu.Libs.Tests", "SharpEmu.Gpu.Metal.Tests" }
+            : new[] { "SharpEmu.Libs.Tests" };
         foreach (var friend in project.Descendants("InternalsVisibleTo"))
-            Assert.Equal("SharpEmu.Libs.Tests", friend.Attribute("Include")!.Value);
+            Assert.Contains(friend.Attribute("Include")!.Value, allowedTests);
     }
 
     [Theory]

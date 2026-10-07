@@ -1484,7 +1484,7 @@ internal static partial class MetalVideoPresenter
     /// called before the consuming render or compute encoder opens on that
     /// same command buffer — encoder order is what keeps the snapshot after
     /// earlier batched passes that render to the source image.</summary>
-    private static nint CreateDrawTexture(
+    internal static nint CreateDrawTexture(
         nint device,
         nint blitCommandBuffer,
         GuestDrawTexture texture,
@@ -1695,7 +1695,17 @@ internal static partial class MetalVideoPresenter
         var handle = MetalNative.Send(device, MetalNative.Selector("newTextureWithDescriptor:"), descriptor);
         if (handle != 0)
         {
-            ReplaceDrawTextureContents(handle, texture, pitch, textureFormat);
+            try
+            {
+                ReplaceDrawTextureContents(handle, texture, pitch, textureFormat);
+            }
+            catch
+            {
+                // newTexture transfers a retain to this caller. Rejected
+                // payloads must release it before they leave the upload path.
+                MetalNative.SendVoid(handle, MetalNative.Selector("release"));
+                throw;
+            }
             if (cacheable)
             {
                 CacheDrawTexture(texture, handle);
@@ -1726,7 +1736,7 @@ internal static partial class MetalVideoPresenter
     /// Cube maps are always 2D arrays here: Gen5 shaders resolve the face themselves and
     /// then address the image by layer, so the MSL declaration is texture2d_array.
     /// </summary>
-    private static (uint TextureType, uint ArrayLength, uint Depth) GuestTextureShape(GuestDrawTexture texture)
+    internal static (uint TextureType, uint ArrayLength, uint Depth) GuestTextureShape(GuestDrawTexture texture)
     {
         var arrayed = texture.ArrayedView;
         var layers = Math.Max(texture.ArrayLayers, 1u);
@@ -1739,6 +1749,14 @@ internal static partial class MetalVideoPresenter
             _ => arrayed ? (MtlTextureType2DArray, layers, 1u) : (MtlTextureType2D, 1u, 1u),
         };
     }
+
+    // Texture kind, rather than extent, selects the native upload API. A
+    // one-layer array and a depth-one volume still have array/3D types.
+    internal static bool RequiresSliceUpload((uint TextureType, uint ArrayLength, uint Depth) shape) =>
+        shape.TextureType is MtlTextureType2DArray or MtlTextureType3D;
+
+    internal static ulong TextureImageStride((uint TextureType, uint ArrayLength, uint Depth) shape, ulong sliceBytes) =>
+        shape.TextureType == MtlTextureType3D ? sliceBytes : 0;
 
     /// <summary>Uploads a draw texture's source texels: linear formats reuse the
     /// row-clamping helper; block-compressed formats upload whole 4x4 block rows
@@ -1757,7 +1775,7 @@ internal static partial class MetalVideoPresenter
         }
 
         var shape = GuestTextureShape(texture);
-        if (shape.ArrayLength > 1 || shape.Depth > 1)
+        if (RequiresSliceUpload(shape))
         {
             ReplaceLayeredTextureContents(handle, texture, pitch, format, shape);
             return;
@@ -1825,7 +1843,7 @@ internal static partial class MetalVideoPresenter
                     MetalNative.SendReplaceRegionSlice(handle, selector,
                         new MtlRegion { Width = upload.Width, Height = upload.Height, Depth = 1 },
                         upload.MipLevel, layer, (nint)(bytes + upload.BufferOffset + sliceBytes * layer),
-                        (nuint)rowBytes, 0);
+                        (nuint)rowBytes, (nuint)TextureImageStride(shape, sliceBytes));
                 }
             }
         }
@@ -1876,7 +1894,7 @@ internal static partial class MetalVideoPresenter
         var selector = MetalNative.Selector("replaceRegion:mipmapLevel:slice:withBytes:bytesPerRow:bytesPerImage:");
         fixed (byte* source = texture.RgbaPixels)
         {
-            if (shape.Depth > 1)
+            if (shape.TextureType == MtlTextureType3D)
             {
                 var depth = (uint)Math.Min(shape.Depth, available);
                 MetalNative.SendReplaceRegionSlice(
