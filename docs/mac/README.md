@@ -44,4 +44,7 @@ Done on `main`:
 
 Not yet verified: running real games on the native stack, physical DualSense features
 and keyboard input at runtime. Open: W10 CPU/fault split, W13+ memory/lifecycle work,
-narrowing transitional `InternalsVisibleTo`, ARM64 execution (deferred, ADR 0003).
+further contract/package extraction, ARM64 execution (deferred, ADR 0003).
+
+Extracted package namespaces and friend-access cleanup are documented in
+[package contracts](package-contracts.md).

@@ -549,19 +549,19 @@ SDL or macOS reference of its own.
 
 ### Known deviations from §2
 
-- **Namespaces still say `SharpEmu.Libs`.** The moved files kept
-  `SharpEmu.Libs.Gpu.Metal`, `SharpEmu.Libs.Gpu.Vulkan`,
-  `SharpEmu.Libs.Platform.MacOS` and `SharpEmu.Libs.VideoOut` so the extraction
-  stays a reviewable file move. Namespace != assembly is tolerated for now;
-  renaming them to match the assemblies is a separate mechanical change.
-- **`InternalsVisibleTo` is load-bearing.** `SharpEmu.Libs` grants internals to
-  all four new packages, which were carved out of it and still reach a long tail
-  of shared-engine internals (`IGuestGpuBackend`, `IRenderHost`,
-  `ShaderPipelineCache`, `GpuFatal`, the internal VideoOut diagnostics and the
-  internal HLE-export state they present for). The list is explicit, named in
-  the csproj with the reason, and shrinks as the backend surface narrows to the
-  public contracts in `Gpu/Abstractions`. Per rule 7 of §4 it is a stated
-  transitional step, not a blanket friend declaration.
+- **Extracted namespaces now match their assemblies.** Metal, Vulkan, macOS
+  presentation/input and SDL adapter code use `SharpEmu.Gpu.Metal`,
+  `SharpEmu.Gpu.Vulkan`, `SharpEmu.Platform.MacOS` and
+  `SharpEmu.Adapters.Sdl`. Host implementations use `SharpEmu.Host.<OS>`.
+  The linked, pure managed POSIX stub emitter retains `SharpEmu.Host.Posix`;
+  it does not become another runtime package.
+- **Extracted packages no longer need production friend access.** HLE and Libs
+  expose the actual host and guest-GPU integration contracts; stateful shader
+  cache, movie bridge and headless command-stream implementations remain
+  internal behind focused services. MacOS presentation and SDL window access
+  are explicit public package APIs, not cross-package friend declarations.
+  The pre-existing HLE/Libs access granted to Core and the test assembly remains
+  scoped to those assemblies. See [package contracts](package-contracts.md).
 - **Backend folders under `Gpu/`.** `Gpu/Images`, `Gpu/Buffers`,
   `Gpu/Pipelines` and `Gpu/Scheduling` were split rather than moved: the types
   that name a Vulkan handle went to `SharpEmu.Gpu.Vulkan`, and the

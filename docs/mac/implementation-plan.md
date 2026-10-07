@@ -240,12 +240,12 @@ These were deliberately left in place; each needs its own change.
   `HostMemory.Query`. It stays in the neutral host layer rather than becoming
   a `Host.Posix` assembly.
 
-The three host packages hold a documented transitional `InternalsVisibleTo`
-from HLE for helpers that are not guest-facing surface
-(`HostMemory.OnMappingChanged`, `HostViewMemory.IsValid*`, `HostViewRegions`,
-`WindowHostInput`, `HostBackingObject`'s descriptor/gate members). That list
-shrinks as those helpers move into the abstraction layer; it is not a licence
-to widen the seam.
+The host packages now use explicit HLE integration contracts for mapping
+invalidation, view bookkeeping/validation, window input and backing ownership.
+No production host/backend/platform package receives HLE or Libs friend access.
+Backing handles are initialized once; mapping and disposal share a documented
+synchronization gate. Existing Core and test access remains. See
+[package contracts](package-contracts.md) for the API and validation scope.
 
 ### W10 — Direct execution and OS/architecture fault adapters
 
