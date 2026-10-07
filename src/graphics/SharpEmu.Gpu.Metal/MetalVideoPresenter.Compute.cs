@@ -222,10 +222,17 @@ internal static partial class MetalVideoPresenter
     /// draws, blits, and flips of the same address all see one texture.</summary>
     private static GuestImage? EnsureStorageImage(nint device, GuestDrawTexture descriptor)
     {
+        // Decode texture descriptor semantics before looking up a live image.
+        // Render-target codes are a different namespace; substituting RGBA8
+        // here changes both native binding type and the seed's byte layout.
+        var nativeFormat = StorageTextureFormat(descriptor);
+        descriptor = PrepareDrawTextureUpload(descriptor);
+        var seedLayout = StorageTextureSeedLayout(descriptor, nativeFormat);
         lock (_gate)
         {
             if (_guestImages.TryGetValue(descriptor.Address, out var existing))
             {
+                ValidateStorageImageView(existing, descriptor, nativeFormat);
                 return existing;
             }
         }
@@ -236,10 +243,9 @@ internal static partial class MetalVideoPresenter
             return null;
         }
 
-        var format = MetalGuestFormats.TryDecodeRenderTargetFormat(
-            descriptor.Format, descriptor.NumberType, out var decoded)
-            ? decoded.Format
-            : MtlPixelFormat.Rgba8Unorm;
+        if (descriptor.RgbaPixels.Length == 0)
+            throw new InvalidOperationException($"Metal storage image 0x{descriptor.Address:X} has no complete initialization source.");
+        var format = nativeFormat.Format;
         var textureDescriptor = MetalNative.SendTextureDescriptor(
             MetalNative.Class("MTLTextureDescriptor"),
             MetalNative.Selector("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"),
@@ -260,22 +266,25 @@ internal static partial class MetalVideoPresenter
             Format = format,
         };
         if (image.Texture == 0)
-        {
-            return null;
-        }
+            throw new InvalidOperationException($"Metal cannot allocate storage image 0x{descriptor.Address:X} with format {format}.");
 
-        var bytesPerPixel = MetalRenderTargetFormat.GetBytesPerPixel(format);
+        var bytesPerPixel = nativeFormat.BytesPerPixel;
         // Snapshot copies arrive in the image's native texel layout; only
         // 4-byte texels can be RGBA8 verbatim, wider ones carry native bytes.
-        if ((ulong)descriptor.RgbaPixels.Length >= (ulong)descriptor.Width * bytesPerPixel)
+        if (descriptor.RgbaPixels.Length != 0)
         {
-            var pitch = descriptor.Pitch != 0
-                ? Math.Max(descriptor.Pitch, descriptor.Width)
-                : descriptor.Width;
-            ReplaceTextureContents(
-                image.Texture, descriptor.Width, descriptor.Height, descriptor.RgbaPixels, pitch, bytesPerPixel);
-            image.Initialized = true;
-            image.ContentVersion++;
+            try
+            {
+                ReplaceTextureContents(
+                    image.Texture, descriptor.Width, descriptor.Height, descriptor.RgbaPixels, seedLayout.Pitch, bytesPerPixel);
+                image.Initialized = true;
+                image.ContentVersion++;
+            }
+            catch
+            {
+                MetalNative.SendVoid(image.Texture, MetalNative.Selector("release"));
+                throw;
+            }
         }
 
         lock (_gate)
@@ -283,6 +292,7 @@ internal static partial class MetalVideoPresenter
             if (_guestImages.TryGetValue(descriptor.Address, out var raced))
             {
                 MetalNative.SendVoid(image.Texture, MetalNative.Selector("release"));
+                ValidateStorageImageView(raced, descriptor, nativeFormat);
                 return raced;
             }
 
@@ -292,6 +302,38 @@ internal static partial class MetalVideoPresenter
         }
 
         return image;
+    }
+
+    private static void ValidateStorageImageView(GuestImage image, GuestDrawTexture descriptor, MetalTextureFormat format)
+    {
+        if (image.Width != descriptor.Width || image.Height != descriptor.Height || image.Format != format.Format)
+            throw new NotSupportedException($"Metal storage image view does not match live image at 0x{descriptor.Address:X}.");
+        if (!image.Initialized)
+            throw new InvalidOperationException($"Metal storage image 0x{descriptor.Address:X} has no initialized contents.");
+    }
+
+    internal static MetalTextureFormat StorageTextureFormat(GuestDrawTexture descriptor)
+    {
+        var format = MetalGuestFormats.DecodeTextureFormat(descriptor.Format, descriptor.NumberType);
+        if (format.IsBlockCompressed)
+            throw new NotSupportedException($"Metal block-compressed storage image format {descriptor.Format}/{descriptor.NumberType} is unsupported.");
+        // This materializer creates a single-mip 2D texture. Reject resource
+        // classes it cannot represent rather than binding a differently typed image.
+        if (descriptor.Type != 9 || descriptor.ArrayedView || descriptor.ArrayLayers != 1 || descriptor.Depth != 1 ||
+            descriptor.MipLevels != 1 || descriptor.ResourceMipLevels != 1 || descriptor.BaseMipLevel != 0 || descriptor.MipLevel != 0)
+            throw new NotSupportedException("Metal storage image materialization supports only a single-mip, non-array 2D view.");
+        return format;
+    }
+
+    internal static (uint Pitch, ulong RequiredBytes) StorageTextureSeedLayout(GuestDrawTexture descriptor, MetalTextureFormat format)
+    {
+        var pitch = Math.Max(descriptor.Width, descriptor.Pitch);
+        var required = descriptor.Height == 0 ? 0 : checked(
+            ((ulong)(descriptor.Height - 1) * pitch + descriptor.Width) * format.BytesPerPixel);
+        if (descriptor.RgbaPixels.Length != 0 &&
+            (!descriptor.CpuSnapshotStable || (ulong)descriptor.RgbaPixels.LongLength < required))
+            throw new InvalidOperationException("Metal storage image seed must contain every complete stable native texel row.");
+        return (pitch, required);
     }
 
     private static bool TryGetComputePipeline(nint device, MetalCompiledGuestShader shader, out nint pipeline)
