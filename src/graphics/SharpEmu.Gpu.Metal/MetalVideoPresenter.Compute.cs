@@ -328,6 +328,8 @@ internal static partial class MetalVideoPresenter
         // The descriptor and compiled shader must agree on native dimension,
         // including depth-one texture3d. No array/cube/mip reinterpretation.
         var volume = descriptor.Type == Gen5TextureType3D;
+        if (volume && (descriptor.TiledSource is not null || descriptor.Detile is not null))
+            throw new NotSupportedException("Metal storage volumes require owned linear seed bytes; deferred XY-only detiling is not a volume source proof.");
         if (volume && (descriptor.Descriptor is not { Length: >= 8 } raw ||
             !TryDecodeTextureDescriptor(raw, out var sourceDescriptor) ||
             sourceDescriptor.MetadataAddress != 0 || sourceDescriptor.DescriptorFlags != 0 || sourceDescriptor.BcSwizzle != 0 ||
