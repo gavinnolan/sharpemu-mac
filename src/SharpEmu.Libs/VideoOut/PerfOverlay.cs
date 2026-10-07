@@ -34,6 +34,8 @@ public static class PerfOverlay
     private static int _frameHistoryIndex;
     private static long _presentedInWindow;
     private static long _submittedInWindow;
+    private static long _guestPresentedInWindow;
+    private static volatile bool _trackPresentedGuestFrames;
     private static long _drawsInWindow;
     private static long _guestBufferCacheBytes;
     private static long _guestImageCacheBytes;
@@ -42,9 +44,9 @@ public static class PerfOverlay
 
     // Refreshed once per second so per-frame fills never allocate.
     private static long _statsWindowStart = Stopwatch.GetTimestamp();
-    // Headline FPS tracks guest VideoOut flips (RecordSubmit), not host
-    // swapchain presents. Metal's free-running present timer hits ~120 Hz on
-    // ProMotion even while the guest is stalled on GPU waits.
+    // Native Metal tracks unique guest frames encoded for presentation;
+    // other presenters retain submit cadence until they opt into this hook.
+    // The host display timer can refresh the same guest frame at 120 Hz.
     private static double _fps;
     private static double _presentFps;
     private static double _drawsPerSecond;
@@ -113,12 +115,32 @@ public static class PerfOverlay
         _lastPresentTimestamp = Stopwatch.GetTimestamp();
     }
 
+    /// <summary>Opts into measuring unique guest frames, excluding host redraws.</summary>
+    public static void UsePresentedGuestFrameTiming() => _trackPresentedGuestFrames = true;
+
+    /// <summary>Called once when a new guest frame is encoded for host presentation.
+    /// This records command submission, not the display scanout completion time.</summary>
+    public static void RecordGuestPresent()
+    {
+        Interlocked.Increment(ref _guestPresentedInWindow);
+        RecordFrameInterval();
+    }
+
     /// <summary>Called on every guest flip submission.</summary>
     public static void RecordSubmit()
     {
         var now = Stopwatch.GetTimestamp();
         Interlocked.CompareExchange(ref _sessionStartTimestamp, now, 0);
         Interlocked.Increment(ref _submittedInWindow);
+        if (!_trackPresentedGuestFrames)
+        {
+            RecordFrameInterval();
+        }
+    }
+
+    private static void RecordFrameInterval()
+    {
+        var now = Stopwatch.GetTimestamp();
         var last = Interlocked.Exchange(ref _lastSubmitTimestamp, now);
         if (last != 0)
         {
@@ -188,7 +210,9 @@ public static class PerfOverlay
         {
             var seconds = (double)elapsedTicks / Stopwatch.Frequency;
             _statsWindowStart = now;
-            _fps = Interlocked.Exchange(ref _submittedInWindow, 0) / seconds;
+            var submissions = Interlocked.Exchange(ref _submittedInWindow, 0);
+            var guestPresents = Interlocked.Exchange(ref _guestPresentedInWindow, 0);
+            _fps = (_trackPresentedGuestFrames ? guestPresents : submissions) / seconds;
             _presentFps = Interlocked.Exchange(ref _presentedInWindow, 0) / seconds;
             _drawsPerSecond = Interlocked.Exchange(ref _drawsInWindow, 0) / seconds;
 
@@ -218,7 +242,7 @@ public static class PerfOverlay
                     ? $"LOAD {_averageFrameMs / 1000.0:0.0}S"
                     : $"STALL {_averageFrameMs / 1000.0:0.0}S";
             }
-            else if (_presentFps > 0)
+            else if (_presentFps > 0 && !_trackPresentedGuestFrames)
             {
                 _averageFrameMs = 1000.0 / _presentFps;
                 msLabel = $"{_averageFrameMs:0.0} MS";
@@ -268,7 +292,7 @@ public static class PerfOverlay
             var timeLabel = $"{elapsedHours:00}:{elapsedMinutes:00}:{elapsedRemainingSeconds:00}";
             _line4 = $"MEM {heapMb}M BUF {guestBufferMb}M IMG {guestImageMemoryInMiB}M";
             _line5 = $"CPU {_cpuPercent:0}%  GPU {gpuLabel}";
-            _line6 = $"TIME {timeLabel}  VKALLOC {liveAllocations}/{peakAllocations}";
+            _line6 = $"TIME {timeLabel}  GPUALLOC {liveAllocations}/{peakAllocations}";
             _minimalLine1 = $"FPS {_fps:0.0}  CPU {_cpuPercent:0}%";
             _minimalLine2 = $"GPU {gpuLabel}  TIME {timeLabel}";
             _minimalSummary = $"FPS {_fps:0.0} | CPU {_cpuPercent:0}% | GPU {gpuLabel} | TIME {timeLabel}";

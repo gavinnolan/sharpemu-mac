@@ -35,7 +35,8 @@ internal static partial class MetalVideoPresenter
         uint GuestImagePitch = 0,
         long RequiredGuestWorkSequence = 0,
         TranslatedGuestDraw? TranslatedDraw = null,
-        GuestDrawKind DrawKind = GuestDrawKind.None);
+        GuestDrawKind DrawKind = GuestDrawKind.None,
+        bool IsGuestFrame = false);
 
     private static readonly object _gate = new();
     private static Thread? _thread;
@@ -72,6 +73,11 @@ internal static partial class MetalVideoPresenter
     private static nint _ownedVersionTexture;
     private static ulong _presentGuestAddress;
     private static long _presentedSequence = -1;
+    private static long _guestFrameSequence = -1;
+    private static long _lastCountedGuestFrameSequence = -1;
+    private static long _presentationStatsTimestamp;
+    private static long _guestFramesInStatsWindow;
+    private static long _hostPresentsInStatsWindow;
     private static uint _windowWidth;
     private static uint _windowHeight;
 
@@ -161,7 +167,7 @@ internal static partial class MetalVideoPresenter
             }
 
             var sequence = (_latestPresentation?.Sequence ?? 0) + 1;
-            _latestPresentation = new Presentation(bgraFrame, width, height, sequence, IsSplash: false);
+            _latestPresentation = new Presentation(bgraFrame, width, height, sequence, IsSplash: false, IsGuestFrame: true);
             if (_thread is not null)
             {
                 return;
@@ -395,6 +401,7 @@ internal static partial class MetalVideoPresenter
 
     private static void RenderFrame()
     {
+        PerfOverlay.UsePresentedGuestFrameTiming();
         var pool = MetalNative.objc_autoreleasePoolPush();
         try
         {
@@ -426,6 +433,7 @@ internal static partial class MetalVideoPresenter
                         ref _presentTextureHeight,
                         ref _ownedVersionTexture);
                     _presentGuestAddress = 0;
+                    _guestFrameSequence = presentation.IsGuestFrame && _frameTexture != 0 ? presentation.Sequence : -1;
                 }
                 else if (presentation.TranslatedDraw is not null ||
                          presentation.DrawKind != GuestDrawKind.None)
@@ -468,6 +476,7 @@ internal static partial class MetalVideoPresenter
                         ref _presentTextureHeight,
                         ref _ownedVersionTexture);
                     _presentGuestAddress = ownsGuestTexture ? 0 : presentation.GuestImageAddress;
+                    _guestFrameSequence = presentation.IsGuestFrame ? presentation.Sequence : -1;
                 }
             }
 
@@ -563,6 +572,28 @@ internal static partial class MetalVideoPresenter
             MetalNative.SendVoid(commandBuffer, MetalNative.Selector("presentDrawable:"), drawable);
             MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
             PerfOverlay.RecordPresent();
+            if (_presentTexture != 0 && _guestFrameSequence >= 0 &&
+                _guestFrameSequence != _lastCountedGuestFrameSequence)
+            {
+                _lastCountedGuestFrameSequence = _guestFrameSequence;
+                PerfOverlay.RecordGuestPresent();
+                _guestFramesInStatsWindow++;
+            }
+            _hostPresentsInStatsWindow++;
+            var statsNow = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (_presentationStatsTimestamp == 0)
+            {
+                _presentationStatsTimestamp = statsNow;
+            }
+            else if (statsNow - _presentationStatsTimestamp >= 2 * System.Diagnostics.Stopwatch.Frequency)
+            {
+                var seconds = (statsNow - _presentationStatsTimestamp) / (double)System.Diagnostics.Stopwatch.Frequency;
+                Console.Error.WriteLine(FormattableString.Invariant(
+                    $"[METAL-PRESENT] guest_frames={_guestFramesInStatsWindow} guest_fps={_guestFramesInStatsWindow / seconds:F2} host_presents={_hostPresentsInStatsWindow} host_hz={_hostPresentsInStatsWindow / seconds:F2} seconds={seconds:F3}"));
+                _presentationStatsTimestamp = statsNow;
+                _guestFramesInStatsWindow = 0;
+                _hostPresentsInStatsWindow = 0;
+            }
         }
         finally
         {
