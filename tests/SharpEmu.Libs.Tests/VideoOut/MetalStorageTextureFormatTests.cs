@@ -75,6 +75,17 @@ public sealed class MetalStorageTextureFormatTests
         }
     }
 
+    [Theory]
+    [InlineData(0u, 2u)]
+    [InlineData(3u, 0u)]
+    [InlineData(16385u, 2u)]
+    public void RealInvalidExtentThrowsInsteadOfBindingANullNativeImage(uint width, uint height)
+    {
+        var failure = Assert.Throws<TargetInvocationException>(() => Ensure(Texture(10, 0, 0) with { Width = width, Height = height }));
+        Assert.IsType<NotSupportedException>(failure.InnerException);
+        Assert.Contains($"{width}x{height}", failure.InnerException!.Message);
+    }
+
     [Fact]
     public void LiveStorageViewMustMatchActualNativeFormatExtentAndInitializedState()
     {
