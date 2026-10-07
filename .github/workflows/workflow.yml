@@ -206,10 +206,6 @@ jobs:
       - name: Publish ${{ matrix.rid }} CLI
         run: dotnet publish src/SharpEmu.CLI/SharpEmu.CLI.csproj -c Release -r ${{ matrix.rid }} --self-contained true --no-restore -p:PublishDir="$PUBLISH_DIR"
 
-      - name: Stage MoltenVK next to the build
-        if: matrix.rid == 'osx-x64'
-        run: scripts/fetch-macos-moltenvk.sh "$PUBLISH_DIR"
-
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:

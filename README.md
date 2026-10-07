@@ -75,7 +75,7 @@ Our goal is **not** to emulate PS4 games, as there is already an excellent emula
 The emulator can currently load the `eboot.bin` of real games, execute native CPU instructions, and partially handle gpu-related functionality. Included 3D games.
 
 SharpEmu supports Windows, Linux, and macOS hosts. Video output uses Vulkan on
-Windows and Linux, and MoltenVK on macOS. Platform support is still experimental,
+Windows and Linux, and native Metal on macOS. Platform support is still experimental,
 so compatibility and performance vary by game, operating system, and GPU driver.
 
 ## Using
@@ -103,8 +103,9 @@ SharpEmu supports environment variables that can be configured from the GUI. Und
 
 You can set them per game or globally in the GUI, or pass them directly through the CLI.
 
-A Vulkan-capable GPU and current graphics driver are required. The macOS
-release includes the MoltenVK Vulkan implementation.
+Windows and Linux require a Vulkan-capable GPU and current graphics driver.
+macOS uses Metal directly; the macOS build runs as an x86-64 process, so Apple
+Silicon Macs need Rosetta 2 (`softwareupdate --install-rosetta`).
 
 > [!IMPORTANT]  
 > This project does **not** support or condone piracy.  

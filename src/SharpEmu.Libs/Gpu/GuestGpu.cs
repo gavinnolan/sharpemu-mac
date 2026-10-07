@@ -9,9 +9,8 @@ namespace SharpEmu.Libs.Gpu;
 /// <summary>
 /// Process-wide access point for the guest-GPU backend, mirroring HostPlatform for the
 /// host seam: static HLE export classes resolve the renderer through <see cref="Current"/>.
-/// Vulkan is the default everywhere; SHARPEMU_GPU_BACKEND=metal opts into the Metal
-/// backend (macOS only) while it is being brought up. macOS flips to Metal by default
-/// once the presenter reaches parity.
+/// Each host OS has exactly one backend: Metal on macOS, Vulkan on Windows and Linux.
+/// There is no fallback; requesting a backend the host does not provide is a startup error.
 /// </summary>
 internal static class GuestGpu
 {
@@ -19,29 +18,26 @@ internal static class GuestGpu
 
     public static IGuestGpuBackend Current => Instance.Value;
 
+    /// <summary>The backend this host OS provides.</summary>
+    public static string HostBackendName => OperatingSystem.IsMacOS() ? "Metal" : "Vulkan";
+
     private static IGuestGpuBackend Create()
     {
         var requested = Environment.GetEnvironmentVariable("SHARPEMU_GPU_BACKEND");
-        if (string.IsNullOrEmpty(requested) || requested.Equals("vulkan", StringComparison.OrdinalIgnoreCase))
+        if (!string.IsNullOrEmpty(requested) &&
+            !requested.Equals(HostBackendName, StringComparison.OrdinalIgnoreCase))
         {
-            return new VulkanGuestGpuBackend();
+            throw new PlatformNotSupportedException(
+                $"SHARPEMU_GPU_BACKEND={requested} is not available on this host; " +
+                $"the only GPU backend here is {HostBackendName}.");
         }
 
-        if (requested.Equals("metal", StringComparison.OrdinalIgnoreCase))
+        if (OperatingSystem.IsMacOS())
         {
-            if (!OperatingSystem.IsMacOS())
-            {
-                Console.Error.WriteLine(
-                    "[LOADER][WARN] SHARPEMU_GPU_BACKEND=metal is only available on macOS; using Vulkan.");
-                return new VulkanGuestGpuBackend();
-            }
-
-            Console.Error.WriteLine("[LOADER][INFO] GPU backend: Metal (SHARPEMU_GPU_BACKEND).");
+            Console.Error.WriteLine("[LOADER][INFO] GPU backend: Metal.");
             return new MetalGuestGpuBackend();
         }
 
-        Console.Error.WriteLine(
-            $"[LOADER][WARN] Unknown SHARPEMU_GPU_BACKEND value '{requested}'; using Vulkan.");
         return new VulkanGuestGpuBackend();
     }
 }

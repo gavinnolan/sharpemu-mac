@@ -67,9 +67,8 @@ public sealed record HostVideoOptions
     public PerformanceOverlayCorner OverlayCorner { get; init; } = PerformanceOverlayCorner.TopRight;
     public PerformanceOverlayMode OverlayMode { get; init; } = PerformanceOverlayMode.TitleBar;
 
-    // On macOS, Auto keeps guests on SDR output: reporting HDR moves titles onto render paths
-    // MoltenVK cannot build yet (Silent Hill's HDR switch fails a pipeline compile and then
-    // crashes inside MoltenVK on every run). --hdr=on still opts in.
+    // On macOS, Auto keeps guests on SDR output: the Metal presenter has no HDR (EDR) output
+    // path yet, so reporting HDR would move titles onto render paths it cannot present.
     internal static bool AutoHdrAllowed => !OperatingSystem.IsMacOS();
 
     internal bool CanUseHdr(bool displayHdrEnabled, bool surfaceSupportsHdr) =>
@@ -105,8 +104,9 @@ public static class HostVideoHost
     {
         var normalized = options.Normalize();
         Volatile.Write(ref _currentOptions, normalized);
-        var configured = VulkanVideoPresenter.TryConfigureVideo(normalized) &
-                         MetalVideoPresenter.TryConfigureVideo(normalized);
+        var configured = OperatingSystem.IsMacOS()
+            ? MetalVideoPresenter.TryConfigureVideo(normalized)
+            : VulkanVideoPresenter.TryConfigureVideo(normalized);
         if (configured)
             Volatile.Write(ref _videoConfigured, true);
         return configured;
