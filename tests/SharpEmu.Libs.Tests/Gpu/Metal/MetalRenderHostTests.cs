@@ -27,7 +27,7 @@ namespace SharpEmu.Libs.Tests.Gpu.Metal;
 // The executor over the Metal host with a recording backend: the copied draw record, its stage bindings,
 // the device-address ranges and the global data share transfers it submits.
 [Collection(SchedulingStateCollection.Name)]
-public sealed class MetalRenderHostTests : IDisposable
+public sealed partial class MetalRenderHostTests : IDisposable
 {
     private const ulong MemoryBase = 0x1_0000_0000;
     private const int MemorySize = 0x10_0000;
