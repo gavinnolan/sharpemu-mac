@@ -87,7 +87,7 @@ public sealed class EndOfPipe
         var hostTicks = KernelRuntimeCompatExports.ReadTscCounter();
         if (!TryScaleReferenceClock(hostTicks, hostFrequency, out var value))
         {
-            throw SubmissionScheduler.Fatal($"Cannot convert the host clock: ticks=0x{hostTicks:X16} frequency={hostFrequency}");
+            throw GpuFatal.Fatal($"Cannot convert the host clock: ticks=0x{hostTicks:X16} frequency={hostFrequency}");
         }
 
         return value;
@@ -99,7 +99,7 @@ public sealed class EndOfPipe
         var size = (ulong)wordCount * sizeof(uint);
         if (gds.IsEmpty || offset > (ulong)gds.Length || size > (ulong)gds.Length - offset || destination.Length < wordCount)
         {
-            throw SubmissionScheduler.Fatal($"Cannot read the requested GDS range: offset={wordOffset} size={wordCount} gds={gds.Length}");
+            throw GpuFatal.Fatal($"Cannot read the requested GDS range: offset={wordOffset} size={wordCount} gds={gds.Length}");
         }
 
         gds.Slice((int)offset, (int)size).CopyTo(MemoryMarshal.AsBytes(destination));
@@ -113,7 +113,7 @@ public sealed class EndOfPipe
         var scheduler = signal.Buffer.Owner;
         if (signal.Completion != EndOfPipeCompletion.None && (!scheduler.Active || signal.Buffer != scheduler.Current))
         {
-            throw SubmissionScheduler.Fatal("End-of-pipe completion requires the current command buffer.");
+            throw GpuFatal.Fatal("End-of-pipe completion requires the current command buffer.");
         }
 
         switch (signal.Completion)
@@ -191,7 +191,7 @@ public sealed class EndOfPipe
             {
                 if (requestId == 0)
                 {
-                    throw SubmissionScheduler.Fatal("The GPU flip submission returned an invalid request ID of zero.");
+                    throw GpuFatal.Fatal("The GPU flip submission returned an invalid request ID of zero.");
                 }
 
                 return requestId;
@@ -199,7 +199,7 @@ public sealed class EndOfPipe
 
             if (result != IFlipSubmitter.FlipQueueFull)
             {
-                throw SubmissionScheduler.Fatal($"Could not submit the GPU flip: result={result} handle={handle} index={index} mode={flipMode} arg={flipArg}");
+                throw GpuFatal.Fatal($"Could not submit the GPU flip: result={result} handle={handle} index={index} mode={flipMode} arg={flipArg}");
             }
 
             _flips.WaitForSubmitSlot();
@@ -227,7 +227,7 @@ public sealed class EndOfPipe
         var scheduler = buffer.Owner;
         if (!scheduler.Active || buffer != scheduler.Current)
         {
-            throw SubmissionScheduler.Fatal("An end-of-pipe event requires the current command buffer.");
+            throw GpuFatal.Fatal("An end-of-pipe event requires the current command buffer.");
         }
 
         scheduler.QueuePriorityCompletionAction(() => _sink.TriggerInterrupt(eventId, contextId));
@@ -237,7 +237,7 @@ public sealed class EndOfPipe
     {
         if (signal.Destination == 0)
         {
-            throw SubmissionScheduler.Fatal("Cannot record an end-of-pipe write to address zero.");
+            throw GpuFatal.Fatal("Cannot record an end-of-pipe write to address zero.");
         }
 
         _ = signal.Buffer.Handle;
@@ -248,7 +248,7 @@ public sealed class EndOfPipe
         WriteAction.Write => RecordedOperation.EopWrite,
         WriteAction.WriteBack or WriteAction.InterruptWriteBack => RecordedOperation.EopWriteBack,
         WriteAction.Interrupt => RecordedOperation.EopInterrupt,
-        _ => throw SubmissionScheduler.Fatal("The end-of-pipe write action is not supported."),
+        _ => throw GpuFatal.Fatal("The end-of-pipe write action is not supported."),
     };
 
     private void RecordValueWrite(ulong submitId, RecordingBuffer buffer, ulong destination, ulong value, WriteSize size, WriteAction action, int eventId = 0, uint contextId = 0)

@@ -5,6 +5,7 @@ namespace SharpEmu.Libs.VideoOut;
 
 using System.Collections.Concurrent;
 using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Rendering;
@@ -79,7 +80,7 @@ internal static unsafe partial class VulkanVideoPresenter
         public bool Clear;
         public ClearColorValue ClearValue;
 
-        public Format Format => Request.View.Format;
+        public Format Format => Request.View.Format.ToVk();
         public ulong Address => Resolution.BaseAddress;
     }
 
@@ -98,7 +99,7 @@ internal static unsafe partial class VulkanVideoPresenter
         public float ClearDepthValue = 1f;
         public byte ClearStencilValue;
 
-        public Format Format => Resolution.Format;
+        public Format Format => Resolution.Format.ToVk();
     }
 
     // One shader image binding: a cached image, or a host movie plane with its own image.
@@ -290,7 +291,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             var resolution = target.Resolution;
             if (!TryDecodeDccClear((byte)metadataValue, resolution.MetadataClearSupported, resolution.MetadataFixedClearSupported,
-                resolution.ColorClearValue, out clearValue))
+                resolution.ColorClearValue.ToVk(), out clearValue))
             {
                 return false;
             }
@@ -343,7 +344,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             var resolution = target.Resolution;
             if (!TryDecodeDccClear(clearCode, resolution.MetadataClearSupported, resolution.MetadataFixedClearSupported,
-                resolution.ColorClearValue, out clearValue))
+                resolution.ColorClearValue.ToVk(), out clearValue))
             {
                 return false;
             }
@@ -434,14 +435,14 @@ internal static unsafe partial class VulkanVideoPresenter
         // The aspects the draw writes: cleared or written depth, cleared or tested-and-written stencil.
         private static ImageAspectFlags GetDepthWriteAspects(DepthAttachment depth, GuestDepthState state)
         {
-            var available = ViewFormatRules.DepthAspects(depth.Format);
+            var available = ViewFormatRules.DepthAspects(depth.Format.ToNeutral());
             var writes = (ImageAspectFlags)0;
-            if ((available & ImageAspectFlags.DepthBit) != 0 && (depth.ClearDepth || (state.TestEnable && state.WriteEnable)))
+            if ((available & GpuImageAspect.DepthBit) != 0 && (depth.ClearDepth || (state.TestEnable && state.WriteEnable)))
             {
                 writes |= ImageAspectFlags.DepthBit;
             }
 
-            if ((available & ImageAspectFlags.StencilBit) == 0)
+            if ((available & GpuImageAspect.StencilBit) == 0)
             {
                 return writes;
             }
@@ -486,15 +487,15 @@ internal static unsafe partial class VulkanVideoPresenter
         // The attachment layout by written aspects; the device enables no separate depth/stencil layouts.
         private static ImageLayout GetDepthAttachmentLayout(DepthAttachment depth, ImageAspectFlags writes)
         {
-            var available = ViewFormatRules.DepthAspects(depth.Format);
+            var available = ViewFormatRules.DepthAspects(depth.Format.ToNeutral());
             var depthWrite = (writes & ImageAspectFlags.DepthBit) != 0;
             var stencilWrite = (writes & ImageAspectFlags.StencilBit) != 0;
-            if ((available & ImageAspectFlags.StencilBit) == 0)
+            if ((available & GpuImageAspect.StencilBit) == 0)
             {
                 return depthWrite ? ImageLayout.DepthStencilAttachmentOptimal : ImageLayout.DepthStencilReadOnlyOptimal;
             }
 
-            if ((available & ImageAspectFlags.DepthBit) == 0)
+            if ((available & GpuImageAspect.DepthBit) == 0)
             {
                 return stencilWrite ? ImageLayout.DepthStencilAttachmentOptimal : ImageLayout.DepthStencilReadOnlyOptimal;
             }
@@ -589,7 +590,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private Sampler ResolveSampler(in GuestSampler sampler, Format viewFormat)
         {
             Span<uint> words = stackalloc uint[4] { sampler.Word0, sampler.Word1, sampler.Word2, sampler.Word3 };
-            return _samplerStore.GetSampler(new SamplerDescriptorWords(words), ViewFormatRules.IsIntegerFormat(viewFormat));
+            return _samplerStore.GetSampler(new SamplerDescriptorWords(words), ViewFormatRules.IsIntegerFormat(viewFormat.ToNeutral()));
         }
 
         // Views for every cached binding after the targets are bound; a stale image is found again first.
@@ -630,7 +631,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 if (binding.IsStorage && image.Description.HasStencil && ViewFormatRules.IsStencilViewFormat(binding.Request.View.Format))
                 {
                     image = AcquireStencilStorage(binding, image);
-                    binding.View = image.GetOrCreateView(binding.Request.View with { Aspect = ImageAspectFlags.ColorBit });
+                    binding.View = image.GetOrCreateView(binding.Request.View with { Aspect = GpuImageAspect.ColorBit });
                 }
                 else
                 {
@@ -643,7 +644,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 binding.Image = image.Backing.Handle;
                 if (!binding.IsStorage)
                 {
-                    binding.Sampler = ResolveSampler(binding.SamplerState, binding.Request.View.Format);
+                    binding.Sampler = ResolveSampler(binding.SamplerState, binding.Request.View.Format.ToVk());
                 }
             }
         }
@@ -681,7 +682,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var sampledRequest = binding.Request with
             {
                 Role = ImageRole.Texture,
-                View = binding.Request.View with { Usage = ImageUsageFlags.SampledBit },
+                View = binding.Request.View with { Usage = GpuImageUsage.SampledBit },
             };
             _imageCache.AcquireTextureView(binding.ImageIdentifier, sampledRequest);
             if (writeBack)
@@ -700,7 +701,7 @@ internal static unsafe partial class VulkanVideoPresenter
             attachment.CopyStencilStorage(storage, _bufferCache.GetUtilityBuffer(GpuBufferUsage.DeviceLocal), writeBack: false);
             if (_hasBoundDepth && _boundDepth.Image == binding.ImageIdentifier)
             {
-                var writes = _boundDepthLoadState.AttachmentWriteAspects(attachment.Backing.Format);
+                var writes = _boundDepthLoadState.AttachmentWriteAspects(attachment.Backing.Format.ToNeutral());
                 attachment.Transition(_boundDepthLayout,
                     AccessFlags.DepthStencilAttachmentReadBit | (writes != 0 ? AccessFlags.DepthStencilAttachmentWriteBit : 0),
                     null, BeginBatchedGuestCommands());
@@ -731,10 +732,10 @@ internal static unsafe partial class VulkanVideoPresenter
             if (snapshot is null)
             {
                 var description = ImageDescription.Create();
-                description.PixelFormat = source.Backing.Format;
+                description.PixelFormat = source.Backing.Format.ToNeutral();
                 description.GuestFormat = source.Description.GuestFormat;
                 description.Type = GuestImageType.Color2D;
-                description.Extent = new Extent3D(source.Backing.Extent.Width, source.Backing.Extent.Height, 1);
+                description.Extent = new GpuExtent3D(source.Backing.Extent.Width, source.Backing.Extent.Height, 1);
                 description.Resources = new SubresourceCount(source.Backing.MipLevels, source.Backing.Layers);
                 description.BytesPerBlock = source.Description.BytesPerBlock == 0 ? 1 : source.Description.BytesPerBlock;
                 description.Samples = source.Backing.Samples;
@@ -854,7 +855,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var depthImage = _imageCache.GetImage(_boundDepth.Image);
             var attachmentView = _boundDepth.Target.Target.Request.View;
             var writes = _boundDepthLoadState.AttachmentWriteAspects(_boundDepth.Target.Target.Format);
-            var writableDepth = writes & ImageAspectFlags.DepthBit;
+            var writableDepth = writes & GpuImageAspect.DepthBit;
             if (writableDepth == 0)
             {
                 return;
@@ -871,7 +872,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 var sampledAspect = ViewFormatRules.IsStencilViewFormat(binding.Request.View.Format)
                     ? ImageAspectFlags.StencilBit
                     : ImageAspectFlags.DepthBit;
-                if ((sampledAspect & writableDepth) == 0)
+                if ((sampledAspect & writableDepth.ToVk()) == 0)
                 {
                     continue;
                 }
@@ -893,7 +894,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             var aspects = (depth.ClearDepth ? ImageAspectFlags.DepthBit : 0) |
                 (depth.ClearStencil ? ImageAspectFlags.StencilBit : 0);
-            aspects &= ViewFormatRules.DepthAspects(depth.Format);
+            aspects &= ViewFormatRules.DepthAspects(depth.Format.ToNeutral()).ToVk();
             if (aspects == 0)
                 return;
 

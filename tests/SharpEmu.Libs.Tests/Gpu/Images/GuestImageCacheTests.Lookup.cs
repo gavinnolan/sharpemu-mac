@@ -1,8 +1,10 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Vulkan;
 using SharpEmu.Libs.Tests.Gpu.Buffers;
 using Silk.NET.Vulkan;
 using Xunit;
@@ -58,9 +60,9 @@ public sealed partial class GuestImageCacheTests
         var baseline = harness.Images.LookupMemoCounters;
 
         var swizzled = Sampled(address);
-        swizzled.View = swizzled.View with { Mapping = new ComponentMapping(ComponentSwizzle.B, ComponentSwizzle.G, ComponentSwizzle.R, ComponentSwizzle.A) };
+        swizzled.View = swizzled.View with { Mapping = new GpuComponentMapping(GpuComponentSwizzle.B, GpuComponentSwizzle.G, GpuComponentSwizzle.R, GpuComponentSwizzle.A) };
         Assert.Equal(firstId, harness.Find(ref swizzled));
-        Assert.Equal(ComponentSwizzle.B, swizzled.View.Mapping.R);
+        Assert.Equal(GpuComponentSwizzle.B, swizzled.View.Mapping.R);
         Assert.Equal(baseline.Hits, harness.Images.LookupMemoCounters.Hits);
     }
 }

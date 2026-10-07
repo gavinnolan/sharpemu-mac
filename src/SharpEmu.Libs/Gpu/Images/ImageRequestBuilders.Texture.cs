@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
-using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Images;
 
 // A texture request built from the descriptor words and the shape the shader was compiled with.
-public readonly record struct TextureRequestResolution(ImageRequest Request, bool ExactFormat, Format ViewFormat, uint Swizzle);
+public readonly record struct TextureRequestResolution(ImageRequest Request, bool ExactFormat, GpuFormat ViewFormat, uint Swizzle);
 
 public static partial class ImageRequestBuilders
 {
@@ -20,16 +20,16 @@ public static partial class ImageRequestBuilders
         var storage = shape.Storage;
         var (format, guestFormat) = numericClass switch
         {
-            TextureNumericClass.Float => (Format.R32Sfloat, GuestPixelFormat.Bits32Float),
-            TextureNumericClass.Uint => (Format.R32Uint, GuestPixelFormat.Bits32UInt),
-            TextureNumericClass.Sint => (Format.R32Sint, GuestPixelFormat.Bits32SInt),
+            TextureNumericClass.Float => (GpuFormat.R32Sfloat, GuestPixelFormat.Bits32Float),
+            TextureNumericClass.Uint => (GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt),
+            TextureNumericClass.Sint => (GpuFormat.R32Sint, GuestPixelFormat.Bits32SInt),
             _ => throw SubmissionScheduler.Fatal($"A null image needs a supported numeric class: class={numericClass}."),
         };
         // Depth-reference sampling needs a depth view even for the placeholder.
         var depthCompare = shape.DepthCompare && numericClass == TextureNumericClass.Float && !storage;
         if (depthCompare)
         {
-            format = Format.D32Sfloat;
+            format = GpuFormat.D32Sfloat;
         }
 
         var description = ImageDescription.Create();
@@ -38,7 +38,7 @@ public static partial class ImageRequestBuilders
         description.Type = shape.Volume
             ? GuestImageType.Color3D
             : shape.OneDimensional ? GuestImageType.Color1D : GuestImageType.Color2D;
-        description.Extent = new Extent3D(1, 1, 1);
+        description.Extent = new GpuExtent3D(1, 1, 1);
         description.Resources = SubresourceCount.Single;
         description.BytesPerBlock = 4;
         description.Samples = shape.Multisampled ? 4u : 1u;
@@ -47,12 +47,12 @@ public static partial class ImageRequestBuilders
         {
             Format = format,
             Type = shape.Volume
-                ? ImageViewType.Type3D
+                ? GpuImageViewType.Type3D
                 : shape.OneDimensional
-                    ? shape.Arrayed ? ImageViewType.Type1DArray : ImageViewType.Type1D
-                    : shape.Arrayed ? ImageViewType.Type2DArray : ImageViewType.Type2D,
-            Aspect = depthCompare ? ImageAspectFlags.DepthBit : ImageAspectFlags.ColorBit,
-            Usage = storage ? ImageUsageFlags.StorageBit : ImageUsageFlags.SampledBit,
+                    ? shape.Arrayed ? GpuImageViewType.Type1DArray : GpuImageViewType.Type1D
+                    : shape.Arrayed ? GpuImageViewType.Type2DArray : GpuImageViewType.Type2D,
+            Aspect = depthCompare ? GpuImageAspect.DepthBit : GpuImageAspect.ColorBit,
+            Usage = storage ? GpuImageUsage.StorageBit : GpuImageUsage.SampledBit,
         };
         return new ImageRequest(description, view, storage ? ImageRole.StorageImage : ImageRole.Texture);
     }
@@ -112,13 +112,13 @@ public static partial class ImageRequestBuilders
 
     // The view follows the compiled module: a volume, a layer window to the last layer, or one layer.
     private static ImageViewDescription TextureView(
-        in TextureDescriptorWords descriptor, in ShaderImageShape shape, Format format, bool shaderConversion, uint viewLevels, uint imageLayers)
+        in TextureDescriptorWords descriptor, in ShaderImageShape shape, GpuFormat format, bool shaderConversion, uint viewLevels, uint imageLayers)
     {
         var mapping = shape.Storage || shaderConversion ? default : ViewFormatRules.ComponentMapping(DestinationSwizzle(descriptor));
-        var usage = shape.Storage ? ImageUsageFlags.StorageBit : ImageUsageFlags.SampledBit;
+        var usage = shape.Storage ? GpuImageUsage.StorageBit : GpuImageUsage.SampledBit;
         if (shape.Volume)
         {
-            return WithMinLod(new ImageViewDescription(format, ImageViewType.Type3D, ImageAspectFlags.ColorBit, descriptor.BaseLevel, viewLevels, 0, 1, mapping, usage), descriptor, shape);
+            return WithMinLod(new ImageViewDescription(format, GpuImageViewType.Type3D, GpuImageAspect.ColorBit, descriptor.BaseLevel, viewLevels, 0, 1, mapping, usage), descriptor, shape);
         }
 
         var baseLayer = descriptor.BaseArray;
@@ -129,9 +129,9 @@ public static partial class ImageRequestBuilders
 
         var layerCount = shape.Arrayed ? imageLayers - baseLayer : 1;
         var type = shape.OneDimensional
-            ? shape.Arrayed ? ImageViewType.Type1DArray : ImageViewType.Type1D
-            : shape.Arrayed ? ImageViewType.Type2DArray : ImageViewType.Type2D;
-        return WithMinLod(new ImageViewDescription(format, type, ImageAspectFlags.ColorBit, descriptor.BaseLevel, viewLevels, baseLayer, layerCount, mapping, usage), descriptor, shape);
+            ? shape.Arrayed ? GpuImageViewType.Type1DArray : GpuImageViewType.Type1D
+            : shape.Arrayed ? GpuImageViewType.Type2DArray : GpuImageViewType.Type2D;
+        return WithMinLod(new ImageViewDescription(format, type, GpuImageAspect.ColorBit, descriptor.BaseLevel, viewLevels, baseLayer, layerCount, mapping, usage), descriptor, shape);
     }
 
     // MIN_LOD (4.8 fixed point, absolute mip levels) keeps sampling off mips a streamed texture has not
@@ -286,15 +286,15 @@ public static partial class ImageRequestBuilders
             pixelFormat = depthFormat.DepthAttachmentFormat;
         }
         // Atomic storage images are declared as UINT in SPIR-V, including float atomics.
-        var storageViewFormat = storage && (shape.Atomic || format == GuestPixelFormat.Bits32SInt) ? Format.R32Uint : ViewFormatRules.SrgbStorageFormat(pixelFormat);
-        var viewFormat = storage && storageViewFormat != Format.Undefined ? storageViewFormat : pixelFormat;
+        var storageViewFormat = storage && (shape.Atomic || format == GuestPixelFormat.Bits32SInt) ? GpuFormat.R32Uint : ViewFormatRules.SrgbStorageFormat(pixelFormat);
+        var viewFormat = storage && storageViewFormat != GpuFormat.Undefined ? storageViewFormat : pixelFormat;
         var blockBytes = GuestPixelFormats.BlockCompressedBytes(format);
         var description = ImageDescription.Create();
         description.Data = new GuestSpan(address, size.Size);
         description.PixelFormat = pixelFormat;
         description.GuestFormat = format;
         description.Type = TextureBaseType(type);
-        description.Extent = new Extent3D(width, height, volume ? depth : 1);
+        description.Extent = new GpuExtent3D(width, height, volume ? depth : 1);
         description.Resources = new SubresourceCount(levels, imageLayers);
         description.Pitch = pitch;
         description.BytesPerBlock = blockBytes != 0 ? blockBytes : GuestPixelFormats.BytesPerElement(format);

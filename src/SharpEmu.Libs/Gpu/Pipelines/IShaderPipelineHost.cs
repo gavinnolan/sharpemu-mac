@@ -1,10 +1,10 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
-using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Pipelines;
 
@@ -49,7 +49,7 @@ internal interface IShaderPipelineHost
     RenderHostLimits Limits { get; }
 
     // The sample counts a pipeline without attachments can rasterize at.
-    SampleCountFlags NoAttachmentSampleCounts { get; }
+    GpuSampleCount NoAttachmentSampleCounts { get; }
 
     bool TryResolveColorOutput(uint dataFormat, uint numberType, uint componentSwap, out Gen5PixelOutputKind outputKind, out Gen5ColorComponentMapping componentMapping);
 

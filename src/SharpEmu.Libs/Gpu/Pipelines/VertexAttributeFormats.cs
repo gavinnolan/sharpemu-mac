@@ -120,7 +120,7 @@ public static class VertexAttributeFormats
     {
         if (!TryResolve(in descriptor, usedComponents, out var format, out size))
         {
-            throw SubmissionScheduler.Fatal($"The vertex buffer format is unknown: format={descriptor.Format}.");
+            throw GpuFatal.Fatal($"The vertex buffer format is unknown: format={descriptor.Format}.");
         }
 
         return format;

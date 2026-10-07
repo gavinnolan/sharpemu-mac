@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Vulkan;
@@ -77,9 +78,9 @@ public sealed class PresenterDispatchThreadLimitTests(HeadlessVulkanFixture fixt
                 using var preparation = presenter.RenderHost.BeginPreparation();
                 var prepared = presenter.RenderHost.PrepareBindings(stage);
                 presenter.RenderHost.BindResources(prepared);
-                presenter.RenderHost.CommitBindings(PipelineBindPoint.Compute, in pipeline, [prepared]);
+                presenter.RenderHost.CommitBindings(GpuBindPoint.Compute, in pipeline, [prepared]);
                 presenter.RenderHost.ShaderWriteHazardBarrier();
-                presenter.RenderHost.BindPipeline(PipelineBindPoint.Compute, in pipeline);
+                presenter.RenderHost.BindPipeline(GpuBindPoint.Compute, in pipeline);
                 presenter.RenderHost.Dispatch(2, 2, 2);
                 presenter.RenderHost.ShaderAccessBarrier();
             }

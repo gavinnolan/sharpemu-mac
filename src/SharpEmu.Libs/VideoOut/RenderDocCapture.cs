@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Runtime.InteropServices;
+using SharpEmu.Logging;
 
 namespace SharpEmu.Libs.VideoOut;
 
@@ -122,9 +123,7 @@ public static unsafe class RenderDocCapture
 
         try
         {
-            var directory = Path.Combine(
-                AppContext.BaseDirectory,
-                "user",
+            var directory = SharpEmuPaths.UserPath(
                 "logs",
                 "capture_logs",
                 safeTitleId);

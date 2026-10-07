@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Vulkan;
 using SharpEmu.Libs.Tests.Gpu.Buffers;
 using Silk.NET.Vulkan;
 using Xunit;
@@ -37,7 +39,7 @@ public sealed unsafe partial class GuestImageCacheTests
         }
 
         harness.Write(address, Bytes(native));
-        var request = LinearRequest(address, guestSize, Format.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D, new Extent3D(width, 1, 1), 1, 4, 1);
+        var request = LinearRequest(address, guestSize, GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D, new GpuExtent3D(width, 1, 1), 1, 4, 1);
         request.Description.Pitch = pitch;
         request.Description.MipLayout[0] = new MipLevelLayout { Offset = spans[0].Offset, Size = spans[0].Size, Pitch = padded[0].Width, Height = padded[0].Height };
         var imageIdentifier = harness.Acquire(ref request);
@@ -63,7 +65,7 @@ public sealed unsafe partial class GuestImageCacheTests
         const ulong volumeSlice = 256;
         harness.Write(address + 0x20000, Bytes(0x10203040u));
         harness.Write(address + 0x20000 + volumeSlice, Bytes(0x50607080u));
-        var volume = LinearRequest(address + 0x20000, 2 * volumeSlice, Format.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color3D, new Extent3D(1, 1, 2), 1, 4, 1);
+        var volume = LinearRequest(address + 0x20000, 2 * volumeSlice, GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color3D, new GpuExtent3D(1, 1, 2), 1, 4, 1);
         var volumeId = harness.Acquire(ref volume);
         harness.MarkGpuWritten(volumeId);
         harness.Worker.Run(() =>
@@ -78,8 +80,8 @@ public sealed unsafe partial class GuestImageCacheTests
 
         // Depth synchronizes only as a whole image.
         harness.Write(address + 0x30000, Bytes(0.25f, 0.75f, 0.5f));
-        var depth = LinearRequest(address + 0x30000, 12, Format.D32Sfloat, GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new Extent3D(2, 1, 1), 1, 4, 1);
-        depth = AsDepthTarget(depth, Format.D32Sfloat);
+        var depth = LinearRequest(address + 0x30000, 12, GpuFormat.D32Sfloat, GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new GpuExtent3D(2, 1, 1), 1, 4, 1);
+        depth = AsDepthTarget(depth, GpuFormat.D32Sfloat);
         depth.Description.Resources = new SubresourceCount(2, 1);
         depth.Description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = 8, Pitch = 2, Height = 1 };
         depth.Description.MipLayout[1] = new MipLevelLayout { Offset = 8, Size = 4, Pitch = 1, Height = 1 };
@@ -103,20 +105,20 @@ public sealed unsafe partial class GuestImageCacheTests
         using var harness = new CacheHarness(_vulkan);
         var address = harness.MapBacked(0x10000, ReadWrite);
         harness.Write(address, Bytes((ushort)0x2000, (ushort)0xc000));
-        var rawDepth = LinearRequest(address, 4, Format.D16Unorm, GuestPixelFormat.Bits16UNorm, GuestImageType.Color2D, new Extent3D(2, 1, 1), 1, 2, 1);
-        rawDepth = AsDepthTarget(rawDepth, Format.D16Unorm);
+        var rawDepth = LinearRequest(address, 4, GpuFormat.D16Unorm, GuestPixelFormat.Bits16UNorm, GuestImageType.Color2D, new GpuExtent3D(2, 1, 1), 1, 2, 1);
+        rawDepth = AsDepthTarget(rawDepth, GpuFormat.D16Unorm);
         var rawDepthId = harness.Acquire(ref rawDepth);
 
         var rawUint = rawDepth;
         rawUint.Role = ImageRole.Texture;
-        rawUint.Description.PixelFormat = Format.R16Uint;
+        rawUint.Description.PixelFormat = GpuFormat.R16Uint;
         rawUint.Description.GuestFormat = GuestPixelFormat.Bits16UInt;
-        rawUint.View = rawUint.View with { Format = Format.R16Uint, Aspect = ImageAspectFlags.ColorBit, Usage = ImageUsageFlags.SampledBit };
+        rawUint.View = rawUint.View with { Format = GpuFormat.R16Uint, Aspect = GpuImageAspect.ColorBit, Usage = GpuImageUsage.SampledBit };
         var rawUintId = harness.Find(ref rawUint);
         Assert.True(rawUintId.IsValid);
         Assert.NotEqual(rawDepthId, rawUintId);
         Assert.False(harness.Images.Contains(rawDepthId));
-        Assert.Equal(Format.R16Uint, harness.Image(rawUintId).Backing.Format);
+        Assert.Equal(GpuFormat.R16Uint, harness.Image(rawUintId).Backing.Format.ToNeutral());
         var local = rawUint;
         Assert.NotEqual(0UL, harness.Worker.Run(() => harness.Images.AcquireTextureView(rawUintId, local)).Handle);
 
@@ -124,7 +126,7 @@ public sealed unsafe partial class GuestImageCacheTests
         var layeredAddress = address + 0x1000;
         var layeredValues = new ushort[] { 0x0102, 0x0304, 0x1112, 0x1314, 0x2122, 0x2324, 0x3132, 0x3334, 0x4142, 0x4344, 0x5152, 0x5354 };
         harness.Write(layeredAddress, Bytes(layeredValues));
-        var layeredColor = LinearRequest(layeredAddress, 24, Format.R16Unorm, GuestPixelFormat.Bits16UNorm, GuestImageType.Color2D, new Extent3D(2, 1, 1), 6, 2, 1);
+        var layeredColor = LinearRequest(layeredAddress, 24, GpuFormat.R16Unorm, GuestPixelFormat.Bits16UNorm, GuestImageType.Color2D, new GpuExtent3D(2, 1, 1), 6, 2, 1);
         var layeredColorId = harness.Acquire(ref layeredColor);
         harness.Worker.Run(() =>
         {
@@ -137,7 +139,7 @@ public sealed unsafe partial class GuestImageCacheTests
         });
         harness.MarkGpuWritten(layeredColorId);
 
-        var layeredDepth = AsDepthTarget(layeredColor, Format.D16Unorm);
+        var layeredDepth = AsDepthTarget(layeredColor, GpuFormat.D16Unorm);
         layeredDepth.Description.Data = new GuestSpan(layeredAddress, 20);
         layeredDepth.Description.GuestFormat = GuestPixelFormat.Bits16UNorm;
         layeredDepth.Description.Resources = new SubresourceCount(1, 5);
@@ -154,14 +156,14 @@ public sealed unsafe partial class GuestImageCacheTests
         harness.Worker.Run(() => harness.Images.AcquireDepthTargetView(layeredDepthId, depthLocal));
 
         var reacquired = layeredColor;
-        reacquired.Description.PixelFormat = Format.R16Uint;
+        reacquired.Description.PixelFormat = GpuFormat.R16Uint;
         reacquired.Description.GuestFormat = GuestPixelFormat.Bits16UInt;
-        reacquired.View = reacquired.View with { Format = Format.R16Uint };
+        reacquired.View = reacquired.View with { Format = GpuFormat.R16Uint };
         var reacquiredId = harness.Acquire(ref reacquired);
         Assert.True(reacquiredId.IsValid);
         Assert.NotEqual(layeredDepthId, reacquiredId);
         Assert.False(harness.Images.Contains(layeredDepthId));
-        Assert.Equal(Format.R16Uint, harness.Image(reacquiredId).Backing.Format);
+        Assert.Equal(GpuFormat.R16Uint, harness.Image(reacquiredId).Backing.Format.ToNeutral());
         Assert.All(harness.ReadImageBytes(harness.Image(reacquiredId)), value => Assert.Equal(0xff, value));
         harness.Shutdown();
     }
@@ -175,8 +177,8 @@ public sealed unsafe partial class GuestImageCacheTests
         const ulong sliceSize = 0x10000;
         const ulong totalSize = sliceSize * layers;
         var address = harness.MapBacked(totalSize + 0x10000, ReadWrite);
-        var color = LinearRequest(address, totalSize, Format.R32Sfloat, GuestPixelFormat.Bits32Float,
-            GuestImageType.Color2D, new Extent3D(128, 128, 1), layers, 4, 1);
+        var color = LinearRequest(address, totalSize, GpuFormat.R32Sfloat, GuestPixelFormat.Bits32Float,
+            GuestImageType.Color2D, new GpuExtent3D(128, 128, 1), layers, 4, 1);
         color.Description.TileMode = GuestTileMode.Depth;
         var colorIdentifier = harness.Acquire(ref color);
         harness.Worker.Run(() =>
@@ -193,7 +195,7 @@ public sealed unsafe partial class GuestImageCacheTests
         });
         harness.MarkGpuWritten(colorIdentifier);
 
-        var depth = AsDepthTarget(color, Format.D32Sfloat);
+        var depth = AsDepthTarget(color, GpuFormat.D32Sfloat);
         depth.Description.Data = new GuestSpan(address, sliceSize);
         depth.Description.Resources = SubresourceCount.Single;
         depth.Description.MipLayout[0].Size = sliceSize;
@@ -212,7 +214,7 @@ public sealed unsafe partial class GuestImageCacheTests
         Assert.False(harness.Images.Contains(colorIdentifier));
         var localDepth = depth;
         harness.Worker.Run(() => harness.Images.AcquireDepthTargetView(depthIdentifier, localDepth));
-        var copied = harness.ReadImageBytes(owner, ImageAspectFlags.DepthBit);
+        var copied = harness.ReadImageBytes(owner, GpuImageAspect.DepthBit);
         for (var layer = 0; layer < layers; layer++)
             Assert.Equal((layer + 1) / 8f, BitConverter.ToSingle(copied, layer * (int)sliceSize));
 
@@ -224,7 +226,7 @@ public sealed unsafe partial class GuestImageCacheTests
             harness.Images.InvalidateMemoryFromGpu(address, totalSize);
             harness.Images.AcquireDepthTargetView(depthIdentifier, localDepth);
         });
-        var refreshed = harness.ReadImageBytes(owner, ImageAspectFlags.DepthBit);
+        var refreshed = harness.ReadImageBytes(owner, GpuImageAspect.DepthBit);
         for (var layer = 0; layer < layers; layer++)
             Assert.Equal(0.75f, BitConverter.ToSingle(refreshed, layer * (int)sliceSize));
         harness.Shutdown();
@@ -235,13 +237,13 @@ public sealed unsafe partial class GuestImageCacheTests
     {
         if (!GatePrerequisites.Ready(_vulkan, sampleRateShading: true)) return;
         // Z16 with stencil may use any of these; AMD RDNA has no D24S8, so take one the device offers.
-        var stencilFormat = SupportedStencilFormat(_vulkan, SampleCountFlags.Count2Bit);
-        if (stencilFormat == Format.Undefined) return;
+        var stencilFormat = SupportedStencilFormat(_vulkan, GpuSampleCount.Count2Bit);
+        if (stencilFormat == GpuFormat.Undefined) return;
         using var harness = new CacheHarness(_vulkan);
         using var reader = new MultisampleDepthSampleReader(_vulkan, harness.Scheduler, harness.Worker.Run);
         var address = harness.MapBacked(0x100000, ReadWrite);
         harness.Write(address + 0x2000, Bytes((ushort)0x4000, (ushort)0xc000));
-        var color = LinearRequest(address + 0x2000, 4, Format.R16G16Unorm, GuestPixelFormat.Bits16_16UNorm, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
+        var color = LinearRequest(address + 0x2000, 4, GpuFormat.R16G16Unorm, GuestPixelFormat.Bits16_16UNorm, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, 4, 1);
         var colorId = harness.Acquire(ref color);
         harness.MarkGpuWritten(colorId);
         Assert.True(harness.WriteFault(address + 0x2000));
@@ -260,7 +262,7 @@ public sealed unsafe partial class GuestImageCacheTests
         depth.Description.GuestFormat = GuestPixelFormat.Bits16UNorm;
         depth.Description.BytesPerBlock = 2;
         depth.Description.Samples = 2;
-        depth.View = depth.View with { Aspect = ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit };
+        depth.View = depth.View with { Aspect = GpuImageAspect.DepthBit | GpuImageAspect.StencilBit };
         var depthId = harness.Find(ref depth);
         var htileAddress = address + 0x90000;
         depth.Description.Metadata.Range = new GuestSpan(htileAddress, 0x10000);
@@ -271,7 +273,7 @@ public sealed unsafe partial class GuestImageCacheTests
         var sampledDepth = depth;
         sampledDepth.Role = ImageRole.Texture;
         sampledDepth.Description.Metadata = default;
-        sampledDepth.View = sampledDepth.View with { Usage = ImageUsageFlags.SampledBit };
+        sampledDepth.View = sampledDepth.View with { Usage = GpuImageUsage.SampledBit };
         var sampledDepthId = harness.Find(ref sampledDepth);
 
         Assert.True(depthId.IsValid);
@@ -281,7 +283,7 @@ public sealed unsafe partial class GuestImageCacheTests
         Assert.NotEqual(0UL, depthView.Handle);
         var depthImage = harness.Image(depthId);
         Assert.Equal(2u, depthImage.Backing.Samples);
-        Assert.Equal(ImageLayout.DepthStencilAttachmentOptimal, depthImage.Backing.State.Layout);
+        Assert.Equal(GpuImageLayout.DepthStencilAttachmentOptimal, depthImage.Backing.State.Layout.ToNeutral());
         Assert.True(depthImage.IsGpuModified);
         Assert.Equal(0u, depthImage.Description.HtileClearMask);
         Assert.Equal(depth.Description.Metadata.Range, depthImage.Description.Metadata.Range);
@@ -299,9 +301,9 @@ public sealed unsafe partial class GuestImageCacheTests
         Assert.False(depthImage.IsBufferModified);
 
         harness.Write(address + 0x7000, Bytes((ushort)0x0000, (ushort)0x4000, (ushort)0x8000, (ushort)0xffff));
-        var color4 = LinearRequest(address + 0x7000, 8, Format.R16G16B16A16Unorm, GuestPixelFormat.Bits16_16_16_16UNorm, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 8, 1);
+        var color4 = LinearRequest(address + 0x7000, 8, GpuFormat.R16G16B16A16Unorm, GuestPixelFormat.Bits16_16_16_16UNorm, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, 8, 1);
         var color4Id = harness.Find(ref color4);
-        var depth4 = AsDepthTarget(color4, Format.D16Unorm);
+        var depth4 = AsDepthTarget(color4, GpuFormat.D16Unorm);
         depth4.Description.GuestFormat = GuestPixelFormat.Bits16UNorm;
         depth4.Description.BytesPerBlock = 2;
         depth4.Description.Samples = 4;
@@ -329,7 +331,7 @@ public sealed unsafe partial class GuestImageCacheTests
         var firstProxy = harness.ProxyAt(stencilAddress, stencilSize);
         Assert.True(firstProxy.IsValid);
         Assert.NotEqual(depthId, firstProxy);
-        Assert.Equal(Format.Undefined, harness.Image(firstProxy).Description.PixelFormat);
+        Assert.Equal(GpuFormat.Undefined, harness.Image(firstProxy).Description.PixelFormat);
         Assert.False(harness.Image(firstProxy).Backing.Exists);
         Assert.Equal(depthId, harness.Image(firstProxy).DepthOwner);
         Assert.False(harness.Worker.Run(() => harness.Images.TryDownloadForTest(firstProxy)));
@@ -337,10 +339,10 @@ public sealed unsafe partial class GuestImageCacheTests
         var exactAlias = depth;
         exactAlias.Role = ImageRole.Texture;
         exactAlias.Description.Stencil = GuestSpan.Empty;
-        exactAlias.Description.PixelFormat = Format.R8G8B8A8Unorm;
+        exactAlias.Description.PixelFormat = GpuFormat.R8G8B8A8Unorm;
         exactAlias.Description.GuestFormat = GuestPixelFormat.Bits8_8_8_8UNorm;
         exactAlias.Description.BytesPerBlock = 4;
-        exactAlias.View = exactAlias.View with { Format = Format.R8G8B8A8Unorm, Aspect = ImageAspectFlags.ColorBit, Usage = ImageUsageFlags.SampledBit };
+        exactAlias.View = exactAlias.View with { Format = GpuFormat.R8G8B8A8Unorm, Aspect = GpuImageAspect.ColorBit, Usage = GpuImageUsage.SampledBit };
         var exactAliasId = harness.Find(ref exactAlias, exactFormat: true);
         Assert.True(exactAliasId.IsValid);
         Assert.NotEqual(depthId, exactAliasId);
@@ -361,7 +363,7 @@ public sealed unsafe partial class GuestImageCacheTests
         Assert.True(secondProxy.IsValid);
         Assert.Equal(depthId, harness.Image(secondProxy).DepthOwner);
 
-        var unrelated = LinearRequest(secondStencil, stencilSize, Format.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D, new Extent3D((uint)(stencilSize / 4), 1, 1), 1, 4, 1);
+        var unrelated = LinearRequest(secondStencil, stencilSize, GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D, new GpuExtent3D((uint)(stencilSize / 4), 1, 1), 1, 4, 1);
         var unrelatedId = harness.Find(ref unrelated);
         Assert.True(unrelatedId.IsValid);
         Assert.NotEqual(depthId, unrelatedId);
@@ -390,14 +392,14 @@ public sealed unsafe partial class GuestImageCacheTests
         var depthAddress = address + 0x60000;
         var stencilAddress = address + 0x70000;
         harness.Write(depthAddress, Bytes(0.75f));
-        var depthOnly = LinearRequest(depthAddress, 0x10000, Format.D32Sfloat, GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
-        depthOnly = AsDepthTarget(depthOnly, Format.D32Sfloat);
+        var depthOnly = LinearRequest(depthAddress, 0x10000, GpuFormat.D32Sfloat, GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, 4, 1);
+        depthOnly = AsDepthTarget(depthOnly, GpuFormat.D32Sfloat);
         var depthOnlyId = harness.Find(ref depthOnly);
 
         var combined = depthOnly;
         combined.Description.Stencil = new GuestSpan(stencilAddress, 0x10000);
-        combined.Description.PixelFormat = Format.D32SfloatS8Uint;
-        combined.View = combined.View with { Format = Format.D32SfloatS8Uint, Aspect = ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit };
+        combined.Description.PixelFormat = GpuFormat.D32SfloatS8Uint;
+        combined.View = combined.View with { Format = GpuFormat.D32SfloatS8Uint, Aspect = GpuImageAspect.DepthBit | GpuImageAspect.StencilBit };
         var combinedId = harness.Find(ref combined);
         harness.Worker.Run(() => harness.Images.AssociateStencilForTest(combinedId, combined.Description.Stencil));
         var proxy = harness.ProxyAt(stencilAddress, 0x10000);
@@ -457,7 +459,7 @@ public sealed unsafe partial class GuestImageCacheTests
         }
 
         harness.Write(layeredAddress, guest);
-        var color = LinearRequest(layeredAddress, guestSize, Format.R32Sfloat, GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new Extent3D(2, 2, 1), 2, 4, 1);
+        var color = LinearRequest(layeredAddress, guestSize, GpuFormat.R32Sfloat, GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new GpuExtent3D(2, 2, 1), 2, 4, 1);
         color.Description.Resources = new SubresourceCount(2, 2);
         color.Description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = 32, Pitch = 2, Height = 2 };
         color.Description.MipLayout[1] = new MipLevelLayout { Offset = 32, Size = 8, Pitch = 1, Height = 1 };
@@ -465,7 +467,7 @@ public sealed unsafe partial class GuestImageCacheTests
         var colorId = harness.Acquire(ref color);
         harness.MarkGpuWritten(colorId);
 
-        var depth = AsDepthTarget(color, Format.D32Sfloat);
+        var depth = AsDepthTarget(color, GpuFormat.D32Sfloat);
         depth.Description.Resources = new SubresourceCount(1, 4);
         depth.View = depth.View with { LevelCount = 1 };
         var depthId = harness.Find(ref depth);
@@ -499,44 +501,44 @@ public sealed unsafe partial class GuestImageCacheTests
         harness.Shutdown();
     }
 
-    private static Format SupportedStencilFormat(SharpEmu.Libs.Tests.Gpu.Vulkan.HeadlessVulkan vulkan, SampleCountFlags samples)
+    private static GpuFormat SupportedStencilFormat(SharpEmu.Libs.Tests.Gpu.Vulkan.HeadlessVulkan vulkan, GpuSampleCount samples)
     {
-        const ImageUsageFlags usage = ImageUsageFlags.TransferSrcBit | ImageUsageFlags.TransferDstBit | ImageUsageFlags.DepthStencilAttachmentBit;
+        const GpuImageUsage usage = GpuImageUsage.TransferSrcBit | GpuImageUsage.TransferDstBit | GpuImageUsage.DepthStencilAttachmentBit;
         foreach (var format in DepthFormatRule.Find(GuestDepthFormat.Z16)!.StencilAttachmentFormats)
         {
-            if (vulkan.DeviceInfo.TryGetImageFormatProperties(format, ImageType.Type2D, ImageTiling.Optimal, usage, 0, out var properties) &&
+            if (vulkan.DeviceInfo.TryGetImageFormatProperties(format, GpuImageType.Type2D, GpuImageTiling.Optimal, usage, 0, out var properties) &&
                 (properties.SampleCounts & samples) != 0)
             {
                 return format;
             }
         }
 
-        return Format.Undefined;
+        return GpuFormat.Undefined;
     }
 
     [Fact]
     public void D16Fallback_CopiesDepthIntoStorageColor()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
-        var stencilFormat = SupportedStencilFormat(_vulkan, SampleCountFlags.Count1Bit);
-        if (stencilFormat == Format.Undefined) return;
+        var stencilFormat = SupportedStencilFormat(_vulkan, GpuSampleCount.Count1Bit);
+        if (stencilFormat == GpuFormat.Undefined) return;
         using var harness = new CacheHarness(_vulkan);
         var address = harness.MapBacked(0x10000, ReadWrite);
         var depthAddress = address + 0xc000;
         var stencilAddress = address + 0xd000;
         harness.Write(depthAddress, Bytes((ushort)0x0000, (ushort)0x2468, (ushort)0xabcd, (ushort)0xffff));
         harness.Write(stencilAddress, [0x6d, 0x6d, 0x6d, 0x6d]);
-        var depth = LinearRequest(depthAddress, 8, stencilFormat, GuestPixelFormat.Bits16UNorm, GuestImageType.Color2D, new Extent3D(4, 1, 1), 1, 2, 1);
+        var depth = LinearRequest(depthAddress, 8, stencilFormat, GuestPixelFormat.Bits16UNorm, GuestImageType.Color2D, new GpuExtent3D(4, 1, 1), 1, 2, 1);
         depth = AsDepthTarget(depth, stencilFormat);
         depth.Description.Stencil = new GuestSpan(stencilAddress, 4);
-        depth.View = depth.View with { Aspect = ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit };
+        depth.View = depth.View with { Aspect = GpuImageAspect.DepthBit | GpuImageAspect.StencilBit };
         var depthId = harness.Acquire(ref depth);
         harness.MarkGpuWritten(depthId);
 
         var storage = AsStorage(depth);
         storage.Description.Stencil = GuestSpan.Empty;
-        storage.Description.PixelFormat = Format.R16Unorm;
-        storage.View = storage.View with { Format = Format.R16Unorm, Aspect = ImageAspectFlags.ColorBit };
+        storage.Description.PixelFormat = GpuFormat.R16Unorm;
+        storage.View = storage.View with { Format = GpuFormat.R16Unorm, Aspect = GpuImageAspect.ColorBit };
         var storageId = harness.Find(ref storage, exactFormat: true);
         Assert.NotEqual(depthId, storageId);
         Assert.True(harness.Image(storageId).IsGpuModified);
@@ -548,19 +550,19 @@ public sealed unsafe partial class GuestImageCacheTests
     public void StencilPlaneWrites_ReachTheCombinedAttachment()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
-        var stencilFormat = SupportedStencilFormat(_vulkan, SampleCountFlags.Count1Bit);
-        if (stencilFormat == Format.Undefined) return;
+        var stencilFormat = SupportedStencilFormat(_vulkan, GpuSampleCount.Count1Bit);
+        if (stencilFormat == GpuFormat.Undefined) return;
         using var harness = new CacheHarness(_vulkan);
         var address = harness.MapBacked(0x10000, ReadWrite);
         var depthAddress = address + 0xc000;
         var stencilAddress = address + 0xd000;
         harness.Write(depthAddress, Bytes((ushort)0x1111, (ushort)0x2222, (ushort)0x3333, (ushort)0x4444));
         harness.Write(stencilAddress, [0x56, 0x56, 0x00, 0x56]);
-        var depth = LinearRequest(depthAddress, 8, stencilFormat, GuestPixelFormat.Bits16UNorm, GuestImageType.Color2D, new Extent3D(4, 1, 1), 1, 2, 1);
+        var depth = LinearRequest(depthAddress, 8, stencilFormat, GuestPixelFormat.Bits16UNorm, GuestImageType.Color2D, new GpuExtent3D(4, 1, 1), 1, 2, 1);
         depth = AsDepthTarget(depth, stencilFormat);
         depth.Description.Stencil = new GuestSpan(stencilAddress, 4);
-        depth.View = depth.View with { Aspect = ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit };
-        byte[] Stencil(ResourceSlotIdentifier id) => harness.ReadImageBytes(harness.Image(id), ImageAspectFlags.StencilBit)[..4];
+        depth.View = depth.View with { Aspect = GpuImageAspect.DepthBit | GpuImageAspect.StencilBit };
+        byte[] Stencil(ResourceSlotIdentifier id) => harness.ReadImageBytes(harness.Image(id), GpuImageAspect.StencilBit)[..4];
 
         var depthId = harness.Acquire(ref depth);
         Assert.Equal(new byte[] { 0x56, 0x56, 0x00, 0x56 }, Stencil(depthId));
@@ -585,20 +587,20 @@ public sealed unsafe partial class GuestImageCacheTests
     public void TiledStencilPlaneWrites_ReachTheCombinedAttachment()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
-        const ImageUsageFlags usage = ImageUsageFlags.TransferSrcBit | ImageUsageFlags.TransferDstBit | ImageUsageFlags.DepthStencilAttachmentBit;
-        if (!_vulkan.DeviceInfo.TryGetImageFormatProperties(Format.D32SfloatS8Uint, ImageType.Type2D, ImageTiling.Optimal, usage, 0, out _)) return;
+        const GpuImageUsage usage = GpuImageUsage.TransferSrcBit | GpuImageUsage.TransferDstBit | GpuImageUsage.DepthStencilAttachmentBit;
+        if (!_vulkan.DeviceInfo.TryGetImageFormatProperties(GpuFormat.D32SfloatS8Uint, GpuImageType.Type2D, GpuImageTiling.Optimal, usage, 0, out _)) return;
         using var harness = new CacheHarness(_vulkan);
         const ulong planeSize = 0x10000;
         const int texels = 128 * 128;
         var address = harness.MapBacked(planeSize * 3, ReadWrite);
         var stencilAddress = address + planeSize;
         harness.Write(stencilAddress, Enumerable.Repeat((byte)0x5a, (int)planeSize).ToArray());
-        var depth = LinearRequest(address, planeSize, Format.D32SfloatS8Uint, GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new Extent3D(128, 128, 1), 1, 4, 1);
+        var depth = LinearRequest(address, planeSize, GpuFormat.D32SfloatS8Uint, GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new GpuExtent3D(128, 128, 1), 1, 4, 1);
         depth.Description.TileMode = GuestTileMode.Depth;
-        depth = AsDepthTarget(depth, Format.D32SfloatS8Uint);
+        depth = AsDepthTarget(depth, GpuFormat.D32SfloatS8Uint);
         depth.Description.Stencil = new GuestSpan(stencilAddress, planeSize);
-        depth.View = depth.View with { Aspect = ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit };
-        byte[] Stencil(ResourceSlotIdentifier id) => harness.ReadImageBytes(harness.Image(id), ImageAspectFlags.StencilBit)[..texels];
+        depth.View = depth.View with { Aspect = GpuImageAspect.DepthBit | GpuImageAspect.StencilBit };
+        byte[] Stencil(ResourceSlotIdentifier id) => harness.ReadImageBytes(harness.Image(id), GpuImageAspect.StencilBit)[..texels];
 
         var depthId = harness.Acquire(ref depth);
         Assert.All(Stencil(depthId), value => Assert.Equal(0x5a, value));

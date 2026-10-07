@@ -1,16 +1,16 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using System.Runtime.CompilerServices;
-using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
 
 // One attachment of a dynamic rendering scope, with the format the pipeline must match.
 public readonly record struct RenderingAttachment(
-    ImageView View,
-    ImageLayout Layout,
-    Format Format,
+    GpuImageHandle View,
+    GpuImageLayout Layout,
+    GpuFormat Format,
     uint ClearWord0,
     uint ClearWord1,
     uint ClearWord2,
@@ -40,9 +40,9 @@ public struct RenderingState : IEquatable<RenderingState>
     public uint ColorAttachmentCount;
     public uint Samples;
 
-    public readonly Format DepthFormat => DepthStencilAttachment.HasDepth ? DepthStencilAttachment.Format : Format.Undefined;
+    public readonly GpuFormat DepthFormat => DepthStencilAttachment.HasDepth ? DepthStencilAttachment.Format : GpuFormat.Undefined;
 
-    public readonly Format StencilFormat => DepthStencilAttachment.HasStencil ? DepthStencilAttachment.Format : Format.Undefined;
+    public readonly GpuFormat StencilFormat => DepthStencilAttachment.HasStencil ? DepthStencilAttachment.Format : GpuFormat.Undefined;
 
     public readonly bool Equals(RenderingState other)
     {

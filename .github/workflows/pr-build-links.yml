@@ -76,14 +76,19 @@ jobs:
               github.rest.actions.listWorkflowRunArtifacts,
               { owner, repo, run_id: run.id, per_page: 100 },
             );
+            // Matched by predicate, not by substring: "sharpemu-osx-x64-app-<sha>"
+            // also contains "osx-x64", so a plain includes() check would let the
+            // .app bundle answer for the flat macOS directory (or the reverse,
+            // depending on upload order).
             const platforms = [
-              { key: 'win-x64', label: 'Windows (win-x64)' },
-              { key: 'linux-x64', label: 'Linux (linux-x64)' },
-              { key: 'osx-x64', label: 'macOS (osx-x64)' },
+              { label: 'Windows (win-x64)', match: n => n.startsWith('sharpemu-win-x64-') },
+              { label: 'Linux (linux-x64)', match: n => n.startsWith('sharpemu-linux-x64-') },
+              { label: 'macOS (osx-x64)', match: n => n.startsWith('sharpemu-osx-x64-') && !n.includes('-app-') },
+              { label: 'macOS app bundle (osx-x64)', match: n => n.startsWith('sharpemu-osx-x64-app-') },
             ];
             const rows = [];
             for (const platform of platforms) {
-              const artifact = artifacts.find(a => a.name.includes(platform.key));
+              const artifact = artifacts.find(a => platform.match(a.name));
               if (!artifact) {
                 continue;
               }

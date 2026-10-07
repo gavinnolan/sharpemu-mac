@@ -8,7 +8,13 @@ namespace SharpEmu.Libs.Gpu.Scheduling;
 
 public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
 {
-    internal static Action<string> OnFatal = message => Environment.FailFast(message);
+    // The fatal reporter lives in the backend-neutral GpuFatal so shared engine code can
+    // give up without reaching into the Vulkan submission scheduler.
+    internal static Action<string> OnFatal
+    {
+        get => GpuFatal.OnFatal;
+        set => GpuFatal.OnFatal = value;
+    }
 
     [ThreadStatic]
     private static SubmissionScheduler? _callbackOwner;
@@ -88,13 +94,7 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
 
     internal bool PriorityWorkerAlive => _priorityThread.IsAlive;
 
-    // Report the fatal error, then return an exception to stop the caller.
-    internal static Exception Fatal(string message)
-    {
-        Console.Error.WriteLine($"[GPU][FATAL] {message}");
-        OnFatal(message);
-        return new InvalidOperationException(message);
-    }
+    internal static Exception Fatal(string message) => GpuFatal.Fatal(message);
 
     // Release the device once after shutdown. A callback leaves final disposal to the shutdown owner.
     public void Dispose()

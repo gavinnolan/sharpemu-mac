@@ -145,8 +145,13 @@ public sealed class HostPackageBoundaryTests
     }
 
     [Theory]
-    [InlineData(MacOS, new[] { "libc", "libSystem.B.dylib" })]
-    [InlineData(Linux, new[] { "libc" })]
+    [InlineData(MacOS, new[]
+    {
+        "libc",
+        "libSystem.B.dylib",
+        "/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox",
+    })]
+    [InlineData(Linux, new[] { "libc", "libasound.so.2" })]
     [InlineData(Windows, new[] { "kernel32.dll", "kernelbase.dll", "winmm.dll" })]
     public void HostPackagesOnlyImportTheirOwnOssLibraries(string package, string[] allowed)
     {
@@ -245,10 +250,34 @@ public sealed class HostPackageBoundaryTests
     /// attribute rather than the raw text keeps prose that legitimately names
     /// another OS's API -- the Win64 calling convention these POSIX stubs
     /// reimplement is described in terms of kernel32 -- from failing the check.
+    /// An attribute whose argument is a const (the framework paths do not fit
+    /// on the attribute) is resolved through that const, so wrapping a library
+    /// name in one does not slip past the check.
     /// </summary>
-    private static IEnumerable<string> NativeImportLibraries(string source) =>
-        Regex.Matches(source, @"\[\s*(?:DllImport|LibraryImport)\s*\(\s*""([^""]*)""")
-            .Select(match => match.Groups[1].Value);
+    private static IEnumerable<string> NativeImportLibraries(string source)
+    {
+        var constants = Regex
+            .Matches(source, @"const\s+string\s+(\w+)\s*=\s*""([^""]*)""")
+            .ToDictionary(match => match.Groups[1].Value, match => match.Groups[2].Value);
+
+        foreach (var match in Regex.Matches(
+                     source,
+                     @"\[\s*(?:DllImport|LibraryImport)\s*\(\s*(?:""([^""]*)""|(\w+))").Cast<Match>())
+        {
+            if (match.Groups[1].Success)
+            {
+                yield return match.Groups[1].Value;
+                continue;
+            }
+
+            var name = match.Groups[2].Value;
+            Assert.True(
+                constants.TryGetValue(name, out var value),
+                $"DllImport({name}) does not resolve to a string constant in the same file, " +
+                "so the host package's native imports cannot be checked.");
+            yield return value!;
+        }
+    }
 
     private static string StripComments(string source)
     {

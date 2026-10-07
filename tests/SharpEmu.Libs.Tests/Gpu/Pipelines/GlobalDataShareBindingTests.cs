@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Vulkan;
@@ -89,9 +90,9 @@ public sealed class GlobalDataShareBindingTests(HeadlessVulkanFixture fixture) :
 
             var module = host.CreateShaderModule(new VulkanCompiledGuestShader(CreateEmptyComputeShader()), ShaderStage.Compute, program.Hash, 1);
             var pipeline = host.CreateComputePipeline(new ComputePipelineDescription { Input = input, Program = new ShaderProgram(1, module), Stage = program });
-            presenter.RenderHost.CommitBindings(PipelineBindPoint.Compute, pipeline, [bindings]);
+            presenter.RenderHost.CommitBindings(GpuBindPoint.Compute, pipeline, [bindings]);
             Assert.False(presenter.GetField<bool>("_renderingActive"));
-            presenter.RenderHost.BindPipeline(PipelineBindPoint.Compute, pipeline);
+            presenter.RenderHost.BindPipeline(GpuBindPoint.Compute, pipeline);
             presenter.RenderHost.Dispatch(1, 1, 1);
             presenter.RenderHost.ShaderAccessBarrier();
         });

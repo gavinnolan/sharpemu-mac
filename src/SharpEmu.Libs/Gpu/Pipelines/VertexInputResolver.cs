@@ -36,7 +36,7 @@ public static class VertexInputResolver
     {
         if (!TryReadTables(context, shader, GpuCommands.Registers.UserScalarRegisters.Capacity, out var metadata, out var error))
         {
-            throw SubmissionScheduler.Fatal($"The vertex program header is invalid: shader=0x{shader.CodeAddress:X16} error={error}.");
+            throw GpuFatal.Fatal($"The vertex program header is invalid: shader=0x{shader.CodeAddress:X16} error={error}.");
         }
 
         var attributes = new List<VertexAttributeResource>();
@@ -48,7 +48,7 @@ public static class VertexInputResolver
             var bufferTable = ReadTablePointer(userData, metadata.VertexBufferRegister);
             if (attributeTable == 0 || bufferTable == 0)
             {
-                throw SubmissionScheduler.Fatal(
+                throw GpuFatal.Fatal(
                     $"The vertex table pointer is null: shader=0x{shader.CodeAddress:X16} attributes=0x{attributeTable:X16} buffers=0x{bufferTable:X16} " +
                     $"attributeRegister={metadata.VertexAttributeRegister} bufferRegister={metadata.VertexBufferRegister} " +
                     $"user_data=[{string.Join(",", userData.ToArray().Select(word => $"{word:X8}"))}].");
@@ -231,13 +231,13 @@ public static class VertexInputResolver
             var semantic = new ShaderInputSemantic(word);
             if (semantic.StaticBufferIndex || semantic.StaticAttribute)
             {
-                throw SubmissionScheduler.Fatal($"A static vertex attribute is not supported: shader=0x{shaderAddress:X16} semantic=0x{word:X8}.");
+                throw GpuFatal.Fatal($"A static vertex attribute is not supported: shader=0x{shaderAddress:X16} semantic=0x{word:X8}.");
             }
 
             var attributeAddress = attributeTable + semantic.Semantic * sizeof(uint);
             if (!context.TryReadUInt32(attributeAddress, out var attribute))
             {
-                throw SubmissionScheduler.Fatal($"The vertex attribute table is unreadable: shader=0x{shaderAddress:X16} address=0x{attributeAddress:X16}.");
+                throw GpuFatal.Fatal($"The vertex attribute table is unreadable: shader=0x{shaderAddress:X16} address=0x{attributeAddress:X16}.");
             }
 
             var index = attribute & 0x1Fu;
@@ -246,12 +246,12 @@ public static class VertexInputResolver
             var fetchIndex = (attribute >> 26) & 0x1u;
             if (index >= VertexInputInfo.MaxBuffers)
             {
-                throw SubmissionScheduler.Fatal($"The vertex attribute names a buffer outside the table: shader=0x{shaderAddress:X16} index={index}.");
+                throw GpuFatal.Fatal($"The vertex attribute names a buffer outside the table: shader=0x{shaderAddress:X16} index={index}.");
             }
 
             if (resources.Count >= VertexInputInfo.MaxBuffers)
             {
-                throw SubmissionScheduler.Fatal($"The vertex program has too many attributes: shader=0x{shaderAddress:X16} count={resources.Count + 1}.");
+                throw GpuFatal.Fatal($"The vertex program has too many attributes: shader=0x{shaderAddress:X16} count={resources.Count + 1}.");
             }
 
             var descriptorAddress = bufferTable + index * 16u;
@@ -259,7 +259,7 @@ public static class VertexInputResolver
             {
                 if (!context.TryReadUInt32(descriptorAddress + (ulong)component * sizeof(uint), out descriptorWords[component]))
                 {
-                    throw SubmissionScheduler.Fatal($"The vertex buffer table is unreadable: shader=0x{shaderAddress:X16} address=0x{descriptorAddress:X16}.");
+                    throw GpuFatal.Fatal($"The vertex buffer table is unreadable: shader=0x{shaderAddress:X16} address=0x{descriptorAddress:X16}.");
                 }
             }
 
@@ -319,14 +319,14 @@ public static class VertexInputResolver
                 {
                     if (buffer.RecordCount != descriptor.RecordCount)
                     {
-                        throw SubmissionScheduler.Fatal(
+                        throw GpuFatal.Fatal(
                             $"Two attributes of one vertex buffer disagree on the record count: shader=0x{shaderAddress:X16} records={buffer.RecordCount}/{descriptor.RecordCount}.");
                     }
 
                     buffer.Address = lowest;
                     if (buffer.AttributeIndices.Count >= VertexInputInfo.MaxBuffers)
                     {
-                        throw SubmissionScheduler.Fatal($"A vertex buffer has too many attributes: shader=0x{shaderAddress:X16}.");
+                        throw GpuFatal.Fatal($"A vertex buffer has too many attributes: shader=0x{shaderAddress:X16}.");
                     }
 
                     buffer.AttributeIndices.Add(resourceIndex);
@@ -342,7 +342,7 @@ public static class VertexInputResolver
 
             if (buffers.Count >= VertexInputInfo.MaxBuffers)
             {
-                throw SubmissionScheduler.Fatal($"The vertex program has too many buffers: shader=0x{shaderAddress:X16}.");
+                throw GpuFatal.Fatal($"The vertex program has too many buffers: shader=0x{shaderAddress:X16}.");
             }
 
             var created = new ResolvedBuffer

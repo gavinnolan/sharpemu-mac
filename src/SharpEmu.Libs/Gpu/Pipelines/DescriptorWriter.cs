@@ -30,7 +30,7 @@ public static class DescriptorWriter
             DescriptorBindingKind.Buffers or DescriptorBindingKind.GlobalDataShare or DescriptorBindingKind.DeviceAddressPageTable or
                 DescriptorBindingKind.FaultBuffer or DescriptorBindingKind.FlattenedResourceTable or DescriptorBindingKind.ShaderData =>
                 Silk.NET.Vulkan.DescriptorType.StorageBuffer,
-            _ => throw SubmissionScheduler.Fatal($"The descriptor binding kind is invalid: kind={kind}."),
+            _ => throw GpuFatal.Fatal($"The descriptor binding kind is invalid: kind={kind}."),
         };
     }
 
@@ -41,7 +41,7 @@ public static class DescriptorWriter
         ShaderStage.Vertex => ShaderStageFlags.VertexBit,
         ShaderStage.Pixel => ShaderStageFlags.FragmentBit,
         ShaderStage.Compute => ShaderStageFlags.ComputeBit,
-        _ => throw SubmissionScheduler.Fatal($"The shader stage is unknown: stage={stage}."),
+        _ => throw GpuFatal.Fatal($"The shader stage is unknown: stage={stage}."),
     };
 
     public static PipelineStageFlags PipelineStageFlag(ShaderStageFlags stages)
@@ -64,7 +64,7 @@ public static class DescriptorWriter
 
         if (result == PipelineStageFlags.None)
         {
-            throw SubmissionScheduler.Fatal($"The shader stages map to no pipeline stage: stages={stages}.");
+            throw GpuFatal.Fatal($"The shader stages map to no pipeline stage: stages={stages}.");
         }
 
         return result;

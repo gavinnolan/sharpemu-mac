@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.Libs.Gpu.Vulkan;
 using SharpEmu.Libs.Tests.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using Silk.NET.Vulkan;
@@ -65,7 +67,7 @@ public sealed class RenderExecutorDrawTests : IDisposable
             "draw_indexed 6 2 0 3 0",
             "reset_bindings");
         Assert.Single(_pipelines.PipelineRequests);
-        Assert.Equal((PrimitiveTopology.TriangleList, false, true), _pipelines.PipelineRequests[0]);
+        Assert.Equal((GpuPrimitiveTopology.TriangleList, false, true), _pipelines.PipelineRequests[0]);
         Assert.DoesNotContain("end_rendering", _host.Calls);
         Assert.DoesNotContain("prepare_device_addresses", _host.Calls);
         Assert.Contains("create_graphics_pipeline colors=1 depth=False topology=TriangleList restart=False", _pipelines.Calls);
@@ -238,15 +240,15 @@ public sealed class RenderExecutorDrawTests : IDisposable
     }
 
     [Theory]
-    [InlineData(1u, PrimitiveTopology.PointList)]
-    [InlineData(2u, PrimitiveTopology.LineList)]
-    [InlineData(3u, PrimitiveTopology.LineStrip)]
-    [InlineData(4u, PrimitiveTopology.TriangleList)]
-    [InlineData(5u, PrimitiveTopology.TriangleFan)]
-    [InlineData(6u, PrimitiveTopology.TriangleStrip)]
-    [InlineData(7u, PrimitiveTopology.PatchList)]
-    [InlineData(19u, PrimitiveTopology.TriangleFan)]
-    public void ResolveTopology_MapsEveryPrimitiveType(uint primitiveType, PrimitiveTopology expected)
+    [InlineData(1u, GpuPrimitiveTopology.PointList)]
+    [InlineData(2u, GpuPrimitiveTopology.LineList)]
+    [InlineData(3u, GpuPrimitiveTopology.LineStrip)]
+    [InlineData(4u, GpuPrimitiveTopology.TriangleList)]
+    [InlineData(5u, GpuPrimitiveTopology.TriangleFan)]
+    [InlineData(6u, GpuPrimitiveTopology.TriangleStrip)]
+    [InlineData(7u, GpuPrimitiveTopology.PatchList)]
+    [InlineData(19u, GpuPrimitiveTopology.TriangleFan)]
+    public void ResolveTopology_MapsEveryPrimitiveType(uint primitiveType, GpuPrimitiveTopology expected)
     {
         var userConfig = new UserConfigRegisters { PrimitiveType = primitiveType };
         Assert.True(_executor.ResolveTopology(userConfig, autoDraw: false, out var topology));
@@ -258,7 +260,7 @@ public sealed class RenderExecutorDrawTests : IDisposable
     {
         Assert.False(_executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 0 }, autoDraw: false, out _));
         Assert.True(_executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 17 }, autoDraw: true, out var topology));
-        Assert.Equal(PrimitiveTopology.TriangleStrip, topology);
+        Assert.Equal(GpuPrimitiveTopology.TriangleStrip, topology);
         var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 17 }, autoDraw: false, out _));
         Assert.Contains("primitiveType=17", fatal.Message);
         fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 9 }, autoDraw: true, out _));
@@ -282,33 +284,33 @@ public sealed class RenderExecutorDrawTests : IDisposable
     {
         var banks = Banks(primitiveType: PrimitiveTriangleStrip);
         banks.UserConfig.PrimitiveResetControl = 0;
-        Assert.False(_executor.ResolvePrimitiveRestart(banks, PrimitiveTopology.TriangleStrip, 0));
+        Assert.False(_executor.ResolvePrimitiveRestart(banks, GpuPrimitiveTopology.TriangleStrip, 0));
 
         banks.UserConfig.PrimitiveResetControl = 1;
         banks.Context.PrimitiveResetIndex = 0xFFFF;
-        Assert.True(_executor.ResolvePrimitiveRestart(banks, PrimitiveTopology.TriangleStrip, 0));
-        Assert.False(_executor.ResolvePrimitiveRestart(banks, PrimitiveTopology.TriangleList, 0));
+        Assert.True(_executor.ResolvePrimitiveRestart(banks, GpuPrimitiveTopology.TriangleStrip, 0));
+        Assert.False(_executor.ResolvePrimitiveRestart(banks, GpuPrimitiveTopology.TriangleList, 0));
 
         banks.UserConfig.PrimitiveType = PrimitiveTriangleList;
-        Assert.False(_executor.ResolvePrimitiveRestart(banks, PrimitiveTopology.TriangleStrip, 0));
+        Assert.False(_executor.ResolvePrimitiveRestart(banks, GpuPrimitiveTopology.TriangleStrip, 0));
 
         banks.UserConfig.PrimitiveType = PrimitiveTriangleStrip;
         banks.Context.PrimitiveResetIndex = 0xFFFF_FFFF;
         banks.UserConfig.PrimitiveResetControl = 3;
-        Assert.False(_executor.ResolvePrimitiveRestart(banks, PrimitiveTopology.TriangleStrip, 0));
-        Assert.True(_executor.ResolvePrimitiveRestart(banks, PrimitiveTopology.TriangleStrip, 1));
+        Assert.False(_executor.ResolvePrimitiveRestart(banks, GpuPrimitiveTopology.TriangleStrip, 0));
+        Assert.True(_executor.ResolvePrimitiveRestart(banks, GpuPrimitiveTopology.TriangleStrip, 1));
 
         banks.UserConfig.PrimitiveResetControl = 1;
         banks.Context.PrimitiveResetIndex = 0xFF;
-        Assert.True(_executor.ResolvePrimitiveRestart(banks, PrimitiveTopology.TriangleStrip, 2));
-        Assert.True(_executor.ResolvePrimitiveRestart(banks, PrimitiveTopology.TriangleStrip, 0));
+        Assert.True(_executor.ResolvePrimitiveRestart(banks, GpuPrimitiveTopology.TriangleStrip, 2));
+        Assert.True(_executor.ResolvePrimitiveRestart(banks, GpuPrimitiveTopology.TriangleStrip, 0));
 
         banks.UserConfig.PrimitiveResetControl = 4;
-        var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.ResolvePrimitiveRestart(banks, PrimitiveTopology.TriangleStrip, 0));
+        var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.ResolvePrimitiveRestart(banks, GpuPrimitiveTopology.TriangleStrip, 0));
         Assert.Contains("control=0x00000004", fatal.Message);
 
         banks.UserConfig.PrimitiveResetControl = 1;
-        fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.ResolvePrimitiveRestart(banks, PrimitiveTopology.TriangleStrip, 3));
+        fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.ResolvePrimitiveRestart(banks, GpuPrimitiveTopology.TriangleStrip, 3));
         Assert.Contains("indexTypeAndSize=3", fatal.Message);
     }
 
@@ -568,7 +570,7 @@ public sealed class RenderExecutorDrawTests : IDisposable
         _pipelines.Graphics = Programs(vertexStage: Stage(Program(ShaderStageKind.Vertex, parameterExportMask: 0)), pixelInputs: 0);
         _executor.DrawAuto(1, Banks(primitiveType: 7), Auto(3));
         Assert.Contains("draw 3 1 0 0", _host.Calls);
-        Assert.Equal(PrimitiveTopology.PatchList, _pipelines.PipelineRequests[0].Topology);
+        Assert.Equal(GpuPrimitiveTopology.PatchList, _pipelines.PipelineRequests[0].Topology);
     }
 
     [Fact]
@@ -693,7 +695,7 @@ public sealed class RenderExecutorDrawTests : IDisposable
             pixelStage: Stage(Program(ShaderStageKind.Pixel, buffers: [written]), buffers: [descriptor]));
         _executor.DrawIndexed(1, Banks(), Indexed(3));
 
-        AssertOrder("draw_indexed 3 1 0 0 0", "end_rendering", $"write_barrier {PipelineStageFlags.VertexShaderBit | PipelineStageFlags.FragmentShaderBit}", "reset_bindings");
+        AssertOrder("draw_indexed 3 1 0 0 0", "end_rendering", $"write_barrier {GpuPipelineStage.VertexShaderBit | GpuPipelineStage.FragmentShaderBit}", "reset_bindings");
     }
 
     [Fact]

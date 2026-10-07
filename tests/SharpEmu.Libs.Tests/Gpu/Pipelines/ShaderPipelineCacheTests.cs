@@ -1,10 +1,12 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.Libs.Gpu.Vulkan;
 using SharpEmu.Libs.Tests.Gpu.Rendering;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using Silk.NET.Vulkan;
@@ -32,11 +34,11 @@ public sealed class ShaderPipelineCacheTests : IDisposable
 
         public GraphicsPrograms GetGraphicsPrograms(VertexStageRegisters vertex, PixelStageRegisters pixel, ShaderInterfaceRegisters shaderInterface, ContextRegisters context, ReadOnlySpan<ColorComponentMap> targetExportMapping, bool pixelActive, bool depthBound) => Graphics;
 
-        public PipelineHandle CreateGraphicsPipeline(ReadOnlySpan<ColorTargetState> colors, in DepthAttachmentState depth, VertexInputInfo vertexInput, PixelInputInfo? pixelInput, ContextRegisters context, in RenderingState rendering, PrimitiveTopology topology, bool primitiveRestartEnabled, bool disableBlending, ShaderProgram vertexProgram, ShaderProgram pixelProgram)
+        public PipelineHandle CreateGraphicsPipeline(ReadOnlySpan<ColorTargetState> colors, in DepthAttachmentState depth, VertexInputInfo vertexInput, PixelInputInfo? pixelInput, ContextRegisters context, in RenderingState rendering, GpuPrimitiveTopology topology, bool primitiveRestartEnabled, bool disableBlending, ShaderProgram vertexProgram, ShaderProgram pixelProgram)
         {
             Descriptions.Add(ShaderPipelineCache.BuildGraphicsDescription(
                 colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled, disableBlending,
-                vertexProgram, pixelProgram, SampleCountFlags.Count1Bit | SampleCountFlags.Count4Bit));
+                vertexProgram, pixelProgram, GpuSampleCount.Count1Bit | GpuSampleCount.Count4Bit));
             return new PipelineHandle(0xA1, 0xB1, false);
         }
 
@@ -90,7 +92,7 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         });
 
         var parameters = description.StaticParameters;
-        Assert.Equal(PrimitiveTopology.TriangleList, parameters.Topology);
+        Assert.Equal(GpuPrimitiveTopology.TriangleList, parameters.Topology);
         Assert.False(parameters.PrimitiveRestartEnable);
         Assert.Equal(1u, parameters.Samples);
         Assert.False(parameters.SampleShadingEnable);
@@ -106,8 +108,8 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         Assert.True(parameters.FrontFaceClockwise);
         Assert.False(parameters.WithDepth);
         Assert.False(parameters.StencilTestEnable);
-        Assert.Equal(Format.Undefined, description.Rendering.DepthFormat);
-        Assert.NotEqual(Format.Undefined, description.Rendering.ColorFormats[0]);
+        Assert.Equal(GpuFormat.Undefined, description.Rendering.DepthFormat);
+        Assert.NotEqual(GpuFormat.Undefined, description.Rendering.ColorFormats[0]);
         Assert.Equal(1u, description.Rendering.ColorCount);
     }
 
@@ -128,7 +130,7 @@ public sealed class ShaderPipelineCacheTests : IDisposable
     {
         var description = Describe(banks => banks.Context.RasterMode.CullBack = true, primitiveType: 7);
 
-        Assert.Equal(PrimitiveTopology.PatchList, description.StaticParameters.Topology);
+        Assert.Equal(GpuPrimitiveTopology.PatchList, description.StaticParameters.Topology);
         Assert.False(description.StaticParameters.CullBack);
     }
 
@@ -138,7 +140,7 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         var description = Describe(withDepth: true);
 
         Assert.True(description.StaticParameters.WithDepth);
-        Assert.NotEqual(Format.Undefined, description.Rendering.DepthFormat);
+        Assert.NotEqual(GpuFormat.Undefined, description.Rendering.DepthFormat);
         Assert.Equal(StencilOperations.Default, description.StaticParameters.StencilFront);
     }
 
@@ -201,7 +203,7 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         Assert.NotEqual(key, ShaderPipelineCache.KeyOf(otherVertex));
 
         var otherRendering = new PipelineRenderingState { ColorCount = 1 };
-        otherRendering.ColorFormats[0] = Format.R16G16B16A16Sfloat;
+        otherRendering.ColorFormats[0] = GpuFormat.R16G16B16A16Sfloat;
         var renderingChanged = new GraphicsPipelineDescription
         {
             Rendering = otherRendering, VertexInput = description.VertexInput, VertexInfo = description.VertexInfo,
@@ -278,7 +280,7 @@ public sealed class ShaderPipelineCacheTests : IDisposable
 
         public GraphicsPrograms GetGraphicsPrograms(VertexStageRegisters vertex, PixelStageRegisters pixel, ShaderInterfaceRegisters shaderInterface, ContextRegisters context, ReadOnlySpan<ColorComponentMap> targetExportMapping, bool pixelActive, bool depthBound) => _programs;
 
-        public PipelineHandle CreateGraphicsPipeline(ReadOnlySpan<ColorTargetState> colors, in DepthAttachmentState depth, VertexInputInfo vertexInput, PixelInputInfo? pixelInput, ContextRegisters context, in RenderingState rendering, PrimitiveTopology topology, bool primitiveRestartEnabled, bool disableBlending, ShaderProgram vertexProgram, ShaderProgram pixelProgram) =>
+        public PipelineHandle CreateGraphicsPipeline(ReadOnlySpan<ColorTargetState> colors, in DepthAttachmentState depth, VertexInputInfo vertexInput, PixelInputInfo? pixelInput, ContextRegisters context, in RenderingState rendering, GpuPrimitiveTopology topology, bool primitiveRestartEnabled, bool disableBlending, ShaderProgram vertexProgram, ShaderProgram pixelProgram) =>
             cache.CreateGraphicsPipeline(colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled, disableBlending, vertexProgram, pixelProgram);
 
         public ComputeProgram GetComputeProgram(ComputeStageRegisters compute, ShaderInterfaceRegisters shaderInterface, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ) =>
@@ -296,8 +298,8 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         var rendering = new RenderingState { Samples = 1 };
 
         var description = ShaderPipelineCache.BuildGraphicsDescription(
-            [], default, programs.VertexInput, programs.PixelInput, banks.Context, in rendering, PrimitiveTopology.TriangleList, false, false,
-            programs.Vertex, programs.Pixel, SampleCountFlags.Count1Bit | SampleCountFlags.Count4Bit);
+            [], default, programs.VertexInput, programs.PixelInput, banks.Context, in rendering, GpuPrimitiveTopology.TriangleList, false, false,
+            programs.Vertex, programs.Pixel, GpuSampleCount.Count1Bit | GpuSampleCount.Count4Bit);
 
         Assert.Equal(4u, description.StaticParameters.Samples);
         Assert.Equal(0u, description.StaticParameters.ColorCount);
@@ -314,15 +316,15 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         banks.Context.RenderTargetMask = 0xF;
         var programs = Programs(pixelStage: Stage(new ShaderProgramInfo { Stage = ShaderStageKind.Pixel, PixelColorExportMasks = exportMasks }));
         var resolution = new ColorTargetResolution(
-            default, 0x1000, 0x10000, new Extent2D(64, 64), 0, 0, 1, ColorComponentMap.Identity, false, false, default);
+            default, 0x1000, 0x10000, new GpuExtent2D(64, 64), 0, 0, 1, ColorComponentMap.Identity, false, false, default);
         ColorTargetState[] colors = [new(in resolution, 0, new SharpEmu.Libs.Gpu.Buffers.ResourceSlotIdentifier(1, 1))];
         var rendering = new RenderingState { Samples = 1, ColorAttachmentCount = 1 };
         rendering.ColorAttachments[0] = new RenderingAttachment(
-            default, ImageLayout.ColorAttachmentOptimal, Format.R8G8B8A8Unorm, 0, 0, 0, 0, false, false, false, false, false);
+            default, GpuImageLayout.ColorAttachmentOptimal, GpuFormat.R8G8B8A8Unorm, 0, 0, 0, 0, false, false, false, false, false);
 
         var description = ShaderPipelineCache.BuildGraphicsDescription(
-            colors, default, programs.VertexInput, programs.PixelInput, banks.Context, in rendering, PrimitiveTopology.TriangleList, false, false,
-            programs.Vertex, programs.Pixel, SampleCountFlags.Count1Bit);
+            colors, default, programs.VertexInput, programs.PixelInput, banks.Context, in rendering, GpuPrimitiveTopology.TriangleList, false, false,
+            programs.Vertex, programs.Pixel, GpuSampleCount.Count1Bit);
 
         Assert.Equal(expectedMask, description.StaticParameters.GetColorMask(0));
     }
@@ -334,15 +336,15 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         banks.Context.RenderTargetMask = 0xF;
         var programs = Programs();
         var resolution = new ColorTargetResolution(
-            default, 0x1000, 0x10000, new Extent2D(64, 64), 0, 0, 1, ColorComponentMap.Identity, false, false, default);
+            default, 0x1000, 0x10000, new GpuExtent2D(64, 64), 0, 0, 1, ColorComponentMap.Identity, false, false, default);
         ColorTargetState[] colors = [new(in resolution, 0, new SharpEmu.Libs.Gpu.Buffers.ResourceSlotIdentifier(1, 1))];
         var rendering = new RenderingState { Samples = 1, ColorAttachmentCount = 1 };
         rendering.ColorAttachments[0] = new RenderingAttachment(
-            default, ImageLayout.ColorAttachmentOptimal, Format.R8G8B8A8Unorm, 0, 0, 0, 0, false, false, false, false, false);
+            default, GpuImageLayout.ColorAttachmentOptimal, GpuFormat.R8G8B8A8Unorm, 0, 0, 0, 0, false, false, false, false, false);
 
         var description = ShaderPipelineCache.BuildGraphicsDescription(
-            colors, default, programs.VertexInput, null, banks.Context, in rendering, PrimitiveTopology.TriangleList, false, false,
-            programs.Vertex, programs.Pixel, SampleCountFlags.Count1Bit);
+            colors, default, programs.VertexInput, null, banks.Context, in rendering, GpuPrimitiveTopology.TriangleList, false, false,
+            programs.Vertex, programs.Pixel, GpuSampleCount.Count1Bit);
 
         Assert.Equal(0u, description.StaticParameters.GetColorMask(0));
     }
@@ -356,8 +358,8 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         var rendering = new RenderingState { Samples = 1 };
 
         var fatal = Assert.Throws<SchedulerFatalException>(() => ShaderPipelineCache.BuildGraphicsDescription(
-            [], default, programs.VertexInput, programs.PixelInput, banks.Context, in rendering, PrimitiveTopology.TriangleList, false, false,
-            programs.Vertex, programs.Pixel, SampleCountFlags.Count1Bit | SampleCountFlags.Count4Bit));
+            [], default, programs.VertexInput, programs.PixelInput, banks.Context, in rendering, GpuPrimitiveTopology.TriangleList, false, false,
+            programs.Vertex, programs.Pixel, GpuSampleCount.Count1Bit | GpuSampleCount.Count4Bit));
 
         Assert.Contains("samples=8", fatal.Message);
     }
@@ -375,8 +377,8 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         var rendering = new RenderingState { Samples = 1 };
 
         var description = ShaderPipelineCache.BuildGraphicsDescription(
-            [], default, programs.VertexInput, pixelInput, banks.Context, in rendering, PrimitiveTopology.TriangleList, false, false,
-            programs.Vertex, programs.Pixel, SampleCountFlags.Count1Bit | SampleCountFlags.Count4Bit);
+            [], default, programs.VertexInput, pixelInput, banks.Context, in rendering, GpuPrimitiveTopology.TriangleList, false, false,
+            programs.Vertex, programs.Pixel, GpuSampleCount.Count1Bit | GpuSampleCount.Count4Bit);
 
         Assert.Equal(expected, description.StaticParameters.SampleShadingEnable);
     }
@@ -389,13 +391,13 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         var rendering = new RenderingState { Samples = 1 };
 
         var noVertex = Assert.Throws<SchedulerFatalException>(() => ShaderPipelineCache.BuildGraphicsDescription(
-            [], default, programs.VertexInput, programs.PixelInput, banks.Context, in rendering, PrimitiveTopology.TriangleList, false, false,
-            default, programs.Pixel, SampleCountFlags.Count1Bit));
+            [], default, programs.VertexInput, programs.PixelInput, banks.Context, in rendering, GpuPrimitiveTopology.TriangleList, false, false,
+            default, programs.Pixel, GpuSampleCount.Count1Bit));
         Assert.Contains("no vertex program", noVertex.Message);
 
         var noPixel = Assert.Throws<SchedulerFatalException>(() => ShaderPipelineCache.BuildGraphicsDescription(
-            [], default, programs.VertexInput, programs.PixelInput, banks.Context, in rendering, PrimitiveTopology.TriangleList, false, false,
-            programs.Vertex, default, SampleCountFlags.Count1Bit));
+            [], default, programs.VertexInput, programs.PixelInput, banks.Context, in rendering, GpuPrimitiveTopology.TriangleList, false, false,
+            programs.Vertex, default, GpuSampleCount.Count1Bit));
         Assert.Contains("without a pixel program", noPixel.Message);
     }
 }

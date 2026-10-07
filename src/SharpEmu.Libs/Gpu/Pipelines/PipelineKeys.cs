@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Rendering;
-using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Pipelines;
 
@@ -74,10 +74,10 @@ public sealed class PipelineStaticParameters : IEquatable<PipelineStaticParamete
     private void SetFloat(int offset, float value) => BinaryPrimitives.WriteSingleLittleEndian(_bytes.AsSpan(offset), value);
 
     private StencilOperations GetStencil(int offset) => new(
-        (StencilOp)GetUInt(offset),
-        (StencilOp)GetUInt(offset + 4),
-        (StencilOp)GetUInt(offset + 8),
-        (CompareOp)GetUInt(offset + 12));
+        (GpuStencilOp)GetUInt(offset),
+        (GpuStencilOp)GetUInt(offset + 4),
+        (GpuStencilOp)GetUInt(offset + 8),
+        (GpuCompareOp)GetUInt(offset + 12));
 
     private void SetStencil(int offset, in StencilOperations operations)
     {
@@ -89,7 +89,7 @@ public sealed class PipelineStaticParameters : IEquatable<PipelineStaticParamete
 
     public bool NegativeOneToOne { get => GetBool(NegativeOneToOneOffset); set => SetBool(NegativeOneToOneOffset, value); }
     public bool DepthClipEnable { get => GetBool(DepthClipEnableOffset); set => SetBool(DepthClipEnableOffset, value); }
-    public PrimitiveTopology Topology { get => (PrimitiveTopology)GetUInt(TopologyOffset); set => SetUInt(TopologyOffset, (uint)value); }
+    public GpuPrimitiveTopology Topology { get => (GpuPrimitiveTopology)GetUInt(TopologyOffset); set => SetUInt(TopologyOffset, (uint)value); }
     public bool PrimitiveRestartEnable { get => GetBool(PrimitiveRestartOffset); set => SetBool(PrimitiveRestartOffset, value); }
     public uint Samples { get => GetUInt(SamplesOffset); set => SetUInt(SamplesOffset, value); }
     public bool SampleShadingEnable { get => GetBool(SampleShadingOffset); set => SetBool(SampleShadingOffset, value); }
@@ -141,9 +141,9 @@ public sealed class PipelineStaticParameters : IEquatable<PipelineStaticParamete
 // The attachment formats a graphics pipeline renders into.
 public sealed class PipelineRenderingState : IEquatable<PipelineRenderingState>
 {
-    public Format[] ColorFormats { get; } = new Format[PipelineStaticParameters.ColorAttachmentCount];
-    public Format DepthFormat { get; set; } = Format.Undefined;
-    public Format StencilFormat { get; set; } = Format.Undefined;
+    public GpuFormat[] ColorFormats { get; } = new GpuFormat[PipelineStaticParameters.ColorAttachmentCount];
+    public GpuFormat DepthFormat { get; set; } = GpuFormat.Undefined;
+    public GpuFormat StencilFormat { get; set; } = GpuFormat.Undefined;
     public uint ColorCount { get; set; }
 
     public bool Equals(PipelineRenderingState? other) =>

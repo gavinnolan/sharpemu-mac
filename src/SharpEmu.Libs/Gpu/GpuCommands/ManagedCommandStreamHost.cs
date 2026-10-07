@@ -229,5 +229,5 @@ public class ManagedCommandStreamHost : ICommandStreamHost
     {
     }
 
-    public Exception Fatal(string message) => SubmissionScheduler.Fatal(message);
+    public Exception Fatal(string message) => GpuFatal.Fatal(message);
 }

@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.VideoOut;
-using Silk.NET.Vulkan;
 using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
@@ -53,7 +53,7 @@ public sealed partial class RenderExecutor
     private readonly IRenderHost _host;
     private readonly IShaderPipelineProvider _pipelines;
     private readonly bool _strictDrawResources;
-    private readonly HashSet<(ulong ShaderHash, ImageType ImageType, ImageViewType ViewType)> _reportedDrawImageTypeMismatches = [];
+    private readonly HashSet<(ulong ShaderHash, GpuImageType ImageType, GpuImageViewType ViewType)> _reportedDrawImageTypeMismatches = [];
 
     public RenderExecutor(IRenderHost host, IShaderPipelineProvider pipelines)
         : this(host, pipelines, Environment.GetEnvironmentVariable("SHARPEMU_STRICT_COMPUTE") != "0")
@@ -72,7 +72,7 @@ public sealed partial class RenderExecutor
     // IndirectArgumentsAddress: the GPU reads the indexed draw's counts from guest memory there.
     private readonly record struct DrawEmission(bool Indexed, int VertexOffset, uint FirstVertex, uint FirstInstance, ulong IndirectArgumentsAddress = 0);
 
-    private readonly record struct IndexSource(bool Enabled, ulong Address, byte[]? HostData, ulong Size, IndexType Type);
+    private readonly record struct IndexSource(bool Enabled, ulong Address, byte[]? HostData, ulong Size, GpuIndexType Type);
 
     [System.Runtime.CompilerServices.InlineArray(RenderingState.ColorAttachmentCapacity)]
     private struct ColorTargetStates
@@ -227,21 +227,21 @@ public sealed partial class RenderExecutor
         }
 
         var primitiveRestart = ResolvePrimitiveRestart(banks, topology, arguments.IndexTypeAndSize);
-        IndexType indexType;
+        GpuIndexType indexType;
         ulong indexSize;
         var expandIndex8 = false;
         switch ((GuestIndexType)arguments.IndexTypeAndSize)
         {
             case GuestIndexType.Index16:
-                indexType = IndexType.Uint16;
+                indexType = GpuIndexType.Uint16;
                 indexSize = 2ul * arguments.IndexCount;
                 break;
             case GuestIndexType.Index32:
-                indexType = IndexType.Uint32;
+                indexType = GpuIndexType.Uint32;
                 indexSize = 4ul * arguments.IndexCount;
                 break;
             case GuestIndexType.Index8:
-                indexType = IndexType.Uint16;
+                indexType = GpuIndexType.Uint16;
                 indexSize = arguments.IndexCount;
                 expandIndex8 = true;
                 break;
@@ -257,12 +257,12 @@ public sealed partial class RenderExecutor
         }
         else if (primitiveRestart)
         {
-            var indexMask = indexType == IndexType.Uint16 ? 0xFFFFu : uint.MaxValue;
+            var indexMask = indexType == GpuIndexType.Uint16 ? 0xFFFFu : uint.MaxValue;
             var restartIndex = banks.Context.PrimitiveResetIndex & indexMask;
             if (restartIndex != indexMask)
             {
                 expandedIndices = ConvertRestartIndices(arguments.IndexAddress, arguments.IndexCount, indexType, restartIndex);
-                indexType = IndexType.Uint32;
+                indexType = GpuIndexType.Uint32;
             }
         }
 
@@ -367,7 +367,7 @@ public sealed partial class RenderExecutor
         ResolveShaderPrograms(banks, ref state);
         var vertexInput = state.Programs.VertexInput;
         var pixelInput = state.Programs.PixelInput;
-        var rectangleList = topology == PrimitiveTopology.PatchList;
+        var rectangleList = topology == GpuPrimitiveTopology.PatchList;
         if (rectangleList && vertexInput.Buffers.Length == 0 && vertexInput.Stage.Program?.ParameterExportMask == 0 && pixelInput.InputCount != 0)
         {
             if (RenderTrace.Enabled)
@@ -401,9 +401,9 @@ public sealed partial class RenderExecutor
         _host.ResetBindings();
     }
 
-    private byte[] ConvertRestartIndices(ulong indexAddress, uint indexCount, IndexType indexType, uint restartIndex)
+    private byte[] ConvertRestartIndices(ulong indexAddress, uint indexCount, GpuIndexType indexType, uint restartIndex)
     {
-        var sourceStride = indexType == IndexType.Uint16 ? sizeof(ushort) : sizeof(uint);
+        var sourceStride = indexType == GpuIndexType.Uint16 ? sizeof(ushort) : sizeof(uint);
         var source = new byte[checked((int)indexCount * sourceStride)];
         if (indexAddress == 0 || !_host.TryReadGuest(indexAddress, source))
         {
@@ -462,7 +462,7 @@ public sealed partial class RenderExecutor
             return (int)indexOffset;
         }
 
-        var program = vertexInput.Stage.Program ?? throw SubmissionScheduler.Fatal("The embedded fetch vertex input has no program.");
+        var program = vertexInput.Stage.Program ?? throw GpuFatal.Fatal("The embedded fetch vertex input has no program.");
         return (int)ReadUserDataScalar(program, vertexInput.Stage.Resources, program.VertexOffsetScalarRegister);
     }
 
@@ -473,7 +473,7 @@ public sealed partial class RenderExecutor
             return 0;
         }
 
-        var program = vertexInput.Stage.Program ?? throw SubmissionScheduler.Fatal("The embedded fetch vertex input has no program.");
+        var program = vertexInput.Stage.Program ?? throw GpuFatal.Fatal("The embedded fetch vertex input has no program.");
         return ReadUserDataScalar(program, vertexInput.Stage.Resources, program.InstanceOffsetScalarRegister);
     }
 
@@ -572,34 +572,34 @@ public sealed partial class RenderExecutor
         return mode is ColorModeEliminateFastClear or ColorModeFmaskDecompress or ColorModeDccDecompress;
     }
 
-    public bool ResolveTopology(UserConfigRegisters userConfig, bool autoDraw, out PrimitiveTopology topology)
+    public bool ResolveTopology(UserConfigRegisters userConfig, bool autoDraw, out GpuPrimitiveTopology topology)
     {
-        topology = PrimitiveTopology.PointList;
+        topology = GpuPrimitiveTopology.PointList;
         switch ((GuestPrimitiveType)userConfig.PrimitiveType)
         {
             case GuestPrimitiveType.None:
                 return false;
             case GuestPrimitiveType.PointList:
-                topology = PrimitiveTopology.PointList;
+                topology = GpuPrimitiveTopology.PointList;
                 break;
             case GuestPrimitiveType.LineList:
-                topology = PrimitiveTopology.LineList;
+                topology = GpuPrimitiveTopology.LineList;
                 break;
             case GuestPrimitiveType.LineStrip:
-                topology = PrimitiveTopology.LineStrip;
+                topology = GpuPrimitiveTopology.LineStrip;
                 break;
             case GuestPrimitiveType.TriangleList:
-                topology = PrimitiveTopology.TriangleList;
+                topology = GpuPrimitiveTopology.TriangleList;
                 break;
             case GuestPrimitiveType.TriangleFan:
             case GuestPrimitiveType.Polygon:
-                topology = PrimitiveTopology.TriangleFan;
+                topology = GpuPrimitiveTopology.TriangleFan;
                 break;
             case GuestPrimitiveType.TriangleStrip:
-                topology = PrimitiveTopology.TriangleStrip;
+                topology = GpuPrimitiveTopology.TriangleStrip;
                 break;
             case GuestPrimitiveType.RectangleList:
-                topology = PrimitiveTopology.PatchList;
+                topology = GpuPrimitiveTopology.PatchList;
                 break;
             case GuestPrimitiveType.RectangleListLegacy:
                 if (!autoDraw)
@@ -607,10 +607,10 @@ public sealed partial class RenderExecutor
                     throw _host.Fatal($"The primitive type is unknown for an indexed draw: primitiveType={userConfig.PrimitiveType}.");
                 }
 
-                topology = PrimitiveTopology.TriangleStrip;
+                topology = GpuPrimitiveTopology.TriangleStrip;
                 break;
             case GuestPrimitiveType.QuadListLegacy:
-                topology = PrimitiveTopology.TriangleFan;
+                topology = GpuPrimitiveTopology.TriangleFan;
                 break;
             default:
                 throw _host.Fatal($"The primitive type is unknown: primitiveType={userConfig.PrimitiveType}.");
@@ -619,7 +619,7 @@ public sealed partial class RenderExecutor
         return true;
     }
 
-    public bool ResolvePrimitiveRestart(RegisterBanks banks, PrimitiveTopology topology, uint indexTypeAndSize)
+    public bool ResolvePrimitiveRestart(RegisterBanks banks, GpuPrimitiveTopology topology, uint indexTypeAndSize)
     {
         var userConfig = banks.UserConfig;
         var control = userConfig.PrimitiveResetControl;
@@ -643,7 +643,7 @@ public sealed partial class RenderExecutor
                 return false;
         }
 
-        if (topology is not (PrimitiveTopology.LineStrip or PrimitiveTopology.TriangleStrip or PrimitiveTopology.TriangleFan))
+        if (topology is not (GpuPrimitiveTopology.LineStrip or GpuPrimitiveTopology.TriangleStrip or GpuPrimitiveTopology.TriangleFan))
         {
             return false;
         }

@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+
+Hardened-runtime entitlements for SharpEmu.app, applied by
+scripts/macos/build-app.sh when it signs with --options runtime.
+
+This file is the *source*, not what codesign receives: codesign's entitlements
+parser (AMFIUnserializeXML) rejects XML comments, so build-app.sh runs the file
+through `plutil -convert xml1` first, which strips them.
+
+Only the main executable needs these. Nested dylibs and frameworks inherit the
+host executable's entitlements, so the script signs them without an
+entitlements file and applies this one to the bundle itself.
+
+Each entry is a capability the hardened runtime otherwise denies. They are
+listed with their justification because every one of them weakens a platform
+defence, and the set should shrink as the emulator changes — in particular, a
+Native AOT build would need none of them.
+
+  com.apple.security.cs.allow-jit
+      Required. CoreCLR compiles managed IL to machine code at runtime and
+      needs MAP_JIT pages to do it. Microsoft documents this entitlement as
+      required for any .NET app that is not published as Native AOT. Without
+      it the runtime cannot allocate executable memory and the process dies
+      before Main.
+
+  com.apple.security.cs.allow-unsigned-executable-memory
+      Required by the emulator specifically, beyond ordinary .NET needs.
+      SharpEmu executes guest PS5 x86-64 code: it maps the guest address space
+      and makes guest-supplied pages executable, which is writable-then-
+      executable memory that did not come from MAP_JIT and carries no
+      signature. This is also the entitlement the `dotnet` host itself is
+      signed with. It is the broadest permission here; it is required because
+      "run code the user supplied" is what an emulator is.
+
+  com.apple.security.cs.disable-library-validation
+      Required while the bundle is ad-hoc signed and while it carries
+      third-party natives. Library validation only admits dylibs signed by
+      Apple or by the same Team ID as the host, and an ad-hoc signature has no
+      Team ID at all. The bundle loads FFmpeg dylibs from sharpemu/ffmpeg-core
+      plus Skia/HarfBuzz/SDL natives from NuGet packages. Re-signing all of
+      them with one Developer ID identity would remove the need for this
+      entitlement; revisit it when a real signing identity is in use.
+
+Deliberately absent:
+
+  com.apple.security.get-task-allow and com.apple.security.cs.debugger
+      These let another process inspect or debug this one. Useful for a local
+      debug build, wrong for a distributed artifact, and get-task-allow makes
+      notarization fail. Add them ad hoc when debugging a packaged build.
+
+  com.apple.security.cs.allow-dyld-environment-variables
+      SharpEmu does not need DYLD_* to find its own libraries; everything
+      resolves from the bundle via AppContext.BaseDirectory. Granting it would
+      let an attacker inject a library through the environment.
+
+  App Sandbox (com.apple.security.app-sandbox)
+      Not enabled. The emulator reads game dumps from arbitrary user-chosen
+      paths; a sandboxed build would need a document-scoped security model that
+      does not exist yet.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+</dict>
+</plist>

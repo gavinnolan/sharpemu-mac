@@ -190,12 +190,12 @@ parses the project files and the compiled sources (including linked shared
 source) rather than reflecting over loaded assemblies — only one host package
 is ever loaded, so a reflection-based check could not see the other two.
 
-Audio defaults are preserved rather than changed: SDL stays the qualified
-default on Windows and Linux, and the native `WindowsWaveOutAudio` /
-`LinuxAlsaAudio` outputs remain non-default pending latency, underrun, clock,
-device-change and shutdown evidence. `SharpEmu.Host.MacOS` must not reference
-SDL, so its audio seam is a placeholder that throws until the native CoreAudio
-output lands.
+Audio: SDL stays the qualified default on Windows and Linux, and the native
+`WindowsWaveOutAudio` / `LinuxAlsaAudio` outputs remain non-default pending
+latency, underrun, clock, device-change and shutdown evidence.
+`SharpEmu.Host.MacOS` owns the native CoreAudio output (merged from the
+CoreAudio workstream) and references SDL neither by package nor by adapter, so
+a macOS process never initialises SDL audio.
 
 #### Known remaining OS checks in shared code
 
