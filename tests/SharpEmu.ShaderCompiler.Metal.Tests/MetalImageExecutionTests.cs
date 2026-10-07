@@ -88,6 +88,49 @@ public sealed class MetalImageExecutionTests(ITestOutputHelper output)
         Assert.Equal(expected, MetalNative.ReadFloatTexture(texture, 4, height, layers, depth));
     }
 
+    [Theory]
+    [InlineData(9u, 2u, 4u, 1u, 1u, 4u, 0u, 0u)]
+    [InlineData(9u, 2u, 4u, 1u, 1u, 0xFFFFFFFFu, 0u, 0u)]
+    [InlineData(13u, 3u, 4u, 3u, 1u, 0u, 0u, 3u)]
+    [InlineData(10u, 7u, 4u, 1u, 4u, 0u, 0u, 4u)]
+    public void OutOfBoundsLoadsReturnZeroRatherThanTheEdgeTexel(uint guestType, uint metalType,
+        uint height, uint layers, uint depth, uint x, uint y, uint extra)
+    {
+        if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") != "1") return;
+        Assert.True(MetalNative.IsAvailable);
+        uint[] coords = guestType == 9 ? [x, y] : [x, y, extra];
+        Assert.True(Gen5ImageFixtures.TryCompile("ImageLoad", guestType, out var shader, out var error,
+            addressValues: coords, storeResults: true), error);
+        var texture = MetalNative.CreateFloatTexture(metalType, 4, height, layers, depth, [Texels(4, height, layers, depth, 0)]);
+        Assert.True(MetalNative.TryCompileLibrary(shader!.Source, out var library, out error), error + shader.Source);
+        Assert.True(MetalNative.TryExecuteWithArgumentBuffer(library, shader.EntryPoint, new byte[16],
+            new byte[PushData.ByteSize], shader.ArgumentLayout!, 1, out var result, out error, texture), error);
+        Assert.Equal(new byte[16], result);
+    }
+
+    [Theory]
+    [InlineData(9u, 2u, 1u, 0u)]
+    [InlineData(13u, 3u, 3u, 2u)]
+    public void GatherUsesTheSpecifiedCounterClockwiseTexelOrder(uint guestType, uint metalType,
+        uint layers, uint selectedLayer)
+    {
+        if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") != "1") return;
+        Assert.True(MetalNative.IsAvailable);
+        uint[] coords = layers == 1 ? [F(.5f), F(.5f)] : [F(.5f), F(.5f), F(selectedLayer)];
+        Assert.True(Gen5ImageFixtures.TryCompile("ImageGather4", guestType, out var shader, out var error,
+            addressValues: coords, storeResults: true, dmask: 1), error);
+        var texture = MetalNative.CreateFloatTexture(metalType, 4, 4, layers, 1, [Texels(4, 4, layers, 1, 0)]);
+        Assert.True(MetalNative.TryCompileLibrary(shader!.Source, out var library, out error), error + shader.Source);
+        Assert.True(MetalNative.TryExecuteWithArgumentBuffer(library, shader.EntryPoint, new byte[16],
+            new byte[PushData.ByteSize], shader.ArgumentLayout!, 1, out var result, out error,
+            texture, MetalNative.CreatePointSampler()), error);
+        // MSL section6.13: (-,+), (+,+), (+,-), (-,-) half-texel deltas.
+        uint[] xs = [1, 2, 2, 1], ys = [2, 2, 1, 1];
+        for (var component = 0; component < 4; component++)
+            Assert.Equal(F(Value(0, selectedLayer, xs[component], ys[component], 0)),
+                BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(component * 4)));
+    }
+
     private static uint F(float value) => BitConverter.SingleToUInt32Bits(value);
     private static float Value(uint mip, uint layer, uint x, uint y, uint z) =>
         mip * 10000 + layer * 1000 + z * 100 + y * 10 + x;

@@ -686,7 +686,7 @@ public static partial class Gen5MslTranslator
                 "VPkMinF16" => $"fmin({left}, {right})",
                 "VPkMaxF16" => $"fmax({left}, {right})",
                 // Use half fma itself: float fma followed by half conversion can
-                // double-round at a half midpoint (MSL specification section 6.7).
+                // double-round at a half midpoint (MSL specification section 6.6).
                 _ => $"(float)fma(half({left}), half({right}), half({PackedF16Operand(instruction, control, sources, 2, highLane)}))",
             };
             if (control.Clamp)

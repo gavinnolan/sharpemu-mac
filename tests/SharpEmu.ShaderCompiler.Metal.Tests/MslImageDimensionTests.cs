@@ -134,8 +134,8 @@ public sealed class MslImageDimensionTests(ITestOutputHelper output)
         Assert.Single(Lines(shader.Source, ".read("));
         if (descriptorType == Gen5ImageFixtures.ImageType3D)
         {
-            // A volume load clamps against the depth as well as width and height.
-            Assert.Contains("get_depth(", shader.Source);
+            Assert.Contains("uint3(", shader.Source);
+            Assert.DoesNotContain("clamp(as_type<int>", shader.Source);
         }
     }
 

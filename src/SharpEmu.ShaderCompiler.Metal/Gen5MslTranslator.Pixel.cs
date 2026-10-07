@@ -160,14 +160,12 @@ public static partial class Gen5MslTranslator
             {
                 // A storage element is its own mip view; multisampled textures
                 // carry a sample operand rather than a mip level.
-                var extentLod = isStorage || !imageClass.SupportsMipLevels ? null : mipLevel;
                 var spatial = new string[imageClass.SpatialComponents];
                 for (var component = 0; component < spatial.Length; component++)
                 {
-                    spatial[component] = Temp(
-                        "uint",
-                        $"(uint)clamp(as_type<int>({ImageIntegerAddress(image, component)}), 0, " +
-                        $"(int){ImageExtentQuery(texture, imageClass, component, extentLod)} - 1)");
+                    // Metal read returns zero outside the image. Clamping would
+                    // incorrectly replace an invalid guest read with an edge texel.
+                    spatial[component] = Temp("uint", ImageIntegerAddress(image, component));
                 }
 
                 var coordinate = spatial.Length == 1
@@ -344,13 +342,10 @@ public static partial class Gen5MslTranslator
             return Temp("uint", $"min({layer}, {texture}.get_array_size() - 1u)");
         }
 
-        // The array layer of an integer access: the raw component, clamped into range.
-        // Cube layers are not remapped here, matching the SPIR-V integer path.
+        // Integer layer accesses retain invalid values so the native read returns
+        // zero rather than reading the nearest layer. Cube layers are raw here.
         private string BuildIntegerLayer(Gen5ImageControl image, int component, string texture) =>
-            Temp(
-                "uint",
-                $"(uint)clamp(as_type<int>({ImageIntegerAddress(image, component)}), 0, " +
-                $"(int){texture}.get_array_size() - 1)");
+            Temp("uint", ImageIntegerAddress(image, component));
 
         private bool TryEmitImageSample(
             Gen5ShaderInstruction instruction,
