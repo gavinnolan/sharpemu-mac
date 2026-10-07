@@ -64,7 +64,7 @@ public sealed class MetalTextureSourceLeaseTests
         Assert.Equal(0UL, MetalVideoPresenter.TextureSourceState(read).ReservedBytes);
     }
 
-    private static GuestDrawTexture PublishAndCapture()
+    internal static GuestDrawTexture PublishAndCapture()
     {
         var seed = Texture(true) with { RgbaPixels = new byte[64], Access = GuestImageAccess.Write };
         var sequence = MetalVideoPresenter.SubmitOrderedGuestAction(static () => { }, "managed source owner fixture");
@@ -85,7 +85,7 @@ public sealed class MetalTextureSourceLeaseTests
     private static void Call(string name, params object[] arguments) => typeof(MetalVideoPresenter)
         .GetMethod(name, BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, arguments);
 
-    private sealed class State : IDisposable
+    internal sealed class State : IDisposable
     {
         private readonly MetalGuestFailureTests.PresenterState presenter = new();
         public void Dispose()
