@@ -224,3 +224,22 @@ native eviction→production preparation with zero guest reads. Their render-pas
 clear is the actual GPU writer; they do not yet qualify translated draw/compute,
 a GPU shader consumer, full Drain hooks, shutdown hooks or game behavior.
 Graph activation remains disabled and no whole-graph root integration is implied.
+
+### Exact hardware results and exception-safety followup
+
+Clean bfe518db58140eba47f50f76fc435152c97b1b3b passed all six hardware
+fixtures on ARM64 and Rosetta x64, require-device1 under the exclusive machine
+game lock:6/6 each, no skipped cases or bypassed device gates. Old/red and
+new/green or blue readbacks compare every byte of all16RGBA8texels. The clear
+pattern is uniform; no coordinate permutation or additional format is qualified.
+Commands, exact source status, architecture drivers, neutral assembly hashes,
+TRX outputs and actual execution markers are retained under
+`artifacts/validation/metal-agent/immutable-gpu-bfe518d-{arm,x64}`.
+
+The next isolated refinement builds error context before changing pin ownership,
+and preflights live-registry capacity before acquiring its extra native retain.
+Registry publication restores both dictionaries and releases that retain if a
+publication fails. The related managed104-case selection remains green. No
+artificial OOM or native command-buffer error was injected; ordering/ownership
+for those failures is reviewed source evidence, not hardware-fault qualification.
+Hardware proof belongs to clean bfe518d, not this later exception-path revision.

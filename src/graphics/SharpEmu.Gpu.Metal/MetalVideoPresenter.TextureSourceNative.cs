@@ -112,18 +112,35 @@ internal static partial class MetalVideoPresenter
             }
             else if (!source.ClearsOutput)
                 throw new NotSupportedException("Metal ordered native CPU initialization requires a backing/copy lease; only retained immutable GPU initialization is qualified.");
-            // The live registry owns a separate retain. Version and command
-            // buffer pins survive replacement; no unbudgeted variant cache.
+            // The live registry owns a separate retain. Capacity and rollback
+            // metadata are established before that extra native owner exists.
             lock (_gate)
             {
+                _guestImages.EnsureCapacity(_guestImages.Count + 1);
+                _guestImageExtents.EnsureCapacity(_guestImageExtents.Count + 1);
+                var hadPrevious = _guestImages.TryGetValue(source.View.Address, out var previous);
+                var hadExtent = _guestImageExtents.TryGetValue(source.View.Address, out var previousExtent);
+                var extent = (source.View.Width, source.View.Height, source.ObservedGuestByteCount);
                 MetalNative.Send(texture, MetalNative.Selector("retain"));
-                if (_guestImages.TryGetValue(source.View.Address, out var previous))
+                try
+                {
+                    _guestImages[source.View.Address] = image;
+                    _guestImageExtents[source.View.Address] = extent;
+                }
+                catch
+                {
+                    if (hadPrevious) _guestImages[source.View.Address] = previous!;
+                    else _guestImages.Remove(source.View.Address);
+                    if (hadExtent) _guestImageExtents[source.View.Address] = previousExtent;
+                    else _guestImageExtents.Remove(source.View.Address);
+                    MetalNative.SendVoid(texture, MetalNative.Selector("release"));
+                    throw;
+                }
+                if (previous is not null)
                 {
                     previous.ReleaseSnapshot();
                     MetalNative.SendVoid(previous.Texture, MetalNative.Selector("release"));
                 }
-                _guestImages[source.View.Address] = image;
-                _guestImageExtents[source.View.Address] = (source.View.Width, source.View.Height, source.ObservedGuestByteCount);
             }
         }
     }
@@ -214,6 +231,12 @@ internal static partial class MetalVideoPresenter
                 if (!batch.Committed) continue;
                 var status = (long)MetalNative.Send(batch.CommandBuffer, MetalNative.Selector("status"));
                 if (status < 4) continue;
+                // Error decoding/context allocation can fail. Build it before
+                // changing ownership; shutdown must see either all pins or none.
+                var failureContext = status == 4 ? null :
+                    $"Metal ordered source command buffer failed: status={status} error='{MetalNative.DescribeError(MetalNative.Send(batch.CommandBuffer, MetalNative.Selector("error")))}' " +
+                    string.Join("; ", batch.ProducedVersions.Select(static source =>
+                        $"producer={source.ProducerSequence} queue='{source.ProducerQueue.Name}' submission={source.ProducerQueue.SubmissionId} version={source.Identity} image=0x{source.View.Address:X}"));
                 foreach (var source in batch.Versions)
                 {
                     source.NativePins--;
@@ -223,10 +246,6 @@ internal static partial class MetalVideoPresenter
                     }
                     else { source.Failed = true; source.Completed = false; }
                 }
-                var failureContext = status == 4 ? null :
-                    $"Metal ordered source command buffer failed: status={status} error='{MetalNative.DescribeError(MetalNative.Send(batch.CommandBuffer, MetalNative.Selector("error")))}' " +
-                    string.Join("; ", batch.ProducedVersions.Select(static source =>
-                        $"producer={source.ProducerSequence} queue='{source.ProducerQueue.Name}' submission={source.ProducerQueue.SubmissionId} version={source.Identity} image=0x{source.View.Address:X}"));
                 _textureSourceNativeBatches.Remove(pair.Key);
                 MetalNative.SendVoid(batch.CommandBuffer, MetalNative.Selector("release"));
                 if (status != 4)
