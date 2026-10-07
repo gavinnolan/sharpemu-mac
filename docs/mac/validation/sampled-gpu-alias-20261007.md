@@ -243,3 +243,81 @@ publication fails. The related managed104-case selection remains green. No
 artificial OOM or native command-buffer error was injected; ordering/ownership
 for those failures is reviewed source evidence, not hardware-fault qualification.
 Hardware proof belongs to clean bfe518d, not this later exception-path revision.
+
+### Actual compute argument-buffer consumer followup
+
+The next isolated branch routes captured immutable textures through the actual
+`CreateDrawTexture` materializer before CPU-stability/cache/alias paths. Under the
+still-disabled graph boundary, read-only storage inputs use that path too;
+writable storage destinations remain separately unqualified. Batched command
+submission publishes native source commit state only after the real commit call.
+
+Four hardware consumer fixtures compile (sampled and read-only storage, with
+preparation alive/disposed before execution). They capture old/red, admit a
+consumer, execute a later new/green producer, then run actual
+`ExecuteComputeDispatch`→`EncodeStageResources`→GPU shader→guest buffer writeback.
+Every byte of all16texels is compared to independent expected colors, starting
+with sentinel destination bytes. The MSL kernel independently exercises the
+production argument-buffer ABI; it is not a Gen5 ISA translation fixture.
+The ARM64 no-device106-case regression selection passes, including pending-copy
+and unassociated-GPU-address rejection before native materialization access.
+The four new GPU consumer cases have not run yet. Drain writer/lifecycle hooks,
+CPU backing/copy ownership, all mutation paths and graph activation remain open.
+
+The consumer fixture teardown now aborts only uncommitted borrowed source batches,
+clears open-batch fields and isolates/restores the global upload arena. Fixture
+upload pages wait for their tagged committed buffers before release; only the
+fixture's pipeline/library cache entries are removed. Fixture construction
+requires no open batch. These are test-harness cleanup guards, not runtime Drain
+cancellation qualification. Queued consumer ownership is released after the
+production writeback completion wait, so these cases do not prove owner release
+before native completion.
+
+Clean839ec71 ARM device execution attempted all four consumer fixtures and all
+four failed with untouched sentinel output. Full TRX run output identifies
+fixture MSL compilation rejection: trailing `[[id]]` on C-array declarations
+applied the attribute to a type. The production translator uses `array<T,N>`
+fields and did not cause this syntax error. The corrected fixture uses that
+valid MSL declaration form and asserts a nonzero compiled library/pipeline and
+a completed real flushed command buffer before the pixel oracle. Failed source,
+assembly hashes, log and TRX remain in `immutable-consumer-839ec71-arm`; the
+consumer shader did not execute in that failed run. Corrected device execution
+is pending a new exclusive grant. No production ABI change is implied.
+
+Clean fe7c727 consumer proof now passes four actual required-device cases on
+ARM64 and four on Rosetta x64 using identical neutral DLL hashes (Apple M4;
+232ms /363ms, zero skips). Both complete through the real compiled pipeline and
+completed native command buffer; every byte of all16old/red and new/green texels
+passes through production argument-buffer binding and guest writeback. Evidence:
+`immutable-consumer-fe7c727-arm` and `immutable-consumer-fe7c727-x64`, each with
+exact clean source, architecture, assembly hashes, commands, log, TRX and parsed
+execution markers. This closes the native shader-consumer gap from bfe518d.
+Queued ownership is still released after writeback wait in those cases. Gen5 ISA
+translation, runtime Drain writer/error/shutdown hooks, CPU seed/backing leases
+and graph activation remain unqualified. The preexisting new-function ownership
+in `GetShaderFunction`/`TryGetComputePipeline` needs separate cleanup review.
+
+The next isolated fixture disables guest writeback synchronization, uses a fresh
+isolated upload arena and retains the actual output MTLBuffer. It releases
+preparation and queued ownership while the real consumer remains encoded in an
+uncommitted batch. Source references reach0 while its native pin keeps the
+captured old image. Positive cases will commit/wait/read all64old bytes and then
+assert exact native retirement; negative cases discard the uncommitted batch and
+require unchanged sentinel output plus released pins/handles. Both sampled and
+read-only storage cases end with explicit shutdown owner/registry assertions.
+These four new lifetime cases are not device-qualified yet.
+
+Clean b038acd precommit lifetime proof now passes four required-device cases on
+ARM64 and four on Rosetta x64 with identical neutral assembly hashes (Apple M4;
+262ms /344ms, zero skips). The actual no-writeback compute consumer remains
+uncommitted while preparation and queued ownership are released: references0,
+native pin1, immutable old texture survives pruning. Commit cases read every
+byte of all16red texels; discard cases remain unsubmitted with all64sentinel
+bytes intact. Completion/discard releases the exact old native texture/pins,
+and explicit shutdown verifies source byte budget0, no source-native batches
+and no matching guest-image/extent registry owner. Evidence lives in
+`immutable-pin-b038acd-arm` /`immutable-pin-b038acd-x64` with source, architecture,
+assembly hashes, commands, log, TRX and parsed actual-execution markers.
+This closes the precompletion owner-release test gap. Work owner release is
+manual in the fixture; production Drain writer/error/shutdown integration and
+CPU backing/copy leases remain unqualified, and the application graph stays off.

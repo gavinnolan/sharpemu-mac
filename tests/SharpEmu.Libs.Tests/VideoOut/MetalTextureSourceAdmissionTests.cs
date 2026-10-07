@@ -216,6 +216,27 @@ public sealed class MetalTextureSourceAdmissionTests
         Assert.Equal(0UL, state.ReservedBytes);
         Assert.Equal(0, memory.Reads);
     }
+    [Fact]
+    public void ActualMaterializerRejectsGpuAddressWithoutCapturedAssociationBeforeNativeAccess()
+    {
+        using var state = new State();
+        SubmitColor(ColorTarget());
+        var unowned = new GuestDrawTexture(Address, 4, 4, 10, 0, [], false, false, CpuSnapshotStable: false);
+        Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.CreateDrawTexture(0, 0, unowned, out _));
+    }
+
+    [Fact]
+    public void ActualMaterializerRejectsPendingCapturedVersionWithoutNativeCopyBeforeNativeAccess()
+    {
+        using var state = new State();
+        SubmitColor(ColorTarget());
+        var memory = new NeverReadMemory();
+        var snapshot = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [SourceBinding()], out _));
+        state.Captures.Add(snapshot);
+        Assert.Throws<InvalidOperationException>(() => MetalVideoPresenter.CreateDrawTexture(0, 0, snapshot, out _));
+        Assert.Equal(0, memory.Reads);
+    }
+
     private static AgcExports.TranslatedImageBinding SourceBinding()
     {
         Assert.True(AgcBackendServices.TryDecodeTextureDescriptor(MetalTextureSourceLeaseTests.ResourceWords(), out var descriptor));

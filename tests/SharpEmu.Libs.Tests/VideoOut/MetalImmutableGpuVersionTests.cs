@@ -21,7 +21,7 @@ namespace SharpEmu.Libs.Tests.VideoOut;
 // admission/materialization/copy/commit/recycle helpers run; render-pass clear
 // is the GPU writer. No translated draw/compute or game qualification is implied.
 [Collection(SchedulingStateCollection.Name)]
-public sealed class MetalImmutableGpuVersionTests(ITestOutputHelper output)
+public sealed partial class MetalImmutableGpuVersionTests(ITestOutputHelper output)
 {
     private const ulong Address = 0x71F0_0000_00;
     private bool DeviceRequested()
@@ -179,23 +179,27 @@ public sealed class MetalImmutableGpuVersionTests(ITestOutputHelper output)
         .GetMethod(name, BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, arguments);
     private static object? Get(object source, string field) => source.GetType().GetField(field)!.GetValue(source);
 
-    private sealed class NativeState : IDisposable
+    private sealed partial class NativeState : IDisposable
     {
         private readonly MetalTextureSourceLeaseTests.State trackerState = new();
         private readonly bool oldGraph = (bool)Field("_textureSourceGraphEnabled").GetValue(null)!;
         private readonly nint pool;
         private readonly nint device;
         private readonly nint queue;
+        private readonly UploadArenaScope uploadArena;
         private readonly List<nint> buffers = [];
         private readonly List<GuestDrawTexture> captures = [];
         private readonly Dictionary<object, object> workByVersion = new(ReferenceEqualityComparer.Instance);
         public ulong NativeBytes => (ulong)Field("_immutableTextureSourceBytes").GetValue(null)!;
         public NativeState()
         {
+            Assert.False((bool)Field("_batchOpen").GetValue(null)!);
+            Assert.Equal((nint)0, Field("_batchCommandBuffer").GetValue(null));
             Assert.Empty((IDictionary)Field("_textureSourceNativeBatches").GetValue(null)!);
             pool = MetalNative.Send(MetalNative.Send(MetalNative.Class("NSAutoreleasePool"), MetalNative.Selector("alloc")), MetalNative.Selector("init"));
             device = MetalNative.MTLCreateSystemDefaultDevice(); Assert.NotEqual((nint)0, device);
             queue = MetalNative.Send(device, MetalNative.Selector("newCommandQueue")); Assert.NotEqual((nint)0, queue);
+            uploadArena = new UploadArenaScope();
             Field("_textureSourceGraphEnabled").SetValue(null, true);
         }
         public nint Buffer()
@@ -231,11 +235,11 @@ public sealed class MetalImmutableGpuVersionTests(ITestOutputHelper output)
             Call("ReleaseTextureSourceWorkOwnerLocked", workByVersion[version]);
             Field("_executingTextureSourceWork").SetValue(null, null);
         }
-        public GuestDrawTexture Capture()
+        public GuestDrawTexture Capture(bool storage = false)
         {
-            var read = new GuestDrawTexture(Address, 4, 4, 10, 0, [], false, false, Pitch: 4,
+            var read = new GuestDrawTexture(Address, 4, 4, 10, 0, [], false, storage, Pitch: 4,
                 Descriptor: MetalTextureSourceLeaseTests.ResourceWords(),
-                Shape: new ShaderImageShape(false, false, false, false, TextureNumericClass.Float), Access: GuestImageAccess.Read);
+                Shape: new ShaderImageShape(false, false, storage, false, TextureNumericClass.Float), Access: GuestImageAccess.Read);
             Assert.True(MetalVideoPresenter.TryCaptureTextureSource(read, 64, false)); captures.Add(read); return read;
         }
         public nint Resolve(GuestDrawTexture texture, nint buffer)
@@ -248,8 +252,14 @@ public sealed class MetalImmutableGpuVersionTests(ITestOutputHelper output)
         public void Recycle() => Call("RecycleTextureSourceNativeBatches");
         public void Dispose()
         {
+            AbortBorrowedConsumerBatch();
             MetalVideoPresenter.ReleasePreparedTextureSources(captures);
             Call("ShutdownTextureSourceNativeOwners");
+            uploadArena.Dispose();
+            var last = (nint)Field("_lastFlushedCommandBuffer").GetValue(null)!;
+            if (last != 0) MetalNative.SendVoid(last, MetalNative.Selector("release"));
+            Field("_lastFlushedCommandBuffer").SetValue(null, (nint)0);
+            ReleaseConsumerShaderResources();
             Field("_executingTextureSourceWork").SetValue(null, null);
             Field("_textureSourceGraphEnabled").SetValue(null, oldGraph);
             foreach (var buffer in buffers) MetalNative.SendVoid(buffer, MetalNative.Selector("release"));

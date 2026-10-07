@@ -45,7 +45,8 @@ internal static partial class MetalVideoPresenter
         _batchOpen = false;
         var commandBuffer = _batchCommandBuffer;
         _batchCommandBuffer = 0;
-        MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
+        if (_textureSourceGraphEnabled) CommitTextureSourceNativeCommands(commandBuffer);
+        else MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
         TagUploadPages(commandBuffer);
         TagSnapshotResources(commandBuffer);
         TagFaultScan(commandBuffer);
