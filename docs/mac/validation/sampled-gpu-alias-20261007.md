@@ -321,3 +321,87 @@ assembly hashes, commands, log, TRX and parsed actual-execution markers.
 This closes the precompletion owner-release test gap. Work owner release is
 manual in the fixture; production Drain writer/error/shutdown integration and
 CPU backing/copy leases remain unqualified, and the application graph stays off.
+
+### W13 actual drain lifecycle proof (source 72750f1)
+
+The private disabled graph now conditionally releases the exact queued work
+owner in `CompleteGuestWork`. Successful native pins record their exact work's
+batch identity; a scalar release receipt distinguishes that work's uncommitted
+use from a peer's pin on the same version. It is diagnostic only, with no handle,
+retention or readiness authority. Ordered managed actions flush before callbacks;
+the receipt records the earlier release phase rather than making a timing claim.
+
+Fatal selection/execution cancels source work owners, discards only uncommitted
+batches, retires failed versions, preserves committed native pins and GPU-address
+tombstones, and drops canceled queue nodes/accounting without acknowledgements.
+`Run` exit uses the actual close helper; native shutdown rejects callers holding
+the gate and waits committed buffers outside it. Graphfalse behavior is unchanged.
+Pooled CPU payload return/serialization beyond source ownership remains a separate
+cancellation audit; dropping queue nodes is not proof of pool ownership semantics.
+
+Six device fixtures compile: sampled/readonly-storage actual Drain consumers with
+production zero-CPU-read snapshot capture; missing-producer dependency fatal
+discard; ordered-action fatal after real commit; pending-reader close with a
+committed producer; and an actual same-version unencoded peer receipt negative.
+Source setup uses actual admission/take plus controlled GPU render-pass clear,
+materialization/immutable copy and logical completion. It does not run the dummy
+admitted pixel shader or qualify translated producer execution. A private drain
+core takes a bounded 5 s fixture budget while the runtime wrapper retains 12 ms,
+avoiding wall-clock-dependent discard ordering. CPU source/backing ownership,
+full producer/output wiring and graph activation remain open.
+
+Actual graph-enabled drain rejects work owning producer outputs before native
+materialization/encoding until producer hooks are separately qualified. The
+controlled setup explicitly bypasses that consumer-only drain boundary to use
+the previously proved GPU clear/copy helpers. It cannot advertise a successful
+unwired runtime producer. Before enabling any broader path, color writers need
+exact materialization before attachment resolution and copy after encoder end
+before writeback flush; storage draw writers need shared exact destinations,
+depth/other image mutations need explicit version publication or rejection, and
+skipped/failed shader encoders must never certify output readiness.
+
+The matching CPU-only source/admission/scheduler/frontend/drain selection passed
+111/111 on ARM64 and 111/111 on Rosetta x64, including five new runtime lifecycle
+cases. These managed results do not execute or qualify the six device fixtures.
+
+Clean `72750f17e20bffda1a13bbf3d1751948d63e6f01` passed all six actual
+required-device cases on Apple M4: ARM64 6/6 (275 ms), Rosetta x64 6/6
+(848 ms), no skips. Both runs used identical neutral assembly hashes and the
+shared machine lock. Source/commands, log, TRX, runner and parsed actual-execution
+markers are retained under `artifacts/validation/metal-agent/immutable-drain-72750f1-{arm,x64}`.
+The assertions read every output byte, prove zero CPU guest reads, and inspect
+exact queued-owner receipts plus native pin/registry/budget cleanup. Runtime
+producer execution, full ISA coverage and production activation remain excluded.
+
+### Final-flush and canceled payload followup
+
+Graph-enabled drain now latches final-flush failures and cancels source/queue
+ownership. Native batches already marked committed keep their pins; only
+uncommitted batches are discarded. A private default-null before-commit failure
+hook permits a real encoded consumer to fail before commit without inventing
+hardware completion. Clean `2192f71d757e6d014084ee931ffc81c6755c077f`
+passed that actual required-device fixture on ARM64 1/1 (156 ms) and x64 1/1
+(305 ms), Apple M4, no skips. Both runs retain matching DLL hashes, exact
+commands/log/TRX/runner and all64A5/zeroCPUread markers under
+`artifacts/validation/metal-agent/immutable-flush-2192f71-{arm,x64}`.
+
+Cancellation inventories only still-queued unexecuted compute/draw payloads,
+deduplicates pooled global/vertex arrays across the canceled queues, and returns
+shared index leases through their idempotent owner. Queue ownership is removed
+before returns, so a repeated close cannot return an array that has been rerented.
+Completed CWT work history is never used to return CPU data. Managed tests use the
+actual pool lease count/rerent paths, including cross-work duplicates, foreign
+nonpooled data, index late copies and a completed work's newer array lease.
+In-flight partial pool returns, presentation-carried payload ownership and broad
+CPU producer/copy serialization remain separate qualification work.
+
+A followup fatal-only cleanup guard preserves the original GPU exception, retains
+any secondary cleanup exception separately, and clears the borrowed batch plus
+wakes gate waiters in `finally`. Two CPU-only actual Drain cases inject a failure
+after a real canceled pool return; both execution and final-flush paths preserve
+the original cause, return remaining arrays, latch the cleanup diagnostic, and
+wake a real condition-variable waiter. This followup does not invent GPU
+completion or change the graphfalse path. The matching source/queue/frontend
+selection passes 116 managed cases on each architecture. The device executions
+above qualify their exact earlier source revisions, not this later exception
+bookkeeping revision. Source graph activation remains off.

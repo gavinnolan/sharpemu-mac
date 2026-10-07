@@ -76,8 +76,12 @@ internal static partial class MetalVideoPresenter
     private static void FailGuestTextureSourceSelectionLocked(in PendingGuestWork pending, string reason, Exception? cause = null)
     {
         var failure = cause ?? new InvalidOperationException(reason);
-        _guestWorkFailure = failure;
-        Monitor.PulseAll(_gate);
+        if (_textureSourceGraphEnabled) LatchTextureSourceDrainFailureLocked(failure);
+        else
+        {
+            _guestWorkFailure = failure;
+            Monitor.PulseAll(_gate);
+        }
         // The creating autorelease pool owns this borrowed command buffer.
         // A failed selection must not commit commands encoded before failure.
         _batchOpen = false;

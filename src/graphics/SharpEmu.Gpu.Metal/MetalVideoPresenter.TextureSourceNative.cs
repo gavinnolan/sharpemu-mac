@@ -10,8 +10,10 @@ internal static partial class MetalVideoPresenter
     // Render-thread ownership. Every batch retains its command buffer and pins
     // the private versions used indirectly through argument buffers. Encoding
     // completion never releases these pins; native completion/error does.
+    private static long _nextTextureSourceNativeBatchIdentity;
     private sealed class TextureSourceNativeBatch
     {
+        public readonly long Identity = Interlocked.Increment(ref _nextTextureSourceNativeBatchIdentity);
         public readonly nint CommandBuffer;
         public readonly HashSet<TextureSourceVersion> Versions = new(ReferenceEqualityComparer.Instance);
         public readonly HashSet<TextureSourceVersion> ProducedVersions = new(ReferenceEqualityComparer.Instance);
@@ -54,7 +56,15 @@ internal static partial class MetalVideoPresenter
             }
             if (batch.Committed) throw new InvalidOperationException("Metal source use cannot enter a committed command buffer.");
             if (batch.Versions.Add(version)) version.NativePins++;
+            RecordTextureSourceNativeWorkUseLocked(batch);
         }
+    }
+
+    private static void RecordTextureSourceNativeWorkUseLocked(TextureSourceNativeBatch batch)
+    {
+        if (_executingTextureSourceWork is { } work &&
+            _textureSourceWorkOwners.TryGetValue(work, out var owner) && !owner.Released)
+            owner.NativeUseBatchIdentity = batch.Identity;
     }
 
     private static void ValidateTextureSourceNativeView(TextureSourceVersion source, nint texture)
@@ -195,10 +205,15 @@ internal static partial class MetalVideoPresenter
 
     // Own the real native commit operation; no metadata-only publication can
     // authorize a second buffer to read an uncommitted producer's copy.
+    // Private failure-injection boundary. Never assigned by production code;
+    // tests fail before the real commit without inventing native completion.
+    private static Action? _textureSourceBeforeNativeCommit;
+
     private static void CommitTextureSourceNativeCommands(nint commandBuffer)
     {
         if (_textureSourceNativeBatches.TryGetValue(commandBuffer, out var batch) && batch.Committed)
             throw new InvalidOperationException("Metal source command buffer has already been committed.");
+        _textureSourceBeforeNativeCommit?.Invoke();
         MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
         if (batch is not null) batch.Committed = true;
     }
@@ -281,6 +296,8 @@ internal static partial class MetalVideoPresenter
 
     private static void ShutdownTextureSourceNativeOwners()
     {
+        if (Monitor.IsEntered(_gate))
+            throw new InvalidOperationException("Metal source shutdown must not wait while holding the presenter gate.");
         nint[] committed;
         lock (_gate)
         {

@@ -780,6 +780,7 @@ internal static partial class MetalVideoPresenter
     {
         lock (_gate)
         {
+            if (_textureSourceGraphEnabled) ReleaseTextureSourceWorkOwnerLocked(pending.Work);
             _pendingGuestWorkBytes = pending.PayloadBytes >= _pendingGuestWorkBytes
                 ? 0
                 : _pendingGuestWorkBytes - pending.PayloadBytes;
@@ -802,19 +803,35 @@ internal static partial class MetalVideoPresenter
 
     /// <summary>Drains queued guest work on the render loop, bounded by count and a
     /// wall-clock budget so a backlog cannot starve the event pump or the present.</summary>
-    internal static void DrainGuestWork(nint device, nint queue)
+    internal static void DrainGuestWork(nint device, nint queue) =>
+        DrainGuestWorkCore(device, queue, _renderWorkBudgetTicks);
+
+    private static void DrainGuestWorkCore(nint device, nint queue, long budgetTicks)
     {
         if (_guestWorkFailure is { } previousFailure)
         {
             throw new GpuFatalException("Metal guest execution has already failed.", previousFailure);
         }
 
-        var deadline = System.Diagnostics.Stopwatch.GetTimestamp() + _renderWorkBudgetTicks;
+        var deadline = System.Diagnostics.Stopwatch.GetTimestamp() + budgetTicks;
         var completedWork = 0;
-        RecycleCompletedUploadPages();
-        RecycleCompletedSnapshotResources();
-        ScanCompletedFaultBitmaps();
-        DrainGuestImageCpuSync(device);
+        try
+        {
+            if (_textureSourceGraphEnabled) RecycleTextureSourceNativeBatches();
+            RecycleCompletedUploadPages();
+            RecycleCompletedSnapshotResources();
+            ScanCompletedFaultBitmaps();
+            DrainGuestImageCpuSync(device);
+        }
+        catch (Exception exception) when (_textureSourceGraphEnabled)
+        {
+            lock (_gate)
+            {
+                LatchTextureSourceDrainFailureLocked(exception);
+            }
+            if (exception is GpuFatalException) throw;
+            throw GpuFatal.Fatal("Metal guest drain preparation failed.", exception);
+        }
         try
         {
             while (completedWork < MaxGuestWorkPerRender)
@@ -830,8 +847,10 @@ internal static partial class MetalVideoPresenter
                     pendingGuestWork.Queue.SubmissionId);
                 _enqueueAsImmediateQueueFollowup = true;
                 _immediateFollowupTail = null;
+                if (_textureSourceGraphEnabled) _executingTextureSourceWork = pendingGuestWork.Work;
                 try
                 {
+                    if (_textureSourceGraphEnabled) RequireQualifiedTextureSourceConsumerWork(pendingGuestWork.Work);
                     // Draws and compute dispatches encode into the shared batch
                     // command buffer; everything else must observe their output
                     // on the serial queue, so it flushes the batch first.
@@ -874,8 +893,12 @@ internal static partial class MetalVideoPresenter
                 {
                     lock (_gate)
                     {
-                        _guestWorkFailure = exception;
-                        Monitor.PulseAll(_gate);
+                        if (_textureSourceGraphEnabled) LatchTextureSourceDrainFailureLocked(exception);
+                        else
+                        {
+                            _guestWorkFailure = exception;
+                            Monitor.PulseAll(_gate);
+                        }
                     }
 
                     // commandBuffer is autoreleased by its creating pool. Drop
@@ -893,6 +916,7 @@ internal static partial class MetalVideoPresenter
                 {
                     _enqueueAsImmediateQueueFollowup = false;
                     _immediateFollowupTail = null;
+                    if (_textureSourceGraphEnabled) _executingTextureSourceWork = null;
                     Volatile.Write(ref _executingGuestWorkSequence, 0);
                 }
 
@@ -904,13 +928,31 @@ internal static partial class MetalVideoPresenter
                 }
             }
         }
+        catch (Exception exception) when (_textureSourceGraphEnabled && _guestWorkFailure is null)
+        {
+            lock (_gate)
+            {
+                LatchTextureSourceDrainFailureLocked(exception);
+            }
+            if (exception is GpuFatalException) throw;
+            throw GpuFatal.Fatal("Metal guest drain completion failed.", exception);
+        }
         finally
         {
             // Successful drains commit their encoded work. A failed item must
             // never issue partially encoded commands or acknowledge success.
             if (_guestWorkFailure is null)
             {
-                _ = FlushBatchedGuestCommands();
+                try { _ = FlushBatchedGuestCommands(); }
+                catch (Exception exception) when (_textureSourceGraphEnabled)
+                {
+                    lock (_gate)
+                    {
+                        LatchTextureSourceDrainFailureLocked(exception);
+                    }
+                    if (exception is GpuFatalException) throw;
+                    throw GpuFatal.Fatal("Metal guest drain final flush failed.", exception);
+                }
             }
         }
     }
