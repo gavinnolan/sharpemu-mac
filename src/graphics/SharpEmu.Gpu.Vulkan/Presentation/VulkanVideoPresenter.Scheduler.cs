@@ -151,7 +151,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 // An unmap waiting for the relay to go away must not outlive a failed shutdown.
                 GuestGpuMemoryHook.Current?.AttachGpuQueue(null, null);
-                VideoOutExports.CancelOutstandingFlips();
+                VideoOutBackendServices.CancelOutstandingFlips();
             }
         }
 

@@ -84,7 +84,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var hdrState = _window.HdrState;
             _ = ChooseSurfaceFormat(formats, requestHdr: true, out var surfaceSupportsHdr);
             var hdrOutputSupported = _videoOptions.CanUseHdr(hdrState.Enabled, surfaceSupportsHdr);
-            var guestHdrRequested = VideoOutExports.IsHdrOutputRequested;
+            var guestHdrRequested = VideoOutBackendServices.IsHdrOutputRequested;
             var requestHdr = _videoOptions.HdrMode switch
             {
                 HostHdrMode.On => true,
@@ -98,7 +98,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _swapchainFormat = surfaceFormat.Format;
             _swapchainColorSpace = surfaceFormat.ColorSpace;
             _extent = ChooseExtent(capabilities);
-            HostMovieBridge.SetPresentationSize(_extent.Width, _extent.Height);
+            SharpEmu.Libs.Media.MoviePresentationServices.SetPresentationSize(_extent.Width, _extent.Height);
             var presentMode = ChoosePresentMode();
             var imageCount = capabilities.MinImageCount + 1;
             if (capabilities.MaxImageCount != 0)

@@ -573,10 +573,10 @@ internal static unsafe partial class VulkanVideoPresenter
             var selectedName = SilkMarshal.PtrToString((nint)selected.DeviceName) ?? "unknown";
             Console.Error.WriteLine(
                 $"[LOADER][INFO] Vulkan device: {selectedName} ({selected.DeviceType})");
-            VideoOutExports.SetSelectedGpuName(selectedName);
+            VideoOutBackendServices.SetSelectedGpuName(selectedName);
             if (_window is not null)
             {
-                _window.SetTitle(VideoOutExports.GetWindowTitle());
+                _window.SetTitle(VideoOutBackendServices.GetWindowTitle());
             }
         }
 
@@ -1339,7 +1339,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             var configured = Environment.GetEnvironmentVariable("SHARPEMU_VK_PIPELINE_CACHE_PATH");
             var cachePath = VulkanPipelineCacheStorage.ResolvePath(
-                VideoOutExports.GetApplicationTitleId(),
+                VideoOutBackendServices.GetApplicationTitleId(),
                 configured);
             if (string.IsNullOrWhiteSpace(configured))
             {

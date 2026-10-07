@@ -6,7 +6,7 @@ using SharpEmu.HLE;
 namespace SharpEmu.Libs.Gpu.Rendering;
 
 // Owns the submitted bytes and layout until the matching draw has copied them.
-internal sealed class SubmittedVertexData
+public sealed class SubmittedVertexData
 {
     private readonly VertexInputBuffer[] _buffers;
     private readonly VertexAttributeResource[] _attributes;

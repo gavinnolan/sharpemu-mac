@@ -81,7 +81,7 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend, IGuestImageSnapsh
         var submitted = MetalVideoPresenter.TrySubmitGuestImage(address, width, height, pitchInPixel);
         if (submitted)
         {
-            VideoOutExports.MarkFlipPresented(flipRequestId);
+            VideoOutBackendServices.MarkFlipPresented(flipRequestId);
         }
 
         return submitted;

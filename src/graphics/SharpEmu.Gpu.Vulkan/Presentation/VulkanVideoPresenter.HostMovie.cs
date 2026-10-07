@@ -136,7 +136,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private void PumpHostMovieFrame()
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.MovieFramePolling);
-            if (!HostMovieBridge.TryDecodeNextFrame(
+            if (!SharpEmu.Libs.Media.MoviePresentationServices.TryDecodeNextFrame(
                     // Once the host bridge owns a movie, advance its clock on
                     // every presenter tick. Texture discovery can lag behind
                     // the first decoded frame; tying playback to those two
@@ -305,12 +305,12 @@ internal static unsafe partial class VulkanVideoPresenter
             var isLuma = plane == 0;
             var frame = _hostMovieFramePixels ??
                 throw new InvalidOperationException("Host movie frame is unavailable.");
-            var lumaLength = HostMovieYuv420.LumaLength(_hostMovieFrameWidth, _hostMovieFrameHeight);
+            var lumaLength = SharpEmu.Libs.Media.MoviePresentationServices.LumaLength(_hostMovieFrameWidth, _hostMovieFrameHeight);
             var pixels = isLuma
                 ? frame.AsSpan(0, lumaLength)
                 : frame.AsSpan(
                     lumaLength,
-                    HostMovieYuv420.ChromaLength(_hostMovieFrameWidth, _hostMovieFrameHeight));
+                    SharpEmu.Libs.Media.MoviePresentationServices.ChromaLength(_hostMovieFrameWidth, _hostMovieFrameHeight));
             var width = isLuma
                 ? _hostMovieFrameWidth
                 : (_hostMovieFrameWidth + 1) / 2;

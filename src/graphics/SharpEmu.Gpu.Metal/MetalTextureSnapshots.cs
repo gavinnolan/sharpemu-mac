@@ -10,7 +10,9 @@ using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
-using static SharpEmu.Libs.Agc.AgcExports;
+using static SharpEmu.Libs.Agc.AgcBackendServices;
+using TranslatedImageBinding = SharpEmu.Libs.Agc.AgcExports.TranslatedImageBinding;
+using TextureDescriptor = SharpEmu.Libs.Agc.AgcExports.TextureDescriptor;
 
 namespace SharpEmu.Gpu.Metal;
 
@@ -440,7 +442,7 @@ internal static class MetalTextureSnapshots
             !_arrayUploadUnsupported.ContainsKey(descriptor.Address);
         var arrayUploadLayers = wantsArrayUpload ? descriptor.Depth : 1u;
         var isVideoBuffer =
-            SharpEmu.Libs.AvPlayer.AvPlayerExports.IsVideoBufferAddress(
+            SharpEmu.Libs.Media.MoviePresentationServices.IsVideoBufferAddress(
                 descriptor.Address);
 
         // Check content freshness before reusing a cached upload.

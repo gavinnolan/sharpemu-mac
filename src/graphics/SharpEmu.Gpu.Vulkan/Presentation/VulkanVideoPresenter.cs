@@ -263,7 +263,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 MaximumCachedHostBufferBytes,
                 DestroyHostBufferAllocation);
             _window = new SdlHostWindow(
-                VideoOutExports.GetWindowTitle(),
+                VideoOutBackendServices.GetWindowTitle(),
                 _videoOptions,
                 SdlGraphicsApi.Vulkan);
         }
@@ -279,7 +279,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         $"[LOADER][WARN] Vulkan VideoOut window closing; " +
                         $"requested={Volatile.Read(ref _presenterCloseRequested)} " +
                         $"deviceLost={_deviceLost}");
-                    VideoOutExports.NotifyPresentationWindowClosed();
+                    VideoOutBackendServices.NotifyPresentationWindowClosed();
                     DisposeVulkan();
                     RenderPhaseProfile.WriteFrameTrace();
                     SubmissionFlowProfile.WriteTrace();

@@ -288,7 +288,7 @@ public static partial class VideoOutExports
         uint PitchInPixel,
         ulong Option);
 
-    internal readonly record struct DisplayBufferInfo(
+    public readonly record struct DisplayBufferInfo(
         ulong Address,
         ulong PixelFormat,
         uint TilingMode,

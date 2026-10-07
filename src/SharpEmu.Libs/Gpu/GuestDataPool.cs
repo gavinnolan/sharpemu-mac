@@ -14,7 +14,7 @@ namespace SharpEmu.Libs.Gpu;
 /// repartitions those large arrays aggressively under GC load, causing hundreds of
 /// MiB/s of replacement byte[] allocations, so this pool is bounded and non-shared.
 /// </summary>
-internal static class GuestDataPool
+public static class GuestDataPool
 {
     public static ArrayPool<byte> Shared { get; } = new BoundedByteArrayPool(
         maxArrayLength: 16 * 1024 * 1024,

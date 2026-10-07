@@ -19,7 +19,7 @@ public sealed class PresenterStartupTests
         private static readonly Type PresenterType = typeof(VulkanVideoPresenter);
         private readonly Dictionary<FieldInfo, object?> _saved = new();
         private readonly object _gate = Read("_gate")!;
-        private readonly Func<SharpEmu.HLE.ICpuMemory, SharpEmu.Libs.Agc.AgcExports.HeadlessCommandStream>? _factory =
+        private readonly Func<SharpEmu.HLE.ICpuMemory, IGuestCommandStream>? _factory =
             VulkanVideoPresenter.TestCommandStreamFactory;
 
         public StartupState()

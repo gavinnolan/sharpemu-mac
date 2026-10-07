@@ -30,8 +30,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
   <ItemGroup>
     <InternalsVisibleTo Include="SharpEmu.Libs.Tests" />
-    <!-- The Metal presenter constructs MacHostWindow and the launcher pad. -->
-    <InternalsVisibleTo Include="SharpEmu.Gpu.Metal" />
   </ItemGroup>
 
 </Project>

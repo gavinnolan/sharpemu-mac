@@ -508,7 +508,7 @@ internal static unsafe partial class VulkanVideoPresenter
         out uint width,
         out uint height)
     {
-        if (!AvPlayerExports.TryGetFallbackPresentationFrame(
+        if (!SharpEmu.Libs.Media.MoviePresentationServices.TryGetFallbackPresentationFrame(
                 out pixels,
                 out width,
                 out height,

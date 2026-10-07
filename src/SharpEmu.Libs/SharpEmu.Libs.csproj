@@ -30,27 +30,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <InternalsVisibleTo Include="SharpEmu.Core" />
   </ItemGroup>
 
-  <!-- Transitional friend assemblies for the graphics/platform package split.
-       The backends were carved out of this project, so they still reach a long
-       tail of its internals: IGuestGpuBackend and GuestGpu, the shared GPU
-       engine (IRenderHost, RenderExecutor, ShaderPipelineCache, GpuFatal,
-       GuestDataPool), the internal VideoOut diagnostics (RenderPhaseProfile,
-       WindowPollProfile, SubmissionFlowProfile, BufferUploadProfile,
-       PerfOverlay) and the internal HLE-export state they present for
-       (AgcExports, VideoOutExports, PadExports).
-
-       The alternative - making several hundred shared-engine members public -
-       would freeze the seam before it is settled, so the friend list is the
-       deliberate intermediate step. It is explicit, it names only the four
-       packages that were extracted from here, and it shrinks as the backend
-       surface is narrowed to the public contracts in Gpu/Abstractions. No
-       other assembly gets added to it. -->
-  <ItemGroup>
-    <InternalsVisibleTo Include="SharpEmu.Gpu.Metal" />
-    <InternalsVisibleTo Include="SharpEmu.Gpu.Vulkan" />
-    <InternalsVisibleTo Include="SharpEmu.Platform.MacOS" />
-    <InternalsVisibleTo Include="SharpEmu.Adapters.Sdl" />
-  </ItemGroup>
+  <!-- Extracted backends and platform packages use explicit public contracts.
+       The existing Core exception above is limited to loader diagnostics. -->
 
   <ItemGroup>
     <PackageReference Include="FFmpeg.AutoGen" />

@@ -19,7 +19,7 @@ internal static unsafe partial class VulkanVideoPresenter
     // The presenter whose render thread runs the command stream; null while no window runs.
     private static Presenter? _activePresenter;
     private static Exception? _presenterStartupFailure;
-    internal static Func<ICpuMemory, AgcExports.HeadlessCommandStream>? TestCommandStreamFactory { get; set; }
+    internal static Func<ICpuMemory, IGuestCommandStream>? TestCommandStreamFactory { get; set; }
 
     public static void SubmitCommandStream(ICpuMemory memory, uint queue, ulong address, uint dwordCount, ulong submissionId, object? geometrySnapshots)
     {
@@ -102,7 +102,7 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         return memory is not null && TestCommandStreamFactory?.Invoke(memory) is { } testStream
-            ? testStream.Queue.SnapshotBlocked()
+            ? testStream.SnapshotBlocked()
             : null;
     }
 
@@ -188,7 +188,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var (_, guest, _) = RequireGuestMemory("command stream");
             _guestMemory = guest;
             _endOfPipe = new EndOfPipe(_endOfPipeEvents, this);
-            _translation = AgcExports.CreateCommandStreamTranslation(guest, this);
+            _translation = AgcBackendServices.CreateCommandStreamTranslation(guest, this);
             _lastCommandStreamProgressTicks = System.Diagnostics.Stopwatch.GetTimestamp();
         }
 
@@ -473,7 +473,7 @@ internal static unsafe partial class VulkanVideoPresenter
             return _endOfPipe.PrepareVideoOutFlip(_scheduler.Current, handle, index, flipMode, flipArgument);
         }
 
-        public bool IsFlipDone(int handle, int index) => VideoOutExports.IsFlipDone(handle, index);
+        public bool IsFlipDone(int handle, int index) => VideoOutBackendServices.IsFlipDone(handle, index);
 
         public void PrepareCpuFlip(int handle, int index, ulong requestId) =>
             CaptureFlip(handle, index, requestId, flipMode: 0, flipArg: 0);
@@ -543,7 +543,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             _ = buffer;
             _translation.PrepareFlip(handle, index);
-            var result = VideoOutExports.TryReserveFlipRequest(handle, index, flipMode, flipArg, gpuQueued: true, out requestId);
+            var result = VideoOutBackendServices.TryReserveFlipRequest(handle, index, flipMode, flipArg, gpuQueued: true, out requestId);
             if (result != 0)
             {
                 return result;
@@ -555,7 +555,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             catch
             {
-                VideoOutExports.CancelFlip(requestId);
+                VideoOutBackendServices.CancelFlip(requestId);
                 throw;
             }
             return 0;
@@ -564,24 +564,24 @@ internal static unsafe partial class VulkanVideoPresenter
         // The interpreter must suspend before capture so this worker can present queued frames.
         public void WaitForSubmitSlot() => throw SubmissionScheduler.Fatal("The GPU worker cannot wait for a flip slot. Suspend the command stream before capture.");
 
-        public void CompleteFlip(ulong requestId) => VideoOutExports.CompleteFlip(requestId);
+        public void CompleteFlip(ulong requestId) => VideoOutBackendServices.CompleteFlip(requestId);
 
         // Copies the display surface through the store; presentation shows the copy once its tick retires.
         internal void CaptureFlip(int handle, int index, ulong requestId, int flipMode, long flipArg)
         {
             // A no-buffer flip has no image to capture; its completion still retires in order.
-            if (VideoOutExports.ReleaseNoBufferFlip(index, requestId))
+            if (VideoOutBackendServices.ReleaseNoBufferFlip(index, requestId))
             {
                 return;
             }
-            if (!VideoOutExports.TryGetDisplayBufferInfo(handle, index, out var displayBuffer))
+            if (!VideoOutBackendServices.TryGetDisplayBufferInfo(handle, index, out var displayBuffer))
             {
                 throw SubmissionScheduler.Fatal($"The flip names a display buffer that is not registered: handle={handle} index={index} request={requestId}.");
             }
 
             if (_deviceLost)
             {
-                VideoOutExports.DiscardFlip(requestId);
+                VideoOutBackendServices.DiscardFlip(requestId);
                 return;
             }
 
@@ -668,7 +668,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         IsSplash: false,
                         GuestImageAddress: displayBuffer.Address,
                         GuestImageVersion: version,
-                        IsHdr: VideoOutExports.IsHdrPixelFormat(displayBuffer.PixelFormat),
+                        IsHdr: VideoOutBackendServices.IsHdrPixelFormat(displayBuffer.PixelFormat),
                         RequiredTick: captureTick,
                         FlipRequestId: requestId);
                     _latestPresentation = presentation;
@@ -686,13 +686,13 @@ internal static unsafe partial class VulkanVideoPresenter
                     $"request={requestId} addr=0x{displayBuffer.Address:X16} " +
                     $"size={extent.Width}x{extent.Height}");
                 RenderDocCapture.OnGuestFlipBoundary(version);
-                VideoOutExports.TraceGpuFlip(_guestMemory, handle, index, flipMode, flipArg, displayBuffer.Address, VideoOutExports.GetFlipEventCount(requestId));
+                VideoOutBackendServices.TraceGpuFlip(_guestMemory, handle, index, flipMode, flipArg, displayBuffer.Address, VideoOutBackendServices.GetFlipEventCount(requestId));
             }
             finally
             {
                 if (!submitted)
                 {
-                    VideoOutExports.DiscardFlip(requestId);
+                    VideoOutBackendServices.DiscardFlip(requestId);
                     if (snapshot is not null)
                     {
                         DestroyGuestImage(snapshot);
@@ -706,7 +706,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             if (presentation.FlipRequestId != 0)
             {
-                VideoOutExports.DiscardFlip(presentation.FlipRequestId);
+                VideoOutBackendServices.DiscardFlip(presentation.FlipRequestId);
             }
         }
 
@@ -721,11 +721,11 @@ internal static unsafe partial class VulkanVideoPresenter
 
             if (presented)
             {
-                VideoOutExports.MarkFlipPresented(presentation.FlipRequestId);
+                VideoOutBackendServices.MarkFlipPresented(presentation.FlipRequestId);
             }
             else
             {
-                VideoOutExports.DiscardFlip(presentation.FlipRequestId);
+                VideoOutBackendServices.DiscardFlip(presentation.FlipRequestId);
             }
 
             _commandStream.RetryBlocked();
@@ -734,7 +734,7 @@ internal static unsafe partial class VulkanVideoPresenter
         // Keep GPU completion separate from refresh eligibility.
         private bool IsPresentationReadyLocked(in Presentation presentation) =>
             (presentation.RequiredTick == 0 || (_scheduler is not null && _scheduler.Timeline.CompletedTick >= presentation.RequiredTick)) &&
-            VideoOutExports.CanPresentFlip(presentation.FlipRequestId, System.Diagnostics.Stopwatch.GetTimestamp());
+            VideoOutBackendServices.CanPresentFlip(presentation.FlipRequestId, System.Diagnostics.Stopwatch.GetTimestamp());
 
         private bool TryTakePresentation(out Presentation presentation)
         {
@@ -743,7 +743,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 // Remove cancelled frames without releasing their in-flight image resources.
                 while (_pendingGuestImagePresentations.Count > 0 &&
                        (_pendingGuestImagePresentations.Peek().Sequence <= _presentedSequence ||
-                        !VideoOutExports.IsFlipPresentationPending(_pendingGuestImagePresentations.Peek().FlipRequestId)))
+                        !VideoOutBackendServices.IsFlipPresentationPending(_pendingGuestImagePresentations.Peek().FlipRequestId)))
                 {
                     var retired = _pendingGuestImagePresentations.Dequeue();
                     RetirePresentation(retired);
@@ -812,7 +812,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 var pending = _pendingGuestImagePresentations.Peek();
                 return pending.Sequence <= _presentedSequence ||
-                    !VideoOutExports.IsFlipPresentationPending(pending.FlipRequestId) ||
+                    !VideoOutBackendServices.IsFlipPresentationPending(pending.FlipRequestId) ||
                     IsPresentationReadyLocked(in pending);
             }
 

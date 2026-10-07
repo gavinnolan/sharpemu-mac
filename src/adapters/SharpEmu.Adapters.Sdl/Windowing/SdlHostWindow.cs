@@ -12,18 +12,18 @@ using SharpEmu.Adapters.Sdl.Input;
 
 namespace SharpEmu.Adapters.Sdl.Windowing;
 
-internal enum SdlGraphicsApi
+public enum SdlGraphicsApi
 {
     Vulkan,
     Metal,
 }
 
-internal readonly record struct SdlHdrState(
+public readonly record struct SdlHdrState(
     bool Enabled,
     float SdrWhiteLevel,
     float Headroom);
 
-internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
+public sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
 {
     private const SDL_InitFlags InitFlags = SDL_InitFlags.SDL_INIT_VIDEO | SDL_InitFlags.SDL_INIT_GAMEPAD;
     private static readonly long CursorHideDelayTicks = 2 * Stopwatch.Frequency;

@@ -17,10 +17,10 @@ namespace SharpEmu.Libs.Gpu;
 /// Shader compilation also lives behind the seam: the backend owns its codegen and
 /// returns opaque <see cref="IGuestCompiledShader"/> handles that only it can submit.
 /// </summary>
-internal interface IGuestGpuBackend
+public interface IGuestGpuBackend
 {
     /// <summary>Human-readable name of this backend ("Metal", "Vulkan"), shown in
-    /// the window title on macOS where either backend can run.</summary>
+    /// the window title. macOS builds link only Metal.</summary>
     string BackendName { get; }
 
     /// <summary>Starts the presenter (window + device) once; safe to call repeatedly.</summary>
@@ -79,7 +79,7 @@ internal interface IGuestGpuBackend
 
 // A backend that keeps CPU snapshots of guest images; the AGC layer feeds it pixels and
 // mirrored writes. A backend with a guest image store reads guest memory itself.
-internal interface IGuestImageSnapshotBackend
+public interface IGuestImageSnapshotBackend
 {
     bool TrySubmitGuestImageBlit(GuestRenderTarget source, GuestRenderTarget destination);
     void SubmitTranslatedDraw(

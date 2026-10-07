@@ -30,7 +30,7 @@ public sealed class ComputePipelineDescription
 }
 
 // The host objects the shader and pipeline caches need: modules, pipelines, limits and guest readers.
-internal interface IShaderPipelineHost
+public interface IShaderPipelineHost
 {
     uint MaxPushDescriptors { get; }
 

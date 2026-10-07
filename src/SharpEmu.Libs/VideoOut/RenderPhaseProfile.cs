@@ -16,15 +16,27 @@ namespace SharpEmu.Libs.VideoOut;
 /// Scopes nest: entering a phase suspends the enclosing one and resumes it on
 /// dispose, so a <see cref="Phase.QueueSubmit"/> inside
 /// <see cref="Phase.Flush"/> is never counted twice.
+///
+/// Backend contract: the phases a graphics backend package measures, plus the
+/// report provider seam, are public here; everything the shared engine charges
+/// for itself stays internal.
 /// </summary>
-internal static class RenderPhaseProfile
+public static class RenderPhaseProfile
 {
     // Backend-owned cache counters append themselves to the per-window report. The shared
     // profile cannot name them: the resource caches they measure live in the graphics backend
     // package, which the shared engine does not reference.
     private static readonly List<Func<string>> ReportProviders = [];
 
-    internal static void RegisterReportProvider(Func<string> provider)
+    /// <summary>
+    /// Appends a backend-owned counter block to the per-window report.
+    /// </summary>
+    /// <remarks>
+    /// Backend contract: the resource caches these counters measure live in the
+    /// graphics backend package, which the shared engine does not reference, so
+    /// the backend hands in the formatter instead.
+    /// </remarks>
+    public static void RegisterReportProvider(Func<string> provider)
     {
         ArgumentNullException.ThrowIfNull(provider);
         lock (ReportProviders)
@@ -36,7 +48,8 @@ internal static class RenderPhaseProfile
         }
     }
 
-    internal enum Phase
+    /// <summary>The render-thread phases the profile charges time to.</summary>
+    public enum Phase
     {
         /// <summary>Outside any measured phase — loop overhead.</summary>
         Unattributed = 0,
@@ -198,7 +211,9 @@ internal static class RenderPhaseProfile
     private static long _lastSubmissionTimestamp;
     private static long _submissionCount;
 
-    internal static void RecordSubmissionArrival()
+    /// <summary>Marks the arrival of a guest submission in the current frame trace row.</summary>
+    /// <remarks>Backend contract: only the backend sees the submission arrive.</remarks>
+    public static void RecordSubmissionArrival()
     {
         if (!FrameTraceEnabled) return;
         Interlocked.Exchange(ref _lastSubmissionTimestamp, Stopwatch.GetTimestamp());
@@ -206,7 +221,9 @@ internal static class RenderPhaseProfile
     }
 
     // Keep recent presentation intervals in memory; format them only after the window stops.
-    internal static void WriteFrameTrace()
+    /// <summary>Flushes the per-frame trace rows collected since the last call.</summary>
+    /// <remarks>Backend contract: the backend decides where a frame ends.</remarks>
+    public static void WriteFrameTrace()
     {
         if (!FrameTraceEnabled) return;
         var stride = (int)Phase.Count + 4;
@@ -240,7 +257,12 @@ internal static class RenderPhaseProfile
         _commandReadCalls[(int)kind]++;
         _commandReadBytes[(int)kind] += bytes;
     }
-    internal static bool ImageUploadDetailsEnabled => Enabled && _scopeDepth > 0;
+    /// <summary>Whether <see cref="RecordImageUpload"/> would record anything.</summary>
+    /// <remarks>
+    /// Backend contract: lets a backend skip gathering upload timings when the
+    /// profile is off or the call is not on the render thread.
+    /// </remarks>
+    public static bool ImageUploadDetailsEnabled => Enabled && _scopeDepth > 0;
 
     private readonly record struct ImageUploadKey(ulong Address, uint Width, uint Height, uint Depth,
         uint Layers, uint Levels, uint Format, uint TileMode, string Reason,
@@ -267,7 +289,9 @@ internal static class RenderPhaseProfile
     private static readonly Dictionary<ImageUploadKey, ImageUploadStatistics> _imageUploads = new();
     private static ImageUploadStatistics _otherImageUploads = new();
 
-    internal static void RecordImageUpload(in SharpEmu.Libs.Gpu.Images.ImageDescription description,
+    /// <summary>Records the cost of one guest image upload, grouped by image.</summary>
+    /// <remarks>Backend contract: the backend owns the image cache that performs the upload.</remarks>
+    public static void RecordImageUpload(in SharpEmu.Libs.Gpu.Images.ImageDescription description,
         string reason, long watchTicks, long sourceTicks, long recordTicks,
         string uploadPath = "unknown", ulong writeAddress = 0, ulong writeSize = 0)
     {
@@ -338,7 +362,8 @@ internal static class RenderPhaseProfile
     [ThreadStatic] private static long _lastTimestamp;
     [ThreadStatic] private static int _scopeDepth;
 
-    internal readonly ref struct Scope
+    /// <summary>The scope returned by <see cref="Measure"/>; disposing it charges the elapsed time.</summary>
+    public readonly ref struct Scope
     {
         private readonly Phase _previous;
         private readonly bool _active;
@@ -388,7 +413,12 @@ internal static class RenderPhaseProfile
 
     // Cache calls on other threads must not enter the render-thread counters.
     // Check the switch first to avoid thread-local storage allocation when profiling is disabled.
-    internal static Scope MeasureDetail(Phase phase) =>
+    /// <summary>
+    /// Like <see cref="Measure"/>, but only inside an enclosing scope, so cache
+    /// work on other threads does not enter the render-thread counters.
+    /// </summary>
+    /// <remarks>Backend contract: the measurement entry point backends use.</remarks>
+    public static Scope MeasureDetail(Phase phase) =>
         Enabled && _scopeDepth > 0 ? Measure(phase) : default;
 
     internal static bool DetailMeasurementsEnabled => Enabled && _scopeDepth > 0;

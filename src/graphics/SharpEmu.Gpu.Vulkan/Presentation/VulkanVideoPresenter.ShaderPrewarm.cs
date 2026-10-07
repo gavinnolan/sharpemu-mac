@@ -52,7 +52,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var directory = Path.GetDirectoryName(VulkanPipelineCacheStorage.ResolvePath(
-                VideoOutExports.GetApplicationTitleId(),
+                VideoOutBackendServices.GetApplicationTitleId(),
                 Environment.GetEnvironmentVariable("SHARPEMU_VK_PIPELINE_CACHE_PATH")));
             if (string.IsNullOrEmpty(directory) || ShaderPrewarmList.Open(directory) is not { } list)
             {
@@ -163,7 +163,7 @@ internal static unsafe partial class VulkanVideoPresenter
             bool sharedInt64Atomics,
             bool execGuardElision)
         {
-            if (!ShaderProgramCache.TryCompilePrewarm(
+            if (!ShaderPrewarmCompiler.TryCompilePrewarm(
                     record, code, compiler, sharedInt64Atomics, execGuardElision, out var compiled, out var layout, out var error))
             {
                 NoteShaderPrewarmFailure(record, error);

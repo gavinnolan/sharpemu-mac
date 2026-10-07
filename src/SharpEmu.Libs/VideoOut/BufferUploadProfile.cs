@@ -6,7 +6,8 @@ using System.Diagnostics;
 namespace SharpEmu.Libs.VideoOut;
 
 // The render thread owns these bounded counters. Reports use the existing profile interval.
-internal static class BufferUploadProfile
+/// <summary>Backend observation contract; aggregation storage and test snapshots stay internal.</summary>
+public static class BufferUploadProfile
 {
     internal readonly record struct Source(bool Sweep, ulong VertexProgramHash, ulong PixelProgramHash, ulong ComputeProgramHash);
     internal readonly record struct UploadKey(Source Source, ulong Address, ulong Size);
@@ -104,9 +105,9 @@ internal static class BufferUploadProfile
 
     [ThreadStatic] private static Counters? _counters;
     [ThreadStatic] private static Source _source;
-    internal static bool Enabled => RenderPhaseProfile.FrameTraceEnabled;
+    public static bool Enabled => RenderPhaseProfile.FrameTraceEnabled;
 
-    internal readonly struct Scope : IDisposable
+    public readonly struct Scope : IDisposable
     {
         private readonly Source _previousSource;
         private readonly bool _enabled;
@@ -126,10 +127,10 @@ internal static class BufferUploadProfile
         }
     }
 
-    internal static Scope BeginSweep(ulong vertexProgramHash, ulong pixelProgramHash, ulong computeProgramHash) =>
+    public static Scope BeginSweep(ulong vertexProgramHash, ulong pixelProgramHash, ulong computeProgramHash) =>
         new(new Source(true, vertexProgramHash, pixelProgramHash, computeProgramHash));
 
-    internal static void Record(ulong address, ulong size, int copies, ulong bytes, ulong hotBytes, long ticks)
+    public static void Record(ulong address, ulong size, int copies, ulong bytes, ulong hotBytes, long ticks)
     {
         if (!Enabled) return;
         (_counters ??= new Counters()).Record(_source, address, size, copies, bytes, hotBytes, ticks,

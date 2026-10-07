@@ -300,7 +300,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 $"Cannot reserve image staging space: address=0x{guestAddress:X16} size=0x{size:X16} capacity=0x{_staging.Size:X16} tick={_scheduler.CurrentTick}.");
         }
         if (!_backing.TryReadBacking(guestAddress, _staging.Mapped.Slice((int)stageOffset, (int)size)) &&
-            !KernelMemoryCompatExports.TryReadPrtBacking(_backing, guestAddress,
+            !SharpEmu.Libs.Gpu.GuestBackingServices.TryReadPrtBacking(_backing, guestAddress,
                 _staging.Mapped.Slice((int)stageOffset, (int)size)))
         {
             throw SubmissionScheduler.Fatal(

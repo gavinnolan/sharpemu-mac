@@ -7,9 +7,9 @@ using SharpEmu.Libs.Gpu;
 
 namespace SharpEmu.Libs.Agc;
 
-internal static class TexturePreparationProfile
+public static class TexturePreparationProfile
 {
-    internal enum BindingOutcome
+    public enum BindingOutcome
     {
         Reused,
         Empty,
@@ -19,7 +19,7 @@ internal static class TexturePreparationProfile
         Skipped,
     }
 
-    internal enum ContentCacheStatus
+    public enum ContentCacheStatus
     {
         Absent,
         Stale,

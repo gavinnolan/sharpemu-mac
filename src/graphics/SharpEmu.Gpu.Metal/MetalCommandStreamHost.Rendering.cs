@@ -411,7 +411,7 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
                 throw Fatal($"An image descriptor is too short: image={imageIndex} words={words.Length} hash=0x{program.Hash:X16}.");
             }
 
-            if (!AgcExports.TryDecodeTextureDescriptor(words, out var descriptor))
+            if (!AgcBackendServices.TryDecodeTextureDescriptor(words, out var descriptor))
             {
                 if (new TextureDescriptorWords(words.Length >= 8 ? words : PadWords(words)).BaseAddress != 0)
                 {

@@ -153,7 +153,7 @@ internal sealed partial class MetalCommandStreamHost : AgcExports.TranslatingCom
     public override ulong PrepareFlip(int handle, int index, int flipMode, long flipArgument)
     {
         var requestId = base.PrepareFlip(handle, index, flipMode, flipArgument);
-        if (VideoOutExports.TryGetDisplayBufferInfo(handle, index, out var displayBuffer))
+        if (VideoOutBackendServices.TryGetDisplayBufferInfo(handle, index, out var displayBuffer))
         {
             _ = MetalVideoPresenter.TrySubmitOrderedGuestImageFlip(
                 handle,
@@ -170,7 +170,7 @@ internal sealed partial class MetalCommandStreamHost : AgcExports.TranslatingCom
     // A video-out export flip at its place in the graphics queue; the capture counts as presented.
     public override void PrepareCpuFlip(int handle, int index, ulong requestId)
     {
-        if (VideoOutExports.TryGetDisplayBufferInfo(handle, index, out var displayBuffer))
+        if (VideoOutBackendServices.TryGetDisplayBufferInfo(handle, index, out var displayBuffer))
         {
             _ = MetalVideoPresenter.TrySubmitOrderedGuestImageFlip(
                 handle,
@@ -181,7 +181,7 @@ internal sealed partial class MetalCommandStreamHost : AgcExports.TranslatingCom
                 displayBuffer.PitchInPixel);
         }
 
-        VideoOutExports.MarkFlipPresented(requestId);
+        VideoOutBackendServices.MarkFlipPresented(requestId);
     }
 
     // The ordered queue runs every earlier record and then waits for the GPU to complete them.

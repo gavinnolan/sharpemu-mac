@@ -18,11 +18,11 @@ internal sealed class SchedulerFatalException(string message) : Exception(messag
 
 internal sealed class FatalScope : IDisposable
 {
-    private readonly Action<string> _previous = SubmissionScheduler.OnFatal;
+    private readonly Action<string> _previous = SharpEmu.Libs.Gpu.Scheduling.GpuFatal.OnFatal;
 
     public FatalScope()
     {
-        SubmissionScheduler.OnFatal = message =>
+        SharpEmu.Libs.Gpu.Scheduling.GpuFatal.OnFatal = message =>
         {
             lock (Messages)
             {
@@ -35,7 +35,7 @@ internal sealed class FatalScope : IDisposable
 
     public List<string> Messages { get; } = new();
 
-    public void Dispose() => SubmissionScheduler.OnFatal = _previous;
+    public void Dispose() => SharpEmu.Libs.Gpu.Scheduling.GpuFatal.OnFatal = _previous;
 }
 
 internal sealed class RecordingRenderingState : IRenderingState

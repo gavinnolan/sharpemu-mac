@@ -6,7 +6,7 @@ using SharpEmu.Libs.Gpu.Abstractions;
 namespace SharpEmu.Libs.Gpu.Rendering;
 
 // Only draw preparation can handle this rejection. Image creation keeps its fatal checks.
-internal sealed class DrawImageTypeMismatchException(
+public sealed class DrawImageTypeMismatchException(
     ulong shaderHash,
     ulong imageAddress,
     GpuImageType imageType,

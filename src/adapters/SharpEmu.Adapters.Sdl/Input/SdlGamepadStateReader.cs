@@ -64,9 +64,9 @@ internal static unsafe class SdlGamepadStateReader
         AddButton(gamepad, SDL_GamepadButton.SDL_GAMEPAD_BUTTON_DPAD_DOWN, HostGamepadButtons.Down, ref buttons);
         AddButton(gamepad, SDL_GamepadButton.SDL_GAMEPAD_BUTTON_DPAD_LEFT, HostGamepadButtons.Left, ref buttons);
 
-        var leftTrigger = HostWindowInput.ToTriggerByte(
+        var leftTrigger = ToTriggerByte(
             SDL_GetGamepadAxis(gamepad, SDL_GamepadAxis.SDL_GAMEPAD_AXIS_LEFT_TRIGGER));
-        var rightTrigger = HostWindowInput.ToTriggerByte(
+        var rightTrigger = ToTriggerByte(
             SDL_GetGamepadAxis(gamepad, SDL_GamepadAxis.SDL_GAMEPAD_AXIS_RIGHT_TRIGGER));
         if (leftTrigger > 64)
         {
@@ -82,16 +82,28 @@ internal static unsafe class SdlGamepadStateReader
         return new HostGamepadState(
             Connected: true,
             Buttons: buttons,
-            LeftX: HostWindowInput.ToStickByte(SDL_GetGamepadAxis(gamepad, SDL_GamepadAxis.SDL_GAMEPAD_AXIS_LEFTX)),
-            LeftY: HostWindowInput.ToStickByte(SDL_GetGamepadAxis(gamepad, SDL_GamepadAxis.SDL_GAMEPAD_AXIS_LEFTY)),
-            RightX: HostWindowInput.ToStickByte(SDL_GetGamepadAxis(gamepad, SDL_GamepadAxis.SDL_GAMEPAD_AXIS_RIGHTX)),
-            RightY: HostWindowInput.ToStickByte(SDL_GetGamepadAxis(gamepad, SDL_GamepadAxis.SDL_GAMEPAD_AXIS_RIGHTY)),
+            LeftX: ToStickByte(SDL_GetGamepadAxis(gamepad, SDL_GamepadAxis.SDL_GAMEPAD_AXIS_LEFTX)),
+            LeftY: ToStickByte(SDL_GetGamepadAxis(gamepad, SDL_GamepadAxis.SDL_GAMEPAD_AXIS_LEFTY)),
+            RightX: ToStickByte(SDL_GetGamepadAxis(gamepad, SDL_GamepadAxis.SDL_GAMEPAD_AXIS_RIGHTX)),
+            RightY: ToStickByte(SDL_GetGamepadAxis(gamepad, SDL_GamepadAxis.SDL_GAMEPAD_AXIS_RIGHTY)),
             LeftTrigger: leftTrigger,
             RightTrigger: rightTrigger,
             Type: MapGamepadType(SDL_GetRealGamepadType(gamepad)),
             Connection: GetConnection(gamepad),
             BatteryPercent: (byte)Math.Clamp(battery, 0, 100));
     }
+
+    // SDL reports both sticks and triggers as signed 16-bit axes; the guest pad
+    // takes unsigned bytes. The ranges are SDL's, so the conversion belongs in
+    // the SDL adapter rather than in the shared pad layer.
+    internal static byte ToStickByte(short value)
+    {
+        var normalized = value + 32768;
+        return (byte)Math.Clamp((normalized * 255 + 32767) / 65535, 0, 255);
+    }
+
+    internal static byte ToTriggerByte(short value) =>
+        (byte)Math.Clamp(value * 255 / 32767, 0, 255);
 
     public static HostGamepadType MapGamepadType(SDL_GamepadType type) => type switch
     {

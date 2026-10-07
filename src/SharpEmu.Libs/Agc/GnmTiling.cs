@@ -7,7 +7,7 @@ using System.Runtime.CompilerServices;
 namespace SharpEmu.Libs.Agc;
 
 /// <summary>Which in-block address equation a <see cref="DetileParams"/> carries.</summary>
-internal enum DetileEquation
+public enum DetileEquation
 {
     /// <summary>Unsupported mode/format; caller must use the CPU path or raw upload.</summary>
     None,
@@ -33,7 +33,7 @@ internal enum DetileEquation
 ///   srcByte = ((y / BlockHeight) * BlocksPerRow + (x / BlockWidth)) * BlockBytes + inBlockByte;
 /// </code>
 /// </summary>
-internal readonly record struct DetileParams(
+public readonly record struct DetileParams(
     DetileEquation Equation,
     int ElementsWide,
     int ElementsHigh,
@@ -55,7 +55,7 @@ internal readonly record struct DetileParams(
     public bool IsSupported => Equation != DetileEquation.None;
 }
 
-internal readonly record struct TiledMipPlacement(
+public readonly record struct TiledMipPlacement(
     ulong ByteOffset,
     ulong ByteCount,
     bool InMipTail,
@@ -77,7 +77,7 @@ internal readonly record struct TiledMipPlacement(
 /// other D/R and pipe/bank-XOR modes stay opt-in while their complete AddrLib
 /// equations are being ported.
 /// </summary>
-internal static unsafe class GnmTiling
+public static unsafe class GnmTiling
 {
     private const int ParallelDetileElementThreshold = 512 * 512;
     private const int MaxDetileWorkers = 4;

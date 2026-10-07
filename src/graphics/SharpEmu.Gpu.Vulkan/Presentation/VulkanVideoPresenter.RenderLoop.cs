@@ -172,7 +172,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var guestHdrRequestChanged =
                 _videoOptions.HdrMode == HostHdrMode.Auto &&
                 _hdrRequestedForSwapchain !=
-                    (_window.HdrState.Enabled && VideoOutExports.IsHdrOutputRequested);
+                    (_window.HdrState.Enabled && VideoOutBackendServices.IsHdrOutputRequested);
             if (_window.ConsumeSurfaceRestore() ||
                 drawableSizeChanged ||
                 _swapchainRecreateDeferred ||
@@ -455,7 +455,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             CheckSwapchainResult(presentResult, "vkQueuePresentKHR");
             recreateAfterPresent |= presentResult == Result.SuboptimalKhr;
-            VideoOutExports.ReportPresentedFrame();
+            VideoOutBackendServices.ReportPresentedFrame();
             PerfOverlay.RecordPresent();
             RenderPhaseProfile.RecordFrame();
             if (_swapchainReadbackPending)

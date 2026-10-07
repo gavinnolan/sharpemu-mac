@@ -9,15 +9,6 @@ namespace SharpEmu.Libs.Tests.Pad;
 
 public sealed class HostWindowInputTests
 {
-    [Theory]
-    [InlineData(short.MinValue, 0)]
-    [InlineData(0, 128)]
-    [InlineData(short.MaxValue, 255)]
-    public void ToStickByteMapsFullSdlRange(short value, int expected)
-    {
-        Assert.Equal((byte)expected, HostWindowInput.ToStickByte(value));
-    }
-
     [Fact]
     public void ConnectPublishesWindowKeyboardState()
     {

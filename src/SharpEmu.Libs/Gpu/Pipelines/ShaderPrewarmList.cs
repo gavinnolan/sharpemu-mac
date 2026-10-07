@@ -95,11 +95,11 @@ internal sealed class ReplayCpuMemory(IReadOnlyList<CodeRange> ranges) : ICpuMem
     public bool TryWrite(ulong virtualAddress, ReadOnlySpan<byte> source) => false;
 }
 
-internal readonly record struct CodeRange(ulong Address, byte[] Bytes);
+public readonly record struct CodeRange(ulong Address, byte[] Bytes);
 
-internal readonly record struct FusedCodeParts(ulong EntryHeaderAddress, ulong ContinuationAddress, ulong ContinuationHeaderAddress);
+public readonly record struct FusedCodeParts(ulong EntryHeaderAddress, ulong ContinuationAddress, ulong ContinuationHeaderAddress);
 
-internal sealed class ShaderCodeCapture
+public sealed class ShaderCodeCapture
 {
     public required ulong Hash { get; init; }
     public required uint CodeSize { get; init; }
@@ -123,7 +123,7 @@ internal sealed class ShaderCodeCapture
     }
 }
 
-internal sealed class ComputePrewarmRecord
+public sealed class ComputePrewarmRecord
 {
     public required ulong Hash { get; init; }
     public required uint CodeSize { get; init; }
@@ -138,7 +138,7 @@ internal sealed class ComputePrewarmRecord
     public (ulong Hash, uint CodeSize, ulong Address) CodeKey => (Hash, CodeSize, Address);
 }
 
-internal sealed class ShaderPrewarmList : IDisposable
+public sealed class ShaderPrewarmList : IDisposable
 {
     public const string FileName = "shader-prewarm.bin";
     public const string StampFileName = "shader-prewarm.stamp";

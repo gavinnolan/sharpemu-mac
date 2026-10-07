@@ -7,9 +7,10 @@ using SharpEmu.Libs.Gpu.GpuCommands;
 
 namespace SharpEmu.Libs.VideoOut;
 
-internal static class SubmissionFlowProfile
+/// <summary>Backend observation contract; aggregation storage and test snapshots stay internal.</summary>
+public static class SubmissionFlowProfile
 {
-    internal enum EventKind
+    public enum EventKind
     {
         SubmitEntered,
         GeometryCaptureStarted,
@@ -82,13 +83,13 @@ internal static class SubmissionFlowProfile
         internal static readonly object WriteGate = new();
     }
 
-    internal static void StartSession()
+    public static void StartSession()
     {
         if (!RenderPhaseProfile.FrameTraceEnabled) return;
         lock (Storage.WriteGate) Storage.Events.Reset();
     }
 
-    internal static void Record(EventKind kind, int queueId = -1, ulong submissionId = 0,
+    public static void Record(EventKind kind, int queueId = -1, ulong submissionId = 0,
         ulong address = 0, uint dwordCount = 0, int detail = 0)
     {
         if (!RenderPhaseProfile.FrameTraceEnabled) return;
@@ -96,16 +97,16 @@ internal static class SubmissionFlowProfile
             kind, queueId, submissionId, address, dwordCount, detail, GuestThreadExecution.CurrentGuestThreadHandle));
     }
 
-    internal static void RecordGuest(EventKind kind, uint queue, ulong submissionId, ulong address, uint dwordCount)
+    public static void RecordGuest(EventKind kind, uint queue, ulong submissionId, ulong address, uint dwordCount)
     {
         if (!RenderPhaseProfile.FrameTraceEnabled) return;
         Record(kind, queue == 0 ? 0 : unchecked((int)queue - GpuCommandInterpreter.ComputeQueueBase + 1),
             submissionId, address, dwordCount);
     }
 
-    internal static void WriteTrace() => WriteTrace(Console.Error);
+    public static void WriteTrace() => WriteTrace(Console.Error);
 
-    internal static void WriteTrace(TextWriter output)
+    public static void WriteTrace(TextWriter output)
     {
         if (!RenderPhaseProfile.FrameTraceEnabled) return;
         lock (Storage.WriteGate)

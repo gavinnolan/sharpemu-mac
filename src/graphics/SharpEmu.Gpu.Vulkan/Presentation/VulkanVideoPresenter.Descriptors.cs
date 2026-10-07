@@ -232,7 +232,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 var words = snapshot.Images[index];
                 var storage = resources.Info.Images[index].ResourceClass == ShaderCompiler.Resources.ImageResourceClass.Storage;
-                textures.Add(AgcExports.TryDecodeTextureDescriptor(words, out var descriptor)
+                textures.Add(AgcBackendServices.TryDecodeTextureDescriptor(words, out var descriptor)
                     ? new GuestDrawTexture(descriptor.Address, descriptor.Width, descriptor.Height, descriptor.Format, descriptor.NumberType, [], false, storage, DstSelect: descriptor.DstSelect)
                     : new GuestDrawTexture(0, 1, 1, 0, 0, [], true, storage));
             }

@@ -16,7 +16,7 @@ namespace SharpEmu.Libs.Gpu;
 /// check and no reference to either backend assembly. There is no fallback; requesting a
 /// backend the application was not built with is a startup error.
 /// </summary>
-internal static class GuestGpu
+public static class GuestGpu
 {
     private static readonly object Gate = new();
     private static Func<IGuestGpuBackend>? _factory;

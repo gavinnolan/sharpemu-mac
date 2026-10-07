@@ -239,7 +239,7 @@ internal static partial class MetalVideoPresenter
             MetalNative.Send(_device, MetalNative.Selector("name")));
         if (!string.IsNullOrEmpty(deviceName))
         {
-            VideoOutExports.SetSelectedGpuName(deviceName);
+            VideoOutBackendServices.SetSelectedGpuName(deviceName);
         }
 
         HostVideoOptions videoOptions;
@@ -248,7 +248,7 @@ internal static partial class MetalVideoPresenter
             videoOptions = _videoOptions;
         }
 
-        using var hostWindow = CreateHostWindow(VideoOutExports.GetWindowTitle(), videoOptions);
+        using var hostWindow = CreateHostWindow(VideoOutBackendServices.GetWindowTitle(), videoOptions);
         Volatile.Write(ref _hostWindow, hostWindow);
         var setupPool = MetalNative.objc_autoreleasePoolPush();
         try
@@ -294,7 +294,7 @@ internal static partial class MetalVideoPresenter
         {
             Console.Error.WriteLine(
                 "[LOADER][WARN] Metal VideoOut window closed; requesting emulator shutdown.");
-            VideoOutExports.NotifyPresentationWindowClosed();
+            VideoOutBackendServices.NotifyPresentationWindowClosed();
         }
     }
 
@@ -493,7 +493,7 @@ internal static partial class MetalVideoPresenter
             // presenter re-reads it, so refresh periodically here for parity.
             if ((++_titleRefreshCounter & 0x3F) == 0)
             {
-                var title = VideoOutExports.GetWindowTitle();
+                var title = VideoOutBackendServices.GetWindowTitle();
                 if (!string.Equals(title, _lastWindowTitle, StringComparison.Ordinal))
                 {
                     _lastWindowTitle = title;

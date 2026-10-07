@@ -3,7 +3,7 @@
 
 using System.Runtime.CompilerServices;
 
-namespace SharpEmu.Libs.Gpu.Rendering;
+namespace SharpEmu.Gpu.Vulkan.Presentation;
 
 // Render-thread-only storage. Exact lengths preserve descriptor counts, and
 // clearing on return preserves new-array semantics and releases resource refs.

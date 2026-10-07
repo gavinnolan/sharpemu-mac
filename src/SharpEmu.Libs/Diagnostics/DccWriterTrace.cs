@@ -6,7 +6,8 @@ using System.Globalization;
 
 namespace SharpEmu.Libs.Diagnostics;
 
-internal static class DccWriterTrace
+/// <summary>Shared guest-resource diagnostics for backend reads and writes.</summary>
+public static class DccWriterTrace
 {
     private const int MaxReports = 256;
     private const int MaxFrames = 12;
@@ -23,7 +24,7 @@ internal static class DccWriterTrace
     public static readonly bool Enabled = DccEnabled || TargetAddresses.Length != 0;
 
     [ThreadStatic]
-    public static ulong CurrentProgram;
+    internal static ulong CurrentProgram;
 
     private static readonly HashSet<(ulong Address, ulong Size, ulong Program)> _reported = new();
     private static readonly HashSet<(ulong Hash, string Reason)> _refusals = new();
