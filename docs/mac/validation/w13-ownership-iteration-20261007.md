@@ -342,3 +342,59 @@ passes104/104; allocation failure was not injected into an actual device test.
 The source graph stays disabled and isolated pending integrated compatibility,
 actual shader consumption and production execution/cleanup qualification. Native
 clear/copy fixtures do not qualify translated draw/compute scheduling or games.
+
+## Integrated dormant graph and bounded tile-5 volume
+
+Local merge `15c0e55` integrates the reviewed dormant ownership/preparation graph.
+Its private switch remains hard default-false, without a production setter or
+producer/Drain activation. The mapping/content observation guard also affects
+legacy CPU snapshot preparation; it is not wholly dormant behavior.
+
+Local merge `4b5e0fae30d343716be15976d98b8b7c2223f343` integrates candidate
+`f6668a19a6d2c09456e34175bc1646b12cea9b06`; source/tests match exactly. Combined
+managed checks pass200/200 on ARM64 and Rosetta. The host-neutral layout is
+bounded to a single-mip16x16x16 16-bit mode5 volume, independently matched against
+all4096 AMD AddrLib offsets. Metal admission additionally pins the observed
+R16Uint/X000 raw descriptor and rejects metadata/flags/unknown shapes. Sampled
+tiled3D snapshots and deferred XY uploads of native3D textures reject before
+reading/uploading; this does not add general sampled-volume support.
+
+Integrated Release native materialization passes40/40 under Rosetta with
+required-device1 and zero skips. Every4096 texels matches the oracle, a translated
+store changes only its selected texel, and a translated sampled load through an
+explicit native X000 texture view returns `[54321,0,0,0]`. The fixture does not
+qualify production sampled-volume materialization or compute submission.
+Logs/TRX are `w13-20261007/tile5-integrated-*`. The clean signed osx-x64 app uses
+Metal/AppKit/GameController/CoreAudio and upstreamb02c061; archive SHA256 is
+`b9f482bb8e7a1caeaf9aaa0ab52c396fe74bdc840d0ed91ae56fac798c1f5dc1`.
+
+Actual games expose a runtime regression in this build. Poppy stops at21s with
+SIGABRT, peak1402MiB, at the supported mode27 singleton0x9007000000: three
+snapshot attempts fail the combined freshness guard. It produces no screenshot
+or guest frame; no tile5 materialization is established. Sarah remains alive150s,
+peak844MiB, but presents only eight initial guest frames and then stalls on the
+Ratalaika logo. Pixel shader0x109472F03FF5477A rejects three snapshot attempts
+at0x70056B0000. Movement/jump and gameplay are not reached. TERM ends the process
+immediately while repeating the stored worker exception. Compared with the
+dd19db6 scene/movement/jump proof, this is a regression requiring diagnosis,
+not game acceptance. See `game-poppy-tile5-4b5e0fa/` and `game-sarah-4b5e0fa/`.
+
+## Actual compute consumer fixture
+
+Isolated `839ec71` fails four actual-device cases because its handwritten MSL
+uses invalid C-array declarations with argument-buffer id attributes. Full TRX
+retains the compilation error and untouchedA5 output sentinel. Production shader
+translation/ABI was not changed on this evidence.
+
+Corrected fixture `fe7c72766794262fc9440fa7e8f314ae48af837c` passes4/4 on both
+ARM64 and Rosetta, zero skips, required-device1. It asserts nonzero native shader
+library/pipeline and completed real command buffer, then checks all64 guest
+writeback bytes for old/red and new/green captured GPU versions through actual
+ExecuteComputeDispatch/EncodeStageResources. Both sampled and readonly-storage
+cases run with preparation alive and disposed. Evidence is under
+`metal-agent/immutable-consumer-fe7c727-{arm,x64}/`.
+
+The kernel is an independent MSL ABI oracle, not translated guest ISA. Queued
+ownership is released after synchronous writeback completion in these fixtures;
+release before completion and actual Drain integration remain unqualified.
+The production source graph remains disabled.
