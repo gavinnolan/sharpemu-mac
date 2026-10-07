@@ -140,9 +140,10 @@ internal sealed unsafe partial class PosixHostViews : IHostViewMemory
         return address;
     }
 
-    // POSIX has no VirtualQuery for foreign host mappings, so find the free
-    // ranges by reserving halves until each attempt fits or falls below the
-    // minimum. Occupied host ranges are few, so this needs few attempts.
+    // Find the free ranges by reserving halves until each attempt fits or falls
+    // below the minimum. Occupied host ranges are few, so this needs few
+    // attempts. Portable POSIX has no VirtualQuery for foreign host mappings;
+    // where one exists, FindUnmappedRange below answers directly.
     public IReadOnlyList<HostAddressRange> ReserveFreeAddressRanges(ulong start, ulong end, ulong minimumSize)
     {
         var reserved = new List<HostAddressRange>();
