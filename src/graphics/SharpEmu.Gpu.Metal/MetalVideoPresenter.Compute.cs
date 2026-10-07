@@ -337,6 +337,7 @@ internal static partial class MetalVideoPresenter
             sourceDescriptor.Width != descriptor.Width || sourceDescriptor.Height != descriptor.Height ||
             sourceDescriptor.Depth != descriptor.Depth || sourceDescriptor.TileMode != descriptor.TileMode ||
             sourceDescriptor.Format != descriptor.Format || sourceDescriptor.NumberType != descriptor.NumberType ||
+            sourceDescriptor.DstSelect != descriptor.DstSelect ||
             sourceDescriptor.BaseLevel != 0 || sourceDescriptor.LastLevel != 0 || sourceDescriptor.MaxMip != 0))
             throw new NotSupportedException(
                 $"Metal volume storage requires a matching complete single-mip uncompressed descriptor with zero metadata/flags/BC swizzle: " +
@@ -357,13 +358,20 @@ internal static partial class MetalVideoPresenter
                 $"view_mips={descriptor.MipLevels} base_mip={descriptor.BaseMipLevel} selected_mip={descriptor.MipLevel} " +
                 $"resource_mips={descriptor.ResourceMipLevels} fmt={descriptor.Format}/{descriptor.NumberType} " +
                 $"pitch={descriptor.Pitch} tile={descriptor.TileMode} shape={descriptor.Shape} access={descriptor.Access}.");
-        if (volume && descriptor.TileMode != 0 &&
+        var qualifiedThickVolume = MetalVolumeStorageAdmission.IsQualified(
+            descriptor.Address, descriptor.Width, descriptor.Height, descriptor.Depth,
+            descriptor.Format, descriptor.NumberType, descriptor.Type, descriptor.TileMode,
+            descriptor.ResourceMipLevels, descriptor.DstSelect);
+        if (volume && descriptor.TileMode != 0 && !qualifiedThickVolume &&
             (descriptor.Width != 1 || descriptor.Height != 1 || descriptor.Depth != 1 ||
                 descriptor.TileMode != 27 || descriptor.ResourceMipLevels != 1 ||
                 (descriptor.Address & 0xFFFFUL) != 0 || !GnmTiling.NeedsDetile(descriptor.TileMode)))
             throw new NotSupportedException(
-                $"Metal tiled volume seed supports only an aligned mode27 single-mip 1x1x1 origin texel; " +
+                $"Metal tiled volume seed supports only a qualified mode5 R16Uint 16x16x16 or aligned mode27 single-mip 1x1x1 origin texel; " +
                 $"addr=0x{descriptor.Address:X} depth={descriptor.Depth} tile={descriptor.TileMode}.");
+        if (qualifiedThickVolume && (descriptor.Pitch != 16 ||
+            !MetalVolumeStorageAdmission.HasQualifiedRawFields(descriptor.Descriptor!)))
+            throw new NotSupportedException("The qualified thick volume requires its exact raw fields and 16-texel linear seed pitch.");
         var numeric = format.Format switch
         {
             MtlPixelFormat.R8Uint or MtlPixelFormat.R16Uint or MtlPixelFormat.R32Uint or

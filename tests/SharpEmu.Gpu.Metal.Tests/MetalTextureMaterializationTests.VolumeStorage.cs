@@ -132,12 +132,12 @@ public sealed partial class MetalTextureMaterializationTests
         SendVoid(texture, Selector("release"));
     }
 
-    private static unsafe byte[] ReadNativeVolume(nint texture, uint width, uint height, uint depth)
+    private static unsafe byte[] ReadNativeVolume(nint texture, uint width, uint height, uint depth, uint bytesPerPixel = 4)
     {
-        var result = new byte[width * height * depth * 4];
+        var result = new byte[width * height * depth * bytesPerPixel];
         fixed (byte* bytes = result)
             GetBytes(texture, Selector("getBytes:bytesPerRow:bytesPerImage:fromRegion:mipmapLevel:slice:"),
-                (nint)bytes, width * 4, width * height * 4,
+                (nint)bytes, width * bytesPerPixel, width * height * bytesPerPixel,
                 new Region { Width = width, Height = height, Depth = depth }, 0, 0);
         return result;
     }
