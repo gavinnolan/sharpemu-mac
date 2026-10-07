@@ -163,7 +163,8 @@ public sealed class MetalQueuedTextureSnapshotTests
         var descriptor = new uint[8];
         var mips = new GuestTextureMipUpload[2];
         var texture = new GuestDrawTexture(Address, 4, 4, 10, 0, pixels, false, compute,
-            TiledSource: tiled, Descriptor: descriptor, MipUploads: mips);
+            TiledSource: tiled, Descriptor: descriptor, MipUploads: mips,
+            Access: compute ? GuestImageAccess.Write : GuestImageAccess.Read);
         var bufferBytes = new byte[1024]; // Logical Length deliberately smaller than the owned allocation.
         var buffer = new GuestMemoryBuffer(Address, bufferBytes, 4, 4, false);
         var shader = new MetalCompiledGuestShader(new Gen5MslShader("", "snapshot_test",

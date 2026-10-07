@@ -47,41 +47,18 @@ internal static partial class MetalVideoPresenter
         bool writesGlobalMemory,
         GuestStageBindings? stageBindings)
     {
-        var hasStorage = false;
+        if (groupCountX == 0 || groupCountY == 0 || groupCountZ == 0) return 0;
+        var hasStorageWrites = false;
         foreach (var texture in textures)
-        {
-            hasStorage |= texture.IsStorage;
-        }
-
-        if (groupCountX == 0 ||
-            groupCountY == 0 ||
-            groupCountZ == 0 ||
-            (!hasStorage && !writesGlobalMemory && !(stageBindings?.UsesGlobalDataShare ?? false)))
-        {
+            hasStorageWrites |= StorageImageWrites(texture);
+        if (!hasStorageWrites && !writesGlobalMemory && !(stageBindings?.UsesGlobalDataShare ?? false))
             return 0;
-        }
 
         lock (_gate)
         {
             if (_closed || _thread is null)
             {
                 return 0;
-            }
-
-            // Storage images a dispatch writes become flip sources and sampled
-            // inputs for later work, exactly like published render targets.
-            foreach (var texture in textures)
-            {
-                if (!texture.IsStorage || texture.Address == 0)
-                {
-                    continue;
-                }
-
-                var guestFormat = GetGuestTextureFormat(texture.Format, texture.NumberType);
-                if (guestFormat != 0)
-                {
-                    _availableGuestImages[texture.Address] = guestFormat;
-                }
             }
 
             var sequence = EnqueueGuestWorkLocked(
@@ -97,12 +74,15 @@ internal static partial class MetalVideoPresenter
                     baseGroupY,
                     baseGroupZ,
                     stageBindings));
+            if (sequence <= 0) return 0;
+            // Admission may wait and release the gate. Publish only once a
+            // real queued writer exists; storage class alone is not intent.
             foreach (var texture in textures)
             {
-                if (texture.IsStorage && texture.Address != 0)
-                {
-                    _guestImageWorkSequences[texture.Address] = sequence;
-                }
+                if (!StorageImageWrites(texture) || texture.Address == 0) continue;
+                var guestFormat = GetGuestTextureFormat(texture.Format, texture.NumberType);
+                if (guestFormat != 0) _availableGuestImages[texture.Address] = guestFormat;
+                _guestImageWorkSequences[texture.Address] = sequence;
             }
 
             return sequence;
@@ -210,26 +190,31 @@ internal static partial class MetalVideoPresenter
             WriteBuffersBackToGuest(writeBackBuffers);
         }
 
-        foreach (var descriptor in dispatch.Textures)
-        {
-            if (!descriptor.IsStorage || descriptor.Address == 0)
-            {
-                continue;
-            }
-
-            GuestImage? image;
-            lock (_gate)
-            {
-                _guestImages.TryGetValue(descriptor.Address, out image);
-            }
-
-            if (image is not null)
-            {
-                image.MarkContentChanged();
-            }
-        }
+        RecordStorageImageWrites(dispatch.Textures);
 
         ReturnPooledComputeData(dispatch);
+    }
+
+    internal static bool StorageImageWrites(GuestDrawTexture texture)
+    {
+        if (!texture.IsStorage) return false;
+        if (texture.Access == GuestImageAccess.Unknown)
+            throw new NotSupportedException($"Metal storage image 0x{texture.Address:X} has unknown instruction access intent.");
+        if ((texture.Access & GuestImageAccess.Atomic) != 0 &&
+            (texture.Access & (GuestImageAccess.Read | GuestImageAccess.Write)) != (GuestImageAccess.Read | GuestImageAccess.Write))
+            throw new NotSupportedException("Metal atomic image intent must include read and write.");
+        return (texture.Access & GuestImageAccess.Write) != 0;
+    }
+
+    internal static void RecordStorageImageWrites(IReadOnlyList<GuestDrawTexture> textures)
+    {
+        lock (_gate)
+        {
+            var changed = new HashSet<ulong>();
+            foreach (var descriptor in textures)
+                if (descriptor.Address != 0 && StorageImageWrites(descriptor) && changed.Add(descriptor.Address) &&
+                    _guestImages.TryGetValue(descriptor.Address, out var image)) image.MarkContentChanged();
+        }
     }
 
     /// <summary>The live, shared storage image for a guest address: dispatches,
@@ -288,7 +273,8 @@ internal static partial class MetalVideoPresenter
                 : descriptor.Width;
             ReplaceTextureContents(
                 image.Texture, descriptor.Width, descriptor.Height, descriptor.RgbaPixels, pitch, bytesPerPixel);
-            image.MarkContentChanged();
+            image.Initialized = true;
+            image.ContentVersion++;
         }
 
         lock (_gate)

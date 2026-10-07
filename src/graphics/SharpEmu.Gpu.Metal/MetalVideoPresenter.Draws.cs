@@ -281,15 +281,6 @@ internal static partial class MetalVideoPresenter
                 return;
             }
 
-            foreach (var target in targets)
-            {
-                var guestTextureFormat = GetGuestTextureFormat(target.Format, target.NumberType);
-                if (target.Address != 0 && guestTextureFormat != 0)
-                {
-                    _availableGuestImages[target.Address] = guestTextureFormat;
-                }
-            }
-
             var workSequence = EnqueueGuestWorkLocked(
                 new OffscreenGuestDraw(
                     new TranslatedGuestDraw(
@@ -310,12 +301,13 @@ internal static partial class MetalVideoPresenter
                     depthTarget,
                     PublishTarget: true,
                     shaderAddress));
+            if (workSequence <= 0) return;
             foreach (var target in targets)
             {
-                if (target.Address != 0)
-                {
-                    _guestImageWorkSequences[target.Address] = workSequence;
-                }
+                if (target.Address == 0) continue;
+                var guestTextureFormat = GetGuestTextureFormat(target.Format, target.NumberType);
+                if (guestTextureFormat != 0) _availableGuestImages[target.Address] = guestTextureFormat;
+                _guestImageWorkSequences[target.Address] = workSequence;
             }
         }
     }
