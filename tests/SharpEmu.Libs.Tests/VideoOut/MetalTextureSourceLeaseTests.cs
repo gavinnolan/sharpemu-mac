@@ -148,6 +148,62 @@ public sealed class MetalTextureSourceLeaseTests
         Assert.Equal(0UL, MetalVideoPresenter.TextureSourceState(read).ReservedBytes);
     }
 
+    [Fact]
+    public void CopiedGenerationZeroSeedCannotBeRetimestampedAfterCpuRewrite()
+    {
+        using var state = new State();
+        var wasEnabled = GuestImageWriteTracker.Enabled;
+        GuestImageWriteTracker.Configure(true);
+        try
+        {
+            // A managed-only watch makes this a deterministic no-device test:
+            // there are no mappings or page-protection calls at this address.
+            GuestImageWriteTracker.TrackManagedWriter(Address, 64);
+            var seed = Texture(true) with { RgbaPixels = new byte[64], WriteGeneration = 0, Access = GuestImageAccess.Write };
+            MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(seed, HostMemory.MappingGeneration);
+            var copy = seed with { Sampler = new GuestSampler(1, 2, 3, 4) };
+            MetalVideoPresenter.CopyCapturedTextureSource(seed, copy);
+            GuestImageWriteTracker.NotifyManagedWrite(Address, 4);
+            Assert.True(GuestImageWriteTracker.TryGetWriteGeneration(Address, out var generation));
+            Assert.Equal(1, generation);
+            var failure = Assert.Throws<TargetInvocationException>(() => Publish(copy));
+            Assert.IsType<InvalidOperationException>(failure.InnerException);
+            Assert.Contains("seed provenance", failure.InnerException!.Message);
+            Assert.False(((IDictionary)Field("_latestTextureSources").GetValue(null)!).Contains(Address));
+            Assert.Equal(0, copy.WriteGeneration);
+        }
+        finally { GuestImageWriteTracker.Configure(wasEnabled); }
+    }
+
+    [Fact]
+    public void SupersededCpuGenerationCannotAuthorizePreviousProducerInitialization()
+    {
+        using var state = new State();
+        var wasEnabled = GuestImageWriteTracker.Enabled;
+        GuestImageWriteTracker.Configure(true);
+        try
+        {
+            GuestImageWriteTracker.TrackManagedWriter(Address, 64);
+            var seed = Texture(true) with { RgbaPixels = new byte[64], WriteGeneration = 0, Access = GuestImageAccess.Write };
+            MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(seed, HostMemory.MappingGeneration);
+            Publish(seed);
+            var previous = ((IDictionary)Field("_latestTextureSources").GetValue(null)!)[Address];
+            GuestImageWriteTracker.NotifyManagedWrite(Address, 4);
+            var failure = Assert.Throws<TargetInvocationException>(() => Publish(Texture(true) with { Access = GuestImageAccess.Write }));
+            Assert.Contains("no faithful initialization", failure.InnerException!.Message);
+            Assert.Same(previous, ((IDictionary)Field("_latestTextureSources").GetValue(null)!)[Address]);
+        }
+        finally { GuestImageWriteTracker.Configure(wasEnabled); }
+    }
+
+    private static void Publish(GuestDrawTexture seed)
+    {
+        var sequence = MetalVideoPresenter.SubmitOrderedGuestAction(static () => { }, "managed provenance fixture");
+        var queueType = typeof(MetalVideoPresenter).GetNestedType("GuestQueueIdentity", BindingFlags.NonPublic)!;
+        var queue = Activator.CreateInstance(queueType, ["host.default", 0UL])!;
+        Call("PublishAdmittedTextureSourceLocked", seed, sequence, queue, false);
+    }
+
     private static object QueuedWork(params GuestDrawTexture[] textures)
     {
         var shader = new MetalCompiledGuestShader(new Gen5MslShader("", "owner_test", Gen5MslStage.Compute, 0));
@@ -161,6 +217,7 @@ public sealed class MetalTextureSourceLeaseTests
     internal static GuestDrawTexture PublishAndCapture()
     {
         var seed = Texture(true) with { RgbaPixels = new byte[64], Access = GuestImageAccess.Write };
+        MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(seed, HostMemory.MappingGeneration);
         var sequence = MetalVideoPresenter.SubmitOrderedGuestAction(static () => { }, "managed source owner fixture");
         var queueType = typeof(MetalVideoPresenter).GetNestedType("GuestQueueIdentity", BindingFlags.NonPublic)!;
         var queue = Activator.CreateInstance(queueType, ["host.default", 0UL])!;

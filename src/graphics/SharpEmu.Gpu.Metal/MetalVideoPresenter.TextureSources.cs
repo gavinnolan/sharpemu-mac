@@ -20,6 +20,22 @@ internal static partial class MetalVideoPresenter
     private static readonly List<TextureSourceVersion> _textureSourceVersions = [];
     private static readonly ConditionalWeakTable<GuestDrawTexture, TextureSourceLease> _textureSourceLeases = new();
     private static readonly ConditionalWeakTable<object, QueuedTextureSourceOwner> _queuedTextureSourceOwners = new();
+    private static readonly ConditionalWeakTable<GuestDrawTexture, CpuTextureSnapshotProvenance> _cpuTextureSnapshotProvenance = new();
+
+    private sealed record CpuTextureSnapshotProvenance(long MappingEpoch, long WriteGeneration, bool MappingStable);
+
+    // Ownership of copied bytes is distinct from selecting a live mapping.
+    // The global epoch is a conservative selection veto, never a backing lease.
+    internal static void RegisterCpuTextureSnapshotProvenance(GuestDrawTexture texture, long beforeMappingEpoch)
+    {
+        if (texture.Address == 0 || texture.RgbaPixels.Length == 0 && texture.TiledSource is not { Length: > 0 }) return;
+        lock (_gate)
+        {
+            if (!_cpuTextureSnapshotProvenance.TryGetValue(texture, out _))
+                _cpuTextureSnapshotProvenance.Add(texture, new(beforeMappingEpoch, texture.WriteGeneration,
+                    beforeMappingEpoch == HostMemory.MappingGeneration));
+        }
+    }
 
     private readonly record struct TextureSourceView(
         ulong Address, uint Width, uint Height, uint Format, uint NumberType,
@@ -73,6 +89,16 @@ internal static partial class MetalVideoPresenter
     {
         public TextureSourceLease[] Leases { get; } = leases;
         public bool Released;
+    }
+
+    internal static void ReleasePreparedTextureSource(GuestDrawTexture texture)
+    {
+        lock (_gate)
+        {
+            if (!_textureSourceLeases.TryGetValue(texture, out var lease) || lease.PreparationReleased) return;
+            lease.PreparationReleased = true;
+            ReleaseTextureSourceLeaseLocked(lease);
+        }
     }
 
     internal static void ReleasePreparedTextureSources(IReadOnlyList<GuestDrawTexture> textures)
@@ -143,13 +169,22 @@ internal static partial class MetalVideoPresenter
     {
         if (ReferenceEquals(source, copy)) return;
         lock (_gate)
-            if (_textureSourceLeases.TryGetValue(source, out var lease))
+        {
+            _textureSourceLeases.TryGetValue(source, out var lease);
+            _cpuTextureSnapshotProvenance.TryGetValue(source, out var provenance);
+            if (lease is not null && (lease.PreparationReleased || lease.References <= 0 ||
+                TextureSourceView.Of(copy) != TextureSourceView.Of(source) || copy.Shape != source.Shape || copy.Access != source.Access))
+                throw new InvalidOperationException("Metal captured texture source copy must preserve its live preparation, view, shape and access.");
+            if (_textureSourceLeases.TryGetValue(copy, out _) || _cpuTextureSnapshotProvenance.TryGetValue(copy, out _))
+                throw new InvalidOperationException("Metal texture copy already has a provenance association.");
+            if (lease is not null) _textureSourceLeases.Add(copy, lease);
+            try { if (provenance is not null) _cpuTextureSnapshotProvenance.Add(copy, provenance); }
+            catch
             {
-                if (lease.PreparationReleased || lease.References <= 0 ||
-                    TextureSourceView.Of(copy) != TextureSourceView.Of(source) || copy.Shape != source.Shape || copy.Access != source.Access)
-                    throw new InvalidOperationException("Metal captured texture source copy must preserve its live preparation, view, shape and access.");
-                _textureSourceLeases.Add(copy, lease);
+                if (lease is not null) _textureSourceLeases.Remove(copy);
+                throw;
             }
+        }
     }
 
     private static long CurrentTextureWriteGeneration(ulong address) =>
@@ -229,16 +264,46 @@ internal static partial class MetalVideoPresenter
         if (sequence <= 0 || descriptor.Address == 0) return;
         var view = TextureSourceView.Of(descriptor);
         _latestTextureSources.TryGetValue(descriptor.Address, out var previous);
-        var hasPrevious = previous is { Failed: false, Retired: false } && previous.View == view;
+        var hasPrevious = previous is { Failed: false, Retired: false } && previous.View == view &&
+            previous.MappingEpoch == HostMemory.MappingGeneration &&
+            previous.WriteGeneration == CurrentTextureWriteGeneration(descriptor.Address);
         var hasSeed = descriptor.CpuSnapshotStable &&
             (descriptor.RgbaPixels.Length != 0 || descriptor.TiledSource is { Length: > 0 });
-        if (!initializesWholeImage && !hasPrevious && !hasSeed && !_textureSourceLeases.TryGetValue(descriptor, out _))
+        CpuTextureSnapshotProvenance? provenance = null;
+        if (hasSeed)
+        {
+            if (!_cpuTextureSnapshotProvenance.TryGetValue(descriptor, out provenance) ||
+                !provenance.MappingStable || provenance.MappingEpoch != HostMemory.MappingGeneration ||
+                provenance.WriteGeneration != descriptor.WriteGeneration ||
+                provenance.WriteGeneration != CurrentTextureWriteGeneration(descriptor.Address))
+                throw new InvalidOperationException("Metal storage seed provenance changed between preparation and publication.");
+            var prepared = PrepareDrawTextureUpload(descriptor);
+            _ = StorageTextureSeedLayout(prepared, StorageTextureFormat(prepared));
+        }
+        var hasCaptured = _textureSourceLeases.TryGetValue(descriptor, out var captured) &&
+            !captured.PreparationReleased && captured.References > 0 && !captured.Version.Failed &&
+            !captured.Version.Retired && captured.Version.View == view &&
+            captured.Version.MappingEpoch == HostMemory.MappingGeneration &&
+            captured.Version.WriteGeneration == CurrentTextureWriteGeneration(descriptor.Address);
+        if (!initializesWholeImage && !hasPrevious && !hasSeed && !hasCaptured)
             throw new InvalidOperationException($"Metal storage writer 0x{descriptor.Address:X} has no faithful initialization source.");
         var nativeFormat = MetalGuestFormats.DecodeTextureFormat(descriptor.Format, descriptor.NumberType);
         var byteCount = MetalGuestFormats.GetTextureByteCount(nativeFormat, descriptor.Width, descriptor.Height);
         var observedBytes = Math.Max(byteCount, descriptor.SourceByteCount);
         var observed = GuestImageWriteTracker.BeginReadSnapshot(descriptor.Address, observedBytes,
             sequence, "metal.gpu-source-producer");
+        // Observation may register a previously absent range at generation0;
+        // it must never retimestamp a known copied seed after a CPU write.
+        if (hasSeed && (!provenance!.MappingStable || provenance.MappingEpoch != HostMemory.MappingGeneration ||
+            (observed.Active ? observed.Generation : -1) != provenance.WriteGeneration ||
+            CurrentTextureWriteGeneration(descriptor.Address) != provenance.WriteGeneration))
+            throw new InvalidOperationException("Metal storage seed provenance changed while publishing its producer.");
+        if (hasPrevious && (previous!.MappingEpoch != HostMemory.MappingGeneration ||
+            previous.WriteGeneration != (observed.Active ? observed.Generation : -1)))
+            throw new InvalidOperationException("Metal previous storage producer changed while publishing its successor.");
+        if (hasCaptured && (captured!.Version.MappingEpoch != HostMemory.MappingGeneration ||
+            captured.Version.WriteGeneration != (observed.Active ? observed.Generation : -1)))
+            throw new InvalidOperationException("Metal captured storage initializer changed while publishing its producer.");
         var source = new TextureSourceVersion
         {
             View = view,
@@ -246,10 +311,10 @@ internal static partial class MetalVideoPresenter
             ProducerQueue = queue,
             ByteCount = byteCount,
             ObservedGuestByteCount = observedBytes,
-            MappingEpoch = HostMemory.MappingGeneration,
+            MappingEpoch = hasSeed ? provenance!.MappingEpoch : HostMemory.MappingGeneration,
             WriteGeneration = observed.Active ? observed.Generation : -1,
             PreviousProducerSequence = hasPrevious ? previous!.ProducerSequence : 0,
-            OwnsInitialization = initializesWholeImage || hasSeed || hasPrevious || _textureSourceLeases.TryGetValue(descriptor, out _),
+            OwnsInitialization = initializesWholeImage || hasSeed || hasPrevious || hasCaptured,
         };
         _latestTextureSources[descriptor.Address] = source;
         _textureSourceVersions.Add(source);

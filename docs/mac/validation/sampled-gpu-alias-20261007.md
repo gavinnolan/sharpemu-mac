@@ -122,3 +122,21 @@ TRX/log evidence is copied to
 `artifacts/validation/integrated-20261007/package-agent/sampled-gpu-alias/`.
 No device suite or game was run for this patch. The root app remained frozen at
 `b557990`; later integration and runtime diagnostics require separate evidence.
+
+### Isolated CPU provenance refinement
+
+The dormant private source registry now keeps the mapping epoch and CPU write
+counter observed for owned snapshot bytes through record copies, rather than
+stamping a later counter during synthetic publication. Producer initialization
+rechecks both before and after widening read observation. A partial snapshot
+batch owns each returned source immediately and releases its captures on failure.
+Managed fixtures cover copied generation0 followed by CPU generation1 and reject
+stale previous-producer initialization without changing the latest registry.
+The related ARM64 no-device selection passes76/76.
+
+This does not activate capture, queue ownership, native version copies or producer
+publication. Address counters can restart after tracker untrack/retrack; a neutral
+tracking identity token is still required before active selection. Mapping epochs
+are conservative vetoes, not mapping lifetime reservations. Native version budget,
+transactional admission, fatal/close cleanup and actual command-completion pins
+remain required; no game or device acceptance follows from these fixtures.

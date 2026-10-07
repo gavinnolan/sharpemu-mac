@@ -70,75 +70,97 @@ internal static class MetalTextureSnapshots
             }
         }
         fallbackTextureCount = 0;
-        foreach (var binding in bindings)
+        GuestDrawTexture? unreturnedTexture = null;
+        try
         {
-            var profileStart = TexturePreparationProfile.Begin();
-            var reuseKey = new GuestTextureSnapshotReuseKey(
-                binding.Descriptor,
-                binding.IsStorage,
-                binding.MipLevel,
-                binding.IsArrayed);
-            GuestDrawTexture texture;
-            if (snapshots?.TryGetValue(reuseKey, out var snapshot) == true)
+            foreach (var binding in bindings)
             {
-                // Keep each binding's sampling state separate; share unchanged pixel data within this draw.
-                texture = snapshot with
-                {
-                    Sampler = ToGuestSampler(binding.SamplerDescriptor),
-                };
-                TexturePreparationProfile.RecordBinding(
-                    TexturePreparationProfile.BindingOutcome.Reused,
-                    profileStart);
-            }
-            else if (TryCreateGuestDrawTexture(
-                    context,
+                var profileStart = TexturePreparationProfile.Begin();
+                var mappingEpochBeforeSnapshot = HostMemory.MappingGeneration;
+                var reuseKey = new GuestTextureSnapshotReuseKey(
                     binding.Descriptor,
                     binding.IsStorage,
                     binding.MipLevel,
-                    binding.SamplerDescriptor,
-                    binding.IsArrayed,
-                    out texture))
-            {
-                // Share faithful payloads within this work item; sampler state
-                // stays separate. Deferred tiled bytes own their snapshot too.
-                if (!texture.IsFallback && texture.CpuSnapshotStable &&
-                    (texture.RgbaPixels.Length != 0 || texture.TiledSource is { Length: > 0 }))
+                    binding.IsArrayed);
+                GuestDrawTexture texture;
+                if (snapshots?.TryGetValue(reuseKey, out var snapshot) == true)
                 {
-                    snapshots?.Add(reuseKey, texture);
+                    // Keep each binding's sampling state separate; share unchanged pixel data within this draw.
+                    texture = snapshot with
+                    {
+                        Sampler = ToGuestSampler(binding.SamplerDescriptor),
+                    };
+                    MetalVideoPresenter.CopyCapturedTextureSource(snapshot, texture);
+                    unreturnedTexture = texture;
+                    TexturePreparationProfile.RecordBinding(
+                        TexturePreparationProfile.BindingOutcome.Reused,
+                        profileStart);
+                }
+                else if (TryCreateGuestDrawTexture(
+                        context,
+                        binding.Descriptor,
+                        binding.IsStorage,
+                        binding.MipLevel,
+                        binding.SamplerDescriptor,
+                        binding.IsArrayed,
+                        out texture))
+                {
+                    unreturnedTexture = texture;
+                    // Share faithful payloads within this work item; sampler state
+                    // stays separate. Deferred tiled bytes own their snapshot too.
+                    if (!texture.IsFallback && texture.CpuSnapshotStable &&
+                        (texture.RgbaPixels.Length != 0 || texture.TiledSource is { Length: > 0 }))
+                    {
+                        snapshots?.Add(reuseKey, texture);
+                    }
+
+                    var outcome = texture.IsFallback
+                        ? TexturePreparationProfile.BindingOutcome.Fallback
+                        : texture.TiledSource is not null
+                            ? TexturePreparationProfile.BindingOutcome.Tiled
+                            : texture.RgbaPixels.Length != 0
+                                ? TexturePreparationProfile.BindingOutcome.Linear
+                                : TexturePreparationProfile.BindingOutcome.Empty;
+                    var payloadBytes = texture.TiledSource?.LongLength ?? texture.RgbaPixels.LongLength;
+                    TexturePreparationProfile.RecordBinding(outcome, profileStart, payloadBytes);
+                }
+                else
+                {
+                    TexturePreparationProfile.RecordBinding(
+                        TexturePreparationProfile.BindingOutcome.Skipped,
+                        profileStart);
+                    continue;
                 }
 
-                var outcome = texture.IsFallback
-                    ? TexturePreparationProfile.BindingOutcome.Fallback
-                    : texture.TiledSource is not null
-                        ? TexturePreparationProfile.BindingOutcome.Tiled
-                        : texture.RgbaPixels.Length != 0
-                            ? TexturePreparationProfile.BindingOutcome.Linear
-                            : TexturePreparationProfile.BindingOutcome.Empty;
-                var payloadBytes = texture.TiledSource?.LongLength ?? texture.RgbaPixels.LongLength;
-                TexturePreparationProfile.RecordBinding(outcome, profileStart, payloadBytes);
-            }
-            else
-            {
-                TexturePreparationProfile.RecordBinding(
-                    TexturePreparationProfile.BindingOutcome.Skipped,
-                    profileStart);
-                continue;
+                // Keep the owner even if association copying or list insertion
+                // fails before a frontend can receive and own this batch.
+                unreturnedTexture = texture;
+                MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(texture, mappingEpochBeforeSnapshot);
+                var originalTexture = texture;
+                texture = texture with
+                {
+                    Descriptor = binding.ResourceDescriptor?.ToArray(),
+                    Shape = binding.Shape,
+                    Access = binding.Access,
+                };
+                MetalVideoPresenter.CopyCapturedTextureSource(originalTexture, texture);
+                textures.Add(texture);
+                unreturnedTexture = null;
+                if (texture.IsFallback)
+                {
+                    fallbackTextureCount++;
+                }
             }
 
-            texture = texture with
-            {
-                Descriptor = binding.ResourceDescriptor?.ToArray(),
-                Shape = binding.Shape,
-                Access = binding.Access,
-            };
-            textures.Add(texture);
-            if (texture.IsFallback)
-            {
-                fallbackTextureCount++;
-            }
+            return textures;
         }
-
-        return textures;
+        catch
+        {
+            MetalVideoPresenter.ReleasePreparedTextureSources(textures);
+            if (unreturnedTexture is not null)
+                MetalVideoPresenter.ReleasePreparedTextureSource(unreturnedTexture);
+            throw;
+        }
     }
 
     // Keep equation support consistent with MetalDetilePass.Supports.
