@@ -3,19 +3,30 @@
 
 namespace SharpEmu.HLE.Host;
 
-// View mappings bypass the anonymous-allocation tables. Keep their query state together.
-//
-// Pure managed bookkeeping: no syscalls, no native layouts, no per-OS constants
-// beyond Environment.SystemPageSize, so it stays in the neutral host layer and
-// is shared by the POSIX view backends and by HostMemory.Query.
-internal static class HostViewRegions
+/// <summary>
+/// The query-visible bookkeeping for view mappings, which bypass the
+/// anonymous-allocation tables.
+/// </summary>
+/// <remarks>
+/// Host-package contract. Pure managed bookkeeping: no syscalls, no native
+/// layouts, no per-OS constants beyond <see cref="Environment.SystemPageSize"/>,
+/// so it stays in the neutral host layer and is shared by the POSIX view
+/// backends in <c>SharpEmu.Host.MacOS</c>/<c>SharpEmu.Host.Linux</c> and by
+/// <c>HostMemory.Query</c>.
+/// </remarks>
+public static class HostViewRegions
 {
-    internal static readonly object Gate = new();
+    /// <summary>
+    /// The lock a backend must hold while it changes a mapping and then records
+    /// it here, so a query never observes the two out of step.
+    /// </summary>
+    public static readonly object Gate = new();
     private readonly record struct Region(ulong Start, ulong End, uint State, uint Protection,
         uint[]? PageProtections, ulong PageBase);
     private static readonly List<Region> Regions = new();
 
-    internal static void Replace(ulong address, ulong size, uint state, uint protection)
+    /// <summary>Records a new view mapping over <paramref name="address"/>, replacing any it overlaps.</summary>
+    public static void Replace(ulong address, ulong size, uint state, uint protection)
     {
         HostMemory.OnMappingChanged();
         var end = RoundPageEnd(address, size);
@@ -52,8 +63,12 @@ internal static class HostViewRegions
         }
     }
 
-    // Mapping creates the storage. Fault-time protection updates must not allocate.
-    internal static void ChangeProtection(ulong address, ulong size, uint protection)
+    /// <summary>Records a protection change over an already mapped range.</summary>
+    /// <remarks>
+    /// Mapping creates the storage, so this allocation-free path is safe to call
+    /// from a fault handler.
+    /// </remarks>
+    public static void ChangeProtection(ulong address, ulong size, uint protection)
     {
         HostMemory.OnMappingChanged();
         var end = RoundPageEnd(address, size);
@@ -68,7 +83,8 @@ internal static class HostViewRegions
         }
     }
 
-    internal static bool TryQuery(ulong address, out HostMemory.BasicInfo info)
+    /// <summary>Describes the view mapping containing <paramref name="address"/>, if there is one.</summary>
+    public static bool TryQuery(ulong address, out HostMemory.BasicInfo info)
     {
         lock (Gate)
         {
@@ -111,7 +127,8 @@ internal static class HostViewRegions
         return remainder == 0 ? end : checked(end + pageSize - remainder);
     }
 
-    internal static uint RawProtection(HostPageProtection protection) => protection switch
+    /// <summary>Translates a <see cref="HostPageProtection"/> into the Win32 PAGE_* value recorded here.</summary>
+    public static uint RawProtection(HostPageProtection protection) => protection switch
     {
         HostPageProtection.NoAccess => HostMemory.PAGE_NOACCESS,
         HostPageProtection.ReadOnly => HostMemory.PAGE_READONLY,

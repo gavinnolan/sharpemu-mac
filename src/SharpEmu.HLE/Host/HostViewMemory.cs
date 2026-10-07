@@ -36,9 +36,23 @@ public static class HostViewMemory
         return factory();
     }
 
-    internal static bool IsValidRange(ulong address, ulong size) =>
+    /// <summary>
+    /// Whether <paramref name="address"/> and <paramref name="size"/> describe a
+    /// non-empty range that does not wrap the address space.
+    /// </summary>
+    /// <remarks>
+    /// Host-package contract: the argument validation every
+    /// <see cref="IHostViewMemory"/> backend applies before it calls into the OS,
+    /// shared so the three per-OS packages reject the same inputs.
+    /// </remarks>
+    public static bool IsValidRange(ulong address, ulong size) =>
         address != 0 && size != 0 && size <= ulong.MaxValue - address;
 
-    internal static bool IsValidOffset(HostBackingObject backing, ulong offset, ulong size, ulong pageSize) =>
+    /// <summary>
+    /// Whether <paramref name="offset"/> and <paramref name="size"/> name a
+    /// page-aligned window that lies inside <paramref name="backing"/>.
+    /// </summary>
+    /// <remarks>Host-package contract; see <see cref="IsValidRange"/>.</remarks>
+    public static bool IsValidOffset(HostBackingObject backing, ulong offset, ulong size, ulong pageSize) =>
         offset % pageSize == 0 && offset < backing.Size && size != 0 && size <= backing.Size - offset;
 }
