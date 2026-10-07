@@ -12,6 +12,11 @@ on:
 
 jobs:
   dispatch:
+    # Upstream only. sharpemu.app/downloads lists upstream releases, so a fork
+    # has nothing to tell it to rebuild. Without the guard the job still ran on
+    # every fork release and silently skipped on the missing secret, which
+    # reads as "the dispatch broke" rather than "this is not our website".
+    if: github.repository == 'sharpemu/sharpemu'
     runs-on: ubuntu-26.04
     steps:
       - name: Trigger sharpemu-site rebuild
