@@ -83,3 +83,15 @@ required before claiming the current build improves compatibility. See the
 Guest font isolation/CoreText rendering is in progress. The Avalonia launcher
 still carries Skia; a native launcher/settings extraction is a separate remaining
 dependency, even after guest fonts stop using Skia on macOS.
+
+The snapshot regression is corrected at `ba83361`. Graph-disabled owned copies
+retain generation/content-identity checks; strict mapping checks still govern
+GPU provenance and graph-enabled admission. Combined checks pass210/210 on
+ARM64 and Rosetta; integrated required-device ownership/materialization checks
+pass14+40 under Rosetta. Fresh Sarah150s again reaches a coherent scene and
+responds to right/left movement, peak1215MiB. Jump input was delivered but its
+airborne phase was not captured. Shutdown still uses forced guest unwind.
+Poppy advances beyond the snapshot veto to SIGBUS at24s; the native trace shows
+an Invalidating handler reporting recovery before a peer's restore syscall
+returns. CPU lifetime/permission-receipt recovery remains unresolved. Earlier
+failing builds and diagnostic runs are retained for comparison.

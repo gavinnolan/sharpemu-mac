@@ -398,3 +398,47 @@ The kernel is an independent MSL ABI oracle, not translated guest ISA. Queued
 ownership is released after synchronous writeback completion in these fixtures;
 release before completion and actual Drain integration remain unqualified.
 The production source graph remains disabled.
+
+## Snapshot admission correction and fresh games
+
+Diagnostic-only `618b57f` identifies a mapping-only veto in both games: Sarah's
+global epoch85610→85611 and Poppy's554266→554287, with unchanged qualified tokens,
+generation0 and Armed owners. The fields are separately sampled, not an atomic
+lease or attribution of the mapping mutation address. A real-host control
+reproduces unrelated HostMemory.Protect vetoing three copies while kernel
+permissions remain READONLY and content tokens/generations are unchanged.
+
+Reviewed correction `661dc8d` integrates as `ba83361`: owned-copy admission with
+the graph disabled retains ReadSnapshot and qualified content identity checks;
+full mapping/content observation still certifies provenance and graph-enabled
+admission. A mapping-raced owned copy receives Stable=false graph provenance.
+Actual notified writes and generation0 owner replacement reject in both modes.
+No new retry or backing lease is claimed. Combined210/210 pass on ARM64 and
+Rosetta; integrated required-device14 ownership and40 materialization checks
+pass under Rosetta without skips (`w13-20261007/owned-copy-integrated-*`).
+Signed clean app archive SHA256 is
+`fcdfdeb4a13a27afe4e516dff94404f77edfe55191bef72ededf0c383369aa31`.
+
+Poppy's new24s run exits SIGBUS/code138, peak1549MiB. Schema2 publishes77 records,
+zero drops. Real signal10/code2/error6 entries3-6 retain nonzero raw==normalized
+registers and VMOVNTDQ RIP0x80135FB0B. Invocation6 accepts Invalidating before
+peer restore operation11 returns; operation11 then succeeds, while later rearm
+epoch2 precedes earlier invocations3/4 final declines. These observations do not
+authorize recovery or prove a pinned mapping lifetime. One telemetry guest frame
+is recorded, no screenshot/menu/scene/gameplay; tile5 materialization is not
+established by this run. See `game-poppy-snapshot-fix-ba83361/`.
+
+Sarah remains alive150s, peak1215MiB, restores coherent scene and right/left
+movement into another area and back. Z input is delivered at140s, but captures
+miss an airborne phase; jump is unqualified for this run. Its72 intervals total
+9952 guest frames over144.377s (weighted reported cadence68.93/s, range34.28–100.59).
+Concurrent compilation/testing prevents a controlled performance comparison.
+TERM stops in2s without KILL but logs a repeating import loop/forced unwind and
+NOT_IMPLEMENTED; clean guest exit remains unqualified. See
+`game-sarah-snapshot-fix-ba83361/`. Source/app remained frozen through both runs.
+
+The native precommit pin fixtures at `b038acd` also pass4/4 on each architecture:
+prep/work references drop to0 before commit while native pin1 survives pruning,
+actual shader output remains old red after completion, and uncommitted discard
+leaves the A5 sentinel while releasing all native/registry ownership. This is
+controlled execution, not actual runtime Drain or producer-pipeline activation.
