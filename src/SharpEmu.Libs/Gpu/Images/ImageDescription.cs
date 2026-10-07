@@ -3,8 +3,8 @@
 
 using System.Runtime.CompilerServices;
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Scheduling;
-using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Images;
 
@@ -74,10 +74,10 @@ public struct ImageDescription
     public GuestSpan Stencil;
     public MetadataDescription Metadata;
     public uint HtileClearMask;
-    public Format PixelFormat;
+    public GpuFormat PixelFormat;
     public GuestPixelFormat GuestFormat;
     public GuestImageType Type;
-    public Extent3D Extent;
+    public GpuExtent3D Extent;
     public SubresourceCount Resources;
     public uint Pitch;
     public uint BytesPerBlock;
@@ -90,7 +90,7 @@ public struct ImageDescription
     {
         HtileClearMask = uint.MaxValue,
         Type = GuestImageType.Color2D,
-        Extent = new Extent3D(1, 1, 1),
+        Extent = new GpuExtent3D(1, 1, 1),
         Resources = SubresourceCount.Single,
         Samples = 1,
     };
@@ -104,7 +104,7 @@ public struct ImageDescription
 
     public readonly bool HasMetadata => Metadata.Kind != MetadataKind.None;
 
-    public readonly bool IsDepth => DepthFormatRule.AspectTransferFormat(PixelFormat) != Format.Undefined;
+    public readonly bool IsDepth => DepthFormatRule.AspectTransferFormat(PixelFormat) != GpuFormat.Undefined;
 
     public readonly bool IsBlock => GuestPixelFormats.BlockCompressedBytes(GuestFormat) != 0;
 
@@ -116,12 +116,12 @@ public struct ImageDescription
 
     public readonly uint TransferLayers => IsVolume ? Extent.Depth : Resources.Layers;
 
-    public readonly Extent2D BlockExtent
+    public readonly GpuExtent2D BlockExtent
     {
         get
         {
             var shift = IsBlock ? 2 : 0;
-            return new Extent2D(Pitch >> shift, Extent.Height >> shift);
+            return new GpuExtent2D(Pitch >> shift, Extent.Height >> shift);
         }
     }
 
@@ -316,7 +316,7 @@ public struct ImageDescription
             throw SubmissionScheduler.Fatal($"The image stencil range is invalid: address=0x{Stencil.Address:X16} size=0x{Stencil.Size:X16}.");
         }
 
-        if (PixelFormat == Format.Undefined)
+        if (PixelFormat == GpuFormat.Undefined)
         {
             if (IsEmptyRange(Data) || HasStencil || Metadata.Kind != MetadataKind.None || !IsEmptyRange(Metadata.Range) ||
                 Metadata.Control != 0 || Metadata.Compression != DisplayCompression.Uncompressed || Metadata.StencilCompressed ||
@@ -391,62 +391,62 @@ public struct ImageDescription
         }
     }
 
-    public static SampleCountFlags VulkanSampleCount(uint samples) => samples switch
+    public static GpuSampleCount VulkanSampleCount(uint samples) => samples switch
     {
-        1 => SampleCountFlags.Count1Bit,
-        2 => SampleCountFlags.Count2Bit,
-        4 => SampleCountFlags.Count4Bit,
-        8 => SampleCountFlags.Count8Bit,
+        1 => GpuSampleCount.Count1Bit,
+        2 => GpuSampleCount.Count2Bit,
+        4 => GpuSampleCount.Count4Bit,
+        8 => GpuSampleCount.Count8Bit,
         _ => 0,
     };
 }
 
 // The host depth and stencil attachment formats of each guest depth format.
-public sealed record DepthFormatRule(GuestDepthFormat DepthFormat, GuestPixelFormat GuestFormat, uint BytesPerElement, Format DepthAttachmentFormat, Format[] StencilAttachmentFormats)
+public sealed record DepthFormatRule(GuestDepthFormat DepthFormat, GuestPixelFormat GuestFormat, uint BytesPerElement, GpuFormat DepthAttachmentFormat, GpuFormat[] StencilAttachmentFormats)
 {
     public static readonly DepthFormatRule[] Table =
     [
-        new(GuestDepthFormat.Z16, GuestPixelFormat.Bits16UNorm, 2, Format.D16Unorm, [Format.D16UnormS8Uint, Format.D24UnormS8Uint, Format.D32SfloatS8Uint]),
-        new(GuestDepthFormat.Z32Float, GuestPixelFormat.Bits32Float, 4, Format.D32Sfloat, [Format.D32SfloatS8Uint, Format.Undefined, Format.Undefined]),
+        new(GuestDepthFormat.Z16, GuestPixelFormat.Bits16UNorm, 2, GpuFormat.D16Unorm, [GpuFormat.D16UnormS8Uint, GpuFormat.D24UnormS8Uint, GpuFormat.D32SfloatS8Uint]),
+        new(GuestDepthFormat.Z32Float, GuestPixelFormat.Bits32Float, 4, GpuFormat.D32Sfloat, [GpuFormat.D32SfloatS8Uint, GpuFormat.Undefined, GpuFormat.Undefined]),
     ];
 
     public static DepthFormatRule? Find(GuestDepthFormat depthFormat) => Array.Find(Table, rule => rule.DepthFormat == depthFormat);
 
     public static DepthFormatRule? FindByGuestFormat(GuestPixelFormat guestFormat) => Array.Find(Table, rule => rule.GuestFormat == guestFormat);
 
-    public bool IsStencilAttachmentFormat(Format format) =>
-        format != Format.Undefined && Array.IndexOf(StencilAttachmentFormats, format) >= 0;
+    public bool IsStencilAttachmentFormat(GpuFormat format) =>
+        format != GpuFormat.Undefined && Array.IndexOf(StencilAttachmentFormats, format) >= 0;
 
-    public Format AttachmentFormat(bool hasStencil) => hasStencil ? StencilAttachmentFormats[0] : DepthAttachmentFormat;
+    public GpuFormat AttachmentFormat(bool hasStencil) => hasStencil ? StencilAttachmentFormats[0] : DepthAttachmentFormat;
 
-    public static Format AttachmentFormat(GuestDepthFormat depthFormat, GuestStencilFormat stencilFormat)
+    public static GpuFormat AttachmentFormat(GuestDepthFormat depthFormat, GuestStencilFormat stencilFormat)
     {
         bool hasStencil;
         switch (stencilFormat)
         {
             case GuestStencilFormat.Invalid: hasStencil = false; break;
             case GuestStencilFormat.Stencil8UInt: hasStencil = true; break;
-            default: return Format.Undefined;
+            default: return GpuFormat.Undefined;
         }
 
-        return Find(depthFormat)?.AttachmentFormat(hasStencil) ?? Format.Undefined;
+        return Find(depthFormat)?.AttachmentFormat(hasStencil) ?? GpuFormat.Undefined;
     }
 
-    public const ImageUsageFlags DepthTargetUsage =
-        ImageUsageFlags.DepthStencilAttachmentBit | ImageUsageFlags.SampledBit | ImageUsageFlags.TransferSrcBit | ImageUsageFlags.TransferDstBit;
+    public const GpuImageUsage DepthTargetUsage =
+        GpuImageUsage.DepthStencilAttachmentBit | GpuImageUsage.SampledBit | GpuImageUsage.TransferSrcBit | GpuImageUsage.TransferDstBit;
 
-    public static Format AspectTransferFormat(Format format) => format switch
+    public static GpuFormat AspectTransferFormat(GpuFormat format) => format switch
     {
-        Format.D16Unorm or Format.D16UnormS8Uint => Format.D16Unorm,
-        Format.D24UnormS8Uint => Format.X8D24UnormPack32,
-        Format.D32Sfloat or Format.D32SfloatS8Uint => Format.D32Sfloat,
-        _ => Format.Undefined,
+        GpuFormat.D16Unorm or GpuFormat.D16UnormS8Uint => GpuFormat.D16Unorm,
+        GpuFormat.D24UnormS8Uint => GpuFormat.X8D24UnormPack32,
+        GpuFormat.D32Sfloat or GpuFormat.D32SfloatS8Uint => GpuFormat.D32Sfloat,
+        _ => GpuFormat.Undefined,
     };
 
-    public static uint AspectTransferBytes(Format format) => AspectTransferFormat(format) switch
+    public static uint AspectTransferBytes(GpuFormat format) => AspectTransferFormat(format) switch
     {
-        Format.D16Unorm => 2,
-        Format.X8D24UnormPack32 or Format.D32Sfloat => 4,
+        GpuFormat.D16Unorm => 2,
+        GpuFormat.X8D24UnormPack32 or GpuFormat.D32Sfloat => 4,
         _ => 0,
     };
 
@@ -455,23 +455,23 @@ public sealed record DepthFormatRule(GuestDepthFormat DepthFormat, GuestPixelFor
     public static uint EncodeD16AsD32(ushort value) => BitConverter.SingleToUInt32Bits(value / 65535.0f);
 }
 
-public readonly record struct DisplayPixelFormat(Format HostFormat, GuestPixelFormat GuestFormat, uint BytesPerElement, bool Bgra16);
+public readonly record struct DisplayPixelFormat(GpuFormat HostFormat, GuestPixelFormat GuestFormat, uint BytesPerElement, bool Bgra16);
 
 // Display formats retain their encoded values; presentation applies the transfer function.
 public static class DisplayFormatRule
 {
     public static readonly (ulong PixelFormat, DisplayPixelFormat Info)[] Table =
     [
-        (0x8000000022000000, new DisplayPixelFormat(Format.R8G8B8A8Srgb, GuestPixelFormat.Bits8_8_8_8Srgb, 4, false)),
-        (0x8000000000000000, new DisplayPixelFormat(Format.B8G8R8A8Srgb, GuestPixelFormat.Bits8_8_8_8Srgb, 4, false)),
-        (0x8100000022000000, new DisplayPixelFormat(Format.A2B10G10R10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
-        (0x8100000000000000, new DisplayPixelFormat(Format.A2R10G10B10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
-        (0x8100000622000000, new DisplayPixelFormat(Format.A2B10G10R10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
-        (0x8100000600000000, new DisplayPixelFormat(Format.A2R10G10B10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
-        (0x8100070422000000, new DisplayPixelFormat(Format.A2B10G10R10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
-        (0x8100070400000000, new DisplayPixelFormat(Format.A2R10G10B10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
-        (0xc001000622000000, new DisplayPixelFormat(Format.R16G16B16A16Sfloat, GuestPixelFormat.Bits16_16_16_16Float, 8, false)),
-        (0xc001000600000000, new DisplayPixelFormat(Format.R16G16B16A16Sfloat, GuestPixelFormat.Bits16_16_16_16Float, 8, true)),
+        (0x8000000022000000, new DisplayPixelFormat(GpuFormat.R8G8B8A8Srgb, GuestPixelFormat.Bits8_8_8_8Srgb, 4, false)),
+        (0x8000000000000000, new DisplayPixelFormat(GpuFormat.B8G8R8A8Srgb, GuestPixelFormat.Bits8_8_8_8Srgb, 4, false)),
+        (0x8100000022000000, new DisplayPixelFormat(GpuFormat.A2B10G10R10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
+        (0x8100000000000000, new DisplayPixelFormat(GpuFormat.A2R10G10B10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
+        (0x8100000622000000, new DisplayPixelFormat(GpuFormat.A2B10G10R10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
+        (0x8100000600000000, new DisplayPixelFormat(GpuFormat.A2R10G10B10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
+        (0x8100070422000000, new DisplayPixelFormat(GpuFormat.A2B10G10R10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
+        (0x8100070400000000, new DisplayPixelFormat(GpuFormat.A2R10G10B10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
+        (0xc001000622000000, new DisplayPixelFormat(GpuFormat.R16G16B16A16Sfloat, GuestPixelFormat.Bits16_16_16_16Float, 8, false)),
+        (0xc001000600000000, new DisplayPixelFormat(GpuFormat.R16G16B16A16Sfloat, GuestPixelFormat.Bits16_16_16_16Float, 8, true)),
     ];
 
     public static bool TryDecode(ulong pixelFormat, out DisplayPixelFormat info)
@@ -507,7 +507,7 @@ public static class DisplayFormatRule
 // Decoders for the packed 32-bit clear values guest compute fills carry.
 public static class PackedClearValue
 {
-    public static bool TryDecodeColor(Format format, uint packed, out ClearColorValue clear)
+    public static bool TryDecodeColor(GpuFormat format, uint packed, out GpuClearColor clear)
     {
         static float Unorm8(uint value) => (value & 0xff) / 255.0f;
         static float Srgb8(uint value)
@@ -520,46 +520,46 @@ public static class PackedClearValue
         switch (format)
         {
             // A single-plane float target carries its clear as raw float bits.
-            case Format.R32Sfloat:
+            case GpuFormat.R32Sfloat:
                 clear.Float32_0 = BitConverter.UInt32BitsToSingle(packed);
                 return true;
-            case Format.R32Uint:
+            case GpuFormat.R32Uint:
                 clear.Uint32_0 = packed;
                 return true;
-            case Format.R32Sint:
+            case GpuFormat.R32Sint:
                 clear.Int32_0 = (int)packed;
                 return true;
-            case Format.R8G8B8A8Srgb:
+            case GpuFormat.R8G8B8A8Srgb:
                 clear.Float32_0 = Srgb8(packed);
                 clear.Float32_1 = Srgb8(packed >> 8);
                 clear.Float32_2 = Srgb8(packed >> 16);
                 clear.Float32_3 = Unorm8(packed >> 24);
                 return true;
-            case Format.B8G8R8A8Srgb:
+            case GpuFormat.B8G8R8A8Srgb:
                 clear.Float32_0 = Srgb8(packed >> 16);
                 clear.Float32_1 = Srgb8(packed >> 8);
                 clear.Float32_2 = Srgb8(packed);
                 clear.Float32_3 = Unorm8(packed >> 24);
                 return true;
-            case Format.R8G8B8A8Unorm:
+            case GpuFormat.R8G8B8A8Unorm:
                 clear.Float32_0 = Unorm8(packed);
                 clear.Float32_1 = Unorm8(packed >> 8);
                 clear.Float32_2 = Unorm8(packed >> 16);
                 clear.Float32_3 = Unorm8(packed >> 24);
                 return true;
-            case Format.B8G8R8A8Unorm:
+            case GpuFormat.B8G8R8A8Unorm:
                 clear.Float32_0 = Unorm8(packed >> 16);
                 clear.Float32_1 = Unorm8(packed >> 8);
                 clear.Float32_2 = Unorm8(packed);
                 clear.Float32_3 = Unorm8(packed >> 24);
                 return true;
-            case Format.A2B10G10R10UnormPack32:
+            case GpuFormat.A2B10G10R10UnormPack32:
                 clear.Float32_0 = (packed & 0x3ff) / 1023.0f;
                 clear.Float32_1 = ((packed >> 10) & 0x3ff) / 1023.0f;
                 clear.Float32_2 = ((packed >> 20) & 0x3ff) / 1023.0f;
                 clear.Float32_3 = ((packed >> 30) & 0x3) / 3.0f;
                 return true;
-            case Format.A2R10G10B10UnormPack32:
+            case GpuFormat.A2R10G10B10UnormPack32:
                 clear.Float32_0 = ((packed >> 20) & 0x3ff) / 1023.0f;
                 clear.Float32_1 = ((packed >> 10) & 0x3ff) / 1023.0f;
                 clear.Float32_2 = (packed & 0x3ff) / 1023.0f;
@@ -576,10 +576,10 @@ public static class PackedClearValue
         return packed == clear * 0x01010101u;
     }
 
-    public static bool TryDecodeDepth(Format format, uint packed, out float clear)
+    public static bool TryDecodeDepth(GpuFormat format, uint packed, out float clear)
     {
         clear = 0;
-        if (format is not (Format.D32Sfloat or Format.D32SfloatS8Uint))
+        if (format is not (GpuFormat.D32Sfloat or GpuFormat.D32SfloatS8Uint))
         {
             return false;
         }

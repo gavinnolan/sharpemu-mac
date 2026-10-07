@@ -79,6 +79,12 @@ public static class VulkanTypeConversions
 
     public static GpuComponentSwizzle ToNeutral(this ComponentSwizzle value) => (GpuComponentSwizzle)value;
 
+    public static ComponentMapping ToVk(this GpuComponentMapping value) =>
+        new(value.R.ToVk(), value.G.ToVk(), value.B.ToVk(), value.A.ToVk());
+
+    public static GpuComponentMapping ToNeutral(this ComponentMapping value) =>
+        new(value.R.ToNeutral(), value.G.ToNeutral(), value.B.ToNeutral(), value.A.ToNeutral());
+
     public static Extent2D ToVk(this GpuExtent2D value) => new(value.Width, value.Height);
 
     public static GpuExtent2D ToNeutral(this Extent2D value) => new(value.Width, value.Height);

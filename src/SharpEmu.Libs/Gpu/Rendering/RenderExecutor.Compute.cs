@@ -1,10 +1,10 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.ShaderCompiler;
-using Silk.NET.Vulkan;
 using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
@@ -165,7 +165,7 @@ public sealed partial class RenderExecutor
 
             _host.BindResources(bindings);
             Span<IPreparedBindings> stages = [bindings];
-            _host.CommitBindings(PipelineBindPoint.Compute, in pipeline, stages);
+            _host.CommitBindings(GpuBindPoint.Compute, in pipeline, stages);
             var hasStorageWrites = HasBufferWrites(input.Stage);
             foreach (var image in program.Images)
             {
@@ -178,7 +178,7 @@ public sealed partial class RenderExecutor
                 _host.ShaderWriteHazardBarrier();
             }
 
-            _host.BindPipeline(PipelineBindPoint.Compute, in pipeline);
+            _host.BindPipeline(GpuBindPoint.Compute, in pipeline);
             // The shader's local workgroup axes may have been remapped at compile time
             // (see Gen5WorkgroupAxisOrder.Compute) so the largest NUM_THREAD
             // axis lands on a physical axis Vulkan actually allows it on. The dispatch group

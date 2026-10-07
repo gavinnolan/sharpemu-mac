@@ -1,9 +1,9 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
-using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
 
@@ -13,7 +13,7 @@ public struct ColorTargetState
     public ColorTargetResolution Resolution;
     public uint Slot;
     public ResourceSlotIdentifier Image;
-    public ImageView View;
+    public GpuImageHandle View;
 
     public ColorTargetState(in ColorTargetResolution resolution, uint slot, ResourceSlotIdentifier image)
     {
@@ -29,7 +29,7 @@ public struct DepthAttachmentState
 {
     public DepthTargetState Target;
     public ResourceSlotIdentifier Image;
-    public ImageView View;
+    public GpuImageHandle View;
     public bool MetadataClear;
 
     public DepthAttachmentState(in DepthTargetState target, ResourceSlotIdentifier image)
@@ -40,7 +40,7 @@ public struct DepthAttachmentState
         MetadataClear = false;
     }
 
-    public readonly bool HasTarget => Image.IsValid && Target.Target.Format != Format.Undefined;
+    public readonly bool HasTarget => Image.IsValid && Target.Target.Format != GpuFormat.Undefined;
 
     // The attachment loads a clear when the registers or the metadata say so.
     public readonly bool LoadClear => Target.State.DepthClearEnabled || MetadataClear;

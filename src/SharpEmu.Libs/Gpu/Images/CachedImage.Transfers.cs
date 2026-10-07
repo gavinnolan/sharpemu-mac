@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Gpu.Vulkan;
@@ -28,7 +29,7 @@ public sealed unsafe partial class CachedImage
         SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
         DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
         Image = Backing.Handle,
-        SubresourceRange = new ImageSubresourceRange(ViewFormatRules.FullAspects(Backing.Format), baseLevel, levelCount, baseLayer, layerCount),
+        SubresourceRange = new ImageSubresourceRange(ViewFormatRules.FullAspects(Backing.Format.ToNeutral()).ToVk(), baseLevel, levelCount, baseLayer, layerCount),
     };
 
     // Barriers for the requested state; a repeated write always gets a barrier.
@@ -306,8 +307,8 @@ public sealed unsafe partial class CachedImage
         _scheduler.EndRendering();
         var levels = Math.Min(source.Backing.MipLevels, Backing.MipLevels);
         var baseDepth = Backing.ImageType == ImageType.Type3D ? Backing.Extent.Depth : source.Backing.Extent.Depth;
-        var sourceAspect = ViewFormatRules.FullAspects(source.Backing.Format) & ~ImageAspectFlags.StencilBit;
-        var destinationAspect = ViewFormatRules.FullAspects(Backing.Format) & ~ImageAspectFlags.StencilBit;
+        var sourceAspect = ViewFormatRules.FullAspects(source.Backing.Format.ToNeutral()) & ~GpuImageAspect.StencilBit;
+        var destinationAspect = ViewFormatRules.FullAspects(Backing.Format.ToNeutral()) & ~GpuImageAspect.StencilBit;
         var copies = new ImageCopy[levels];
         for (uint level = 0; level < levels; level++)
         {
@@ -317,8 +318,8 @@ public sealed unsafe partial class CachedImage
             var (sourceLayers, destinationLayers) = SanitizeCopyLayers(source, this, depth);
             var copy = new ImageCopy
             {
-                SrcSubresource = new ImageSubresourceLayers(sourceAspect, level, 0, 1),
-                DstSubresource = new ImageSubresourceLayers(destinationAspect, level, 0, 1),
+                SrcSubresource = new ImageSubresourceLayers(sourceAspect.ToVk(), level, 0, 1),
+                DstSubresource = new ImageSubresourceLayers(destinationAspect.ToVk(), level, 0, 1),
             };
             if (source.Backing.ImageType == Backing.ImageType)
             {
@@ -382,7 +383,7 @@ public sealed unsafe partial class CachedImage
         var destinationWidth = Math.Max(Backing.Extent.Width >> (int)destinationRange.BaseLevel, 1);
         var destinationHeight = Math.Max(Backing.Extent.Height >> (int)destinationRange.BaseLevel, 1);
         var copy = source.Backing.Samples == 1;
-        var formatsAgree = copy ? ViewFormatRules.AreCompatible(source.Backing.Format, Backing.Format) : source.Backing.Format == Backing.Format;
+        var formatsAgree = copy ? ViewFormatRules.AreCompatible(source.Backing.Format.ToNeutral(), Backing.Format.ToNeutral()) : source.Backing.Format == Backing.Format;
         if (layers == 0 || Description.Extent.Width > sourceWidth || Description.Extent.Height > sourceHeight ||
             Description.Extent.Width > destinationWidth || Description.Extent.Height > destinationHeight || !formatsAgree)
         {
@@ -414,8 +415,8 @@ public sealed unsafe partial class CachedImage
     public void CopyDepthStencilFrom(CachedImage source, in SubresourceRange range, in Extent3D extent, ImageAspectFlags aspects)
     {
         var requested = aspects & (ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit);
-        var available = ViewFormatRules.FullAspects(Backing.Format);
-        if (requested == 0 || (requested & ~available) != 0 || source.Backing.Format != Backing.Format ||
+        var available = ViewFormatRules.FullAspects(Backing.Format.ToNeutral());
+        if (requested == 0 || (requested & ~available.ToVk()) != 0 || source.Backing.Format != Backing.Format ||
             source.Backing.ImageType != ImageType.Type2D || Backing.ImageType != ImageType.Type2D ||
             source.Backing.Samples != Backing.Samples || range.LevelCount != 1 ||
             range.BaseLevel >= source.Backing.MipLevels || range.BaseLevel >= Backing.MipLevels ||
@@ -470,16 +471,16 @@ public sealed unsafe partial class CachedImage
     // A storage image holds the stencil bytes while the shader runs; the attachment stays the owner.
     public CachedImage CreateStencilStorageImage()
     {
-        if ((ViewFormatRules.FullAspects(Backing.Format) & ImageAspectFlags.StencilBit) == 0 ||
+        if ((ViewFormatRules.FullAspects(Backing.Format.ToNeutral()) & GpuImageAspect.StencilBit) == 0 ||
             Backing.ImageType != ImageType.Type2D || Backing.Samples != 1 || Backing.MipLevels != 1)
         {
             throw SubmissionScheduler.Fatal("Stencil storage needs a single-sample, single-level 2D stencil image.");
         }
 
         var description = ImageDescription.Create();
-        description.PixelFormat = Format.R8Uint;
+        description.PixelFormat = GpuFormat.R8Uint;
         description.GuestFormat = GuestPixelFormat.Bits8UInt;
-        description.Extent = Backing.Extent;
+        description.Extent = Backing.Extent.ToNeutral();
         description.Resources = new SubresourceCount(1, Backing.Layers);
         description.Pitch = Backing.Extent.Width;
         description.BytesPerBlock = 1;
@@ -488,7 +489,7 @@ public sealed unsafe partial class CachedImage
 
     public void CopyStencilStorage(CachedImage storage, GpuBuffer buffer, bool writeBack)
     {
-        if ((ViewFormatRules.FullAspects(Backing.Format) & ImageAspectFlags.StencilBit) == 0 ||
+        if ((ViewFormatRules.FullAspects(Backing.Format.ToNeutral()) & GpuImageAspect.StencilBit) == 0 ||
             Backing.ImageType != ImageType.Type2D || Backing.Samples != 1 || Backing.MipLevels != 1 ||
             storage.Backing.Format != Format.R8Uint || storage.Backing.ImageType != ImageType.Type2D ||
             storage.Backing.Samples != 1 || storage.Backing.MipLevels != 1 || storage.Backing.Layers != Backing.Layers ||
@@ -505,8 +506,8 @@ public sealed unsafe partial class CachedImage
 
     // Reinterprets the source through a staging buffer, one row band at a time.
     public void CopyThroughBuffer(CachedImage source, GpuBuffer buffer) =>
-        CopyThroughBuffer(source, buffer, ViewFormatRules.FullAspects(source.Backing.Format) & ~ImageAspectFlags.StencilBit,
-            ViewFormatRules.FullAspects(Backing.Format) & ~ImageAspectFlags.StencilBit);
+        CopyThroughBuffer(source, buffer, (ViewFormatRules.FullAspects(source.Backing.Format.ToNeutral()) & ~GpuImageAspect.StencilBit).ToVk(),
+            (ViewFormatRules.FullAspects(Backing.Format.ToNeutral()) & ~GpuImageAspect.StencilBit).ToVk());
 
     private void CopyThroughBuffer(CachedImage source, GpuBuffer buffer, ImageAspectFlags sourceAspect, ImageAspectFlags destinationAspect)
     {
@@ -518,9 +519,9 @@ public sealed unsafe partial class CachedImage
         _scheduler.EndRendering();
         var levels = Math.Min(source.Backing.MipLevels, Backing.MipLevels);
         var sourceBytes = sourceAspect == ImageAspectFlags.StencilBit ? 1u :
-            DepthFormatRule.AspectTransferBytes(source.Backing.Format) is var sourceTransfer && sourceTransfer != 0 ? sourceTransfer : source.Description.BytesPerBlock;
+            DepthFormatRule.AspectTransferBytes(source.Backing.Format.ToNeutral()) is var sourceTransfer && sourceTransfer != 0 ? sourceTransfer : source.Description.BytesPerBlock;
         var destinationBytes = destinationAspect == ImageAspectFlags.StencilBit ? 1u :
-            DepthFormatRule.AspectTransferBytes(Backing.Format) is var destinationTransfer && destinationTransfer != 0 ? destinationTransfer : Description.BytesPerBlock;
+            DepthFormatRule.AspectTransferBytes(Backing.Format.ToNeutral()) is var destinationTransfer && destinationTransfer != 0 ? destinationTransfer : Description.BytesPerBlock;
         var sourceBlock = source.Description.IsBlock ? 4u : 1u;
         var destinationBlock = Description.IsBlock ? 4u : 1u;
         if (levels == 0 || sourceBytes == 0 || sourceBytes != destinationBytes || sourceBlock != destinationBlock)
@@ -594,15 +595,15 @@ public sealed unsafe partial class CachedImage
         }
 
         var (sourceLayers, destinationLayers) = SanitizeCopyLayers(source, this, depth);
-        var aspects = ViewFormatRules.FullAspects(source.Backing.Format);
-        if (aspects != ViewFormatRules.FullAspects(Backing.Format))
+        var aspects = ViewFormatRules.FullAspects(source.Backing.Format.ToNeutral());
+        if (aspects != ViewFormatRules.FullAspects(Backing.Format.ToNeutral()))
         {
-            throw SubmissionScheduler.Fatal($"The mip copy aspects differ: source=0x{(uint)aspects:x} destination=0x{(uint)ViewFormatRules.FullAspects(Backing.Format):x}.");
+            throw SubmissionScheduler.Fatal($"The mip copy aspects differ: source=0x{(uint)aspects:x} destination=0x{(uint)ViewFormatRules.FullAspects(Backing.Format.ToNeutral()):x}.");
         }
 
         var copies = stackalloc ImageCopy[2];
         uint copyCount = 0;
-        foreach (var aspect in new[] { ImageAspectFlags.ColorBit, ImageAspectFlags.DepthBit, ImageAspectFlags.StencilBit })
+        foreach (var aspect in new[] { GpuImageAspect.ColorBit, GpuImageAspect.DepthBit, GpuImageAspect.StencilBit })
         {
             if ((aspects & aspect) == 0)
             {
@@ -611,8 +612,8 @@ public sealed unsafe partial class CachedImage
 
             copies[copyCount++] = new ImageCopy
             {
-                SrcSubresource = new ImageSubresourceLayers(aspect, 0, 0, sourceLayers),
-                DstSubresource = new ImageSubresourceLayers(aspect, mip, layer, destinationLayers),
+                SrcSubresource = new ImageSubresourceLayers(aspect.ToVk(), 0, 0, sourceLayers),
+                DstSubresource = new ImageSubresourceLayers(aspect.ToVk(), mip, layer, destinationLayers),
                 Extent = new Extent3D(width, height, depth),
             };
         }

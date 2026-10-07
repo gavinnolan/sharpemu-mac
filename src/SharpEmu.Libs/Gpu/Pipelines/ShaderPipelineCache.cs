@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Rendering;
@@ -9,7 +10,6 @@ using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
-using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Pipelines;
 
@@ -410,7 +410,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         PixelInputInfo? pixelInput,
         ContextRegisters context,
         in RenderingState rendering,
-        PrimitiveTopology topology,
+        GpuPrimitiveTopology topology,
         bool primitiveRestartEnabled,
         bool disableBlending,
         ShaderProgram vertexProgram,
@@ -451,12 +451,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         PixelInputInfo? pixelInput,
         ContextRegisters context,
         in RenderingState rendering,
-        PrimitiveTopology topology,
+        GpuPrimitiveTopology topology,
         bool primitiveRestartEnabled,
         bool disableBlending,
         ShaderProgram vertexProgram,
         ShaderProgram pixelProgram,
-        SampleCountFlags noAttachmentSampleCounts)
+        GpuSampleCount noAttachmentSampleCounts)
     {
         if (colors.Length > PipelineStaticParameters.ColorAttachmentCount)
         {
@@ -483,7 +483,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         {
             ref readonly var color = ref colors[index];
             var format = rendering.ColorAttachments[index].Format;
-            if (!color.Image.IsValid || format == Format.Undefined)
+            if (!color.Image.IsValid || format == GpuFormat.Undefined)
             {
                 throw GpuFatal.Fatal($"A color attachment has no image or format: slot={color.Slot} format={format}.");
             }
@@ -531,7 +531,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         var depthState = withDepth ? depth.Target.State : default;
-        var rectangleList = topology == PrimitiveTopology.PatchList;
+        var rectangleList = topology == GpuPrimitiveTopology.PatchList;
         var mode = context.RasterMode;
         parameters.NegativeOneToOne = !context.Clip.DirectXClipSpace;
         parameters.DepthClipEnable = context.Clip.IsZClipEnabled;

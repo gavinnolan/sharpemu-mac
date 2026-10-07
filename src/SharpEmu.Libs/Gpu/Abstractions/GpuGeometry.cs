@@ -3,10 +3,10 @@
 
 namespace SharpEmu.Libs.Gpu.Abstractions;
 
-// A two-dimensional size in texels; the neutral stand-in for Silk.NET.Vulkan.Extent2D.
+// A two-dimensional size in texels; the neutral stand-in for Vulkan's Extent2D.
 public record struct GpuExtent2D(uint Width, uint Height);
 
-// A three-dimensional size in texels; the neutral stand-in for Silk.NET.Vulkan.Extent3D.
+// A three-dimensional size in texels; the neutral stand-in for Vulkan's Extent3D.
 public record struct GpuExtent3D(uint Width, uint Height, uint Depth);
 
 // An opaque handle to a backend image view the host handed the engine. The engine only
@@ -15,7 +15,7 @@ public record struct GpuExtent3D(uint Width, uint Height, uint Depth);
 public readonly record struct GpuImageHandle(ulong Handle);
 
 // What the device can do with one image format, usage and tiling combination; the neutral
-// stand-in for the subset of Silk.NET.Vulkan.ImageFormatProperties the engine reads.
+// stand-in for the subset of Vulkan's ImageFormatProperties the engine reads.
 public record struct GpuImageFormatProperties
 {
     public GpuExtent3D MaxExtent;
@@ -24,3 +24,11 @@ public record struct GpuImageFormatProperties
     public GpuSampleCount SampleCounts;
     public ulong MaxResourceSize;
 }
+
+// How a view routes the image's channels into the shader's R, G, B and A; the neutral
+// stand-in for Vulkan's ComponentMapping.
+public record struct GpuComponentMapping(
+    GpuComponentSwizzle R,
+    GpuComponentSwizzle G,
+    GpuComponentSwizzle B,
+    GpuComponentSwizzle A);

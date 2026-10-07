@@ -4,9 +4,11 @@
 namespace SharpEmu.Libs.VideoOut;
 
 using System.Runtime.CompilerServices;
+using SharpEmu.Libs.Gpu.Abstractions;
+using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Vulkan;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Media;
-using SharpEmu.Libs.Gpu.Images;
 using Silk.NET.Vulkan;
 using VkBuffer = Silk.NET.Vulkan.Buffer;
 
@@ -462,7 +464,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 Image = image,
                 ViewType = ImageViewType.Type2D,
                 Format = format,
-                Components = ViewFormatRules.ComponentMapping(dstSelect),
+                Components = ViewFormatRules.ComponentMapping(dstSelect).ToVk(),
                 SubresourceRange = ColorSubresourceRange(),
             };
             Check(

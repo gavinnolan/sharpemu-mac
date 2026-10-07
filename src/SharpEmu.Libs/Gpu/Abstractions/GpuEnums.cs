@@ -5,12 +5,12 @@ namespace SharpEmu.Libs.Gpu.Abstractions;
 
 // The backend-neutral vocabulary of the shared GPU engine.
 //
-// Every member carries the numeric value of the identically named Silk.NET.Vulkan member, so
-// the Vulkan backend converts with a plain cast (see Gpu/Vulkan/VulkanTypeConversions.cs) and
-// the recorded Vulkan stream is unchanged. The GpuVulkanParityTests architecture test keeps
-// the two in step; only the members the engine actually names are listed.
+// Every member carries the numeric value of the identically named Vulkan enumerant, so the
+// Vulkan backend converts with a plain cast (see Gpu/Vulkan/VulkanTypeConversions.cs) and the
+// recorded Vulkan stream is unchanged. The NeutralGpuVocabularyParityTests architecture test
+// keeps the two in step; only the members the engine actually names are listed.
 
-// Matches Silk.NET.Vulkan.ImageType.
+// Matches the Vulkan enum VkImageType.
 public enum GpuImageType
 {
     Type1D = 0,
@@ -18,14 +18,14 @@ public enum GpuImageType
     Type3D = 2,
 }
 
-// Matches Silk.NET.Vulkan.ImageTiling.
+// Matches the Vulkan enum VkImageTiling.
 public enum GpuImageTiling
 {
     Optimal = 0,
     Linear = 1,
 }
 
-// Matches Silk.NET.Vulkan.ImageUsageFlags.
+// Matches the Vulkan enum VkImageUsageFlags.
 [Flags]
 public enum GpuImageUsage
 {
@@ -38,7 +38,7 @@ public enum GpuImageUsage
     DepthStencilAttachmentBit = 32,
 }
 
-// Matches Silk.NET.Vulkan.ImageCreateFlags.
+// Matches the Vulkan enum VkImageCreateFlags.
 [Flags]
 public enum GpuImageCreateFlags
 {
@@ -50,7 +50,7 @@ public enum GpuImageCreateFlags
     CreateExtendedUsageBit = 256,
 }
 
-// Matches Silk.NET.Vulkan.SampleCountFlags.
+// Matches the Vulkan enum VkSampleCountFlags.
 [Flags]
 public enum GpuSampleCount
 {
@@ -64,14 +64,14 @@ public enum GpuSampleCount
     Count64Bit = 64,
 }
 
-// Matches Silk.NET.Vulkan.IndexType.
+// Matches the Vulkan enum VkIndexType.
 public enum GpuIndexType
 {
     Uint16 = 0,
     Uint32 = 1,
 }
 
-// Matches Silk.NET.Vulkan.ImageLayout.
+// Matches the Vulkan enum VkImageLayout.
 public enum GpuImageLayout
 {
     Undefined = 0,
@@ -93,7 +93,7 @@ public enum GpuImageLayout
     StencilReadOnlyOptimal = 1000241003,
 }
 
-// Matches Silk.NET.Vulkan.ImageAspectFlags.
+// Matches the Vulkan enum VkImageAspectFlags.
 [Flags]
 public enum GpuImageAspect
 {
@@ -103,7 +103,7 @@ public enum GpuImageAspect
     StencilBit = 4,
 }
 
-// Matches Silk.NET.Vulkan.PipelineStageFlags.
+// Matches the Vulkan enum VkPipelineStageFlags.
 [Flags]
 public enum GpuPipelineStage
 {
@@ -124,14 +124,14 @@ public enum GpuPipelineStage
     AllCommandsBit = 65536,
 }
 
-// Matches Silk.NET.Vulkan.PipelineBindPoint.
+// Matches the Vulkan enum VkPipelineBindPoint.
 public enum GpuBindPoint
 {
     Graphics = 0,
     Compute = 1,
 }
 
-// Matches Silk.NET.Vulkan.PrimitiveTopology.
+// Matches the Vulkan enum VkPrimitiveTopology.
 public enum GpuPrimitiveTopology
 {
     PointList = 0,
@@ -143,7 +143,7 @@ public enum GpuPrimitiveTopology
     PatchList = 10,
 }
 
-// Matches Silk.NET.Vulkan.CompareOp.
+// Matches the Vulkan enum VkCompareOp.
 public enum GpuCompareOp
 {
     Never = 0,
@@ -156,7 +156,7 @@ public enum GpuCompareOp
     Always = 7,
 }
 
-// Matches Silk.NET.Vulkan.StencilOp.
+// Matches the Vulkan enum VkStencilOp.
 public enum GpuStencilOp
 {
     Keep = 0,
@@ -169,7 +169,7 @@ public enum GpuStencilOp
     DecrementAndWrap = 7,
 }
 
-// Matches Silk.NET.Vulkan.ImageViewType.
+// Matches the Vulkan enum VkImageViewType.
 public enum GpuImageViewType
 {
     Type1D = 0,
@@ -181,7 +181,7 @@ public enum GpuImageViewType
     TypeCubeArray = 6,
 }
 
-// Matches Silk.NET.Vulkan.ComponentSwizzle.
+// Matches the Vulkan enum VkComponentSwizzle.
 public enum GpuComponentSwizzle
 {
     Identity = 0,

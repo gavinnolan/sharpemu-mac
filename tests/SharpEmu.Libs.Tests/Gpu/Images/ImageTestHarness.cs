@@ -6,6 +6,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using SharpEmu.HLE;
 using SharpEmu.HLE.Host;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
@@ -297,7 +298,7 @@ internal sealed unsafe class ImageTestHarness : IDisposable
                 copies.Add(new BufferImageCopy
                 {
                     BufferOffset = offset,
-                    ImageSubresource = new ImageSubresourceLayers(ViewFormatRules.FullAspects(description.PixelFormat) & ~ImageAspectFlags.StencilBit, level, volume ? 0 : z, 1),
+                    ImageSubresource = new ImageSubresourceLayers((ViewFormatRules.FullAspects(description.PixelFormat) & ~GpuImageAspect.StencilBit).ToVk(), level, volume ? 0 : z, 1),
                     ImageOffset = new Offset3D(0, 0, volume ? (int)z : 0),
                     ImageExtent = new Extent3D(width, height, 1),
                 });

@@ -4,6 +4,7 @@
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.HLE.Host;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Vulkan;
@@ -20,7 +21,7 @@ internal static class ImageCacheTestSupport
     public const GuestPageProtection ReadWrite = GuestPageProtection.Read | GuestPageProtection.Write;
 
     // A linear single-level image request: the texture role with a sampled view.
-    public static ImageRequest LinearRequest(ulong address, ulong size, Format format, GuestPixelFormat guestFormat, GuestImageType type, Extent3D extent, uint layers, uint bytesPerBlock, uint samples)
+    public static ImageRequest LinearRequest(ulong address, ulong size, GpuFormat format, GuestPixelFormat guestFormat, GuestImageType type, GpuExtent3D extent, uint layers, uint bytesPerBlock, uint samples)
     {
         var description = ImageDescription.Create();
         description.Data = new GuestSpan(address, size);
@@ -37,36 +38,36 @@ internal static class ImageCacheTestSupport
         var view = ImageViewDescription.Default with
         {
             Format = format,
-            Type = type == GuestImageType.Color3D ? ImageViewType.Type3D : layers > 1 ? ImageViewType.Type2DArray : ImageViewType.Type2D,
-            Aspect = ImageAspectFlags.ColorBit,
+            Type = type == GuestImageType.Color3D ? GpuImageViewType.Type3D : layers > 1 ? GpuImageViewType.Type2DArray : GpuImageViewType.Type2D,
+            Aspect = GpuImageAspect.ColorBit,
             LayerCount = layers,
-            Usage = ImageUsageFlags.SampledBit,
+            Usage = GpuImageUsage.SampledBit,
         };
         return new ImageRequest(description, view, ImageRole.Texture);
     }
 
     public static ImageRequest Color32(ulong address, uint width = 1) =>
-        LinearRequest(address, width * 4, Format.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D, new Extent3D(width, 1, 1), 1, 4, 1);
+        LinearRequest(address, width * 4, GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D, new GpuExtent3D(width, 1, 1), 1, 4, 1);
 
-    public static ImageRequest AsDepthTarget(ImageRequest request, Format format)
+    public static ImageRequest AsDepthTarget(ImageRequest request, GpuFormat format)
     {
         request.Role = ImageRole.DepthTarget;
         request.Description.PixelFormat = format;
-        request.View = request.View with { Format = format, Aspect = ImageAspectFlags.DepthBit, Usage = ImageUsageFlags.DepthStencilAttachmentBit };
+        request.View = request.View with { Format = format, Aspect = GpuImageAspect.DepthBit, Usage = GpuImageUsage.DepthStencilAttachmentBit };
         return request;
     }
 
     public static ImageRequest AsColorTarget(ImageRequest request)
     {
         request.Role = ImageRole.ColorTarget;
-        request.View = request.View with { Usage = ImageUsageFlags.ColorAttachmentBit };
+        request.View = request.View with { Usage = GpuImageUsage.ColorAttachmentBit };
         return request;
     }
 
     public static ImageRequest AsStorage(ImageRequest request)
     {
         request.Role = ImageRole.StorageImage;
-        request.View = request.View with { Usage = ImageUsageFlags.StorageBit };
+        request.View = request.View with { Usage = GpuImageUsage.StorageBit };
         return request;
     }
 
@@ -143,14 +144,14 @@ internal static class ImageCacheTestSupport
     public static uint ReadUInt32(this CacheHarness harness, ulong address) => BitConverter.ToUInt32(harness.Read(address, 4));
 
     // Reads the whole first level of every layer of an image through a download buffer.
-    public static byte[] ReadImageBytes(this CacheHarness harness, CachedImage image, ImageAspectFlags aspect = ImageAspectFlags.ColorBit) => harness.Worker.Run(() =>
+    public static byte[] ReadImageBytes(this CacheHarness harness, CachedImage image, GpuImageAspect aspect = GpuImageAspect.ColorBit) => harness.Worker.Run(() =>
     {
         var extent = image.Backing.Extent;
         var layers = image.Backing.ImageType == ImageType.Type3D ? 1u : image.Backing.Layers;
         var bytesPerTexel = image.Description.BytesPerBlock;
-        if (aspect == ImageAspectFlags.DepthBit)
+        if (aspect == GpuImageAspect.DepthBit)
         {
-            bytesPerTexel = DepthFormatRule.AspectTransferBytes(image.Backing.Format);
+            bytesPerTexel = DepthFormatRule.AspectTransferBytes(image.Backing.Format.ToNeutral());
         }
 
         var size = (ulong)extent.Width * extent.Height * extent.Depth * layers * bytesPerTexel;
@@ -158,7 +159,7 @@ internal static class ImageCacheTestSupport
         using var download = new GpuBuffer(harness.Vulkan.DeviceInfo, harness.Scheduler, GpuBufferUsage.Download, 0, GpuBuffer.AllFlags, aligned);
         var copy = new BufferImageCopy
         {
-            ImageSubresource = new ImageSubresourceLayers(aspect, 0, 0, layers),
+            ImageSubresource = new ImageSubresourceLayers(aspect.ToVk(), 0, 0, layers),
             ImageExtent = extent,
         };
         image.DownloadToBuffer(new[] { copy }, download.Handle, 0, aligned);

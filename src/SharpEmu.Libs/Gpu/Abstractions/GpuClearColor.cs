@@ -7,7 +7,7 @@ namespace SharpEmu.Libs.Gpu.Abstractions;
 
 // One clear colour in the format the target expects, as four floats, four signed or four
 // unsigned integers. The three readings overlap exactly as VkClearColorValue does, and the
-// member names match Silk.NET.Vulkan.ClearColorValue so the Vulkan backend copies the bits
+// member names match VkClearColorValue's so the Vulkan backend copies the bits
 // across unchanged.
 [StructLayout(LayoutKind.Explicit, Size = 16)]
 public struct GpuClearColor

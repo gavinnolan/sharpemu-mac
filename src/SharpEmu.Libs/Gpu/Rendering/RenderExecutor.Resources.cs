@@ -1,11 +1,11 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.VideoOut;
-using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
 
@@ -23,7 +23,7 @@ public sealed partial class RenderExecutor
         public readonly ulong RequestedSize => RequestedEnd - BaseAddress;
     }
 
-    private readonly record struct PreparedIndexBuffer(BufferBinding Binding, ulong Size, IndexType Type);
+    private readonly record struct PreparedIndexBuffer(BufferBinding Binding, ulong Size, GpuIndexType Type);
 
     // Merges the vertex ranges, obtains one host buffer per merged range and offsets every slot into it.
     private BufferBinding[] AcquireVertexBuffers(VertexInputInfo vertexInput)
@@ -201,7 +201,7 @@ public sealed partial class RenderExecutor
         RegisterBanks banks,
         in DrawCall draw,
         ref DrawState state,
-        PrimitiveTopology topology,
+        GpuPrimitiveTopology topology,
         in DrawEmission emission,
         in IndexSource indexSource,
         bool primitiveRestart,
@@ -286,7 +286,7 @@ public sealed partial class RenderExecutor
         }
 
         Span<IPreparedBindings> stages = pixelBindings is null ? [vertexBindings] : [vertexBindings, pixelBindings];
-        _host.CommitBindings(PipelineBindPoint.Graphics, in pipeline, stages);
+        _host.CommitBindings(GpuBindPoint.Graphics, in pipeline, stages);
         if (indexBuffer.Size != 0)
         {
             _host.BindIndexBuffer(indexBuffer.Binding, indexBuffer.Type);
@@ -304,7 +304,7 @@ public sealed partial class RenderExecutor
         }
 
         _host.BeginRendering(in state.Rendering);
-        _host.BindPipeline(PipelineBindPoint.Graphics, in pipeline);
+        _host.BindPipeline(GpuBindPoint.Graphics, in pipeline);
         if (setAutoDebug)
         {
             SetDrawDebugPhase(submitId, in draw, 0x500);
@@ -325,18 +325,18 @@ public sealed partial class RenderExecutor
             SetDrawDebugPhase(submitId, in draw, 0x600);
         }
 
-        var writeStages = PipelineStageFlags.None;
+        var writeStages = GpuPipelineStage.None;
         if (HasBufferWrites(vertexInput.Stage))
         {
-            writeStages |= PipelineStageFlags.VertexShaderBit;
+            writeStages |= GpuPipelineStage.VertexShaderBit;
         }
 
         if (state.PixelActive && HasBufferWrites(pixelInput.Stage))
         {
-            writeStages |= PipelineStageFlags.FragmentShaderBit;
+            writeStages |= GpuPipelineStage.FragmentShaderBit;
         }
 
-        if (writeStages != PipelineStageFlags.None)
+        if (writeStages != GpuPipelineStage.None)
         {
             _host.EndRendering();
             _host.ShaderWriteBarrier(writeStages);

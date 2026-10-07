@@ -4,13 +4,15 @@
 using System.Reflection;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
-using SharpEmu.Libs.Gpu;
-using SharpEmu.Libs.Gpu.GpuCommands;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Metal;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.Libs.Gpu.Vulkan;
+using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Tests.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using SharpEmu.ShaderCompiler;
@@ -169,7 +171,7 @@ public sealed class MetalRenderHostTests : IDisposable
             };
         }
 
-        public PipelineHandle CreateGraphicsPipeline(ReadOnlySpan<ColorTargetState> colors, in DepthAttachmentState depth, VertexInputInfo vertexInput, PixelInputInfo? pixelInput, ContextRegisters context, in RenderingState rendering, PrimitiveTopology topology, bool primitiveRestartEnabled, bool disableBlending, ShaderProgram vertexProgram, ShaderProgram pixelProgram)
+        public PipelineHandle CreateGraphicsPipeline(ReadOnlySpan<ColorTargetState> colors, in DepthAttachmentState depth, VertexInputInfo vertexInput, PixelInputInfo? pixelInput, ContextRegisters context, in RenderingState rendering, GpuPrimitiveTopology topology, bool primitiveRestartEnabled, bool disableBlending, ShaderProgram vertexProgram, ShaderProgram pixelProgram)
         {
             if (ReuseGraphicsPipeline && _graphicsPipeline is { } cached) return cached;
             var pipeline = host.CreateGraphicsPipeline(ShaderPipelineCache.BuildGraphicsDescription(

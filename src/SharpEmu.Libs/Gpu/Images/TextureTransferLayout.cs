@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Scheduling;
 using Silk.NET.Vulkan;
 
@@ -28,9 +29,9 @@ public struct TileTransfer
     public uint SurfaceZ;
 }
 
-public readonly record struct RenderTargetFormatInfo(Format HostFormat, uint BytesPerElement, ColorComponentMap ExportMapping);
+public readonly record struct RenderTargetFormatInfo(GpuFormat HostFormat, uint BytesPerElement, ColorComponentMap ExportMapping);
 
-public readonly record struct SurfaceFormatInfo(Format HostFormat, GuestPixelFormat ConversionFormat);
+public readonly record struct SurfaceFormatInfo(GpuFormat HostFormat, GuestPixelFormat ConversionFormat);
 
 public struct TransferMipLayout
 {
@@ -57,24 +58,24 @@ public sealed class TextureTransferLayout
         [ColorComponentMap.Agba, ColorComponentMap.Arbg, ColorComponentMap.Agbr, ColorComponentMap.Argb],
     ];
 
-    private static (Format Format, ColorComponentMap HostToStorage) RenderTargetHostFormat(GuestPixelFormat guestFormat, ChannelOrder order)
+    private static (GpuFormat Format, ColorComponentMap HostToStorage) RenderTargetHostFormat(GuestPixelFormat guestFormat, ChannelOrder order)
     {
         if (order == ChannelOrder.Alternate)
         {
             switch (guestFormat)
             {
-                case GuestPixelFormat.Bits8_8_8_8UNorm: return (Format.B8G8R8A8Unorm, ColorComponentMap.Bgra);
-                case GuestPixelFormat.Bits8_8_8_8SNorm: return (Format.B8G8R8A8SNorm, ColorComponentMap.Bgra);
-                case GuestPixelFormat.Bits8_8_8_8Srgb: return (Format.B8G8R8A8Srgb, ColorComponentMap.Bgra);
-                case GuestPixelFormat.Bits10_10_10_2UNorm: return (Format.A2R10G10B10UnormPack32, ColorComponentMap.Bgra);
+                case GuestPixelFormat.Bits8_8_8_8UNorm: return (GpuFormat.B8G8R8A8Unorm, ColorComponentMap.Bgra);
+                case GuestPixelFormat.Bits8_8_8_8SNorm: return (GpuFormat.B8G8R8A8SNorm, ColorComponentMap.Bgra);
+                case GuestPixelFormat.Bits8_8_8_8Srgb: return (GpuFormat.B8G8R8A8Srgb, ColorComponentMap.Bgra);
+                case GuestPixelFormat.Bits10_10_10_2UNorm: return (GpuFormat.A2R10G10B10UnormPack32, ColorComponentMap.Bgra);
             }
         }
 
         return guestFormat switch
         {
-            GuestPixelFormat.Bits5_5_5_1UNorm => (Format.A1R5G5B5UnormPack16, ColorComponentMap.Bgra),
-            GuestPixelFormat.Bits1_5_5_5UNorm => (Format.R5G5B5A1UnormPack16, ColorComponentMap.Abgr),
-            GuestPixelFormat.Bits4_4_4_4UNorm => (Format.R4G4B4A4UnormPack16, ColorComponentMap.Abgr),
+            GuestPixelFormat.Bits5_5_5_1UNorm => (GpuFormat.A1R5G5B5UnormPack16, ColorComponentMap.Bgra),
+            GuestPixelFormat.Bits1_5_5_5UNorm => (GpuFormat.R5G5B5A1UnormPack16, ColorComponentMap.Abgr),
+            GuestPixelFormat.Bits4_4_4_4UNorm => (GpuFormat.R4G4B4A4UnormPack16, ColorComponentMap.Abgr),
             _ => (GuestPixelFormats.HostFormat(guestFormat), ColorComponentMap.Identity),
         };
     }
@@ -86,7 +87,7 @@ public sealed class TextureTransferLayout
         {
             var host = RenderTargetHostFormat(encoding.Format, order);
             var bytes = GuestPixelFormats.RenderTargetBytesPerElement(encoding.Format);
-            if (host.Format != Format.Undefined && bytes != 0)
+            if (host.Format != GpuFormat.Undefined && bytes != 0)
             {
                 var orderMapping = RenderTargetColorMappings[(int)order][encoding.Components - 1];
                 return new RenderTargetFormatInfo(host.Format, bytes, host.HostToStorage.Then(orderMapping));
@@ -100,7 +101,7 @@ public sealed class TextureTransferLayout
     {
         var backingFormat = GuestPixelFormats.RemapTextureFormat(format);
         var hostFormat = GuestPixelFormats.HostFormat(backingFormat);
-        if (hostFormat == Format.Undefined)
+        if (hostFormat == GpuFormat.Undefined)
         {
             throw SubmissionScheduler.Fatal($"The guest texture format has no host format: format={(uint)format}.");
         }

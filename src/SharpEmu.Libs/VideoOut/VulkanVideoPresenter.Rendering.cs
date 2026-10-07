@@ -6,7 +6,7 @@ namespace SharpEmu.Libs.VideoOut;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
 using SharpEmu.ShaderCompiler;
-using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
@@ -14,6 +14,7 @@ using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Gpu.Vulkan;
+using SharpEmu.Libs.Gpu;
 using Silk.NET.Core;
 using Silk.NET.Core.Native;
 using Silk.NET.Vulkan;
@@ -291,11 +292,11 @@ internal static unsafe partial class VulkanVideoPresenter
             AcquireColorAttachment(attachment);
             return new ColorAttachmentAcquisition(
                 attachment.ImageIdentifier,
-                attachment.View,
-                attachment.Layout,
+                attachment.View.ToNeutral(),
+                attachment.Layout.ToNeutral(),
                 attachment.Image.Backing.Samples,
                 attachment.Clear,
-                attachment.ClearValue);
+                attachment.ClearValue.ToNeutral());
         }
 
         DepthAttachmentAcquisition IRenderHost.AcquireDepthAttachment(in DepthAttachmentState depth)
@@ -321,20 +322,20 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var image = _imageCache.GetImage(depth.Image);
-            return new DepthAttachmentAcquisition(view, image.Backing.Samples, metadataClear);
+            return new DepthAttachmentAcquisition(view.ToNeutral(), image.Backing.Samples, metadataClear);
         }
 
         // The image transition ends the scope only when it records a barrier.
-        public void TransitionDepthAttachment(in DepthAttachmentState depth, ImageLayout layout, ImageAspectFlags writeAspects)
+        public void TransitionDepthAttachment(in DepthAttachmentState depth, GpuImageLayout layout, GpuImageAspect writeAspects)
         {
             var command = BeginBatchedGuestCommands();
             var image = _imageCache.GetImage(depth.Image);
             var view = depth.Target.Target.Request.View;
             var access = AccessFlags.DepthStencilAttachmentReadBit | (writeAspects != 0 ? AccessFlags.DepthStencilAttachmentWriteBit : 0);
-            image.Transition(layout, access, new SubresourceRange(view.BaseLevel, view.LevelCount, view.BaseLayer, view.LayerCount), command);
+            image.Transition(layout.ToVk(), access, new SubresourceRange(view.BaseLevel, view.LevelCount, view.BaseLayer, view.LayerCount), command);
             _hasBoundDepth = true;
             _boundDepth = depth;
-            _boundDepthLayout = layout;
+            _boundDepthLayout = layout.ToVk();
             _boundDepthLoadState = depth.LoadState;
         }
 
@@ -384,8 +385,8 @@ internal static unsafe partial class VulkanVideoPresenter
             _vk.CmdBindVertexBuffers(command, 0, (uint)bindings.Length, buffers, offsets);
         }
 
-        public void BindIndexBuffer(BufferBinding binding, IndexType type) =>
-            _vk.CmdBindIndexBuffer(BeginBatchedGuestCommands(), new VkBuffer(binding.Handle), binding.Offset, type);
+        public void BindIndexBuffer(BufferBinding binding, GpuIndexType type) =>
+            _vk.CmdBindIndexBuffer(BeginBatchedGuestCommands(), new VkBuffer(binding.Handle), binding.Offset, type.ToVk());
 
         public IResourcePreparation BeginPreparation()
         {
@@ -429,7 +430,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var depthImage = _imageCache.GetImage(_boundDepth.Image);
             var attachmentView = _boundDepth.Target.Target.Request.View;
             var writes = _boundDepthLoadState.AttachmentWriteAspects(_boundDepth.Target.Target.Format);
-            if ((writes & ImageAspectFlags.StencilBit) == 0)
+            if ((writes & GpuImageAspect.StencilBit) == 0)
             {
                 return;
             }
@@ -446,7 +447,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 var storage = AcquireStencilStorage(binding, image, writeBack: false);
                 binding.CachedImage = storage;
                 binding.Image = storage.Backing.Handle;
-                binding.View = storage.GetOrCreateView(binding.Request.View with { Aspect = ImageAspectFlags.ColorBit });
+                binding.View = storage.GetOrCreateView(binding.Request.View with { Aspect = GpuImageAspect.ColorBit });
                 binding.MipViews = [];
             }
         }
@@ -462,7 +463,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 depthImage = _imageCache.GetImage(_boundDepth.Image);
                 var depthView = _boundDepth.Target.Target.Request.View;
-                depthFormat = _boundDepth.Target.Target.Format;
+                depthFormat = _boundDepth.Target.Target.Format.ToVk();
                 if (_boundDepthLoadState.DepthClearEnabled || _boundDepthLoadState.StencilClearEnabled)
                 {
                     foreach (var binding in bindings)
@@ -476,8 +477,8 @@ internal static unsafe partial class VulkanVideoPresenter
                         RecordSampledDepthClear(depthImage, depthView, depthFormat);
                         _boundDepthLoadState = _boundDepthLoadState with { DepthClearEnabled = false, StencilClearEnabled = false };
                         _depthClearRecordedSeparately = true;
-                        var remainingWrites = _boundDepthLoadState.AttachmentWriteAspects(depthFormat);
-                        _boundDepthLayout = _boundDepthLoadState.AttachmentLayout(depthFormat);
+                        var remainingWrites = _boundDepthLoadState.AttachmentWriteAspects(depthFormat.ToNeutral());
+                        _boundDepthLayout = _boundDepthLoadState.AttachmentLayout(depthFormat.ToNeutral()).ToVk();
                         depthImage.Transition(
                             _boundDepthLayout,
                             AccessFlags.DepthStencilAttachmentReadBit | (remainingWrites != 0 ? AccessFlags.DepthStencilAttachmentWriteBit : 0),
@@ -514,10 +515,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 else if (depthImage is not null && ReferenceEquals(image, depthImage))
                 {
                     var sampledAspects = ViewFormatRules.IsStencilViewFormat(view.Format) ? ImageAspectFlags.StencilBit : ImageAspectFlags.DepthBit;
-                    var writes = _boundDepthLoadState.AttachmentWriteAspects(depthFormat);
+                    var writes = _boundDepthLoadState.AttachmentWriteAspects(depthFormat.ToNeutral());
                     var attachmentView = _boundDepth.Target.Target.Request.View;
                     var overlaps = ViewsOverlap(view, attachmentView);
-                    if (overlaps && (sampledAspects & writes) != 0)
+                    if (overlaps && (sampledAspects & writes.ToVk()) != 0)
                     {
                         throw SubmissionScheduler.Fatal(
                             "A draw cannot sample and write the same depth or stencil aspect without feedback-loop support: " +
@@ -628,7 +629,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             var aspects = (_boundDepthLoadState.DepthClearEnabled ? ImageAspectFlags.DepthBit : 0) |
                 (_boundDepthLoadState.StencilClearEnabled ? ImageAspectFlags.StencilBit : 0);
-            aspects &= ViewFormatRules.DepthAspects(format);
+            aspects &= ViewFormatRules.DepthAspects(format.ToNeutral()).ToVk();
             if (aspects == 0)
             {
                 return;
@@ -658,7 +659,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _vk.CmdSetBlendConstants(command, blendConstants);
             _vk.CmdSetDepthTestEnable(command, state.DepthTestEnabled);
             _vk.CmdSetDepthWriteEnable(command, state.DepthWriteEnabled);
-            _vk.CmdSetDepthCompareOp(command, state.DepthCompare);
+            _vk.CmdSetDepthCompareOp(command, state.DepthCompare.ToVk());
             _vk.CmdSetDepthBiasEnable(command, state.DepthBiasEnabled);
             if (state.DepthBiasEnabled)
             {
@@ -804,8 +805,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 colors[index] = new RenderingAttachmentInfo
                 {
                     SType = StructureType.RenderingAttachmentInfo,
-                    ImageView = attachment.View,
-                    ImageLayout = attachment.Layout,
+                    ImageView = attachment.View.ToVk(),
+                    ImageLayout = attachment.Layout.ToVk(),
                     LoadOp = attachment.IsClear ? AttachmentLoadOp.Clear : AttachmentLoadOp.Load,
                     StoreOp = AttachmentStoreOp.Store,
                     ClearValue = new ClearValue
@@ -827,7 +828,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var stencilClear = depthStencil.StencilClear;
             if (_depthClearRecordedSeparately)
             {
-                depthLayout = _boundDepthLayout;
+                depthLayout = _boundDepthLayout.ToNeutral();
                 depthClear = false;
                 stencilClear = false;
             }
@@ -835,8 +836,8 @@ internal static unsafe partial class VulkanVideoPresenter
             var depth = new RenderingAttachmentInfo
             {
                 SType = StructureType.RenderingAttachmentInfo,
-                ImageView = depthStencil.View,
-                ImageLayout = depthLayout,
+                ImageView = depthStencil.View.ToVk(),
+                ImageLayout = depthLayout.ToVk(),
                 LoadOp = depthClear ? AttachmentLoadOp.Clear : AttachmentLoadOp.Load,
                 StoreOp = AttachmentStoreOp.Store,
                 ClearValue = new ClearValue { DepthStencil = new ClearDepthStencilValue(BitConverter.UInt32BitsToSingle(depthStencil.ClearWord0), 0) },
@@ -844,8 +845,8 @@ internal static unsafe partial class VulkanVideoPresenter
             var stencil = new RenderingAttachmentInfo
             {
                 SType = StructureType.RenderingAttachmentInfo,
-                ImageView = depthStencil.View,
-                ImageLayout = depthLayout,
+                ImageView = depthStencil.View.ToVk(),
+                ImageLayout = depthLayout.ToVk(),
                 LoadOp = stencilClear ? AttachmentLoadOp.Clear : AttachmentLoadOp.Load,
                 StoreOp = AttachmentStoreOp.Store,
                 ClearValue = new ClearValue { DepthStencil = new ClearDepthStencilValue(0f, depthStencil.ClearWord1) },
@@ -908,22 +909,22 @@ internal static unsafe partial class VulkanVideoPresenter
             _nextDrawWritesMemory = true;
         }
 
-        public void BindPipeline(PipelineBindPoint bindPoint, in PipelineHandle pipeline)
+        public void BindPipeline(GpuBindPoint bindPoint, in PipelineHandle pipeline)
         {
             var entry = RequirePipelineEntry(in pipeline);
             var command = BeginBatchedGuestCommands();
-            if (bindPoint == PipelineBindPoint.Graphics)
+            if (bindPoint == GpuBindPoint.Graphics)
             {
                 _boundGraphicsPipeline = entry;
                 if (!entry.RectangleList)
                 {
-                    _vk.CmdBindPipeline(command, bindPoint, entry.Pipeline);
+                    _vk.CmdBindPipeline(command, bindPoint.ToVk(), entry.Pipeline);
                 }
 
                 return;
             }
 
-            _vk.CmdBindPipeline(command, bindPoint, entry.Pipeline);
+            _vk.CmdBindPipeline(command, bindPoint.ToVk(), entry.Pipeline);
             _profileComputePipeline = entry.Id;
         }
 
@@ -1087,9 +1088,9 @@ internal static unsafe partial class VulkanVideoPresenter
             VulkanSynchronization.PipelineBarrier(_vk,command, sourceStages, destinationStages, 0, 1, &barrier, 0, null, 0, null);
         }
 
-        public void ShaderWriteBarrier(PipelineStageFlags sourceStages) =>
+        public void ShaderWriteBarrier(GpuPipelineStage sourceStages) =>
             RecordMemoryBarrier(
-                sourceStages,
+                sourceStages.ToVk(),
                 PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.VertexInputBit | PipelineStageFlags.VertexShaderBit |
                 PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.TransferBit | PipelineStageFlags.ColorAttachmentOutputBit,
                 AccessFlags.ShaderWriteBit,
@@ -1164,14 +1165,14 @@ internal static unsafe partial class VulkanVideoPresenter
             _ = BeginBatchedGuestCommands();
         }
 
-        public void CopyDepthStencilImage(ResourceSlotIdentifier source, ResourceSlotIdentifier destination, in SubresourceRange range, in Extent3D extent, ImageAspectFlags aspects)
+        public void CopyDepthStencilImage(ResourceSlotIdentifier source, ResourceSlotIdentifier destination, in SubresourceRange range, in GpuExtent3D extent, GpuImageAspect aspects)
         {
             EndRendering();
             _imageCache.RefreshImage(source);
             _imageCache.RefreshImage(destination);
             var sourceImage = _imageCache.GetImage(source);
             var destinationImage = _imageCache.GetImage(destination);
-            destinationImage.CopyDepthStencilFrom(sourceImage, in range, in extent, aspects);
+            destinationImage.CopyDepthStencilFrom(sourceImage, in range, extent.ToVk(), aspects.ToVk());
             _ = BeginBatchedGuestCommands();
         }
 

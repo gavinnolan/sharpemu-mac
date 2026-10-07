@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Scheduling;
-using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Images;
 
@@ -12,14 +12,14 @@ public readonly record struct ColorTargetResolution(
     ImageRequest Request,
     ulong BaseAddress,
     ulong BackingSize,
-    Extent2D Extent,
+    GpuExtent2D Extent,
     uint BaseMipLevel,
     uint BaseArrayLayer,
     uint Samples,
     ColorComponentMap ExportMapping,
     bool MetadataClearSupported,
     bool MetadataFixedClearSupported,
-    ClearColorValue ColorClearValue);
+    GpuClearColor ColorClearValue);
 
 // One layer window of a target view; the whole image has LastLayer + 1 layers.
 public readonly record struct TargetViewRange(uint BaseLayer, uint LayerCount, uint ImageLayers)
@@ -44,21 +44,21 @@ public static partial class ImageRequestBuilders
     public static uint SampleCount(uint encodedLog2) => encodedLog2 <= 3 ? 1u << (int)encodedLog2 : 0;
 
     // DCC clears use the target's packed clear word; the fixed-clear set is a format allow-list.
-    private static (bool Supported, bool FixedSupported, ClearColorValue Value) DccClearInfo(Format format, bool hasDcc, uint packedClear)
+    private static (bool Supported, bool FixedSupported, GpuClearColor Value) DccClearInfo(GpuFormat format, bool hasDcc, uint packedClear)
     {
-        ClearColorValue value = default;
+        GpuClearColor value = default;
         var supported = hasDcc && PackedClearValue.TryDecodeColor(format, packedClear, out value);
         var fixedSupported = hasDcc && SupportsDccFixedClear(format);
         return (supported, fixedSupported, supported ? value : default);
     }
 
-    public static bool SupportsDccFixedClear(Format format) => format switch
+    public static bool SupportsDccFixedClear(GpuFormat format) => format switch
     {
-        Format.R8Unorm or Format.R8G8Unorm or Format.R8G8B8A8Unorm or Format.R8G8B8A8Srgb or Format.B8G8R8A8Unorm or Format.B8G8R8A8Srgb or
-        Format.A2B10G10R10UnormPack32 or Format.A2R10G10B10UnormPack32 or Format.R5G6B5UnormPack16 or Format.A1R5G5B5UnormPack16 or
-        Format.R4G4B4A4UnormPack16 or Format.R16Unorm or Format.R16G16Unorm or Format.R16G16B16A16Unorm or Format.R16Sfloat or
-        Format.R16G16Sfloat or Format.R16G16B16A16Sfloat or Format.R32Sfloat or Format.R32G32Sfloat or Format.R32G32B32A32Sfloat or
-        Format.B10G11R11UfloatPack32 => true,
+        GpuFormat.R8Unorm or GpuFormat.R8G8Unorm or GpuFormat.R8G8B8A8Unorm or GpuFormat.R8G8B8A8Srgb or GpuFormat.B8G8R8A8Unorm or GpuFormat.B8G8R8A8Srgb or
+        GpuFormat.A2B10G10R10UnormPack32 or GpuFormat.A2R10G10B10UnormPack32 or GpuFormat.R5G6B5UnormPack16 or GpuFormat.A1R5G5B5UnormPack16 or
+        GpuFormat.R4G4B4A4UnormPack16 or GpuFormat.R16Unorm or GpuFormat.R16G16Unorm or GpuFormat.R16G16B16A16Unorm or GpuFormat.R16Sfloat or
+        GpuFormat.R16G16Sfloat or GpuFormat.R16G16B16A16Sfloat or GpuFormat.R32Sfloat or GpuFormat.R32G32Sfloat or GpuFormat.R32G32B32A32Sfloat or
+        GpuFormat.B10G11R11UfloatPack32 => true,
         _ => false,
     };
 
@@ -295,7 +295,7 @@ public static partial class ImageRequestBuilders
             throw SubmissionScheduler.Fatal($"The render-target backing range is invalid: address=0x{words.BaseAddress:X16} size=0x{backingSize:X}.");
         }
 
-        var viewExtent = new Extent2D(Math.Max(width >> (int)words.MipLevel, 1), Math.Max(height >> (int)words.MipLevel, 1));
+        var viewExtent = new GpuExtent2D(Math.Max(width >> (int)words.MipLevel, 1), Math.Max(height >> (int)words.MipLevel, 1));
         var viewDepth = Math.Max(depth >> (int)words.MipLevel, 1);
         if (volume && view.BaseLayer < viewDepth && view.LayerCount > viewDepth - view.BaseLayer)
         {
@@ -314,7 +314,7 @@ public static partial class ImageRequestBuilders
         description.PixelFormat = targetFormat.HostFormat;
         description.GuestFormat = transferFormat;
         description.Type = imageType;
-        description.Extent = new Extent3D(width, height, depth);
+        description.Extent = new GpuExtent3D(width, height, depth);
         description.Resources = new SubresourceCount(levels, volume ? 1 : view.ImageLayers);
         description.Pitch = pitch;
         description.BytesPerBlock = bytesPerElement;
@@ -344,10 +344,10 @@ public static partial class ImageRequestBuilders
         }
 
         var viewType = is1D
-            ? view.LayerCount == 1 ? ImageViewType.Type1D : ImageViewType.Type1DArray
-            : view.LayerCount == 1 ? ImageViewType.Type2D : ImageViewType.Type2DArray;
+            ? view.LayerCount == 1 ? GpuImageViewType.Type1D : GpuImageViewType.Type1DArray
+            : view.LayerCount == 1 ? GpuImageViewType.Type2D : GpuImageViewType.Type2DArray;
         var viewDescription = new ImageViewDescription(
-            targetFormat.HostFormat, viewType, ImageAspectFlags.ColorBit, words.MipLevel, 1, view.BaseLayer, view.LayerCount, default, ImageUsageFlags.ColorAttachmentBit);
+            targetFormat.HostFormat, viewType, GpuImageAspect.ColorBit, words.MipLevel, 1, view.BaseLayer, view.LayerCount, default, GpuImageUsage.ColorAttachmentBit);
         var request = new ImageRequest(description, viewDescription, ImageRole.ColorTarget);
         var (clearSupported, fixedClearSupported, clearValue) = DccClearInfo(targetFormat.HostFormat, hasDcc, words.ClearWord0);
         return new ColorTargetResolution(

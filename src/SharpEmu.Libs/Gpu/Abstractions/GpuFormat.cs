@@ -5,11 +5,11 @@ namespace SharpEmu.Libs.Gpu.Abstractions;
 
 // The host pixel formats the shared GPU engine names, free of any graphics API type.
 //
-// Every member carries the numeric value of the identically named Silk.NET.Vulkan.Format
-// member, so the Vulkan backend converts with a plain cast and the recorded Vulkan stream
-// stays byte-for-byte what it was before the neutral vocabulary was introduced. The
-// GpuFormatVulkanParityTests architecture test keeps the two in step; only the members the
-// engine actually names are listed.
+// Every member carries the numeric value of the identically named VkFormat enumerant, so
+// the Vulkan backend converts with a plain cast and the recorded Vulkan stream stays
+// byte-for-byte what it was before the neutral vocabulary was introduced. The
+// NeutralGpuVocabularyParityTests architecture test keeps the two in step; only the members
+// the engine actually names are listed.
 public enum GpuFormat
 {
     Undefined = 0,

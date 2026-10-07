@@ -1,9 +1,9 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
-using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
 
@@ -70,7 +70,7 @@ public interface IShaderPipelineProvider
         PixelInputInfo? pixelInput,
         ContextRegisters context,
         in RenderingState rendering,
-        PrimitiveTopology topology,
+        GpuPrimitiveTopology topology,
         bool primitiveRestartEnabled,
         bool disableBlending,
         ShaderProgram vertexProgram,

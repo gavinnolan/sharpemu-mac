@@ -4,8 +4,10 @@
 using System.IO.Hashing;
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.Gpu.Vulkan;
 using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Images;
@@ -95,14 +97,14 @@ public sealed unsafe partial class CachedImage : IDisposable
         Description = description;
         Description.Validate();
         _cpuDirty = !ImageDescription.IsEmptyRange(Description.Data) && Description.Metadata.Compression == DisplayCompression.Uncompressed;
-        if (Description.PixelFormat == Format.Undefined)
+        if (Description.PixelFormat == GpuFormat.Undefined)
         {
             return;
         }
 
-        Backing.Format = Description.PixelFormat;
+        Backing.Format = Description.PixelFormat.ToVk();
         Backing.ImageType = HostImageType(Description.Type);
-        Backing.Extent = Description.Extent;
+        Backing.Extent = Description.Extent.ToVk();
         Backing.GuestPitch = Description.Pitch;
         Backing.Layers = Description.IsVolume ? 1 : Description.Resources.Layers;
         Backing.MipLevels = Description.Resources.Levels;
@@ -123,7 +125,7 @@ public sealed unsafe partial class CachedImage : IDisposable
             InitialLayout = Backing.State.Layout,
             Usage = Backing.Usage,
             SharingMode = SharingMode.Exclusive,
-            Samples = ImageDescription.VulkanSampleCount(Backing.Samples),
+            Samples = ImageDescription.VulkanSampleCount(Backing.Samples).ToVk(),
         };
         if (!TrySelectSupportedImageConfiguration(device, ref create, allowCompressedImageFallback: OperatingSystem.IsMacOS()))
         {
@@ -201,8 +203,8 @@ public sealed unsafe partial class CachedImage : IDisposable
     internal static bool TrySelectSupportedImageConfiguration(IImageFormatSupport device, ref ImageCreateInfo configuration, bool allowCompressedImageFallback)
     {
         static bool SupportsImageConfiguration(IImageFormatSupport device, in ImageCreateInfo configuration) =>
-            device.TryGetImageFormatProperties(configuration.Format, configuration.ImageType, configuration.Tiling, configuration.Usage, configuration.Flags, out var properties) &&
-            (properties.SampleCounts & configuration.Samples) != 0;
+            device.TryGetImageFormatProperties(configuration.Format.ToNeutral(), configuration.ImageType.ToNeutral(), configuration.Tiling.ToNeutral(), configuration.Usage.ToNeutral(), configuration.Flags.ToNeutral(), out var properties) &&
+            (properties.SampleCounts & configuration.Samples.ToNeutral()) != 0;
 
         if (SupportsImageConfiguration(device, configuration))
         {
@@ -254,7 +256,7 @@ public sealed unsafe partial class CachedImage : IDisposable
     private static ImageCreateFlags CreateFlags(in ImageDescription description)
     {
         ImageCreateFlags flags = 0;
-        if (DepthFormatRule.AspectTransferFormat(description.PixelFormat) == Format.Undefined)
+        if (DepthFormatRule.AspectTransferFormat(description.PixelFormat) == GpuFormat.Undefined)
         {
             flags |= ImageCreateFlags.CreateMutableFormatBit | ImageCreateFlags.CreateExtendedUsageBit;
             if (GuestPixelFormats.BlockCompressedBytes(description.GuestFormat) != 0)
@@ -282,14 +284,14 @@ public sealed unsafe partial class CachedImage : IDisposable
 
     private static ImageUsageFlags UsageFlags(GpuDeviceInfo device, in ImageDescription description)
     {
-        var features = device.GetFormatProperties(description.PixelFormat).OptimalTilingFeatures;
+        var features = device.GetFormatProperties(description.PixelFormat.ToVk()).OptimalTilingFeatures;
         var usage = ImageUsageFlags.TransferSrcBit | ImageUsageFlags.TransferDstBit;
         if ((features & FormatFeatureFlags.SampledImageBit) != 0)
         {
             usage |= ImageUsageFlags.SampledBit;
         }
 
-        if (DepthFormatRule.AspectTransferFormat(description.PixelFormat) != Format.Undefined)
+        if (DepthFormatRule.AspectTransferFormat(description.PixelFormat) != GpuFormat.Undefined)
         {
             return usage | ImageUsageFlags.DepthStencilAttachmentBit;
         }
@@ -306,12 +308,12 @@ public sealed unsafe partial class CachedImage : IDisposable
         var storageFormat = GuestPixelFormats.BlockCompressedBytes(description.GuestFormat) != 0
             ? ViewFormatRules.BlockBytes(description.PixelFormat) switch
             {
-                8 => Format.R32G32Uint,
-                16 => Format.R32G32B32A32Uint,
-                _ => Format.Undefined,
+                8 => GpuFormat.R32G32Uint,
+                16 => GpuFormat.R32G32B32A32Uint,
+                _ => GpuFormat.Undefined,
             }
             : ViewFormatRules.SrgbStorageFormat(description.PixelFormat);
-        var storageFeatures = storageFormat == Format.Undefined ? features : device.GetFormatProperties(storageFormat).OptimalTilingFeatures;
+        var storageFeatures = storageFormat == GpuFormat.Undefined ? features : device.GetFormatProperties(storageFormat.ToVk()).OptimalTilingFeatures;
         if (description.Samples == 1 && (storageFeatures & FormatFeatureFlags.StorageImageBit) != 0)
         {
             usage |= ImageUsageFlags.StorageBit;
@@ -483,27 +485,27 @@ public sealed unsafe partial class CachedImage : IDisposable
         switch (image.ImageType)
         {
             case ImageType.Type1D:
-                if (view.Type is not (ImageViewType.Type1D or ImageViewType.Type1DArray))
+                if (view.Type is not (GpuImageViewType.Type1D or GpuImageViewType.Type1DArray))
                 {
                     return false;
                 }
 
-                return view.Type != ImageViewType.Type1D || view.LayerCount == 1;
+                return view.Type != GpuImageViewType.Type1D || view.LayerCount == 1;
             case ImageType.Type2D:
                 return view.Type switch
                 {
-                    ImageViewType.Type2D => view.LayerCount == 1,
-                    ImageViewType.Type2DArray => true,
-                    ImageViewType.TypeCube => (image.Flags & ImageCreateFlags.CreateCubeCompatibleBit) != 0 && view.BaseLayer % 6 == 0 && view.LayerCount == 6,
-                    ImageViewType.TypeCubeArray => (image.Flags & ImageCreateFlags.CreateCubeCompatibleBit) != 0 && view.BaseLayer % 6 == 0 && view.LayerCount % 6 == 0,
+                    GpuImageViewType.Type2D => view.LayerCount == 1,
+                    GpuImageViewType.Type2DArray => true,
+                    GpuImageViewType.TypeCube => (image.Flags & ImageCreateFlags.CreateCubeCompatibleBit) != 0 && view.BaseLayer % 6 == 0 && view.LayerCount == 6,
+                    GpuImageViewType.TypeCubeArray => (image.Flags & ImageCreateFlags.CreateCubeCompatibleBit) != 0 && view.BaseLayer % 6 == 0 && view.LayerCount % 6 == 0,
                     _ => false,
                 };
             case ImageType.Type3D:
                 return view.Type switch
                 {
-                    ImageViewType.Type3D => view.BaseLayer == 0 && view.LayerCount == 1,
-                    ImageViewType.Type2D => (image.Flags & ImageCreateFlags.Create2DArrayCompatibleBit) != 0 && view.LevelCount == 1 && view.LayerCount == 1,
-                    ImageViewType.Type2DArray => (image.Flags & ImageCreateFlags.Create2DArrayCompatibleBit) != 0 && view.LevelCount == 1,
+                    GpuImageViewType.Type3D => view.BaseLayer == 0 && view.LayerCount == 1,
+                    GpuImageViewType.Type2D => (image.Flags & ImageCreateFlags.Create2DArrayCompatibleBit) != 0 && view.LevelCount == 1 && view.LayerCount == 1,
+                    GpuImageViewType.Type2DArray => (image.Flags & ImageCreateFlags.Create2DArrayCompatibleBit) != 0 && view.LevelCount == 1,
                     _ => false,
                 };
             default:
@@ -513,13 +515,13 @@ public sealed unsafe partial class CachedImage : IDisposable
 
     private static bool IsValidAspect(ImageBacking image, ImageAspectFlags aspect)
     {
-        if (DepthFormatRule.AspectTransferFormat(image.Format) == Format.Undefined)
+        if (DepthFormatRule.AspectTransferFormat(image.Format.ToNeutral()) == GpuFormat.Undefined)
         {
             return aspect == ImageAspectFlags.ColorBit;
         }
 
-        var supported = ViewFormatRules.DepthAspects(image.Format);
-        return aspect != 0 && (aspect & ~supported) == 0;
+        var supported = ViewFormatRules.DepthAspects(image.Format.ToNeutral());
+        return aspect != 0 && (aspect & ~supported.ToVk()) == 0;
     }
 
     // Returns the cached view for the normalized description, creating it on first use.
@@ -527,29 +529,29 @@ public sealed unsafe partial class CachedImage : IDisposable
     {
         var image = Backing;
         var normalized = requested;
-        var isStorage = (normalized.Usage & ImageUsageFlags.StorageBit) != 0;
-        var imageAspect = ViewFormatRules.FullAspects(image.Format);
-        if ((imageAspect & ImageAspectFlags.DepthBit) != 0 && ViewFormatRules.IsDepthCompatible(normalized.Format))
+        var isStorage = (normalized.Usage & GpuImageUsage.StorageBit) != 0;
+        var imageAspect = ViewFormatRules.FullAspects(image.Format.ToNeutral());
+        if ((imageAspect & GpuImageAspect.DepthBit) != 0 && ViewFormatRules.IsDepthCompatible(normalized.Format))
         {
-            normalized = normalized with { Format = image.Format, Aspect = ImageAspectFlags.DepthBit };
+            normalized = normalized with { Format = image.Format.ToNeutral(), Aspect = GpuImageAspect.DepthBit };
         }
 
-        if ((imageAspect & ImageAspectFlags.StencilBit) != 0 && ViewFormatRules.IsStencilViewFormat(normalized.Format))
+        if ((imageAspect & GpuImageAspect.StencilBit) != 0 && ViewFormatRules.IsStencilViewFormat(normalized.Format))
         {
-            normalized = normalized with { Format = image.Format, Aspect = ImageAspectFlags.StencilBit };
+            normalized = normalized with { Format = image.Format.ToNeutral(), Aspect = GpuImageAspect.StencilBit };
         }
 
-        normalized = normalized with { Usage = isStorage ? ImageUsageFlags.StorageBit : 0 };
-        var formatCompatible = normalized.Format != Format.Undefined && ViewFormatRules.AreImageViewFormatsCompatible(image.Format, normalized.Format, image.Flags);
+        normalized = normalized with { Usage = isStorage ? GpuImageUsage.StorageBit : 0 };
+        var formatCompatible = normalized.Format != GpuFormat.Undefined && ViewFormatRules.AreImageViewFormatsCompatible(image.Format.ToNeutral(), normalized.Format, image.Flags.ToNeutral());
         var usageValid = !isStorage || (image.Usage & ImageUsageFlags.StorageBit) != 0;
-        var sliceView = image.ImageType == ImageType.Type3D && normalized.Type is ImageViewType.Type2D or ImageViewType.Type2DArray;
+        var sliceView = image.ImageType == ImageType.Type3D && normalized.Type is GpuImageViewType.Type2D or GpuImageViewType.Type2DArray;
         var levelsValid = normalized.LevelCount != 0 && normalized.BaseLevel < image.MipLevels && normalized.LevelCount <= image.MipLevels - normalized.BaseLevel;
         var viewLayers = sliceView && levelsValid ? Math.Max(image.Extent.Depth >> (int)normalized.BaseLevel, 1) : image.Layers;
         var rangesValid = levelsValid && normalized.LayerCount != 0 && normalized.BaseLayer < viewLayers && normalized.LayerCount <= viewLayers - normalized.BaseLayer;
         var mappingValid = ViewFormatRules.IsComponentSwizzle(normalized.Mapping.R) && ViewFormatRules.IsComponentSwizzle(normalized.Mapping.G) &&
                            ViewFormatRules.IsComponentSwizzle(normalized.Mapping.B) && ViewFormatRules.IsComponentSwizzle(normalized.Mapping.A);
         var typeValid = IsValidViewType(image, normalized);
-        var aspectValid = IsValidAspect(image, normalized.Aspect);
+        var aspectValid = IsValidAspect(image, normalized.Aspect.ToVk());
         if (!image.Exists || !formatCompatible || !usageValid || !rangesValid || !mappingValid || !typeValid || !aspectValid)
         {
             throw SubmissionScheduler.Fatal(
@@ -584,10 +586,10 @@ public sealed unsafe partial class CachedImage : IDisposable
             SType = StructureType.ImageViewCreateInfo,
             PNext = &usage,
             Image = image.Handle,
-            ViewType = normalized.Type,
-            Format = normalized.Format,
-            Components = normalized.Mapping,
-            SubresourceRange = new ImageSubresourceRange(normalized.Aspect, normalized.BaseLevel, normalized.LevelCount, normalized.BaseLayer, normalized.LayerCount),
+            ViewType = normalized.Type.ToVk(),
+            Format = normalized.Format.ToVk(),
+            Components = normalized.Mapping.ToVk(),
+            SubresourceRange = new ImageSubresourceRange(normalized.Aspect.ToVk(), normalized.BaseLevel, normalized.LevelCount, normalized.BaseLayer, normalized.LayerCount),
         };
         var result = _device.Vk.CreateImageView(_device.Device, &create, null, out var view);
         if (result != Result.Success || view.Handle == 0)

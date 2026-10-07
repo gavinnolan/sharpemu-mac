@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
+using SharpEmu.Libs.Gpu.Vulkan;
 using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Buffers;
@@ -86,7 +88,7 @@ public sealed unsafe class GpuDeviceInfo : IImageFormatSupport
         return properties;
     }
 
-    public bool TryGetImageFormatProperties(Format format, ImageType type, ImageTiling tiling, ImageUsageFlags usage, ImageCreateFlags flags, out ImageFormatProperties properties)
+    public bool TryGetVkImageFormatProperties(Format format, ImageType type, ImageTiling tiling, ImageUsageFlags usage, ImageCreateFlags flags, out ImageFormatProperties properties)
     {
         var key = (format, type, tiling, usage, flags);
         if (!_imageFormatProperties.TryGetValue(key, out var entry))
@@ -98,6 +100,22 @@ public sealed unsafe class GpuDeviceInfo : IImageFormatSupport
 
         properties = entry.Properties;
         return entry.Result == Result.Success;
+    }
+
+    // The engine asks in the neutral vocabulary; every neutral enum shares its Vulkan value,
+    // so the query itself is unchanged.
+    public bool TryGetImageFormatProperties(
+        GpuFormat format,
+        GpuImageType type,
+        GpuImageTiling tiling,
+        GpuImageUsage usage,
+        GpuImageCreateFlags flags,
+        out GpuImageFormatProperties properties)
+    {
+        var supported = TryGetVkImageFormatProperties(
+            format.ToVk(), type.ToVk(), tiling.ToVk(), usage.ToVk(), flags.ToVk(), out var found);
+        properties = found.ToNeutral();
+        return supported;
     }
 
     // Every device-memory allocation goes through here so the live count stays exact.

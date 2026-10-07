@@ -5,11 +5,13 @@ namespace SharpEmu.Libs.VideoOut;
 
 using SharpEmu.HLE.GpuMemory;
 using System.Diagnostics;
-using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.Gpu.Vulkan;
+using SharpEmu.Libs.Gpu;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
@@ -52,7 +54,7 @@ internal static unsafe partial class VulkanVideoPresenter
             public ulong ProfilePixelHash;
             public ulong ProfileComputeHash;
 
-            public bool RectangleList => Description is { StaticParameters.Topology: PrimitiveTopology.PatchList };
+            public bool RectangleList => Description is { StaticParameters.Topology: GpuPrimitiveTopology.PatchList };
         }
 
         private readonly Dictionary<ulong, ShaderModule> _shaderModules = new();
@@ -94,7 +96,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         RenderHostLimits IShaderPipelineHost.Limits => _renderHostLimits;
 
-        SampleCountFlags IShaderPipelineHost.NoAttachmentSampleCounts => _noAttachmentSampleCounts;
+        GpuSampleCount IShaderPipelineHost.NoAttachmentSampleCounts => _noAttachmentSampleCounts.ToNeutral();
 
         // A range the GPU wrote is downloaded first, so the word is what the guest CPU would read.
         public bool TryReadGuestWord(ulong address, out uint word)
@@ -594,7 +596,7 @@ internal static unsafe partial class VulkanVideoPresenter
             // Rectangle draws bind a native fill or compatibility variant at draw time.
             if (!entry.RectangleList)
             {
-                entry.Pipeline = CreateRenderPipeline(description, description.StaticParameters.Topology, entry.Layout);
+                entry.Pipeline = CreateRenderPipeline(description, description.StaticParameters.Topology.ToVk(), entry.Layout);
             }
 
             return RegisterPipeline(entry);
@@ -602,10 +604,10 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private static StencilOpState ToVkStencilOpState(in StencilOperations operations) => new()
         {
-            FailOp = operations.FailOperation,
-            PassOp = operations.PassOperation,
-            DepthFailOp = operations.DepthFailOperation,
-            CompareOp = operations.Compare,
+            FailOp = operations.FailOperation.ToVk(),
+            PassOp = operations.PassOperation.ToVk(),
+            DepthFailOp = operations.DepthFailOperation.ToVk(),
+            CompareOp = operations.Compare.ToVk(),
         };
 
         // The host format of each attribute, narrowed to the components the program fetches.
@@ -849,7 +851,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     {
                         SType = StructureType.PipelineMultisampleStateCreateInfo,
                         SampleShadingEnable = parameters.SampleShadingEnable,
-                        RasterizationSamples = ImageDescription.VulkanSampleCount(parameters.Samples),
+                        RasterizationSamples = ImageDescription.VulkanSampleCount(parameters.Samples).ToVk(),
                         MinSampleShading = 1f,
                     };
                     var colorBlend = new PipelineColorBlendStateCreateInfo
@@ -900,8 +902,8 @@ internal static unsafe partial class VulkanVideoPresenter
                         SType = StructureType.PipelineRenderingCreateInfo,
                         ColorAttachmentCount = (uint)colorCount,
                         PColorAttachmentFormats = colorCount == 0 ? null : colorFormatPointer,
-                        DepthAttachmentFormat = rendering.DepthFormat,
-                        StencilAttachmentFormat = rendering.StencilFormat,
+                        DepthAttachmentFormat = rendering.DepthFormat.ToVk(),
+                        StencilAttachmentFormat = rendering.StencilFormat.ToVk(),
                     };
                     var pipelineInfo = new GraphicsPipelineCreateInfo
                     {

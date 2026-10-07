@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
@@ -12,7 +13,6 @@ using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Metal;
 using SharpEmu.ShaderCompiler.Resources;
-using Silk.NET.Vulkan;
 using ImageResourceClass = SharpEmu.ShaderCompiler.Resources.ImageResourceClass;
 
 namespace SharpEmu.Libs.Gpu.Metal;
@@ -34,12 +34,12 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
     // Every image format the target builders ask about is accepted; the Metal presenter picks its own formats.
     private sealed class AcceptingFormatSupport : IImageFormatSupport
     {
-        public bool TryGetImageFormatProperties(Format format, ImageType type, ImageTiling tiling, ImageUsageFlags usage, ImageCreateFlags flags, out ImageFormatProperties properties)
+        public bool TryGetImageFormatProperties(GpuFormat format, GpuImageType type, GpuImageTiling tiling, GpuImageUsage usage, GpuImageCreateFlags flags, out GpuImageFormatProperties properties)
         {
-            properties = new ImageFormatProperties
+            properties = new GpuImageFormatProperties
             {
-                SampleCounts = SampleCountFlags.Count1Bit | SampleCountFlags.Count2Bit | SampleCountFlags.Count4Bit | SampleCountFlags.Count8Bit,
-                MaxExtent = new Extent3D(MaxDimension, MaxDimension, 1),
+                SampleCounts = GpuSampleCount.Count1Bit | GpuSampleCount.Count2Bit | GpuSampleCount.Count4Bit | GpuSampleCount.Count8Bit,
+                MaxExtent = new GpuExtent3D(MaxDimension, MaxDimension, 1),
                 MaxMipLevels = 15,
                 MaxArrayLayers = 2048,
             };
@@ -118,7 +118,7 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
     private BufferBinding[] _vertexBindings = [];
     private VertexInputInfo? _vertexInput;
     private BufferBinding? _indexBinding;
-    private IndexType _indexType;
+    private GpuIndexType _indexType;
     private object? _boundPipeline;
 
     private IGuestGpuBackend Backend => _backend;
@@ -169,8 +169,8 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
 
     RenderHostLimits IShaderPipelineHost.Limits => new(MaxDimension, MaxDimension, MaxDimension, MaxDimension);
 
-    SampleCountFlags IShaderPipelineHost.NoAttachmentSampleCounts =>
-        SampleCountFlags.Count1Bit | SampleCountFlags.Count2Bit | SampleCountFlags.Count4Bit | SampleCountFlags.Count8Bit;
+    GpuSampleCount IShaderPipelineHost.NoAttachmentSampleCounts =>
+        GpuSampleCount.Count1Bit | GpuSampleCount.Count2Bit | GpuSampleCount.Count4Bit | GpuSampleCount.Count8Bit;
 
     // Guest memory is the only backing on Metal; GPU writes reach it through the completion write-back.
     bool IShaderPipelineHost.TryReadGuestWord(ulong address, out uint word) => TryReadWord(address, out word);
@@ -297,13 +297,13 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         var context = RequireContext();
         _guestTargets[target.Image] = GuestTargetOf(in target, context.ColorTargets[target.Slot], context.RenderTargetMaskForSlot(target.Slot));
         _colorTargets.Add(target);
-        return new ColorAttachmentAcquisition(target.Image, new ImageView(target.Image.Index), ImageLayout.General, target.Resolution.Samples, false, default);
+        return new ColorAttachmentAcquisition(target.Image, new GpuImageHandle(target.Image.Index), GpuImageLayout.General, target.Resolution.Samples, false, default);
     }
 
     DepthAttachmentAcquisition IRenderHost.AcquireDepthAttachment(in DepthAttachmentState depth) =>
-        new(new ImageView(depth.Image.Index), depth.Target.Target.Samples, false);
+        new(new GpuImageHandle(depth.Image.Index), depth.Target.Target.Samples, false);
 
-    void IRenderHost.TransitionDepthAttachment(in DepthAttachmentState depth, ImageLayout layout, ImageAspectFlags writeAspects)
+    void IRenderHost.TransitionDepthAttachment(in DepthAttachmentState depth, GpuImageLayout layout, GpuImageAspect writeAspects)
     {
         _ = (layout, writeAspects);
         _depth = depth;
@@ -334,7 +334,7 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         _vertexInput = input;
     }
 
-    void IRenderHost.BindIndexBuffer(BufferBinding binding, IndexType type)
+    void IRenderHost.BindIndexBuffer(BufferBinding binding, GpuIndexType type)
     {
         _indexBinding = binding;
         _indexType = type;
@@ -699,7 +699,7 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         stage.Bound = true;
     }
 
-    void IRenderHost.CommitBindings(PipelineBindPoint bindPoint, in PipelineHandle pipeline, ReadOnlySpan<IPreparedBindings> stages)
+    void IRenderHost.CommitBindings(GpuBindPoint bindPoint, in PipelineHandle pipeline, ReadOnlySpan<IPreparedBindings> stages)
     {
         _ = (bindPoint, pipeline);
         _committedStages.Clear();
@@ -726,7 +726,7 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
     {
     }
 
-    void IRenderHost.BindPipeline(PipelineBindPoint bindPoint, in PipelineHandle pipeline)
+    void IRenderHost.BindPipeline(GpuBindPoint bindPoint, in PipelineHandle pipeline)
     {
         _ = bindPoint;
         _boundPipeline = _pipelineRecords.TryGetValue(pipeline.Pipeline, out var record)
@@ -738,14 +738,14 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         _boundPipeline as GraphicsPipelineRecord ?? throw Fatal("No graphics pipeline is bound for the draw.");
 
     // The guest primitive code the presenter maps itself; a patch list is the rectangle list.
-    private static uint PrimitiveTypeOf(PrimitiveTopology topology) => topology switch
+    private static uint PrimitiveTypeOf(GpuPrimitiveTopology topology) => topology switch
     {
-        PrimitiveTopology.PointList => 1,
-        PrimitiveTopology.LineList => 2,
-        PrimitiveTopology.LineStrip => 3,
-        PrimitiveTopology.TriangleFan => 5,
-        PrimitiveTopology.TriangleStrip => 6,
-        PrimitiveTopology.PatchList => 7,
+        GpuPrimitiveTopology.PointList => 1,
+        GpuPrimitiveTopology.LineList => 2,
+        GpuPrimitiveTopology.LineStrip => 3,
+        GpuPrimitiveTopology.TriangleFan => 5,
+        GpuPrimitiveTopology.TriangleStrip => 6,
+        GpuPrimitiveTopology.PatchList => 7,
         _ => 4,
     };
 
@@ -851,9 +851,9 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         }
 
         var buffer = RequireBuffer(in binding);
-        var indexSize = _indexType == IndexType.Uint32 ? 4u : 2u;
+        var indexSize = _indexType == GpuIndexType.Uint32 ? 4u : 2u;
         var bytes = ReadBound(buffer, binding.Offset, Math.Min(buffer.Size - binding.Offset, indexCount * (ulong)indexSize));
-        return new GuestIndexBuffer(bytes, bytes.Length, _indexType == IndexType.Uint32, Pooled: false) { GuestAddress = buffer.Bytes is null ? buffer.Address + binding.Offset : 0 };
+        return new GuestIndexBuffer(bytes, bytes.Length, _indexType == GpuIndexType.Uint32, Pooled: false) { GuestAddress = buffer.Bytes is null ? buffer.Address + binding.Offset : 0 };
     }
 
     private static GuestRenderTarget GuestTargetOf(in ColorTargetState target, in ColorTargetWords words, uint writeMask) =>
@@ -1017,7 +1017,7 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         var indexBuffer = indexed ? CopyIndexBuffer(vertexCount) : null;
         var topology = pipeline.Parameters.Topology;
         var primitiveType = PrimitiveTypeOf(topology);
-        var count = topology == PrimitiveTopology.PatchList && !indexed && vertexCount is 1 or 3 or 4 ? SingleRectangleVertexCount : vertexCount;
+        var count = topology == GpuPrimitiveTopology.PatchList && !indexed && vertexCount is 1 or 3 or 4 ? SingleRectangleVertexCount : vertexCount;
         var depthTarget = GuestDepthOf(context);
         var pixelShader = pipeline.PixelShader ?? (MetalCompiledGuestShader)Backend.GetDepthOnlyFragmentShader();
         var renderState = RenderStateOf(context, _colorTargets, pipeline.Parameters);
@@ -1091,7 +1091,7 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
     }
 
     // The seam submits whole records; the presenter orders them itself.
-    void IRenderHost.ShaderWriteBarrier(PipelineStageFlags sourceStages)
+    void IRenderHost.ShaderWriteBarrier(GpuPipelineStage sourceStages)
     {
         _ = sourceStages;
     }
@@ -1155,7 +1155,7 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
 
     bool IRenderHost.TryDispatchIndirect(ulong argumentsAddress) => false;
 
-    void IRenderHost.CopyDepthStencilImage(ResourceSlotIdentifier source, ResourceSlotIdentifier destination, in SubresourceRange range, in Extent3D extent, ImageAspectFlags aspects)
+    void IRenderHost.CopyDepthStencilImage(ResourceSlotIdentifier source, ResourceSlotIdentifier destination, in SubresourceRange range, in GpuExtent3D extent, GpuImageAspect aspects)
     {
         _ = (source, destination, range, extent, aspects);
         throw Fatal("Depth/stencil image copies are not implemented by the Metal command stream host.");
