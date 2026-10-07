@@ -17,33 +17,22 @@ namespace SharpEmu.HLE.Host;
 /// </remarks>
 public static class HostPlatform
 {
-    private static readonly object Gate = new();
-    private static Func<IHostPlatform>? _factory;
-    private static IHostPlatform? _instance;
+    // Lazy, not a hand-rolled lock: it keeps the publication semantics the OS-check
+    // factory had (one construction, a cached failure rather than a retry on every
+    // access) and it detects a backend whose construction reaches back into
+    // Current instead of recursing until the stack runs out.
+    private static Lazy<IHostPlatform>? _instance;
 
     /// <summary>
-    /// Whether a backend has been registered. Does not create it.
+    /// Whether a backend has been registered. Does not construct it.
     /// </summary>
-    public static bool IsInitialized
-    {
-        get
-        {
-            lock (Gate)
-            {
-                return _instance is not null || _factory is not null;
-            }
-        }
-    }
+    public static bool IsInitialized => Volatile.Read(ref _instance) is not null;
 
-    /// <summary>Registers the backend eagerly. Last registration wins.</summary>
+    /// <summary>Registers an already-constructed backend. Last registration wins.</summary>
     public static void Initialize(IHostPlatform platform)
     {
         ArgumentNullException.ThrowIfNull(platform);
-        lock (Gate)
-        {
-            _factory = null;
-            _instance = platform;
-        }
+        Volatile.Write(ref _instance, new Lazy<IHostPlatform>(platform));
     }
 
     /// <summary>
@@ -56,36 +45,20 @@ public static class HostPlatform
     public static void Initialize(Func<IHostPlatform> factory)
     {
         ArgumentNullException.ThrowIfNull(factory);
-        lock (Gate)
-        {
-            _instance = null;
-            _factory = factory;
-        }
+        Volatile.Write(ref _instance, new Lazy<IHostPlatform>(factory));
     }
 
     public static IHostPlatform Current
     {
         get
         {
-            lock (Gate)
-            {
-                if (_instance is not null)
-                {
-                    return _instance;
-                }
-
-                if (_factory is null)
-                {
-                    throw new InvalidOperationException(
-                        "No host platform has been registered. The application must call " +
-                        "HostPlatform.Initialize(...) with the SharpEmu.Host.* backend for its " +
-                        "target OS before any guest work starts (see SharpEmu.CLI's HostComposition).");
-                }
-
-                _instance = _factory() ??
-                    throw new InvalidOperationException("The registered host platform factory returned null.");
-                return _instance;
-            }
+            var instance = Volatile.Read(ref _instance) ??
+                throw new InvalidOperationException(
+                    "No host platform has been registered. The application must call " +
+                    "HostPlatform.Initialize(...) with the SharpEmu.Host.* backend for its " +
+                    "target OS before any guest work starts (see SharpEmu.CLI's HostComposition).");
+            return instance.Value ??
+                throw new InvalidOperationException("The registered host platform factory returned null.");
         }
     }
 }
