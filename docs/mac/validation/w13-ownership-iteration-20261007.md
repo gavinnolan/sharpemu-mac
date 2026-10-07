@@ -212,3 +212,70 @@ pass 7/7 on ARM64 and Rosetta. Exact clean-source Windows/Linux CLI cross-builds
 pass with zero errors and 9/3 warnings, recorded under
 `cross-platform-final/2c5ab39/`. These are cross-builds, not native non-Mac runtime
 verification. The game-qualified archived application still embeds `dd19db6`.
+
+## Integrated upstream and native volume checkpoint
+
+Local merge `a46904f` preserves upstream `b02c06181a296f4dc7d9ee2a44780a6ecd959592`
+ancestry. The reviewed update includes AudioOut2 PCM snapshot and cleanup fixes,
+service exports and ABI corrections. Its intended managed/architecture selection
+passes 182/182 on ARM64 and Rosetta; Windows/Linux CLI cross-builds pass with
+zero errors and 9/3 warnings. Service stubs remain scoped in the upstream review;
+these checks do not qualify a title or native Windows/Linux execution. Exact
+commands, hashes and review are in `package-agent/upstream-b02c061-caa2f92/`
+under the integrated evidence directory. No remote push or merge was performed.
+
+The clean combined source `a00db6662d2543569bd3daab5744360c2d3afc60` contains
+bounded native storage-volume materialization. Depth-one volume bindings use a
+real Metal 3D texture. Linear volumes support complete padded slices; tiled
+volumes support only the independently bounded, aligned mode27 single-mip
+1x1x1 origin. Larger tiled volumes remain unsupported. Two-dimensional image
+operations reject volume handles explicitly. See `storage-volume-materialization.md`
+for descriptor admission and the address-oracle limitations.
+
+The combined managed selection passes 280/280 without skips. Release actual-device
+materialization checks pass 39/39 without skips, including translated guest MIMG
+loads/stores across depth-one and depth-three linear textures and the bounded
+mode27 singleton. They validate materialization and native argument-buffer
+execution, not complete command scheduling. Logs/TRX are
+`volume-upstream-integrated-x64` and `volume-native-integrated-x64` in W13
+evidence; the latter build and test logs are retained separately.
+
+The signed app embeds clean a00 source, upstream b02, Metal, AppKit, CoreAudio,
+GameController and osx-x64. Build log is `app-a00db66-build.log`; the archived
+zip SHA256 is `58bd474add1c70d08258b44f958f78bde4edbac1ba0a29687bcfe2f6f33b69a8`.
+Its manifest is `sharpemu-a00db66-archive-manifest.json` in integrated evidence.
+
+Poppy exits with SIGABRT/code134 after21s, peak1390MiB. It rejects a different
+larger tiled volume during Compute binding preparation: shader
+`DB87BCC8ED30AD37`, address `0x7AC109C000`, depth16, tile5. Raw resource words
+are `7AC109C0 C0B00000 0003C003 A0500004 0000000F 00700000 00000000 00000000`.
+Local decoding identifies a 16x16x16 signed BC4 resource (8-byte compressed
+4x4 blocks), so an uncompressed storage-volume extension would not by itself
+qualify it. This capture does not print the shader's sampled/storage access
+metadata or an exact admitted work sequence.
+This run does not prove the previous exact singleton binding was reached.
+There are no screenshots or positive presentation periods. Schema2 records26
+entries with zero drops, but no actual game fault or prior VMOVNTDQ callback;
+CPU recovery remains unqualified. The indexed report is
+`game-poppy-volume-a00db66/REPORT.md`. No process or machine lock remains.
+
+The larger volume requires a true 3D address oracle including z and allocation
+extents before widening support. The isolated GPU source graph remains disabled
+pending native writer/copy/completion/retirement and failure/close proofs. Tracker
+observations alone do not serialize guest copies or retain backing mappings.
+
+## Observation metadata qualification
+
+Root `6248d0f` adds `TryGetObservedContentToken(address, byteCount, out token)`.
+It requires full-footprint armed protection metadata or an explicitly registered
+managed-writer footprint; missing, ordinary watch-only and insufficient owners
+fail closed. It preserves legacy tokens, snapshots and fault paths. Managed
+notification occurs before the copy and native fault handling before the resumed
+store, so a successful observation does not certify a stable copy or backing
+lease. The GPU source graph remains isolated.
+
+The integrated Rosetta token/tracker selection passes 35/35 with zero skips
+(`observed-token-integrated-x64` log/TRX). The standalone metadata fixture and
+existing token selection passes 18/18 on ARM64 and Rosetta under
+`package-agent/observed-token-2d25589/`. Fabricated protected-owner state tests
+are metadata checks, not native arming or kernel permission verification.
