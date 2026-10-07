@@ -4,7 +4,7 @@
 using SharpEmu.Core.Cpu.Native.Platform;
 using SharpEmu.HLE.Host;
 
-namespace SharpEmu.Cpu.DirectExecution.Linux;
+namespace SharpEmu.Cpu.DirectExecution.Linux.X64;
 
 /// <summary>
 /// The Linux x86-64 direct-execution integration: the OS side of the shared
@@ -81,6 +81,17 @@ public sealed unsafe class LinuxExecutionPlatform : IDirectExecutionPlatform
     /// </remarks>
     public nuint TrySetThreadAffinity(nint threadHandle, nuint affinityMask) => 1;
 
+    public nint OpenThreadForContext(uint threadId) => 0;
+    public uint GetThreadId(nint threadHandle) => 0;
+    public bool CloseThreadHandle(nint threadHandle) => false;
+    public nint CreateNativeWorker(nuint stackReservation, nint entry, out uint threadId)
+    {
+        threadId = 0;
+        return 0;
+    }
+    public uint WaitNativeWorker(nint threadHandle, uint timeoutMilliseconds) => uint.MaxValue;
+    public bool TerminateNativeWorker(nint threadHandle, uint exitCode) => false;
+
     public nint CreateWorkerEvent() => LinuxExecutionStubs.CreateWorkerEvent();
 
     public bool SignalWorkerEvent(nint handle) => LinuxExecutionStubs.SignalWorkerEvent(handle);
@@ -94,6 +105,11 @@ public sealed unsafe class LinuxExecutionPlatform : IDirectExecutionPlatform
     /// Nothing to do: Linux delivers access faults straight to the installed
     /// signal handler. Only macOS has a Mach exception port ahead of signals.
     /// </remarks>
+    public void InstallFaultHandling(in DirectExecutionFaultHandlers handlers) =>
+        PosixFaultBridge.Install(handlers);
+
+    public void RemoveFaultHandling() => PosixFaultBridge.Remove();
+
     public void RouteGuestFaultsOnCurrentThread()
     {
     }
@@ -107,4 +123,46 @@ public sealed unsafe class LinuxExecutionPlatform : IDirectExecutionPlatform
     /// </remarks>
     public bool TryReadExecutableHostMemory(ulong address, byte* destination, int byteCount) =>
         LinuxHostMemoryProbe.TryRead(address, destination, byteCount);
+
+    // ---------------------------------------------------------------------
+    // Thread stack bounds
+    // ---------------------------------------------------------------------
+
+    /// <remarks>
+    /// No equivalent of the Windows memory-information query that reports a
+    /// thread stack's whole reservation; the engine's neutral host region
+    /// lookup answers instead.
+    /// </remarks>
+    public bool TryGetCommittedStackRegion(ulong stackPointer, out ulong bottom, out ulong top)
+    {
+        bottom = 0;
+        top = 0;
+        return false;
+    }
+
+    /// <remarks>
+    /// Emits nothing. There is no thread block whose stack bounds emitted code
+    /// may swap: gs addresses the pthread TSD, not a TEB, and writing stack
+    /// bounds into it corrupts unrelated thread-specific slots. The fault
+    /// bridge moves the handler onto the host stack instead.
+    /// </remarks>
+    public void EmitHostStackBounds(byte* code, ref int offset, bool save)
+    {
+    }
+
+    /// <inheritdoc cref="EmitHostStackBounds"/>
+    public void EmitFiberStackBounds(byte* code, ref int offset)
+    {
+    }
+
+    /// <inheritdoc cref="EmitHostStackBounds"/>
+    public void EmitGuestStackBounds(byte* code, ref int offset, ulong stackBottom, ulong stackTop)
+    {
+    }
+
+    /// <inheritdoc cref="EmitHostStackBounds"/>
+    public void EmitSavedStackBounds(byte* code, ref int offset, bool restore)
+    {
+    }
+
 }

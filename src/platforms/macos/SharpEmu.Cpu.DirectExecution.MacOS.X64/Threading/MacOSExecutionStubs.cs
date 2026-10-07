@@ -4,7 +4,7 @@
 using System.Runtime.InteropServices;
 using SharpEmu.HLE;
 
-namespace SharpEmu.Cpu.DirectExecution.MacOS;
+namespace SharpEmu.Cpu.DirectExecution.MacOS.X64;
 
 /// <summary>
 /// Darwin replacements for the kernel32 helpers the direct-execution backend

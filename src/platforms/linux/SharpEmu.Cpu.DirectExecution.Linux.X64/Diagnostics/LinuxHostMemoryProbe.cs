@@ -3,7 +3,7 @@
 
 using System.Runtime.InteropServices;
 
-namespace SharpEmu.Cpu.DirectExecution.Linux;
+namespace SharpEmu.Cpu.DirectExecution.Linux.X64;
 
 /// <summary>
 /// Reads host memory for fault diagnostics through the kernel, so an untracked

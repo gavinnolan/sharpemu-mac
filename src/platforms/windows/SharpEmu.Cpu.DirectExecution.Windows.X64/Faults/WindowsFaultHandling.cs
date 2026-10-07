@@ -4,7 +4,7 @@
 using System.Runtime.InteropServices;
 using SharpEmu.HLE.Host;
 
-namespace SharpEmu.Core.Cpu.Native.Windows;
+namespace SharpEmu.Cpu.DirectExecution.Windows.X64;
 
 /// <summary>
 /// Vectored-exception-handler installation and the handler pre-filter thunk.

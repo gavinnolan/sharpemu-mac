@@ -3,7 +3,7 @@
 
 using System.Runtime.InteropServices;
 
-namespace SharpEmu.Cpu.DirectExecution.Windows;
+namespace SharpEmu.Cpu.DirectExecution.Windows.X64;
 
 /// <summary>
 /// The kernel32 TLS, thread and routine-resolution primitives the
@@ -44,4 +44,17 @@ internal static class WindowsExecutionStubs
 
     [DllImport("kernel32.dll", CharSet = CharSet.Ansi)]
     internal static extern nint GetProcAddress(nint hModule, string procName);
+    [DllImport("kernel32.dll", EntryPoint = "OpenThread", SetLastError = true)]
+    internal static extern nint OpenThread(uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, uint threadId);
+    [DllImport("kernel32.dll", EntryPoint = "CloseHandle", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool CloseHandle(nint handle);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    internal static extern nint CreateThread(nint attributes, nuint stackSize, nint entry, nint parameter, uint flags, out uint threadId);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    internal static extern uint WaitForSingleObject(nint handle, uint timeout);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    internal static extern bool TerminateThread(nint handle, uint exitCode);
+    [DllImport("kernel32.dll")]
+    internal static extern uint GetThreadId(nint handle);
 }

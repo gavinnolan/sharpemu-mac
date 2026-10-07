@@ -18,22 +18,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <InternalsVisibleTo Include="SharpEmu.Libs.Tests" />
   </ItemGroup>
 
-  <!-- W10 transitional. The per-OS direct-execution integrations were lifted
-       out of the DirectExecutionBackend partial class, so they still reach a
-       handful of its members: the Win64 EXCEPTION_POINTERS/CONTEXT vocabulary
-       the shared recovery chain is written against, the recovery entry points
-       themselves, and the host-range readability check. Making those public
-       would publish the backend's fault internals as API; this keeps the seam
-       (SharpEmu.Core.Cpu.Native.Platform) as the only public contract and the
-       internals visible to exactly the three integrations that implement it.
-       Shrink this as the shared fault vocabulary becomes a first-class type.
-       SharpEmu.Core does not and must not reference these projects back. -->
-  <ItemGroup>
-    <InternalsVisibleTo Include="SharpEmu.Cpu.DirectExecution.MacOS.X64" />
-    <InternalsVisibleTo Include="SharpEmu.Cpu.DirectExecution.Linux.X64" />
-    <InternalsVisibleTo Include="SharpEmu.Cpu.DirectExecution.Windows.X64" />
-  </ItemGroup>
-
   <PropertyGroup>
     <NoWarn>$(NoWarn);1591</NoWarn>
   </PropertyGroup>

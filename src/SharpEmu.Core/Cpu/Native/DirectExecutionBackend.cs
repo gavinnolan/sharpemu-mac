@@ -98,14 +98,18 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		int ManagedThreadId);
 
 #pragma warning disable CS0649
-	private struct EXCEPTION_POINTERS
+	// Visible to the per-OS execution integrations: a POSIX fault bridge
+	// rebuilds exactly this view from its signal context so the recovery chain
+	// below stays single-sourced. See the InternalsVisibleTo note in
+	// SharpEmu.Core.csproj.
+	internal struct EXCEPTION_POINTERS
 	{
 		public unsafe EXCEPTION_RECORD* ExceptionRecord;
 
 		public unsafe void* ContextRecord;
 	}
 
-	private struct EXCEPTION_RECORD
+	internal struct EXCEPTION_RECORD
 	{
 		public uint ExceptionCode;
 
@@ -120,8 +124,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		public unsafe fixed ulong ExceptionInformation[15];
 	}
 #pragma warning restore CS0649
-
-	private delegate int ExceptionHandlerDelegate(void* exceptionInfo);
 
 #pragma warning disable CS0649
 	private struct MEMORY_BASIC_INFORMATION64
@@ -231,16 +233,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private uint _tbbAbortEligibleTlsIndex = uint.MaxValue;
 
 	private nint _setEventAddress;
-
-	private nint _rawExceptionHandler;
-
-	private nint _rawExceptionHandlerStub;
-
-	private nint _exceptionHandler;
-
-	private nint _exceptionHandlerStub;
-
-	private nint _unhandledFilterStub;
 
 	private nint _lowIndexedTableScratch;
 
@@ -798,10 +790,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private const int MinTlsPatchInstructionBytes = 9;
 
 	private delegate ulong ImportGatewayDelegate(nint backendHandle, int importIndex, nint argPackPtr);
-	private delegate int RawExceptionHandlerDelegate(void* exceptionInfo);
 	private static readonly ImportGatewayDelegate ImportGatewayDelegateInstance = ImportDispatchGatewayManaged;
-	private static readonly RawExceptionHandlerDelegate RawVectoredHandlerDelegateInstance = RawVectoredHandlerManaged;
-	private static readonly RawExceptionHandlerDelegate RawUnhandledFilterDelegateInstance = RawUnhandledFilterManaged;
 
 	private static readonly Lazy<nint> ImportGatewayAddress = new(() => ResolveWin64CallbackPtr(
 		Marshal.GetFunctionPointerForDelegate(ImportGatewayDelegateInstance)));
@@ -813,11 +802,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private static nint ResolveWin64CallbackPtr(nint sysvPtr) =>
 		ExecutionPlatform.ResolveWin64CallbackAddress(sysvPtr);
 
-	private static readonly nint RawVectoredHandlerPtrManaged =
-		Marshal.GetFunctionPointerForDelegate(RawVectoredHandlerDelegateInstance);
 
-	private static readonly nint RawUnhandledFilterPtrManaged =
-		Marshal.GetFunctionPointerForDelegate(RawUnhandledFilterDelegateInstance);
 
 
 	/// <summary>
@@ -877,14 +862,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private const int CTX_RIP = 248;
 
-	private ExceptionHandlerDelegate? _handlerDelegate;
-
-	private GCHandle _handlerHandle;
-
-	private ExceptionHandlerDelegate? _unhandledFilterDelegate;
-
-	private GCHandle _unhandledFilterHandle;
-
 	[ThreadStatic]
 	private static int _vectoredHandlerDepth;
 
@@ -919,7 +896,14 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private const uint ThreadSuspendResume = 0x0002u;
 
-	private const int Win64ContextSize = 0x4D0;
+	internal const int Win64ContextSize = 0x4D0;
+
+	// Named aliases of the CTX_* offsets above, for the per-OS fault bridges:
+	// the first register of the contiguous CTX_RAX..CTX_RIP block, plus the two
+	// they report on directly.
+	internal const int CtxRax = CTX_RAX;
+	internal const int CtxRsp = CTX_RSP;
+	internal const int CtxRip = CTX_RIP;
 
 	private const int Win64ContextFlagsOffset = 0x30;
 
@@ -950,7 +934,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	public string? LastError { get; private set; }
 
-	private unsafe static ulong ReadCtxU64(void* contextRecord, int offset)
+	internal unsafe static ulong ReadCtxU64(void* contextRecord, int offset)
 	{
 		return *(ulong*)((byte*)contextRecord + offset);
 	}
@@ -961,7 +945,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return nativeEntry();
 	}
 
-	private unsafe static void WriteCtxU64(void* contextRecord, int offset, ulong value)
+	internal unsafe static void WriteCtxU64(void* contextRecord, int offset, ulong value)
 	{
 		*(ulong*)((byte*)contextRecord + offset) = value;
 	}
@@ -2813,10 +2797,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			return 0;
 		}
 
-		nint kernel32 = GetModuleHandle("kernel32.dll");
-		nint getStdHandle = kernel32 != 0 ? GetProcAddress(kernel32, "GetStdHandle") : 0;
-		nint writeFile = kernel32 != 0 ? GetProcAddress(kernel32, "WriteFile") : 0;
-		nint flushFileBuffers = kernel32 != 0 ? GetProcAddress(kernel32, "FlushFileBuffers") : 0;
+		nint getStdHandle = ExecutionPlatform.GetRuntimeRoutine(HostRuntimeFunction.GetStandardErrorHandle);
+        nint writeFile = ExecutionPlatform.GetRuntimeRoutine(HostRuntimeFunction.WriteFile);
+        nint flushFileBuffers = ExecutionPlatform.GetRuntimeRoutine(HostRuntimeFunction.FlushFileBuffers);
 
 		const uint stubSize = 256u;
 		void* ptr = VirtualAlloc(null, stubSize, 12288u, 4u);
@@ -2925,446 +2908,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			VirtualFree(ptr, 0u, 32768u);
 			return 0;
 		}
-		FlushInstructionCache(GetCurrentProcess(), ptr, (nuint)offset);
-		return (nint)ptr;
-	}
-
-	private unsafe nint CreateExceptionHandlerTrampoline(nint managedHandler)
-	{
-		// Filter runtime exceptions before entering managed code.
-		// Reserve space for native worker recovery and fatal diagnostics.
-		const uint stubSize = 2048u;
-		void* ptr = VirtualAlloc(null, stubSize, 12288u, 64u);
-		if (ptr == null)
-		{
-			return 0;
-		}
-
-		byte* code = (byte*)ptr;
-		int offset = 0;
-
-		ReadOnlySpan<uint> nonManagedExceptionCodes =
-		[
-			0xE0434352u, // CLR managed exception
-			0xE06D7363u, // MSVC C++ exception
-			0xC0000409u, // STATUS_STACK_BUFFER_OVERRUN / FailFast
-			0xC00000FDu, // STATUS_STACK_OVERFLOW
-			0x40010006u, // ANSI debug output
-			0x4001000Au, // Unicode debug output
-		];
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x01); // mov rax, [rcx]
-		EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x00); // mov eax, [rax] ExceptionCode
-		var passJumpOffsets = stackalloc int[nonManagedExceptionCodes.Length];
-		int fastFailJumpSlot = -1;
-		for (int i = 0; i < nonManagedExceptionCodes.Length; i++)
-		{
-			EmitByte(code, ref offset, 0x3D);
-			EmitUInt32(code, ref offset, nonManagedExceptionCodes[i]);
-			EmitByte(code, ref offset, 0x74);
-			passJumpOffsets[i] = offset;
-			EmitByte(code, ref offset, 0x00);
-			if (nonManagedExceptionCodes[i] == 0xC0000409u)
-			{
-				fastFailJumpSlot = i;
-			}
-		}
-
-		EmitByte(code, ref offset, 0xE9); // jmp mainBody (rel32; FastFail breadcrumb sits between)
-		var mainBodyJumpSlot = offset;
-		EmitUInt32(code, ref offset, 0u);
-
-		int passOffset = offset;
-		EmitByte(code, ref offset, 0x31); EmitByte(code, ref offset, 0xC0); // xor eax, eax
-		EmitByte(code, ref offset, 0xC3);
-
-		int fastFailPassOffset = offset;
-		var fastFailLogInstalled = false;
-		nint kernel32 = GetModuleHandle("kernel32.dll");
-		nint getStdHandle = kernel32 != 0 ? GetProcAddress(kernel32, "GetStdHandle") : 0;
-		nint writeFile = kernel32 != 0 ? GetProcAddress(kernel32, "WriteFile") : 0;
-		if (fastFailJumpSlot >= 0 && getStdHandle != 0 && writeFile != 0)
-		{
-			// Prefix + Context.Rip hex (AMD64 CONTEXT.Rip @ 0xF8) + newline.
-			// Keep in sync with WindowsFaultHandling.CreateHandlerThunk.
-			ReadOnlySpan<byte> msg =
-				"[LOADER][FATAL] VEH_PASS FastFail 0xC0000409 (live trampoline; skip managed VEH) rip=0x"u8;
-			ReadOnlySpan<byte> hexDigits = "0123456789ABCDEF"u8;
-			// rcx=EXCEPTION_POINTERS*: capture Rip into r10 before clobbering.
-			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x41);
-			EmitByte(code, ref offset, 0x08); // mov rax, [rcx+8] ContextRecord*
-			EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x90);
-			EmitUInt32(code, ref offset, 0xF8u); // mov r10, [rax+0xF8] Rip
-			EmitByte(code, ref offset, 0x50);
-			EmitByte(code, ref offset, 0x51);
-			EmitByte(code, ref offset, 0x52);
-			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x50);
-			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x51);
-			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x52); // push r10 (Rip)
-			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83);
-			EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x40); // sub rsp, 0x40 (hex buf @ +0x30)
-			EmitByte(code, ref offset, 0xB9); EmitUInt32(code, ref offset, unchecked((uint)-12));
-			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
-			*(nint*)(code + offset) = getStdHandle;
-			offset += sizeof(nint);
-			EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xD0);
-			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x89);
-			EmitByte(code, ref offset, 0x44); EmitByte(code, ref offset, 0x24);
-			EmitByte(code, ref offset, 0x28); // mov [rsp+0x28], rax  stderr handle
-			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xC1);
-			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
-			var msgAbsSlot = offset;
-			*(nint*)(code + offset) = 0;
-			offset += sizeof(nint);
-			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xC2);
-			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0xB8);
-			EmitUInt32(code, ref offset, (uint)msg.Length);
-			EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x8D);
-			EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x24);
-			EmitByte(code, ref offset, 0x20);
-			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xC7);
-			EmitByte(code, ref offset, 0x44); EmitByte(code, ref offset, 0x24);
-			EmitByte(code, ref offset, 0x20); EmitUInt32(code, ref offset, 0);
-			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xC7);
-			EmitByte(code, ref offset, 0x44); EmitByte(code, ref offset, 0x24);
-			EmitByte(code, ref offset, 0x38); EmitUInt32(code, ref offset, 0); // lpOverlapped slot
-			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
-			*(nint*)(code + offset) = writeFile;
-			offset += sizeof(nint);
-			EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xD0);
-
-			// Hex-encode Rip. Stack after sub 0x40: [rsp+0x40]=saved Rip (push r10).
-			EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x8B);
-			EmitByte(code, ref offset, 0x54); EmitByte(code, ref offset, 0x24);
-			EmitByte(code, ref offset, 0x40); // mov r10, [rsp+0x40]
-			EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0xB8);
-			var hexDigitsAbsSlot = offset;
-			*(nint*)(code + offset) = 0;
-			offset += sizeof(nint); // mov r8, hexDigits
-			EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x8D);
-			EmitByte(code, ref offset, 0x5C); EmitByte(code, ref offset, 0x24);
-			EmitByte(code, ref offset, 0x30); // lea r11, [rsp+0x30] hex out
-			EmitByte(code, ref offset, 0xB9); EmitUInt32(code, ref offset, 16u); // ecx = 16 nibbles
-			EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xD0); // mov rax, r10
-			int hexLoopOffset = offset;
-			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xC1); EmitByte(code, ref offset, 0xC0);
-			EmitByte(code, ref offset, 0x04); // rol rax, 4
-			EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xC2); // mov edx, eax
-			EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xE2); EmitByte(code, ref offset, 0x0F); // and edx, 0xF
-			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0xB6);
-			EmitByte(code, ref offset, 0x14); EmitByte(code, ref offset, 0x10); // movzx edx, byte [r8+rdx]
-			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x88); EmitByte(code, ref offset, 0x13); // mov [r11], dl
-			EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xC3); // inc r11
-			EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xC9); // dec ecx
-			EmitByte(code, ref offset, 0x75);
-			EmitByte(code, ref offset, unchecked((byte)(hexLoopOffset - (offset + 1)))); // jnz hexLoop (rel8)
-			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0xC6); EmitByte(code, ref offset, 0x03);
-			EmitByte(code, ref offset, 0x0A); // mov byte [r11], '\n'
-
-			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x8B);
-			EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x24);
-			EmitByte(code, ref offset, 0x28); // mov rcx, [rsp+0x28] stderr
-			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x8D);
-			EmitByte(code, ref offset, 0x54); EmitByte(code, ref offset, 0x24);
-			EmitByte(code, ref offset, 0x30); // lea rdx, [rsp+0x30]
-			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0xB8);
-			EmitUInt32(code, ref offset, 17u); // 16 hex + newline
-			EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x8D);
-			EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x24);
-			EmitByte(code, ref offset, 0x20);
-			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xC7);
-			EmitByte(code, ref offset, 0x44); EmitByte(code, ref offset, 0x24);
-			EmitByte(code, ref offset, 0x20); EmitUInt32(code, ref offset, 0);
-			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xC7);
-			EmitByte(code, ref offset, 0x44); EmitByte(code, ref offset, 0x24);
-			EmitByte(code, ref offset, 0x38); EmitUInt32(code, ref offset, 0);
-			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
-			*(nint*)(code + offset) = writeFile;
-			offset += sizeof(nint);
-			EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xD0);
-
-			// Flush redirected stderr so FastFail rip survives process teardown.
-			nint flushFileBuffers = kernel32 != 0 ? GetProcAddress(kernel32, "FlushFileBuffers") : 0;
-			if (flushFileBuffers != 0)
-			{
-				EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x8B);
-				EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x24);
-				EmitByte(code, ref offset, 0x28); // mov rcx, stderr
-				EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
-				*(nint*)(code + offset) = flushFileBuffers;
-				offset += sizeof(nint);
-				EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xD0);
-			}
-
-			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83);
-			EmitByte(code, ref offset, 0xC4); EmitByte(code, ref offset, 0x40);
-			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5A); // pop r10
-			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x59);
-			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x58);
-			EmitByte(code, ref offset, 0x5A);
-			EmitByte(code, ref offset, 0x59);
-			EmitByte(code, ref offset, 0x58);
-			EmitByte(code, ref offset, 0x31); EmitByte(code, ref offset, 0xC0);
-			EmitByte(code, ref offset, 0xC3);
-
-			var msgOffset = offset;
-			for (int i = 0; i < msg.Length; i++)
-			{
-				EmitByte(code, ref offset, msg[i]);
-			}
-
-			var hexDigitsOffset = offset;
-			for (int i = 0; i < hexDigits.Length; i++)
-			{
-				EmitByte(code, ref offset, hexDigits[i]);
-			}
-
-			*(nint*)(code + msgAbsSlot) = (nint)ptr + msgOffset;
-			*(nint*)(code + hexDigitsAbsSlot) = (nint)ptr + hexDigitsOffset;
-			code[passJumpOffsets[fastFailJumpSlot]] =
-				checked((byte)(fastFailPassOffset - (passJumpOffsets[fastFailJumpSlot] + 1)));
-			fastFailLogInstalled = true;
-		}
-
-		int mainBodyOffset = offset;
-		*(int*)(code + mainBodyJumpSlot) = mainBodyOffset - (mainBodyJumpSlot + sizeof(int));
-		for (int i = 0; i < nonManagedExceptionCodes.Length; i++)
-		{
-			if (i == fastFailJumpSlot && fastFailLogInstalled)
-			{
-				continue;
-			}
-
-			code[passJumpOffsets[i]] = checked((byte)(passOffset - (passJumpOffsets[i] + 1)));
-		}
-
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x54); // push r12
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x55); // push r13
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x56); // push r14
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x57); // push r15
-		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xE4); // mov r12, rsp
-		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xCD); // mov r13, rcx
-		EmitExceptionHostStackBounds(code, ref offset);
-
-		// Native worker EXECUTE-AV abort without managed VEH.
-		// Do NOT catch read/write AVs — workers need managed lazy-commit (tLTJ
-		// silent-die when every worker AV was aborted). Execute faults on
-		// tbb_thead are the concurrent-managed FailFast case (tLTC).
-		int tbbFallthroughJump = -1;
-		if (_workerAbortStub != 0 &&
-			_tlsGetValueAddress != 0 &&
-			_hostRspSlotTlsIndex != uint.MaxValue)
-		{
-			EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x8B);
-			EmitByte(code, ref offset, 0x45); EmitByte(code, ref offset, 0x00); // mov rax, [r13]
-			EmitByte(code, ref offset, 0x81); EmitByte(code, ref offset, 0x38);
-			EmitUInt32(code, ref offset, 0xC0000005u); // cmp dword [rax], AV
-			EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x85);
-			tbbFallthroughJump = offset;
-			EmitUInt32(code, ref offset, 0u); // jne fallthrough
-
-			// ExceptionInformation[0] == 8 → EXECUTE (DEP). Offset 32 on x64 RECORD.
-			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83);
-			EmitByte(code, ref offset, 0xB8); EmitUInt32(code, ref offset, 32u);
-			EmitByte(code, ref offset, 0x08); // cmp qword [rax+32], 8
-			EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x85);
-			var tbbNotExecuteJump = offset;
-			EmitUInt32(code, ref offset, 0u);
-
-			int tbbNotEligibleJump = -1;
-			if (_tbbAbortEligibleTlsIndex != uint.MaxValue)
-			{
-				EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83);
-				EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x28);
-				EmitByte(code, ref offset, 0xB9);
-				EmitUInt32(code, ref offset, _tbbAbortEligibleTlsIndex);
-				EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
-				*(nint*)(code + offset) = _tlsGetValueAddress;
-				offset += sizeof(nint);
-				EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xD0);
-				EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83);
-				EmitByte(code, ref offset, 0xC4); EmitByte(code, ref offset, 0x28);
-				EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x85);
-				EmitByte(code, ref offset, 0xC0);
-				EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x84);
-				tbbNotEligibleJump = offset;
-				EmitUInt32(code, ref offset, 0u);
-			}
-
-			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83);
-			EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x28);
-			EmitByte(code, ref offset, 0xB9);
-			EmitUInt32(code, ref offset, _hostRspSlotTlsIndex);
-			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
-			*(nint*)(code + offset) = _tlsGetValueAddress;
-			offset += sizeof(nint);
-			EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xD0);
-			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83);
-			EmitByte(code, ref offset, 0xC4); EmitByte(code, ref offset, 0x28);
-			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x85);
-			EmitByte(code, ref offset, 0xC0);
-			EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x84);
-			var tbbNoHostRspJump = offset;
-			EmitUInt32(code, ref offset, 0u);
-			EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x8B);
-			EmitByte(code, ref offset, 0x00); // mov r8, [rax] hostRsp
-			EmitByte(code, ref offset, 0x4D); EmitByte(code, ref offset, 0x85);
-			EmitByte(code, ref offset, 0xC0);
-			EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x84);
-			var tbbZeroRspJump = offset;
-			EmitUInt32(code, ref offset, 0u);
-
-			EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x83);
-			EmitByte(code, ref offset, 0xE0); EmitByte(code, ref offset, 0xF0); // and r8, ~0xF
-			EmitByte(code, ref offset, 0x4D); EmitByte(code, ref offset, 0x8B);
-			EmitByte(code, ref offset, 0x4D); EmitByte(code, ref offset, 0x08); // mov r9, [r13+8]
-			EmitByte(code, ref offset, 0x4D); EmitByte(code, ref offset, 0x89);
-			EmitByte(code, ref offset, 0x81); EmitUInt32(code, ref offset, 0x98u); // Context.Rsp
-			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
-			*(nint*)(code + offset) = _workerAbortStub;
-			offset += sizeof(nint);
-			EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x89);
-			EmitByte(code, ref offset, 0x81); EmitUInt32(code, ref offset, 0xF8u); // Context.Rip
-			EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0xC7);
-			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x78);
-			EmitUInt32(code, ref offset, 0u); // Context.Rax = 0
-
-			EmitByte(code, ref offset, 0xB8); EmitUInt32(code, ref offset, unchecked((uint)-1));
-			EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89);
-			EmitByte(code, ref offset, 0xE4); // mov rsp, r12
-			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5F);
-			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5E);
-			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5D);
-			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5C);
-			EmitByte(code, ref offset, 0xC3);
-
-			int tbbFallthroughOffset = offset;
-			*(int*)(code + tbbFallthroughJump) = tbbFallthroughOffset - (tbbFallthroughJump + sizeof(int));
-			*(int*)(code + tbbNotExecuteJump) = tbbFallthroughOffset - (tbbNotExecuteJump + sizeof(int));
-			if (tbbNotEligibleJump >= 0)
-			{
-				*(int*)(code + tbbNotEligibleJump) = tbbFallthroughOffset - (tbbNotEligibleJump + sizeof(int));
-			}
-			*(int*)(code + tbbNoHostRspJump) = tbbFallthroughOffset - (tbbNoHostRspJump + sizeof(int));
-			*(int*)(code + tbbZeroRspJump) = tbbFallthroughOffset - (tbbZeroRspJump + sizeof(int));
-		}
-
-		EmitByte(code, ref offset, 0x65); EmitByte(code, ref offset, 0x48); // mov rax, gs:[8]
-		EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x04); EmitByte(code, ref offset, 0x25);
-		EmitUInt32(code, ref offset, 8u);
-		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x39); EmitByte(code, ref offset, 0xC4); // cmp r12, rax
-		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x83); // jae guestStack
-		int aboveStackJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-		EmitByte(code, ref offset, 0x65); EmitByte(code, ref offset, 0x48); // mov rax, gs:[0x10]
-		EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x04); EmitByte(code, ref offset, 0x25);
-		EmitUInt32(code, ref offset, 0x10u);
-		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x39); EmitByte(code, ref offset, 0xC4); // cmp r12, rax
-		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x82); // jb guestStack
-		int belowStackJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-
-		// A host-stack access violation can originate in managed or JIT code.
-		// Do not enter a managed VEH callback from that state. Direct guest code
-		// uses the guest stack and keeps the existing managed recovery path.
-		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x8B);
-		EmitByte(code, ref offset, 0x45); EmitByte(code, ref offset, 0x00); // mov rax, [r13]
-		EmitByte(code, ref offset, 0x81); EmitByte(code, ref offset, 0x38);
-		EmitUInt32(code, ref offset, 0xC0000005u);
-		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x85);
-		int hostNotAccessViolationJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-		EmitByte(code, ref offset, 0x31); EmitByte(code, ref offset, 0xC0);
-		EmitSavedStackBounds(code, ref offset, restore: true);
-		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89);
-		EmitByte(code, ref offset, 0xE4); // mov rsp, r12
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5F);
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5E);
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5D);
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5C);
-		EmitByte(code, ref offset, 0xC3);
-		int hostManagedOffset = offset;
-		*(int*)(code + hostNotAccessViolationJump) =
-			hostManagedOffset - (hostNotAccessViolationJump + sizeof(int));
-
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x28);
-		// A managed handler can wait for another faulting thread.
-		// Do not hold a native lock across the callback.
-		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xE9); // mov rcx, r13
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
-		*(nint*)(code + offset) = managedHandler;
-		offset += sizeof(nint);
-		EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xD0);
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xC4); EmitByte(code, ref offset, 0x28);
-		EmitByte(code, ref offset, 0xE9);
-		int hostRestoreJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-
-		int guestStackOffset = offset;
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x28);
-		EmitByte(code, ref offset, 0xB9);
-		EmitUInt32(code, ref offset, _hostRspSlotTlsIndex);
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
-		*(nint*)(code + offset) = _tlsGetValueAddress;
-		offset += sizeof(nint);
-		EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xD0);
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xC4); EmitByte(code, ref offset, 0x28);
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x85); EmitByte(code, ref offset, 0xC0); // test rax, rax
-		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x84);
-		int missingTlsJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x18); // mov r11, [rax]
-		EmitByte(code, ref offset, 0x4D); EmitByte(code, ref offset, 0x85); EmitByte(code, ref offset, 0xDB); // test r11, r11
-		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x84);
-		int missingHostStackJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xDC); // mov rsp, r11
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x48);
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0x44); EmitByte(code, ref offset, 0x24); EmitByte(code, ref offset, 0x38); // mov [rsp+0x38],rax
-		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xE9); // mov rcx, r13
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
-		*(nint*)(code + offset) = managedHandler;
-		offset += sizeof(nint);
-		EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xD0);
-		EmitExceptionStackSelection(code, ref offset);
-		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x54); EmitByte(code, ref offset, 0x24); EmitByte(code, ref offset, 0x38); // mov r10,[rsp+0x38]
-		EmitHostStackBounds(code, ref offset, save: true);
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xC4); EmitByte(code, ref offset, 0x48);
-		EmitByte(code, ref offset, 0xE9);
-		int guestRestoreJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-
-		int passThroughOffset = offset;
-		EmitByte(code, ref offset, 0x31); EmitByte(code, ref offset, 0xC0); // xor eax, eax
-		int restoreOffset = offset;
-		EmitSavedStackBounds(code, ref offset, restore: true);
-		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xE4); // mov rsp, r12
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5F);
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5E);
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5D);
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5C);
-		EmitByte(code, ref offset, 0xC3);
-
-		*(int*)(code + aboveStackJump) = guestStackOffset - (aboveStackJump + sizeof(int));
-		*(int*)(code + belowStackJump) = guestStackOffset - (belowStackJump + sizeof(int));
-		*(int*)(code + hostRestoreJump) = restoreOffset - (hostRestoreJump + sizeof(int));
-		*(int*)(code + missingTlsJump) = passThroughOffset - (missingTlsJump + sizeof(int));
-		*(int*)(code + missingHostStackJump) = passThroughOffset - (missingHostStackJump + sizeof(int));
-		*(int*)(code + guestRestoreJump) = restoreOffset - (guestRestoreJump + sizeof(int));
-
-		if (offset > (int)stubSize)
-		{
-			Console.Error.WriteLine(
-				$"[LOADER][ERROR] Exception handler trampoline overflow: used={offset} cap={stubSize}");
-			VirtualFree(ptr, 0, 0x8000u);
-			return 0;
-		}
-
-		Console.Error.WriteLine(
-			$"[LOADER][INFO] VEH trampoline built: bytes={offset} native_worker_abort=" +
-			$"{(_workerAbortStub != 0 && _hostRspSlotTlsIndex != uint.MaxValue)}");
-
-		uint oldProtect = default;
-		VirtualProtect(ptr, stubSize, 32u, &oldProtect);
 		FlushInstructionCache(GetCurrentProcess(), ptr, (nuint)offset);
 		return (nint)ptr;
 	}
@@ -7435,47 +6978,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private static nuint SetThreadAffinityMask(nint hThread, nuint dwThreadAffinityMask) =>
 		ExecutionPlatform.TrySetThreadAffinity(hThread, dwThreadAffinityMask);
 
-	// Still shared: vectored exception registration, thread handles for the
-	// stall sampler and the kernel32 export lookups the Windows-only fault
-	// thunk, native guest worker loop and thread-context capture make. Those
-	// three move to SharpEmu.Cpu.DirectExecution.Windows.X64 with the rest of
-	// the Windows fault integration; until then they stay no-ops off Windows.
-	private unsafe static void* AddVectoredExceptionHandler(uint first, IntPtr handler) =>
-		OperatingSystem.IsWindows() ? Win32AddVectoredExceptionHandler(first, handler) : null;
-
-	private unsafe static uint RemoveVectoredExceptionHandler(void* handle) =>
-		OperatingSystem.IsWindows() ? Win32RemoveVectoredExceptionHandler(handle) : 0u;
-
-	private static IntPtr SetUnhandledExceptionFilter(IntPtr lpTopLevelExceptionFilter) =>
-		OperatingSystem.IsWindows() ? Win32SetUnhandledExceptionFilter(lpTopLevelExceptionFilter) : IntPtr.Zero;
-
-	private static nint OpenThread(uint dwDesiredAccess, bool bInheritHandle, uint dwThreadId) =>
-		OperatingSystem.IsWindows() ? Win32OpenThread(dwDesiredAccess, bInheritHandle, dwThreadId) : 0;
-
-	private static bool CloseHandle(nint hObject) =>
-		OperatingSystem.IsWindows() && Win32CloseHandle(hObject);
-
-	[DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
-	private static extern nint GetModuleHandle(string lpModuleName);
-
-	[DllImport("kernel32.dll", CharSet = CharSet.Ansi)]
-	private static extern nint GetProcAddress(nint hModule, string procName);
-
-	[DllImport("kernel32.dll", EntryPoint = "AddVectoredExceptionHandler")]
-	private unsafe static extern void* Win32AddVectoredExceptionHandler(uint first, IntPtr handler);
-
-	[DllImport("kernel32.dll", EntryPoint = "RemoveVectoredExceptionHandler")]
-	private unsafe static extern uint Win32RemoveVectoredExceptionHandler(void* handle);
-
-	[DllImport("kernel32.dll", EntryPoint = "SetUnhandledExceptionFilter")]
-	private static extern IntPtr Win32SetUnhandledExceptionFilter(IntPtr lpTopLevelExceptionFilter);
-
-	[DllImport("kernel32.dll", EntryPoint = "OpenThread", SetLastError = true)]
-	private static extern nint Win32OpenThread(uint dwDesiredAccess, [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle, uint dwThreadId);
-
-	[DllImport("kernel32.dll", EntryPoint = "CloseHandle", SetLastError = true)]
-	[return: MarshalAs(UnmanagedType.Bool)]
-	private static extern bool Win32CloseHandle(nint hObject);
+    private static bool CloseHandle(nint handle) => ExecutionPlatform.CloseThreadHandle(handle);
 
 	/// <summary>
 	/// Set when <see cref="Dispose"/> intentionally left the native session
@@ -7541,52 +7044,22 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 		WriteGuestFlowTraces();
 		ClearGuestThreads();
-		if (ReferenceEquals(_posixSignalBackend, this))
+		if (ReferenceEquals(_faultRecoveryBackend, this))
 		{
-			// The signal handlers stay installed (they chain to the previous
-			// action when no backend is active), but must stop dispatching
-			// into a disposed backend.
-			_posixSignalBackend = null;
+			// The platform's fault hooks stay installed (they chain to the
+			// previous handler when no backend is active), but must stop
+			// dispatching into a disposed backend.
+			_faultRecoveryBackend = null;
 		}
 		ClearImportHandlerTrampolines();
 		_importEntries = Array.Empty<ImportStubEntry>();
 		_runtimeSymbolsByName.Clear();
 		StopReadyThreadDispatcher();
 		StopStallWatchdog();
-		if (_exceptionHandler != 0)
-		{
-			RemoveVectoredExceptionHandler((void*)_exceptionHandler);
-			_exceptionHandler = 0;
-		}
-		if (_rawExceptionHandler != 0)
-		{
-			RemoveVectoredExceptionHandler((void*)_rawExceptionHandler);
-			_rawExceptionHandler = 0;
-		}
-		if (_rawExceptionHandlerStub != 0)
-		{
-			VirtualFree((void*)_rawExceptionHandlerStub, 0u, 32768u);
-			_rawExceptionHandlerStub = 0;
-		}
-		if (_exceptionHandlerStub != 0)
-		{
-			VirtualFree((void*)_exceptionHandlerStub, 0u, 32768u);
-			_exceptionHandlerStub = 0;
-		}
-		if (_unhandledFilterStub != 0)
-		{
-			SetUnhandledExceptionFilter(0);
-			VirtualFree((void*)_unhandledFilterStub, 0u, 32768u);
-			_unhandledFilterStub = 0;
-		}
-		if (_handlerHandle.IsAllocated)
-		{
-			_handlerHandle.Free();
-		}
-		if (_unhandledFilterHandle.IsAllocated)
-		{
-			_unhandledFilterHandle.Free();
-		}
+		// The platform removes whatever fault interception it installed, where
+		// that is safe; an integration that cannot prove no guest thread will
+		// fault again deliberately leaves its hooks in place.
+		ExecutionPlatform.RemoveFaultHandling();
 		if (_selfHandle.IsAllocated)
 		{
 			_selfHandle.Free();

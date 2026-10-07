@@ -12,10 +12,26 @@ SPDX-License-Identifier: GPL-2.0-or-later
        or OS check. -->
   <PropertyGroup>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefineConstants>$(DefineConstants);SHARPEMU_CPU_LINUX_X64</DefineConstants>
     <NoWarn>$(NoWarn);1591</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\..\SharpEmu.Core\SharpEmu.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Shared by source, not by a POSIX execution assembly: only the parts
+         that carry no OS-specific declaration, constant or ABI detail. Every
+         Darwin/Linux difference lives in this package's own
+         Faults/PosixSignalLayout.cs, which this file compiles against. -->
+    <Compile Include="..\..\shared\PosixFaults\PosixFaultBridge.cs"
+             Link="Faults\Shared\PosixFaultBridge.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The signal fault bridge is driven with fabricated signal frames by
+         tests/SharpEmu.Libs.Tests/Cpu/Sse4aPosixSignalRecoveryTests.cs. -->
+    <InternalsVisibleTo Include="SharpEmu.Libs.Tests" />
   </ItemGroup>
 </Project>

@@ -3,7 +3,7 @@
 
 using System.Runtime.InteropServices;
 
-namespace SharpEmu.Cpu.DirectExecution.MacOS;
+namespace SharpEmu.Cpu.DirectExecution.MacOS.X64;
 
 // On macOS the runtime receives EXC_BAD_ACCESS on each of its threads through a Mach exception
 // port before the kernel raises SIGSEGV or SIGBUS. It calls any fault in the page holding RSP, or

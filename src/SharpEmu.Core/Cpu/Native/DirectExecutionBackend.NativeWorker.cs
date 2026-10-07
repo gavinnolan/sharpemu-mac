@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using SharpEmu.HLE.Host;
 using System.Threading;
 using SharpEmu.HLE;
 
@@ -57,22 +58,8 @@ public sealed partial class DirectExecutionBackend
 	private bool _nativeWorkersDisposed;
 	private int _nativeWorkerCreationFailedLogged;
 
-	private const uint StackSizeParamIsAReservation = 0x00010000u;
-
-	[DllImport("kernel32.dll", SetLastError = true)]
-	private static extern nint CreateThread(
-		nint lpThreadAttributes,
-		nuint dwStackSize,
-		nint lpStartAddress,
-		nint lpParameter,
-		uint dwCreationFlags,
-		out uint lpThreadId);
-
-	[DllImport("kernel32.dll", SetLastError = true)]
-	private static extern uint WaitForSingleObject(nint hHandle, uint dwMilliseconds);
-
-	[DllImport("kernel32.dll", SetLastError = true)]
-	private static extern bool TerminateThread(nint hThread, uint dwExitCode);
+    private static uint WaitForSingleObject(nint handle, uint timeout) => ExecutionPlatform.WaitNativeWorker(handle, timeout);
+    private static bool TerminateThread(nint handle, uint exitCode) => ExecutionPlatform.TerminateNativeWorker(handle, exitCode);
 
 	// Runs an emitted guest entry stub. Preferred path is a pooled native worker
 	// thread; falls back to the historical inline calli (guest frames above this
@@ -413,14 +400,9 @@ public sealed partial class DirectExecutionBackend
 			{
 				return _waitForSingleObjectAddress != 0 && _setEventAddress != 0;
 			}
-			nint kernel32 = GetModuleHandle("kernel32.dll");
-			if (kernel32 == 0)
-			{
-				return false;
-			}
-			_waitForSingleObjectAddress = GetProcAddress(kernel32, "WaitForSingleObject");
-			_setEventAddress = GetProcAddress(kernel32, "SetEvent");
-			_exitThreadAddress = GetProcAddress(kernel32, "ExitThread");
+			_waitForSingleObjectAddress = ExecutionPlatform.GetRuntimeRoutine(HostRuntimeFunction.WaitForSingleObject);
+            _setEventAddress = ExecutionPlatform.GetRuntimeRoutine(HostRuntimeFunction.SetEvent);
+            _exitThreadAddress = ExecutionPlatform.GetRuntimeRoutine(HostRuntimeFunction.ExitThread);
 			return _waitForSingleObjectAddress != 0 && _setEventAddress != 0 && _exitThreadAddress != 0;
 		}
 
@@ -561,13 +543,7 @@ public sealed partial class DirectExecutionBackend
 
 		private bool StartWorkerThread()
 		{
-			_threadHandle = CreateThread(
-				0,
-				WorkerStackReservation,
-				(nint)_loopStub,
-				0,
-				StackSizeParamIsAReservation,
-				out _nativeThreadId);
+			_threadHandle = ExecutionPlatform.CreateNativeWorker(WorkerStackReservation, (nint)_loopStub, out _nativeThreadId);
 			if (_threadHandle == 0)
 			{
 				return false;

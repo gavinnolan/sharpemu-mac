@@ -95,6 +95,16 @@ public unsafe interface IDirectExecutionPlatform
     /// </summary>
     nuint TrySetThreadAffinity(nint threadHandle, nuint affinityMask);
 
+    /// <summary>Opens a thread for context capture; 0 when unsupported.</summary>
+    nint OpenThreadForContext(uint threadId);
+    uint GetThreadId(nint threadHandle);
+    bool CloseThreadHandle(nint threadHandle);
+
+    /// <summary>Starts an emitted native worker; 0 when unsupported.</summary>
+    nint CreateNativeWorker(nuint stackReservation, nint entry, out uint threadId);
+    uint WaitNativeWorker(nint threadHandle, uint timeoutMilliseconds);
+    bool TerminateNativeWorker(nint threadHandle, uint exitCode);
+
     // ---------------------------------------------------------------------
     // Worker events for the emitted guest worker wait loop
     // ---------------------------------------------------------------------
@@ -122,12 +132,67 @@ public unsafe interface IDirectExecutionPlatform
     // ---------------------------------------------------------------------
 
     /// <summary>
+    /// Installs this platform's process-wide fault interception in front of the
+    /// shared recovery entries in <paramref name="handlers"/>, chaining to
+    /// whatever was installed before so the .NET runtime keeps turning its own
+    /// faults into managed exceptions. Idempotent: a second call republishes
+    /// the handlers without reinstalling.
+    /// </summary>
+    void InstallFaultHandling(in DirectExecutionFaultHandlers handlers);
+
+    /// <summary>
+    /// Removes what <see cref="InstallFaultHandling"/> installed, where that is
+    /// safe. An implementation that cannot prove no guest thread will fault
+    /// again deliberately leaves the hooks in place.
+    /// </summary>
+    void RemoveFaultHandling();
+
+
+    /// <summary>
     /// Makes the calling thread's guest access faults reach the installed
     /// handler. macOS reroutes the thread's Mach exception port so
     /// <c>EXC_BAD_ACCESS</c> becomes a signal instead of being called a stack
     /// overflow by the runtime; other platforms do nothing.
     /// </summary>
     void RouteGuestFaultsOnCurrentThread();
+
+    // ---------------------------------------------------------------------
+    // Thread stack bounds
+    // ---------------------------------------------------------------------
+
+    /// <summary>
+    /// Bounds of the committed allocation holding <paramref name="stackPointer"/>,
+    /// where the platform can report a thread stack's whole reservation rather
+    /// than one committed region of it. False leaves the engine to fall back on
+    /// the neutral host region table.
+    /// </summary>
+    bool TryGetCommittedStackRegion(ulong stackPointer, out ulong bottom, out ulong top);
+
+    /// <summary>
+    /// Emits the thread-block stack-bounds save (<paramref name="save"/>) or
+    /// restore into the stub at <paramref name="code"/>, advancing
+    /// <paramref name="offset"/>. Emits nothing where the platform has no
+    /// swappable bounds.
+    /// </summary>
+    void EmitHostStackBounds(byte* code, ref int offset, bool save);
+
+    /// <summary>
+    /// Emits the fiber-switch bounds sync, which takes the target stack top and
+    /// bottom from the context-transfer state in R11.
+    /// </summary>
+    void EmitFiberStackBounds(byte* code, ref int offset);
+
+    /// <summary>
+    /// Emits a switch to the supplied guest stack bounds, saving the host
+    /// bounds first.
+    /// </summary>
+    void EmitGuestStackBounds(byte* code, ref int offset, ulong stackBottom, ulong stackTop);
+
+    /// <summary>
+    /// Emits the save (<paramref name="restore"/> false) or restore of bounds
+    /// held in R14/R15 across a guest entry.
+    /// </summary>
+    void EmitSavedStackBounds(byte* code, ref int offset, bool restore);
 
     // ---------------------------------------------------------------------
     // Diagnostics

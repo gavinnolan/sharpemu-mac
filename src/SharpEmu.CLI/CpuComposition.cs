@@ -33,11 +33,11 @@ internal static class CpuComposition
     public static void Register()
     {
 #if SHARPEMU_CPU_MACOS_X64
-        DirectExecutionPlatform.Initialize(SharpEmu.Cpu.DirectExecution.MacOS.MacOSExecutionPlatform.Create);
+        DirectExecutionPlatform.Initialize(SharpEmu.Cpu.DirectExecution.MacOS.X64.MacOSExecutionPlatform.Create);
 #elif SHARPEMU_CPU_LINUX_X64
-        DirectExecutionPlatform.Initialize(SharpEmu.Cpu.DirectExecution.Linux.LinuxExecutionPlatform.Create);
+        DirectExecutionPlatform.Initialize(SharpEmu.Cpu.DirectExecution.Linux.X64.LinuxExecutionPlatform.Create);
 #elif SHARPEMU_CPU_WINDOWS_X64
-        DirectExecutionPlatform.Initialize(SharpEmu.Cpu.DirectExecution.Windows.WindowsExecutionPlatform.Create);
+        DirectExecutionPlatform.Initialize(SharpEmu.Cpu.DirectExecution.Windows.X64.WindowsExecutionPlatform.Create);
 #else
 #error No SHARPEMU_CPU_*_X64 symbol was defined. SharpEmu.CLI.csproj selects the execution package from the target RuntimeIdentifier; an unrecognized RID leaves the application with no way to run guest code.
 #endif

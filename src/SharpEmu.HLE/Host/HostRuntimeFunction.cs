@@ -18,4 +18,10 @@ public enum HostRuntimeFunction
     WaitForSingleObject,
     SetEvent,
     ExitThread,
+    SuspendThread,
+    GetThreadContext,
+    ResumeThread,
+    GetStandardErrorHandle,
+    WriteFile,
+    FlushFileBuffers,
 }

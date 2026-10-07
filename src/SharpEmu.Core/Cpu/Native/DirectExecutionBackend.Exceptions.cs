@@ -26,50 +26,13 @@ public sealed partial class DirectExecutionBackend
 	private nint _workerAbortStack;
 	private const uint WorkerAbortStackSize = 0x10000u;
 
-	private unsafe void SetupExceptionHandler()
-	{
-		if (!OperatingSystem.IsWindows())
-		{
-			SetupPosixExceptionHandler();
-			return;
-		}
+	// Fault interception is installed by the registered execution platform:
+	// a vectored handler on Windows, a sigaction bridge on POSIX. Everything
+	// below this point is the shared recovery chain those hooks call, written
+	// once against the Win64 EXCEPTION_POINTERS/CONTEXT view.
+	private unsafe void SetupExceptionHandler() => InstallPlatformFaultHandling();
 
-		if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_RAW_HANDLER"), "1", StringComparison.Ordinal))
-		{
-			_rawExceptionHandlerStub = CreateExceptionHandlerTrampoline(RawVectoredHandlerPtrManaged);
-			if (_rawExceptionHandlerStub == 0)
-			{
-				throw new InvalidOperationException("Failed to create raw exception handler trampoline");
-			}
-			_rawExceptionHandler = (nint)AddVectoredExceptionHandler(1u, _rawExceptionHandlerStub);
-			Console.Error.WriteLine($"[LOADER][INFO] Raw exception handler installed: 0x{_rawExceptionHandler:X16}");
-		}
-		else
-		{
-			Console.Error.WriteLine("[LOADER][INFO] Raw exception handler disabled by SHARPEMU_DISABLE_RAW_HANDLER=1");
-		}
-
-		_handlerDelegate = VectoredHandler;
-		_handlerHandle = GCHandle.Alloc(_handlerDelegate);
-		_exceptionHandlerStub = CreateExceptionHandlerTrampoline(Marshal.GetFunctionPointerForDelegate(_handlerDelegate));
-		if (_exceptionHandlerStub == 0)
-		{
-			throw new InvalidOperationException("Failed to create exception handler trampoline");
-		}
-		_exceptionHandler = (nint)AddVectoredExceptionHandler(1u, _exceptionHandlerStub);
-		Console.Error.WriteLine($"[LOADER][INFO] Exception handler installed: 0x{_exceptionHandler:X16}");
-
-		_unhandledFilterDelegate = UnhandledExceptionFilter;
-		_unhandledFilterHandle = GCHandle.Alloc(_unhandledFilterDelegate);
-		_unhandledFilterStub = CreateExceptionHandlerTrampoline(Marshal.GetFunctionPointerForDelegate(_unhandledFilterDelegate));
-		if (_unhandledFilterStub == 0)
-		{
-			throw new InvalidOperationException("Failed to create unhandled exception filter trampoline");
-		}
-		SetUnhandledExceptionFilter(_unhandledFilterStub);
-	}
-
-	private unsafe int UnhandledExceptionFilter(void* exceptionInfo)
+	internal unsafe int UnhandledExceptionFilter(void* exceptionInfo)
 	{
 		try
 		{
@@ -90,7 +53,7 @@ public sealed partial class DirectExecutionBackend
 		return 0;
 	}
 
-	private unsafe int VectoredHandler(void* exceptionInfo)
+	internal unsafe int VectoredHandler(void* exceptionInfo)
 	{
 		if (_vectoredHandlerDepth > 0)
 		{
@@ -1378,61 +1341,10 @@ public sealed partial class DirectExecutionBackend
 	}
 
 
-	/// <summary>
-	/// Whether the whole range is committed and readable, from the neutral host
-	/// region table rather than any OS call. Visible to the per-OS execution
-	/// integrations, whose host-memory probes pre-check with it.
-	/// </summary>
-	internal unsafe static bool IsReadableHostRange(ulong address, int byteCount, bool allowExecuteOnly = false)
-	{
-		if (byteCount < 0 || !IsCanonicalUserAddress(address))
-		{
-			return false;
-		}
-
-		var length = (ulong)byteCount;
-		if (address > 0x0000_8000_0000_0000UL - length)
-		{
-			return false;
-		}
-
-		var end = address + length;
-		var cursor = address;
-		while (cursor < end)
-		{
-			if (VirtualQuery(
-					(void*)cursor,
-					out var mbi,
-					(nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0 ||
-				mbi.State != MEM_COMMIT ||
-				(!IsReadableProtection(mbi.Protect) &&
-				 !(allowExecuteOnly && mbi.Protect == 0x10)))
-			{
-				return false;
-			}
-
-			var regionEnd = mbi.BaseAddress + mbi.RegionSize;
-			if (regionEnd < mbi.BaseAddress || regionEnd <= cursor)
-			{
-				return false;
-			}
-
-			cursor = Math.Min(regionEnd, end);
-		}
-
-		return true;
-	}
 
 	private static bool IsCanonicalUserAddress(ulong address) =>
 		address >= 0x10000 && address < 0x0000_8000_0000_0000UL;
 
-	[DllImport("kernel32.dll", SetLastError = false)]
-	private unsafe static extern int ReadProcessMemory(
-		nint process,
-		nint baseAddress,
-		void* buffer,
-		nuint byteCount,
-		out nuint bytesRead);
 
 	private string FormatPointerWithNearestSymbol(ulong value)
 	{

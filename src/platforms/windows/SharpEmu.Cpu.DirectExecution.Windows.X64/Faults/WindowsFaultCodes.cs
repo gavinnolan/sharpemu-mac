@@ -1,7 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-namespace SharpEmu.Core.Cpu.Native.Windows;
+namespace SharpEmu.Cpu.DirectExecution.Windows.X64;
 
 /// <summary>
 /// Windows NTSTATUS exception codes and EXCEPTION_RECORD access-type values the

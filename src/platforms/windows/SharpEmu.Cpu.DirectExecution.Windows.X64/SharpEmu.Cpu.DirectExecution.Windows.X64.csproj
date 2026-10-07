@@ -18,4 +18,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <ItemGroup>
     <ProjectReference Include="..\..\..\SharpEmu.Core\SharpEmu.Core.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- The fault pre-filter thunk and its exception-code filter are covered
+         by tests that only run on Windows; see tests/SharpEmu.Libs.Tests/Cpu. -->
+    <InternalsVisibleTo Include="SharpEmu.Libs.Tests" />
+  </ItemGroup>
 </Project>

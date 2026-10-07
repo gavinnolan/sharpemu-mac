@@ -19,7 +19,7 @@ public sealed partial class DirectExecutionBackend
     // checked against this file's own Win64ContextSize (0x4D0): rebuilding the whole CONTEXT
     // layout field-by-field from offset 0 lands on the same 0x4D0 total, which would not happen
     // if this offset (or anything before it) were wrong.
-    private const int Win64ContextXmm0Offset = 0x1A0;
+    internal const int Win64ContextXmm0Offset = 0x1A0;
 
     private static int _sse4aSoftwareFallbackAnnounced;
     private static long _sse4aInstructionsEmulated;

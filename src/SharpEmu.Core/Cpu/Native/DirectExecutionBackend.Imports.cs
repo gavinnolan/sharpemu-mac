@@ -72,16 +72,6 @@ public sealed partial class DirectExecutionBackend
 		}
 	}
 
-	private unsafe static int RawVectoredHandlerManaged(void* exceptionInfo)
-	{
-		return TryRecoverUnresolvedSentinel(exceptionInfo);
-	}
-
-	private unsafe static int RawUnhandledFilterManaged(void* exceptionInfo)
-	{
-		return TryRecoverUnresolvedSentinel(exceptionInfo);
-	}
-
 	private unsafe static int TryRecoverUnresolvedSentinel(void* exceptionInfo)
 	{
 		EXCEPTION_RECORD* exceptionRecord = ((EXCEPTION_POINTERS*)exceptionInfo)->ExceptionRecord;

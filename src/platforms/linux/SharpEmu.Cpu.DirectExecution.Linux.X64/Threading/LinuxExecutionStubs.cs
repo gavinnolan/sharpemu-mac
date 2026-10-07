@@ -4,7 +4,7 @@
 using System.Runtime.InteropServices;
 using SharpEmu.HLE;
 
-namespace SharpEmu.Cpu.DirectExecution.Linux;
+namespace SharpEmu.Cpu.DirectExecution.Linux.X64;
 
 /// <summary>
 /// Linux replacements for the kernel32 helpers the direct-execution backend

@@ -4,7 +4,7 @@
 using SharpEmu.Core.Cpu.Native.Platform;
 using SharpEmu.HLE.Host;
 
-namespace SharpEmu.Cpu.DirectExecution.Windows;
+namespace SharpEmu.Cpu.DirectExecution.Windows.X64;
 
 /// <summary>
 /// The Windows x86-64 direct-execution integration: the OS side of the shared
@@ -71,6 +71,12 @@ public sealed unsafe class WindowsExecutionPlatform : IDirectExecutionPlatform
             HostRuntimeFunction.WaitForSingleObject => "WaitForSingleObject",
             HostRuntimeFunction.SetEvent => "SetEvent",
             HostRuntimeFunction.ExitThread => "ExitThread",
+            HostRuntimeFunction.SuspendThread => "SuspendThread",
+            HostRuntimeFunction.GetThreadContext => "GetThreadContext",
+            HostRuntimeFunction.ResumeThread => "ResumeThread",
+            HostRuntimeFunction.GetStandardErrorHandle => "GetStdHandle",
+            HostRuntimeFunction.WriteFile => "WriteFile",
+            HostRuntimeFunction.FlushFileBuffers => "FlushFileBuffers",
             _ => throw new ArgumentOutOfRangeException(nameof(routine), routine, null),
         });
     }
@@ -90,6 +96,16 @@ public sealed unsafe class WindowsExecutionPlatform : IDirectExecutionPlatform
     /// (see <see cref="DirectExecutionCapabilities.Win64WorkerEventHandles"/>), so
     /// this platform creates no separate worker event.
     /// </remarks>
+    public nint OpenThreadForContext(uint threadId) => WindowsExecutionStubs.OpenThread(0x0008 | 0x0002 | 0x0800, false, threadId);
+    public uint GetThreadId(nint threadHandle) => WindowsExecutionStubs.GetThreadId(threadHandle);
+    public bool CloseThreadHandle(nint threadHandle) => WindowsExecutionStubs.CloseHandle(threadHandle);
+    public nint CreateNativeWorker(nuint stackReservation, nint entry, out uint threadId) =>
+        WindowsExecutionStubs.CreateThread(0, stackReservation, entry, 0, 0x00010000, out threadId);
+    public uint WaitNativeWorker(nint threadHandle, uint timeoutMilliseconds) =>
+        WindowsExecutionStubs.WaitForSingleObject(threadHandle, timeoutMilliseconds);
+    public bool TerminateNativeWorker(nint threadHandle, uint exitCode) =>
+        WindowsExecutionStubs.TerminateThread(threadHandle, exitCode);
+
     public nint CreateWorkerEvent() => 0;
 
     public bool SignalWorkerEvent(nint handle) => false;
@@ -113,4 +129,29 @@ public sealed unsafe class WindowsExecutionPlatform : IDirectExecutionPlatform
 
     public bool TryReadExecutableHostMemory(ulong address, byte* destination, int byteCount) =>
         WindowsHostMemoryProbe.TryReadExecutable(address, destination, byteCount);
+
+    public void InstallFaultHandling(in DirectExecutionFaultHandlers handlers) =>
+        WindowsFaultInterception.Install(handlers);
+
+    public void RemoveFaultHandling() => WindowsFaultInterception.Remove();
+
+    // ---------------------------------------------------------------------
+    // Thread stack bounds
+    // ---------------------------------------------------------------------
+
+    public bool TryGetCommittedStackRegion(ulong stackPointer, out ulong bottom, out ulong top) =>
+        WindowsStackBounds.TryGetCommittedStackRegion(stackPointer, out bottom, out top);
+
+    public void EmitHostStackBounds(byte* code, ref int offset, bool save) =>
+        WindowsStackBounds.EmitHostStackBounds(code, ref offset, save);
+
+    public void EmitFiberStackBounds(byte* code, ref int offset) =>
+        WindowsStackBounds.EmitFiberStackBounds(code, ref offset);
+
+    public void EmitGuestStackBounds(byte* code, ref int offset, ulong stackBottom, ulong stackTop) =>
+        WindowsStackBounds.EmitGuestStackBounds(code, ref offset, stackBottom, stackTop);
+
+    public void EmitSavedStackBounds(byte* code, ref int offset, bool restore) =>
+        WindowsStackBounds.EmitSavedStackBounds(code, ref offset, restore);
+
 }

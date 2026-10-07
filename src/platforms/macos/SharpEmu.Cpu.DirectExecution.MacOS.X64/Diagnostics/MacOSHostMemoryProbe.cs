@@ -3,7 +3,7 @@
 
 using System.Runtime.InteropServices;
 
-namespace SharpEmu.Cpu.DirectExecution.MacOS;
+namespace SharpEmu.Cpu.DirectExecution.MacOS.X64;
 
 /// <summary>
 /// Reads host memory for fault diagnostics through Mach, so an unmapped or
