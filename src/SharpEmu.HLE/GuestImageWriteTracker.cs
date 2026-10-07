@@ -25,6 +25,20 @@ public static unsafe partial class GuestImageWriteTracker
         long Generation,
         bool Active);
 
+    /// <summary>
+    /// Safe-context content observation of the protected and managed-watch
+    /// owners at one address. Owner identities prevent counter reset after
+    /// untracking from making old copied bytes appear current. A token is not
+    /// a memory mapping lease, native protection receipt or signal retry claim.
+    /// </summary>
+    public readonly record struct ContentToken(
+        long ProtectedIdentity,
+        long ProtectedGeneration,
+        long WatchIdentity,
+        long WatchGeneration,
+        ulong ProtectedByteCount,
+        ulong WatchByteCount);
+
     private const int ProtRead = 0x1;
     private const int ProtWrite = 0x2;
     private const int ProtExec = 0x4;
@@ -470,6 +484,34 @@ public static unsafe partial class GuestImageWriteTracker
             {
                 ArmLocked(range, "rearm");
             }
+        }
+    }
+
+    /// <summary>
+    /// Observes both tracker owners in ordinary managed execution. Capture
+    /// after establishing observation and before copying bytes, then compare
+    /// again afterwards and before using the copy. An absent component is
+    /// identity zero/generation minus one/byte count zero; false means neither
+    /// owner exists. Callers must establish coverage of the copied footprint;
+    /// a present owner of a smaller view does not cover a larger allocation.
+    /// Registry identities are coherent under the tracker gate. Concurrent
+    /// writes can still advance the individually observed counters, so this
+    /// does not reserve content or exclude later writes or mapping changes.
+    /// </summary>
+    public static bool TryGetContentToken(ulong address, out ContentToken token)
+    {
+        lock (_gate)
+        {
+            _rangesByAddress.TryGetValue(address, out var protectedRange);
+            _watchRangesByAddress.TryGetValue(address, out var watchRange);
+            token = new ContentToken(
+                protectedRange?.DiagnosticIdentity ?? 0,
+                protectedRange is null ? -1 : Volatile.Read(ref protectedRange.WriteGeneration),
+                watchRange?.DiagnosticIdentity ?? 0,
+                watchRange is null ? -1 : Volatile.Read(ref watchRange.WriteGeneration),
+                protectedRange?.ByteCount ?? 0,
+                watchRange?.ByteCount ?? 0);
+            return protectedRange is not null || watchRange is not null;
         }
     }
 
