@@ -8,6 +8,9 @@ using static SharpEmu.Libs.Tests.Memory.HostViews.HostViewTestSupport;
 
 namespace SharpEmu.Libs.Tests.Memory.HostViews;
 
+// Probes and reserves host address space, so it may not run beside a suite
+// doing the same.
+[Collection(HostViewStateCollection.Name)]
 public sealed unsafe class HostViewQueryTests
 {
     [Fact]

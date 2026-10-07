@@ -302,7 +302,9 @@ public sealed class KernelBackedMemoryTests
         Assert.Equal((second, second + 0x10000), test.Query(second));
     }
 
-    [Fact]
+    // Reserves 512 GiB, which does not reliably fit beside anything else on a
+    // host that withholds the low guest range. See GuestAddressSpaceRequirements.
+    [RoomyGuestAddressSpaceFact]
     public void LargeVirtualReservationFallsBackToSparseGuestRange()
     {
         using var test = new BackedKernelMemory();
@@ -361,7 +363,16 @@ public sealed class KernelBackedMemoryTests
     {
         using var test = new BackedKernelMemory();
         const ulong alignment = 0x10000;
-        var start = test.Reserve(8 * alignment);
+
+        // Reserve with the same alignment the search below asks for. Without
+        // it the reservation only has to be guest-page aligned, and then
+        // start + alignment is not an aligned address, so the search correctly
+        // returns the next aligned one inside the gap instead. Which of the two
+        // happens depends on where the host left its free space: it was aligned
+        // by luck until an Apple Silicon host started handing out ranges from
+        // its own allocation base.
+        var start = test.Reserve(8 * alignment, alignment: alignment);
+        Assert.Equal(0UL, start % alignment);
         Assert.Equal(0, test.Unmap(start + alignment, 3 * alignment));
         var method = typeof(KernelMemoryCompatExports).GetMethod("FindAvailableMappingAddress",
             System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
@@ -831,13 +842,13 @@ internal sealed class BackedKernelMemory : IDisposable
         return result;
     }
 
-    public ulong Reserve(ulong size, ulong address = 0)
+    public ulong Reserve(ulong size, ulong address = 0, ulong alignment = 0)
     {
         Assert.True(Context.TryWriteUInt64(Output, address));
         Context[CpuRegister.Rdi] = Output;
         Context[CpuRegister.Rsi] = size;
         Context[CpuRegister.Rdx] = address == 0 ? 0UL : 0x10UL;
-        Context[CpuRegister.Rcx] = 0;
+        Context[CpuRegister.Rcx] = alignment;
         Assert.Equal(0, KernelRuntimeCompatExports.KernelReserveVirtualRange(Context));
         Assert.True(Context.TryReadUInt64(Output, out var result));
         return result;
