@@ -647,15 +647,11 @@ public static class FontExports
         lock (FaceGate)
         {
             if (sourceHandle == destinationHandle) return;
-            FontFaces.TryGetValue(sourceHandle, out var source);
+            if (!FontFaces.TryGetValue(sourceHandle, out var source)) return;
             FontFaces.TryGetValue(destinationHandle, out var previous);
-            source?.Retain();
-            try
-            {
-                if (source is not null) FontFaces[destinationHandle] = source;
-                else FontFaces.TryRemove(destinationHandle, out _);
-            }
-            catch { source?.Release(); throw; }
+            source.Retain();
+            try { FontFaces[destinationHandle] = source; }
+            catch { source.Release(); throw; }
             previous?.Release();
         }
     }
