@@ -100,18 +100,10 @@ public static partial class Gen5MslTranslator
                 _ => "float2",
             };
 
-            /// <summary>Metal only mipmaps 2D and 3D textures; 1D sampling takes no LOD.</summary>
-            public bool SupportsSampleLod => Dimension
-                is not (ImageDimension.Dim1D or ImageDimension.Dim1DArray);
-
-            /// <summary>
-            /// Whether a level operand may be passed at all. Metal 1D textures carry a
-            /// single level and constrain every LOD argument to a compile-time constant,
-            /// and a multisampled texture has no mip chain, so both take none.
-            /// </summary>
-            public bool SupportsMipLevels => Dimension is not (
-                ImageDimension.Dim1D or ImageDimension.Dim1DArray or
-                ImageDimension.Dim2DMsaa or ImageDimension.Dim2DMsaaArray);
+            // Guest 1D images are represented as height-one 2D images so their
+            // mip/LOD/derivative semantics survive Metal's non-mipmapped 1D API.
+            public bool SupportsSampleLod => !Multisampled;
+            public bool SupportsMipLevels => !Multisampled;
 
             /// <summary>Metal exposes gather on 2D and 2D-array textures only.</summary>
             public bool SupportsGather => Dimension
@@ -720,7 +712,7 @@ public static partial class Gen5MslTranslator
             if (imageInfo.MipMode == ImageMipMode.DynamicStorage && instruction.Opcode is "ImageLoadMip" or "ImageStoreMip")
             {
                 // A mip past the last descriptor matches no case and does nothing.
-                selector = Temp("uint", ImageIntegerAddress(image, 2));
+                selector = Temp("uint", ImageIntegerAddress(image, imageClass.CoordinateComponents));
                 elements = Enumerable.Range(0, (int)imageInfo.MipCount)
                     .Select(mip => ((uint)resourceIndex, (uint)element + (uint)mip)).ToList();
                 return true;

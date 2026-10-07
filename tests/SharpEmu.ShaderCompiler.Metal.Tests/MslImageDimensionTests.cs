@@ -14,6 +14,15 @@ namespace SharpEmu.ShaderCompiler.Metal.Tests;
 /// </summary>
 public sealed class MslImageDimensionTests(ITestOutputHelper output)
 {
+    [Theory]
+    [InlineData("ImageBvhIntersectRay")]
+    [InlineData("ImageBvh64IntersectRay")]
+    public void UnimplementedBvhIntersectionIsReportedRatherThanReturningAFalseMiss(string opcode)
+    {
+        Assert.False(Gen5ImageFixtures.TryCompile(opcode, Gen5ImageFixtures.ImageType2D, out _, out var error));
+        Assert.Contains("BVH", error);
+    }
+
     // The guest types that reach a sampled binding class.
     public static TheoryData<uint> SampledTypes() =>
     [
@@ -39,8 +48,8 @@ public sealed class MslImageDimensionTests(ITestOutputHelper output)
     // The Metal texture type each guest type must be declared as. Cube maps are
     // addressed as 2D arrays because Gen5 shaders resolve the face themselves.
     [Theory]
-    [InlineData(Gen5ImageFixtures.ImageType1D, "texture1d<float>")]
-    [InlineData(Gen5ImageFixtures.ImageType1DArray, "texture1d_array<float>")]
+    [InlineData(Gen5ImageFixtures.ImageType1D, "texture2d<float>")]
+    [InlineData(Gen5ImageFixtures.ImageType1DArray, "texture2d_array<float>")]
     [InlineData(Gen5ImageFixtures.ImageType2D, "texture2d<float>")]
     [InlineData(Gen5ImageFixtures.ImageType2DArray, "texture2d_array<float>")]
     [InlineData(Gen5ImageFixtures.ImageTypeCube, "texture2d_array<float>")]
@@ -58,8 +67,8 @@ public sealed class MslImageDimensionTests(ITestOutputHelper output)
     }
 
     [Theory]
-    [InlineData(Gen5ImageFixtures.ImageType1D, "texture1d<float, access::write>")]
-    [InlineData(Gen5ImageFixtures.ImageType1DArray, "texture1d_array<float, access::write>")]
+    [InlineData(Gen5ImageFixtures.ImageType1D, "texture2d<float, access::write>")]
+    [InlineData(Gen5ImageFixtures.ImageType1DArray, "texture2d_array<float, access::write>")]
     [InlineData(Gen5ImageFixtures.ImageType2D, "texture2d<float, access::write>")]
     [InlineData(Gen5ImageFixtures.ImageType2DArray, "texture2d_array<float, access::write>")]
     [InlineData(Gen5ImageFixtures.ImageTypeCube, "texture2d_array<float, access::write>")]
@@ -84,7 +93,7 @@ public sealed class MslImageDimensionTests(ITestOutputHelper output)
     {
         var shader = Gen5ImageFixtures.CompileOrThrow("ImageSampleLz", descriptorType);
         var line = Assert.Single(Lines(shader.Source, marker));
-        var coordinateType = spatialComponents switch { 1 => "float ", 3 => "float3 ", _ => "float2 " };
+        var coordinateType = spatialComponents switch { 1 => "float2 ", 3 => "float3 ", _ => "float2 " };
         Assert.Contains(coordinateType, DeclarationOf(shader.Source, Argument(line, 1)));
         if (arrayed)
         {
@@ -105,7 +114,7 @@ public sealed class MslImageDimensionTests(ITestOutputHelper output)
         var write = Assert.Single(Lines(shader.Source, ".write("));
         var expectedCoordinate = descriptorType switch
         {
-            Gen5ImageFixtures.ImageType1D or Gen5ImageFixtures.ImageType1DArray => "(uint)",
+            Gen5ImageFixtures.ImageType1D or Gen5ImageFixtures.ImageType1DArray => "uint2((uint)",
             Gen5ImageFixtures.ImageType3D => "uint3(",
             _ => "uint2(",
         };
@@ -205,19 +214,18 @@ public sealed class MslImageDimensionTests(ITestOutputHelper output)
         Assert.DoesNotContain("rint(", shader.Source);
     }
 
-    // Metal has no LOD, bias or gradient form of texture1d::sample, and a 1D image has a
-    // single level, so the modifier is dropped rather than refused.
+    // A height-one 2D backing retains the guest LOD and derivatives.
     [Theory]
-    [InlineData("ImageSampleL")]
-    [InlineData("ImageSampleB")]
-    [InlineData("ImageSampleD")]
-    public void OneDimensionalSample_DropsTheLevelOperand(string opcode)
+    [InlineData("ImageSampleL", "level(")]
+    [InlineData("ImageSampleB", "bias(")]
+    [InlineData("ImageSampleD", "gradient2d(")]
+    public void OneDimensionalSample_RetainsTheLevelOperand(string opcode, string modifier)
     {
-        var shader = Gen5ImageFixtures.CompileOrThrow(opcode, Gen5ImageFixtures.ImageType1D);
+        var shader = Gen5ImageFixtures.CompileOrThrow(opcode, Gen5ImageFixtures.ImageType1D,
+            stage: SharpEmu.ShaderCompiler.Resources.ShaderStage.Pixel);
         var line = Assert.Single(Lines(shader.Source, ".sample("));
-        Assert.DoesNotContain("level(", line);
-        Assert.DoesNotContain("bias(", line);
-        Assert.DoesNotContain("gradient", line);
+        Assert.Contains(modifier, line);
+        Assert.Contains("float2(", shader.Source);
     }
 
     // A volume sample needs gradient3d, not gradient2d.

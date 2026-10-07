@@ -150,8 +150,8 @@ public sealed class Gen5MslArgumentLayout
     {
         var typeName = dimension switch
         {
-            ImageDimension.Dim1D => "texture1d",
-            ImageDimension.Dim1DArray => "texture1d_array",
+            ImageDimension.Dim1D => "texture2d",
+            ImageDimension.Dim1DArray => "texture2d_array",
             ImageDimension.Dim2DArray => "texture2d_array",
             ImageDimension.Dim2DMsaa => "texture2d_ms",
             ImageDimension.Dim2DMsaaArray => "texture2d_ms_array",

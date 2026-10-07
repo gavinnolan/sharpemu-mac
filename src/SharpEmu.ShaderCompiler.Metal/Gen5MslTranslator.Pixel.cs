@@ -26,15 +26,8 @@ public static partial class Gen5MslTranslator
             error = string.Empty;
             if (instruction.Opcode is "ImageBvhIntersectRay" or "ImageBvh64IntersectRay")
             {
-                // Metal has no bound representation of GFX10's raw BVH
-                // descriptor in this backend. Preserve the hardware miss
-                // fallback used by the Vulkan path and keep the shader valid.
-                for (uint component = 0; component < 4; component++)
-                {
-                    StoreVector(image.VectorData + component, "0u");
-                }
-
-                return true;
+                error = $"{instruction.Opcode}: Metal has no guest BVH descriptor/intersection implementation";
+                return false;
             }
 
             string texture;
@@ -142,7 +135,7 @@ public static partial class Gen5MslTranslator
                 }
 
                 var coordinate = spatial.Length == 1
-                    ? $"(uint){spatial[0]}"
+                    ? $"uint2((uint){spatial[0]}, 0u)"
                     : $"{imageClass.IntegerCoordinateType}({string.Join(", ", spatial.Select(part => $"(uint){part}"))})";
 
                 // Bounds-checked, EXEC-guarded write.
@@ -165,8 +158,8 @@ public static partial class Gen5MslTranslator
             var writeAllComponents = false;
             if (instruction.Opcode is "ImageLoad" or "ImageLoadMip")
             {
-                // A storage element is already its own mip view, and a 1D or multisampled
-                // texture has no mip chain at all, so neither takes a level operand.
+                // A storage element is its own mip view; multisampled textures
+                // carry a sample operand rather than a mip level.
                 var extentLod = isStorage || !imageClass.SupportsMipLevels ? null : mipLevel;
                 var spatial = new string[imageClass.SpatialComponents];
                 for (var component = 0; component < spatial.Length; component++)
@@ -178,7 +171,7 @@ public static partial class Gen5MslTranslator
                 }
 
                 var coordinate = spatial.Length == 1
-                    ? spatial[0]
+                    ? $"uint2({spatial[0]}, 0u)"
                     : $"{imageClass.IntegerCoordinateType}({string.Join(", ", spatial)})";
                 var arguments = coordinate;
                 if (imageClass.Arrayed)
@@ -293,9 +286,8 @@ public static partial class Gen5MslTranslator
             }
         }
 
-        // The Metal extent accessor for one spatial axis. A 1D or multisampled texture
-        // carries a single level and constrains its LOD argument to a compile-time
-        // constant, so those shapes are queried without one.
+        // The extent accessor uses the guest's logical rank. Height-one 2D
+        // backing preserves 1D mip queries; multisampled textures take no LOD.
         private static string ImageExtentQuery(string texture, MslImageClass imageClass, int component, string? lod)
         {
             var accessor = component switch
@@ -313,16 +305,15 @@ public static partial class Gen5MslTranslator
         //
         // Guest cube bodies carry face-relative s/t that the SPIR-V backend biases by -1
         // before sampling; that bias is mirrored here so both backends address cube faces
-        // identically. It also lands on gradient vectors, which share this helper in the
-        // SPIR-V path -- a quirk of that sharing rather than a deliberate derivative bias.
-        private string BuildFloatSpatial(Gen5ImageControl image, int start, MslImageClass imageClass)
+        // identically. Derivatives have no coordinate origin and must not take this bias.
+        private string BuildFloatSpatial(Gen5ImageControl image, int start, MslImageClass imageClass, bool biasCube = true)
         {
             var count = imageClass.SpatialComponents;
             var parts = new string[count];
             for (var component = 0; component < count; component++)
             {
                 var value = ImageFloatAddress(image, start + component);
-                parts[component] = imageClass.Cube && component < 2 ? $"({value}) - 1.0f" : value;
+                parts[component] = biasCube && imageClass.Cube && component < 2 ? $"({value}) - 1.0f" : value;
             }
 
             return count == 1
@@ -421,8 +412,8 @@ public static partial class Gen5MslTranslator
             var gradientY = string.Empty;
             if (hasGradients)
             {
-                gradientX = BuildFloatSpatial(image, addressCursor, imageClass);
-                gradientY = BuildFloatSpatial(image, addressCursor + spatialComponents, imageClass);
+                gradientX = BuildFloatSpatial(image, addressCursor, imageClass, biasCube: false);
+                gradientY = BuildFloatSpatial(image, addressCursor + spatialComponents, imageClass, biasCube: false);
                 addressCursor += spatialComponents * 2;
             }
 
@@ -462,9 +453,16 @@ public static partial class Gen5MslTranslator
                         : $"{coordinates} + {imageClass.FloatCoordinateType}({string.Join(", ", scaled)})");
             }
 
-            // Metal only mipmaps 2D and 3D textures: texture1d{,_array}::sample takes the
-            // coordinate and nothing else. A 1D image has a single level, so dropping the
-            // level/bias/derivative operand there samples exactly what the hardware would.
+            if (spatialComponents == 1)
+            {
+                coordinates = Temp("float2", $"float2({coordinates}, 0.5f)");
+                if (hasGradients)
+                {
+                    gradientX = $"float2({gradientX}, 0.0f)";
+                    gradientY = $"float2({gradientY}, 0.0f)";
+                }
+            }
+
             var samplerArguments = !imageClass.SupportsSampleLod
                 ? string.Empty
                 : hasGradients
@@ -610,10 +608,10 @@ public static partial class Gen5MslTranslator
 
             var first = Temp(
                 $"vec<{kind}, 4>",
-                $"{texture}.sample({samplerName}, ({left} + 0.5f) / {width})");
+                $"{texture}.sample({samplerName}, float2(({left} + 0.5f) / {width}, 0.5f), level(0.0f))");
             var second = Temp(
                 $"vec<{kind}, 4>",
-                $"{texture}.sample({samplerName}, ({left} + 1.5f) / {width})");
+                $"{texture}.sample({samplerName}, float2(({left} + 1.5f) / {width}, 0.5f), level(0.0f))");
             return Temp(
                 $"vec<{kind}, 4>",
                 $"{VectorLiteral(kind)}({first}[{component}], {second}[{component}], " +

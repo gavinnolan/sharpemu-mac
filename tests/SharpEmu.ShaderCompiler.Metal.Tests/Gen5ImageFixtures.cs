@@ -69,7 +69,10 @@ internal static class Gen5ImageFixtures
         uint unifiedFormat = 71u,
         bool a16 = false,
         bool d16 = false,
-        ShaderStage stage = ShaderStage.Compute)
+        ShaderStage stage = ShaderStage.Compute,
+        uint[]? addressValues = null,
+        bool storeResults = false,
+        uint[]? storeValues = null)
     {
         var isArray = arrayed ?? descriptorType is ImageType1DArray or ImageType2DArray or ImageTypeCube or ImageType2DMsaaArray;
         var dimension = instructionDimension ?? descriptorType switch
@@ -103,11 +106,51 @@ internal static class Gen5ImageFixtures
             D16: d16);
         var imageInstruction = new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Mimg, opcode, [], [], [], control);
         var end = new Gen5ShaderInstruction(8, Gen5ShaderEncoding.Sopp, "SEndpgm", [SEndpgm], [], [], null);
-        var program = new Gen5ShaderProgram(ShaderAddress, [imageInstruction, end]);
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        if (addressValues is not null)
+        {
+            for (uint index = 0; index < addressValues.Length; index++)
+            {
+                instructions.Add(new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Vop1, "VMovB32", [],
+                    [Gen5Operand.Source(255, addressValues[index])], [Gen5Operand.Vector(index)], null));
+                pc += 8;
+            }
+        }
+        if (storeValues is not null)
+        {
+            for (uint index = 0; index < storeValues.Length; index++)
+            {
+                instructions.Add(new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Vop1, "VMovB32", [],
+                    [Gen5Operand.Source(255, storeValues[index])], [Gen5Operand.Vector(16 + index)], null));
+                pc += 8;
+            }
+        }
+        instructions.Add(imageInstruction with { Pc = pc });
+        pc += 8;
+        if (storeResults)
+        {
+            for (uint component = 0; component < 4; component++)
+            {
+                var stores = Gen5ComputeFixtures.DecodeOrThrow(new Gen5ComputeFixture("image-result-store",
+                    [0xE0700000u | component * 4, 0x80000000u | ((16 + component) << 8), SEndpgm], 0, 16));
+                instructions.Add(stores.Instructions[0] with { Pc = pc });
+                pc += 8;
+            }
+        }
+        instructions.Add(end with { Pc = pc });
+        var program = new Gen5ShaderProgram(ShaderAddress, instructions);
 
         var plan = ShaderResourcePlan.Extract(program, stage, RequestHash, 0, UserDataCount);
         var userData = new uint[UserDataCount];
         WriteDescriptor(userData, descriptorType, unifiedFormat, dstSelect);
+        if (addressValues is not null) userData[18] = 1u << 26;
+        if (storeResults)
+        {
+            userData[0] = 0x80;
+            userData[2] = 16;
+            userData[3] = 0x00038FAC;
+        }
         var snapshot = new ResourceSnapshot();
         var specialization = new ResourceSpecialization();
         Assert.True(

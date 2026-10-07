@@ -40,10 +40,12 @@ public sealed class Gen5MslAluParityTests(ITestOutputHelper output)
         new object[] { "VMaxI16", 0xFFFFu, 2u, 0u, 0xABCD5678u, 0u, 0u, 0u, 0u, false, 0xABCD0002u },
     };
 
+    public static IEnumerable<object[]> TranslationCases => Cases.Select(static row => row[..^1]);
+
     [Theory]
-    [MemberData(nameof(Cases))]
+    [MemberData(nameof(TranslationCases))]
     public void EveryFixtureTranslates(string opcode, uint a, uint b, uint c, uint old,
-        uint select, uint high, uint neg, uint abs, bool clamp, uint expected)
+        uint select, uint high, uint neg, uint abs, bool clamp)
     {
         var shader = Compile(opcode, a, b, c, old, select, high, neg, abs, clamp);
         Assert.NotEmpty(shader.Source);
