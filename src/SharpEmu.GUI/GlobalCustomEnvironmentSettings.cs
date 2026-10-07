@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Text.Json;
+using SharpEmu.Logging;
 
 namespace SharpEmu.GUI;
 
@@ -15,7 +16,7 @@ internal sealed class GlobalCustomEnvironmentSettings
     public List<string> EnvironmentVariables { get; set; } = new();
 
     public static string FilePath =>
-        Path.Combine(AppContext.BaseDirectory, "user", "custom_envs.json");
+        SharpEmuPaths.UserPath("custom_envs.json");
 
     public static IReadOnlyList<string> Load()
     {

@@ -7,6 +7,7 @@ using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
+using SharpEmu.Logging;
 using ImageResourceClass = SharpEmu.Libs.Gpu.Rendering.ImageResourceClass;
 using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
 
@@ -908,7 +909,7 @@ internal static class CompiledShaderDump
         var directory = Environment.GetEnvironmentVariable("SHARPEMU_SHADER_SPIRV_DUMP_DIR");
         if (string.IsNullOrWhiteSpace(directory))
         {
-            directory = Path.Combine(AppContext.BaseDirectory, "shader-dumps");
+            directory = SharpEmuPaths.DataPath("shader-dumps");
         }
 
         Directory.CreateDirectory(directory);

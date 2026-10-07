@@ -1,0 +1,145 @@
+# Copyright (C) 2026 SharpEmu Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# Keeps this fork's `upstream` mirror branch current with sharpemu/sharpemu and
+# opens a merge PR into main when upstream has commits we do not have.
+#
+# The branch model and the manual equivalent (scripts/mac/sync-upstream.sh) are
+# documented in docs/mac/upstream-sync.md. The point of running it on a schedule
+# is that a stalled sync shows up as an open PR rather than as nothing
+# happening.
+#
+# Conflicts are deliberately not resolved here. A conflicted merge cannot be
+# pushed, and committing conflict markers would be worse than failing, so the
+# job updates the mirror, reports the conflicting files and fails. A human then
+# runs scripts/mac/sync-upstream.sh locally and finishes the merge.
+name: Upstream sync
+
+on:
+  schedule:
+    # 04:17 UTC daily. Off the hour on purpose: scheduled runs bunch up on
+    # round times and GitHub delays them under load.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Fast-forward mirror and open merge PR
+    # This fork only. Upstream has no `upstream` mirror branch to maintain, and
+    # a third-party fork of this fork would be syncing from the wrong place.
+    if: github.repository == 'sharpemu/sharpemu-mac'
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          # Full history: the fast-forward and merge-base checks below need it,
+          # and a shallow clone cannot merge an unrelated upstream history.
+          fetch-depth: 0
+
+      - name: Sync upstream mirror and prepare merge branch
+        id: sync
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream https://github.com/sharpemu/sharpemu.git 2>/dev/null || \
+            git remote set-url upstream https://github.com/sharpemu/sharpemu.git
+          git fetch --prune upstream main
+
+          fetched="$(git rev-parse upstream/main)"
+          fetched_short="$(git rev-parse --short upstream/main)"
+          echo "upstream/main is at ${fetched_short}"
+
+          # The mirror is fast-forward only. If upstream rewrote history, say so
+          # and stop: silently force-pushing the mirror would destroy the record
+          # of what we previously integrated.
+          if git rev-parse --verify --quiet origin/upstream >/dev/null; then
+            if ! git merge-base --is-ancestor origin/upstream "${fetched}"; then
+              echo "::error::upstream/main (${fetched_short}) is not a descendant of the upstream mirror branch; upstream rewrote history. Resolve by hand."
+              exit 1
+            fi
+          fi
+          git push origin "${fetched}:refs/heads/upstream"
+
+          if git merge-base --is-ancestor "${fetched}" origin/main; then
+            echo "main already contains ${fetched_short}; nothing to integrate."
+            echo "has-work=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          new_commits="$(git rev-list --count "${fetched}" ^origin/main)"
+          sync_branch="sync/upstream-${fetched_short}"
+          echo "${new_commits} upstream commit(s) to integrate on ${sync_branch}"
+
+          open_prs="$(gh pr list --head "${sync_branch}" --state open --json number --jq 'length')"
+          if [ "${open_prs}" != "0" ]; then
+            echo "A PR for ${sync_branch} is already open; leaving it alone."
+            echo "has-work=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git switch --create "${sync_branch}" origin/main
+
+          # Merge, never rebase: main is published history.
+          if ! git merge --no-ff --no-edit \
+              -m "Merge upstream ${fetched_short} into main" "${fetched}"; then
+            conflicts="$(git diff --name-only --diff-filter=U)"
+            git merge --abort
+            {
+              echo "### Upstream sync needs a human"
+              echo
+              echo "Merging upstream \`${fetched_short}\` into \`main\` conflicts in:"
+              echo
+              echo '```'
+              echo "${conflicts}"
+              echo '```'
+              echo
+              echo "Run \`scripts/mac/sync-upstream.sh\` locally and resolve them."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Upstream merge conflicts; see the job summary."
+            exit 1
+          fi
+
+          git push origin "HEAD:refs/heads/${sync_branch}"
+          {
+            echo "has-work=true"
+            echo "sync-branch=${sync_branch}"
+            echo "fetched-short=${fetched_short}"
+            echo "new-commits=${new_commits}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Open the merge PR
+        if: steps.sync.outputs.has-work == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SYNC_BRANCH: ${{ steps.sync.outputs.sync-branch }}
+          FETCHED_SHORT: ${{ steps.sync.outputs.fetched-short }}
+          NEW_COMMITS: ${{ steps.sync.outputs.new-commits }}
+        run: |
+          set -euo pipefail
+          gh pr create \
+            --base main \
+            --head "${SYNC_BRANCH}" \
+            --title "Merge upstream ${FETCHED_SHORT} into main" \
+            --body "$(printf '%s\n' \
+              "Automated upstream sync: ${NEW_COMMITS} commit(s) from sharpemu/sharpemu \`main\` at \`${FETCHED_SHORT}\`." \
+              "" \
+              "The merge applied cleanly. Build and macOS-specific behaviour still need review before this lands —" \
+              "a clean merge is not evidence that the Metal path, the Rosetta GC policy or the app bundle still work." \
+              "" \
+              "Branch model: [docs/mac/upstream-sync.md](docs/mac/upstream-sync.md). Do not rebase this branch.")"

@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+
+Info.plist template for SharpEmu.app. scripts/macos/build-app.sh substitutes
+the @UPPERCASE@ placeholders; everything else is fixed policy.
+
+Keys deliberately absent:
+
+  LSRequiresNativeExecution — its *presence* makes the system prefer a native
+  slice over a translated one, and Apple documents that an Intel-only binary
+  linked against the macOS 11+ SDK will not run on Apple silicon at all when
+  this key is set. Setting it to false is not a documented no-op, so the key is
+  omitted rather than set either way. SharpEmu must run translated.
+
+  CFBundleIconName — that key names an asset-catalog entry (Assets.car).
+  SharpEmu ships a loose .icns, which is CFBundleIconFile's job.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>SharpEmu</string>
+	<key>CFBundleName</key>
+	<string>SharpEmu</string>
+	<key>CFBundleIdentifier</key>
+	<string>@SHARPEMU_BUNDLE_ID@</string>
+	<key>CFBundleExecutable</key>
+	<string>@SHARPEMU_EXECUTABLE@</string>
+	<key>CFBundleIconFile</key>
+	<string>@SHARPEMU_ICON_FILE@</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@SHARPEMU_SHORT_VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@SHARPEMU_BUNDLE_VERSION@</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>SharpEmu Emulator Project — GPL-2.0-or-later</string>
+
+	<!-- .NET 10 supports macOS 15 and later on both architectures, and the
+	     Rosetta 2 x64 emulator is supported on Apple silicon within that
+	     range. The native runtime itself is built against a 12.0 deployment
+	     target, so a lower value here would only promise a configuration
+	     nobody tests. -->
+	<key>LSMinimumSystemVersion</key>
+	<string>@SHARPEMU_MIN_MACOS@</string>
+
+	<!-- The CPU backend executes guest x86-64 instructions natively, so the
+	     host process must itself be x86-64: on Apple silicon the bundle runs
+	     under Rosetta 2. The binary is x86_64-only, which makes this key
+	     informational rather than load-bearing, but it documents the intent
+	     and keeps the choice explicit if a universal slice is ever added. -->
+	<key>LSArchitecturePriority</key>
+	<array>
+		<string>x86_64</string>
+	</array>
+
+	<!-- Without this the window is rendered at 1x and scaled up, which on a
+	     Retina display looks like a blurry emulator rather than a blurry
+	     window. -->
+	<key>NSHighResolutionCapable</key>
+	<true/>
+
+	<!-- Lets the window server keep the app on the integrated GPU when the
+	     discrete one is not needed, instead of forcing a GPU switch for every
+	     launch. Apple documents it for OpenGL; it is harmless for Metal and
+	     still meaningful on Intel Macs with dual GPUs, which is exactly the
+	     hardware an osx-x64 build runs on natively. -->
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+
+	<!-- Game controller support. macOS routes DualSense/DualShock pads through
+	     the Extended profile — GameController has no vendor-specific profile
+	     names — so ExtendedGamepad is the complete list for a gamepad
+	     emulator. GCSupportsControllerUserInteraction marks the app as
+	     controller-aware so the system offers per-app button remapping. -->
+	<key>GCSupportsControllerUserInteraction</key>
+	<true/>
+	<key>GCSupportedGameControllers</key>
+	<array>
+		<dict>
+			<key>ProfileName</key>
+			<string>ExtendedGamepad</string>
+		</dict>
+	</array>
+
+	<!-- Opening a game by dragging an eboot.bin onto the icon is not wired up
+	     yet (it needs the AppKit open-request handling in plan W26), so the
+	     bundle claims no document types on purpose rather than claiming some
+	     and ignoring the request. -->
+</dict>
+</plist>

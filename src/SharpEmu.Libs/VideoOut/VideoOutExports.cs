@@ -2290,7 +2290,7 @@ public static partial class VideoOutExports
             current = current.Parent;
         }
 
-        return Path.Combine(Directory.GetCurrentDirectory(), "logs");
+        return SharpEmuPaths.DataPath("logs");
     }
 
     private static void WriteBmp(string path, uint width, uint height, byte[] rgb)

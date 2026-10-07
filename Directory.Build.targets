@@ -1,0 +1,13 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<Project>
+  <!-- Target-RID-scoped platform policy. The condition tests the RID being
+       built, never the OS of the build machine: publishing osx-x64 from a
+       Linux host has to get the same guard, and building linux-x64 on a Mac
+       must not. -->
+  <Import Project="$(RepoRoot)build/platforms/macos/macos.targets"
+    Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('osx'))" />
+</Project>

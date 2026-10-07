@@ -214,6 +214,28 @@ jobs:
           if-no-files-found: error
           include-hidden-files: true
 
+      # The .app bundle is the macOS distribution format; the flat directory
+      # above stays as the comparison/legacy profile. build-app.sh runs its own
+      # osx-x64 publish because the bundle needs a non-single-file layout, then
+      # ad-hoc signs with the hardened runtime and verifies the result. No
+      # signing identity and no notarization credentials are used here, so a
+      # fork or a PR build produces the same artifact as a maintainer does.
+      - name: Build macOS app bundle
+        if: matrix.rid == 'osx-x64'
+        run: scripts/macos/build-app.sh
+
+      # Only the zip is uploaded, not the assembled bundle: a .app uploaded as
+      # a raw directory loses the symlinks and extended attributes its
+      # signature seals, so it would arrive broken. The ditto archive keeps
+      # them, and the artifact name carries the RID so PR Build Links finds it.
+      - name: Upload macOS app bundle artifact
+        if: matrix.rid == 'osx-x64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: sharpemu-osx-x64-app-${{ needs.init.outputs.short-sha }}
+          path: artifacts/macos/sharpemu-*-osx-x64-app.zip
+          if-no-files-found: error
+
   release:
     name: Publish GitHub Release
     needs:
@@ -248,7 +270,8 @@ jobs:
           win_dir="release/sharpemu-win-x64-${SHORT_SHA}"
           linux_dir="release/sharpemu-linux-x64-${SHORT_SHA}"
           macos_dir="release/sharpemu-osx-x64-${SHORT_SHA}"
-          for package_dir in "${win_dir}" "${linux_dir}" "${macos_dir}"; do
+          macos_app_dir="release/sharpemu-osx-x64-app-${SHORT_SHA}"
+          for package_dir in "${win_dir}" "${linux_dir}" "${macos_dir}" "${macos_app_dir}"; do
             test -d "${package_dir}"
           done
 
@@ -258,6 +281,11 @@ jobs:
           chmod +x "${linux_dir}/SharpEmu" "${macos_dir}/SharpEmu"
           tar -czf "release-assets/sharpemu-${VERSION}-linux-x64.tar.gz" -C "${linux_dir}" .
           tar -czf "release-assets/sharpemu-${VERSION}-osx-x64.tar.gz" -C "${macos_dir}" .
+
+          # Copied, never repacked: the zip was produced by ditto so that the
+          # signed bundle's symlinks and extended attributes survive, and
+          # unpacking and re-zipping it here would undo that.
+          cp "${macos_app_dir}/sharpemu-${VERSION}-osx-x64-app.zip" release-assets/
 
       - name: Build release notes
         shell: bash
@@ -323,8 +351,9 @@ jobs:
           RELEASE_TAG: ${{ needs.init.outputs.release-tag }}
         run: |
           mapfile -t assets < <(find release-assets -maxdepth 1 -type f \( -name '*.zip' -o -name '*.tar.gz' \) | sort)
-          if [ "${#assets[@]}" -ne 3 ]; then
-            echo "Expected 3 release assets, found ${#assets[@]}." >&2
+          # win-x64 zip, linux-x64 tar.gz, osx-x64 tar.gz, osx-x64 .app zip.
+          if [ "${#assets[@]}" -ne 4 ]; then
+            echo "Expected 4 release assets, found ${#assets[@]}." >&2
             exit 1
           fi
 

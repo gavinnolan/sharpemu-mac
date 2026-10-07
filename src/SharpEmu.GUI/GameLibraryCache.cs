@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using SharpEmu.Logging;
 
 namespace SharpEmu.GUI;
 
@@ -26,7 +27,7 @@ internal static class GameLibraryCache
     };
 
     internal static string CachePath =>
-        Path.Combine(AppContext.BaseDirectory, "user", "library_cache.json");
+        SharpEmuPaths.UserPath("library_cache.json");
 
     internal sealed class CachedGame
     {
