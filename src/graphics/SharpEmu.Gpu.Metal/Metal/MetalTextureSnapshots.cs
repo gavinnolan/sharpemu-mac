@@ -580,6 +580,9 @@ internal static class MetalTextureSnapshots
                 DstSelect: descriptor.DstSelect,
                 Sampler: ToGuestSampler(samplerDescriptor),
                 WriteGeneration: storageSnapshot.Active ? storageSnapshot.Generation : -1,
+                // A compute store to a 2D-array UAV declares an arrayed texture in the
+                // shader, so the host texture has to be created with a matching type.
+                ArrayedView: isArrayed,
                 Type: descriptor.Type,
                 Depth: textureDepth,
                 SourceByteCount: checked(baseMipByteOffset + physicalSourceByteCount),

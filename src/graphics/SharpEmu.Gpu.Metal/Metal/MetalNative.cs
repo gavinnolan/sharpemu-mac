@@ -311,6 +311,22 @@ internal static partial class MetalNative
         nint bytes,
         nuint bytesPerRow);
 
+    /// <summary>
+    /// The slice- and volume-aware upload. One array layer takes a slice with
+    /// Depth 1 and no image stride; a volume takes slice 0, the region's full
+    /// Depth and the byte stride between depth slices.
+    /// </summary>
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendReplaceRegionSlice(
+        nint receiver,
+        nint selector,
+        MtlRegion region,
+        nuint mipmapLevel,
+        nuint slice,
+        nint bytes,
+        nuint bytesPerRow,
+        nuint bytesPerImage);
+
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendDrawPrimitives(
         nint receiver,
