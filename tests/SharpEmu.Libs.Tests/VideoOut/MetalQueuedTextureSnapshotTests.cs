@@ -132,6 +132,27 @@ public sealed class MetalQueuedTextureSnapshotTests
         Assert.Contains("write generation changed across 3 attempts", error.Message);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ActualProducerRejectsUntrackRetrackDuringEveryCopyDespiteCounterZero(bool storage)
+    {
+        using var state = new SnapshotState();
+        var memory = new CountingMemory { AfterRead = () =>
+        {
+            GuestImageWriteTracker.NotifyManagedWrite(Address, AllocationBytes);
+            GuestImageWriteTracker.Untrack(Address);
+            GuestImageWriteTracker.TrackManagedWriter(Address, AllocationBytes);
+            Assert.True(GuestImageWriteTracker.TryGetWriteGeneration(Address, out var generation));
+            Assert.Equal(0, generation);
+        } };
+        var binding = Binding(Descriptor(false), [], false) with { IsStorage = storage };
+        var error = Assert.Throws<InvalidOperationException>(() => MetalTextureSnapshots.CreateTextureSnapshots(
+            new CpuContext(memory, Generation.Gen5), [binding], out _));
+        Assert.Equal(3, memory.Reads);
+        Assert.Contains("across 3 attempts", error.Message);
+    }
+
     [Fact]
     public void UnstableSnapshotsAreRejectedBeforeNativeAliasOrCacheRecovery()
     {

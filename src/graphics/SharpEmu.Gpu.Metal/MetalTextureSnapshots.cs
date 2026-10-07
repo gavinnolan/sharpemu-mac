@@ -50,7 +50,7 @@ internal static class MetalTextureSnapshots
         TextureDescriptor Descriptor,
         bool IsStorage,
         uint MipLevel,
-        bool IsArrayed);
+        bool IsArrayed, ShaderImageShape Shape, GuestImageAccess Access);
 
     internal static IReadOnlyList<GuestDrawTexture> CreateTextureSnapshots(
         CpuContext context,
@@ -70,75 +70,124 @@ internal static class MetalTextureSnapshots
             }
         }
         fallbackTextureCount = 0;
-        foreach (var binding in bindings)
+        GuestDrawTexture? unreturnedTexture = null;
+        try
         {
-            var profileStart = TexturePreparationProfile.Begin();
-            var reuseKey = new GuestTextureSnapshotReuseKey(
-                binding.Descriptor,
-                binding.IsStorage,
-                binding.MipLevel,
-                binding.IsArrayed);
-            GuestDrawTexture texture;
-            if (snapshots?.TryGetValue(reuseKey, out var snapshot) == true)
+            foreach (var binding in bindings)
             {
-                // Keep each binding's sampling state separate; share unchanged pixel data within this draw.
-                texture = snapshot with
-                {
-                    Sampler = ToGuestSampler(binding.SamplerDescriptor),
-                };
-                TexturePreparationProfile.RecordBinding(
-                    TexturePreparationProfile.BindingOutcome.Reused,
-                    profileStart);
-            }
-            else if (TryCreateGuestDrawTexture(
-                    context,
+                var profileStart = TexturePreparationProfile.Begin();
+                var reuseKey = new GuestTextureSnapshotReuseKey(
                     binding.Descriptor,
                     binding.IsStorage,
                     binding.MipLevel,
-                    binding.SamplerDescriptor,
-                    binding.IsArrayed,
-                    out texture))
-            {
-                // Share faithful payloads within this work item; sampler state
-                // stays separate. Deferred tiled bytes own their snapshot too.
-                if (!texture.IsFallback && texture.CpuSnapshotStable &&
-                    (texture.RgbaPixels.Length != 0 || texture.TiledSource is { Length: > 0 }))
+                    binding.IsArrayed, binding.Shape, binding.Access);
+                GuestDrawTexture texture;
+                if (snapshots?.TryGetValue(reuseKey, out var snapshot) == true)
                 {
-                    snapshots?.Add(reuseKey, texture);
+                    // Keep each binding's sampling state separate; share unchanged pixel data within this draw.
+                    texture = snapshot with
+                    {
+                        Sampler = ToGuestSampler(binding.SamplerDescriptor),
+                    };
+                    MetalVideoPresenter.CopyCapturedTextureSource(snapshot, texture);
+                    unreturnedTexture = texture;
+                    TexturePreparationProfile.RecordBinding(
+                        TexturePreparationProfile.BindingOutcome.Reused,
+                        profileStart);
+                }
+                else if (TryCreateCapturedTextureSource(binding, out texture))
+                {
+                    unreturnedTexture = texture;
+                    TexturePreparationProfile.RecordBinding(TexturePreparationProfile.BindingOutcome.Empty, profileStart);
+                }
+                else if (TryCreateGuestDrawTexture(
+                        context,
+                        binding.Descriptor,
+                        binding.IsStorage,
+                        binding.MipLevel,
+                        binding.SamplerDescriptor,
+                        binding.IsArrayed,
+                        out texture))
+                {
+                    unreturnedTexture = texture;
+                    // Share faithful payloads within this work item; sampler state
+                    // stays separate. Deferred tiled bytes own their snapshot too.
+                    if (!texture.IsFallback && texture.CpuSnapshotStable &&
+                        (texture.RgbaPixels.Length != 0 || texture.TiledSource is { Length: > 0 }))
+                    {
+                        snapshots?.Add(reuseKey, texture);
+                    }
+
+                    var outcome = texture.IsFallback
+                        ? TexturePreparationProfile.BindingOutcome.Fallback
+                        : texture.TiledSource is not null
+                            ? TexturePreparationProfile.BindingOutcome.Tiled
+                            : texture.RgbaPixels.Length != 0
+                                ? TexturePreparationProfile.BindingOutcome.Linear
+                                : TexturePreparationProfile.BindingOutcome.Empty;
+                    var payloadBytes = texture.TiledSource?.LongLength ?? texture.RgbaPixels.LongLength;
+                    TexturePreparationProfile.RecordBinding(outcome, profileStart, payloadBytes);
+                }
+                else
+                {
+                    TexturePreparationProfile.RecordBinding(
+                        TexturePreparationProfile.BindingOutcome.Skipped,
+                        profileStart);
+                    continue;
                 }
 
-                var outcome = texture.IsFallback
-                    ? TexturePreparationProfile.BindingOutcome.Fallback
-                    : texture.TiledSource is not null
-                        ? TexturePreparationProfile.BindingOutcome.Tiled
-                        : texture.RgbaPixels.Length != 0
-                            ? TexturePreparationProfile.BindingOutcome.Linear
-                            : TexturePreparationProfile.BindingOutcome.Empty;
-                var payloadBytes = texture.TiledSource?.LongLength ?? texture.RgbaPixels.LongLength;
-                TexturePreparationProfile.RecordBinding(outcome, profileStart, payloadBytes);
-            }
-            else
-            {
-                TexturePreparationProfile.RecordBinding(
-                    TexturePreparationProfile.BindingOutcome.Skipped,
-                    profileStart);
-                continue;
+                // Keep the owner even if association copying or list insertion
+                // fails before a frontend can receive and own this batch.
+                unreturnedTexture = texture;
+                var originalTexture = texture;
+                texture = texture with
+                {
+                    Descriptor = binding.ResourceDescriptor?.ToArray(),
+                    Shape = binding.Shape,
+                    Access = binding.Access,
+                };
+                MetalVideoPresenter.CopyCapturedTextureSource(originalTexture, texture);
+                textures.Add(texture);
+                unreturnedTexture = null;
+                if (texture.IsFallback)
+                {
+                    fallbackTextureCount++;
+                }
             }
 
-            texture = texture with
-            {
-                Descriptor = binding.ResourceDescriptor?.ToArray(),
-                Shape = binding.Shape,
-                Access = binding.Access,
-            };
-            textures.Add(texture);
-            if (texture.IsFallback)
-            {
-                fallbackTextureCount++;
-            }
+            return textures;
         }
+        catch
+        {
+            MetalVideoPresenter.ReleasePreparedTextureSources(textures);
+            if (unreturnedTexture is not null)
+                MetalVideoPresenter.ReleasePreparedTextureSource(unreturnedTexture);
+            throw;
+        }
+    }
 
-        return textures;
+    private static bool TryCreateCapturedTextureSource(TranslatedImageBinding binding, out GuestDrawTexture texture)
+    {
+        texture = null!;
+        if (!MetalVideoPresenter.TextureSourceGraphEnabled || binding.Descriptor.Address == 0) return false;
+        var descriptor = binding.Descriptor;
+        var candidate = new GuestDrawTexture(descriptor.Address, descriptor.Width, descriptor.Height,
+            descriptor.Format, descriptor.NumberType, [], false, binding.IsStorage,
+            Sampler: ToGuestSampler(binding.SamplerDescriptor), Type: descriptor.Type, Pitch: descriptor.Pitch,
+            TileMode: descriptor.TileMode, MipLevels: descriptor.MipLevels, BaseMipLevel: descriptor.ViewBaseLevel,
+            MipLevel: binding.MipLevel, ResourceMipLevels: descriptor.ResourceMipLevels,
+            DstSelect: descriptor.DstSelect, ArrayedView: binding.IsArrayed, Depth: descriptor.Depth,
+            Descriptor: binding.ResourceDescriptor?.ToArray(), Shape: binding.Shape, Access: binding.Access,
+            CpuSnapshotStable: false);
+        // Exact producer/view identity decides footprint compatibility. No
+        // guest byte read or retrospective CPU provenance stamp occurs here.
+        if (MetalVideoPresenter.TryCaptureTextureSource(candidate, 0, descriptor.BaseArray != 0))
+        {
+            texture = candidate;
+            return true;
+        }
+        MetalVideoPresenter.RequireNoUncapturedGpuTextureSource(candidate);
+        return false;
     }
 
     // Keep equation support consistent with MetalDetilePass.Supports.
@@ -303,6 +352,7 @@ internal static class MetalTextureSnapshots
         out GuestDrawTexture texture,
         int snapshotAttempt = 0)
     {
+        var mappingEpochBeforeSnapshot = HostMemory.MappingGeneration;
         texture = default!;
         var textureDepth = GetTextureVolumeDepth(
             descriptor.Type,
@@ -509,6 +559,7 @@ internal static class MetalTextureSnapshots
             var readSucceeded = false;
             var linearNonzero = false;
             var storageSnapshot = default(SharpEmu.HLE.GuestImageWriteTracker.ReadSnapshot);
+            var storageObservation = default(MetalVideoPresenter.CpuTextureSnapshotObservation);
             if (descriptor.Address != 0 && !uploadKnown)
             {
                 // Read and decode the full tiled storage footprint before upload.
@@ -516,6 +567,8 @@ internal static class MetalTextureSnapshots
                     descriptor.Address,
                     checked(baseMipByteOffset + physicalSourceByteCount),
                     source: "agc.storage-image-snapshot");
+                storageObservation = MetalVideoPresenter.ObserveCpuTextureSnapshot(
+                    descriptor.Address, checked(baseMipByteOffset + physicalSourceByteCount), mappingEpochBeforeSnapshot);
                 var storageSource = new byte[(int)physicalSourceByteCount];
                 if (context.Memory.TryRead(descriptor.Address + baseMipByteOffset, storageSource))
                 {
@@ -545,7 +598,8 @@ internal static class MetalTextureSnapshots
                 }
 
                 if (readSucceeded &&
-                    !SharpEmu.HLE.GuestImageWriteTracker.IsReadSnapshotStable(storageSnapshot))
+                    (!SharpEmu.HLE.GuestImageWriteTracker.IsReadSnapshotStable(storageSnapshot) ||
+                     !MetalVideoPresenter.IsCpuTextureSnapshotObservationStable(descriptor.Address, storageObservation)))
                 {
                     if (snapshotAttempt < 2)
                     {
@@ -560,7 +614,9 @@ internal static class MetalTextureSnapshots
                             snapshotAttempt + 1);
                     }
 
-                    initialPixels = [];
+                    throw new InvalidOperationException(
+                        $"Metal cannot capture stable storage texture snapshot at 0x{descriptor.Address:X}: " +
+                        $"content observation changed across {snapshotAttempt + 1} attempts.");
                 }
             }
 
@@ -606,7 +662,9 @@ internal static class MetalTextureSnapshots
                 SourceByteCount: checked(baseMipByteOffset + physicalSourceByteCount),
                 CpuSnapshotStable:
                     !readSucceeded ||
-                    SharpEmu.HLE.GuestImageWriteTracker.IsReadSnapshotStable(storageSnapshot));
+                    SharpEmu.HLE.GuestImageWriteTracker.IsReadSnapshotStable(storageSnapshot) &&
+                    MetalVideoPresenter.IsCpuTextureSnapshotObservationStable(descriptor.Address, storageObservation));
+            MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(texture, storageObservation);
             return true;
         }
 
@@ -629,6 +687,8 @@ internal static class MetalTextureSnapshots
             descriptor.Address,
             trackedSourceByteCount,
             source: "agc.sampled-texture-snapshot");
+        var cpuObservation = MetalVideoPresenter.ObserveCpuTextureSnapshot(
+            descriptor.Address, trackedSourceByteCount, mappingEpochBeforeSnapshot);
         if (readSnapshot.Active)
         {
             hasWriteGeneration = true;
@@ -661,6 +721,7 @@ internal static class MetalTextureSnapshots
                     samplerDescriptor,
                     isArrayed,
                     readSnapshot,
+                    cpuObservation,
                     snapshotAttempt,
                     texture,
                     out texture);
@@ -727,6 +788,7 @@ internal static class MetalTextureSnapshots
                             samplerDescriptor,
                             isArrayed,
                             readSnapshot,
+                            cpuObservation,
                             snapshotAttempt,
                             texture,
                             out texture);
@@ -794,6 +856,7 @@ internal static class MetalTextureSnapshots
                         samplerDescriptor,
                         isArrayed,
                         readSnapshot,
+                        cpuObservation,
                         snapshotAttempt,
                         texture,
                         out texture);
@@ -880,6 +943,7 @@ internal static class MetalTextureSnapshots
                     samplerDescriptor,
                     isArrayed,
                     readSnapshot,
+                    cpuObservation,
                     snapshotAttempt,
                     texture,
                     out texture);
@@ -925,6 +989,7 @@ internal static class MetalTextureSnapshots
             samplerDescriptor,
             isArrayed,
             readSnapshot,
+            cpuObservation,
             snapshotAttempt,
             texture,
             out texture);
@@ -938,11 +1003,13 @@ internal static class MetalTextureSnapshots
         IReadOnlyList<uint> samplerDescriptor,
         bool isArrayed,
         SharpEmu.HLE.GuestImageWriteTracker.ReadSnapshot snapshot,
+        MetalVideoPresenter.CpuTextureSnapshotObservation observation,
         int snapshotAttempt,
         GuestDrawTexture candidate,
         out GuestDrawTexture texture)
     {
-        if (SharpEmu.HLE.GuestImageWriteTracker.IsReadSnapshotStable(snapshot))
+        if (SharpEmu.HLE.GuestImageWriteTracker.IsReadSnapshotStable(snapshot) &&
+            MetalVideoPresenter.IsCpuTextureSnapshotObservationStable(descriptor.Address, observation))
         {
             texture = snapshot.Active
                 ? candidate with
@@ -951,6 +1018,7 @@ internal static class MetalTextureSnapshots
                     CpuSnapshotStable = true,
                 }
                 : candidate;
+            MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(texture, observation);
             return true;
         }
 
@@ -972,7 +1040,7 @@ internal static class MetalTextureSnapshots
         // deferring an unprotected guest-memory read until execution.
         throw new InvalidOperationException(
             $"Metal cannot capture stable texture snapshot at 0x{descriptor.Address:X}: " +
-            $"write generation changed across {snapshotAttempt + 1} attempts.");
+            $"write generation changed across {snapshotAttempt + 1} attempts (content identity and mapping observation also checked).");
     }
 
     private static Exception SnapshotBudgetExceeded(TextureDescriptor descriptor, ulong bytes, string layout) =>

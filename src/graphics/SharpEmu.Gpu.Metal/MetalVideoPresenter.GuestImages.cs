@@ -590,6 +590,8 @@ internal static partial class MetalVideoPresenter
         }
 
         var queue = _submittingGuestQueue ?? GuestQueueIdentity.Default;
+        if (_textureSourceGraphEnabled)
+            return EnqueueTextureSourceWorkLocked(work, payloadBytes, queue);
         var sequence = ++_enqueuedGuestWorkSequence;
         _lastEnqueuedGuestWorkByQueue[queue.Name] = sequence;
         if (!_pendingGuestWorkByQueue.TryGetValue(queue.Name, out var pendingQueue))
@@ -700,7 +702,17 @@ internal static partial class MetalVideoPresenter
     {
         lock (_gate)
         {
-            while (_pendingGuestQueueSchedule.Count > 0)
+            if (_guestWorkFailure is not null)
+            {
+                work = default;
+                return false;
+            }
+            // Visit each logical queue head at most once. A dependent head
+            // cannot expose later work in its own FIFO queue, but must not
+            // prevent its producer or an unrelated queue from progressing.
+            var remainingHeads = _pendingGuestQueueSchedule.Count;
+            PendingGuestWork? blockedHead = null;
+            while (remainingHeads-- > 0 && _pendingGuestQueueSchedule.Count > 0)
             {
                 if (_pendingGuestQueueCursor >= _pendingGuestQueueSchedule.Count)
                 {
@@ -713,6 +725,27 @@ internal static partial class MetalVideoPresenter
                 {
                     _pendingGuestWorkByQueue.Remove(queueName);
                     _pendingGuestQueueSchedule.RemoveAt(_pendingGuestQueueCursor);
+                    continue;
+                }
+
+                bool sourcesReady;
+                try
+                {
+                    sourcesReady = GuestTextureSourcesReadyLocked(first.Value);
+                }
+                catch (Exception exception) when (_guestWorkFailure is null)
+                {
+                    // Dependency lookup can allocate or expose an invalid
+                    // owner. Latch before Drain's finally can commit a prior
+                    // batch; intended fatal paths have already latched.
+                    FailGuestTextureSourceSelectionLocked(first.Value, "dependency readiness lookup failed", exception);
+                    throw;
+                }
+                if (!sourcesReady)
+                {
+                    blockedHead ??= first.Value;
+                    _pendingGuestQueueCursor =
+                        (_pendingGuestQueueCursor + 1) % _pendingGuestQueueSchedule.Count;
                     continue;
                 }
 
@@ -733,6 +766,11 @@ internal static partial class MetalVideoPresenter
                 return true;
             }
 
+            // Pending means producer work still needs encoding, not a native
+            // completion event. If every live head depends on another pending
+            // queue, none can make progress: fail instead of stalling forever.
+            if (blockedHead is { } blocked)
+                FailGuestTextureSourceSelectionLocked(blocked, "all logical queue heads are blocked by a source dependency cycle");
             work = default;
             return false;
         }
