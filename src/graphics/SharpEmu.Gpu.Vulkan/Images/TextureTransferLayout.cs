@@ -4,8 +4,10 @@
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Scheduling;
 using Silk.NET.Vulkan;
+using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Gpu.Vulkan.Scheduling;
 
-namespace SharpEmu.Libs.Gpu.Images;
+namespace SharpEmu.Gpu.Vulkan.Images;
 
 // One tiler dispatch: a linear span, a tiled span and the surface window between them.
 public struct TileTransfer

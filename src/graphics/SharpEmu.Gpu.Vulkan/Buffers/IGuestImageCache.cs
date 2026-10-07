@@ -1,7 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-namespace SharpEmu.Libs.Gpu.Buffers;
+
+namespace SharpEmu.Gpu.Vulkan.Buffers;
 
 // ImagePages: an image shares a tracker page with the range; ImageBytes: an image overlaps its bytes.
 public readonly record struct ImageRegionInfo(bool ImagePages, bool ImageBytes, bool GpuImageBytes);

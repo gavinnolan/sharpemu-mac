@@ -5,8 +5,9 @@ using System.IO.Hashing;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Kernel;
 using Silk.NET.Vulkan;
+using SharpEmu.Libs.Gpu.Images;
 
-namespace SharpEmu.Libs.Gpu.Images;
+namespace SharpEmu.Gpu.Vulkan.Images;
 
 // Large layered textures are pools the game streams into one slot at a time. One CPU write
 // makes the whole image dirty, and re-uploading a 256-layer BC3 array (~350 MB) cost

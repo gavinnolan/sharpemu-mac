@@ -5,7 +5,7 @@ using SharpEmu.Libs.Gpu.Scheduling;
 using Silk.NET.Vulkan;
 using VkBuffer = Silk.NET.Vulkan.Buffer;
 
-namespace SharpEmu.Libs.Gpu.Pipelines;
+namespace SharpEmu.Gpu.Vulkan.Pipelines;
 
 // The dependency every host, transfer and shader write to the global data share has before a shader reads it.
 public static class GlobalDataShareBarrier

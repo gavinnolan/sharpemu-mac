@@ -5,13 +5,14 @@ using System.Runtime.InteropServices;
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.HLE.GuestMemory;
-using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
-using SharpEmu.Libs.Gpu.Vulkan;
 using Silk.NET.Vulkan;
+using SharpEmu.Libs.Gpu.Buffers;
+using SharpEmu.Gpu.Vulkan.Scheduling;
+using SharpEmu.Libs.Diagnostics;
 
-namespace SharpEmu.Libs.Gpu.Buffers;
+namespace SharpEmu.Gpu.Vulkan.Buffers;
 
 public readonly record struct DownloadPiece(GpuBuffer Buffer, ulong SourceOffset, ulong Address, ulong Size);
 
@@ -241,10 +242,10 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         if (isWritten)
         {
             buffer.NoteGpuWrite();
-            if (Diagnostics.DccWriterTrace.Enabled)
+            if (DccWriterTrace.Enabled)
             {
                 var images = RequireImageCache();
-                Diagnostics.DccWriterTrace.Record(images.OverlapsDccMetadata, guestAddress, size);
+                DccWriterTrace.Record(images.OverlapsDccMetadata, guestAddress, size);
             }
 
             if (!_gpuModifiedRanges.Contains(guestAddress, size))

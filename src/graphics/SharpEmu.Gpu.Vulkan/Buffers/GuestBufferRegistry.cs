@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Numerics;
-using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.Gpu.Buffers;
+using SharpEmu.Gpu.Vulkan.Scheduling;
 
-namespace SharpEmu.Libs.Gpu.Buffers;
+namespace SharpEmu.Gpu.Vulkan.Buffers;
 
 internal enum BufferLifetimeState { Allocated, Registered, Retiring, Released }
 

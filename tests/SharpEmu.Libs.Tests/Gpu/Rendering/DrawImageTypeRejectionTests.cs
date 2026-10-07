@@ -3,7 +3,6 @@
 
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Rendering;
-using SharpEmu.Libs.Gpu.Vulkan;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using Silk.NET.Vulkan;
 using Xunit;

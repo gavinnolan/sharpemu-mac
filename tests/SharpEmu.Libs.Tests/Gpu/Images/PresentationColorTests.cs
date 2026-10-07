@@ -1,10 +1,10 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using SharpEmu.Libs.Gpu.Vulkan;
+using SharpEmu.Gpu.Vulkan;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Vulkan;
-using SharpEmu.Libs.VideoOut;
+using SharpEmu.Gpu.Vulkan.Presentation;
 using Silk.NET.Vulkan;
 using Xunit;
 

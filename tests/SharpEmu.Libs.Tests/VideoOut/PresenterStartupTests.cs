@@ -6,7 +6,7 @@ using System.Runtime.CompilerServices;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Tests.Gpu.GpuCommands;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
-using SharpEmu.Libs.VideoOut;
+using SharpEmu.Gpu.Vulkan.Presentation;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.VideoOut;

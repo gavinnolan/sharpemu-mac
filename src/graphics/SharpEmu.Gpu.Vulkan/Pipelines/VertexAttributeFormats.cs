@@ -5,7 +5,7 @@ using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
 using Silk.NET.Vulkan;
 
-namespace SharpEmu.Libs.Gpu.Pipelines;
+namespace SharpEmu.Gpu.Vulkan.Pipelines;
 
 // The host vertex format of a buffer descriptor's format, narrowed to the components the program fetches.
 public static class VertexAttributeFormats

@@ -3,8 +3,9 @@
 
 using SharpEmu.HLE.GpuMemory;
 using Silk.NET.Vulkan;
+using SharpEmu.Libs.Gpu.Scheduling;
 
-namespace SharpEmu.Libs.Gpu.Scheduling;
+namespace SharpEmu.Gpu.Vulkan.Scheduling;
 
 public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
 {

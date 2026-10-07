@@ -6,7 +6,7 @@ using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
 using Silk.NET.Vulkan;
 
-namespace SharpEmu.Libs.Gpu.Pipelines;
+namespace SharpEmu.Gpu.Vulkan.Pipelines;
 
 // The native descriptor type and count of every binding kind, shared by layouts and writes.
 public static class DescriptorWriter

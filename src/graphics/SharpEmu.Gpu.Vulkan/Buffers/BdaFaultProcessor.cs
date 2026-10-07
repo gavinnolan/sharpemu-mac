@@ -3,12 +3,11 @@
 
 using System.Runtime.InteropServices;
 using SharpEmu.HLE.GpuMemory;
-using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.ShaderCompiler.Vulkan;
-using SharpEmu.Libs.Gpu.Vulkan;
 using Silk.NET.Vulkan;
+using SharpEmu.Gpu.Vulkan.Scheduling;
 
-namespace SharpEmu.Libs.Gpu.Buffers;
+namespace SharpEmu.Gpu.Vulkan.Buffers;
 
 // Turns the GPU fault bitmap into buffers: a compute pass lists faulted pages per area.
 public sealed unsafe class BdaFaultProcessor : IDisposable

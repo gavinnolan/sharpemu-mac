@@ -1,7 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-namespace SharpEmu.Libs.Gpu.Buffers;
+
+namespace SharpEmu.Gpu.Vulkan.Buffers;
 
 public enum GpuBufferUsage : byte
 {

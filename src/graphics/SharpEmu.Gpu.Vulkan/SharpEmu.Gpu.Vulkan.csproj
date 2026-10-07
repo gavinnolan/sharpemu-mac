@@ -15,9 +15,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
   Buffers (GpuBuffer, the slab allocator, the guest buffer cache),
   Pipelines (descriptor heap/writer, the GDS barrier, VkFormat vertex
   attributes) and Scheduling (the submission scheduler, its recording buffers,
-  timeline and tick device). Their namespaces are unchanged so the move stays
-  reviewable; what is left in SharpEmu.Libs under those names is the
-  backend-neutral part the Metal backend shares.
+  timeline and tick device). They are now SharpEmu.Gpu.Vulkan.{Images,Buffers,
+  Pipelines,Scheduling}; what is left in SharpEmu.Libs.Gpu under those names is
+  the backend-neutral part the Metal backend shares.
 
   This package is never built for macOS, which is what keeps Silk.NET.Vulkan
   and MoltenVK out of a macOS publish output.

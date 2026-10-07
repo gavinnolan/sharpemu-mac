@@ -66,7 +66,7 @@ public sealed class ShaderPrewarmPresenterTests(HeadlessVulkanFixture fixture) :
 
         Assert.Equal(0, presenter.GetField<int>("_shaderPrewarmFailed"));
         Assert.Equal(1, presenter.GetField<int>("_shaderPrewarmCompiled"));
-        Assert.True(prewarmed.ContainsKey(SharpEmu.Libs.VideoOut.VulkanPipelineCacheStorage.CompiledShaderIdentity(runtime)));
+        Assert.True(prewarmed.ContainsKey(SharpEmu.Gpu.Vulkan.Presentation.VulkanPipelineCacheStorage.CompiledShaderIdentity(runtime)));
         vulkan.AssertNoValidationMessages();
     }
 }

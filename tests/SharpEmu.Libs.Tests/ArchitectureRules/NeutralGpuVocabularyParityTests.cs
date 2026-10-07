@@ -3,7 +3,7 @@
 
 using System.Runtime.InteropServices;
 using SharpEmu.Libs.Gpu.Abstractions;
-using SharpEmu.Libs.Gpu.Vulkan;
+using SharpEmu.Gpu.Vulkan;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.ArchitectureRules;

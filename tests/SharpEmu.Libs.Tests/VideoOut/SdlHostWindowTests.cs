@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SDL;
-using SharpEmu.Libs.VideoOut;
 using Xunit;
 using SharpEmu.Adapters.Sdl.Windowing;
 

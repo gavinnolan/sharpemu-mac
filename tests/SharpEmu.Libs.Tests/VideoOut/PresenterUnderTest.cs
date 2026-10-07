@@ -6,13 +6,13 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.GpuCommands;
-using SharpEmu.Libs.Gpu.Images;
-using SharpEmu.Libs.Gpu.Pipelines;
+using SharpEmu.Gpu.Vulkan.Images;
+using SharpEmu.Gpu.Vulkan.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
-using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Gpu.Vulkan.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Buffers;
 using SharpEmu.Libs.Tests.Gpu.Vulkan;
-using SharpEmu.Libs.VideoOut;
+using SharpEmu.Gpu.Vulkan.Presentation;
 using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Tests.VideoOut;

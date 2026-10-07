@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.Abstractions;
-using SharpEmu.Libs.Gpu.Vulkan;
 using Silk.NET.Vulkan;
+using SharpEmu.Libs.Gpu.Buffers;
 
-namespace SharpEmu.Libs.Gpu.Buffers;
+namespace SharpEmu.Gpu.Vulkan.Buffers;
 
 // The device facts the stores need: handles, memory types, limits, format support
 // and the count of live device-memory allocations made through this object.
