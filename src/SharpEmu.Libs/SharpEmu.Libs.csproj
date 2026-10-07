@@ -7,6 +7,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <ItemGroup>
     <ProjectReference Include="..\SharpEmu.LibAtrac9\SharpEmu.LibAtrac9.csproj" />
     <ProjectReference Include="..\SharpEmu.HLE\SharpEmu.HLE.csproj" />
+    <ProjectReference Include="..\SharpEmu.Fonts.Abstractions\SharpEmu.Fonts.Abstractions.csproj" />
     <ProjectReference Include="..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
     <ProjectReference Include="..\SharpEmu.ShaderCompiler\SharpEmu.ShaderCompiler.csproj" />
     <!-- The backend emitters moved out with their backends: the MSL emitter is
@@ -36,24 +37,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <ItemGroup>
     <PackageReference Include="FFmpeg.AutoGen" />
     <PackageReference Include="NLayer" />
-    <PackageReference Include="SkiaSharp" />
     <PackageReference Include="System.IO.Hashing" />
-  </ItemGroup>
-
-  <!-- Native asset packages are selected by the *target* RID, not by the OS of
-       the machine doing the build. SkiaSharp.NativeAssets.Linux was referenced
-       unconditionally, which means a macOS or Windows publish restored a
-       package whose only payload is runtimes/linux-*/native/libSkiaSharp.so.
-       RID-specific publish already filtered those files out of the output, but
-       the reference still pulled the package into restore and would copy the
-       .so into any RID-less build output on a Linux host. Scope it instead:
-       Windows natives ship inside the SkiaSharp package itself and the macOS
-       natives arrive transitively through Avalonia.Skia
-       (SkiaSharp.NativeAssets.macOS), so Linux is the only platform that needs
-       an explicit reference. The '$(RuntimeIdentifier)' == '' arm covers
-       RID-less builds and test runs, which need the host's own natives. -->
-  <ItemGroup Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('linux')) Or ('$(RuntimeIdentifier)' == '' And $([MSBuild]::IsOSPlatform('Linux')))">
-    <PackageReference Include="SkiaSharp.NativeAssets.Linux" />
   </ItemGroup>
 
   <PropertyGroup>

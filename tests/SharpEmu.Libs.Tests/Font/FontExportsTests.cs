@@ -17,8 +17,11 @@ public sealed class FontExportsTests
     private readonly FakeCpuMemory _memory = new(Base, 0x1000);
     private readonly CpuContext _ctx;
 
+    private static readonly SharpEmu.Fonts.Skia.SkiaFontFactory Factory = new();
+
     public FontExportsTests()
     {
+        GuestFontServices.Initialize(Factory);
         _ctx = new CpuContext(_memory, Generation.Gen5);
     }
 
@@ -214,4 +217,35 @@ public sealed class FontExportsTests
         Assert.Equal(font.MeasureText("\u0130"), BinaryPrimitives.ReadSingleLittleEndian(metrics.AsSpan(16)));
         Assert.Equal(0, FontExports.CloseFont(ctx));
     }
+    [Fact]
+    public void FailedInstanceOutputDoesNotReplaceExistingFace()
+    {
+        _ctx[CpuRegister.Rsi] = 7; // bold source
+        _ctx[CpuRegister.R8] = Base + 0x80;
+        Assert.Equal(0, FontExports.OpenFontSet(_ctx));
+        Assert.True(_ctx.TryReadUInt64(Base + 0x80, out var source));
+        _ctx[CpuRegister.Rsi] = 1u << 20; // italic destination
+        _ctx[CpuRegister.R8] = Base + 0x88;
+        Assert.Equal(0, FontExports.OpenFontSet(_ctx));
+        Assert.True(_ctx.TryReadUInt64(Base + 0x88, out var destination));
+        byte[] Metrics(ulong handle)
+        {
+            _ctx[CpuRegister.Rdi] = handle;
+            _ctx[CpuRegister.Rsi] = 'W';
+            _ctx[CpuRegister.Rdx] = Base + 0x100;
+            Assert.Equal(0, FontExports.GetCharGlyphMetrics(_ctx));
+            var result = new byte[32]; Assert.True(_memory.TryRead(Base + 0x100, result)); return result;
+        }
+        var before = Metrics(destination);
+        _ctx[CpuRegister.Rdi] = source;
+        _ctx[CpuRegister.Rsi] = destination;
+        _ctx[CpuRegister.Rdx] = Base + 0x2000; // outside the writable output range
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT, FontExports.OpenFontInstance(_ctx));
+        Assert.Equal(0, FontExports.CloseFont(_ctx)); // source close cannot dispose destination
+        Assert.Equal(before, Metrics(destination));
+        _ctx[CpuRegister.Rdi] = destination;
+        Assert.Equal(0, FontExports.CloseFont(_ctx));
+        Assert.Equal(0, FontExports.CloseFont(_ctx));
+    }
+
 }

@@ -5,7 +5,7 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Text;
 using SharpEmu.HLE;
-using SkiaSharp;
+using SharpEmu.Fonts.Abstractions;
 
 namespace SharpEmu.Libs.Font;
 
@@ -21,7 +21,8 @@ public static class FontExports
     private static ulong _rendererSelectionAddress;
     private static readonly ConcurrentDictionary<ulong, (float Width, float Height)> FontScales = new();
     private static readonly ConcurrentDictionary<ulong, FontFace> FontFaces = new();
-    private static readonly Lazy<FontFace> DefaultFont = new(() => new(SKTypeface.FromFamilyName(null)));
+    private static readonly object FaceGate = new();
+    private static FontFace? _defaultFont;
 
     [SysAbiExport(
         Nid = "oaJ1BpN2FQk",
@@ -190,6 +191,7 @@ public static class FontExports
         var fontHandle = ctx[CpuRegister.Rdi];
         var scale = GetFontScale(fontHandle);
         float[] values = [scale.Height * 0.75f, scale.Height, 0];
+        lock (FaceGate)
         if (FontFaces.TryGetValue(fontHandle, out var face))
         {
             var metrics = face.GetMetrics(scale.Width, scale.Height);
@@ -257,9 +259,8 @@ public static class FontExports
         var fontSet = (uint)ctx[CpuRegister.Rsi];
         var bold = (fontSet & 0xf) >= 7;
         var italic = ((fontSet >> 20) & 0xf) == 1;
-        var style = bold ? (italic ? SKFontStyle.BoldItalic : SKFontStyle.Bold) :
-            (italic ? SKFontStyle.Italic : SKFontStyle.Normal);
-        return OpenFace(ctx, new(SKTypeface.FromFamilyName(null, style)));
+        var style = (bold ? FontStyle.Bold : FontStyle.Normal) | (italic ? FontStyle.Italic : FontStyle.Normal);
+        return OpenFace(ctx, OwnFace(GuestFontServices.Factory.CreateSystemFace(style)));
     }
 
     [SysAbiExport(
@@ -293,22 +294,38 @@ public static class FontExports
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
-        using var data = SKData.CreateCopy(bytes);
-        var typeface = SKTypeface.FromData(data, (int)index);
-        return typeface is null
+        var face = GuestFontServices.Factory.CreateMemoryFace(bytes, index);
+        return face is null
             ? SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT)
-            : OpenFace(ctx, new(typeface));
+            : OpenFace(ctx, OwnFace(face));
+    }
+
+    private static FontFace OwnFace(IFontFace face)
+    {
+        try { return new(face); }
+        catch { face.Dispose(); throw; }
     }
 
     private static int OpenFace(CpuContext ctx, FontFace face)
     {
-        var result = CreateOpaqueHandle(ctx, ctx[CpuRegister.R8], 0x100, magic: 0x0F02);
-        if (result == 0 && ctx.TryReadUInt64(ctx[CpuRegister.R8], out var handle))
+        var published = false;
+        try
         {
-            FontFaces[handle] = face;
-            FontScales.TryRemove(handle, out _);
+            var result = CreateOpaqueHandle(ctx, ctx[CpuRegister.R8], 0x100, magic: 0x0F02);
+            if (result != 0) return result;
+            if (!ctx.TryReadUInt64(ctx[CpuRegister.R8], out var handle))
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            lock (FaceGate)
+            {
+                FontFaces.TryGetValue(handle, out var old);
+                FontFaces[handle] = face;
+                published = true;
+                old?.Release();
+                FontScales.TryRemove(handle, out _);
+            }
+            return result;
         }
-        return result;
+        finally { if (!published) { lock (FaceGate) face.Release(); } }
     }
 
     [SysAbiExport(
@@ -328,11 +345,11 @@ public static class FontExports
 
         if (setupHandle != 0)
         {
-            if (FontFaces.TryGetValue(sourceHandle, out var face)) FontFaces[setupHandle] = face;
+            if (!ctx.TryWriteUInt64(outputAddress, setupHandle))
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            ShareFace(sourceHandle, setupHandle);
             FontScales[setupHandle] = GetFontScale(sourceHandle);
-            return ctx.TryWriteUInt64(outputAddress, setupHandle)
-                ? SetSuccess(ctx)
-                : SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return SetSuccess(ctx);
         }
 
         if (!TryAllocateOpaque(ctx, 0x100, out var handle))
@@ -350,11 +367,11 @@ public static class FontExports
         }
 
         _ = TryWriteUInt16(ctx, handle, 0x0F02);
-        if (FontFaces.TryGetValue(sourceHandle, out var sourceFace)) FontFaces[handle] = sourceFace;
+        if (!ctx.TryWriteUInt64(outputAddress, handle))
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        ShareFace(sourceHandle, handle);
         FontScales[handle] = GetFontScale(sourceHandle);
-        return ctx.TryWriteUInt64(outputAddress, handle)
-            ? SetSuccess(ctx)
-            : SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        return SetSuccess(ctx);
     }
 
     [SysAbiExport(
@@ -602,7 +619,7 @@ public static class FontExports
             }
         }
 
-        if (surfaceAddress != 0 && !DrawGlyph(ctx, surfaceAddress, left, top, width, height, glyph.Coverage))
+        if (surfaceAddress != 0 && !DrawGlyph(ctx, surfaceAddress, left, top, width, height, glyph.Coverage.Span))
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
@@ -625,18 +642,35 @@ public static class FontExports
         return SetSuccess(ctx);
     }
 
+    private static void ShareFace(ulong sourceHandle, ulong destinationHandle)
+    {
+        lock (FaceGate)
+        {
+            if (sourceHandle == destinationHandle) return;
+            if (!FontFaces.TryGetValue(sourceHandle, out var source)) return;
+            FontFaces.TryGetValue(destinationHandle, out var previous);
+            source.Retain();
+            try { FontFaces[destinationHandle] = source; }
+            catch { source.Release(); throw; }
+            previous?.Release();
+        }
+    }
+
     private static (float Width, float Height) GetFontScale(ulong font) =>
         FontScales.TryGetValue(font, out var scale) ? scale : (16, 16);
 
     private static bool IsValidCode(uint code) => (code & 0xffff0000) == 0x80000000 || Rune.IsValid((int)code);
 
-    private static FontGlyph GetGlyph(ulong font, uint code)
+    private static FontGlyphBitmap GetGlyph(ulong font, uint code)
     {
         var scale = GetFontScale(font);
-        return (FontFaces.TryGetValue(font, out var face) ? face : DefaultFont.Value).GetGlyph(code, scale.Width, scale.Height);
+        lock (FaceGate)
+            return (FontFaces.TryGetValue(font, out var face) ? face :
+                _defaultFont ??= OwnFace(GuestFontServices.Factory.CreateSystemFace(FontStyle.Normal)))
+                .GetGlyph(code, scale.Width, scale.Height);
     }
 
-    private static bool WriteGlyphMetrics(CpuContext ctx, ulong address, FontGlyph glyph, float height)
+    private static bool WriteGlyphMetrics(CpuContext ctx, ulong address, FontGlyphBitmap glyph, float height)
     {
         Span<byte> metrics = stackalloc byte[32];
         float[] values = [glyph.Width, glyph.Height, glyph.BearingX, glyph.BearingY, glyph.Advance, 0, 0, height];
@@ -648,7 +682,7 @@ public static class FontExports
     }
 
     internal static bool DrawGlyph(CpuContext ctx, ulong surface, int left, int top,
-        int glyphWidth, int glyphHeight, byte[] coverage)
+        int glyphWidth, int glyphHeight, ReadOnlySpan<byte> coverage)
     {
         if (!ctx.TryReadUInt64(surface, out var buffer) ||
             !ctx.TryReadUInt32(surface + 8, out var pitch) ||
@@ -710,7 +744,8 @@ public static class FontExports
         LibraryName = "libSceFont")]
     public static int CloseFont(CpuContext ctx)
     {
-        FontFaces.TryRemove(ctx[CpuRegister.Rdi], out _);
+        lock (FaceGate)
+            if (FontFaces.TryRemove(ctx[CpuRegister.Rdi], out var face)) face.Release();
         FontScales.TryRemove(ctx[CpuRegister.Rdi], out _);
         return SetSuccess(ctx);
     }

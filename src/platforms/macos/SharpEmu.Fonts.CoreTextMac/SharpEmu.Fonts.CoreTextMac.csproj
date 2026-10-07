@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><AllowUnsafeBlocks>true</AllowUnsafeBlocks><NoWarn>$(NoWarn);1591</NoWarn></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../../../SharpEmu.Fonts.Abstractions/SharpEmu.Fonts.Abstractions.csproj" /></ItemGroup>
+</Project>

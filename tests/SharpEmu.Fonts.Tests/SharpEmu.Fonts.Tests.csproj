@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><IsPackable>false</IsPackable><GenerateDocumentationFile>false</GenerateDocumentationFile></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/SharpEmu.Libs/SharpEmu.Libs.csproj" />
+    <ProjectReference Include="../../src/platforms/macos/SharpEmu.Fonts.CoreTextMac/SharpEmu.Fonts.CoreTextMac.csproj" />
+    <ProjectReference Include="../../src/adapters/SharpEmu.Fonts.Skia/SharpEmu.Fonts.Skia.csproj" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+</Project>
