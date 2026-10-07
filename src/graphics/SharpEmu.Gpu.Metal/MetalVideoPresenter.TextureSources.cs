@@ -92,10 +92,14 @@ internal static partial class MetalVideoPresenter
 
     private static void RetainQueuedTextureSourcesLocked(object work)
     {
-        foreach (var lease in TextureSourcesOf(work))
-        {
+        // Enumerating/deduplicating can allocate or fail. Do it and validate
+        // every owner before changing any counters so admission is atomic.
+        var leases = TextureSourcesOf(work).ToArray();
+        foreach (var lease in leases)
             if (lease.References <= 0 || lease.PreparationReleased)
                 throw new InvalidOperationException("Metal texture source preparation has already been released.");
+        foreach (var lease in leases)
+        {
             lease.References++;
             lease.Version.References++;
         }
@@ -138,6 +142,7 @@ internal static partial class MetalVideoPresenter
         !texture.Shape.Multisampled && !texture.Shape.DepthCompare && !texture.Shape.DynamicMip &&
         !texture.Shape.R128 && !texture.Shape.Atomic && (texture.Access & GuestImageAccess.Atomic) == 0 &&
         texture.Shape.Storage == texture.IsStorage && texture.Access != GuestImageAccess.Unknown &&
+        (texture.Access & ~(GuestImageAccess.Read | GuestImageAccess.Write | GuestImageAccess.Atomic)) == 0 &&
         (texture.IsStorage || texture.Access == GuestImageAccess.Read);
 
     // No native calls or guest reads: preparation captures a real admitted
@@ -147,6 +152,8 @@ internal static partial class MetalVideoPresenter
         if (texture.Address == 0 || texture.IsFallback) return false;
         lock (_gate)
         {
+            if (_textureSourceLeases.TryGetValue(texture, out _))
+                throw new InvalidOperationException("Metal texture already has a captured source association.");
             if (!_latestTextureSources.TryGetValue(texture.Address, out var source))
             {
                 if (_guestImages.TryGetValue(texture.Address, out var image) && image.GpuWritten ||
@@ -175,7 +182,12 @@ internal static partial class MetalVideoPresenter
                 _reservedTextureSourceBytes += source.ByteCount;
             }
             source.References++;
-            _textureSourceLeases.Add(texture, new TextureSourceLease(source));
+            try { _textureSourceLeases.Add(texture, new TextureSourceLease(source)); }
+            catch
+            {
+                if (--source.References == 0) _reservedTextureSourceBytes -= source.ByteCount;
+                throw;
+            }
             return true;
         }
     }
