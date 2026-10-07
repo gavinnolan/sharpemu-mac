@@ -651,7 +651,8 @@ internal static class MetalTextureSnapshots
 
                     throw new InvalidOperationException(
                         $"Metal cannot capture stable storage texture snapshot at 0x{descriptor.Address:X}: " +
-                        $"content observation changed across {snapshotAttempt + 1} attempts.");
+                        $"content observation changed across {snapshotAttempt + 1} attempts. " +
+                        MetalVideoPresenter.DescribeCpuTextureSnapshotStability(descriptor.Address, storageSnapshot, storageObservation));
                 }
             }
 
@@ -1075,7 +1076,8 @@ internal static class MetalTextureSnapshots
         // deferring an unprotected guest-memory read until execution.
         throw new InvalidOperationException(
             $"Metal cannot capture stable texture snapshot at 0x{descriptor.Address:X}: " +
-            $"write generation changed across {snapshotAttempt + 1} attempts (content identity and mapping observation also checked).");
+            $"write generation changed across {snapshotAttempt + 1} attempts (content identity and mapping observation also checked). " +
+            MetalVideoPresenter.DescribeCpuTextureSnapshotStability(descriptor.Address, snapshot, observation));
     }
 
     private static Exception SnapshotBudgetExceeded(TextureDescriptor descriptor, ulong bytes, string layout) =>

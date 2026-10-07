@@ -43,6 +43,21 @@ internal static partial class MetalVideoPresenter
         (!observation.Observed || GuestImageWriteTracker.TryGetObservedContentToken(address, observation.ByteCount, out var current) &&
             current == observation.Token);
 
+    // Safe-side diagnostics only: these separately sampled scalars identify a
+    // freshness veto, never establish a backing reservation or trap ordering.
+    internal static string DescribeCpuTextureSnapshotStability(
+        ulong address, in GuestImageWriteTracker.ReadSnapshot snapshot,
+        in CpuTextureSnapshotObservation observation)
+    {
+        var mappingNow = HostMemory.MappingGeneration;
+        var observedNow = GuestImageWriteTracker.TryGetObservedContentToken(address, observation.ByteCount, out var current);
+        var generationPresent = GuestImageWriteTracker.TryGetWriteGeneration(address, out var generationNow);
+        var ownerPresent = GuestImageWriteTracker.TryGetProtectionState(address, out var protect, out var armed);
+        return $"snapshot_active={snapshot.Active} generation_before={snapshot.Generation} generation_present={generationPresent} generation_now={generationNow} " +
+            $"mapping_before={observation.MappingEpoch} mapping_now={mappingNow} observed_before={observation.Observed} observed_now={observedNow} " +
+            $"token_before=[{observation.Token}] token_now=[{current}] owner_present={ownerPresent} protect={protect} armed={armed} bytes={observation.ByteCount}";
+    }
+
     internal static void RegisterCpuTextureSnapshotProvenance(
         GuestDrawTexture texture, in CpuTextureSnapshotObservation observation)
     {
