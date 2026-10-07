@@ -2120,7 +2120,7 @@ internal static partial class MetalVideoPresenter
         sample = 0;
         // Identity channel select only; swizzled depth reads keep the
         // unresolved-texture warning until a title needs them.
-        if (texture.DstSelect != 0xFAC || blitCommandBuffer == 0)
+        if (texture.Type == Gen5TextureType3D || texture.DstSelect != 0xFAC || blitCommandBuffer == 0)
         {
             return false;
         }

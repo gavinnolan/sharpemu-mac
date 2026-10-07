@@ -230,6 +230,7 @@ public sealed class MetalStorageTextureFormatTests
             Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.StorageTextureFormat(Volume(1, 40) with { Descriptor = raw }));
         }
         Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.StorageTextureFormat(Volume(1, 40) with { Descriptor = null }));
+        Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.StorageTextureFormat(Volume(1, 40) with { TiledSource = new byte[40] }));
     }
 
     [Fact]
