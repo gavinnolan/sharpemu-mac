@@ -162,6 +162,50 @@ public sealed class MetalTextureSourceAdmissionTests
         Assert.False(state.HasLatest(Address));
     }
 
+    [Fact]
+    public void ActualPreparationCapturesPendingGpuSourceBeforeAnyGuestByteRead()
+    {
+        using var state = new State();
+        SubmitColor(ColorTarget());
+        var memory = new NeverReadMemory();
+        var binding = SourceBinding();
+        var snapshots = MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [binding], out _);
+        state.Captures.AddRange(snapshots);
+        var read = Assert.Single(snapshots);
+        Assert.Equal(state.Summary.Sequence, MetalVideoPresenter.TextureSourceState(read).Producer);
+        Assert.Empty(read.RgbaPixels);
+        Assert.Equal(0, memory.Reads);
+    }
+
+    [Fact]
+    public void ActualMultiImageFailureRollsBackUnreturnedCapturedGpuSource()
+    {
+        using var state = new State();
+        SubmitColor(ColorTarget());
+        var memory = new NeverReadMemory();
+        var source = state.LatestSource(Address)!;
+        var binding = SourceBinding();
+        var invalid = binding with { Shape = binding.Shape with { NumericClass = TextureNumericClass.Uint } };
+        Assert.Throws<NotSupportedException>(() =>
+            MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [binding, invalid], out _));
+        Assert.Equal(0, source.GetType().GetField("References")!.GetValue(source));
+        Assert.Equal(0UL, state.ReservedBytes);
+        Assert.Equal(0, memory.Reads);
+    }
+    private static AgcExports.TranslatedImageBinding SourceBinding()
+    {
+        Assert.True(AgcBackendServices.TryDecodeTextureDescriptor(MetalTextureSourceLeaseTests.ResourceWords(), out var descriptor));
+        return new(descriptor, false, 0, [], ResourceDescriptor: MetalTextureSourceLeaseTests.ResourceWords(),
+            Shape: new ShaderImageShape(false, false, false, false, TextureNumericClass.Float), Access: GuestImageAccess.Read);
+    }
+    private sealed class NeverReadMemory : ICpuMemory
+    {
+        public int Reads;
+        public bool TryRead(ulong address, Span<byte> bytes) { Reads++; throw new InvalidOperationException("Guest read was not permitted for captured source preparation."); }
+        public bool TryWrite(ulong address, ReadOnlySpan<byte> bytes) => false;
+        public bool CanRead(ulong address, ulong bytes) => true;
+    }
+
     private static GuestRenderTarget ColorTarget() => new(Address, 4, 4, 10, 0,
         Registers: new ColorTargetWords(Address, 0, 10u << 2, 0, 3u | 3u << 14, 1u << 24, 0, 0, 0, 0, 0));
     private static void SubmitColor(GuestRenderTarget target) => MetalVideoPresenter.SubmitOffscreenTranslatedDraw(
@@ -206,6 +250,7 @@ public sealed class MetalTextureSourceAdmissionTests
             available.Remove(Address);
             Field("_textureSourceGraphEnabled").SetValue(null, true);
         }
+        public ulong ReservedBytes { get { lock (gate) return (ulong)Field("_reservedTextureSourceBytes").GetValue(null)!; } }
         public ulong NativeBytes
         {
             get { lock (gate) return (ulong)Field("_immutableTextureSourceBytes").GetValue(null)!; }

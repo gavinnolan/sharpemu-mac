@@ -325,6 +325,7 @@ public sealed class MetalTextureSourceLeaseTests
         public void Dispose()
         {
             ((IDictionary)Field("_latestTextureSources").GetValue(null)!).Remove(Address);
+            ((HashSet<ulong>)Field("_gpuTextureSourceAddresses").GetValue(null)!).Remove(Address);
             var versions = (IList)Field("_textureSourceVersions").GetValue(null)!;
             for (var index = versions.Count - 1; index >= 0; index--)
             {

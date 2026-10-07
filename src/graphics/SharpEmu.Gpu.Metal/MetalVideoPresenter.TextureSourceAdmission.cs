@@ -14,6 +14,7 @@ internal static partial class MetalVideoPresenter
     // This is a private integration boundary, not a user-selectable fallback.
     private static bool _textureSourceGraphEnabled;
     private const int MaximumTextureSourceVersions = 4096;
+    private static readonly HashSet<ulong> _gpuTextureSourceAddresses = [];
     private static readonly ConditionalWeakTable<object, TextureSourceWorkOwner> _textureSourceWorkOwners = new();
 
     private sealed class TextureSourceWorkOwner(TextureSourceVersion[] outputs, TextureSourceVersion[] predecessors)
@@ -97,6 +98,9 @@ internal static partial class MetalVideoPresenter
         }
         var preparedOutputs = outputs.Values.ToArray();
         var preparedPredecessors = predecessors.ToArray();
+        if (preparedOutputs.Count(output => !_gpuTextureSourceAddresses.Contains(output.View.Address)) >
+            MaximumTextureSourceVersions - _gpuTextureSourceAddresses.Count)
+            throw new InvalidOperationException("Metal GPU source address provenance budget exceeded.");
         if (preparedOutputs.Length > MaximumTextureSourceVersions - _textureSourceVersions.Count)
             throw new InvalidOperationException("Metal ordered texture source metadata budget exceeded.");
         ulong bytes = 0;
@@ -162,6 +166,8 @@ internal static partial class MetalVideoPresenter
         _textureSourceVersions.EnsureCapacity(_textureSourceVersions.Count + owner.Outputs.Length);
         var previousVersions = owner.Outputs.Select(output =>
             _latestTextureSources.TryGetValue(output.View.Address, out var previous) ? previous : null).ToArray();
+        _gpuTextureSourceAddresses.EnsureCapacity(_gpuTextureSourceAddresses.Count + owner.Outputs.Length);
+        var hadAddressProvenance = owner.Outputs.Select(output => _gpuTextureSourceAddresses.Contains(output.View.Address)).ToArray();
         var oldRetired = previousVersions.Select(static previous => previous?.Retired ?? false).ToArray();
         var oldSequence = _enqueuedGuestWorkSequence;
         var oldBytes = _pendingGuestWorkBytes;
@@ -202,6 +208,7 @@ internal static partial class MetalVideoPresenter
                 source.Budgeted = true;
                 _immutableTextureSourceBytes = checked(_immutableTextureSourceBytes + source.ByteCount * 2);
                 _latestTextureSources[source.View.Address] = source;
+                _gpuTextureSourceAddresses.Add(source.View.Address);
                 _textureSourceVersions.Add(source);
             }
         }
@@ -224,6 +231,7 @@ internal static partial class MetalVideoPresenter
             {
                 var source = owner.Outputs[index];
                 source.Budgeted = false;
+                if (!hadAddressProvenance[index]) _gpuTextureSourceAddresses.Remove(source.View.Address);
                 if (previousVersions[index] is { } previous)
                 {
                     previous.Retired = oldRetired[index];

@@ -198,3 +198,29 @@ writer notification precedes the actual write and is not a copy exclusion
 protocol. Native graph materialization will therefore begin with GPU-only
 immutable initialization/fresh clear output; CPU seed admission remains a dormant
 transaction fixture until a backing/copy lifetime contract is qualified.
+
+### GPU-only native lifecycle qualification boundary
+
+The isolated branch now has private native materialization and eager-copy helpers.
+Each supported producer receives a fresh exact2D image; only fresh clear outputs
+or retained immutable GPU initializers are accepted by native materialization.
+CPU-only seed materialization explicitly rejects the missing backing/copy lease.
+The copy's producing batch identity is retained. Same-buffer consumption is
+ordered after the copy; another buffer needs the actual native commit operation
+first. Read-use completion cannot mark a producing copy completed. Explicit
+version pins survive until actual Metal command-buffer completion/error.
+
+The native helpers implement whole-uncommitted-batch invalidation, exact registry
+retain removal, committed-close waiting outside the presenter gate and pruning.
+Soft-budget retirement keeps bounded GPU-address tombstones; source preparation
+cannot recover retired GPU content from old guest bytes or mutable registry
+aliases. The actual snapshot path captures pending source metadata before any
+guest-byte read and rolls back unreturned multi-image captures.
+
+The ARM64 managed104-case selection passes. Six hardware fixtures compile but
+are not executed yet: real GPU clear→immutable old/new copies in one/two buffers,
+uncommitted cross-buffer rejection, whole-batch discard, committed close and
+native eviction→production preparation with zero guest reads. Their render-pass
+clear is the actual GPU writer; they do not yet qualify translated draw/compute,
+a GPU shader consumer, full Drain hooks, shutdown hooks or game behavior.
+Graph activation remains disabled and no whole-graph root integration is implied.

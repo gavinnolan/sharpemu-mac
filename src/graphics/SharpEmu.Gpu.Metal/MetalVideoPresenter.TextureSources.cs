@@ -122,6 +122,7 @@ internal static partial class MetalVideoPresenter
         public bool ProducerReleased;
         public int NativePins;
         public bool NativeCompleted;
+        public TextureSourceNativeBatch? CopyBatch;
     }
 
     private sealed class TextureSourceLease(TextureSourceVersion version)
@@ -257,6 +258,18 @@ internal static partial class MetalVideoPresenter
         (texture.Access & ~(GuestImageAccess.Read | GuestImageAccess.Write | GuestImageAccess.Atomic)) == 0 &&
         (texture.IsStorage || texture.Access == GuestImageAccess.Read);
 
+    internal static bool TextureSourceGraphEnabled => _textureSourceGraphEnabled;
+
+    internal static void RequireNoUncapturedGpuTextureSource(GuestDrawTexture texture)
+    {
+        lock (_gate)
+        {
+            if (_textureSourceGraphEnabled && texture.Address != 0 && _gpuTextureSourceAddresses.Contains(texture.Address) &&
+                !_textureSourceLeases.TryGetValue(texture, out _))
+                throw new NotSupportedException($"Metal GPU-produced texture 0x{texture.Address:X} requires a captured immutable source; retired backing cannot be reconstructed from guest memory or mutable live aliases.");
+        }
+    }
+
     // No native calls or guest reads: preparation captures a real admitted
     // producer, never an address advertisement or its own prospective writer.
     internal static bool TryCaptureTextureSource(GuestDrawTexture texture, ulong sourceBytes, bool nonzeroBaseLayer)
@@ -268,6 +281,7 @@ internal static partial class MetalVideoPresenter
                 throw new InvalidOperationException("Metal texture already has a captured source association.");
             if (!_latestTextureSources.TryGetValue(texture.Address, out var source))
             {
+                RequireNoUncapturedGpuTextureSource(texture);
                 if (_guestImages.TryGetValue(texture.Address, out var image) && image.GpuWritten ||
                     _guestDepthImages.ContainsKey(texture.Address) || _guestDepthReadAliases.ContainsKey(texture.Address))
                     throw new NotSupportedException($"Metal texture 0x{texture.Address:X} has GPU content without a supported ordered source.");

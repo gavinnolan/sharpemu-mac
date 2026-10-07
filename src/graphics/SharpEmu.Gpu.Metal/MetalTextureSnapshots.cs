@@ -50,7 +50,7 @@ internal static class MetalTextureSnapshots
         TextureDescriptor Descriptor,
         bool IsStorage,
         uint MipLevel,
-        bool IsArrayed);
+        bool IsArrayed, ShaderImageShape Shape, GuestImageAccess Access);
 
     internal static IReadOnlyList<GuestDrawTexture> CreateTextureSnapshots(
         CpuContext context,
@@ -80,7 +80,7 @@ internal static class MetalTextureSnapshots
                     binding.Descriptor,
                     binding.IsStorage,
                     binding.MipLevel,
-                    binding.IsArrayed);
+                    binding.IsArrayed, binding.Shape, binding.Access);
                 GuestDrawTexture texture;
                 if (snapshots?.TryGetValue(reuseKey, out var snapshot) == true)
                 {
@@ -94,6 +94,11 @@ internal static class MetalTextureSnapshots
                     TexturePreparationProfile.RecordBinding(
                         TexturePreparationProfile.BindingOutcome.Reused,
                         profileStart);
+                }
+                else if (TryCreateCapturedTextureSource(binding, out texture))
+                {
+                    unreturnedTexture = texture;
+                    TexturePreparationProfile.RecordBinding(TexturePreparationProfile.BindingOutcome.Empty, profileStart);
                 }
                 else if (TryCreateGuestDrawTexture(
                         context,
@@ -159,6 +164,30 @@ internal static class MetalTextureSnapshots
                 MetalVideoPresenter.ReleasePreparedTextureSource(unreturnedTexture);
             throw;
         }
+    }
+
+    private static bool TryCreateCapturedTextureSource(TranslatedImageBinding binding, out GuestDrawTexture texture)
+    {
+        texture = null!;
+        if (!MetalVideoPresenter.TextureSourceGraphEnabled || binding.Descriptor.Address == 0) return false;
+        var descriptor = binding.Descriptor;
+        var candidate = new GuestDrawTexture(descriptor.Address, descriptor.Width, descriptor.Height,
+            descriptor.Format, descriptor.NumberType, [], false, binding.IsStorage,
+            Sampler: ToGuestSampler(binding.SamplerDescriptor), Type: descriptor.Type, Pitch: descriptor.Pitch,
+            TileMode: descriptor.TileMode, MipLevels: descriptor.MipLevels, BaseMipLevel: descriptor.ViewBaseLevel,
+            MipLevel: binding.MipLevel, ResourceMipLevels: descriptor.ResourceMipLevels,
+            DstSelect: descriptor.DstSelect, ArrayedView: binding.IsArrayed, Depth: descriptor.Depth,
+            Descriptor: binding.ResourceDescriptor?.ToArray(), Shape: binding.Shape, Access: binding.Access,
+            CpuSnapshotStable: false);
+        // Exact producer/view identity decides footprint compatibility. No
+        // guest byte read or retrospective CPU provenance stamp occurs here.
+        if (MetalVideoPresenter.TryCaptureTextureSource(candidate, 0, descriptor.BaseArray != 0))
+        {
+            texture = candidate;
+            return true;
+        }
+        MetalVideoPresenter.RequireNoUncapturedGpuTextureSource(candidate);
+        return false;
     }
 
     // Keep equation support consistent with MetalDetilePass.Supports.
