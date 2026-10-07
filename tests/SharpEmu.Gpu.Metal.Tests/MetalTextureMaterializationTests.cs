@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Collections;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using Xunit;
@@ -210,6 +211,54 @@ public sealed partial class MetalTextureMaterializationTests(ITestOutputHelper o
         var descriptor = constructor.Invoke(arguments);
         return snapshots.GetMethod("CreateNullGuestDrawTexture", Methods)!.Invoke(null,
             [false, descriptor, arrayed, depth])!;
+    }
+
+    [Theory]
+    [InlineData(2u, 7u, 2u)]
+    [InlineData(11u, 4u, 8u)]
+    public void ProductionStorageUploadPreservesPaddedNativeRowsAndFinalRow(uint format, uint number, uint bytesPerTexel)
+    {
+        if (!RequireDevice()) return;
+        const uint width = 3, height = 2, pitch = 5;
+        var bytes = new byte[8 * bytesPerTexel];
+        for (var index = 0; index < bytes.Length; index++) bytes[index] = (byte)(17 + index * 7);
+        var expected = bytes.AsSpan(0, checked((int)(width * bytesPerTexel))).ToArray()
+            .Concat(bytes.AsSpan(checked((int)(pitch * bytesPerTexel)), checked((int)(width * bytesPerTexel))).ToArray()).ToArray();
+        var address = 0x71F3_0000_00UL + format * 0x1000UL;
+        var guest = Guest(9, 1, 1, false, height, bytes, extra: new()
+        {
+            ["Address"] = address, ["Width"] = width, ["Pitch"] = pitch,
+            ["Format"] = format, ["NumberType"] = number, ["IsStorage"] = true,
+        });
+        var image = Presenter.GetMethod("EnsureStorageImage", Methods)!.Invoke(null, [Device.Value, guest])!;
+        var texture = (nint)image.GetType().GetField("Texture")!.GetValue(image)!;
+        try
+        {
+            Assert.True((bool)image.GetType().GetField("Initialized")!.GetValue(image)!);
+            Assert.False((bool)image.GetType().GetField("GpuWritten")!.GetValue(image)!);
+            var formats = Presenter.Assembly.GetTypes().Single(static type => type.Name == "MetalGuestFormats");
+            var native = formats.GetMethod("DecodeTextureFormat", Methods)!.Invoke(null, [format, number])!;
+            var expectedFormat = Convert.ToUInt64(native.GetType().GetProperty("Format")!.GetValue(native));
+            Assert.Equal(expectedFormat, ReadInteger(texture, Selector("pixelFormat")));
+            Assert.Equal(expected, ReadNativeRows(texture, width, height, bytesPerTexel));
+            output.WriteLine($"Actual production storage readback {format}/{number}: {width}x{height}, pitch={pitch}, bpp={bytesPerTexel}; every native row matched.");
+        }
+        finally
+        {
+            ((IDictionary)Presenter.GetField("_guestImages", Methods)!.GetValue(null)!).Remove(address);
+            ((IDictionary)Presenter.GetField("_guestImageExtents", Methods)!.GetValue(null)!).Remove(address);
+            SendVoid(texture, Selector("release"));
+        }
+    }
+
+    private static unsafe byte[] ReadNativeRows(nint texture, uint width, uint height, uint bytesPerTexel)
+    {
+        var bytes = new byte[width * height * bytesPerTexel];
+        fixed (byte* destination = bytes)
+            GetBytes(texture, Selector("getBytes:bytesPerRow:bytesPerImage:fromRegion:mipmapLevel:slice:"),
+                (nint)destination, width * bytesPerTexel, 0,
+                new Region { Width = width, Height = height, Depth = 1 }, 0, 0);
+        return bytes;
     }
 
     private bool RequireDevice()
