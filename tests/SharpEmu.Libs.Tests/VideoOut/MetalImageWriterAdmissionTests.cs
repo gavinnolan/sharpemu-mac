@@ -76,6 +76,8 @@ public sealed class MetalImageWriterAdmissionTests
     [Theory]
     [InlineData(GuestImageAccess.Unknown)]
     [InlineData(GuestImageAccess.Atomic)]
+    [InlineData((GuestImageAccess)8)]
+    [InlineData(GuestImageAccess.Write | (GuestImageAccess)8)]
     public void UnknownOrIncompleteAtomicIntentCannotBecomeAWriter(GuestImageAccess access)
     {
         using var state = new MetalGuestFailureTests.PresenterState();
@@ -91,15 +93,29 @@ public sealed class MetalImageWriterAdmissionTests
         for (var index = 0; index < 64; index++)
             Assert.True(MetalVideoPresenter.SubmitOrderedGuestAction(static () => { }, "admission pressure") > 0);
         using var entered = new ManualResetEventSlim();
-        var submit = Task.Run(() => { entered.Set(); return Submit(Texture(GuestImageAccess.Write)); });
+        Thread? admissionThread = null;
+        var submit = Task.Run(() =>
+        {
+            admissionThread = Thread.CurrentThread;
+            entered.Set();
+            return Submit(Texture(GuestImageAccess.Write));
+        });
         try
         {
             Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
-            // The bound is the actual production pending count; this task has
-            // no room until DrainGuestWork acknowledges existing actions.
-            Assert.False(submit.Wait(TimeSpan.FromMilliseconds(100)));
-            Assert.False(Registry("_availableGuestImages").Contains(Address));
-            Assert.False(Registry("_guestImageWorkSequences").Contains(Address));
+            // After the worker enters Submit, its only blocking operation is
+            // EnqueueGuestWorkLocked's Monitor.Wait. Observe that real wait,
+            // then inspect both admission bounds and publication under _gate.
+            Assert.True(SpinWait.SpinUntil(() =>
+                (admissionThread!.ThreadState & ThreadState.WaitSleepJoin) != 0,
+                TimeSpan.FromSeconds(5)));
+            lock (Field("_gate").GetValue(null)!)
+            {
+                Assert.False(submit.IsCompleted);
+                Assert.Equal(64, Field("_pendingGuestWorkCount").GetValue(null));
+                Assert.False(Registry("_availableGuestImages").Contains(Address));
+                Assert.False(Registry("_guestImageWorkSequences").Contains(Address));
+            }
             MetalVideoPresenter.DrainGuestWork(0, 0);
             Assert.True(submit.Wait(TimeSpan.FromSeconds(5)));
             Assert.True(submit.Result > 0);
