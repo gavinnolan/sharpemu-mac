@@ -449,11 +449,11 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
                     throw Fatal($"An image descriptor cannot be decoded: image={imageIndex} word1=0x{words[1]:X8} word3=0x{words[3]:X8} hash=0x{program.Hash:X16}.");
                 }
 
-                textures[element] = new GuestDrawTexture(0, 1, 1, 0, 0, [0, 0, 0, 255], IsFallback: true, IsStorage: storage,
-                    Descriptor: words.ToArray(), Shape: ImageShapeOf(image), Access: ImageAccessOf(image));
+                textures[element] = CreateUndecodableNullImage(words, image);
                 continue;
             }
 
+            if (descriptor.Address == 0) ValidateNullImageAccess(ImageAccessOf(image));
             var arrayed = image.Cube || image.Dimension is ImageDimension.Dim1DArray or ImageDimension.Dim2DArray or ImageDimension.Dim2DMsaaArray;
             bindings.Add(new AgcExports.TranslatedImageBinding(
                 descriptor,
@@ -482,6 +482,33 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         }
 
         return textures;
+    }
+
+    // All-zero T# is the documented unbound resource. A base address of zero
+    // alone does not authorize turning an otherwise invalid descriptor into
+    // fabricated pixels. Null stores require discard semantics, which a
+    // writable native dummy texture does not provide.
+    internal static GuestDrawTexture CreateUndecodableNullImage(uint[] words, ImageResource image)
+    {
+        var shape = ImageShapeOf(image);
+        var access = ImageAccessOf(image);
+        var resource = shape.Storage ? "storage" : "sampled";
+        if (words.Length < 4 || words.Any(static word => word != 0))
+            throw new NotSupportedException($"Metal undecodable {resource} image is not a documented all-zero null resource.");
+        ValidateNullImageAccess(access);
+        if (image.ResourceClass is not (ImageResourceClass.Sampled or ImageResourceClass.Storage) ||
+            image.Dimension != ImageDimension.Dim2D || access != GuestImageAccess.Read || shape.NumericClass != TextureNumericClass.Float ||
+            shape.Volume || shape.Arrayed || shape.Cube || shape.OneDimensional || shape.Multisampled ||
+            shape.DynamicMip || shape.DepthCompare || shape.R128 || shape.Atomic)
+            throw new NotSupportedException($"Metal null {resource} image supports only read-only single-mip 2D float resources: shape={shape} access={access}.");
+        return new GuestDrawTexture(0, 1, 1, 10, 0, new byte[4], IsFallback: true, IsStorage: shape.Storage,
+            Descriptor: words.ToArray(), Shape: shape, Access: access);
+    }
+
+    private static void ValidateNullImageAccess(GuestImageAccess access)
+    {
+        if ((access & (GuestImageAccess.Write | GuestImageAccess.Atomic)) != 0)
+            throw new NotSupportedException("Metal writable null storage resources require discarded stores; native dummy stores are unsupported.");
     }
 
     internal static GuestImageAccess ImageAccessOf(ImageResource image) =>

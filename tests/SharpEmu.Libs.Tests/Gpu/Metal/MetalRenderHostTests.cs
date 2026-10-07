@@ -81,7 +81,7 @@ public sealed partial class MetalRenderHostTests : IDisposable
 
     private static uint[] BufferWords(ulong address, uint bytes) => [unchecked((uint)address), (uint)(address >> 32), bytes, 0];
 
-    private static uint[] NullImageWords() => [0, 0, 0, 9u << 28, 0, 0, 0, 0];
+    private static uint[] NullImageWords() => new uint[8];
 
     private static uint[] SamplerWords() => [0x7u << 12, 0, 0, 0];
 
