@@ -76,7 +76,6 @@ internal static class MetalTextureSnapshots
             foreach (var binding in bindings)
             {
                 var profileStart = TexturePreparationProfile.Begin();
-                var mappingEpochBeforeSnapshot = HostMemory.MappingGeneration;
                 var reuseKey = new GuestTextureSnapshotReuseKey(
                     binding.Descriptor,
                     binding.IsStorage,
@@ -135,7 +134,6 @@ internal static class MetalTextureSnapshots
                 // Keep the owner even if association copying or list insertion
                 // fails before a frontend can receive and own this batch.
                 unreturnedTexture = texture;
-                MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(texture, mappingEpochBeforeSnapshot);
                 var originalTexture = texture;
                 texture = texture with
                 {
@@ -325,6 +323,7 @@ internal static class MetalTextureSnapshots
         out GuestDrawTexture texture,
         int snapshotAttempt = 0)
     {
+        var mappingEpochBeforeSnapshot = HostMemory.MappingGeneration;
         texture = default!;
         var textureDepth = GetTextureVolumeDepth(
             descriptor.Type,
@@ -515,6 +514,7 @@ internal static class MetalTextureSnapshots
             var readSucceeded = false;
             var linearNonzero = false;
             var storageSnapshot = default(SharpEmu.HLE.GuestImageWriteTracker.ReadSnapshot);
+            var storageObservation = default(MetalVideoPresenter.CpuTextureSnapshotObservation);
             if (descriptor.Address != 0 && !uploadKnown)
             {
                 // Read and decode the full tiled storage footprint before upload.
@@ -522,6 +522,8 @@ internal static class MetalTextureSnapshots
                     descriptor.Address,
                     checked(baseMipByteOffset + physicalSourceByteCount),
                     source: "agc.storage-image-snapshot");
+                storageObservation = MetalVideoPresenter.ObserveCpuTextureSnapshot(
+                    descriptor.Address, checked(baseMipByteOffset + physicalSourceByteCount), mappingEpochBeforeSnapshot);
                 var storageSource = new byte[(int)physicalSourceByteCount];
                 if (context.Memory.TryRead(descriptor.Address + baseMipByteOffset, storageSource))
                 {
@@ -543,7 +545,8 @@ internal static class MetalTextureSnapshots
                 }
 
                 if (readSucceeded &&
-                    !SharpEmu.HLE.GuestImageWriteTracker.IsReadSnapshotStable(storageSnapshot))
+                    (!SharpEmu.HLE.GuestImageWriteTracker.IsReadSnapshotStable(storageSnapshot) ||
+                     !MetalVideoPresenter.IsCpuTextureSnapshotObservationStable(descriptor.Address, storageObservation)))
                 {
                     if (snapshotAttempt < 2)
                     {
@@ -558,7 +561,9 @@ internal static class MetalTextureSnapshots
                             snapshotAttempt + 1);
                     }
 
-                    initialPixels = [];
+                    throw new InvalidOperationException(
+                        $"Metal cannot capture stable storage texture snapshot at 0x{descriptor.Address:X}: " +
+                        $"content observation changed across {snapshotAttempt + 1} attempts.");
                 }
             }
 
@@ -604,7 +609,9 @@ internal static class MetalTextureSnapshots
                 SourceByteCount: checked(baseMipByteOffset + physicalSourceByteCount),
                 CpuSnapshotStable:
                     !readSucceeded ||
-                    SharpEmu.HLE.GuestImageWriteTracker.IsReadSnapshotStable(storageSnapshot));
+                    SharpEmu.HLE.GuestImageWriteTracker.IsReadSnapshotStable(storageSnapshot) &&
+                    MetalVideoPresenter.IsCpuTextureSnapshotObservationStable(descriptor.Address, storageObservation));
+            MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(texture, storageObservation);
             return true;
         }
 
@@ -627,6 +634,8 @@ internal static class MetalTextureSnapshots
             descriptor.Address,
             trackedSourceByteCount,
             source: "agc.sampled-texture-snapshot");
+        var cpuObservation = MetalVideoPresenter.ObserveCpuTextureSnapshot(
+            descriptor.Address, trackedSourceByteCount, mappingEpochBeforeSnapshot);
         if (readSnapshot.Active)
         {
             hasWriteGeneration = true;
@@ -659,6 +668,7 @@ internal static class MetalTextureSnapshots
                     samplerDescriptor,
                     isArrayed,
                     readSnapshot,
+                    cpuObservation,
                     snapshotAttempt,
                     texture,
                     out texture);
@@ -725,6 +735,7 @@ internal static class MetalTextureSnapshots
                             samplerDescriptor,
                             isArrayed,
                             readSnapshot,
+                            cpuObservation,
                             snapshotAttempt,
                             texture,
                             out texture);
@@ -792,6 +803,7 @@ internal static class MetalTextureSnapshots
                         samplerDescriptor,
                         isArrayed,
                         readSnapshot,
+                        cpuObservation,
                         snapshotAttempt,
                         texture,
                         out texture);
@@ -878,6 +890,7 @@ internal static class MetalTextureSnapshots
                     samplerDescriptor,
                     isArrayed,
                     readSnapshot,
+                    cpuObservation,
                     snapshotAttempt,
                     texture,
                     out texture);
@@ -923,6 +936,7 @@ internal static class MetalTextureSnapshots
             samplerDescriptor,
             isArrayed,
             readSnapshot,
+            cpuObservation,
             snapshotAttempt,
             texture,
             out texture);
@@ -936,11 +950,13 @@ internal static class MetalTextureSnapshots
         IReadOnlyList<uint> samplerDescriptor,
         bool isArrayed,
         SharpEmu.HLE.GuestImageWriteTracker.ReadSnapshot snapshot,
+        MetalVideoPresenter.CpuTextureSnapshotObservation observation,
         int snapshotAttempt,
         GuestDrawTexture candidate,
         out GuestDrawTexture texture)
     {
-        if (SharpEmu.HLE.GuestImageWriteTracker.IsReadSnapshotStable(snapshot))
+        if (SharpEmu.HLE.GuestImageWriteTracker.IsReadSnapshotStable(snapshot) &&
+            MetalVideoPresenter.IsCpuTextureSnapshotObservationStable(descriptor.Address, observation))
         {
             texture = snapshot.Active
                 ? candidate with
@@ -949,6 +965,7 @@ internal static class MetalTextureSnapshots
                     CpuSnapshotStable = true,
                 }
                 : candidate;
+            MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(texture, observation);
             return true;
         }
 
@@ -970,7 +987,7 @@ internal static class MetalTextureSnapshots
         // deferring an unprotected guest-memory read until execution.
         throw new InvalidOperationException(
             $"Metal cannot capture stable texture snapshot at 0x{descriptor.Address:X}: " +
-            $"write generation changed across {snapshotAttempt + 1} attempts.");
+            $"write generation changed across {snapshotAttempt + 1} attempts (content identity and mapping observation also checked).");
     }
 
     private static Exception SnapshotBudgetExceeded(TextureDescriptor descriptor, ulong bytes, string layout) =>

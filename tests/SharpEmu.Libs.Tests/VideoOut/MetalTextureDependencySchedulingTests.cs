@@ -364,8 +364,10 @@ public sealed class MetalTextureDependencySchedulingTests
         private readonly ulong oldReserved = (ulong)Field("_reservedTextureSourceBytes").GetValue(null)!;
         private readonly List<GuestDrawTexture> captures = [];
         private ulong nextAddress = 0x71F4_0000_00;
+        private readonly bool wasTrackerEnabled = GuestImageWriteTracker.Enabled;
         public State()
         {
+            GuestImageWriteTracker.Configure(true);
             oldLatest = latest.Cast<DictionaryEntry>().ToArray();
             oldVersions = versions.Cast<object>().ToArray();
             latest.Clear(); versions.Clear();
@@ -374,8 +376,11 @@ public sealed class MetalTextureDependencySchedulingTests
         public GuestDrawTexture Capture(long producer, string queue)
         {
             var address = nextAddress; nextAddress += 0x1000;
-            var seed = new GuestDrawTexture(address, 4, 4, 10, 0, new byte[64], false, true, Pitch: 4,
+            GuestImageWriteTracker.TrackManagedWriter(address, 64);
+            var seed = new GuestDrawTexture(address, 4, 4, 10, 0, new byte[64], false, true, Pitch: 4, WriteGeneration: 0,
                 Shape: new ShaderImageShape(false, false, true, false, TextureNumericClass.Float), Access: GuestImageAccess.Write);
+            MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(seed,
+                MetalVideoPresenter.ObserveCpuTextureSnapshot(address, 64, HostMemory.MappingGeneration));
             Call("PublishAdmittedTextureSourceLocked", seed, producer, Queue(queue), false);
             var read = seed with { RgbaPixels = [], IsStorage = false, Shape = seed.Shape with { Storage = false }, Access = GuestImageAccess.Read };
             Assert.True(MetalVideoPresenter.TryCaptureTextureSource(read, 64, false));
@@ -421,6 +426,7 @@ public sealed class MetalTextureDependencySchedulingTests
             foreach (var item in oldLatest) latest.Add(item.Key, item.Value);
             foreach (var item in oldVersions) versions.Add(item);
             Field("_reservedTextureSourceBytes").SetValue(null, oldReserved);
+            GuestImageWriteTracker.Configure(wasTrackerEnabled);
             presenter.Dispose();
         }
     }

@@ -140,3 +140,23 @@ tracking identity token is still required before active selection. Mapping epoch
 are conservative vetoes, not mapping lifetime reservations. Native version budget,
 transactional admission, fatal/close cleanup and actual command-completion pins
 remain required; no game or device acceptance follows from these fixtures.
+
+### Tracker identity observation before copying
+
+The isolated graph branch captures the neutral content token only after
+`BeginReadSnapshot` establishes observation and before the actual CPU copy.
+Both storage and sampled producers compare that original identity/generation/
+extent tuple after copying; copied metadata and per-work reuse preserve it.
+Repeated storage instability now fails after three attempts rather than returning
+an empty seed. Native source selection/publication compares the original token
+again and rejects unobserved CPU initialization. Owner retirement can no longer
+be hidden by resetting an address counter to0 in these paths.
+
+The ARM64 managed105-case selection passes, including actual producer callbacks
+that write, untrack and recreate a watch during every sampled/storage copy.
+Scheduler stage fixtures remain synthetic and do not certify native copies.
+No global CPU-pixel reuse remains in this producer; the separate native texture
+cache still needs token qualification or disabling under the eventual active
+graph. Detached immutable native versions need independent lifetime ownership,
+not indiscriminate mapping-epoch checks at consumption. Source activation and
+native old/new-version readbacks remain outstanding.

@@ -160,7 +160,7 @@ public sealed class MetalTextureSourceLeaseTests
             // there are no mappings or page-protection calls at this address.
             GuestImageWriteTracker.TrackManagedWriter(Address, 64);
             var seed = Texture(true) with { RgbaPixels = new byte[64], WriteGeneration = 0, Access = GuestImageAccess.Write };
-            MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(seed, HostMemory.MappingGeneration);
+            MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(seed, MetalVideoPresenter.ObserveCpuTextureSnapshot(Address, 64, HostMemory.MappingGeneration));
             var copy = seed with { Sampler = new GuestSampler(1, 2, 3, 4) };
             MetalVideoPresenter.CopyCapturedTextureSource(seed, copy);
             GuestImageWriteTracker.NotifyManagedWrite(Address, 4);
@@ -185,7 +185,7 @@ public sealed class MetalTextureSourceLeaseTests
         {
             GuestImageWriteTracker.TrackManagedWriter(Address, 64);
             var seed = Texture(true) with { RgbaPixels = new byte[64], WriteGeneration = 0, Access = GuestImageAccess.Write };
-            MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(seed, HostMemory.MappingGeneration);
+            MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(seed, MetalVideoPresenter.ObserveCpuTextureSnapshot(Address, 64, HostMemory.MappingGeneration));
             Publish(seed);
             var previous = ((IDictionary)Field("_latestTextureSources").GetValue(null)!)[Address];
             GuestImageWriteTracker.NotifyManagedWrite(Address, 4);
@@ -194,6 +194,48 @@ public sealed class MetalTextureSourceLeaseTests
             Assert.Same(previous, ((IDictionary)Field("_latestTextureSources").GetValue(null)!)[Address]);
         }
         finally { GuestImageWriteTracker.Configure(wasEnabled); }
+    }
+
+    [Fact]
+    public void SeedObservationRejectsTrackerRetirementEvenWhenGenerationRestartsAtZero()
+    {
+        using var state = new State();
+        var observation = MetalVideoPresenter.ObserveCpuTextureSnapshot(Address, 64, HostMemory.MappingGeneration);
+        var seed = Texture(true) with { RgbaPixels = new byte[64], WriteGeneration = 0, Access = GuestImageAccess.Write };
+        MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(seed, observation);
+        GuestImageWriteTracker.NotifyManagedWrite(Address, 4);
+        GuestImageWriteTracker.Untrack(Address);
+        GuestImageWriteTracker.TrackManagedWriter(Address, 64);
+        Assert.True(GuestImageWriteTracker.TryGetWriteGeneration(Address, out var generation));
+        Assert.Equal(0, generation);
+        Assert.False(MetalVideoPresenter.IsCpuTextureSnapshotObservationStable(Address, observation));
+        var failure = Assert.Throws<TargetInvocationException>(() => Publish(seed));
+        Assert.Contains("seed provenance", failure.InnerException!.Message);
+        Assert.False(((IDictionary)Field("_latestTextureSources").GetValue(null)!).Contains(Address));
+    }
+
+    [Fact]
+    public void UnobservedOwnedSeedCannotAuthorizeNativeProducerFreshness()
+    {
+        using var state = new State();
+        GuestImageWriteTracker.Configure(false);
+        var seed = Texture(true) with { RgbaPixels = new byte[64], WriteGeneration = 0, Access = GuestImageAccess.Write };
+        MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(seed,
+            MetalVideoPresenter.ObserveCpuTextureSnapshot(Address, 64, HostMemory.MappingGeneration));
+        var failure = Assert.Throws<TargetInvocationException>(() => Publish(seed));
+        Assert.Contains("seed provenance", failure.InnerException!.Message);
+    }
+
+    [Fact]
+    public void NewCaptureRejectsRetiredTrackerOwnerEvenWhenCounterMatches()
+    {
+        using var state = new State();
+        var existing = PublishAndCapture();
+        GuestImageWriteTracker.Untrack(Address);
+        GuestImageWriteTracker.TrackManagedWriter(Address, 64);
+        Assert.Throws<InvalidOperationException>(() => MetalVideoPresenter.TryCaptureTextureSource(Texture(false), 64, false));
+        Assert.Equal(1, MetalVideoPresenter.TextureSourceState(existing).References);
+        MetalVideoPresenter.ReleasePreparedTextureSources([existing]);
     }
 
     private static void Publish(GuestDrawTexture seed)
@@ -216,8 +258,8 @@ public sealed class MetalTextureSourceLeaseTests
 
     internal static GuestDrawTexture PublishAndCapture()
     {
-        var seed = Texture(true) with { RgbaPixels = new byte[64], Access = GuestImageAccess.Write };
-        MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(seed, HostMemory.MappingGeneration);
+        var seed = Texture(true) with { RgbaPixels = new byte[64], WriteGeneration = 0, Access = GuestImageAccess.Write };
+        MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(seed, MetalVideoPresenter.ObserveCpuTextureSnapshot(Address, 64, HostMemory.MappingGeneration));
         var sequence = MetalVideoPresenter.SubmitOrderedGuestAction(static () => { }, "managed source owner fixture");
         var queueType = typeof(MetalVideoPresenter).GetNestedType("GuestQueueIdentity", BindingFlags.NonPublic)!;
         var queue = Activator.CreateInstance(queueType, ["host.default", 0UL])!;
@@ -239,6 +281,12 @@ public sealed class MetalTextureSourceLeaseTests
     internal sealed class State : IDisposable
     {
         private readonly MetalGuestFailureTests.PresenterState presenter = new();
+        private readonly bool wasEnabled = GuestImageWriteTracker.Enabled;
+        public State()
+        {
+            GuestImageWriteTracker.Configure(true);
+            GuestImageWriteTracker.TrackManagedWriter(Address, 64);
+        }
         public void Dispose()
         {
             ((IDictionary)Field("_latestTextureSources").GetValue(null)!).Remove(Address);
@@ -249,6 +297,7 @@ public sealed class MetalTextureSourceLeaseTests
                 if ((ulong)view.GetType().GetProperty("Address")!.GetValue(view)! == Address) versions.RemoveAt(index);
             }
             GuestImageWriteTracker.Untrack(Address);
+            GuestImageWriteTracker.Configure(wasEnabled);
             presenter.Dispose();
         }
     }
