@@ -20,17 +20,50 @@ internal static class HostViewTestSupport
 
     public static ulong HoleSize(IHostViewMemory views) => AlignUp(4 * Segment, views.Granularity);
 
-    // Keep search tests below the guest address limit and outside reserved graphics memory.
+    // Keep search tests below the guest address limit (0xFC_0000_0000) and
+    // outside reserved graphics memory. Stay well above the address the host
+    // hands out for an "anywhere" mapping too: on macOS/arm64 that is
+    // 0x70_0000_0000, which is exactly where this window used to start, so a
+    // background thread allocating anything at all landed on the range a probe
+    // had just freed for its caller to reserve.
+    private const ulong ProbeWindowStart = 0xA0_0000_0000UL;
+    private const ulong ProbeWindowEnd = 0xF0_0000_0000UL;
+
+    // One slot has to hold the largest range any caller probes for.
+    private const ulong ProbeSlot = 0x400_0000UL;
+
+    private static ulong _probeSlotCursor;
+
+    // Hands out a free, granularity-aligned guest address.
+    //
+    // The probe reserves a range, frees it, and returns the address for the
+    // caller to reserve again, so there is a window in which anyone else can
+    // take it. Every caller used to start probing at the same address, which
+    // made concurrent callers collide in exactly that window: the loser either
+    // saw its own reservation fail or found the range already occupied. Give
+    // each call its own slot instead, so they do not aim at the same address in
+    // the first place.
     public static ulong ProbeGuestAddress(IHostViewMemory views, ulong size)
     {
         size = AlignUp(size, views.Granularity);
+        Assert.True(size <= ProbeSlot, $"A probe of 0x{size:X} bytes does not fit one slot.");
         var step = AlignUp(Math.Max(size, 0x1000000UL), views.Granularity);
-        for (var candidate = 0x70_0000_0000UL; candidate < 0x71_0000_0000UL; candidate += step)
+        var slots = (ProbeWindowEnd - ProbeWindowStart) / ProbeSlot;
+        var firstSlot = Interlocked.Increment(ref _probeSlotCursor) - 1;
+
+        // Walk every slot once, starting from this call's own, so a host mapping
+        // that happens to sit in one slot does not fail the test.
+        for (var attempt = 0UL; attempt < slots; attempt++)
         {
-            if (views.ReserveHole(candidate, size) != candidate) continue;
-            Assert.True(views.FreeHole(candidate, size));
-            return candidate;
+            var slotBase = ProbeWindowStart + (firstSlot + attempt) % slots * ProbeSlot;
+            for (var candidate = slotBase; candidate + size <= slotBase + ProbeSlot; candidate += step)
+            {
+                if (views.ReserveHole(candidate, size) != candidate) continue;
+                Assert.True(views.FreeHole(candidate, size));
+                return candidate;
+            }
         }
+
         Assert.Fail("No free guest test range was found.");
         return 0;
     }
