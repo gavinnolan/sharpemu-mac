@@ -3,8 +3,9 @@
 
 using SDL;
 using static SDL.SDL3;
+using SharpEmu.Libs.VideoOut;
 
-namespace SharpEmu.Libs.VideoOut;
+namespace SharpEmu.Adapters.Sdl.Display;
 
 /// <summary>
 /// The SDL display enumerator behind <see cref="HostDisplayCatalog"/> on Windows and Linux.

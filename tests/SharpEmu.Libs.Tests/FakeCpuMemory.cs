@@ -42,7 +42,7 @@ internal sealed class FakeCpuMemory : ICpuMemory, IGuestMemoryAllocator
         }
         else
         {
-            SharpEmu.Libs.VideoOut.SdlPlatform.Register();
+            SharpEmu.Adapters.Sdl.SdlPlatform.Register();
             SharpEmu.Libs.Gpu.Vulkan.VulkanGpuBackend.Register();
         }
     }

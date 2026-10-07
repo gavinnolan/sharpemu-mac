@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Pad;
+using SharpEmu.Adapters.Sdl.Display;
+using SharpEmu.Adapters.Sdl.Input;
 
-namespace SharpEmu.Libs.VideoOut;
+namespace SharpEmu.Adapters.Sdl;
 
 /// <summary>
 /// Composition root of the SDL adapter package: the SDL window/event loop, SDL gamepads and

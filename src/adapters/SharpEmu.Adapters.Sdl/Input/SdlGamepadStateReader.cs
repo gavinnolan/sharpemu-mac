@@ -4,8 +4,9 @@
 using SharpEmu.HLE.Host;
 using SDL;
 using static SDL.SDL3;
+using SharpEmu.Libs.Pad;
 
-namespace SharpEmu.Libs.Pad;
+namespace SharpEmu.Adapters.Sdl.Input;
 
 internal static unsafe class SdlGamepadStateReader
 {

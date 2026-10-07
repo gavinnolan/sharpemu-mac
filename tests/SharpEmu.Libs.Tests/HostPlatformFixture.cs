@@ -29,11 +29,11 @@ internal static class HostPlatformFixture
         HostViewMemory.Initialize(SharpEmu.Host.MacOS.MacOSHost.CreateViewMemory);
 #elif SHARPEMU_HOST_LINUX
         HostPlatform.Initialize(static () =>
-            SharpEmu.Host.Linux.LinuxHost.Create(new SharpEmu.Adapters.Sdl.SdlHostAudio()));
+            SharpEmu.Host.Linux.LinuxHost.Create(new SharpEmu.Adapters.Sdl.Audio.SdlHostAudio()));
         HostViewMemory.Initialize(SharpEmu.Host.Linux.LinuxHost.CreateViewMemory);
 #elif SHARPEMU_HOST_WINDOWS
         HostPlatform.Initialize(static () =>
-            SharpEmu.Host.Windows.WindowsHost.Create(new SharpEmu.Adapters.Sdl.SdlHostAudio()));
+            SharpEmu.Host.Windows.WindowsHost.Create(new SharpEmu.Adapters.Sdl.Audio.SdlHostAudio()));
         HostViewMemory.Initialize(SharpEmu.Host.Windows.WindowsHost.CreateViewMemory);
 #else
 #error No SHARPEMU_HOST_* symbol was defined; see SharpEmu.Libs.Tests.csproj.

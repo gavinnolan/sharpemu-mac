@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.Host;
+using SharpEmu.Libs.Pad;
 
-namespace SharpEmu.Libs.Pad;
+namespace SharpEmu.Adapters.Sdl.Input;
 
 /// <summary>Adapts the SDL launcher pad to <see cref="ILauncherGamepadProvider"/>.</summary>
 public sealed class SdlLauncherGamepadProvider : ILauncherGamepadProvider

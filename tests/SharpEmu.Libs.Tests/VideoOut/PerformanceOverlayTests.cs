@@ -3,6 +3,7 @@
 
 using SharpEmu.Libs.VideoOut;
 using Xunit;
+using SharpEmu.Adapters.Sdl.Windowing;
 
 namespace SharpEmu.Libs.Tests.VideoOut;
 

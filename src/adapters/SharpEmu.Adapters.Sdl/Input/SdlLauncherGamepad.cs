@@ -5,7 +5,7 @@ using SharpEmu.HLE.Host;
 using SDL;
 using static SDL.SDL3;
 
-namespace SharpEmu.Libs.Pad;
+namespace SharpEmu.Adapters.Sdl.Input;
 
 /// <summary>Cross-platform SDL gamepad polling for launcher navigation.</summary>
 public static unsafe class SdlLauncherGamepad

@@ -7,8 +7,10 @@ using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Pad;
 using SDL;
 using static SDL.SDL3;
+using SharpEmu.Libs.VideoOut;
+using SharpEmu.Adapters.Sdl.Input;
 
-namespace SharpEmu.Libs.VideoOut;
+namespace SharpEmu.Adapters.Sdl.Windowing;
 
 internal enum SdlGraphicsApi
 {

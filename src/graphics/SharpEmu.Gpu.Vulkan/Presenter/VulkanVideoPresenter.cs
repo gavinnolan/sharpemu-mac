@@ -23,6 +23,7 @@ using System.Security.Cryptography;
 using System.Text;
 using VkBuffer = Silk.NET.Vulkan.Buffer;
 using VkSemaphore = Silk.NET.Vulkan.Semaphore;
+using SharpEmu.Adapters.Sdl.Windowing;
 
 namespace SharpEmu.Libs.VideoOut;
 
