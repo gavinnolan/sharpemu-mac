@@ -183,19 +183,30 @@ owns the SDL audio output; HLE no longer references `ppy.SDL3-CS`.
 registration (`HostPlatform.Initialize` / `HostViewMemory.Initialize`, with
 `Current` throwing a directed `InvalidOperationException` when nothing is
 registered). `SharpEmu.CLI` references exactly one host project, selected from
-the target RID, and `src/SharpEmu.CLI/HostComposition.cs` is the only place in
+the target RID, and `src/SharpEmu.CLI/HostComposition.cs` — the counterpart to
+`GpuComposition.cs`, using the same RID-to-OS convention — is the only place in
 the application that names a host package. Enforced by
-`tests/SharpEmu.Libs.Tests/Architecture/HostPackageBoundaryTests.cs`, which
+`tests/SharpEmu.Libs.Tests/ArchitectureRules/HostPackageBoundaryTests.cs`, which
 parses the project files and the compiled sources (including linked shared
 source) rather than reflecting over loaded assemblies — only one host package
 is ever loaded, so a reflection-based check could not see the other two.
 
-Audio: SDL stays the qualified default on Windows and Linux, and the native
-`WindowsWaveOutAudio` / `LinuxAlsaAudio` outputs remain non-default pending
+Audio is the one host service the application supplies rather than the host
+package: `WindowsHost.Create` / `LinuxHost.Create` / `MacOSHost.Create` take an
+optional `IHostAudioOutput`, and `HostComposition` hands the Windows and Linux
+hosts `SdlHostAudio`. That keeps SDL the qualified default there without any
+host package referencing `SharpEmu.Adapters.Sdl`, which also owns the window
+and input and therefore references `SharpEmu.Libs` — a dependency that does not
+belong in a host closure. Passing null falls back to each package's own native
+output (`WindowsWaveOutAudio` / `LinuxAlsaAudio`), still unqualified pending
 latency, underrun, clock, device-change and shutdown evidence.
-`SharpEmu.Host.MacOS` owns the native CoreAudio output (merged from the
-CoreAudio workstream) and references SDL neither by package nor by adapter, so
-a macOS process never initialises SDL audio.
+`SharpEmu.Host.MacOS` owns the native CoreAudio output and references SDL
+neither by package nor by adapter, so a macOS process never initialises SDL
+audio. That retired the last macOS SDL exemption: the `SDL3-CS.dll` /
+`libSDL3.dylib` entries in `build/platforms/macos/macos.targets` and the
+`SharpEmu.HLE -> ppy.SDL3-CS` `AllowedEdges` entry in
+`VulkanFreeSharedGpuTests` are both gone, and an `osx-x64` release publish
+reports a clean closure with no SDL string in the artifact at all.
 
 #### Known remaining OS checks in shared code
 
@@ -216,6 +227,13 @@ These were deliberately left in place; each needs its own change.
   is W10 (`Cpu.DirectExecution.<OS>.X64`); process-wide fault hooks and the
   emitted pre-filter thunks are exactly the code the plan says not to move
   without the ownership seam, so this workstream left them untouched.
+- The view backends diverge in their reservation primitive, by design and not
+  by an OS check: macOS reserves only through `mach_vm_allocate` with
+  `VM_FLAGS_FIXED` (Apple Silicon ignores mmap's address hint entirely) and
+  answers `IHostViewMemory.FindUnmappedRange` from
+  `mach_vm_region_recurse`, while Linux uses `MAP_FIXED_NOREPLACE` and
+  inherits the interface's default `FindUnmappedRange`. The Mach declarations
+  exist only in `SharpEmu.Host.MacOS`.
 - `src/SharpEmu.HLE/Host/HostViewRegions.cs` holds no OS check: it is pure
   managed bookkeeping (no syscalls, no native layouts, nothing per-OS beyond
   `Environment.SystemPageSize`), shared by both POSIX view backends and by
