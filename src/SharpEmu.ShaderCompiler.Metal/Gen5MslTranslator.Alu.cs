@@ -209,6 +209,8 @@ public static partial class Gen5MslTranslator
                     $"fma({F16(instruction, 0)}, {F16(instruction, 1)}, {F16(instruction, 2)})"),
                 "VFmacF32" or "VMacF32" =>
                     FloatResult(instruction, $"fma({F(instruction, 0)}, {F(instruction, 1)}, as_type<float>(v[{destination}]))"),
+                "VPkFmacF16" => EmitPackedF16Fmac(instruction, destination),
+                "VDot2cF32F16" => EmitDot2cF32F16(instruction, destination),
                 "VFloorF32" => FloatResult(instruction, $"floor({F(instruction, 0)})"),
                 "VCeilF32" => FloatResult(instruction, $"ceil({F(instruction, 0)})"),
                 "VTruncF32" => FloatResult(instruction, $"trunc({F(instruction, 0)})"),
@@ -295,6 +297,9 @@ public static partial class Gen5MslTranslator
                     $"(({RawSource(instruction, 1)}) - ({RawSource(instruction, 0)}))",
                 "VMulI32I24" =>
                     EmitSignedMultiply24(instruction),
+                // The 24-bit product wraps in 32 bits before the addend joins it.
+                "VMadI32I24" =>
+                    $"({EmitSignedMultiply24(instruction)} + ({RawSource(instruction, 2)}))",
                 // The SPIR-V translator treats the U24 multiply as a full 32-bit
                 // multiply (only the Hi/Mad forms mask); mirror it exactly.
                 "VMulLoU32" or "VMulLoI32" or "VMulU32U24" =>
@@ -362,6 +367,10 @@ public static partial class Gen5MslTranslator
                     AsUInt($"(as_type<int>({RawSource(instruction, 1)}) >> (({RawSource(instruction, 0)}) & 31u))"),
                 "VBfeU32" =>
                     $"extract_bits({RawSource(instruction, 0)}, ({RawSource(instruction, 1)}) & 31u, ({RawSource(instruction, 2)}) & 31u)",
+                // Same field as VBfeU32; the signed overload sign-extends from the
+                // field's top bit, so the source has to enter extract_bits as int.
+                "VBfeI32" =>
+                    AsUInt($"extract_bits(as_type<int>({RawSource(instruction, 0)}), ({RawSource(instruction, 1)}) & 31u, ({RawSource(instruction, 2)}) & 31u)"),
                 "VBfiB32" =>
                     $"((({RawSource(instruction, 0)}) & ({RawSource(instruction, 1)})) | (~({RawSource(instruction, 0)}) & ({RawSource(instruction, 2)})))",
                 "VAlignbitB32" =>
@@ -374,6 +383,8 @@ public static partial class Gen5MslTranslator
                 "VBcntU32B32" => $"(popcount({RawSource(instruction, 0)}) + ({RawSource(instruction, 1)}))",
                 "VFfblB32" =>
                     $"(({RawSource(instruction, 0)}) == 0u ? 0xFFFFFFFFu : (uint)ctz({RawSource(instruction, 0)}))",
+                "VFfbhU32" => EmitFindFirstBitHigh(instruction, signed: false),
+                "VFfbhI32" => EmitFindFirstBitHigh(instruction, signed: true),
 
                 // ---- wave / lane ----
                 // mbcnt reads the mask dword the guest passes (no cross-lane
@@ -467,6 +478,77 @@ public static partial class Gen5MslTranslator
                         expression = $"(uint){wide}";
                         break;
                     }
+                    case "VPkAddF16":
+                    case "VPkMulF16":
+                    case "VPkMinF16":
+                    case "VPkMaxF16":
+                    case "VPkFmaF16":
+                    case "VPkAddI16":
+                    case "VPkSubI16":
+                    case "VFmaMixF32":
+                    case "VFmaMixloF16":
+                    case "VFmaMixhiF16":
+                    {
+                        if (instruction.Control is not Gen5Vop3pControl packed)
+                        {
+                            error = $"missing vop3p control for {instruction.Opcode}";
+                            return false;
+                        }
+
+                        expression = instruction.Opcode switch
+                        {
+                            "VPkAddI16" => EmitPackedI16Arithmetic(instruction, packed, subtract: false),
+                            "VPkSubI16" => EmitPackedI16Arithmetic(instruction, packed, subtract: true),
+                            "VFmaMixF32" or "VFmaMixloF16" or "VFmaMixhiF16" =>
+                                EmitFmaMix(instruction, packed, destination),
+                            _ => EmitPackedF16(instruction, packed),
+                        };
+                        break;
+                    }
+                    case "VAddNcU16":
+                    case "VAddNcI16":
+                    case "VSubNcU16":
+                    case "VSubNcI16":
+                    case "VLshrrevB16":
+                    case "VLshlrevB16":
+                    case "VAshrrevI16":
+                    case "VMaxU16":
+                    case "VMinU16":
+                    case "VMaxI16":
+                    case "VMinI16":
+                    {
+                        // The hardware saturates these to the 16-bit signed or
+                        // unsigned range when clamp is set; the SPIR-V translator
+                        // refuses that case rather than mis-emitting it, and both
+                        // backends have to agree on what a program may rely on.
+                        if (instruction.Control is Gen5Vop3Control { Clamp: true })
+                        {
+                            error = $"{instruction.Opcode}: clamped 16-bit integer results are not supported";
+                            return false;
+                        }
+
+                        var signed = instruction.Opcode.EndsWith("I16", StringComparison.Ordinal);
+                        var left = Int16Source(instruction, 0, signed);
+                        var right = Int16Source(instruction, 1, signed);
+                        expression = Int16Result(
+                            instruction,
+                            destination,
+                            instruction.Opcode switch
+                            {
+                                "VAddNcU16" or "VAddNcI16" => $"(({left}) + ({right}))",
+                                "VSubNcU16" or "VSubNcI16" => $"(({left}) - ({right}))",
+                                // The rev shifts take the shift amount from src0 and
+                                // the value from src1, with only four bits of count.
+                                "VLshrrevB16" => $"(({right}) >> (({left}) & 15u))",
+                                "VLshlrevB16" => $"(({right}) << (({left}) & 15u))",
+                                "VAshrrevI16" => AsUInt($"(as_type<int>({right}) >> (({left}) & 15u))"),
+                                "VMaxU16" => $"max({left}, {right})",
+                                "VMinU16" => $"min({left}, {right})",
+                                "VMaxI16" => AsUInt($"max(as_type<int>({left}), as_type<int>({right}))"),
+                                _ => AsUInt($"min(as_type<int>({left}), as_type<int>({right}))"),
+                            });
+                        break;
+                    }
                     default:
                         error = $"unsupported vector opcode {instruction.Opcode}";
                         return false;
@@ -524,6 +606,268 @@ public static partial class Gen5MslTranslator
                 "float",
                 $"as_type<float>(as_type<uint>({F(instruction, 1)}) & 0xFFFFE000u)");
             return $"(((uint)as_type<ushort>(half({first}))) | (((uint)as_type<ushort>(half({second}))) << 16))";
+        }
+
+        private string EmitFindFirstBitHigh(Gen5ShaderInstruction instruction, bool signed)
+        {
+            var source = Temp("uint", RawSource(instruction, 0));
+            if (!signed)
+            {
+                // V_FFBH_U32 counts from bit 31, so 31 - findMSB is just the
+                // leading-zero count; a zero source has no set bit and reports ~0.
+                return $"({source} == 0u ? 0xFFFFFFFFu : (uint)clz({source}))";
+            }
+
+            // V_FFBH_I32 looks for the first bit that differs from the sign, which
+            // is the first clear bit of a negative source: complementing turns it
+            // back into a leading-zero count. 0 and -1 have no such bit at all.
+            var magnitude = Temp(
+                "uint",
+                $"(({source} & 0x80000000u) != 0u) ? ~{source} : {source}");
+            return $"({magnitude} == 0u ? 0xFFFFFFFFu : (uint)clz({magnitude}))";
+        }
+
+        // ---- VOP3P: packed and mixed 16-bit math ----
+
+        // Packed f16 (VOP3P). Each source register carries two f16 values, one per
+        // result lane, and the two lanes are computed independently: op_sel /
+        // op_sel_hi pick which half of each source feeds the lane, neg_lo / neg_hi
+        // negate it, the op runs in f32 and the result is rounded back to f16. The
+        // SPIR-V backend has to open-code every f16 <-> f32 conversion because
+        // SPIR-V without the Float16 capability cannot express them exactly; Metal
+        // has a native `half` whose conversions are IEEE (the translator's libraries
+        // are built with fast math off), so the conversions here are plain casts.
+        // VOP3P carries neither abs nor omod, and F/FloatResult only look at
+        // Gen5Vop3Control, so every modifier below is decoded by hand.
+        private string EmitPackedF16(Gen5ShaderInstruction instruction, Gen5Vop3pControl control)
+        {
+            var sources = PackedSources(instruction, control, instruction.Opcode == "VPkFmaF16" ? 3 : 2);
+            var low = EmitPackedF16Lane(instruction, control, sources, highLane: false);
+            var high = EmitPackedF16Lane(instruction, control, sources, highLane: true);
+            return $"(({low}) | (({high}) << 16))";
+        }
+
+        // Both lanes read the same sources, so each one is hoisted into a single
+        // temp. A constant operand is one f32 value rather than a packed pair: both
+        // lanes take it whole, which is why it is held as a float and not as raw bits.
+        private string[] PackedSources(
+            Gen5ShaderInstruction instruction,
+            Gen5Vop3pControl control,
+            int count)
+        {
+            var sources = new string[count];
+            for (var index = 0; index < count; index++)
+            {
+                sources[index] = IsPackedConstant(instruction.Sources[index])
+                    ? Temp("float", F(instruction, index))
+                    : Temp("uint", RawSource(instruction, index));
+            }
+
+            return sources;
+        }
+
+        private static bool IsPackedConstant(Gen5Operand operand) =>
+            operand.Kind is Gen5OperandKind.EncodedConstant or Gen5OperandKind.LiteralConstant;
+
+        private string EmitPackedF16Lane(
+            Gen5ShaderInstruction instruction,
+            Gen5Vop3pControl control,
+            string[] sources,
+            bool highLane)
+        {
+            var left = PackedF16Operand(instruction, control, sources, 0, highLane);
+            var right = PackedF16Operand(instruction, control, sources, 1, highLane);
+            var value = instruction.Opcode switch
+            {
+                "VPkAddF16" => $"({left} + {right})",
+                "VPkMulF16" => $"({left} * {right})",
+                // fminnum_like / fmaxnum_like: a NaN operand yields the other one,
+                // which is exactly what MSL's fmin/fmax are specified to do.
+                "VPkMinF16" => $"fmin({left}, {right})",
+                "VPkMaxF16" => $"fmax({left}, {right})",
+                // Use half fma itself: float fma followed by half conversion can
+                // double-round at a half midpoint (MSL specification section 6.7).
+                _ => $"(float)fma(half({left}), half({right}), half({PackedF16Operand(instruction, control, sources, 2, highLane)}))",
+            };
+            if (control.Clamp)
+            {
+                value = ClampToUnitInterval(value);
+            }
+
+            // 0 and 1 are exact in both formats and the clamp is monotonic, so
+            // clamping ahead of the narrowing gives the f16 the hardware clamps to.
+            return $"((uint)as_type<ushort>(half({value})))";
+        }
+
+        /// <summary>One packed-f16 source half widened to f32, with its lane's negate applied.</summary>
+        private string PackedF16Operand(
+            Gen5ShaderInstruction instruction,
+            Gen5Vop3pControl control,
+            string[] sources,
+            int index,
+            bool highLane)
+        {
+            var negateMask = highLane ? control.NegHiMask : control.NegLoMask;
+            // A constant has no half to select; only the lane's negate applies.
+            var value = IsPackedConstant(instruction.Sources[index])
+                ? sources[index]
+                : HalfToFloat(
+                    sources[index],
+                    (((highLane ? control.OpSelHiMask : control.OpSelMask) >> index) & 1) != 0);
+            return ((negateMask >> index) & 1) != 0 ? $"(-{value})" : value;
+        }
+
+        /// <summary>Widens one 16-bit half of a packed register to f32.</summary>
+        private static string HalfToFloat(string raw, bool highHalf) =>
+            $"(float)as_type<half2>({raw}).{(highHalf ? "y" : "x")}";
+
+        /// <summary>
+        /// The VOP3P clamp modifier saturates to [0, 1] and turns NaN into 0. MSL's
+        /// clamp() is unspecified for a NaN input, so the bounds are applied as
+        /// ordered compares, which are false for NaN and therefore pick the 0 bound.
+        /// </summary>
+        private string ClampToUnitInterval(string value)
+        {
+            var bounded = Temp("float", value);
+            var lowerBounded = Temp("float", $"({bounded} > 0.0f) ? {bounded} : 0.0f");
+            return $"(({lowerBounded} < 1.0f) ? {lowerBounded} : 1.0f)";
+        }
+
+        // V_PK_ADD/SUB_I16 operate on the op_sel-selected halves of src0 and src1
+        // and wrap in 16 bits per lane, so the signed and unsigned readings of the
+        // operands share one bit-level implementation.
+        private string EmitPackedI16Arithmetic(
+            Gen5ShaderInstruction instruction,
+            Gen5Vop3pControl control,
+            bool subtract)
+        {
+            var left = Temp("uint", RawSource(instruction, 0));
+            var right = Temp("uint", RawSource(instruction, 1));
+            var op = subtract ? "-" : "+";
+
+            static string SelectHalf(string value, uint mask, int index) =>
+                ((mask >> index) & 1) != 0
+                    ? $"(({value} >> 16) & 0xFFFFu)"
+                    : $"({value} & 0xFFFFu)";
+
+            string Lane(uint mask) =>
+                $"(({SelectHalf(left, mask, 0)} {op} {SelectHalf(right, mask, 1)}) & 0xFFFFu)";
+
+            return $"({Lane(control.OpSelMask)} | ({Lane(control.OpSelHiMask)} << 16))";
+        }
+
+        // V_FMA_MIX_F32 / _MIXLO_F16 / _MIXHI_F16. Unlike the v_pk_* ops these are a
+        // single f32 fma whose three sources are decoded independently: op_sel_hi
+        // says a register source is an f16 half (picked by op_sel) widened to f32
+        // rather than a whole f32, neg_hi is the absolute-value modifier and neg_lo
+        // negates. _MIXLO / _MIXHI round the f32 result to f16 and merge it into one
+        // half of vdst, leaving the other half as it was.
+        private string EmitFmaMix(
+            Gen5ShaderInstruction instruction,
+            Gen5Vop3pControl control,
+            uint destination)
+        {
+            var value =
+                $"fma({FmaMixOperand(instruction, control, 0)}, " +
+                $"{FmaMixOperand(instruction, control, 1)}, " +
+                $"{FmaMixOperand(instruction, control, 2)})";
+            if (control.Clamp)
+            {
+                value = ClampToUnitInterval(value);
+            }
+
+            if (instruction.Opcode == "VFmaMixF32")
+            {
+                return AsUInt($"({value})");
+            }
+
+            var packed = $"((uint)as_type<ushort>(half({value})))";
+            return instruction.Opcode == "VFmaMixloF16"
+                ? $"((v[{destination}] & 0xFFFF0000u) | {packed})"
+                : $"((v[{destination}] & 0x0000FFFFu) | ({packed} << 16))";
+        }
+
+        private string FmaMixOperand(
+            Gen5ShaderInstruction instruction,
+            Gen5Vop3pControl control,
+            int index)
+        {
+            var operand = instruction.Sources[index];
+            // Inline constants and literals are always read as a whole f32; only a
+            // register source can be narrowed to one of its halves.
+            var readAsHalf = ((control.OpSelHiMask >> index) & 1) != 0 &&
+                operand.Kind is Gen5OperandKind.VectorRegister or Gen5OperandKind.ScalarRegister;
+            var value = readAsHalf
+                ? HalfToFloat(
+                    Temp("uint", RawSource(instruction, index)),
+                    ((control.OpSelMask >> index) & 1) != 0)
+                : F(instruction, index);
+
+            // abs first, then negate — the order the hardware applies them in.
+            if (((control.NegHiMask >> index) & 1) != 0)
+            {
+                value = $"fabs({value})";
+            }
+
+            return ((control.NegLoMask >> index) & 1) != 0 ? $"(-{value})" : value;
+        }
+
+        // V_PK_FMAC_F16 (VOP2 0x3C): each half of the destination accumulates its own
+        // fused f16 multiply-add, D.h = fma(S0.h, S1.h, D.h). There is no op_sel and
+        // no neg on this encoding, so the halves are read straight out of the raw
+        // bits — including for an inline-constant source, whose 32 bits are read as a
+        // packed pair like any register. Metal's half fma rounds exactly once, which
+        // is what makes the fused form expressible directly.
+        private string EmitPackedF16Fmac(Gen5ShaderInstruction instruction, uint destination)
+        {
+            var left = Temp("half2", $"as_type<half2>({RawSource(instruction, 0)})");
+            var right = Temp("half2", $"as_type<half2>({RawSource(instruction, 1)})");
+            var accumulator = Temp("half2", $"as_type<half2>(v[{destination}])");
+            return AsUInt($"fma({left}, {right}, {accumulator})");
+        }
+
+        // RDNA2 ISA section 12.7: DOT2C accumulates the two half products
+        // into the old float destination. The C means accumulate, not clamp.
+        private string EmitDot2cF32F16(Gen5ShaderInstruction instruction, uint destination)
+        {
+            var left = Temp("float2", $"(float2)as_type<half2>({RawSource(instruction, 0)})");
+            var right = Temp("float2", $"(float2)as_type<half2>({RawSource(instruction, 1)})");
+            var dot = $"({left}.x * {right}.x + {left}.y * {right}.y + as_type<float>(v[{destination}]))";
+            return FloatResult(instruction, dot);
+        }
+
+        // ---- 16-bit integer VALU ----
+
+        /// <summary>
+        /// The 16-bit half of a source feeding a VOP3 16-bit integer op: op_sel bit
+        /// `sourceIndex` takes the high half, and the signed forms sign-extend it so
+        /// the surrounding 32-bit op sees the right value.
+        /// </summary>
+        private string Int16Source(Gen5ShaderInstruction instruction, int sourceIndex, bool signed)
+        {
+            var raw = RawSource(instruction, sourceIndex, applySdwaIntegerModifiers: false);
+            var shift = instruction.Control is Gen5Vop3Control control &&
+                (control.OperandSelect & (1u << sourceIndex)) != 0
+                    ? 16
+                    : 0;
+            var half = $"((({raw}) >> {shift}) & 0xFFFFu)";
+            return signed ? AsUInt($"(as_type<int>({half} << 16) >> 16)") : half;
+        }
+
+        /// <summary>Writes the low 16 bits of a result into the op_sel-selected
+        /// destination half, preserving the other half.</summary>
+        private static string Int16Result(
+            Gen5ShaderInstruction instruction,
+            uint destination,
+            string value)
+        {
+            var half = $"(({value}) & 0xFFFFu)";
+            return ((instruction.Control as Gen5Vop3Control)?.OperandSelect ?? 0) switch
+            {
+                var select when (select & 8) != 0 =>
+                    $"((v[{destination}] & 0x0000FFFFu) | ({half} << 16))",
+                _ => $"((v[{destination}] & 0xFFFF0000u) | {half})",
+            };
         }
 
         // ---- DPP / SDWA machinery ----
@@ -693,14 +1037,19 @@ public static partial class Gen5MslTranslator
             else if (opcode is
                      "VCmpTruF32" or "VCmpxTruF32" or
                      "VCmpTruF16" or "VCmpxTruF16" or
-                     "VCmpTI32" or "VCmpTU32")
+                     "VCmpTI32" or "VCmpTU32" or
+                     // The 64-bit F/T forms are constant compares like their 32-bit
+                     // siblings; without them TrimCompare hands "F"/"T" to the
+                     // integer operator table and the opcode reads as unsupported.
+                     "VCmpTI64" or "VCmpxTI64" or "VCmpTU64" or "VCmpxTU64")
             {
                 condition = "true";
             }
             else if (opcode is
                      "VCmpFF32" or "VCmpxFF32" or
                      "VCmpFF16" or "VCmpxFF16" or
-                     "VCmpFI32" or "VCmpFU32")
+                     "VCmpFI32" or "VCmpFU32" or
+                     "VCmpFI64" or "VCmpxFI64" or "VCmpFU64" or "VCmpxFU64")
             {
                 condition = "false";
             }

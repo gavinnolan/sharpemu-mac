@@ -284,8 +284,12 @@ public sealed class DirectImageTableTests
         Assert.Equal(344u + 31 * 32, snapshot.FlattenedResourceTable[mapping + 63]);
         Assert.Equal(2u, snapshot.FlattenedResourceTable[mapping + 64]);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error), error);
-        Assert.False(Gen5MslTranslator.TryCompileProgram(request, out _, out error));
-        Assert.Contains("not supported on Metal", error);
+
+        // Both backends declare one image class per dimension, so a candidate list that
+        // mixes 2D and 2D-array descriptors translates across the two binding classes.
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var metal, out error), error);
+        Assert.Contains("_2d [[id(", metal.Source);
+        Assert.Contains("_2d_array [[id(", metal.Source);
     }
 
     [Theory]

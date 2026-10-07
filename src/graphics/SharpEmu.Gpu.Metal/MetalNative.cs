@@ -131,6 +131,9 @@ internal static partial class MetalNative
     public static partial void objc_autoreleasePoolPop(nint pool);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    internal static partial void SendVoidFloat(nint receiver, nint selector, float value);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint Send(nint receiver, nint selector);
 
     /// <summary>objc_msgSend for -gpuResourceID. MTLResourceID is a one-field
@@ -311,6 +314,22 @@ internal static partial class MetalNative
         nuint mipmapLevel,
         nint bytes,
         nuint bytesPerRow);
+
+    /// <summary>
+    /// The slice- and volume-aware upload. One array layer takes a slice with
+    /// Depth 1 and no image stride; a volume takes slice 0, the region's full
+    /// Depth and the byte stride between depth slices.
+    /// </summary>
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendReplaceRegionSlice(
+        nint receiver,
+        nint selector,
+        MtlRegion region,
+        nuint mipmapLevel,
+        nuint slice,
+        nint bytes,
+        nuint bytesPerRow,
+        nuint bytesPerImage);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendDrawPrimitives(

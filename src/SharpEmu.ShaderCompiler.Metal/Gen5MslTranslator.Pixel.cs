@@ -3,6 +3,7 @@
 
 using System.Text;
 using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Resources;
 
 namespace SharpEmu.ShaderCompiler.Metal;
 
@@ -25,21 +26,13 @@ public static partial class Gen5MslTranslator
             error = string.Empty;
             if (instruction.Opcode is "ImageBvhIntersectRay" or "ImageBvh64IntersectRay")
             {
-                // Metal has no bound representation of GFX10's raw BVH
-                // descriptor in this backend. Preserve the hardware miss
-                // fallback used by the Vulkan path and keep the shader valid.
-                for (uint component = 0; component < 4; component++)
-                {
-                    StoreVector(image.VectorData + component, "0u");
-                }
-
-                return true;
+                error = $"{instruction.Opcode}: Metal has no guest BVH descriptor/intersection implementation";
+                return false;
             }
 
             string texture;
             string samplerName;
-            string kind;
-            bool isStorage;
+            MslImageClass imageClass;
             uint dstSelect;
             string mipLevel;
             {
@@ -52,8 +45,8 @@ public static partial class Gen5MslTranslator
                         Line("{");
                         _indent++;
                         var emitted =
-                            TryResolveLayoutImage(instruction, image, out texture, out samplerName, out kind, out isStorage, out dstSelect, out mipLevel, out error, elements[index]) &&
-                            EmitImageOperation(instruction, image, texture, samplerName, kind, isStorage, dstSelect, mipLevel, out error);
+                            TryResolveLayoutImage(instruction, image, out texture, out samplerName, out imageClass, out dstSelect, out mipLevel, out error, elements[index]) &&
+                            EmitImageOperation(instruction, image, texture, samplerName, imageClass, dstSelect, mipLevel, out error);
                         _indent--;
                         Line("}");
                         if (!emitted)
@@ -70,13 +63,13 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
-                if (!TryResolveLayoutImage(instruction, image, out texture, out samplerName, out kind, out isStorage, out dstSelect, out mipLevel, out error))
+                if (!TryResolveLayoutImage(instruction, image, out texture, out samplerName, out imageClass, out dstSelect, out mipLevel, out error))
                 {
                     return false;
                 }
             }
 
-            return EmitImageOperation(instruction, image, texture, samplerName, kind, isStorage, dstSelect, mipLevel, out error);
+            return EmitImageOperation(instruction, image, texture, samplerName, imageClass, dstSelect, mipLevel, out error);
         }
 
         // One image operation over a resolved texture; its results are register writes.
@@ -85,39 +78,17 @@ public static partial class Gen5MslTranslator
             Gen5ImageControl image,
             string texture,
             string samplerName,
-            string kind,
-            bool isStorage,
+            MslImageClass imageClass,
             uint dstSelect,
             string mipLevel,
             out string error)
         {
             error = string.Empty;
+            var kind = imageClass.ComponentKind;
+            var isStorage = imageClass.IsStorage;
             if (instruction.Opcode == "ImageGetResinfo")
             {
-                var width = Temp("uint", isStorage
-                    ? $"{texture}.get_width()"
-                    : $"{texture}.get_width(0)");
-                var height = Temp("uint", isStorage
-                    ? $"{texture}.get_height()"
-                    : $"{texture}.get_height(0)");
-                uint outputIndex = 0;
-                for (var component = 0; component < 4; component++)
-                {
-                    if ((image.Dmask & (1u << component)) == 0)
-                    {
-                        continue;
-                    }
-
-                    StoreVector(
-                        image.VectorData + outputIndex++,
-                        component switch
-                        {
-                            0 => width,
-                            1 => height,
-                            _ => "1u",
-                        });
-                }
-
+                EmitImageGetResinfo(image, texture, imageClass);
                 return true;
             }
 
@@ -129,8 +100,26 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
-                var x = Temp("int", $"as_type<int>({ImageIntegerAddress(image, 0)})");
-                var y = Temp("int", $"as_type<int>({ImageIntegerAddress(image, 1)})");
+                // Raw signed spatial address components plus the layer, all bounds-checked
+                // together so an out-of-range texel drops the write instead of wrapping.
+                var spatial = new string[imageClass.SpatialComponents];
+                var guards = new List<string>(4);
+                for (var component = 0; component < spatial.Length; component++)
+                {
+                    spatial[component] = Temp("int", $"as_type<int>({ImageIntegerAddress(image, component)})");
+                    guards.Add($"{spatial[component]} >= 0");
+                    guards.Add($"{spatial[component]} < (int){ImageExtentQuery(texture, imageClass, component, null)}");
+                }
+
+                var layerArgument = string.Empty;
+                if (imageClass.Arrayed)
+                {
+                    var layer = Temp("int", $"as_type<int>({ImageIntegerAddress(image, imageClass.SpatialComponents)})");
+                    guards.Add($"{layer} >= 0");
+                    guards.Add($"{layer} < (int){texture}.get_array_size()");
+                    layerArgument = $", (uint){layer}";
+                }
+
                 var components = new string[4];
                 for (var component = 0; component < 4; component++)
                 {
@@ -145,11 +134,15 @@ public static partial class Gen5MslTranslator
                         : kind == "float" ? "0.0f" : "0";
                 }
 
+                var coordinate = spatial.Length == 1
+                    ? $"uint2((uint){spatial[0]}, 0u)"
+                    : $"{imageClass.IntegerCoordinateType}({string.Join(", ", spatial.Select(part => $"(uint){part}"))})";
+
                 // Bounds-checked, EXEC-guarded write.
-                Line($"if (exec && {x} >= 0 && {y} >= 0 && {x} < (int){texture}.get_width() && {y} < (int){texture}.get_height())");
+                Line($"if (exec && {string.Join(" && ", guards)})");
                 Line("{");
                 _indent++;
-                Line($"{texture}.write({VectorLiteral(kind)}({components[0]}, {components[1]}, {components[2]}, {components[3]}), uint2((uint){x}, (uint){y}));");
+                Line($"{texture}.write({VectorLiteral(kind)}({components[0]}, {components[1]}, {components[2]}, {components[3]}), {coordinate}{layerArgument});");
                 _indent--;
                 Line("}");
                 return true;
@@ -165,30 +158,50 @@ public static partial class Gen5MslTranslator
             var writeAllComponents = false;
             if (instruction.Opcode is "ImageLoad" or "ImageLoadMip")
             {
-                var widthQuery = isStorage ? $"{texture}.get_width()" : $"{texture}.get_width({mipLevel})";
-                var heightQuery = isStorage ? $"{texture}.get_height()" : $"{texture}.get_height({mipLevel})";
-                var x = Temp(
-                    "uint",
-                    $"(uint)clamp(as_type<int>({ImageIntegerAddress(image, 0)}), 0, (int){widthQuery} - 1)");
-                var y = Temp(
-                    "uint",
-                    $"(uint)clamp(as_type<int>({ImageIntegerAddress(image, 1)}), 0, (int){heightQuery} - 1)");
-                sampled = Temp(
-                    $"vec<{kind}, 4>",
-                    isStorage
-                        ? $"{texture}.read(uint2({x}, {y}))"
-                        : $"{texture}.read(uint2({x}, {y}), {mipLevel})");
+                // A storage element is its own mip view; multisampled textures
+                // carry a sample operand rather than a mip level.
+                var extentLod = isStorage || !imageClass.SupportsMipLevels ? null : mipLevel;
+                var spatial = new string[imageClass.SpatialComponents];
+                for (var component = 0; component < spatial.Length; component++)
+                {
+                    spatial[component] = Temp(
+                        "uint",
+                        $"(uint)clamp(as_type<int>({ImageIntegerAddress(image, component)}), 0, " +
+                        $"(int){ImageExtentQuery(texture, imageClass, component, extentLod)} - 1)");
+                }
+
+                var coordinate = spatial.Length == 1
+                    ? $"uint2({spatial[0]}, 0u)"
+                    : $"{imageClass.IntegerCoordinateType}({string.Join(", ", spatial)})";
+                var arguments = coordinate;
+                if (imageClass.Arrayed)
+                {
+                    arguments += $", {BuildIntegerLayer(image, imageClass.SpatialComponents, texture)}";
+                }
+
+                // 2DMsaa/2DMsaaArray take a sample index where a mip level would go; it is
+                // the address component right after the coordinates, like the mip operand.
+                if (imageClass.Multisampled)
+                {
+                    arguments += $", {Temp("uint", ImageIntegerAddress(image, imageClass.CoordinateComponents))}";
+                }
+                else if (!isStorage && imageClass.SupportsMipLevels)
+                {
+                    arguments += $", {mipLevel}";
+                }
+
+                sampled = Temp($"vec<{kind}, 4>", $"{texture}.read({arguments})");
             }
             else if (instruction.Opcode.StartsWith("ImageSample", StringComparison.Ordinal))
             {
-                if (!TryEmitImageSample(instruction, image, texture, samplerName, kind, out sampled, out error))
+                if (!TryEmitImageSample(instruction, image, texture, samplerName, imageClass, out sampled, out error))
                 {
                     return false;
                 }
             }
             else if (instruction.Opcode.StartsWith("ImageGather4", StringComparison.Ordinal))
             {
-                if (!TryEmitImageGather(instruction, image, texture, samplerName, kind, out sampled, out error))
+                if (!TryEmitImageGather(instruction, image, texture, samplerName, imageClass, out sampled, out error))
                 {
                     return false;
                 }
@@ -235,17 +248,122 @@ public static partial class Gen5MslTranslator
             return true;
         }
 
+        // The size query reports the spatial extent, then the layer count for an arrayed
+        // image, then the mip count in w. Components past the image's own rank read zero,
+        // mirroring the SPIR-V backend's OpImageQuerySize{Lod} handling.
+        private void EmitImageGetResinfo(Gen5ImageControl image, string texture, MslImageClass imageClass)
+        {
+            // Storage elements and multisampled textures have no queryable mip chain.
+            var queryable = !imageClass.IsStorage && !imageClass.Multisampled;
+            var lod = queryable ? Temp("uint", ImageIntegerAddress(image, 0)) : null;
+            var sizes = new string[imageClass.CoordinateComponents];
+            for (var component = 0; component < imageClass.SpatialComponents; component++)
+            {
+                sizes[component] = Temp("uint", ImageExtentQuery(texture, imageClass, component, lod));
+            }
+
+            if (imageClass.Arrayed)
+            {
+                sizes[imageClass.SpatialComponents] = Temp("uint", $"{texture}.get_array_size()");
+            }
+
+            var levels = (image.Dmask & 0x8) != 0 && queryable
+                ? Temp("uint", $"{texture}.get_num_mip_levels()")
+                : "1u";
+            uint outputIndex = 0;
+            for (var component = 0; component < 4; component++)
+            {
+                if ((image.Dmask & (1u << component)) == 0)
+                {
+                    continue;
+                }
+
+                StoreVector(
+                    image.VectorData + outputIndex++,
+                    component < sizes.Length ? sizes[component]
+                        : component == 3 ? levels
+                        : "0u");
+            }
+        }
+
+        // The extent accessor uses the guest's logical rank. Height-one 2D
+        // backing preserves 1D mip queries; multisampled textures take no LOD.
+        private static string ImageExtentQuery(string texture, MslImageClass imageClass, int component, string? lod)
+        {
+            var accessor = component switch
+            {
+                0 => "get_width",
+                1 => "get_height",
+                _ => "get_depth",
+            };
+            return lod is null || !imageClass.SupportsMipLevels
+                ? $"{texture}.{accessor}()"
+                : $"{texture}.{accessor}({lod})";
+        }
+
+        // One spatial float coordinate vector from consecutive address components.
+        //
+        // Guest cube bodies carry face-relative s/t that the SPIR-V backend biases by -1
+        // before sampling; that bias is mirrored here so both backends address cube faces
+        // identically. Derivatives have no coordinate origin and must not take this bias.
+        private string BuildFloatSpatial(Gen5ImageControl image, int start, MslImageClass imageClass, bool biasCube = true)
+        {
+            var count = imageClass.SpatialComponents;
+            var parts = new string[count];
+            for (var component = 0; component < count; component++)
+            {
+                var value = ImageFloatAddress(image, start + component);
+                parts[component] = biasCube && imageClass.Cube && component < 2 ? $"({value}) - 1.0f" : value;
+            }
+
+            return count == 1
+                ? Temp("float", parts[0])
+                : Temp(imageClass.FloatCoordinateType, $"{imageClass.FloatCoordinateType}({string.Join(", ", parts)})");
+        }
+
+        // The array layer of a sampled access. Hardware rounds the float layer to the
+        // nearest slice, and Metal wants an integer, so the rounding is explicit.
+        //
+        // Guest cube layers advance by 8 per cube (6 faces plus 2 padding slices) while
+        // the host 2D-array view packs 6, so the padding is subtracted. The float-to-integer
+        // conversion truncates there, matching the SPIR-V backend's OpConvertFToU.
+        private string BuildSampleLayer(Gen5ImageControl image, int component, MslImageClass imageClass, string texture)
+        {
+            var raw = ImageFloatAddress(image, component);
+            string layer;
+            if (imageClass.Cube)
+            {
+                var guest = Temp("uint", $"(uint)max({raw}, 0.0f)");
+                layer = Temp("uint", $"{guest} - (({guest} >> 3u) << 1u)");
+            }
+            else
+            {
+                layer = Temp("uint", $"(uint)max(rint({raw}), 0.0f)");
+            }
+
+            return Temp("uint", $"min({layer}, {texture}.get_array_size() - 1u)");
+        }
+
+        // The array layer of an integer access: the raw component, clamped into range.
+        // Cube layers are not remapped here, matching the SPIR-V integer path.
+        private string BuildIntegerLayer(Gen5ImageControl image, int component, string texture) =>
+            Temp(
+                "uint",
+                $"(uint)clamp(as_type<int>({ImageIntegerAddress(image, component)}), 0, " +
+                $"(int){texture}.get_array_size() - 1)");
+
         private bool TryEmitImageSample(
             Gen5ShaderInstruction instruction,
             Gen5ImageControl image,
             string texture,
             string samplerName,
-            string kind,
+            MslImageClass imageClass,
             out string sampled,
             out string error)
         {
             sampled = string.Empty;
             error = string.Empty;
+            var kind = imageClass.ComponentKind;
             var opcode = instruction.Opcode;
             var hasOffset = opcode.EndsWith("O", StringComparison.Ordinal);
             var hasCompare = opcode.Contains("SampleC", StringComparison.Ordinal);
@@ -253,21 +371,27 @@ public static partial class Gen5MslTranslator
             var hasZeroLod = opcode.Contains("Lz", StringComparison.Ordinal);
             var hasLod = !hasZeroLod && opcode.Contains("SampleL", StringComparison.Ordinal);
             var hasBias = opcode.Contains("SampleB", StringComparison.Ordinal);
+            var spatialComponents = imageClass.SpatialComponents;
 
             // RDNA MIMG address operands are ordered
             // {offset}{bias}{z-compare}{derivatives}{body}; SAMPLE_L carries LOD
             // as the final body component instead.
             var addressCursor = 0;
-            var offsetX = "0";
-            var offsetY = "0";
+            var offsets = new string[spatialComponents];
+            Array.Fill(offsets, "0");
             if (hasOffset)
             {
                 addressCursor = AlignFullImageAddress(image, addressCursor);
                 var packed = Temp(
                     "int",
                     $"as_type<int>(v[{image.GetAddressRegister(ImageAddressRegister(image, addressCursor))}])");
-                offsetX = Temp("int", $"extract_bits({packed}, 0u, 6u)");
-                offsetY = Temp("int", $"extract_bits({packed}, 8u, 6u)");
+
+                // One signed 6-bit field per spatial axis: x at bit 0, y at 8, z at 16.
+                for (var component = 0; component < spatialComponents; component++)
+                {
+                    offsets[component] = Temp("int", $"extract_bits({packed}, {component * 8}u, 6u)");
+                }
+
                 addressCursor += ImageFullAddressSlots(image);
             }
 
@@ -282,51 +406,75 @@ public static partial class Gen5MslTranslator
                 addressCursor += ImageFullAddressSlots(image);
             }
 
-            var gradientX = "float2(0.0f)";
-            var gradientY = "float2(0.0f)";
+            // Derivatives are one spatial vector per axis pair, with no array layer.
+            var gradientType = spatialComponents == 3 ? "gradient3d" : "gradient2d";
+            var gradientX = string.Empty;
+            var gradientY = string.Empty;
             if (hasGradients)
             {
-                gradientX = Temp(
-                    "float2",
-                    $"float2({ImageFloatAddress(image, addressCursor)}, {ImageFloatAddress(image, addressCursor + 1)})");
-                gradientY = Temp(
-                    "float2",
-                    $"float2({ImageFloatAddress(image, addressCursor + 2)}, {ImageFloatAddress(image, addressCursor + 3)})");
-                addressCursor += 4;
+                gradientX = BuildFloatSpatial(image, addressCursor, imageClass, biasCube: false);
+                gradientY = BuildFloatSpatial(image, addressCursor + spatialComponents, imageClass, biasCube: false);
+                addressCursor += spatialComponents * 2;
             }
 
-            var coordinates = Temp(
-                "float2",
-                $"float2({ImageFloatAddress(image, addressCursor)}, {ImageFloatAddress(image, addressCursor + 1)})");
+            var coordinates = BuildFloatSpatial(image, addressCursor, imageClass);
+            var layerArgument = imageClass.Arrayed
+                ? $", {BuildSampleLayer(image, addressCursor + spatialComponents, imageClass, texture)}"
+                : string.Empty;
+            // Implicit-LOD and bias sampling need the derivatives a fragment quad provides,
+            // so Metal only offers them in a fragment function. Outside one the level is
+            // explicit, which is what the SPIR-V backend does for the same reason.
+            var explicitLod = hasGradients || hasZeroLod || hasLod || _stage != Gen5MslStage.Pixel;
             var lod = hasZeroLod
                 ? "0.0f"
                 : hasLod
-                    ? Temp("float", ImageFloatAddress(image, addressCursor + 2))
-                    : bias;
+                    ? Temp("float", ImageFloatAddress(image, addressCursor + imageClass.CoordinateComponents))
+                    : explicitLod
+                        ? "0.0f"
+                        : bias;
             if (hasOffset)
             {
                 // Per-lane texel offsets fold into normalized coordinates using
                 // the selected mip extent, mirroring the SPIR-V translator
                 // (Metal sample offsets must be compile-time constants).
-                var explicitLod = hasGradients || hasZeroLod || hasLod;
                 var offsetLod = explicitLod && !hasGradients ? lod : "0.0f";
                 var mipLevel = Temp("uint", $"(uint)max((int)({offsetLod}), 0)");
+                var scaled = new string[spatialComponents];
+                for (var component = 0; component < spatialComponents; component++)
+                {
+                    scaled[component] =
+                        $"(float){offsets[component]} / (float){ImageExtentQuery(texture, imageClass, component, mipLevel)}";
+                }
+
                 coordinates = Temp(
-                    "float2",
-                    $"{coordinates} + float2((float){offsetX} / (float){texture}.get_width({mipLevel}), " +
-                    $"(float){offsetY} / (float){texture}.get_height({mipLevel}))");
+                    imageClass.FloatCoordinateType,
+                    spatialComponents == 1
+                        ? $"{coordinates} + {scaled[0]}"
+                        : $"{coordinates} + {imageClass.FloatCoordinateType}({string.Join(", ", scaled)})");
             }
 
-            var samplerArguments = hasGradients
-                ? $", gradient2d({gradientX}, {gradientY})"
-                : hasZeroLod || hasLod
-                    ? $", level({lod})"
-                    : hasBias
-                        ? $", bias({bias})"
-                        : string.Empty;
+            if (spatialComponents == 1)
+            {
+                coordinates = Temp("float2", $"float2({coordinates}, 0.5f)");
+                if (hasGradients)
+                {
+                    gradientX = $"float2({gradientX}, 0.0f)";
+                    gradientY = $"float2({gradientY}, 0.0f)";
+                }
+            }
+
+            var samplerArguments = !imageClass.SupportsSampleLod
+                ? string.Empty
+                : hasGradients
+                    ? $", {gradientType}({gradientX}, {gradientY})"
+                    : explicitLod
+                        ? $", level({lod})"
+                        : hasBias
+                            ? $", bias({bias})"
+                            : string.Empty;
             sampled = Temp(
                 $"vec<{kind}, 4>",
-                $"{texture}.sample({samplerName}, {coordinates}{samplerArguments})");
+                $"{texture}.sample({samplerName}, {coordinates}{layerArgument}{samplerArguments})");
             if (hasCompare)
             {
                 // Manual PCF: reference passes when <= texel, broadcast (r,r,r,1).
@@ -346,15 +494,35 @@ public static partial class Gen5MslTranslator
             Gen5ImageControl image,
             string texture,
             string samplerName,
-            string kind,
+            MslImageClass imageClass,
             out string sampled,
             out string error)
         {
             sampled = string.Empty;
             error = string.Empty;
+            var kind = imageClass.ComponentKind;
             var opcode = instruction.Opcode;
             var hasOffset = opcode.EndsWith("O", StringComparison.Ordinal);
             var hasCompare = opcode.Contains("Gather4C", StringComparison.Ordinal);
+
+            // Metal exposes gather on 2D and 2D-array textures only. A 1D gather is
+            // emulated from two point samples, the way the SPIR-V backend does it;
+            // a volume gather has no hardware or Vulkan equivalent either.
+            if (!imageClass.SupportsGather)
+            {
+                if (imageClass.Dimension == ImageDimension.Dim1D &&
+                    opcode == "ImageGather4Lz" &&
+                    !hasCompare &&
+                    !hasOffset)
+                {
+                    sampled = EmitOneDimensionalGatherLz(image, texture, samplerName, imageClass);
+                    return true;
+                }
+
+                error = $"image dimension {imageClass.Dimension} does not support {opcode} on Metal";
+                return false;
+            }
+
             var addressCursor = 0;
             var offset = "int2(0)";
             if (hasOffset)
@@ -378,9 +546,10 @@ public static partial class Gen5MslTranslator
                 addressCursor += ImageFullAddressSlots(image);
             }
 
-            var coordinates = Temp(
-                "float2",
-                $"float2({ImageFloatAddress(image, addressCursor)}, {ImageFloatAddress(image, addressCursor + 1)})");
+            var coordinates = BuildFloatSpatial(image, addressCursor, imageClass);
+            var layerArgument = imageClass.Arrayed
+                ? $", {BuildSampleLayer(image, addressCursor + imageClass.SpatialComponents, imageClass, texture)}"
+                : string.Empty;
 
             // The gathered component is selected from the first dmask bit.
             uint component = 0;
@@ -398,7 +567,7 @@ public static partial class Gen5MslTranslator
             };
             sampled = Temp(
                 $"vec<{kind}, 4>",
-                $"{texture}.gather({samplerName}, {coordinates}, {offset}, component::{componentName})");
+                $"{texture}.gather({samplerName}, {coordinates}{layerArgument}, {offset}, component::{componentName})");
             if (hasCompare)
             {
                 var one = kind == "float" ? "1.0f" : "1";
@@ -414,6 +583,39 @@ public static partial class Gen5MslTranslator
             }
 
             return true;
+        }
+
+        // A 1D gather has no Metal (or Vulkan) instruction, so the two texels the filter
+        // would straddle are point-sampled and laid out the way GATHER4 returns them:
+        // (v0, v1, v1, v0). Mirrors Gen5SpirvTranslator's EmitOneDimensionalGatherLz.
+        private string EmitOneDimensionalGatherLz(
+            Gen5ImageControl image,
+            string texture,
+            string samplerName,
+            MslImageClass imageClass)
+        {
+            var kind = imageClass.ComponentKind;
+            var width = Temp("float", $"(float){texture}.get_width(0)");
+            var coordinate = Temp("float", ImageFloatAddress(image, 0));
+            var left = Temp("float", $"floor({coordinate} * {width} - 0.5f)");
+
+            // The gathered component is selected from the first dmask bit.
+            uint component = 0;
+            while (component < 3 && (image.Dmask & (1u << (int)component)) == 0)
+            {
+                component++;
+            }
+
+            var first = Temp(
+                $"vec<{kind}, 4>",
+                $"{texture}.sample({samplerName}, float2(({left} + 0.5f) / {width}, 0.5f), level(0.0f))");
+            var second = Temp(
+                $"vec<{kind}, 4>",
+                $"{texture}.sample({samplerName}, float2(({left} + 1.5f) / {width}, 0.5f), level(0.0f))");
+            return Temp(
+                $"vec<{kind}, 4>",
+                $"{VectorLiteral(kind)}({first}[{component}], {second}[{component}], " +
+                $"{second}[{component}], {first}[{component}])");
         }
 
         private static string VectorLiteral(string kind) => $"vec<{kind}, 4>";

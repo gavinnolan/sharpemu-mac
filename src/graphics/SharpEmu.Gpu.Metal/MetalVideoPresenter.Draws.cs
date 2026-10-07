@@ -7,6 +7,7 @@ using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Metal;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.VideoOut;
+using static SharpEmu.Libs.Agc.AgcBackendServices;
 
 namespace SharpEmu.Gpu.Metal;
 
@@ -1495,6 +1496,14 @@ internal static partial class MetalVideoPresenter
             return 0;
         }
 
+        // A CPU snapshot does not carry per-sample MSAA data. Binding a
+        // single-sample 2D texture to texture2d_ms would be undefined behavior.
+        if (texture.Type is 14 or 15)
+        {
+            throw new NotSupportedException(
+                $"Metal cannot materialize per-sample guest texture type {texture.Type} at 0x{texture.Address:X}.");
+        }
+
         var cacheable = IsCacheableDrawTexture(texture);
 
         // Feedback reads of a live guest render target sample an ordered
@@ -1631,9 +1640,39 @@ internal static partial class MetalVideoPresenter
             texture.Width,
             texture.Height,
             mipmapped: false);
+        if (texture.MipUploads is { Length: > 0 } mipUploads)
+        {
+            var levelCount = mipUploads.Max(static upload => upload.MipLevel) + 1;
+            if (levelCount != mipUploads.Length ||
+                !mipUploads.Select(static upload => upload.MipLevel).Order().SequenceEqual(
+                    Enumerable.Range(0, mipUploads.Length).Select(static level => (uint)level)))
+                throw new InvalidOperationException("Metal texture mip snapshot must cover every mip level exactly once.");
+            MetalNative.Send(descriptor, MetalNative.Selector("setMipmapLevelCount:"), (nint)levelCount);
+        }
+
         // MTLStorageModeShared (0): CPU-uploaded (replaceRegion) + GPU-sampled;
         // the Managed default reads stale on unified memory (see CreateGuestTexture).
         MetalNative.Send(descriptor, MetalNative.Selector("setStorageMode:"), (nint)0);
+
+        // The bound texture's type has to be the one the shader declared, because a
+        // mismatch between an argument-buffer texture and its MSL declaration is
+        // undefined. The 2D factory above only ever produces MTLTextureType2D, so
+        // anything else is corrected here.
+        var shape = GuestTextureShape(texture);
+        if (shape.TextureType != MtlTextureType2D)
+        {
+            MetalNative.Send(descriptor, MetalNative.Selector("setTextureType:"), (nint)shape.TextureType);
+        }
+
+        if (shape.ArrayLength != 1)
+        {
+            MetalNative.Send(descriptor, MetalNative.Selector("setArrayLength:"), (nint)shape.ArrayLength);
+        }
+
+        if (shape.Depth != 1)
+        {
+            MetalNative.Send(descriptor, MetalNative.Selector("setDepth:"), (nint)shape.Depth);
+        }
         if (texture.IsStorage)
         {
             MetalNative.Send(
@@ -1666,15 +1705,64 @@ internal static partial class MetalVideoPresenter
         return handle;
     }
 
+    // MTLTextureType. The 2D descriptor factory produces Type2D, so the others are
+    // applied with setTextureType: after the fact.
+    private const uint MtlTextureType1D = 0;
+    private const uint MtlTextureType1DArray = 1;
+    private const uint MtlTextureType2D = 2;
+    private const uint MtlTextureType2DArray = 3;
+    private const uint MtlTextureType3D = 7;
+
+    /// <summary>
+    /// The Metal texture shape a guest descriptor has to be created with, which is the
+    /// shape the shader declared rather than the descriptor's own type.
+    ///
+    /// <paramref name="texture"/>'s ArrayedView carries whether the shader declared an
+    /// arrayed image: a MIMG instruction can address an array descriptor non-arrayed, in
+    /// which case it only ever reaches slice 0 and the shader declares a plain 2D texture.
+    /// This mirrors ResourceMaterializer.DescriptorDimension, which the shader's own
+    /// declaration came from, so the two agree by construction.
+    ///
+    /// Cube maps are always 2D arrays here: Gen5 shaders resolve the face themselves and
+    /// then address the image by layer, so the MSL declaration is texture2d_array.
+    /// </summary>
+    private static (uint TextureType, uint ArrayLength, uint Depth) GuestTextureShape(GuestDrawTexture texture)
+    {
+        var arrayed = texture.ArrayedView;
+        var layers = Math.Max(texture.ArrayLayers, 1u);
+        return texture.Type switch
+        {
+            Gen5TextureType3D => (MtlTextureType3D, 1u, Math.Max(texture.Depth, 1u)),
+            Gen5TextureTypeCube => (MtlTextureType2DArray, layers, 1u),
+            Gen5TextureType1D or Gen5TextureType1DArray =>
+                arrayed ? (MtlTextureType2DArray, layers, 1u) : (MtlTextureType2D, 1u, 1u),
+            _ => arrayed ? (MtlTextureType2DArray, layers, 1u) : (MtlTextureType2D, 1u, 1u),
+        };
+    }
+
     /// <summary>Uploads a draw texture's source texels: linear formats reuse the
     /// row-clamping helper; block-compressed formats upload whole 4x4 block rows
-    /// with the block-row stride replaceRegion expects.</summary>
+    /// with the block-row stride replaceRegion expects. Array layers and volume
+    /// slices beyond the first are uploaded from layer-major source bytes.</summary>
     private static unsafe void ReplaceDrawTextureContents(
         nint handle,
         GuestDrawTexture texture,
         uint pitch,
         in MetalTextureFormat format)
     {
+        if (texture.MipUploads is { Length: > 0 })
+        {
+            ReplaceMipChainContents(handle, texture, format);
+            return;
+        }
+
+        var shape = GuestTextureShape(texture);
+        if (shape.ArrayLength > 1 || shape.Depth > 1)
+        {
+            ReplaceLayeredTextureContents(handle, texture, pitch, format, shape);
+            return;
+        }
+
         if (!format.IsBlockCompressed)
         {
             ReplaceTextureContents(
@@ -1707,6 +1795,115 @@ internal static partial class MetalVideoPresenter
                 0,
                 (nint)source,
                 (nuint)bytesPerBlockRow);
+        }
+    }
+
+    // Snapshot mip ranges are mip-major, with each level's layers contiguous.
+    // These are already detiled bytes; do not reinterpret them as one base level.
+    private static unsafe void ReplaceMipChainContents(nint handle, GuestDrawTexture texture,
+        in MetalTextureFormat format)
+    {
+        var shape = GuestTextureShape(texture);
+        if (shape.Depth > 1)
+            throw new NotSupportedException("Metal volume mip-chain snapshots need per-level depth ranges.");
+        var selector = MetalNative.Selector("replaceRegion:mipmapLevel:slice:withBytes:bytesPerRow:bytesPerImage:");
+        foreach (var upload in texture.MipUploads!)
+        {
+            var rowPitch = Math.Max(upload.RowLength, upload.Width);
+            var rowBytes = format.IsBlockCompressed
+                ? ((ulong)rowPitch + 3) / 4 * format.BlockBytes
+                : (ulong)rowPitch * format.BytesPerPixel;
+            var rows = format.IsBlockCompressed ? ((ulong)upload.Height + 3) / 4 : upload.Height;
+            var sliceBytes = checked(rowBytes * rows);
+            var end = checked(upload.BufferOffset + sliceBytes * shape.ArrayLength);
+            if (rowBytes == 0 || end > (ulong)texture.RgbaPixels.Length)
+                throw new InvalidOperationException($"Metal texture mip {upload.MipLevel} has incomplete layer data.");
+            fixed (byte* bytes = texture.RgbaPixels)
+            {
+                for (uint layer = 0; layer < shape.ArrayLength; layer++)
+                {
+                    MetalNative.SendReplaceRegionSlice(handle, selector,
+                        new MtlRegion { Width = upload.Width, Height = upload.Height, Depth = 1 },
+                        upload.MipLevel, layer, (nint)(bytes + upload.BufferOffset + sliceBytes * layer),
+                        (nuint)rowBytes, 0);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Uploads an array or volume texture. The detiled source is layer-major (see the
+    /// per-layer detile loop in CreateDrawTexture), so each slice is a contiguous run of
+    /// one 2D image. A volume goes up in a single call with the depth stride, because
+    /// Metal walks a 3D region itself; array layers need one call per slice.
+    ///
+    /// Incomplete source data is rejected; Metal allocation contents are undefined
+    /// until uploaded, so missing slices must never be described as cleared.
+    /// </summary>
+    private static unsafe void ReplaceLayeredTextureContents(
+        nint handle,
+        GuestDrawTexture texture,
+        uint pitch,
+        in MetalTextureFormat format,
+        (uint TextureType, uint ArrayLength, uint Depth) shape)
+    {
+        var rowPitch = Math.Max(pitch, texture.Width);
+        ulong bytesPerRow;
+        uint rows;
+        if (format.IsBlockCompressed)
+        {
+            bytesPerRow = ((ulong)rowPitch + 3) / 4 * format.BlockBytes;
+            rows = (texture.Height + 3) / 4;
+        }
+        else
+        {
+            bytesPerRow = (ulong)rowPitch * format.BytesPerPixel;
+            rows = texture.Height;
+        }
+
+        var bytesPerImage = bytesPerRow * rows;
+        if (bytesPerRow == 0 || bytesPerImage == 0)
+        {
+            return;
+        }
+
+        var available = (ulong)texture.RgbaPixels.Length / bytesPerImage;
+        if (available < Math.Max(shape.Depth, shape.ArrayLength))
+        {
+            throw new InvalidOperationException("Metal layered texture snapshot does not cover every layer/depth slice.");
+        }
+
+        var selector = MetalNative.Selector("replaceRegion:mipmapLevel:slice:withBytes:bytesPerRow:bytesPerImage:");
+        fixed (byte* source = texture.RgbaPixels)
+        {
+            if (shape.Depth > 1)
+            {
+                var depth = (uint)Math.Min(shape.Depth, available);
+                MetalNative.SendReplaceRegionSlice(
+                    handle,
+                    selector,
+                    new MtlRegion { X = 0, Y = 0, Z = 0, Width = texture.Width, Height = texture.Height, Depth = depth },
+                    0,
+                    0,
+                    (nint)source,
+                    (nuint)bytesPerRow,
+                    (nuint)bytesPerImage);
+                return;
+            }
+
+            var layers = (uint)Math.Min(shape.ArrayLength, available);
+            for (var layer = 0u; layer < layers; layer++)
+            {
+                MetalNative.SendReplaceRegionSlice(
+                    handle,
+                    selector,
+                    new MtlRegion { X = 0, Y = 0, Z = 0, Width = texture.Width, Height = texture.Height, Depth = 1 },
+                    0,
+                    layer,
+                    (nint)(source + layer * bytesPerImage),
+                    (nuint)bytesPerRow,
+                    0);
+            }
         }
     }
 
@@ -1930,6 +2127,14 @@ internal static partial class MetalVideoPresenter
             descriptor,
             MetalNative.Selector("setMinFilter:"),
             minFilter is 1 or 3 ? 1 : 0);
+        var mipFilter = (sampler.Word2 >> 26) & 0x3;
+        if (mipFilter == 3)
+            throw new NotSupportedException("Metal sampler uses a reserved guest mip-filter encoding.");
+        MetalNative.Send(descriptor, MetalNative.Selector("setMipFilter:"), (nint)mipFilter);
+        MetalNative.SendVoidFloat(descriptor, MetalNative.Selector("setLodMinClamp:"),
+            mipFilter == 0 ? 0.0f : (sampler.Word1 & 0xFFF) / 256.0f);
+        MetalNative.SendVoidFloat(descriptor, MetalNative.Selector("setLodMaxClamp:"),
+            mipFilter == 0 ? 0.0f : ((sampler.Word1 >> 12) & 0xFFF) / 256.0f);
         // The stage argument buffer stores the sampler's resource id; Metal refuses one without this flag.
         MetalNative.SendVoidBool(descriptor, MetalNative.Selector("setSupportArgumentBuffers:"), true);
 

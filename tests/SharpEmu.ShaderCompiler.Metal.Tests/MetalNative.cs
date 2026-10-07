@@ -24,6 +24,23 @@ internal static partial class MetalNative
         public nuint Depth;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MtlRegion
+    {
+        public nuint X, Y, Z, Width, Height, Depth;
+    }
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    private static partial void SendInteger(nint receiver, nint selector, nuint value);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    private static partial void SendReplace(nint receiver, nint selector, MtlRegion region,
+        nuint level, nuint slice, nint bytes, nuint rowBytes, nuint imageBytes);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    private static partial void SendReadTexture(nint receiver, nint selector, nint bytes,
+        nuint rowBytes, nuint imageBytes, MtlRegion region, nuint level, nuint slice);
+
     [LibraryImport(MetalFramework)]
     private static partial nint MTLCreateSystemDefaultDevice();
 
@@ -142,7 +159,9 @@ internal static partial class MetalNative
         Gen5MslArgumentLayout layout,
         uint threadsPerThreadgroup,
         out byte[] result,
-        out string error)
+        out string error,
+        nint texture = 0,
+        nint sampler = 0)
     {
         result = [];
         var buffer = SharedBuffer(bufferContents);
@@ -163,6 +182,14 @@ internal static partial class MetalNative
                     case MslArgumentFieldKind.BufferPointers:
                         BitConverter.TryWriteBytes(arguments.AsSpan((int)field.ByteOffset + (element * 8)), address);
                         break;
+                    case MslArgumentFieldKind.Textures:
+                        BitConverter.TryWriteBytes(arguments.AsSpan((int)field.ByteOffset + (element * 8)),
+                            SendULong(texture, Selector("gpuResourceID")));
+                        break;
+                    case MslArgumentFieldKind.Samplers:
+                        BitConverter.TryWriteBytes(arguments.AsSpan((int)field.ByteOffset + (element * 8)),
+                            SendULong(sampler, Selector("gpuResourceID")));
+                        break;
                     case MslArgumentFieldKind.BufferByteCounts:
                         BitConverter.TryWriteBytes(arguments.AsSpan((int)field.ByteOffset + (element * 4)), (uint)bufferContents.Length);
                         break;
@@ -182,12 +209,78 @@ internal static partial class MetalNative
             library,
             entryPoint,
             [(argumentBuffer, (nuint)Gen5MslArgumentLayout.ResourcesBufferIndex), (pushBuffer, (nuint)Gen5MslArgumentLayout.PushDataBufferIndex)],
-            [buffer],
+            texture == 0 ? [buffer] : [buffer, texture],
             threadsPerThreadgroup,
             buffer,
             bufferContents.Length,
             out result,
             out error);
+    }
+
+    /// <summary>Float RGBA fixture with one distinct value per texel/mip/layer.
+    /// Texture type is the actual MSL backing (1D guest images use height-one2D).</summary>
+    public static nint CreateFloatTexture(uint type, uint width, uint height, uint layers,
+        uint depth, IReadOnlyList<byte[]> mipBytes)
+    {
+        var descriptor = Send(Send(objc_getClass("MTLTextureDescriptor"), Selector("alloc")), Selector("init"));
+        SendInteger(descriptor, Selector("setPixelFormat:"), 125); // RGBA32Float
+        SendInteger(descriptor, Selector("setTextureType:"), type);
+        SendInteger(descriptor, Selector("setWidth:"), width);
+        SendInteger(descriptor, Selector("setHeight:"), height);
+        SendInteger(descriptor, Selector("setDepth:"), depth);
+        SendInteger(descriptor, Selector("setArrayLength:"), layers);
+        SendInteger(descriptor, Selector("setMipmapLevelCount:"), (nuint)mipBytes.Count);
+        SendInteger(descriptor, Selector("setStorageMode:"), 0);
+        SendInteger(descriptor, Selector("setUsage:"), 3);
+        var texture = Send(Device.Value, Selector("newTextureWithDescriptor:"), descriptor);
+        if (texture == 0) throw new InvalidOperationException("Failed to create fixture texture.");
+        for (uint level = 0; level < mipBytes.Count; level++)
+        {
+            var w = Math.Max(width >> (int)level, 1u);
+            var h = Math.Max(height >> (int)level, 1u);
+            var d = Math.Max(depth >> (int)level, 1u);
+            var imageBytes = w * h * 16;
+            unsafe
+            {
+                fixed (byte* bytes = mipBytes[(int)level])
+                {
+                    for (uint layer = 0; layer < layers; layer++)
+                    {
+                        SendReplace(texture, Selector("replaceRegion:mipmapLevel:slice:withBytes:bytesPerRow:bytesPerImage:"),
+                            new MtlRegion { Width = w, Height = h, Depth = d }, level, layer,
+                            (nint)(bytes + layer * imageBytes), w * 16, type == 7 ? imageBytes : 0);
+                    }
+                }
+            }
+        }
+        return texture;
+    }
+
+    public static byte[] ReadFloatTexture(nint texture, uint width, uint height, uint layers, uint depth)
+    {
+        var data = new byte[width * height * layers * depth * 16];
+        unsafe
+        {
+            fixed (byte* bytes = data)
+            {
+                for (uint layer = 0; layer < layers; layer++)
+                {
+                    SendReadTexture(texture, Selector("getBytes:bytesPerRow:bytesPerImage:fromRegion:mipmapLevel:slice:"),
+                        (nint)(bytes + layer * width * height * 16), width * 16, depth > 1 ? width * height * 16 : 0,
+                        new MtlRegion { Width = width, Height = height, Depth = depth }, 0, layer);
+                }
+            }
+        }
+        return data;
+    }
+
+    public static nint CreatePointSampler()
+    {
+        var descriptor = Send(Send(objc_getClass("MTLSamplerDescriptor"), Selector("alloc")), Selector("init"));
+        SendVoidBool(descriptor, Selector("setSupportArgumentBuffers:"), true);
+        SendInteger(descriptor, Selector("setNormalizedCoordinates:"), 1);
+        SendInteger(descriptor, Selector("setMipFilter:"), 1);
+        return Send(Device.Value, Selector("newSamplerStateWithDescriptor:"), descriptor);
     }
 
     // options 0 = MTLResourceStorageModeShared: CPU-visible for readback.
@@ -267,6 +360,12 @@ internal static partial class MetalNative
         SendVoid(commandBuffer, Selector("commit"));
         SendVoid(commandBuffer, Selector("waitUntilCompleted"));
 
+        var commandError = Send(commandBuffer, Selector("error"));
+        if (commandError != 0)
+        {
+            error = "GPU execution failed: " + DescribeError(commandError);
+            return false;
+        }
         var contentsPointer = Send(resultBuffer, Selector("contents"));
         if (contentsPointer == 0)
         {

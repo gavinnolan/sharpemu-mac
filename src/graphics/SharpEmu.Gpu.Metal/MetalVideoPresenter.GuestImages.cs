@@ -456,6 +456,7 @@ internal static partial class MetalVideoPresenter
                 height,
                 sequence,
                 IsSplash: false,
+                IsGuestFrame: true,
                 GuestImageAddress: address,
                 GuestImagePitch: pitchInPixel,
                 RequiredGuestWorkSequence: requiredWorkSequence);
@@ -906,6 +907,7 @@ internal static partial class MetalVideoPresenter
                 image.Height,
                 sequence,
                 IsSplash: false,
+                IsGuestFrame: true,
                 GuestImageAddress: flip.Address,
                 GuestImageVersion: flip.Version);
             _latestPresentation = presentation;
