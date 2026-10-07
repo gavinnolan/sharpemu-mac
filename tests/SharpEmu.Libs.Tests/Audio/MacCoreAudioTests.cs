@@ -5,11 +5,15 @@ using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Runtime.Versioning;
 using SharpEmu.HLE.Host;
-using SharpEmu.HLE.Host.MacOS;
+using SharpEmu.Host.MacOS;
 using SharpEmu.Libs.Tests.Gpu.Images;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Audio;
+
+// The macOS host package is only referenced when the tests are built on macOS
+// (see SharpEmu.Libs.Tests.csproj), so the whole file is macOS-only.
+#if SHARPEMU_HOST_MACOS
 
 /// <summary>
 /// The device-independent half of the macOS CoreAudio backend: the channel fold,
@@ -514,3 +518,4 @@ public class MacCoreAudioDeviceTests
         Assert.True(drained, $"the device never consumed the queued {queued} ms");
     }
 }
+#endif

@@ -19,6 +19,36 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <ProjectReference Include="..\SharpEmu.ShaderCompiler.Tests\SharpEmu.ShaderCompiler.Tests.csproj" />
   </ItemGroup>
 
+  <!-- Host OS package for the OS the tests run on, selected like SharpEmu.CLI
+       does but keyed off the build host (these tests exercise the real host
+       backend, so they are never cross-built). HostPlatformFixture.cs reads the
+       matching SHARPEMU_HOST_* symbol. -->
+  <PropertyGroup>
+    <_SharpEmuHostOS Condition="$([MSBuild]::IsOSPlatform('OSX'))">macos</_SharpEmuHostOS>
+    <_SharpEmuHostOS Condition="$([MSBuild]::IsOSPlatform('Linux'))">linux</_SharpEmuHostOS>
+    <_SharpEmuHostOS Condition="$([MSBuild]::IsOSPlatform('Windows'))">windows</_SharpEmuHostOS>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(_SharpEmuHostOS)' == 'macos'">
+    <DefineConstants>$(DefineConstants);SHARPEMU_HOST_MACOS</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(_SharpEmuHostOS)' == 'linux'">
+    <DefineConstants>$(DefineConstants);SHARPEMU_HOST_LINUX</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(_SharpEmuHostOS)' == 'windows'">
+    <DefineConstants>$(DefineConstants);SHARPEMU_HOST_WINDOWS</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(_SharpEmuHostOS)' == 'macos'">
+    <ProjectReference Include="..\..\src\platforms\macos\SharpEmu.Host.MacOS\SharpEmu.Host.MacOS.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(_SharpEmuHostOS)' == 'linux'">
+    <ProjectReference Include="..\..\src\platforms\linux\SharpEmu.Host.Linux\SharpEmu.Host.Linux.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(_SharpEmuHostOS)' == 'windows'">
+    <ProjectReference Include="..\..\src\platforms\windows\SharpEmu.Host.Windows\SharpEmu.Host.Windows.csproj" />
+  </ItemGroup>
+
   <!-- The test assembly is not shipped, so unlike the application it references
        every backend and platform package and composes the one this machine can
        run (see FakeCpuMemory.ConfigureCommandStreamTests). That is also what

@@ -31,6 +31,7 @@ public sealed class VulkanFreeSharedGpuTests
         "src/SharpEmu.Core/SharpEmu.Core.csproj",
         "src/graphics/SharpEmu.Gpu.Metal/SharpEmu.Gpu.Metal.csproj",
         "src/platforms/macos/SharpEmu.Platform.MacOS/SharpEmu.Platform.MacOS.csproj",
+        "src/platforms/macos/SharpEmu.Host.MacOS/SharpEmu.Host.MacOS.csproj",
     ];
 
     // Dependencies that must not appear anywhere in those closures.
@@ -47,17 +48,13 @@ public sealed class VulkanFreeSharedGpuTests
     ];
 
     // Edges that are still there, each with the reason and who removes it. Keep this list
-    // short: an entry is a dependency the macOS artifact still carries. The same two files are
-    // exempted, for the same reason, in build/platforms/macos/macos.targets; delete both
-    // together.
-    private static readonly Dictionary<string, string> AllowedEdges = new(StringComparer.Ordinal)
-    {
-        // SdlHostAudio is the default POSIX audio output. CoreAudio replaces it on macOS in the
-        // host-platform split, which moves SdlHostAudio out of HLE into SharpEmu.Host.MacOS.
-        ["SharpEmu.HLE -> ppy.SDL3-CS"] = "HLE/Host/Sdl/SdlHostAudio, pending the host split",
-    };
+    // short: an entry is a dependency the macOS artifact still carries. Empty since the host
+    // split moved SdlHostAudio into SharpEmu.Adapters.Sdl and dropped ppy.SDL3-CS from
+    // SharpEmu.HLE -- the matching exemption in build/platforms/macos/macos.targets went with
+    // it. Keep the mechanism (and the unused-entry assertion below), not a standing exception.
+    private static readonly Dictionary<string, string> AllowedEdges = new(StringComparer.Ordinal);
 
-    // Directories whose sources must not name a Vulkan or SDL API, with the same exception.
+    // Directories whose sources must not name a Vulkan or SDL API.
     private static readonly string[] ScannedProjectDirectories =
     [
         "src/SharpEmu.Libs",
@@ -65,14 +62,12 @@ public sealed class VulkanFreeSharedGpuTests
         "src/SharpEmu.Core",
         "src/graphics/SharpEmu.Gpu.Metal",
         "src/platforms/macos/SharpEmu.Platform.MacOS",
+        "src/platforms/macos/SharpEmu.Host.MacOS",
     ];
 
-    private static readonly string[] AllowedSourcePrefixes =
-    [
-        // The SDL audio output above; it is a whole directory because the host split moves it
-        // as a unit.
-        "src/SharpEmu.HLE/Host/Sdl/",
-    ];
+    // No exceptions: HLE/Host/Sdl is gone (the host split moved SdlHostAudio into
+    // SharpEmu.Adapters.Sdl, which is referenced only for win-*/linux-* RIDs).
+    private static readonly string[] AllowedSourcePrefixes = [];
 
     private static readonly string[] ForbiddenSourceReferences =
     [

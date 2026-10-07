@@ -1,0 +1,22 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Windows host services (kernel32/winmm). Referenced only by win-* builds;
+       see the conditional ProjectReference in SharpEmu.CLI.csproj. -->
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Test-only failure-injection hooks on the view backend. -->
+    <InternalsVisibleTo Include="SharpEmu.Libs.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\SharpEmu.HLE\SharpEmu.HLE.csproj" />
+  </ItemGroup>
+</Project>

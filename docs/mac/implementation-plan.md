@@ -170,6 +170,83 @@ and keep a named shrinking legacy exception list until W14 removes old dependenc
 Done when: intentionally invalid dependency fixtures fail the checker; real graphs
 are acyclic; Mac/Windows/Linux closures exclude sibling OS implementations.
 
+### W06-W08 — Progress
+
+Done. The host OS implementations are separately compiled packages:
+`src/platforms/{macos,linux,windows}/SharpEmu.Host.*`, each referencing only
+`SharpEmu.HLE` (which keeps the neutral `Host/` contracts and is the de facto
+`Host.Abstractions` until an extraction is needed to break a real cycle) and
+each marked `[assembly: SupportedOSPlatform(...)]`. `SharpEmu.Adapters.Sdl`
+owns the SDL audio output; HLE no longer references `ppy.SDL3-CS`.
+
+`HostPlatform`'s `OperatingSystem`-based factory is replaced by explicit
+registration (`HostPlatform.Initialize` / `HostViewMemory.Initialize`, with
+`Current` throwing a directed `InvalidOperationException` when nothing is
+registered). `SharpEmu.CLI` references exactly one host project, selected from
+the target RID, and `src/SharpEmu.CLI/HostComposition.cs` — the counterpart to
+`GpuComposition.cs`, using the same RID-to-OS convention — is the only place in
+the application that names a host package. Enforced by
+`tests/SharpEmu.Libs.Tests/ArchitectureRules/HostPackageBoundaryTests.cs`, which
+parses the project files and the compiled sources (including linked shared
+source) rather than reflecting over loaded assemblies — only one host package
+is ever loaded, so a reflection-based check could not see the other two.
+
+Audio is the one host service the application supplies rather than the host
+package: `WindowsHost.Create` / `LinuxHost.Create` / `MacOSHost.Create` take an
+optional `IHostAudioOutput`, and `HostComposition` hands the Windows and Linux
+hosts `SdlHostAudio`. That keeps SDL the qualified default there without any
+host package referencing `SharpEmu.Adapters.Sdl`, which also owns the window
+and input and therefore references `SharpEmu.Libs` — a dependency that does not
+belong in a host closure. Passing null falls back to each package's own native
+output (`WindowsWaveOutAudio` / `LinuxAlsaAudio`), still unqualified pending
+latency, underrun, clock, device-change and shutdown evidence.
+`SharpEmu.Host.MacOS` owns the native CoreAudio output and references SDL
+neither by package nor by adapter, so a macOS process never initialises SDL
+audio. That retired the last macOS SDL exemption: the `SDL3-CS.dll` /
+`libSDL3.dylib` entries in `build/platforms/macos/macos.targets` and the
+`SharpEmu.HLE -> ppy.SDL3-CS` `AllowedEdges` entry in
+`VulkanFreeSharedGpuTests` are both gone, and an `osx-x64` release publish
+reports a clean closure with no SDL string in the artifact at all.
+
+#### Known remaining OS checks in shared code
+
+These were deliberately left in place; each needs its own change.
+
+- `src/SharpEmu.HLE/HostMemory.cs` — a static `public` Win32-semantics shim
+  (`Alloc`/`Free`/`Protect`/`Query`) with its own `OperatingSystem.IsWindows`
+  split and a second private POSIX shadow-region table, duplicating what the
+  host memory backends now own. It is used widely and statically
+  (`PhysicalVirtualMemory`, `GuestImageWriteTracker`, the `Kernel*CompatExports`
+  families, `StubManager`, `DirectExecutionBackend*`), so routing it through
+  `IHostMemory` is a behavioural change to the memory and CPU paths, not a move.
+  Retiring it belongs with the `Memory` extraction (W13/W14), not here.
+- `src/SharpEmu.Core/Cpu/Native/PosixHostStubs.cs` and the
+  `DirectExecutionBackend.{MachExceptions,PosixSignals,PosixSignalStack}`
+  partials — a second, independent copy of the POSIX stub/TLS helpers next to
+  the fault-handling code, with its own macOS/Linux branches. Splitting these
+  is W10 (`Cpu.DirectExecution.<OS>.X64`); process-wide fault hooks and the
+  emitted pre-filter thunks are exactly the code the plan says not to move
+  without the ownership seam, so this workstream left them untouched.
+- The view backends diverge in their reservation primitive, by design and not
+  by an OS check: macOS reserves only through `mach_vm_allocate` with
+  `VM_FLAGS_FIXED` (Apple Silicon ignores mmap's address hint entirely) and
+  answers `IHostViewMemory.FindUnmappedRange` from
+  `mach_vm_region_recurse`, while Linux uses `MAP_FIXED_NOREPLACE` and
+  inherits the interface's default `FindUnmappedRange`. The Mach declarations
+  exist only in `SharpEmu.Host.MacOS`.
+- `src/SharpEmu.HLE/Host/HostViewRegions.cs` holds no OS check: it is pure
+  managed bookkeeping (no syscalls, no native layouts, nothing per-OS beyond
+  `Environment.SystemPageSize`), shared by both POSIX view backends and by
+  `HostMemory.Query`. It stays in the neutral host layer rather than becoming
+  a `Host.Posix` assembly.
+
+The three host packages hold a documented transitional `InternalsVisibleTo`
+from HLE for helpers that are not guest-facing surface
+(`HostMemory.OnMappingChanged`, `HostViewMemory.IsValid*`, `HostViewRegions`,
+`WindowHostInput`, `HostBackingObject`'s descriptor/gate members). That list
+shrinks as those helpers move into the abstraction layer; it is not a licence
+to widen the seam.
+
 ### W10 — Direct execution and OS/architecture fault adapters
 
 Depends on: W02, W07-W09, W13 ownership seam. Priority: P1.

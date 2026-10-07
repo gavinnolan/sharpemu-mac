@@ -12,6 +12,42 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <ProjectReference Include="..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
   </ItemGroup>
 
+  <!-- Host OS package selection (W06-W09). Exactly one SharpEmu.Host.* project
+       is referenced, picked from the target RID so an osx-* build never carries
+       the Windows or Linux host implementations. HostComposition.cs reads the
+       matching SHARPEMU_HOST_* symbol and is the only place that names a host
+       package. Directory.Build.props already defaults $(RuntimeIdentifier) to
+       the build host's RID for this project; the IsOSPlatform fallbacks below
+       cover an explicitly RID-less build. -->
+  <PropertyGroup>
+    <_SharpEmuHostOS Condition="$(RuntimeIdentifier.StartsWith('osx'))">macos</_SharpEmuHostOS>
+    <_SharpEmuHostOS Condition="$(RuntimeIdentifier.StartsWith('linux'))">linux</_SharpEmuHostOS>
+    <_SharpEmuHostOS Condition="$(RuntimeIdentifier.StartsWith('win'))">windows</_SharpEmuHostOS>
+    <_SharpEmuHostOS Condition="'$(RuntimeIdentifier)' == '' And $([MSBuild]::IsOSPlatform('OSX'))">macos</_SharpEmuHostOS>
+    <_SharpEmuHostOS Condition="'$(RuntimeIdentifier)' == '' And $([MSBuild]::IsOSPlatform('Linux'))">linux</_SharpEmuHostOS>
+    <_SharpEmuHostOS Condition="'$(RuntimeIdentifier)' == '' And $([MSBuild]::IsOSPlatform('Windows'))">windows</_SharpEmuHostOS>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(_SharpEmuHostOS)' == 'macos'">
+    <DefineConstants>$(DefineConstants);SHARPEMU_HOST_MACOS</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(_SharpEmuHostOS)' == 'linux'">
+    <DefineConstants>$(DefineConstants);SHARPEMU_HOST_LINUX</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(_SharpEmuHostOS)' == 'windows'">
+    <DefineConstants>$(DefineConstants);SHARPEMU_HOST_WINDOWS</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(_SharpEmuHostOS)' == 'macos'">
+    <ProjectReference Include="..\platforms\macos\SharpEmu.Host.MacOS\SharpEmu.Host.MacOS.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(_SharpEmuHostOS)' == 'linux'">
+    <ProjectReference Include="..\platforms\linux\SharpEmu.Host.Linux\SharpEmu.Host.Linux.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(_SharpEmuHostOS)' == 'windows'">
+    <ProjectReference Include="..\platforms\windows\SharpEmu.Host.Windows\SharpEmu.Host.Windows.csproj" />
+  </ItemGroup>
+
   <!-- ===================================================================== -->
   <!-- Graphics backend composition (GpuComposition.cs).                     -->
   <!--                                                                       -->

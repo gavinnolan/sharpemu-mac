@@ -5,8 +5,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 <!--
   The SDL3 adapter: the host window and its event loop, keyboard and gamepad
-  input, pad output (rumble, trigger effects, lightbar) and the display
-  catalog, used on Windows and Linux.
+  input, pad output (rumble, trigger effects, lightbar), the display catalog
+  and the audio output, used on Windows and Linux.
+
+  The host packages do not reference this one: SdlHostAudio is handed to
+  WindowsHost.Create/LinuxHost.Create by the application (see
+  SharpEmu.CLI's HostComposition), which keeps the SharpEmu.Libs reference
+  below out of the host packages' dependency closures.
 
   Deliberately free of Silk.NET: SdlHostWindow exposes the Vulkan instance
   extension list and the surface it creates as native handles, exactly as SDL's

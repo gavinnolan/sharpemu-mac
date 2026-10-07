@@ -80,17 +80,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
        Same discipline as the Vulkan allowlist in VulkanFreeSharedGpuTests: the
        policy stays on so nothing new slips in, and every exception is named.
        Delete an entry (not the policy) when its dependency goes away. -->
-  <ItemGroup>
-    <!-- SharpEmu.HLE still references ppy.SDL3-CS for HLE/Host/Sdl/SdlHostAudio,
-         the default POSIX audio output. CoreAudio replaces it on macOS in the
-         host-platform split (SharpEmu.Host.MacOS), which moves SdlHostAudio out
-         of HLE; these two entries go with it. Nothing else in a macOS closure
-         touches SDL any more: the window, keyboard, gamepads, haptics and the
-         display catalog are AppKit/GameController/CoreGraphics, and the SDL
-         adapter package is referenced only for win-*/linux-* RIDs. -->
-    <SharpEmuMacSdlClosureException Include="SDL3-CS.dll" />
-    <SharpEmuMacSdlClosureException Include="libSDL3.dylib" />
-  </ItemGroup>
+  <!-- Empty: the host-platform split moved SdlHostAudio into
+       SharpEmu.Adapters.Sdl and dropped ppy.SDL3-CS from SharpEmu.HLE, so the
+       SDL3-CS.dll / libSDL3.dylib exception is gone along with the matching
+       AllowedEdges entry in VulkanFreeSharedGpuTests. Nothing in a macOS
+       closure touches SDL: the window, keyboard, gamepads, haptics and the
+       display catalog are AppKit/GameController/CoreGraphics, audio is
+       CoreAudio, and the SDL adapter package is referenced only for
+       win-*/linux-* RIDs. Add an entry here only with a named owner. -->
 
   <Target Name="SharpEmuMacValidatePublishClosure"
     AfterTargets="ComputeResolvedFilesToPublishList"
