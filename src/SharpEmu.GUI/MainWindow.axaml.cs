@@ -2668,7 +2668,10 @@ public partial class MainWindow : Window
                 return null;
             }
 
-            var logsDirectory = Path.Combine(exeDirectory, "user", "logs");
+            // The child process resolves its own data root the same way, so
+            // both agree even when the bundle redirects writes out of itself.
+            var logsDirectory = Path.Combine(
+                SharpEmuPaths.ResolveDataRoot(exeDirectory), "user", "logs");
             Directory.CreateDirectory(logsDirectory);
 
             var id = string.IsNullOrWhiteSpace(titleId) ? "UNKNOWN" : titleId;

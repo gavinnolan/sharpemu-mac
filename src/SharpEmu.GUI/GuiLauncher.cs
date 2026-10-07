@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using Avalonia;
+using SharpEmu.Logging;
 
 namespace SharpEmu.GUI;
 
@@ -36,7 +37,7 @@ public static class GuiLauncher
         try
         {
             File.AppendAllText(
-                Path.Combine(AppContext.BaseDirectory, "gui-crash.log"),
+                SharpEmuPaths.DataPath("gui-crash.log"),
                 $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {ex}{Environment.NewLine}{Environment.NewLine}");
         }
         catch (Exception)
