@@ -27,6 +27,7 @@
 #   SHARPEMU_MAC_DMG              pass "1" to also produce a .dmg
 #   SHARPEMU_OUTPUT_DIR           where SharpEmu.app is written
 #                                 (default artifacts/macos)
+#   SHARPEMU_BUILD_WORKERS        maximum MSBuild workers (default 2)
 #   Notarization (all three required, otherwise skipped):
 #   SHARPEMU_NOTARY_APPLE_ID, SHARPEMU_NOTARY_PASSWORD, SHARPEMU_NOTARY_TEAM_ID
 
@@ -80,7 +81,15 @@ fi
 
 rm -rf "${publish_dir}" "${app_dir}"
 mkdir -p "${output_dir}"
-dotnet "${publish_args[@]}"
+build_workers="${SHARPEMU_BUILD_WORKERS:-2}"
+case "${build_workers}" in
+    ''|*[!0-9]*|0) echo "build-app.sh: SHARPEMU_BUILD_WORKERS must be a positive integer." >&2; exit 2 ;;
+esac
+source_snapshot="${output_dir}/build-source.json"
+sdk_version="$(dotnet --version)"
+python3 "${script_dir}/build-metadata.py" snapshot \
+    --repo "${repo_root}" --snapshot "${source_snapshot}"
+MSBUILDDISABLENODEREUSE=1 dotnet "${publish_args[@]}" -m:"${build_workers}" -nr:false
 
 if [ ! -x "${publish_dir}/${executable_name}" ]; then
     echo "build-app.sh: expected ${publish_dir}/${executable_name} to exist after publish." >&2
@@ -97,6 +106,9 @@ fi
 # lookups work with no @rpath edits and no code change.
 mkdir -p "${app_dir}/Contents/MacOS" "${app_dir}/Contents/Resources"
 ditto "${publish_dir}" "${app_dir}/Contents/MacOS"
+python3 "${script_dir}/build-metadata.py" embed \
+    --repo "${repo_root}" --snapshot "${source_snapshot}" --sdk "${sdk_version}" \
+    --output "${app_dir}/Contents/Resources/build-info.json"
 
 cp "${icon_source}" "${app_dir}/Contents/Resources/${icon_file}"
 

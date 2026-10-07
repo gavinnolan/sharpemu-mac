@@ -64,9 +64,28 @@ KEYS="$OUT/keys.state"
   echo "eboot=$EBOOT"
   echo "app=$APP_DIR"
   echo "commit=$(git -C "$REPO_ROOT" rev-parse --short HEAD)$(git -C "$REPO_ROOT" diff --quiet || echo -dirty)"
+  echo "commit_scope=checkout (use build-info.json for binary source provenance)"
   echo "keyplan=$PLAN"
   for e in "$@"; do echo "$e"; done
 } > "$OUT/run.env"
+# A preexisting bundle may predate provenance metadata. Never equate the current
+# checkout with that binary: retain the exact payload hashes and label it unknown.
+python3 - "$APP_DIR" "$OUT" <<'PY'
+import hashlib, json, pathlib, sys
+app, out = map(pathlib.Path, sys.argv[1:])
+info = app.parent / "Resources" / "build-info.json"
+record = {
+    "buildInfo": json.loads(info.read_text()) if info.exists() else None,
+    "binarySourceKnown": info.exists(),
+    "payloads": [],
+}
+for p in sorted(app.glob("SharpEmu*")):
+    if p.is_file():
+        record["payloads"].append({"file": p.name, "sha256": hashlib.sha256(p.read_bytes()).hexdigest()})
+(out / "binary-provenance.json").write_text(json.dumps(record, indent=2) + "\n")
+if info.exists():
+    (out / "build-info.json").write_bytes(info.read_bytes())
+PY
 
 # Machine-wide single-game lock; stale owners are cleared.
 mkdir -p "$(dirname "$SHARPEMU_GAME_LOCK")"
