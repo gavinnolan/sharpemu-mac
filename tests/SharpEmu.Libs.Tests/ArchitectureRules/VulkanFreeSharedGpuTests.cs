@@ -13,15 +13,18 @@ namespace SharpEmu.Libs.Tests.ArchitectureRules;
 // compiled assembly because today everything still lives in one project.
 public sealed class VulkanFreeSharedGpuTests
 {
-    // Folders that must stay free of the Vulkan graphics API.
-    private static readonly string[] ScannedDirectories =
+    // Folders that must stay free of the Vulkan graphics API. The Gpu folder itself is
+    // scanned without recursing, because its backend-neutral entry points sit next to the
+    // Vulkan-only resource caches in Gpu/Buffers, Gpu/Images and Gpu/Vulkan.
+    private static readonly (string Path, SearchOption Depth)[] ScannedDirectories =
     [
-        "src/SharpEmu.Libs/Gpu/Abstractions",
-        "src/SharpEmu.Libs/Gpu/GpuCommands",
-        "src/SharpEmu.Libs/Gpu/Metal",
-        "src/SharpEmu.Libs/Gpu/Pipelines",
-        "src/SharpEmu.Libs/Gpu/Rendering",
-        "src/SharpEmu.Libs/Gpu/Scheduling",
+        ("src/SharpEmu.Libs/Gpu", SearchOption.TopDirectoryOnly),
+        ("src/SharpEmu.Libs/Gpu/Abstractions", SearchOption.AllDirectories),
+        ("src/SharpEmu.Libs/Gpu/GpuCommands", SearchOption.AllDirectories),
+        ("src/SharpEmu.Libs/Gpu/Metal", SearchOption.AllDirectories),
+        ("src/SharpEmu.Libs/Gpu/Pipelines", SearchOption.AllDirectories),
+        ("src/SharpEmu.Libs/Gpu/Rendering", SearchOption.AllDirectories),
+        ("src/SharpEmu.Libs/Gpu/Scheduling", SearchOption.AllDirectories),
     ];
 
     // Files inside the scanned folders that only the Vulkan backend uses, with the reason
@@ -57,12 +60,12 @@ public sealed class VulkanFreeSharedGpuTests
         var root = FindRepositoryRoot();
         var offenders = new List<string>();
 
-        foreach (var relativeDirectory in ScannedDirectories)
+        foreach (var (relativeDirectory, depth) in ScannedDirectories)
         {
             var directory = Path.Combine(root, relativeDirectory.Replace('/', Path.DirectorySeparatorChar));
             Assert.True(Directory.Exists(directory), $"The scanned folder is missing: {relativeDirectory}.");
 
-            foreach (var file in Directory.EnumerateFiles(directory, "*.cs", SearchOption.AllDirectories))
+            foreach (var file in Directory.EnumerateFiles(directory, "*.cs", depth))
             {
                 var relative = Path.GetRelativePath(root, file).Replace(Path.DirectorySeparatorChar, '/');
                 if (Allowed.ContainsKey(relative))

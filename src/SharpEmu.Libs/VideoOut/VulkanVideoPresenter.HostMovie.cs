@@ -4,10 +4,10 @@
 namespace SharpEmu.Libs.VideoOut;
 
 using System.Runtime.CompilerServices;
+using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Vulkan;
-using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Media;
 using Silk.NET.Vulkan;
 using VkBuffer = Silk.NET.Vulkan.Buffer;
