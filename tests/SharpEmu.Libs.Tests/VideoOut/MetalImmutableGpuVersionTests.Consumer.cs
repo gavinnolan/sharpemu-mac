@@ -74,9 +74,9 @@ public sealed partial class MetalImmutableGpuVersionTests
                 #include <metal_stdlib>
                 using namespace metal;
                 struct Gen5StageResources {
-                    device uint* buffers[1] [[id({{pointer.FirstId}})]];
-                    uint buffer_bytes[1] [[id({{count.FirstId}})]];
-                    {{(storage ? "texture2d<float, access::read>" : "texture2d<float>")}} {{texture.Name}}[1] [[id({{texture.FirstId}})]];
+                    array<device uint*, 1> buffers [[id({{pointer.FirstId}})]];
+                    array<uint, 1> buffer_bytes [[id({{count.FirstId}})]];
+                    array<{{(storage ? "texture2d<float, access::read>" : "texture2d<float>")}}, 1> {{texture.Name}} [[id({{texture.FirstId}})]];
                 };
                 kernel void immutable_consume(constant Gen5StageResources& resources [[buffer(0)]], uint3 tid [[thread_position_in_grid]]) {
                     uint index = tid.y * 4u + tid.x;
@@ -107,7 +107,16 @@ public sealed partial class MetalImmutableGpuVersionTests
             Field("_guestMemory").SetValue(null, memory);
             try
             {
+                Assert.False((bool)Field("_skipAllCompute").GetValue(null)!);
                 Call("ExecuteComputeDispatch", device, queue, work);
+                var shader = (MetalCompiledGuestShader)work.GetType().GetProperty("Shader")!.GetValue(work)!;
+                Assert.NotEqual((nint)0, shader.CachedLibrary);
+                var pipelines = (IDictionary)Field("_computePipelineCache").GetValue(null)!;
+                Assert.True(pipelines.Contains(shader));
+                Assert.NotEqual((nint)0, pipelines[shader]);
+                var committed = (nint)Field("_lastFlushedCommandBuffer").GetValue(null)!;
+                Assert.NotEqual((nint)0, committed);
+                Assert.Equal((nint)4, MetalNative.Send(committed, MetalNative.Selector("status")));
                 // The production writeback waits for real completion and writes
                 // through the actual GuestMemoryBuffer/ICpuMemory route.
                 var result = new byte[64]; Assert.True(memory.TryRead(OutputAddress, result));

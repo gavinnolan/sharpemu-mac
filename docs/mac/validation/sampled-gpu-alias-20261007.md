@@ -272,3 +272,14 @@ requires no open batch. These are test-harness cleanup guards, not runtime Drain
 cancellation qualification. Queued consumer ownership is released after the
 production writeback completion wait, so these cases do not prove owner release
 before native completion.
+
+Clean839ec71 ARM device execution attempted all four consumer fixtures and all
+four failed with untouched sentinel output. Full TRX run output identifies
+fixture MSL compilation rejection: trailing `[[id]]` on C-array declarations
+applied the attribute to a type. The production translator uses `array<T,N>`
+fields and did not cause this syntax error. The corrected fixture uses that
+valid MSL declaration form and asserts a nonzero compiled library/pipeline and
+a completed real flushed command buffer before the pixel oracle. Failed source,
+assembly hashes, log and TRX remain in `immutable-consumer-839ec71-arm`; the
+consumer shader did not execute in that failed run. Corrected device execution
+is pending a new exclusive grant. No production ABI change is implied.
