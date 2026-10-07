@@ -1,6 +1,8 @@
 # ADR 0003: Rosetta sunset makes native ARM64 guest execution required
 
-Status: accepted (problem statement); approach open. 2026-10-07.
+Status: accepted (problem statement). Approach deferred by decision on 2026-10-07: keep
+shipping osx-x64 under Rosetta for macOS 27 and earlier, focus on the native Mac stack first,
+and revisit before macOS 28.
 
 ## Facts (Apple primary sources)
 
