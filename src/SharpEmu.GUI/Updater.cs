@@ -10,18 +10,34 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Reflection;
+using SharpEmu.Logging;
 
 namespace SharpEmu.GUI;
 
-/// <summary>Self-contained Windows updater; the emulator layers do not depend on it.</summary>
+/// <summary>Self-contained updater; the emulator layers do not depend on it.</summary>
 public static class Updater
 {
     private const string ApplyArgument = "--sharpemu-apply-update";
-    private const string LatestReleaseUrl = "https://api.github.com/repos/sharpemu/sharpemu/releases/latest";
     private static readonly TimeSpan CheckTimeout = TimeSpan.FromSeconds(10);
     private static readonly HttpClient Http = CreateHttpClient();
 
     public sealed record UpdateInfo(string Sha, string Name, string DownloadUrl, long Size, string Sha256, string TagName);
+
+    /// <summary>
+    /// Whether this installation can replace its own files in place.
+    /// </summary>
+    /// <remarks>
+    /// False inside a macOS .app bundle. The release archive is a flat
+    /// directory layout, not a bundle, so copying it over Contents/MacOS would
+    /// produce a bundle whose Info.plist and signature no longer describe its
+    /// contents — Gatekeeper then refuses to launch it, and an installation in
+    /// /Applications is not user-writable in the first place. Replacing a
+    /// signed bundle correctly means staging a whole new .app, validating its
+    /// signature and swapping it atomically, which is a separate piece of work
+    /// (plan W28). Until that exists the GUI reports the new release and sends
+    /// the user to the releases page instead of installing it.
+    /// </remarks>
+    public static bool SupportsInPlaceUpdate => !SharpEmuPaths.IsMacAppBundle;
 
     public static async Task<UpdateInfo?> CheckAsync(string? currentSha, CancellationToken cancellationToken = default)
     {
@@ -29,7 +45,7 @@ public static class Updater
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(CheckTimeout);
 
-        using var response = await Http.GetAsync(LatestReleaseUrl, timeout.Token);
+        using var response = await Http.GetAsync(ProjectLinks.LatestReleaseApiUrl, timeout.Token);
         response.EnsureSuccessStatusCode();
         var update = ParseRelease(
             await response.Content.ReadAsStringAsync(timeout.Token),
@@ -63,6 +79,12 @@ public static class Updater
         IProgress<int>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        if (!SupportsInPlaceUpdate)
+        {
+            throw new PlatformNotSupportedException(
+                "A macOS .app bundle cannot be updated in place; download the new release instead.");
+        }
+
         var root = Path.Combine(Path.GetTempPath(), "SharpEmu.Update");
         var payload = Path.Combine(root, "payload");
         if (Directory.Exists(root))
@@ -293,8 +315,8 @@ public static class Updater
         string releaseSha,
         CancellationToken cancellationToken)
     {
-        var url = $"https://api.github.com/repos/sharpemu/sharpemu/compare/{currentSha}...{releaseSha}";
-        using var response = await Http.GetAsync(url, cancellationToken);
+        using var response = await Http.GetAsync(
+            ProjectLinks.CompareCommitsApiUrl(currentSha, releaseSha), cancellationToken);
         response.EnsureSuccessStatusCode();
         using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
         var root = document.RootElement;

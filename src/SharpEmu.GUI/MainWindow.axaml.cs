@@ -1464,6 +1464,19 @@ public partial class MainWindow : Window
             return;
         }
 
+        // A signed .app bundle cannot be rewritten in place, so point the user
+        // at the release instead of pretending the install succeeded.
+        if (!Updater.SupportsInPlaceUpdate)
+        {
+            SetUpdateStatus("Updater.Status.ManualDownload");
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = ProjectLinks.ReleasesUrl,
+                UseShellExecute = true
+            });
+            return;
+        }
+
         UpdateButton.IsEnabled = false;
         try
         {

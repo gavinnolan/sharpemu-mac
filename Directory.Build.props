@@ -12,6 +12,16 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <SharpEmuVersion>0.0.5-nexus</SharpEmuVersion>
     <Version>$(SharpEmuVersion)</Version>
 
+    <!-- Fork identity. Every GitHub URL the app uses at runtime — update
+         check, release download, latest-commit banner, "view source" links —
+         is derived from this one slug, surfaced to the app as
+         [AssemblyMetadata("SharpEmu.RepositorySlug")] and read by
+         SharpEmu.GUI.ProjectLinks. It must name the repository this binary
+         was built from: a fork that queries upstream's releases would offer
+         upstream archives as an in-place update and overwrite itself with
+         binaries that do not contain its own changes. -->
+    <SharpEmuRepositorySlug Condition="'$(SharpEmuRepositorySlug)' == ''">sharpemu/sharpemu-mac</SharpEmuRepositorySlug>
+
     <RepoRoot>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)'))</RepoRoot>
 
     <_HostRidOSPrefix Condition="'$(RuntimeIdentifier)' == '' And '$(MSBuildProjectName)' == 'SharpEmu.CLI' And $([MSBuild]::IsOSPlatform('Windows'))">win</_HostRidOSPrefix>
@@ -55,6 +65,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
        building in CI; empty locally. -->
   <ItemGroup>
     <AssemblyMetadata Include="SharpEmu.BuildConfiguration" Value="$(Configuration)" />
+    <AssemblyMetadata Include="SharpEmu.RepositorySlug" Value="$(SharpEmuRepositorySlug)" />
     <AssemblyMetadata Condition="'$(GITHUB_SHA)' != ''" Include="SharpEmu.BuildSha" Value="$(GITHUB_SHA)" />
     <AssemblyMetadata Condition="'$(GITHUB_REF_NAME)' != ''" Include="SharpEmu.BuildBranch" Value="$(GITHUB_REF_NAME)" />
     <AssemblyMetadata Condition="'$(GITHUB_REF)' != ''" Include="SharpEmu.BuildRef" Value="$(GITHUB_REF)" />
