@@ -1,10 +1,14 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-namespace SharpEmu.HLE.Host.Posix;
+namespace SharpEmu.HLE.Host;
 
 // View mappings bypass the anonymous-allocation tables. Keep their query state together.
-internal static class PosixViewRegions
+//
+// Pure managed bookkeeping: no syscalls, no native layouts, no per-OS constants
+// beyond Environment.SystemPageSize, so it stays in the neutral host layer and
+// is shared by the POSIX view backends and by HostMemory.Query.
+internal static class HostViewRegions
 {
     internal static readonly object Gate = new();
     private readonly record struct Region(ulong Start, ulong End, uint State, uint Protection,

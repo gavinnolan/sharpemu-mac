@@ -64,11 +64,11 @@ internal sealed unsafe partial class PosixHostViews : IHostViewMemory
 
     public ulong ReserveHole(ulong address, ulong size)
     {
-        lock (PosixViewRegions.Gate)
+        lock (HostViewRegions.Gate)
         {
             var result = ReserveHoleCore(address, size);
             if (result != 0)
-                PosixViewRegions.Replace(address, size, HostMemory.MEM_RESERVE, HostMemory.PAGE_NOACCESS);
+                HostViewRegions.Replace(address, size, HostMemory.MEM_RESERVE, HostMemory.PAGE_NOACCESS);
             return result;
         }
     }
@@ -109,7 +109,7 @@ internal sealed unsafe partial class PosixHostViews : IHostViewMemory
             return reserved;
         }
 
-        lock (PosixViewRegions.Gate)
+        lock (HostViewRegions.Gate)
         {
             ReserveFreeAddressRangesLocked(start, end - start, Math.Max(minimumSize, Granularity), reserved);
         }
@@ -121,7 +121,7 @@ internal sealed unsafe partial class PosixHostViews : IHostViewMemory
     {
         if (ReserveHoleCore(address, size) == address)
         {
-            PosixViewRegions.Replace(address, size, HostMemory.MEM_RESERVE, HostMemory.PAGE_NOACCESS);
+            HostViewRegions.Replace(address, size, HostMemory.MEM_RESERVE, HostMemory.PAGE_NOACCESS);
             if (reserved.Count != 0 && reserved[^1].Address + reserved[^1].Size == address)
             {
                 reserved[^1] = reserved[^1] with { Size = reserved[^1].Size + size };
@@ -158,10 +158,10 @@ internal sealed unsafe partial class PosixHostViews : IHostViewMemory
 
     public bool TryMapView(HostBackingObject backing, ulong address, ulong offset, ulong size, HostPageProtection protection, out HostViewFailure failure)
     {
-        lock (PosixViewRegions.Gate)
+        lock (HostViewRegions.Gate)
         {
             if (!TryMapViewCore(backing, address, offset, size, protection, out failure)) return false;
-            PosixViewRegions.Replace(address, size, HostMemory.MEM_COMMIT, PosixViewRegions.RawProtection(protection));
+            HostViewRegions.Replace(address, size, HostMemory.MEM_COMMIT, HostViewRegions.RawProtection(protection));
             return true;
         }
     }
@@ -217,10 +217,10 @@ internal sealed unsafe partial class PosixHostViews : IHostViewMemory
 
     public bool CommitPrivate(ulong address, ulong size, HostPageProtection protection)
     {
-        lock (PosixViewRegions.Gate)
+        lock (HostViewRegions.Gate)
         {
             if (mprotect((nint)address, (nuint)size, GetNativeProtection(protection)) != 0) return false;
-            PosixViewRegions.Replace(address, size, HostMemory.MEM_COMMIT, PosixViewRegions.RawProtection(protection));
+            HostViewRegions.Replace(address, size, HostMemory.MEM_COMMIT, HostViewRegions.RawProtection(protection));
             return true;
         }
     }
@@ -229,31 +229,31 @@ internal sealed unsafe partial class PosixHostViews : IHostViewMemory
 
     public bool ChangeAccess(ulong address, ulong size, HostPageProtection protection)
     {
-        lock (PosixViewRegions.Gate)
+        lock (HostViewRegions.Gate)
         {
             if (mprotect((nint)address, (nuint)size, GetNativeProtection(protection)) != 0) return false;
-            PosixViewRegions.ChangeProtection(address, size, PosixViewRegions.RawProtection(protection));
+            HostViewRegions.ChangeProtection(address, size, HostViewRegions.RawProtection(protection));
             return true;
         }
     }
 
     public bool FreeOwnedRange(ulong address, ulong size)
     {
-        lock (PosixViewRegions.Gate)
+        lock (HostViewRegions.Gate)
         {
             if (munmap((nint)address, (nuint)size) != 0) return false;
-            PosixViewRegions.Replace(address, size, HostMemory.MEM_FREE_STATE, HostMemory.PAGE_NOACCESS);
+            HostViewRegions.Replace(address, size, HostMemory.MEM_FREE_STATE, HostMemory.PAGE_NOACCESS);
             return true;
         }
     }
 
     private static bool RestoreHole(ulong address, ulong size)
     {
-        lock (PosixViewRegions.Gate)
+        lock (HostViewRegions.Gate)
         {
             var ptr = mmap((nint)address, (nuint)size, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
             if (ptr == MAP_FAILED || (ulong)ptr != address) return false;
-            PosixViewRegions.Replace(address, size, HostMemory.MEM_RESERVE, HostMemory.PAGE_NOACCESS);
+            HostViewRegions.Replace(address, size, HostMemory.MEM_RESERVE, HostMemory.PAGE_NOACCESS);
             return true;
         }
     }

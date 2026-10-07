@@ -90,7 +90,7 @@ public static unsafe class HostMemory
             return Win32VirtualQuery(address, out info, (nuint)sizeof(BasicInfo));
         }
 
-        if (Host.Posix.PosixViewRegions.TryQuery((ulong)address, out info))
+        if (Host.HostViewRegions.TryQuery((ulong)address, out info))
             return (nuint)sizeof(BasicInfo);
         return Posix.Query(address, out info);
     }
