@@ -87,7 +87,7 @@ public sealed class MetalGuestFailureTests
 
     // The real consumer runs ordered managed actions with no device. Static
     // scheduling state is isolated and restored under the existing solo collection.
-    private sealed class PresenterState : IDisposable
+    internal sealed class PresenterState : IDisposable
     {
         private readonly Dictionary<FieldInfo, object?> saved = new();
         private readonly List<Action> restoreCollections = new();
@@ -113,6 +113,8 @@ public sealed class MetalGuestFailureTests
             ClearDictionary("_pendingGuestWorkByQueue");
             ClearDictionary("_lastEnqueuedGuestWorkByQueue");
             ClearDictionary("_guestImageExtents");
+            ClearDictionary("_availableGuestImages");
+            ClearDictionary("_guestImageWorkSequences");
             ClearList("_pendingGuestQueueSchedule");
             foreach (var name in new[] { "_retiredUploadPages", "_retiredSnapshotResources", "_pendingFaultScans" })
                 Assert.Empty((IEnumerable)Field(name).GetValue(null)!);

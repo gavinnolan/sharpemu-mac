@@ -7,15 +7,10 @@ using SharpEmu.Libs.Gpu;
 
 namespace SharpEmu.Gpu.Metal;
 
-// Draw textures decoded from guest memory are cached across draws keyed by
-// their content identity, mirroring the Vulkan presenter's texture
-// cache: once an identity is marked cached, the AGC submit thread skips the
-// guest-memory read/detile/copy entirely (shipping empty texels) and the
-// render thread serves the cached MTLTexture — for scenes that sample large
-// textures every draw, that per-draw copy dominated both allocation churn
-// and CPU time. GuestImageWriteTracker write-protects the source pages, so
-// a guest CPU write dirties the address and the entry is evicted at the next
-// drain; the following draw ships fresh texels and re-populates the cache.
+// Render-thread native textures are cached by content identity and evicted
+// after observed CPU writes. A cache advertisement carries no lifetime or
+// write-generation reservation: producer CPU snapshots retain faithful bytes
+// through preparation/queueing instead of relying on this evictable entry.
 internal static partial class MetalVideoPresenter
 {
     private const int MaxCachedDrawTextures = 2048;
@@ -25,8 +20,9 @@ internal static partial class MetalVideoPresenter
     /// reference, so eviction releases immediately without a GPU drain.</summary>
     private static readonly Dictionary<TextureContentIdentity, nint> _drawTextureCache = new();
 
-    /// <summary>Identities the AGC submit thread may skip texel copies for.
-    /// Read from the submit thread, written by the render thread.</summary>
+    /// <summary>Advertised cache identities. A hit alone does not authorize
+    /// discarding a producer snapshot. Read from the submit thread, written
+    /// by the render thread.</summary>
     private static readonly ConcurrentDictionary<TextureCacheLookupIdentity, byte> _cachedDrawTextureIdentities = new();
 
     internal static bool IsTextureContentCached(in TextureCacheLookupIdentity identity) =>
@@ -274,11 +270,9 @@ internal static partial class MetalVideoPresenter
         }
     }
 
-    /// <summary>Self-heal for the skip/eviction race: the submit thread saw a
-    /// cached identity and skipped the copy, but the entry was evicted before
-    /// this draw executed. Read the texels directly rather than rendering a
-    /// fallback texture for the frame, sized with the same block-aware math
-    /// the draw path expects.</summary>
+    /// <summary>Legacy empty-payload recovery supports only linear base-level
+    /// resources. Producer CPU snapshots retain their payload; tiled/mip data
+    /// must never be recovered by interpreting raw guest bytes as linear.</summary>
     private static byte[]? TryReadGuestDrawTexturePixels(GuestDrawTexture texture)
     {
         var memory = _guestMemory;

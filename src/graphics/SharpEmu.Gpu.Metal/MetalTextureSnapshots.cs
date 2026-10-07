@@ -21,12 +21,6 @@ internal static class MetalTextureSnapshots
     private const ulong MaximumSnapshotBytes = 128UL * 1024UL * 1024UL;
     private static readonly ConcurrentDictionary<ulong, byte> _arrayUploadUnsupported = new();
 
-    // Disable cache reuse to check snapshot freshness.
-    private static readonly bool _textureCopySkipDisabled = string.Equals(
-        Environment.GetEnvironmentVariable("SHARPEMU_NO_TEXTURE_SKIP"),
-        "1",
-        StringComparison.Ordinal);
-
     // Send supported tiled data to the GPU; decode other layouts on the CPU.
     private static readonly bool _gpuDetileEnabled = !string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_GPU_DETILE"),
@@ -105,8 +99,10 @@ internal static class MetalTextureSnapshots
                     binding.IsArrayed,
                     out texture))
             {
-                // Reuse only decoded pixels; an empty snapshot can refer to a sampler-specific cache entry.
-                if (!texture.IsFallback && texture.RgbaPixels.Length != 0)
+                // Share faithful payloads within this work item; sampler state
+                // stays separate. Deferred tiled bytes own their snapshot too.
+                if (!texture.IsFallback && texture.CpuSnapshotStable &&
+                    (texture.RgbaPixels.Length != 0 || texture.TiledSource is { Length: > 0 }))
                 {
                     snapshots?.Add(reuseKey, texture);
                 }
@@ -359,9 +355,9 @@ internal static class MetalTextureSnapshots
             sourceWidth,
             descriptor.Height,
             textureDepth);
-        if (sourceByteCount == 0 ||
-            sourceByteCount > MaximumSnapshotBytes ||
-            sourceByteCount > int.MaxValue)
+        if (sourceByteCount > MaximumSnapshotBytes)
+            throw SnapshotBudgetExceeded(descriptor, sourceByteCount, "logical");
+        if (sourceByteCount == 0)
         {
             TraceTextureFallback(
                 descriptor,
@@ -421,16 +417,8 @@ internal static class MetalTextureSnapshots
         }
 
         physicalSourceByteCount = checked(physicalSourceByteCount * textureDepth);
-        if (physicalSourceByteCount > MaximumSnapshotBytes ||
-            physicalSourceByteCount > int.MaxValue)
-        {
-            texture = CreateNullGuestDrawTexture(
-                isStorage,
-                descriptor,
-                isArrayed,
-                textureDepth);
-            return true;
-        }
+        if (physicalSourceByteCount > MaximumSnapshotBytes)
+            throw SnapshotBudgetExceeded(descriptor, physicalSourceByteCount, "tiled");
 
         var wantsArrayUpload = isArrayed &&
             !isStorage &&
@@ -599,59 +587,10 @@ internal static class MetalTextureSnapshots
             SharpEmu.HLE.GuestImageWriteTracker.TryGetWriteGeneration(
                 descriptor.Address,
                 out var writeGeneration);
-        // Keep this draw's decoded pixels when a rotating video buffer can be reused.
-        var contentCached = false;
-        if (!_textureCopySkipDisabled &&
-            !isVideoBuffer &&
-            descriptor.Address != 0)
-        {
-            var lookupStart = TexturePreparationProfile.Begin();
-            contentCached = GuestGpu.Current is IGuestImageSnapshotBackend contentSnapshots &&
-                contentSnapshots.IsTextureContentCached(
-                new TextureCacheLookupIdentity(
-                    new TextureContentIdentity(
-                        descriptor.Address,
-                        descriptor.Width,
-                        descriptor.Height,
-                        descriptor.Format,
-                        descriptor.NumberType,
-                        descriptor.DstSelect,
-                        descriptor.TileMode,
-                        sourceWidth,
-                        isArrayed,
-                        arrayUploadLayers,
-                        descriptor.Type,
-                        textureDepth,
-                        descriptor.ResourceMipLevels),
-                    sampler));
-            TexturePreparationProfile.RecordContentCache(lookupStart, contentCached);
-        }
-
-        if (contentCached)
-        {
-            texture = new GuestDrawTexture(
-                descriptor.Address,
-                descriptor.Width,
-                descriptor.Height,
-                descriptor.Format,
-                descriptor.NumberType,
-                [],
-                IsFallback: false,
-                IsStorage: false,
-                MipLevels: descriptor.MipLevels,
-                MipLevel: mipLevel,
-                BaseMipLevel: descriptor.ViewBaseLevel,
-                ResourceMipLevels: descriptor.ResourceMipLevels,
-                Pitch: sourceWidth,
-                TileMode: descriptor.TileMode,
-                DstSelect: descriptor.DstSelect,
-                Sampler: sampler,
-                ArrayedView: isArrayed,
-                ArrayLayers: arrayUploadLayers,
-                Type: descriptor.Type,
-                Depth: textureDepth);
-            return true;
-        }
+        // The native cache is a consumer optimization, not ownership of this
+        // prepared/queued work. Without an atomic generation-checked reservation,
+        // a cache hit can be evicted before execution. Retain faithful pixels or
+        // tiled/mip bytes here so that eviction never requires a late guest read.
 
         var trackedSourceByteCount = wantsArrayUpload
             ? checked(chainSliceBytes * arrayUploadLayers)
@@ -998,17 +937,20 @@ internal static class MetalTextureSnapshots
                 snapshotAttempt + 1);
         }
 
-        // Withhold bytes read across a guest write to prevent a torn upload.
-        texture = candidate with
-        {
-            RgbaPixels = [],
-            TiledSource = null,
-            MipUploads = null,
-            WriteGeneration = -1,
-            CpuSnapshotStable = false,
-        };
-        return true;
+        // An empty payload cannot promise that an older cached native image
+        // will remain available. Fail instead of publishing a torn snapshot or
+        // deferring an unprotected guest-memory read until execution.
+        throw new InvalidOperationException(
+            $"Metal cannot capture stable texture snapshot at 0x{descriptor.Address:X}: " +
+            $"write generation changed across {snapshotAttempt + 1} attempts.");
     }
+
+    private static Exception SnapshotBudgetExceeded(TextureDescriptor descriptor, ulong bytes, string layout) =>
+        new NotSupportedException(
+            $"Metal texture snapshot exceeds budget: addr=0x{descriptor.Address:X} " +
+            $"size={descriptor.Width}x{descriptor.Height} format={descriptor.Format}/{descriptor.NumberType} " +
+            $"tile={descriptor.TileMode} layout={layout} required_bytes={bytes} " +
+            $"maximum_snapshot_bytes={MaximumSnapshotBytes}.");
 
     private static bool TryCreateTiledArrayMipChain(
         CpuContext context,

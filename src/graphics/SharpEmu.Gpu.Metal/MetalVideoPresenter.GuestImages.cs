@@ -619,8 +619,71 @@ internal static partial class MetalVideoPresenter
         return sequence;
     }
 
-    private static ulong GetGuestWorkPayloadBytes(object work) =>
-        work is GuestImageWrite { Pixels: { } pixels } ? (ulong)pixels.Length : 0;
+    internal static ulong GetGuestWorkPayloadBytes(object work)
+    {
+        if (work is GuestImageWrite writePayload)
+            return (ulong)(writePayload.Pixels?.LongLength ?? 0);
+        if (work is GlobalDataShareCopyFromGuest gdsPayload)
+            return (ulong)gdsPayload.Bytes.LongLength;
+        if (work is not OffscreenGuestDraw and not ComputeGuestDispatch)
+            return 0;
+        // Count owned backing arrays, not guest allocation sizes or logical
+        // buffer lengths. Shared per-work snapshots count once; pooled arrays
+        // retain their full allocation until this work leaves the queue.
+        var arrays = new HashSet<Array>(ReferenceEqualityComparer.Instance);
+        ulong total = 0;
+        void Add(Array? array, uint elementBytes = 1)
+        {
+            if (array is not null && arrays.Add(array))
+                total = checked(total + (ulong)array.LongLength * elementBytes);
+        }
+        void AddTextures(GuestDrawTexture[] textures)
+        {
+            foreach (var texture in textures)
+            {
+                Add(texture.RgbaPixels);
+                Add(texture.TiledSource);
+                Add(texture.Descriptor, 4);
+                Add(texture.MipUploads, 24);
+                if (texture.Detile is { } detile)
+                {
+                    Add(detile.XByteTerm, 4);
+                    Add(detile.YByteTerm, 4);
+                    Add(detile.BlockTable, 4);
+                }
+            }
+        }
+        void AddBuffers(GuestMemoryBuffer[] buffers)
+        {
+            foreach (var buffer in buffers) Add(buffer.Data);
+        }
+        void AddStage(GuestStageBindings stage)
+        {
+            Add(stage.BufferIndices, 4);
+            Add(stage.ImageElements, 4);
+            Add(stage.Samplers, 16);
+            Add(stage.ShaderData, 4);
+            Add(stage.PushData, 4);
+            Add(stage.FlattenedTable, 4);
+            Add(stage.AddressRanges, 12);
+        }
+        switch (work)
+        {
+            case OffscreenGuestDraw draw:
+                AddTextures(draw.Draw.Textures);
+                AddBuffers(draw.Draw.GlobalMemoryBuffers);
+                foreach (var vertex in draw.Draw.VertexBuffers) Add(vertex.Data);
+                Add(draw.Draw.IndexBuffer?.Data);
+                foreach (var stage in draw.Draw.Stages) AddStage(stage);
+                break;
+            case ComputeGuestDispatch dispatch:
+                AddTextures(dispatch.Textures);
+                AddBuffers(dispatch.GlobalMemoryBuffers);
+                if (dispatch.StageBindings is { } dispatchStage) AddStage(dispatchStage);
+                break;
+        }
+        return total;
+    }
 
     private static bool TryTakeGuestWork(out PendingGuestWork work)
     {

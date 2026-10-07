@@ -50,8 +50,9 @@ public sealed record GuestDrawTexture(
     // payloads can be smaller because tiled mip padding is not uploaded.
     ulong SourceByteCount = 0,
     // False when the guest changed the backing range while AGC copied it.
-    // Backends must retain an older cached image instead of publishing these
-    // bytes or performing an unprotected recovery read.
+    // Backends must not publish unstable bytes or perform a late unprotected
+    // recovery read. A retained image requires a safe lifetime/freshness
+    // reservation; otherwise the backend must explicitly reject the snapshot.
     bool CpuSnapshotStable = true,
     // The raw resource descriptor dwords and the shape the shader module was compiled with.
     uint[]? Descriptor = null,

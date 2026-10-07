@@ -1504,6 +1504,10 @@ internal static partial class MetalVideoPresenter
                 $"Metal cannot materialize per-sample guest texture type {texture.Type} at 0x{texture.Address:X}.");
         }
 
+        if (!texture.CpuSnapshotStable)
+            throw new InvalidOperationException(
+                $"Metal cannot upload unstable texture snapshot at 0x{texture.Address:X}.");
+
         var cacheable = IsCacheableDrawTexture(texture);
 
         // Feedback reads of a live guest render target sample an ordered
@@ -1575,49 +1579,7 @@ internal static partial class MetalVideoPresenter
 
             texture = texture with { RgbaPixels = refreshed };
         }
-        // Default-on GPU detile packages the tiled source + resolved DetileParams
-        // with empty RgbaPixels so a backend can deswizzle on the GPU. The Metal
-        // GPU compute pass (MetalDetilePass / detile_compute.msl) is the intended
-        // equivalent of VulkanDetilePass, but it is Mac-untested, so the active
-        // Metal path CPU-detiles here via GnmTiling.DetileWithParams — the exact
-        // same DetileParams addressing the kernel runs — restoring the linear-upload
-        // behavior Metal had before GPU detile existed, with no regression.
-        if (texture.RgbaPixels.Length == 0 &&
-            texture.TiledSource is { } tiledSource &&
-            texture.Detile is { } detileParameters)
-        {
-            // The tiled source packs the array slices contiguously (one per layer);
-            // detile each into its layer-major linear region so the reconstructed
-            // pixels match what the CPU array-upload path produced pre-GPU-detile.
-            // A plain 2D texture is just one layer.
-            var deferredShape = GuestTextureShape(texture);
-            var layers = checked((int)Math.Max(deferredShape.ArrayLength, deferredShape.Depth));
-            var sliceLinearBytes =
-                detileParameters.ElementsWide * detileParameters.ElementsHigh * detileParameters.BytesPerElement;
-            var sliceTiledBytes = tiledSource.Length / layers;
-            var requiredTiledBytes = checked((long)detileParameters.BlocksPerRow *
-                ((detileParameters.ElementsHigh + detileParameters.BlockHeight - 1) / detileParameters.BlockHeight) *
-                detileParameters.BlockBytes);
-            if (tiledSource.Length % layers != 0 || sliceTiledBytes < requiredTiledBytes)
-                throw new InvalidOperationException($"Metal tiled snapshot 0x{texture.Address:X} does not cover every source block.");
-            var linear = new byte[sliceLinearBytes * layers];
-            var detiledAll = true;
-            for (var layer = 0; layer < layers; layer++)
-            {
-                if (!GnmTiling.DetileWithParams(
-                        detileParameters,
-                        tiledSource.AsSpan(layer * sliceTiledBytes, sliceTiledBytes),
-                        linear.AsSpan(layer * sliceLinearBytes, sliceLinearBytes)))
-                {
-                    detiledAll = false;
-                    break;
-                }
-            }
-
-            if (!detiledAll)
-                throw new NotSupportedException($"Metal cannot detile texture 0x{texture.Address:X} type={texture.Type} tile={texture.TileMode}.");
-            texture = texture with { RgbaPixels = linear };
-        }
+        texture = PrepareDrawTextureUpload(texture);
 
         // AGC ships the raw (detiled) source texels; create the texture in the
         // guest's native format — Mac-family GPUs sample BC blocks directly —
@@ -1722,6 +1684,55 @@ internal static partial class MetalVideoPresenter
         }
 
         return handle;
+    }
+
+    /// <summary>Materializes deferred faithful bytes without a device or a
+    /// guest-memory read. The native upload path and queue lifetime tests share it.</summary>
+    internal static GuestDrawTexture PrepareDrawTextureUpload(GuestDrawTexture texture)
+    {
+        if (!texture.CpuSnapshotStable)
+            throw new InvalidOperationException(
+                $"Metal cannot upload unstable texture snapshot at 0x{texture.Address:X}.");
+        // Deferred snapshots own exact tiled source bytes and their addressing
+        // equations. Materialize them without consulting mutable guest memory.
+        if (texture.RgbaPixels.Length == 0 &&
+            texture.TiledSource is { } tiledSource &&
+            texture.Detile is { } detileParameters)
+        {
+            // The tiled source packs the array slices contiguously (one per layer);
+            // detile each into its layer-major linear region so the reconstructed
+            // pixels match what the CPU array-upload path produced pre-GPU-detile.
+            // A plain 2D texture is just one layer.
+            var deferredShape = GuestTextureShape(texture);
+            var layers = checked((int)Math.Max(deferredShape.ArrayLength, deferredShape.Depth));
+            var sliceLinearBytes =
+                detileParameters.ElementsWide * detileParameters.ElementsHigh * detileParameters.BytesPerElement;
+            var sliceTiledBytes = tiledSource.Length / layers;
+            var requiredTiledBytes = checked((long)detileParameters.BlocksPerRow *
+                ((detileParameters.ElementsHigh + detileParameters.BlockHeight - 1) / detileParameters.BlockHeight) *
+                detileParameters.BlockBytes);
+            if (tiledSource.Length % layers != 0 || sliceTiledBytes < requiredTiledBytes)
+                throw new InvalidOperationException($"Metal tiled snapshot 0x{texture.Address:X} does not cover every source block.");
+            var linear = new byte[sliceLinearBytes * layers];
+            var detiledAll = true;
+            for (var layer = 0; layer < layers; layer++)
+            {
+                if (!GnmTiling.DetileWithParams(
+                        detileParameters,
+                        tiledSource.AsSpan(layer * sliceTiledBytes, sliceTiledBytes),
+                        linear.AsSpan(layer * sliceLinearBytes, sliceLinearBytes)))
+                {
+                    detiledAll = false;
+                    break;
+                }
+            }
+
+            if (!detiledAll)
+                throw new NotSupportedException($"Metal cannot detile texture 0x{texture.Address:X} type={texture.Type} tile={texture.TileMode}.");
+            texture = texture with { RgbaPixels = linear };
+        }
+
+        return texture;
     }
 
     // MTLTextureType. The 2D descriptor factory produces Type2D, so the others are
