@@ -51,12 +51,6 @@ Fetched is the `upstream/main` commit the sync saw; integrated is the merge
 commit it produced on the sync branch, or `conflicts` if the merge stopped and a
 human had to finish it.
 
-<!-- sync-log -->
-
-| Date | Fetched upstream | New commits | Integrated | Branch |
-| --- | --- | --- | --- | --- |
-| 2026-10-07 | `b02c06181a296f4dc7d9ee2a44780a6ecd959592` | 1 | `caa2f92a481cdf4850883ba5a52725f51742c089` | `sync/upstream-b02c061` |
-
 The reviewed local sync was merged into local `main` as
 `a46904fd906f8b52fbf53240c91c5578fa7cf860`. It required no conflicts or
 platform adaptations. Affected managed and architecture checks pass 182/182
@@ -64,3 +58,9 @@ on both ARM64 and Rosetta; Windows/Linux CLI cross-builds pass with zero errors.
 Evidence: `artifacts/validation/integrated-20261007/package-agent/upstream-b02c061-caa2f92/`.
 No remote push, PR or remote merge was performed. Runtime qualification of the
 merged app is recorded separately from these integration checks.
+
+<!-- sync-log -->
+
+| Date | Fetched upstream | New commits | Integrated | Branch |
+| --- | --- | --- | --- | --- |
+| 2026-10-07 | `b02c06181a296f4dc7d9ee2a44780a6ecd959592` | 1 | `caa2f92a481cdf4850883ba5a52725f51742c089` | `sync/upstream-b02c061` |
