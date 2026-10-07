@@ -51,6 +51,10 @@ public sealed class CoreTextGuestAbiTests(ITestOutputHelper output)
         Assert.Equal(actual.BearingX, BinaryPrimitives.ReadSingleLittleEndian(metrics.AsSpan(8)));
         Assert.Equal(actual.BearingY, BinaryPrimitives.ReadSingleLittleEndian(metrics.AsSpan(12)));
         Assert.Equal(actual.Advance, BinaryPrimitives.ReadSingleLittleEndian(metrics.AsSpan(16)));
+        var expectedMetrics = new byte[32];
+        float[] fields = [actual.Width, actual.Height, actual.BearingX, actual.BearingY, actual.Advance, 0, 0, 16];
+        for (var i = 0; i < fields.Length; i++) BinaryPrimitives.WriteSingleLittleEndian(expectedMetrics.AsSpan(i * 4), fields[i]);
+        Assert.Equal(expectedMetrics, metrics);
         Assert.Equal(0, FontExports.CloseFont(ctx));
         Assert.Equal(0, FontExports.CloseFont(ctx));
         Assert.DoesNotContain(typeof(FontExports).Assembly.GetReferencedAssemblies(), reference => reference.Name == "SkiaSharp");
