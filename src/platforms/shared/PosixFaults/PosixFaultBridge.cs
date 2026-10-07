@@ -260,14 +260,10 @@ internal static unsafe class PosixFaultBridge
         }
         try
         {
-            // Guest-image write tracking runs first: it only needs the fault
-            // address (safe for host and guest threads alike) and must resume
-            // the faulting write immediately after restoring write access.
-            if (signal != PosixSigIll &&
-                signal != PosixSigFpe &&
-                siginfo != 0 &&
-                GuestImageWriteTracker.TryHandleWriteFault(
-                    *(ulong*)((byte*)siginfo + PosixSignalLayout.SigInfoAddressOffset)))
+            // Only a classified write can belong to guest-image tracking.
+            // Use the same normalized address as the later fault bridge:
+            // Darwin can provide the address in mcontext when si_addr is zero.
+            if (TryHandleTrackedImageWriteFault(signal, siginfo, ucontext))
             {
                 return;
             }
@@ -298,6 +294,25 @@ internal static unsafe class PosixFaultBridge
         }
 
         ChainPreviousAction(signal, siginfo, ucontext);
+    }
+
+    internal static bool TryHandleTrackedImageWriteFault(int signal, nint siginfo, nint ucontext)
+    {
+        if (signal != PosixSigSegv && signal != PosixSignalLayout.SigBus)
+        {
+            return false;
+        }
+
+        byte* registers = PosixSignalLayout.GetRegisterBase(ucontext);
+        if (registers == null)
+        {
+            return false;
+        }
+
+        ulong address = GetFaultAddress(siginfo, registers);
+        ulong rip = *(ulong*)(registers + PosixSignalLayout.RegisterOffsets[16]);
+        return GetAccessType(registers, address, rip) == 1 &&
+            GuestImageWriteTracker.TryHandleWriteFault(address);
     }
 
     private static bool TryResolveGpuFault(nint siginfo, nint ucontext)
