@@ -99,7 +99,7 @@ public sealed partial class MetalTextureMaterializationTests
         try
         {
             var descriptor = new AgcExports.TextureDescriptor(address, 1, 1, 10, 4, 27, 10, 0, 0, 1, 0xFAC, Depth: 1, HasExtendedDescriptor: true);
-            var binding = new AgcExports.TranslatedImageBinding(descriptor, true, 0, VolumeResourceWords(address, 1, 1, 1, 27),
+            var binding = new AgcExports.TranslatedImageBinding(descriptor, true, 0, [], ResourceDescriptor: VolumeResourceWords(address, 1, 1, 1, 27),
                 Shape: new ShaderImageShape(true, false, true, false, TextureNumericClass.Uint), Access: GuestImageAccess.Write);
             var snapshots = Presenter.Assembly.GetTypes().Single(static type => type.Name == "MetalTextureSnapshots");
             var args = new object?[] { new CpuContext(new SnapshotMemory(address, source), Generation.Gen5), new[] { binding }, 0 };

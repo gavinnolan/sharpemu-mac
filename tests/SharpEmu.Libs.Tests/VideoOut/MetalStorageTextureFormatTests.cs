@@ -288,7 +288,7 @@ public sealed class MetalStorageTextureFormatTests
         foreach (var descriptor in new[] { baseline with { MetadataAddress = 0x10000 }, baseline with { DescriptorFlags = 1 },
             baseline with { BcSwizzle = 1 }, baseline with { HasExtendedDescriptor = false } })
         {
-            var binding = new AgcExports.TranslatedImageBinding(descriptor, true, 0, VolumeRaw(address, 1, 1, 1, 27),
+            var binding = new AgcExports.TranslatedImageBinding(descriptor, true, 0, [], ResourceDescriptor: VolumeRaw(address, 1, 1, 1, 27),
                 Shape: new ShaderImageShape(true, false, true, false, TextureNumericClass.Uint), Access: GuestImageAccess.Write);
             Assert.Throws<NotSupportedException>(() => MetalTextureSnapshots.CreateTextureSnapshots(
                 new CpuContext(memory, Generation.Gen5), [binding], out _));
