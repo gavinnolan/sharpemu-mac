@@ -132,7 +132,22 @@ public sealed class Gen5NativeReturnSmokeTests
             Assert.Equal(0, restore.Result);
             Assert.Equal(0, restore.Errno);
             Assert.True(begin.Nanoseconds >= entry.Nanoseconds && restore.Nanoseconds >= begin.Nanoseconds);
-            Assert.Contains(records, record => record.Kind == 2 && record.Invocation == entry.Invocation && record.Result == 1);
+            AssertDiagnosticPair(records, entry.Invocation, true, 1, 0);
+            // A distinct real SIGILL exercises early decline followed by the
+            // existing shared instruction recovery, rather than tracker recovery.
+            if ((X86Base.CpuId(unchecked((int)0x80000001), 0).Ecx & (1 << 6)) == 0)
+            {
+                ExecuteSyntheticGuest([
+                    0x48, 0xB8, 0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE,
+                    0x66, 0x48, 0x0F, 0x6E, 0xC0,
+                    0x66, 0x0F, 0x78, 0xC0, 0x40, 0x00,
+                    0x66, 0x48, 0x0F, 0x7E, 0xC0, 0xC3
+                ]);
+                records = GuestImageWriteTracker.SnapshotNativeFaultDiagnosticsForTests();
+                var illegalInstruction = Assert.Single(records.Where(record => record.Kind == 1 && record.Signal == 4));
+                Assert.Equal(-1, illegalInstruction.Access);
+                AssertDiagnosticPair(records, illegalInstruction.Invocation, false, 4, 0);
+            }
             // Ordinary file reads see completed MAP_SHARED slots before disposal;
             // no handler flush or file I/O was used to preserve the record.
             var bytes = File.ReadAllBytes(path);
@@ -141,6 +156,89 @@ public sealed class Gen5NativeReturnSmokeTests
         }
         finally { File.Delete(path); }
     }
+
+    private static void AssertDiagnosticPair(SharpEmu.HLE.Host.NativeFaultTraceRecord[] records,
+        long invocation, bool earlyHandled, int finalRoute, int finalReason, bool finalRecovered = true)
+    {
+        var entry = Assert.Single(records.Where(record => record.Kind == 1 && record.Invocation == invocation));
+        var early = Assert.Single(records.Where(record => record.Kind == 2 && record.Invocation == invocation));
+        var final = Assert.Single(records.Where(record => record.Kind == 7 && record.Invocation == invocation));
+        Assert.Equal(earlyHandled ? 1 : 0, early.Result);
+        Assert.Equal(finalRecovered ? 1 : 0, final.Result);
+        Assert.Equal(finalRoute, final.Route);
+        Assert.Equal(finalReason, final.Reason);
+        Assert.True(entry.Sequence < early.Sequence && early.Sequence < final.Sequence);
+        Assert.True(entry.Nanoseconds <= early.Nanoseconds && early.Nanoseconds <= final.Nanoseconds);
+    }
+
+    [Fact]
+    public async Task PosixBridgeDisposition_PairsRecoveredDeclinedExceptionAndWarmup()
+    {
+        if (!IsSupportedHost || (!OperatingSystem.IsMacOS() && !OperatingSystem.IsLinux())) return;
+        const string completed = "[CPU-FAULT] fabricated bridge outcomes retained exact invocation pairing";
+        if (Environment.GetEnvironmentVariable(WorkerEnvironmentVariable) != "1")
+        {
+            await RunIsolatedFaultWorker(nameof(PosixBridgeDisposition_PairsRecoveredDeclinedExceptionAndWarmup), completed);
+            return;
+        }
+        ExecuteFabricatedDiagnosticBridgeOutcomes();
+        File.WriteAllText(Environment.GetEnvironmentVariable(FaultWorkerReportVariable)!, completed);
+    }
+
+    private static unsafe void ExecuteFabricatedDiagnosticBridgeOutcomes()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"sharpemu-bridge-trace-{Guid.NewGuid():N}.bin");
+        Environment.SetEnvironmentVariable("SHARPEMU_NATIVE_FAULT_TRACE_PATH", path);
+        try
+        {
+            GuestImageWriteTracker.InitializeNativeFaultDiagnostics();
+            var package = OperatingSystem.IsMacOS() ? "SharpEmu.Cpu.DirectExecution.MacOS.X64" :
+                "SharpEmu.Cpu.DirectExecution.Linux.X64";
+            var assembly = Assembly.Load(package);
+            var bridge = assembly.GetType(package + ".PosixFaultBridge", true)!;
+            var layout = assembly.GetType(package + ".PosixSignalLayout", true)!;
+            var entries = bridge.GetMethod("UseSharedRecoveryEntriesForTest", BindingFlags.NonPublic | BindingFlags.Static)!;
+            var warmup = bridge.GetField("_signalWarmup", BindingFlags.NonPublic | BindingFlags.Static)!;
+            bridge.GetField("_rawRecoveryEnabled", BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, true);
+            // Keep legacy optional signal logging out of the measured scalar fixture.
+            bridge.GetField("_signalTraceCount", BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, 16);
+            var handler = (delegate* unmanaged<int, nint, nint, void>)bridge.GetMethod(
+                "HandlePosixSignal", BindingFlags.NonPublic | BindingFlags.Static)!.MethodHandle.GetFunctionPointer();
+            byte* user = stackalloc byte[512];
+            byte* machine = stackalloc byte[1032];
+            new Span<byte>(user, 512).Clear();
+            new Span<byte>(machine, 1032).Clear();
+            layout.GetMethod("PrepareWarmUpContext", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null,
+                [Pointer.Box(user, typeof(byte*)), Pointer.Box(machine, typeof(byte*)), 1032UL]);
+            // Signal 0 is deliberately synthetic: chaining its absent previous
+            // action calls sigaction(0), which fails without changing real handlers.
+            void Check(nint raw, nint core, int route, int reason, bool recovered, bool isWarmup = false,
+                bool missingContext = false)
+            {
+                entries.Invoke(null, [raw, core]);
+                warmup.SetValue(null, isWarmup);
+                var lastSequence = GuestImageWriteTracker.SnapshotNativeFaultDiagnosticsForTests().Max(record => record.Sequence);
+                handler(0, 0, missingContext ? 0 : (nint)user);
+                var records = GuestImageWriteTracker.SnapshotNativeFaultDiagnosticsForTests();
+                var entry = Assert.Single(records.Where(record => record.Kind == 1 && record.Sequence > lastSequence));
+                AssertDiagnosticPair(records, entry.Invocation, false, route, reason, recovered);
+            }
+            Check((nint)(delegate* managed<void*, int>)&RecoverDiagnosticFrame, 0, 3, 0, true);
+            Check((nint)(delegate* managed<void*, int>)&DeclineDiagnosticFrame,
+                (nint)(delegate* managed<void*, int>)&RecoverDiagnosticFrame, 4, 0, true);
+            Check((nint)(delegate* managed<void*, int>)&DeclineDiagnosticFrame,
+                (nint)(delegate* managed<void*, int>)&DeclineDiagnosticFrame, 4, 1, false);
+            Check((nint)(delegate* managed<void*, int>)&ThrowDiagnosticFrame, 0, 6, 3, false);
+            Check((nint)(delegate* managed<void*, int>)&DeclineDiagnosticFrame, 0, 3, 4, true, isWarmup: true);
+            Check(0, 0, 5, 1, false);
+            Check(0, 0, 5, 2, false, missingContext: true);
+        }
+        finally { File.Delete(path); }
+    }
+
+    private static unsafe int RecoverDiagnosticFrame(void* _) => -1;
+    private static unsafe int DeclineDiagnosticFrame(void* _) => 0;
+    private static unsafe int ThrowDiagnosticFrame(void* _) => throw new InvalidOperationException("fabricated callback failure");
 
     private static bool IsSupportedHost =>
         RuntimeInformation.ProcessArchitecture == Architecture.X64 &&

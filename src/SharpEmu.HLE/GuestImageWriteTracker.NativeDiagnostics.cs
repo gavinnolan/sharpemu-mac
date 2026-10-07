@@ -40,6 +40,7 @@ public static unsafe partial class GuestImageWriteTracker
                     Volatile.Write(ref _nativeDiagnosticBuffer, buffer);
                     var invocation = RecordNativeImageFaultEntry(0, 0, 0, 0, -1, 0, 0);
                     RecordNativeImageFaultResult(false, invocation);
+                    RecordNativeFaultDisposition(invocation, false, 5, 4);
                     RecordNativeProtection(0, 0, 0, 0, 0, false, 0, 0, null);
                     RecordNativeProtection(0, 0, 0, 0, 0, true, 0, 0, null);
                 }
@@ -58,7 +59,9 @@ public static unsafe partial class GuestImageWriteTracker
         }
     }
 
-    /// <summary>Signal-facing scalar observations; these are not mapping claims.</summary>
+    public static bool NativeFaultDiagnosticsEnabled => Volatile.Read(ref _nativeDiagnosticBuffer) is not null;
+
+    /// <summary>Scalar native signal entry (memory or otherwise), never a mapping claim.</summary>
     public static long RecordNativeImageFaultEntry(
         int signal, ulong rawAddress, int signalCode, ulong address,
         int access, ulong errorCode, ulong rip)
@@ -84,6 +87,22 @@ public static unsafe partial class GuestImageWriteTracker
         if (buffer is null) return;
         var record = DiagnosticRecord(2, 0, invocation);
         record.Result = handled ? 1 : 0;
+        _ = buffer.Write(record);
+    }
+
+    /// <summary>
+    /// Final POSIX bridge outcome for this explicit invocation. Route/reason
+    /// are neutral diagnostic scalars; no native context or retry claim crosses
+    /// the Core callback ABI. Result precedes chaining an unhandled action.
+    /// </summary>
+    public static void RecordNativeFaultDisposition(long invocation, bool recovered, int route, int reason)
+    {
+        var buffer = Volatile.Read(ref _nativeDiagnosticBuffer);
+        if (buffer is null || invocation == 0) return;
+        var record = DiagnosticRecord(7, 0, invocation);
+        record.Result = recovered ? 1 : 0;
+        record.Route = route;
+        record.Reason = reason;
         _ = buffer.Write(record);
     }
 

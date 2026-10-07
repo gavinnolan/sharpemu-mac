@@ -87,11 +87,13 @@ public sealed unsafe class NativeFaultTraceTests
             // Buffer and scalar entry/result paths must not allocate in a warmed handler.
             invocation = GuestImageWriteTracker.RecordNativeImageFaultEntry(10, address, 2, address, 1, 6, 0x1234);
             GuestImageWriteTracker.RecordNativeImageFaultResult(false, invocation);
+            GuestImageWriteTracker.RecordNativeFaultDisposition(invocation, false, 5, 1);
             var before = GC.GetAllocatedBytesForCurrentThread();
             for (var i = 0; i < 100; i++)
             {
                 invocation = GuestImageWriteTracker.RecordNativeImageFaultEntry(10, address, 2, address, 1, 6, 0x1234);
                 GuestImageWriteTracker.RecordNativeImageFaultResult(false, invocation);
+                GuestImageWriteTracker.RecordNativeFaultDisposition(invocation, false, 5, 1);
             }
             Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
         }

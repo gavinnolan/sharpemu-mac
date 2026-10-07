@@ -34,12 +34,14 @@ internal struct NativeFaultTraceRecord
     public int Errno;
     public int OwnerObservation;
     public int Reserved;
+    public int Route;
+    public int Reason;
 }
 
 internal sealed unsafe class NativeFaultTraceBuffer : IDisposable
 {
     internal const ulong Magic = 0x53454D554641554CUL;
-    internal const int Version = 1;
+    internal const int Version = 2;
     internal const int HeaderBytes = 128;
     internal const int DefaultCapacity = 4096;
     private readonly MemoryMappedFile? _file;
