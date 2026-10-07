@@ -92,6 +92,45 @@ undersized-source checks. Those additional checks do not execute on a GPU.
 
 ## Frame timing and game evidence
 
+### Dense buffer atomics (follow-up to the integrated corpus)
+
+The clean `9498713` Silent Hill corpus stopped at compute shader
+`0xED96FD5D77F7BBD3`, PC `0x05D8`, with unsupported `BufferAtomicSwap`.
+The native atomic-expression builder already supported exchange, but the
+dense-buffer opcode allowlist omitted it. That path now accepts the decoded
+32-bit SWAP and the actual decoded `BufferAtomicUmax` spelling. It captures
+the byte address before modifying VDATA, uses native exchange/unsigned max,
+returns the pre-operation word into VDATA only with GLC, and honors EXEC.
+Its four-byte bounds check avoids overflowing `address + 4`; an active
+out-of-range returning atomic returns zero and performs no write.
+
+`Gen5MslBufferAtomicTests` passed **14/14** in both the managed run and the
+exclusive required-device run. The required-device run contains **nine real
+MSL compilation/execution/readbacks**, comparing the entire sentinel-filled
+buffer: seven SWAP address/GLC/EXEC/boundary cases, one SWAP with address and
+VDATA aliased, and one decoded unsigned-max case whose sign-bit-set old word
+distinguishes unsigned from signed max. The other five cases check decoding,
+code generation, and explicit rejection of Inc/Dec/X2. In the managed run
+seven execution-only cases return at the device gate; the two other native
+cases still perform their decoder/codegen checks before that gate.
+
+These fixtures encode independent RDNA2 instructions and reference the
+operand/address rules in ISA sections 8.1 and 12.14. The original game's raw
+shader bytes were not captured, so this qualifies the operation and addressing
+fixtures rather than that entire compute shader or game progression. The
+misalignment case verifies the existing host safety policy (drop/zero); it
+does not establish hardware behavior for an unaligned AMD atomic. Tests use
+one invocation, not a contention or cross-dispatch synchronization test.
+Swizzled addressing, other descriptor OOB modes, byte bias, and broad alias
+coherence still require separate qualification.
+
+Buffer Inc/Dec and 64-bit X2 atomics remain explicit unsupported cases.
+The inherited shared Global/GDS Inc/Dec builder currently ignores the DATA
+limit and is not qualified for AMD bounded increment/decrement semantics;
+this bounded SWAP change does not enable or correct it. Evidence and exact
+source/test provenance are preserved in
+`artifacts/validation/integrated-20261007/metal-atomics/`.
+
 The Metal headline FPS counts unique guest frames encoded into committed
 presentation command buffers. `[METAL-PRESENT]` separately reports guest frame
 cadence and host redraw cadence. This avoids measuring host timer redraws or

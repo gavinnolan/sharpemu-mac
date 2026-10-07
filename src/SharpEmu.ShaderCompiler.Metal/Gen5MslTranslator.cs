@@ -1538,21 +1538,28 @@ public static partial class Gen5MslTranslator
             out string error)
         {
             error = string.Empty;
-            if (opcode is "GlobalAtomicAdd" or "BufferAtomicAdd" or
-                "GlobalAtomicUMax" or "BufferAtomicUMax")
+            if (opcode is "BufferAtomicSwap" or "GlobalAtomicAdd" or "BufferAtomicAdd" or
+                "GlobalAtomicUMax" or "BufferAtomicUMax" or "BufferAtomicUmax")
             {
-                var function = opcode.EndsWith("Add", StringComparison.Ordinal)
-                    ? "atomic_fetch_add_explicit"
-                    : "atomic_fetch_max_explicit";
+                var atomic = opcode.StartsWith("BufferAtomic", StringComparison.Ordinal)
+                    ? opcode["BufferAtomic".Length..] : opcode["GlobalAtomic".Length..];
+                // MUBUF SWAP reads VDATA and, with GLC, replaces that same
+                // register with the pre-operation word (RDNA2 sections 8.1/12.14).
+                if (!TryGetAtomicExpression(atomic, $"v[{sourceVectorRegister}]", "0u", out var build))
+                {
+                    error = $"unsupported memory opcode {opcode}";
+                    return false;
+                }
                 Line("if (exec)");
                 Line("{");
                 _indent++;
-                Line($"if ({byteAddress} + 4u <= {BufferBytes(bindingIndex)} && ({byteAddress} & 3u) == 0u)");
+                var bytes = BufferBytes(bindingIndex);
+                Line($"if (4u <= {bytes} && {byteAddress} <= {bytes} - 4u && ({byteAddress} & 3u) == 0u)");
                 Line("{");
                 _indent++;
                 var original = Temp(
                     "uint",
-                    $"{function}((device atomic_uint*)(b{bindingIndex} + ({byteAddress} >> 2)), v[{sourceVectorRegister}], memory_order_relaxed)");
+                    build($"b{bindingIndex} + ({byteAddress} >> 2)"));
                 if (glc)
                 {
                     Line($"v[{destinationVectorRegister}] = {original};");
@@ -1560,6 +1567,8 @@ public static partial class Gen5MslTranslator
 
                 _indent--;
                 Line("}");
+                if (glc)
+                    Line($"else {{ v[{destinationVectorRegister}] = 0u; }}");
                 _indent--;
                 Line("}");
                 return true;
