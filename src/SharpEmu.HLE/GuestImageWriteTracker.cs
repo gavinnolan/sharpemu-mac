@@ -50,6 +50,8 @@ public static unsafe partial class GuestImageWriteTracker
         public ulong End;
         public int Dirty;
         public int Armed;
+        public readonly long DiagnosticIdentity = Interlocked.Increment(ref _nativeDiagnosticOwnerIdentity);
+        public long DiagnosticArmEpoch;
         /// <summary>
         /// When false the range is watch-only: managed writes still dirty it via
         /// <see cref="NotifyManagedWrite"/>, but pages are never write-protected
@@ -290,6 +292,7 @@ public static unsafe partial class GuestImageWriteTracker
                 var writeGeneration = Volatile.Read(ref range.WriteGeneration);
                 var keepProtect = range.Protect || protect;
                 DisarmLocked(range, "replace-range");
+                RecordNativeRangeState(range, retired: true);
                 _rangesByAddress.Remove(address);
                 range = new TrackedRange
                 {
@@ -360,6 +363,7 @@ public static unsafe partial class GuestImageWriteTracker
             if (_rangesByAddress.TryGetValue(address, out var range))
             {
                 DisarmLocked(range, "untrack");
+                RecordNativeRangeState(range, retired: true);
                 _rangesByAddress.Remove(address);
                 RebuildSnapshotLocked();
             }
@@ -382,6 +386,7 @@ public static unsafe partial class GuestImageWriteTracker
             if (_rangesByAddress.TryGetValue(address, out var range))
             {
                 DisarmLocked(range, "untrack");
+                RecordNativeRangeState(range, retired: true);
                 _rangesByAddress.Remove(address);
                 RebuildSnapshotLocked();
             }
@@ -574,7 +579,11 @@ public static unsafe partial class GuestImageWriteTracker
     /// range, restore write access, mark the range dirty, and return true so
     /// the faulting write can be retried. Must not allocate or lock.
     /// </summary>
-    public static bool TryHandleWriteFault(ulong faultAddress)
+    public static bool TryHandleWriteFault(ulong faultAddress) =>
+        TryHandleWriteFaultWithNativeDiagnostics(faultAddress, 0);
+
+    /// <summary>Same recovery semantics with an explicit diagnostic invocation scalar.</summary>
+    public static bool TryHandleWriteFaultWithNativeDiagnostics(ulong faultAddress, long invocation)
     {
         if (!_enabled || faultAddress == 0)
         {
@@ -615,9 +624,10 @@ public static unsafe partial class GuestImageWriteTracker
                 continue;
             }
 
-            if (!RemovePageWatchers(range, out var changedBytes))
+            if (!RemovePageWatchers(range, out var changedBytes, invocation))
             {
                 Volatile.Write(ref range.Armed, RangeDisarmed);
+                RecordNativeRangeState(range, invocation: invocation);
                 return false;
             }
 
@@ -629,6 +639,7 @@ public static unsafe partial class GuestImageWriteTracker
             }
             MarkFaultedRange(range, faultAddress);
             Volatile.Write(ref range.Armed, RangeDisarmed);
+            RecordNativeRangeState(range, invocation: invocation);
             handled = true;
         }
 
@@ -662,9 +673,10 @@ public static unsafe partial class GuestImageWriteTracker
                     continue;
                 }
 
-                if (!RemovePageWatchers(range, out var changedBytes))
+                if (!RemovePageWatchers(range, out var changedBytes, invocation))
                 {
                     Volatile.Write(ref range.Armed, RangeDisarmed);
+                    RecordNativeRangeState(range, invocation: invocation);
                     return false;
                 }
 
@@ -676,6 +688,7 @@ public static unsafe partial class GuestImageWriteTracker
                 }
                 MarkFaultedRange(range, faultAddress);
                 Volatile.Write(ref range.Armed, RangeDisarmed);
+                RecordNativeRangeState(range, invocation: invocation);
                 handled = true;
             }
         }
@@ -705,6 +718,9 @@ public static unsafe partial class GuestImageWriteTracker
             return;
         }
 
+        Interlocked.Increment(ref range.DiagnosticArmEpoch);
+        RecordNativeRangeState(range);
+
         // A new publication/rearm starts a new first-write lifetime.
         Volatile.Write(ref range.FirstCpuWriteSeen, 0);
         var failed = !AddPageWatchers(range, out var protectedBytes);
@@ -724,6 +740,7 @@ public static unsafe partial class GuestImageWriteTracker
             }
         }
 
+        RecordNativeRangeState(range);
         if (range.TraceLifetime)
         {
             TraceLifetime(
@@ -748,6 +765,7 @@ public static unsafe partial class GuestImageWriteTracker
             }
         }
 
+        RecordNativeRangeState(range);
         if (range.TraceLifetime)
         {
             TraceLifetime(
@@ -836,7 +854,7 @@ public static unsafe partial class GuestImageWriteTracker
                         ref runEnd,
                         runExecutable,
                         writable: false,
-                        ref protectedBytes))
+                        ref protectedBytes, range))
                 {
                     _ = RemovePageWatchers(range, processedPages, out _);
                     return false;
@@ -855,7 +873,7 @@ public static unsafe partial class GuestImageWriteTracker
                     ref runEnd,
                     runExecutable,
                     writable: false,
-                    ref protectedBytes))
+                    ref protectedBytes, range))
             {
                 _ = RemovePageWatchers(range, processedPages, out _);
                 return false;
@@ -871,7 +889,7 @@ public static unsafe partial class GuestImageWriteTracker
                 ref runEnd,
                 runExecutable,
                 writable: false,
-                ref protectedBytes))
+                ref protectedBytes, range))
         {
             return true;
         }
@@ -880,13 +898,14 @@ public static unsafe partial class GuestImageWriteTracker
         return false;
     }
 
-    private static bool RemovePageWatchers(TrackedRange range, out long writableBytes) =>
-        RemovePageWatchers(range, range.Pages.Length, out writableBytes);
+    private static bool RemovePageWatchers(TrackedRange range, out long writableBytes, long invocation = 0) =>
+        RemovePageWatchers(range, range.Pages.Length, out writableBytes, invocation);
 
     private static bool RemovePageWatchers(
         TrackedRange range,
         int pageCount,
-        out long writableBytes)
+        out long writableBytes,
+        long invocation = 0)
     {
         writableBytes = 0;
         var runStart = 0UL;
@@ -910,7 +929,7 @@ public static unsafe partial class GuestImageWriteTracker
                         ref runEnd,
                         runExecutable,
                         writable: true,
-                        ref writableBytes))
+                        ref writableBytes, range, invocation))
                 {
                     return false;
                 }
@@ -928,7 +947,7 @@ public static unsafe partial class GuestImageWriteTracker
                     ref runEnd,
                     runExecutable,
                     writable: true,
-                    ref writableBytes))
+                    ref writableBytes, range, invocation))
             {
                 return false;
             }
@@ -943,7 +962,7 @@ public static unsafe partial class GuestImageWriteTracker
             ref runEnd,
             runExecutable,
             writable: true,
-            ref writableBytes);
+            ref writableBytes, range, invocation);
     }
 
     private static bool FlushProtectionRun(
@@ -951,7 +970,9 @@ public static unsafe partial class GuestImageWriteTracker
         ref ulong runEnd,
         bool executable,
         bool writable,
-        ref long changedBytes)
+        ref long changedBytes,
+        TrackedRange? initiatingRange = null,
+        long invocation = 0)
     {
         if (runEnd <= runStart)
         {
@@ -959,7 +980,7 @@ public static unsafe partial class GuestImageWriteTracker
         }
 
         var byteCount = runEnd - runStart;
-        if (!TrySetProtection(runStart, byteCount, writable, executable))
+        if (!TrySetProtection(runStart, byteCount, writable, executable, initiatingRange, invocation))
         {
             return false;
         }
@@ -1312,7 +1333,9 @@ public static unsafe partial class GuestImageWriteTracker
         ulong start,
         ulong length,
         bool writable,
-        bool executable)
+        bool executable,
+        TrackedRange? initiatingRange = null,
+        long invocation = 0)
     {
         if (length == 0)
         {
@@ -1322,10 +1345,14 @@ public static unsafe partial class GuestImageWriteTracker
         var protection = ProtRead |
             (writable ? ProtWrite : 0) |
             (executable ? ProtExec : 0);
-        return Mprotect(
-            (nint)start,
-            (nuint)length,
-            protection) == 0;
+        var operation = Volatile.Read(ref _nativeDiagnosticBuffer) is null
+            ? 0 : Interlocked.Increment(ref _nativeDiagnosticOperation);
+        RecordNativeProtection(start, length, protection, 0, 0, false, operation, invocation, initiatingRange);
+        var result = Mprotect((nint)start, (nuint)length, protection);
+        // Capture before clock/telemetry can disturb native errno.
+        var error = result == 0 ? 0 : Marshal.GetLastPInvokeError();
+        RecordNativeProtection(start, length, protection, result, error, true, operation, invocation, initiatingRange);
+        return result == 0;
     }
 
     private static bool IsExecutableMapping(ulong address)

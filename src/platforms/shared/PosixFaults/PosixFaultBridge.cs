@@ -126,6 +126,7 @@ internal static unsafe class PosixFaultBridge
             Console.Error.WriteLine("[LOADER][INFO] Raw sentinel recovery disabled by SHARPEMU_DISABLE_RAW_HANDLER=1");
         }
 
+        GuestImageWriteTracker.InitializeNativeFaultDiagnostics();
         WarmUpSignalPath(handlers.WarmUp);
         GuestImageWriteTracker.WarmUp();
 
@@ -311,8 +312,15 @@ internal static unsafe class PosixFaultBridge
 
         ulong address = GetFaultAddress(siginfo, registers);
         ulong rip = *(ulong*)(registers + PosixSignalLayout.RegisterOffsets[16]);
-        return GetAccessType(registers, address, rip) == 1 &&
-            GuestImageWriteTracker.TryHandleWriteFault(address);
+        var access = GetAccessType(registers, address, rip);
+        var rawAddress = siginfo == 0 ? 0 : *(ulong*)((byte*)siginfo + PosixSignalLayout.SigInfoAddressOffset);
+        var signalCode = siginfo == 0 ? 0 : *(int*)((byte*)siginfo + PosixSignalLayout.SigInfoCodeOffset);
+        var invocation = GuestImageWriteTracker.RecordNativeImageFaultEntry(
+            signal, rawAddress, signalCode, address, (int)access,
+            PosixSignalLayout.GetPageFaultErrorCode(registers), rip);
+        var handled = access == 1 && GuestImageWriteTracker.TryHandleWriteFaultWithNativeDiagnostics(address, invocation);
+        GuestImageWriteTracker.RecordNativeImageFaultResult(handled, invocation);
+        return handled;
     }
 
     private static bool TryResolveGpuFault(nint siginfo, nint ucontext)

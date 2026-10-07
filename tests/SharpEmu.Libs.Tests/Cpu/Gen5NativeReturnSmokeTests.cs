@@ -94,6 +94,54 @@ public sealed class Gen5NativeReturnSmokeTests
         File.WriteAllText(Environment.GetEnvironmentVariable(FaultWorkerReportVariable)!, completed);
     }
 
+    [Fact]
+    public async Task PosixProtectedPageWrite_PreservesRawNativeEntryDiagnostics()
+    {
+        if (!IsSupportedHost || (!OperatingSystem.IsMacOS() && !OperatingSystem.IsLinux())) return;
+        const string completed = "[CPU-FAULT] real protected write retained raw native telemetry";
+        if (Environment.GetEnvironmentVariable(WorkerEnvironmentVariable) != "1")
+        {
+            await RunIsolatedFaultWorker(nameof(PosixProtectedPageWrite_PreservesRawNativeEntryDiagnostics), completed);
+            return;
+        }
+
+        var path = Path.Combine(Path.GetTempPath(), $"sharpemu-real-native-trace-{Guid.NewGuid():N}.bin");
+        Environment.SetEnvironmentVariable("SHARPEMU_NATIVE_FAULT_TRACE_PATH", path);
+        try
+        {
+            ExecuteSyntheticGuest([
+                0x48, 0xB8, 0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE,
+                0x48, 0x89, 0x47, 0x10, // real store into the tracker-protected data
+                0x48, 0x8B, 0x47, 0x10,
+                0xC3
+            ], protectData: true);
+            var records = GuestImageWriteTracker.SnapshotNativeFaultDiagnosticsForTests();
+            var entry = Assert.Single(records.Where(record => record.Kind == 1 && record.Access == 1 && record.OwnerIdentity > 0));
+            Assert.True(entry.Signal == 10 || entry.Signal == 11);
+            Assert.Equal(2, entry.SignalCode);
+            Assert.True((entry.ErrorCode & 2) != 0);
+            Assert.Equal(1, entry.OwnerState);
+            Assert.True(entry.Invocation > 0 && entry.ArmEpoch > 0);
+            if (entry.RawAddress != 0) Assert.Equal(entry.RawAddress, entry.Address);
+            var begin = Assert.Single(records.Where(record => record.Kind == 3 && record.Invocation == entry.Invocation));
+            var restore = Assert.Single(records.Where(record => record.Kind == 4 && record.Invocation == entry.Invocation));
+            Assert.True(begin.Operation > 0);
+            Assert.Equal(begin.Operation, restore.Operation);
+            Assert.Equal(entry.OwnerIdentity, restore.OwnerIdentity);
+            Assert.Equal(2, restore.OwnerObservation);
+            Assert.Equal(0, restore.Result);
+            Assert.Equal(0, restore.Errno);
+            Assert.True(begin.Nanoseconds >= entry.Nanoseconds && restore.Nanoseconds >= begin.Nanoseconds);
+            Assert.Contains(records, record => record.Kind == 2 && record.Invocation == entry.Invocation && record.Result == 1);
+            // Ordinary file reads see completed MAP_SHARED slots before disposal;
+            // no handler flush or file I/O was used to preserve the record.
+            var bytes = File.ReadAllBytes(path);
+            Assert.Equal(SharpEmu.HLE.Host.NativeFaultTraceBuffer.Magic, BinaryPrimitives.ReadUInt64LittleEndian(bytes));
+            File.WriteAllText(Environment.GetEnvironmentVariable(FaultWorkerReportVariable)!, completed);
+        }
+        finally { File.Delete(path); }
+    }
+
     private static bool IsSupportedHost =>
         RuntimeInformation.ProcessArchitecture == Architecture.X64 &&
         (OperatingSystem.IsWindows() || OperatingSystem.IsLinux() || OperatingSystem.IsMacOS());

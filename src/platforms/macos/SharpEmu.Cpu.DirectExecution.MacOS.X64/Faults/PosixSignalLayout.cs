@@ -31,6 +31,7 @@ internal static unsafe class PosixSignalLayout
     internal const int SaNoDefer = 0x0010;
 
     // siginfo_t.si_addr: { signo, errno, code, pid, uid, status, addr }.
+    internal const int SigInfoCodeOffset = 8;
     internal const int SigInfoAddressOffset = 24;
 
     // ucontext_t stores a pointer to __darwin_mcontext64 at +48 and the size of

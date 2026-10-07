@@ -29,6 +29,7 @@ internal static unsafe class PosixSignalLayout
     internal const int SaNoDefer = 0x40000000;
 
     // siginfo_t.si_addr: { signo, errno, code, pad32, addr }.
+    internal const int SigInfoCodeOffset = 8;
     internal const int SigInfoAddressOffset = 16;
 
     // glibc embeds mcontext_t inline in ucontext_t at +40, with the general
