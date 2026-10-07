@@ -2,77 +2,71 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.Host;
-using SharpEmu.Libs.Platform.MacOS;
 
 namespace SharpEmu.Libs.Pad;
 
 /// <summary>
-/// Gamepad polling for launcher menu navigation, routed to the platform's native
-/// backend: GameController.framework on macOS, SDL everywhere else.
+/// One launcher-navigation gamepad implementation: GameController.framework on macOS, SDL on
+/// Windows and Linux. The platform package registers its own, so this facade names neither.
 /// </summary>
 /// <remarks>
-/// GameController must be touched from the main thread, which for the Avalonia
-/// launcher is the dispatcher thread its poll timer already ticks on. Output
-/// (rumble, lightbar, adaptive triggers) is deliberately not wired up here — the
-/// launcher only reads navigation input, and a running session owns the pad's
-/// outputs.
+/// The provider is polled from the launcher's dispatcher thread, which GameController requires
+/// (it must be touched from the main thread) and SDL tolerates. Output (rumble, lightbar,
+/// adaptive triggers) is deliberately outside this contract — the launcher only reads
+/// navigation input, and a running session owns the pad's outputs.
 /// </remarks>
+public interface ILauncherGamepadProvider
+{
+    void EnsureStarted();
+
+    bool TryGetState(out HostGamepadState state);
+
+    void Shutdown();
+}
+
+/// <summary>
+/// Gamepad polling for launcher menu navigation, routed to whichever
+/// <see cref="ILauncherGamepadProvider"/> the application composed in. With no provider
+/// registered the launcher simply reports no pad.
+/// </summary>
 public static class LauncherGamepad
 {
     private static readonly object Gate = new();
-    private static MacGameControllerGamepad? _macGamepad;
+    private static ILauncherGamepadProvider? _provider;
 
-    public static void EnsureStarted()
+    /// <summary>Installs the launcher's pad reader. Called once from the composition root.</summary>
+    public static void RegisterProvider(ILauncherGamepadProvider provider)
     {
-        if (!OperatingSystem.IsMacOS())
-        {
-            SdlLauncherGamepad.EnsureStarted();
-            return;
-        }
-
+        ArgumentNullException.ThrowIfNull(provider);
         lock (Gate)
         {
-            _macGamepad ??= new MacGameControllerGamepad(outputEnabled: false);
+            _provider = provider;
         }
     }
+
+    public static void EnsureStarted() => Provider?.EnsureStarted();
 
     public static bool TryGetState(out HostGamepadState state)
     {
-        if (!OperatingSystem.IsMacOS())
+        if (Provider is { } provider)
         {
-            return SdlLauncherGamepad.TryGetState(out state);
+            return provider.TryGetState(out state);
         }
 
-        MacGameControllerGamepad? gamepad;
-        lock (Gate)
-        {
-            gamepad = _macGamepad;
-        }
-
-        if (gamepad is null)
-        {
-            state = default;
-            return false;
-        }
-
-        return gamepad.TryReadState(out state);
+        state = default;
+        return false;
     }
 
-    public static void Shutdown()
+    public static void Shutdown() => Provider?.Shutdown();
+
+    private static ILauncherGamepadProvider? Provider
     {
-        if (!OperatingSystem.IsMacOS())
+        get
         {
-            SdlLauncherGamepad.Shutdown();
-            return;
+            lock (Gate)
+            {
+                return _provider;
+            }
         }
-
-        MacGameControllerGamepad? gamepad;
-        lock (Gate)
-        {
-            gamepad = _macGamepad;
-            _macGamepad = null;
-        }
-
-        gamepad?.Dispose();
     }
 }

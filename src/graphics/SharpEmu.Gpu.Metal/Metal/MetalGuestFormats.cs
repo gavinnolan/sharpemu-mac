@@ -237,8 +237,9 @@ internal static class MetalGuestFormats
     {
         var format = (dataFormat, numberType, componentSwap) switch
         {
-            // Early G-buffer / scene targets (R16 + RG32). Keep in sync with
-            // VulkanVideoPresenter.TryDecodeRenderTargetFormat.
+            // Early G-buffer / scene targets (R16 + RG32). The same guest encodings are
+            // decoded by the Vulkan backend's TryDecodeRenderTargetFormat; keep both in sync
+            // (GuestSurfaceFormats in the shared engine is the backend-neutral half).
             (2, 0, _) => MtlPixelFormat.R16Unorm,
             (2, 1, _) => MtlPixelFormat.R16Snorm,
             (2, 4, _) => MtlPixelFormat.R16Uint,

@@ -9,8 +9,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <ProjectReference Include="..\SharpEmu.HLE\SharpEmu.HLE.csproj" />
     <ProjectReference Include="..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
     <ProjectReference Include="..\SharpEmu.ShaderCompiler\SharpEmu.ShaderCompiler.csproj" />
-    <ProjectReference Include="..\SharpEmu.ShaderCompiler.Metal\SharpEmu.ShaderCompiler.Metal.csproj" />
-    <ProjectReference Include="..\SharpEmu.ShaderCompiler.Vulkan\SharpEmu.ShaderCompiler.Vulkan.csproj" />
+    <!-- The backend emitters moved out with their backends: the MSL emitter is
+         referenced only by SharpEmu.Gpu.Metal and the SPIR-V emitter only by
+         SharpEmu.Gpu.Vulkan. The shared engine keeps the guest-facing
+         SharpEmu.ShaderCompiler above and nothing else. -->
     <!-- SysAbi export generator + analyzers (compile-time registry, NID validation). -->
     <ProjectReference Include="..\SharpEmu.SourceGenerators\SharpEmu.SourceGenerators.csproj"
                       OutputItemType="Analyzer"
@@ -28,13 +30,31 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <InternalsVisibleTo Include="SharpEmu.Core" />
   </ItemGroup>
 
+  <!-- Transitional friend assemblies for the graphics/platform package split.
+       The backends were carved out of this project, so they still reach a long
+       tail of its internals: IGuestGpuBackend and GuestGpu, the shared GPU
+       engine (IRenderHost, RenderExecutor, ShaderPipelineCache, GpuFatal,
+       GuestDataPool), the internal VideoOut diagnostics (RenderPhaseProfile,
+       WindowPollProfile, SubmissionFlowProfile, BufferUploadProfile,
+       PerfOverlay) and the internal HLE-export state they present for
+       (AgcExports, VideoOutExports, PadExports).
+
+       The alternative - making several hundred shared-engine members public -
+       would freeze the seam before it is settled, so the friend list is the
+       deliberate intermediate step. It is explicit, it names only the four
+       packages that were extracted from here, and it shrinks as the backend
+       surface is narrowed to the public contracts in Gpu/Abstractions. No
+       other assembly gets added to it. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="SharpEmu.Gpu.Metal" />
+    <InternalsVisibleTo Include="SharpEmu.Gpu.Vulkan" />
+    <InternalsVisibleTo Include="SharpEmu.Platform.MacOS" />
+    <InternalsVisibleTo Include="SharpEmu.Adapters.Sdl" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="FFmpeg.AutoGen" />
     <PackageReference Include="NLayer" />
-    <PackageReference Include="ppy.SDL3-CS" />
-    <PackageReference Include="Silk.NET.Vulkan" />
-    <PackageReference Include="Silk.NET.Vulkan.Extensions.EXT" />
-    <PackageReference Include="Silk.NET.Vulkan.Extensions.KHR" />
     <PackageReference Include="SkiaSharp" />
     <PackageReference Include="System.IO.Hashing" />
   </ItemGroup>

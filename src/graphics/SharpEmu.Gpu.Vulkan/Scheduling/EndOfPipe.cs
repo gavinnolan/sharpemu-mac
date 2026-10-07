@@ -30,7 +30,6 @@ public readonly record struct EndOfPipeSignal(
 
 public sealed class EndOfPipe
 {
-    public const ulong ReferenceClockFrequency = 100_000_000;
 
     private enum WriteSize : uint
     {
@@ -53,56 +52,6 @@ public sealed class EndOfPipe
     {
         _sink = sink;
         _flips = flips;
-    }
-
-    public static bool TryScaleReferenceClock(ulong hostTicks, ulong hostFrequency, out ulong value)
-    {
-        value = 0;
-        if (hostFrequency == 0)
-        {
-            return false;
-        }
-
-        var wholeSeconds = hostTicks / hostFrequency;
-        var remainder = hostTicks % hostFrequency;
-        if (wholeSeconds > ulong.MaxValue / ReferenceClockFrequency || remainder > ulong.MaxValue / ReferenceClockFrequency)
-        {
-            return false;
-        }
-
-        var wholeValue = wholeSeconds * ReferenceClockFrequency;
-        var fractionalValue = remainder * ReferenceClockFrequency / hostFrequency;
-        if (wholeValue > ulong.MaxValue - fractionalValue)
-        {
-            return false;
-        }
-
-        value = wholeValue + fractionalValue;
-        return true;
-    }
-
-    public static ulong ReadReferenceClock()
-    {
-        var hostFrequency = KernelRuntimeCompatExports.TscFrequency;
-        var hostTicks = KernelRuntimeCompatExports.ReadTscCounter();
-        if (!TryScaleReferenceClock(hostTicks, hostFrequency, out var value))
-        {
-            throw GpuFatal.Fatal($"Cannot convert the host clock: ticks=0x{hostTicks:X16} frequency={hostFrequency}");
-        }
-
-        return value;
-    }
-
-    public static void ReadGdsWords(ReadOnlySpan<byte> gds, Span<uint> destination, uint wordOffset, uint wordCount)
-    {
-        var offset = (ulong)wordOffset * sizeof(uint);
-        var size = (ulong)wordCount * sizeof(uint);
-        if (gds.IsEmpty || offset > (ulong)gds.Length || size > (ulong)gds.Length - offset || destination.Length < wordCount)
-        {
-            throw GpuFatal.Fatal($"Cannot read the requested GDS range: offset={wordOffset} size={wordCount} gds={gds.Length}");
-        }
-
-        gds.Slice((int)offset, (int)size).CopyTo(MemoryMarshal.AsBytes(destination));
     }
 
     public void RecordEndOfPipeSignal(in EndOfPipeSignal signal)

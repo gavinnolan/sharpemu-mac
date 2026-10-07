@@ -392,7 +392,7 @@ public static partial class AgcExports
         var userDataCount = declaredCount == 0 ? writtenCount : declaredCount;
         if (userDataCount > userData.Length)
         {
-            throw Gpu.Scheduling.SubmissionScheduler.Fatal($"The vertex program declares too many user registers: shader=0x{exportShaderAddress:X16} count={userDataCount}.");
+            throw Gpu.Scheduling.GpuFatal.Fatal($"The vertex program declares too many user registers: shader=0x{exportShaderAddress:X16} count={userDataCount}.");
         }
 
         VertexInputInfo input;

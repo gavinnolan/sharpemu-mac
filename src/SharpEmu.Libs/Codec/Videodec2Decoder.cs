@@ -3,6 +3,7 @@
 
 using System.Threading.Channels;
 using FFmpeg.AutoGen;
+using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.VideoOut;
 
 namespace SharpEmu.Libs.Codec;
@@ -19,11 +20,11 @@ namespace SharpEmu.Libs.Codec;
 /// thread may write to guest memory directly (the guest's stack slot may
 /// already be reused by the time they finish), so readiness is reported via
 /// TryConsumeProtocolReadySignal (metadata only) while pixels go straight
-/// to VulkanVideoPresenter.Submit from the scheduler thread.
+/// to the GPU backend's presenter from the scheduler thread.
 /// </summary>
 internal sealed unsafe class Videodec2Decoder : IDisposable
 {
-    // BGRA matches VulkanVideoPresenter.Submit; decode bypasses guest memory entirely.
+    // BGRA matches IGuestGpuBackend.Submit; decode bypasses guest memory entirely.
     private const AVPixelFormat OutputPixelFormat = AVPixelFormat.AV_PIX_FMT_BGRA;
 
     // Enough lookahead to absorb decode jitter without adding visible latency.
@@ -322,7 +323,7 @@ internal sealed unsafe class Videodec2Decoder : IDisposable
                 }
             }
 
-            VulkanVideoPresenter.Submit(item.Bgra, item.Width, item.Height);
+            GuestGpu.Current.Submit(item.Bgra, item.Width, item.Height);
             nextDeadline += frameInterval;
 
             // Resync to "now" if we fell behind, instead of burning through a deadline backlog unpaced.

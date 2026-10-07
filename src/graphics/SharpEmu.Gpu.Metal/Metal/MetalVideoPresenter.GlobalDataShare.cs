@@ -76,7 +76,7 @@ internal static partial class MetalVideoPresenter
         unsafe
         {
             var bytes = new ReadOnlySpan<byte>((void*)contents, ManagedCommandStreamHost.GdsBytes);
-            EndOfPipe.ReadGdsWords(bytes, destination, wordOffset, wordCount);
+            GlobalDataShare.ReadWords(bytes, destination, wordOffset, wordCount);
         }
     }
 

@@ -52,10 +52,13 @@ fi
 
 # Metal-only: a Vulkan loader, an ICD manifest or a MoltenVK dylib in the
 # output means something re-introduced a GPU dependency this fork removed.
-# Scoped to native payloads and loader manifests on purpose — the managed
-# SharpEmu.ShaderCompiler.Vulkan.dll, Silk.NET.Vulkan.dll and
-# Avalonia.Vulkan.dll assemblies are part of the cross-platform build and are
-# expected to be present.
+# Scoped to native payloads and loader manifests: the managed Vulkan/SDL
+# assemblies are now kept out of a macOS closure by project reference instead
+# (SharpEmu.Gpu.Vulkan, SharpEmu.Adapters.Sdl and SharpEmu.ShaderCompiler.Vulkan
+# are referenced only for win-*/linux-* RIDs), which SharpEmuMacValidatePublishClosure
+# in macos.targets enforces before single-file bundling - the place this
+# directory scan cannot reach. Avalonia.Vulkan.dll is still expected: it is
+# Avalonia's own managed assembly and ships on every platform.
 forbidden_find_args=(
     '(' -iname '*moltenvk*' ')'
     -o '(' -iname 'libvulkan*' ')'
@@ -68,15 +71,48 @@ forbidden_find_args=(
     -o '(' -name '*.so.*' ')'
 )
 
-# SDL3 is still on the macOS runtime path until the native AppKit
-# window/input backend lands, so it is only forbidden on request. The
-# SharpEmuMacForbidSdl MSBuild property (and SHARPEMU_MAC_FORBID_SDL for the
-# bundle script) flips to true once that workstream merges.
+# The macOS runtime path is native (Metal, AppKit, GameController), so SDL3 is
+# forbidden; SharpEmuMacForbidSdl defaults to true and the bundle script passes
+# SHARPEMU_MAC_FORBID_SDL. It stays a flag so a bisect can turn it off.
 if [ "${forbid_sdl}" = true ]; then
     forbidden_find_args+=(-o '(' -iname '*sdl3*' ')')
 fi
 
 forbidden="$(find "${directory}" -type f '(' "${forbidden_find_args[@]}" ')' | sort)"
+
+# Known-remaining entries, each with the reason it is still there. Mirrors
+# SharpEmuMacSdlClosureException in macos.targets, which holds the same two
+# files for the same reason; delete them together.
+#
+#   SDL3-CS.dll, libSDL3.dylib - SharpEmu.HLE still references ppy.SDL3-CS for
+#   HLE/Host/Sdl/SdlHostAudio, the default POSIX audio output. CoreAudio
+#   replaces it on macOS in the host-platform split, which moves SdlHostAudio
+#   out of HLE. Nothing else in a macOS artifact touches SDL: the window,
+#   keyboard, gamepads, haptics and display catalog are
+#   AppKit/GameController/CoreGraphics, and the SDL adapter package is
+#   referenced only for win-*/linux-* RIDs.
+allowed_basenames=(
+    'SDL3-CS.dll'
+    'libSDL3.dylib'
+)
+
+if [ -n "${forbidden}" ]; then
+    kept=""
+    while IFS= read -r entry; do
+        [ -n "${entry}" ] || continue
+        skip=false
+        for allowed in "${allowed_basenames[@]}"; do
+            if [ "$(basename "${entry}")" = "${allowed}" ]; then
+                skip=true
+                break
+            fi
+        done
+        [ "${skip}" = true ] || kept="${kept}${entry}"$'\n'
+    done <<EOF
+${forbidden}
+EOF
+    forbidden="$(printf '%s' "${kept}" | sed '/^$/d' | sort)"
+fi
 
 # RID-specific publish flattens the natives it selects, so a surviving
 # runtimes/<other-os> tree means asset selection did not happen at all.

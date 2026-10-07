@@ -29,6 +29,22 @@ internal sealed class FakeCpuMemory : ICpuMemory, IGuestMemoryAllocator
             SharpEmu.Libs.Agc.AgcExports.GetHeadlessCommandStreamForTests;
         SharpEmu.Libs.VideoOut.VulkanVideoPresenter.TestCommandStreamFactory =
             SharpEmu.Libs.Agc.AgcExports.GetHeadlessCommandStreamForTests;
+
+        // Unlike the shipped applications, the test assembly references every backend
+        // package, so it composes the one this machine can actually run: Metal on macOS,
+        // Vulkan elsewhere. Registering it here keeps GuestGpu.Current resolvable for the
+        // exports under test (behind the headless command-stream seam set above), which the
+        // old OS check used to do implicitly.
+        if (OperatingSystem.IsMacOS())
+        {
+            SharpEmu.Libs.Platform.MacOS.MacPlatform.Register();
+            SharpEmu.Libs.Gpu.Metal.MetalGpuBackend.Register();
+        }
+        else
+        {
+            SharpEmu.Libs.VideoOut.SdlPlatform.Register();
+            SharpEmu.Libs.Gpu.Vulkan.VulkanGpuBackend.Register();
+        }
     }
 
     public bool TryRead(ulong virtualAddress, Span<byte> destination)

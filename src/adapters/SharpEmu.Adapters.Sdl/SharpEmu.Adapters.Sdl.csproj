@@ -1,0 +1,41 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<!--
+  The SDL3 adapter: the host window and its event loop, keyboard and gamepad
+  input, pad output (rumble, trigger effects, lightbar) and the display
+  catalog, used on Windows and Linux.
+
+  Deliberately free of Silk.NET: SdlHostWindow exposes the Vulkan instance
+  extension list and the surface it creates as native handles, exactly as SDL's
+  own prototypes do, so the Vulkan type vocabulary stays inside
+  SharpEmu.Gpu.Vulkan and this package has no graphics-API reference at all.
+  It is never built for macOS - the AppKit/GameController package replaces it
+  there - which is what keeps libSDL3.dylib out of a macOS publish output.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\SharpEmu.HLE\SharpEmu.HLE.csproj" />
+    <ProjectReference Include="..\..\SharpEmu.Libs\SharpEmu.Libs.csproj" />
+    <ProjectReference Include="..\..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="SharpEmu.Libs.Tests" />
+    <!-- The Vulkan presenter owns the SDL window and its render loop. -->
+    <InternalsVisibleTo Include="SharpEmu.Gpu.Vulkan" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ppy.SDL3-CS" />
+  </ItemGroup>
+
+</Project>

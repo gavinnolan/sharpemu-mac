@@ -3,7 +3,6 @@
 
 using System.Diagnostics;
 using System.Globalization;
-using SharpEmu.Libs.Gpu.Buffers;
 
 namespace SharpEmu.Libs.Diagnostics;
 
@@ -45,10 +44,12 @@ internal static class DccWriterTrace
         return ulong.TryParse(text, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var parsed) ? parsed : 0;
     }
 
-    public static void Record(IGuestImageCache images, ulong address, ulong size)
+    // Takes an overlaps-DCC-metadata predicate rather than the image cache that answers it:
+    // the cache belongs to the graphics backend, while this trace is shared.
+    public static void Record(Func<ulong, ulong, bool> overlapsDccMetadata, ulong address, ulong size)
     {
         var targeted = TargetAddresses.Any(target => target >= address && target - address < size);
-        if (_reported.Count >= MaxReports || (!targeted && !(DccEnabled && images.OverlapsDccMetadata(address, size))) ||
+        if (_reported.Count >= MaxReports || (!targeted && !(DccEnabled && overlapsDccMetadata(address, size))) ||
             !_reported.Add((address, size, CurrentProgram)))
         {
             return;

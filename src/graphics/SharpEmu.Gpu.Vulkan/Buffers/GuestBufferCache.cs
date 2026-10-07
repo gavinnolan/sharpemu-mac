@@ -243,7 +243,8 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             buffer.NoteGpuWrite();
             if (Diagnostics.DccWriterTrace.Enabled)
             {
-                Diagnostics.DccWriterTrace.Record(RequireImageCache(), guestAddress, size);
+                var images = RequireImageCache();
+                Diagnostics.DccWriterTrace.Record(images.OverlapsDccMetadata, guestAddress, size);
             }
 
             if (!_gpuModifiedRanges.Contains(guestAddress, size))

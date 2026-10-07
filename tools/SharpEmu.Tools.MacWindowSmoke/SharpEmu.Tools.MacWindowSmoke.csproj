@@ -14,12 +14,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
 
-  <!-- Only SharpEmu.Libs, for MacHostWindow and HostVideoOptions. The tool runs
-       natively (arm64 or x64) because AppKit and Metal do not care about the
-       emulator's osx-x64 requirement; its Metal calls are its own tiny interop
-       so it needs nothing internal from the library. -->
+  <!-- SharpEmu.Platform.MacOS for MacHostWindow and the display catalog
+       provider, SharpEmu.Libs for HostVideoOptions. No graphics backend: the
+       tool's Metal calls are its own tiny interop, so it needs nothing from
+       SharpEmu.Gpu.Metal. It runs natively (arm64 or x64) because AppKit and
+       Metal do not care about the emulator's osx-x64 requirement. -->
   <ItemGroup>
     <ProjectReference Include="..\..\src\SharpEmu.Libs\SharpEmu.Libs.csproj" />
+    <ProjectReference Include="..\..\src\platforms\macos\SharpEmu.Platform.MacOS\SharpEmu.Platform.MacOS.csproj" />
   </ItemGroup>
 
 </Project>

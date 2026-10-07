@@ -492,7 +492,7 @@ internal static unsafe partial class VulkanVideoPresenter
         }
         private void CreateSurface()
         {
-            _surface = _window.CreateVulkanSurface(_instance);
+            _surface = new SurfaceKHR(_window.CreateVulkanSurface(_instance.Handle));
         }
 
         private void SelectPhysicalDevice()

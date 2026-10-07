@@ -187,7 +187,7 @@ public sealed partial class GpuCommandInterpreter
             case 4:
                 if (is64Bit)
                 {
-                    var clock = EndOfPipe.ReadReferenceClock();
+                    var clock = GpuReferenceClock.Read();
                     WriteQword(destination, clock);
                     switch (cacheAction)
                     {

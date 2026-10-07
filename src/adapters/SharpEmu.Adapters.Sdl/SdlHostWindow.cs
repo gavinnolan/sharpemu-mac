@@ -6,7 +6,6 @@ using System.Runtime.InteropServices;
 using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Pad;
 using SDL;
-using Silk.NET.Vulkan;
 using static SDL.SDL3;
 
 namespace SharpEmu.Libs.VideoOut;
@@ -175,20 +174,26 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
         return extensions;
     }
 
-    public SurfaceKHR CreateVulkanSurface(Instance instance)
+    /// <summary>
+    /// Creates a Vulkan surface for this window and returns its raw <c>VkSurfaceKHR</c>.
+    /// Handles cross as integers on purpose: SDL's own prototype takes and returns native
+    /// handles, so the adapter does not need the Vulkan bindings, and the graphics backend
+    /// keeps sole ownership of the Vulkan type vocabulary.
+    /// </summary>
+    public ulong CreateVulkanSurface(nint instanceHandle)
     {
         EnsureGraphicsApi(SdlGraphicsApi.Vulkan);
         VkSurfaceKHR_T* surface = null;
         if (!SDL_Vulkan_CreateSurface(
                 _window,
-                (VkInstance_T*)instance.Handle,
+                (VkInstance_T*)instanceHandle,
                 null,
                 &surface) || surface is null)
         {
             throw new InvalidOperationException($"SDL Vulkan surface creation failed: {GetError()}");
         }
 
-        return new SurfaceKHR(unchecked((ulong)surface));
+        return unchecked((ulong)surface);
     }
 
     public nint CreateMetalLayer()

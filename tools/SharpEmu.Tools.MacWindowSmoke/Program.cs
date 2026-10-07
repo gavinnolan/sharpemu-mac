@@ -34,6 +34,10 @@ internal static class Program
             return 2;
         }
 
+        // The display catalog is a registered provider, so the harness composes the macOS
+        // platform package the same way the application does.
+        MacPlatform.Register();
+
         var fullscreen = args.Contains("--fullscreen", StringComparer.Ordinal);
         var seconds = args
             .Where(argument => !argument.StartsWith("--", StringComparison.Ordinal))
