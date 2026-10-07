@@ -226,6 +226,14 @@ internal static partial class MetalVideoPresenter
         _textureSourceVersions.Add(source);
     }
 
+    // Metadata invalidation is real even before active queue/native ownership
+    // lands. Activation must also cancel explicit work owners and uncommitted
+    // native-use pins; this method alone does not claim resource cleanup.
+    private static void InvalidateTextureSourceVersionsLocked()
+    {
+        foreach (var source in _textureSourceVersions) source.Failed = true;
+    }
+
     internal static (long Producer, int References, bool Completed, bool Failed, ulong ReservedBytes) TextureSourceState(GuestDrawTexture texture)
     {
         lock (_gate)
