@@ -1,0 +1,67 @@
+<div id="sharpemu-platform-map">
+  <style>
+    #sharpemu-platform-map { color:var(--foreground); font-family:var(--font-sans); }
+    #sharpemu-platform-map .controls { display:flex; flex-wrap:wrap; align-items:center; gap:12px; margin-bottom:20px; }
+    #sharpemu-platform-map .controls label { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+    #sharpemu-platform-map .band { display:grid; grid-template-columns:150px minmax(0,1fr); gap:16px; padding:14px 0; border-bottom:1px solid var(--border); }
+    #sharpemu-platform-map .band:last-child { border-bottom:0; }
+    #sharpemu-platform-map .label { color:var(--muted-foreground); }
+    #sharpemu-platform-map .packages { display:flex; flex-wrap:wrap; gap:6px 16px; }
+    #sharpemu-platform-map code { overflow-wrap:anywhere; }
+    #sharpemu-platform-map .scope { margin-top:16px; color:var(--muted-foreground); }
+    #sharpemu-platform-map .context { margin-bottom:16px; }
+    #sharpemu-platform-map .flow { text-align:center; color:var(--muted-foreground); padding:8px 0; }
+    @media(max-width:500px) { #sharpemu-platform-map .band { grid-template-columns:1fr; gap:6px; } }
+  </style>
+  <div class="controls">
+    <label class="form-label" for="sharpemu-platform-choice">Platform
+      <select class="form-select" id="sharpemu-platform-choice">
+        <option value="macos">macOS</option>
+        <option value="windows">Windows</option>
+        <option value="linux">Linux</option>
+      </select>
+    </label>
+    <span>Proposed package boundaries</span>
+  </div>
+  <div id="sharpemu-platform-context" class="context" aria-live="polite">osx-x64 · Metal · Rosetta on Apple Silicon</div>
+  <div role="group" aria-label="Proposed platform-specific packages and shared emulator dependencies">
+    <div class="band"><span class="label">Application</span><div class="packages" id="sharpemu-apps"><code>App.MacOS.Cli</code><code>App.MacOS.Gui</code></div></div>
+    <div class="band"><span class="label">OS and CPU</span><div class="packages" id="sharpemu-hosts"><code>Platform.MacOS</code><code>Host.MacOS</code><code>Cpu.DirectExecution.MacOS.X64</code></div></div>
+    <div class="band"><span class="label">Graphics</span><div class="packages" id="sharpemu-graphics"><code>Gpu.Metal</code><code>ShaderCompiler.Metal</code></div></div>
+    <div class="band"><span class="label">Selected adapters</span><div class="packages"><code>Adapters.Sdl</code><code>Media.FFmpeg</code><code>Fonts.Skia</code></div></div>
+  </div>
+  <div class="flow" aria-hidden="true">↓ implement and consume domain contracts ↓</div>
+  <div role="group" aria-label="Shared packages used by every platform">
+    <div class="band"><span class="label">Shared behavior</span><div class="packages"><code>Application</code><code>Core</code><code>HLE / Libs</code><code>Memory</code><code>Gpu</code><code>Media</code></div></div>
+    <div class="band"><span class="label">Shared machinery</span><div class="packages"><code>Cpu.DirectExecution</code><code>ShaderCompiler</code><code>Diagnostics</code><code>Domain abstractions</code></div></div>
+  </div>
+  <div class="scope">Metal default after qualification · Vulkan available in a separate Mac comparison profile · Native ARM64 CPU later</div>
+  <script>
+    (() => {
+      const root = document.getElementById('sharpemu-platform-map');
+      const choice = root.querySelector('#sharpemu-platform-choice');
+      const platforms = {
+        macos: {name:'MacOS', backend:'Metal', context:'osx-x64 · Metal · Rosetta on Apple Silicon'},
+        windows: {name:'Windows', backend:'Vulkan', context:'win-x64 · Vulkan · Existing x64 execution'},
+        linux: {name:'Linux', backend:'Vulkan', context:'linux-x64 · Vulkan · Existing x64 execution'}
+      };
+      function labels(id, values) {
+        const target = root.querySelector(id);
+        target.replaceChildren(...values.map(value => {
+          const code = document.createElement('code');
+          code.textContent = value;
+          return code;
+        }));
+      }
+      function update() {
+        const p = platforms[choice.value];
+        root.querySelector('#sharpemu-platform-context').textContent = p.context;
+        labels('#sharpemu-apps',['App.'+p.name+'.Cli','App.'+p.name+'.Gui']);
+        labels('#sharpemu-hosts',['Platform.'+p.name,'Host.'+p.name,'Cpu.DirectExecution.'+p.name+'.X64']);
+        labels('#sharpemu-graphics',['Gpu.'+p.backend,'ShaderCompiler.'+p.backend]);
+      }
+      choice.addEventListener('change', update);
+      update();
+    })();
+  </script>
+</div>
