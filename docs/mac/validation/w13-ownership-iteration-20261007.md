@@ -101,3 +101,25 @@ decoded records and correlation details under
 `artifacts/validation/integrated-20261007/game-poppy-native-c78e8ad/`.
 The frozen application archive is retained as
 `artifacts/validation/integrated-20261007/sharpemu-c78e8ad-osx-x64-app.zip`.
+
+## Reviewed writer admission
+
+Root source `820d4ba` includes a bounded queue correction: compute and render
+targets advertise writer sequences only after queue admission succeeds. Compute
+storage writer detection and content-change markers use normalized instruction
+access; readonly storage is not advertised or marked GPU-written. Unknown access,
+undefined flags and incomplete atomic intent fail explicitly before admission.
+CPU seeding initializes a texture without falsely marking it GPU-written.
+
+The integrated Rosetta selection passes 25/25 with no skips, covering real
+full-queue backpressure, failed admission, readonly/writable/atomic intent,
+duplicate content markers, retained CPU snapshots and fatal queue behavior.
+Evidence: `writer-admission-integration-x64.log` / `.trx` in the W13 directory.
+These tests use production admission and helper paths without a Metal device;
+they do not qualify native source ordering or repair the DS alias failure.
+
+Private source leases and preparation cleanup remain isolated with the source
+versioning work. Their synthetic lifetime tests are useful contract checks, but
+are not native writer/copy/completion proof. The separate storage layout review
+also leaves address-current image reuse explicitly unqualified until captured
+source, CPU generation and mapping ownership are enforced.
