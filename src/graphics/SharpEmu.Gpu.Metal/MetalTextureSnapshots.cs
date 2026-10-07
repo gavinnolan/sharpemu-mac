@@ -634,7 +634,7 @@ internal static class MetalTextureSnapshots
 
                 if (readSucceeded &&
                     (!SharpEmu.HLE.GuestImageWriteTracker.IsReadSnapshotStable(storageSnapshot) ||
-                     !MetalVideoPresenter.IsCpuTextureSnapshotObservationStable(descriptor.Address, storageObservation)))
+                     !MetalVideoPresenter.IsCpuTextureSnapshotAdmissionStable(descriptor.Address, storageObservation)))
                 {
                     if (snapshotAttempt < 2)
                     {
@@ -699,7 +699,7 @@ internal static class MetalTextureSnapshots
                 CpuSnapshotStable:
                     !readSucceeded ||
                     SharpEmu.HLE.GuestImageWriteTracker.IsReadSnapshotStable(storageSnapshot) &&
-                    MetalVideoPresenter.IsCpuTextureSnapshotObservationStable(descriptor.Address, storageObservation));
+                    MetalVideoPresenter.IsCpuTextureSnapshotAdmissionStable(descriptor.Address, storageObservation));
             MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(texture, storageObservation);
             return true;
         }
@@ -1045,7 +1045,7 @@ internal static class MetalTextureSnapshots
         out GuestDrawTexture texture)
     {
         if (SharpEmu.HLE.GuestImageWriteTracker.IsReadSnapshotStable(snapshot) &&
-            MetalVideoPresenter.IsCpuTextureSnapshotObservationStable(descriptor.Address, observation))
+            MetalVideoPresenter.IsCpuTextureSnapshotAdmissionStable(descriptor.Address, observation))
         {
             texture = snapshot.Active
                 ? candidate with

@@ -37,11 +37,27 @@ internal static partial class MetalVideoPresenter
         return new(beforeMappingEpoch, token, observed, byteCount);
     }
 
+    internal static bool IsCpuTextureSnapshotContentObservationStable(
+        ulong address, in CpuTextureSnapshotObservation observation) =>
+        !observation.Observed ||
+        GuestImageWriteTracker.TryGetObservedContentToken(address, observation.ByteCount, out var current) &&
+            current == observation.Token;
+
+    // Graph certification always retains the full conservative mapping veto.
     internal static bool IsCpuTextureSnapshotObservationStable(
         ulong address, in CpuTextureSnapshotObservation observation) =>
         observation.MappingEpoch == HostMemory.MappingGeneration &&
-        (!observation.Observed || GuestImageWriteTracker.TryGetObservedContentToken(address, observation.ByteCount, out var current) &&
-            current == observation.Token);
+        IsCpuTextureSnapshotContentObservationStable(address, observation);
+
+    // The existing graph-disabled path owns copied bytes, not a backing lease.
+    // Unrelated process-wide map/protect changes cannot certify a graph source,
+    // but do not invalidate an otherwise unchanged owned copy. Qualified owner
+    // identity/counter changes still veto admission, alongside ReadSnapshot.
+    internal static bool IsCpuTextureSnapshotAdmissionStable(
+        ulong address, in CpuTextureSnapshotObservation observation) =>
+        TextureSourceGraphEnabled
+            ? IsCpuTextureSnapshotObservationStable(address, observation)
+            : IsCpuTextureSnapshotContentObservationStable(address, observation);
 
     // Safe-side diagnostics only: these separately sampled scalars identify a
     // freshness veto, never establish a backing reservation or trap ordering.
