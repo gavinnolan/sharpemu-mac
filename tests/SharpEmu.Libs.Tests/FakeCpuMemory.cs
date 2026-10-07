@@ -22,9 +22,14 @@ internal sealed class FakeCpuMemory : ICpuMemory, IGuestMemoryAllocator
     }
 
     [System.Runtime.CompilerServices.ModuleInitializer]
-    internal static void ConfigureCommandStreamTests() =>
+    internal static void ConfigureCommandStreamTests()
+    {
+        // Command streams run inline whichever backend the host OS provides.
+        SharpEmu.Libs.Gpu.GuestGpu.HeadlessCommandStreamFactory =
+            SharpEmu.Libs.Agc.AgcExports.GetHeadlessCommandStreamForTests;
         SharpEmu.Libs.VideoOut.VulkanVideoPresenter.TestCommandStreamFactory =
             SharpEmu.Libs.Agc.AgcExports.GetHeadlessCommandStreamForTests;
+    }
 
     public bool TryRead(ulong virtualAddress, Span<byte> destination)
     {
