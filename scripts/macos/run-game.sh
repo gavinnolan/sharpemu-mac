@@ -140,6 +140,12 @@ done
 if [[ -n "$GPID" ]]; then
   shot "$OUT/shot-final.png"
   status="${status:-alive at ${SECONDS_LIMIT}s}"
+  # SHARPEMU_CAPTURE_STACKS=1 records managed (dotnet-stack, x64 runtime) and native (sample) stacks.
+  if [[ "${SHARPEMU_CAPTURE_STACKS:-0}" == "1" ]]; then
+    DOTNET_ROOT="${SHARPEMU_X64_DOTNET_ROOT:-$HOME/.dotnet-x64}" timeout 60 \
+      "$HOME/.dotnet/tools/dotnet-stack" report -p "$GPID" > "$OUT/stacks.txt" 2>&1 || true
+    sample "$GPID" 3 -file "$OUT/sample.txt" >/dev/null 2>&1 || true
+  fi
 fi
 echo "$status" > "$OUT/result.txt"
 echo "peak_rss_mb=$peak_mb" >> "$OUT/result.txt"
