@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu;
+
 namespace SharpEmu.Gpu.Metal;
 
 internal static partial class MetalVideoPresenter
@@ -54,6 +56,37 @@ internal static partial class MetalVideoPresenter
 
     private static void DropCanceledGuestQueueReferencesLocked()
     {
+        // Only still-queued work is unexecuted and owns its CPU payloads. A
+        // completed CWT owner may point at an array already returned/rerented;
+        // never use that history as authority to return it again.
+        var arrays = new HashSet<byte[]>(ReferenceEqualityComparer.Instance);
+        var indices = new HashSet<GuestIndexBufferLease>(ReferenceEqualityComparer.Instance);
+        foreach (var queue in _pendingGuestWorkByQueue.Values)
+            foreach (var pending in queue)
+                switch (pending.Work)
+                {
+                    case ComputeGuestDispatch compute:
+                        foreach (var buffer in compute.GlobalMemoryBuffers)
+                            if (buffer.Pooled) arrays.Add(buffer.Data);
+                        break;
+                    case OffscreenGuestDraw offscreen:
+                        foreach (var buffer in offscreen.Draw.GlobalMemoryBuffers)
+                            if (buffer.Pooled) arrays.Add(buffer.Data);
+                        foreach (var buffer in offscreen.Draw.VertexBuffers)
+                            if (buffer.Pooled) arrays.Add(buffer.Data);
+                        if (offscreen.Draw.IndexBuffer is { Pooled: true } index)
+                        {
+                            if (index.Lease is { } lease) indices.Add(lease);
+                            else arrays.Add(index.Data);
+                        }
+                        break;
+                }
+        // Record copies share the index lease. It owns its array return even if
+        // another descriptor in the canceled batch references that same array.
+        foreach (var queue in _pendingGuestWorkByQueue.Values)
+            foreach (var pending in queue)
+                if (pending.Work is OffscreenGuestDraw { Draw.IndexBuffer: { Pooled: true, Lease: not null } index })
+                    arrays.Remove(index.Data);
         _pendingGuestWorkByQueue.Clear();
         _pendingGuestQueueSchedule.Clear();
         _lastEnqueuedGuestWorkByQueue.Clear();
@@ -61,5 +94,13 @@ internal static partial class MetalVideoPresenter
         _pendingGuestWorkCount = 0;
         _pendingGuestWorkBytes = 0;
         _immediateFollowupTail = null;
+        // Clear queue ownership before returning arrays. Even a pool-cache
+        // allocation failure must not permit retry to return a newer lease.
+        Exception? failure = null;
+        foreach (var index in indices)
+            try { index.TryReturn(); } catch (Exception exception) { failure ??= exception; }
+        foreach (var array in arrays)
+            try { GuestDataPool.Shared.Return(array); } catch (Exception exception) { failure ??= exception; }
+        if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
 }

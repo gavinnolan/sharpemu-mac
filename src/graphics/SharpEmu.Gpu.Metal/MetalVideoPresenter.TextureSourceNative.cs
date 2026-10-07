@@ -205,10 +205,15 @@ internal static partial class MetalVideoPresenter
 
     // Own the real native commit operation; no metadata-only publication can
     // authorize a second buffer to read an uncommitted producer's copy.
+    // Private failure-injection boundary. Never assigned by production code;
+    // tests fail before the real commit without inventing native completion.
+    private static Action? _textureSourceBeforeNativeCommit;
+
     private static void CommitTextureSourceNativeCommands(nint commandBuffer)
     {
         if (_textureSourceNativeBatches.TryGetValue(commandBuffer, out var batch) && batch.Committed)
             throw new InvalidOperationException("Metal source command buffer has already been committed.");
+        _textureSourceBeforeNativeCommit?.Invoke();
         MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
         if (batch is not null) batch.Committed = true;
     }

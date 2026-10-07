@@ -948,7 +948,20 @@ internal static partial class MetalVideoPresenter
             // never issue partially encoded commands or acknowledge success.
             if (_guestWorkFailure is null)
             {
-                _ = FlushBatchedGuestCommands();
+                try { _ = FlushBatchedGuestCommands(); }
+                catch (Exception exception) when (_textureSourceGraphEnabled)
+                {
+                    lock (_gate)
+                    {
+                        _guestWorkFailure = exception;
+                        AbortQueuedTextureSourceWorkLocked();
+                        _batchOpen = false;
+                        _batchCommandBuffer = 0;
+                        Monitor.PulseAll(_gate);
+                    }
+                    if (exception is GpuFatalException) throw;
+                    throw GpuFatal.Fatal("Metal guest drain final flush failed.", exception);
+                }
             }
         }
     }

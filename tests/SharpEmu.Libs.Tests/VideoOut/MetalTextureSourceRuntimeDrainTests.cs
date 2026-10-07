@@ -133,6 +133,94 @@ public sealed class MetalTextureSourceRuntimeDrainTests
         }
     }
 
+    [Fact]
+    public void ActualFinalFlushFailureLatchesAndCancelsUnexecutedPayload()
+    {
+        using var state = new State();
+        var reports = new List<string>(); GpuFatal.OnFatal = reports.Add;
+        var before = GuestDataPool.DiagnosticStats().LeaseCount;
+        var data = GuestDataPool.Shared.Rent(64);
+        var cause = new InvalidOperationException("controlled precommit failure");
+        var oldHook = Field("_textureSourceBeforeNativeCommit").GetValue(null);
+        try
+        {
+            MetalVideoPresenter.SubmitOrderedGuestAction(() =>
+            {
+                Field("_batchOpen").SetValue(null, true);
+                Field("_batchCommandBuffer").SetValue(null, (nint)0);
+            }, "open controlled final-flush boundary");
+            state.AdmitComputePayload([new GuestMemoryBuffer(0, data, 64, 64, true)]);
+            Field("_textureSourceBeforeNativeCommit").SetValue(null, (Action)(() => throw cause));
+            // Zero budget exits after the first real ordered item. The final
+            // flush fails before native commit; no GPU completion is invented.
+            var error = Assert.Throws<TargetInvocationException>(() => Call("DrainGuestWorkCore", (nint)0, (nint)0, 0L));
+            Assert.Same(cause, Assert.IsType<GpuFatalException>(error.InnerException).InnerException);
+            Assert.Single(reports); Assert.Contains("final flush", reports[0]);
+            Assert.Same(cause, Field("_guestWorkFailure").GetValue(null));
+            Assert.False((bool)Field("_batchOpen").GetValue(null)!);
+            Assert.Equal(0, Field("_pendingGuestWorkCount").GetValue(null));
+            Assert.Equal(before, GuestDataPool.DiagnosticStats().LeaseCount);
+            Assert.Throws<GpuFatalException>(() => MetalVideoPresenter.DrainGuestWork(0, 0));
+            Assert.Single(reports);
+        }
+        finally { Field("_textureSourceBeforeNativeCommit").SetValue(null, oldHook); GuestDataPool.Shared.Return(data); }
+    }
+
+    [Fact]
+    public void ActualCloseReturnsCanceledUniquePayloadsAndIndexLeaseWithoutReturningForeignData()
+    {
+        using var state = new State();
+        GuestDataPool.Trim();
+        var before = GuestDataPool.DiagnosticStats().LeaseCount;
+        var shared = GuestDataPool.Shared.Rent(128);
+        var indexData = GuestDataPool.Shared.Rent(64);
+        var foreign = GuestDataPool.Shared.Rent(256);
+        var index = new GuestIndexBuffer(indexData, 64, false, true, new GuestIndexBufferLease(indexData));
+        byte[]? rentedIndex = null;
+        try
+        {
+            state.AdmitComputePayload([new GuestMemoryBuffer(0, shared, 128, 128, true), new GuestMemoryBuffer(0, foreign, 256, 256, false)]);
+            var target = new GuestRenderTarget(Address, 4, 4, 10, 0,
+                Registers: new ColorTargetWords(Address, 0, 10u << 2, 0, 3u | 3u << 14, 1u << 24, 0, 0, 0, 0, 0));
+            MetalVideoPresenter.SubmitOffscreenTranslatedDraw(new(new Gen5MslShader("", "canceled payload draw", Gen5MslStage.Pixel, 0)), [],
+                [new GuestMemoryBuffer(0, shared, 128, 128, true)], 0, [target], null, 3, 1, 4, index,
+                [new GuestVertexBuffer(0, 4, 0, 0, 0, 16, 0, shared, 128, true)], null, null, 0);
+            Call("CompletePresenterShutdown");
+            Assert.Equal(before + 1, GuestDataPool.DiagnosticStats().LeaseCount);
+            Assert.True(index.LeaseReturned);
+            rentedIndex = GuestDataPool.Shared.Rent(64); Assert.Same(indexData, rentedIndex);
+            Assert.False(index.TryReturnPooledData()); // must not steal rerented lease
+            Call("CompletePresenterShutdown");
+            Assert.Equal(before + 2, GuestDataPool.DiagnosticStats().LeaseCount);
+        }
+        finally
+        {
+            if (rentedIndex is not null) GuestDataPool.Shared.Return(rentedIndex);
+            GuestDataPool.Shared.Return(shared); GuestDataPool.Shared.Return(indexData); GuestDataPool.Shared.Return(foreign);
+        }
+        Assert.Equal(before, GuestDataPool.DiagnosticStats().LeaseCount);
+    }
+
+    [Fact]
+    public void CloseNeverReturnsCompletedWorkPayloadAfterItsArrayWasRerented()
+    {
+        using var state = new State(); GuestDataPool.Trim();
+        var before = GuestDataPool.DiagnosticStats().LeaseCount;
+        var data = GuestDataPool.Shared.Rent(64); byte[]? rerented = null;
+        try
+        {
+            var work = state.AdmitComputePayload([new GuestMemoryBuffer(0, data, 64, 64, true)]);
+            object?[] args = [null]; Assert.True((bool)Call("TryTakeGuestWork", args)!);
+            Assert.Same(work, args[0]!.GetType().GetProperty("Work")!.GetValue(args[0]));
+            Call("ReturnPooledComputeData", work); Call("CompleteGuestWork", args[0]);
+            rerented = GuestDataPool.Shared.Rent(64); Assert.Same(data, rerented);
+            Call("CompletePresenterShutdown");
+            Assert.Equal(before + 1, GuestDataPool.DiagnosticStats().LeaseCount);
+        }
+        finally { if (rerented is not null) GuestDataPool.Shared.Return(rerented); else GuestDataPool.Shared.Return(data); }
+        Assert.Equal(before, GuestDataPool.DiagnosticStats().LeaseCount);
+    }
+
     private sealed class State : IDisposable
     {
         private readonly MetalTextureSourceLeaseTests.State sourceState = new();
@@ -159,6 +247,15 @@ public sealed class MetalTextureSourceRuntimeDrainTests
             var work = pending.GetType().GetProperty("Work")!.GetValue(pending)!;
             sequences.Add(work, sequence);
             return work;
+        }
+        public object AdmitComputePayload(GuestMemoryBuffer[] buffers)
+        {
+            var shader = new MetalCompiledGuestShader(new Gen5MslShader("", "queued payload never encoded", Gen5MslStage.Compute, 0));
+            var sequence = MetalVideoPresenter.SubmitComputeDispatch(0, shader, [], buffers, 1, 1, 1, 0, 0, 0, true, null);
+            var pending = ((IDictionary)Field("_pendingGuestWorkByQueue").GetValue(null)!).Values.Cast<IEnumerable>()
+                .SelectMany(static queue => queue.Cast<object>()).Single(item => (long)item.GetType().GetProperty("Sequence")!.GetValue(item)! == sequence);
+            var work = pending.GetType().GetProperty("Work")!.GetValue(pending)!;
+            sequences.Add(work, sequence); return work;
         }
         public void Dispose()
         {

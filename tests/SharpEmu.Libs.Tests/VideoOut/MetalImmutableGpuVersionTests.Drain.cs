@@ -166,6 +166,41 @@ public sealed partial class MetalImmutableGpuVersionTests
         output.WriteLine("Actual same-version uncommitted native pin cannot produce a false release receipt for an unencoded queued peer; all64red bytes and close owners0 verified.");
     }
 
+    [Fact]
+    public void ActualRuntimeDrainFinalPrecommitFailureDiscardsEncodedConsumer()
+    {
+        if (!DeviceRequested()) return;
+        using var state = new NativeState(); using var memory = new NoGuestReadScope();
+        var reports = new List<string>(); GpuFatal.OnFatal = reports.Add;
+        output.WriteLine($"Device={state.DeviceName}; process_arch={RuntimeInformation.ProcessArchitecture}");
+        state.PrepareControlledProducer(new MtlClearColor { Red = 1, Alpha = 1 });
+        var read = state.CaptureFromProductionPreparation(memory.Memory, false);
+        state.PrepareControlledProducer(new MtlClearColor { Green = 1, Alpha = 1 });
+        var consumer = state.AdmitConsumer(read, writeBack: false);
+        MetalVideoPresenter.ReleasePreparedTextureSources([read]);
+        var cause = new InvalidOperationException("controlled native final-precommit failure");
+        var oldHook = Field("_textureSourceBeforeNativeCommit").GetValue(null);
+        try
+        {
+            Field("_textureSourceBeforeNativeCommit").SetValue(null, (Action)(() => throw cause));
+            var failure = Assert.Throws<TargetInvocationException>(() => state.DrainWithControlledBudget());
+            Assert.Same(cause, Assert.IsType<GpuFatalException>(failure.InnerException).InnerException);
+            Assert.Single(reports); Assert.Contains("final flush", reports[0]);
+            Assert.Same(cause, Field("_guestWorkFailure").GetValue(null));
+            Assert.True(NativeState.ReleaseReceipt(consumer).BeforeCommit);
+            Assert.Equal(0, MetalVideoPresenter.TextureSourceState(read).References);
+            Assert.False((bool)Field("_batchOpen").GetValue(null)!);
+            Assert.Empty((IDictionary)Field("_textureSourceNativeBatches").GetValue(null)!);
+            Assert.Equal((nint)0, Field("_lastFlushedCommandBuffer").GetValue(null));
+            using var result = state.RetainDrainOutput();
+            Assert.Equal(Enumerable.Repeat((byte)0xA5, 64).ToArray(), result.Read());
+            state.AssertNoCpuFallbackAfterFatal(memory.Memory);
+            state.CloseThroughRuntimeHook(); Assert.Equal(0, memory.Memory.Reads);
+            output.WriteLine("Actual final-flush precommit failure latched once; encoded consumer discarded, all64A5 bytes unchanged, zeroCPUreads and close owners0.");
+        }
+        finally { Field("_textureSourceBeforeNativeCommit").SetValue(null, oldHook); }
+    }
+
     private sealed class NoGuestReadScope : IDisposable
     {
         private readonly object? previous = Field("_guestMemory").GetValue(null);

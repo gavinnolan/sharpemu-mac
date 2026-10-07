@@ -322,7 +322,7 @@ This closes the precompletion owner-release test gap. Work owner release is
 manual in the fixture; production Drain writer/error/shutdown integration and
 CPU backing/copy leases remain unqualified, and the application graph stays off.
 
-### W13 actual drain lifecycle followup (not yet device-qualified)
+### W13 actual drain lifecycle proof (source 72750f1)
 
 The private disabled graph now conditionally releases the exact queued work
 owner in `CompleteGuestWork`. Successful native pins record their exact work's
@@ -363,3 +363,30 @@ skipped/failed shader encoders must never certify output readiness.
 The matching CPU-only source/admission/scheduler/frontend/drain selection passed
 111/111 on ARM64 and 111/111 on Rosetta x64, including five new runtime lifecycle
 cases. These managed results do not execute or qualify the six device fixtures.
+
+Clean `72750f17e20bffda1a13bbf3d1751948d63e6f01` passed all six actual
+required-device cases on Apple M4: ARM64 6/6 (275 ms), Rosetta x64 6/6
+(848 ms), no skips. Both runs used identical neutral assembly hashes and the
+shared machine lock. Source/commands, log, TRX, runner and parsed actual-execution
+markers are retained under `artifacts/validation/metal-agent/immutable-drain-72750f1-{arm,x64}`.
+The assertions read every output byte, prove zero CPU guest reads, and inspect
+exact queued-owner receipts plus native pin/registry/budget cleanup. Runtime
+producer execution, full ISA coverage and production activation remain excluded.
+
+### Final-flush and canceled payload followup
+
+Graph-enabled drain now latches final-flush failures and cancels source/queue
+ownership. Native batches already marked committed keep their pins; only
+uncommitted batches are discarded. A private default-null before-commit failure
+hook permits a real encoded consumer to fail before commit without inventing
+hardware completion. The new device fixture is compiled but not yet executed.
+
+Cancellation inventories only still-queued unexecuted compute/draw payloads,
+deduplicates pooled global/vertex arrays across the canceled queues, and returns
+shared index leases through their idempotent owner. Queue ownership is removed
+before returns, so a repeated close cannot return an array that has been rerented.
+Completed CWT work history is never used to return CPU data. Managed tests use the
+actual pool lease count/rerent paths, including cross-work duplicates, foreign
+nonpooled data, index late copies and a completed work's newer array lease.
+In-flight partial pool returns, presentation-carried payload ownership and broad
+CPU producer/copy serialization remain separate qualification work.
