@@ -121,13 +121,19 @@ fi
 # arm64-only one would fail to load at runtime with a confusing dyld error, so
 # catch it here instead.
 arch_failures=""
+# MSBuild may inherit Rosetta's execution architecture while Command Line
+# Tools ship ARM64-only. Inspect x64 payloads using the host's native lipo.
+lipo_command=(/usr/bin/lipo)
+if [ "$(/usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null || true)" = "1" ]; then
+    lipo_command=(/usr/bin/arch -arm64 /usr/bin/lipo)
+fi
 while IFS= read -r candidate; do
     [ -n "${candidate}" ] || continue
     case "$(file -b "${candidate}")" in
         *Mach-O*) ;;
         *) continue ;;
     esac
-    slices="$(lipo -archs "${candidate}" 2>/dev/null || true)"
+    slices="$("${lipo_command[@]}" -archs "${candidate}" 2>/dev/null || true)"
     case " ${slices} " in
         *" x86_64 "*) ;;
         *) arch_failures="${arch_failures}${candidate} [${slices:-unreadable}]"$'\n' ;;
