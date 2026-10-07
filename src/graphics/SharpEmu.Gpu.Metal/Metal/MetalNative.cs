@@ -130,6 +130,9 @@ internal static partial class MetalNative
     public static partial void objc_autoreleasePoolPop(nint pool);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    internal static partial void SendVoidFloat(nint receiver, nint selector, float value);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint Send(nint receiver, nint selector);
 
     /// <summary>objc_msgSend for -gpuResourceID. MTLResourceID is a one-field

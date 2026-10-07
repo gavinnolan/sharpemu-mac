@@ -1494,6 +1494,14 @@ internal static partial class MetalVideoPresenter
             return 0;
         }
 
+        // A CPU snapshot does not carry per-sample MSAA data. Binding a
+        // single-sample 2D texture to texture2d_ms would be undefined behavior.
+        if (texture.Type is 14 or 15)
+        {
+            throw new NotSupportedException(
+                $"Metal cannot materialize per-sample guest texture type {texture.Type} at 0x{texture.Address:X}.");
+        }
+
         var cacheable = IsCacheableDrawTexture(texture);
 
         // Feedback reads of a live guest render target sample an ordered
@@ -1630,6 +1638,16 @@ internal static partial class MetalVideoPresenter
             texture.Width,
             texture.Height,
             mipmapped: false);
+        if (texture.MipUploads is { Length: > 0 } mipUploads)
+        {
+            var levelCount = mipUploads.Max(static upload => upload.MipLevel) + 1;
+            if (levelCount != mipUploads.Length ||
+                !mipUploads.Select(static upload => upload.MipLevel).Order().SequenceEqual(
+                    Enumerable.Range(0, mipUploads.Length).Select(static level => (uint)level)))
+                throw new InvalidOperationException("Metal texture mip snapshot must cover every mip level exactly once.");
+            MetalNative.Send(descriptor, MetalNative.Selector("setMipmapLevelCount:"), (nint)levelCount);
+        }
+
         // MTLStorageModeShared (0): CPU-uploaded (replaceRegion) + GPU-sampled;
         // the Managed default reads stale on unified memory (see CreateGuestTexture).
         MetalNative.Send(descriptor, MetalNative.Selector("setStorageMode:"), (nint)0);
@@ -1715,7 +1733,7 @@ internal static partial class MetalVideoPresenter
             Gen5TextureType3D => (MtlTextureType3D, 1u, Math.Max(texture.Depth, 1u)),
             Gen5TextureTypeCube => (MtlTextureType2DArray, layers, 1u),
             Gen5TextureType1D or Gen5TextureType1DArray =>
-                arrayed ? (MtlTextureType1DArray, layers, 1u) : (MtlTextureType1D, 1u, 1u),
+                arrayed ? (MtlTextureType2DArray, layers, 1u) : (MtlTextureType2D, 1u, 1u),
             _ => arrayed ? (MtlTextureType2DArray, layers, 1u) : (MtlTextureType2D, 1u, 1u),
         };
     }
@@ -1730,6 +1748,12 @@ internal static partial class MetalVideoPresenter
         uint pitch,
         in MetalTextureFormat format)
     {
+        if (texture.MipUploads is { Length: > 0 })
+        {
+            ReplaceMipChainContents(handle, texture, format);
+            return;
+        }
+
         var shape = GuestTextureShape(texture);
         if (shape.ArrayLength > 1 || shape.Depth > 1)
         {
@@ -1772,14 +1796,47 @@ internal static partial class MetalVideoPresenter
         }
     }
 
+    // Snapshot mip ranges are mip-major, with each level's layers contiguous.
+    // These are already detiled bytes; do not reinterpret them as one base level.
+    private static unsafe void ReplaceMipChainContents(nint handle, GuestDrawTexture texture,
+        in MetalTextureFormat format)
+    {
+        var shape = GuestTextureShape(texture);
+        if (shape.Depth > 1)
+            throw new NotSupportedException("Metal volume mip-chain snapshots need per-level depth ranges.");
+        var selector = MetalNative.Selector("replaceRegion:mipmapLevel:slice:withBytes:bytesPerRow:bytesPerImage:");
+        foreach (var upload in texture.MipUploads!)
+        {
+            var rowPitch = Math.Max(upload.RowLength, upload.Width);
+            var rowBytes = format.IsBlockCompressed
+                ? ((ulong)rowPitch + 3) / 4 * format.BlockBytes
+                : (ulong)rowPitch * format.BytesPerPixel;
+            var rows = format.IsBlockCompressed ? ((ulong)upload.Height + 3) / 4 : upload.Height;
+            var sliceBytes = checked(rowBytes * rows);
+            var end = checked(upload.BufferOffset + sliceBytes * shape.ArrayLength);
+            if (rowBytes == 0 || end > (ulong)texture.RgbaPixels.Length)
+                throw new InvalidOperationException($"Metal texture mip {upload.MipLevel} has incomplete layer data.");
+            fixed (byte* bytes = texture.RgbaPixels)
+            {
+                for (uint layer = 0; layer < shape.ArrayLength; layer++)
+                {
+                    MetalNative.SendReplaceRegionSlice(handle, selector,
+                        new MtlRegion { Width = upload.Width, Height = upload.Height, Depth = 1 },
+                        upload.MipLevel, layer, (nint)(bytes + upload.BufferOffset + sliceBytes * layer),
+                        (nuint)rowBytes, 0);
+                }
+            }
+        }
+    }
+
     /// <summary>
     /// Uploads an array or volume texture. The detiled source is layer-major (see the
     /// per-layer detile loop in CreateDrawTexture), so each slice is a contiguous run of
     /// one 2D image. A volume goes up in a single call with the depth stride, because
     /// Metal walks a 3D region itself; array layers need one call per slice.
     ///
-    /// Short source data uploads the layers it covers and leaves the rest cleared, which
-    /// keeps a partially resident array sampling zeros instead of refusing the draw.
+    /// Incomplete source data is rejected; Metal allocation contents are undefined
+    /// until uploaded, so missing slices must never be described as cleared.
     /// </summary>
     private static unsafe void ReplaceLayeredTextureContents(
         nint handle,
@@ -1809,9 +1866,9 @@ internal static partial class MetalVideoPresenter
         }
 
         var available = (ulong)texture.RgbaPixels.Length / bytesPerImage;
-        if (available == 0)
+        if (available < Math.Max(shape.Depth, shape.ArrayLength))
         {
-            return;
+            throw new InvalidOperationException("Metal layered texture snapshot does not cover every layer/depth slice.");
         }
 
         var selector = MetalNative.Selector("replaceRegion:mipmapLevel:slice:withBytes:bytesPerRow:bytesPerImage:");
@@ -2068,6 +2125,14 @@ internal static partial class MetalVideoPresenter
             descriptor,
             MetalNative.Selector("setMinFilter:"),
             minFilter is 1 or 3 ? 1 : 0);
+        var mipFilter = (sampler.Word2 >> 26) & 0x3;
+        if (mipFilter == 3)
+            throw new NotSupportedException("Metal sampler uses a reserved guest mip-filter encoding.");
+        MetalNative.Send(descriptor, MetalNative.Selector("setMipFilter:"), (nint)mipFilter);
+        MetalNative.SendVoidFloat(descriptor, MetalNative.Selector("setLodMinClamp:"),
+            mipFilter == 0 ? 0.0f : (sampler.Word1 & 0xFFF) / 256.0f);
+        MetalNative.SendVoidFloat(descriptor, MetalNative.Selector("setLodMaxClamp:"),
+            mipFilter == 0 ? 0.0f : ((sampler.Word1 >> 12) & 0xFFF) / 256.0f);
         // The stage argument buffer stores the sampler's resource id; Metal refuses one without this flag.
         MetalNative.SendVoidBool(descriptor, MetalNative.Selector("setSupportArgumentBuffers:"), true);
 
