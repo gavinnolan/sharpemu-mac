@@ -185,7 +185,7 @@ osx-x64, with the same integrated upstream base. Publish dependency/architecture
 guards and deep strict ad hoc signature verification pass. Final integrated
 fault/alias/queue/shape/architecture selection passes 136/136 x64 cases;
 five isolated native-return/fault workers also pass, including real protected-page
-SIGSEGV and unsupported-SSE4a SIGILL recovery. The ARM64 runner passes 96/96
+memory-fault and unsupported-SSE4a SIGILL recovery. The ARM64 runner passes 96/96
 alias/queue/shape/architecture cases; it does not run native x64 guest faults.
 Evidence: `final-guard-alias-x64`, `final-native-fault-x64`,
 `final-alias-architecture-arm64` `.log`/`.trx` pairs and
