@@ -63,3 +63,23 @@ exit remain separate acceptance checks.
 
 Extracted package namespaces and friend-access cleanup are documented in
 [package contracts](package-contracts.md).
+
+## Latest runtime status (2026-10-08)
+
+The local `4b5e0fa` build integrates a bounded, independently checked tile5 R16Uint
+volume path and a disabled GPU texture ownership graph. Combined managed checks
+pass200/200 on ARM64 and Rosetta; integrated native materialization passes40/40
+under Rosetta. The separate actual compute consumer oracle passes4/4 on each
+architecture, while production graph activation remains unfinished.
+
+Game verification caught a regression: the added CPU snapshot freshness guard
+rejects three attempts in both Poppy and Sarah. Poppy aborts before any frame;
+Sarah presents eight initial logo frames and stalls, without the earlier
+dd19db6 scene/movement/jump progression. That earlier evidence is historical,
+not current acceptance. Snapshot diagnosis/fix and fresh game verification are
+required before claiming the current build improves compatibility. See the
+[ownership/runtime journal](validation/w13-ownership-iteration-20261007.md).
+
+Guest font isolation/CoreText rendering is in progress. The Avalonia launcher
+still carries Skia; a native launcher/settings extraction is a separate remaining
+dependency, even after guest fonts stop using Skia on macOS.

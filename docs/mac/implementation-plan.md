@@ -1,6 +1,10 @@
 # Implementation plan and acceptance gates
 
-Status: proposed backlog, 2026-10-07. All items below are planned, not implemented.
+Status: acceptance backlog, updated2026-10-08. Several package/build/native backend
+portions are implemented; the gates below describe the complete target and do
+not imply that each workstream is accepted. See [current implementation status](README.md)
+and the [ownership/runtime journal](validation/w13-ownership-iteration-20261007.md)
+for implemented portions, exact evidence and remaining failures.
 The user asked for deeper platform packages and a complete plan; source import,
 runtime experiments, publication and package implementation have not started.
 
