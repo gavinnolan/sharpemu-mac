@@ -37,7 +37,7 @@ internal sealed class FakeCpuMemory : ICpuMemory, IGuestMemoryAllocator
         // old OS check used to do implicitly.
         if (OperatingSystem.IsMacOS())
         {
-            SharpEmu.Libs.Platform.MacOS.MacPlatform.Register();
+            SharpEmu.Platform.MacOS.MacPlatform.Register();
             SharpEmu.Gpu.Metal.MetalGpuBackend.Register();
         }
         else

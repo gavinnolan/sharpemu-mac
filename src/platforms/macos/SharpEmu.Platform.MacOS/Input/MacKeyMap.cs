@@ -1,7 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-namespace SharpEmu.Libs.Platform.MacOS;
+namespace SharpEmu.Platform.MacOS.Input;
 
 /// <summary>
 /// Virtual key codes from Carbon's <c>Events.h</c> (<c>kVK_*</c>), the values

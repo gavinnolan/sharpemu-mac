@@ -3,7 +3,7 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE.Host;
-using SharpEmu.Libs.Platform.MacOS;
+using SharpEmu.Platform.MacOS.Input;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Platform;

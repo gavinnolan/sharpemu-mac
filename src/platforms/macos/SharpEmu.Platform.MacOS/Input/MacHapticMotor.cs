@@ -4,7 +4,7 @@
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 
-namespace SharpEmu.Libs.Platform.MacOS;
+namespace SharpEmu.Platform.MacOS.Input;
 
 /// <summary>
 /// One continuous-rumble channel, built on GCDeviceHaptics plus CoreHaptics.

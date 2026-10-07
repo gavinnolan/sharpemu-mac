@@ -5,7 +5,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using SharpEmu.Libs.VideoOut;
 
-namespace SharpEmu.Libs.Platform.MacOS;
+namespace SharpEmu.Platform.MacOS.Display;
 
 /// <summary>
 /// Display and mode enumeration through CoreGraphics, with monitor names from

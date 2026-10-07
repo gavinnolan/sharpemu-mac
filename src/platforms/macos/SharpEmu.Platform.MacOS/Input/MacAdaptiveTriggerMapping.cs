@@ -4,7 +4,7 @@
 using System.Buffers.Binary;
 using SharpEmu.HLE.Host;
 
-namespace SharpEmu.Libs.Platform.MacOS;
+namespace SharpEmu.Platform.MacOS.Input;
 
 /// <summary>The GCDualSenseAdaptiveTrigger setter a decoded effect maps onto.</summary>
 internal enum MacAdaptiveTriggerMode

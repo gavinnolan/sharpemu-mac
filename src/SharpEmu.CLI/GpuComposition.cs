@@ -27,7 +27,7 @@ internal static class GpuComposition
         // throw PlatformNotSupportedException if the process somehow is not on macOS, so a
         // duplicate OperatingSystem.IsMacOS() here would only hide the real guard.
 #pragma warning disable CA1416
-        SharpEmu.Libs.Platform.MacOS.MacPlatform.Register();
+        SharpEmu.Platform.MacOS.MacPlatform.Register();
         SharpEmu.Gpu.Metal.MetalGpuBackend.Register();
 #pragma warning restore CA1416
 #elif SHARPEMU_GPU_VULKAN

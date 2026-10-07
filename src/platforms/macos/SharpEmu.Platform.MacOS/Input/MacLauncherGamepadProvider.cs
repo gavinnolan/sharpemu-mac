@@ -5,7 +5,7 @@ using System.Runtime.Versioning;
 using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Pad;
 
-namespace SharpEmu.Libs.Platform.MacOS;
+namespace SharpEmu.Platform.MacOS.Input;
 
 /// <summary>
 /// The macOS launcher pad: GameController.framework, read without the output path (no rumble,

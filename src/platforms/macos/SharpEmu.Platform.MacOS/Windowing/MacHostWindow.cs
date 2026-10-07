@@ -6,8 +6,9 @@ using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using SharpEmu.Libs.Pad;
 using SharpEmu.Libs.VideoOut;
+using SharpEmu.Platform.MacOS.Input;
 
-namespace SharpEmu.Libs.Platform.MacOS;
+namespace SharpEmu.Platform.MacOS.Windowing;
 
 /// <summary>
 /// The macOS presentation window: a native NSWindow with a layer-hosting NSView

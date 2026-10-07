@@ -2,18 +2,17 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
-using SharpEmu.Libs.Platform.MacOS;
+using SharpEmu.Platform.MacOS.Windowing;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Metal;
-using SharpEmu.Libs.Gpu;
 
 namespace SharpEmu.Gpu.Metal;
 
 /// <summary>
 /// The Metal presenter renders into the CAMetalLayer of a native AppKit window
 /// (<see cref="IMetalHostWindow"/>, implemented by
-/// <c>SharpEmu.Libs.Platform.MacOS.MacHostWindow</c>), which also owns keyboard
+/// <c>SharpEmu.Platform.MacOS.Windowing.MacHostWindow</c>), which also owns keyboard
 /// events and GameController gamepads. Nothing on this path touches SDL.
 /// </summary>
 internal static partial class MetalVideoPresenter

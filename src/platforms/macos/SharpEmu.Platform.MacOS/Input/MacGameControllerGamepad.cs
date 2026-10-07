@@ -6,7 +6,7 @@ using System.Runtime.Versioning;
 using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Pad;
 
-namespace SharpEmu.Libs.Platform.MacOS;
+namespace SharpEmu.Platform.MacOS.Input;
 
 /// <summary>
 /// Gamepad input and output through GameController.framework — the macOS
@@ -16,7 +16,7 @@ namespace SharpEmu.Libs.Platform.MacOS;
 /// GameController wants the main thread: controller connect/disconnect arrives as
 /// main-queue notifications and the profile snapshots are read from the run loop.
 /// This type is therefore created and polled exclusively from the AppKit window
-/// loop (<see cref="MacHostWindow"/>), and the <see cref="IHostGamepadOutput"/>
+/// loop (<see cref="Windowing.MacHostWindow"/>), and the <see cref="IHostGamepadOutput"/>
 /// calls that arrive from guest threads only record intent under a lock; the
 /// polling tick applies it. Connect/disconnect is detected by comparing
 /// <c>+[GCController controllers]</c> each tick rather than by installing an

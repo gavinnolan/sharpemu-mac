@@ -4,8 +4,10 @@
 using System.Runtime.Versioning;
 using SharpEmu.Libs.Pad;
 using SharpEmu.Libs.VideoOut;
+using SharpEmu.Platform.MacOS.Display;
+using SharpEmu.Platform.MacOS.Input;
 
-namespace SharpEmu.Libs.Platform.MacOS;
+namespace SharpEmu.Platform.MacOS;
 
 /// <summary>
 /// Composition root of the native macOS platform package: AppKit window, GameController pads
