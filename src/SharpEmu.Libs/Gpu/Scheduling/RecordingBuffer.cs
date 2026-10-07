@@ -3,20 +3,6 @@
 
 namespace SharpEmu.Libs.Gpu.Scheduling;
 
-public enum RecordedOperation : uint
-{
-    DispatchDirect,
-    DrawIndex,
-    DrawIndexAuto,
-    EopWrite,
-    EopInterrupt,
-    EopWriteBack,
-    EopFlip,
-    EopWriteBackFlip,
-    EopOnlyFlip,
-    Unknown,
-}
-
 public sealed class RecordingBuffer
 {
     private readonly IGpuTickDevice _device;

@@ -1,0 +1,37 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<!--
+  The native macOS platform package: AppKit window and event loop, the AppKit
+  keycode map, GameController pads with CoreHaptics output and adaptive
+  triggers, and the CoreGraphics/NSScreen display catalog.
+
+  It depends inward only. Everything it implements (IMetalHostWindow,
+  ILauncherGamepadProvider, HostDisplayCatalog's provider seam,
+  IHostGamepadOutput) is a contract in the shared engine, so this package
+  carries no reference to a graphics backend; SharpEmu.Gpu.Metal references
+  this, not the other way round. Apple's frameworks are loaded from the OS
+  through objc_msgSend, so there is no native asset to ship.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\SharpEmu.HLE\SharpEmu.HLE.csproj" />
+    <ProjectReference Include="..\..\..\SharpEmu.Libs\SharpEmu.Libs.csproj" />
+    <ProjectReference Include="..\..\..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="SharpEmu.Libs.Tests" />
+    <!-- The Metal presenter constructs MacHostWindow and the launcher pad. -->
+    <InternalsVisibleTo Include="SharpEmu.Gpu.Metal" />
+  </ItemGroup>
+
+</Project>

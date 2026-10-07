@@ -19,6 +19,15 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <ProjectReference Include="..\SharpEmu.ShaderCompiler.Tests\SharpEmu.ShaderCompiler.Tests.csproj" />
   </ItemGroup>
 
+  <!-- The test assembly is not shipped, so unlike the application it references
+       every backend and platform package and composes the one this machine can
+       run (see FakeCpuMemory.ConfigureCommandStreamTests). That is also what
+       lets the Metal and Vulkan backends be covered from one test run. -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\graphics\SharpEmu.Gpu.Metal\SharpEmu.Gpu.Metal.csproj" />
+    <ProjectReference Include="..\..\src\platforms\macos\SharpEmu.Platform.MacOS\SharpEmu.Platform.MacOS.csproj" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="xunit" />

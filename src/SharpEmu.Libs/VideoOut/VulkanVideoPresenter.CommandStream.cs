@@ -397,7 +397,7 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         public void ReadGds(Span<uint> destination, uint wordOffset, uint wordCount) =>
-            EndOfPipe.ReadGdsWords(_bufferCache.GdsBuffer.Mapped, destination, wordOffset, wordCount);
+            GlobalDataShare.ReadWords(_bufferCache.GdsBuffer.Mapped, destination, wordOffset, wordCount);
 
         public void RecordEndOfPipe(in EndOfPipeWrite write)
         {

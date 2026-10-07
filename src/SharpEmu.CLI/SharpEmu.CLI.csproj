@@ -37,6 +37,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <DefineConstants>$(DefineConstants);SHARPEMU_GPU_VULKAN</DefineConstants>
   </PropertyGroup>
 
+  <ItemGroup Condition="'$(_SharpEmuTargetsMac)' == 'true'">
+    <ProjectReference Include="..\graphics\SharpEmu.Gpu.Metal\SharpEmu.Gpu.Metal.csproj" />
+    <ProjectReference Include="..\platforms\macos\SharpEmu.Platform.MacOS\SharpEmu.Platform.MacOS.csproj" />
+  </ItemGroup>
+
   <PropertyGroup>
     <!-- GUI subsystem so starting without arguments opens the frontend with no
          console window; CLI mode re-attaches to the parent terminal's console. -->

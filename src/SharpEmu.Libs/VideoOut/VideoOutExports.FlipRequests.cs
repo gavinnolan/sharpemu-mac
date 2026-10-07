@@ -57,7 +57,7 @@ public static partial class VideoOutExports
             var result = TryReserveFlipRequest(handle, index, flipMode, flipArgument, gpuQueued: true, out var requestId);
             if (result != 0)
             {
-                throw SubmissionScheduler.Fatal(
+                throw GpuFatal.Fatal(
                     $"Could not submit the GPU flip: result=0x{result:X8} handle={handle} index={index} mode={flipMode} arg={flipArgument}");
             }
 

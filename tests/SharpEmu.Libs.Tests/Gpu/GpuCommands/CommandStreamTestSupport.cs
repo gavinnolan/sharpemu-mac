@@ -132,7 +132,7 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
     public void ReadGds(Span<uint> destination, uint wordOffset, uint wordCount)
     {
         Calls.Add($"read_gds {wordOffset} {wordCount}");
-        EndOfPipe.ReadGdsWords(Gds, destination, wordOffset, wordCount);
+        GlobalDataShare.ReadWords(Gds, destination, wordOffset, wordCount);
     }
 
     public void RecordEndOfPipe(in EndOfPipeWrite write)

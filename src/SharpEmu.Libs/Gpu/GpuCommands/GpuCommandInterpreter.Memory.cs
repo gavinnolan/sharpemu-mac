@@ -48,7 +48,7 @@ public sealed partial class GpuCommandInterpreter
             throw _host.Fatal($"The reference-clock copy is invalid: destination=0x{destination:X16} size={byteCount}.");
         }
 
-        var clock = EndOfPipe.ReadReferenceClock();
+        var clock = GpuReferenceClock.Read();
         if (byteCount == sizeof(uint))
         {
             WriteDword(destination, (uint)clock);

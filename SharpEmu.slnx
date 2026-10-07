@@ -19,6 +19,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <Project Path="src/SharpEmu.ShaderCompiler.Vulkan/SharpEmu.ShaderCompiler.Vulkan.csproj" />
     <Project Path="src/SharpEmu.SourceGenerators/SharpEmu.SourceGenerators.csproj" />
   </Folder>
+  <Folder Name="/src/graphics/">
+    <Project Path="src/graphics/SharpEmu.Gpu.Metal/SharpEmu.Gpu.Metal.csproj" />
+  </Folder>
+  <Folder Name="/src/platforms/">
+    <Project Path="src/platforms/macos/SharpEmu.Platform.MacOS/SharpEmu.Platform.MacOS.csproj" />
+  </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/SharpEmu.Libs.Tests/SharpEmu.Libs.Tests.csproj" />
     <Project Path="tests/SharpEmu.ShaderCompiler.Metal.Tests/SharpEmu.ShaderCompiler.Metal.Tests.csproj" />
