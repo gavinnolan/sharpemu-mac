@@ -237,12 +237,6 @@ internal static partial class MetalVideoPresenter
             }
         }
 
-        if (descriptor.Width == 0 || descriptor.Height == 0 ||
-            descriptor.Width > 16384 || descriptor.Height > 16384)
-        {
-            return null;
-        }
-
         if (descriptor.RgbaPixels.Length == 0)
             throw new InvalidOperationException($"Metal storage image 0x{descriptor.Address:X} has no complete initialization source.");
         var format = nativeFormat.Format;
@@ -314,6 +308,8 @@ internal static partial class MetalVideoPresenter
 
     internal static MetalTextureFormat StorageTextureFormat(GuestDrawTexture descriptor)
     {
+        if (descriptor.Width == 0 || descriptor.Height == 0 || descriptor.Width > 16384 || descriptor.Height > 16384)
+            throw new NotSupportedException($"Metal storage image 0x{descriptor.Address:X} has unsupported extent {descriptor.Width}x{descriptor.Height}.");
         var format = MetalGuestFormats.DecodeTextureFormat(descriptor.Format, descriptor.NumberType);
         if (format.IsBlockCompressed)
             throw new NotSupportedException($"Metal block-compressed storage image format {descriptor.Format}/{descriptor.NumberType} is unsupported.");
