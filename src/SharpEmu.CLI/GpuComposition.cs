@@ -1,0 +1,43 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+namespace SharpEmu.CLI;
+
+/// <summary>
+/// Static composition of the graphics backend and the host platform adapters.
+///
+/// Which packages exist in the build is decided by the publish RID, not at runtime: the
+/// SHARPEMU_GPU_* constants come from the conditional ItemGroups in SharpEmu.CLI.csproj, so an
+/// osx-x64 artifact links SharpEmu.Gpu.Metal and SharpEmu.Platform.MacOS and contains no
+/// Vulkan, MoltenVK or SDL at all, while win-x64/linux-x64 link SharpEmu.Gpu.Vulkan and
+/// SharpEmu.Adapters.Sdl. There is deliberately no runtime probe and no fallback: a build has
+/// exactly one backend, and asking for another one is an error at registration time.
+/// </summary>
+internal static class GpuComposition
+{
+    /// <summary>
+    /// Installs the process's GPU backend, presenter, display catalog and launcher pad. Must run
+    /// before anything touches the renderer — that is, before emulation or the GUI starts.
+    /// </summary>
+    public static void Register()
+    {
+#if SHARPEMU_GPU_METAL
+        // CA1416 cannot see that SHARPEMU_GPU_METAL is only defined for osx-* RIDs, so it
+        // reads these [SupportedOSPlatform("macos")] calls as reachable everywhere. Both
+        // throw PlatformNotSupportedException if the process somehow is not on macOS, so a
+        // duplicate OperatingSystem.IsMacOS() here would only hide the real guard.
+#pragma warning disable CA1416
+        SharpEmu.Libs.Platform.MacOS.MacPlatform.Register();
+        SharpEmu.Libs.Gpu.Metal.MetalGpuBackend.Register();
+#pragma warning restore CA1416
+#elif SHARPEMU_GPU_VULKAN
+        SharpEmu.Libs.VideoOut.SdlPlatform.Register();
+        SharpEmu.Libs.Gpu.Vulkan.VulkanGpuBackend.Register();
+        // RenderDoc needs its layer allowed through the Vulkan loader before the first
+        // instance is created; the Metal build has no loader to configure.
+        SharpEmu.Libs.VideoOut.RenderDocCapture.ApplyGraphicsLoaderEnvironment();
+#else
+#error No GPU backend was composed. SharpEmu.CLI.csproj must define SHARPEMU_GPU_METAL or SHARPEMU_GPU_VULKAN for the target RID.
+#endif
+    }
+}

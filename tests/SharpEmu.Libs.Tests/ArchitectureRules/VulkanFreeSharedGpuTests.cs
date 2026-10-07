@@ -1,80 +1,150 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Xml.Linq;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.ArchitectureRules;
 
-// The macOS build is Metal-only and carries no Vulkan code at all, and the GPU backends are
-// on their way into separate SharpEmu.Gpu.Metal and SharpEmu.Gpu.Vulkan assemblies. Both
-// need the shared GPU engine and the Metal backend to speak the backend-neutral vocabulary
-// in Gpu/Abstractions rather than Silk.NET.Vulkan types, so this test scans the source tree
-// and fails on any reference that creeps back in. It reads the sources rather than the
-// compiled assembly because today everything still lives in one project.
+/// <summary>
+/// The macOS build is Metal/AppKit/GameController/CoreAudio only and carries no Vulkan, MoltenVK
+/// or SDL code at all (ADR 0002). Now that the backends live in their own assemblies, that is
+/// primarily a <em>reference</em> rule, so this fixture checks the project graph: it walks the
+/// transitive ProjectReference/PackageReference closure of every project a macOS artifact
+/// contains and fails on any edge into the Vulkan or SDL packages. A publish-closure guard in
+/// build/platforms/macos/macos.targets enforces the same thing on the shipped artifact; this
+/// test fails first, on a developer machine, with the offending edge named.
+///
+/// The source scan is kept alongside it because a reference is not the only way a dependency
+/// creeps back: a <c>using Silk.NET.Vulkan</c> added to a shared file would be caught here
+/// before someone "fixes" it by adding the package reference the project test forbids.
+/// </summary>
 public sealed class VulkanFreeSharedGpuTests
 {
-    // Folders that must stay free of the Vulkan graphics API. The Gpu folder itself is
-    // scanned without recursing, because its backend-neutral entry points sit next to the
-    // Vulkan-only resource caches in Gpu/Buffers, Gpu/Images and Gpu/Vulkan.
-    private static readonly (string Path, SearchOption Depth)[] ScannedDirectories =
+    // Every project in a macOS artifact's closure that must stay free of Vulkan and SDL. The
+    // Metal backend and the macOS platform package are in the list for the same reason as the
+    // shared engine: they are what replaced those dependencies.
+    private static readonly string[] MacOsClosureProjects =
     [
-        ("src/SharpEmu.Libs/Gpu", SearchOption.TopDirectoryOnly),
-        ("src/SharpEmu.Libs/Gpu/Abstractions", SearchOption.AllDirectories),
-        ("src/SharpEmu.Libs/Gpu/GpuCommands", SearchOption.AllDirectories),
-        ("src/SharpEmu.Libs/Gpu/Metal", SearchOption.AllDirectories),
-        ("src/SharpEmu.Libs/Gpu/Pipelines", SearchOption.AllDirectories),
-        ("src/SharpEmu.Libs/Gpu/Rendering", SearchOption.AllDirectories),
-        ("src/SharpEmu.Libs/Gpu/Scheduling", SearchOption.AllDirectories),
+        "src/SharpEmu.Libs/SharpEmu.Libs.csproj",
+        "src/SharpEmu.HLE/SharpEmu.HLE.csproj",
+        "src/SharpEmu.Core/SharpEmu.Core.csproj",
+        "src/graphics/SharpEmu.Gpu.Metal/SharpEmu.Gpu.Metal.csproj",
+        "src/platforms/macos/SharpEmu.Platform.MacOS/SharpEmu.Platform.MacOS.csproj",
+        "src/platforms/macos/SharpEmu.Host.MacOS/SharpEmu.Host.MacOS.csproj",
     ];
 
-    // Files inside the scanned folders that only the Vulkan backend uses, with the reason
-    // each one stays Vulkan. Keep this list short: a new entry means a file that the
-    // assembly split will have to move into SharpEmu.Gpu.Vulkan.
-    private static readonly Dictionary<string, string> Allowed = new(StringComparer.Ordinal)
-    {
-        // Writes VkWriteDescriptorSet arrays for the Vulkan descriptor path.
-        ["src/SharpEmu.Libs/Gpu/Pipelines/DescriptorWriter.cs"] = "Vulkan descriptor writes",
-        // Owns the Vulkan descriptor pools and set layouts.
-        ["src/SharpEmu.Libs/Gpu/Pipelines/DescriptorHeap.cs"] = "Vulkan descriptor pools",
-        // Records the Vulkan memory barrier that orders global-data-share traffic.
-        ["src/SharpEmu.Libs/Gpu/Pipelines/GlobalDataShareBarrier.cs"] = "Vulkan memory barrier",
-        // Maps guest vertex formats onto VkFormat for Vulkan vertex input state.
-        ["src/SharpEmu.Libs/Gpu/Pipelines/VertexAttributeFormats.cs"] = "Vulkan vertex input formats",
-        // Submits Vulkan command buffers to a VkQueue; the neutral parts of it (the fatal
-        // reporter) live in Gpu/Scheduling/GpuFatal.cs.
-        ["src/SharpEmu.Libs/Gpu/Scheduling/SubmissionScheduler.cs"] = "Vulkan queue submission",
-        // Defers VkImageMemoryBarrier2 records until a dynamic rendering scope ends; only
-        // the Vulkan presenter implements and uses it.
-        ["src/SharpEmu.Libs/Gpu/Scheduling/IRenderingState.cs"] = "Vulkan image barriers",
-    };
+    // Dependencies that must not appear anywhere in those closures.
+    private static readonly string[] ForbiddenDependencies =
+    [
+        "Silk.NET.Vulkan",
+        "Silk.NET.Vulkan.Extensions.EXT",
+        "Silk.NET.Vulkan.Extensions.KHR",
+        "Silk.NET.Core",
+        "ppy.SDL3-CS",
+        "SharpEmu.ShaderCompiler.Vulkan",
+        "SharpEmu.Gpu.Vulkan",
+        "SharpEmu.Adapters.Sdl",
+    ];
 
-    private static readonly string[] ForbiddenReferences =
+    // Edges that are still there, each with the reason and who removes it. Keep this list
+    // short: an entry is a dependency the macOS artifact still carries. Empty since the host
+    // split moved SdlHostAudio into SharpEmu.Adapters.Sdl and dropped ppy.SDL3-CS from
+    // SharpEmu.HLE -- the matching exemption in build/platforms/macos/macos.targets went with
+    // it. Keep the mechanism (and the unused-entry assertion below), not a standing exception.
+    private static readonly Dictionary<string, string> AllowedEdges = new(StringComparer.Ordinal);
+
+    // Directories whose sources must not name a Vulkan or SDL API.
+    private static readonly string[] ScannedProjectDirectories =
+    [
+        "src/SharpEmu.Libs",
+        "src/SharpEmu.HLE",
+        "src/SharpEmu.Core",
+        "src/graphics/SharpEmu.Gpu.Metal",
+        "src/platforms/macos/SharpEmu.Platform.MacOS",
+        "src/platforms/macos/SharpEmu.Host.MacOS",
+    ];
+
+    // No exceptions: HLE/Host/Sdl is gone (the host split moved SdlHostAudio into
+    // SharpEmu.Adapters.Sdl, which is referenced only for win-*/linux-* RIDs).
+    private static readonly string[] AllowedSourcePrefixes = [];
+
+    private static readonly string[] ForbiddenSourceReferences =
     [
         "Silk.NET",
         "SharpEmu.ShaderCompiler.Vulkan",
+        "using SDL;",
+        "SDL.SDL3",
     ];
 
     [Fact]
-    public void TheSharedGpuEngineAndTheMetalBackendDoNotReferenceVulkan()
+    public void NoProjectInTheMacOsClosureReferencesVulkanOrSdl()
     {
         var root = FindRepositoryRoot();
         var offenders = new List<string>();
 
-        foreach (var (relativeDirectory, depth) in ScannedDirectories)
+        foreach (var entry in MacOsClosureProjects)
         {
-            var directory = Path.Combine(root, relativeDirectory.Replace('/', Path.DirectorySeparatorChar));
+            var project = Resolve(root, entry);
+            Assert.True(File.Exists(project), $"The project is missing: {entry}.");
+
+            foreach (var edge in ForbiddenEdges(project))
+            {
+                if (!AllowedEdges.ContainsKey(edge))
+                {
+                    offenders.Add($"{entry}: {edge}");
+                }
+            }
+        }
+
+        Assert.Empty(offenders);
+    }
+
+    // An allowlisted edge that no longer exists would silently widen the rule, so every entry
+    // must still be a real dependency of the project it names.
+    [Fact]
+    public void EveryAllowedEdgeStillExists()
+    {
+        var root = FindRepositoryRoot();
+        var present = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var entry in MacOsClosureProjects)
+        {
+            foreach (var edge in ForbiddenEdges(Resolve(root, entry)))
+            {
+                present.Add(edge);
+            }
+        }
+
+        foreach (var (edge, reason) in AllowedEdges)
+        {
+            Assert.True(
+                present.Contains(edge),
+                $"The allowed edge '{edge}' ({reason}) is gone, so its entry should be removed " +
+                "here and in build/platforms/macos/macos.targets.");
+        }
+    }
+
+    [Fact]
+    public void NoSourceInTheMacOsClosureNamesVulkanOrSdl()
+    {
+        var root = FindRepositoryRoot();
+        var offenders = new List<string>();
+
+        foreach (var relativeDirectory in ScannedProjectDirectories)
+        {
+            var directory = Resolve(root, relativeDirectory);
             Assert.True(Directory.Exists(directory), $"The scanned folder is missing: {relativeDirectory}.");
 
-            foreach (var file in Directory.EnumerateFiles(directory, "*.cs", depth))
+            foreach (var file in Directory.EnumerateFiles(directory, "*.cs", SearchOption.AllDirectories))
             {
                 var relative = Path.GetRelativePath(root, file).Replace(Path.DirectorySeparatorChar, '/');
-                if (Allowed.ContainsKey(relative))
+                if (AllowedSourcePrefixes.Any(prefix => relative.StartsWith(prefix, StringComparison.Ordinal)))
                 {
                     continue;
                 }
 
                 var text = File.ReadAllText(file);
-                foreach (var reference in ForbiddenReferences)
+                foreach (var reference in ForbiddenSourceReferences)
                 {
                     if (text.Contains(reference, StringComparison.Ordinal))
                     {
@@ -87,23 +157,65 @@ public sealed class VulkanFreeSharedGpuTests
         Assert.Empty(offenders);
     }
 
-    // An allowlist entry that no longer names a Vulkan-only file would silently widen the
-    // rule, so every entry must exist and must still need the exemption.
-    [Fact]
-    public void EveryAllowlistedFileExistsAndStillNeedsTheExemption()
+    // Walks the project's transitive ProjectReference closure and returns every
+    // "<owner> -> <dependency>" edge that lands on a forbidden package or project. Edges rather
+    // than endpoints, so an exception names the project that actually pulls the dependency in
+    // instead of exempting every project that transitively reaches it.
+    private static IEnumerable<string> ForbiddenEdges(string projectPath)
     {
-        var root = FindRepositoryRoot();
-        foreach (var (relative, reason) in Allowed)
-        {
-            var file = Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar));
-            Assert.True(File.Exists(file), $"The allowlisted file is missing: {relative}.");
+        var edges = new SortedSet<string>(StringComparer.Ordinal);
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var queue = new Queue<string>();
+        queue.Enqueue(Path.GetFullPath(projectPath));
 
-            var text = File.ReadAllText(file);
-            Assert.True(
-                ForbiddenReferences.Any(reference => text.Contains(reference, StringComparison.Ordinal)),
-                $"{relative} no longer references Vulkan, so its allowlist entry ({reason}) should be removed.");
+        while (queue.Count > 0)
+        {
+            var current = queue.Dequeue();
+            if (!visited.Add(current) || !File.Exists(current))
+            {
+                continue;
+            }
+
+            var owner = Path.GetFileNameWithoutExtension(current);
+            var document = XDocument.Load(current);
+
+            foreach (var package in Attributes(document, "PackageReference"))
+            {
+                if (ForbiddenDependencies.Contains(package, StringComparer.Ordinal))
+                {
+                    edges.Add($"{owner} -> {package}");
+                }
+            }
+
+            foreach (var reference in Attributes(document, "ProjectReference"))
+            {
+                var referenced = Path.GetFullPath(Path.Combine(
+                    Path.GetDirectoryName(current)!,
+                    reference.Replace('\\', Path.DirectorySeparatorChar)));
+                var name = Path.GetFileNameWithoutExtension(referenced);
+                if (ForbiddenDependencies.Contains(name, StringComparer.Ordinal))
+                {
+                    edges.Add($"{owner} -> {name}");
+                    continue;
+                }
+
+                queue.Enqueue(referenced);
+            }
         }
+
+        return edges;
     }
+
+    // Element names in these csproj files carry no namespace, and an analyzer-only reference
+    // (ReferenceOutputAssembly=false) is still a build input worth following for its own refs.
+    private static IEnumerable<string> Attributes(XDocument document, string elementName) =>
+        document.Descendants(elementName)
+            .Select(element => (string?)element.Attribute("Include"))
+            .Where(value => !string.IsNullOrEmpty(value))
+            .Select(value => value!);
+
+    private static string Resolve(string root, string relative) =>
+        Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar));
 
     private static string FindRepositoryRoot()
     {

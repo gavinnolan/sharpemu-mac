@@ -197,7 +197,30 @@ public sealed class ModuleManager : IModuleManager
         assemblyName.StartsWith("System", StringComparison.Ordinal) ||
         string.Equals(assemblyName, "netstandard", StringComparison.Ordinal);
 
-    // Warm the interop assemblies guest threads reach (e.g. Silk.NET via the flip path).
+    // Interop assembly prefixes whose JIT warmup a guest thread can reach. SharpEmu's own
+    // assemblies always count; a package whose name is not ours has to be registered by
+    // whoever depends on it, because which one that is depends on the build - the Vulkan
+    // backend registers its bindings package, and a macOS build has no such assembly.
+    private static readonly List<string> GuestReachableInteropPrefixes = ["SharpEmu"];
+
+    /// <summary>
+    /// Adds an assembly-name prefix to the guest-reachable interop warmup. Called from a
+    /// composition root, before emulation starts.
+    /// </summary>
+    public static void RegisterGuestReachableInterop(string assemblyNamePrefix)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(assemblyNamePrefix);
+        lock (GuestReachableInteropPrefixes)
+        {
+            if (!GuestReachableInteropPrefixes.Contains(assemblyNamePrefix, StringComparer.Ordinal))
+            {
+                GuestReachableInteropPrefixes.Add(assemblyNamePrefix);
+            }
+        }
+    }
+
+    // Warm the interop assemblies guest threads reach (e.g. the GPU backend's bindings via
+    // the flip path).
     private static Assembly[] WithGuestReachableDependencies(Assembly[] scanned)
     {
         var result = new Dictionary<string, Assembly>(StringComparer.Ordinal);
@@ -240,9 +263,21 @@ public sealed class ModuleManager : IModuleManager
         return result.Values.ToArray();
     }
 
-    private static bool IsGuestReachableInterop(string assemblyName) =>
-        assemblyName.StartsWith("Silk.NET", StringComparison.Ordinal) ||
-        assemblyName.StartsWith("SharpEmu", StringComparison.Ordinal);
+    private static bool IsGuestReachableInterop(string assemblyName)
+    {
+        lock (GuestReachableInteropPrefixes)
+        {
+            foreach (var prefix in GuestReachableInteropPrefixes)
+            {
+                if (assemblyName.StartsWith(prefix, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
 
     public bool TryGetFunction(string nid, out Delegate function)
     {

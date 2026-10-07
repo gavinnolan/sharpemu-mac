@@ -48,6 +48,41 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <ProjectReference Include="..\platforms\windows\SharpEmu.Host.Windows\SharpEmu.Host.Windows.csproj" />
   </ItemGroup>
 
+  <!-- ===================================================================== -->
+  <!-- Graphics backend composition (GpuComposition.cs).                     -->
+  <!--                                                                       -->
+  <!-- The target RID picks the graphics backend and the host platform        -->
+  <!-- adapters, so a macOS artifact never restores Vulkan/SDL packages and a -->
+  <!-- Windows/Linux artifact never restores the macOS package. The RID->OS   -->
+  <!-- convention matches Directory.Build.props: osx-* => macOS, linux-* =>   -->
+  <!-- Linux, win-* => Windows, and an empty RID means "the build host's OS"  -->
+  <!-- (a RID-less `dotnet build` of this project is already given the host   -->
+  <!-- RID by Directory.Build.props, so the empty arms only cover an explicit -->
+  <!-- -p:RuntimeIdentifier=''). Kept in its own block, separate from the     -->
+  <!-- ItemGroup above, so the concurrent HLE host split merges cleanly.      -->
+  <!-- ===================================================================== -->
+  <PropertyGroup>
+    <_SharpEmuTargetsMac Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('osx')) Or ('$(RuntimeIdentifier)' == '' And $([MSBuild]::IsOSPlatform('OSX')))">true</_SharpEmuTargetsMac>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(_SharpEmuTargetsMac)' == 'true'">
+    <DefineConstants>$(DefineConstants);SHARPEMU_GPU_METAL</DefineConstants>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(_SharpEmuTargetsMac)' != 'true'">
+    <DefineConstants>$(DefineConstants);SHARPEMU_GPU_VULKAN</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(_SharpEmuTargetsMac)' == 'true'">
+    <ProjectReference Include="..\graphics\SharpEmu.Gpu.Metal\SharpEmu.Gpu.Metal.csproj" />
+    <ProjectReference Include="..\platforms\macos\SharpEmu.Platform.MacOS\SharpEmu.Platform.MacOS.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(_SharpEmuTargetsMac)' != 'true'">
+    <ProjectReference Include="..\graphics\SharpEmu.Gpu.Vulkan\SharpEmu.Gpu.Vulkan.csproj" />
+    <ProjectReference Include="..\adapters\SharpEmu.Adapters.Sdl\SharpEmu.Adapters.Sdl.csproj" />
+  </ItemGroup>
+
   <PropertyGroup>
     <!-- GUI subsystem so starting without arguments opens the frontend with no
          console window; CLI mode re-attaches to the parent terminal's console. -->

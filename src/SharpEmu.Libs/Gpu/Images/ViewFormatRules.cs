@@ -206,7 +206,7 @@ public static class ViewFormatRules
     {
         GpuFormat.D16Unorm or GpuFormat.D32Sfloat => GpuImageAspect.DepthBit,
         GpuFormat.D16UnormS8Uint or GpuFormat.D24UnormS8Uint or GpuFormat.D32SfloatS8Uint => GpuImageAspect.DepthBit | GpuImageAspect.StencilBit,
-        _ => throw SubmissionScheduler.Fatal($"The format is not a depth/stencil format: format={(int)format}."),
+        _ => throw GpuFatal.Fatal($"The format is not a depth/stencil format: format={(int)format}."),
     };
 
     public static GpuImageAspect FullAspects(GpuFormat format) => format switch
@@ -257,7 +257,7 @@ public static class ViewFormatRules
         ComponentSelector.Green => GpuComponentSwizzle.G,
         ComponentSelector.Blue => GpuComponentSwizzle.B,
         ComponentSelector.Alpha => GpuComponentSwizzle.A,
-        _ => throw SubmissionScheduler.Fatal($"The component selector is unknown: selector={selector}."),
+        _ => throw GpuFatal.Fatal($"The component selector is unknown: selector={selector}."),
     };
 
     public static GpuComponentMapping ComponentMapping(uint swizzle) => new(
@@ -287,7 +287,7 @@ public static class ViewFormatRules
     public static uint SelectSampledDepthView(GpuFormat imageFormat, GpuFormat viewFormat, uint swizzle) =>
         IsSupportedSampledDepthView(imageFormat, viewFormat, swizzle)
             ? swizzle
-            : throw SubmissionScheduler.Fatal($"The sampled depth view is not supported: imageFormat={(int)imageFormat} viewFormat={(int)viewFormat} swizzle=0x{swizzle:x3}.");
+            : throw GpuFatal.Fatal($"The sampled depth view is not supported: imageFormat={(int)imageFormat} viewFormat={(int)viewFormat} swizzle=0x{swizzle:x3}.");
 
     public static void ValidateStorageColorView(GpuFormat imageFormat, GpuFormat viewFormat, uint swizzle)
     {
@@ -298,5 +298,5 @@ public static class ViewFormatRules
     }
 
     private static Exception UnsupportedColorView(string usage, GpuFormat imageFormat, GpuFormat viewFormat, uint swizzle) =>
-        SubmissionScheduler.Fatal($"The {usage} color view is not supported: imageFormat={(int)imageFormat} viewFormat={(int)viewFormat} swizzle=0x{swizzle:x3}.");
+        GpuFatal.Fatal($"The {usage} color view is not supported: imageFormat={(int)imageFormat} viewFormat={(int)viewFormat} swizzle=0x{swizzle:x3}.");
 }

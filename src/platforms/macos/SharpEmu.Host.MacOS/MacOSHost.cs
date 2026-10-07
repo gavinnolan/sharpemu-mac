@@ -21,7 +21,12 @@ public static class MacOSHost
     /// must be rejected here rather than crash undefined later (x64 processes
     /// under Rosetta 2 report <see cref="Architecture.X64"/>).
     /// </exception>
-    public static IHostPlatform Create()
+    /// <param name="audio">
+    /// The audio output to use. Null uses this package's native CoreAudio
+    /// output, which is the qualified default here; SDL is deliberately not
+    /// referenced from the macOS host at all.
+    /// </param>
+    public static IHostPlatform Create(IHostAudioOutput? audio = null)
     {
         if (!OperatingSystem.IsMacOS() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
         {
@@ -30,7 +35,7 @@ public static class MacOSHost
                 "On Apple Silicon, use the osx-x64 build under Rosetta 2.");
         }
 
-        return new MacOSHostPlatform();
+        return new MacOSHostPlatform(audio ?? new MacCoreAudioOutput());
     }
 
     /// <summary>

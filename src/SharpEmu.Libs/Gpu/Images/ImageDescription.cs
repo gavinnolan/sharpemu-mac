@@ -298,7 +298,7 @@ public struct ImageDescription
         4 => GuestPixelFormat.Bits32Float,
         8 => GuestPixelFormat.Bits16_16_16_16Float,
         16 => GuestPixelFormat.Bits32_32_32_32Float,
-        _ => throw SubmissionScheduler.Fatal($"No transfer format exists for this render-target element size: bytes={bytesPerElement}."),
+        _ => throw GpuFatal.Fatal($"No transfer format exists for this render-target element size: bytes={bytesPerElement}."),
     };
 
     private static bool IsValidOptionalRange(GuestSpan range) => IsEmptyRange(range) || IsValidRange(range);
@@ -308,12 +308,12 @@ public struct ImageDescription
     {
         if (!IsValidOptionalRange(Data))
         {
-            throw SubmissionScheduler.Fatal($"The image data range is invalid: address=0x{Data.Address:X16} size=0x{Data.Size:X16}.");
+            throw GpuFatal.Fatal($"The image data range is invalid: address=0x{Data.Address:X16} size=0x{Data.Size:X16}.");
         }
 
         if (!IsValidOptionalRange(Stencil))
         {
-            throw SubmissionScheduler.Fatal($"The image stencil range is invalid: address=0x{Stencil.Address:X16} size=0x{Stencil.Size:X16}.");
+            throw GpuFatal.Fatal($"The image stencil range is invalid: address=0x{Stencil.Address:X16} size=0x{Stencil.Size:X16}.");
         }
 
         if (PixelFormat == GpuFormat.Undefined)
@@ -323,7 +323,7 @@ public struct ImageDescription
                 Extent.Width == 0 || Extent.Height == 0 || Extent.Depth == 0 ||
                 Resources.Levels != 1 || Resources.Layers != 1 || Samples != 1 || Pitch != 0 || BytesPerBlock != 0)
             {
-                throw SubmissionScheduler.Fatal("A stencil-association image must carry only a data range and an extent.");
+                throw GpuFatal.Fatal("A stencil-association image must carry only a data range and an extent.");
             }
 
             return;
@@ -333,33 +333,33 @@ public struct ImageDescription
             Resources.Levels > MaxLevels || Resources.Layers == 0 || VulkanSampleCount(Samples) == 0 ||
             BytesPerBlock == 0 || (Data.Address != 0 && Pitch == 0))
         {
-            throw SubmissionScheduler.Fatal($"The image geometry or format is invalid: extent={Extent.Width}x{Extent.Height}x{Extent.Depth} levels={Resources.Levels} layers={Resources.Layers} samples={Samples} bytesPerBlock={BytesPerBlock} pitch={Pitch}.");
+            throw GpuFatal.Fatal($"The image geometry or format is invalid: extent={Extent.Width}x{Extent.Height}x{Extent.Depth} levels={Resources.Levels} layers={Resources.Layers} samples={Samples} bytesPerBlock={BytesPerBlock} pitch={Pitch}.");
         }
 
         switch (Type)
         {
             case GuestImageType.Color1D when Extent.Height != 1 || Extent.Depth != 1:
-                throw SubmissionScheduler.Fatal($"A 1D image must have a height and depth of one: extent={Extent.Width}x{Extent.Height}x{Extent.Depth}.");
+                throw GpuFatal.Fatal($"A 1D image must have a height and depth of one: extent={Extent.Width}x{Extent.Height}x{Extent.Depth}.");
             case GuestImageType.Color3D when Resources.Layers != 1:
-                throw SubmissionScheduler.Fatal($"A 3D image cannot have array layers: layers={Resources.Layers}.");
+                throw GpuFatal.Fatal($"A 3D image cannot have array layers: layers={Resources.Layers}.");
             case GuestImageType.Color2D when Extent.Depth != 1:
-                throw SubmissionScheduler.Fatal($"A 2D image must have a depth of one: extent={Extent.Width}x{Extent.Height}x{Extent.Depth}.");
+                throw GpuFatal.Fatal($"A 2D image must have a depth of one: extent={Extent.Width}x{Extent.Height}x{Extent.Depth}.");
             case GuestImageType.Color1D:
             case GuestImageType.Color2D:
             case GuestImageType.Color3D:
                 break;
             default:
-                throw SubmissionScheduler.Fatal($"The image type is not a base type: type={(uint)Type}.");
+                throw GpuFatal.Fatal($"The image type is not a base type: type={(uint)Type}.");
         }
 
         if (Samples > 1 && Resources.Levels != 1)
         {
-            throw SubmissionScheduler.Fatal($"A multisampled image cannot have mip levels: samples={Samples} levels={Resources.Levels}.");
+            throw GpuFatal.Fatal($"A multisampled image cannot have mip levels: samples={Samples} levels={Resources.Levels}.");
         }
 
         if (Metadata.StencilCompressed && !HasStencil)
         {
-            throw SubmissionScheduler.Fatal("Compressed stencil metadata needs a stencil plane.");
+            throw GpuFatal.Fatal("Compressed stencil metadata needs a stencil plane.");
         }
 
         switch (Metadata.Kind)
@@ -368,14 +368,14 @@ public struct ImageDescription
                 if (!IsEmptyRange(Metadata.Range) || Metadata.Control != 0 ||
                     Metadata.Compression != DisplayCompression.Uncompressed || Metadata.StencilCompressed)
                 {
-                    throw SubmissionScheduler.Fatal("An image without metadata carries metadata state.");
+                    throw GpuFatal.Fatal("An image without metadata carries metadata state.");
                 }
 
                 break;
             case MetadataKind.Htile:
                 if (!IsValidRange(Metadata.Range) || Metadata.Compression != DisplayCompression.Uncompressed)
                 {
-                    throw SubmissionScheduler.Fatal($"The HTile metadata is invalid: address=0x{Metadata.Range.Address:X16} size=0x{Metadata.Range.Size:X16}.");
+                    throw GpuFatal.Fatal($"The HTile metadata is invalid: address=0x{Metadata.Range.Address:X16} size=0x{Metadata.Range.Size:X16}.");
                 }
 
                 break;
@@ -384,7 +384,7 @@ public struct ImageDescription
                     Metadata.Range.Size > TrackerLayout.SpaceBytes - Metadata.Range.Address ||
                     Metadata.Compression == DisplayCompression.Unsupported)
                 {
-                    throw SubmissionScheduler.Fatal($"The DCC metadata is invalid: address=0x{Metadata.Range.Address:X16} size=0x{Metadata.Range.Size:X16} compression={Metadata.Compression}.");
+                    throw GpuFatal.Fatal($"The DCC metadata is invalid: address=0x{Metadata.Range.Address:X16} size=0x{Metadata.Range.Size:X16} compression={Metadata.Compression}.");
                 }
 
                 break;
@@ -602,7 +602,7 @@ public static class GuestRangeOverlap
     {
         if (leftSize == 0 || rightSize == 0 || left > ulong.MaxValue - leftSize || right > ulong.MaxValue - rightSize)
         {
-            throw SubmissionScheduler.Fatal($"An image overlap range is invalid: left=0x{left:X16}+0x{leftSize:X} right=0x{right:X16}+0x{rightSize:X}.");
+            throw GpuFatal.Fatal($"An image overlap range is invalid: left=0x{left:X16}+0x{leftSize:X} right=0x{right:X16}+0x{rightSize:X}.");
         }
     }
 

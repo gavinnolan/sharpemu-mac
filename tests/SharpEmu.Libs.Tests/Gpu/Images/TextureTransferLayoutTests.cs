@@ -134,29 +134,29 @@ public sealed class TextureTransferLayoutTests
     [Fact]
     public void RenderTargetFormats_CombineHostSwizzleAndOrder()
     {
-        var standard = TextureTransferLayout.RenderTargetFormat(ChannelLayout.Bits8_8_8_8, ChannelType.UNorm, ChannelOrder.Standard);
+        var standard = GuestSurfaceFormats.RenderTargetFormat(ChannelLayout.Bits8_8_8_8, ChannelType.UNorm, ChannelOrder.Standard);
         Assert.Equal((GpuFormat.R8G8B8A8Unorm, 4u, ColorComponentMap.Identity), (standard.HostFormat, standard.BytesPerElement, standard.ExportMapping));
-        var alternate = TextureTransferLayout.RenderTargetFormat(ChannelLayout.Bits8_8_8_8, ChannelType.UNorm, ChannelOrder.Alternate);
+        var alternate = GuestSurfaceFormats.RenderTargetFormat(ChannelLayout.Bits8_8_8_8, ChannelType.UNorm, ChannelOrder.Alternate);
         Assert.Equal((GpuFormat.B8G8R8A8Unorm, ColorComponentMap.Identity), (alternate.HostFormat, alternate.ExportMapping));
-        var reversed = TextureTransferLayout.RenderTargetFormat(ChannelLayout.Bits8_8_8_8, ChannelType.Srgb, ChannelOrder.Reversed);
+        var reversed = GuestSurfaceFormats.RenderTargetFormat(ChannelLayout.Bits8_8_8_8, ChannelType.Srgb, ChannelOrder.Reversed);
         Assert.Equal((GpuFormat.R8G8B8A8Srgb, ColorComponentMap.Abgr), (reversed.HostFormat, reversed.ExportMapping));
-        var twoChannels = TextureTransferLayout.RenderTargetFormat(ChannelLayout.Bits8_8, ChannelType.UNorm, ChannelOrder.Alternate);
+        var twoChannels = GuestSurfaceFormats.RenderTargetFormat(ChannelLayout.Bits8_8, ChannelType.UNorm, ChannelOrder.Alternate);
         Assert.Equal(ColorComponentMap.Rabg, twoChannels.ExportMapping);
         Assert.Equal(2u, twoChannels.BytesPerElement);
 
         using var fatal = new FatalScope();
-        Assert.Throws<SchedulerFatalException>(() => TextureTransferLayout.RenderTargetFormat(ChannelLayout.Bits10_10_10_2Float, ChannelType.Float, ChannelOrder.Alternate));
-        Assert.Throws<SchedulerFatalException>(() => TextureTransferLayout.RenderTargetFormat(ChannelLayout.Bits32, ChannelType.UNorm, ChannelOrder.Standard));
+        Assert.Throws<SchedulerFatalException>(() => GuestSurfaceFormats.RenderTargetFormat(ChannelLayout.Bits10_10_10_2Float, ChannelType.Float, ChannelOrder.Alternate));
+        Assert.Throws<SchedulerFatalException>(() => GuestSurfaceFormats.RenderTargetFormat(ChannelLayout.Bits32, ChannelType.UNorm, ChannelOrder.Standard));
         Assert.All(fatal.Messages, message => Assert.Contains("render-target format combination is not supported", message));
     }
 
     [Fact]
     public void SurfaceFormats_RemapAndReportTheConversion()
     {
-        Assert.Equal(new SurfaceFormatInfo(GpuFormat.R32Uint, GuestPixelFormat.Bits11_11_10UInt), TextureTransferLayout.SurfaceFormat(GuestPixelFormat.Bits11_11_10UInt));
-        Assert.Equal(new SurfaceFormatInfo(GpuFormat.R8G8B8A8Unorm, GuestPixelFormat.Invalid), TextureTransferLayout.SurfaceFormat(GuestPixelFormat.Bits8_8_8_8UNorm));
+        Assert.Equal(new SurfaceFormatInfo(GpuFormat.R32Uint, GuestPixelFormat.Bits11_11_10UInt), GuestSurfaceFormats.SurfaceFormat(GuestPixelFormat.Bits11_11_10UInt));
+        Assert.Equal(new SurfaceFormatInfo(GpuFormat.R8G8B8A8Unorm, GuestPixelFormat.Invalid), GuestSurfaceFormats.SurfaceFormat(GuestPixelFormat.Bits8_8_8_8UNorm));
         using var fatal = new FatalScope();
-        Assert.Throws<SchedulerFatalException>(() => TextureTransferLayout.SurfaceFormat(GuestPixelFormat.Invalid));
+        Assert.Throws<SchedulerFatalException>(() => GuestSurfaceFormats.SurfaceFormat(GuestPixelFormat.Invalid));
         Assert.Contains(fatal.Messages, message => message.Contains("has no host format"));
     }
 }

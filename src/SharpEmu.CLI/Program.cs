@@ -46,14 +46,16 @@ internal static partial class Program
     private static int Main(string[] args)
     {
         // Must precede anything that can touch HostPlatform/HostViewMemory.
-        HostComposition.Initialize();
+        HostComposition.Register();
 
         ConfigureManagedPluginResolution();
 
         if (args.Length > 0 && args[0] == SharpEmu.Core.Diagnostics.WindowsCrashCapture.HelperArgument)
             return SharpEmu.Core.Diagnostics.WindowsCrashCapture.RunHelper(args);
 
-        RenderDocCapture.ApplyVulkanLoaderEnvironment();
+        // The GPU backend and the host platform adapters are composed in, not detected; this
+        // has to happen before anything can reach for a renderer, a display list or a pad.
+        GpuComposition.Register();
         SharpEmu.Libs.VideoOut.RenderDocCapture.Initialize();
 
         try

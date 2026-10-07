@@ -18,7 +18,5 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
   <ItemGroup>
     <ProjectReference Include="..\..\..\SharpEmu.HLE\SharpEmu.HLE.csproj" />
-    <!-- SDL is the qualified default audio output on Windows and Linux. -->
-    <ProjectReference Include="..\..\..\adapters\SharpEmu.Adapters.Sdl\SharpEmu.Adapters.Sdl.csproj" />
   </ItemGroup>
 </Project>

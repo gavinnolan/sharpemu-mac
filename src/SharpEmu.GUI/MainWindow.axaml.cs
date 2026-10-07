@@ -376,7 +376,7 @@ public partial class MainWindow : Window
         Closing += (_, _) => BeginWindowClosing();
         Closed += (_, _) => CompleteWindowClosing();
 
-        SdlLauncherGamepad.EnsureStarted();
+        LauncherGamepad.EnsureStarted();
         _gamepadTimer = new DispatcherTimer
         {
             Interval = TimeSpan.FromMilliseconds(50),
@@ -409,7 +409,7 @@ public partial class MainWindow : Window
         Closing += (_, _) => BeginWindowClosing();
         Closed += (_, _) => CompleteWindowClosing();
 
-        SdlLauncherGamepad.EnsureStarted();
+        LauncherGamepad.EnsureStarted();
         _gamepadTimer = new DispatcherTimer
         {
             Interval = TimeSpan.FromMilliseconds(50),
@@ -804,7 +804,7 @@ public partial class MainWindow : Window
 
     private void PollGamepad()
     {
-        if (!SdlLauncherGamepad.TryGetState(out var pad))
+        if (!LauncherGamepad.TryGetState(out var pad))
         {
             _previousPadButtons = HostGamepadButtons.None;
             return;
@@ -1141,7 +1141,7 @@ public partial class MainWindow : Window
         RunShutdownStep("library watcher", _libraryWatcher.Dispose);
         RememberEmbeddedConsoleHeight();
         RunShutdownStep("settings", _settings.Save);
-        RunShutdownStep("SDL gamepad", SdlLauncherGamepad.Shutdown);
+        RunShutdownStep("launcher gamepad", LauncherGamepad.Shutdown);
         RunShutdownStep("title music", _sndPreview.Stop);
         RunShutdownStep("Discord Rich Presence", () => _discord?.Dispose());
         RunShutdownStep("console window", () => _consoleWindow?.Close());
@@ -2542,11 +2542,11 @@ public partial class MainWindow : Window
             _appliedEnvironmentVariables.Add(name);
         }
 
-        if (RenderDocCapture.ApplyVulkanLoaderEnvironment())
+        // Whether a graphics loader needs configuring at all, and which variables that takes,
+        // is the composed backend's business; the GUI only has to undo what was set.
+        foreach (var name in RenderDocCapture.ApplyGraphicsLoaderEnvironment())
         {
-            _appliedEnvironmentVariables.Add("VK_LOADER_DEBUG");
-            _appliedEnvironmentVariables.Add("VK_LOADER_LAYERS_DISABLE");
-            _appliedEnvironmentVariables.Add("VK_LOADER_LAYERS_ALLOW");
+            _appliedEnvironmentVariables.Add(name);
         }
 
         Environment.SetEnvironmentVariable(

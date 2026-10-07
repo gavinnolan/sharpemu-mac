@@ -2,8 +2,9 @@
 
 Status: proposed implementation architecture, 2026-10-07. This document expands
 the [architecture roadmap](architecture-roadmap.md) and is the authoritative
-package-boundary proposal where the earlier sketches differ. It does not claim
-these packages exist. The repository still contains planning documents only.
+package-boundary proposal where the earlier sketches differ. Most of it is still
+a target rather than a description: see [section 10](#10-progress-graphics-and-platform-packages-exist)
+for the part that exists, which is the graphics and platform seam.
 
 Confirmed scope: native Metal first, existing x64/Rosetta guest execution first,
 native ARM64 guest execution later. Windows and Linux remain supported development
@@ -492,3 +493,97 @@ Intel GPU coverage, native audio default, Metal feature floors, performance/memo
 budgets, .app payload layout, signing entitlements and update mechanism. Maintain
 an explicit device capability matrix; don't pick an OS floor from SDK availability
 alone. Native ARM64 execution and a native Cocoa UI remain later designs.
+
+## 10. Progress: graphics and platform packages exist
+
+Updated 2026-10-07. The §2 layout is still the target; this section records what
+of it is real, so the "does not claim these packages exist" note at the top no
+longer applies to the graphics and platform seam.
+
+### Packages created
+
+| Package | Path | Contents |
+| --- | --- | --- |
+| `SharpEmu.Gpu.Metal` | `src/graphics/SharpEmu.Gpu.Metal` | Metal resources, encoders, pipelines, the CAMetalLayer presenter, the MSL emitter reference |
+| `SharpEmu.Gpu.Vulkan` | `src/graphics/SharpEmu.Gpu.Vulkan` | Device/swapchain, submission scheduler, Vulkan image/buffer caches, descriptor pools, the SPIR-V emitter reference, `Silk.NET.Vulkan*` |
+| `SharpEmu.Platform.MacOS` | `src/platforms/macos/SharpEmu.Platform.MacOS` | AppKit window and event loop, keycode map, GameController pads, CoreHaptics, adaptive triggers, CoreGraphics display catalog |
+| `SharpEmu.Adapters.Sdl` | `src/adapters/SharpEmu.Adapters.Sdl` | SDL window/event loop, keyboard, gamepads, pad output, display catalog, `ppy.SDL3-CS` |
+
+Reference graph, all edges pointing inward:
+
+```text
+SharpEmu.CLI ──(osx-*)──> SharpEmu.Gpu.Metal ──> SharpEmu.Platform.MacOS ──┐
+             └(win/linux)> SharpEmu.Gpu.Vulkan ─> SharpEmu.Adapters.Sdl ───┤
+                                                                           v
+                                             SharpEmu.Libs -> SharpEmu.HLE -> SharpEmu.Core*
+```
+
+(`SharpEmu.Core` is a sibling consumer of Libs/HLE, not a dependency of them.)
+`SharpEmu.Libs` references no `Silk.NET.*`, no `ppy.SDL3-CS` and neither backend
+shader emitter. The two backends cannot see each other, and neither platform
+package references a graphics backend.
+
+### Composition replaced the OS checks
+
+Rule 6 of §4 ("common OS checks are allowed only in an explicit
+selection/probe/validation allowlist") now holds for the graphics seam. The
+backend is registered once from `src/SharpEmu.CLI/GpuComposition.cs`, which the
+target RID selects through `SHARPEMU_GPU_METAL`/`SHARPEMU_GPU_VULKAN`:
+
+| Seam | Registration |
+| --- | --- |
+| Guest GPU backend | `GuestGpu.Register(factory, backendName)` |
+| Presenter config + HDR capability | `HostVideoHost.RegisterPresenter(configure, queryHdr, autoHdrAllowed)` |
+| Display enumeration | `HostDisplayCatalog.RegisterProvider(name, query)` |
+| Launcher navigation pad | `LauncherGamepad.RegisterProvider(provider)` |
+| GPU-wait diagnostics | `LoadProgressDiagnostics.RegisterBlockedCommandStreamProbe(probe)` |
+| Backend cache counters | `RenderPhaseProfile.RegisterReportProvider(report)` |
+| Graphics loader environment | `RenderDocCapture.RegisterLoaderEnvironment(apply)` |
+| Guest-reachable interop warmup | `ModuleManager.RegisterGuestReachableInterop(prefix)` |
+
+`GuestGpu.Current` throws a message naming the composition root when nothing
+registered, `SHARPEMU_GPU_BACKEND` is validated against the registered name, and
+the `HeadlessCommandStreamFactory` test seam still wraps the registered backend.
+The `SharpEmu.GUI` class library consumes the registered providers, so it has no
+SDL or macOS reference of its own.
+
+### Known deviations from §2
+
+- **Namespaces still say `SharpEmu.Libs`.** The moved files kept
+  `SharpEmu.Libs.Gpu.Metal`, `SharpEmu.Libs.Gpu.Vulkan`,
+  `SharpEmu.Libs.Platform.MacOS` and `SharpEmu.Libs.VideoOut` so the extraction
+  stays a reviewable file move. Namespace != assembly is tolerated for now;
+  renaming them to match the assemblies is a separate mechanical change.
+- **`InternalsVisibleTo` is load-bearing.** `SharpEmu.Libs` grants internals to
+  all four new packages, which were carved out of it and still reach a long tail
+  of shared-engine internals (`IGuestGpuBackend`, `IRenderHost`,
+  `ShaderPipelineCache`, `GpuFatal`, the internal VideoOut diagnostics and the
+  internal HLE-export state they present for). The list is explicit, named in
+  the csproj with the reason, and shrinks as the backend surface narrows to the
+  public contracts in `Gpu/Abstractions`. Per rule 7 of §4 it is a stated
+  transitional step, not a blanket friend declaration.
+- **Backend folders under `Gpu/`.** `Gpu/Images`, `Gpu/Buffers`,
+  `Gpu/Pipelines` and `Gpu/Scheduling` were split rather than moved: the types
+  that name a Vulkan handle went to `SharpEmu.Gpu.Vulkan`, and the
+  backend-neutral remainder (guest pixel formats, tile geometry, image
+  requests/descriptions, view format rules, `ResourceSlotIdentifier`,
+  `RecordedOperation`, `GpuReferenceClock`, `GuestSurfaceFormats`) stayed in the
+  shared engine, which is what the Metal backend consumes.
+- **One SDL dependency remains in a macOS closure.** `SharpEmu.HLE` still
+  references `ppy.SDL3-CS` for `HLE/Host/Sdl/SdlHostAudio`. It is exempted by
+  name, with the reason, in `VulkanFreeSharedGpuTests` and in
+  `build/platforms/macos/macos.targets`; CoreAudio replaces it in the
+  host-platform split, which moves that file out of HLE.
+
+### Enforcement
+
+- `VulkanFreeSharedGpuTests` walks the transitive
+  ProjectReference/PackageReference graph of every project in a macOS artifact
+  and fails on any edge into `Silk.NET*`, `ppy.SDL3-CS`,
+  `SharpEmu.ShaderCompiler.Vulkan`, `SharpEmu.Gpu.Vulkan` or
+  `SharpEmu.Adapters.Sdl`, plus a source scan for Vulkan/SDL usings.
+- `SharpEmuMacValidatePublishClosure` in `build/platforms/macos/macos.targets`
+  checks the resolved publish closure before single-file bundling, which is the
+  only place the policy is visible for a compressed single-file artifact;
+  `check-macos-output.sh` keeps checking the finished directory and `.app`.
+  `SharpEmuMacForbidSdl` now defaults to true.

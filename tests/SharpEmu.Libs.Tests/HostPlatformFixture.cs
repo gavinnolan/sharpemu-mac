@@ -22,14 +22,18 @@ internal static class HostPlatformFixture
     [ModuleInitializer]
     internal static void Initialize()
     {
+        // Same audio output the application composes, so the tests exercise the
+        // qualified default rather than each package's unqualified fallback.
 #if SHARPEMU_HOST_MACOS
-        HostPlatform.Initialize(SharpEmu.Host.MacOS.MacOSHost.Create);
+        HostPlatform.Initialize(static () => SharpEmu.Host.MacOS.MacOSHost.Create());
         HostViewMemory.Initialize(SharpEmu.Host.MacOS.MacOSHost.CreateViewMemory);
 #elif SHARPEMU_HOST_LINUX
-        HostPlatform.Initialize(SharpEmu.Host.Linux.LinuxHost.Create);
+        HostPlatform.Initialize(static () =>
+            SharpEmu.Host.Linux.LinuxHost.Create(new SharpEmu.Adapters.Sdl.SdlHostAudio()));
         HostViewMemory.Initialize(SharpEmu.Host.Linux.LinuxHost.CreateViewMemory);
 #elif SHARPEMU_HOST_WINDOWS
-        HostPlatform.Initialize(SharpEmu.Host.Windows.WindowsHost.Create);
+        HostPlatform.Initialize(static () =>
+            SharpEmu.Host.Windows.WindowsHost.Create(new SharpEmu.Adapters.Sdl.SdlHostAudio()));
         HostViewMemory.Initialize(SharpEmu.Host.Windows.WindowsHost.CreateViewMemory);
 #else
 #error No SHARPEMU_HOST_* symbol was defined; see SharpEmu.Libs.Tests.csproj.

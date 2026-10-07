@@ -21,7 +21,17 @@ public static class WindowsHost
     /// must be rejected here rather than crash undefined later (x64 processes
     /// under emulation report <see cref="Architecture.X64"/>).
     /// </exception>
-    public static IHostPlatform Create()
+    /// <param name="audio">
+    /// The audio output to use. SDL remains the qualified default, and the
+    /// application passes <c>SdlHostAudio</c> here (see SharpEmu.CLI's
+    /// HostComposition) rather than this package referencing the SDL adapter:
+    /// that adapter also owns the window and input and reaches into
+    /// SharpEmu.Libs, which does not belong in a host package's closure.
+    /// Null falls back to the native winmm output in this package, which is
+    /// not yet qualified -- promoting it needs latency, underrun, clock,
+    /// device-change and shutdown evidence.
+    /// </param>
+    public static IHostPlatform Create(IHostAudioOutput? audio = null)
     {
         if (!OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
         {
@@ -29,7 +39,7 @@ public static class WindowsHost
                 "SharpEmu native guest execution requires an x86-64 Windows process.");
         }
 
-        return new WindowsHostPlatform();
+        return new WindowsHostPlatform(audio ?? new WindowsWaveOutAudio());
     }
 
     /// <summary>

@@ -7,15 +7,18 @@ namespace SharpEmu.Host.MacOS;
 
 internal sealed class MacOSHostPlatform : IHostPlatform
 {
+    internal MacOSHostPlatform(IHostAudioOutput audio) => Audio = audio;
+
     public IHostMemory Memory { get; } = new MacHostMemory();
 
     public IHostThreading Threading { get; } = new MacHostThreading();
 
     public IHostSymbolResolver Symbols { get; } = new MacHostSymbolResolver();
 
-    // Native CoreAudio, not the SDL adapter: this package does not reference
-    // SDL at all, so a macOS process never initialises SDL audio.
-    public IHostAudioOutput Audio { get; } = new MacCoreAudioOutput();
+    // Defaulted by MacOSHost.Create to the native CoreAudio output: this
+    // package does not reference SDL at all, so a macOS process never
+    // initialises SDL audio.
+    public IHostAudioOutput Audio { get; }
 
     public IHostInput Input { get; } = new WindowHostInput();
 }

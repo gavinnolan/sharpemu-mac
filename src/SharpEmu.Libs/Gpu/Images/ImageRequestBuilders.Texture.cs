@@ -23,7 +23,7 @@ public static partial class ImageRequestBuilders
             TextureNumericClass.Float => (GpuFormat.R32Sfloat, GuestPixelFormat.Bits32Float),
             TextureNumericClass.Uint => (GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt),
             TextureNumericClass.Sint => (GpuFormat.R32Sint, GuestPixelFormat.Bits32SInt),
-            _ => throw SubmissionScheduler.Fatal($"A null image needs a supported numeric class: class={numericClass}."),
+            _ => throw GpuFatal.Fatal($"A null image needs a supported numeric class: class={numericClass}."),
         };
         // Depth-reference sampling needs a depth view even for the placeholder.
         var depthCompare = shape.DepthCompare && numericClass == TextureNumericClass.Float && !storage;
@@ -75,7 +75,7 @@ public static partial class ImageRequestBuilders
                 description.Extent.Width, description.Extent.Height, description.Extent.Depth, description.Resources.Levels, 1);
             if (!TileGeometry.TryGetTiledTextureLayout(surfaceDescription, out var surface))
             {
-                throw SubmissionScheduler.Fatal(
+                throw GpuFatal.Fatal(
                     $"The volume texture layout is not supported: format={(uint)description.GuestFormat} tile={(uint)description.TileMode} " +
                     $"extent={description.Extent.Width}x{description.Extent.Height}x{description.Extent.Depth} levels={description.Resources.Levels}.");
             }
@@ -124,7 +124,7 @@ public static partial class ImageRequestBuilders
         var baseLayer = descriptor.BaseArray;
         if (baseLayer >= imageLayers)
         {
-            throw SubmissionScheduler.Fatal($"The texture base layer is outside the image: baseLayer={baseLayer} layers={imageLayers} address=0x{descriptor.BaseAddress:X16}.");
+            throw GpuFatal.Fatal($"The texture base layer is outside the image: baseLayer={baseLayer} layers={imageLayers} address=0x{descriptor.BaseAddress:X16}.");
         }
 
         var layerCount = shape.Arrayed ? imageLayers - baseLayer : 1;
@@ -232,7 +232,7 @@ public static partial class ImageRequestBuilders
              (baseLevel != 0 || lastLevel == 0 || lastLevel > 3 || maxMip != lastLevel || !msaaTile || (descriptor.MsaaDepth && !depthTile) ||
               (!msaaArray && (descriptor.Depth != 0 || descriptor.BaseArray != 0)))))
         {
-            throw SubmissionScheduler.Fatal(
+            throw GpuFatal.Fatal(
                 $"The texture mip view is not supported: address=0x{address:X16} type={(uint)type} baseLevel={baseLevel} lastLevel={lastLevel} maxMip={maxMip} " +
                 $"levels={levels} tile={(uint)tile} depth={descriptor.Depth} baseArray={descriptor.BaseArray} msaaDepth={descriptor.MsaaDepth} storage={storage}.");
         }
@@ -241,7 +241,7 @@ public static partial class ImageRequestBuilders
         var viewLevels = multisampled ? 1 : viewLastLevel - baseLevel + 1;
         var depth = descriptor.Depth + 1;
         var format = descriptor.Format;
-        var surfaceFormat = TextureTransferLayout.SurfaceFormat(format);
+        var surfaceFormat = GuestSurfaceFormats.SurfaceFormat(format);
         var shaderConversion = surfaceFormat.ConversionFormat != GuestPixelFormat.Invalid;
         var volume = type == GuestImageType.Color3D;
         var layered = type is GuestImageType.Color1DArray or GuestImageType.Color2DArray or GuestImageType.Color2DMsaaArray;
@@ -250,7 +250,7 @@ public static partial class ImageRequestBuilders
             (volume || multisampled || width != height || descriptor.BaseArray > descriptor.Depth ||
              (descriptor.Depth - descriptor.BaseArray + 1) % 6 != 0))
         {
-            throw SubmissionScheduler.Fatal(
+            throw GpuFatal.Fatal(
                 $"The cubemap view is invalid: address=0x{address:X16} extent={width}x{height} layers={imageLayers} baseArray={descriptor.BaseArray} samples={samples}.");
         }
         uint pitch;
@@ -261,7 +261,7 @@ public static partial class ImageRequestBuilders
             pitch = depthTile ? TileGeometry.DepthPitch(width, bytes, lastLevel) : TileGeometry.RenderTargetPitch(width, bytes, lastLevel);
             if (pitch == 0 || !TileGeometry.TryGetRenderTargetSize(width, height, pitch, bytes, out size, lastLevel) || size.Size > uint.MaxValue / imageLayers)
             {
-                throw SubmissionScheduler.Fatal(
+                throw GpuFatal.Fatal(
                     $"The multisample texture layout is not supported: address=0x{address:X16} extent={width}x{height} bytes={bytes} pitch={pitch} samplesLog2={lastLevel} layers={imageLayers}.");
             }
 
@@ -275,7 +275,7 @@ public static partial class ImageRequestBuilders
 
         if (size.Size == 0 || size.Align == 0 || (address & (size.Align - 1UL)) != 0)
         {
-            throw SubmissionScheduler.Fatal(
+            throw GpuFatal.Fatal(
                 $"The texture footprint or alignment is invalid: address=0x{address:X16} size=0x{size.Size:X} align=0x{size.Align:X} format={(uint)format} tile={(uint)tile}.");
         }
 
@@ -322,32 +322,38 @@ public static partial class ImageRequestBuilders
         return new TextureRequestResolution(request, shaderConversion, pixelFormat, DestinationSwizzle(descriptor));
     }
 
-    // After the lookup: a stencil association redirects to its depth owner; the view rules run on the owner.
-    public static ResourceSlotIdentifier ValidateTextureOwner(GuestImageCache cache, ResourceSlotIdentifier imageIdentifier, in TextureRequestResolution resolution)
+    // After the lookup: a stencil association redirects to its depth owner; the view rules run
+    // on the owner. The found image is passed in as its description plus depth owner rather than
+    // as a cache handle, so the view rules stay in the shared engine while the image cache that
+    // resolved the handle stays in the graphics backend.
+    public static ResourceSlotIdentifier ValidateTextureOwner(
+        in ImageDescription description,
+        ResourceSlotIdentifier depthOwner,
+        ResourceSlotIdentifier imageIdentifier,
+        in TextureRequestResolution resolution)
     {
-        var image = cache.GetImage(imageIdentifier);
-        if (image.DepthOwner.IsValid)
+        if (depthOwner.IsValid)
         {
-            return image.DepthOwner;
+            return depthOwner;
         }
 
         var storage = resolution.Request.Role == ImageRole.StorageImage;
-        if (image.Description.IsDepth)
+        if (description.IsDepth)
         {
             if (storage)
             {
-                throw SubmissionScheduler.Fatal($"A depth target cannot be bound as a storage image: address=0x{image.Description.Data.Address:X16}.");
+                throw GpuFatal.Fatal($"A depth target cannot be bound as a storage image: address=0x{description.Data.Address:X16}.");
             }
 
-            _ = ViewFormatRules.SelectSampledDepthView(image.Description.PixelFormat, resolution.ViewFormat, resolution.Swizzle);
+            _ = ViewFormatRules.SelectSampledDepthView(description.PixelFormat, resolution.ViewFormat, resolution.Swizzle);
         }
         else if (storage)
         {
-            ViewFormatRules.ValidateStorageColorView(image.Description.PixelFormat, resolution.Request.View.Format, resolution.Swizzle);
+            ViewFormatRules.ValidateStorageColorView(description.PixelFormat, resolution.Request.View.Format, resolution.Swizzle);
         }
         else
         {
-            _ = ViewFormatRules.SelectSampledColorView(image.Description.PixelFormat, resolution.ViewFormat, resolution.Swizzle);
+            _ = ViewFormatRules.SelectSampledColorView(description.PixelFormat, resolution.ViewFormat, resolution.Swizzle);
         }
 
         return imageIdentifier;

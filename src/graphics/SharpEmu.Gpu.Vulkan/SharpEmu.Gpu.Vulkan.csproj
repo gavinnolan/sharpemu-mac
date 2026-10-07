@@ -1,0 +1,54 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<!--
+  The Vulkan graphics backend used on Windows and Linux: the device and
+  swapchain, the command-buffer submission scheduler, the Vulkan-shaped guest
+  image and buffer caches, descriptor pools and writes, and the SPIR-V emitter
+  it compiles through.
+
+  Four folders here came out of SharpEmu.Libs/Gpu because, despite sitting in
+  the shared engine's directories, every one of their types names a Vulkan
+  handle: Images (CachedImage, GuestImageCache, samplers, the tiler),
+  Buffers (GpuBuffer, the slab allocator, the guest buffer cache),
+  Pipelines (descriptor heap/writer, the GDS barrier, VkFormat vertex
+  attributes) and Scheduling (the submission scheduler, its recording buffers,
+  timeline and tick device). Their namespaces are unchanged so the move stays
+  reviewable; what is left in SharpEmu.Libs under those names is the
+  backend-neutral part the Metal backend shares.
+
+  This package is never built for macOS, which is what keeps Silk.NET.Vulkan
+  and MoltenVK out of a macOS publish output.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\SharpEmu.HLE\SharpEmu.HLE.csproj" />
+    <ProjectReference Include="..\..\SharpEmu.Libs\SharpEmu.Libs.csproj" />
+    <ProjectReference Include="..\..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
+    <ProjectReference Include="..\..\SharpEmu.ShaderCompiler\SharpEmu.ShaderCompiler.csproj" />
+    <ProjectReference Include="..\..\SharpEmu.ShaderCompiler.Vulkan\SharpEmu.ShaderCompiler.Vulkan.csproj" />
+    <!-- The presenter drives the SDL window and creates its surface from it. -->
+    <ProjectReference Include="..\..\adapters\SharpEmu.Adapters.Sdl\SharpEmu.Adapters.Sdl.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="SharpEmu.Libs.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Silk.NET.Vulkan" />
+    <PackageReference Include="Silk.NET.Vulkan.Extensions.EXT" />
+    <PackageReference Include="Silk.NET.Vulkan.Extensions.KHR" />
+    <!-- Image and pipeline cache keys hash guest surface descriptions. -->
+    <PackageReference Include="System.IO.Hashing" />
+  </ItemGroup>
+
+</Project>

@@ -6,7 +6,8 @@ using SharpEmu.HLE.Host;
 namespace SharpEmu.CLI;
 
 /// <summary>
-/// The single place where the application picks its host OS backend.
+/// Static composition of the host OS backend — the counterpart to
+/// <see cref="GpuComposition"/>, using the same RID-to-OS convention.
 /// </summary>
 /// <remarks>
 /// The OS host package is chosen at build time, not at run time: the csproj
@@ -17,19 +18,32 @@ namespace SharpEmu.CLI;
 /// process it cannot run the guest in (a native ARM64 process), and that
 /// diagnostic belongs at the point guest work starts, not at frontend launch,
 /// so the GUI still opens on an unsupported process architecture.
+///
+/// Audio is the one host service supplied from here rather than from inside
+/// the host package: SDL remains the qualified default on Windows and Linux,
+/// and SharpEmu.Adapters.Sdl also owns the window and input and reaches into
+/// SharpEmu.Libs, so a host package must not depend on it. macOS takes the
+/// native CoreAudio output that SharpEmu.Host.MacOS owns.
 /// </remarks>
 internal static class HostComposition
 {
-    public static void Initialize()
+    /// <summary>
+    /// Registers the process's host OS backend. Must run before anything
+    /// touches <see cref="HostPlatform"/> or <see cref="HostViewMemory"/> --
+    /// that is, before emulation or the GUI starts.
+    /// </summary>
+    public static void Register()
     {
 #if SHARPEMU_HOST_MACOS
-        HostPlatform.Initialize(SharpEmu.Host.MacOS.MacOSHost.Create);
+        HostPlatform.Initialize(static () => SharpEmu.Host.MacOS.MacOSHost.Create());
         HostViewMemory.Initialize(SharpEmu.Host.MacOS.MacOSHost.CreateViewMemory);
 #elif SHARPEMU_HOST_LINUX
-        HostPlatform.Initialize(SharpEmu.Host.Linux.LinuxHost.Create);
+        HostPlatform.Initialize(static () =>
+            SharpEmu.Host.Linux.LinuxHost.Create(new SharpEmu.Adapters.Sdl.SdlHostAudio()));
         HostViewMemory.Initialize(SharpEmu.Host.Linux.LinuxHost.CreateViewMemory);
 #elif SHARPEMU_HOST_WINDOWS
-        HostPlatform.Initialize(SharpEmu.Host.Windows.WindowsHost.Create);
+        HostPlatform.Initialize(static () =>
+            SharpEmu.Host.Windows.WindowsHost.Create(new SharpEmu.Adapters.Sdl.SdlHostAudio()));
         HostViewMemory.Initialize(SharpEmu.Host.Windows.WindowsHost.CreateViewMemory);
 #else
 #error No SHARPEMU_HOST_* symbol was defined. SharpEmu.CLI.csproj selects the host package from the target RuntimeIdentifier; an unrecognized RID leaves the application with no host OS backend.

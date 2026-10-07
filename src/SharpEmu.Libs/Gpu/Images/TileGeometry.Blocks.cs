@@ -56,7 +56,7 @@ public static partial class TileGeometry
                 offset ^= (x << 8) & 0x800;
                 return offset;
             default:
-                throw SubmissionScheduler.Fatal($"The 4 KiB tile block does not support this element size: bytes={bytesPerElement}.");
+                throw GpuFatal.Fatal($"The 4 KiB tile block does not support this element size: bytes={bytesPerElement}.");
         }
     }
 
@@ -125,7 +125,7 @@ public static partial class TileGeometry
                 offset ^= (z << 8) & 0x400;
                 return offset;
             default:
-                throw SubmissionScheduler.Fatal($"The 4 KiB volume tile block does not support this element size: bytes={bytesPerElement}.");
+                throw GpuFatal.Fatal($"The 4 KiB volume tile block does not support this element size: bytes={bytesPerElement}.");
         }
     }
 
@@ -226,7 +226,7 @@ public static partial class TileGeometry
                 offset ^= Bit(x, 3, 15) ^ Bit(y, 6, 15);
                 return offset;
             default:
-                throw SubmissionScheduler.Fatal($"The render-target tile block does not support this element size: bytes={bytesPerElement}.");
+                throw GpuFatal.Fatal($"The render-target tile block does not support this element size: bytes={bytesPerElement}.");
         }
     }
 

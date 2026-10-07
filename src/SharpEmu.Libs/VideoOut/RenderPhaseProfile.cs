@@ -19,6 +19,23 @@ namespace SharpEmu.Libs.VideoOut;
 /// </summary>
 internal static class RenderPhaseProfile
 {
+    // Backend-owned cache counters append themselves to the per-window report. The shared
+    // profile cannot name them: the resource caches they measure live in the graphics backend
+    // package, which the shared engine does not reference.
+    private static readonly List<Func<string>> ReportProviders = [];
+
+    internal static void RegisterReportProvider(Func<string> provider)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        lock (ReportProviders)
+        {
+            if (!ReportProviders.Contains(provider))
+            {
+                ReportProviders.Add(provider);
+            }
+        }
+    }
+
     internal enum Phase
     {
         /// <summary>Outside any measured phase — loop overhead.</summary>
@@ -468,8 +485,10 @@ internal static class RenderPhaseProfile
         ReportImageUploads();
         BufferUploadProfile.Report();
         Console.Error.WriteLine(SharpEmu.ShaderCompiler.Resources.ResourceMaterializationCache.TakeReport());
-        Console.Error.WriteLine(SharpEmu.Libs.Gpu.Buffers.GuestBufferCache.TakeAsyncReadbackReport());
-        Console.Error.WriteLine(SharpEmu.Libs.Gpu.Images.GuestImageCache.TakeLookupReport());
+        foreach (var provider in ReportProviders)
+        {
+            Console.Error.WriteLine(provider());
+        }
         SharpEmu.ShaderCompiler.Resources.ResourceMaterializationProfile.WriteReport();
         SharpEmu.Libs.Diagnostics.AgcRegisterPacketProfile.WriteReport();
         SharpEmu.HLE.GpuMemory.GpuMemoryAccessProfile.WriteReport();
