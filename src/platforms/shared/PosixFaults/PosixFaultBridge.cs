@@ -126,6 +126,7 @@ internal static unsafe class PosixFaultBridge
             Console.Error.WriteLine("[LOADER][INFO] Raw sentinel recovery disabled by SHARPEMU_DISABLE_RAW_HANDLER=1");
         }
 
+        GuestImageWriteTracker.InitializeNativeFaultDiagnostics();
         WarmUpSignalPath(handlers.WarmUp);
         GuestImageWriteTracker.WarmUp();
 
@@ -237,6 +238,12 @@ internal static unsafe class PosixFaultBridge
         return true;
     }
 
+    // Neutral diagnostic route/reason scalars; no recovery ABI changes.
+    private const int TraceEarlyImage = 1, TraceGpuFast = 2, TraceRawCore = 3,
+        TraceCoreRecovery = 4, TraceNoCoreCallback = 5, TraceBridgeException = 6;
+    private const int TraceRecovered = 0, TraceDeclined = 1, TraceMissingContext = 2,
+        TraceHandlerException = 3, TraceWarmup = 4;
+
     [UnmanagedCallersOnly]
     private static void HandlePosixSignal(int signal, nint siginfo, nint ucontext)
     {
@@ -258,13 +265,21 @@ internal static unsafe class PosixFaultBridge
                 Console.Error.WriteLine($"[PERF][MEM] posix_faults={n}");
             }
         }
+        long invocation = 0;
+        var recovered = false;
+        var route = TraceNoCoreCallback;
+        var reason = TraceDeclined;
         try
         {
+            invocation = BeginNativeSignalDiagnostics(signal, siginfo, ucontext);
             // Only a classified write can belong to guest-image tracking.
             // Use the same normalized address as the later fault bridge:
             // Darwin can provide the address in mcontext when si_addr is zero.
-            if (TryHandleTrackedImageWriteFault(signal, siginfo, ucontext))
+            if (TryHandleTrackedImageWriteFaultForInvocation(signal, siginfo, ucontext, invocation))
             {
+                recovered = true;
+                route = TraceEarlyImage;
+                reason = TraceRecovered;
                 return;
             }
 
@@ -276,43 +291,77 @@ internal static unsafe class PosixFaultBridge
                 siginfo != 0 &&
                 TryResolveGpuFault(siginfo, ucontext))
             {
+                recovered = true;
+                route = TraceGpuFast;
+                reason = TraceRecovered;
                 return;
             }
 
-            if (TryHandleFault(signal, siginfo, ucontext))
+            if (TryHandleFaultWithDiagnosticRoute(signal, siginfo, ucontext, out route, out reason))
             {
+                recovered = true;
                 return;
             }
         }
         catch
         {
             // A managed exception must never unwind out of a signal frame.
+            route = TraceBridgeException;
+            reason = TraceHandlerException;
         }
         finally
         {
+            try
+            {
+                GuestImageWriteTracker.RecordNativeFaultDisposition(invocation, recovered, route, reason);
+            }
+            catch
+            {
+                // Optional diagnostics must never unwind from a native signal.
+                // A missing final slot remains explicitly unknown to the reader.
+            }
             _signalHandlerDepth--;
         }
 
         ChainPreviousAction(signal, siginfo, ucontext);
     }
 
-    internal static bool TryHandleTrackedImageWriteFault(int signal, nint siginfo, nint ucontext)
+    internal static bool TryHandleTrackedImageWriteFault(int signal, nint siginfo, nint ucontext) =>
+        TryHandleTrackedImageWriteFaultForInvocation(signal, siginfo, ucontext,
+            BeginNativeSignalDiagnostics(signal, siginfo, ucontext));
+
+    private static long BeginNativeSignalDiagnostics(int signal, nint siginfo, nint ucontext)
     {
-        if (signal != PosixSigSegv && signal != PosixSignalLayout.SigBus)
-        {
-            return false;
-        }
-
+        if (!GuestImageWriteTracker.NativeFaultDiagnosticsEnabled) return 0;
         byte* registers = PosixSignalLayout.GetRegisterBase(ucontext);
-        if (registers == null)
-        {
-            return false;
-        }
+        var rawAddress = siginfo == 0 ? 0 : *(ulong*)((byte*)siginfo + PosixSignalLayout.SigInfoAddressOffset);
+        var signalCode = siginfo == 0 ? 0 : *(int*)((byte*)siginfo + PosixSignalLayout.SigInfoCodeOffset);
+        var address = registers == null ? rawAddress : GetFaultAddress(siginfo, registers);
+        var rip = registers == null ? 0 : *(ulong*)(registers + PosixSignalLayout.RegisterOffsets[16]);
+        var access = registers != null && (signal == PosixSigSegv || signal == PosixSignalLayout.SigBus)
+            ? (int)GetAccessType(registers, address, rip) : -1;
+        return GuestImageWriteTracker.RecordNativeImageFaultEntry(
+            signal, rawAddress, signalCode, address, access,
+            registers == null ? 0 : PosixSignalLayout.GetPageFaultErrorCode(registers), rip);
+    }
 
-        ulong address = GetFaultAddress(siginfo, registers);
-        ulong rip = *(ulong*)(registers + PosixSignalLayout.RegisterOffsets[16]);
-        return GetAccessType(registers, address, rip) == 1 &&
-            GuestImageWriteTracker.TryHandleWriteFault(address);
+    private static bool TryHandleTrackedImageWriteFaultForInvocation(
+        int signal, nint siginfo, nint ucontext, long invocation)
+    {
+        var handled = false;
+        if (signal == PosixSigSegv || signal == PosixSignalLayout.SigBus)
+        {
+            byte* registers = PosixSignalLayout.GetRegisterBase(ucontext);
+            if (registers != null)
+            {
+                ulong address = GetFaultAddress(siginfo, registers);
+                ulong rip = *(ulong*)(registers + PosixSignalLayout.RegisterOffsets[16]);
+                handled = GetAccessType(registers, address, rip) == 1 &&
+                    GuestImageWriteTracker.TryHandleWriteFaultWithNativeDiagnostics(address, invocation);
+            }
+        }
+        GuestImageWriteTracker.RecordNativeImageFaultResult(handled, invocation);
+        return handled;
     }
 
     private static bool TryResolveGpuFault(nint siginfo, nint ucontext)
@@ -339,8 +388,14 @@ internal static unsafe class PosixFaultBridge
     /// recovery chain over it. Internal rather than private so the per-OS
     /// fault fixtures can drive it with a fabricated frame.
     /// </summary>
-    internal static bool TryHandleFault(int signal, nint siginfo, nint ucontext)
+    internal static bool TryHandleFault(int signal, nint siginfo, nint ucontext) =>
+        TryHandleFaultWithDiagnosticRoute(signal, siginfo, ucontext, out _, out _);
+
+    private static bool TryHandleFaultWithDiagnosticRoute(
+        int signal, nint siginfo, nint ucontext, out int route, out int reason)
     {
+        route = TraceNoCoreCallback;
+        reason = TraceMissingContext;
         byte* registers = PosixSignalLayout.GetRegisterBase(ucontext);
         if (registers == null)
         {
@@ -418,12 +473,15 @@ internal static unsafe class PosixFaultBridge
         int disposition = 0;
         if (_rawRecoveryEnabled && _rawRecovery != null)
         {
+            route = TraceRawCore;
             disposition = _rawRecovery(&pointers);
         }
         if (disposition != -1 && !_signalWarmup && _recovery != null)
         {
+            route = TraceCoreRecovery;
             disposition = _recovery(&pointers);
         }
+        reason = _signalWarmup ? TraceWarmup : disposition == -1 ? TraceRecovered : TraceDeclined;
         if (traceSignal)
         {
             Console.Error.WriteLine(
