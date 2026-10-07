@@ -340,7 +340,7 @@ public sealed partial class DirectExecutionBackend
 		// Once the host is shutting down, a guest thread still running reaches no more HLE: the
 		// services behind the imports are being torn down, and a title that sees them fail (a null
 		// command buffer from the GPU library, say) crashes the process on its way out.
-		if (_forcedGuestExit && !ActiveForcedGuestExit && TryEndGuestSliceForShutdown(argPackPtr))
+		if (Volatile.Read(ref _forcedGuestExit) && TryEndGuestSliceForShutdown(argPackPtr))
 		{
 			cpuContext[CpuRegister.Rax] = 1uL;
 			return 1uL;
@@ -1864,6 +1864,13 @@ public sealed partial class DirectExecutionBackend
 	// Returns the import straight to the host entry stub, which ends this guest slice.
 	private unsafe bool TryEndGuestSliceForShutdown(nint argPackPtr)
 	{
+		// The session-wide request also makes ActiveForcedGuestExit true;
+		// check whether this particular slice has redirected separately.
+		if (!Volatile.Read(ref _forcedGuestExit) || !HasActiveExecutionThread || _activeForcedGuestExit)
+		{
+			return false;
+		}
+
 		ulong sentinel = ActiveEntryReturnSentinelRip;
 		if (sentinel < 65536 || !TryPatchActiveGuestReturnSlot(sentinel))
 		{

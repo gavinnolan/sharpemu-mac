@@ -1285,7 +1285,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	internal void RequestHostShutdown(string reason)
 	{
-		_forcedGuestExit = true;
+		Volatile.Write(ref _forcedGuestExit, true);
 		LastError = string.IsNullOrWhiteSpace(reason)
 			? "Host shutdown requested."
 			: $"Host shutdown requested: {reason}";
