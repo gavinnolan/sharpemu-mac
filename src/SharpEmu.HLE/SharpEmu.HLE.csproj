@@ -15,14 +15,20 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <ItemGroup>
     <InternalsVisibleTo Include="SharpEmu.Core" />
     <InternalsVisibleTo Include="SharpEmu.Libs.Tests" />
+    <!-- Transitional (W06-W09): the per-OS host packages implement the Host/
+         contracts from their own assemblies and still need a handful of
+         internal helpers that are not part of the guest-facing surface:
+         HostMemory.OnMappingChanged, HostViewMemory.IsValid*, HostViewRegions,
+         WindowHostInput and HostBackingObject's descriptor/gate members.
+         Shrink this list as those helpers move into Host.Abstractions; do not
+         add other assemblies here. -->
+    <InternalsVisibleTo Include="SharpEmu.Host.MacOS" />
+    <InternalsVisibleTo Include="SharpEmu.Host.Linux" />
+    <InternalsVisibleTo Include="SharpEmu.Host.Windows" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <PackageReference Include="ppy.SDL3-CS" />
   </ItemGroup>
 
   <ItemGroup>

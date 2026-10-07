@@ -2,8 +2,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.Host;
-using SharpEmu.HLE.Host.Posix;
-using SharpEmu.HLE.Host.Windows;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Memory.HostViews;
@@ -16,7 +14,7 @@ internal static class HostViewTestSupport
 
     public static bool Supported => OperatingSystem.IsWindows() || OperatingSystem.IsLinux() || OperatingSystem.IsMacOS();
 
-    public static IHostMemory PlatformMemory => OperatingSystem.IsWindows() ? new WindowsHostMemory() : new PosixHostMemory();
+    public static IHostMemory PlatformMemory => HostBackendUnderTest.CreateMemory();
 
     public static ulong HoleSize(IHostViewMemory views) => AlignUp(4 * Segment, views.Granularity);
 

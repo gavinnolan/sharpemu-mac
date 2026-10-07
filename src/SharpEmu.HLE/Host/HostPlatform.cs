@@ -1,10 +1,6 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using System.Runtime.InteropServices;
-using SharpEmu.HLE.Host.Posix;
-using SharpEmu.HLE.Host.Windows;
-
 namespace SharpEmu.HLE.Host;
 
 /// <summary>
@@ -13,30 +9,83 @@ namespace SharpEmu.HLE.Host;
 /// through <see cref="Current"/>; injectable components should instead accept an
 /// <see cref="IHostPlatform"/> and merely default to this.
 /// </summary>
+/// <remarks>
+/// The backend is registered explicitly by the application at startup (see
+/// SharpEmu.CLI's HostComposition) rather than chosen here from
+/// <see cref="OperatingSystem"/> checks: a macOS build links only
+/// SharpEmu.Host.MacOS, so there is nothing for an OS check to choose between.
+/// </remarks>
 public static class HostPlatform
 {
-    private static readonly Lazy<IHostPlatform> Instance = new(Create);
+    private static readonly object Gate = new();
+    private static Func<IHostPlatform>? _factory;
+    private static IHostPlatform? _instance;
 
-    public static IHostPlatform Current => Instance.Value;
-
-    private static IHostPlatform Create()
+    /// <summary>
+    /// Whether a backend has been registered. Does not create it.
+    /// </summary>
+    public static bool IsInitialized
     {
-        // The Windows backend executes guest x86-64 natively and emits x86-64
-        // stubs, so a native ARM64 process must be rejected here rather than
-        // crash undefined later (x64 processes under emulation report X64).
-        if (OperatingSystem.IsWindows() && RuntimeInformation.ProcessArchitecture == Architecture.X64)
+        get
         {
-            return new WindowsHostPlatform();
+            lock (Gate)
+            {
+                return _instance is not null || _factory is not null;
+            }
         }
+    }
 
-        if ((OperatingSystem.IsLinux() || OperatingSystem.IsMacOS()) &&
-            RuntimeInformation.ProcessArchitecture == Architecture.X64)
+    /// <summary>Registers the backend eagerly. Last registration wins.</summary>
+    public static void Initialize(IHostPlatform platform)
+    {
+        ArgumentNullException.ThrowIfNull(platform);
+        lock (Gate)
         {
-            return new PosixHostPlatform();
+            _factory = null;
+            _instance = platform;
         }
+    }
 
-        throw new PlatformNotSupportedException(
-            "SharpEmu native guest execution requires an x86-64 process on Windows, Linux, or macOS. " +
-            "On Apple Silicon, use the osx-x64 build under Rosetta 2.");
+    /// <summary>
+    /// Registers a backend factory invoked once, on first use. Applications
+    /// prefer this overload: a host package may reject the running process
+    /// (for example a native ARM64 process, which cannot execute the x86-64
+    /// guest), and that diagnostic must surface when guest work starts rather
+    /// than when the frontend launches.
+    /// </summary>
+    public static void Initialize(Func<IHostPlatform> factory)
+    {
+        ArgumentNullException.ThrowIfNull(factory);
+        lock (Gate)
+        {
+            _instance = null;
+            _factory = factory;
+        }
+    }
+
+    public static IHostPlatform Current
+    {
+        get
+        {
+            lock (Gate)
+            {
+                if (_instance is not null)
+                {
+                    return _instance;
+                }
+
+                if (_factory is null)
+                {
+                    throw new InvalidOperationException(
+                        "No host platform has been registered. The application must call " +
+                        "HostPlatform.Initialize(...) with the SharpEmu.Host.* backend for its " +
+                        "target OS before any guest work starts (see SharpEmu.CLI's HostComposition).");
+                }
+
+                _instance = _factory() ??
+                    throw new InvalidOperationException("The registered host platform factory returned null.");
+                return _instance;
+            }
+        }
     }
 }

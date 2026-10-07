@@ -1,0 +1,23 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Optional SDL adapter for the host contracts. OS-neutral by itself; a
+       host package references it only when SDL is the qualified default output
+       for that OS. SharpEmu.Host.MacOS deliberately does not: macOS gets a
+       native CoreAudio output instead. -->
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\SharpEmu.HLE\SharpEmu.HLE.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ppy.SDL3-CS" />
+  </ItemGroup>
+</Project>
