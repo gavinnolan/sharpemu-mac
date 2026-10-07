@@ -309,3 +309,36 @@ formats before any guest memory read, including linear 2D/3D and tiled volume
 shapes. The affected snapshot/storage selection passes45/45 without skips
 (`compressed-storage-snapshot-x64` log/TRX), including four no-read regressions.
 This guard does not affect Poppy's R16Uint resource and does not qualify tile5.
+
+The exact descriptor/store replay is integrated at `0c58480`. It runs through
+the real shader materializer and permutation cache with a fake compiler/host:
+format11 Uint, a deliberately changed format176 Float, then the original Uint
+descriptor. The original permutation is reused and each stage retains detached,
+matching descriptor words. Two checks pass on ARM64 and Rosetta in the isolated
+replay; integrated Rosetta also passes2/2 without skips. No specialization/cache
+defect was reproduced. Root's combined test command stalled during build before
+test execution; its log is retained. A separate build passes with zero errors,
+then the no-build test succeeds. See `poppy-descriptor-replay-integrated-*` logs
+and TRX, and `poppy-volume-descriptor-replay-20261008.md` for limits.
+
+## Isolated native GPU ownership proof
+
+Private source `bfe518db58140eba47f50f76fc435152c97b1b3b` passes six actual-device
+ownership fixtures on ARM64 and Rosetta, with required-device1 and zero skips.
+They verify all16 RGBA texels of an old red immutable GPU copy after a later
+green writer, in one command buffer and in ordered separate buffers; reject a
+different buffer consuming an uncommitted producer; invalidate all earlier
+outputs when an uncommitted batch is discarded; wait for a committed buffer
+before close releases native and live-registry ownership; and reject an evicted
+GPU source before any CPU memory read. The writer is an actual render-pass clear.
+The byte oracle uses CPU texture readback after native completion, not a shader
+consumer. Logs/TRX and source/assembly hashes are under
+`artifacts/validation/metal-agent/immutable-gpu-bfe518d-{arm,x64}/`.
+
+Reviewed cleanup refinement `6dbb13d01eaf4f7fec4d8974de904f18840baedd` constructs
+native-error context before pin bookkeeping and preflights registry capacity
+before extra retains, with rollback on registry failure. Its managed selection
+passes104/104; allocation failure was not injected into an actual device test.
+The source graph stays disabled and isolated pending integrated compatibility,
+actual shader consumption and production execution/cleanup qualification. Native
+clear/copy fixtures do not qualify translated draw/compute scheduling or games.
