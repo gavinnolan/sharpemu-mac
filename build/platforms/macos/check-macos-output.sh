@@ -78,41 +78,9 @@ if [ "${forbid_sdl}" = true ]; then
     forbidden_find_args+=(-o '(' -iname '*sdl3*' ')')
 fi
 
-forbidden="$(find "${directory}" -type f '(' "${forbidden_find_args[@]}" ')' | sort)"
-
-# Known-remaining entries, each with the reason it is still there. Mirrors
-# SharpEmuMacSdlClosureException in macos.targets, which holds the same two
-# files for the same reason; delete them together.
-#
-#   SDL3-CS.dll, libSDL3.dylib - SharpEmu.HLE still references ppy.SDL3-CS for
-#   HLE/Host/Sdl/SdlHostAudio, the default POSIX audio output. CoreAudio
-#   replaces it on macOS in the host-platform split, which moves SdlHostAudio
-#   out of HLE. Nothing else in a macOS artifact touches SDL: the window,
-#   keyboard, gamepads, haptics and display catalog are
-#   AppKit/GameController/CoreGraphics, and the SDL adapter package is
-#   referenced only for win-*/linux-* RIDs.
-allowed_basenames=(
-    'SDL3-CS.dll'
-    'libSDL3.dylib'
-)
-
-if [ -n "${forbidden}" ]; then
-    kept=""
-    while IFS= read -r entry; do
-        [ -n "${entry}" ] || continue
-        skip=false
-        for allowed in "${allowed_basenames[@]}"; do
-            if [ "$(basename "${entry}")" = "${allowed}" ]; then
-                skip=true
-                break
-            fi
-        done
-        [ "${skip}" = true ] || kept="${kept}${entry}"$'\n'
-    done <<EOF
-${forbidden}
-EOF
-    forbidden="$(printf '%s' "${kept}" | sed '/^$/d' | sort)"
-fi
+# Match symlinks too: renaming a forbidden payload behind a library alias must
+# not make the policy pass. The host split retired all SDL exceptions.
+forbidden="$(find "${directory}" '(' -type f -o -type l ')' '(' "${forbidden_find_args[@]}" ')' | sort)"
 
 # RID-specific publish flattens the natives it selects, so a surviving
 # runtimes/<other-os> tree means asset selection did not happen at all.
@@ -126,13 +94,17 @@ fi
 if [ -n "${forbidden}" ]; then
     if [ "${strip_forbidden}" = true ]; then
         echo "macOS output policy: stripping forbidden entries from ${directory}:"
-        printf '  %s\n' ${forbidden}
-        # shellcheck disable=SC2086
-        rm -rf ${forbidden}
+        while IFS= read -r entry; do
+            [ -n "${entry}" ] || continue
+            printf '  %s\n' "${entry}"
+            rm -rf -- "${entry}"
+        done <<EOF
+${forbidden}
+EOF
         forbidden=""
     else
         echo "macOS output policy violation in ${directory}:" >&2
-        printf '  %s\n' ${forbidden} >&2
+        printf '%s\n' "${forbidden}" >&2
         echo "The macOS build is Metal-only and osx-x64-only, so it must not carry" >&2
         echo "Vulkan/MoltenVK assets or sibling-OS natives. Scope the offending native" >&2
         echo "asset package to its RID; see build/platforms/macos/macos.targets." >&2
