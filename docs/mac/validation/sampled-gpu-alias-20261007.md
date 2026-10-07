@@ -243,3 +243,23 @@ publication fails. The related managed104-case selection remains green. No
 artificial OOM or native command-buffer error was injected; ordering/ownership
 for those failures is reviewed source evidence, not hardware-fault qualification.
 Hardware proof belongs to clean bfe518d, not this later exception-path revision.
+
+### Actual compute argument-buffer consumer followup
+
+The next isolated branch routes captured immutable textures through the actual
+`CreateDrawTexture` materializer before CPU-stability/cache/alias paths. Under the
+still-disabled graph boundary, read-only storage inputs use that path too;
+writable storage destinations remain separately unqualified. Batched command
+submission publishes native source commit state only after the real commit call.
+
+Four hardware consumer fixtures compile (sampled and read-only storage, with
+preparation alive/disposed before execution). They capture old/red, admit a
+consumer, execute a later new/green producer, then run actual
+`ExecuteComputeDispatch`→`EncodeStageResources`→GPU shader→guest buffer writeback.
+Every byte of all16texels is compared to independent expected colors, starting
+with sentinel destination bytes. The MSL kernel independently exercises the
+production argument-buffer ABI; it is not a Gen5 ISA translation fixture.
+The ARM64 no-device106-case regression selection passes, including pending-copy
+and unassociated-GPU-address rejection before native materialization access.
+The four new GPU consumer cases have not run yet. Drain writer/lifecycle hooks,
+CPU backing/copy ownership, all mutation paths and graph activation remain open.

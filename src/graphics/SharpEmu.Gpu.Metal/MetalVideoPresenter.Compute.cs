@@ -131,7 +131,8 @@ internal static partial class MetalVideoPresenter
         for (var index = 0; index < dispatch.Textures.Length; index++)
         {
             var descriptor = dispatch.Textures[index];
-            if (descriptor.IsStorage && descriptor.Address != 0)
+            if (descriptor.IsStorage && descriptor.Address != 0 &&
+                (!_textureSourceGraphEnabled || StorageImageWrites(descriptor)))
             {
                 textureHandles[index] = EnsureStorageImage(device, descriptor).Texture;
                 textureOwned[index] = false;

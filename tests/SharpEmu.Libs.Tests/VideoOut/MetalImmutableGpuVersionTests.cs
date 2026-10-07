@@ -21,7 +21,7 @@ namespace SharpEmu.Libs.Tests.VideoOut;
 // admission/materialization/copy/commit/recycle helpers run; render-pass clear
 // is the GPU writer. No translated draw/compute or game qualification is implied.
 [Collection(SchedulingStateCollection.Name)]
-public sealed class MetalImmutableGpuVersionTests(ITestOutputHelper output)
+public sealed partial class MetalImmutableGpuVersionTests(ITestOutputHelper output)
 {
     private const ulong Address = 0x71F0_0000_00;
     private bool DeviceRequested()
@@ -179,7 +179,7 @@ public sealed class MetalImmutableGpuVersionTests(ITestOutputHelper output)
         .GetMethod(name, BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, arguments);
     private static object? Get(object source, string field) => source.GetType().GetField(field)!.GetValue(source);
 
-    private sealed class NativeState : IDisposable
+    private sealed partial class NativeState : IDisposable
     {
         private readonly MetalTextureSourceLeaseTests.State trackerState = new();
         private readonly bool oldGraph = (bool)Field("_textureSourceGraphEnabled").GetValue(null)!;
@@ -231,11 +231,11 @@ public sealed class MetalImmutableGpuVersionTests(ITestOutputHelper output)
             Call("ReleaseTextureSourceWorkOwnerLocked", workByVersion[version]);
             Field("_executingTextureSourceWork").SetValue(null, null);
         }
-        public GuestDrawTexture Capture()
+        public GuestDrawTexture Capture(bool storage = false)
         {
-            var read = new GuestDrawTexture(Address, 4, 4, 10, 0, [], false, false, Pitch: 4,
+            var read = new GuestDrawTexture(Address, 4, 4, 10, 0, [], false, storage, Pitch: 4,
                 Descriptor: MetalTextureSourceLeaseTests.ResourceWords(),
-                Shape: new ShaderImageShape(false, false, false, false, TextureNumericClass.Float), Access: GuestImageAccess.Read);
+                Shape: new ShaderImageShape(false, false, storage, false, TextureNumericClass.Float), Access: GuestImageAccess.Read);
             Assert.True(MetalVideoPresenter.TryCaptureTextureSource(read, 64, false)); captures.Add(read); return read;
         }
         public nint Resolve(GuestDrawTexture texture, nint buffer)

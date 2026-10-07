@@ -1483,6 +1483,13 @@ internal static partial class MetalVideoPresenter
         out bool ownedByCaller)
     {
         ownedByCaller = true;
+        if (_textureSourceGraphEnabled && TryResolveCapturedTextureSource(blitCommandBuffer, texture, out var captured))
+        {
+            ownedByCaller = false;
+            return captured;
+        }
+        RequireNoUncapturedGpuTextureSource(texture);
+
         if (texture.Width == 0 || texture.Height == 0)
         {
             return 0;
