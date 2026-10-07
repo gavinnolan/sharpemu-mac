@@ -18,6 +18,14 @@ internal sealed unsafe partial class PosixHostViews : IHostViewMemory
     private const int MAP_FIXED = 0x10;
     private const int MAP_FIXED_NOREPLACE = 0x100000;
     private const int O_RDWR = 0x2;
+    private const int KERN_SUCCESS = 0;
+
+    // On Darwin fixed placement is the absence of VM_FLAGS_ANYWHERE. Never add
+    // VM_FLAGS_OVERWRITE: an overlapping request must fail, not clobber.
+    private const int VM_FLAGS_FIXED = 0;
+
+    // sizeof(vm_region_submap_short_info_data_64_t) / sizeof(natural_t).
+    private const int VM_REGION_SUBMAP_SHORT_INFO_COUNT_64 = 12;
     private static readonly int MAP_ANON = OperatingSystem.IsMacOS() ? 0x1000 : 0x20;
     private static readonly int MAP_NORESERVE = OperatingSystem.IsMacOS() ? 0 : 0x4000;
     private static readonly int O_CREAT = OperatingSystem.IsMacOS() ? 0x200 : 0x40;
@@ -80,6 +88,22 @@ internal sealed unsafe partial class PosixHostViews : IHostViewMemory
             return 0;
         }
 
+        // Darwin has no MAP_FIXED_NOREPLACE, and mmap's address argument is only
+        // a hint there. On Apple Silicon the hint is ignored outright: every
+        // anonymous mapping lands at the kernel's own allocation base no matter
+        // what was asked for, so the "did it land where we asked?" test below
+        // can never succeed and every guest reservation would be reported as
+        // occupied. mach_vm_allocate with fixed placement and without
+        // VM_FLAGS_OVERWRITE maps exactly the requested range or fails with
+        // KERN_NO_SPACE, and unlike MAP_FIXED it cannot clobber CLR, dyld, JIT,
+        // or Rosetta mappings that are absent from our shadow table. Use it as
+        // the only reservation path on macOS so a placement answer costs one
+        // syscall instead of a hint attempt that is known to miss.
+        if (OperatingSystem.IsMacOS())
+        {
+            return ReserveHoleDarwinFixed(address, size);
+        }
+
         var flags = MAP_PRIVATE | MAP_ANON | MAP_NORESERVE | (OperatingSystem.IsLinux() ? MAP_FIXED_NOREPLACE : 0);
         var ptr = mmap((nint)address, (nuint)size, PROT_NONE, flags, -1, 0);
         if (ptr == MAP_FAILED)
@@ -96,9 +120,30 @@ internal sealed unsafe partial class PosixHostViews : IHostViewMemory
         return address;
     }
 
-    // POSIX has no VirtualQuery for foreign host mappings, so find the free
-    // ranges by reserving halves until each attempt fits or falls below the
-    // minimum. Occupied host ranges are few, so this needs few attempts.
+    // Reserve exactly [address, address + size) or fail, without overwriting
+    // anything already mapped there. mach_vm_allocate hands back pages with
+    // VM_PROT_DEFAULT, so drop them to PROT_NONE to match the mmap path.
+    private static ulong ReserveHoleDarwinFixed(ulong address, ulong size)
+    {
+        var allocated = address;
+        if (mach_vm_allocate(mach_task_self(), ref allocated, size, VM_FLAGS_FIXED) != KERN_SUCCESS)
+        {
+            return 0;
+        }
+
+        if (allocated != address || mprotect((nint)address, (nuint)size, PROT_NONE) != 0)
+        {
+            mach_vm_deallocate(mach_task_self(), allocated, size);
+            return 0;
+        }
+
+        return address;
+    }
+
+    // Find the free ranges by reserving halves until each attempt fits or falls
+    // below the minimum. Occupied host ranges are few, so this needs few
+    // attempts. Portable POSIX has no VirtualQuery for foreign host mappings;
+    // where one exists, FindUnmappedRange below answers directly.
     public IReadOnlyList<HostAddressRange> ReserveFreeAddressRanges(ulong start, ulong end, ulong minimumSize)
     {
         var reserved = new List<HostAddressRange>();
@@ -142,6 +187,60 @@ internal sealed unsafe partial class PosixHostViews : IHostViewMemory
 
         ReserveFreeAddressRangesLocked(address, half, minimumSize, reserved);
         ReserveFreeAddressRangesLocked(address + half, size - half, minimumSize, reserved);
+    }
+
+    // Darwin does have a VirtualQuery equivalent. mach_vm_region_recurse walks
+    // the task's own map including mappings this process never made, and asking
+    // at nesting depth 0 collapses a whole submap into one entry. That matters
+    // on Apple Silicon, where the kernel refuses fixed placement everywhere
+    // below its own allocation base: the span from the dyld shared region up to
+    // that base is hundreds of gigabytes, and a caller stepping one guest page
+    // at a time needs tens of millions of probes to cross it. At depth 0 the
+    // same crossing is a couple of dozen calls.
+    public ulong FindUnmappedRange(ulong address, ulong size, ulong searchEnd)
+    {
+        if (!OperatingSystem.IsMacOS() || size == 0 || address >= searchEnd || size > searchEnd - address)
+        {
+            return 0;
+        }
+
+        var task = mach_task_self();
+        var info = stackalloc uint[VM_REGION_SUBMAP_SHORT_INFO_COUNT_64];
+        var cursor = address;
+        while (cursor < searchEnd && size <= searchEnd - cursor)
+        {
+            var regionAddress = cursor;
+            ulong regionSize = 0;
+            uint depth = 0;
+            var count = VM_REGION_SUBMAP_SHORT_INFO_COUNT_64;
+            if (mach_vm_region_recurse(task, ref regionAddress, ref regionSize, ref depth, info, ref count) != KERN_SUCCESS)
+            {
+                // Nothing is mapped between the cursor and the end of the map.
+                return cursor;
+            }
+
+            // A region starting above the cursor leaves a hole in front of it.
+            if (regionAddress > cursor && regionAddress - cursor >= size)
+            {
+                return cursor;
+            }
+
+            if (regionSize == 0 || regionSize > ulong.MaxValue - regionAddress)
+            {
+                return 0;
+            }
+
+            var regionEnd = regionAddress + regionSize;
+            if (regionEnd <= cursor)
+            {
+                // The map did not move forward, so stop instead of spinning.
+                return 0;
+            }
+
+            cursor = regionEnd;
+        }
+
+        return 0;
     }
 
     private static ulong AlignUp(ulong value, ulong alignment)
@@ -311,4 +410,17 @@ internal sealed unsafe partial class PosixHostViews : IHostViewMemory
 
     [LibraryImport("libc", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
     private static partial int shm_unlink(string name);
+
+    [LibraryImport("libSystem.B.dylib")]
+    private static partial uint mach_task_self();
+
+    [LibraryImport("libSystem.B.dylib")]
+    private static partial int mach_vm_allocate(uint task, ref ulong address, ulong size, int flags);
+
+    [LibraryImport("libSystem.B.dylib")]
+    private static partial int mach_vm_deallocate(uint task, ulong address, ulong size);
+
+    [LibraryImport("libSystem.B.dylib")]
+    private static partial int mach_vm_region_recurse(
+        uint task, ref ulong address, ref ulong size, ref uint nestingDepth, uint* info, ref int infoCount);
 }

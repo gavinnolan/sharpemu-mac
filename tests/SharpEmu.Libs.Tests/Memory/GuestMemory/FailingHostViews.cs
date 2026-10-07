@@ -76,6 +76,17 @@ internal sealed class FailingHostViews : IHostViewMemory
         return ShouldFail(Op.ReserveHole) ? 0 : _inner.ReserveHole(address, size);
     }
 
+    // Forward the optional capabilities too. They have default implementations
+    // that answer "this host cannot do that", so a decorator that leaves them
+    // out silently takes the slow path away from everything it wraps: the free
+    // ranges stay undiscovered and an address search degrades into a probe of
+    // every guest page.
+    public IReadOnlyList<HostAddressRange> ReserveFreeAddressRanges(ulong start, ulong end, ulong minimumSize) =>
+        _inner.ReserveFreeAddressRanges(start, end, minimumSize);
+
+    public ulong FindUnmappedRange(ulong address, ulong size, ulong searchEnd) =>
+        _inner.FindUnmappedRange(address, size, searchEnd);
+
     public bool SplitHole(ulong address, ulong size) =>
         !ShouldFail(Op.SplitHole) && _inner.SplitHole(address, size);
 
