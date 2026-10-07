@@ -3,6 +3,7 @@
 
 using System.Runtime.CompilerServices;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.Images;
 
@@ -63,11 +64,32 @@ internal static partial class MetalVideoPresenter
         uint BaseMipLevel, uint MipLevel, uint ResourceMipLevels,
         bool Arrayed, uint Layers, uint Depth)
     {
-        public static TextureSourceView Of(GuestDrawTexture texture) => new(
-            texture.Address, texture.Width, texture.Height, texture.Format, texture.NumberType,
-            texture.TileMode, texture.Pitch == 0 ? texture.Width : texture.Pitch,
-            texture.Type, texture.MipLevels, texture.BaseMipLevel, texture.MipLevel,
-            texture.ResourceMipLevels, texture.ArrayedView, texture.ArrayLayers, texture.Depth);
+        public static TextureSourceView Of(GuestDrawTexture texture, bool verifiedColorProducer = false)
+        {
+            // DTO pitch describes upload rows, which can differ from the
+            // actual tiled guest resource pitch. Owned raw descriptor words
+            // retain that resource identity; never borrow a consumer's view
+            // to manufacture producer metadata.
+            var pitch = texture.Pitch == 0 ? texture.Width : texture.Pitch;
+            if (texture.Descriptor is { Length: >= 8 } words)
+            {
+                if (!AgcBackendServices.TryDecodeTextureDescriptor(words, out var decoded) ||
+                    decoded.Address != texture.Address || decoded.Width != texture.Width || decoded.Height != texture.Height ||
+                    decoded.Format != texture.Format || decoded.NumberType != texture.NumberType || decoded.Type != texture.Type ||
+                    decoded.TileMode != texture.TileMode || decoded.Depth != texture.Depth || decoded.DstSelect != texture.DstSelect ||
+                    decoded.BaseLevel != texture.BaseMipLevel || decoded.MipLevels != texture.MipLevels ||
+                    decoded.ResourceMipLevels != texture.ResourceMipLevels || decoded.BaseArray != 0 || decoded.ArrayPitch != 0 ||
+                    decoded.MetadataAddress != 0 || decoded.DescriptorFlags != 0 || decoded.BcSwizzle != 0 ||
+                    decoded.MinLod != 0 || decoded.MinLodWarn != 0)
+                    throw new NotSupportedException("Metal texture source raw descriptor does not match its prepared view.");
+                pitch = decoded.Pitch;
+            }
+            else if (!verifiedColorProducer)
+                throw new NotSupportedException("Metal ordered texture sources require all eight owned resource descriptor words.");
+            return new(texture.Address, texture.Width, texture.Height, texture.Format, texture.NumberType,
+                texture.TileMode, pitch, texture.Type, texture.MipLevels, texture.BaseMipLevel, texture.MipLevel,
+                texture.ResourceMipLevels, texture.ArrayedView, texture.ArrayLayers, texture.Depth);
+        }
     }
 
     // A logical producer version is separate from its mutable image registry
@@ -96,6 +118,13 @@ internal static partial class MetalVideoPresenter
         public nint Texture;
         public nint ImmutableTexture;
         public bool Retired;
+        public GuestDrawTexture? Descriptor;
+        public TextureSourceVersion? Initializer;
+        public bool ClearsOutput;
+        public bool Budgeted;
+        public bool ProducerReleased;
+        public int NativePins;
+        public bool NativeCompleted;
     }
 
     private sealed class TextureSourceLease(TextureSourceVersion version)
@@ -222,7 +251,7 @@ internal static partial class MetalVideoPresenter
     private static bool SupportedTextureSourceView(GuestDrawTexture texture) =>
         SupportedFloatTextureSourceFormat(texture) &&
         texture.Type == 9 && !texture.ArrayedView && texture.ArrayLayers == 1 && texture.Depth == 1 &&
-        texture.MipLevels == 1 && texture.ResourceMipLevels == 1 && texture.BaseMipLevel == 0 && texture.MipLevel == 0 &&
+        texture.MipLevels == 1 && texture.ResourceMipLevels >= 1 && texture.BaseMipLevel == 0 && texture.MipLevel == 0 &&
         texture.DstSelect is 0 or 0xFAC && texture.Shape.NumericClass == TextureNumericClass.Float &&
         !texture.Shape.Volume && !texture.Shape.Arrayed && !texture.Shape.Cube && !texture.Shape.OneDimensional &&
         !texture.Shape.Multisampled && !texture.Shape.DepthCompare && !texture.Shape.DynamicMip &&
@@ -288,7 +317,19 @@ internal static partial class MetalVideoPresenter
         GuestDrawTexture descriptor, long sequence, GuestQueueIdentity queue, bool initializesWholeImage)
     {
         if (sequence <= 0 || descriptor.Address == 0) return;
-        var view = TextureSourceView.Of(descriptor);
+        var source = PrepareTextureSourceVersionLocked(descriptor, sequence, queue, initializesWholeImage);
+        _latestTextureSources[descriptor.Address] = source;
+        _textureSourceVersions.Add(source);
+    }
+
+    private static TextureSourceVersion PrepareTextureSourceVersionLocked(
+        GuestDrawTexture descriptor, long sequence, GuestQueueIdentity queue, bool initializesWholeImage,
+        bool verifiedColorProducer = false)
+    {
+        if (!SupportedTextureSourceView(descriptor) || descriptor.Width == 0 || descriptor.Height == 0 ||
+            descriptor.Width > 16384 || descriptor.Height > 16384)
+            throw new NotSupportedException($"Metal ordered producer has unsupported view at 0x{descriptor.Address:X}.");
+        var view = TextureSourceView.Of(descriptor, verifiedColorProducer);
         _latestTextureSources.TryGetValue(descriptor.Address, out var previous);
         var hasPrevious = previous is { Failed: false, Retired: false } && previous.View == view &&
             previous.MappingEpoch == HostMemory.MappingGeneration &&
@@ -311,11 +352,13 @@ internal static partial class MetalVideoPresenter
         }
         var hasCaptured = _textureSourceLeases.TryGetValue(descriptor, out var captured) &&
             !captured.PreparationReleased && captured.References > 0 && !captured.Version.Failed &&
-            !captured.Version.Retired && captured.Version.View == view &&
+            captured.Version.View == view &&
             captured.Version.MappingEpoch == HostMemory.MappingGeneration &&
             captured.Version.WriteGeneration == CurrentTextureWriteGeneration(descriptor.Address) &&
             captured.Version.ContentObserved && GuestImageWriteTracker.TryGetContentToken(descriptor.Address, out var capturedToken) &&
             capturedToken == captured.Version.ContentToken;
+        if (hasSeed && hasPrevious && !hasCaptured)
+            throw new InvalidOperationException("Metal CPU seed cannot overwrite a current GPU producer without a captured source choice.");
         if (!initializesWholeImage && !hasPrevious && !hasSeed && !hasCaptured)
             throw new InvalidOperationException($"Metal storage writer 0x{descriptor.Address:X} has no faithful initialization source.");
         var nativeFormat = MetalGuestFormats.DecodeTextureFormat(descriptor.Format, descriptor.NumberType);
@@ -324,7 +367,11 @@ internal static partial class MetalVideoPresenter
         var observed = GuestImageWriteTracker.BeginReadSnapshot(descriptor.Address, observedBytes,
             sequence, "metal.gpu-source-producer");
         var hasObservedToken = GuestImageWriteTracker.TryGetContentToken(descriptor.Address, out var observedContentToken);
-        var contentObserved = GuestImageWriteTracker.Enabled && hasObservedToken;
+        var contentObserved = GuestImageWriteTracker.Enabled && hasObservedToken &&
+            (observedContentToken.ProtectedIdentity != 0 && observedContentToken.ProtectedByteCount >= observedBytes ||
+             observedContentToken.WatchIdentity != 0 && observedContentToken.WatchByteCount >= observedBytes);
+        if (!contentObserved)
+            throw new InvalidOperationException("Metal ordered producer has no complete content observation.");
         // Observation may register a previously absent range at generation0;
         // it must never retimestamp a known copied seed after a CPU write.
         if (hasSeed && (!provenance!.Stable || !IsCpuTextureSnapshotObservationStable(descriptor.Address, provenance.Observation) ||
@@ -355,9 +402,11 @@ internal static partial class MetalVideoPresenter
             ContentToken = contentToken,
             PreviousProducerSequence = hasPrevious ? previous!.ProducerSequence : 0,
             OwnsInitialization = initializesWholeImage || hasSeed || hasPrevious || hasCaptured,
+            Descriptor = descriptor,
+            Initializer = hasCaptured ? captured!.Version : hasPrevious ? previous : null,
+            ClearsOutput = initializesWholeImage && !hasCaptured && !hasPrevious && !hasSeed,
         };
-        _latestTextureSources[descriptor.Address] = source;
-        _textureSourceVersions.Add(source);
+        return source;
     }
 
     // Metadata invalidation is real even before active queue/native ownership

@@ -56,7 +56,7 @@ public sealed class MetalTextureSourceLeaseTests
     {
         using var state = new State();
         var read = PublishAndCapture();
-        var copy = read with { Descriptor = [0, 1, 2, 3, 4, 5, 6, 7] };
+        var copy = read with { Sampler = new GuestSampler(1, 2, 3, 4) };
         MetalVideoPresenter.CopyCapturedTextureSource(read, copy);
         Assert.Equal(MetalVideoPresenter.TextureSourceState(read), MetalVideoPresenter.TextureSourceState(copy));
         MetalVideoPresenter.ReleasePreparedTextureSources([copy]);
@@ -117,7 +117,7 @@ public sealed class MetalTextureSourceLeaseTests
     {
         using var state = new State();
         var read = PublishAndCapture();
-        Assert.Throws<InvalidOperationException>(() => MetalVideoPresenter.CopyCapturedTextureSource(read, read with { Width = 2 }));
+        Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.CopyCapturedTextureSource(read, read with { Width = 2 }));
         Assert.Throws<InvalidOperationException>(() => MetalVideoPresenter.CopyCapturedTextureSource(read, read with { Access = GuestImageAccess.Write }));
         MetalVideoPresenter.ReleasePreparedTextureSources([read]);
         Assert.Throws<InvalidOperationException>(() => MetalVideoPresenter.CopyCapturedTextureSource(read, read with { Sampler = new GuestSampler(1, 2, 3, 4) }));
@@ -272,8 +272,11 @@ public sealed class MetalTextureSourceLeaseTests
     }
 
     private static GuestDrawTexture Texture(bool storage) => new(Address, 4, 4, 10, 0, [], false, storage,
-        Pitch: 4, Shape: new ShaderImageShape(false, false, storage, false, TextureNumericClass.Float),
+        Pitch: 4, Descriptor: ResourceWords(), Shape: new ShaderImageShape(false, false, storage, false, TextureNumericClass.Float),
         Access: GuestImageAccess.Read);
+    internal static uint[] ResourceWords(ulong address = Address) =>
+        [(uint)(address >> 8), (uint)((address >> 40) & 0xFF) | 56u << 20 | 3u << 30,
+         3u << 14, 0xFACu | 9u << 28, 3, 0, 0, 0];
     private static FieldInfo Field(string name) => typeof(MetalVideoPresenter).GetField(name, BindingFlags.Static | BindingFlags.NonPublic)!;
     private static void Call(string name, params object[] arguments) => typeof(MetalVideoPresenter)
         .GetMethod(name, BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, arguments);

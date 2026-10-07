@@ -160,3 +160,24 @@ cache still needs token qualification or disabling under the eventual active
 graph. Detached immutable native versions need independent lifetime ownership,
 not indiscriminate mapping-epoch checks at consumption. Source activation and
 native old/new-version readbacks remain outstanding.
+
+### Dormant transactional admission boundary
+
+The isolated branch now plans every output and initialization/WAW dependency
+before queue mutation. Admission publishes queue sequence, schedule, pending
+count/bytes, explicit input/work owners and latest producer versions together;
+rollback restores all of them. Native budgeting reserves both the fresh writer
+image and immutable copy, including latest versions without read references.
+An incomplete resource descriptor, conflicting same-address initialization,
+released preparation or budget rejection cannot manufacture a producer.
+Color views come from validated real color-target registers; a texture binding
+requires all eight owned descriptor words and matching decoded view fields.
+
+The ARM64 no-device89-case selection includes twelve actual production admission
+cases alongside lease, scheduler, metadata and frontend ownership cases. The
+private activation boundary stays disabled. Native allocation/copy, actual
+command-completion retention, pruning, cancellation and shutdown hooks remain
+outstanding; these tests do not establish the DS219 source or fix its format/view
+compatibility. Content identity plus extents also does not prove successful page
+protection or serialize against an in-flight managed write. That observation
+contract is a separate activation blocker, never a mapping lease.

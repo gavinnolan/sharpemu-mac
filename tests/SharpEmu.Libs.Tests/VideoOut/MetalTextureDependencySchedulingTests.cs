@@ -377,7 +377,7 @@ public sealed class MetalTextureDependencySchedulingTests
         {
             var address = nextAddress; nextAddress += 0x1000;
             GuestImageWriteTracker.TrackManagedWriter(address, 64);
-            var seed = new GuestDrawTexture(address, 4, 4, 10, 0, new byte[64], false, true, Pitch: 4, WriteGeneration: 0,
+            var seed = new GuestDrawTexture(address, 4, 4, 10, 0, new byte[64], false, true, Pitch: 4, WriteGeneration: 0, Descriptor: MetalTextureSourceLeaseTests.ResourceWords(address),
                 Shape: new ShaderImageShape(false, false, true, false, TextureNumericClass.Float), Access: GuestImageAccess.Write);
             MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(seed,
                 MetalVideoPresenter.ObserveCpuTextureSnapshot(address, 64, HostMemory.MappingGeneration));

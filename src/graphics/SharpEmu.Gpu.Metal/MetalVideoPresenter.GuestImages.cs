@@ -579,6 +579,8 @@ internal static partial class MetalVideoPresenter
         }
 
         var queue = _submittingGuestQueue ?? GuestQueueIdentity.Default;
+        if (_textureSourceGraphEnabled)
+            return EnqueueTextureSourceWorkLocked(work, payloadBytes, queue);
         var sequence = ++_enqueuedGuestWorkSequence;
         _lastEnqueuedGuestWorkByQueue[queue.Name] = sequence;
         if (!_pendingGuestWorkByQueue.TryGetValue(queue.Name, out var pendingQueue))

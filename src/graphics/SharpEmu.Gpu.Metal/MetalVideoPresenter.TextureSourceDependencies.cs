@@ -14,19 +14,27 @@ internal static partial class MetalVideoPresenter
     private readonly record struct TextureSourceDependency(
         long ProducerSequence, string ProducerQueue, TextureSourceDependencyState State, string Context);
 
-    // The inactive foundation currently has captured input owners only. Active
-    // admission must additionally supply each writer's initialization/WAW owner
-    // before source publication or dependency selection can be enabled.
-    private static TextureSourceDependency[] GetGuestTextureSourceDependenciesLocked(object work) =>
-        TextureSourcesOf(work)
-            .Select(static lease => new TextureSourceDependency(
-                lease.Version.ProducerSequence,
-                lease.Version.ProducerQueue.Name,
-                lease.Version.Failed || lease.References <= 0 ? TextureSourceDependencyState.Failed :
-                    lease.Version.Completed ? TextureSourceDependencyState.Encoded : TextureSourceDependencyState.Pending,
-                $"image=0x{lease.Version.View.Address:X} version={lease.Version.Identity}"))
-            .DistinctBy(static dependency => (dependency.ProducerSequence, dependency.Context))
-            .ToArray();
+    // Dormant admission supplies input and initialization/WAW owners. Encoded
+    // remains a synthetic fixture stage until native ordered copy ownership and
+    // command-completion retention are integrated; it is not hardware completion.
+    private static TextureSourceDependency[] GetGuestTextureSourceDependenciesLocked(object work)
+    {
+        IEnumerable<TextureSourceVersion> versions = TextureSourcesOf(work).Select(static lease =>
+        {
+            if (lease.References <= 0) throw new InvalidOperationException("Metal captured texture input owner was released.");
+            return lease.Version;
+        });
+        if (_textureSourceWorkOwners.TryGetValue(work, out var owner))
+        {
+            if (owner.Released) throw new InvalidOperationException("Metal texture work owner was already released.");
+            versions = versions.Concat(owner.Predecessors);
+        }
+        return versions.DistinctBy(static source => source.Identity).Select(static source => new TextureSourceDependency(
+            source.ProducerSequence, source.ProducerQueue.Name,
+            source.Failed ? TextureSourceDependencyState.Failed :
+                source.Completed ? TextureSourceDependencyState.Encoded : TextureSourceDependencyState.Pending,
+            $"image=0x{source.View.Address:X} version={source.Identity}")).ToArray();
+    }
 
     private static bool GuestTextureSourcesReadyLocked(in PendingGuestWork pending)
     {
