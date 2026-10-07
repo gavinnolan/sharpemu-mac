@@ -256,6 +256,9 @@ public sealed partial class MetalImmutableGpuVersionTests(ITestOutputHelper outp
             MetalVideoPresenter.ReleasePreparedTextureSources(captures);
             Call("ShutdownTextureSourceNativeOwners");
             uploadArena.Dispose();
+            var last = (nint)Field("_lastFlushedCommandBuffer").GetValue(null)!;
+            if (last != 0) MetalNative.SendVoid(last, MetalNative.Selector("release"));
+            Field("_lastFlushedCommandBuffer").SetValue(null, (nint)0);
             ReleaseConsumerShaderResources();
             Field("_executingTextureSourceWork").SetValue(null, null);
             Field("_textureSourceGraphEnabled").SetValue(null, oldGraph);

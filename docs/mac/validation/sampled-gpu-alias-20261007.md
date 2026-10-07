@@ -296,3 +296,13 @@ Queued ownership is still released after writeback wait in those cases. Gen5 ISA
 translation, runtime Drain writer/error/shutdown hooks, CPU seed/backing leases
 and graph activation remain unqualified. The preexisting new-function ownership
 in `GetShaderFunction`/`TryGetComputePipeline` needs separate cleanup review.
+
+The next isolated fixture disables guest writeback synchronization, uses a fresh
+isolated upload arena and retains the actual output MTLBuffer. It releases
+preparation and queued ownership while the real consumer remains encoded in an
+uncommitted batch. Source references reach0 while its native pin keeps the
+captured old image. Positive cases will commit/wait/read all64old bytes and then
+assert exact native retirement; negative cases discard the uncommitted batch and
+require unchanged sentinel output plus released pins/handles. Both sampled and
+read-only storage cases end with explicit shutdown owner/registry assertions.
+These four new lifetime cases are not device-qualified yet.

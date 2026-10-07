@@ -88,11 +88,11 @@ public sealed partial class MetalImmutableGpuVersionTests
                 """;
             return new(new Gen5MslShader(source, "immutable_consume", Gen5MslStage.Compute, 0, ArgumentLayout: layout));
         }
-        public object AdmitConsumer(GuestDrawTexture texture)
+        public object AdmitConsumer(GuestDrawTexture texture, bool writeBack = true)
         {
             var shader = ConsumerShader(texture.IsStorage);
             consumerShaders.Add(shader);
-            var destination = new GuestMemoryBuffer(OutputAddress, Enumerable.Repeat((byte)0xA5, 64).ToArray(), 64, 64, false, Writable: true);
+            var destination = new GuestMemoryBuffer(OutputAddress, Enumerable.Repeat((byte)0xA5, 64).ToArray(), 64, 64, false, Writable: true, WriteBackToGuest: writeBack);
             var binding = new GuestStageBindings(GuestStageKind.Compute, [0], [0], [], [], null, [], [], false, false, 0);
             var sequence = MetalVideoPresenter.SubmitComputeDispatch(0, shader, [texture], [destination], 4, 4, 1, 0, 0, 0, true, binding);
             var pending = ((IDictionary)Field("_pendingGuestWorkByQueue").GetValue(null)!).Values.Cast<IEnumerable>()
