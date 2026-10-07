@@ -75,6 +75,32 @@ internal static class MetalTextureSnapshots
         {
             foreach (var binding in bindings)
             {
+                // Preserve the shared block-write rejection before the narrower
+                // mode5 descriptor gate and before any captured-source shortcut.
+                if (binding.IsStorage && binding.Descriptor.Address != 0 &&
+                    GetBlockCompressedBlockBytes(binding.Descriptor.Format) != 0)
+                    throw new NotSupportedException(
+                        $"Metal compressed storage images require explicit guest block-write semantics: " +
+                        $"addr=0x{binding.Descriptor.Address:X} type={binding.Descriptor.Type} format={binding.Descriptor.Format}/{binding.Descriptor.NumberType} tile={binding.Descriptor.TileMode}.");
+                // No general XYZ sampled-volume path is qualified. In particular,
+                // cached/known upload shortcuts cannot authorize an XY-only decode.
+                if (!binding.IsStorage && binding.Descriptor.Type == Gen5TextureType3D && binding.Descriptor.TileMode != 0)
+                    throw new NotSupportedException("Metal sampled tiled volumes require a qualified 3D source and sampled-view consumer; XY detiling is unsupported.");
+                if (binding.Descriptor.Type == Gen5TextureType3D && binding.Descriptor.TileMode == 5)
+                {
+                    var d = binding.Descriptor;
+                    if (!binding.IsStorage || binding.MipLevel != 0 || binding.IsArrayed ||
+                        !binding.Shape.Volume || !binding.Shape.Storage || binding.Shape.NumericClass != TextureNumericClass.Uint ||
+                        binding.Shape.Arrayed || binding.Shape.Cube || binding.Shape.DynamicMip || binding.Shape.OneDimensional ||
+                        binding.Shape.Multisampled || binding.Shape.DepthCompare || binding.Shape.R128 || binding.Shape.Atomic ||
+                        binding.ResourceDescriptor is not { Count: >= 8 } raw ||
+                        !MetalVolumeStorageAdmission.HasQualifiedRawFields(raw) ||
+                        !TryDecodeTextureDescriptor(raw, out var actual) ||
+                        !MetalVolumeStorageAdmission.IsQualified(actual.Address, actual.Width, actual.Height, actual.Depth,
+                            actual.Format, actual.NumberType, actual.Type, actual.TileMode, actual.ResourceMipLevels, actual.DstSelect) ||
+                        actual != d)
+                        throw new NotSupportedException("Metal mode5 volume snapshot requires the exact qualified raw R16Uint 16x16x16 descriptor.");
+                }
                 var profileStart = TexturePreparationProfile.Begin();
                 var reuseKey = new GuestTextureSnapshotReuseKey(
                     binding.Descriptor,
@@ -476,7 +502,14 @@ internal static class MetalTextureSnapshots
             chainSliceBytes = placedChainSliceBytes;
         }
 
-        physicalSourceByteCount = checked(physicalSourceByteCount * textureDepth);
+        var qualifiedThickVolume = isStorage && MetalVolumeStorageAdmission.IsQualified(
+            descriptor.Address, descriptor.Width, descriptor.Height, descriptor.Depth,
+            descriptor.Format, descriptor.NumberType, descriptor.Type, descriptor.TileMode,
+            descriptor.ResourceMipLevels, descriptor.DstSelect);
+        // The thick 3D footprint is not the sum of padded 2D footprints.
+        physicalSourceByteCount = qualifiedThickVolume
+            ? Gfx10StandardVolumeLayout.ByteCount
+            : checked(physicalSourceByteCount * textureDepth);
         if (physicalSourceByteCount > MaximumSnapshotBytes)
             throw SnapshotBudgetExceeded(descriptor, physicalSourceByteCount, "tiled");
 
@@ -540,12 +573,12 @@ internal static class MetalTextureSnapshots
                 throw new NotSupportedException(
                     $"Metal volume storage snapshot requires a complete uncompressed descriptor with zero metadata/flags/BC swizzle: " +
                     $"addr=0x{descriptor.Address:X} metadata=0x{descriptor.MetadataAddress:X} flags=0x{descriptor.DescriptorFlags:X} bc_swizzle={descriptor.BcSwizzle} extended={descriptor.HasExtendedDescriptor}.");
-            if (descriptor.Type == Gen5TextureType3D && descriptor.TileMode != 0 &&
+            if (descriptor.Type == Gen5TextureType3D && descriptor.TileMode != 0 && !qualifiedThickVolume &&
                 (descriptor.Width != 1 || descriptor.Height != 1 || descriptor.Depth != 1 ||
                  descriptor.TileMode != 27 || descriptor.ResourceMipLevels != 1 ||
                  (descriptor.Address & 0xFFFFUL) != 0))
                 throw new NotSupportedException(
-                    $"Metal tiled volume snapshots support only an aligned mode27 single-mip 1x1x1 origin texel: " +
+                    $"Metal tiled volume snapshots support only a qualified mode5 R16Uint 16x16x16 or aligned mode27 single-mip 1x1x1 origin texel: " +
                     $"addr=0x{descriptor.Address:X} depth={descriptor.Depth} tile={descriptor.TileMode}.");
             var initialPixels = Array.Empty<byte>();
             var uploadKnownStart = TexturePreparationProfile.Begin();
@@ -576,7 +609,9 @@ internal static class MetalTextureSnapshots
                     // The bounded singleton proof uses only the aligned, uncompressed
                     // resource origin. Do not qualify a 3D volume using the XY-only
                     // 2D equation, even when its depth happens to be one.
-                    var linearStorage = descriptor.Type == Gen5TextureType3D && descriptor.TileMode != 0
+                    var linearStorage = qualifiedThickVolume
+                        ? Gfx10StandardVolumeLayout.Decode16Cube(storageSource)
+                        : descriptor.Type == Gen5TextureType3D && descriptor.TileMode != 0
                         ? storageSource.AsSpan(0, checked((int)sourceByteCount)).ToArray()
                         : TryDetileTextureSource(
                         descriptor,

@@ -192,6 +192,30 @@ public sealed class MetalTextureSourceAdmissionTests
         Assert.Equal(0UL, state.ReservedBytes);
         Assert.Equal(0, memory.Reads);
     }
+
+    [Fact]
+    public void Tile5RawGuardFailureReleasesEarlierCapturedSourceBeforeAnyGuestRead()
+    {
+        using var state = new State();
+        SubmitColor(ColorTarget());
+        var memory = new NeverReadMemory();
+        var source = state.LatestSource(Address)!;
+        Assert.True(AgcBackendServices.TryDecodeTextureDescriptor(
+            SharpEmu.Tests.Fixtures.Tile5VolumeOracle.Raw, out var volume));
+        // A decoded valid tile5 descriptor without owned raw words must fail
+        // inside the existing preparation rollback boundary, after image1
+        // captured a real admitted source and before image2 reads any bytes.
+        var invalid = new AgcExports.TranslatedImageBinding(volume, true, 0, [],
+            Shape: new ShaderImageShape(true, false, true, false, TextureNumericClass.Uint),
+            Access: GuestImageAccess.Write);
+        var failure = Assert.Throws<NotSupportedException>(() =>
+            MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5),
+                [SourceBinding(), invalid], out _));
+        Assert.Contains("exact qualified raw R16Uint", failure.Message);
+        Assert.Equal(0, source.GetType().GetField("References")!.GetValue(source));
+        Assert.Equal(0UL, state.ReservedBytes);
+        Assert.Equal(0, memory.Reads);
+    }
     private static AgcExports.TranslatedImageBinding SourceBinding()
     {
         Assert.True(AgcBackendServices.TryDecodeTextureDescriptor(MetalTextureSourceLeaseTests.ResourceWords(), out var descriptor));

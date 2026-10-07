@@ -18,4 +18,8 @@
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../Fixtures/Tile5Volume/Tile5VolumeOracle.cs" Link="Fixtures/Tile5VolumeOracle.cs" />
+    <EmbeddedResource Include="../Fixtures/Tile5Volume/offsets.csv" LogicalName="Tile5Volume.offsets.csv" />
+  </ItemGroup>
 </Project>

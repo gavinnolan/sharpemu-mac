@@ -297,6 +297,131 @@ public sealed class MetalStorageTextureFormatTests
         Assert.Equal(0, memory.Reads);
     }
 
+    [Fact]
+    public void ExactMode5VolumeMatchesEveryPrimaryAddrLibCoordinateAndCompleteSeed()
+    {
+        var raw = SharpEmu.Tests.Fixtures.Tile5VolumeOracle.Raw;
+        Assert.True(AgcBackendServices.TryDecodeTextureDescriptor(raw, out var descriptor));
+        Assert.Equal((2u, 4u, 16u, 16u, 16u, 5u, 4u),
+            (descriptor.Format, descriptor.NumberType, descriptor.Width, descriptor.Height, descriptor.Depth, descriptor.TileMode, descriptor.DstSelect));
+        Assert.True(Gfx10StandardVolumeLayout.IsSupported(16, 16, 16, 16, 5, 1));
+        Assert.False(Gfx10StandardVolumeLayout.IsSupported(16, 16, 15, 16, 5, 1));
+        Assert.False(Gfx10StandardVolumeLayout.IsSupported(16, 16, 16, 32, 5, 1));
+        Assert.False(Gfx10StandardVolumeLayout.IsSupported(16, 16, 16, 16, 9, 1));
+        Assert.False(Gfx10StandardVolumeLayout.IsSupported(16, 16, 16, 16, 5, 2));
+        var offsets = SharpEmu.Tests.Fixtures.Tile5VolumeOracle.Offsets();
+        for (var z = 0; z < 16; z++)
+        for (var y = 0; y < 16; y++)
+        for (var x = 0; x < 16; x++)
+            Assert.Equal(offsets[(z * 16 + y) * 16 + x], Gfx10StandardVolumeLayout.TexelOffset16Cube(x, y, z));
+        Assert.Equal(4096, offsets.Distinct().Count());
+        var (tiled, linear) = SharpEmu.Tests.Fixtures.Tile5VolumeOracle.Seed();
+        Assert.Equal(linear, Gfx10StandardVolumeLayout.Decode16Cube(tiled));
+        Assert.Throws<ArgumentException>(() => Gfx10StandardVolumeLayout.Decode16Cube(tiled.AsSpan(0, 8191)));
+        Assert.Throws<ArgumentOutOfRangeException>(() => Gfx10StandardVolumeLayout.TexelOffset16Cube(16, 0, 0));
+        var memory = new SourceMemory(descriptor.Address, tiled);
+        var binding = new AgcExports.TranslatedImageBinding(descriptor, true, 0, [], ResourceDescriptor: raw,
+            Shape: new ShaderImageShape(true, false, true, false, TextureNumericClass.Uint), Access: GuestImageAccess.Write);
+        var backendField = typeof(GuestGpu).GetField("_instance", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var previous = backendField.GetValue(null);
+        using var state = new MetalGuestFailureTests.PresenterState();
+        backendField.SetValue(null, RuntimeHelpers.GetUninitializedObject(typeof(MetalGuestGpuBackend)));
+        try
+        {
+            var snapshot = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(
+                new CpuContext(memory, Generation.Gen5), [binding], out _));
+            Assert.Equal(1, memory.Reads);
+            Assert.Equal(linear, snapshot.RgbaPixels);
+            Assert.Equal(16u, snapshot.Pitch);
+            var native = MetalVideoPresenter.StorageTextureFormat(snapshot);
+            Assert.Equal(MtlPixelFormat.R16Uint, native.Format);
+            Assert.Equal((16u, 8192UL), MetalVideoPresenter.StorageTextureSeedLayout(snapshot, native));
+            Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.StorageTextureFormat(snapshot with { Pitch = 17 }));
+            Assert.Throws<InvalidOperationException>(() => MetalVideoPresenter.StorageTextureSeedLayout(snapshot with { RgbaPixels = new byte[8191] }, native));
+        }
+        finally { GuestImageWriteTracker.Untrack(descriptor.Address); backendField.SetValue(null, previous); }
+    }
+
+    [Fact]
+    public void NearMissMode5VolumesRejectBeforeAnyGuestRead()
+    {
+        var baseline = SharpEmu.Tests.Fixtures.Tile5VolumeOracle.Raw;
+        var memory = new SourceMemory(SharpEmu.Tests.Fixtures.Tile5VolumeOracle.Address, new byte[131072]);
+        var variants = new List<uint[]>();
+        foreach (var (word, mask) in new[] { (0, 1u), (1, 1u << 20), (2, 1u), (2, 1u << 14), (3, 1u),
+            (3, 1u << 12), (3, 1u << 16), (3, 1u << 25), (4, 1u), (4, 1u << 16), (5, 1u << 4), (5, 1u << 20), (6, 1u), (6, 1u << 24), (7, 1u) })
+        {
+            var raw = (uint[])baseline.Clone(); raw[word] ^= mask; variants.Add(raw);
+        }
+        foreach (var raw in variants)
+        {
+            Assert.True(AgcBackendServices.TryDecodeTextureDescriptor(raw, out var descriptor));
+            var binding = new AgcExports.TranslatedImageBinding(descriptor, true, 0, [], ResourceDescriptor: raw,
+                Shape: new ShaderImageShape(true, false, true, false, TextureNumericClass.Uint), Access: GuestImageAccess.Write);
+            Assert.Throws<NotSupportedException>(() => MetalTextureSnapshots.CreateTextureSnapshots(
+                new CpuContext(memory, Generation.Gen5), [binding], out _));
+        }
+        Assert.True(AgcBackendServices.TryDecodeTextureDescriptor(baseline, out var valid));
+        foreach (IReadOnlyList<uint>? raw in new IReadOnlyList<uint>?[] { null, new uint[7], variants[0] })
+        {
+            var binding = new AgcExports.TranslatedImageBinding(valid, true, 0, [], ResourceDescriptor: raw,
+                Shape: new ShaderImageShape(true, false, true, false, TextureNumericClass.Uint), Access: GuestImageAccess.Write);
+            Assert.Throws<NotSupportedException>(() => MetalTextureSnapshots.CreateTextureSnapshots(
+                new CpuContext(memory, Generation.Gen5), [binding], out _));
+        }
+        var acceptedBinding = new AgcExports.TranslatedImageBinding(valid, true, 0, [], ResourceDescriptor: baseline,
+            Shape: new ShaderImageShape(true, false, true, false, TextureNumericClass.Uint), Access: GuestImageAccess.Write);
+        foreach (var binding in new[] { acceptedBinding with { IsStorage = false }, acceptedBinding with { MipLevel = 1 }, acceptedBinding with { IsArrayed = true },
+            acceptedBinding with { Shape = acceptedBinding.Shape with { NumericClass = TextureNumericClass.Float } },
+            acceptedBinding with { Shape = acceptedBinding.Shape with { Atomic = true } } })
+            Assert.Throws<NotSupportedException>(() => MetalTextureSnapshots.CreateTextureSnapshots(
+                new CpuContext(memory, Generation.Gen5), [binding], out _));
+        Assert.Equal(0, memory.Reads);
+    }
+
+    [Theory]
+    [InlineData(5u)]
+    [InlineData(9u)]
+    [InlineData(27u)]
+    public void SampledTiledVolumeCannotReachKnownUploadOrXyDecodeBeforeQualification(uint tile)
+    {
+        var raw = SharpEmu.Tests.Fixtures.Tile5VolumeOracle.Raw;
+        raw[3] = (raw[3] & ~(31u << 20)) | (tile << 20);
+        Assert.True(AgcBackendServices.TryDecodeTextureDescriptor(raw, out var descriptor));
+        var memory = new SourceMemory(descriptor.Address, new byte[131072]);
+        var binding = new AgcExports.TranslatedImageBinding(descriptor, false, 0, [], ResourceDescriptor: raw,
+            Shape: new ShaderImageShape(true, false, false, false, TextureNumericClass.Uint), Access: GuestImageAccess.Read);
+        Assert.Throws<NotSupportedException>(() => MetalTextureSnapshots.CreateTextureSnapshots(
+            new CpuContext(memory, Generation.Gen5), [binding], out _));
+        Assert.Equal(0, memory.Reads);
+    }
+
+    [Theory]
+    [InlineData(1u, false)]
+    [InlineData(3u, false)]
+    [InlineData(1u, true)]
+    [InlineData(3u, true)]
+    public void DirectUploadEntryCannotApplyValidXyDetileParametersToVolume(uint depth, bool storage)
+    {
+        var table = Enumerable.Range(0, 16).Select(static pixel => 15 - pixel).ToArray();
+        var parameters = new DetileParams(DetileEquation.BlockTable, 4, 4, 4, 4, 4, 16, 64, 1, [], 0, [], 0, table);
+        var source = Enumerable.Range(0, checked((int)(64 * depth))).Select(static i => (byte)i).ToArray();
+        var decoded = new byte[64];
+        Assert.True(GnmTiling.DetileWithParams(parameters, source.AsSpan(0, 64), decoded)); // valid2D control
+        Assert.False(source.AsSpan(0, 64).SequenceEqual(decoded));
+        var texture = Volume(depth, 0) with
+        {
+            Width = 4, Height = 4, Pitch = 4, TileMode = 5, IsStorage = storage,
+            TiledSource = source, Detile = parameters,
+        };
+        var failure = Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.PrepareDrawTextureUpload(texture));
+        Assert.Contains("qualified XYZ", failure.Message);
+        // A linear seed must not conceal the unsupported deferred form either.
+        Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.PrepareDrawTextureUpload(texture with { RgbaPixels = new byte[source.Length] }));
+        Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.PrepareDrawTextureUpload(texture with { Detile = null }));
+        Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.PrepareDrawTextureUpload(texture with { TiledSource = null }));
+    }
+
     private static GuestDrawTexture Volume(uint depth, int bytes) => Texture(10, 4, bytes) with
     { Type = 10, Depth = depth, Descriptor = VolumeRaw(0x71F2000000, 3, 2, depth, 0), Shape = new ShaderImageShape(true, false, true, false, TextureNumericClass.Uint) };
 
