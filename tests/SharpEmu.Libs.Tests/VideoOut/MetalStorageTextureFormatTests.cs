@@ -396,6 +396,32 @@ public sealed class MetalStorageTextureFormatTests
         Assert.Equal(0, memory.Reads);
     }
 
+    [Theory]
+    [InlineData(1u, false)]
+    [InlineData(3u, false)]
+    [InlineData(1u, true)]
+    [InlineData(3u, true)]
+    public void DirectUploadEntryCannotApplyValidXyDetileParametersToVolume(uint depth, bool storage)
+    {
+        var table = Enumerable.Range(0, 16).Select(static pixel => 15 - pixel).ToArray();
+        var parameters = new DetileParams(DetileEquation.BlockTable, 4, 4, 4, 4, 4, 16, 64, 1, [], 0, [], 0, table);
+        var source = Enumerable.Range(0, checked((int)(64 * depth))).Select(static i => (byte)i).ToArray();
+        var decoded = new byte[64];
+        Assert.True(GnmTiling.DetileWithParams(parameters, source.AsSpan(0, 64), decoded)); // valid2D control
+        Assert.False(source.AsSpan(0, 64).SequenceEqual(decoded));
+        var texture = Volume(depth, 0) with
+        {
+            Width = 4, Height = 4, Pitch = 4, TileMode = 5, IsStorage = storage,
+            TiledSource = source, Detile = parameters,
+        };
+        var failure = Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.PrepareDrawTextureUpload(texture));
+        Assert.Contains("qualified XYZ", failure.Message);
+        // A linear seed must not conceal the unsupported deferred form either.
+        Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.PrepareDrawTextureUpload(texture with { RgbaPixels = new byte[source.Length] }));
+        Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.PrepareDrawTextureUpload(texture with { Detile = null }));
+        Assert.Throws<NotSupportedException>(() => MetalVideoPresenter.PrepareDrawTextureUpload(texture with { TiledSource = null }));
+    }
+
     private static GuestDrawTexture Volume(uint depth, int bytes) => Texture(10, 4, bytes) with
     { Type = 10, Depth = depth, Descriptor = VolumeRaw(0x71F2000000, 3, 2, depth, 0), Shape = new ShaderImageShape(true, false, true, false, TextureNumericClass.Uint) };
 

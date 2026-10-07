@@ -1697,6 +1697,9 @@ internal static partial class MetalVideoPresenter
     /// guest-memory read. The native upload path and queue lifetime tests share it.</summary>
     internal static GuestDrawTexture PrepareDrawTextureUpload(GuestDrawTexture texture)
     {
+        if (GuestTextureShape(texture).TextureType == MtlTextureType3D &&
+            (texture.TiledSource is not null || texture.Detile is not null))
+            throw new NotSupportedException("Metal 3D uploads require owned linear texels from a qualified XYZ layout; deferred XY detiling is unsupported.");
         if (!texture.CpuSnapshotStable)
             throw new InvalidOperationException(
                 $"Metal cannot upload unstable texture snapshot at 0x{texture.Address:X}.");
