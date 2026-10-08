@@ -60,7 +60,7 @@ public enum EndOfPipeWriteKind
 }
 
 // A completion the host records on the current command buffer. The label itself is
-// already in guest memory when this is recorded.
+// already in guest memory unless the host explicitly defers end-of-pipe labels.
 public readonly record struct EndOfPipeWrite(
     EndOfPipeWriteKind Kind,
     ulong SubmitId,
@@ -105,6 +105,11 @@ public interface ICommandStreamHost
     void CopyBuffer(ulong destination, ulong source, ulong size, bool destinationIsGds, bool sourceIsGds);
 
     void ReadGds(Span<uint> destination, uint wordOffset, uint wordCount);
+
+    // A deferred host owns the scalar label payload and must publish its bytes
+    // successfully after preceding GPU work, before any interrupt/flip acknowledgement.
+    // Other hosts retain the existing immediate interpreter label writes.
+    bool DefersEndOfPipeLabels => false;
 
     void RecordEndOfPipe(in EndOfPipeWrite write);
 

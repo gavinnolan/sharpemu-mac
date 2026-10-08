@@ -165,6 +165,7 @@ internal static partial class MetalVideoPresenter
 
         lock (_gate)
         {
+            WaitForInitialGuestCompletionLocked("translated presentation admission");
             if (_closed)
             {
                 return;
@@ -210,6 +211,7 @@ internal static partial class MetalVideoPresenter
 
         lock (_gate)
         {
+            WaitForInitialGuestCompletionLocked("fixed presentation admission");
             if (_closed ||
                 _latestPresentation is { Pixels: null } latest &&
                 latest.DrawKind == drawKind &&
@@ -628,7 +630,7 @@ internal static partial class MetalVideoPresenter
         if (writeBackBuffers.Count > 0)
         {
             var committed = FlushBatchedGuestCommands();
-            WaitForCommittedCommandBuffer(committed);
+            WaitForCommittedGuestBufferWriteback(committed);
             WriteBuffersBackToGuest(writeBackBuffers);
         }
 
@@ -721,7 +723,7 @@ internal static partial class MetalVideoPresenter
         ResumeOpenFaultScan(batchScan);
         if (writeBackBuffers.Count > 0)
         {
-            WaitForCommittedCommandBuffer(commandBuffer);
+            WaitForCommittedGuestBufferWriteback(commandBuffer);
             WriteBuffersBackToGuest(writeBackBuffers);
         }
 
@@ -2311,50 +2313,45 @@ internal static partial class MetalVideoPresenter
     private static void WriteBuffersBackToGuest(
         List<(nint Pointer, GuestMemoryBuffer Guest)> writeBackBuffers)
     {
-        var memory = _guestMemory;
-        if (memory is null)
-        {
-            return;
-        }
-
+        if (writeBackBuffers.Count == 0) return;
+        var memory = _guestMemory ?? throw new InvalidOperationException(
+            "Metal GPU buffer writeback requires attached guest memory.");
         foreach (var (pointer, guest) in writeBackBuffers)
         {
+            if (guest.Length < 0 || (guest.Length > 0 && pointer == 0) ||
+                (ulong)guest.Length > ulong.MaxValue - guest.BaseAddress)
+                throw new InvalidOperationException(
+                    $"Metal GPU buffer writeback has an invalid range: address=0x{guest.BaseAddress:X16} bytes={guest.Length} pointer_present={pointer != 0}.");
+            if (guest.Length == 0) continue;
             unsafe
             {
-                // The pointer addresses the slice's data (past the alignment
-                // bias) inside its shared-storage arena page, which stays
-                // alive until the command buffer completes — and the caller
-                // waited on that before reading.
-                _ = memory.TryWrite(
-                    guest.BaseAddress,
-                    new ReadOnlySpan<byte>((void*)pointer, guest.Length));
+                // This owned arena slice remains alive through successful native
+                // completion, which the caller must establish before CPU reads.
+                if (!memory.TryWrite(guest.BaseAddress,
+                        new ReadOnlySpan<byte>((void*)pointer, guest.Length)))
+                    throw new InvalidOperationException(
+                        $"Metal GPU buffer writeback cannot write guest memory: address=0x{guest.BaseAddress:X16} bytes={guest.Length}.");
             }
         }
     }
 
-
-    /// <summary>
-    /// Blocks until a committed command buffer finishes. Skips the ObjC wait
-    /// when status is already Completed (common for tiny label/writeback
-    /// batches), avoiding redundant waitUntilCompleted round-trips on the
-    /// ordered queue.
-    /// </summary>
+    // Writeback and explicit synchronization require successful completion,
+    // not merely a terminal status: MTLCommandBufferStatusError is 5.
     private static void WaitForCommittedCommandBuffer(nint commandBuffer)
     {
-        if (commandBuffer == 0)
+        if (commandBuffer == 0) return; // no preceding native commands
+        var status = ReadGuestCommandBufferStatus(commandBuffer);
+        if (status == 4) return;
+        if (status is >= 0 and < 4)
         {
-            return;
+            if (_guestCommandBufferWaitOverride is { } wait) wait(commandBuffer);
+            else MetalNative.SendVoid(commandBuffer, MetalNative.Selector("waitUntilCompleted"));
+            status = ReadGuestCommandBufferStatus(commandBuffer);
+            if (status == 4) return;
         }
-
-        // MTLCommandBufferStatusCompleted = 4.
-        const nint completed = 4;
-        if (MetalNative.Send(commandBuffer, MetalNative.Selector("status")) >= completed)
-        {
-            return;
-        }
-
-        MetalNative.SendVoid(commandBuffer, MetalNative.Selector("waitUntilCompleted"));
+        throw GuestCommandBufferCompletionFailure(commandBuffer, status);
     }
+
 
     private static void ReturnPooledGuestData(TranslatedGuestDraw draw)
     {

@@ -36,6 +36,7 @@ internal static partial class MetalVideoPresenter
         GuestMemoryBuffer[] guests,
         List<(nint Pointer, GuestMemoryBuffer Guest)> writeBackBuffers)
     {
+        foreach (var guest in guests) ValidateGuestBufferWritebackUpload(guest);
         var uploads = new UploadedDrawBuffers
         {
             Buffers = new nint[guests.Length],

@@ -173,7 +173,14 @@ internal static partial class MetalVideoPresenter
     }
     private static void PublishGuestPresentationLocked(Presentation presentation)
     {
-        if (!_textureSourceGraphEnabled) { _latestPresentation = presentation; return; }
+        WaitForInitialGuestCompletionLocked("presentation publication");
+        var unorderedWrites = PresentationHasUnorderedGuestWrites(presentation);
+        if (!_textureSourceGraphEnabled)
+        {
+            _latestPresentation = presentation;
+            if (unorderedWrites) _unorderedPresentationWriteSequence = presentation.Sequence == 0 ? -1 : presentation.Sequence;
+            return;
+        }
         if (_closed || _guestWorkFailure is not null)
             throw new InvalidOperationException("Metal cannot publish a presentation after close or failure.");
         var owner = PrepareGuestPayloadOwnerLocked(presentation);
@@ -183,6 +190,7 @@ internal static partial class MetalVideoPresenter
         // Acquire the replacement first: shared arrays remain rented between
         // presentations and repeated-frame rendering retains its CPU snapshot.
         _latestPresentation = presentation;
+        if (unorderedWrites) _unorderedPresentationWriteSequence = presentation.Sequence == 0 ? -1 : presentation.Sequence;
         if (previous is not null)
             try { ReleaseGuestPayloadWork(previous); }
             catch (Exception exception) { LatchTextureSourceDrainFailureLocked(exception); throw; }

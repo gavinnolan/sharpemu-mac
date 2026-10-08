@@ -122,6 +122,8 @@ internal static partial class MetalVideoPresenter
                 return;
             }
 
+            WaitForInitialGuestCompletionLocked("presenter initialization");
+            if (_closed || _thread is not null) return;
             _windowWidth = width;
             _windowHeight = height;
             if (_latestPresentation is null) PublishGuestPresentationLocked(_splashHidden
@@ -137,6 +139,7 @@ internal static partial class MetalVideoPresenter
     {
         lock (_gate)
         {
+            WaitForInitialGuestCompletionLocked("splash publication");
             _splashHidden = true;
             if (_closed || _latestPresentation is not { IsSplash: true } latest)
             {
@@ -162,6 +165,7 @@ internal static partial class MetalVideoPresenter
 
         lock (_gate)
         {
+            WaitForInitialGuestCompletionLocked("CPU presentation admission");
             if (_closed)
             {
                 return;
@@ -189,6 +193,9 @@ internal static partial class MetalVideoPresenter
 
     private static void StartPresenterLocked()
     {
+        WaitForInitialGuestCompletionLocked("presenter startup");
+        if (_closed) return;
+        if (_guestWorkFailure is { } failure) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
         if (HostMainThread.IsAvailable)
         {
             _thread = Thread.CurrentThread;

@@ -20,7 +20,7 @@ public sealed partial class GpuCommandInterpreter
 
     private static int _unknownGcrWarnings;
 
-    // The label is written to guest memory now; only the interrupt waits for the GPU.
+    // Immediate hosts write the label now; deferred hosts receive its owned scalar payload.
     internal void WriteEndOfPipe(
         bool is64Bit,
         uint cachePolicy,
@@ -188,7 +188,7 @@ public sealed partial class GpuCommandInterpreter
                 if (is64Bit)
                 {
                     var clock = GpuReferenceClock.Read();
-                    WriteQword(destination, clock);
+                    WriteEndOfPipeQword(destination, clock);
                     switch (cacheAction)
                     {
                         case 0x00:
@@ -218,9 +218,21 @@ public sealed partial class GpuCommandInterpreter
             $"index={eventIndex} bits={(is64Bit ? 64 : 32)} interrupt={interruptSelector} destination=0x{destination:X16}.");
     }
 
+    private void WriteEndOfPipeDword(ulong destination, uint value)
+    {
+        if (_host.DefersEndOfPipeLabels) _lastWriteLength = 0;
+        else WriteDword(destination, value);
+    }
+
+    private void WriteEndOfPipeQword(ulong destination, ulong value)
+    {
+        if (_host.DefersEndOfPipeLabels) _lastWriteLength = 0;
+        else WriteQword(destination, value);
+    }
+
     private void Write32(ulong destination, uint value, bool withWriteBack, bool withInterrupt, int eventId, uint contextId)
     {
-        WriteDword(destination, value);
+        WriteEndOfPipeDword(destination, value);
         var kind = withInterrupt
             ? (withWriteBack ? EndOfPipeWriteKind.InterruptWriteBack32 : EndOfPipeWriteKind.Interrupt32)
             : (withWriteBack ? EndOfPipeWriteKind.WriteBack32 : EndOfPipeWriteKind.Write32);
@@ -229,7 +241,7 @@ public sealed partial class GpuCommandInterpreter
 
     private void Write64(ulong destination, ulong value, bool withWriteBack, bool withInterrupt, int eventId, uint contextId)
     {
-        WriteQword(destination, value);
+        WriteEndOfPipeQword(destination, value);
         var kind = withInterrupt
             ? (withWriteBack ? EndOfPipeWriteKind.InterruptWriteBack64 : EndOfPipeWriteKind.Interrupt64)
             : (withWriteBack ? EndOfPipeWriteKind.WriteBack64 : EndOfPipeWriteKind.Write64);
@@ -261,8 +273,8 @@ public sealed partial class GpuCommandInterpreter
     }
 
     // Release-memory completions stay in the recording command buffer instead of
-    // submitting it at every packet: labels are already written to guest memory,
-    // only the interrupt waits for the GPU, and RunSlice submits the buffer when
+    // submitting it at every packet: immediate hosts already wrote their labels,
+    // deferred hosts own the payload+acknowledgement, and RunSlice submits when
     // the slice ends or blocks, so every deferred interrupt still reaches the GPU.
     // Submitting per packet produced ~430 tiny submissions per Astro Bot frame.
     // SHARPEMU_DEFER_RELEASE_FLUSH=0 restores the per-packet submit.
@@ -485,7 +497,7 @@ public sealed partial class GpuCommandInterpreter
             return;
         }
 
-        WriteDword(destination, value);
+        WriteEndOfPipeDword(destination, value);
         var flip = PendingFlip;
         var requestId = _host.PrepareFlip(flip.Handle, flip.Index, flip.FlipMode, flip.FlipArgument);
         _host.RecordEndOfPipe(new EndOfPipeWrite(
@@ -506,7 +518,7 @@ public sealed partial class GpuCommandInterpreter
             return;
         }
 
-        WriteDword(destination, value);
+        WriteEndOfPipeDword(destination, value);
         var flip = PendingFlip;
         var requestId = _host.PrepareFlip(flip.Handle, flip.Index, flip.FlipMode, flip.FlipArgument);
         _host.RecordEndOfPipe(new EndOfPipeWrite(

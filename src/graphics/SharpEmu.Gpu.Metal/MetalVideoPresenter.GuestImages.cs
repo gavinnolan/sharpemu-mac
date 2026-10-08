@@ -456,6 +456,7 @@ internal static partial class MetalVideoPresenter
     {
         lock (_gate)
         {
+            WaitForInitialGuestCompletionLocked("guest image presentation admission");
             if (_closed || !_availableGuestImages.ContainsKey(address))
             {
                 return false;
@@ -570,6 +571,7 @@ internal static partial class MetalVideoPresenter
 
     private static long EnqueueGuestWorkLocked(object work)
     {
+        WaitForInitialGuestCompletionLocked("guest queue admission");
         var payloadBytes = GetGuestWorkPayloadBytes(work);
         // Work executed by the render-loop consumer can enqueue an ordered
         // same-queue follow-up; blocking the consumer on producer backpressure
@@ -838,6 +840,7 @@ internal static partial class MetalVideoPresenter
 
     private static void DrainGuestWorkCore(nint device, nint queue, long budgetTicks)
     {
+        lock (_gate) WaitForInitialGuestCompletionLocked("guest queue execution");
         if (_guestWorkFailure is { } previousFailure)
         {
             throw new GpuFatalException("Metal guest execution has already failed.", previousFailure);

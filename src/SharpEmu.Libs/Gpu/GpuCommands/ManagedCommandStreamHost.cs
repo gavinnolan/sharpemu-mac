@@ -169,6 +169,8 @@ public class ManagedCommandStreamHost : ICommandStreamHost
     public virtual void ReadGds(Span<uint> destination, uint wordOffset, uint wordCount) =>
         GlobalDataShare.ReadWords(_gds, destination, wordOffset, wordCount);
 
+    public virtual bool DefersEndOfPipeLabels => false;
+
     // Without a GPU tick every completion is due as soon as it is recorded.
     public virtual void RecordEndOfPipe(in EndOfPipeWrite write)
     {

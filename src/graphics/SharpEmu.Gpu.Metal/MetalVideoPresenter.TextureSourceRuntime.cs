@@ -71,6 +71,7 @@ internal static partial class MetalVideoPresenter
         GuestPresentationShutdownAttempt? attempt = null;
         lock (_gate)
         {
+            WaitForInitialGuestCompletionLocked("presenter shutdown", allowFailedLifetime: true);
             // A successful receipt belongs to its closed presenter lifetime;
             // it cannot authorize teardown of a newly opened lifetime.
             if (!_closed)

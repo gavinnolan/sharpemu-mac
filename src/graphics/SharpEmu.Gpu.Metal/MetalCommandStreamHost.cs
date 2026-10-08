@@ -168,14 +168,19 @@ internal sealed partial class MetalCommandStreamHost : AgcExports.TranslatingCom
         }
     }
 
-    // Use the same ordered queue to complete each request after its preceding draws.
+    public override bool DefersEndOfPipeLabels => true;
+
+    // One scalar payload owns label+acknowledgement at its logical queue position.
     public override void RecordEndOfPipe(in EndOfPipeWrite write)
     {
         var completion = write;
-        if (MetalVideoPresenter.SubmitOrderedGuestAction(() => base.RecordEndOfPipe(in completion), $"command_stream completion {write.Kind}") == 0)
+        _ = MetalVideoPresenter.SubmitOrderedGuestCompletion(() =>
         {
+            MetalVideoPresenter.RequireGuestCompletionHealthy();
+            WriteDeferredEndOfPipeLabel(in completion);
+            MetalVideoPresenter.RequireGuestCompletionHealthy();
             base.RecordEndOfPipe(in completion);
-        }
+        }, $"command_stream completion {write.Kind}");
     }
 
     public override ulong PrepareFlip(int handle, int index, int flipMode, long flipArgument)
@@ -215,10 +220,13 @@ internal sealed partial class MetalCommandStreamHost : AgcExports.TranslatingCom
     // The ordered queue runs every earlier record and then waits for the GPU to complete them.
     public override void SynchronizeGpu()
     {
-        var sequence = _snapshots.SubmitGpuSynchronization("command_stream synchronize");
-        if (sequence != 0)
-        {
-            _ = MetalVideoPresenter.WaitForGuestWork(sequence, Timeout.Infinite);
-        }
+        long sequence;
+        try { sequence = _snapshots.SubmitGpuSynchronization("command_stream synchronize"); }
+        catch (Exception exception) when (exception is not SharpEmu.Libs.Gpu.Scheduling.GpuFatalException)
+        { throw MetalVideoPresenter.FailGuestCompletion("command_stream synchronize admission failed", exception); }
+        if (sequence == 0)
+            MetalVideoPresenter.RequireEmptyGuestCompletion("command_stream synchronize was not admitted");
+        else if (!MetalVideoPresenter.WaitForGuestWork(sequence, Timeout.Infinite))
+            throw MetalVideoPresenter.FailGuestCompletion("command_stream synchronize did not complete");
     }
 }

@@ -157,7 +157,7 @@ internal static partial class MetalVideoPresenter
             buffer, (nuint)copy.Offset, destination, (nuint)destinationOffset, (nuint)copy.Size);
         EndBlit(blit);
         var committed = FlushBatchedGuestCommands();
-        WaitForCommittedCommandBuffer(committed);
+        WaitForCommittedGuestBufferWriteback(committed);
         unsafe
         {
             fixed (byte* data = slice)

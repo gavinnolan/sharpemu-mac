@@ -213,7 +213,7 @@ internal static partial class MetalVideoPresenter
             if (writeBackBuffers.Count > 0)
             {
                 var committed = FlushBatchedGuestCommands();
-                WaitForCommittedCommandBuffer(committed);
+                WaitForCommittedGuestBufferWriteback(committed);
                 WriteBuffersBackToGuest(writeBackBuffers);
             }
         }
