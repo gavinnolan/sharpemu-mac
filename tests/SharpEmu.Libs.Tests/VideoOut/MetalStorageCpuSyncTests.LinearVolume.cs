@@ -49,7 +49,7 @@ public sealed partial class MetalStorageCpuSyncTests
                 Assert.Equal(memory.Bytes.AsSpan((z*16+y)*256,256).ToArray(), snapshot.RgbaPixels.AsSpan((z*16+y)*256,256).ToArray());
             Assert.Equal(memory.Bytes[^1],snapshot.RgbaPixels[^1]);
             Assert.Same(memory.LastMapping, origin.GetType().GetProperty("Mapping")!.GetValue(origin));
-            Assert.Equal((7u,16u,1u), MetalVideoPresenter.GuestTextureShape(snapshot));
+            Assert.Equal((7u,1u,16u), MetalVideoPresenter.GuestTextureShape(snapshot));
             Assert.Equal(1,memory.Copies); Assert.Equal(0,memory.Reads);
             Assert.Throws<NotSupportedException>(()=>layout.Encode(new byte[65536])); // no volume publisher expansion
             memory.Bytes[65535] ^= 255; Assert.NotEqual(memory.Bytes[65535],snapshot.RgbaPixels[65535]);
@@ -113,7 +113,7 @@ public sealed partial class MetalStorageCpuSyncTests
         if(change=="depth") Set(image,"Depth",1u);
         if(change=="width") Set(image,"Width",1u);
         if(change=="format") Set(image,"Format",MtlPixelFormat.Rgba8Unorm);
-        try { Assert.Throws<TargetInvocationException>(()=>PublishLinearVolume(snapshot,image)); Assert.False(Images.Contains(Address)); Assert.Equal(0,memory.Releases); }
+        try { Assert.Throws<TargetInvocationException>(()=>PublishLinearVolume(snapshot,image)); Assert.False(Images.Contains(Address)); Assert.Equal(1,memory.Releases); // rejected publication consumes its unaccepted original watch }
         finally { Images.Remove(Address); MetalVideoPresenter.ReleasePreparedTextureSources([snapshot]); }
         Assert.Equal(1,memory.Releases);
     }
