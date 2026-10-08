@@ -1,5 +1,36 @@
 # Selected storage mip candidate — 2026-10-08
 
+## Actual DS follow-up and scalar rejection diagnostics
+
+The signed clean AE157337 run retained at
+`artifacts/runs/20261008-045952-ds-selected-mip-ae157337/game.log:636`
+reaches selected-view preparation but rejects in
+`ValidateSelectedStorageMipOwner(requireObserved:false)` during queue admission,
+before queue insertion or native materialization. The final78-second screenshot
+shows a black render area and0.0FPS, with zero counted guest frames. It does not
+show accepted scene rendering or progression.
+
+The original aggregate error cannot distinguish presenter-session revocation,
+global mapping-epoch change, or missing/changed content token. Diagnostic source
+`5eae49c04915017a0b30e8b880f7bf7862e34acd` preserves the same checks, query counts
+and session→epoch→token short circuit. Rejections now include the actual captured
+reason, admission stage, resource address, absolute selected mip, memory-domain
+identity and before/current scalar observations. No second query is used to
+construct an error. A global epoch veto does not prove that this resource changed;
+none of these observations authorizes a backing lifetime or stale CPU replacement.
+
+The exact Debug assembly passed21/21 managed cases on each CLR, including five
+actual Enqueue rejection controls (each veto and combined-change precedence),
+existing selected-view regressions and publication rollback. The controlled epoch
+case modifies only an isolated test worker's scalar and restores it; it does not
+exercise native mapping permissions. No device operation was invoked. Initial
+broad ARM selection23 is separately retained: four native-gated cases returned
+with required-device disabled and are excluded from the21 managed count.
+Evidence is `artifacts/validation/selected-mip-diagnostics-5eae49c0/manifest.json`
+(SHA256 `008fa798431c4ae39375bf6fea8b87993d1407820f5a01f7fc1eb3279a91e290`).
+A new exact-source game run is required to attribute the actual DS rejection;
+no gate is relaxed and the private immutable-source graph remains disabled.
+
 This isolated candidate addresses the earliest Demon's Souls failure in source
 8c19cd7, not the older downstream DS alias failure and not gameplay acceptance.
 The production graph remains hardfalse. No shared DTO or native ABI is changed.
