@@ -53,11 +53,7 @@ public sealed partial class DirectExecutionBackend
 
 			if (_perfHleHistogram)
 			{
-				var startTicks = System.Diagnostics.Stopwatch.GetTimestamp();
-				var r = directExecutionBackend.DispatchImport(importIndex, argPackPtr);
-				RecordPerfHleDispatchTime(System.Diagnostics.Stopwatch.GetTimestamp() - startTicks);
-				directExecutionBackend.ClearActiveImportIndex();
-				return r;
+				return DispatchImportWithProfile(directExecutionBackend, importIndex, argPackPtr);
 			}
 
 			var result = directExecutionBackend.DispatchImport(importIndex, argPackPtr);
@@ -69,6 +65,31 @@ public sealed partial class DirectExecutionBackend
 			Console.Error.WriteLine(
 				$"[LOADER][ERROR] ImportDispatchGatewayManaged exception: {ex.GetType().Name}: {ex.Message}");
 			return 18446744071562199298uL;
+		}
+	}
+
+	// The enabled gateway branch owns a balanced scope even when an export throws.
+	// Disabled dispatch never enters this helper or touches profiling TLS/timestamps.
+	private static ulong DispatchImportWithProfile(DirectExecutionBackend backend, int importIndex, nint argPackPtr)
+	{
+		var name = backend.ActiveCpuContext is not null && (uint)importIndex < (uint)backend._importEntries.Length
+			? backend._importEntries[importIndex].Export?.Name ?? backend._importEntries[importIndex].Nid : null;
+		var scope = HleDispatchTiming.Begin(Stopwatch.GetTimestamp());
+		if (name is not null) HleDispatchTiming.NameCurrent(name);
+		try
+		{
+			var result = backend.DispatchImport(importIndex, argPackPtr);
+			backend.ClearActiveImportIndex();
+			return result;
+		}
+		finally
+		{
+			var elapsed = scope.Complete(Stopwatch.GetTimestamp());
+			try { RecordPerfHleDispatchTime(elapsed); }
+			catch (Exception diagnosticFailure) when (diagnosticFailure is System.IO.IOException or ObjectDisposedException)
+			{
+				// A closed profiling sink cannot replace the export result/original exception.
+			}
 		}
 	}
 
@@ -159,7 +180,11 @@ public sealed partial class DirectExecutionBackend
 		using var registerPacketImport = SharpEmu.Libs.Diagnostics.AgcRegisterPacketProfile.MeasureImport(importStubEntry.Nid);
 		if (_perfHleHistogram)
 		{
-			RecordPerfHleCall(importStubEntry.Export?.Name ?? importStubEntry.Nid);
+			try { RecordPerfHleCall(importStubEntry.Export?.Name ?? importStubEntry.Nid); }
+			catch (Exception diagnosticFailure) when (diagnosticFailure is System.IO.IOException or ObjectDisposedException)
+			{
+				// Profiling output is optional; a closed sink must not skip the export.
+			}
 		}
 		if (_profileGuestRip)
 		{
