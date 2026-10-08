@@ -30,11 +30,11 @@ execution remains x64/Rosetta; ARM64 CLR tests qualify host code only.
 | Title | Earliest frozen baseline blocker / evidence | Next qualified change |
 | --- | --- | --- |
 | Dreaming Sarah | Controllable outdoor scene; fresh b7 capture averages 57.96 guest commits/s with p99 38.693 ms | Reduce unnecessary drawable acquisition; then queue-drain attribution and controlled same-build pacing comparison |
-| Demon’s Souls | First selected storage mip fails, before any guest frame | Native level-zero view of the correct selected mip; original-resource identity, queue admission and content observation |
-| Silent Hill: The Short Message | Singleton mode-27 RGBA8 storage array | Native 2D-array type, explicit slice bounds, complete physical source copy; repeat title for next blocker |
-| Octopath Traveler II | Same singleton array family | Same independently qualified implementation; separate title progression/rendering evidence |
+| Demon’s Souls | AE passes old selected-mip snapshot gate, then fails backing observation at queue admission; zero guest frames | Scalar session/epoch/token veto reasons; preserve original-resource identity and content authority |
+| Silent Hill: The Short Message | Singleton mode-27 RGBA8 array; AE rejects actual PERF_MOD7 / BGRA selectors | Exact raw replay and asymmetric native BGRA store/read; explicit slice bounds and owned physical copy |
+| Octopath Traveler II | Same singleton array family, actual PERF_MOD7 / BGRA selectors | Exact raw replay and asymmetric physical/store/sampled-channel oracle; separate title evidence |
 | The Oregon Trail | Same singleton array family | Same implementation; separate title progression/rendering evidence |
-| Poppy Playtime Chapter 1 | Fatal write fault; later b7 record observes tracker Disarmed after a successful RW restore | Exact per-range recovery-decision diagnostics, then authoritative mapping lifetime / rearm ordering; no unconditional retry |
+| Poppy Playtime Chapter 1 | Fatal write fault; later b7 record observes tracker Disarmed after a successful RW restore | Schema3 actual capture saturated; refine bounded capture, classify fatal per-range decisions, then mapping lifetime/rearm ordering; no unconditional retry |
 | Superliminal | First rejected sampled tiled 3D image, then cancelled queue spam and loading stall | Actual raw type-10 mode-5 RGBA8sRGB singleton volume (unified format130); owned origin texel and native sampled-3D sRGB/alpha oracle before broader volume geometry |
 | Quake | Native movie plays; first 8192² R32 tiled depth image exceeds 128 MiB snapshot bound | Independent PS5 tile-mode-24 address oracle, bounded upload staging and correctly filtered depth comparison |
 | Void Terrarium | Scene visible but progression and gameplay unverified under contention | Input/checkpoint qualification on quiet host, first visual discrepancy and scene-specific GPU/producer attribution |

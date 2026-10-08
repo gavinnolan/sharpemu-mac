@@ -102,7 +102,10 @@ hashes and the source-linked recovery protocol are under
 `artifacts/validation/integrated-20261007/poppy-fault-classification-tools/`.
 Offline classifier8/8 and schema reader6/6 pass. Schema3 per-range decision diagnostics are integrated in63a198ac without
 changing recovery ordering. Candidate13/13 per CLR plus12/12 offline reader
-controls pass; actual schema3 signal execution remains to be captured.
+controls pass. An actual schema3 run on the frozen AE bundle exits138 after29s,
+peak1164MiB. Its4096-slot prefix is saturated with28720 dropped records; a missing
+fatal decision in that prefix must not be treated as proof that no decision ran.
+Classification and diagnostic capture refinement are pending; recovery is unchanged.
 
 ## Texture compatibility qualification
 
@@ -118,9 +121,71 @@ integrated evidence directory. Raw non-content fields remain strictly gated.
 Whole title rendering, progression, FPS and loading are not established by this
 fixture. Array feedback copies remain explicitly unsupported.
 
-Selected storage-mip and exception-safe publication candidates are still under
-native/integration review. Their source-only coverage does not establish Demon’s
-Souls progression. The texture-source graph stays hard-disabled.
+Selected storage-mip and exception-safe publication changes are integrated through
+`ae157337`. The [selected-mip report](selected-storage-mip-20261008.md) records
+actual native store/load, rollback and retry qualification. Root combined frozen
+qualification has22/22 managed controls per CLR and8/8 required-device numerical
+cases per CLR, zero skips. Exact copied source/DLL/results are retained under
+`graphics-combined-ae157337/`. The texture-source graph stays hard-disabled.
+
+## Frozen AE compatibility re-runs
+
+The dedicated `artifacts/macos/graphics-compat-ae157337/SharpEmu.app` is signed,
+native-only, clean exact `ae157337`, SDK10.0.103/runtime10.0.3. Source and bundle
+were frozen throughout five runs. Concurrent compilers, CPU controls and foreign
+REmu activity make these blocker diagnostics, not FPS/loading comparisons.
+
+| Title | Actual result | First remaining blocker |
+| --- | --- | --- |
+| Silent Hill | Exit134,24s,1960MiB | Singleton array raw WORD5=`00700000`, DST_SEL=`F2E` rejected before native dispatch |
+| Octopath II | Exit134,33s,3142MiB | Same exact non-content field and BGRA selector family |
+| Oregon Trail | Exit134,29s,2128MiB | Same exact family |
+| Demon’s Souls | Alive90s,2832MiB, failed GPU queue, zero guest frames | Selected-mip admission rejects changed session/epoch/token observation before queue insertion |
+| Poppy | Exit138,29s,1164MiB | Native fault persists; schema3 prefix saturated |
+
+`ae157337-game-replays/manifest.json` hashes the original run provenance,
+logs, screenshots, outcomes and immutable Poppy binary/decoded trace.
+
+Compute-readiness source `b71c9129` integrates as `4d3dabfd`: nil command buffer
+or encoder rejects before dispatch/content acknowledgement; temporary texture
+retains receive one cleanup attempt per owned slot, preserving the first failure.
+Root Release build125 existing warnings/zero errors and65/65 fake-handle controls
+per CLR pass. No native failure injection, successful binding, pooled-failure
+ownership or whole-game fix is established by those controls.
+
+The previous singleton array fixture qualified WORD5 zero and identity selectors;
+it did not qualify these actual game descriptors. A successor must replay each
+exact descriptor and use asymmetric physical/store/sampled-channel oracles.
+
+DS passes the former snapshot-placement gate but stops at
+`ValidateSelectedStorageMipOwner(requireObserved:false)` through queue admission.
+The aggregate diagnostic does not identify whether session, global mapping epoch
+or tracker identity changed. No gate has been relaxed. Host redraws (~120) are
+not guest frames. TERM removes the process without KILL, but the stop log contains
+an abort trap, so this is not clean process/guest shutdown.
+
+Retained runs: `artifacts/runs/20261008-045425-sh-singleton-array-ae157337`,
+`20261008-045634-octo-singleton-array-ae157337`,
+`20261008-045759-oregon-singleton-array-ae157337`,
+`20261008-045952-ds-selected-mip-ae157337`, and
+`20261008-050440-poppy-native-range-decisions-ae157337`.
+
+## Isolated runtime patch controls
+
+An official checksum-verified SDK10.0.112/runtime10.0.12 is installed only in
+`artifacts/toolchains/`; global SDK/config and production bundles are unchanged.
+The same archived x64 diagnostic DLL passes13/13 on runtime10.0.3 and10.0.12,
+with host traces proving the parent and testhost CoreCLR selections. These are
+metadata controls, not actual signal/protection or game qualification.
+
+Four same-DLL warmed selector processes in baseline/candidate/candidate/baseline
+order report zero allocations, identical native selector identities and actual
+X64/SSE2=true/AVX2=false. Runtime3 cached medians9.767/9.907ns and runtime12
+9.564/10.293ns overlap; no stable patch performance improvement is established.
+The selector cache benefit reproduces within both runtimes. These measurements
+are not game/loading/FPS evidence, and do not justify replacing runtime3 yet.
+Exact payload/runtime hashes, host traces, commands and results:
+`artifacts/validation/integrated-20261007/dotnet10-patch-controls-20261008/`.
 
 ## References and next gates
 
@@ -129,7 +194,8 @@ reference SHAs and the tile-mode-24 topology disagreement. Do not blindly copy
 GPU equations or zero-copy paths without this emulator's current backing authority.
 
 The next bundle must have its own frozen provenance and output directory. Repeat
-SH/Octopath/Oregon and DS to capture actual descriptor admission/next blockers.
+SH/Octopath/Oregon after exact-descriptor qualification; add scalar DS admission
+reasons before considering any ownership change.
 Owned-frame idle experimenta31c112c (candidate2576429d) has6/6 policy controls
 per CLR,19 retained source/DLL/result hashes and independent source review.
 Persistent restore/minimize/hidden invalidation, externally enabled HUD veto and
