@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using SharpEmu.Libs.Gpu;
 
@@ -341,7 +342,14 @@ internal static partial class MetalNative
 
     public static nint Class(string name) => objc_getClass(name);
 
-    public static nint Selector(string name) => sel_registerName(name);
+    // Objective-C selector identities are process-wide and permanent. Reuse the
+    // native identity instead of marshalling/registering constant names on every
+    // encoder call. Concurrent first use may register twice; both yield the same
+    // identity, and no native object retain/release belongs to this cache.
+    private static readonly ConcurrentDictionary<string, nint> Selectors = new(StringComparer.Ordinal);
+    public static nint Selector(string name) => Selectors.TryGetValue(name, out var selector)
+        ? selector
+        : Selectors.GetOrAdd(name, static key => sel_registerName(key));
 
     /// <summary>Autoreleased NSString — only valid inside an autorelease pool
     /// unless the caller retains it.</summary>
