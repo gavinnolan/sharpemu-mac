@@ -63,6 +63,22 @@ public sealed partial class MetalTextureMaterializationTests
         Assert.Contains("consuming command buffer", failure.InnerException!.Message);
     }
 
+    [Fact]
+    public void ActualNativeDepthComparisonRefusesUnretainedReferencesBeforeMaterialization()
+    {
+        if (!RequireDevice()) return;
+        var queue = NullSend(Device.Value, Selector("newCommandQueue")); Assert.NotEqual(0, queue);
+        try
+        {
+            var command = NullSend(queue, Selector("commandBufferWithUnretainedReferences")); Assert.NotEqual(0, command);
+            var failure = Assert.Throws<System.Reflection.TargetInvocationException>(() =>
+                Presenter.GetMethod("CreateDrawTexture", Methods)!.Invoke(null, [Device.Value, command, ComparisonGuest(4, 7, false, 1, 1), false]));
+            Assert.IsType<NotSupportedException>(failure.InnerException);
+            Assert.Contains("retained references", failure.InnerException!.Message);
+        }
+        finally { SendVoid(queue, Selector("release")); }
+    }
+
     [Theory]
     [InlineData(0u, 0f)]
     [InlineData(1u, 0.5f)]

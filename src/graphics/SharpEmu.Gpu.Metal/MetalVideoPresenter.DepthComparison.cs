@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.Images;
+using static SharpEmu.Libs.Agc.AgcBackendServices;
 
 namespace SharpEmu.Gpu.Metal;
 
@@ -46,6 +47,8 @@ internal static partial class MetalVideoPresenter
             return CreateDrawColorTexture(device, blitCommandBuffer, texture, out ownedByCaller);
 
         ValidateDepthComparisonTexture(texture, blitCommandBuffer);
+        if (!MetalNative.SendBool(blitCommandBuffer, MetalNative.Selector("retainedReferences")))
+            throw new NotSupportedException("Metal depth conversion requires command-buffer retained references.");
         var source = CreateDrawColorTexture(device, blitCommandBuffer, texture, out var ownsSource);
         if (source == 0)
             throw new InvalidOperationException("Metal depth comparison requires a materialized source texture.");
