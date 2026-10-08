@@ -1177,12 +1177,21 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     {
         observation = null;
         var space = _backedSpace;
-        if (Volatile.Read(ref _disposed) || space is not ICpuMappedReadWatchSource source)
+        var disposedBefore = Volatile.Read(ref _disposed);
+        if (disposedBefore || space is not ICpuMappedReadWatchSource source)
+        {
+            TraceMappedCopyRefusal(disposedBefore ? "pre-provider-disposed" : "pre-provider-capability-unavailable",
+                CpuMappedCopyResult.Unavailable, footprintAddress, footprintByteCount, sourceAddress, destination.Length, true);
             return CpuMappedCopyResult.Unavailable;
+        }
         var result = source.TryReadMappedCopyWithWriteWatch(footprintAddress, footprintByteCount, sourceAddress, destination, out observation);
-        if (!Volatile.Read(ref _disposed) && ReferenceEquals(_backedSpace, space)) return result;
+        var disposedAfter = Volatile.Read(ref _disposed);
+        if (!disposedAfter && ReferenceEquals(_backedSpace, space)) return result;
         if (observation is not null) source.ReleaseMappedCopyWriteWatch(observation);
-        observation = null; return CpuMappedCopyResult.Rejected;
+        observation = null;
+        TraceMappedCopyRefusal(disposedAfter ? "post-provider-disposed" : "post-provider-backing-replaced",
+            CpuMappedCopyResult.Rejected, footprintAddress, footprintByteCount, sourceAddress, destination.Length, true);
+        return CpuMappedCopyResult.Rejected;
     }
     public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation observation) =>
         !Volatile.Read(ref _disposed) && _backedSpace is ICpuMappedReadWatchSource source && source.IsMappedCopyWriteWatchCurrent(observation);
@@ -1194,16 +1203,34 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     {
         observation = null;
         var space = _backedSpace;
-        if (Volatile.Read(ref _disposed) || space is not ICpuMappedCopySource source)
+        var disposedBefore = Volatile.Read(ref _disposed);
+        if (disposedBefore || space is not ICpuMappedCopySource source)
+        {
+            TraceMappedCopyRefusal(disposedBefore ? "pre-provider-disposed" : "pre-provider-capability-unavailable",
+                CpuMappedCopyResult.Unavailable, footprintAddress, footprintByteCount, sourceAddress, destination.Length, false);
             return CpuMappedCopyResult.Unavailable;
+        }
         // The participating provider resolves its actual immutable mapping and
         // copies only through the pinned alias. No lazy commit/protection repair
         // and no PVM gate is held across the copy or any lifetime drain.
         var result = source.TryReadMappedCopy(footprintAddress, footprintByteCount, sourceAddress, destination, out observation);
-        if (Volatile.Read(ref _disposed) || !ReferenceEquals(_backedSpace, space))
-        { observation = null; return CpuMappedCopyResult.Rejected; }
+        var disposedAfter = Volatile.Read(ref _disposed);
+        if (disposedAfter || !ReferenceEquals(_backedSpace, space))
+        {
+            observation = null;
+            TraceMappedCopyRefusal(disposedAfter ? "post-provider-disposed" : "post-provider-backing-replaced",
+                CpuMappedCopyResult.Rejected, footprintAddress, footprintByteCount, sourceAddress, destination.Length, false);
+            return CpuMappedCopyResult.Rejected;
+        }
         return result;
     }
+    private static void TraceMappedCopyRefusal(string reason, CpuMappedCopyResult result,
+        ulong footprint, ulong footprintBytes, ulong source, int copyBytes, bool watched)
+    {
+        if (!CpuMappedCopyDiagnostics.Enabled) return;
+        CpuMappedCopyDiagnostics.Emit(new("pvm", reason, result, footprint, footprintBytes, source, copyBytes, watched));
+    }
+
     public bool IsMappedCopyObservationCurrent(CpuMappedCopyObservation observation) =>
         !Volatile.Read(ref _disposed) && _backedSpace is ICpuMappedCopySource source &&
         source.IsMappedCopyObservationCurrent(observation);

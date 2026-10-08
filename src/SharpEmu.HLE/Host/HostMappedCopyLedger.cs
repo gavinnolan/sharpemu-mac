@@ -185,6 +185,20 @@ public sealed unsafe partial class HostMappedCopyLedger
         ulong footprintByteCount, ulong sourceAddress, Span<byte> destination, bool withWriteWatch,
         out CpuMappedCopyObservation? observation)
     {
+        CpuMappedCopyDiagnostics.Failure diagnostic = default;
+        try
+        {
+            return TryReadMappedCopyImplementation(backing, footprintAddress, footprintByteCount,
+                sourceAddress, destination, withWriteWatch, out observation, ref diagnostic);
+        }
+        finally { CpuMappedCopyDiagnostics.Emit(diagnostic); } // all implementation gates and pins are already unwound
+    }
+
+    private CpuMappedCopyResult TryReadMappedCopyImplementation(HostBackingObject backing, ulong footprintAddress,
+        ulong footprintByteCount, ulong sourceAddress, Span<byte> destination, bool withWriteWatch,
+        out CpuMappedCopyObservation? observation, ref CpuMappedCopyDiagnostics.Failure diagnostic)
+    {
+        var copyBytes = destination.Length;
         Capture? ownedCapture = null;
         var keepWatch = false;
         observation = null;
@@ -192,9 +206,9 @@ public sealed unsafe partial class HostMappedCopyLedger
             destination.Length > MaximumCopyBytes || !HostViewMemory.IsValidRange(sourceAddress, (ulong)destination.Length) ||
             sourceAddress < footprintAddress || sourceAddress - footprintAddress > footprintByteCount ||
             (ulong)destination.Length > footprintByteCount - (sourceAddress - footprintAddress))
-            return CpuMappedCopyResult.Rejected;
+            return Refuse(ref diagnostic, "request-geometry", CpuMappedCopyResult.Rejected);
         if (Monitor.IsEntered(gate)) throw new InvalidOperationException("Mapped copy must not run under the provider gate.");
-        if (!backing.TryEnterAccess()) return CpuMappedCopyResult.Rejected;
+        if (!backing.TryEnterAccess()) return Refuse(ref diagnostic, "backing-lifetime", CpuMappedCopyResult.Rejected);
         try
         {
             // Enrollment does not certify pre-existing/native writers, serialize
@@ -206,19 +220,23 @@ public sealed unsafe partial class HostMappedCopyLedger
             var hasWriterRevision = writers.TryCaptureRevision(out var writerRevision);
             lock (gate)
             {
-                if (unknownAlias || !aliases.ContainsKey(backing)) return CpuMappedCopyResult.Unavailable;
+                if (unknownAlias) return Refuse(ref diagnostic, "unknown-alias", CpuMappedCopyResult.Unavailable);
+                if (!aliases.ContainsKey(backing)) return Refuse(ref diagnostic, "backing-not-enrolled", CpuMappedCopyResult.Unavailable);
                 var states = new List<View>();
                 var segments = new List<CpuMappingFootprintSegment>();
                 var cursor = footprintAddress; var end = footprintAddress + footprintByteCount;
                 while (cursor < end)
                 {
                     var index = FindAtOrBelow(cursor);
-                    if (index < 0) return CpuMappedCopyResult.Rejected;
+                    if (index < 0) return Refuse(ref diagnostic, "no-view-at-cursor", CpuMappedCopyResult.Rejected, cursor, states.Count);
                     var view = views.Values[index];
-                    if (view.Revoked != 0 || view.CopyAvailable == 0 || !view.GuestAccessKnown || !ReferenceEquals(view.Backing, backing) ||
-                        cursor < view.Address || cursor - view.Address >= view.Size ||
-                        (view.Access & GuestPageProtection.Read) == 0 || states.Count == CpuMappedCopyObservation.MaximumSegments)
-                        return CpuMappedCopyResult.Rejected;
+                    if (view.Revoked != 0) return Refuse(ref diagnostic, "view-revoked", CpuMappedCopyResult.Rejected, cursor, states.Count, view);
+                    if (view.CopyAvailable == 0) return Refuse(ref diagnostic, "view-copy-unavailable", CpuMappedCopyResult.Rejected, cursor, states.Count, view);
+                    if (!view.GuestAccessKnown) return Refuse(ref diagnostic, "view-guest-access-unknown", CpuMappedCopyResult.Rejected, cursor, states.Count, view);
+                    if (!ReferenceEquals(view.Backing, backing)) return Refuse(ref diagnostic, "view-other-backing", CpuMappedCopyResult.Rejected, cursor, states.Count, view);
+                    if (cursor < view.Address || cursor - view.Address >= view.Size) return Refuse(ref diagnostic, "view-gap", CpuMappedCopyResult.Rejected, cursor, states.Count, view);
+                    if ((view.Access & GuestPageProtection.Read) == 0) return Refuse(ref diagnostic, "view-not-readable", CpuMappedCopyResult.Rejected, cursor, states.Count, view);
+                    if (states.Count == CpuMappedCopyObservation.MaximumSegments) return Refuse(ref diagnostic, "segment-bound", CpuMappedCopyResult.Rejected, cursor, states.Count, view);
                     var bytes = Math.Min(end - cursor, view.Size - (cursor - view.Address));
                     states.Add(view);
                     segments.Add(new(view.Address, view.Size, cursor, bytes, view.Incarnation,
@@ -236,7 +254,7 @@ public sealed unsafe partial class HostMappedCopyLedger
                 var watchOwnership = new ReadWatchOwnership(this); // Only watched copies are finalizable.
                 ownedCapture.WatchOwnership = watchOwnership;
                 if (Interlocked.Increment(ref readWatchCount) > MaximumReadWatches)
-                { Interlocked.Decrement(ref readWatchCount); return CpuMappedCopyResult.Rejected; }
+                { Interlocked.Decrement(ref readWatchCount); return Refuse(ref diagnostic, "watch-capacity", CpuMappedCopyResult.Rejected); }
                 watchOwnership.Charged = 1;
                 var physical = new List<HostManagedWriteIntervals.PhysicalRun>();
                 var lastSource = sourceAddress + (ulong)destination.Length;
@@ -247,7 +265,7 @@ public sealed unsafe partial class HostMappedCopyLedger
                     if (first < last) physical.Add(new(view.Offset + first - view.Address, last - first));
                 }
                 watchOwnership.Watch = writers.TryCreateReadWatch(physical.ToArray());
-                if (ownedCapture.ReadWatch is null) return CpuMappedCopyResult.Rejected;
+                if (ownedCapture.ReadWatch is null) return Refuse(ref diagnostic, "watch-enrollment", CpuMappedCopyResult.Rejected);
             }
             // No virtual pointer, permission repair, provider query, callback or
             // mapping gate is used here. The exact backing pin owns the alias.
@@ -262,17 +280,27 @@ public sealed unsafe partial class HostMappedCopyLedger
                 new ReadOnlySpan<byte>((void*)(backing.AliasBase + offset), checked((int)(last - first)))
                     .CopyTo(destination.Slice(checked((int)(first - sourceAddress))));
             }
-            if (!IsCurrent(backing, captured)) return CpuMappedCopyResult.Rejected;
+            if (!IsCurrent(backing, captured)) return Refuse(ref diagnostic, "post-copy-original-mapping", CpuMappedCopyResult.Rejected);
             // Mapping-only copies still succeed if participating writes raced.
             // Such an observation has no publication history, permanently.
             if (hasWriterRevision && writers.TryCaptureRevision(out var afterRevision) && afterRevision == writerRevision)
                 Volatile.Write(ref ((Capture)captured.OwnerIdentity).WriterRevision, writerRevision);
-            if (withWriteWatch && !ownedCapture.ReadWatch!.IsCurrent) return CpuMappedCopyResult.Rejected;
+            if (withWriteWatch && !ownedCapture.ReadWatch!.IsCurrent) return Refuse(ref diagnostic, "post-copy-original-watch", CpuMappedCopyResult.Rejected);
             observation = captured;
             keepWatch = true;
             return CpuMappedCopyResult.Copied;
         }
         finally { if (!keepWatch) ownedCapture?.ReleaseWatch(); backing.ExitAccess(); }
+
+        CpuMappedCopyResult Refuse(ref CpuMappedCopyDiagnostics.Failure target, string reason,
+            CpuMappedCopyResult result, ulong cursor = 0, int count = 0, View? view = null)
+        {
+            if (CpuMappedCopyDiagnostics.Enabled)
+                target = new("ledger", reason, result, footprintAddress, footprintByteCount, sourceAddress,
+                    copyBytes, withWriteWatch, backing.Identity, cursor, count,
+                    view?.Address ?? 0, view?.Size ?? 0, view?.Backing.Identity ?? 0);
+            return result;
+        }
     }
 
     // Bounded scalar validation, without taking Gate or consulting native state.
