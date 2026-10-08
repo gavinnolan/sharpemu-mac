@@ -7,6 +7,13 @@ namespace SharpEmu.HLE;
 /// exclusion, permission ownership, GPU completion and signal recovery.</summary>
 public interface ICpuMappedPublicationSource
 {
+    /// <summary>Cancel-only reservation from the ORIGINAL mapping and physical
+    /// writer baseline. It changes no bytes or revision and certifies no native
+    /// guest writer completion. Unsupported providers decline.</summary>
+    CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(
+        CpuMappedCopyObservation original, out CpuMappedPublicationValidation? validation)
+    { validation = null; return CpuMappedPublicationPreparationResult.Unavailable; }
+
     /// <summary>Resolve the original opaque observation and detached byte runs,
     /// acquire exact mapping/backing lifetime and participating-writer exclusion,
     /// then return a one-use transaction. No bytes change during preparation.
@@ -58,4 +65,20 @@ internal abstract class CpuMappedPublicationTransaction
     internal abstract CpuMappedPublicationResult TryCommit();
     internal abstract void Cancel();
     internal abstract CpuMappedCopyObservation? SuccessfulObservation { get; }
+}
+
+/// <summary>Opaque one-use ordinary validation reservation. No commit or byte
+/// payload exists. The producer validates its original tracker/image observations
+/// outside provider gates while mapping and participating writers are excluded.</summary>
+public sealed class CpuMappedPublicationValidation : IDisposable
+{
+    private readonly CpuMappedPublicationValidationTransaction transaction;
+    internal CpuMappedPublicationValidation(CpuMappedPublicationValidationTransaction transaction) => this.transaction = transaction;
+    public bool IsCurrent => transaction.IsCurrent;
+    public void Dispose() => transaction.Cancel();
+}
+internal abstract class CpuMappedPublicationValidationTransaction
+{
+    internal abstract bool IsCurrent { get; }
+    internal abstract void Cancel();
 }

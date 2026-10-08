@@ -64,6 +64,23 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
 
     public ulong Size => _backing?.Size ?? 0;
 
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(CpuMappedCopyObservation original,
+        out CpuMappedPublicationValidation? validation)
+    {
+        validation = null;
+        if (_host is not IHostMappedPublicationMemory provider || _backing is null)
+            return CpuMappedPublicationPreparationResult.Unavailable;
+        if (!TryEnterAliasAccess()) return CpuMappedPublicationPreparationResult.Rejected;
+        try
+        {
+            var result = provider.TryPrepareMappedPublicationValidation(_backing, original, out validation);
+            if (IsAvailable) return result;
+            validation?.Dispose(); validation = null;
+            return CpuMappedPublicationPreparationResult.Rejected;
+        }
+        finally { ExitAliasAccess(); }
+    }
+
     public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(CpuMappedCopyObservation original,
         IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication)
     {

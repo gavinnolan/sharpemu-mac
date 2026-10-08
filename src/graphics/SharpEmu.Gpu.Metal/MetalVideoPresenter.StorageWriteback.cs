@@ -9,9 +9,26 @@ namespace SharpEmu.Gpu.Metal;
 
 internal static partial class MetalVideoPresenter
 {
-    // Deliberately dormant: provider publication/writer participation is a separate
-    // prerequisite. Neither an environment flag nor address lookup enables this.
+    // Retained fixture-only switch. Runtime opt-in below independently requires
+    // original producer, participating provider and exact completion receipts.
     private static bool _finiteStorageWritebackEnabled = false;
+    // Explicit diagnostic/qualification opt-in; never adopts an old GPU-written
+    // image. Every work still needs its original seed and exact completion.
+    private static readonly bool _rgbaStorageRuntimePublicationRequested =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_RGBA8_CANONICAL_PUBLICATION") == "1";
+
+    internal static bool RgbaStorageRuntimePublicationRequested => _rgbaStorageRuntimePublicationRequested;
+
+    private static bool RequiresFiniteStoragePublication(GuestDrawTexture[] textures) =>
+        _finiteStorageWritebackEnabled || _rgbaStorageRuntimePublicationRequested &&
+            textures.Any(texture => texture.IsStorage && StorageImageWrites(texture) &&
+                MetalBgra1024ArrayStorageAdmission.IsQualified(texture));
+
+    // Ordinary deterministic native/managed controls only; default null and
+    // never invoked by a signal or while holding presenter/provider gates.
+    private static Action? _finiteStorageAfterAppliedForControl = null;
+    private static Action? _finiteStorageAfterCanonicalVersionForControl = null;
+
     private const int MaximumFiniteStorageWritebacks = 32;
     private const int FiniteStorageStagingRowAlignment = 256;
 
@@ -25,6 +42,7 @@ internal static partial class MetalVideoPresenter
         // that another unrecorded writer has settled its canonical debt.
         internal int CanonicalVersion = -1;
         internal StorageCpuSeedOrigin? CanonicalOrigin;
+        internal GuestDrawTexture? CanonicalDescriptor;
     }
     private static readonly ConditionalWeakTable<GuestImage, FiniteStorageDebt> _finiteStorageDebts = new();
 
@@ -106,8 +124,16 @@ internal static partial class MetalVideoPresenter
     private static void ValidateFiniteStorageBufferCohort(GuestDrawTexture[] textures, GuestMemoryBuffer[] buffers)
     {
         if (!textures.Any(texture => texture.IsStorage && StorageImageWrites(texture))) return;
-        if (buffers.Any(buffer => buffer.Writable && buffer.WriteBackToGuest && buffer.Length != 0))
-            throw new NotSupportedException("Metal finite storage publication cannot mix image and nonempty writable guest-buffer publication in one work.");
+        var bytes = 0;
+        var count = 0;
+        foreach (var buffer in buffers)
+        {
+            if (!buffer.Writable || !buffer.WriteBackToGuest || buffer.Length == 0) continue;
+            if (++count > MaximumFiniteWritableBuffers || buffer.Length > MaximumFiniteBufferBytes - bytes)
+                throw new NotSupportedException("Metal finite storage mixed buffer inventory is unqualified or exceeds its bound.");
+            _ = RequireFiniteStorageBufferOrigin(buffer);
+            bytes += buffer.Length;
+        }
     }
 
     // Exact GPU bytes only. Singleton padding is never copied; the qualified
@@ -176,7 +202,10 @@ internal static partial class MetalVideoPresenter
             origin.Mapping.FootprintAddress != descriptor.Address || origin.Mapping.FootprintByteCount != origin.Layout.PhysicalBytes ||
             origin.Mapping.SourceAddress != descriptor.Address || origin.Mapping.SourceByteCount != origin.Layout.PhysicalBytes ||
             !origin.Source.IsMappedCopyObservationCurrent(origin.Mapping) || !origin.Observation.Observed ||
-            !IsCpuTextureSnapshotObservationStable(descriptor.Address, origin.Observation))
+            origin.Observation.ByteCount != origin.Layout.PhysicalBytes ||
+            !IsCpuTextureSnapshotContentObservationStable(descriptor.Address, origin.Observation) ||
+            !GuestImageWriteTracker.TryGetProtectedObservedContentToken(descriptor.Address,
+                origin.Layout.PhysicalBytes, out var currentToken) || currentToken != origin.Observation.Token)
             throw new InvalidOperationException("Metal finite storage publication original mapping/content/session observation changed.");
     }
 
@@ -280,23 +309,23 @@ internal static partial class MetalVideoPresenter
                 throw new InvalidOperationException("Metal finite storage publication applied without its exact provider continuity; GPU debt remains pending.");
             ValidateFiniteStorageMappingContinuation(receipt.Origin.Mapping, mapping);
             var nextOrigin = receipt.Origin with { Mapping = mapping };
-            lock (_gate)
+            _finiteStorageAfterAppliedForControl?.Invoke();
+            WithFiniteStorageValidation(receipt, nextOrigin, () =>
             {
-                ValidateFiniteStorageFinalizationContext(receipt.Origin);
-                if (receipt.Image.Texture != receipt.Texture || receipt.Image.ContentVersion != receipt.Version ||
-                    !ReferenceEquals(receipt.Image.StorageCpuOrigin, receipt.Origin) ||
-                    !_guestImages.TryGetValue(receipt.Descriptor.Address, out var current) || !ReferenceEquals(current, receipt.Image) ||
-                    receipt.Debt.Failed || !receipt.Debt.Pending || receipt.Debt.Work != receipt.Work)
+                lock (_gate)
                 {
-                    receipt.Debt.Failed = true;
-                    throw new InvalidOperationException("Metal finite storage owner changed during canonical publication.");
+                    ValidateFiniteStorageFinalizationContext(receipt.Origin);
+                    if (receipt.Image.Texture != receipt.Texture || receipt.Image.ContentVersion != receipt.Version ||
+                        !ReferenceEquals(receipt.Image.StorageCpuOrigin, receipt.Origin) ||
+                        !_guestImages.TryGetValue(receipt.Descriptor.Address, out var current) || !ReferenceEquals(current, receipt.Image) ||
+                        receipt.Debt.Failed || !receipt.Debt.Pending || receipt.Debt.Work != receipt.Work)
+                        throw new InvalidOperationException("Metal finite storage owner changed during canonical publication.");
+                    receipt.PublishedOrigin = nextOrigin;
+                    // Remain pending until the exact native mutation is recorded.
                 }
-                receipt.PublishedOrigin = nextOrigin;
-                // Remain pending until the actual native mutation metadata is
-                // recorded. CompleteGuestWork/EOP cannot precede this transition.
-            }
+            });
         }
-        catch (Exception failure) { receipt.Debt.Failed = true; primary = failure; throw; }
+        catch (Exception failure) { lock (_gate) { receipt.Debt.Failed = true; receipt.Debt.Pending = true; } primary = failure; throw; }
         finally
         {
             CancelFiniteStoragePublication(transaction, primary);
@@ -353,31 +382,79 @@ internal static partial class MetalVideoPresenter
                 throw new InvalidOperationException("Metal finite storage publication provider continuity changed an original physical mapping identity.");
     }
 
+    private static CpuMappedPublicationValidation PrepareFiniteStorageValidation(StorageCpuSeedOrigin origin)
+    {
+        if (origin.Memory is not ICpuMappedPublicationSource source)
+            throw new NotSupportedException("Finite canonical validation has no participating provider.");
+        var result = source.TryPrepareMappedPublicationValidation(origin.Mapping, out var validation);
+        if (result == CpuMappedPublicationPreparationResult.Prepared && validation is not null) return validation;
+        validation?.Dispose();
+        throw new InvalidOperationException($"Finite canonical physical-history validation was refused: result={result}.");
+    }
+
+    private static void WithFiniteStorageValidation(FiniteStorageWriteback receipt,
+        StorageCpuSeedOrigin next, Action finalize)
+    {
+        CpuMappedPublicationValidation? validation = null;
+        Exception? primary = null;
+        try
+        {
+            validation = PrepareFiniteStorageValidation(next);
+            ValidateFiniteStorageOrigin(next, receipt.Descriptor);
+            if (!validation.IsCurrent)
+                throw new InvalidOperationException("Finite canonical original writer/mapping reservation was revoked.");
+            finalize();
+            // Scalar tracker state may change independently of presenter state.
+            // No ack is emitted if it changes while this reservation is held.
+            ValidateFiniteStorageOrigin(next, receipt.Descriptor);
+            if (!validation.IsCurrent)
+                throw new InvalidOperationException("Finite canonical original mapping changed at finalization.");
+        }
+        catch (Exception failure)
+        {
+            lock (_gate) { receipt.Debt.Failed = true; receipt.Debt.Pending = true; }
+            primary = failure;
+            throw;
+        }
+        finally
+        {
+            try { validation?.Dispose(); }
+            catch (Exception cleanup)
+            {
+                lock (_gate) { receipt.Debt.Failed = true; receipt.Debt.Pending = true; _textureSourceCleanupFailure ??= cleanup; }
+                if (primary is null) ExceptionDispatchInfo.Capture(cleanup).Throw();
+                try { primary.Data["FiniteStorageValidationCleanup"] = cleanup; } catch { }
+            }
+        }
+    }
+
     private static void FinalizeFiniteStorageWrites(List<FiniteStorageWriteback>? receipts)
     {
-        if (receipts is null) return;
-        lock (_gate)
+        if (receipts is null || receipts.Count == 0) return;
+        if (receipts.Count != 1) throw new InvalidOperationException("Finite canonical work has an ambiguous image inventory.");
+        var receipt = receipts[0];
+        var next = receipt.PublishedOrigin ?? throw new InvalidOperationException("Finite canonical work has no applied origin.");
+        // Prepare and dispose outside _gate; the final token veto is likewise
+        // outside it. Failure after metadata installation restores sticky debt.
+        WithFiniteStorageValidation(receipt, next, () =>
         {
-            // Validate the complete work inventory before changing any owner.
-            foreach (var receipt in receipts)
+            lock (_gate)
             {
                 ValidateFiniteStorageFinalizationContext(receipt.Origin);
-                if (!receipt.Published || receipt.Consumed || receipt.PublishedOrigin is null ||
-                    !receipt.SuccessfullyCompleted || receipt.Debt.Failed || !receipt.Debt.Pending ||
-                    receipt.Debt.Work != receipt.Work || receipt.Image.Texture != receipt.Texture ||
-                    receipt.Image.ContentVersion != checked(receipt.Version + 1) ||
+                if (!receipt.Published || receipt.Consumed || !receipt.SuccessfullyCompleted ||
+                    receipt.Debt.Failed || !receipt.Debt.Pending || receipt.Debt.Work != receipt.Work ||
+                    receipt.Image.Texture != receipt.Texture || receipt.Image.ContentVersion != checked(receipt.Version + 1) ||
                     !ReferenceEquals(receipt.Image.StorageCpuOrigin, receipt.Origin) ||
                     !_guestImages.TryGetValue(receipt.Descriptor.Address, out var current) || !ReferenceEquals(current, receipt.Image))
                     throw new InvalidOperationException("Metal finite storage canonical publication cannot finalize its exact native mutation version.");
-            }
-            foreach (var receipt in receipts)
-            {
-                receipt.Image.StorageCpuOrigin = receipt.PublishedOrigin;
-                receipt.Debt.CanonicalOrigin = receipt.PublishedOrigin;
+                receipt.Image.StorageCpuOrigin = next;
+                receipt.Debt.CanonicalOrigin = next;
+                receipt.Debt.CanonicalDescriptor = receipt.Descriptor;
                 receipt.Debt.CanonicalVersion = receipt.Image.ContentVersion;
                 receipt.Debt.Pending = false;
             }
-        }
+            _finiteStorageAfterCanonicalVersionForControl?.Invoke();
+        });
     }
 
     // Called under _gate at both post-effect metadata boundaries. Applied bytes

@@ -23,6 +23,8 @@ public sealed unsafe partial class HostMappedCopyLedger
         var effect = new HostAddressRange(address, size);
         for (var item = publications; item is not null; item = item.Next)
             if (Overlaps(effect, new(item.Original.FootprintAddress, item.Original.FootprintByteCount))) return true;
+        for (var item = validations; item is not null; item = item.Next)
+            if (Overlaps(effect, new(item.Original.FootprintAddress, item.Original.FootprintByteCount))) return true;
         return false;
     }
 
@@ -69,7 +71,7 @@ public sealed unsafe partial class HostMappedCopyLedger
         {
             lock (gate)
             {
-                if (!IsCurrent(backing, original) || publicationCount >= MaximumPublications ||
+                if (!IsCurrent(backing, original) || publicationCount + validationCount >= MaximumPublications ||
                     bytes > MaximumRetainedPublicationBytes - retainedPublicationBytes ||
                     HasOverlappingPublicationLocked(original.FootprintAddress, original.FootprintByteCount))
                     return CpuMappedPublicationPreparationResult.Rejected;

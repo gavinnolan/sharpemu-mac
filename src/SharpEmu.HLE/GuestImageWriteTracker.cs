@@ -448,6 +448,47 @@ public static unsafe partial class GuestImageWriteTracker
         }
     }
 
+    // Ordinary-thread deterministic phase seam only, never invoked by a signal.
+    private static Action? _afterProtectedDirtyConsumeForControl = null;
+
+    /// <summary>Consume only a dirty flag already covered by the exact original
+    /// protected observation. Managed-watch owners deliberately decline: their
+    /// notification has no Armed CAS before generation publication. This is an
+    /// ordinary generation acknowledgment, not write completion authorization.</summary>
+    public static bool TryConsumeDirtyAtProtectedToken(ulong address, ulong byteCount, ContentToken expected)
+    {
+        if (!_enabled || address == 0 || byteCount == 0 || expected.WatchIdentity != 0 ||
+            expected.WatchGeneration != -1 || expected.WatchByteCount != 0 || expected.ProtectedIdentity <= 0)
+            return false;
+        lock (_gate)
+        {
+            if (!_rangesByAddress.TryGetValue(address, out var range) || !range.Protect ||
+                range.DiagnosticIdentity != expected.ProtectedIdentity || range.ByteCount != expected.ProtectedByteCount ||
+                range.ByteCount < byteCount || _watchRangesByAddress.ContainsKey(address) ||
+                Volatile.Read(ref range.Armed) != RangeArmed ||
+                Volatile.Read(ref range.WriteGeneration) != expected.ProtectedGeneration) return false;
+            Interlocked.Exchange(ref range.Dirty, 0);
+            try { _afterProtectedDirtyConsumeForControl?.Invoke(); }
+            catch { Interlocked.Exchange(ref range.Dirty, 1); throw; }
+            // A fault claims Armed->Invalidating before publishing Dirty/Gen.
+            // This recheck prevents acknowledgment from losing that publication.
+            if (Volatile.Read(ref range.Armed) != RangeArmed ||
+                Volatile.Read(ref range.WriteGeneration) != expected.ProtectedGeneration)
+            { Interlocked.Exchange(ref range.Dirty, 1); return false; }
+            return true;
+        }
+    }
+
+    /// <summary>Conservative rollback of an ordinary acknowledgment if its exact
+    /// presenter owner subsequently changes. Never changes counters or rearms.</summary>
+    public static void RestoreDirtyAtProtectedOwner(ulong address, ContentToken expected)
+    {
+        lock (_gate)
+            if (_rangesByAddress.TryGetValue(address, out var range) && range.Protect &&
+                range.DiagnosticIdentity == expected.ProtectedIdentity && range.ByteCount == expected.ProtectedByteCount)
+                Interlocked.Exchange(ref range.Dirty, 1);
+    }
+
     private static readonly bool _dirtyCausalityEnabled =
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGE_DIRTY") == "1";
     private static int _dirtyCausalityCount;
@@ -520,7 +561,7 @@ public static unsafe partial class GuestImageWriteTracker
     public static void TraceManagedDirtyCompletion(ulong address, ulong byteCount) =>
         TraceManagedDirtyWrite(address, SaturatingEnd(address, byteCount), completed: true);
 
-    private static void TraceManagedDirtyWrite(ulong address, ulong end, bool completed)
+    private static void TraceManagedDirtyWrite(ulong address, ulong end, bool completed, string source = "managed")
     {
         if (!_dirtyCausalityEnabled) return;
         lock (_gate)
@@ -538,7 +579,7 @@ public static unsafe partial class GuestImageWriteTracker
                     if (candidate.Address < end && address < candidate.End) { watch = candidate; break; }
                 if (range is null && watch is null) return;
                 count++;
-                Console.Error.WriteLine($"[WT][DIRTY] event={(completed ? "managed-completed" : "managed-attempt-not-completed")} address=0x{address:X} bytes={end - address}" +
+                Console.Error.WriteLine($"[WT][DIRTY] event={(source == "managed" ? completed ? "managed-completed" : "managed-attempt-not-completed" : "canonical-gpu-completed")} source={source} address=0x{address:X} bytes={end - address}" +
                     $" first_matched_protected=0x{range?.Address ?? 0:X} first_matched_watch=0x{watch?.Address ?? 0:X}" +
                     $"{Environment.NewLine}{Environment.StackTrace}");
             }
@@ -713,6 +754,25 @@ public static unsafe partial class GuestImageWriteTracker
     /// a resumable guest fault. Visit every page in the write span up front so
     /// all overlapping texture owners are dirtied and made writable.
     /// </summary>
+    /// <summary>Ordinary notification after an exact completed GPU command and
+    /// Applied original mapped publication. This only invalidates intersecting
+    /// virtual observers: no mprotect, rearm, token refresh or content certificate.
+    /// Unknown/partial publication must never call it.</summary>
+    public static void NotifyCompletedMappedGpuWrite(ulong address, ulong byteCount)
+    {
+        if (address == 0 || byteCount == 0 || byteCount > ulong.MaxValue - address) return;
+        var end = address + byteCount;
+        MarkManagedWatchRanges(address, end);
+        lock (_gate)
+            foreach (var range in _rangesByAddress.Values)
+                if ((UInt128)range.Address < end && (UInt128)address < (UInt128)range.Address + range.ByteCount)
+                {
+                    Interlocked.Exchange(ref range.Dirty, 1);
+                    Interlocked.Increment(ref range.WriteGeneration);
+                }
+        TraceManagedDirtyWrite(address, end, completed: true, source: "canonical-gpu-publication");
+    }
+
     public static void NotifyManagedWrite(ulong address, ulong byteCount)
     {
         if (address == 0 || byteCount == 0)

@@ -20,6 +20,15 @@ public sealed class TrackedCpuMemory : ICpuMemory, ITrackedCpuMemory, IGuestMemo
 
     public string DescribeReadRange(ulong address, ulong size) => _inner.DescribeReadRange(address, size);
 
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(CpuMappedCopyObservation original,
+        out CpuMappedPublicationValidation? validation)
+    {
+        validation = null;
+        return _inner is ICpuMappedPublicationSource source
+            ? source.TryPrepareMappedPublicationValidation(original, out validation)
+            : CpuMappedPublicationPreparationResult.Unavailable;
+    }
+
     public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(CpuMappedCopyObservation original,
         IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication)
     {

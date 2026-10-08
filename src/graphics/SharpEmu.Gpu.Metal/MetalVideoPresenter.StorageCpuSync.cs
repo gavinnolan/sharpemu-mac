@@ -43,6 +43,26 @@ internal static partial class MetalVideoPresenter
     private static StorageCpuSeedOrigin? StorageCpuOrigin(GuestDrawTexture descriptor) =>
         _storageCpuSeedOrigins.TryGetValue(descriptor, out var origin) && origin.Layout.Matches(descriptor) ? origin : null;
 
+    // Attribution only: carries the ORIGINAL complete mapping, never a fresh
+    // probe/token or writer authorization. A present-but-incompatible original
+    // must not fall through to reconstruction at the same address.
+    internal static bool TryGetOriginalStorageCpuMapping(GuestDrawTexture descriptor, ICpuMemory memory,
+        out CpuMappedCopyObservation? mapping, out long originalSession, out bool originalPresent)
+    {
+        mapping = null; originalSession = -1;
+        originalPresent = _storageCpuSeedOrigins.TryGetValue(descriptor, out var origin);
+        if (!originalPresent || origin is null) return false;
+        originalSession = origin.Session;
+        if (!ReferenceEquals(memory, origin.Memory) || !origin.Layout.Matches(descriptor) ||
+            origin.Session != CurrentStorageCpuSeedSession ||
+            origin.Mapping.SourceAddress != descriptor.Address ||
+            origin.Mapping.FootprintAddress != descriptor.Address ||
+            origin.Mapping.SourceByteCount != origin.Layout.PhysicalBytes ||
+            origin.Mapping.FootprintByteCount != origin.Layout.PhysicalBytes) return false;
+        mapping = origin.Mapping;
+        return true;
+    }
+
     private static void ValidateStorageCpuSeedSession(StorageCpuSeedOrigin? origin)
     {
         if (origin is not null && origin.Session != CurrentStorageCpuSeedSession)

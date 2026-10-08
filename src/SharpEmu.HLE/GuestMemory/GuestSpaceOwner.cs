@@ -61,6 +61,16 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMap
 
     public ulong BackingSize => _views.Size;
 
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(CpuMappedCopyObservation original,
+        out CpuMappedPublicationValidation? validation)
+    {
+        validation = null;
+        if (Volatile.Read(ref _disposed)) return CpuMappedPublicationPreparationResult.Rejected;
+        var result = _views.TryPrepareMappedPublicationValidation(original, out validation);
+        if (!Volatile.Read(ref _disposed)) return result;
+        validation?.Dispose(); validation = null; return CpuMappedPublicationPreparationResult.Rejected;
+    }
+
     public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(CpuMappedCopyObservation original,
         IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication)
     {

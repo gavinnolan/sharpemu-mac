@@ -94,6 +94,9 @@ public sealed class MappedPublicationTests
         public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(HostBackingObject backing,
             CpuMappedCopyObservation original, IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication) =>
             Ledger.TryPrepareMappedPublication(backing, original, runs, out publication);
+        public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(HostBackingObject backing,
+            CpuMappedCopyObservation original, out CpuMappedPublicationValidation? validation) =>
+            Ledger.TryPrepareMappedPublicationValidation(backing, original, out validation);
         internal bool Effect(ulong address, ulong size) { lock (gate) return Ledger.BeforeNativeEffect(address, size); }
         internal void Unknown() { lock (gate) Ledger.QuarantineUnknownAlias(); }
         public ulong ReserveHole(ulong address, ulong size) => throw new NotSupportedException();
@@ -611,6 +614,88 @@ public sealed class MappedPublicationTests
         Assert.False(state.Views.TryWriteBacking(State.Address, ReadOnlySpan<byte>.Empty));
         Assert.False(state.Views.TryCopyBacking(State.Address, State.Address, 0));
         Assert.Equal(CpuMappedPublicationResult.Applied, receipt.TryCommit());
+    }
+
+    [Fact]
+    public void CancelOnlyOriginalValidationChangesNoBytesOrWriterBaseline()
+    {
+        using var state = new State();
+        Assert.True(state.Views.TryWriteBacking(State.Address, new byte[] { 71, 72, 73 }));
+        var original = state.Capture(); var before = state.Bytes();
+        Assert.Equal(CpuMappedPublicationPreparationResult.Prepared,
+            state.Views.TryPrepareMappedPublicationValidation(original, out var validation));
+        Assert.True(validation!.IsCurrent);
+        Assert.Equal(before, state.Bytes());
+        validation.Dispose(); validation.Dispose();
+        Assert.False(validation.IsCurrent);
+        // Original history still authorizes the same bytes: cancellation did
+        // not mint a refreshed observation or record an imaginary write.
+        using var publication = state.Prepare(original, State.Address, [17]);
+        Assert.Equal(CpuMappedPublicationResult.Applied, publication.TryCommit());
+        before[0] = 17; Assert.Equal(before, state.Bytes());
+    }
+
+    [Fact]
+    public void HeldCancelOnlyValidationExcludesFullMappingAndParticipatingWriters()
+    {
+        using var state = new State(); var original = state.Capture(); var before = state.Bytes();
+        Assert.Equal(CpuMappedPublicationPreparationResult.Prepared,
+            state.Views.TryPrepareMappedPublicationValidation(original, out var validation));
+        using (validation)
+        {
+            Assert.False(state.Host.Effect(State.Address + State.Page - 1, 1));
+            Assert.False(state.Views.TryWriteBacking(State.Address + 32, new byte[] { 99 }));
+            Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
+                state.Views.TryPrepareMappedPublication(original, [new(State.Address, new byte[] { 1 })], out _));
+            Assert.Equal(before, state.Bytes());
+        }
+        Assert.True(state.Host.Effect(State.Address, State.Page));
+        Assert.False(state.Views.IsMappedCopyObservationCurrent(original));
+    }
+
+    [Theory]
+    [InlineData(false)] [InlineData(true)]
+    public void CancelOnlyValidationUsesOriginalPhysicalHistoryNotMappingEquality(bool overlap)
+    {
+        using var state = new State(); var original = state.Capture();
+        Assert.True(state.Views.TryWriteBacking(State.Address + (overlap ? 0ul : 32ul), new byte[] { 99 }));
+        Assert.True(state.Views.IsMappedCopyObservationCurrent(original));
+        var result = state.Views.TryPrepareMappedPublicationValidation(original, out var validation);
+        using (validation)
+        {
+            Assert.Equal(overlap ? CpuMappedPublicationPreparationResult.Rejected : CpuMappedPublicationPreparationResult.Prepared, result);
+            if (!overlap) Assert.True(validation!.IsCurrent);
+        }
+        Assert.Equal(99, state.Bytes()[overlap ? 0 : 32]);
+    }
+
+    [Fact]
+    public void CancelOnlyValidationRejectsForeignReadonlyAndRetiredOwner()
+    {
+        using var first = new State(); using var other = new State(HostPageProtection.ReadOnly);
+        var original = first.Capture(); var readonlyOriginal = other.Capture();
+        Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
+            other.Views.TryPrepareMappedPublicationValidation(original, out _));
+        Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
+            other.Views.TryPrepareMappedPublicationValidation(readonlyOriginal, out _));
+        Assert.True(first.Host.Effect(State.Address, State.Page));
+        Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
+            first.Views.TryPrepareMappedPublicationValidation(original, out _));
+    }
+
+    [Fact]
+    public void CancelOnlyValidationDeclinesUnknownAndActiveBackingClose()
+    {
+        using var state = new State(); var original = state.Capture();
+        Assert.Equal(CpuMappedPublicationPreparationResult.Prepared,
+            state.Views.TryPrepareMappedPublicationValidation(original, out var validation));
+        state.Backing.CloseAccess();
+        Assert.False(validation!.IsCurrent); validation.Dispose();
+        Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
+            state.Views.TryPrepareMappedPublicationValidation(original, out _));
+        using var unknown = new State(); var observed = unknown.Capture(); unknown.Host.Unknown();
+        Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
+            unknown.Views.TryPrepareMappedPublicationValidation(observed, out _));
     }
 
 }

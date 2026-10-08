@@ -123,6 +123,7 @@ internal static partial class MetalVideoPresenter
             foreach (var (address, width, height, byteCount) in extents)
             {
                 TraceStorageDirtyBeforeConsume(address);
+                if (TryAcknowledgeFiniteCanonicalDirty(address)) continue;
                 if (!GuestImageWriteTracker.ConsumeDirty(address))
                 {
                     continue;

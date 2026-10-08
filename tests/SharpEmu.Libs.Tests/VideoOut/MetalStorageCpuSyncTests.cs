@@ -293,6 +293,24 @@ public sealed class MetalStorageCpuSyncTests
         finally { Images.Remove(Address); }
     }
 
+    [Theory]
+    [InlineData("original")] [InlineData("session")] [InlineData("descriptor")]
+    public void OriginalStorageAttributionNeverReconstructsPresentIncompatibleCopy(string kind)
+    {
+        ActualArchitecture(); using var state = new State(); var memory = new MappedMemory(Physical(0));
+        var texture = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [Binding(0)], out _));
+        var origin = GetOrigin(texture);
+        var originalMapping = (CpuMappedCopyObservation)origin.GetType().GetProperty("Mapping")!.GetValue(origin)!;
+        var originalSession = (long)origin.GetType().GetProperty("Session")!.GetValue(origin)!;
+        if (kind == "session") Field("_selectedStorageMipSession").SetValue(null, originalSession + 1);
+        if (kind == "descriptor") texture.Descriptor![5] ^= 1;
+        Assert.Equal(kind == "original", MetalVideoPresenter.TryGetOriginalStorageCpuMapping(texture, memory,
+            out var mapping, out var session, out var present));
+        Assert.True(present); Assert.Equal(originalSession, session);
+        if (kind == "original") Assert.Same(originalMapping, mapping); else Assert.Null(mapping);
+        Assert.Equal(1, memory.Copies); Assert.Equal(0, memory.Reads);
+    }
+
     private static object GetOrigin(GuestDrawTexture texture) => Presenter.GetMethod("StorageCpuOrigin", Private)!.Invoke(null, [texture])!;
     private static IDictionary Images => (IDictionary)Field("_guestImages").GetValue(null)!;
     private static FieldInfo Field(string name) => Presenter.GetField(name, Private)!;

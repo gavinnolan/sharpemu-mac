@@ -53,7 +53,19 @@ public sealed partial class MetalImmutableGpuVersionTests
     public void ActualRuntimeRgba1024OverlappingWriterRejectsSecondPublicationAndEop() =>
         RunActualRuntimeTwoTypedPublications(overlappingCpuWrite: true, rgba: true);
 
-    private void RunActualRuntimeTwoTypedPublications(bool overlappingCpuWrite, bool rgba = false)
+    [FiniteStoragePublicationNativeFact]
+    public void ActualRuntimeDisjointMappedGlobalAndRgbaPublicationsPreserveAllOwnedBytes() =>
+        RunActualRuntimeTwoTypedPublications(overlappingCpuWrite: false, rgba: true, mixedBuffer: true);
+
+    [FiniteStoragePublicationNativeFact]
+    public void ActualRuntimeAliasWriteAfterAppliedImageCommitVetoesFinalizationAndEop() =>
+        RunActualRuntimeTwoTypedPublications(false, rgba: true, lateFailure: "writer");
+
+    [FiniteStoragePublicationNativeFact]
+    public void ActualRuntimeLateDirtyGenerationAfterCanonicalVersionKeepsStickyDebtAndNoEop() =>
+        RunActualRuntimeTwoTypedPublications(false, rgba: true, lateFailure: "generation");
+
+    private void RunActualRuntimeTwoTypedPublications(bool overlappingCpuWrite, bool rgba = false, bool mixedBuffer = false, string? lateFailure = null)
     {
         Assert.True(DeviceRequested());
         var imageBytes = rgba ? 4194304 : 65536;
@@ -67,6 +79,8 @@ public sealed partial class MetalImmutableGpuVersionTests
         var owners = new FiniteStorageFixtureOwners();
         var oldFinite = Field("_finiteStorageWritebackEnabled").GetValue(null);
         var oldMemory = Field("_guestMemory").GetValue(null);
+        var oldAfterApplied = Field("_finiteStorageAfterAppliedForControl").GetValue(null);
+        var oldAfterVersion = Field("_finiteStorageAfterCanonicalVersionForControl").GetValue(null);
         var backendField = typeof(GuestGpu).GetField("_instance", BindingFlags.Static | BindingFlags.NonPublic)!;
         var oldBackend = backendField.GetValue(null);
         NativeState? state = null;
@@ -135,16 +149,45 @@ public sealed partial class MetalImmutableGpuVersionTests
             var host = new MetalCommandStreamHost(memory, backend, backend);
             var reports = new List<string>(); GpuFatal.OnFatal = reports.Add;
             using var queueScope = MetalVideoPresenter.EnterGuestQueue("finite.storage.native", 1);
-            var firstShader = state.FiniteStorageShader(0x11223344, rgba);
-            var firstSequence = state.AdmitFiniteStorage(first, firstShader);
+            var firstShader = state.FiniteStorageShader(0x11223344, rgba, mixedBuffer);
+            var firstBuffer = mixedBuffer ? CaptureBuffer() : null;
+            var firstSequence = state.AdmitFiniteStorage(first, firstShader, firstBuffer);
             Assert.True(firstSequence > 0);
             host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write32, 1, address + (ulong)imageBytes, 0x13579BDF));
             var firstEop = (long)Field("_enqueuedGuestWorkSequence").GetValue(null)!;
             Assert.Equal(expected, ReadCanonical());
             Assert.False(MetalVideoPresenter.WaitForGuestWork(firstSequence, 0));
+            if (lateFailure is not null)
+            {
+                if (lateFailure == "writer")
+                    Field("_finiteStorageAfterAppliedForControl").SetValue(null, (Action)(() =>
+                    {
+                        Assert.True(physical.TryWriteBacking(address, new byte[] { 0x5B }));
+                    }));
+                else Field("_finiteStorageAfterCanonicalVersionForControl").SetValue(null,
+                    (Action)(() => GuestImageWriteTracker.NotifyCompletedMappedGpuWrite(address, 1)));
+                var failure = Assert.Throws<TargetInvocationException>(() => state.DrainWithControlledBudget());
+                Assert.IsType<GpuFatalException>(failure.InnerException);
+                Assert.False(MetalVideoPresenter.WaitForGuestWork(firstSequence, 0));
+                Assert.False(MetalVideoPresenter.WaitForGuestWork(firstEop, 0));
+                BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(storeOffset), 0x11223344);
+                if (lateFailure == "writer") expected[0] = 0x5B;
+                Assert.Equal(expected, ReadCanonical()); // real Applied bytes, no EOP label
+                state.AssertFinitePipelineCompleted(firstShader);
+                image = ((IDictionary)Field("_guestImages").GetValue(null)!)[address]!;
+                owners.Image = image;
+                var failedDebt = FiniteDebt(image);
+                Assert.True((bool)StorageMember(failedDebt, "Failed")!);
+                Assert.True((bool)StorageMember(failedDebt, "Pending")!);
+                if (lateFailure == "generation")
+                    Assert.Equal(StorageMember(image, "ContentVersion"), StorageMember(failedDebt, "CanonicalVersion"));
+                output.WriteLine($"finite-storage-native status=4; Applied full-byte image; late={lateFailure}; sticky-debt=true; EOP-unacknowledged; actual-participating-effect-only");
+                return;
+            }
             state.DrainWithControlledBudget();
             Assert.True(MetalVideoPresenter.WaitForGuestWork(firstEop, 0));
             BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(storeOffset), 0x11223344);
+            if (mixedBuffer) BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(imageBytes + 16384), 0xCAFEBABE);
             BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(imageBytes), 0x13579BDF);
             Assert.Equal(expected, ReadCanonical()); // every texel, padding and label byte
             state.AssertFinitePipelineCompleted(firstShader);
@@ -171,8 +214,9 @@ public sealed partial class MetalImmutableGpuVersionTests
             var next = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [binding], out _));
             Assert.Empty(next.RgbaPixels); // actual known native input, no new CPU seed authority
             Assert.Same(ownOrigin, StorageMember(image, "StorageCpuOrigin"));
-            var secondShader = state.FiniteStorageShader(0xAABBCCDD, rgba);
-            var secondSequence = state.AdmitFiniteStorage(next, secondShader);
+            var secondShader = state.FiniteStorageShader(0xAABBCCDD, rgba, mixedBuffer);
+            var secondBuffer = mixedBuffer ? CaptureBuffer() : null;
+            var secondSequence = state.AdmitFiniteStorage(next, secondShader, secondBuffer);
             Assert.True(secondSequence > firstEop);
             host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write32, 2, address + (ulong)imageBytes, 0x2468ACE0));
             var secondEop = (long)Field("_enqueuedGuestWorkSequence").GetValue(null)!;
@@ -208,6 +252,19 @@ public sealed partial class MetalImmutableGpuVersionTests
                 output.WriteLine("finite-storage-native second status=4; all-owned canonical bytes including disjoint EOP verified");
             }
             output.WriteLine($"Actual Mac/PVM/Tracked original-copy→SubmitCompute→Drain→typedGPU staging→status4→checked canonical scatter→EOP; two-publication overlap={overlappingCpuWrite}; exact typed array; all-owned canonical bytes compared. Ordinary participating route only; no native/JIT writer or guest ISA qualification.");
+
+            GuestMemoryBuffer CaptureBuffer()
+            {
+                var bufferAddress = address + (ulong)imageBytes + 16384;
+                var bytes = new byte[16384];
+                Assert.Equal(CpuMappedCopyResult.Copied, MetalVideoPresenter.TryReadFiniteStorageBuffer(memory,
+                    bufferAddress, bytes, out var mapping, out var session));
+                Assert.Equal(expected.AsSpan(imageBytes + 16384, 16384).ToArray(), bytes);
+                var buffer = new GuestMemoryBuffer(bufferAddress, bytes, bytes.Length, (ulong)bytes.Length, false, true);
+                MetalVideoPresenter.RegisterFiniteStorageBufferOrigin(buffer, memory, mapping!, session);
+                output.WriteLine($"finite-storage-native original writable-global footprint={mapping!.FootprintByteCount}; segments={mapping.Segments.Count}; disjoint-physical=true");
+                return buffer;
+            }
 
             byte[] ReadCanonical()
             {
@@ -261,6 +318,8 @@ public sealed partial class MetalImmutableGpuVersionTests
                 // Do not free its mappings after uncertain native teardown.
                 if (cleanup is null && physical is not null) Attempt(physical.Dispose);
             }
+            Attempt(() => Field("_finiteStorageAfterAppliedForControl").SetValue(null, oldAfterApplied));
+            Attempt(() => Field("_finiteStorageAfterCanonicalVersionForControl").SetValue(null, oldAfterVersion));
             Attempt(() => Field("_finiteStorageWritebackEnabled").SetValue(null, oldFinite));
             Attempt(() => Field("_guestMemory").SetValue(null, oldMemory));
             Attempt(() => backendField.SetValue(null, oldBackend));
@@ -303,12 +362,17 @@ public sealed partial class MetalImmutableGpuVersionTests
     {
         public void AbortFiniteStorageEncoding() => AbortBorrowedConsumerBatch();
 
-        public MetalCompiledGuestShader FiniteStorageShader(uint value, bool rgba = false)
+        public MetalCompiledGuestShader FiniteStorageShader(uint value, bool rgba = false, bool mixedBuffer = false)
         {
             var resource = new ImageResource { ResourceClass = ImageResourceClass.Storage,
                 NumericClass = rgba ? ImageNumericClass.Float : ImageNumericClass.Uint, Dimension = ImageDimension.Dim2DArray, Written = true };
             var kind = ImageDescriptorBinding.ForImage(resource)!.Value;
-            var layout = Gen5MslArgumentLayout.Build(new BindingLayout { Descriptors = [new(kind, [0])] });
+            var layout = Gen5MslArgumentLayout.Build(new BindingLayout { Descriptors = mixedBuffer
+                ? [new(DescriptorBindingKind.Buffers, [0]), new(kind, [0])] : [new(kind, [0])] });
+            var pointer = mixedBuffer ? layout.Fields.Single(field => field.FieldKind == MslArgumentFieldKind.BufferPointers) : null;
+            var count = mixedBuffer ? layout.Fields.Single(field => field.FieldKind == MslArgumentFieldKind.BufferByteCounts) : null;
+            var bufferFields = mixedBuffer ? $"array<device uint*, 1> buffers [[id({pointer!.FirstId})]]; array<uint, 1> buffer_bytes [[id({count!.FirstId})]];" : "";
+            var bufferStore = mixedBuffer ? "if (resources.buffer_bytes[0] >= 4u) resources.buffers[0][0] = 0xCAFEBABEu;" : "";
             var texture = Assert.Single(layout.Fields.Where(field => field.FieldKind == MslArgumentFieldKind.Textures));
             var componentType = rgba ? "float" : "uint";
             var valueExpression = rgba
@@ -319,19 +383,21 @@ public sealed partial class MetalImmutableGpuVersionTests
                 #include <metal_stdlib>
                 using namespace metal;
                 struct Gen5StageResources {
+                    {{bufferFields}}
                     array<texture2d_array<{{componentType}}, access::read_write>, 1> {{texture.Name}} [[id({{texture.FirstId}})]];
                 };
                 kernel void finite_storage_write(constant Gen5StageResources& resources [[buffer(0)]]) {
                     resources.{{texture.Name}}[0].write({{valueExpression}}, {{coordinates}}, 0u);
+                    {{bufferStore}}
                 }
                 """;
             var shader = new MetalCompiledGuestShader(new Gen5MslShader(source, "finite_storage_write", Gen5MslStage.Compute, 0, ArgumentLayout: layout));
             consumerShaders.Add(shader); // existing exact shader/cache cleanup owner
             return shader;
         }
-        public long AdmitFiniteStorage(GuestDrawTexture texture, MetalCompiledGuestShader shader) =>
-            MetalVideoPresenter.SubmitComputeDispatch(0, shader, [texture], [], 1, 1, 1, 0, 0, 0, false,
-                new GuestStageBindings(GuestStageKind.Compute, [], [0], [], [], null, [], [], false, false, 0));
+        public long AdmitFiniteStorage(GuestDrawTexture texture, MetalCompiledGuestShader shader, GuestMemoryBuffer? buffer = null) =>
+            MetalVideoPresenter.SubmitComputeDispatch(0, shader, [texture], buffer is null ? [] : [buffer], 1, 1, 1, 0, 0, 0, false,
+                new GuestStageBindings(GuestStageKind.Compute, buffer is null ? [] : [0], [0], [], [], null, [], [], false, false, 0));
         public void AssertFinitePipelineCompleted(MetalCompiledGuestShader shader)
         {
             Assert.NotEqual((nint)0, shader.CachedLibrary);
