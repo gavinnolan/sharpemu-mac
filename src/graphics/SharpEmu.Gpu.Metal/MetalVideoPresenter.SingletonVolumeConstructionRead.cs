@@ -11,6 +11,8 @@ internal static partial class MetalVideoPresenter
 {
     private const int SingletonVolumeConstructionBusyMilliseconds = 500;
     private static Action? _singletonVolumeConstructionReadReleasedForControl = null;
+    private static Action? _singletonVolumeConstructionBeforeFinalContentForControl = null;
+    private static Action? _singletonVolumeConstructionBeforeFinalOwnerForControl = null;
 
     // Only private ORIGINAL CPU preparation can acquire this exclusion. It
     // cannot refresh a live owner or retry an already encoded dispatch.
@@ -118,12 +120,7 @@ internal static partial class MetalVideoPresenter
                 if (Monitor.IsEntered(_gate)) throw new InvalidOperationException("Volume construction cannot wait under presenter gates.");
                 // Original token/mapping and exact transferred native owner
                 // are mandatory on EVERY tick; Busy alone never supplies content.
-                if (_closed || _guestWorkFailure is not null || _singletonVolumeOriginalCleanupFailure is not null ||
-                    !ReferenceEquals(_guestMemory, origin.Memory) || origin.Session != CurrentStorageCpuSeedSession ||
-                    !origin.Source.IsMappedCopyObservationCurrent(origin.Mapping) ||
-                    !GuestImageWriteTracker.IsReadSnapshotStable(watch.Read) || !origin.Observation.Observed ||
-                    !GuestImageWriteTracker.TryGetProtectedObservedContentToken(origin.Layout.Address, origin.Layout.PhysicalBytes, out var token) ||
-                    token != origin.Observation.Token)
+                if (!OriginalTransferredObservationCurrent())
                     throw new InvalidOperationException("Volume construction ORIGINAL observation changed after reservation release.");
                 lock (_gate)
                     if (!_guestImages.TryGetValue(origin.Layout.Address, out var current) || !ReferenceEquals(current, native) ||
@@ -135,12 +132,42 @@ internal static partial class MetalVideoPresenter
                 var status = watch.Source.GetMappedCopyWriteWatchStatus(watch.Mapping);
                 if (status == CpuMappedReadWatchStatus.Current)
                 {
-                    ValidateSingletonVolumeOriginalContent(origin);
-                    lock (_gate)
-                        if (!_guestImages.TryGetValue(origin.Layout.Address, out var final) || !ReferenceEquals(final, native) ||
-                            !IsSingletonVolumeNativeOwnerCurrentLocked(native!, origin))
-                            throw new InvalidOperationException("Volume construction ORIGINAL owner changed at its final encoding boundary.");
-                    return; // successful ordinary guard, no disposed-ticket borrowing
+                    _singletonVolumeConstructionBeforeFinalContentForControl?.Invoke();
+                    try { ValidateSingletonVolumeOriginalContent(origin); }
+                    catch (InvalidOperationException failure)
+                    {
+                        // The writer may begin AFTER the status read. It may
+                        // delay only this retained constructor, never hide any
+                        // changed original token/mapping/session/health.
+                        var originalBusy = false;
+                        try
+                        {
+                            originalBusy = OriginalTransferredObservationCurrent() &&
+                                watch.Source.GetMappedCopyWriteWatchStatus(watch.Mapping) == CpuMappedReadWatchStatus.Busy;
+                        }
+                        catch { ExceptionDispatchInfo.Capture(failure).Throw(); }
+                        if (!originalBusy) throw;
+                        status = CpuMappedReadWatchStatus.Busy;
+                    }
+                    if (status == CpuMappedReadWatchStatus.Current)
+                    {
+                        _singletonVolumeConstructionBeforeFinalOwnerForControl?.Invoke();
+                        var accepted = false;
+                        lock (_gate)
+                        {
+                            if (OriginalTransferredOwnerIdentityLocked() && IsSingletonVolumeNativeOwnerCurrentLocked(native!, origin))
+                                accepted = true;
+                            else if (!OriginalTransferredOwnerIdentityLocked() ||
+                                watch.Source.GetMappedCopyWriteWatchStatus(watch.Mapping) != CpuMappedReadWatchStatus.Busy)
+                                throw new InvalidOperationException("Volume construction ORIGINAL owner changed at its final encoding boundary.");
+                        }
+                        if (accepted) return; // ordinary guard succeeds; no disposed-ticket borrowing
+                        // Token/mapping checks remain outside the gate. Busy
+                        // never turns a failed strict owner check into success.
+                        if (!OriginalTransferredObservationCurrent())
+                            throw new InvalidOperationException("Volume construction ORIGINAL observation changed at its final encoding boundary.");
+                        status = CpuMappedReadWatchStatus.Busy;
+                    }
                 }
                 if (status != CpuMappedReadWatchStatus.Busy)
                     throw new InvalidOperationException("Volume construction ORIGINAL watch became stale before encoding.");
@@ -148,6 +175,31 @@ internal static partial class MetalVideoPresenter
                     throw new TimeoutException("Volume construction ORIGINAL participating writer remained busy before shader encoding.");
                 Thread.Sleep(1);
             }
+        }
+
+        private bool OriginalTransferredObservationCurrent()
+        {
+            var watch = origin.VolumeWatch!;
+            return !_closed && _guestWorkFailure is null && _singletonVolumeOriginalCleanupFailure is null &&
+                ReferenceEquals(_guestMemory, origin.Memory) && origin.Session == CurrentStorageCpuSeedSession &&
+                origin.Source.IsMappedCopyObservationCurrent(origin.Mapping) &&
+                GuestImageWriteTracker.IsReadSnapshotStable(watch.Read) && origin.Observation.Observed &&
+                GuestImageWriteTracker.TryGetProtectedObservedContentToken(origin.Layout.Address, origin.Layout.PhysicalBytes, out var token) &&
+                token == origin.Observation.Token;
+        }
+
+        private bool OriginalTransferredOwnerIdentityLocked()
+        {
+            var watch = origin.VolumeWatch!;
+            return !_closed && _guestWorkFailure is null && _singletonVolumeOriginalCleanupFailure is null &&
+                ReferenceEquals(_guestMemory, origin.Memory) && origin.Session == CurrentStorageCpuSeedSession &&
+                _guestImages.TryGetValue(origin.Layout.Address, out var current) && ReferenceEquals(current, native) &&
+                native is not null && native.Texture != 0 && native.Initialized &&
+                ReferenceEquals(native.StorageCpuOrigin, origin) && ReferenceEquals(native.StorageCpuLayout, origin.Layout) &&
+                ReferenceEquals(watch.Image, native) && watch.Texture == native.Texture && watch.Version == native.ContentVersion &&
+                Volatile.Read(ref watch.State) == 1 && !Volatile.Read(ref watch.UnknownProducer) &&
+                native.TextureType == MtlTextureType3D && native.Depth == origin.Layout.Depth && native.ArrayLength == 1 &&
+                native.Width == origin.Layout.Width && native.Height == origin.Layout.Height && native.Format == origin.Layout.NativeFormat.Format;
         }
     }
 }

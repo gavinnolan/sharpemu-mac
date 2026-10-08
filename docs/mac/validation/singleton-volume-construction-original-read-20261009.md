@@ -41,10 +41,18 @@ Prepared genuine managed rows:
   1 other-watch identity, 6 busy/stale/ABA/unknown/foreign refusals). Actual
   ledger/exclusion over pinned managed bytes and synthetic mapping metadata;
   no kernel/native entitlement claim.
-* Libs `MetalStorageCpuSyncTests.ConstructionRead`: 9 (5 device0 constructor
-  refusals, 4 exact transfer/release/owner/session controls). Opaque synthetic
+* Libs `MetalStorageCpuSyncTests.ConstructionRead`: 14 (5 device0 constructor
+  refusals, 4 exact transfer/release/owner/session controls, 5 final-status/content/
+  owner-window Busy versus changed-token/replacement/session controls). Opaque synthetic
   ticket and protected owner metadata; fake123 texture is never dereferenced or
   released by MetalNative. No actual provider/native completion claim.
+
+The final two race windows continue the SAME retained constructor when a new
+ordinary Busy is observed after the first Current result or after token validation
+before the final owner gate. They do not rerun allocation/upload/transfer. The
+original independent token/mapping/session/health and complete native-owner
+identity are checked again; a changed original still fails. A secondary provider
+failure while classifying a caught content refusal preserves that first refusal.
 
 Native qualification prerequisite (separate source fixture/approval): use the
 existing public original singleton+linear-volume Submit/Drain fixture with a

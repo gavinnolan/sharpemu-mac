@@ -65,6 +65,8 @@ public sealed partial class MetalStorageCpuSyncTests
 
     [Theory]
     [InlineData("healthy")] [InlineData("replacement")] [InlineData("session")] [InlineData("release-error")]
+    [InlineData("content-busy")] [InlineData("owner-busy")]
+    [InlineData("content-busy-token")] [InlineData("owner-busy-replacement")] [InlineData("owner-busy-session")]
     public void SingletonVolumeConstructionTransferUsesSameTicketAndRevalidatesOnlyExactOwnerAfterRelease(string cause)
     {
         ActualArchitecture(); using var state = new VolumeState(); using var protection = new VolumeProtectedScalar();
@@ -77,6 +79,10 @@ public sealed partial class MetalStorageCpuSyncTests
         var scope = InvokeVolume("PrepareSingletonVolumeConstructionRead", snapshot)!;
         var reservation = scope.GetType().GetProperty("Reservation", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(scope);
         var image = VolumeImage(origin, memory); Images.Remove(Address);
+        var contentHook = Field("_singletonVolumeConstructionBeforeFinalContentForControl");
+        var ownerHook = Field("_singletonVolumeConstructionBeforeFinalOwnerForControl");
+        var oldContentHook = contentHook.GetValue(null); var oldOwnerHook = ownerHook.GetValue(null);
+        var paused = false; var busyObserved = 0;
         try
         {
             lock (Field("_gate").GetValue(null)!)
@@ -91,8 +97,28 @@ public sealed partial class MetalStorageCpuSyncTests
                 if (cause == "session") Field("_selectedStorageMipSession").SetValue(null, MetalVideoPresenter.CurrentStorageCpuSeedSession + 1);
             };
             if (cause == "release-error") control.ReleaseFailure = cleanup;
+            if (cause.Contains("busy"))
+            {
+                var hook = cause.StartsWith("content") ? contentHook : ownerHook;
+                hook.SetValue(null, (Action)(() =>
+                {
+                    if (paused) return; paused = true;
+                    Assert.False(Monitor.IsEntered(Field("_gate").GetValue(null)!));
+                    Assert.Equal(1, control.Releases); // original read receipt was consumed once
+                    memory.WatchCurrent = false;
+                    memory.ReadStatus = () =>
+                    {
+                        if (busyObserved++ == 0) { memory.WatchCurrent = true; return CpuMappedReadWatchStatus.Busy; }
+                        return CpuMappedReadWatchStatus.Current;
+                    };
+                    if (cause == "content-busy-token") protection.Generation(1);
+                    if (cause == "owner-busy-replacement") Images.Remove(Address);
+                    if (cause == "owner-busy-session") Field("_selectedStorageMipSession").SetValue(null, MetalVideoPresenter.CurrentStorageCpuSeedSession + 1);
+                }));
+            }
             var finish = scope.GetType().GetMethod("Finish", BindingFlags.Instance | BindingFlags.NonPublic)!;
-            if (cause == "healthy") finish.Invoke(scope, [null]);
+            var success = cause is "healthy" or "content-busy" or "owner-busy";
+            if (success) finish.Invoke(scope, [null]);
             else
             {
                 var error = Assert.Throws<TargetInvocationException>(() => finish.Invoke(scope, [null])).InnerException;
@@ -101,10 +127,12 @@ public sealed partial class MetalStorageCpuSyncTests
             }
             Assert.Equal(1, control.Releases); finish.Invoke(scope, [null]); Assert.Equal(1, control.Releases);
             Assert.Equal(1, memory.Copies); Assert.Equal(0, memory.Reads);
-            Assert.Equal(cause != "healthy", VolumeWatch(origin).GetType().GetField("UnknownProducer", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(VolumeWatch(origin)));
+            Assert.Equal(!success, VolumeWatch(origin).GetType().GetField("UnknownProducer", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(VolumeWatch(origin)));
+            if (cause is "content-busy" or "owner-busy") { Assert.True(paused); Assert.True(busyObserved > 0); }
         }
         finally
         {
+            contentHook.SetValue(null, oldContentHook); ownerHook.SetValue(null, oldOwnerHook);
             Images.Remove(Address); InvokeVolume("ReleaseSingletonVolumeNativeOriginals");
             MetalVideoPresenter.ReleasePreparedTextureSources([snapshot]);
         }
