@@ -1115,10 +1115,10 @@ public static class AmprExports
             return true;
         }
 
-        if (ctx.TryReadUInt64(commandBuffer + CommandBufferDataOffset, out buffer) &&
-            TryReadUInt32(ctx, commandBuffer + CommandBufferSizeOffset, out var size32) &&
-            TryReadUInt32(ctx, commandBuffer + CommandBufferOffsetOffset, out var offset32) &&
-            TryReadUInt32(ctx, commandBuffer + CommandBufferNumOffset, out var count32))
+        if (TryReadHeader64(commandBuffer + CommandBufferDataOffset, out buffer) &&
+            TryReadHeader32(commandBuffer + CommandBufferSizeOffset, out var size32) &&
+            TryReadHeader32(commandBuffer + CommandBufferOffsetOffset, out var offset32) &&
+            TryReadHeader32(commandBuffer + CommandBufferNumOffset, out var count32))
         {
             size = size32;
             state = _commandBuffers.GetOrAdd(commandBuffer, static _ => new CommandBufferState());
@@ -1145,6 +1145,21 @@ public static class AmprExports
         size = 0;
         state = null;
         return false;
+
+        bool TryReadHeader64(ulong address, out ulong value)
+        {
+            var read = ctx.TryReadUInt64(address, out value);
+            if (!read) AprFailureDiagnostics.Failed("header-read", commandBuffer, address, sizeof(ulong),
+                (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return read;
+        }
+        bool TryReadHeader32(ulong address, out uint value)
+        {
+            var read = TryReadUInt32(ctx, address, out value);
+            if (!read) AprFailureDiagnostics.Failed("header-read", commandBuffer, address, sizeof(uint),
+                (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return read;
+        }
     }
 
     private static bool HasQueuedCommands(CommandBufferState state)

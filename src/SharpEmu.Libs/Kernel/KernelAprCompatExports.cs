@@ -54,6 +54,8 @@ public static class KernelAprCompatExports
             out var errorOffset);
         if (completionResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
         {
+            AprFailureDiagnostics.Failed("submit-command-state", commandBuffer, commandBuffer, 0x18,
+                completionResult, executionResult, errorOffset);
             return completionResult;
         }
         _submittedCommandBuffers[submissionId] =
@@ -61,11 +63,15 @@ public static class KernelAprCompatExports
 
         if (outSubmissionId != 0 && !ctx.TryWriteUInt32(outSubmissionId, submissionId))
         {
+            AprFailureDiagnostics.Failed("submit-id-write", commandBuffer, outSubmissionId, sizeof(uint),
+                (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT, executionResult, errorOffset);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
         if (resultAddress != 0 && !TryWriteAprResult(ctx, resultAddress, executionResult, errorOffset))
         {
+            AprFailureDiagnostics.Failed("submit-result-write", commandBuffer, resultAddress, sizeof(ulong),
+                (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT, executionResult, errorOffset);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
