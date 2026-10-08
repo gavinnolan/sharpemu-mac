@@ -37,13 +37,13 @@ public sealed class MslDepthCompareFieldTests(ITestOutputHelper output)
     {
         var control = new Gen5ImageControl(0xF, 0, Enumerable.Range(0, 12).Select(static value => (uint)value).ToArray(),
             16, 8, 16, Gen5ImageFixtures.Dim2D, false, false, false, false, false);
-        var program = new Gen5ShaderProgram(0x10000C000, new[]
+        var program = new Gen5ShaderProgram(0x10000C000UL, new[]
         {
             new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Mimg, "ImageSampleLz", [], [], [], control),
             new Gen5ShaderInstruction(8, Gen5ShaderEncoding.Mimg, "ImageSampleCLz", [], [], [], control with { ScalarResource = 24 }),
             new Gen5ShaderInstruction(16, Gen5ShaderEncoding.Sopp, "SEndpgm", [0xBF810000], [], [], null),
         });
-        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Pixel, 0x534844524546, 0, 40);
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Pixel, 0x534844524546UL, 0, 40);
         var userData = new uint[40];
         foreach (var scalar in new[] { 8, 24 })
         {
