@@ -6,6 +6,48 @@ visual polish are deferred. Renderer changes remain in scope when they remove
 a crash or prevent progression. Intro playback, an automatic demo and process
 survival do not satisfy this milestone.
 
+## Latest combined qualification and first failures
+
+Candidate `43a89254` passed 634 managed cases per actual ARM64 and Rosetta/x64
+CLR, plus five fresh real Metal cases per CLR. Both depth cases checked all
+6,291,456 float texels after an actual unrelated PVM mapping changed the global
+epoch while the original face mappings and content tokens remained unchanged.
+Three builds, 104 compiled closure files and the signed 239-file native-only
+bundle were retained. All 28 owned process groups and the shared lock were gone
+at archive closure. This is qualification of the candidate, not gameplay.
+
+- **Superliminal:** the 150-second replay reached title/loading and stalled.
+  Its first rejection is now initial `Project` admission: global mapping epoch
+  418685 → 418688 despite a copied, current original provider mapping and equal
+  presenter session. The current content token was not queried after that
+  short circuit. The scoped `RequireOriginalCurrent` fix passed the native
+  controls; initial capture still needs its own scoped mapping validation.
+- **Octopath:** the original watch enrollment revision fix advanced the replay
+  to two applied canonical GPU publications. The game exited 134 after 32
+  seconds. Its first guest error is APR `74006e` followed by an abort. This code
+  can represent a command header or result/output memory failure; the existing
+  trace does not establish a host file read failure. A later volume-watch
+  rejection sees admission 1 with intact ownership and coverage. That later GPU
+  rejection must not be assigned as the cause of the earlier guest APR abort.
+- **Oregon Trail, diagnostic candidate `73e0ee8d`:** the replay fails before the
+  sampled-alias check, during original singleton-volume content validation.
+  The first retained read watch sees writer admission 2; the sampled-image
+  shape diagnostic is therefore not exercised.
+- **Demon's Souls, `73e0ee8d`:** all three selected-mip copy attempts fail watch
+  enrollment. Original session, token and global mapping epoch remain equal.
+  The inner enrollment reason still needs attribution; increasing limits or
+  bypassing the original watch is not justified by this result.
+
+No additional title has reached verified controllable gameplay. Void Terrarium
+has reached its main menu, as recorded below. These production candidates remain
+isolated from main while the next fixes are qualified.
+
+Immutable evidence:
+`artifacts/validation/all-games-20261009/entry-watch-fixes-43a89254-prepared`
+(manifest `c43d2bc0d35170faaae0852170e6cfebb104e567f0db1c8198c422855914030e`),
+and `artifacts/validation/all-games-20261009/entry-first-refusals-73e0ee8d-prepared`
+(manifest `8dbaed3423f42fbf2f005dd8f1171d4a5a6b2f03c2d8aa239f22d5aaa9378185`).
+
 ## Quake: texture-budget crash cleared, gameplay not accepted
 
 Isolated source `decd4910d3f2ac482d60de8ab9e41ca3d5fe7929`, based on main
