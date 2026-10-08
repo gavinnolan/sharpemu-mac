@@ -14,7 +14,7 @@ public enum RangeKind
 
 public readonly record struct OwnedRange(ulong Address, ulong Size, RangeKind Kind);
 
-public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMappedPublicationSource
+public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMappedReadWatchSource, ICpuMappedPublicationSource
 {
     internal static Action<string> OnFatal = message => Environment.FailFast(message);
 
@@ -70,6 +70,20 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMap
         if (!Volatile.Read(ref _disposed)) return result;
         publication?.Dispose(); publication = null; return CpuMappedPublicationPreparationResult.Rejected;
     }
+
+    public CpuMappedCopyResult TryReadMappedCopyWithWriteWatch(ulong footprintAddress, ulong footprintByteCount,
+        ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)
+    {
+        observation = null;
+        if (Volatile.Read(ref _disposed)) return CpuMappedCopyResult.Rejected;
+        var result = _views.TryReadMappedCopyWithWriteWatch(footprintAddress, footprintByteCount, sourceAddress, destination, out observation);
+        if (!Volatile.Read(ref _disposed)) return result;
+        if (observation is not null) _views.ReleaseMappedCopyWriteWatch(observation);
+        observation = null; return CpuMappedCopyResult.Rejected;
+    }
+    public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation observation) =>
+        !Volatile.Read(ref _disposed) && _views.IsMappedCopyWriteWatchCurrent(observation);
+    public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation observation) => _views.ReleaseMappedCopyWriteWatch(observation);
 
     public CpuMappedCopyResult TryReadMappedCopy(ulong footprintAddress, ulong footprintByteCount,
         ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)

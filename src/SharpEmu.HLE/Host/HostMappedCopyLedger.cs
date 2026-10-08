@@ -25,6 +25,9 @@ public sealed unsafe partial class HostMappedCopyLedger
         internal readonly View[] States;
         internal readonly long[] Incarnations;
         internal long WriterRevision = -1;
+        internal ReadWatchOwnership? WatchOwnership;
+        internal HostManagedWriteIntervals.ReadWatch? ReadWatch => WatchOwnership?.Watch;
+        internal void ReleaseWatch() => WatchOwnership?.Release();
         internal Capture(HostMappedCopyLedger owner, View[] states, long[]? originalIncarnations = null)
         {
             Owner = owner; States = states;
@@ -34,6 +37,8 @@ public sealed unsafe partial class HostMappedCopyLedger
         }
     }
     private long nextIncarnation;
+    private int readWatchCount;
+    private const int MaximumReadWatches = 128;
     private bool unknownAlias;
     private int aliasEffectsInFlight;
     // Ordinary test-only pause, default null. Never called under provider Gate,
@@ -174,7 +179,14 @@ public sealed unsafe partial class HostMappedCopyLedger
     public CpuMappedCopyResult TryReadMappedCopy(HostBackingObject backing, ulong footprintAddress,
         ulong footprintByteCount, ulong sourceAddress, Span<byte> destination,
         out CpuMappedCopyObservation? observation)
+        => TryReadMappedCopyCore(backing, footprintAddress, footprintByteCount, sourceAddress, destination, false, out observation);
+
+    private CpuMappedCopyResult TryReadMappedCopyCore(HostBackingObject backing, ulong footprintAddress,
+        ulong footprintByteCount, ulong sourceAddress, Span<byte> destination, bool withWriteWatch,
+        out CpuMappedCopyObservation? observation)
     {
+        Capture? ownedCapture = null;
+        var keepWatch = false;
         observation = null;
         if (!HostViewMemory.IsValidRange(footprintAddress, footprintByteCount) || destination.Length == 0 ||
             destination.Length > MaximumCopyBytes || !HostViewMemory.IsValidRange(sourceAddress, (ulong)destination.Length) ||
@@ -217,6 +229,26 @@ public sealed unsafe partial class HostMappedCopyLedger
                 captured = new(new Capture(this, selected), footprintAddress, footprintByteCount, sourceAddress,
                     (ulong)destination.Length, segments.ToArray());
             }
+            ownedCapture = (Capture)captured.OwnerIdentity;
+            if (withWriteWatch)
+            {
+                // Reserve a bounded ledger owner before exposing a receipt.
+                var watchOwnership = new ReadWatchOwnership(this); // Only watched copies are finalizable.
+                ownedCapture.WatchOwnership = watchOwnership;
+                if (Interlocked.Increment(ref readWatchCount) > MaximumReadWatches)
+                { Interlocked.Decrement(ref readWatchCount); return CpuMappedCopyResult.Rejected; }
+                watchOwnership.Charged = 1;
+                var physical = new List<HostManagedWriteIntervals.PhysicalRun>();
+                var lastSource = sourceAddress + (ulong)destination.Length;
+                foreach (var view in selected)
+                {
+                    var first = Math.Max(sourceAddress, view.Address);
+                    var last = Math.Min(lastSource, view.Address + view.Size);
+                    if (first < last) physical.Add(new(view.Offset + first - view.Address, last - first));
+                }
+                watchOwnership.Watch = writers.TryCreateReadWatch(physical.ToArray());
+                if (ownedCapture.ReadWatch is null) return CpuMappedCopyResult.Rejected;
+            }
             // No virtual pointer, permission repair, provider query, callback or
             // mapping gate is used here. The exact backing pin owns the alias.
             afterCaptureForControl?.Invoke();
@@ -235,10 +267,12 @@ public sealed unsafe partial class HostMappedCopyLedger
             // Such an observation has no publication history, permanently.
             if (hasWriterRevision && writers.TryCaptureRevision(out var afterRevision) && afterRevision == writerRevision)
                 Volatile.Write(ref ((Capture)captured.OwnerIdentity).WriterRevision, writerRevision);
+            if (withWriteWatch && !ownedCapture.ReadWatch!.IsCurrent) return CpuMappedCopyResult.Rejected;
             observation = captured;
+            keepWatch = true;
             return CpuMappedCopyResult.Copied;
         }
-        finally { backing.ExitAccess(); }
+        finally { if (!keepWatch) ownedCapture?.ReleaseWatch(); backing.ExitAccess(); }
     }
 
     // Bounded scalar validation, without taking Gate or consulting native state.

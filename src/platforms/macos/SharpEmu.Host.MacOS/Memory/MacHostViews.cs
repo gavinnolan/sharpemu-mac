@@ -12,7 +12,7 @@ namespace SharpEmu.Host.MacOS;
 /// guest address space with MAP_FIXED, tracked in the neutral
 /// <see cref="HostViewRegions"/> table so VirtualQuery-style lookups see them.
 /// </summary>
-internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMappedCopyMemory, IHostMappedPublicationMemory, IHostDerivedProtectionMemory
+internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMappedCopyMemory, IHostMappedReadWatchMemory, IHostMappedPublicationMemory, IHostDerivedProtectionMemory
 {
     internal static bool FailAliasMapForTests;
 
@@ -26,6 +26,19 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
             ? ledger.TryPrepareMappedPublication(backing, original, runs, out publication)
             : CpuMappedPublicationPreparationResult.Unavailable;
     }
+
+    public CpuMappedCopyResult TryReadMappedCopyWithWriteWatch(HostBackingObject backing, ulong footprintAddress,
+        ulong footprintByteCount, ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)
+    {
+        observation = null;
+        return MacMappedCopyState.Ledger is { } ledger
+            ? ledger.TryReadMappedCopyWithWriteWatch(backing, footprintAddress, footprintByteCount, sourceAddress, destination, out observation)
+            : CpuMappedCopyResult.Unavailable;
+    }
+    public bool IsMappedCopyWriteWatchCurrent(HostBackingObject backing, CpuMappedCopyObservation observation) =>
+        MacMappedCopyState.Ledger?.IsMappedCopyWriteWatchCurrent(backing, observation) == true;
+    public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation observation) =>
+        MacMappedCopyState.Ledger?.ReleaseMappedCopyWriteWatch(observation);
 
     public CpuMappedCopyResult TryReadMappedCopy(HostBackingObject backing, ulong footprintAddress,
         ulong footprintByteCount, ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)

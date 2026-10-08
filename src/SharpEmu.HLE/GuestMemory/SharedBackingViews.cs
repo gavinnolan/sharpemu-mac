@@ -11,7 +11,7 @@ public readonly record struct ViewRecord(ulong Address, ulong Size, ulong Offset
     public bool WasRestored { get; init; }
 }
 
-public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySource, ICpuMappedPublicationSource
+public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySource, ICpuMappedReadWatchSource, ICpuMappedPublicationSource
 {
     internal static Action<string> OnFatal = message => Environment.FailFast(message);
 
@@ -80,6 +80,29 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
         }
         finally { ExitAliasAccess(); }
     }
+
+    public CpuMappedCopyResult TryReadMappedCopyWithWriteWatch(ulong footprintAddress, ulong footprintByteCount,
+        ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)
+    {
+        observation = null;
+        if (_host is not IHostMappedReadWatchMemory provider || _backing is null)
+            return CpuMappedCopyResult.Unavailable;
+        if (!TryEnterAliasAccess()) return CpuMappedCopyResult.Rejected;
+        try
+        {
+            var result = provider.TryReadMappedCopyWithWriteWatch(_backing, footprintAddress, footprintByteCount,
+                sourceAddress, destination, out observation);
+            if (IsAvailable) return result;
+            if (observation is not null) provider.ReleaseMappedCopyWriteWatch(observation);
+            observation = null; return CpuMappedCopyResult.Rejected;
+        }
+        finally { ExitAliasAccess(); }
+    }
+    public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation observation) =>
+        IsAvailable && _backing is not null && _host is IHostMappedReadWatchMemory provider &&
+        provider.IsMappedCopyWriteWatchCurrent(_backing, observation);
+    public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation observation)
+    { if (_host is IHostMappedReadWatchMemory provider) provider.ReleaseMappedCopyWriteWatch(observation); }
 
     public CpuMappedCopyResult TryReadMappedCopy(ulong footprintAddress, ulong footprintByteCount,
         ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)

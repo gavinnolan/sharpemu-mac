@@ -13,7 +13,7 @@ using SharpEmu.Logging;
 
 namespace SharpEmu.Core.Memory;
 
-public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryAllocator, IGuestAddressSpace, IGuestBackedSpace, IDisposable, ICpuMappedCopySource, ICpuMappedPublicationSource, IGuestDerivedProtectionAddressSpace
+public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryAllocator, IGuestAddressSpace, IGuestBackedSpace, IDisposable, ICpuMappedCopySource, ICpuMappedReadWatchSource, ICpuMappedPublicationSource, IGuestDerivedProtectionAddressSpace
 {
     private static readonly SharpEmuLogger Log = SharpEmuLog.For("VMEM");
 
@@ -1159,6 +1159,23 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         if (!Volatile.Read(ref _disposed) && ReferenceEquals(_backedSpace, space)) return result;
         publication?.Dispose(); publication = null; return CpuMappedPublicationPreparationResult.Rejected;
     }
+
+    public CpuMappedCopyResult TryReadMappedCopyWithWriteWatch(ulong footprintAddress, ulong footprintByteCount,
+        ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)
+    {
+        observation = null;
+        var space = _backedSpace;
+        if (Volatile.Read(ref _disposed) || space is not ICpuMappedReadWatchSource source)
+            return CpuMappedCopyResult.Unavailable;
+        var result = source.TryReadMappedCopyWithWriteWatch(footprintAddress, footprintByteCount, sourceAddress, destination, out observation);
+        if (!Volatile.Read(ref _disposed) && ReferenceEquals(_backedSpace, space)) return result;
+        if (observation is not null) source.ReleaseMappedCopyWriteWatch(observation);
+        observation = null; return CpuMappedCopyResult.Rejected;
+    }
+    public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation observation) =>
+        !Volatile.Read(ref _disposed) && _backedSpace is ICpuMappedReadWatchSource source && source.IsMappedCopyWriteWatchCurrent(observation);
+    public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation observation)
+    { if (_backedSpace is ICpuMappedReadWatchSource source) source.ReleaseMappedCopyWriteWatch(observation); }
 
     public CpuMappedCopyResult TryReadMappedCopy(ulong footprintAddress, ulong footprintByteCount,
         ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)

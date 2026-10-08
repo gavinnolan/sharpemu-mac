@@ -46,6 +46,7 @@ internal sealed partial class HostManagedWriteIntervals
             slot.Offset = offset; slot.Count = count; slot.Operation = operation;
             if (!operation)
             {
+                InvalidateReadWatches(offset, count); // BEFORE any participating destination bytes.
                 Interlocked.Increment(ref active);
                 if (Interlocked.Increment(ref begun) <= 0) Interlocked.Exchange(ref coverageIncomplete, 1);
             }
@@ -71,6 +72,7 @@ internal sealed partial class HostManagedWriteIntervals
             return false;
         // Copy the owned slot's fields before consuming it: a later operation
         // may immediately reuse the slot. Admission stays held through history.
+        if (!succeeded) InvalidateReadWatches(offset, count, unknown: true);
         RecordCompletedHistory(token.Identity, offset, count, operation, succeeded);
         if (!operation)
         {
@@ -105,6 +107,7 @@ internal sealed partial class HostManagedWriteIntervals
     }
     internal long RecordPublicationWrite(ReadOnlySpan<PhysicalRun> runs)
     {
+        foreach (var run in runs) InvalidateReadWatches(run.Offset, run.Count);
         var revision = Interlocked.Increment(ref nextIdentity);
         if (revision <= 0 || revision == long.MaxValue) Interlocked.Exchange(ref coverageIncomplete, 1);
         else RecordHistory(revision, runs, false);
