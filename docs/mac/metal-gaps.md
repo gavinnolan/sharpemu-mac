@@ -188,4 +188,7 @@ one-level256x128. Exact domain+resource+mip native storage reuse is separate fro
 address-only images. Unsupported overlapping/base/sampled aliases fail explicitly;
 no whole-allocation coherence or graph activation is claimed. See
 [scope, placement and fixture limits](validation/selected-storage-mip-20261008.md).
-Native required-device qualification and actual DS progression remain pending.
+Clean cdc source passed4/4 required-device cases on ARM64 and4/4 under Rosetta,
+including translated selected-level stores/loads, all-texel/neighbor oracles and
+native publication rollback. Actual DS descriptor acceptance/progression and
+downstream sampled aliases remain pending; this does not qualify gameplay/FPS.

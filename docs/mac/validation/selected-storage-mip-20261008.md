@@ -84,10 +84,10 @@ controls reject malformed raw metadata, unknown geometry/dynamic mip, incomplete
 selected source, cross-queue admission, tracker lifetime ABA, old presenter session,
 native-queue mismatch, and overlapping alias reads before guest-memory access.
 
-The four required-device cases are compiled but initially unexecuted. Two
+The four required-device cases were initially compiled without execution. Two
 store/load cases explicitly establish managed-writer coverage of serial owned
 test memory; this is a test premise, not native guest store coverage. The
-store/load fixture It uses actual
+store/load fixture uses actual
 production snapshot→`EnsureStorageImage`, then actual translated MIMG store/load
 through a native argument buffer. It compares all32768 selected texels, every
 unchanged guest-chain byte, a repeated native view after the GPU store, and zero
@@ -112,3 +112,31 @@ same publication failure, verify no ghost owner, independently retain/read every
 uploaded byte, release that test retain, and retry successfully. The test retain
 keeps its probe safe: reference-count/deallocation timing is not measured, and
 native command-buffer teardown is not claimed from this construction test.
+
+## Exact-source numerical qualification
+
+Clean source `cdc4311ae1ca9ec15184ad151c59b2a382b0ae60` passed all four
+required-device cases on Apple M4 under ARM64 and then Rosetta/x64, in fresh
+serialized workers holding the shared machine lock. Both selected MIMG cases
+compared all32768 native texels and the entire unchanged guest mip chain; both
+publication-failure cases read every uploaded row under an independent test
+retain before clean retry. All eight executions passed, with zero skipped or
+notExecuted cases. The focused managed16 and existing storage/admission/fatal21
+also passed separately on each CLR, with identical architecture case sets.
+
+Evidence: `artifacts/validation/selected-storage-mip-publication/cdc4311a/manifest.json`
+indexes source, DLL, imported native-call helper, hardware, command, log and TRX
+hashes. Source graph remains hardfalse. The numerical-only grant allowed recorded
+foreign REmu activity; the actual final pre/post inventories found none. This is
+not quiet-host performance evidence, native teardown proof, runtime Drain proof,
+or a Demon's Souls gameplay result. Raw actual-game descriptor acceptance and
+downstream allocation-wide sampled aliases still need an integrated run.
+
+Failed predecessors are retained: source59's generic-dictionary cast assertion
+failed two managed cases; sourceece's fresh ARM native worker lacked explicit
+host-memory-authority startup, so three cases failed before selected upload and
+one ordinary publication case passed. The test-only cdc module initializer now
+registers the real plain Mac memory factory before tracker use. No production
+memory policy or Metal oracle was relaxed to obtain the final result. Two earlier
+foreign-emulator preflights stopped before launching a device worker; their
+comm-only inventories are retained alongside the failed ece run.
