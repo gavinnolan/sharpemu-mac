@@ -162,15 +162,87 @@ public sealed class MetalQueuedTextureSnapshotTests
     }
 
     [Fact]
-    public void SnapshotBudgetFailureReportsRequiredBytesAndTheUnchangedLimit()
+    public void SnapshotBudgetFailureReportsRequiredBytesAboveTheFull8KLimit()
     {
         using var state = new SnapshotState();
-        var descriptor = Descriptor(false) with { Width = 8192, Height = 8192, Pitch = 8192, Format = 4, NumberType = 7 };
+        var descriptor = Descriptor(false) with { Width = 8192, Height = 8192, Pitch = 8192, Format = 11, NumberType = 7 };
         var error = Assert.Throws<NotSupportedException>(() => MetalTextureSnapshots.CreateTextureSnapshots(
             new CpuContext(new CountingMemory(), Generation.Gen5), [Binding(descriptor, [], false)], out _));
-        Assert.Contains("required_bytes=268435456", error.Message);
+        Assert.Contains("required_bytes=536870912", error.Message);
+        Assert.Contains("maximum_snapshot_bytes=268435456", error.Message);
+        Assert.Contains("format=11/7 tile=24", error.Message);
+    }
+
+    [Fact]
+    public void Full8KR32SnapshotReachesTheCompleteOriginalBackingRead()
+    {
+        using var state = new SnapshotState();
+        var memory = new FullReadProbeMemory();
+        var descriptor = Descriptor(false) with { Width = 8192, Height = 8192, Pitch = 8192, Format = 4, NumberType = 7 };
+        var error = Assert.Throws<FullReadProbeException>(() => MetalTextureSnapshots.CreateTextureSnapshots(
+            new CpuContext(memory, Generation.Gen5), [Binding(descriptor, [], false)], out _));
+        Assert.Same(memory.ProbeFailure, error);
+        Assert.Equal(1, memory.Reads);
+        Assert.Equal(Address, memory.Address);
+        Assert.Equal(268435456, memory.ByteCount);
+    }
+
+    [Fact]
+    public void CapturedQuakeDepthDescriptorReachesItsCompleteOriginalRead()
+    {
+        using var state = new SnapshotState();
+        uint[] words = [0x70952000, 0xC1600000, 0x07FFC7FF, 0x91800204, 0, 0x00700000, 0, 0];
+        Assert.True(AgcBackendServices.TryDecodeTextureDescriptor(words, out var descriptor));
+        Assert.Equal((8192u, 8192u, 4u, 7u, 24u),
+            (descriptor.Width, descriptor.Height, descriptor.Format, descriptor.NumberType, descriptor.TileMode));
+        var memory = new FullReadProbeMemory();
+        var error = Assert.Throws<FullReadProbeException>(() => MetalTextureSnapshots.CreateTextureSnapshots(
+            new CpuContext(memory, Generation.Gen5), [Binding(descriptor, [], false)], out _));
+        Assert.Same(memory.ProbeFailure, error);
+        Assert.Equal(1, memory.Reads);
+        Assert.Equal(0x7095200000UL, memory.Address);
+        Assert.Equal(268435456, memory.ByteCount);
+    }
+
+    [Fact]
+    public void Full8KLinearPitchPaddingCannotExceedTheSnapshotBound()
+    {
+        using var state = new SnapshotState();
+        var memory = new FullReadProbeMemory();
+        var descriptor = Descriptor(false) with { Width = 8192, Height = 8192, Pitch = 8193, Format = 4, NumberType = 7, TileMode = 0 };
+        var error = Assert.Throws<NotSupportedException>(() => MetalTextureSnapshots.CreateTextureSnapshots(
+            new CpuContext(memory, Generation.Gen5), [Binding(descriptor, [], false)], out _));
+        Assert.Contains("maximum_snapshot_bytes=268435456", error.Message);
+        Assert.Equal(0, memory.Reads);
+    }
+
+    [Theory]
+    [InlineData(13u, 2u, 0u)]
+    [InlineData(9u, 1u, 1u)]
+    public void LargeArrayOrMipChainKeepsTheOriginalLimit(uint type, uint depth, uint maxMip)
+    {
+        using var state = new SnapshotState();
+        var memory = new FullReadProbeMemory();
+        var descriptor = Descriptor(false) with { Width = 8192, Height = 8192, Pitch = 8192,
+            Format = 4, NumberType = 7, Type = type, Depth = depth, MaxMip = maxMip };
+        var error = Assert.Throws<NotSupportedException>(() => MetalTextureSnapshots.CreateTextureSnapshots(
+            new CpuContext(memory, Generation.Gen5), [Binding(descriptor, [], type == 13)], out _));
         Assert.Contains("maximum_snapshot_bytes=134217728", error.Message);
-        Assert.Contains("format=4/7 tile=24", error.Message);
+        Assert.Equal(0, memory.Reads);
+    }
+
+    private sealed class FullReadProbeException : Exception { }
+    private sealed class FullReadProbeMemory : ICpuMemory
+    {
+        public readonly FullReadProbeException ProbeFailure = new();
+        public int Reads, ByteCount;
+        public ulong Address;
+        public bool TryRead(ulong address, Span<byte> destination)
+        {
+            Reads++; Address = address; ByteCount = destination.Length;
+            throw ProbeFailure;
+        }
+        public bool TryWrite(ulong address, ReadOnlySpan<byte> source) => false;
     }
 
     [Theory]

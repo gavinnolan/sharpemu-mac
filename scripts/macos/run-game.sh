@@ -8,7 +8,7 @@
 #
 #   game     ds | sarah | octo | poppy | quake | sh | superl | oregon | void (under $SHARPEMU_GAMES_DIR),
 #            or a path to an eboot.bin
-#   seconds  run length, capped at 150
+#   seconds  run length, capped at 150 (600 with SHARPEMU_GAME_ENTRY_RUN=1)
 #   keyplan  comma list "t:key[:hold]" pressed through SHARPEMU_INPUT_FILE, e.g. "20:enter,30:down:1",
 #            or "-" for none
 #
@@ -54,7 +54,12 @@ shift 3; [[ $# -gt 0 ]] && shift
 
 [[ -f "$EBOOT" ]] || { echo "eboot not found: $EBOOT" >&2; exit 2; }
 [[ -x "$APP_DIR/SharpEmu" ]] || { echo "no SharpEmu in $APP_DIR (run scripts/macos/build-app.sh)" >&2; exit 2; }
-(( SECONDS_LIMIT <= 150 )) || { echo "refusing ${SECONDS_LIMIT}s (cap 150)" >&2; exit 2; }
+MAX_SECONDS=150
+[[ "${SHARPEMU_GAME_ENTRY_RUN:-0}" == "1" ]] && MAX_SECONDS=600
+[[ "$SECONDS_LIMIT" =~ ^[0-9]+$ ]] && (( 10#$SECONDS_LIMIT >= 1 && 10#$SECONDS_LIMIT <= MAX_SECONDS )) || {
+  echo "refusing ${SECONDS_LIMIT}s (allowed 1..${MAX_SECONDS}; extended runs require SHARPEMU_GAME_ENTRY_RUN=1)" >&2
+  exit 2
+}
 
 OUT="$REPO_ROOT/artifacts/runs/$(date +%Y%m%d-%H%M%S)-$GAME-$TAG"
 mkdir -p "$OUT"
@@ -66,6 +71,8 @@ KEYS="$OUT/keys.state"
   echo "commit=$(git -C "$REPO_ROOT" rev-parse --short HEAD)$(git -C "$REPO_ROOT" diff --quiet || echo -dirty)"
   echo "commit_scope=checkout (use build-info.json for binary source provenance)"
   echo "keyplan=$PLAN"
+  echo "entry_run=${SHARPEMU_GAME_ENTRY_RUN:-0}"
+  echo "seconds_limit=$SECONDS_LIMIT"
   for e in "$@"; do echo "$e"; done
 } > "$OUT/run.env"
 # A preexisting bundle may predate provenance metadata. Never equate the current
