@@ -219,6 +219,8 @@ internal static partial class MetalVideoPresenter
             _selectedStorageMipCloseInProgress = true;
             try
             {
+                foreach (var image in _selectedStorageMipImages.Values)
+                    NoteFiniteStorageOwnerRetirementLocked(image);
                 var watchCleanup = ReleaseSelectedNativeOriginalProofsLocked(); // Consume before release/reentrant close; attempt every watch.
                 // Snapshot the bounded new class before a release callback can
                 // reenter close and clear the dictionary. Consume only exact owners.

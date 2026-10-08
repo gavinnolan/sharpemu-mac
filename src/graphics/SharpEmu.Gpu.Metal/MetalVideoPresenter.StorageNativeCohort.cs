@@ -4,15 +4,59 @@ namespace SharpEmu.Gpu.Metal;
 
 internal static partial class MetalVideoPresenter
 {
+    private const int MaximumFiniteRetiredOrigins = 128;
+    private static StorageCpuSeedOrigin?[]? _finiteStorageRetiredOrigins;
+    private static int _finiteStorageRetiredOriginCount;
+    private static bool _finiteStorageRetiredUnknown;
+
+    // Called BEFORE a native owner leaves/replaces its registry entry. Retain
+    // immutable original physical facts, not a native handle or a fresh probe.
+    // Missing/overflow debt is process-sticky: session reset is not teardown.
+    private static void NoteFiniteStorageOwnerRetirementLocked(GuestImage retired)
+    {
+        if (!_rgbaStorageRuntimePublicationRequested || !retired.GpuWritten) return;
+        if (_finiteStorageDebts.TryGetValue(retired, out var debt) &&
+            !debt.Failed && !debt.Pending && debt.CanonicalVersion == retired.ContentVersion &&
+            debt.CanonicalOrigin is { } canonical &&
+            ReferenceEquals(canonical, retired.StorageCpuOrigin)) return;
+        if (retired.StorageCpuOrigin is not { } original ||
+            original.Mapping.FootprintAddress != original.Layout.Address ||
+            original.Mapping.FootprintByteCount != original.Layout.PhysicalBytes ||
+            original.Mapping.SourceAddress != original.Layout.Address ||
+            original.Mapping.SourceByteCount != original.Layout.PhysicalBytes)
+        { _finiteStorageRetiredUnknown = true; return; }
+        for (var index = 0; index < _finiteStorageRetiredOriginCount; index++)
+            if (ReferenceEquals(_finiteStorageRetiredOrigins![index], original)) return;
+        if (_finiteStorageRetiredOriginCount == MaximumFiniteRetiredOrigins)
+        { _finiteStorageRetiredUnknown = true; return; }
+        try { _finiteStorageRetiredOrigins ??= new StorageCpuSeedOrigin?[MaximumFiniteRetiredOrigins]; }
+        catch { _finiteStorageRetiredUnknown = true; throw; }
+        _finiteStorageRetiredOrigins[_finiteStorageRetiredOriginCount++] = original;
+    }
+
     // Only retained ORIGINAL mapping facts prove physical disjointness. Never
     // probe a new mapping, query tracker content under _gate, or use distinct
     // virtual addresses as evidence that two native resources cannot alias.
     private static bool IsFiniteStorageNativeCohortCurrentLocked(GuestImage image,
         StorageCpuSeedOrigin origin, out string reason)
     {
+        reason = "sticky-native-cleanup-failure";
+        if (_textureSourceCleanupFailure is not null || _typedCpuSyncCleanupFailure is not null ||
+            _r16SelectedRetainCleanupFailure is not null || _selectedNativeOriginalCleanupFailure is not null) return false;
         reason = "unordered-presentation-write-debt";
         if (_unorderedPresentationWriteSequence != 0 ||
             _latestPresentation is { } presentation && PresentationHasUnorderedGuestWrites(presentation)) return false;
+        reason = "retired-native-owner-unknown-or-overflow";
+        if (_finiteStorageRetiredUnknown) return false;
+        for (var index = 0; index < _finiteStorageRetiredOriginCount; index++)
+        {
+            var retired = _finiteStorageRetiredOrigins![index]!;
+            reason = "retired-native-owner-original-provenance-stale";
+            if (!ReferenceEquals(retired.Memory, origin.Memory) || retired.Session != origin.Session ||
+                !retired.Source.IsMappedCopyObservationCurrent(retired.Mapping)) return false;
+            reason = "retired-native-owner-physical-overlap";
+            if (PhysicalMappingOverlaps(origin.Mapping, retired.Mapping)) return false;
+        }
         reason = "unknown-texture-source-or-depth-alias";
         if (_latestTextureSources.Count != 0 || _guestDepthImages.Count != 0 || _guestDepthReadAliases.Count != 0) return false;
         reason = "image-inventory-bound";

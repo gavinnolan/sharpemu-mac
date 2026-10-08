@@ -1407,6 +1407,7 @@ internal static partial class MetalVideoPresenter
 
     private static void RetireGuestImageVariantLocked(ulong address, GuestImage retired)
     {
+        NoteFiniteStorageOwnerRetirementLocked(retired);
         var key = (address, retired.Width, retired.Height, retired.Format);
         if (_guestImageVariants.Remove(key, out var previous))
         {

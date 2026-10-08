@@ -1295,6 +1295,8 @@ internal static partial class MetalVideoPresenter
 
         lock (_gate)
         {
+            if (_guestImages.TryGetValue(address, out var retired) && !ReferenceEquals(retired, image))
+                NoteFiniteStorageOwnerRetirementLocked(retired);
             _guestImages[address] = image;
             _guestImageExtents[address] = (width, height, (ulong)pitch * height * bytesPerPixel);
         }

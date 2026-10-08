@@ -80,6 +80,8 @@ internal static partial class MetalVideoPresenter
             }
             else if (nativeAdded)
             {
+                if (_guestImages.TryGetValue(descriptor.Address, out var retired))
+                    NoteFiniteStorageOwnerRetirementLocked(retired);
                 _guestImages.Remove(descriptor.Address);
                 if (hadExtent) _guestImageExtents[descriptor.Address] = previousExtent;
                 else _guestImageExtents.Remove(descriptor.Address);
