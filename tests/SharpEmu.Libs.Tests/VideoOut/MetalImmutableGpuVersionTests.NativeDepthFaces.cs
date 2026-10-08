@@ -13,6 +13,7 @@ using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.ShaderCompiler.Metal;
 using Xunit;
