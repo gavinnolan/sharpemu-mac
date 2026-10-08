@@ -391,7 +391,8 @@ internal static partial class MetalVideoPresenter
         }
         catch (Exception exception) when (_textureSourceGraphEnabled && _guestWorkFailure is null && exception is not GpuFatalException)
         {
-            lock (_gate) LatchTextureSourceDrainFailureLocked(exception);
+            lock (_gate)
+                if (_guestWorkFailure is null) LatchTextureSourceDrainFailureLocked(exception);
             throw GpuFatal.Fatal("Metal render frame failed.", exception);
         }
         catch (Exception exception) when (_guestWorkFailure is null && exception is not GpuFatalException)
