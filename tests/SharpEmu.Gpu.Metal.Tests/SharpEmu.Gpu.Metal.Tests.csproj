@@ -14,6 +14,9 @@
     <Compile Include="../SharpEmu.ShaderCompiler.Metal.Tests/FakeGuestMemory.cs" Link="Fixtures/FakeGuestMemory.cs" />
     <Compile Include="../SharpEmu.ShaderCompiler.Metal.Tests/MetalNative.cs" Link="Fixtures/MetalNative.cs" />
     <ProjectReference Include="../../src/graphics/SharpEmu.Gpu.Metal/SharpEmu.Gpu.Metal.csproj" />
+    <!-- Fresh device workers need the same plain host-memory startup as the
+         application before tracker Configure/Query; no guest CPU/UI is created. -->
+    <ProjectReference Include="../../src/platforms/macos/SharpEmu.Host.MacOS/SharpEmu.Host.MacOS.csproj" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" />
