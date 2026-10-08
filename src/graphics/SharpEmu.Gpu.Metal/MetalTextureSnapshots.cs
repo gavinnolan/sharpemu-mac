@@ -572,7 +572,7 @@ internal static partial class MetalTextureSnapshots
         {
             var fullBytes = checked(chainSliceBytes * arrayUploadLayers);
             if (fullBytes > MaximumSnapshotBytes)
-                throw SnapshotBudgetExceeded(descriptor, fullBytes, "complete-cube-face-chains");
+                throw SnapshotBudgetExceeded(descriptor, fullBytes, "complete-cube-face-chains", MaximumSnapshotBytes);
             MetalVideoPresenter.RejectDepthCubeCpuSourceGpuOverlap(descriptor.Address, fullBytes);
         }
         var isVideoBuffer =

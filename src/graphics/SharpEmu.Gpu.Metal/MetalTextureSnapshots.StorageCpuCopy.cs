@@ -44,7 +44,7 @@ internal static partial class MetalTextureSnapshots
             var nativeFormat = MetalVideoPresenter.StorageTextureFormat(template);
             physical = MetalVideoPresenter.StorageTextureSeedLayout(template, nativeFormat).RequiredBytes;
             if (physical == 0 || physical > MaximumSnapshotBytes)
-                throw SnapshotBudgetExceeded(d, physical, "linear storage-volume original");
+                throw SnapshotBudgetExceeded(d, physical, "linear storage-volume original", MaximumSnapshotBytes);
             template = template with { SourceByteCount = physical };
         }
         var layout = MetalStorageCpuLayout.TryCreate(template);
