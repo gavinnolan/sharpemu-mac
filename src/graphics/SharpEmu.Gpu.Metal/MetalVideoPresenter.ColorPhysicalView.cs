@@ -120,8 +120,32 @@ internal static partial class MetalVideoPresenter
                     !ColorPhysicalOverlap(d.Address, 0x10000, view.PhysicalAddress, view.ByteCount)) continue;
                 // Do not recreate even the correctly placed selected mip from
                 // stale CPU bytes. An exact immutable native borrow is separate.
-                throw new NotSupportedException("Metal binding overlaps a finite color backing allocation without a qualified disjoint typed view/native source receipt.");
+                throw ColorPhysicalBindingFailure(view, request);
             }
         }
+    }
+
+    // Failure-only original placement and current inventory scalars. No new
+    // provider/content read or native query; none of these fields admits a view.
+    private static NotSupportedException ColorPhysicalBindingFailure(
+        MetalColorMipPlacement.Observation original, ImageDescription request)
+    {
+        const string primary = "Metal binding overlaps a finite color backing allocation without a qualified disjoint typed view/native source receipt.";
+        try
+        {
+            var imagePresent = _guestImages.TryGetValue(original.PhysicalAddress, out var image);
+            return new NotSupportedException($"{primary} " +
+                $"request_addr=0x{request.Data.Address:X} request_bytes={request.Data.Size} " +
+                $"request_extent={request.Extent.Width}x{request.Extent.Height}x{request.Extent.Depth} " +
+                $"request_pitch={request.Pitch} request_levels={request.Resources.Levels} request_layers={request.Resources.Layers} " +
+                $"original_base=0x{original.Registers.BaseAddress:X} original_backing_bytes={original.BackingByteCount} " +
+                $"original_selected=0x{original.PhysicalAddress:X} original_selected_bytes={original.ByteCount} " +
+                $"selected_overlap={ColorPhysicalOverlap(request.Data.Address, request.Data.Size, original.PhysicalAddress, original.ByteCount)} " +
+                $"native_present={imagePresent} native_initialized={image?.Initialized} native_written={image?.GpuWritten} " +
+                $"native_version={image?.ContentVersion} native_width={image?.Width} native_height={image?.Height} " +
+                $"native_type={image?.TextureType} native_format={image?.Format} " +
+                $"native_original_placement_same={ReferenceEquals(image?.ColorPhysicalView, original)} pending_work={_pendingGuestWorkCount}");
+        }
+        catch (Exception) { return new NotSupportedException(primary); }
     }
 }
