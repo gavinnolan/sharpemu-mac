@@ -50,6 +50,43 @@ internal static partial class MetalVideoPresenter
         !_imageProvenanceEnabled ? default : new(ImageDiagnosticContext("display"), address, width, height,
             pitch, 0, formatTag, 0, 0, 0, 0, 0, 0, null, null);
 
+    private static NotSupportedException CpuDirtyImageShapeMismatch(
+        GuestImage image, ulong address, uint width, uint height, ulong byteCount)
+    {
+        // Exception-path observations only: none of these fields authorizes a
+        // CPU upload over GPU-written content or proves mapping/write stability.
+        var message = $"Metal CPU dirty image synchronization requires a 2D guest image;" +
+            $" native_type={image.TextureType} depth={image.Depth}." +
+            $" address=0x{address:X} registered_size={width}x{height} registered_bytes={byteCount}" +
+            $" live_size={image.Width}x{image.Height} array_length={image.ArrayLength}" +
+            $" native_format={image.Format}/{(uint)image.Format}" +
+            $" live_initialized={image.Initialized} live_gpu_written={image.GpuWritten}" +
+            $" live_content_version={image.ContentVersion}";
+        var primary = new NotSupportedException(message);
+        if (!_imageProvenanceEnabled) return primary;
+        try
+        {
+            var origin = image.DiagnosticOrigin;
+            var mutation = image.DiagnosticMutation;
+            long advertisedSequence;
+            lock (_gate) _guestImageWorkSequences.TryGetValue(address, out advertisedSequence);
+            return new NotSupportedException(message +
+                $" diagnostic_creation_kind={origin.Work.Kind ?? "unrecorded"} creation_sequence={origin.Work.Sequence}" +
+                $" creation_queue='{origin.Work.Queue.Name}' creation_submission={origin.Work.Queue.SubmissionId}" +
+                $" creation_address=0x{origin.Address:X} creation_size={origin.Width}x{origin.Height}" +
+                $" creation_pitch={origin.Pitch} creation_tile={origin.Tile} creation_guest_format={origin.Format}/{origin.Number}" +
+                $" creation_guest_type={origin.Type} creation_base_mip={origin.BaseMip} creation_selected_mip={origin.SelectedMip}" +
+                $" creation_resource_mips={origin.ResourceMips} creation_source_bytes={origin.SourceBytes}" +
+                $" creation_raw={origin.Raw?.ToString() ?? "unavailable"}" +
+                $" creation_color_registers=[{origin.Color?.ToString() ?? "unavailable"}]" +
+                $" mutation_kind={mutation.Kind ?? "unrecorded"} mutation_sequence={mutation.Sequence}" +
+                $" mutation_queue='{mutation.Queue.Name}' mutation_submission={mutation.Queue.SubmissionId}" +
+                $" advertised_sequence={advertisedSequence}" +
+                $" executing_sequence={Volatile.Read(ref _executingGuestWorkSequence)}.");
+        }
+        catch { return primary; } // Preserve the strict veto if optional diagnostics fail.
+    }
+
     private static NotSupportedException StorageImageMismatch(string message, GuestImage image, GuestDrawTexture requested)
     {
         var primary = new NotSupportedException(message);
