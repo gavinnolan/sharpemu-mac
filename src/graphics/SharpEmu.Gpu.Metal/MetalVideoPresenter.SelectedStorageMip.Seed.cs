@@ -32,15 +32,25 @@ internal static partial class MetalVideoPresenter
     internal static bool TryReadInitialSelectedStorageMipSource(ICpuMemory memory, ulong address,
         ulong footprintBytes, ulong sourceAddress, byte[] destination,
         out ICpuMappedCopySource? mappedSource, out CpuMappedCopyObservation? mapping)
+        => TryReadInitialSelectedStorageMipSourceWithDiagnostic(memory, address, footprintBytes, sourceAddress,
+            destination, out mappedSource, out mapping, out _);
+
+    internal static bool TryReadInitialSelectedStorageMipSourceWithDiagnostic(ICpuMemory memory, ulong address,
+        ulong footprintBytes, ulong sourceAddress, byte[] destination,
+        out ICpuMappedCopySource? mappedSource, out CpuMappedCopyObservation? mapping,
+        out SelectedSeedCopyDiagnostic diagnostic)
     {
         mappedSource = null;
         mapping = null;
+        diagnostic = new(false, false, CpuMappedCopyResult.Unavailable, false, null, false, sourceAddress, (ulong)destination.Length);
         if (memory is ICpuMappedCopySource optional)
         {
             CpuMappedCopyObservation? original;
+            var watchedRequested = _selectedNativeOriginalReuseEnabled && optional is ICpuMappedReadWatchSource;
             var result = _selectedNativeOriginalReuseEnabled && optional is ICpuMappedReadWatchSource watched
                 ? watched.TryReadMappedCopyWithWriteWatch(address, footprintBytes, sourceAddress, destination, out original)
                 : optional.TryReadMappedCopy(address, footprintBytes, sourceAddress, destination, out original);
+            diagnostic = diagnostic with { ProviderPresent = true, WatchedRequested = watchedRequested, ProviderResult = result, MappingReturned = original is not null };
             if (result == CpuMappedCopyResult.Rejected) return false; // discard; never ordinary-read fallback
             if (result == CpuMappedCopyResult.Copied)
             {
@@ -55,6 +65,7 @@ internal static partial class MetalVideoPresenter
                 try { current = optional.IsMappedCopyObservationCurrent(original); }
                 catch (Exception primary)
                 { ReleaseOriginalSelectedWriteWatch(optional, original, primary); throw; }
+                diagnostic = diagnostic with { MappingCurrent = current };
                 if (!current)
                 { ReleaseOriginalSelectedWriteWatch(optional, original); return false; }
                 mappedSource = optional;
@@ -66,6 +77,7 @@ internal static partial class MetalVideoPresenter
         }
         // Unavailable preserves the complete legacy read and its strict native
         // owner policy. Any partly changed optional destination is overwritten.
+        diagnostic = diagnostic with { LegacyRead = true };
         if (!memory.TryRead(sourceAddress, destination))
             throw new InvalidOperationException($"Metal initial selected storage seed is unreadable: addr=0x{address:X} source=0x{sourceAddress:X} bytes={destination.Length}.");
         return true;
@@ -84,14 +96,25 @@ internal static partial class MetalVideoPresenter
     }
 
     internal static bool IsInitialSelectedStorageMipSeedStable(ulong address,
-        in CpuTextureSnapshotObservation observation, ICpuMappedCopySource? source, CpuMappedCopyObservation? mapping)
+        in CpuTextureSnapshotObservation observation, ICpuMappedCopySource? source, CpuMappedCopyObservation? mapping) =>
+        IsInitialSelectedStorageMipSeedStableWithReason(address, observation, source, mapping, out _);
+
+    internal static bool IsInitialSelectedStorageMipSeedStableWithReason(ulong address,
+        in CpuTextureSnapshotObservation observation, ICpuMappedCopySource? source, CpuMappedCopyObservation? mapping,
+        out string reason)
     {
+        reason = "legacy-content-or-epoch-admission";
         if (source is null || mapping is null) return IsCpuTextureSnapshotAdmissionStable(address, observation);
-        if (!source.IsMappedCopyObservationCurrent(mapping) ||
-            _selectedNativeOriginalReuseEnabled && source is ICpuMappedReadWatchSource watched && !watched.IsMappedCopyWriteWatchCurrent(mapping)) return false;
+        reason = "original-mapping-currentness-veto";
+        if (!source.IsMappedCopyObservationCurrent(mapping)) return false;
+        reason = "original-physical-read-watch-veto";
+        if (_selectedNativeOriginalReuseEnabled && source is ICpuMappedReadWatchSource watched &&
+            !watched.IsMappedCopyWriteWatchCurrent(mapping)) return false;
+        reason = "original-observed-content-or-graph-epoch-veto";
         if (observation.MappingEpoch != HostMemory.MappingGeneration)
             return !TextureSourceGraphEnabled && observation.Observed &&
                 IsCpuTextureSnapshotContentObservationStable(address, observation);
+        reason = "content-or-epoch-admission-veto";
         return IsCpuTextureSnapshotAdmissionStable(address, observation);
     }
 
