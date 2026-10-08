@@ -45,7 +45,8 @@ public sealed partial class MetalTextureMaterializationTests
         var backendField = typeof(GuestGpu).GetField("_instance", Methods)!;
         var previousBackend = backendField.GetValue(null);
         backendField.SetValue(null, RuntimeHelpers.GetUninitializedObject(Presenter.Assembly.GetTypes().Single(static t => t.Name == "MetalGuestGpuBackend")));
-        nint original = 0, replacement = 0;
+        nint original = 0, variedReplacement = 0, zeroReplacement = 0;
+        Exception? primary = null;
         try
         {
             var snapshots = Presenter.Assembly.GetTypes().Single(static t => t.Name == "MetalTextureSnapshots");
@@ -56,25 +57,75 @@ public sealed partial class MetalTextureMaterializationTests
             original = (nint)image.GetType().GetField("Texture")!.GetValue(image)!;
             Assert.NotNull(image.GetType().GetField("StorageCpuLayout")!.GetValue(image));
             var format = Presenter.GetMethod("StorageTextureFormat", Methods)!.Invoke(null, [snapshot])!;
-            var zero = snapshot with { RgbaPixels = new byte[expected.Length] };
-            replacement = (nint)Presenter.GetMethod("CreateTypedStorageCpuTexture", Methods)!.Invoke(null, [Device.Value, zero, format])!;
-            Assert.NotEqual((nint)0, replacement); Assert.NotEqual(original, replacement);
-            Assert.Equal(3UL, ReadInteger(replacement, Selector("textureType")));
-            Assert.Equal(1UL, ReadInteger(replacement, Selector("depth")));
-            Assert.Equal(1UL, ReadInteger(replacement, Selector("arrayLength")));
-            Assert.Equal(ReadInteger(original, Selector("pixelFormat")), ReadInteger(replacement, Selector("pixelFormat")));
-            Assert.Equal(3UL, ReadInteger(replacement, Selector("usage")));
+            var varied = new byte[expected.Length];
+            if (kind == 3)
+                for (var channel = 0; channel < 4; channel++)
+                    System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(varied.AsSpan(channel * 2),
+                        BitConverter.HalfToUInt16Bits((Half)(channel + 2.75f)));
+            else
+                for (var i = 0; i < varied.Length; i++) varied[i] = (byte)((i * 113 + 31) & 255);
+            Assert.False(expected.AsSpan().SequenceEqual(varied));
+            variedReplacement = (nint)Presenter.GetMethod("CreateTypedStorageCpuTexture", Methods)!.Invoke(null,
+                [Device.Value, snapshot with { RgbaPixels = varied }, format])!;
+            VerifyNativeShape(variedReplacement);
             var bpp = (uint)(expected.Length / checked((int)(descriptor.Width * descriptor.Height)));
+            Assert.Equal(varied, ReadNativeRows(variedReplacement, descriptor.Width, descriptor.Height, bpp));
             Assert.Equal(expected, ReadNativeRows(original, descriptor.Width, descriptor.Height, bpp));
-            Assert.Equal(new byte[expected.Length], ReadNativeRows(replacement, descriptor.Width, descriptor.Height, bpp));
-            output.WriteLine($"typed-cpu-sync native architecture={RuntimeInformation.ProcessArchitecture} framework={RuntimeInformation.FrameworkDescription} kind={kind} full_bytes={expected.Length}; fresh type3 typed zero upload matched every byte; original native pixels unchanged. This qualifies allocation/upload only, not mapping/content authority or full dirty synchronization.");
+            var zero = snapshot with { RgbaPixels = new byte[expected.Length] };
+            zeroReplacement = (nint)Presenter.GetMethod("CreateTypedStorageCpuTexture", Methods)!.Invoke(null, [Device.Value, zero, format])!;
+            VerifyNativeShape(zeroReplacement);
+            Assert.NotEqual(variedReplacement, zeroReplacement);
+            Assert.Equal(expected, ReadNativeRows(original, descriptor.Width, descriptor.Height, bpp));
+            Assert.Equal(varied, ReadNativeRows(variedReplacement, descriptor.Width, descriptor.Height, bpp));
+            Assert.Equal(new byte[expected.Length], ReadNativeRows(zeroReplacement, descriptor.Width, descriptor.Height, bpp));
+            output.WriteLine($"typed-cpu-sync native architecture={RuntimeInformation.ProcessArchitecture} framework={RuntimeInformation.FrameworkDescription} kind={kind} full_bytes={expected.Length}; distinct fresh type3 varied and zero uploads matched every byte; original and varied native pixels unchanged after zero creation. This qualifies allocation/upload only, not mapping/content authority or full dirty synchronization.");
+
+            void VerifyNativeShape(nint texture)
+            {
+                Assert.NotEqual((nint)0, texture); Assert.NotEqual(original, texture);
+                Assert.Equal(3UL, ReadInteger(texture, Selector("textureType")));
+                Assert.Equal(1UL, ReadInteger(texture, Selector("depth")));
+                Assert.Equal(1UL, ReadInteger(texture, Selector("arrayLength")));
+                Assert.Equal(ReadInteger(original, Selector("pixelFormat")), ReadInteger(texture, Selector("pixelFormat")));
+                Assert.Equal(3UL, ReadInteger(texture, Selector("usage")));
+            }
         }
+        catch (Exception error) { primary = error; throw; }
         finally
         {
-            if (replacement != 0) SendVoid(replacement, Selector("release"));
-            if (original != 0) ReleaseStorageVolume(address, original);
-            GuestImageWriteTracker.Untrack(address);
-            backendField.SetValue(null, previousBackend);
+            Exception? cleanup = null;
+            // Consume each known retain before release; an uncertain release is never retried.
+            var releaseZero = zeroReplacement; zeroReplacement = 0;
+            if (releaseZero != 0) Attempt(() => SendVoid(releaseZero, Selector("release")));
+            var releaseVaried = variedReplacement; variedReplacement = 0;
+            if (releaseVaried != 0) Attempt(() => SendVoid(releaseVaried, Selector("release")));
+            var releaseOriginal = original; original = 0;
+            if (releaseOriginal != 0) Attempt(() => ReleaseStorageVolume(address, releaseOriginal));
+            Attempt(() => GuestImageWriteTracker.Untrack(address));
+            Attempt(() => backendField.SetValue(null, previousBackend));
+            if (cleanup != null)
+            {
+                if (primary != null)
+                {
+                    try { primary.Data["TypedCpuSyncFixtureCleanupFailure"] = cleanup; }
+                    catch { /* Diagnostic attachment must not replace the primary failure. */ }
+                }
+                else System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(cleanup).Throw();
+            }
+
+            void Attempt(Action action)
+            {
+                try { action(); }
+                catch (Exception error)
+                {
+                    if (cleanup == null) cleanup = error;
+                    else
+                    {
+                        try { cleanup.Data[$"SecondaryCleanupFailure{cleanup.Data.Count}"] = error; }
+                        catch { /* Continue attempting the remaining independently owned cleanup. */ }
+                    }
+                }
+            }
         }
     }
 }

@@ -84,9 +84,14 @@ architecture. Managed-only tracking prevents native protection on synthetic VA.
 
 Four declared opt-in native rows invoke the production fresh typed allocation /
 upload primitive for R8FourK, BGRA1024, singleton R32Uint and RGBA16Float. Each
-requires device/actual architecture/framework, verifies every new zero byte and
-every unchanged original byte, native type/depth/layers/format/usage, and exact
-owned release. They qualify native allocation/upload only, not the full mapping /
+requires device/actual architecture/framework, first verifies every byte of a
+distinct varied nonzero replacement, then every byte of a second zero
+replacement. Original and varied textures must remain unchanged after zero
+creation; this avoids accepting an omitted upload merely because fresh memory
+was zero. Native type/depth/layers/format/usage are checked for both replacements.
+Cleanup attempts every independently owned release and global restoration,
+consumes retains before release, and preserves primary and secondary failures.
+They qualify native allocation/upload only, not the full mapping /
 content admission path or translated writeback. Without device opt-in the rows
 are declared skipped. A separate root-granted bounded fresh worker and shared
 machine lock are required for execution.
