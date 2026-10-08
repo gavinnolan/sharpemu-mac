@@ -143,11 +143,44 @@ internal static class MetalDepthFacePlacement
         catch (Exception) { return new NotSupportedException(primary); }
     }
 
-    internal static void RequireOriginalCurrent(Observation original)
+    internal static void RequireOriginalCurrent(Observation original,
+        [CallerMemberName] string invocation = "")
     {
-        if (!original.Content.Observed || original.Content.ByteCount != FaceBytes || original.Session != MetalVideoPresenter.CurrentNativeDepthFaceSession ||
-            !original.Source.IsMappedCopyObservationCurrent(original.Mapping) ||
-            !MetalVideoPresenter.IsCpuTextureSnapshotObservationStable(original.Address, original.Content))
-            throw new NotSupportedException("Metal native depth face lost its ORIGINAL mapping/session/content observation.");
+        long? sessionNow = null, epochNow = null;
+        bool? mappingCurrent = null, tokenPresent = null;
+        GuestImageWriteTracker.ContentToken tokenNow = default;
+        string? reason = null;
+        // Inline the existing nested stability predicate in its exact query
+        // order. The earlier Observed check excludes its !Observed shortcut.
+        // Reuse the values which actually caused this veto; never query again
+        // for diagnostics or replace the original stamp.
+        if (!original.Content.Observed) reason = "original-content-unobserved";
+        else if (original.Content.ByteCount != FaceBytes) reason = "original-content-size";
+        else if ((sessionNow = MetalVideoPresenter.CurrentNativeDepthFaceSession) != original.Session) reason = "presenter-session";
+        else if (!(mappingCurrent = original.Source.IsMappedCopyObservationCurrent(original.Mapping)).Value) reason = "original-mapping-currentness";
+        else if ((epochNow = HostMemory.MappingGeneration) != original.Content.MappingEpoch) reason = "global-mapping-epoch";
+        else if (!(tokenPresent = GuestImageWriteTracker.TryGetObservedContentToken(
+            original.Address, original.Content.ByteCount, out tokenNow)).Value) reason = "current-content-unobserved";
+        else if (tokenNow != original.Content.Token) reason = "original-content-token";
+        if (reason is not null)
+            throw OriginalCurrentFailure(original, invocation, reason, sessionNow, mappingCurrent, epochNow, tokenPresent, tokenNow);
+    }
+
+    private static NotSupportedException OriginalCurrentFailure(Observation original, string invocation, string reason,
+        long? sessionNow, bool? mappingCurrent, long? epochNow, bool? tokenPresent,
+        GuestImageWriteTracker.ContentToken tokenNow)
+    {
+        const string primary = "Metal native depth face lost its ORIGINAL mapping/session/content observation.";
+        try
+        {
+            return new NotSupportedException($"{primary} reason={reason} stage=require-original invocation={invocation} " +
+                $"selected_addr=0x{original.Address:X} selected_bytes={original.Content.ByteCount} layer={original.Layer} " +
+                $"backing_addr=0x{original.BackingAddress:X} backing_bytes={original.BackingBytes} " +
+                $"session_before={original.Session} session_now={sessionNow} mapping_current={mappingCurrent} " +
+                $"mapping_before={original.Content.MappingEpoch} mapping_now={epochNow} " +
+                $"observed_before={original.Content.Observed} observed_now={tokenPresent} " +
+                $"token_before=[{original.Content.Token}] token_now=[{tokenNow}]");
+        }
+        catch (Exception) { return new NotSupportedException(primary); }
     }
 }
