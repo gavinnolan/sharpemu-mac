@@ -97,9 +97,14 @@ internal static partial class MetalVideoPresenter
         lock (_gate)
         {
             bool SameBlock(ulong other) => (other & ~4095UL) == address;
+            bool Overlaps(ulong other, ulong bytes) => (UInt128)other < (UInt128)address + 4096 &&
+                (UInt128)address < (UInt128)other + bytes;
             if (_availableGuestImages.Keys.Any(SameBlock) || _guestImages.Keys.Any(SameBlock) ||
                 _guestDepthImages.Keys.Any(SameBlock) || _guestDepthReadAliases.Keys.Any(SameBlock) ||
-                _latestTextureSources.Keys.Any(SameBlock) || _gpuTextureSourceAddresses.Any(SameBlock))
+                _latestTextureSources.Keys.Any(SameBlock) || _gpuTextureSourceAddresses.Any(SameBlock) ||
+                _guestImageExtents.Any(pair => Overlaps(pair.Key, pair.Value.ByteCount)) ||
+                _latestTextureSources.Values.Any(source => Overlaps(source.View.Address,
+                    Math.Max(source.ByteCount, source.ObservedGuestByteCount))))
                 throw new NotSupportedException($"Metal sampled singleton volume at 0x{address:X} has a GPU alias in its physical block; ordered native volume alias ownership is unsupported.");
         }
     }
