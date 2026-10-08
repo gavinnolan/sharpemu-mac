@@ -35,6 +35,9 @@ public sealed partial class MetalImmutableGpuVersionTests
         public TrackedCpuMemory? Memory;
         public object? OriginalOrigin;
         public object? Image;
+        public bool OrdinaryWriterUnconfirmed;
+        public object? OrdinaryWriterOwner;
+        public Action? AfterOwnedRetirement;
         public readonly List<GuestDrawTexture> VolumeSeeds = [];
         public readonly List<object> VolumeImages = [];
     }
@@ -67,7 +70,7 @@ public sealed partial class MetalImmutableGpuVersionTests
     public void ActualRuntimeLateDirtyGenerationAfterCanonicalVersionKeepsStickyDebtAndNoEop() =>
         RunActualRuntimeTwoTypedPublications(false, rgba: true, lateFailure: "generation");
 
-    private void RunActualRuntimeTwoTypedPublications(bool overlappingCpuWrite, bool rgba = false, bool mixedBuffer = false, string? lateFailure = null, bool originalVolumes = false)
+    private void RunActualRuntimeTwoTypedPublications(bool overlappingCpuWrite, bool rgba = false, bool mixedBuffer = false, string? lateFailure = null, bool originalVolumes = false, string? busyOriginalRetry = null)
     {
         Assert.True(DeviceRequested());
         var imageBytes = rgba ? 4194304 : 65536;
@@ -208,6 +211,14 @@ public sealed partial class MetalImmutableGpuVersionTests
             Assert.Equal(rgba ? 70u : 53u, (uint)(MtlPixelFormat)StorageMember(image, "Format")!);
             Assert.Equal(3u, (uint)StorageMember(image, "TextureType")!);
 
+            if (busyOriginalRetry is not null)
+            {
+                Assert.True(rgba && originalVolumes && !overlappingCpuWrite && !mixedBuffer && lateFailure is null);
+                RunBusyOriginalRetry(state, physical, memory, host, owners, address, imageBytes,
+                    expected, image, ownOrigin, ReadCanonical, busyOriginalRetry);
+                return;
+            }
+
             if (overlappingCpuWrite)
             {
                 // A real ordinary participating canonical write bypasses the
@@ -347,14 +358,18 @@ public sealed partial class MetalImmutableGpuVersionTests
         finally
         {
             Exception? cleanup = null;
-            var completionConfirmed = true;
+            var completionConfirmed = !owners.OrdinaryWriterUnconfirmed;
             // This fresh fixture owns every newly opened batch. Discard only its
             // uncommitted encoding, then wait/status-check every committed buffer.
             // An unknown outcome keeps all exact owners quarantined, not freed.
             try
             {
-                state?.AbortFiniteStorageEncoding();
-                Call("WaitForFlushedGuestCommands");
+                if (completionConfirmed)
+                {
+                    state?.AbortFiniteStorageEncoding();
+                    Call("WaitForFlushedGuestCommands");
+                }
+                else cleanup = new InvalidOperationException("Busy fixture ordinary writer did not terminate; exact owners remain quarantined.");
             }
             catch (Exception failure) { cleanup = failure; completionConfirmed = false; }
             if (completionConfirmed)
@@ -411,6 +426,9 @@ public sealed partial class MetalImmutableGpuVersionTests
                 if (state is not null) Attempt(state.Dispose);
                 // Do not free its mappings after uncertain native teardown.
                 if (cleanup is null && physical is not null) Attempt(physical.Dispose);
+                // Negative Busy rows keep their original receipt/session until
+                // every real owned native resource and mapping has retired.
+                if (cleanup is null) Attempt(() => owners.AfterOwnedRetirement?.Invoke());
             }
             Attempt(() => Field("_finiteStorageAfterAppliedForControl").SetValue(null, oldAfterApplied));
             Attempt(() => Field("_finiteStorageAfterCanonicalVersionForControl").SetValue(null, oldAfterVersion));

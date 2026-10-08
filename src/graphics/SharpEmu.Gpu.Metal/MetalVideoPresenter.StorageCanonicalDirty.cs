@@ -12,6 +12,9 @@ internal static partial class MetalVideoPresenter
     private sealed record DeferredCanonicalDirty(ulong Address, GuestImage Image, FiniteStorageDebt Debt,
         StorageCpuSeedOrigin Origin, int Version, nint Texture);
     private static DeferredCanonicalDirty? _deferredCanonicalDirty;
+    // Default-null controlled race boundary. Runs only after the actual
+    // cancel-only reservation has released; cannot supply content or status.
+    private static Action? _canonicalDirtyAfterValidationReleasedForControl = null;
 
     private static bool IsExactCanonicalDirtyOwnerLocked(ulong address, GuestImage image,
         FiniteStorageDebt debt, StorageCpuSeedOrigin origin, int version, nint texture, out string reason,
@@ -130,6 +133,7 @@ internal static partial class MetalVideoPresenter
                 validationReleased = true;
                 if (primary is null && consumed)
                 {
+                    _canonicalDirtyAfterValidationReleasedForControl?.Invoke();
                     ValidateFiniteStorageOrigin(origin, debt.CanonicalDescriptor!);
                     lock (_gate)
                         ownerCurrent = IsExactCanonicalDirtyOwnerLocked(address, image, debt, origin, version, texture, out reason, out offender);
