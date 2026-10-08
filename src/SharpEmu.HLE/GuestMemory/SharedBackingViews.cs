@@ -196,14 +196,14 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
         if (!HostManagedWriteIntervals.AllowsBytes(interval))
         {
             // Exact rejected token is the provenance, never a later admission sample.
-            if (captureBusy && originalMapping is not null && originalMapping.IsCurrent && interval.IsPublicationBusy &&
+            if (captureBusy && originalMapping is { } originalIdentity && originalIdentity.IsCurrent && interval.IsPublicationBusy &&
                 _host is IHostMappedPublicationMemory provider && provider.CanWaitForOrdinaryWriteAdmission &&
                 TryEnterAliasAccess())
             {
                 try
                 {
                     if (IsAvailable && ReferenceEquals(snapshot, AliasSnapshot))
-                        busy = new(this, _backing!, snapshot, originalMapping, interval.RejectedAdmission);
+                        busy = new(this, _backing!, snapshot, originalIdentity, interval.RejectedAdmission);
                 }
                 finally { if (busy is null) ExitAliasAccess(); }
             }

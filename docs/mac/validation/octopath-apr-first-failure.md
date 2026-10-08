@@ -24,10 +24,12 @@ Before the first admission attempt, PVM retains the exact `MemoryRegion`
 reference and all its fields, and SharedBackingViews retains its immutable view
 snapshot. An enrolled known provider additionally captures at most 64 ORIGINAL
 recorded Views, including their backing/physical offsets/logical guest Write
-entitlement and copy incarnations. This capture allocates bounded arrays and
-acquires the ordinary provider gate before admission; it performs no byte read,
-query, content sampling or younger mapping reconstruction. This per-enrolled-write
-cost is explicit and has not been measured. Missing, readonly, revoked, partial,
+entitlement and copy incarnations. The successor single-view capture is a readonly value retaining the SAME
+original View and its incarnation, with no identity/list/array allocation or
+boxing. Only genuine multiview spans allocate bounded original arrays. Both
+forms acquire the ordinary provider gate before admission; it performs no byte read,
+query, content sampling or younger mapping reconstruction. The per-enrolled-write provider-lock cost and multiview allocation cost remain
+explicit and have not been measured. Missing, readonly, revoked, partial,
 unknown or unsupported original provider records cannot qualify a busy receipt.
 
 Only the exact rejected `BeginOperation` token containing PublicationBit can
@@ -49,7 +51,7 @@ write history. This does not serialize native/JIT/raw writers or confer an
 exclusive virtual permission lease; participating provider changes invalidate
 the original identity and veto success rather than rebase it.
 
-Thirteen prepared Host.Memory controls use the real ledger/reservations plus
+Seventeen prepared Host.Memory controls use the real ledger/reservations plus
 actual pinned-array SharedViews bytes: first rejection/no bytes, peer cancel,
 bounded timeout, same-address remap, backing close, provider gate refusal,
 thread affinity/replay, whole-backing exclusion, no-byte history, unresolved
@@ -57,3 +59,9 @@ completion, incomplete coverage, raw-provider revocation despite unchanged
 outer snapshot, readonly/invalid destinations and post-attempt identity drift.
 They do not instantiate PVM or fabricate native outcomes. Actual PVM/macOS
 forwarding and the APR branch require separately authorized runtime controls.
+
+The additive value-identity controls measure warmed same-thread allocation for
+the actual normal SharedViews write overload (including pre-admission provider
+capture), and distinguish single-view from full two-view original invalidation.
+These controls are prepared only, not executed allocation/performance claims.
+The original class/array candidate remains frozen as301e252c.

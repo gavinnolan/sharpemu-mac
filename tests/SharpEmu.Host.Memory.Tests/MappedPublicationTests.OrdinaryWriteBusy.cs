@@ -209,4 +209,37 @@ public sealed partial class MappedPublicationTests
         Assert.False(state.Views.IsMappedCopyObservationCurrent(original));
     }
 
+    [Fact]
+    public void WarmedOriginalSingleViewNormalWriteWithBusyCaptureDoesNotAllocate()
+    {
+        using var state = new State(); _ = state.Capture(); byte[] bytes = [1, 3, 5, 7];
+        for (var index = 0; index < 10000; index++)
+        {
+            Assert.True(state.Views.TryWriteBacking(State.Address + 32, bytes, out var busy)); Assert.Null(busy);
+        }
+        var before = GC.GetAllocatedBytesForCurrentThread(); var succeeded = true; var noBusy = true;
+        for (var index = 0; index < 10000; index++)
+        {
+            succeeded &= state.Views.TryWriteBacking(State.Address + 32, bytes, out var busy); noBusy &= busy is null;
+        }
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.True(succeeded); Assert.True(noBusy); Assert.Equal(0L, allocated);
+        Assert.Equal(bytes, state.Bytes().AsSpan(32, bytes.Length).ToArray());
+    }
+
+    [Theory]
+    [InlineData(1, true)]
+    [InlineData(16384, true)]
+    [InlineData(16385, false)]
+    public void ValueOriginalIdentityRetainsExactlyItsInitialViewSet(int bytes, bool unaffected)
+    {
+        using var state = new State(); _ = state.Capture();
+        var original = state.Host.Ledger.CaptureOrdinaryWriteIdentity(state.Backing, State.Address, (ulong)bytes);
+        Assert.True(original.HasValue); Assert.True(original.Value.IsCurrent);
+        Assert.True(state.Host.Effect(State.Address + State.Page, State.Page));
+        Assert.Equal(unaffected, original.Value.IsCurrent);
+        // Copying the value cannot replace any original incarnation.
+        var copied = original.Value; Assert.Equal(unaffected, copied.IsCurrent);
+    }
+
 }
