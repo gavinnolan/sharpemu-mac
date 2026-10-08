@@ -94,4 +94,25 @@ internal static partial class MetalVideoPresenter
                 throw new InvalidOperationException("Deferred canonical dirty ORIGINAL receipt was not consumed.");
         return result;
     }
+
+    // Called only after Run's native-depth, volume-watch and selected-owner
+    // retirement attempts succeeded. Drop retry bookkeeping, never a native
+    // retain or a guest completion. Existing owner/quarantine records survive.
+    private static bool DropDeferredCanonicalDirtyAfterShutdown()
+    {
+        lock (_gate)
+        {
+            if (_deferredCanonicalDirty is not { } retry) return true;
+            if (!_closed || _thread is not null || !ReferenceEquals(_renderOwner, Thread.CurrentThread) ||
+                _batchOpen || _takenGuestWorkSequence != 0 || _executingGuestWorkSequence != 0 ||
+                _guestWorkFailure is not null || _textureSourceCleanupFailure is not null ||
+                _typedCpuSyncCleanupFailure is not null || _singletonVolumeOriginalCleanupFailure is not null ||
+                _selectedNativeOriginalCleanupFailure is not null || _r16SelectedRetainCleanupFailure is not null ||
+                _nativeDepthBatches.Count != 0 || retry.Origin.Session == CurrentStorageCpuSeedSession ||
+                retry.Debt.Failed || retry.Debt.Pending || retry.Debt.CanonicalVersion != retry.Version ||
+                !ReferenceEquals(retry.Debt.CanonicalOrigin, retry.Origin)) return false;
+            _deferredCanonicalDirty = null;
+            return true;
+        }
+    }
 }

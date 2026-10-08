@@ -275,6 +275,8 @@ internal static partial class MetalVideoPresenter
                         if (shutdownFailure is null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(volumeCleanup).Throw();
                         try { shutdownFailure.Data["MetalSingletonVolumeShutdownCleanup"] = volumeCleanup; } catch { }
                     }
+                    if (shutdownFailure is null && volumeCleanup is null)
+                        _ = DropDeferredCanonicalDirtyAfterShutdown();
                 }
                 finally
                 {

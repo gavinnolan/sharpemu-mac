@@ -38,7 +38,15 @@ The next frame retries the same receipt and requires all original provider,
 protected token, mapping, native owner, physical disjointness and session checks.
 No status refresh or new observation replaces the original.
 
-Prepared controls, 14 rows, all unexecuted:
+Run drops retry bookkeeping only after existing native-depth, volume-watch and
+selected-owner retirement attempts succeed, on the closed actual render owner
+and after the selected session advances. Active work/batch, incomplete depth
+batches, unhealthy canonical debt or sticky cleanup failure retain the receipt.
+This releases no native image and advances no completion; existing owner and
+quarantine records remain. The graph-disabled presenter has no general production
+reopen/reset API, and this change introduces none.
+
+Prepared controls, 16 rows, all unexecuted:
 
 - Host `MappedCopyReadWatchTests.Status.cs`: two ordinary busy/end cases; five
   overlap/failure/release/ABA/publication negatives; one unsupported-status case.
@@ -49,6 +57,12 @@ Prepared controls, 14 rows, all unexecuted:
   work. The default-null refusal hook supplies no content, native handle,
   provider reservation or positive publication authority. The frame control
   verifies the explicit caller result boundary, not a real window/native frame.
+- Two cleanup-bookkeeping controls use actual closed/shutdown and selected-session
+  retirement methods with asserted-empty native inventories. A clean retirement
+  drops only the retry; a cleanup failure retains it. Both preserve old labels
+  and completed sequence. The explicit new managed scheduling lifetime checks
+  old retry metadata cannot block/adopt a new session. Its synthetic canonical
+  debt has no provider/content/native authority and proves no native teardown.
 
 Required next native phase (not implemented or executed by this checkpoint):
 create a real PVM/Tracked original watched volume and qualified canonical image;
@@ -60,7 +74,7 @@ full native/canonical bytes and ordered label. Separate overlap, failed envelope
 mapping ABA, session reset and owner-version cases must refuse with no label.
 The pause seam itself and cleanup/unknown-outcome quarantine require source review
 before any build/native grant. These native assertions are not inferred from the
-14 managed/model rows.
+16 managed/model rows.
 
 Raw/native/JIT writers outside the participating ordinary provider protocol
 remain unqualified. This checkpoint does not change that policy or the separate
