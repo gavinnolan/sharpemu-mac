@@ -19,6 +19,7 @@ namespace SharpEmu.Gpu.Metal;
 internal static partial class MetalTextureSnapshots
 {
     private const ulong MaximumSnapshotBytes = 128UL * 1024UL * 1024UL;
+    private const ulong MaximumSingleMip2DSnapshotBytes = 256UL * 1024UL * 1024UL;
     private static readonly ConcurrentDictionary<ulong, byte> _arrayUploadUnsupported = new();
 
     // Send supported tiled data to the GPU; decode other layouts on the CPU.
@@ -471,6 +472,7 @@ internal static partial class MetalTextureSnapshots
             }
         }
 
+        var snapshotByteLimit = SnapshotByteLimit(descriptor);
         var sourceWidth = descriptor.TileMode == 0
             ? GetLinearTexturePitch(
                 Math.Max(descriptor.Width, descriptor.Pitch),
@@ -486,8 +488,8 @@ internal static partial class MetalTextureSnapshots
             sourceWidth,
             descriptor.Height,
             textureDepth);
-        if (sourceByteCount > MaximumSnapshotBytes)
-            throw SnapshotBudgetExceeded(descriptor, sourceByteCount, "logical");
+        if (sourceByteCount > snapshotByteLimit)
+            throw SnapshotBudgetExceeded(descriptor, sourceByteCount, "logical", snapshotByteLimit);
         if (sourceByteCount == 0)
         {
             TraceTextureFallback(
@@ -555,8 +557,8 @@ internal static partial class MetalTextureSnapshots
         physicalSourceByteCount = qualifiedThickVolume
             ? Gfx10StandardVolumeLayout.ByteCount
             : checked(physicalSourceByteCount * textureDepth);
-        if (physicalSourceByteCount > MaximumSnapshotBytes)
-            throw SnapshotBudgetExceeded(descriptor, physicalSourceByteCount, "tiled");
+        if (physicalSourceByteCount > snapshotByteLimit)
+            throw SnapshotBudgetExceeded(descriptor, physicalSourceByteCount, "tiled", snapshotByteLimit);
 
         var wantsArrayUpload = isArrayed &&
             !isStorage &&
@@ -1148,12 +1150,22 @@ internal static partial class MetalTextureSnapshots
             MetalVideoPresenter.DescribeCpuTextureSnapshotStability(descriptor.Address, snapshot, observation));
     }
 
-    private static Exception SnapshotBudgetExceeded(TextureDescriptor descriptor, ulong bytes, string layout) =>
+    // One complete 8K four-byte 2D image is 256 MiB. Larger slices are not
+    // admitted for arrays, volumes or mip chains: their aggregate allocations
+    // need separate budgeting. This changes no backing or content authority.
+    private static ulong SnapshotByteLimit(TextureDescriptor descriptor) =>
+        descriptor.Type == Gen5TextureType2D && descriptor.Depth == 1 &&
+        descriptor.BaseArray == 0 && descriptor.HasExtendedDescriptor &&
+        descriptor.ResourceMipLevels == 1 && descriptor.MipLevels == 1 &&
+        descriptor.BaseLevel == 0 && descriptor.LastLevel == 0
+            ? MaximumSingleMip2DSnapshotBytes : MaximumSnapshotBytes;
+
+    private static Exception SnapshotBudgetExceeded(TextureDescriptor descriptor, ulong bytes, string layout, ulong limit) =>
         new NotSupportedException(
             $"Metal texture snapshot exceeds budget: addr=0x{descriptor.Address:X} " +
             $"size={descriptor.Width}x{descriptor.Height} format={descriptor.Format}/{descriptor.NumberType} " +
             $"tile={descriptor.TileMode} layout={layout} required_bytes={bytes} " +
-            $"maximum_snapshot_bytes={MaximumSnapshotBytes}.");
+            $"maximum_snapshot_bytes={limit}.");
 
     private static bool TryCreateTiledArrayMipChain(
         CpuContext context,
