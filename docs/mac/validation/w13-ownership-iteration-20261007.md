@@ -691,3 +691,24 @@ ARM excludes26 x64-only cases. Build111 warnings, zero errors. Launcher
 controls25/25 each CLR pass, build0/0; seven native output-policy cases pass.
 Exact logs/TRX/command assembly hashes: `w13-20261007/native-frontend-*` and
 `native-launcher-integrated-*`. A new signed app/game remains pending.
+
+## Integrated native bundle and visible launcher — e627027
+
+Signed native AppKit/Metal bundle passes closure and signature policy without
+Avalonia, Skia, HarfBuzz, Vulkan, MoltenVK or SDL. Sarah remains alive 150s, peak
+1214MiB, with reviewed movement, airborne jump and landing; TERM needs no KILL.
+The real stop now records confirmed host-return reason and CPU_TRAP, without
+false import-loop/NOT_IMPLEMENTED. Join interruption still prevents clean guest
+teardown acceptance. Bundle/game evidence: `integrated-native-frontend-e627027/`
+and `game-sarah-native-e627027/`. Windows/Linux CLI cross-builds pass, 13 warnings
+and zero errors each, with isolated output profiles.
+
+Visible root native launcher completed 138.985s, exit zero, no watchdog. Exact
+owned groups were absent (ESRCH), PIDs gone, shared lock released, and signed
+payload/source unchanged. Settings save/reopen, responsive heavy output, natural
+exit seven with descendant cleanup and modeless owned Quit were exercised. A
+real TERM EPERM remained visible; later confirmed cleanup enabled final Quit.
+No game ran through this synthetic launcher session. Evidence:
+`package-agent/root-native-e627-window/`. Typed settings/disk-failure retry, full
+frontend parity and minimum resize remain separate pending work. GPU graph and
+fault-domain activation remain disabled; no 3D progression/performance claim.

@@ -70,10 +70,10 @@ Local main now includes the native AppKit launcher, modeless settings, bounded
 console output and private child-process groups. macOS composition references
 `SharpEmu.Launcher.MacOS`; Windows/Linux retain their GUI adapter. Mac publish
 policy rejects Avalonia, SkiaSharp, HarfBuzz and portable font/UI packages as
-well as Vulkan, MoltenVK and SDL. The latest signed default bundle still
-contains cleanadf8297 until the integrated native frontend build completes.
+well as Vulkan, MoltenVK and SDL. The latest signed default bundle contains clean `e627027`, with the native
+AppKit launcher and no portable UI dependencies.
 
-The isolated signedb1b9ff8 launcher passes a240s visible synthetic session:
+The integrated signed `e627027` launcher passes a 139s visible synthetic session:
 modeless settings, sustained20,000-line output, natural root exit7 with
 inherited-pipe descendant cleanup and CmdQ/owned Stop&Quit. A real TERM EPERM
 receipt displays an error and cancels auto-Quit; later actual group/process
@@ -89,9 +89,10 @@ The final actual native return/fault/telemetry workers pass4/4 after bundle
 publish with unchanged assembly hashes. Mapping/domain leases, alias retirement
 and fault retry receipts remain unactivated.
 
-Fresh signedadf8297 Sarah150s verifies coherent scene, right/left movement,
-airborne jump and landing, peak1204MiB. TERM process stop needs no KILL; guest
-join and forced-unwind/NOT_IMPLEMENTED diagnostics remain at this source.
+Fresh signed `e627027` Sarah 150s verifies coherent scene, right/left movement,
+airborne jump and landing, peak 1214MiB. TERM process stop needs no KILL. Actual
+host-stop return retains CPU_TRAP without fabricated import-loop/NOT_IMPLEMENTED
+diagnosis. The guest join error still prevents a clean-teardown claim.
 Concurrent builds and dense capture prevent a performance comparison.
 [Latest screenshots](../../artifacts/validation/integrated-20261007/SCREENSHOTS.md).
 
@@ -101,7 +102,9 @@ for HostShutdownRequested. It retains CPU_TRAP/false and preserves known errors;
 it does not declare successful guest exit or clean teardown. Candidate15/15
 x64 controls and an actual normal-return worker pass. Integratedeb334c1 checks pass318/318 Rosetta and292/292 ARM64; ARM excludes26
 x64-only cases. Launcher lifecycle controls pass25/25 on each CLR and seven
-output-policy cases pass. Signed app/game qualification of this source is pending.
+output-policy cases pass. Signed `e627027` bundle, Sarah game and visible native launcher qualification
+are complete. Windows/Linux CLI cross-builds pass with 13 warnings and no errors
+each; native OS runtime remains unqualified.
 
 CoreText/CoreGraphics guest fonts and neutral `SharpEmu.Application` services
 are integrated. Their earlier CPU/ABI controls remain distinct from title

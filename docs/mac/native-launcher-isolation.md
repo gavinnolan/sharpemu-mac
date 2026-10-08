@@ -1,6 +1,6 @@
 # Native launcher and application services (W25/W26)
 
-Base: d231b6d90319ef4c4fc244f9c1d75fcc63a91374. This isolated implementation has not replaced the shipping launcher. The exact first visible qualification and later unqualified successors are distinguished below.
+Base: d231b6d90319ef4c4fc244f9c1d75fcc63a91374. The native launcher is now integrated and qualified in signed root `e627027`. Historical isolated stages and their separate evidence are retained below.
 
 ## Boundaries
 
@@ -95,3 +95,16 @@ A separate successor retains and awaits the run's exit-observation and cleanup t
 Release requires actual root exit, completed owned readers, and absence of the originally acknowledged private group (native `kill(group, 0)` yielding ESRCH). A failed reader is recorded and only that owned endpoint is disposed; it is not treated as EOF evidence or successful child execution. Failure before the private-group acknowledgement cannot authorize unknown group cleanup. No names, unrelated PIDs, escaped groups or replacement sessions are scanned or killed. If completion cannot be confirmed, the session stays retained with an explicit diagnostic rather than silently freeing Launch or holding an invisible pending Quit.
 
 Final related selection: 25/25 ARM64 and 25/25 Rosetta, zero declared skips; build zero warnings/errors. Added controls use real children with injected TERM/KILL errors to prove retained Start exclusion, handled cleanup task completion and successful explicit retry; a synchronous failure-observer retry proves it cannot be lost at the prior task-return boundary. Actual pump read failure remains visible while natural root exit seven is preserved. A main-loop session control rejects stale failures and cancels only its own pending Quit. Existing real inherited-pipe descendant/isolation/deadline controls remain in the same selection. These cover ordinary controlled OS error paths, not exhaustive runtime resource exhaustion or arbitrary descendant daemonization, and do not qualify a native window or guest shutdown.
+
+## Integrated native launcher qualification — e627027
+
+The signed root app completed a 138.985s visible synthetic session, exit zero,
+with settings Save/reopen, selection retention, sustained output, natural root
+exit seven plus inherited-pipe descendant cleanup, and modeless Cmd-Q with owned
+Stop-and-Quit. Final exact private groups returned ESRCH and all owned PIDs were
+absent; signed payload hashes and source stayed unchanged. A real transient TERM
+EPERM remained visible and canceled automatic Quit; later confirmed cleanup and
+a second Cmd-Q closed the app. This is launcher lifecycle evidence, separate
+from Sarah gameplay. Full frontend parity, minimum resize, typed controls and
+actual failed-disk persistence remain open. Evidence:
+`artifacts/validation/integrated-20261007/package-agent/root-native-e627-window/`.
