@@ -387,9 +387,16 @@ internal static partial class MetalVideoPresenter
     private static void ValidateStorageImageView(GuestImage image, GuestDrawTexture descriptor, MetalTextureFormat format)
     {
         var shape = GuestTextureShape(descriptor);
-        if (image.Width != descriptor.Width || image.Height != descriptor.Height || image.Format != format.Format ||
-            image.TextureType != shape.TextureType || image.Depth != shape.Depth || image.ArrayLength != shape.ArrayLength)
-            throw new NotSupportedException($"Metal storage image view does not match live image at 0x{descriptor.Address:X}.");
+        var observed = (image.Width, image.Height, image.Format, image.TextureType, image.Depth, image.ArrayLength);
+        var requested = (descriptor.Width, descriptor.Height, format.Format, shape.TextureType, shape.Depth, shape.ArrayLength);
+        if (observed != requested)
+            throw new NotSupportedException($"Metal storage image view does not match live image at 0x{descriptor.Address:X}: " +
+                $"observed_width={observed.Width} observed_height={observed.Height} observed_format={(uint)observed.Format} " +
+                $"observed_type={observed.TextureType} observed_depth={observed.Depth} observed_layers={observed.ArrayLength} " +
+                $"requested_width={requested.Width} requested_height={requested.Height} requested_format={(uint)requested.Format} " +
+                $"requested_type={requested.TextureType} requested_depth={requested.Depth} requested_layers={requested.ArrayLength} " +
+                $"guest_format={descriptor.Format}/{descriptor.NumberType} guest_type={descriptor.Type} " +
+                $"base_mip={descriptor.BaseMipLevel} selected_mip={descriptor.MipLevel} numeric_class={descriptor.Shape.NumericClass}.");
         if (!image.Initialized)
             throw new InvalidOperationException($"Metal storage image 0x{descriptor.Address:X} has no initialized contents.");
     }
