@@ -251,6 +251,9 @@ public static class ImageDescriptorBinding
     public static bool IsCube(DescriptorBindingKind kind) =>
         (uint)kind is >= SampledCubeFloatBinding and <= AtomicCubeUintBinding or SampledCompareCubeBinding;
 
+    public static bool IsDepthCompare(DescriptorBindingKind kind) =>
+        (uint)kind is >= SampledCompare2DBinding and <= SampledCompareCubeBinding;
+
     private static readonly ImageDimension[] SampledDimensions =
     [
         ImageDimension.Dim1D, ImageDimension.Dim1DArray, ImageDimension.Dim2D, ImageDimension.Dim2DArray,

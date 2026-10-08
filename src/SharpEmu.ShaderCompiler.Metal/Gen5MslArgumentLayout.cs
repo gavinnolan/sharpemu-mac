@@ -116,7 +116,8 @@ public sealed class Gen5MslArgumentLayout
             throw new InvalidOperationException($"binding kind {kind} is not an image class");
         }
 
-        var classPart = atomic ? "atomic" : resourceClass == ImageResourceClass.Storage ? "storage" : "sampled";
+        var classPart = atomic ? "atomic" : resourceClass == ImageResourceClass.Storage ? "storage" :
+            ImageDescriptorBinding.IsDepthCompare(kind) ? "sampled_compare" : "sampled";
         var numericPart = numericClass switch
         {
             ImageNumericClass.Uint => "uint",
