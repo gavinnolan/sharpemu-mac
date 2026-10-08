@@ -27,8 +27,16 @@ public sealed class HostShutdownSliceTests
     public void InvalidSentinelCannotPatchWritableReturnSlot() =>
         Check(true, false, true, false, sentinel: 0xFFFF);
 
+    [NativeX64Fact]
+    public void WorkerOrNestedContextRedirectDoesNotCertifyMainEntryReturn() =>
+        Check(true, false, true, true, mainContext: false);
+
+    [NativeX64Fact]
+    public void MatchingContextOutsideOriginalNativeCallCannotCertifyEntryReturn() =>
+        Check(true, false, true, true, entryInFlight: false);
+
     private static void Check(bool requested, bool sliceEnded, bool mapped, bool redirects,
-        bool active = true, ulong sentinel = 0x123456)
+        bool active = true, ulong sentinel = 0x123456, bool mainContext = true, bool entryInFlight = true)
     {
         var modules = new ModuleManager(); modules.Freeze();
         using var backend = new DirectExecutionBackend(modules);
@@ -45,10 +53,12 @@ public sealed class HostShutdownSliceTests
         {
             fields[0].SetValue(null, active ? backend : null);
             fields[1].SetValue(null, context);
+            type.GetField("_cpuContext", instances)!.SetValue(backend, mainContext ? context : new CpuContext(memory, Generation.Gen5));
             fields[2].SetValue(null, sentinel);
             fields[3].SetValue(null, ReturnSlotMemory.Address);
             fields[4].SetValue(null, sliceEnded);
             type.GetField("_forcedGuestExit", instances)!.SetValue(backend, requested);
+            type.GetField("_hostShutdownEntryInFlight", instances)!.SetValue(backend, entryInFlight ? 1 : 0);
             Marshal.WriteInt64(pack, 96, 0xABCDEF);
             // Global stop already makes this combined property true before
             // the current slice has actually redirected its return.
@@ -57,6 +67,7 @@ public sealed class HostShutdownSliceTests
             Assert.Equal(redirects, (bool)redirect.Invoke(backend, [pack])!);
             Assert.Equal(redirects ? (long)sentinel : 0xABCDEFL, Marshal.ReadInt64(pack, 96));
             Assert.Equal(redirects ? sentinel : 0UL, memory.Value);
+            Assert.Equal(redirects && mainContext && entryInFlight ? 1 : 0, (int)type.GetField("_hostShutdownEntryRedirected", instances)!.GetValue(backend)!);
             Assert.Equal(sliceEnded || redirects, (bool)fields[4].GetValue(null)!);
             if (redirects)
             {

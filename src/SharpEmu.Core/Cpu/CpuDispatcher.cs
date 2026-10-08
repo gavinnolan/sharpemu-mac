@@ -328,6 +328,14 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
             return nativeResult;
         }
 
+        // A confirmed forced host stop is not a missing backend implementation,
+        // nor a successful normal guest return. Keep its non-success native result.
+        if (_nativeCpuBackend is DirectExecutionBackend { HostShutdownCompleted: true })
+        {
+            debugHook?.OnFrameExit(debugFrame!, nativeResult);
+            return FailEarly(nativeResult, CpuExitReason.HostShutdownRequested);
+        }
+
         debugHook?.OnFrameExit(debugFrame!, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_IMPLEMENTED);
 
         var backendName = string.IsNullOrWhiteSpace(_nativeCpuBackend.BackendName)

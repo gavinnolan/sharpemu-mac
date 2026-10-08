@@ -1878,6 +1878,9 @@ public sealed partial class DirectExecutionBackend
 		}
 
 		*(ulong*)(argPackPtr + 96) = sentinel;
+		// A worker/nested callback redirect alone cannot certify the main entry's return.
+		if (Volatile.Read(ref _hostShutdownEntryInFlight) != 0 && ReferenceEquals(_activeCpuContext, _cpuContext))
+			Interlocked.Exchange(ref _hostShutdownEntryRedirected, 1);
 		ActiveForcedGuestExit = true;
 		return true;
 	}

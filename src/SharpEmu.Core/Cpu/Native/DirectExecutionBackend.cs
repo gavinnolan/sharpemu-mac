@@ -762,6 +762,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private string? _guestThreadYieldReason;
 
 	private volatile bool _forcedGuestExit;
+	private string? _hostShutdownReason;
+	private int _hostShutdownEntryRedirected;
+	private int _hostShutdownEntryInFlight;
+	internal bool HostShutdownCompleted { get; private set; }
 
 	private ulong _lastAvTraceRip;
 
@@ -1185,6 +1189,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		Volatile.Write(ref _globalUnresolvedReturnStub, (ulong)_unresolvedReturnStub);
 		result = OrbisGen2Result.ORBIS_GEN2_OK;
 		LastError = null;
+		_hostShutdownReason = null;
+		_hostShutdownEntryRedirected = 0;
+		HostShutdownCompleted = false;
 		InitializeRuntimeSymbolIndex(runtimeSymbols);
 		_recentImportTraceCount = 0;
 		_recentImportTraceWriteIndex = 0;
@@ -1269,6 +1276,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 		catch (Exception ex)
 		{
+			HostShutdownCompleted = false;
 			LastError = "Exception in TryExecute: " + ex.GetType().Name + ": " + ex.Message;
 			Console.Error.WriteLine("[LOADER][ERROR] " + LastError);
 			Console.Error.WriteLine("[LOADER][ERROR] Stack trace: " + ex.StackTrace);
@@ -1283,13 +1291,46 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 	}
 
+	private bool CompleteNativeEntryResult(ulong returnValue, bool nativeReturned, out OrbisGen2Result result)
+	{
+		HostShutdownCompleted = false;
+		if (ActiveForcedGuestExit)
+		{
+			result = OrbisGen2Result.ORBIS_GEN2_ERROR_CPU_TRAP;
+			if (nativeReturned && Volatile.Read(ref _hostShutdownEntryRedirected) != 0 &&
+				Volatile.Read(ref _hostShutdownReason) is { } reason && string.IsNullOrEmpty(LastError))
+			{
+				HostShutdownCompleted = true;
+				LastError = reason + " Native entry returned after the host-stop redirect; guest teardown is unverified.";
+				Console.Error.WriteLine("[LOADER][INFO] " + LastError);
+				return false;
+			}
+			if (string.IsNullOrEmpty(LastError)) LastError = "Guest execution was forced to unwind to host; cause not classified.";
+			Console.Error.WriteLine("[LOADER][ERROR] " + LastError);
+			return false;
+		}
+		if (returnValue == 0)
+		{
+			result = OrbisGen2Result.ORBIS_GEN2_OK;
+			LastError = null;
+			return true;
+		}
+		result = OrbisGen2Result.ORBIS_GEN2_ERROR_CPU_TRAP;
+		if (string.IsNullOrEmpty(LastError)) LastError = $"Guest entry point returned non-zero: {returnValue}";
+		Console.Error.WriteLine("[LOADER][ERROR] " + LastError);
+		return false;
+	}
+
 	internal void RequestHostShutdown(string reason)
 	{
-		Volatile.Write(ref _forcedGuestExit, true);
-		LastError = string.IsNullOrWhiteSpace(reason)
+		var requestedReason = string.IsNullOrWhiteSpace(reason)
 			? "Host shutdown requested."
 			: $"Host shutdown requested: {reason}";
-		Console.Error.WriteLine($"[LOADER][INFO] {LastError}");
+		// Callback scopes clear/restore LastError. A request is a separate cause,
+		// not proof of return, and must not replace a real execution failure.
+		Interlocked.CompareExchange(ref _hostShutdownReason, requestedReason, null);
+		Volatile.Write(ref _forcedGuestExit, true);
+		Console.Error.WriteLine($"[LOADER][INFO] {Volatile.Read(ref _hostShutdownReason)}");
 		// Process exit can bypass disposal; finish the retained trace before returning to the caller.
 		WriteGuestFlowTraces();
 	}
@@ -6394,9 +6435,16 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			StartStallWatchdog();
 			StartReadyThreadDispatcher();
 			ulong num6 = ulong.MaxValue;
+			var nativeReturned = false;
 			try
 			{
-				num6 = CallNativeEntry(ptr);
+				Volatile.Write(ref _hostShutdownEntryInFlight, 1);
+				try
+				{
+					num6 = CallNativeEntry(ptr);
+					nativeReturned = true;
+				}
+				finally { Volatile.Write(ref _hostShutdownEntryInFlight, 0); }
 				Console.Error.WriteLine($"[LOADER][INFO] Guest returned: {num6}");
 				// A host stop has already invalidated the session. Draining guest
 				// continuations here can re-enter a blocked HLE call after its owner
@@ -6414,37 +6462,18 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				Console.Error.WriteLine("  1. Invalid memory access in guest code");
 				Console.Error.WriteLine("  2. Unpatched import/TLS call");
 				Console.Error.WriteLine("  3. Stack corruption");
+				if (string.IsNullOrEmpty(LastError)) LastError = "Access Violation during execution: " + ex.Message;
+				nativeReturned = false;
 				num6 = ulong.MaxValue;
 			}
 			catch (Exception ex2)
 			{
 				Console.Error.WriteLine("[LOADER][ERROR] Exception during execution: " + ex2.GetType().Name + ": " + ex2.Message);
+				nativeReturned = false;
 				LastError = "Exception during execution: " + ex2.GetType().Name + ": " + ex2.Message;
 				num6 = ulong.MaxValue;
 			}
-			if (ActiveForcedGuestExit)
-			{
-				result = OrbisGen2Result.ORBIS_GEN2_ERROR_CPU_TRAP;
-				if (string.IsNullOrEmpty(LastError))
-				{
-					LastError = "Detected repeating import loop and forced guest unwind to host.";
-				}
-				Console.Error.WriteLine("[LOADER][ERROR] " + LastError);
-				return false;
-			}
-			if (num6 == 0)
-			{
-				result = OrbisGen2Result.ORBIS_GEN2_OK;
-				LastError = null;
-				return true;
-			}
-			result = OrbisGen2Result.ORBIS_GEN2_ERROR_CPU_TRAP;
-			if (string.IsNullOrEmpty(LastError))
-			{
-				LastError = $"Guest entry point returned non-zero: {num6}";
-			}
-			Console.Error.WriteLine("[LOADER][ERROR] " + LastError);
-			return false;
+			return CompleteNativeEntryResult(num6, nativeReturned, out result);
 		}
 		finally
 		{
