@@ -25,6 +25,23 @@ public sealed unsafe partial class HostMappedCopyLedger
         IsCurrent(backing, observation) && observation.OwnerIdentity is Capture capture &&
         capture.ReadWatch is { IsCurrent: true };
 
+
+    // No gate, allocation, native query or current-View reconstruction. The
+    // caller checks its exact prepared ticket state on both sides of this read.
+    private bool IsOriginalDisjointReadWatchCurrent(HostBackingObject backing,
+        CpuMappedCopyObservation reservationOriginal, HostManagedWriteIntervals writers,
+        ReadOnlySpan<HostManagedWriteIntervals.PhysicalRun> reservedRuns, CpuMappedCopyObservation watchedOriginal)
+    {
+        if (!IsCurrent(backing, reservationOriginal) || !IsCurrent(backing, watchedOriginal) ||
+            watchedOriginal.OwnerIdentity is not Capture capture || !ReferenceEquals(capture.Owner, this) ||
+            capture.ReadWatch is not { } watch || !watch.IsUnrevokedDuringPublication(writers)) return false;
+        foreach (var watched in watch.Runs)
+            foreach (var reserved in reservedRuns)
+                if (Overlaps(new(watched.Offset, watched.Count), new(reserved.Offset, reserved.Count))) return false;
+        return watch.IsUnrevokedDuringPublication(writers) && IsCurrent(backing, reservationOriginal) &&
+            IsCurrent(backing, watchedOriginal);
+    }
+
     public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation observation)
     {
         if (observation?.OwnerIdentity is Capture capture && ReferenceEquals(capture.Owner, this)) capture.ReleaseWatch();

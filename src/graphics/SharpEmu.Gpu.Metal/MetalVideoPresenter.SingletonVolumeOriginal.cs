@@ -180,13 +180,17 @@ internal static partial class MetalVideoPresenter
 
     // Content sampling is ordinary and always OUTSIDE the presenter/provider
     // gates. Original tokens/read/session are never refreshed after the copy.
-    private static void ValidateSingletonVolumeOriginalContent(StorageCpuSeedOrigin? origin)
+    private static void ValidateSingletonVolumeOriginalContent(StorageCpuSeedOrigin? origin) =>
+        ValidateSingletonVolumeOriginalContentWithReservation(origin, default);
+
+    private static void ValidateSingletonVolumeOriginalContentWithReservation(StorageCpuSeedOrigin? origin,
+        StorageWatchReservation reservation)
     {
         if (origin?.VolumeWatch is not { } watch) return;
         if (Monitor.IsEntered(_gate)) throw new InvalidOperationException("Singleton volume content validation requires a released presenter gate.");
         if (_closed || _guestWorkFailure is not null || !ReferenceEquals(_guestMemory, origin.Memory) ||
             _singletonVolumeOriginalCleanupFailure is not null || origin.Session != CurrentStorageCpuSeedSession ||
-            !watch.IsCurrent || !origin.Source.IsMappedCopyObservationCurrent(origin.Mapping) ||
+            !reservation.IsCurrent(watch) || !origin.Source.IsMappedCopyObservationCurrent(origin.Mapping) ||
             !GuestImageWriteTracker.IsReadSnapshotStable(watch.Read) || !origin.Observation.Observed ||
             !GuestImageWriteTracker.TryGetProtectedObservedContentToken(origin.Layout.Address, origin.Layout.PhysicalBytes, out var token) ||
             token != origin.Observation.Token)
@@ -204,9 +208,13 @@ internal static partial class MetalVideoPresenter
     }
 
     private static bool IsSingletonVolumeNativeOwnerCurrentLocked(GuestImage image, StorageCpuSeedOrigin origin) =>
+        IsSingletonVolumeNativeOwnerCurrentWithReservationLocked(image, origin, default);
+
+    private static bool IsSingletonVolumeNativeOwnerCurrentWithReservationLocked(GuestImage image,
+        StorageCpuSeedOrigin origin, StorageWatchReservation reservation) =>
         !_closed && _guestWorkFailure is null && _singletonVolumeOriginalCleanupFailure is null &&
         ReferenceEquals(_guestMemory, origin.Memory) &&
-        origin.VolumeWatch is { } watch && Volatile.Read(ref watch.State) == 1 && watch.IsCurrent &&
+        origin.VolumeWatch is { } watch && Volatile.Read(ref watch.State) == 1 && reservation.IsCurrent(watch) &&
         ReferenceEquals(watch.Image, image) && ReferenceEquals(image.StorageCpuOrigin, origin) &&
         image.Initialized && ReferenceEquals(image.StorageCpuLayout, origin.Layout) &&
         image.Texture != 0 && image.Texture == watch.Texture && image.ContentVersion == watch.Version &&
@@ -242,7 +250,7 @@ internal static partial class MetalVideoPresenter
         watch.Version = image.ContentVersion; // exact known queued producer, never new CPU provenance
     }
 
-    private static void ValidateSingletonVolumeOriginalCohortContent()
+    private static void ValidateSingletonVolumeOriginalCohortContent(StorageWatchReservation reservation = default)
     {
         StorageCpuSeedOrigin[] originals;
         lock (_gate)
@@ -251,7 +259,7 @@ internal static partial class MetalVideoPresenter
             originals = _guestImages.Values.Select(image => image.StorageCpuOrigin)
                 .Where(origin => origin?.VolumeWatch is not null).Cast<StorageCpuSeedOrigin>().ToArray();
         }
-        foreach (var original in originals) ValidateSingletonVolumeOriginalContent(original);
+        foreach (var original in originals) ValidateSingletonVolumeOriginalContentWithReservation(original, reservation);
     }
 
     internal static void ReleaseFailedPreparedSingletonVolumeOriginals(IReadOnlyList<GuestDrawTexture> textures,

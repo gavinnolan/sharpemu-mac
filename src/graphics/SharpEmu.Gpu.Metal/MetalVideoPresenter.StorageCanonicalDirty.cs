@@ -9,7 +9,7 @@ namespace SharpEmu.Gpu.Metal;
 internal static partial class MetalVideoPresenter
 {
     private static bool IsExactCanonicalDirtyOwnerLocked(ulong address, GuestImage image,
-        FiniteStorageDebt debt, StorageCpuSeedOrigin origin, int version, nint texture, out string reason)
+        FiniteStorageDebt debt, StorageCpuSeedOrigin origin, int version, nint texture, out string reason, StorageWatchReservation reservation = default)
     {
         reason = "presenter-owner-session-or-version";
         if (_closed || _guestWorkFailure is not null || _typedCpuSyncCleanupFailure is not null ||
@@ -27,7 +27,7 @@ internal static partial class MetalVideoPresenter
             debt.CanonicalDescriptor is not { } descriptor || !MetalBgra1024ArrayStorageAdmission.IsQualified(descriptor) ||
             !origin.Layout.Matches(descriptor) || image.Width != origin.Layout.Width || image.Height != origin.Layout.Height ||
             image.Format != origin.Layout.NativeFormat.Format) return false;
-        return IsFiniteStorageNativeCohortCurrentLocked(image, origin, out reason);
+        return InspectFiniteStorageNativeCohortLocked(image, origin, out reason, out _, captureOffender: false, reservation: reservation);
     }
 
     // Before the ordinary dirty consumer. Historical GpuWritten is never cleared;
@@ -56,19 +56,20 @@ internal static partial class MetalVideoPresenter
             var result = ((ICpuMappedPublicationSource)origin.Memory).TryPrepareMappedPublicationValidation(origin.Mapping, out validation);
             if (result != CpuMappedPublicationPreparationResult.Prepared || validation is null)
             { TraceFiniteStorageRuntime("dirty-refused", address, "original-physical-history-reservation", origin); return false; }
-            ValidateFiniteStorageOrigin(origin, debt.CanonicalDescriptor!);
+            var reservation = new StorageWatchReservation(validation);
+            ValidateFiniteStorageOrigin(origin, debt.CanonicalDescriptor!, reservation);
             if (!validation.IsCurrent)
             { TraceFiniteStorageRuntime("dirty-refused", address, "validation-revoked", origin); return false; }
             lock (_gate)
-                ownerCurrent = IsExactCanonicalDirtyOwnerLocked(address, image, debt, origin, version, texture, out reason);
+                ownerCurrent = IsExactCanonicalDirtyOwnerLocked(address, image, debt, origin, version, texture, out reason, reservation);
             if (!ownerCurrent) { TraceFiniteStorageRuntime("dirty-refused", address, reason, origin); return false; }
             consumed = GuestImageWriteTracker.TryConsumeDirtyAtProtectedToken(address, origin.Layout.PhysicalBytes, origin.Observation.Token);
             if (!consumed)
             { TraceFiniteStorageRuntime("dirty-refused", address, "original-protected-token-or-armed-owner", origin); return false; }
-            ValidateFiniteStorageOrigin(origin, debt.CanonicalDescriptor!);
+            ValidateFiniteStorageOrigin(origin, debt.CanonicalDescriptor!, reservation);
             if (!validation.IsCurrent) throw new InvalidOperationException("Canonical dirty acknowledgment mapping was revoked.");
             lock (_gate)
-                ownerCurrent = IsExactCanonicalDirtyOwnerLocked(address, image, debt, origin, version, texture, out reason);
+                ownerCurrent = IsExactCanonicalDirtyOwnerLocked(address, image, debt, origin, version, texture, out reason, reservation);
             if (!ownerCurrent) throw new InvalidOperationException("Canonical dirty acknowledgment exact native owner changed: " + reason);
             TraceFiniteStorageRuntime("dirty-acknowledged", address, "original-token-unchanged", origin);
             return true;
@@ -82,7 +83,17 @@ internal static partial class MetalVideoPresenter
         }
         finally
         {
-            try { validation?.Dispose(); }
+            try
+            {
+                validation?.Dispose();
+                if (primary is null && consumed)
+                {
+                    ValidateFiniteStorageOrigin(origin, debt.CanonicalDescriptor!);
+                    lock (_gate)
+                        ownerCurrent = IsExactCanonicalDirtyOwnerLocked(address, image, debt, origin, version, texture, out reason);
+                    if (!ownerCurrent) throw new InvalidOperationException("Canonical dirty ordinary post-release owner changed: " + reason);
+                }
+            }
             catch (Exception cleanup)
             {
                 if (consumed) GuestImageWriteTracker.RestoreDirtyAtProtectedOwner(address, origin.Observation.Token);

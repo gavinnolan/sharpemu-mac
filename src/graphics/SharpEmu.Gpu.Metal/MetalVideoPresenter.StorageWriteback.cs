@@ -197,9 +197,10 @@ internal static partial class MetalVideoPresenter
             throw new InvalidOperationException("Metal finite storage image has no exact successful canonical publication for its current GPU version.");
     }
 
-    private static void ValidateFiniteStorageOrigin(StorageCpuSeedOrigin origin, GuestDrawTexture descriptor)
+    private static void ValidateFiniteStorageOrigin(StorageCpuSeedOrigin origin, GuestDrawTexture descriptor,
+        StorageWatchReservation reservation = default)
     {
-        ValidateSingletonVolumeOriginalCohortContent(); // original content sampling outside all presenter gates
+        ValidateSingletonVolumeOriginalCohortContent(reservation); // original content sampling outside all presenter gates
         if (_closed || _guestWorkFailure is not null || !ReferenceEquals(_guestMemory, origin.Memory) ||
             origin.Session != Volatile.Read(ref _selectedStorageMipSession) ||
             origin.Mapping.FootprintAddress != descriptor.Address || origin.Mapping.FootprintByteCount != origin.Layout.PhysicalBytes ||
@@ -212,11 +213,11 @@ internal static partial class MetalVideoPresenter
             throw new InvalidOperationException("Metal finite storage publication original mapping/content/session observation changed.");
     }
 
-    private static void ValidateFiniteStorageReceipt(FiniteStorageWriteback receipt)
+    private static void ValidateFiniteStorageReceipt(FiniteStorageWriteback receipt, StorageWatchReservation reservation = default)
     {
         lock (_gate)
         {
-            RequireFiniteStorageNativeCohortLocked(receipt.Image, receipt.Origin);
+            RequireFiniteStorageNativeCohortLocked(receipt.Image, receipt.Origin, reservation);
             if (_closed || _guestWorkFailure is not null || receipt.Consumed || receipt.Published || receipt.Image.Texture == 0 ||
                 receipt.Image.Texture != receipt.Texture || receipt.Image.ContentVersion != receipt.Version ||
                 !ReferenceEquals(receipt.Image.StorageCpuOrigin, receipt.Origin) ||
@@ -224,7 +225,7 @@ internal static partial class MetalVideoPresenter
                 !receipt.Debt.Pending || receipt.Debt.Failed || receipt.Debt.Work != receipt.Work)
                 throw new InvalidOperationException("Metal finite storage publication exact owner/version receipt changed.");
         }
-        ValidateFiniteStorageOrigin(receipt.Origin, receipt.Descriptor);
+        ValidateFiniteStorageOrigin(receipt.Origin, receipt.Descriptor, reservation);
     }
 
     private static void EncodeFiniteStorageReadback(nint device, nint commandBuffer, FiniteStorageWriteback receipt)
@@ -300,7 +301,7 @@ internal static partial class MetalVideoPresenter
         Exception? primary = null;
         try
         {
-            ValidateFiniteStorageReceipt(receipt);
+            ValidateFiniteStorageReceipt(receipt, new StorageWatchReservation(transaction));
             var result = transaction.TryCommit();
             if (result != CpuMappedPublicationResult.Applied)
                 throw new InvalidOperationException($"Metal finite storage canonical publication was not fully applied: result={result}; GPU debt remains pending.");
@@ -315,12 +316,12 @@ internal static partial class MetalVideoPresenter
             var nextOrigin = receipt.Origin with { Mapping = mapping };
             TraceFiniteStorageRuntime("provider-applied", receipt.Descriptor.Address, "exact-own-mapping-continuity", receipt.Origin);
             _finiteStorageAfterAppliedForControl?.Invoke();
-            WithFiniteStorageValidation(receipt, nextOrigin, () =>
+            WithFiniteStorageValidation(receipt, nextOrigin, reservation =>
             {
                 lock (_gate)
                 {
                     ValidateFiniteStorageFinalizationContext(receipt.Origin);
-                    RequireFiniteStorageNativeCohortLocked(receipt.Image, nextOrigin);
+                    RequireFiniteStorageNativeCohortLocked(receipt.Image, nextOrigin, reservation);
                     if (receipt.Image.Texture != receipt.Texture || receipt.Image.ContentVersion != receipt.Version ||
                         !ReferenceEquals(receipt.Image.StorageCpuOrigin, receipt.Origin) ||
                         !_guestImages.TryGetValue(receipt.Descriptor.Address, out var current) || !ReferenceEquals(current, receipt.Image) ||
@@ -399,20 +400,21 @@ internal static partial class MetalVideoPresenter
     }
 
     private static void WithFiniteStorageValidation(FiniteStorageWriteback receipt,
-        StorageCpuSeedOrigin next, Action finalize)
+        StorageCpuSeedOrigin next, Action<StorageWatchReservation> finalize)
     {
         CpuMappedPublicationValidation? validation = null;
         Exception? primary = null;
         try
         {
             validation = PrepareFiniteStorageValidation(next);
-            ValidateFiniteStorageOrigin(next, receipt.Descriptor);
+            var reservation = new StorageWatchReservation(validation);
+            ValidateFiniteStorageOrigin(next, receipt.Descriptor, reservation);
             if (!validation.IsCurrent)
                 throw new InvalidOperationException("Finite canonical original writer/mapping reservation was revoked.");
-            finalize();
+            finalize(reservation);
             // Scalar tracker state may change independently of presenter state.
             // No ack is emitted if it changes while this reservation is held.
-            ValidateFiniteStorageOrigin(next, receipt.Descriptor);
+            ValidateFiniteStorageOrigin(next, receipt.Descriptor, reservation);
             if (!validation.IsCurrent)
                 throw new InvalidOperationException("Finite canonical original mapping changed at finalization.");
         }
@@ -424,7 +426,16 @@ internal static partial class MetalVideoPresenter
         }
         finally
         {
-            try { validation?.Dispose(); }
+            try
+            {
+                validation?.Dispose();
+                if (primary is null)
+                {
+                    // Back to ordinary currentness after the exact exclusion ends.
+                    ValidateFiniteStorageOrigin(next, receipt.Descriptor);
+                    lock (_gate) RequireFiniteStorageNativeCohortLocked(receipt.Image, next);
+                }
+            }
             catch (Exception cleanup)
             {
                 lock (_gate) { receipt.Debt.Failed = true; receipt.Debt.Pending = true; _textureSourceCleanupFailure ??= cleanup; }
@@ -442,12 +453,12 @@ internal static partial class MetalVideoPresenter
         var next = receipt.PublishedOrigin ?? throw new InvalidOperationException("Finite canonical work has no applied origin.");
         // Prepare and dispose outside _gate; the final token veto is likewise
         // outside it. Failure after metadata installation restores sticky debt.
-        WithFiniteStorageValidation(receipt, next, () =>
+        WithFiniteStorageValidation(receipt, next, reservation =>
         {
             lock (_gate)
             {
                 ValidateFiniteStorageFinalizationContext(receipt.Origin);
-                RequireFiniteStorageNativeCohortLocked(receipt.Image, next);
+                RequireFiniteStorageNativeCohortLocked(receipt.Image, next, reservation);
                 if (!receipt.Published || receipt.Consumed || !receipt.SuccessfullyCompleted ||
                     receipt.Debt.Failed || !receipt.Debt.Pending || receipt.Debt.Work != receipt.Work ||
                     receipt.Image.Texture != receipt.Texture || receipt.Image.ContentVersion != checked(receipt.Version + 1) ||

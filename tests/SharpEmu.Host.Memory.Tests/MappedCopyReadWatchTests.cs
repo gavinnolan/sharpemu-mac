@@ -10,7 +10,7 @@ using Xunit.Abstractions;
 namespace SharpEmu.Host.Memory.Tests;
 
 // Pinned managed bytes and synthetic ledger metadata, no kernel/native receipt.
-public sealed unsafe class MappedCopyReadWatchTests
+public sealed unsafe partial class MappedCopyReadWatchTests
 {
     public MappedCopyReadWatchTests(ITestOutputHelper output)
     {

@@ -139,6 +139,11 @@ public sealed unsafe partial class HostMappedCopyLedger
         internal override CpuMappedCopyObservation? SuccessfulObservation =>
             Volatile.Read(ref applied) == 1 ? successfulObservation : null;
 
+        internal override bool IsOriginalDisjointReadWatchCurrent(CpuMappedCopyObservation watchedOriginal) =>
+            Volatile.Read(ref state) == 0 && Volatile.Read(ref released) == 0 &&
+            owner.IsOriginalDisjointReadWatchCurrent(backing, Original, writers, physicalRuns, watchedOriginal) &&
+            Volatile.Read(ref state) == 0 && Volatile.Read(ref released) == 0;
+
         internal override CpuMappedPublicationResult TryCommit()
         {
             if (Monitor.IsEntered(owner.gate)) throw new InvalidOperationException("Publication bytes cannot run under the provider gate.");

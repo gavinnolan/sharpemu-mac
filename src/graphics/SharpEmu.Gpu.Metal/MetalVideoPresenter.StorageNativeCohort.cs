@@ -51,7 +51,7 @@ internal static partial class MetalVideoPresenter
 
     private static bool InspectFiniteStorageNativeCohortLocked(GuestImage image,
         StorageCpuSeedOrigin origin, out string reason, out FiniteStorageCohortOffender? offender,
-        bool captureOffender)
+        bool captureOffender, StorageWatchReservation reservation = default)
     {
         offender = null;
         reason = "sticky-native-cleanup-failure";
@@ -116,7 +116,7 @@ internal static partial class MetalVideoPresenter
             }
             reason = "other-image-original-volume-watch-or-version";
             if (other.TextureType == MtlTextureType3D &&
-                (otherOrigin!.VolumeWatch is null || !IsSingletonVolumeNativeOwnerCurrentLocked(other, otherOrigin)))
+                (otherOrigin!.VolumeWatch is null || !IsSingletonVolumeNativeOwnerCurrentWithReservationLocked(other, otherOrigin, reservation)))
             {
                 if (captureOffender && _rgbaStorageRuntimePublicationRequested)
                     offender = CaptureFiniteStorageCohortOffender(pair.Key, other, "original-volume-watch-or-version");
@@ -134,10 +134,11 @@ internal static partial class MetalVideoPresenter
         return true;
     }
 
-    private static void RequireFiniteStorageNativeCohortLocked(GuestImage image, StorageCpuSeedOrigin origin)
+    private static void RequireFiniteStorageNativeCohortLocked(GuestImage image, StorageCpuSeedOrigin origin,
+        StorageWatchReservation reservation = default)
     {
         if (!InspectFiniteStorageNativeCohortLocked(image, origin, out var reason, out var offender,
-            captureOffender: _rgbaStorageRuntimePublicationRequested))
+            captureOffender: _rgbaStorageRuntimePublicationRequested, reservation: reservation))
         {
             var message = "Metal finite canonical publication native cohort is unavailable: " + reason;
             if (offender is { } captured) throw new FiniteStorageCohortRefusal(message, captured);

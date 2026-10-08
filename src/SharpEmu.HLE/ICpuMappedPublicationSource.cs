@@ -57,12 +57,18 @@ public sealed class CpuMappedPublication : IDisposable
     /// writer history advances for this known own write. No content token,
     /// external/native writer coverage or mapping recapture is certified.</summary>
     public CpuMappedCopyObservation? SuccessfulObservation => transaction.SuccessfulObservation;
+    /// <summary>Scalar check of an ORIGINAL disjoint read watch while this exact
+    /// prepared ticket owns participating-writer exclusion. No new watch/content
+    /// observation is minted; committing or consumed tickets decline.</summary>
+    public bool IsOriginalDisjointReadWatchCurrent(CpuMappedCopyObservation original) =>
+        transaction.IsOriginalDisjointReadWatchCurrent(original);
     public void Dispose() => transaction.Cancel();
 }
 
 internal abstract class CpuMappedPublicationTransaction
 {
     internal abstract CpuMappedPublicationResult TryCommit();
+    internal virtual bool IsOriginalDisjointReadWatchCurrent(CpuMappedCopyObservation original) => false;
     internal abstract void Cancel();
     internal abstract CpuMappedCopyObservation? SuccessfulObservation { get; }
 }
@@ -75,10 +81,16 @@ public sealed class CpuMappedPublicationValidation : IDisposable
     private readonly CpuMappedPublicationValidationTransaction transaction;
     internal CpuMappedPublicationValidation(CpuMappedPublicationValidationTransaction transaction) => this.transaction = transaction;
     public bool IsCurrent => transaction.IsCurrent;
+    /// <summary>Scalar check of an ORIGINAL disjoint read watch while this exact
+    /// prepared ticket owns participating-writer exclusion. No new watch/content
+    /// observation is minted; committing or consumed tickets decline.</summary>
+    public bool IsOriginalDisjointReadWatchCurrent(CpuMappedCopyObservation original) =>
+        transaction.IsOriginalDisjointReadWatchCurrent(original);
     public void Dispose() => transaction.Cancel();
 }
 internal abstract class CpuMappedPublicationValidationTransaction
 {
     internal abstract bool IsCurrent { get; }
+    internal virtual bool IsOriginalDisjointReadWatchCurrent(CpuMappedCopyObservation original) => false;
     internal abstract void Cancel();
 }

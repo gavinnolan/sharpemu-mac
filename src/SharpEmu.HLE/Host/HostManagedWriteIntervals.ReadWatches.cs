@@ -13,6 +13,12 @@ internal sealed partial class HostManagedWriteIntervals
         internal bool IsCurrent => Volatile.Read(ref Released) == 0 && Volatile.Read(ref Revoked) == 0 &&
             Volatile.Read(ref owner.coverageIncomplete) == 0 && Volatile.Read(ref owner.admission) == 0 &&
             Volatile.Read(ref Revoked) == 0 && Volatile.Read(ref Released) == 0;
+        // Only the exact prepared provider ticket may use this scalar predicate.
+        // Ordinary reads and new-watch admission still require admission == 0.
+        internal bool IsUnrevokedDuringPublication(HostManagedWriteIntervals expected) =>
+            ReferenceEquals(owner, expected) && Volatile.Read(ref Released) == 0 && Volatile.Read(ref Revoked) == 0 &&
+            Volatile.Read(ref owner.coverageIncomplete) == 0 && Volatile.Read(ref owner.admission) == PublicationBit &&
+            Volatile.Read(ref Revoked) == 0 && Volatile.Read(ref Released) == 0;
         internal void Release()
         {
             if (Interlocked.Exchange(ref Released, 1) != 0) return;

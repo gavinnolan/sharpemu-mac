@@ -19,7 +19,7 @@ public sealed unsafe partial class HostMappedCopyLedger
         var writers = backing.ManagedWrites;
         if (writers is null) return CpuMappedPublicationPreparationResult.Rejected;
         var physical = new HostManagedWriteIntervals.PhysicalRun[capture.States.Length];
-        var transaction = new Validation(this, backing, original, writers);
+        var transaction = new Validation(this, backing, original, writers, physical);
         var wrapper = new CpuMappedPublicationValidation(transaction);
         if (!backing.TryEnterAccess()) return CpuMappedPublicationPreparationResult.Rejected;
         var installed = false;
@@ -57,6 +57,7 @@ public sealed unsafe partial class HostMappedCopyLedger
                 if (cursor != end || count == 0) return CpuMappedPublicationPreparationResult.Rejected;
                 reserved = writers.TryReservePublication(Volatile.Read(ref capture.WriterRevision), physical.AsSpan(0, count));
                 if (!reserved || !IsCurrent(backing, original)) return CpuMappedPublicationPreparationResult.Rejected;
+                transaction.PhysicalCount = count; // exact resolved original prefix, never trailing entries
                 transaction.Next = validations; validations = transaction; validationCount++;
                 installed = true; validation = wrapper;
                 return CpuMappedPublicationPreparationResult.Prepared;
@@ -73,11 +74,17 @@ public sealed unsafe partial class HostMappedCopyLedger
     }
 
     private sealed class Validation(HostMappedCopyLedger owner, HostBackingObject backing,
-        CpuMappedCopyObservation original, HostManagedWriteIntervals writers) : CpuMappedPublicationValidationTransaction
+        CpuMappedCopyObservation original, HostManagedWriteIntervals writers,
+        HostManagedWriteIntervals.PhysicalRun[] physical) : CpuMappedPublicationValidationTransaction
     {
         internal readonly CpuMappedCopyObservation Original = original;
         internal Validation? Next;
         private int consumed;
+        internal int PhysicalCount; // installed once before publication under provider gate
+        internal override bool IsOriginalDisjointReadWatchCurrent(CpuMappedCopyObservation watchedOriginal) =>
+            Volatile.Read(ref consumed) == 0 && PhysicalCount > 0 &&
+            owner.IsOriginalDisjointReadWatchCurrent(backing, Original, writers,
+                physical.AsSpan(0, PhysicalCount), watchedOriginal) && Volatile.Read(ref consumed) == 0;
         internal override bool IsCurrent
         {
             get
