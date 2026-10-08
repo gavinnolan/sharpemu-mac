@@ -15,7 +15,7 @@ namespace SharpEmu.Host.MacOS;
 /// "reserve-only" regions are mapped as committed memory directly and
 /// commit requests become protection changes.
 /// </summary>
-internal sealed unsafe class MacHostMemory : IHostMemoryRaw
+internal sealed unsafe partial class MacHostMemory : IHostMemoryRaw
 {
     private const uint MEM_COMMIT = 0x1000;
     private const uint MEM_RESERVE = 0x2000;
@@ -158,7 +158,7 @@ internal sealed unsafe class MacHostMemory : IHostMemoryRaw
         _ => HostPageProtection.NoAccess,
     };
 
-    private static class Darwin
+    private static partial class Darwin
     {
         private const int PROT_NONE = 0x0;
         private const int PROT_READ = 0x1;
@@ -183,13 +183,14 @@ internal sealed unsafe class MacHostMemory : IHostMemoryRaw
         private static readonly object Gate = new();
         private static readonly SortedList<ulong, Region> Regions = new();
 
-        private sealed class Region
+        public sealed class Region
         {
             public ulong Base;
             public ulong Size;
             public uint DefaultProtect;
             public Dictionary<ulong, uint>? PageProtects;
             public bool UsesMachAllocation;
+            public OwnedAnonymousAllocation? ExclusiveOwner;
 
             public ulong End => Base + Size;
 
@@ -215,6 +216,10 @@ internal sealed unsafe class MacHostMemory : IHostMemoryRaw
 
             lock (Gate)
             {
+                // The dormant controlled adapter owns full native extents.
+                // Legacy desired-address/commit/fixed-fallback routes cannot bypass it.
+                if ((allocationType & MEM_RESERVE) != 0 && NewAnonymousPlacementExcludedLocked()) return null;
+                if (address != null && OverlapsOwnedEffectLocked((ulong)address, alignedSize)) return null;
                 if (allocationType == MEM_COMMIT && address != null &&
                     TryFindRegionLocked((ulong)address, out var existing))
                 {
@@ -348,6 +353,7 @@ internal sealed unsafe class MacHostMemory : IHostMemoryRaw
                     return false;
                 }
 
+                if (OverlapsOwnedEffectLocked(region.Base, region.Size)) return false;
                 var released = region.UsesMachAllocation
                     ? mach_vm_deallocate(mach_task_self(), (ulong)address, region.Size) == KERN_SUCCESS
                     : munmap((nint)address, (nuint)region.Size) == 0;
@@ -374,6 +380,7 @@ internal sealed unsafe class MacHostMemory : IHostMemoryRaw
 
             lock (Gate)
             {
+                if (end <= start || OverlapsOwnedEffectLocked(start, end - start)) return false;
                 if (!TryFindRegionLocked(start, out var region) || end > region.End)
                 {
                     return false;
@@ -397,12 +404,24 @@ internal sealed unsafe class MacHostMemory : IHostMemoryRaw
 
             lock (Gate)
             {
+                // Cookie survives a failed setup even without a logical Region.
+                if (ContainsUnknownOwnedPageLocked(pageAddress)) return 0;
                 if (TryFindRegionLocked(pageAddress, out var region))
                 {
                     // Win32 VirtualQuery reports a run of pages sharing the
                     // same protection, so stop the run where it changes.
                     // Preserve the legacy sparse run query: huge guest apertures
                     // must not scan every logical page when overrides are sparse.
+                    if (region.ExclusiveOwner is { } uncertain && uncertain.IsUnknownAt(pageAddress)) return 0;
+                    if (region.ExclusiveOwner is { } owner && !owner.IsMappedAt(pageAddress))
+                    {
+                        info.BaseAddress = pageAddress;
+                        info.RegionSize = owner.UnmappedRunEnd(pageAddress) - pageAddress;
+                        info.State = MEM_FREE_STATE;
+                        info.AllocationProtect = PAGE_NOACCESS;
+                        info.Protect = PAGE_NOACCESS;
+                        return (nuint)sizeof(HostMemory.BasicInfo);
+                    }
                     var pageProtects = region.PageProtects;
                     uint protect;
                     ulong runEnd;
@@ -416,7 +435,8 @@ internal sealed unsafe class MacHostMemory : IHostMemoryRaw
                         runEnd = pageAddress + PageSize;
                         while (runEnd < region.End &&
                             pageProtects.TryGetValue(runEnd, out var nextProtect) &&
-                            nextProtect == protect)
+                            nextProtect == protect &&
+                            (region.ExclusiveOwner is null || region.ExclusiveOwner.IsMappedAt(runEnd) && !region.ExclusiveOwner.IsUnknownAt(runEnd)))
                         {
                             runEnd += PageSize;
                         }
