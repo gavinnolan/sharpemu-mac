@@ -38,7 +38,61 @@ hashes, but that is not a clean game-shutdown result. No owned process group
 or shared game lock remained. An unrelated emulator process was present and
 was left untouched; this run makes no performance claim.
 
-## Next entry checks
+## Current entry blockers after the latest signed replays
+
+The latest observations below supersede the older next-step list. Dreaming
+Sarah remains the only title with prior verified directional control; none of
+these runs accepts an additional title.
+
+- **Octopath and Silent Hill:** isolated `9e3adfcb` passed 132 managed cases
+  and two real native GPU cases on each host architecture. Its original volume
+  snapshots and disjoint publication controls passed. Signed same-bundle game
+  replays still exited 134 at 37 and 24 seconds respectively. Both identify
+  the same display image at `0xEFC0000000`, 3840-by-2160 RGBA8, without original
+  physical ownership provenance. The next source change captures that provenance
+  at the actual initial display copy, with no lookup-time reconstruction.
+- **Demon's Souls:** the same signed `9e3adfcb` bundle remained alive for 60
+  seconds but had zero guest frames and a black capture. Shutdown exposed a
+  prior worker failure: selected storage mip copy changed during all three
+  attempts at `0x7092C80000`. Process survival does not establish progression.
+- **Superliminal:** `f4ebd249` passed the original six-face CPU depth-cube
+  snapshot and real translated comparison controls on both host architectures.
+  Its 150-second game replay still failed because the sampled cube overlaps an
+  existing native depth producer. The successor must retain each original
+  selected depth face and its ordered native producer; it cannot substitute a
+  CPU copy over that producer. Cold, previously untracked faces must retain
+  independent original content tokens.
+- **Void Terrarium:** the 600-second entry run and a separate 300-second shader
+  diagnostic run did not verify control. The actual rejected shader contains
+  LDS operations, six barriers, GS allocation and primitive export target 20.
+  It needs native mesh translation. Transport candidate `d2639278` passed real
+  mesh rasterization on both host runtimes, including both triangles and every
+  pixel of the complete test target. Guest translation and gameplay remain pending.
+- **Quake:** the bounded 256 MiB texture candidate passed the earlier budget
+  blocker. A further 300-second run used the correct Options mapping (Tab) and
+  movement inputs but did not establish player control; captures remain corrupt.
+  Shutdown required the harness's owned KILL after its TERM grace period. An
+  initial wrapper cleanup assertion saw a brief owned zombie; a separate fresh
+  check found the group absent. The original rejection is retained.
+- **Poppy Playtime:** actual ordinary-provider testing exposed Rosetta's
+  4 KiB placement inside the measured 16 KiB kernel page. Final candidate
+  `d9d1dc8e` retains a doubled original Mach allocation and protects a contained
+  aligned page. Its 24 managed controls passed on each host runtime, and three
+  fresh x64 native workers passed actual permission restore, SFENCE, lifetime
+  drain, full 16 KiB byte checks and real 128/129 receipt capacity. Genuine
+  guest signal continuation and gameplay remain pending; these constructed
+  ordinary frame inputs do not qualify signal activation.
+- **Oregon Trail:** sampled-image ownership remains an entry blocker.
+
+Current immutable evidence:
+`artifacts/validation/all-games-20261008/octopath-volume-publication-watch-9e3adfcb-qualified`,
+`artifacts/validation/all-games-20261008/depth-cube-entry-f4ebd249-qualified`,
+`artifacts/validation/void-skipped-shader-400e5c64`,
+`artifacts/validation/native-mesh-entry-d2639278`,
+`artifacts/validation/quake-entry-decd4910`, and
+`artifacts/validation/all-games-20261008/poppy-native-permission-receipt-d9d1dc8e-qualification`.
+
+## Earlier entry checks (superseded by the observations above)
 
 - Superliminal: qualify isolated `aa38ff5a`, which separates selected color
   mip 0 from the disjoint storage view that currently causes startup failure,
