@@ -125,7 +125,7 @@ internal static class MacOwnedNativeWorker
     {
         var release = owner.Prepare("TryPreparePageRelease", [1, 1, null]); owner.Execute(release);
         Receipt(release, "AppliedWholeScope", 1, 1);
-        Assert.False(IsMapped(owner.At(1))); Assert.Equal(4u, NativePageProtection.Query(owner.At(0))); Assert.Equal(4u, NativePageProtection.Query(owner.At(2)));
+        ObserveReleasedPage(owner, 1); owner.VerifySurvivor(0); owner.VerifySurvivor(2);
         Assert.True(HostMemoryAuthority.Current.Query(owner.At(1), out var info)); Assert.Equal(HostRegionState.Free, info.State);
         var generation = HostMemory.MappingGeneration;
         Assert.Equal(0ul, HostMemoryAuthority.Current.AllocateRaw(0, owner.Page, 0x3000, 4));
@@ -134,7 +134,6 @@ internal static class MacOwnedNativeWorker
         object?[] attempt = [1, false, 4u, null, null];
         Assert.False((bool)Factory().Invoke(HostMemoryAuthority.Current, attempt)!); Assert.Null(attempt[3]);
         owner.Release(); // exactly two per-page syscalls, never old full extent
-        Assert.False(IsMapped(owner.At(0))); Assert.False(IsMapped(owner.At(2)));
     }
 
     private static void Bookkeeping(Owner owner, bool release)
@@ -147,12 +146,21 @@ internal static class MacOwnedNativeWorker
         var wrapped = Assert.Throws<TargetInvocationException>(() => Call(operation, "ExecuteOnce", [])); Assert.Same(failure, wrapped.InnerException);
         Receipt(operation, "Unknown", 1, 1); Assert.Same(failure, Get<object>(Get<object>(operation, "Result"), "BookkeepingFailure"));
         Assert.Equal("Quarantined", Get<object>(owner.Cookie, "State").ToString()); Assert.Null(Get<object?>(owner.Cookie, "CurrentDomain"));
-        if (release) { Assert.False(IsMapped(owner.At(1))); Assert.Equal(4u, NativePageProtection.Query(owner.At(0))); Assert.Equal(4u, NativePageProtection.Query(owner.At(2))); }
+        if (release) { ObserveReleasedPage(owner, 1); owner.VerifySurvivor(0); owner.VerifySurvivor(2); }
         else { Assert.Equal(2u, NativePageProtection.Query(owner.At(0))); Assert.Equal(4u, NativePageProtection.Query(owner.At(1))); }
         Assert.False((bool)Call(operation, "ExecuteOnce", [])!);
     }
 
     private static MethodInfo Factory() => HostMemoryAuthority.Current.GetType().GetMethod("TryCreateOwnedAnonymousControl", BindingFlags.Instance | BindingFlags.NonPublic)!;
+    private static void ObserveReleasedPage(Owner owner, int page)
+    {
+        var mapped = (bool[])owner.Cookie.GetType().GetField("_mapped", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(owner.Cookie)!;
+        Assert.False(mapped[page]);
+        // Successful munmap relinquishes this address. Runtime/JIT may immediately
+        // reuse it: this read-only later observation is not a continuing vacancy
+        // receipt. Never dereference or reclaim the removed page.
+        Console.WriteLine($"released-page-observation page={page} mapped_after_release={IsMapped(owner.At(page))}; observation-not-owned-vacancy");
+    }
     private static object? Call(object target, string method, object?[] args) => target.GetType().GetMethod(method, BindingFlags.Public | BindingFlags.Instance)!.Invoke(target, args);
     private static T Get<T>(object target, string name) => (T)target.GetType().GetProperty(name)!.GetValue(target)!;
     private static void Receipt(object operation, string outcome, int invocations, int successes)
@@ -170,12 +178,19 @@ internal static class MacOwnedNativeWorker
         internal ulong Page => Get<ulong>(Cookie, "NativePageSize");
         internal ulong At(int page) => Address + (ulong)page * Page;
         internal HostRecoveryOwner Domain => Get<HostRecoveryOwner>(Cookie, "CurrentDomain");
-        internal Owner(bool reserve)
+        internal unsafe Owner(bool reserve)
         {
             object?[] args = [3, reserve, reserve ? 1u : 4u, null, null];
             Assert.True((bool)Factory().Invoke(HostMemoryAuthority.Current, args)!); Cookie = args[3]!;
             Assert.Equal("AppliedWholeScope", Get<object>(args[4]!, "Outcome").ToString()); Assert.Equal((ulong)Environment.SystemPageSize, Page);
             Assert.True(IsMapped(Address)); // warm exact readback path before deliberate holes
+            if (!reserve)
+                for (var page = 0; page < 3; page++) { ((byte*)At(page))[0] = (byte)(0x61 + page); ((byte*)At(page))[Page - 1] = (byte)(0xA1 + page); }
+        }
+        internal unsafe void VerifySurvivor(int page)
+        {
+            Assert.Equal(4u, NativePageProtection.Query(At(page)));
+            Assert.Equal((byte)(0x61 + page), ((byte*)At(page))[0]); Assert.Equal((byte)(0xA1 + page), ((byte*)At(page))[Page - 1]);
         }
         internal object Prepare(string method, object?[] args) { Assert.True((bool)Call(Cookie, method, args)!); return args[^1]!; }
         internal void Execute(object operation)
@@ -186,10 +201,16 @@ internal static class MacOwnedNativeWorker
         internal void Release()
         {
             if (Get<object>(Cookie, "State").ToString() == "Released") return;
-            var mappedBefore = (bool[])Cookie.GetType().GetField("_mapped", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(Cookie)!;
+            var mappedBefore = ((bool[])Cookie.GetType().GetField("_mapped", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(Cookie)!).ToArray();
             var remaining = mappedBefore.Count(static mapped => mapped);
             var operation = Prepare("TryPrepareRelease", [null]); Execute(operation);
             Receipt(operation, "AppliedWholeScope", remaining, remaining);
+            var records = Get<System.Collections.IEnumerable>(Get<object>(operation, "Result"), "Pages").Cast<object>().ToArray();
+            for (var page = 0; page < mappedBefore.Length; page++)
+            {
+                Assert.Equal(At(page), Get<ulong>(records[page], "Address")); Assert.Equal(Page, Get<ulong>(records[page], "ByteSize"));
+                Assert.Equal(mappedBefore[page] ? "Applied" : "AlreadyReleased", Get<object>(records[page], "Outcome").ToString());
+            }
             // Native per-page release skips only positively recorded removed pages.
             var mapped = (bool[])Cookie.GetType().GetField("_mapped", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(Cookie)!;
             Assert.All(mapped, value => Assert.False(value)); Assert.Equal("Released", Get<object>(Cookie, "State").ToString());
@@ -212,7 +233,7 @@ internal static class MacOwnedNativeWorker
 [SupportedOSPlatform("macos")]
 public sealed class MacOwnedNativeOperationTests(ITestOutputHelper output)
 {
-    [Theory]
+    [OwnedNativeTheory]
     [InlineData("reserve-commit")]
     [InlineData("exclusion")]
     [InlineData("held-pin")]
@@ -243,6 +264,15 @@ public sealed class MacOwnedNativeOperationTests(ITestOutputHelper output)
         {
             if (!worker.HasExited) { worker.Kill(entireProcessTree: true); await worker.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)); }
         }
+    }
+}
+
+internal sealed class OwnedNativeTheoryAttribute : TheoryAttribute
+{
+    public OwnedNativeTheoryAttribute()
+    {
+        if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_OWNED_NATIVE") != "1")
+            Skip = "Native owned-operation workers require separately authorized SHARPEMU_TEST_REQUIRE_OWNED_NATIVE=1.";
     }
 }
 #endif

@@ -79,6 +79,15 @@ an mmap allocation failure, native munmap failure, setup rollback failure or
 unknown native-call outcome. They cannot establish alias/view participation,
 trap ordering, write-permission authorization or callback recovery safety.
 
+Successful unmap ends ownership of the released page, rather than reserving a
+continuing hole. Subsequent kernel occupancy is recorded as an observation:
+the runtime may already have reused that address. The fixture never dereferences
+or reclaims it; remaining owned pages retain their seeded bytes and permissions,
+and exact cleanup receipts mark the removed page AlreadyReleased. The initial
+ARM checkpoint passed 7/9 and failed two vacancy assertions; that evidence is
+preserved separately and does not qualify the corrected fixture. Ordinary
+non-opt-in discovery reports declared skips for these native cases.
+
 The initial fixture checkpoint is build-only. Native outcomes remain
 unqualified until the frozen source is reviewed and separately executed on
 the 4KiB Rosetta and 16KiB native ARM CLRs. The dormant factory and production
