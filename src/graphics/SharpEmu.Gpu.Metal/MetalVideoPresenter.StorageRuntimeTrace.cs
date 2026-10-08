@@ -40,6 +40,7 @@ internal static partial class MetalVideoPresenter
     }
 
     private static int _finiteStorageRuntimeTraceRows;
+    private static int _finiteStoragePostReleaseRefusalTraceRows;
     private static long _finiteStorageRuntimeProducers, _finiteStorageRuntimeApplied, _finiteStorageRuntimeCanonical;
 
     private static void TraceFiniteStorageDispatchRefusal(ComputeGuestDispatch dispatch, Exception failure)
@@ -67,8 +68,10 @@ internal static partial class MetalVideoPresenter
             if (stage == "producer-retained") Interlocked.Increment(ref _finiteStorageRuntimeProducers);
             else if (stage == "provider-applied") Interlocked.Increment(ref _finiteStorageRuntimeApplied);
             else if (stage == "canonical-completed") Interlocked.Increment(ref _finiteStorageRuntimeCanonical);
-            var rows = Volatile.Read(ref _finiteStorageRuntimeTraceRows);
-            if (rows >= 64 || Interlocked.CompareExchange(ref _finiteStorageRuntimeTraceRows, rows + 1, rows) != rows) return;
+            ref var budget = ref _finiteStorageRuntimeTraceRows;
+            if (stage == "dirty-post-release-refused") budget = ref _finiteStoragePostReleaseRefusalTraceRows;
+            var rows = Volatile.Read(ref budget);
+            if (rows >= 64 || Interlocked.CompareExchange(ref budget, rows + 1, rows) != rows) return;
             var original = origin?.Observation.Token;
             var current = default(GuestImageWriteTracker.ContentToken);
             var observed = origin is not null && GuestImageWriteTracker.TryGetProtectedObservedContentToken(
