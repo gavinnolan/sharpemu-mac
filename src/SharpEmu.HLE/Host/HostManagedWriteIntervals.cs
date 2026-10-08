@@ -19,6 +19,18 @@ internal sealed partial class HostManagedWriteIntervals
     private long admission;
     private long nextIdentity, active, begun, completed, aborted;
     private int coverageIncomplete;
+    private enum CoverageLoss { InvalidPhysicalBounds = 1, IdentityExhausted, BegunCounterExhausted,
+        ActiveSlotCapacity, CompletionCounterExhausted, PublicationIdentityExhausted, PublicationQuarantined,
+        InvalidHistoryRecord }
+    private int firstCoverageLoss;
+    internal int FirstCoverageLoss => Volatile.Read(ref firstCoverageLoss);
+    private void LoseCoverage(CoverageLoss reason)
+    {
+        // Preserve the first cause before publishing the existing sticky veto.
+        // No allocation, callback or logging in ordinary write/completion gates.
+        Interlocked.CompareExchange(ref firstCoverageLoss, (int)reason, 0);
+        Interlocked.Exchange(ref coverageIncomplete, 1);
+    }
 
     internal HostManagedWriteIntervals(HostBackingObject backing) => this.backing = backing;
     internal readonly record struct Token(HostManagedWriteIntervals? Owner, int Slot, long Identity);
@@ -32,10 +44,10 @@ internal sealed partial class HostManagedWriteIntervals
         if ((admitted & PublicationBit) != 0 || admitted >= PublicationBit)
         { Interlocked.Decrement(ref admission); return new(this, -1, 0); }
         if (offset > backing.Size || count > backing.Size - offset)
-        { Interlocked.Exchange(ref coverageIncomplete, 1); Interlocked.Decrement(ref admission); return default; }
+        { LoseCoverage(CoverageLoss.InvalidPhysicalBounds); Interlocked.Decrement(ref admission); return default; }
         if (Volatile.Read(ref coverageIncomplete) != 0) { Interlocked.Decrement(ref admission); return default; }
         var identity = Interlocked.Increment(ref nextIdentity);
-        if (identity <= 0 || identity == long.MaxValue) { Interlocked.Exchange(ref coverageIncomplete, 1); Interlocked.Decrement(ref admission); return default; }
+        if (identity <= 0 || identity == long.MaxValue) { LoseCoverage(CoverageLoss.IdentityExhausted); Interlocked.Decrement(ref admission); return default; }
         var first = (int)((ulong)identity % Capacity);
         for (var visited = 0; visited < Capacity; visited++)
         {
@@ -48,12 +60,12 @@ internal sealed partial class HostManagedWriteIntervals
             {
                 InvalidateReadWatches(offset, count); // BEFORE any participating destination bytes.
                 Interlocked.Increment(ref active);
-                if (Interlocked.Increment(ref begun) <= 0) Interlocked.Exchange(ref coverageIncomplete, 1);
+                if (Interlocked.Increment(ref begun) <= 0) LoseCoverage(CoverageLoss.BegunCounterExhausted);
             }
             Volatile.Write(ref slot.State, identity);
             return new(this, index, identity);
         }
-        Interlocked.Exchange(ref coverageIncomplete, 1);
+        LoseCoverage(CoverageLoss.ActiveSlotCapacity);
         Interlocked.Decrement(ref admission);
         return default; // preserve legacy write, explicitly lose bookkeeping coverage
     }
@@ -78,7 +90,7 @@ internal sealed partial class HostManagedWriteIntervals
         {
             Interlocked.Decrement(ref active);
             var total = succeeded ? Interlocked.Increment(ref completed) : Interlocked.Increment(ref aborted);
-            if (total <= 0) Interlocked.Exchange(ref coverageIncomplete, 1);
+            if (total <= 0) LoseCoverage(CoverageLoss.CompletionCounterExhausted);
         }
         Interlocked.Decrement(ref admission);
         return true;
@@ -132,12 +144,12 @@ internal sealed partial class HostManagedWriteIntervals
     {
         foreach (var run in runs) InvalidateReadWatches(run.Offset, run.Count, unpublishedSuccessor: unpublishedSuccessor);
         var revision = Interlocked.Increment(ref nextIdentity);
-        if (revision <= 0 || revision == long.MaxValue) Interlocked.Exchange(ref coverageIncomplete, 1);
+        if (revision <= 0 || revision == long.MaxValue) LoseCoverage(CoverageLoss.PublicationIdentityExhausted);
         else RecordHistory(revision, runs, false);
         return revision;
     }
     internal void ReleasePublication() => Interlocked.Add(ref admission, -PublicationBit);
-    internal void QuarantinePublication() => Interlocked.Exchange(ref coverageIncomplete, 1);
+    internal void QuarantinePublication() => LoseCoverage(CoverageLoss.PublicationQuarantined);
 
     // Test-only ordinary observation. Never used for publication, permission,
     // GPU/fault admission or content-currentness. Concurrent snapshot is fuzzy:

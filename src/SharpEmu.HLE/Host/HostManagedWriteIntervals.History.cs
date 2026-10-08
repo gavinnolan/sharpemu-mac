@@ -19,6 +19,8 @@ internal sealed partial class HostManagedWriteIntervals
     }
     // Created only at ordinary enrollment, never in a write/End hot path.
     private readonly HistoryEntry[] history = new HistoryEntry[HistoryCapacity];
+    private long historyRecordLosses;
+    internal long HistoryRecordLosses => Volatile.Read(ref historyRecordLosses);
 
     private void RecordCompletedHistory(long identity, ulong offset, ulong count, bool operation, bool succeeded)
     {
@@ -37,13 +39,25 @@ internal sealed partial class HostManagedWriteIntervals
 
     private void RecordHistory(long identity, ReadOnlySpan<PhysicalRun> runs, bool unknown)
     {
+        if (identity <= 0 || runs.Length > HostMappedCopyLedger.MaximumPublicationRuns)
+        { LoseCoverage(CoverageLoss.InvalidHistoryRecord); return; }
         ref var entry = ref history[(int)((ulong)identity % HistoryCapacity)];
         var previous = Volatile.Read(ref entry.State);
         // One bounded CAS, never spin or overwrite an in-progress/newer record.
-        // A delayed completion that has fallen out of the ring loses coverage.
-        if (identity <= 0 || previous < 0 || previous >= identity || runs.Length > HostMappedCopyLedger.MaximumPublicationRuns ||
+        // A delayed completion may outlive its bounded history slot, including
+        // a successful operation envelope around many precisely tracked chunks.
+        // Missing history still rejects unwatched publication. Physical watches
+        // were revoked BEFORE overlapping bytes (or ALL on unknown completion)
+        // and admission stays held until End; their coverage is not lost here.
+        if (previous < 0 || previous >= identity ||
             Interlocked.CompareExchange(ref entry.State, -identity, previous) != previous)
-        { Interlocked.Exchange(ref coverageIncomplete, 1); return; }
+        {
+            // Failure-only diagnostic, never a revision or admission certificate.
+            // Saturate with one bounded CAS; an approximate concurrent count is enough.
+            var losses = Volatile.Read(ref historyRecordLosses);
+            if (losses < long.MaxValue) Interlocked.CompareExchange(ref historyRecordLosses, losses + 1, losses);
+            return;
+        }
         entry.Count = runs.Length; entry.Unknown = unknown;
         for (var index = 0; index < runs.Length; index++) entry.Runs[index] = runs[index];
         Volatile.Write(ref entry.State, identity);

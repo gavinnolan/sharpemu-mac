@@ -312,7 +312,8 @@ public sealed unsafe partial class HostMappedCopyLedger
             if (CpuMappedCopyDiagnostics.Enabled)
                 target = new("ledger", reason, result, footprintAddress, footprintByteCount, sourceAddress,
                     copyBytes, withWriteWatch, backing.Identity, cursor, count,
-                    view?.Address ?? 0, view?.Size ?? 0, view?.Backing.Identity ?? 0, enrollmentAdmission);
+                    view?.Address ?? 0, view?.Size ?? 0, view?.Backing.Identity ?? 0, enrollmentAdmission,
+                    backing.ManagedWrites?.FirstCoverageLoss ?? 0, backing.ManagedWrites?.HistoryRecordLosses ?? 0);
             return result;
         }
     }
