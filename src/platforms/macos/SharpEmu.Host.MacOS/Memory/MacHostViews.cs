@@ -48,7 +48,7 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory
     {
         backing = null;
         failure = HostViewFailure.BackingUnavailable;
-        if (size == 0)
+        if (size == 0 || size > long.MaxValue || size > ulong.MaxValue - (PageSize - 1))
         {
             return false;
         }
@@ -74,7 +74,23 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory
             return false;
         }
 
-        backing = new HostBackingObject((ulong)alias, size, ReleaseBackingObject) { Descriptor = descriptor };
+        try
+        {
+            backing = new HostBackingObject((ulong)alias, size, PageSize, ReleaseOwnedBackingObject) { Descriptor = descriptor };
+        }
+        catch (Exception error)
+        {
+            // Only this successful new alias is owned here; no guest view exists.
+            var unmap = munmap(alias, (nuint)size);
+            var unmapError = unmap == 0 ? 0 : Marshal.GetLastPInvokeError();
+            // No descriptor cleanup after uncertain alias unmap. Never repeat
+            // failed effects; retain exact attempted obligations in startup error.
+            var closed = unmap == 0 ? close(descriptor) : -1;
+            var closeError = unmap == 0 && closed != 0 ? Marshal.GetLastPInvokeError() : 0;
+            if (unmap != 0 || closed != 0)
+                error.Data["BackingSetupCleanup"] = $"alias=0x{(ulong)alias:X};size={size};descriptor={descriptor};munmap={unmap}/{unmapError};close_attempted={unmap == 0};close={closed}/{closeError}";
+            throw;
+        }
         failure = HostViewFailure.None;
         return true;
     }
@@ -249,12 +265,18 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory
 
     public bool TryMapView(HostBackingObject backing, ulong address, ulong offset, ulong size, HostPageProtection protection, out HostViewFailure failure)
     {
-        lock (HostViewRegions.Gate)
+        if (!backing.TryEnterAccess())
+        { failure = HostViewFailure.BackingUnavailable; return false; }
+        try
         {
-            if (!TryMapViewCore(backing, address, offset, size, protection, out failure)) return false;
-            HostViewRegions.Replace(address, size, HostMemory.MEM_COMMIT, HostViewRegions.RawProtection(protection));
-            return true;
+            lock (HostViewRegions.Gate)
+            {
+                if (!TryMapViewCore(backing, address, offset, size, protection, out failure)) return false;
+                HostViewRegions.Replace(address, size, HostMemory.MEM_COMMIT, HostViewRegions.RawProtection(protection));
+                return true;
+            }
         }
+        finally { backing.ExitAccess(); }
     }
 
     private bool TryMapViewCore(HostBackingObject backing, ulong address, ulong offset, ulong size, HostPageProtection protection, out HostViewFailure failure)
@@ -361,10 +383,25 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory
         return descriptor;
     }
 
-    private static void ReleaseBackingObject(HostBackingObject backing)
+    private static HostBackingReleaseResult ReleaseOwnedBackingObject(HostBackingObject backing)
     {
-        munmap((nint)backing.AliasBase, (nuint)backing.Size);
-        close(backing.Descriptor);
+        // Called once, after balanced ordinary accesses drain, outside provider
+        // gates. This owns only alias+descriptor; existing guest mappings survive
+        // close and need their own mapping/permission protocol.
+        if (munmap((nint)backing.AliasBase, (nuint)backing.NativeAliasSize) != 0)
+        {
+            var error = Marshal.GetLastPInvokeError();
+            // Do not assume a failed unmap is wholly unchanged, and do not close
+            // the descriptor while alias ownership remains uncertain.
+            return new(HostBackingReleaseStatus.AliasOutcomeUnknown, error);
+        }
+        if (close(backing.Descriptor) != 0)
+        {
+            var error = Marshal.GetLastPInvokeError();
+            // Retrying close can destroy an unrelated reused fd (including EINTR).
+            return new(HostBackingReleaseStatus.StorageOutcomeUnknown, error);
+        }
+        return new(HostBackingReleaseStatus.Released);
     }
 
     private static int GetNativeProtection(HostPageProtection protection) => protection switch

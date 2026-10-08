@@ -20,6 +20,12 @@ public sealed unsafe class SharedBackingViews : IDisposable
     private readonly object _lock = new();
     private readonly SortedList<ulong, ViewRecord> _views = new();
     private bool _disposed;
+    private readonly object _disposeGate = new(); // never needed by access or mapping paths
+    private bool _disposeRequested;
+    private int _operationThread;
+    private int _operationDepth;
+    private Exception? _cleanupFailure;
+    private bool _cleanupComplete;
 
     // Guest command writes and their reads by the render thread reach TryWriteBacking and
     // TryReadBacking millions of times per second, a few bytes at a time, while views
@@ -36,7 +42,9 @@ public sealed unsafe class SharedBackingViews : IDisposable
         _ = host.TryCreateBacking(size, out _backing, out _);
     }
 
-    public bool IsAvailable => _backing != null && !_disposed;
+    public bool IsAvailable => _backing != null && !Volatile.Read(ref _disposeRequested) && !Volatile.Read(ref _disposed) && !_backing.IsClosing && !_backing.IsDisposed;
+
+    public bool CleanupComplete => Volatile.Read(ref _cleanupComplete);
 
     public ulong AliasBase => _backing?.AliasBase ?? 0;
 
@@ -46,13 +54,18 @@ public sealed unsafe class SharedBackingViews : IDisposable
     {
         lock (_lock)
         {
-            if (!IsAvailable || !IsWithinBacking(offset, size))
+            if (!TryEnterAliasAccess()) return false;
+            try
             {
-                return false;
-            }
+                if (!IsAvailable || !IsWithinBacking(offset, size))
+                {
+                    return false;
+                }
 
-            NativeMemory.Clear((void*)(AliasBase + offset), (nuint)size);
-            return true;
+                NativeMemory.Clear((void*)(AliasBase + offset), (nuint)size);
+                return true;
+            }
+            finally { ExitAliasAccess(); }
         }
     }
 
@@ -67,35 +80,40 @@ public sealed unsafe class SharedBackingViews : IDisposable
             }
             finally
             {
-                Interlocked.Decrement(ref _activeAccesses);
+                ExitAliasAccess();
             }
         }
 
         lock (_lock)
         {
-            if (IsAvailable && TryFindRecord(address, (ulong)data.Length, out var record))
+            if (!TryEnterAliasAccess()) return false;
+            try
             {
-                var offset = record.Offset + address - record.Address;
-                if (!IsWithinBacking(offset, (ulong)data.Length))
+                if (IsAvailable && TryFindRecord(address, (ulong)data.Length, out var record))
+                {
+                    var offset = record.Offset + address - record.Address;
+                    if (!IsWithinBacking(offset, (ulong)data.Length))
+                    {
+                        return false;
+                    }
+
+                    data.CopyTo(new Span<byte>((void*)(AliasBase + offset), data.Length));
+                    return true;
+                }
+
+                if (!TryCollectBackingSegments(address, (ulong)data.Length, out var pieces))
                 {
                     return false;
                 }
 
-                data.CopyTo(new Span<byte>((void*)(AliasBase + offset), data.Length));
+                foreach (var (backing, dataOffset, bytes) in pieces)
+                {
+                    data.Slice(dataOffset, bytes).CopyTo(new Span<byte>((void*)backing, bytes));
+                }
+
                 return true;
             }
-
-            if (!TryCollectBackingSegments(address, (ulong)data.Length, out var pieces))
-            {
-                return false;
-            }
-
-            foreach (var (backing, dataOffset, bytes) in pieces)
-            {
-                data.Slice(dataOffset, bytes).CopyTo(new Span<byte>((void*)backing, bytes));
-            }
-
-            return true;
+            finally { ExitAliasAccess(); }
         }
     }
 
@@ -114,7 +132,7 @@ public sealed unsafe class SharedBackingViews : IDisposable
         }
         finally
         {
-            Interlocked.Decrement(ref _activeAccesses);
+            ExitAliasAccess();
         }
     }
 
@@ -129,36 +147,41 @@ public sealed unsafe class SharedBackingViews : IDisposable
             }
             finally
             {
-                Interlocked.Decrement(ref _activeAccesses);
+                ExitAliasAccess();
             }
         }
 
         lock (_lock)
         {
-            // A read inside one mapping needs no temporary segment list.
-            if (IsAvailable && TryFindRecord(address, (ulong)data.Length, out var record))
+            if (!TryEnterAliasAccess()) return false;
+            try
             {
-                var offset = record.Offset + address - record.Address;
-                if (!IsWithinBacking(offset, (ulong)data.Length))
+                // A read inside one mapping needs no temporary segment list.
+                if (IsAvailable && TryFindRecord(address, (ulong)data.Length, out var record))
+                {
+                    var offset = record.Offset + address - record.Address;
+                    if (!IsWithinBacking(offset, (ulong)data.Length))
+                    {
+                        return false;
+                    }
+
+                    new ReadOnlySpan<byte>((void*)(AliasBase + offset), data.Length).CopyTo(data);
+                    return true;
+                }
+
+                if (!TryCollectBackingSegments(address, (ulong)data.Length, out var pieces))
                 {
                     return false;
                 }
 
-                new ReadOnlySpan<byte>((void*)(AliasBase + offset), data.Length).CopyTo(data);
+                foreach (var (backing, dataOffset, bytes) in pieces)
+                {
+                    new ReadOnlySpan<byte>((void*)backing, bytes).CopyTo(data.Slice(dataOffset, bytes));
+                }
+
                 return true;
             }
-
-            if (!TryCollectBackingSegments(address, (ulong)data.Length, out var pieces))
-            {
-                return false;
-            }
-
-            foreach (var (backing, dataOffset, bytes) in pieces)
-            {
-                new ReadOnlySpan<byte>((void*)backing, bytes).CopyTo(data.Slice(dataOffset, bytes));
-            }
-
-            return true;
+            finally { ExitAliasAccess(); }
         }
     }
 
@@ -167,51 +190,56 @@ public sealed unsafe class SharedBackingViews : IDisposable
     {
         lock (_lock)
         {
-            if (IsAvailable && size <= int.MaxValue &&
-                TryFindRecord(source, size, out var sourceRecord) &&
-                TryFindRecord(destination, size, out var destinationRecord))
+            if (!TryEnterAliasAccess()) return false;
+            try
             {
-                var sourceOffset = sourceRecord.Offset + source - sourceRecord.Address;
-                var destinationOffset = destinationRecord.Offset + destination - destinationRecord.Address;
-                if (!IsWithinBacking(sourceOffset, size) || !IsWithinBacking(destinationOffset, size))
+                if (IsAvailable && size <= int.MaxValue &&
+                    TryFindRecord(source, size, out var sourceRecord) &&
+                    TryFindRecord(destination, size, out var destinationRecord))
+                {
+                    var sourceOffset = sourceRecord.Offset + source - sourceRecord.Address;
+                    var destinationOffset = destinationRecord.Offset + destination - destinationRecord.Address;
+                    if (!IsWithinBacking(sourceOffset, size) || !IsWithinBacking(destinationOffset, size))
+                    {
+                        return false;
+                    }
+
+                    // Use the backing alias so CopyTo can detect overlap between different guest views.
+                    new ReadOnlySpan<byte>((void*)(AliasBase + sourceOffset), (int)size)
+                        .CopyTo(new Span<byte>((void*)(AliasBase + destinationOffset), (int)size));
+                    return true;
+                }
+
+                if (!TryCollectBackingSegments(source, size, out var from) || !TryCollectBackingSegments(destination, size, out var to))
                 {
                     return false;
                 }
 
-                // Use the backing alias so CopyTo can detect overlap between different guest views.
-                new ReadOnlySpan<byte>((void*)(AliasBase + sourceOffset), (int)size)
-                    .CopyTo(new Span<byte>((void*)(AliasBase + destinationOffset), (int)size));
-                return true;
-            }
-
-            if (!TryCollectBackingSegments(source, size, out var from) || !TryCollectBackingSegments(destination, size, out var to))
-            {
-                return false;
-            }
-
-            var chunks = CreateCopySegments(from, to);
-            if (!HasCrossSegmentOverlap(chunks))
-            {
-                foreach (var (fromPtr, toPtr, bytes) in chunks)
+                var chunks = CreateCopySegments(from, to);
+                if (!HasCrossSegmentOverlap(chunks))
                 {
-                    Buffer.MemoryCopy((void*)fromPtr, (void*)toPtr, bytes, bytes);
+                    foreach (var (fromPtr, toPtr, bytes) in chunks)
+                    {
+                        Buffer.MemoryCopy((void*)fromPtr, (void*)toPtr, bytes, bytes);
+                    }
+
+                    return true;
+                }
+
+                var staging = new byte[size];
+                foreach (var (backing, dataOffset, bytes) in from)
+                {
+                    new ReadOnlySpan<byte>((void*)backing, bytes).CopyTo(staging.AsSpan(dataOffset, bytes));
+                }
+
+                foreach (var (backing, dataOffset, bytes) in to)
+                {
+                    staging.AsSpan(dataOffset, bytes).CopyTo(new Span<byte>((void*)backing, bytes));
                 }
 
                 return true;
             }
-
-            var staging = new byte[size];
-            foreach (var (backing, dataOffset, bytes) in from)
-            {
-                new ReadOnlySpan<byte>((void*)backing, bytes).CopyTo(staging.AsSpan(dataOffset, bytes));
-            }
-
-            foreach (var (backing, dataOffset, bytes) in to)
-            {
-                staging.AsSpan(dataOffset, bytes).CopyTo(new Span<byte>((void*)backing, bytes));
-            }
-
-            return true;
+            finally { ExitAliasAccess(); }
         }
     }
 
@@ -221,92 +249,122 @@ public sealed unsafe class SharedBackingViews : IDisposable
     private bool TryMapReservedRange(ulong address, ulong size, ulong offset, HostPageProtection protection,
         bool wasRestored, out HostViewFailure failure)
     {
-        if (!IsAvailable || !IsWithinBacking(offset, size))
+        failure = HostViewFailure.BackingUnavailable;
+        if (!TryBeginViewOperation(wasRestored)) return false;
+        Exception? primary = null;
+        try
         {
-            failure = IsAvailable ? HostViewFailure.OffsetOutOfBounds : HostViewFailure.BackingUnavailable;
-            return false;
+            if (_backing is null || _backing.IsClosing || _backing.IsDisposed || !IsWithinBacking(offset, size))
+            { failure = HostViewFailure.OffsetOutOfBounds; return false; }
+            lock (_lock)
+                if (_views.ContainsKey(address)) OnFatal($"A backing view record already exists at 0x{address:X16}.");
+            bool mapped;
+            try { mapped = _host.TryMapView(_backing, address, offset, size, protection, out failure); }
+            catch (Exception error)
+            {
+                // Provider threw before returning an outcome: retain the attempted
+                // exact scope as unknown; do not guess whether MAP_FIXED occurred.
+                lock (_lock)
+                {
+                    _views[address] = new ViewRecord(address, size, offset, protection);
+                    _cleanupFailure = error;
+                    _disposeRequested = true;
+                    PublishSnapshot();
+                }
+                throw;
+            }
+            if (!mapped) return false;
+            lock (_lock)
+            {
+                // Nested remaps belong to an already admitted unmap/rollback
+                // transaction. Finish them before requested disposal captures.
+                if (!_disposeRequested || wasRestored)
+                {
+                    _views[address] = new ViewRecord(address, size, offset, protection) { WasRestored = wasRestored };
+                    PublishSnapshot(); failure = HostViewFailure.None; return true;
+                }
+            }
+            try
+            {
+                if (!_host.UnmapView(address, size))
+                    throw new InvalidOperationException("Late backing view cleanup outcome unknown.");
+            }
+            catch (Exception error)
+            {
+                lock (_lock)
+                {
+                    _views[address] = new ViewRecord(address, size, offset, protection);
+                    _cleanupFailure = error;
+                }
+                throw;
+            }
+            failure = HostViewFailure.BackingUnavailable; return false;
         }
-
-        // Keep the mapping and its record under one lock to prevent disposal between them.
-        lock (_lock)
-        {
-            if (!_host.TryMapView(_backing!, address, offset, size, protection, out failure))
-            {
-                return false;
-            }
-
-            if (_disposed)
-            {
-                _ = _host.UnmapView(address, size);
-                failure = HostViewFailure.BackingUnavailable;
-                return false;
-            }
-
-            if (_views.ContainsKey(address))
-            {
-                OnFatal($"A backing view record already exists at 0x{address:X16}.");
-            }
-
-            _views[address] = new ViewRecord(address, size, offset, protection) { WasRestored = wasRestored };
-            PublishSnapshot();
-        }
-
-        failure = HostViewFailure.None;
-        return true;
+        catch (Exception error) { primary = error; throw; }
+        finally { EndViewOperation(primary); }
     }
 
     public bool Unmap(ulong address, ulong size, out bool holePreserved)
     {
         holePreserved = false;
-        if (!IsAvailable || size == 0 || ulong.MaxValue - address < size)
+        if (!TryBeginViewOperation(continuation: false)) return false;
+        Exception? primary = null;
+        try
         {
-            return false;
-        }
-
-        var end = address + size;
-        var targets = new List<ViewRecord>();
-        lock (_lock)
-        {
-            var current = address;
-            while (current < end)
+            holePreserved = false;
+            if (_backing is null || _backing.IsClosing || size == 0 || ulong.MaxValue - address < size)
             {
-                if (!TryFindRecord(current, 1, out var record))
+                return false;
+            }
+
+            var end = address + size;
+            var targets = new List<ViewRecord>();
+            lock (_lock)
+            {
+                var current = address;
+                while (current < end)
                 {
+                    if (!TryFindRecord(current, 1, out var record))
+                    {
+                        return false;
+                    }
+
+                    var partSize = Math.Min(end, record.Address + record.Size) - current;
+                    targets.Add(new ViewRecord(current, partSize, record.Offset + current - record.Address, record.Protection));
+                    current += partSize;
+                }
+            }
+
+            var removed = new List<ViewRecord>();
+            foreach (var target in targets)
+            {
+                if (!TryUnmapSingleView(target.Address, target.Size, out var partPreserved))
+                {
+                    RestoreMappingsInReverseOrder(removed);
                     return false;
                 }
 
-                var partSize = Math.Min(end, record.Address + record.Size) - current;
-                targets.Add(new ViewRecord(current, partSize, record.Offset + current - record.Address, record.Protection));
-                current += partSize;
-            }
-        }
+                if (!partPreserved)
+                {
+                    OnFatal($"The address range was not kept reserved after unmapping the view at 0x{target.Address:X16}.");
+                }
 
-        var removed = new List<ViewRecord>();
-        foreach (var target in targets)
-        {
-            if (!TryUnmapSingleView(target.Address, target.Size, out var partPreserved))
+                removed.Add(target);
+            }
+
+            // Each removed view leaves a reserved range. Join these ranges into one free range.
+            if (removed.Count > 1 && !_host.JoinHoles(address, size))
             {
                 RestoreMappingsInReverseOrder(removed);
                 return false;
             }
 
-            if (!partPreserved)
-            {
-                OnFatal($"The address range was not kept reserved after unmapping the view at 0x{target.Address:X16}.");
-            }
+            holePreserved = true;
+            return true;
 
-            removed.Add(target);
         }
-
-        // Each removed view leaves a reserved range. Join these ranges into one free range.
-        if (removed.Count > 1 && !_host.JoinHoles(address, size))
-        {
-            RestoreMappingsInReverseOrder(removed);
-            return false;
-        }
-
-        holePreserved = true;
-        return true;
+        catch (Exception error) { primary = error; throw; }
+        finally { EndViewOperation(primary); }
     }
 
     private bool TryUnmapSingleView(ulong address, ulong size, out bool holePreserved)
@@ -333,11 +391,18 @@ public sealed unsafe class SharedBackingViews : IDisposable
             return false;
         }
 
-        if (!_host.UnmapView(old.Address, old.Size))
+        bool unmapped;
+        try { unmapped = _host.UnmapView(old.Address, old.Size); }
+        catch (Exception error)
         {
-            RestoreViewRecord(old);
-            return false;
+            lock (_lock)
+            {
+                _views[old.Address] = old; // attempted scope retained, not a physical mapping assertion
+                _cleanupFailure = error; _disposeRequested = true; PublishSnapshot();
+            }
+            throw;
         }
+        if (!unmapped) { RestoreViewRecord(old); return false; }
 
         if (address == old.Address && size == old.Size)
         {
@@ -470,40 +535,102 @@ public sealed unsafe class SharedBackingViews : IDisposable
         }
     }
 
-    // Remove all recorded views before releasing the backing alias and object.
-    public void Dispose()
+    private bool TryBeginViewOperation(bool continuation)
     {
-        List<ViewRecord> views;
         lock (_lock)
         {
-            if (_disposed)
+            var thread = Environment.CurrentManagedThreadId;
+            if (_operationDepth != 0 && _operationThread == thread)
             {
-                return;
+                // Thread identity alone cannot admit a fresh callback operation
+                // after close. Only private existing-transaction remaps continue.
+                if (_disposed || (_disposeRequested && !continuation)) return false;
+                _operationDepth++; return true;
             }
-
-            _disposed = true;
-            views = new List<ViewRecord>(_views.Values);
-            _views.Clear();
-            PublishSnapshot();
-        }
-
-        // A lock-free access that found a view before the snapshot emptied still copies
-        // through the alias; let it finish before the alias is released.
-        var spin = new SpinWait();
-        while (Volatile.Read(ref _activeAccesses) != 0)
-        {
-            spin.SpinOnce();
-        }
-
-        foreach (var view in views)
-        {
-            if (!_host.UnmapView(view.Address, view.Size))
+            var start = System.Diagnostics.Stopwatch.GetTimestamp();
+            while (_operationDepth != 0 && !_disposeRequested)
             {
-                OnFatal($"Could not remove the backing view at 0x{view.Address:X16} during disposal.");
+                var remaining = TimeSpan.FromSeconds(2) - System.Diagnostics.Stopwatch.GetElapsedTime(start);
+                if (remaining <= TimeSpan.Zero || !Monitor.Wait(_lock, remaining)) return false;
+            }
+            if (_disposeRequested || _disposed) return false;
+            _operationThread = thread; _operationDepth = 1; return true;
+        }
+    }
+
+    private void EndViewOperation(Exception? primary)
+    {
+        bool close;
+        lock (_lock)
+        {
+            if (_operationThread != Environment.CurrentManagedThreadId || _operationDepth == 0)
+                throw new InvalidOperationException("Unbalanced view operation.");
+            close = --_operationDepth == 0 && _disposeRequested;
+            if (_operationDepth == 0) { _operationThread = 0; Monitor.PulseAll(_lock); }
+        }
+        if (!close) return;
+        try { Dispose(); }
+        catch (Exception error) when (primary is not null && error is not OutOfMemoryException and not AccessViolationException)
+        { primary.Data["BackingDeferredCleanupFailure"] = error; }
+    }
+
+    /// <summary>
+    /// Ordinary disposal. Provider reentrancy requests close without waiting for
+    /// its own pending operation; CleanupComplete remains false. The outer map/
+    /// unmap discharges cleanup before returning, or retains quarantined ownership.
+    /// </summary>
+    public void Dispose()
+    {
+        if (Monitor.IsEntered(_lock) || Monitor.IsEntered(_disposeGate))
+            throw new InvalidOperationException("Backing disposal cannot drain under the view or cleanup gate.");
+        lock (_lock)
+        {
+            _disposeRequested = true; PublishSnapshot();
+            if (_operationDepth != 0 && _operationThread == Environment.CurrentManagedThreadId) return;
+            var start = System.Diagnostics.Stopwatch.GetTimestamp();
+            while (_operationDepth != 0)
+            {
+                var remaining = TimeSpan.FromSeconds(2) - System.Diagnostics.Stopwatch.GetElapsedTime(start);
+                // Monitor.Wait releases the only held gate; pending operation
+                // completion never needs the cleanup gate and cannot wait on us.
+                if (remaining <= TimeSpan.Zero || !Monitor.Wait(_lock, remaining))
+                    throw new TimeoutException("Backing view operation did not finish; storage remains owned.");
             }
         }
-
-        _backing?.Dispose();
+        if (!Monitor.TryEnter(_disposeGate, TimeSpan.FromSeconds(2)))
+            throw new TimeoutException("Backing cleanup attempt remains in flight.");
+        try
+        {
+            List<ViewRecord> views;
+            lock (_lock)
+            {
+                if (_cleanupComplete) return;
+                Volatile.Write(ref _disposed, true); PublishSnapshot();
+                if (_cleanupFailure is not null)
+                    throw new InvalidOperationException("Backing view cleanup is quarantined.", _cleanupFailure);
+                views = new List<ViewRecord>(_views.Values);
+            }
+            var start = System.Diagnostics.Stopwatch.GetTimestamp();
+            while (Volatile.Read(ref _activeAccesses) != 0)
+            {
+                if (System.Diagnostics.Stopwatch.GetElapsedTime(start) >= TimeSpan.FromSeconds(2))
+                    throw new TimeoutException("Backing alias accesses did not drain; storage remains owned.");
+                Thread.Sleep(1);
+            }
+            foreach (var view in views)
+            {
+                try
+                {
+                    if (!_host.UnmapView(view.Address, view.Size))
+                        throw new InvalidOperationException($"Backing view cleanup outcome unknown at 0x{view.Address:X16}.");
+                }
+                catch (Exception error) { lock (_lock) _cleanupFailure = error; throw; }
+                lock (_lock) _views.Remove(view.Address);
+            }
+            _backing?.Dispose();
+            lock (_lock) Volatile.Write(ref _cleanupComplete, true);
+        }
+        finally { Monitor.Exit(_disposeGate); }
     }
 
     private bool TryCollectBackingSegments(ulong address, ulong size, out List<(ulong Backing, int DataOffset, int Bytes)> pieces)
@@ -606,6 +733,7 @@ public sealed unsafe class SharedBackingViews : IDisposable
     // Must be called under _lock after every change to _views.
     private void PublishSnapshot()
     {
+        if (_disposed || _disposeRequested) { Volatile.Write(ref _snapshot, []); return; }
         var snapshot = new ViewRecord[_views.Count];
         _views.Values.CopyTo(snapshot, 0);
         Volatile.Write(ref _snapshot, snapshot);
@@ -622,13 +750,9 @@ public sealed unsafe class SharedBackingViews : IDisposable
             return false;
         }
 
-        Interlocked.Increment(ref _activeAccesses);
-        if (TryFindAlias(Volatile.Read(ref _snapshot), address, size, out target))
-        {
-            return true;
-        }
-
-        Interlocked.Decrement(ref _activeAccesses);
+        if (!TryEnterAliasAccess()) return false;
+        if (TryFindAlias(Volatile.Read(ref _snapshot), address, size, out target)) return true;
+        ExitAliasAccess();
         return false;
     }
 
@@ -637,16 +761,20 @@ public sealed unsafe class SharedBackingViews : IDisposable
     public bool TryEnterAliasAccess()
     {
         Interlocked.Increment(ref _activeAccesses);
-        if (!Volatile.Read(ref _disposed) && _backing != null)
+        if (!Volatile.Read(ref _disposed) && !Volatile.Read(ref _disposeRequested) && _backing is not null && _backing.TryEnterAccess())
         {
-            return true;
+            if (!Volatile.Read(ref _disposed) && !Volatile.Read(ref _disposeRequested)) return true;
+            _backing.ExitAccess();
         }
-
         Interlocked.Decrement(ref _activeAccesses);
         return false;
     }
 
-    public void ExitAliasAccess() => Interlocked.Decrement(ref _activeAccesses);
+    public void ExitAliasAccess()
+    {
+        _backing!.ExitAccess();
+        Interlocked.Decrement(ref _activeAccesses);
+    }
 
     public bool TryResolveAlias(ulong address, ulong size, out ulong target)
     {

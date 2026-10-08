@@ -32,6 +32,9 @@ public sealed class GuestSpaceOwner : IDisposable
     private readonly List<(ulong Address, ulong Size)> _owned = new();
     private readonly bool _preReserveGuestAddressSpace;
     private bool _disposed;
+    private readonly object _disposeGate = new(); // not used by mapping/protection/access paths
+    private Exception? _disposeFailure;
+    private bool _disposeComplete;
 
     public GuestSpaceOwner(IHostViewMemory host, ulong backingSize, bool preReserveGuestAddressSpace = false)
     {
@@ -351,7 +354,7 @@ public sealed class GuestSpaceOwner : IDisposable
 
         using (EnterMappingLock())
         {
-            if (!TryTakeFreeRange(address, size))
+            if (_disposed || !TryTakeFreeRange(address, size))
             {
                 failure = HostViewFailure.AddressUnavailable;
                 return false;
@@ -382,7 +385,7 @@ public sealed class GuestSpaceOwner : IDisposable
 
         using (EnterMappingLock())
         {
-            if (!HasOnlyRangeKind(address, size, RangeKind.Backed))
+            if (_disposed || !HasOnlyRangeKind(address, size, RangeKind.Backed))
             {
                 return false;
             }
@@ -411,7 +414,7 @@ public sealed class GuestSpaceOwner : IDisposable
 
         using (EnterMappingLock())
         {
-            if (!TryTakeFreeRange(address, size))
+            if (_disposed || !TryTakeFreeRange(address, size))
             {
                 return false;
             }
@@ -440,7 +443,7 @@ public sealed class GuestSpaceOwner : IDisposable
 
         using (EnterMappingLock())
         {
-            if (!HasOnlyRangeKind(address, size, RangeKind.Private))
+            if (_disposed || !HasOnlyRangeKind(address, size, RangeKind.Private))
             {
                 return false;
             }
@@ -532,26 +535,43 @@ public sealed class GuestSpaceOwner : IDisposable
 
     public void Dispose()
     {
-        using (EnterMappingLock())
+        if (Monitor.IsEntered(_mappingLock) || Monitor.IsEntered(_disposeGate) ||
+            _protectionLocks.Any(Monitor.IsEntered))
+            throw new InvalidOperationException("Guest disposal cannot drain under mapping/protection gates.");
+        lock (_disposeGate)
         {
-            if (_disposed)
+            using (EnterMappingLock())
             {
-                return;
+                if (_disposeComplete) return;
+                if (_disposeFailure is not null)
+                    throw new InvalidOperationException("Guest range cleanup is quarantined.", _disposeFailure);
+                _disposed = true; // revoke every new mapping/protection request before dropping gates
+                _free.Clear();
             }
-
-            _disposed = true;
+            // Alias copies need neither mapping gate nor protection stripe to exit.
+            // Leave owned records intact until each positive cleanup succeeds.
             _views.Dispose();
-            foreach (var (address, size) in _owned)
+            (ulong Address, ulong Size)[] owned;
+            using (EnterMappingLock()) owned = _owned.ToArray();
+            foreach (var (address, size) in owned)
             {
-                if (!_host.FreeOwnedRange(address, size))
+                try
                 {
-                    OnFatal($"Could not release the owned range at 0x{address:X16}.");
+                    if (!_host.FreeOwnedRange(address, size))
+                        throw new InvalidOperationException($"Guest range cleanup outcome unknown at 0x{address:X16}.");
                 }
+                catch (Exception error)
+                {
+                    using (EnterMappingLock()) _disposeFailure = error;
+                    throw;
+                }
+                using (EnterMappingLock()) _owned.Remove((address, size));
             }
-
-            _owned.Clear();
-            _free.Clear();
-            _mapped.Clear();
+            using (EnterMappingLock())
+            {
+                _mapped.Clear();
+                _disposeComplete = true;
+            }
         }
     }
 
