@@ -48,6 +48,8 @@ public static class UninitializedProbe
     public static unsafe int Main(string[] args)
     {
 #if SHARPEMU_HOST_MACOS
+        if (args.Length == 1 && args[0].StartsWith("--mac-mapped-publication=", StringComparison.Ordinal))
+            return OperatingSystem.IsMacOS() ? MacMappedPublicationWorker.Run(args[0]["--mac-mapped-publication=".Length..]) : 81;
         if (args.Length == 1 && args[0].StartsWith("--mac-mapped-copy=", StringComparison.Ordinal))
             return OperatingSystem.IsMacOS() ? MacMappedCopyWorker.Run(args[0]["--mac-mapped-copy=".Length..]) : 81;
         if (args.Length == 1 && args[0].StartsWith("--mac-backing-lifecycle=", StringComparison.Ordinal))

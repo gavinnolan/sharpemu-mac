@@ -104,6 +104,7 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
 
     public bool Clear(ulong offset, ulong size)
     {
+        if (size == 0) return ClearCore(offset, size);
         // One admission spans the complete multi-chunk operation, including
         // staged/memmove reads. Publication cannot enter between its chunks.
         var interval = _backing?.BeginManagedWriteOperation() ?? default;
@@ -134,6 +135,7 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
 
     public bool TryWriteBacking(ulong address, ReadOnlySpan<byte> data)
     {
+        if (data.IsEmpty) return TryWriteBackingCore(address, data);
         // One admission spans the complete multi-chunk operation, including
         // staged/memmove reads. Publication cannot enter between its chunks.
         var interval = _backing?.BeginManagedWriteOperation() ?? default;
@@ -291,6 +293,7 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
     // Use temporary storage if a copy segment can overwrite another segment's source.
     public bool TryCopyBacking(ulong destination, ulong source, ulong size)
     {
+        if (size == 0) return TryCopyBackingCore(destination, source, size);
         // One admission spans the complete multi-chunk operation, including
         // staged/memmove reads. Publication cannot enter between its chunks.
         var interval = _backing?.BeginManagedWriteOperation() ?? default;

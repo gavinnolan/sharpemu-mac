@@ -256,4 +256,51 @@ public sealed unsafe class MappedPublicationTests
         Assert.Equal(CpuMappedPublicationResult.Rejected, rejected.TryCommit()); Assert.Null(rejected.SuccessfulObservation);
     }
 
+    [Fact]
+    public void ParticipatingWriterDuringOriginalCopyPermanentlyDeclinesPublicationHistory()
+    {
+        using var state = new State();
+        var hook = typeof(HostMappedCopyLedger).GetField("afterCaptureForControl", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        try
+        {
+            hook.SetValue(state.Host.Ledger, (Action)(() => Assert.True(state.Views.TryWriteBacking(State.Address, new byte[] { 79 }))));
+            var original = state.Capture();
+            Assert.True(state.Views.IsMappedCopyObservationCurrent(original));
+            Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
+                state.Views.TryPrepareMappedPublication(original, [new(State.Address, new byte[] { 14 })], out _));
+        }
+        finally { hook.SetValue(state.Host.Ledger, null); }
+    }
+
+    [Fact]
+    public void HeldWriterAndSaturatedBookkeepingCannotAcquirePublication()
+    {
+        using var state = new State(); var original = state.Capture(); var writers = state.Enroll();
+        var begin = writers.GetType().GetMethod("Begin", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var end = writers.GetType().GetMethod("End", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var tokens = new List<object>();
+        try
+        {
+            tokens.Add(begin.Invoke(writers, [0ul, 1ul])!);
+            Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
+                state.Views.TryPrepareMappedPublication(original, [new(State.Address, new byte[] { 14 })], out _));
+            for (var i = 1; i < 128; i++) tokens.Add(begin.Invoke(writers, [(ulong)i, 1ul])!);
+            Assert.True(state.Views.TryWriteBacking(State.Address, new byte[] { 81 })); // saturation preserves legacy write
+        }
+        finally { foreach (var token in tokens) Assert.True((bool)end.Invoke(writers, [token, true])!); }
+        var after = state.Capture();
+        Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
+            state.Views.TryPrepareMappedPublication(after, [new(State.Address, new byte[] { 14 })], out _));
+    }
+
+    [Fact]
+    public void EmptyOperationsRetainLegacyValidationDuringPublication()
+    {
+        using var state = new State(); using var receipt = state.Prepare(state.Capture(), State.Address, [13]);
+        Assert.True(state.Views.Clear(0, 0));
+        Assert.True(state.Views.TryWriteBacking(State.Address, ReadOnlySpan<byte>.Empty));
+        Assert.True(state.Views.TryCopyBacking(State.Address, State.Address, 0));
+        Assert.Equal(CpuMappedPublicationResult.Applied, receipt.TryCommit());
+    }
+
 }

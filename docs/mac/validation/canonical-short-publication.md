@@ -58,6 +58,21 @@ Prepared managed controls exercise the real neutral transaction and alias bytes
 over privately pinned arrays, including detached 1/4/8-byte scatter and every
 neighbor, ordinary-writer history, held reservation refusals, cancellation/replay,
 concurrent exact commit, old same-address incarnation, foreign owner and bounds.
-Their provider is explicitly synthetic and records no native receipt. Real Mac
-workers and native staging integration need separate reviewed source and execution
-grants. No test or game advancement claim follows from this source checkpoint.
+Their provider is explicitly synthetic and records no native receipt. Four fresh-process Mac workers are now source-prepared for actual owned dual
+aliases, detached scatter/full neighbors, exact own continuity versus a completed
+alias write, reservation refusal/cancel and same-address ABA. Each uses two whole
+32KiB Mach-owned placeholder extents and a small canonical backing. They explicitly
+assert process architecture and print measured kernel/provider page sizes. Normal
+cleanup consumes whole extents once; uncertain cleanup retains them until the fresh
+process exits. Real workers and native staging integration need separate reviewed
+source and execution grants. No test or game advancement claim follows from this source checkpoint.
+
+The first-use a57 checkpoint prepared 12 managed rows. The 395 continuity successor
+prepared 15. The following source-only worker/control successor prepares 18 managed
+rows and four opt-in fresh-process native rows. No row has executed. Managed selection:
+`FullyQualifiedName~MappedPublicationTests|FullyQualifiedName~ManagedWriteIntervalTests`.
+Native selection: `FullyQualifiedName~MacMappedPublicationNativeTests`, separately
+requires `SHARPEMU_TEST_REQUIRE_MAPPED_PUBLICATION_NATIVE=1` and exact
+`SHARPEMU_TEST_EXPECT_ARCH=Arm64` or `X64`. Normal suites declare the native theory
+skipped; that must not be counted as native qualification. Zero-byte operations keep
+original validation and no-op behavior even while publication is held.
