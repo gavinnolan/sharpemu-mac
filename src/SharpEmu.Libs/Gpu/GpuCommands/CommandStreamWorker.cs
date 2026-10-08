@@ -11,14 +11,16 @@ public sealed class CommandStreamWorker
     private readonly Func<bool> _hasPendingCommands;
     private readonly bool _cancelBlockedAtStop;
     private readonly Thread _thread;
+    private readonly Action<Exception>? _onTerminalFailure;
     private Exception? _failure;
 
-    public CommandStreamWorker(CommandStreamQueue queue, ICommandStreamHost host, Func<bool> hasPendingCommands, bool cancelBlockedAtStop, string threadName)
+    public CommandStreamWorker(CommandStreamQueue queue, ICommandStreamHost host, Func<bool> hasPendingCommands, bool cancelBlockedAtStop, string threadName, Action<Exception>? onTerminalFailure = null)
     {
         _queue = queue;
         _host = host;
         _hasPendingCommands = hasPendingCommands;
         _cancelBlockedAtStop = cancelBlockedAtStop;
+        _onTerminalFailure = onTerminalFailure;
         _thread = new Thread(Run) { IsBackground = true, Name = threadName };
     }
 
@@ -38,7 +40,7 @@ public sealed class CommandStreamWorker
 
         if (_failure is not null)
         {
-            throw _failure;
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(_failure).Throw();
         }
 
         return _queue.Outcome;
@@ -81,8 +83,24 @@ public sealed class CommandStreamWorker
         catch (Exception exception)
         {
             _failure = exception;
-            _queue.Fail();
+            try { _queue.Fail(exception); }
+            catch (Exception cleanup) { AttachFailureCleanup(exception, cleanup); }
+            // Queue failure owns its own gate. Host notification runs only after
+            // that attempt returns, including when cancellation cleanup throws.
+            try { _onTerminalFailure?.Invoke(exception); }
+            catch (Exception cleanup) { AttachFailureCleanup(exception, cleanup); }
         }
+    }
+
+    private static void AttachFailureCleanup(Exception original, Exception cleanup)
+    {
+        try
+        {
+            if (original.Data["CommandStreamWorkerCleanup"] is Exception previous)
+                original.Data["CommandStreamWorkerCleanup"] = new AggregateException(previous, cleanup);
+            else original.Data["CommandStreamWorkerCleanup"] = cleanup;
+        }
+        catch { /* Optional diagnostics cannot replace the worker's first cause. */ }
     }
 
     private const int AllBlockedWait = 1000;

@@ -104,12 +104,16 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend, IGuestImageSnapsh
             var host = new MetalCommandStreamHost(memory, this, this);
             var queue = new CommandStreamQueue(host);
             host.AttachQueue(queue);
-            _commandStreamWorker = new CommandStreamWorker(queue, host, static () => false, cancelBlockedAtStop: true, "SharpEmu Metal command stream");
+            _commandStreamWorker = new CommandStreamWorker(queue, host, static () => false, cancelBlockedAtStop: true, "SharpEmu Metal command stream",
+                NotifyCommandStreamFailure);
             _commandStreamWorker.Start();
             _commandStream = queue;
             return queue;
         }
     }
+
+    internal static void NotifyCommandStreamFailure(Exception original) =>
+        _ = MetalVideoPresenter.LatchGuestCompletionFailure("command stream worker failed", original);
 
     public void SubmitCommandStream(ICpuMemory memory, uint queue, ulong address, uint dwordCount, ulong submissionId, object? geometrySnapshots)
     {

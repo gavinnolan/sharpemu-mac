@@ -150,6 +150,14 @@ internal static partial class MetalVideoPresenter
 
     public static Exception FailGuestCompletion(string reason, Exception? failure = null)
     {
+        var cause = LatchGuestCompletionFailure(reason, failure);
+        return GpuFatal.Fatal($"Metal guest completion failed: {reason}.", cause);
+    }
+
+    // Notify waiters without invoking FailFast before the render lifetime can
+    // unwind its owned native resources. Existing fatal callers keep reporting.
+    internal static Exception LatchGuestCompletionFailure(string reason, Exception? failure = null)
+    {
         Exception cause;
         lock (_gate)
         {
@@ -160,6 +168,6 @@ internal static partial class MetalVideoPresenter
                 else { _guestWorkFailure = cause; Monitor.PulseAll(_gate); }
             }
         }
-        return GpuFatal.Fatal($"Metal guest completion failed: {reason}.", cause);
+        return cause;
     }
 }

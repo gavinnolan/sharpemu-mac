@@ -334,7 +334,7 @@ public sealed class CommandStreamQueue
     }
 
     // Publishes a failure: nothing runs any more and every waiter is released with Failed.
-    public void Fail()
+    public void Fail(Exception? original = null)
     {
         Action[] cancellations;
         lock (_gate)
@@ -343,8 +343,27 @@ public sealed class CommandStreamQueue
             cancellations = CancelControlBarriersLocked();
         }
 
+        Exception? cleanupFailure = null;
         foreach (var cancel in cancellations)
-            cancel();
+        {
+            try { cancel(); }
+            catch (Exception cleanup)
+            {
+                if (original is null) cleanupFailure ??= cleanup;
+                else
+                {
+                    try
+                    {
+                        if (original.Data["CommandCancellationCleanup"] is Exception previous)
+                            original.Data["CommandCancellationCleanup"] = new AggregateException(previous, cleanup);
+                        else original.Data["CommandCancellationCleanup"] = cleanup;
+                    }
+                    catch { /* Diagnostic attachment cannot replace the first failure. */ }
+                }
+            }
+        }
+        if (cleanupFailure is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(cleanupFailure).Throw();
     }
 
     private void FailLocked()
@@ -444,7 +463,7 @@ public sealed class CommandStreamQueue
                 {
                 }
 
-                Fail();
+                Fail(exception);
                 throw;
             }
 
@@ -474,7 +493,7 @@ public sealed class CommandStreamQueue
                 // An output failure must not prevent queue failure or replace the original exception.
             }
 
-            Fail();
+            Fail(exception);
             throw;
         }
 
