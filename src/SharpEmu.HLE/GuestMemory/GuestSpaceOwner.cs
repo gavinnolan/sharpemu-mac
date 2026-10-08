@@ -110,11 +110,22 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMap
     public bool TryClearBacking(ulong offset, ulong size) => _views.Clear(offset, size);
 
     public bool TryWriteBacking(ulong address, ReadOnlySpan<byte> data) => _views.TryWriteBacking(address, data);
+    public bool TryWriteBacking(ulong address, ReadOnlySpan<byte> data, out OrdinaryBackingWriteReservation? busy)
+        => _views.TryWriteBacking(address, data, out busy);
 
     public bool TryReadBacking(ulong address, Span<byte> data) => _views.TryReadBacking(address, data);
 
     // Reads through a view that covers the whole range without any lock; false otherwise.
     public bool TryReadSingleView(ulong address, Span<byte> data) => _views.TryReadSingleView(address, data);
+
+    public void RequireOrdinaryWriteWaitOutsideGates()
+    {
+        if (Monitor.IsEntered(_mappingLock) || Monitor.IsEntered(_disposeGate))
+            throw new InvalidOperationException("Ordinary write wait cannot hold guest mapping/disposal gates.");
+        foreach (var stripe in _protectionLocks)
+            if (Monitor.IsEntered(stripe))
+                throw new InvalidOperationException("Ordinary write wait cannot hold guest protection gates.");
+    }
 
     public object AliasSnapshot => _views.AliasSnapshot;
 

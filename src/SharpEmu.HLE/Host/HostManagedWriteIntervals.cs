@@ -33,7 +33,12 @@ internal sealed partial class HostManagedWriteIntervals
     }
 
     internal HostManagedWriteIntervals(HostBackingObject backing) => this.backing = backing;
-    internal readonly record struct Token(HostManagedWriteIntervals? Owner, int Slot, long Identity);
+    internal readonly record struct Token(HostManagedWriteIntervals? Owner, int Slot, long Identity)
+    {
+        internal long RejectedAdmission { get; init; }
+        internal bool IsPublicationBusy => Owner is not null && Slot == -1 && Identity == 0 &&
+            (RejectedAdmission & PublicationBit) != 0;
+    }
 
     internal Token Begin(ulong offset, ulong count) => BeginCore(offset, count, false);
     internal Token BeginOperation() => BeginCore(0, backing.Size, true);
@@ -42,7 +47,7 @@ internal sealed partial class HostManagedWriteIntervals
         if (count == 0) return default;
         var admitted = Interlocked.Increment(ref admission);
         if ((admitted & PublicationBit) != 0 || admitted >= PublicationBit)
-        { Interlocked.Decrement(ref admission); return new(this, -1, 0); }
+        { Interlocked.Decrement(ref admission); return new(this, -1, 0) { RejectedAdmission = admitted }; }
         if (offset > backing.Size || count > backing.Size - offset)
         { LoseCoverage(CoverageLoss.InvalidPhysicalBounds); Interlocked.Decrement(ref admission); return default; }
         if (Volatile.Read(ref coverageIncomplete) != 0) { Interlocked.Decrement(ref admission); return default; }

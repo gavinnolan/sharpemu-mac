@@ -2188,22 +2188,28 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         GuestGpuMemoryHook.MarkCpuWrite(virtualAddress, (ulong)source.Length);
 
         var requiresExclusiveAccess = false;
+        OrdinaryBackingWriteReservation? publicationBusy = null;
+        GuestSpaceOwner? originalSpace = null;
+        OriginalBackedWriteRegion originalRegion = default;
         _gate.EnterReadLock();
         try
         {
             var region = FindRegion(virtualAddress, (ulong)source.Length);
             if (IsBackedSpan(region, virtualAddress, (ulong)source.Length))
             {
-                var written = _backedSpace!.TryWriteBacking(virtualAddress, source);
-                if (written)
+                originalSpace = _backedSpace!;
+                originalRegion = new(region); // BEFORE the first admission attempt.
+                var written = originalSpace.TryWriteBacking(virtualAddress, source, out publicationBusy);
+                if (publicationBusy is null)
                 {
-                    NotifyGuestWriteWatch(virtualAddress, source);
+                    if (written) NotifyGuestWriteWatch(virtualAddress, source);
+                    return written;
                 }
-
-                return written;
+                // This receipt exists only for an exact pre-byte publication
+                // refusal. Keep the ORIGINAL region and alias lifetime, then
+                // release this gate before bounded ordinary writer admission.
             }
-
-            if (region is not null &&
+            else if (region is not null &&
                 TryResolveRegionOffset(
                     virtualAddress,
                     (ulong)source.Length,
@@ -2245,6 +2251,10 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             _gate.ExitReadLock();
         }
 
+        if (publicationBusy is not null)
+            return TryWriteOriginalBackedAfterPublication(virtualAddress, source,
+                originalSpace!, originalRegion, publicationBusy, notifyWriteWatch: true);
+
         if (!requiresExclusiveAccess)
         {
             return false;
@@ -2259,6 +2269,68 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         {
             _gate.ExitWriteLock();
         }
+    }
+
+    // An unchanged pointer/backing value is not enough: hold the original
+    // alias pin while waiting and revalidate exact region + immutable view
+    // snapshot before ONE write. There is no file operation or partial-copy retry.
+    private bool TryWriteOriginalBackedAfterPublication(ulong address, ReadOnlySpan<byte> source,
+        GuestSpaceOwner originalSpace, OriginalBackedWriteRegion originalRegion,
+        OrdinaryBackingWriteReservation reservation, bool notifyWriteWatch)
+    {
+        Exception? primary = null;
+        try
+        {
+            // Recursive callers may still own an inherited PVM gate. They
+            // must decline without waiting, not drop somebody else's lock.
+            if (_gate.IsReadLockHeld || _gate.IsWriteLockHeld || _gate.IsUpgradeableReadLockHeld ||
+                Monitor.IsEntered(_guestAllocationGate) || Monitor.IsEntered(_allocationSearchHintGate))
+                return false;
+            originalSpace.RequireOrdinaryWriteWaitOutsideGates();
+            if (reservation.TryAcquire(TimeSpan.FromMilliseconds(500)) != OrdinaryBackingWriteAdmission.Admitted)
+                return false;
+            _gate.EnterReadLock();
+            try
+            {
+                var region = FindRegion(address, (ulong)source.Length);
+                if (_disposed || !ReferenceEquals(_backedSpace, originalSpace) ||
+                    !originalRegion.Matches(region) || !reservation.IsOriginalCurrent ||
+                    !IsBackedSpan(region, address, (ulong)source.Length)) return false;
+                reservation.BeginWriteAttempt();
+                var written = originalSpace.TryWriteBacking(address, source);
+                written = reservation.CompleteWriteAttempt(written);
+                if (written && notifyWriteWatch) NotifyGuestWriteWatch(address, source);
+                return written;
+            }
+            finally { _gate.ExitReadLock(); }
+        }
+        catch (Exception error) { primary = error; throw; }
+        finally
+        {
+            try { reservation.Dispose(); }
+            catch (Exception cleanup) when (primary is not null)
+            {
+                // Failure diagnostics must not replace the original copy cause.
+                try { primary.Data["OrdinaryBackingWriteCleanup"] = cleanup; } catch { }
+            }
+        }
+    }
+
+    private readonly record struct OriginalBackedWriteRegion
+    {
+        private readonly MemoryRegion? owner;
+        private readonly ulong address, size;
+        private readonly bool executable, reserved, backed;
+        private readonly uint protection;
+        internal OriginalBackedWriteRegion(MemoryRegion? region)
+        {
+            owner = region; address = region?.VirtualAddress ?? 0; size = region?.Size ?? 0;
+            executable = region?.IsExecutable ?? false; reserved = region?.IsReservedOnly ?? false;
+            backed = region?.IsBackedView ?? false; protection = region?.Protection ?? 0;
+        }
+        internal bool Matches(MemoryRegion? region) => owner is not null && ReferenceEquals(owner, region) &&
+            region!.VirtualAddress == address && region.Size == size && region.IsExecutable == executable &&
+            region.IsReservedOnly == reserved && region.IsBackedView == backed && region.Protection == protection;
     }
 
     private static void NotifyGuestWriteWatch(ulong virtualAddress, ReadOnlySpan<byte> source)

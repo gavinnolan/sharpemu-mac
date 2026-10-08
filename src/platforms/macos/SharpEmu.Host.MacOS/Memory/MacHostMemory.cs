@@ -19,6 +19,8 @@ internal sealed unsafe partial class MacHostMemory : IHostMemoryRaw
 {
     public MacHostMemory() => MacMappedCopyState.Initialize();
 
+    internal static bool IsNativeMappingGateHeld => Darwin.IsMappingGateHeld;
+
     private const uint MEM_COMMIT = 0x1000;
     private const uint MEM_RESERVE = 0x2000;
     private const uint MEM_RELEASE = 0x8000;
@@ -186,6 +188,7 @@ internal sealed unsafe partial class MacHostMemory : IHostMemoryRaw
         private static readonly nint MAP_FAILED = -1;
 
         private static readonly object Gate = new();
+        internal static bool IsMappingGateHeld => Monitor.IsEntered(Gate);
         private static readonly SortedList<ulong, Region> Regions = new();
 
         public sealed class Region

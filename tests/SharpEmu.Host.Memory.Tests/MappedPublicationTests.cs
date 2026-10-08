@@ -12,7 +12,7 @@ namespace SharpEmu.Host.Memory.Tests;
 
 // Actual neutral alias-copy transaction over owned pinned managed arrays.
 // The fixture provider never fabricates kernel outcomes or native coverage.
-public sealed class MappedPublicationTests
+public sealed partial class MappedPublicationTests
 {
     public MappedPublicationTests(ITestOutputHelper output)
     {
@@ -67,6 +67,9 @@ public sealed class MappedPublicationTests
             gate = sharedGate ?? new(); pin = GCHandle.Alloc(storage, GCHandleType.Pinned);
             Ledger = sharedLedger ?? new(gate, State.Page);
         }
+        public HostMappedCopyLedger.OrdinaryWriteIdentity? CaptureOrdinaryWriteIdentity(
+            HostBackingObject backing, ulong address, ulong size) => Ledger.CaptureOrdinaryWriteIdentity(backing, address, size);
+        public bool CanWaitForOrdinaryWriteAdmission => !Monitor.IsEntered(gate);
         public ulong PageSize => State.Page;
         public ulong Granularity => PageSize;
         public bool TryCreateBacking(ulong size, out HostBackingObject? backing, out HostViewFailure failure)

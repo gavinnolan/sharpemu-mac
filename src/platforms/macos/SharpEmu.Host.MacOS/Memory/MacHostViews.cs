@@ -18,6 +18,13 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
 
     public MacHostViews() => MacMappedCopyState.Initialize();
 
+    public bool CanWaitForOrdinaryWriteAdmission =>
+        !Monitor.IsEntered(HostViewRegions.Gate) && !MacHostMemory.IsNativeMappingGateHeld;
+
+    public HostMappedCopyLedger.OrdinaryWriteIdentity? CaptureOrdinaryWriteIdentity(
+        HostBackingObject backing, ulong address, ulong size) =>
+        MacMappedCopyState.Ledger?.CaptureOrdinaryWriteIdentity(backing, address, size);
+
     public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(HostBackingObject backing,
         CpuMappedCopyObservation original, out CpuMappedPublicationValidation? validation)
     {

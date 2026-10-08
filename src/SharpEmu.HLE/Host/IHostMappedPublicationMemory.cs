@@ -6,6 +6,12 @@ namespace SharpEmu.HLE.Host;
 /// and offsets resolve only from an original opaque mapping observation.</summary>
 public interface IHostMappedPublicationMemory
 {
+    // An unknown wrapper cannot authorize an ordinary wait under hidden gates.
+    // Known providers check their CURRENT calling-thread native mapping gates.
+    bool CanWaitForOrdinaryWriteAdmission => false;
+    HostMappedCopyLedger.OrdinaryWriteIdentity? CaptureOrdinaryWriteIdentity(
+        HostBackingObject backing, ulong address, ulong size) => null;
+
     CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(
         HostBackingObject backing, CpuMappedCopyObservation original, out CpuMappedPublicationValidation? validation)
     { validation = null; return CpuMappedPublicationPreparationResult.Unavailable; }
