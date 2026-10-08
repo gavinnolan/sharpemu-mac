@@ -117,3 +117,27 @@ first draw47.047ms, EOP3 admission-to-start58.667ms. Library preparation alone
 is insufficient. Exact runnable-prefix completion backpressure and immediate
 worker-failure notification are the next changes. This isolated candidate does
 not replace the all-nine baseline or qualify new gameplay/FPS/loading gates.
+
+The [prompt worker-failure integration](command-worker-failure-main-20261008.md)
+is now local at cd02e3cd: 129 managed checks pass per host runtime and a real
+AppKit/Metal window probe returns after terminal worker notification on ARM64
+and Rosetta/x64, retaining the original cause. A signed 150-second Sarah replay
+verifies outdoor right/left movement, peak 702 MiB; late two-second frame
+windows include 59.83–66.50 Hz and do not establish sustained 60+ or faster
+loading. Its first 90-second title-screen control remains preserved. A 35-second
+Octopath control does not reach the worker failure before host stop, so no
+affected-game failure-path or progression improvement is certified.
+
+The isolated [exact-prefix completion replay](completed-prefix-runtime-20261008.md)
+at 71b05e8c passes 185 managed checks per host runtime. Its signed Quake replay
+passes the previous frame-start timeout, renders the intro/warning and logs engine
+initialization plus demo loading, then exits 134 after 63 seconds at the known
+256 MiB 8192² depth snapshot limit (peak 2274 MiB). The demo scene is not rendered
+in accepted evidence, and movie cadence is not gameplay FPS. This candidate
+remains isolated; actual depth producer/native ownership is the next check.
+
+The isolated [original native-owner qualification](selected-native-original-qualification-20261008.md)
+at efe7235c passes 21 managed and six actual native Metal scenarios per runtime,
+with stable current DLL hashes and zero skips. Those controlled provider tests do
+not qualify the complete PVM/JIT path or game support; signed Octopath replay is
+the next check. No additional title meets the full acceptance gate.
