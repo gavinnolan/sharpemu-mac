@@ -14,11 +14,11 @@ internal static partial class MetalVideoPresenter
             var draw = work.Draw;
             if (work.Targets.Length != 1 || work.Targets[0].Address == 0 || work.DepthTarget is not null ||
                 draw.RenderState.Depth != GuestDepthState.Default || draw.PrimitiveType != 4 ||
-                draw.VertexCount == 0 || draw.InstanceCount == 0 || draw.BaseVertex < 0 ||
+                draw.VertexCount == 0 || draw.InstanceCount == 0 || draw.BaseVertex < 0 || draw.IndexBuffer is not null ||
                 draw.RenderState.Blends.Count != 1)
-                throw new NotSupportedException("Metal ordered color producer requires one nonzero exact 2D color target, triangles and no depth/presentation writer.");
+                throw new NotSupportedException("Metal ordered color producer requires one nonzero exact 2D color target, nonindexed triangles and no depth/presentation writer.");
             if (draw.PixelShader.Shader.Stage != Gen5MslStage.Pixel ||
-                draw.VertexShader is { } vertex && vertex.Shader.Stage != Gen5MslStage.Vertex)
+                draw.VertexShader is not { } vertex || vertex.Shader.Stage != Gen5MslStage.Vertex)
                 throw new NotSupportedException("Metal ordered color producer requires actual vertex/pixel shader stages.");
             var target = work.Targets[0];
             if (target.Width == 0 || target.Height == 0 || target.Width > 16384 || target.Height > 16384 ||

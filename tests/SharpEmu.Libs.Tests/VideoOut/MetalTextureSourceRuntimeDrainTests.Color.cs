@@ -24,9 +24,9 @@ public sealed partial class MetalTextureSourceRuntimeDrainTests
         return pending.GetType().GetProperty("Work")!.GetValue(pending)!;
     }
     private static void SubmitControlColor(GuestRenderTarget[] targets, uint vertices = 6, uint instances = 1, uint primitive = 4,
-        GuestRenderState? render = null, GuestDepthTarget? depth = null, GuestDrawTexture[]? textures = null, GuestVertexBuffer[]? streams = null) =>
+        GuestRenderState? render = null, GuestDepthTarget? depth = null, GuestDrawTexture[]? textures = null, GuestVertexBuffer[]? streams = null, GuestIndexBuffer? indices = null, bool noVertexShader = false) =>
         MetalVideoPresenter.SubmitOffscreenTranslatedDraw(new(new Gen5MslShader("", "managed color pipeline never compiled", Gen5MslStage.Pixel, 0)),
-            textures ?? [], [], 0, targets, null, vertices, instances, primitive, null, streams, render, depth, 0);
+            textures ?? [], [], 0, targets, noVertexShader ? null : new(new Gen5MslShader("", "managed vertex never compiled", Gen5MslStage.Vertex, 0)), vertices, instances, primitive, indices, streams, render, depth, 0);
 
     [Theory]
     [InlineData("depth")]
@@ -38,6 +38,8 @@ public sealed partial class MetalTextureSourceRuntimeDrainTests
     [InlineData("empty_instances")]
     [InlineData("unsupported_primitive")]
     [InlineData("storage_writer")]
+    [InlineData("indexed")]
+    [InlineData("missing_vertex_shader")]
     public void ActualColorDrainRejectsUnqualifiedWriterBeforeNativeMutation(string invalid)
     {
         using var state = new State();
@@ -50,7 +52,9 @@ public sealed partial class MetalTextureSourceRuntimeDrainTests
         SubmitControlColor(targets, vertices: invalid == "empty_vertices" ? 0u : 6u,
             instances: invalid == "empty_instances" ? 0u : 1u, primitive: invalid == "unsupported_primitive" ? 1u : 4u,
             depth: invalid == "depth" ? new GuestDepthTarget(Address + 0x1000, Address + 0x1000, 4, 4, 3, 0, 1, false) : null,
-            textures: invalid == "storage_writer" ? [storage] : []);
+            textures: invalid == "storage_writer" ? [storage] : [],
+            indices: invalid == "indexed" ? new GuestIndexBuffer(new byte[12], 6, false, false) : null,
+            noVertexShader: invalid == "missing_vertex_shader");
         var work = LastQueuedWork();
         var owner = Owner(work); var sources = (Array)owner.GetType().GetProperty("Outputs")!.GetValue(owner)!;
         var failure = Assert.Throws<GpuFatalException>(() => MetalVideoPresenter.DrainGuestWork(0, 0));
