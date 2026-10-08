@@ -1,6 +1,5 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
-using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -17,7 +16,7 @@ public sealed partial class MacLauncher : IDisposable
     private static readonly List<Delegate> callbacks = [];
     private static readonly Lazy<nint> targetClass = new(RegisterTargetClass);
     private readonly List<nint> owned = [];
-    private readonly ConcurrentQueue<Action> pending = new();
+    private readonly BoundedLauncherNotifications pending = new();
     private readonly Dictionary<nint, Action> actions = [];
     private readonly GameLibraryWatcher watcher = new();
     private readonly OwnedEmulatorProcess child = new();
@@ -48,7 +47,7 @@ public sealed partial class MacLauncher : IDisposable
     {
         strings.Load(settings.Language);
         watcher.RefreshRequested += (_, _) => Post(Refresh);
-        child.Output += (session, line, error) => Post(() => DispatchChildNotification(session, () => Append(line)));
+        child.Output += (session, line, error) => pending.PostOutput(session, line);
         child.Exited += (session, code) => Post(() => DispatchChildNotification(session, () => { Append($"Emulator exited ({code})."); fileLog?.Dispose(); fileLog = null; SetStatus(strings.Get("Launch.Launch"));
             if (closeAfterChildExit) { closeAfterChildExit = false; RequestQuit(); }
         }));
@@ -80,13 +79,20 @@ public sealed partial class MacLauncher : IDisposable
     }
     private string L(string key, string fallback) { var value = strings.Get(key); return value == key ? fallback : value; }
     private nint Own(nint obj) { if (obj == 0) throw new InvalidOperationException("AppKit object creation failed."); owned.Add(obj); return obj; }
-    private void Post(Action action) { if (!Volatile.Read(ref closed)) pending.Enqueue(action); }
+    private void Post(Action action) => pending.Post(action);
     private void Tick()
     {
         if (closed) return;
         ContinueQuit();
-        for (var count = 0; count < 128 && pending.TryDequeue(out var action); count++)
-            try { action(); } catch (Exception exception) { Append(exception.Message); }
+        var dropped = pending.TakeDroppedCount();
+        if (dropped != 0) Append($"Launcher output backlog: discarded {dropped} older lines.");
+        for (var count = 0; count < 128 && pending.TryTake(out var job); count++)
+            try
+            {
+                if (job!.Action is { } action) action();
+                else DispatchChildNotification(job.Session, () => Append(job.Line!));
+            }
+            catch (Exception exception) { Append(exception.Message); }
     }
     private void Build()
     {
@@ -220,7 +226,7 @@ public sealed partial class MacLauncher : IDisposable
     public void Dispose()
     {
         if (closed && owned.Count == 0) return;
-        closed = true; watcher.Dispose(); child.Dispose(); fileLog?.Dispose(); fileLog = null;
+        closed = true; pending.Close(); watcher.Dispose(); child.Dispose(); fileLog?.Dispose(); fileLog = null;
         if (timer != 0) Send(timer, Selector("invalidate"));
         if (app != 0) Send(app, Selector("setDelegate:"), 0);
         if (window != 0) Send(window, Selector("setDelegate:"), 0);
@@ -230,6 +236,6 @@ public sealed partial class MacLauncher : IDisposable
         foreach (var nativeWindow in new[] { window, consoleWindow })
             if (nativeWindow != 0) { Send(nativeWindow, Selector("setDelegate:"), 0); Send(nativeWindow, Selector("orderOut:"), 0); Send(nativeWindow, Selector("close")); }
         foreach (var handle in owned.AsEnumerable().Reverse()) Release(handle);
-        owned.Clear(); actions.Clear(); while (pending.TryDequeue(out _)) { }
+        owned.Clear(); actions.Clear();
     }
 }
