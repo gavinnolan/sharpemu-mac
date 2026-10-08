@@ -124,11 +124,11 @@ internal static partial class MetalVideoPresenter
 
             _windowWidth = width;
             _windowHeight = height;
-            _latestPresentation ??= _splashHidden
+            if (_latestPresentation is null) PublishGuestPresentationLocked(_splashHidden
                 ? new Presentation(CreateBlackFrame(width, height), width, height, 1, IsSplash: false)
                 : hasSplash
                 ? new Presentation(splashPixels, splashWidth, splashHeight, 1, IsSplash: true)
-                : new Presentation(null, width, height, 0, IsSplash: false);
+                : new Presentation(null, width, height, 0, IsSplash: false));
             StartPresenterLocked();
         }
     }
@@ -143,12 +143,12 @@ internal static partial class MetalVideoPresenter
                 return;
             }
 
-            _latestPresentation = new Presentation(
+            PublishGuestPresentationLocked(new Presentation(
                 CreateBlackFrame(latest.Width, latest.Height),
                 latest.Width,
                 latest.Height,
                 latest.Sequence + 1,
-                IsSplash: false);
+                IsSplash: false));
             Console.Error.WriteLine("[LOADER][INFO] Metal VideoOut hid splash");
         }
     }
@@ -168,7 +168,7 @@ internal static partial class MetalVideoPresenter
             }
 
             var sequence = (_latestPresentation?.Sequence ?? 0) + 1;
-            _latestPresentation = new Presentation(bgraFrame, width, height, sequence, IsSplash: false, IsGuestFrame: true);
+            PublishGuestPresentationLocked(new Presentation(bgraFrame, width, height, sequence, IsSplash: false, IsGuestFrame: true));
             if (_thread is not null)
             {
                 return;

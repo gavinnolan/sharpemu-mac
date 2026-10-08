@@ -248,4 +248,44 @@ public sealed partial class MetalTextureSourceRuntimeDrainTests
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AcceptedDrawPayloadReleasesOnBgraOrSplashPublication(bool splash)
+    {
+        using var state = new State(); lock (PoolGate)
+        {
+            var oldSplashHidden = Field("_splashHidden").GetValue(null);
+            var before = GuestDataPool.DiagnosticStats().LeaseCount; var data = GuestDataPool.Shared.Rent(64);
+            try
+            {
+                MetalVideoPresenter.SubmitTranslatedDraw(new(new Gen5MslShader("", "managed replaced presentation", Gen5MslStage.Pixel, 0)), [],
+                    [new GuestMemoryBuffer(0, data, 64, 64, true)], 4, 4, 0, null, 6, 1, 4, null, null, null);
+                var previous = Field("_latestPresentation").GetValue(null)!;
+                if (!splash) MetalVideoPresenter.Submit(new byte[64], 4, 4);
+                else
+                {
+                    // EnsureStarted only creates initial splash when no latest
+                    // presentation exists. Exercise its actual common publisher
+                    // with an ordinary splash record, then public HideSplash.
+                    var constructor = previous.GetType().GetConstructors().Single();
+                    var args = constructor.GetParameters().Select(parameter => parameter.Name switch
+                    {
+                        "Pixels" => (object)new byte[64], "Width" or "Height" => 4u,
+                        "Sequence" => 100L, "IsSplash" => true, _ => parameter.DefaultValue,
+                    }).ToArray();
+                    var frame = constructor.Invoke(args); Call("PublishGuestPresentationLocked", frame);
+                    Assert.True((bool)frame.GetType().GetProperty("IsSplash")!.GetValue(frame)!);
+                    MetalVideoPresenter.HideSplashScreen();
+                    Assert.False((bool)Field("_latestPresentation").GetValue(null)!.GetType().GetProperty("IsSplash")!
+                        .GetValue(Field("_latestPresentation").GetValue(null))!);
+                }
+                Assert.True((bool)Get(PayloadOwner(previous), "Released")!);
+                Assert.Equal(before, GuestDataPool.DiagnosticStats().LeaseCount);
+                Call("CompletePresenterShutdown"); AssertNoLivePayloadReceipts();
+            }
+            finally { Field("_splashHidden").SetValue(null, oldSplashHidden); GuestDataPool.Shared.Return(data); }
+        }
+    }
+
 }
