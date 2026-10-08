@@ -19,9 +19,17 @@ internal static class MetalR16FloatSelectedMip
     }
 
     internal static bool IsCandidate(Descriptor resource) =>
-        resource.ResourceMipLevels > 1 &&
-        (resource.Format == 2 && resource.NumberType == 7 ||
-         resource.Width == 2048 && resource.Height == 2048 && resource.ResourceMipLevels == 11);
+        RequiresPhysicalSelectedView(resource.Width, resource.Height, resource.Format,
+            resource.NumberType, resource.TileMode, resource.ResourceMipLevels);
+
+    internal static bool RequiresPhysicalSelectedView(uint width, uint height, uint format,
+        uint numberType, uint tileMode, uint resourceMipLevels) =>
+        resourceMipLevels > 1 &&
+        // Linear mip0 already has a qualified base-address seed path. Only
+        // tiled R16 chains need this physical selected-mip interception; keep
+        // the captured geometry gate so mutated raw classes still fail closed.
+        (tileMode != 0 && format == 2 && numberType == 7 ||
+         width == 2048 && height == 2048 && resourceMipLevels == 11);
 
     internal static bool TryPlacement(Descriptor resource, uint selected, out Placement placement)
     {

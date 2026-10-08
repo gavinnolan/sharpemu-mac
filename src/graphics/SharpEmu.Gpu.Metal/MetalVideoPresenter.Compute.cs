@@ -420,7 +420,8 @@ internal static partial class MetalVideoPresenter
         if (descriptor.Width == 0 || descriptor.Height == 0 || descriptor.Width > 16384 || descriptor.Height > 16384)
             throw new NotSupportedException($"Metal storage image 0x{descriptor.Address:X} has unsupported extent {descriptor.Width}x{descriptor.Height}.");
         var format = MetalGuestFormats.DecodeTextureFormat(descriptor.Format, descriptor.NumberType);
-        if (descriptor.Format == 2 && descriptor.NumberType == 7 && descriptor.ResourceMipLevels > 1 &&
+        if (MetalR16FloatSelectedMip.RequiresPhysicalSelectedView(descriptor.Width, descriptor.Height,
+                descriptor.Format, descriptor.NumberType, descriptor.TileMode, descriptor.ResourceMipLevels) &&
             !IsQualifiedSelectedStorageMip(descriptor))
             throw new NotSupportedException("Metal R16Float mip-chain storage requires its exact qualified selected physical view, including mip0.");
         if (format.IsBlockCompressed)
