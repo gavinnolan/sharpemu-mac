@@ -405,3 +405,38 @@ completion or change the graphfalse path. The matching source/queue/frontend
 selection passes 116 managed cases on each architecture. The device executions
 above qualify their exact earlier source revisions, not this later exception
 bookkeeping revision. Source graph activation remains off.
+
+### Exact 2D color producer prerequisite (managed qualification only)
+
+The private defaultfalse graph now allows only validated offscreen single-target
+2D color triangle work, with matching nonempty target/pipeline write masks, no
+depth attachment/state or shader-storage/global-data-share writer. A successful
+pipeline is required before a fresh reserved output is allocated and installed;
+attachment lookup then validates the reserved object's actual native type,
+depth, dimensions and pixel format. A real render encoder must open and end;
+only then does `MarkContentChanged` precede the immutable blit, before any buffer
+writeback can flush the batch. Presentation/transient and other unqualified
+writer paths fail explicitly rather than certifying a skipped source.
+
+Fresh output initialization is the existing host first-use full-target render
+pass clear. Apple's [load action documentation](https://developer.apple.com/documentation/metal/mtlloadaction/clear)
+defines this as initialization of every attachment pixel; the default
+[clear color](https://developer.apple.com/documentation/metal/mtlrenderpasscolorattachmentdescriptor/clearcolor)
+is opaque black. This is host behavior, not a decoded guest clear intent or
+proof that prior guest bytes were undefined. Pending CPU seeds and initialized
+live contents without a retained immutable GPU predecessor are rejected. Later
+partial draws must initialize from that predecessor, regardless of vertex count,
+viewport/scissor or channel masks. Game activation still requires a separate
+initialization/backing/coherence policy.
+
+The matching CPU-only source/queue/frontend/color selection passes 135/135 on
+ARM64 and 135/135 on Rosetta x64, no skips. Nineteen added production-path cases
+cover unsupported actual Drain writers, pending CPU data, initialized live
+contents, real vertex-slot pipeline failure, native metadata mismatch/zero
+handle rejection and presentation exclusion before native mutation. No device
+execution is claimed by these managed controls. Actual queued vertex/pixel
+producer fixtures and old/new all-byte native consumer oracles follow separately.
+
+The first color increment now requires an explicit vertex shader and nonindexed triangles. Indexed resources and the existing fixed fullscreen vertex substitution remain outside this proof. Two production Drain negative cases cover those boundaries. `MetalImmutableGpuVersionTests.Color.cs` contains four required-device fixtures for the real queued color draw path: captured-old/new all-pixel shader consumers with full and scissored/red-masked first draws, actual invalid native pixel compilation, and immutable-copy ordering before the real buffer-writeback flush. Native shaders are independent ABI/pipeline oracles, not guest ISA translation fixtures. Their hardware execution is pending review and an exclusive device grant. The existing shader-function retain cleanup concern and in-flight/presentation pooled CPU payload ownership remain separate limitations.
+
+Frozen `152c570` executed all four required-device ARM cases on Apple M4: actual compile-failure and pre-writeback-copy cases passed; both old/new tests verified the old 64-byte oracle and actual VS/PS, then failed a premature test assertion about `NativeCompleted`. The ordered checkpoint had really waited for GPU completion, but Drain only recycles completion metadata at entry. The fixture now explicitly invokes the real recycle path after that wait, before asserting completion metadata and executing the new-version oracle. Failed TRX/log/source hashes are retained under `artifacts/validation/metal-agent/immutable-color-152c570-arm`; no production completion semantics were relaxed.

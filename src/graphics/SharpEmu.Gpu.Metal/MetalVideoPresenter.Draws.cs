@@ -452,6 +452,7 @@ internal static partial class MetalVideoPresenter
     private static void ExecuteOffscreenDrawCore(nint device, nint queue, OffscreenGuestDraw work)
     {
         var draw = work.Draw;
+        if (_textureSourceGraphEnabled) RequireQualifiedColorTextureSourceWork(work);
         var targetFormats = new MetalRenderTargetFormat[work.Targets.Length];
         for (var index = 0; index < targetFormats.Length; index++)
         {
@@ -462,6 +463,8 @@ internal static partial class MetalVideoPresenter
                     target.ComponentSwap,
                     out targetFormats[index]))
             {
+                if (_textureSourceGraphEnabled)
+                    throw new NotSupportedException("Metal ordered color producer has an unsupported render-target format.");
                 Console.Error.WriteLine(
                     $"[LOADER][WARN] Metal skipped draw with unsupported color target " +
                     $"format={target.Format} number_type={target.NumberType}.");
@@ -472,8 +475,22 @@ internal static partial class MetalVideoPresenter
 
         if (draw.RenderState.Blends.Count != targetFormats.Length)
         {
+            if (_textureSourceGraphEnabled) throw new NotSupportedException("Metal ordered color producer blend/target count mismatch.");
             ReturnPooledGuestData(draw);
             return;
+        }
+
+        // Graph producers need a real successful pipeline before allocating or
+        // replacing their native output. No skipped draw may certify a source.
+        nint graphPipeline = 0;
+        if (_textureSourceGraphEnabled && !TryGetDrawPipeline(device, draw, targetFormats, hasDepth: false, out graphPipeline))
+            throw new InvalidOperationException("Metal ordered color producer pipeline creation failed.");
+        nint commandBuffer = 0;
+        if (_textureSourceGraphEnabled)
+        {
+            commandBuffer = BeginBatchedGuestCommands(queue);
+            if (commandBuffer == 0) throw new InvalidOperationException("Metal ordered color producer has no command buffer.");
+            MaterializeTextureSourceOutputs(device, commandBuffer);
         }
 
         // Resolve color targets: published guest images by address, transient
@@ -499,10 +516,12 @@ internal static partial class MetalVideoPresenter
             var image = EnsureGuestRenderTarget(device, target, targetFormats[index].Format);
             if (image is null)
             {
+                if (_textureSourceGraphEnabled) throw new InvalidOperationException("Metal ordered color producer has no actual attachment.");
                 ReturnPooledGuestData(draw);
                 return;
             }
 
+            if (_textureSourceGraphEnabled) ValidateReservedColorTextureSourceTarget(work, image);
             publishedTargets[index] = image;
             targetTextures[index] = image.Texture;
             targetLoadActions[index] = image.Initialized ? LoadActionLoad : LoadActionClear;
@@ -510,6 +529,7 @@ internal static partial class MetalVideoPresenter
 
         if (targetTextures[0] == 0)
         {
+            if (_textureSourceGraphEnabled) throw new InvalidOperationException("Metal ordered color producer has an empty actual attachment.");
             ReturnPooledGuestData(draw);
             return;
         }
@@ -532,13 +552,14 @@ internal static partial class MetalVideoPresenter
             depth = EnsureGuestDepthImage(device, depthTarget, depthWidth, depthHeight);
         }
 
-        if (!TryGetDrawPipeline(device, draw, targetFormats, depth is not null, out var pipeline))
+        var pipeline = graphPipeline;
+        if (!_textureSourceGraphEnabled && !TryGetDrawPipeline(device, draw, targetFormats, depth is not null, out pipeline))
         {
             ReturnPooledGuestData(draw);
             return;
         }
 
-        var commandBuffer = BeginBatchedGuestCommands(queue);
+        if (!_textureSourceGraphEnabled) commandBuffer = BeginBatchedGuestCommands(queue);
         Span<nint> textureHandles = stackalloc nint[draw.Textures.Length];
         Span<bool> textureOwned = stackalloc bool[draw.Textures.Length];
         ResolveDrawTextures(device, commandBuffer, draw.Textures, textureHandles, textureOwned);
@@ -583,6 +604,8 @@ internal static partial class MetalVideoPresenter
 
         var encoder = MetalNative.Send(
             commandBuffer, MetalNative.Selector("renderCommandEncoderWithDescriptor:"), pass);
+        if (_textureSourceGraphEnabled && encoder == 0)
+            throw new InvalidOperationException("Metal ordered color producer could not open its render encoder.");
         MetalNative.SendVoid(encoder, MetalNative.Selector("setRenderPipelineState:"), pipeline);
 
         EncodeRenderState(device, encoder, draw.RenderState, depthState, depth is not null, firstWidth, firstHeight);
@@ -590,6 +613,13 @@ internal static partial class MetalVideoPresenter
         EncodeDrawCall(encoder, draw);
 
         MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
+        if (_textureSourceGraphEnabled)
+        {
+            foreach (var image in publishedTargets) image!.MarkContentChanged();
+            // Must precede ANY writeback flush, and run only after the real
+            // render-pass clear/raster encoder has successfully ended.
+            EncodeTextureSourceOutputCopies(device, commandBuffer);
+        }
 
         // CPU-visible GPU writes are ordering points in the guest command
         // stream: completing this work item is the signal WaitForGuestWork
@@ -604,7 +634,7 @@ internal static partial class MetalVideoPresenter
 
         for (var index = 0; index < publishedTargets.Length; index++)
         {
-            if (publishedTargets[index] is { } published)
+            if (!_textureSourceGraphEnabled && publishedTargets[index] is { } published)
             {
                 published.MarkContentChanged();
             }
@@ -618,6 +648,8 @@ internal static partial class MetalVideoPresenter
     /// recognized fixed-function draw) into the reusable onscreen target.</summary>
     private static nint ExecutePresentationDraw(nint device, nint queue, Presentation presentation)
     {
+        if (_textureSourceGraphEnabled)
+            throw new NotSupportedException("Metal ordered texture source graph does not support presentation/transient writers.");
         var target = GetTransientTarget(
             device, MtlPixelFormat.Bgra8Unorm, presentation.Width, presentation.Height);
         if (target == 0)

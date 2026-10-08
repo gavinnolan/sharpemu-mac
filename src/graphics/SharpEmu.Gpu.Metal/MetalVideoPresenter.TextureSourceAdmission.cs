@@ -94,8 +94,12 @@ internal static partial class MetalVideoPresenter
                 var descriptor = DescribeColorTextureSource(target);
                 // First use clears a fresh attachment. An initialized old image
                 // without an ordered source cannot be relabeled as a clear.
+                if (_pendingGuestImageInitialData.ContainsKey(target.Address))
+                    throw new NotSupportedException("Metal ordered color producer cannot discard pending CPU initialization.");
                 var canClear = !_latestTextureSources.ContainsKey(target.Address) &&
                     (!_guestImages.TryGetValue(target.Address, out var live) || !live.Initialized);
+                if (!canClear && !_latestTextureSources.ContainsKey(target.Address))
+                    throw new NotSupportedException("Metal ordered color producer cannot discard initialized contents without a retained GPU predecessor.");
                 AddOutput(descriptor, canClear, verifiedColorProducer: true);
             }
         }

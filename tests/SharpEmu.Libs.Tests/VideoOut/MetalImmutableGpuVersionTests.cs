@@ -260,6 +260,7 @@ public sealed partial class MetalImmutableGpuVersionTests(ITestOutputHelper outp
             if (last != 0) MetalNative.SendVoid(last, MetalNative.Selector("release"));
             Field("_lastFlushedCommandBuffer").SetValue(null, (nint)0);
             ReleaseConsumerShaderResources();
+            ReleaseColorShaderResources();
             Field("_executingTextureSourceWork").SetValue(null, null);
             Field("_textureSourceGraphEnabled").SetValue(null, oldGraph);
             foreach (var buffer in buffers) MetalNative.SendVoid(buffer, MetalNative.Selector("release"));

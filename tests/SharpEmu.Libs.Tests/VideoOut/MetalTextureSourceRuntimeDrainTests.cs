@@ -15,7 +15,7 @@ using Xunit;
 namespace SharpEmu.Libs.Tests.VideoOut;
 
 [Collection(SchedulingStateCollection.Name)]
-public sealed class MetalTextureSourceRuntimeDrainTests
+public sealed partial class MetalTextureSourceRuntimeDrainTests
 {
     private const ulong Address = 0x71F0_0000_00;
     private static FieldInfo Field(string name) => typeof(MetalVideoPresenter).GetField(name, BindingFlags.Static | BindingFlags.NonPublic)!;
@@ -85,14 +85,14 @@ public sealed class MetalTextureSourceRuntimeDrainTests
     }
 
     [Fact]
-    public void ActualDrainRejectsUnwiredProducerBeforeNativeMaterialization()
+    public void ActualDrainRejectsUnqualifiedDepthProducerBeforeNativeMaterialization()
     {
         using var state = new State();
         var reports = new List<string>(); GpuFatal.OnFatal = reports.Add;
-        var read = state.AdmitPendingSource();
+        var read = state.AdmitPendingSource(withDepth: true);
         MetalVideoPresenter.ReleasePreparedTextureSources([read]);
         var error = Assert.Throws<GpuFatalException>(() => MetalVideoPresenter.DrainGuestWork(0, 0));
-        Assert.Contains("producer encoding", Assert.IsType<NotSupportedException>(error.InnerException).Message);
+        Assert.Contains("no depth", Assert.IsType<NotSupportedException>(error.InnerException).Message);
         Assert.Single(reports);
         Assert.Equal(0UL, Field("_immutableTextureSourceBytes").GetValue(null));
         Assert.False((bool)Field("_batchOpen").GetValue(null)!);
@@ -298,11 +298,12 @@ public sealed class MetalTextureSourceRuntimeDrainTests
         private readonly Dictionary<object, long> sequences = new(ReferenceEqualityComparer.Instance);
         public long SequenceOf(object work) => sequences[work];
         public State() => Field("_textureSourceGraphEnabled").SetValue(null, true);
-        public GuestDrawTexture AdmitPendingSource()
+        public GuestDrawTexture AdmitPendingSource(bool withDepth = false)
         {
             var target = new GuestRenderTarget(Address, 4, 4, 10, 0,
                 Registers: new ColorTargetWords(Address, 0, 10u << 2, 0, 3u | 3u << 14, 1u << 24, 0, 0, 0, 0, 0));
-            MetalVideoPresenter.SubmitOffscreenTranslatedDraw(new(new Gen5MslShader("", "pending never encoded", Gen5MslStage.Pixel, 0)), [], [], 0, [target], null, 3, 1, 4, null, null, null, null, 0);
+            MetalVideoPresenter.SubmitOffscreenTranslatedDraw(new(new Gen5MslShader("", "pending never encoded", Gen5MslStage.Pixel, 0)), [], [], 0, [target], null, 3, 1, 4, null, null, null,
+                withDepth ? new GuestDepthTarget(Address + 0x1000, Address + 0x1000, 4, 4, 3, 0, 1, false) : null, 0);
             var read = new GuestDrawTexture(Address, 4, 4, 10, 0, [], false, false, Pitch: 4,
                 Descriptor: MetalTextureSourceLeaseTests.ResourceWords(), Shape: new ShaderImageShape(false, false, false, false, TextureNumericClass.Float), Access: GuestImageAccess.Read);
             Assert.True(MetalVideoPresenter.TryCaptureTextureSource(read, 64, false)); captures.Add(read); return read;
