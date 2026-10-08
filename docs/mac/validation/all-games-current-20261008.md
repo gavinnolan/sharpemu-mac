@@ -87,3 +87,11 @@ rejection. It exits134 after35s, peak2359MiB, with a black30-second screenshot
 and one reported guest frame. This does not identify the prior c24 resource's
 trigger or authorize CPU seed replacement. Exact dirty causality and canonical
 GPU publication remain incomplete; see the protection-intent checkpoint.
+
+The [cold shader timing replay](quake-cold-shader-compilation-20261008.md) at
+d6461778 repeats Quake's timeout but locates160.151ms in the first draw's two
+shader-library creation intervals, within206.564ms total draw wall time.
+Native pipeline creation is1.393ms; cached later draws are4.084/2.467ms.
+Library preparation/readiness is now the production fix target. The106 focused
+controls pass on each CLR; this diagnostic changes no execution/completion
+policy and remains isolated.
