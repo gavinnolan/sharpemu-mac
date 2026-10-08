@@ -505,3 +505,20 @@ and late work release cannot return either new rent or clear uncertainty. The
 separate post-return-only case proves normal-call confirmation versus diagnostic.
 This fault seam does not claim an actual allocator OOM or hardware failure.
 The successor's preliminary combined ARM64 selection passed 162/162.
+
+Final clean-source qualification is `97fdd7f7469d35a62ebd1978e0dec22d1bccb879`
+(`fbd4cba` borrower ownership + `52507af` under-gate failure recheck + sticky
+whole-close correction). Separate bounded Metal/test Rebuilds passed with zero
+errors. The unchanged neutral assemblies ran the same 162 managed cases under
+ARM64 (382 ms) and Rosetta x64 (930 ms), zero skips, required-device=0. Fourteen
+new cases supplement the existing 148 selected controls. Independent CPU-peer
+review cleared source and verified all indexed hashes and identical case sets.
+No game/device run or graph activation was performed.
+
+Evidence: `artifacts/validation/metal-agent/presentation-borrows-97fdd7f/source-results.json`
+(SHA256 `73c56f1f395b7602a79f585a58012a5a99a86f058bbe32b8be1b6e2255ae0ffe`),
+with frozen source, assembly/source/TRX/log hashes, all case identities and exact
+commands. It retains the prior clean 525 dual-CLR 160-case manifest and failed
+preliminary artifacts. These results certify managed accepted-payload lifetime
+and close coordination only; actual native repeated presentation, command-buffer
+teardown and mutable guest backing lifetime remain separate prerequisites.
