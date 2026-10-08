@@ -31,11 +31,11 @@ execution remains x64/Rosetta; ARM64 CLR tests qualify host code only.
 | --- | --- | --- |
 | Dreaming Sarah | Controllable outdoor scene; same-binary876 ABBA: off63.34/65.86Hz; idle-on73.34/69.41Hz, tails remain33.8–36.2ms | Reduce unnecessary drawable acquisition; then queue-drain attribution and controlled same-build pacing comparison |
 | Demon’s Souls | DF identifies global mapping epoch change at admission; zero guest frames | Preserve content authority while replacing broad vetoes with qualified per-range lifetime/operation ownership |
-| Silent Hill: The Short Message | d756 passes RGBA16Float and rejects R8Uint mode24 singleton array | Qualify full64KiB origin seed, primary8bpp mode24 geometry, native Uint/bounds |
-| Octopath Traveler II | d756 rejects same R8Uint mode24 family | Exact title raw replay and native Uint origin/bounds proof |
-| The Oregon Trail | d756 rejects RGBA8Uint mode27 identity array | Full4-byte unsigned seed/store/load proof; separate title progression |
+| Silent Hill: The Short Message | a8c passes small Uint origin arrays;1024x1024 BGRA mode27 array rejects; one early frame, then zero | Qualify complete multi-block coordinates, BGRA semantics and native array store/load/writeback |
+| Octopath Traveler II | a8c reaches the same1024x1024 BGRA array rejection | Shared finite layout proof; exact title replay and progression |
+| The Oregon Trail | a8c passes RGBA8Uint and rejects the same1024x1024 BGRA array | Full multi-block addressing and typed native proof; separate title progression |
 | Poppy Playtime Chapter 1 | Fatal write fault; later b7 record observes tracker Disarmed after a successful RW restore | Filtered schema3 retains85/0drops and three actual Disarmed CAS declines after successful RW restore; require permission/lifetime ownership, no unconditional retry |
-| Superliminal | d756 fixes MSL collisions; loading hallway then same-address512x512→128x64 view mismatch | Establish resource/view lifetime and authoritative alias contents before changing typed identity |
+| Superliminal | a8c provenance identifies GPU-written512x512 color target before128x64 storage image atsameaddress | Qualify typed layout and GPU-content publication before safe rebinding |
 | Quake | Native movie plays; first 8192² R32 tiled depth image exceeds 128 MiB snapshot bound | Independent PS5 tile-mode-24 address oracle, bounded upload staging and correctly filtered depth comparison |
 | Void Terrarium | Scene visible but progression and gameplay unverified under contention | Input/checkpoint qualification on quiet host, first visual discrepancy and scene-specific GPU/producer attribution |
 

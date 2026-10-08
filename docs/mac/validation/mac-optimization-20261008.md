@@ -352,3 +352,9 @@ inputs and payload provenance: `compat-d756a2b3-game-replays/{REPORT.md,manifest
 Next work must qualify the two unsigned format families and diagnose alias/view
 lifetime without discarding live GPU-written contents. Ordinary backing change
 remains outside this bundle pending corrected race and native provider proof.
+
+## SmallUint and image provenance integration
+
+Clean a8c65ae1 signed app passed123 texture/readiness and74 genuine presenter controls plus36 actual numerical Metal cases perCLR. [Actual four-title replay](smalluint-provenance-game-replay-20261008.md) advances the three smallUint failures to shared1024x1024 BGRA arrays; allthree report one early guestframe, then zero. Superliminal identifies an earlier GPU-written512x512 color target at the incoming128x64 storage address. No gameplay, loading or sustainedFPS gain follows from this evidence. CPU backing/performance candidates are excluded.
+
+A separate signed d756 Sarah EventPipe capture attributes allocation ticks to vertex copies and duplicate texture arrays; exact trace/reader/failure records are retained under artifacts/validation/all-games-20261008/sarah-eventpipe-d756a2b3.101475 ticks belong to the owned app, EventsLost0.92270 trigger Byte[] allocations;50013 stacks include CopyVertexBuffers,20948 the initial texture copy and20945 Span.ToArray. These are samples, not exact typed bytes or CPU self-time. An isolated linear ownership candidate reduces the actual warmed256KiB snapshot allocation528376→266208 bytes onbothCLR architectures (3genuine managed cases each); actual native upload and game performance qualification remain pending.
