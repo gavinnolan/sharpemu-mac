@@ -25,9 +25,11 @@ internal static class DcbSubmissionProfile
     private static long _lockWaitTicks;
     private static long _queuePumpTicks;
     private static long _resumeDrainTicks;
+    private static long _preparationWaitTicks;
     private static long _totalTicks;
     private static long _maxTotalTicks;
     private static long _maxQueuePumpTicks;
+    private static long _maxPreparationWaitTicks;
     private static int _reporting;
     private static long _vertexSnapshotMisses;
     private static long _vertexSnapshotMismatches;
@@ -116,7 +118,8 @@ internal static class DcbSubmissionProfile
         long lockWaitTicks,
         long queuePumpTicks,
         long resumeDrainTicks,
-        long totalTicks)
+        long totalTicks,
+        long preparationWaitTicks = 0)
     {
         if (!_enabled)
         {
@@ -130,9 +133,11 @@ internal static class DcbSubmissionProfile
         Interlocked.Add(ref _lockWaitTicks, lockWaitTicks);
         Interlocked.Add(ref _queuePumpTicks, queuePumpTicks);
         Interlocked.Add(ref _resumeDrainTicks, resumeDrainTicks);
+        Interlocked.Add(ref _preparationWaitTicks, preparationWaitTicks);
         Interlocked.Add(ref _totalTicks, totalTicks);
         UpdateMaximum(ref _maxTotalTicks, totalTicks);
         UpdateMaximum(ref _maxQueuePumpTicks, queuePumpTicks);
+        UpdateMaximum(ref _maxPreparationWaitTicks, preparationWaitTicks);
 
         TryReport();
     }
@@ -161,9 +166,11 @@ internal static class DcbSubmissionProfile
             var lockWaitTicks = Interlocked.Exchange(ref _lockWaitTicks, 0);
             var queuePumpTicks = Interlocked.Exchange(ref _queuePumpTicks, 0);
             var resumeDrainTicks = Interlocked.Exchange(ref _resumeDrainTicks, 0);
+            var preparationWaitTicks = Interlocked.Exchange(ref _preparationWaitTicks, 0);
             var totalTicks = Interlocked.Exchange(ref _totalTicks, 0);
             var maxTotalTicks = Interlocked.Exchange(ref _maxTotalTicks, 0);
             var maxQueuePumpTicks = Interlocked.Exchange(ref _maxQueuePumpTicks, 0);
+            var maxPreparationWaitTicks = Interlocked.Exchange(ref _maxPreparationWaitTicks, 0);
             var snapshotMisses = Interlocked.Exchange(ref _vertexSnapshotMisses, 0);
             var snapshotMismatches = Interlocked.Exchange(ref _vertexSnapshotMismatches, 0);
             var snapshotReuses = Interlocked.Exchange(ref _vertexSnapshotReuses, 0);
@@ -195,10 +202,12 @@ internal static class DcbSubmissionProfile
                 $"lock_wait_ms={ToMilliseconds(lockWaitTicks):F2} " +
                 $"queue_pump_ms={ToMilliseconds(queuePumpTicks):F2} " +
                 $"resume_drain_ms={ToMilliseconds(resumeDrainTicks):F2} " +
-                $"other_ms={ToMilliseconds(Math.Max(0, totalTicks - setupTicks - snapshotTicks - lockWaitTicks - queuePumpTicks - resumeDrainTicks)):F2} " +
+                $"preparation_wait_ms={ToMilliseconds(preparationWaitTicks):F2} " +
+                $"other_ms={ToMilliseconds(Math.Max(0, totalTicks - setupTicks - snapshotTicks - lockWaitTicks - queuePumpTicks - resumeDrainTicks - preparationWaitTicks)):F2} " +
                 $"avg_call_ms={ToMilliseconds(totalTicks) / calls:F3} " +
                 $"max_call_ms={ToMilliseconds(maxTotalTicks):F3} " +
-                $"max_queue_pump_ms={ToMilliseconds(maxQueuePumpTicks):F3}");
+                $"max_queue_pump_ms={ToMilliseconds(maxQueuePumpTicks):F3} " +
+                $"max_preparation_wait_ms={ToMilliseconds(maxPreparationWaitTicks):F3}");
             Console.Error.WriteLine(
                 $"[PERF][VERTEX_SNAPSHOT] window={elapsedSeconds:F1}s reused={snapshotReuses} " +
                 $"missing={snapshotMisses} mismatch={snapshotMismatches} " +

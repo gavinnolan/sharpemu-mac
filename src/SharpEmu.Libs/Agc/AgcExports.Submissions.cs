@@ -94,11 +94,15 @@ public static partial class AgcExports
             }
         }
 
+        var preparationStartTicks = profileEnabled
+            ? System.Diagnostics.Stopwatch.GetTimestamp()
+            : 0L;
         if (!TryWaitSubmissionPreparation(preparation))
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_CANCELED);
 
         if (profileEnabled)
         {
+            var preparationEndTicks = System.Diagnostics.Stopwatch.GetTimestamp();
             DcbSubmissionProfile.Record(
                 dwordCount,
                 setupEndTicks - callStartTicks,
@@ -106,7 +110,8 @@ public static partial class AgcExports
                 lockAcquiredTicks - setupEndTicks,
                 enqueueEndTicks - snapshotEndTicks,
                 0,
-                enqueueEndTicks - callStartTicks);
+                preparationEndTicks - callStartTicks,
+                preparationEndTicks - preparationStartTicks);
         }
 
         ctx[CpuRegister.Rax] = 0;
