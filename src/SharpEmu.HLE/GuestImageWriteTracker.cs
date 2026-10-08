@@ -501,6 +501,38 @@ public static unsafe partial class GuestImageWriteTracker
         uint NativeType, uint NativeFormat, uint Depth, uint Layers, uint Width, uint Height,
         uint Pitch, ulong PhysicalBytes, uint BytesPerPixel);
 
+    private static readonly bool _selectedCopyWriterDiagnostics =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_SELECTED_COPY_DIAGNOSTICS") == "1";
+    private static int _selectedCopyWriterRows;
+
+    // Diagnostic-only ordinary producer observation, never a dirty consumer or
+    // native/signal writer completion receipt. Counter is bounded under Gate.
+    public static void TraceSelectedCopyWriterState(ulong address, int row, int attempt, string reason)
+    {
+        if (!_selectedCopyWriterDiagnostics) return;
+        lock (_gate)
+        {
+            if (_selectedCopyWriterRows >= 64) return;
+            _selectedCopyWriterRows++;
+            try
+            {
+                _rangesByAddress.TryGetValue(address, out var range);
+                _watchRangesByAddress.TryGetValue(address, out var watch);
+                var published = range is not null && Volatile.Read(ref range.FirstCpuWriteSeen) == 2;
+                Console.Error.WriteLine($"[WT][SELECTED-COPY] row={row} address=0x{address:X} attempt={attempt} reason={reason}" +
+                    $" protected_dirty={range is not null && Volatile.Read(ref range.Dirty) != 0} watch_dirty={watch is not null && Volatile.Read(ref watch.Dirty) != 0}" +
+                    $" protected_id={range?.DiagnosticIdentity ?? 0} protected_generation={(range is null ? -1 : Volatile.Read(ref range.WriteGeneration))}" +
+                    $" protected_bytes={range?.ByteCount ?? 0} arm_epoch={range?.DiagnosticArmEpoch ?? 0}" +
+                    $" protected_source='{range?.Source}' protected_source_sequence={range?.SourceSequence ?? 0}" +
+                    $" watch_id={watch?.DiagnosticIdentity ?? 0} watch_generation={(watch is null ? -1 : Volatile.Read(ref watch.WriteGeneration))}" +
+                    $" watch_bytes={watch?.ByteCount ?? 0} watch_source='{watch?.Source}' watch_source_sequence={watch?.SourceSequence ?? 0}" +
+                    $" first_record_published={published} first_fault=0x{(published ? range!.FirstCpuWriteAddress : 0):X}" +
+                    $" first_invocation={(published ? range!.FirstCpuWriteInvocation : -1)} correlation0_is_unknown_writer_route=true");
+            }
+            catch { } // No mutation, consumption or retry policy follows from these sampled fields.
+        }
+    }
+
     // Ordinary diagnostic only. Called before ConsumeDirty, never from a fault
     // callback; a first trap/pre-notification is not completed write coverage.
     public static void TraceDirtyBeforeConsume(ulong address, long session,
