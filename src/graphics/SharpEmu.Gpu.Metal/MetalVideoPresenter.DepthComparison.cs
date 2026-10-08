@@ -46,6 +46,11 @@ internal static partial class MetalVideoPresenter
         if (!texture.Shape.DepthCompare)
             return CreateDrawColorTexture(device, blitCommandBuffer, texture, out ownedByCaller);
 
+        if (TryAssembleNativeDepthCube(device, blitCommandBuffer, texture, out var nativeCube))
+        {
+            ownedByCaller = false; // consuming snapshot pool owns array through actual CB completion
+            return nativeCube;
+        }
         ValidateDepthComparisonTexture(texture, blitCommandBuffer);
         if (!MetalNative.SendBool(blitCommandBuffer, MetalNative.Selector("retainedReferences")))
             throw new NotSupportedException("Metal depth conversion requires command-buffer retained references.");

@@ -138,6 +138,11 @@ internal static partial class MetalTextureSnapshots
                         TexturePreparationProfile.BindingOutcome.Reused,
                         profileStart);
                 }
+                else if (depthCubeFaces && MetalVideoPresenter.TryCaptureNativeDepthCube(context.Memory, binding, out texture))
+                {
+                    unreturnedTexture = texture;
+                    TexturePreparationProfile.RecordBinding(TexturePreparationProfile.BindingOutcome.Empty, profileStart);
+                }
                 else if (TryCreateSelectedStorageMip(context, binding, out texture))
                 {
                     unreturnedTexture = texture;

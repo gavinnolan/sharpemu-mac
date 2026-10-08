@@ -252,7 +252,11 @@ internal static partial class MetalVideoPresenter
             }
             finally
             {
-                try { ReleaseSelectedStorageMipImages(); }
+                try
+                {
+                    try { RetireNativeDepthCubeFromRenderOwner(); }
+                    finally { ReleaseSelectedStorageMipImages(); }
+                }
                 finally
                 {
                     MetalPresentationProfile.End();

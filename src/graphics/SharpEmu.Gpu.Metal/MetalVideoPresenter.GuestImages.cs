@@ -616,6 +616,7 @@ internal static partial class MetalVideoPresenter
             return accepted;
         }
         var prefixProducer = GuestPrefixProducerForAdmission(checked(_enqueuedGuestWorkSequence + 1), queue);
+        var nativeDepthFaceAdmission = PrepareNativeDepthFaceLocked(work, checked(_enqueuedGuestWorkSequence + 1), queue);
         var selectedMipAdmission = PrepareSelectedStorageMipAdmissionLocked(work, queue);
         var colorPhysicalAdmission = PrepareColorPhysicalAdmissionLocked(work);
         var sequence = ++_enqueuedGuestWorkSequence;
@@ -647,8 +648,21 @@ internal static partial class MetalVideoPresenter
             pendingQueue.AddLast(pending);
         }
 
-        PublishSelectedStorageMipAdmissionLocked(selectedMipAdmission);
-        PublishColorPhysicalAdmissionLocked(colorPhysicalAdmission);
+        try
+        {
+            PublishSelectedStorageMipAdmissionLocked(selectedMipAdmission);
+            PublishColorPhysicalAdmissionLocked(colorPhysicalAdmission);
+            PublishNativeDepthFaceLocked(nativeDepthFaceAdmission);
+        }
+        catch (Exception failure) when (nativeDepthFaceAdmission is not null)
+        {
+            // No finite producer may remain runnable after a failed accepted
+            // metadata publication. Keep the original failure and wake waiters.
+            pendingQueue.Remove(pending);
+            _guestWorkFailure ??= failure;
+            Monitor.PulseAll(_gate);
+            throw;
+        }
         _pendingGuestWorkCount++;
         var total = _pendingGuestWorkBytes + payloadBytes;
         _pendingGuestWorkBytes = total < _pendingGuestWorkBytes ? ulong.MaxValue : total;
