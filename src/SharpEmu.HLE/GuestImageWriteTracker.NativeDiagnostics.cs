@@ -135,6 +135,10 @@ public static unsafe partial class GuestImageWriteTracker
         TrackedRange? range, ulong address, long invocation, NativeRangeDecisionPass pass,
         NativeRangeDecisionReason reason, int casPreviousState, bool branchHandled)
     {
+        // Ordinary managed writes and legacy Core calls supply no native
+        // invocation. Their per-page declines can exhaust the fixed slots
+        // before the first real signal; never associate them with a later entry.
+        if (invocation <= 0 && reason != NativeRangeDecisionReason.PreflightWarmup) return;
         var buffer = Volatile.Read(ref _nativeDiagnosticBuffer);
         if (buffer is null) return; // default-off path: no clock or owner observation
         // The initiating range is already known. Do not rescan the snapshot

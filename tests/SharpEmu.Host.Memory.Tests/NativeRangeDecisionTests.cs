@@ -147,6 +147,45 @@ public sealed class NativeRangeDecisionTests
         Assert.Equal(0L, Value<long>(fixture.Buffer, "Dropped"));
     }
 
+    [Fact]
+    public void UncorrelatedCallsCannotConsumeNativeDecisionCapacity()
+    {
+        using var fixture = new Fixture(true, new Range(0x8120, 16, 0));
+        for (var index = 0; index < 10_000; index++)
+        {
+            Assert.False(GuestImageWriteTracker.TryHandleWriteFault(0x8120));
+            Assert.False(GuestImageWriteTracker.TryHandleWriteFaultWithNativeDiagnostics(0x8120, -1));
+        }
+        Assert.Empty(fixture.Records);
+        Assert.Equal(0L, Value<long>(fixture.Buffer, "Dropped"));
+
+        Assert.False(GuestImageWriteTracker.TryHandleWriteFaultWithNativeDiagnostics(0x8120, 17));
+        var records = fixture.Decisions;
+        Assert.Equal(2, records.Length);
+        Check(records[0], 1, 5, 0, false);
+        Assert.Equal(0x8120UL, Value<ulong>(records[0], "Address"));
+        Assert.Equal(0x8120UL, Value<ulong>(records[0], "OwnerAddress"));
+        Assert.Equal(16UL, Value<ulong>(records[0], "RawAddress"));
+        Assert.Equal(0x8000UL, Value<ulong>(records[0], "ErrorCode"));
+        Assert.Equal(0x9000UL, Value<ulong>(records[0], "OwnerEnd"));
+        Assert.Equal(7L, Value<long>(records[0], "ArmEpoch"));
+        Assert.Equal(2, Value<int>(records[0], "OwnerObservation"));
+        Assert.Equal(0L, Value<long>(fixture.Buffer, "Dropped"));
+        Check(records[1], 3, 8, -1, false);
+    }
+
+    [Fact]
+    public void ExplicitPreflightMarkerRemainsCollectedWithoutInvocation()
+    {
+        using var fixture = new Fixture(true, new Range(0x8120, 16, 0));
+        fixture.RecordDecision(9, -1, false, 0);
+        var record = Assert.Single(fixture.Decisions);
+        Assert.Equal(0L, Value<long>(record, "Invocation"));
+        Assert.Equal(9, Value<int>(record, "Reason"));
+        Assert.True(Value<long>(record, "Nanoseconds") > 0);
+        Assert.Equal(0L, Value<long>(fixture.Buffer, "Dropped"));
+    }
+
     private static void Check(object record, int pass, int reason, int previous, bool handled)
     {
         Assert.Equal(8, Value<int>(record, "Kind"));
@@ -201,12 +240,12 @@ public sealed class NativeRangeDecisionTests
             SetBuffer(Buffer);
         }
         internal void SetBuffer(object? buffer) => Tracker.GetMethod("ExchangeNativeDiagnosticBufferForTests", HiddenStatic)!.Invoke(null, [buffer]);
-        internal void RecordDecision(int reason, int previous, bool handled)
+        internal void RecordDecision(int reason, int previous, bool handled, long invocation = 17)
         {
             var passType = Tracker.GetNestedType("NativeRangeDecisionPass", BindingFlags.NonPublic)!;
             var reasonType = Tracker.GetNestedType("NativeRangeDecisionReason", BindingFlags.NonPublic)!;
             Tracker.GetMethod("RecordNativeRangeDecision", HiddenStatic)!.Invoke(null,
-                [_ranges[0], 0x8120UL, 17L, Enum.ToObject(passType, 1), Enum.ToObject(reasonType, reason), previous, handled]);
+                [_ranges[0], 0x8120UL, invocation, Enum.ToObject(passType, 1), Enum.ToObject(reasonType, reason), previous, handled]);
         }
         public void Dispose()
         {
