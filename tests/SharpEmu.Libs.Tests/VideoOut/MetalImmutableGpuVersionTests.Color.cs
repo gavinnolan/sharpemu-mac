@@ -36,6 +36,9 @@ public sealed partial class MetalImmutableGpuVersionTests
         var oldBytes = state.DrainColorConsumer(oldRead);
         state.AssertColorPipelineSucceeded(first.Work); state.AssertColorPipelineSucceeded(second.Work);
         Assert.Equal(oldExpected, oldBytes);
+        // Real Wait in the ordered checkpoint precedes completion recycling;
+        // Drain recycles at entry, not after its final command-buffer wait.
+        state.Recycle();
         Assert.True((bool)Get(first.Source, "NativeCompleted")!);
         Assert.True((bool)Get(second.Source, "NativeCompleted")!);
         Assert.Equal(newExpected, state.DrainColorConsumer(newRead));
