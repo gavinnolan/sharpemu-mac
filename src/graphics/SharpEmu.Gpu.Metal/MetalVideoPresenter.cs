@@ -41,6 +41,9 @@ internal static partial class MetalVideoPresenter
 
     private static readonly object _gate = new();
     private static Thread? _thread;
+    // _thread reserves startup/admission; AppKit may run on another thread.
+    private static Thread? _renderOwner;
+    [ThreadStatic] private static int _guestWorkDrainDepth;
     private static bool _closed;
     private static bool _splashHidden;
     private static bool _closeRequested;
@@ -189,6 +192,9 @@ internal static partial class MetalVideoPresenter
     {
         Volatile.Write(ref _closeRequested, true);
         Volatile.Read(ref _hostWindow)?.Close();
+        // Device preparation may precede window startup. Revoke that exact owner
+        // even when no Run lifetime exists; active preparation/render leases pin it.
+        RetireLibraryPreparationDevice();
     }
 
     private static void StartPresenterLocked()
@@ -214,6 +220,18 @@ internal static partial class MetalVideoPresenter
 
     private static void Run()
     {
+        var owner = Thread.CurrentThread;
+        lock (_gate) _renderOwner = owner;
+        try { RunWithRenderOwner(); }
+        finally
+        {
+            lock (_gate)
+                if (ReferenceEquals(_renderOwner, owner)) _renderOwner = null;
+        }
+    }
+
+    private static void RunWithRenderOwner()
+    {
         MetalPresentationProfile.Begin();
         try
         {
@@ -227,7 +245,11 @@ internal static partial class MetalVideoPresenter
         }
         finally
         {
-            try { CompletePresenterShutdown(); }
+            try
+            {
+                try { RetireLibraryPreparationDevice(); }
+                finally { CompletePresenterShutdown(); }
+            }
             finally
             {
                 try { ReleaseSelectedStorageMipImages(); }
@@ -243,14 +265,17 @@ internal static partial class MetalVideoPresenter
 
     private static void RunWindowLoop()
     {
-        MetalNative.EnsureFrameworksLoaded();
+        var lease = AcquireLibraryPreparationDevice();
+        Exception? first = null;
+        try { RunWindowLoopWithDevice(lease.Owner.Device); }
+        catch (Exception failure) { first = failure; }
+        finally { try { lease.Dispose(); } catch (Exception cleanup) { RecordCleanup(ref first, cleanup); } }
+        if (first is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(first).Throw();
+    }
 
-        _device = MetalNative.MTLCreateSystemDefaultDevice();
-        if (_device == 0)
-        {
-            Console.Error.WriteLine("[LOADER][ERROR] No Metal device available.");
-            return;
-        }
+    private static void RunWindowLoopWithDevice(nint device)
+    {
+        _device = device;
 
         // Mirror the Vulkan presenter: fold the selected GPU's name into the
         // window title. Without this the Metal title never gains the "· <GPU>"
@@ -862,8 +887,9 @@ internal static partial class MetalVideoPresenter
         return true;
     }
 
-    private static bool TryCompileLibrary(nint device, string source, out nint library, out string error)
+    private static bool TryCompileLibrary(nint device, string source, out nint library, out string error, bool traceGuestWork = true)
     {
+        if (traceGuestWork) TraceGuestWorkStage("shader.library.begin");
         error = string.Empty;
 
         // Fast-math off everywhere for parity with translated guest shaders,
@@ -871,22 +897,40 @@ internal static partial class MetalVideoPresenter
         var options = MetalNative.Send(
             MetalNative.Send(MetalNative.Class("MTLCompileOptions"), MetalNative.Selector("alloc")),
             MetalNative.Selector("init"));
-        MetalNative.SendVoidBool(options, MetalNative.Selector("setFastMathEnabled:"), false);
-
         nint nsError = 0;
-        library = MetalNative.Send(
-            device,
-            MetalNative.Selector("newLibraryWithSource:options:error:"),
-            MetalNative.NsString(source),
-            options,
-            ref nsError);
-        if (library == 0)
+        library = 0;
+        Exception? first = null;
+        try
         {
-            error = MetalNative.DescribeError(nsError);
-            return false;
+            if (options == 0) throw new InvalidOperationException("Metal native shader compile options could not be initialized.");
+            MetalNative.SendVoidBool(options, MetalNative.Selector("setFastMathEnabled:"), false);
+            library = MetalNative.Send(
+                device,
+                MetalNative.Selector("newLibraryWithSource:options:error:"),
+                MetalNative.NsString(source),
+                options,
+                ref nsError);
+            if (traceGuestWork) TraceGuestWorkStage("shader.library.end");
+            if (library == 0) error = MetalNative.DescribeError(nsError);
         }
-
-        return true;
+        catch (Exception failure) { first = failure; }
+        finally
+        {
+            if (options != 0)
+                try { MetalNative.SendVoid(options, MetalNative.Selector("release")); }
+                catch (Exception cleanup) { RecordCleanup(ref first, cleanup); }
+        }
+        if (first is not null)
+        {
+            if (library != 0)
+            {
+                var unpublished = library; library = 0;
+                try { MetalNative.SendVoid(unpublished, MetalNative.Selector("release")); }
+                catch (Exception cleanup) { AddLibraryPreparationCleanup(first, cleanup); }
+            }
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(first).Throw();
+        }
+        return library != 0;
     }
 
     private static nint CreateLinearSampler(nint device)

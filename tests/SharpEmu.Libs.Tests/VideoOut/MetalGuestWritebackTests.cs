@@ -313,6 +313,12 @@ public sealed class MetalGuestWritebackTests
         public State()
         {
             Set("_textureSourceGraphEnabled", false);
+            Set("_guestPrefixCapture", null);
+            Set("_guestPrefixExecution", false);
+            Set("_takenGuestWorkSequence", 0L);
+            Set("_takenGuestPrefixProducerSequence", 0L);
+            Set("_guestPrefixProducerSequence", 0L);
+            Set("_guestPrefixProducerQueue", null);
             Set("_guestPresentationShutdownAttempt", null);
             Set("_guestPresentationNativeOwnersDrained", false);
             Set("_initialGuestCompletion", null);

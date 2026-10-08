@@ -15,7 +15,7 @@ namespace SharpEmu.Libs.Tests.VideoOut;
 public sealed class MetalCommandWorkerFailureTests
 {
     [Fact]
-    public async Task ResumedBlockedSliceFailureWakesPresenterBeforeStopWithoutPublishingItsLabel()
+    public async Task DeferredPrefixFailureWakesPresenterBeforeStopWithoutPublishingItsLabel()
     {
         using var state = new MetalGuestFailureTests.PresenterState();
         var reports = new List<string>(); GpuFatal.OnFatal = reports.Add;
@@ -23,8 +23,9 @@ public sealed class MetalCommandWorkerFailureTests
         var words = StreamRunner.Packet(PacketOpcode.WaitRegisterMemory, 0x13u,
             StreamRunner.Low(StreamRunner.LabelAddress), StreamRunner.High(StreamRunner.LabelAddress), 1u, uint.MaxValue, 0u);
         host.WriteWords(StreamRunner.CommandAddress, words);
-        queue.EnqueueGraphics(StreamRunner.CommandAddress, (uint)words.Length, 81, null);
+        var receipt = queue.EnqueueWithPreparation(0, StreamRunner.CommandAddress, (uint)words.Length, 81, null);
         Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+        Assert.Equal(GuestSubmissionPreparationResult.DeferredDependency, receipt.WaitUntilPrepared());
         var labelPublished = false;
         var sequence = MetalVideoPresenter.SubmitOrderedGuestAction(() => labelPublished = true, "unexecuted EOP boundary");
         Assert.True(sequence > 0);
@@ -50,6 +51,8 @@ public sealed class MetalCommandWorkerFailureTests
             Assert.False(await waiter.WaitAsync(TimeSpan.FromSeconds(2)));
             Assert.Equal(1, Volatile.Read(ref calls));
             Assert.Same(original, Field(typeof(MetalVideoPresenter), "_guestWorkFailure").GetValue(null));
+            Assert.Equal(CommandSubmissionPreparation.State.DeferredDependency, receipt.Status);
+            Assert.Same(original, Assert.Throws<NotSupportedException>(() => receipt.WaitUntilPrepared()));
             var refused = Assert.Throws<GpuFatalException>(() => MetalVideoPresenter.DrainGuestWork(0, 0));
             Assert.Same(original, refused.InnerException); // Failure precedes every native call.
             Assert.False(labelPublished); Assert.Empty(host.EndOfPipeWrites); Assert.Empty(reports);

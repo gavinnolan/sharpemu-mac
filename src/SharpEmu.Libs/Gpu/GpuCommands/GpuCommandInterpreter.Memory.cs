@@ -34,11 +34,11 @@ public sealed partial class GpuCommandInterpreter
 
         if (writeOneAddress)
         {
-            WriteDword(destination, source[^1]);
+            WriteDword(destination, source[^1], "WRITE_DATA");
             return;
         }
 
-        WriteBytes(destination, MemoryMarshal.AsBytes(source));
+        WriteBytes(destination, MemoryMarshal.AsBytes(source), "WRITE_DATA");
     }
 
     internal void WriteReferenceClock(ulong destination, uint byteCount)

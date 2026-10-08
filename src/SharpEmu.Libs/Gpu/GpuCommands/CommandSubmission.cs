@@ -116,6 +116,8 @@ public sealed class CommandSubmission
 
     // Its place in the order every queue was fed; the frame run-ahead waits by it.
 
+    internal CommandSubmissionPreparation? Preparation { get; init; }
+
     public bool ResetInterpreter { get; internal set; }
 
     public bool Started { get; internal set; }

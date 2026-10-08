@@ -4,6 +4,7 @@
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Scheduling;
 using Xunit;
@@ -13,8 +14,12 @@ namespace SharpEmu.Libs.Tests.Gpu.GpuCommands;
 internal sealed class CommandStreamFatalException(string message) : Exception(message);
 
 // Records every host call in order and serves guest memory from a fake.
-internal sealed class RecordingCommandStreamHost : ICommandStreamHost
+internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandSubmissionCompletionHost
 {
+    internal Action<int, ulong>? BeginPrefixCapture;
+    internal Func<bool, IGuestSubmissionPrefixCompletion?>? EndPrefixCapture;
+    public void BeginSubmissionCompletionCapture(int queueId, ulong submissionId) => BeginPrefixCapture?.Invoke(queueId, submissionId);
+    public IGuestSubmissionPrefixCompletion? EndSubmissionCompletionCapture(bool complete) => EndPrefixCapture?.Invoke(complete);
     public const ulong MemoryBase = 0x1000_0000;
     public const int MemorySize = 0x10_0000;
 

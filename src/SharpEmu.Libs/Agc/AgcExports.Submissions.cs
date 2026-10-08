@@ -52,6 +52,7 @@ public static partial class AgcExports
         (GuestGpu.Current as IGuestImageSnapshotBackend)?.AttachGuestMemory(ctx.Memory);
         SubmissionFlowProfile.RecordGuest(SubmissionFlowProfile.EventKind.SubmitEntered, 0, 0, commandAddress, dwordCount);
         var gpuState = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
+        IGuestSubmissionPreparation? preparation = null;
         var setupEndTicks = profileEnabled
             ? System.Diagnostics.Stopwatch.GetTimestamp()
             : 0L;
@@ -83,7 +84,7 @@ public static partial class AgcExports
                 commandAddress,
                 dwordCount,
                 ++gpuState.SubmissionSequence,
-                snapshots))
+                snapshots, out preparation))
             {
                 return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_CANCELED);
             }
@@ -92,6 +93,9 @@ public static partial class AgcExports
                 enqueueEndTicks = System.Diagnostics.Stopwatch.GetTimestamp();
             }
         }
+
+        if (!TryWaitSubmissionPreparation(preparation))
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_CANCELED);
 
         if (profileEnabled)
         {
@@ -139,6 +143,7 @@ public static partial class AgcExports
             ownerHandle, 0, commandAddress, dwordCount);
         (GuestGpu.Current as IGuestImageSnapshotBackend)?.AttachGuestMemory(ctx.Memory);
         var gpuState = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
+        IGuestSubmissionPreparation? preparation = null;
         lock (gpuState.CommandSubmissionGate)
         lock (gpuState.Gate)
         {
@@ -148,12 +153,14 @@ public static partial class AgcExports
                 commandAddress,
                 dwordCount,
                 ++gpuState.SubmissionSequence,
-                null))
+                null, out preparation))
             {
                 return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_CANCELED);
             }
         }
 
+        if (!TryWaitSubmissionPreparation(preparation))
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_CANCELED);
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -288,6 +295,7 @@ public static partial class AgcExports
 
         (GuestGpu.Current as IGuestImageSnapshotBackend)?.AttachGuestMemory(ctx.Memory);
         var gpuState = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
+        List<IGuestSubmissionPreparation>? preparations = null;
         lock (gpuState.CommandSubmissionGate)
         lock (gpuState.Gate)
         {
@@ -319,13 +327,18 @@ public static partial class AgcExports
                     commandAddress,
                     dwordCount,
                     ++gpuState.SubmissionSequence,
-                    snapshots))
+                    snapshots, out var preparation))
                 {
                     return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_CANCELED);
                 }
+                if (preparation is not null) (preparations ??= []).Add(preparation);
             }
         }
 
+        if (preparations is not null)
+            foreach (var preparation in preparations)
+                if (!TryWaitSubmissionPreparation(preparation))
+                    return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_CANCELED);
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -336,8 +349,9 @@ public static partial class AgcExports
         ulong address,
         uint dwordCount,
         ulong submissionId,
-        object? geometrySnapshots)
+        object? geometrySnapshots, out IGuestSubmissionPreparation? preparation)
     {
+        preparation = null;
         if (HostSessionControl.IsShutdownRequested)
         {
             return false;
@@ -347,7 +361,10 @@ public static partial class AgcExports
         {
             SubmissionFlowProfile.RecordGuest(SubmissionFlowProfile.EventKind.BackendEntered,
                 queue, submissionId, address, dwordCount);
-            GuestGpu.Current.SubmitCommandStream(memory, queue, address, dwordCount, submissionId, geometrySnapshots);
+            var backend = GuestGpu.Current;
+            if (backend is IGuestSubmissionPreparationBackend preparing)
+                preparation = preparing.SubmitCommandStreamWithPreparation(memory, queue, address, dwordCount, submissionId, geometrySnapshots);
+            else backend.SubmitCommandStream(memory, queue, address, dwordCount, submissionId, geometrySnapshots);
             SubmissionFlowProfile.RecordGuest(SubmissionFlowProfile.EventKind.BackendReturned,
                 queue, submissionId, address, dwordCount);
             return true;
@@ -357,4 +374,11 @@ public static partial class AgcExports
             return false;
         }
     }
+    private static bool TryWaitSubmissionPreparation(IGuestSubmissionPreparation? preparation)
+    {
+        if (preparation is null) return true;
+        try { _ = preparation.WaitUntilPrepared(); return true; }
+        catch (OperationCanceledException) { return false; }
+    }
+
 }

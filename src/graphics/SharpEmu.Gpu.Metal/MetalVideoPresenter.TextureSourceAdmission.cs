@@ -163,13 +163,18 @@ internal static partial class MetalVideoPresenter
     private static long EnqueueTextureSourceWorkLocked(object work, ulong payloadBytes, GuestQueueIdentity queue)
     {
         var sequence = checked(_enqueuedGuestWorkSequence + 1);
+        var prefixProducer = GuestPrefixProducerForAdmission(sequence, queue);
         // Every throwing descriptor/provenance/layout/budget/allocation step is
         // before linked-list admission and producer publication.
         var owner = PrepareTextureSourceWorkLocked(work, sequence, queue);
         var payloadOwner = PrepareGuestPayloadOwnerLocked(work);
         if (_textureSourceWorkOwners.TryGetValue(work, out _))
             throw new InvalidOperationException("Metal work already has an ordered source owner.");
-        var pending = new PendingGuestWork(work, payloadBytes, sequence, queue);
+        var pending = new PendingGuestWork(work, payloadBytes, sequence, queue)
+        {
+            RequiresSuccessfulExecution = _guestPrefixCapture is not null || _guestPrefixExecution,
+            PrefixProducerSequence = prefixProducer,
+        };
         var node = new LinkedListNode<PendingGuestWork>(pending);
         var newQueue = !_pendingGuestWorkByQueue.TryGetValue(queue.Name, out var pendingQueue);
         pendingQueue ??= new();
@@ -265,6 +270,7 @@ internal static partial class MetalVideoPresenter
             throw;
         }
         if (!_enqueueAsImmediateQueueFollowup) ScheduleGuestWorkDrain();
+        TraceGuestWork("admitted", new PendingGuestWork(work, payloadBytes, sequence, queue));
         return sequence;
     }
 }

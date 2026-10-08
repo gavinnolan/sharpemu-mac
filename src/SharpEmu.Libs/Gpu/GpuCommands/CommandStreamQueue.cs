@@ -53,6 +53,8 @@ public sealed class CommandStreamQueue
     private int _pendingBoundaries;
     private IdleOutcome _outcome = IdleOutcome.Completed;
     private Thread? _processingThread;
+    private CommandSubmissionPreparation? _activePreparation;
+    private Exception? _preparationFailure;
 
     private readonly int _boundariesInFlight;
 
@@ -170,6 +172,85 @@ public sealed class CommandStreamQueue
         {
             EnqueueLocked(new CommandSubmission(CommandSubmissionKind.Compute, (int)(queue - GpuCommandInterpreter.ComputeQueueBase) + 1, address, dwordCount, submissionId, geometrySnapshots));
         }
+    }
+
+    // Preparation is optional; old callers preserve admission/return behavior.
+    public CommandSubmissionPreparation EnqueueWithPreparation(uint queue, ulong address, uint dwordCount, ulong submissionId, object? geometrySnapshots)
+    {
+        if (queue != 0 && (queue < GpuCommandInterpreter.ComputeQueueBase || queue >= GpuCommandInterpreter.ComputeQueueBase + ComputeQueueCount))
+            throw _host.Fatal($"The compute preparation queue is outside the supported range: queue=0x{queue:X}.");
+        if (queue != 0 && dwordCount == 0)
+            throw _host.Fatal($"A compute submission is empty: queue=0x{queue:X} address=0x{address:X16}.");
+        var queueId = queue == 0 ? 0 : checked((int)(queue - GpuCommandInterpreter.ComputeQueueBase) + 1);
+        lock (_gate)
+        {
+            var receipt = new CommandSubmissionPreparation(this, queueId, submissionId);
+            if (dwordCount == 0)
+            {
+                if (!_accepting) throw new OperationCanceledException("Command preparation admission is closed.");
+                receipt.Resolve(CommandSubmissionPreparation.State.PreparedPrefix);
+                return receipt;
+            }
+            var submission = new CommandSubmission(queue == 0 ? CommandSubmissionKind.Graphics : CommandSubmissionKind.Compute,
+                queueId, address, dwordCount, submissionId, geometrySnapshots)
+            { Preparation = receipt, ResetInterpreter = queue == 0 && _graphicsDone };
+            EnqueueLocked(submission);
+            if (queue == 0) _graphicsDone = false;
+            return receipt;
+        }
+    }
+
+    internal GuestSubmissionPreparationResult WaitForPreparation(CommandSubmissionPreparation receipt)
+    {
+        Exception? failure = null;
+        IGuestSubmissionPrefixCompletion? completion = null;
+        var result = GuestSubmissionPreparationResult.DeferredDependency;
+        lock (_gate)
+        {
+            if (_processing && ReferenceEquals(_processingThread, Thread.CurrentThread))
+                failure = new InvalidOperationException("Command preparation cannot wait on its own command worker.");
+            else
+            {
+                var deadline = Environment.TickCount64 + 30_000;
+                while (receipt.Status == CommandSubmissionPreparation.State.Pending && _outcome == IdleOutcome.Completed)
+                {
+                    // CPU/other-queue dependencies must remain able to be submitted.
+                    // Deferral certifies no shader/GPU work beyond the parsed prefix.
+                    if (!_processing && _submissionCount != 0 && !HasRunnableWorkLocked())
+                    { receipt.Resolve(CommandSubmissionPreparation.State.DeferredDependency); break; }
+                    var remaining = deadline - Environment.TickCount64;
+                    if (remaining <= 0)
+                    { failure = new TimeoutException("Accepted command preparation did not reach a runnable-prefix boundary."); break; }
+                    Monitor.Wait(_gate, (int)Math.Min(remaining, 1000));
+                }
+                failure ??= receipt.Failure ?? _preparationFailure;
+                if (failure is null && receipt.Status == CommandSubmissionPreparation.State.Failed)
+                    failure = new InvalidOperationException("Accepted command preparation failed before readiness.");
+                if (failure is null && receipt.Status is CommandSubmissionPreparation.State.Pending or CommandSubmissionPreparation.State.Cancelled)
+                    failure = new OperationCanceledException("Accepted command preparation was cancelled before readiness.");
+            }
+            if (receipt.Status == CommandSubmissionPreparation.State.PreparedPrefix)
+            { result = GuestSubmissionPreparationResult.PreparedPrefix; completion = receipt.Completion; }
+        }
+        if (failure is not null)
+        {
+            if (failure is not OperationCanceledException)
+                try { Fail(failure); }
+                catch (Exception cleanup)
+                { try { failure.Data["CommandPrefixWaitCleanup"] = cleanup; } catch { } }
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+        }
+        // Both AGC gates and this queue gate are free. Future queue slices stay
+        // runnable while this exact caller waits for its accepted native prefix.
+        try { completion?.WaitUntilCompleted(); }
+        catch (Exception original)
+        {
+            try { Fail(original); }
+            catch (Exception cleanup)
+            { try { original.Data["CommandPrefixWaitCleanup"] = cleanup; } catch { } }
+            throw;
+        }
+        return result;
     }
 
     // Queues a video-out export flip behind the graphics submissions accepted before it.
@@ -339,6 +420,7 @@ public sealed class CommandStreamQueue
         Action[] cancellations;
         lock (_gate)
         {
+            _preparationFailure ??= original;
             FailLocked();
             cancellations = CancelControlBarriersLocked();
         }
@@ -372,6 +454,8 @@ public sealed class CommandStreamQueue
         _accepting = false;
         _stopping = true;
         DropAllLocked();
+        _activePreparation?.Resolve(CommandSubmissionPreparation.State.Failed, _preparationFailure);
+        _activePreparation = null;
         _processing = false;
         Monitor.PulseAll(_gate);
     }
@@ -429,6 +513,11 @@ public sealed class CommandStreamQueue
                 var selected = SelectQueueLocked();
                 if (selected < 0)
                 {
+                    if (_submissionCount != 0)
+                        foreach (var pendingQueue in _queues)
+                            foreach (var pending in pendingQueue)
+                                pending.Preparation?.Resolve(CommandSubmissionPreparation.State.DeferredDependency);
+                    Monitor.PulseAll(_gate);
                     return _submissionCount != 0 ? SliceResult.AllBlocked : SliceResult.NoWork;
                 }
 
@@ -441,6 +530,7 @@ public sealed class CommandStreamQueue
 
             _processing = true;
             _processingThread = Thread.CurrentThread;
+            _activePreparation = submission?.Preparation;
             if (submission is { Started: false } &&
                 submission.Kind is not (CommandSubmissionKind.FlipPreparation or CommandSubmissionKind.FrameBoundary))
                 SubmissionFlowProfile.Record(SubmissionFlowProfile.EventKind.ProcessingStarted, submission.QueueId,
@@ -477,12 +567,32 @@ public sealed class CommandStreamQueue
         }
 
         bool complete;
+        IGuestSubmissionPrefixCompletion? prefixCompletion = null;
+        ICommandSubmissionCompletionHost? completionHost;
+        lock (_gate)
+            completionHost = submission!.Preparation is { Status: CommandSubmissionPreparation.State.Pending }
+                ? _host as ICommandSubmissionCompletionHost : null;
+        var captureStarted = false;
         try
         {
+            if (completionHost is not null)
+            {
+                completionHost.BeginSubmissionCompletionCapture(submission!.QueueId, submission.SubmissionId);
+                captureStarted = true;
+            }
             complete = RunSlice(submission!);
+            if (captureStarted)
+            {
+                prefixCompletion = completionHost!.EndSubmissionCompletionCapture(complete);
+                captureStarted = false;
+            }
         }
         catch (Exception exception)
         {
+            if (captureStarted)
+                try { _ = completionHost!.EndSubmissionCompletionCapture(false); }
+                catch (Exception cleanup)
+                { try { exception.Data["CommandPrefixCaptureCleanup"] = cleanup; } catch { } }
             try
             {
                 // Report the cause before another submitting thread observes the failed queue.
@@ -499,6 +609,9 @@ public sealed class CommandStreamQueue
 
         lock (_gate)
         {
+            submission!.Preparation?.Resolve(complete ? CommandSubmissionPreparation.State.PreparedPrefix : CommandSubmissionPreparation.State.DeferredDependency,
+                completion: complete ? prefixCompletion : null);
+            _activePreparation = null;
             SliceResult result;
             if (!complete)
             {
@@ -671,6 +784,7 @@ public sealed class CommandStreamQueue
                         }
                     }
 
+                    foreach (var dropped in queue) dropped.Preparation?.Resolve(CommandSubmissionPreparation.State.Cancelled);
                     queue.Clear();
                     _outcome = IdleOutcome.Cancelled;
                 }
@@ -687,6 +801,7 @@ public sealed class CommandStreamQueue
         lock (_gate)
         {
             _outcome = IdleOutcome.Failed;
+            _activePreparation?.Resolve(CommandSubmissionPreparation.State.Failed, _preparationFailure);
             DropAllLocked();
             cancellations = CancelControlBarriersLocked();
             Monitor.PulseAll(_gate);
@@ -826,6 +941,8 @@ public sealed class CommandStreamQueue
     {
         foreach (var queue in _queues)
         {
+            foreach (var dropped in queue) dropped.Preparation?.Resolve(
+                _outcome == IdleOutcome.Failed ? CommandSubmissionPreparation.State.Failed : CommandSubmissionPreparation.State.Cancelled, _preparationFailure);
             queue.Clear();
         }
 

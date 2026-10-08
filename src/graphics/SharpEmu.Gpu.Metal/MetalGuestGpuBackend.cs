@@ -17,7 +17,7 @@ namespace SharpEmu.Gpu.Metal;
 /// surface (presentation, guest images, ordered flips, translated draws, and
 /// compute) with no Vulkan, MoltenVK, or windowing-library dependency.
 /// </summary>
-internal sealed class MetalGuestGpuBackend : IGuestGpuBackend, IGuestImageSnapshotBackend
+internal sealed class MetalGuestGpuBackend : IGuestGpuBackend, IGuestImageSnapshotBackend, IGuestSubmissionPreparationBackend
 {
     // Only a backend with CPU image snapshots arms the guest image write tracker.
     public MetalGuestGpuBackend() => SharpEmu.HLE.GuestImageWriteTracker.Configure(true);
@@ -128,6 +128,22 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend, IGuestImageSnapsh
         }
     }
 
+    public IGuestSubmissionPreparation SubmitCommandStreamWithPreparation(ICpuMemory memory, uint queue, ulong address, uint dwordCount, ulong submissionId, object? geometrySnapshots) =>
+        EnsureCommandStream(memory).EnqueueWithPreparation(queue, address, dwordCount, submissionId, geometrySnapshots);
+
+    private MetalCompiledGuestShader PreparedMsl(IGuestCompiledShader shader, IGuestCompiledShader? vertexShader = null, uint? attributeCount = null)
+    {
+        var compiled = Msl(shader);
+        if (_commandStreamWorker?.IsWorkerThread == true)
+        {
+            if (_commandStream is null || _commandStream.Outcome != IdleOutcome.Completed) throw new OperationCanceledException("Metal shader preparation command worker has failed or been cancelled.");
+            if (vertexShader is not null) MetalVideoPresenter.PrepareGuestShaderLibrary(Msl(vertexShader));
+            MetalVideoPresenter.PrepareGuestShaderLibrary(compiled, vertexShader is null ? attributeCount : null);
+            if (_commandStream.Outcome != IdleOutcome.Completed) throw new OperationCanceledException("Metal shader preparation was cancelled before renderer admission.");
+        }
+        return compiled;
+    }
+
     public IdleOutcome SubmitDone(ICpuMemory memory) => EnsureCommandStream(memory).Done();
 
     public void RunAfterPendingCommandStreams(Action work)
@@ -218,7 +234,7 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend, IGuestImageSnapsh
         IReadOnlyList<GuestVertexBuffer>? vertexBuffers = null,
         GuestRenderState? renderState = null) =>
         MetalVideoPresenter.SubmitTranslatedDraw(
-            Msl(pixelShader),
+            PreparedMsl(pixelShader, vertexShader, attributeCount),
             textures,
             globalMemoryBuffers,
             width,
@@ -249,7 +265,7 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend, IGuestImageSnapsh
         int baseVertex = 0,
         IReadOnlyList<GuestStageBindings>? stageBindings = null) =>
         MetalVideoPresenter.SubmitDepthOnlyTranslatedDraw(
-            Msl(pixelShader),
+            PreparedMsl(pixelShader, vertexShader, attributeCount),
             textures,
             globalMemoryBuffers,
             attributeCount,
@@ -283,7 +299,7 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend, IGuestImageSnapsh
         int baseVertex = 0,
         IReadOnlyList<GuestStageBindings>? stageBindings = null) =>
         MetalVideoPresenter.SubmitOffscreenTranslatedDraw(
-            Msl(pixelShader),
+            PreparedMsl(pixelShader, vertexShader, attributeCount),
             textures,
             globalMemoryBuffers,
             attributeCount,
@@ -309,7 +325,7 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend, IGuestImageSnapsh
         uint height,
         ulong shaderAddress = 0) =>
         MetalVideoPresenter.SubmitStorageTranslatedDraw(
-            Msl(pixelShader),
+            PreparedMsl(pixelShader, attributeCount: attributeCount),
             textures,
             globalMemoryBuffers,
             attributeCount,
@@ -348,7 +364,7 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend, IGuestImageSnapsh
         _ = (localSizeX, localSizeY, localSizeZ, isIndirect, threadCountX, threadCountY, threadCountZ);
         return MetalVideoPresenter.SubmitComputeDispatch(
             shaderAddress,
-            Msl(computeShader),
+            PreparedMsl(computeShader),
             textures,
             globalMemoryBuffers,
             groupCountX,

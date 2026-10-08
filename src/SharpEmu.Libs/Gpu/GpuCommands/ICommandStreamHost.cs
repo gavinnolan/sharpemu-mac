@@ -84,6 +84,11 @@ public interface ICommandStreamHost
     // Reads guest memory the GPU may have written; the host synchronizes GPU-owned pages first.
     bool TryReadGuest(ulong address, Span<byte> destination);
 
+    // Immediate hosts retain their ordinary memory effects. An ordered host
+    // must finish this owned operation before interpreter results are consumed.
+    bool TryWriteGuest(ulong address, ReadOnlySpan<byte> source, string kind = "WRITE_BYTES") => Memory.TryWrite(address, source);
+    void ExecuteGuestMemoryOperation(Action operation, string kind = "MEMORY_OPERATION", ulong address = 0, ulong bytes = 0, ulong value = 0) => operation();
+
     // Runs commands other threads posted to this worker. Called before every packet.
     void RunPendingCommands();
 

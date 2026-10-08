@@ -19,9 +19,11 @@ internal sealed class MetalCompiledGuestShader(Gen5MslShader shader) : IGuestCom
 
     public Gen5MslShader Shader { get; } = shader;
 
-    /// <summary>MTLLibrary handle cached by the presenter after the first
-    /// runtime compile; the render loop is its only reader and writer.</summary>
+    // Library creation may run on the command worker before render admission.
+    // The per-program gate serializes it with renderer cache lookup/creation.
+    internal readonly object LibraryGate = new();
     internal nint CachedLibrary;
+    internal nint LibraryDevice;
 
     public byte[] Payload => _payload ??= Encoding.UTF8.GetBytes(Shader.Source);
 

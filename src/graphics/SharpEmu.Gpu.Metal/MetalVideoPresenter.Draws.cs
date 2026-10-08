@@ -436,6 +436,7 @@ internal static partial class MetalVideoPresenter
 
     private static void ExecuteOffscreenDraw(nint device, nint queue, OffscreenGuestDraw work)
     {
+        TraceGuestWorkStage("draw.wrapper.entry");
         var perfStart = System.Diagnostics.Stopwatch.GetTimestamp();
         Interlocked.Increment(ref _perfDrawCount);
         PerfOverlay.RecordDraw();
@@ -453,6 +454,7 @@ internal static partial class MetalVideoPresenter
 
     private static void ExecuteOffscreenDrawCore(nint device, nint queue, OffscreenGuestDraw work)
     {
+        TraceGuestWorkStage("draw.core.entry");
         var draw = work.Draw;
         if (_textureSourceGraphEnabled) RequireQualifiedColorTextureSourceWork(work);
         var targetFormats = new MetalRenderTargetFormat[work.Targets.Length];
@@ -465,6 +467,7 @@ internal static partial class MetalVideoPresenter
                     target.ComponentSwap,
                     out targetFormats[index]))
             {
+                RequireGuestPrefixExecution(false, "unsupported color target format");
                 if (_textureSourceGraphEnabled)
                     throw new NotSupportedException("Metal ordered color producer has an unsupported render-target format.");
                 Console.Error.WriteLine(
@@ -477,6 +480,7 @@ internal static partial class MetalVideoPresenter
 
         if (draw.RenderState.Blends.Count != targetFormats.Length)
         {
+            RequireGuestPrefixExecution(false, "blend/target count mismatch");
             if (_textureSourceGraphEnabled) throw new NotSupportedException("Metal ordered color producer blend/target count mismatch.");
             ReturnPooledGuestData(draw);
             return;
@@ -495,6 +499,7 @@ internal static partial class MetalVideoPresenter
             MaterializeTextureSourceOutputs(device, commandBuffer);
         }
 
+        TraceGuestWorkStage("draw.color_attachments.begin");
         // Resolve color targets: published guest images by address, transient
         // pooled textures for address-0 targets (depth-only and storage draws).
         var targetTextures = new nint[work.Targets.Length];
@@ -518,6 +523,7 @@ internal static partial class MetalVideoPresenter
             var image = EnsureGuestRenderTarget(device, target, targetFormats[index].Format);
             if (image is null)
             {
+                RequireGuestPrefixExecution(false, "missing color attachment");
                 if (_textureSourceGraphEnabled) throw new InvalidOperationException("Metal ordered color producer has no actual attachment.");
                 ReturnPooledGuestData(draw);
                 return;
@@ -531,11 +537,14 @@ internal static partial class MetalVideoPresenter
 
         if (targetTextures[0] == 0)
         {
+            RequireGuestPrefixExecution(false, "empty color attachment");
             if (_textureSourceGraphEnabled) throw new InvalidOperationException("Metal ordered color producer has an empty actual attachment.");
             ReturnPooledGuestData(draw);
             return;
         }
 
+        TraceGuestWorkStage("draw.color_attachments.end");
+        TraceGuestWorkStage("draw.depth_attachment.begin");
         // Depth attachment, keyed by guest DB address; read-only depth drops write.
         GuestImage? depth = null;
         var depthState = draw.RenderState.Depth;
@@ -554,18 +563,26 @@ internal static partial class MetalVideoPresenter
             depth = EnsureGuestDepthImage(device, depthTarget, depthWidth, depthHeight);
         }
 
+        TraceGuestWorkStage("draw.depth_attachment.end");
+        TraceGuestWorkStage("draw.pipeline.begin");
         var pipeline = graphPipeline;
         if (!_textureSourceGraphEnabled && !TryGetDrawPipeline(device, draw, targetFormats, depth is not null, out pipeline))
         {
+            RequireGuestPrefixExecution(false, "draw pipeline creation failed");
             ReturnPooledGuestData(draw);
             return;
         }
 
+        TraceGuestWorkStage("draw.pipeline.end");
+        TraceGuestWorkStage("draw.textures.begin");
         if (!_textureSourceGraphEnabled) commandBuffer = BeginBatchedGuestCommands(queue);
+        RequireGuestPrefixExecution(commandBuffer != 0, "missing draw command buffer");
         Span<nint> textureHandles = stackalloc nint[draw.Textures.Length];
         Span<bool> textureOwned = stackalloc bool[draw.Textures.Length];
         ResolveDrawTextures(device, commandBuffer, draw.Textures, textureHandles, textureOwned);
 
+        TraceGuestWorkStage("draw.textures.end");
+        TraceGuestWorkStage("draw.encoder.begin");
         var pass = MetalNative.Send(
             MetalNative.Class("MTLRenderPassDescriptor"),
             MetalNative.Selector("renderPassDescriptor"));
@@ -606,15 +623,28 @@ internal static partial class MetalVideoPresenter
 
         var encoder = MetalNative.Send(
             commandBuffer, MetalNative.Selector("renderCommandEncoderWithDescriptor:"), pass);
+        if (_guestPrefixExecution && encoder == 0)
+        {
+            var failure = new InvalidOperationException("Metal completed submission prefix has no draw encoder.");
+            // These per-call retains have not reached EncodeDrawBindings' normal
+            // release loop. Consume each once and preserve the encoder cause.
+            ReleaseComputeTemporaryTextures(textureHandles, textureOwned, failure);
+            throw failure;
+        }
         if (_textureSourceGraphEnabled && encoder == 0)
             throw new InvalidOperationException("Metal ordered color producer could not open its render encoder.");
         MetalNative.SendVoid(encoder, MetalNative.Selector("setRenderPipelineState:"), pipeline);
 
+        TraceGuestWorkStage("draw.encoder.end");
+        TraceGuestWorkStage("draw.bindings.begin");
         EncodeRenderState(device, encoder, draw.RenderState, depthState, depth is not null, firstWidth, firstHeight);
         EncodeDrawBindings(device, encoder, work, textureHandles, textureOwned, out var writeBackBuffers);
+        TraceGuestWorkStage("draw.bindings.end");
+        TraceGuestWorkStage("draw.raster_encoding.begin");
         EncodeDrawCall(encoder, draw);
 
         MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
+        TraceGuestWorkStage("draw.raster_encoding.end");
         if (_textureSourceGraphEnabled)
         {
             foreach (var image in publishedTargets) image!.MarkContentChangedWithDiagnostic("color-draw");
@@ -629,9 +659,15 @@ internal static partial class MetalVideoPresenter
         // before this item does. Pure-GPU draws stay in the open batch.
         if (writeBackBuffers.Count > 0)
         {
+            TraceGuestWorkStage("draw.writeback_flush.begin");
             var committed = FlushBatchedGuestCommands();
+            TraceGuestWorkStage("draw.writeback_flush.end");
+            TraceGuestWorkStage("draw.writeback_wait.begin");
             WaitForCommittedGuestBufferWriteback(committed);
+            TraceGuestWorkStage("draw.writeback_wait.end");
+            TraceGuestWorkStage("draw.writeback_copy.begin");
             WriteBuffersBackToGuest(writeBackBuffers);
+            TraceGuestWorkStage("draw.writeback_copy.end");
         }
 
         for (var index = 0; index < publishedTargets.Length; index++)
@@ -1038,6 +1074,7 @@ internal static partial class MetalVideoPresenter
         bool hasDepth,
         out nint pipeline)
     {
+        TraceGuestWorkStage("draw.pipeline_lookup.entry");
         var stateHash = 14695981039346656037UL;
         void Mix(ulong value)
         {
@@ -1091,10 +1128,12 @@ internal static partial class MetalVideoPresenter
         {
             if (_pipelineCache.TryGetValue(key, out pipeline))
             {
+                TraceGuestWorkStage("draw.pipeline.cache_hit");
                 return pipeline != 0;
             }
         }
 
+        TraceGuestWorkStage("draw.pipeline.cache_miss");
         pipeline = CreateDrawPipeline(device, draw, targetFormats, hasDepth);
         lock (_pipelineCache)
         {
@@ -1110,10 +1149,15 @@ internal static partial class MetalVideoPresenter
         MetalRenderTargetFormat[] targetFormats,
         bool hasDepth)
     {
+        TraceGuestWorkStage("draw.pipeline_creation.entry");
+        TraceGuestWorkStage("draw.vertex_function.call");
         var vertexFunction = draw.VertexShader is { } vertexShader
             ? GetShaderFunction(device, vertexShader)
             : GetFixedFullscreenVertexFunction(device, draw.AttributeCount);
+        TraceGuestWorkStage("draw.vertex_function.return");
+        TraceGuestWorkStage("draw.fragment_function.call");
         var fragmentFunction = GetShaderFunction(device, draw.PixelShader);
+        TraceGuestWorkStage("draw.fragment_function.return");
         if (vertexFunction == 0 || fragmentFunction == 0)
         {
             return 0;
@@ -1187,11 +1231,13 @@ internal static partial class MetalVideoPresenter
         }
 
         nint error = 0;
+        TraceGuestWorkStage("draw.native_pso.begin");
         var pipeline = MetalNative.Send(
             device,
             MetalNative.Selector("newRenderPipelineStateWithDescriptor:error:"),
             descriptor,
             ref error);
+        TraceGuestWorkStage("draw.native_pso.end");
         if (pipeline == 0)
         {
             Console.Error.WriteLine(
@@ -1251,51 +1297,62 @@ internal static partial class MetalVideoPresenter
 
     private static nint GetShaderFunction(nint device, MetalCompiledGuestShader shader)
     {
-        if (shader.CachedLibrary == 0)
-        {
-            if (!TryCompileLibrary(device, shader.Shader.Source, out var library, out var error))
-            {
-                Console.Error.WriteLine($"[LOADER][WARN] Metal shader compile failed: {error}");
-                return 0;
-            }
-
-            shader.CachedLibrary = library;
-        }
-
-        return MetalNative.Send(
-            shader.CachedLibrary,
-            MetalNative.Selector("newFunctionWithName:"),
+        TraceGuestWorkStage("shader.function.begin");
+        var library = GetOrCreateShaderLibrary(device, shader);
+        if (library == 0) return 0;
+        var function = MetalNative.Send(library, MetalNative.Selector("newFunctionWithName:"),
             MetalNative.NsString(shader.Shader.EntryPoint));
+        TraceGuestWorkStage("shader.function.end");
+        return function;
     }
 
     private static readonly Dictionary<uint, nint> _fixedVertexLibraries = new();
     private static nint _fixedDrawPipeline;
+    private static readonly Dictionary<uint, nint> _fixedVertexLibraryDevices = new();
 
-    private static nint GetFixedFullscreenVertexFunction(nint device, uint attributeCount)
+    private static nint GetFixedFullscreenVertexFunction(nint device, uint attributeCount, LibraryDeviceLease? preparation = null)
     {
         nint library;
         lock (_fixedVertexLibraries)
         {
-            _fixedVertexLibraries.TryGetValue(attributeCount, out library);
-        }
-
-        if (library == 0)
-        {
-            if (!TryCompileLibrary(
-                    device, MslFixedShaders.CreateFullscreenVertex(attributeCount), out library, out var error))
+            if (_fixedVertexLibraries.TryGetValue(attributeCount, out library))
             {
-                Console.Error.WriteLine($"[LOADER][WARN] Metal fullscreen vertex compile failed: {error}");
-                return 0;
+                if (!_fixedVertexLibraryDevices.TryGetValue(attributeCount, out var cachedDevice) || cachedDevice != device)
+                    throw new InvalidOperationException("Metal fixed vertex library belongs to a different initialized device.");
+                if (preparation is not null) lock (_gate) RequireLibraryPreparationCurrentLocked(preparation);
             }
-
-            lock (_fixedVertexLibraries)
+            else
             {
-                _fixedVertexLibraries[attributeCount] = library;
+                // Preflight both metadata allocations before constructing the owned library.
+                _fixedVertexLibraries.EnsureCapacity(_fixedVertexLibraries.Count + 1);
+                _fixedVertexLibraryDevices.EnsureCapacity(_fixedVertexLibraryDevices.Count + 1);
+                if (!TryCompileLibrary(device, MslFixedShaders.CreateFullscreenVertex(attributeCount), out library, out var error, traceGuestWork: preparation is null))
+                { Console.Error.WriteLine($"[LOADER][WARN] Metal fullscreen vertex compile failed: {error}"); return 0; }
+                Exception? first = null;
+                var transferred = false;
+                try
+                {
+                    if (preparation is null) Publish();
+                    else lock (_gate) { RequireLibraryPreparationCurrentLocked(preparation); Publish(); }
+                    void Publish()
+                    {
+                        _fixedVertexLibraryDevices.Add(attributeCount, device);
+                        try { _fixedVertexLibraries.Add(attributeCount, library); }
+                        catch { _fixedVertexLibraryDevices.Remove(attributeCount); throw; }
+                        transferred = true;
+                    }
+                }
+                catch (Exception failure) { first = failure; throw; }
+                finally
+                {
+                    if (!transferred)
+                        try { MetalNative.SendVoid(library, MetalNative.Selector("release")); }
+                        catch (Exception cleanup)
+                        { if (first is null) throw; AddLibraryPreparationCleanup(first, cleanup); }
+                }
             }
         }
-
-        return MetalNative.Send(
-            library, MetalNative.Selector("newFunctionWithName:"), MetalNative.NsString("fullscreen_vs"));
+        return MetalNative.Send(library, MetalNative.Selector("newFunctionWithName:"), MetalNative.NsString("fullscreen_vs"));
     }
 
     private static bool TryGetFixedDrawPipeline(nint device, out nint pipeline)

@@ -33,7 +33,11 @@ internal static partial class MetalVideoPresenter
         object Work,
         ulong PayloadBytes,
         long Sequence,
-        GuestQueueIdentity Queue);
+        GuestQueueIdentity Queue)
+    {
+        internal bool RequiresSuccessfulExecution { get; init; }
+        internal long PrefixProducerSequence { get; init; }
+    }
 
     private sealed record OrderedGuestAction(Action Action, string DebugName);
 
@@ -126,6 +130,8 @@ internal static partial class MetalVideoPresenter
     private static readonly Dictionary<string, long> _lastEnqueuedGuestWorkByQueue =
         new(StringComparer.Ordinal);
     private static long _executingGuestWorkSequence;
+    private static long _takenGuestWorkSequence;
+    private static long _takenGuestPrefixProducerSequence;
     private static Exception? _guestWorkFailure;
     [ThreadStatic]
     private static GuestQueueIdentity? _submittingGuestQueue;
@@ -602,7 +608,12 @@ internal static partial class MetalVideoPresenter
 
         var queue = _submittingGuestQueue ?? GuestQueueIdentity.Default;
         if (_textureSourceGraphEnabled)
-            return EnqueueTextureSourceWorkLocked(work, payloadBytes, queue);
+        {
+            var accepted = EnqueueTextureSourceWorkLocked(work, payloadBytes, queue);
+            RecordGuestSubmissionPrefixAdmission(accepted, queue);
+            return accepted;
+        }
+        var prefixProducer = GuestPrefixProducerForAdmission(checked(_enqueuedGuestWorkSequence + 1), queue);
         var selectedMipAdmission = PrepareSelectedStorageMipAdmissionLocked(work, queue);
         var sequence = ++_enqueuedGuestWorkSequence;
         _lastEnqueuedGuestWorkByQueue[queue.Name] = sequence;
@@ -613,7 +624,11 @@ internal static partial class MetalVideoPresenter
             _pendingGuestQueueSchedule.Add(queue.Name);
         }
 
-        var pending = new PendingGuestWork(work, payloadBytes, sequence, queue);
+        var pending = new PendingGuestWork(work, payloadBytes, sequence, queue)
+        {
+            RequiresSuccessfulExecution = _guestPrefixCapture is not null || _guestPrefixExecution,
+            PrefixProducerSequence = prefixProducer,
+        };
         if (_enqueueAsImmediateQueueFollowup &&
             _immediateFollowupTail is { List: not null } tail &&
             ReferenceEquals(tail.List, pendingQueue))
@@ -642,6 +657,8 @@ internal static partial class MetalVideoPresenter
             ScheduleGuestWorkDrain();
         }
 
+        TraceGuestWork("admitted", pending);
+        RecordGuestSubmissionPrefixAdmission(sequence, queue);
         return sequence;
     }
 
@@ -763,6 +780,10 @@ internal static partial class MetalVideoPresenter
                 }
 
                 work = first.Value;
+                // Exact take ownership spans the gaps before execution begins
+                // and after it ends but before its completion is published.
+                _takenGuestWorkSequence = work.Sequence;
+                _takenGuestPrefixProducerSequence = work.PrefixProducerSequence;
                 queue.RemoveFirst();
                 _pendingGuestWorkCount--;
                 if (queue.Count == 0)
@@ -793,6 +814,8 @@ internal static partial class MetalVideoPresenter
     {
         lock (_gate)
         {
+            if (_takenGuestWorkSequence == pending.Sequence)
+            { _takenGuestWorkSequence = 0; _takenGuestPrefixProducerSequence = 0; }
             if (_textureSourceGraphEnabled)
             {
                 ReleaseGuestPayloadWork(pending.Work);
@@ -821,6 +844,13 @@ internal static partial class MetalVideoPresenter
     /// <summary>Drains queued guest work on the render loop, bounded by count and a
     /// wall-clock budget so a backlog cannot starve the event pump or the present.</summary>
     internal static void DrainGuestWork(nint device, nint queue)
+    {
+        _guestWorkDrainDepth++;
+        try { DrainGuestWorkWithOwner(device, queue); }
+        finally { _guestWorkDrainDepth--; }
+    }
+
+    private static void DrainGuestWorkWithOwner(nint device, nint queue)
     {
         if (!MetalPresentationProfile.AllocationsEnabled)
         {
@@ -874,6 +904,7 @@ internal static partial class MetalVideoPresenter
                     return;
                 }
 
+                TraceGuestWork("started", pendingGuestWork);
                 Volatile.Write(ref _executingGuestWorkSequence, pendingGuestWork.Sequence);
                 using var guestQueueScope = EnterGuestQueue(
                     pendingGuestWork.Queue.Name,
@@ -881,6 +912,12 @@ internal static partial class MetalVideoPresenter
                 var previousDiagnosticWork = BeginImageDiagnosticWork(pendingGuestWork.Sequence);
                 _enqueueAsImmediateQueueFollowup = true;
                 _immediateFollowupTail = null;
+                var previousPrefixExecution = _guestPrefixExecution;
+                var previousPrefixProducer = _guestPrefixProducerSequence;
+                var previousPrefixQueue = _guestPrefixProducerQueue;
+                _guestPrefixExecution = pendingGuestWork.RequiresSuccessfulExecution;
+                _guestPrefixProducerSequence = pendingGuestWork.PrefixProducerSequence;
+                _guestPrefixProducerQueue = pendingGuestWork.Queue;
                 if (_textureSourceGraphEnabled) _executingTextureSourceWork = pendingGuestWork.Work;
                 try
                 {
@@ -925,8 +962,11 @@ internal static partial class MetalVideoPresenter
                 }
                 catch (Exception exception)
                 {
+                    TraceGuestWork("failed", pendingGuestWork);
                     lock (_gate)
                     {
+                        if (_takenGuestWorkSequence == pendingGuestWork.Sequence)
+                        { _takenGuestWorkSequence = 0; _takenGuestPrefixProducerSequence = 0; }
                         if (_textureSourceGraphEnabled) LatchTextureSourceDrainFailureLocked(exception);
                         else
                         {
@@ -950,12 +990,16 @@ internal static partial class MetalVideoPresenter
                 {
                     _enqueueAsImmediateQueueFollowup = false;
                     _immediateFollowupTail = null;
+                    _guestPrefixExecution = previousPrefixExecution;
+                    _guestPrefixProducerSequence = previousPrefixProducer;
+                    _guestPrefixProducerQueue = previousPrefixQueue;
                     if (_textureSourceGraphEnabled) _executingTextureSourceWork = null;
                     EndImageDiagnosticWork(previousDiagnosticWork);
                     Volatile.Write(ref _executingGuestWorkSequence, 0);
                 }
 
                 CompleteGuestWork(pendingGuestWork);
+                TraceGuestWork("finished", pendingGuestWork);
                 completedWork++;
                 if (MetalPresentationProfile.AllocationsEnabled)
                     MetalPresentationProfile.RecordCompletedDrainWork(pendingGuestWork.Work switch

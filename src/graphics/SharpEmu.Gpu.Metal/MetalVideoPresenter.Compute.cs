@@ -95,8 +95,10 @@ internal static partial class MetalVideoPresenter
 
     private static void ExecuteComputeDispatch(nint device, nint queue, ComputeGuestDispatch dispatch)
     {
+        TraceGuestWorkStage("compute.entry");
         if (_skipAllCompute)
         {
+            RequireGuestPrefixExecution(false, "compute execution is disabled");
             if (dispatch.Textures.Any(texture => _selectedStorageMipAssociations.TryGetValue(texture, out _)))
                 throw new NotSupportedException("Metal selected storage mip writes cannot be skipped.");
             ReturnPooledComputeData(dispatch);
@@ -118,19 +120,24 @@ internal static partial class MetalVideoPresenter
                 "executing without the base offset.");
         }
 
+        TraceGuestWorkStage("compute.pipeline.begin");
         if (!TryGetComputePipeline(device, dispatch.Shader, out var pipeline))
         {
+            RequireGuestPrefixExecution(false, "compute pipeline creation failed");
             if (dispatch.Textures.Any(texture => _selectedStorageMipAssociations.TryGetValue(texture, out _)))
                 throw new InvalidOperationException("Metal selected storage mip dispatch pipeline could not be created.");
             ReturnPooledComputeData(dispatch);
             return;
         }
 
+        TraceGuestWorkStage("compute.pipeline.end");
+        TraceGuestWorkStage("compute.command_buffer.begin");
         var commandBuffer = _computeBeginCommandsOverride is { } beginCommands
             ? beginCommands(queue) : BeginBatchedGuestCommands(queue);
         if (commandBuffer == 0)
             throw new InvalidOperationException("Metal compute dispatch cannot create its command buffer.");
 
+        TraceGuestWorkStage("compute.command_buffer.end");
         // Pre-resolve textures before the compute encoder opens: snapshot
         // blits for feedback reads encode into the batch and encoder order
         // must place them ahead of this dispatch.
@@ -142,6 +149,7 @@ internal static partial class MetalVideoPresenter
         Exception? dispatchFailure = null;
         try
         {
+            TraceGuestWorkStage("compute.textures.begin");
             for (var index = 0; index < dispatch.Textures.Length; index++)
             {
                 var descriptor = dispatch.Textures[index];
@@ -172,6 +180,8 @@ internal static partial class MetalVideoPresenter
                 }
             }
 
+            TraceGuestWorkStage("compute.textures.end");
+            TraceGuestWorkStage("compute.encoder.begin");
             var encoder = _computeEncoderCreationOverride is { } createEncoder
                 ? createEncoder(commandBuffer)
                 : MetalNative.Send(commandBuffer, MetalNative.Selector("computeCommandEncoder"));
@@ -179,6 +189,8 @@ internal static partial class MetalVideoPresenter
                 throw new InvalidOperationException("Metal compute dispatch cannot create its compute encoder.");
             MetalNative.SendVoid(encoder, MetalNative.Selector("setComputePipelineState:"), pipeline);
 
+            TraceGuestWorkStage("compute.encoder.end");
+            TraceGuestWorkStage("compute.bindings.begin");
             var writeBackBuffers = new List<(nint Pointer, GuestMemoryBuffer Guest)>();
             var uploads = UploadDrawBuffers(device, dispatch.GlobalMemoryBuffers, writeBackBuffers);
             var stages = dispatch.StageBindings is { } bindings ? new[] { bindings } : [];
@@ -189,6 +201,8 @@ internal static partial class MetalVideoPresenter
                     computeBindings, uploads, textureHandles, MergePushData(stages));
             }
 
+            TraceGuestWorkStage("compute.bindings.end");
+            TraceGuestWorkStage("compute.dispatch_encoding.begin");
             var shader = dispatch.Shader.Shader;
             MetalNative.SendDispatch(
                 encoder,
@@ -206,15 +220,22 @@ internal static partial class MetalVideoPresenter
                     Depth = Math.Max(shader.ThreadgroupSizeZ, 1),
                 });
             MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
+            TraceGuestWorkStage("compute.dispatch_encoding.end");
 
             // CPU-visible writes are ordering points (see the draw path): flush
             // the batch and wait so the write-back lands before this work item
             // completes. Pure-GPU dispatches stay in the open batch.
             if (writeBackBuffers.Count > 0)
             {
+                TraceGuestWorkStage("compute.writeback_flush.begin");
                 var committed = FlushBatchedGuestCommands();
+                TraceGuestWorkStage("compute.writeback_flush.end");
+                TraceGuestWorkStage("compute.writeback_wait.begin");
                 WaitForCommittedGuestBufferWriteback(committed);
+                TraceGuestWorkStage("compute.writeback_wait.end");
+                TraceGuestWorkStage("compute.writeback_copy.begin");
                 WriteBuffersBackToGuest(writeBackBuffers);
+                TraceGuestWorkStage("compute.writeback_copy.end");
             }
         }
         catch (Exception exception)
@@ -510,23 +531,28 @@ internal static partial class MetalVideoPresenter
 
     private static bool TryGetComputePipeline(nint device, MetalCompiledGuestShader shader, out nint pipeline)
     {
+        TraceGuestWorkStage("compute.pipeline_lookup.entry");
         lock (_computePipelineCache)
         {
             if (_computePipelineCache.TryGetValue(shader, out pipeline))
             {
+                TraceGuestWorkStage("compute.pipeline.cache_hit");
                 return pipeline != 0;
             }
         }
 
+        TraceGuestWorkStage("compute.pipeline.cache_miss");
         var function = GetShaderFunction(device, shader);
         if (function != 0)
         {
             nint error = 0;
+            TraceGuestWorkStage("compute.native_pso.begin");
             pipeline = MetalNative.Send(
                 device,
                 MetalNative.Selector("newComputePipelineStateWithFunction:error:"),
                 function,
                 ref error);
+            TraceGuestWorkStage("compute.native_pso.end");
             if (pipeline == 0)
             {
                 Console.Error.WriteLine(

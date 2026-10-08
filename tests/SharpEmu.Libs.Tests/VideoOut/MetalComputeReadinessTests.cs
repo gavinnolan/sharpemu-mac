@@ -15,6 +15,20 @@ namespace SharpEmu.Libs.Tests.VideoOut;
 [Collection(SchedulingStateCollection.Name)]
 public sealed class MetalComputeReadinessTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CapturedPrefixRejectsCachedNilPipelineBeforeNativeCallsOrCompletion(bool rendererFollowup)
+    {
+        using var state = new State();
+        state.RejectPipeline();
+        state.Set("_computeBeginCommandsOverride", (Func<nint, nint>)(_ => throw new Exception("must not create commands")));
+        state.Set("_computeTextureCreationOverride", (Func<nint, nint, GuestDrawTexture, (nint, bool)>)((_, _, _) => throw new Exception("must not resolve textures")));
+        var fatal = state.Fail([], capturePrefix: true, rendererFollowup: rendererFollowup);
+        Assert.Contains("compute pipeline creation failed", Assert.IsType<InvalidOperationException>(fatal.InnerException).Message);
+        Assert.Empty(state.Released);
+    }
+
     [Fact]
     public void NilCommandBufferFailsBeforeAnyTextureOrEncoderAndNeverCompletes()
     {
@@ -102,6 +116,12 @@ public sealed class MetalComputeReadinessTests
         public State()
         {
             Set("_textureSourceGraphEnabled", false);
+            Set("_guestPrefixCapture", null);
+            Set("_guestPrefixExecution", false);
+            Set("_takenGuestWorkSequence", 0L);
+            Set("_takenGuestPrefixProducerSequence", 0L);
+            Set("_guestPrefixProducerSequence", 0L);
+            Set("_guestPrefixProducerQueue", null);
             Set("_textureSourceCleanupFailure", null);
             Set("_computeBeginCommandsOverride", (Func<nint, nint>)(_ => { Field("_batchOpen").SetValue(null, true); Field("_batchCommandBuffer").SetValue(null, (nint)101); return 101; }));
             Set("_computeEncoderCreationOverride", (Func<nint, nint>)(_ => 0));
@@ -125,16 +145,29 @@ public sealed class MetalComputeReadinessTests
             ((IDictionary)Field("_guestImages").GetValue(null)!).Add(0xA000UL, image);
             imageInstalled = true; return image;
         }
-        internal GpuFatalException Fail(GuestDrawTexture[] textures)
+        internal void RejectPipeline() => ((IDictionary)Field("_computePipelineCache").GetValue(null)!)[shader] = (nint)0;
+        internal GpuFatalException Fail(GuestDrawTexture[] textures, bool capturePrefix = false, bool rendererFollowup = false)
         {
             var leases = GuestDataPool.DiagnosticStats().LeaseCount;
-            using var queue = MetalVideoPresenter.EnterGuestQueue("compute.readiness", 91);
-            var failed = MetalVideoPresenter.SubmitComputeDispatch(0, shader, textures,
+            using var queue = MetalVideoPresenter.EnterGuestQueue(capturePrefix ? "dcb.graphics" : "compute.readiness", 91);
+            if (capturePrefix) MetalVideoPresenter.BeginGuestSubmissionPrefixCapture(0, 91);
+            long SubmitDispatch() => MetalVideoPresenter.SubmitComputeDispatch(0, shader, textures,
                 [new GuestMemoryBuffer(0, payload, 64, 64, true)], 1, 1, 1, 0, 0, 0, true, null);
-            Assert.True(failed > 0);
+            long failed = 0;
+            if (rendererFollowup)
+                Assert.True(MetalVideoPresenter.SubmitOrderedGuestAction(() => failed = SubmitDispatch(), "captured renderer followup") > 0);
+            else
+            { failed = SubmitDispatch(); Assert.True(failed > 0); }
             var followed = false;
             var next = MetalVideoPresenter.SubmitOrderedGuestAction(() => followed = true, "must not follow failed encoder");
+            var completion = capturePrefix ? MetalVideoPresenter.EndGuestSubmissionPrefixCapture(true) : null;
             var fatal = Assert.Throws<GpuFatalException>(() => MetalVideoPresenter.DrainGuestWork(0, 0));
+            Assert.True(failed > 0);
+            if (capturePrefix)
+            {
+                Assert.NotNull(completion);
+                Assert.Same(fatal.InnerException, Assert.Throws<InvalidOperationException>(completion.WaitUntilCompleted));
+            }
             Assert.Contains("kind=ComputeGuestDispatch", fatal.Message);
             Assert.False(followed);
             Assert.False(MetalVideoPresenter.WaitForGuestWork(failed, 0));

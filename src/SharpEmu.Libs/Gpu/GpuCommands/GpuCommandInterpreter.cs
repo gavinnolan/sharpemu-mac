@@ -423,23 +423,23 @@ public sealed partial class GpuCommandInterpreter
         }
     }
 
-    internal void WriteDword(ulong address, uint value)
+    internal void WriteDword(ulong address, uint value, string kind = "WRITE32")
     {
         Span<byte> bytes = stackalloc byte[sizeof(uint)];
         BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
-        WriteBytes(address, bytes);
+        WriteBytes(address, bytes, kind);
     }
 
-    internal void WriteQword(ulong address, ulong value)
+    internal void WriteQword(ulong address, ulong value, string kind = "WRITE64")
     {
         Span<byte> bytes = stackalloc byte[sizeof(ulong)];
         BinaryPrimitives.WriteUInt64LittleEndian(bytes, value);
-        WriteBytes(address, bytes);
+        WriteBytes(address, bytes, kind);
     }
 
-    internal void WriteBytes(ulong address, ReadOnlySpan<byte> source)
+    internal void WriteBytes(ulong address, ReadOnlySpan<byte> source, string kind = "WRITE_BYTES")
     {
-        if (!_host.Memory.TryWrite(address, source))
+        if (!_host.TryWriteGuest(address, source, kind))
         {
             throw _host.Fatal($"The command stream cannot write guest memory: address=0x{address:X16} size={source.Length}.");
         }

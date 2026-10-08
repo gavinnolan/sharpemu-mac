@@ -154,8 +154,8 @@ internal static partial class MetalVideoPresenter
         return GpuFatal.Fatal($"Metal guest completion failed: {reason}.", cause);
     }
 
-    // Notify waiters without invoking FailFast before the render lifetime can
-    // unwind its owned native resources. Existing fatal callers keep reporting.
+    // Worker failure must wake/refuse presenter work promptly without invoking
+    // FailFast before the render lifetime can unwind its owned native resources.
     internal static Exception LatchGuestCompletionFailure(string reason, Exception? failure = null)
     {
         Exception cause;

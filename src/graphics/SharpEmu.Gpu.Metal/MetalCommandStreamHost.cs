@@ -12,7 +12,7 @@ namespace SharpEmu.Gpu.Metal;
 
 // The command interpreter host of the Metal backend: managed transfers mirrored into the
 // snapshot images, draws and completions posted to the presenter's ordered queue in stream order.
-internal sealed partial class MetalCommandStreamHost : AgcExports.TranslatingCommandStreamHost
+internal sealed partial class MetalCommandStreamHost : AgcExports.TranslatingCommandStreamHost, ICommandSubmissionCompletionHost
 {
     private readonly IGuestImageSnapshotBackend _snapshots;
     private readonly IGuestGpuBackend _backend;
@@ -37,6 +37,12 @@ internal sealed partial class MetalCommandStreamHost : AgcExports.TranslatingCom
         _queueScope = MetalVideoPresenter.EnterGuestQueue(queueName, submissionId);
         base.BeginSubmission(queueId, submissionId, geometrySnapshots);
     }
+
+    public void BeginSubmissionCompletionCapture(int queueId, ulong submissionId) =>
+        MetalVideoPresenter.BeginGuestSubmissionPrefixCapture(queueId, submissionId);
+
+    public IGuestSubmissionPrefixCompletion? EndSubmissionCompletionCapture(bool complete) =>
+        MetalVideoPresenter.EndGuestSubmissionPrefixCapture(complete);
 
     // Only this synchronous packet→executor invocation may qualify an indexed prefix.
     // Retained replay and indirect/resolved-indirect draws do not carry that proof.
@@ -64,6 +70,12 @@ internal sealed partial class MetalCommandStreamHost : AgcExports.TranslatingCom
 
     // The global data share lives on the GPU; its transfers queue behind the draws before them.
     public override void FillBuffer(ulong address, ulong size, uint value, bool isGds)
+    {
+        if (isGds) FillBufferAtQueuePosition(address, size, value, true);
+        else ExecuteGuestMemoryOperation(() => FillBufferAtQueuePosition(address, size, value, false), "FILL", address, size, value);
+    }
+
+    private void FillBufferAtQueuePosition(ulong address, ulong size, uint value, bool isGds)
     {
         if (isGds)
         {
@@ -101,6 +113,11 @@ internal sealed partial class MetalCommandStreamHost : AgcExports.TranslatingCom
     }
 
     public override void CopyBuffer(ulong destination, ulong source, ulong size, bool destinationIsGds, bool sourceIsGds)
+    {
+        ExecuteGuestMemoryOperation(() => CopyBufferAtQueuePosition(destination, source, size, destinationIsGds, sourceIsGds), "COPY", destination, size, source);
+    }
+
+    private void CopyBufferAtQueuePosition(ulong destination, ulong source, ulong size, bool destinationIsGds, bool sourceIsGds)
     {
         if (size == 0)
         {
@@ -174,13 +191,16 @@ internal sealed partial class MetalCommandStreamHost : AgcExports.TranslatingCom
     public override void RecordEndOfPipe(in EndOfPipeWrite write)
     {
         var completion = write;
-        _ = MetalVideoPresenter.SubmitOrderedGuestCompletion(() =>
+        var sequence = MetalVideoPresenter.SubmitOrderedGuestCompletion(() =>
         {
             MetalVideoPresenter.RequireGuestCompletionHealthy();
+            MetalVideoPresenter.TraceCommandMemoryEop("executing", completion);
             WriteDeferredEndOfPipeLabel(in completion);
             MetalVideoPresenter.RequireGuestCompletionHealthy();
             base.RecordEndOfPipe(in completion);
+            MetalVideoPresenter.TraceCommandMemoryEop("acknowledged", completion);
         }, $"command_stream completion {write.Kind}");
+        MetalVideoPresenter.TraceCommandMemoryEop("admitted", completion, sequence);
     }
 
     public override ulong PrepareFlip(int handle, int index, int flipMode, long flipArgument)
