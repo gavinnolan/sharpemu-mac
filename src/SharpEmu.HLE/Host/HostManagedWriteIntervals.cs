@@ -98,9 +98,11 @@ internal sealed class HostManagedWriteIntervals
         if (Volatile.Read(ref nextIdentity) == originalRevision && Volatile.Read(ref coverageIncomplete) == 0) return true;
         ReleasePublication(); return false;
     }
-    internal void RecordPublicationWrite()
+    internal long RecordPublicationWrite()
     {
-        if (Interlocked.Increment(ref nextIdentity) <= 0) Interlocked.Exchange(ref coverageIncomplete, 1);
+        var revision = Interlocked.Increment(ref nextIdentity);
+        if (revision <= 0) Interlocked.Exchange(ref coverageIncomplete, 1);
+        return revision;
     }
     internal void ReleasePublication() => Interlocked.Add(ref admission, -PublicationBit);
     internal void QuarantinePublication() => Interlocked.Exchange(ref coverageIncomplete, 1);

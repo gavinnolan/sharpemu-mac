@@ -211,4 +211,49 @@ public sealed unsafe class MappedPublicationTests
         Assert.Equal(CpuMappedPublicationResult.Rejected, receipt.TryCommit()); Assert.Equal(before, state.Bytes());
         Assert.Equal(0, state.Backing.ActiveAccesses);
     }
+    [Fact]
+    public void ReadableButNotWritableOriginalViewCannotPublish()
+    {
+        using var state = new State();
+        Assert.True(state.Views.TryMapReservedRange(State.Address, State.Page, 0, HostPageProtection.ReadOnly, out _));
+        var original = state.Capture();
+        Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
+            state.Views.TryPrepareMappedPublication(original, [new(State.Address, new byte[] { 13 })], out _));
+    }
+
+    [Fact]
+    public void ExactOwnContinuityAllowsRepeatButOldOriginalAndExternalWriteReject()
+    {
+        using var state = new State(); var original = state.Capture();
+        using var first = state.Prepare(original, State.Address, [13]);
+        Assert.Null(first.SuccessfulObservation);
+        Assert.Equal(CpuMappedPublicationResult.Applied, first.TryCommit());
+        var own = Assert.IsType<CpuMappedCopyObservation>(first.SuccessfulObservation);
+        Assert.Equal(original.FootprintAddress, own.FootprintAddress);
+        Assert.Equal(original.SourceAddress, own.SourceAddress);
+        Assert.Equal(original.Segments, own.Segments);
+        Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
+            state.Views.TryPrepareMappedPublication(original, [new(State.Address, new byte[] { 14 })], out _));
+        using var second = state.Prepare(own, State.Address, [27]);
+        Assert.Equal(CpuMappedPublicationResult.Applied, second.TryCommit());
+        var next = Assert.IsType<CpuMappedCopyObservation>(second.SuccessfulObservation);
+        Assert.Equal(27, state.Bytes()[0]);
+        Assert.True(state.Views.TryWriteBacking(State.Address + 4, new byte[] { 91 }));
+        Assert.True(state.Views.IsMappedCopyObservationCurrent(next));
+        Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
+            state.Views.TryPrepareMappedPublication(next, [new(State.Address, new byte[] { 14 })], out _));
+    }
+
+    [Fact]
+    public void CancelledOrRejectedCommitCannotMintOwnContinuity()
+    {
+        using var state = new State(); var original = state.Capture();
+        var cancelled = state.Prepare(original, State.Address, [13]);
+        cancelled.Dispose(); Assert.Null(cancelled.SuccessfulObservation);
+        Assert.Equal(CpuMappedPublicationResult.Rejected, cancelled.TryCommit()); Assert.Null(cancelled.SuccessfulObservation);
+        using var rejected = state.Prepare(original, State.Address, [27]);
+        state.Backing.CloseAccess();
+        Assert.Equal(CpuMappedPublicationResult.Rejected, rejected.TryCommit()); Assert.Null(rejected.SuccessfulObservation);
+    }
+
 }

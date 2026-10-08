@@ -38,9 +38,14 @@ An original copy retains a private writer revision only if participating writers
 were quiescent at both boundaries and the revision stayed unchanged. Mapping-only
 IsCurrent is unchanged. A completed participating alias write since that original
 copy vetoes publication even if the texture tracker did not see it. Publication
-increments that revision. This first-use checkpoint consequently rejects a second
-publication using the old observation; a separate provider-owned continuity receipt
-will be required to advance from an exact confirmed own write.
+increments that revision. The first-use checkpoint rejects a second publication using the old observation.
+Its separate continuity successor preallocates a provider-owned observation from
+those SAME original view identities. Only an exact Applied ticket exposes it,
+with the revision returned by its own write. There is no fresh lookup, writer
+recapture, content-token update or restored mapping identity. A subsequent external
+participating write still vetoes prepare; cancelled/rejected/unknown tickets expose
+no observation. Any Metal origin/content-token transition remains a separately
+reviewed caller responsibility, with missing raw/native writers still uncertified.
 
 Raw cached AliasBase/Descriptor access, native/JIT guest stores, tracker direct
 mprotect, external syscalls and unsupported providers remain outside this writer

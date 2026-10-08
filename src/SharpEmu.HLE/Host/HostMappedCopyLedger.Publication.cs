@@ -52,7 +52,13 @@ public sealed unsafe partial class HostMappedCopyLedger
         if (writers is null) return CpuMappedPublicationPreparationResult.Rejected;
         var reserved = false;
         var installed = false;
-        var transaction = new Publication(this, backing, original, writers, aliasesToWrite);
+        // Preallocate continuity from the SAME immutable original view identities,
+        // before admission. Its revision is filled only from this exact commit.
+        var successfulCapture = new Capture(this, capture.States);
+        var successfulObservation = new CpuMappedCopyObservation(successfulCapture,
+            original.FootprintAddress, original.FootprintByteCount, original.SourceAddress,
+            original.SourceByteCount, original.Segments.ToArray());
+        var transaction = new Publication(this, backing, original, writers, aliasesToWrite, successfulObservation);
         var wrapper = new CpuMappedPublication(transaction);
         if (!backing.TryEnterAccess()) return CpuMappedPublicationPreparationResult.Rejected;
         try
@@ -111,13 +117,16 @@ public sealed unsafe partial class HostMappedCopyLedger
     }
 
     private sealed class Publication(HostMappedCopyLedger owner, HostBackingObject backing,
-        CpuMappedCopyObservation original, HostManagedWriteIntervals writers, AliasRun[] runs)
+        CpuMappedCopyObservation original, HostManagedWriteIntervals writers, AliasRun[] runs,
+        CpuMappedCopyObservation successfulObservation)
         : CpuMappedPublicationTransaction
     {
         internal readonly CpuMappedCopyObservation Original = original;
         internal Publication? Next;
         private int state; // prepared, committing, completed, unknown, cancelled
-        private int released;
+        private int released, applied;
+        internal override CpuMappedCopyObservation? SuccessfulObservation =>
+            Volatile.Read(ref applied) == 1 ? successfulObservation : null;
 
         internal override CpuMappedPublicationResult TryCommit()
         {
@@ -139,10 +148,11 @@ public sealed unsafe partial class HostMappedCopyLedger
                 lock (owner.gate)
                 {
                     if (!owner.IsCurrent(backing, Original)) return QuarantineLocked();
-                    writers.RecordPublicationWrite();
+                    var revision = writers.RecordPublicationWrite();
+                    Volatile.Write(ref ((Capture)successfulObservation.OwnerIdentity).WriterRevision, revision);
                     owner.RemovePublicationLocked(this); state = 2;
                 }
-                Release(); return CpuMappedPublicationResult.Applied;
+                Release(); Volatile.Write(ref applied, 1); return CpuMappedPublicationResult.Applied;
             }
             catch
             {

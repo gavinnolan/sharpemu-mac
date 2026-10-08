@@ -45,6 +45,11 @@ public sealed class CpuMappedPublication : IDisposable
     private readonly CpuMappedPublicationTransaction transaction;
     internal CpuMappedPublication(CpuMappedPublicationTransaction transaction) => this.transaction = transaction;
     public CpuMappedPublicationResult TryCommit() => transaction.TryCommit();
+    /// <summary>Provider-owned continuity from this exact Applied transaction.
+    /// Mapping identities are the unchanged original ones; only participating
+    /// writer history advances for this known own write. No content token,
+    /// external/native writer coverage or mapping recapture is certified.</summary>
+    public CpuMappedCopyObservation? SuccessfulObservation => transaction.SuccessfulObservation;
     public void Dispose() => transaction.Cancel();
 }
 
@@ -52,4 +57,5 @@ internal abstract class CpuMappedPublicationTransaction
 {
     internal abstract CpuMappedPublicationResult TryCommit();
     internal abstract void Cancel();
+    internal abstract CpuMappedCopyObservation? SuccessfulObservation { get; }
 }

@@ -42,7 +42,18 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
         _ = host.TryCreateBacking(size, out _backing, out _);
         // Outside the provider gate and before this wrapper is published: all
         // of its participating writes have history from the first operation.
-        if (host is IHostMappedPublicationMemory) _backing?.EnrollManagedWrites();
+        try { if (host is IHostMappedPublicationMemory) _backing?.EnrollManagedWrites(); }
+        catch (Exception primary)
+        {
+            // This newly created backing was not published to a caller yet.
+            // Enrollment allocation failure must not abandon its native owner.
+            try { _backing?.Dispose(); }
+            catch (Exception cleanup)
+            {
+                try { primary.Data["ManagedWriterEnrollmentCleanup"] = cleanup; } catch { }
+            }
+            throw;
+        }
     }
 
     public bool IsAvailable => _backing != null && !Volatile.Read(ref _disposeRequested) && !Volatile.Read(ref _disposed) && !_backing.IsClosing && !_backing.IsDisposed;
