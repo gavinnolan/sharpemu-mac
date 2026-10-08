@@ -1064,6 +1064,7 @@ internal static partial class MetalVideoPresenter
         }
 
         Require2DGuestImage(image, "CPU image write/clear");
+        RejectColorPhysicalAddressOnly(write.Address, checked((ulong)image.Width * image.Height * MetalRenderTargetFormat.GetBytesPerPixel(image.Format)));
         if (write.Pixels is { } pixels)
         {
             var bytesPerPixel = MetalRenderTargetFormat.GetBytesPerPixel(image.Format);
@@ -1117,6 +1118,7 @@ internal static partial class MetalVideoPresenter
         }
 
         Require2DGuestImage(image, "VideoOut flip");
+        RejectColorPhysicalAddressOnly(flip.Address, checked((ulong)image.Width * image.Height * MetalRenderTargetFormat.GetBytesPerPixel(image.Format)));
         // Capture the mutable image into an immutable generation at this exact
         // queue position; later work cannot change the frame this flip selected.
         var captured = new GuestImage
@@ -1199,6 +1201,8 @@ internal static partial class MetalVideoPresenter
 
         Require2DGuestImage(source, "guest image blit source");
         Require2DGuestImage(destination, "guest image blit destination");
+        RejectColorPhysicalAddressOnly(blit.SourceAddress, checked((ulong)source.Width * source.Height * MetalRenderTargetFormat.GetBytesPerPixel(source.Format)));
+        RejectColorPhysicalAddressOnly(blit.DestinationAddress, checked((ulong)destination.Width * destination.Height * MetalRenderTargetFormat.GetBytesPerPixel(destination.Format)));
         CopyTexture(queue, source.Texture, destination.Texture);
         destination.MarkContentChangedWithDiagnostic("guest-blit");
     }
@@ -1277,6 +1281,11 @@ internal static partial class MetalVideoPresenter
             if (_guestImages.TryGetValue(address, out var existing))
             {
                 Require2DGuestImage(existing, "display image materialization");
+                if (MetalColorMipPlacement.Enabled)
+                {
+                    var sourcePitch = pitchInPixel == 0 ? width : Math.Max(pitchInPixel, width);
+                    RejectColorPhysicalAddressOnly(address, checked((ulong)sourcePitch * height * MetalRenderTargetFormat.GetBytesPerPixel(existing.Format)));
+                }
                 return existing;
             }
 
@@ -1285,6 +1294,15 @@ internal static partial class MetalVideoPresenter
                 return null;
             }
 
+            // Guard the full source BEFORE taking pending bytes, allocating a
+            // native texture, or reading the guest seed. A start point below a
+            // finite allocation does not prove its pitched rows miss that range.
+            if (MetalColorMipPlacement.Enabled)
+            {
+                var sourcePitch = pitchInPixel == 0 ? width : Math.Max(pitchInPixel, width);
+                var sourceFormat = DecodeGuestFormatTag(formatTag);
+                RejectColorPhysicalAddressOnly(address, checked((ulong)sourcePitch * height * MetalRenderTargetFormat.GetBytesPerPixel(sourceFormat)));
+            }
             _pendingGuestImageInitialData.Remove(address, out initialData);
         }
 

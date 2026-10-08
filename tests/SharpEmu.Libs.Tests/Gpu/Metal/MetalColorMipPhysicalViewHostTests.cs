@@ -153,6 +153,45 @@ public sealed partial class MetalRenderHostTests
         Assert.Equal(1, fallback); Assert.True(texture.IsFallback); Assert.Equal(0, memory.Reads);
     }
 
+    [Theory]
+    [InlineData(false)] [InlineData(true)]
+    public void ColorPhysicalCrossingStartDisplaySeedRejectsBeforePendingDataOrRead(bool paddedRows)
+    {
+        using var enabled = new ColorPhysicalFlagScope();
+        var memory = new ColorPhysicalNeverReadMemory();
+        using var inventory = new ColorPhysicalInventoryScope(memory);
+        const ulong start = ColorBase - 0x10000;
+        var flags = BindingFlags.Static | BindingFlags.NonPublic;
+        var available = (IDictionary)typeof(MetalVideoPresenter).GetField("_availableGuestImages", flags)!.GetValue(null)!;
+        var pending = (IDictionary)typeof(MetalVideoPresenter).GetField("_pendingGuestImageInitialData", flags)!.GetValue(null)!;
+        var images = (IDictionary)typeof(MetalVideoPresenter).GetField("_guestImages", flags)!.GetValue(null)!;
+        var hadAvailable = available.Contains(start); var oldAvailable = available[start];
+        var hadPending = pending.Contains(start); var oldPending = pending[start];
+        var hadImage = images.Contains(start); var oldImage = images[start];
+        var originalPending = new byte[8];
+        try
+        {
+            available[start] = 0x80000C07u; // Actual render namespace RGBA16Float.
+            pending[start] = originalPending; images.Remove(start);
+            var width = paddedRows ? 128u : 512u;
+            var height = paddedRows ? 64u : 512u;
+            var pitch = paddedRows ? 4096u : 0u;
+            var failure = Assert.Throws<TargetInvocationException>(() =>
+                typeof(MetalVideoPresenter).GetMethod("EnsureGuestImage", flags)!.Invoke(null,
+                    [nint.Zero, start, width, height, pitch]));
+            Assert.IsType<NotSupportedException>(failure.InnerException);
+            Assert.Same(originalPending, pending[start]); // No accepted seed consumption.
+            Assert.False(images.Contains(start)); // No native allocation/publication.
+            Assert.Equal(0, memory.Reads);
+        }
+        finally
+        {
+            if (hadAvailable) available[start] = oldAvailable; else available.Remove(start);
+            if (hadPending) pending[start] = oldPending; else pending.Remove(start);
+            if (hadImage) images[start] = oldImage; else images.Remove(start);
+        }
+    }
+
     private static AgcExports.TranslatedImageBinding ColorPhysicalTailBinding()
     {
         uint[] raw = [(uint)(ColorBase >> 8), 0xC4700000, 0x000FC01F, 0x91B00FAC, 0, 0x00700000, 0, 0];
