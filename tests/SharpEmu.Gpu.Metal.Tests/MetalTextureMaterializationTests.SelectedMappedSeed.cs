@@ -11,6 +11,7 @@ public sealed partial class MetalTextureMaterializationTests
     [Fact]
     public void InitialSelectedMappedSeedUnavailablePreservesLegacyReadAndDetachedBytes()
     {
+        SelectedMappedSeedAssertClr();
         var (bytes, expected) = SelectedMipSeed();
         var memory = new RefusedSelectedMappedMemory(bytes, CpuMappedCopyResult.Unavailable);
         var texture = Assert.Single(SelectedMipSnapshots(memory));
@@ -26,6 +27,7 @@ public sealed partial class MetalTextureMaterializationTests
     [InlineData((CpuMappedCopyResult)17, 1)]
     public void InitialSelectedMappedSeedRefusalNeverFallsBackOrPublishes(CpuMappedCopyResult result, int attempts)
     {
+        SelectedMappedSeedAssertClr();
         using var state = new SelectedMipQueueScope();
         var (bytes, _) = SelectedMipSeed();
         var memory = new RefusedSelectedMappedMemory(bytes, result);
@@ -33,6 +35,17 @@ public sealed partial class MetalTextureMaterializationTests
         Assert.IsType<InvalidOperationException>(error.InnerException);
         Assert.Equal(attempts, memory.OptionalCalls); Assert.Equal(0, memory.Reads);
         Assert.Equal(0, Presenter.GetField("_pendingGuestWorkCount", Methods)!.GetValue(null));
+    }
+
+    private void SelectedMappedSeedAssertClr()
+    {
+        var actual = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString();
+        var framework = System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription;
+        var expected = Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_ARCH");
+        var expectedFramework = Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_FRAMEWORK");
+        if (!string.IsNullOrEmpty(expected)) Assert.Equal(expected, actual);
+        if (!string.IsNullOrEmpty(expectedFramework)) Assert.Equal(expectedFramework, framework);
+        output.WriteLine($"selected mapped seed actualCLR={actual} framework={framework}; expected={expected ?? "unspecified"}");
     }
 
     private sealed class RefusedSelectedMappedMemory(byte[] bytes, CpuMappedCopyResult result) : ICpuMemory, ICpuMappedCopySource

@@ -27,6 +27,7 @@ public sealed partial class MetalTextureMaterializationTests
     [InlineData("consumed-owner")]
     public void ActualMacOriginalMappedSeedAndFirstUseVetoes(string kind)
     {
+        SelectedMappedSeedAssertClr();
         Assert.True(OperatingSystem.IsMacOS());
         Assert.Equal("1", Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_SELECTED_MAPPED_SEED_NATIVE"));
         Assert.Equal(RuntimeInformation.ProcessArchitecture.ToString(), Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_ARCH"));
