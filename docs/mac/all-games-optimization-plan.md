@@ -10,7 +10,8 @@ own frame cap must be distinguished from host performance; changing guest time
 or silently interpolating duplicate frames does not satisfy that target.
 
 The [frozen all-nine baseline](validation/all-games-baseline-20261008.md) records
-actual blockers. The [current optimization evidence](validation/mac-optimization-20261008.md)
+initial blockers. The [current all-nine replay](validation/all-games-current-20261008.md)
+records the signed2ad build and its newer failure points. The [current optimization evidence](validation/mac-optimization-20261008.md)
 separates code changes, numerical device fixtures and game observations.
 macOS remains native Metal/AppKit/CoreAudio/GameController/CoreText. Guest CPU
 execution remains x64/Rosetta; ARM64 CLR tests qualify host code only.
@@ -31,13 +32,13 @@ execution remains x64/Rosetta; ARM64 CLR tests qualify host code only.
 | --- | --- | --- |
 | Dreaming Sarah | Controllable outdoor scene; same-binary876 ABBA: off63.34/65.86Hz; idle-on73.34/69.41Hz, tails remain33.8–36.2ms | Reduce unnecessary drawable acquisition; then queue-drain attribution and controlled same-build pacing comparison |
 | Demon’s Souls | DF identifies global mapping epoch change at admission; zero guest frames | Preserve content authority while replacing broad vetoes with qualified per-range lifetime/operation ownership |
-| Silent Hill: The Short Message | a8c passes small Uint origin arrays;1024x1024 BGRA mode27 array rejects; one early frame, then zero | Qualify complete multi-block coordinates, BGRA semantics and native array store/load/writeback |
-| Octopath Traveler II | a8c reaches the same1024x1024 BGRA array rejection | Shared finite layout proof; exact title replay and progression |
-| The Oregon Trail | a8c passes RGBA8Uint and rejects the same1024x1024 BGRA array | Full multi-block addressing and typed native proof; separate title progression |
+| Silent Hill: The Short Message | 2ad passes1024² BGRA; exact3840×2160 R8Uint mode24 array rejects; one early frame, then zero | 4K R8 full-layout/byte/native candidate qualified in isolation; actual SH replay pending |
+| Octopath Traveler II | 2ad reaches the same4K R8Uint array rejection | Shared4K R8 candidate; separate exact title replay and progression |
+| The Oregon Trail | 2ad passes BGRA; GPU-written1×1 RGBA8 sampled alias lacks captured provenance | Capture exact retained GPU-owner/view provenance before admitting sampled aliases |
 | Poppy Playtime Chapter 1 | Fatal write fault; later b7 record observes tracker Disarmed after a successful RW restore | Filtered schema3 retains85/0drops and three actual Disarmed CAS declines after successful RW restore; require permission/lifetime ownership, no unconditional retry |
-| Superliminal | a8c provenance identifies GPU-written512x512 color target before128x64 storage image atsameaddress | Qualify typed layout and GPU-content publication before safe rebinding |
+| Superliminal | 2ad retains the ten-mip512² color and disjoint128×64 storage collision | Preserve normalized physical selected-mip placement; actual production clear/Drain and disjoint-tail proof before integration |
 | Quake | Native movie plays; first 8192² R32 tiled depth image exceeds 128 MiB snapshot bound | Independent PS5 tile-mode-24 address oracle, bounded upload staging and correctly filtered depth comparison |
-| Void Terrarium | Scene visible but progression and gameplay unverified under contention | Input/checkpoint qualification on quiet host, first visual discrepancy and scene-specific GPU/producer attribution |
+| Void Terrarium | 2ad Move prompt visible; extra direction replay overlaps loading, progression unverified | Input/checkpoint qualification on quiet host, first visual discrepancy and scene-specific GPU/producer attribution |
 
 ## Ownership before speed
 
