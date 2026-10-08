@@ -1187,10 +1187,11 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         var result = source.TryReadMappedCopyWithWriteWatch(footprintAddress, footprintByteCount, sourceAddress, destination, out observation);
         var disposedAfter = Volatile.Read(ref _disposed);
         if (!disposedAfter && ReferenceEquals(_backedSpace, space)) return result;
+        if (observation is not null) source.ReleaseMappedCopyWriteWatch(observation);
+        observation = null;
         TraceMappedCopyRefusal(disposedAfter ? "post-provider-disposed" : "post-provider-backing-replaced",
             CpuMappedCopyResult.Rejected, footprintAddress, footprintByteCount, sourceAddress, destination.Length, true);
-        if (observation is not null) source.ReleaseMappedCopyWriteWatch(observation);
-        observation = null; return CpuMappedCopyResult.Rejected;
+        return CpuMappedCopyResult.Rejected;
     }
     public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation observation) =>
         !Volatile.Read(ref _disposed) && _backedSpace is ICpuMappedReadWatchSource source && source.IsMappedCopyWriteWatchCurrent(observation);
