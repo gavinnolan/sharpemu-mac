@@ -142,7 +142,8 @@ The game remained alive at 150 seconds, peak RSS 4422 MiB. The previous
 `demo1.dem` and The Necropolis and produced a few level frames. The inspected
 120-second screenshot is visibly corrupted. Scheduled menu and movement
 inputs do not establish player control; automatic demo loading is not gameplay
-acceptance. This candidate has not been integrated into main.
+acceptance. The scoped budget change is now included in the qualified local
+`d5d198f7` integration; Quake gameplay remains unverified.
 
 Shutdown did not finish within the harness's ten-second TERM grace period,
 so the owned game required KILL. The shutdown log also records command-stream
@@ -151,11 +152,12 @@ hashes, but that is not a clean game-shutdown result. No owned process group
 or shared game lock remained. An unrelated emulator process was present and
 was left untouched; this run makes no performance claim.
 
-## Current entry blockers after the latest signed replays
+## Earlier entry blockers and isolated candidates
 
-The latest observations below supersede the older next-step list. Dreaming
-Sarah remains the only title with prior verified directional control; none of
-these runs accepts an additional title.
+These earlier observations explain the candidate lineages. The signed replays
+at the top of this document supersede them where the same failure has been
+retested. Dreaming Sarah remains the only title with verified directional
+control; none of these earlier runs accepts an additional title.
 
 - **Octopath and Silent Hill:** successor `1610948d` captures original display
   ownership at the initial copy and passed 150 managed cases on each host
