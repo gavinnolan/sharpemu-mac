@@ -140,4 +140,21 @@ public sealed partial class MetalTextureMaterializationTests
         }
         finally { lock (cache) cache.Remove(key); }
     }
+
+    private sealed class SamplerDiagnosticDataFailure : InvalidOperationException
+    {
+        public override IDictionary Data => throw new InvalidOperationException("diagnostic getter sentinel");
+    }
+
+    [Fact]
+    public void SamplerOwnershipThrowingDiagnosticDataCannotReplacePrimaryOrSkipCleanup()
+    {
+        var primary = new SamplerDiagnosticDataFailure(); var released = new List<nint>();
+        Func<nint> descriptor = () => 11;
+        Action<nint> configure = _ => throw primary;
+        Func<nint, nint> state = _ => throw new InvalidOperationException("must not create state");
+        Action<nint> release = value => { released.Add(value); throw new InvalidOperationException("cleanup sentinel"); };
+        var caught = Assert.Throws<SamplerDiagnosticDataFailure>(() => SamplerOwnershipCall("CreateOwnedSamplerState", descriptor, configure, state, release));
+        Assert.Same(primary, caught); Assert.Equal(new nint[] { 11 }, released);
+    }
 }
