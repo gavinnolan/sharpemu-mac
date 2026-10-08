@@ -12,9 +12,23 @@ namespace SharpEmu.Host.MacOS;
 /// guest address space with MAP_FIXED, tracked in the neutral
 /// <see cref="HostViewRegions"/> table so VirtualQuery-style lookups see them.
 /// </summary>
-internal sealed unsafe partial class MacHostViews : IHostViewMemory
+internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMappedCopyMemory
 {
     internal static bool FailAliasMapForTests;
+
+    public MacHostViews() => MacMappedCopyState.Initialize();
+
+    public CpuMappedCopyResult TryReadMappedCopy(HostBackingObject backing, ulong footprintAddress,
+        ulong footprintByteCount, ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)
+    {
+        observation = null;
+        return MacMappedCopyState.Ledger is { } ledger
+            ? ledger.TryReadMappedCopy(backing, footprintAddress, footprintByteCount, sourceAddress, destination, out observation)
+            : CpuMappedCopyResult.Unavailable;
+    }
+
+    public bool IsMappedCopyObservationCurrent(HostBackingObject backing, CpuMappedCopyObservation observation) =>
+        MacMappedCopyState.Ledger?.IsCurrent(backing, observation) == true;
 
     private const int PROT_NONE = 0x0;
     private const int PROT_READ = 0x1;
@@ -53,46 +67,67 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory
             return false;
         }
 
-        // Darwin has no memfd_create; shm_open plus an immediate shm_unlink
-        // gives the same anonymous, descriptor-only backing object.
-        var descriptor = OpenSharedObject();
-        if (descriptor < 0)
+        lock (HostViewRegions.Gate)
         {
-            return false;
-        }
+            if (MacMappedCopyState.Ledger is { } copyLedger && !copyLedger.CanMakeAnonymousPlacement()) return false;
+            MacMappedCopyState.Ledger?.PreflightBackingPublication();
+            // Darwin has no memfd_create; shm_open plus an immediate shm_unlink
+            // gives the same anonymous, descriptor-only backing object.
+            var descriptor = OpenSharedObject();
+            if (descriptor < 0)
+            {
+                return false;
+            }
 
-        if (ftruncate(descriptor, (long)size) != 0)
-        {
-            close(descriptor);
-            return false;
-        }
+            if (ftruncate(descriptor, (long)size) != 0)
+            {
+                close(descriptor);
+                return false;
+            }
 
-        var alias = FailAliasMapForTests ? MAP_FAILED : mmap(0, (nuint)size, PROT_READ | PROT_WRITE, MAP_SHARED, descriptor, 0);
-        if (alias == MAP_FAILED)
-        {
-            close(descriptor);
-            return false;
-        }
+            var alias = FailAliasMapForTests ? MAP_FAILED : mmap(0, (nuint)size, PROT_READ | PROT_WRITE, MAP_SHARED, descriptor, 0);
+            if (alias == MAP_FAILED)
+            {
+                close(descriptor);
+                return false;
+            }
 
-        try
-        {
-            backing = new HostBackingObject((ulong)alias, size, PageSize, ReleaseOwnedBackingObject) { Descriptor = descriptor };
+            try
+            {
+                backing = new HostBackingObject((ulong)alias, size, PageSize, ReleaseOwnedBackingObject) { Descriptor = descriptor };
+                MacMappedCopyState.Ledger?.RegisterBacking(backing);
+            }
+            catch (Exception error)
+            {
+                // Only this successful new alias is owned here; no guest view exists.
+                var unmap = int.MinValue; var unmapError = 0;
+                var closed = int.MinValue; var closeError = 0;
+                Exception? cleanupFailure = null;
+                try
+                {
+                    unmap = munmap(alias, (nuint)size);
+                    unmapError = unmap == 0 ? 0 : Marshal.GetLastPInvokeError();
+                    // No descriptor cleanup after an uncertain alias unmap.
+                    if (unmap == 0)
+                    {
+                        closed = close(descriptor);
+                        closeError = closed == 0 ? 0 : Marshal.GetLastPInvokeError();
+                    }
+                }
+                catch (Exception secondary) { cleanupFailure = secondary; }
+                if (unmap != 0) MacMappedCopyState.Ledger?.QuarantineUnknownAlias();
+                if (unmap != 0 || closed != 0 || cleanupFailure is not null)
+                    try
+                    {
+                        error.Data["BackingSetupCleanup"] = $"alias=0x{(ulong)alias:X};size={size};descriptor={descriptor};munmap={unmap}/{unmapError};close_attempted={unmap == 0};close={closed}/{closeError}";
+                        if (cleanupFailure is not null) error.Data["BackingSetupCleanupException"] = cleanupFailure;
+                    }
+                    catch { } // primary construction/publication failure remains authoritative
+                throw;
+            }
+            failure = HostViewFailure.None;
+            return true;
         }
-        catch (Exception error)
-        {
-            // Only this successful new alias is owned here; no guest view exists.
-            var unmap = munmap(alias, (nuint)size);
-            var unmapError = unmap == 0 ? 0 : Marshal.GetLastPInvokeError();
-            // No descriptor cleanup after uncertain alias unmap. Never repeat
-            // failed effects; retain exact attempted obligations in startup error.
-            var closed = unmap == 0 ? close(descriptor) : -1;
-            var closeError = unmap == 0 && closed != 0 ? Marshal.GetLastPInvokeError() : 0;
-            if (unmap != 0 || closed != 0)
-                error.Data["BackingSetupCleanup"] = $"alias=0x{(ulong)alias:X};size={size};descriptor={descriptor};munmap={unmap}/{unmapError};close_attempted={unmap == 0};close={closed}/{closeError}";
-            throw;
-        }
-        failure = HostViewFailure.None;
-        return true;
     }
 
     public ulong ReserveHole(ulong address, ulong size)
@@ -112,6 +147,8 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory
         {
             return 0;
         }
+
+        if (MacMappedCopyState.Ledger is { } ledger && !ledger.BeforeNativeEffect(address, size)) return 0;
 
         // Darwin has no MAP_FIXED_NOREPLACE, and mmap's address argument is only
         // a hint there. On Apple Silicon the hint is ignored outright: every
@@ -271,8 +308,13 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory
         {
             lock (HostViewRegions.Gate)
             {
+                failure = HostViewFailure.WrongHostAddress;
+                var ledger = MacMappedCopyState.Ledger;
+                var prepared = ledger?.PrepareView(backing, address, size, offset, protection);
+                if (ledger is not null && !ledger.BeforeNativeEffect(address, size)) return false;
                 if (!TryMapViewCore(backing, address, offset, size, protection, out failure)) return false;
                 HostViewRegions.Replace(address, size, HostMemory.MEM_COMMIT, HostViewRegions.RawProtection(protection));
+                ledger?.PublishView(prepared);
                 return true;
             }
         }
@@ -332,6 +374,7 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory
     {
         lock (HostViewRegions.Gate)
         {
+            if (MacMappedCopyState.Ledger is { } ledger && !ledger.BeforeNativeEffect(address, size)) return false;
             if (mprotect((nint)address, (nuint)size, GetNativeProtection(protection)) != 0) return false;
             HostViewRegions.Replace(address, size, HostMemory.MEM_COMMIT, HostViewRegions.RawProtection(protection));
             return true;
@@ -344,6 +387,7 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory
     {
         lock (HostViewRegions.Gate)
         {
+            if (MacMappedCopyState.Ledger is { } ledger && !ledger.BeforeNativeEffect(address, size)) return false;
             if (mprotect((nint)address, (nuint)size, GetNativeProtection(protection)) != 0) return false;
             HostViewRegions.ChangeProtection(address, size, HostViewRegions.RawProtection(protection));
             return true;
@@ -354,6 +398,7 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory
     {
         lock (HostViewRegions.Gate)
         {
+            if (MacMappedCopyState.Ledger is { } ledger && !ledger.BeforeNativeEffect(address, size)) return false;
             if (munmap((nint)address, (nuint)size) != 0) return false;
             HostViewRegions.Replace(address, size, HostMemory.MEM_FREE_STATE, HostMemory.PAGE_NOACCESS);
             return true;
@@ -364,6 +409,7 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory
     {
         lock (HostViewRegions.Gate)
         {
+            if (MacMappedCopyState.Ledger is { } ledger && !ledger.BeforeNativeEffect(address, size)) return false;
             var ptr = mmap((nint)address, (nuint)size, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
             if (ptr == MAP_FAILED || (ulong)ptr != address) return false;
             HostViewRegions.Replace(address, size, HostMemory.MEM_RESERVE, HostMemory.PAGE_NOACCESS);
@@ -388,9 +434,16 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory
         // Called once, after balanced ordinary accesses drain, outside provider
         // gates. This owns only alias+descriptor; existing guest mappings survive
         // close and need their own mapping/permission protocol.
-        if (munmap((nint)backing.AliasBase, (nuint)backing.NativeAliasSize) != 0)
+        var ledger = MacMappedCopyState.Ledger;
+        lock (HostViewRegions.Gate)
+            if (ledger is not null && !ledger.BeginBackingRelease(backing))
+                throw new InvalidOperationException("Backing release has no exact canonical alias owner; no native effect was attempted.");
+        var unmap = munmap((nint)backing.AliasBase, (nuint)backing.NativeAliasSize);
+        var unmapError = unmap == 0 ? 0 : Marshal.GetLastPInvokeError();
+        lock (HostViewRegions.Gate) ledger?.CompleteBackingAliasRelease(backing, unmap == 0);
+        if (unmap != 0)
         {
-            var error = Marshal.GetLastPInvokeError();
+            var error = unmapError;
             // Do not assume a failed unmap is wholly unchanged, and do not close
             // the descriptor while alias ownership remains uncertain.
             return new(HostBackingReleaseStatus.AliasOutcomeUnknown, error);

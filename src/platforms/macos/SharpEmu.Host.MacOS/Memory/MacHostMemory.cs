@@ -17,6 +17,8 @@ namespace SharpEmu.Host.MacOS;
 /// </summary>
 internal sealed unsafe partial class MacHostMemory : IHostMemoryRaw
 {
+    public MacHostMemory() => MacMappedCopyState.Initialize();
+
     private const uint MEM_COMMIT = 0x1000;
     private const uint MEM_RESERVE = 0x2000;
     private const uint MEM_RELEASE = 0x8000;
@@ -40,6 +42,9 @@ internal sealed unsafe partial class MacHostMemory : IHostMemoryRaw
 
     public nuint QueryRaw(ulong address, out HostMemory.BasicInfo info)
     {
+        lock (HostViewRegions.Gate)
+            if (MacMappedCopyState.Ledger?.IsInternalAliasAddress(address) == true)
+            { info = default; return 0; }
         if (HostViewRegions.TryQuery(address, out info)) return (nuint)sizeof(HostMemory.BasicInfo);
         return Darwin.Query((void*)address, out info);
     }
@@ -215,7 +220,12 @@ internal sealed unsafe partial class MacHostMemory : IHostMemoryRaw
             var alignedSize = AlignUp((ulong)size, PageSize);
 
             lock (Gate)
+            lock (HostViewRegions.Gate)
             {
+                var ledger = MacMappedCopyState.Ledger;
+                if ((allocationType & MEM_RESERVE) != 0 && ledger is not null && !ledger.CanMakeAnonymousPlacement()) return null;
+                if (address != null && (allocationType & MEM_RESERVE) != 0 &&
+                    ledger is not null && !ledger.BeforeNativeEffect((ulong)address, alignedSize)) return null;
                 // The dormant controlled adapter owns full native extents.
                 // Legacy desired-address/commit/fixed-fallback routes cannot bypass it.
                 if ((allocationType & MEM_RESERVE) != 0 && NewAnonymousPlacementExcludedLocked()) return null;
@@ -239,6 +249,7 @@ internal sealed unsafe partial class MacHostMemory : IHostMemoryRaw
                         return null;
                     }
 
+                    if (ledger is not null && !ledger.BeforeNativeEffect(start, end - start)) return null;
                     if (mprotect((nint)start, (nuint)(end - start), ToPosixProtect(protect)) != 0)
                     {
                         return null;
@@ -347,6 +358,7 @@ internal sealed unsafe partial class MacHostMemory : IHostMemoryRaw
             _ = freeType;
 
             lock (Gate)
+            lock (HostViewRegions.Gate)
             {
                 if (!Regions.TryGetValue((ulong)address, out var region))
                 {
@@ -354,6 +366,7 @@ internal sealed unsafe partial class MacHostMemory : IHostMemoryRaw
                 }
 
                 if (OverlapsOwnedEffectLocked(region.Base, region.Size)) return false;
+                if (MacMappedCopyState.Ledger is { } ledger && !ledger.BeforeNativeEffect(region.Base, region.Size)) return false;
                 var released = region.UsesMachAllocation
                     ? mach_vm_deallocate(mach_task_self(), (ulong)address, region.Size) == KERN_SUCCESS
                     : munmap((nint)address, (nuint)region.Size) == 0;
@@ -379,6 +392,7 @@ internal sealed unsafe partial class MacHostMemory : IHostMemoryRaw
             var end = AlignUp((ulong)address + size, PageSize);
 
             lock (Gate)
+            lock (HostViewRegions.Gate)
             {
                 if (end <= start || OverlapsOwnedEffectLocked(start, end - start)) return false;
                 if (!TryFindRegionLocked(start, out var region) || end > region.End)
@@ -386,6 +400,7 @@ internal sealed unsafe partial class MacHostMemory : IHostMemoryRaw
                     return false;
                 }
 
+                if (MacMappedCopyState.Ledger is { } ledger && !ledger.BeforeNativeEffect(start, end - start)) return false;
                 oldProtect = region.ProtectAt(start);
                 if (mprotect((nint)start, (nuint)(end - start), ToPosixProtect(newProtect)) != 0)
                 {

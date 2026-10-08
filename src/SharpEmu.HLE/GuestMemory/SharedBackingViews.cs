@@ -11,7 +11,7 @@ public readonly record struct ViewRecord(ulong Address, ulong Size, ulong Offset
     public bool WasRestored { get; init; }
 }
 
-public sealed unsafe class SharedBackingViews : IDisposable
+public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySource
 {
     internal static Action<string> OnFatal = message => Environment.FailFast(message);
 
@@ -49,6 +49,27 @@ public sealed unsafe class SharedBackingViews : IDisposable
     public ulong AliasBase => _backing?.AliasBase ?? 0;
 
     public ulong Size => _backing?.Size ?? 0;
+
+    public CpuMappedCopyResult TryReadMappedCopy(ulong footprintAddress, ulong footprintByteCount,
+        ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)
+    {
+        observation = null;
+        if (_host is not IHostMappedCopyMemory provider || _backing is null)
+            return CpuMappedCopyResult.Unavailable;
+        if (!TryEnterAliasAccess()) return CpuMappedCopyResult.Rejected;
+        try
+        {
+            var result = provider.TryReadMappedCopy(_backing, footprintAddress, footprintByteCount,
+                sourceAddress, destination, out observation);
+            if (!IsAvailable) { observation = null; return CpuMappedCopyResult.Rejected; }
+            return result;
+        }
+        finally { ExitAliasAccess(); }
+    }
+
+    public bool IsMappedCopyObservationCurrent(CpuMappedCopyObservation observation) =>
+        IsAvailable && _backing is not null && _host is IHostMappedCopyMemory provider &&
+        provider.IsMappedCopyObservationCurrent(_backing, observation);
 
     public bool Clear(ulong offset, ulong size)
     {

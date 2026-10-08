@@ -13,7 +13,7 @@ using SharpEmu.Logging;
 
 namespace SharpEmu.Core.Memory;
 
-public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryAllocator, IGuestAddressSpace, IGuestBackedSpace, IDisposable
+public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryAllocator, IGuestAddressSpace, IGuestBackedSpace, IDisposable, ICpuMappedCopySource
 {
     private static readonly SharpEmuLogger Log = SharpEmuLog.For("VMEM");
 
@@ -1147,6 +1147,25 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             _ => false,
         };
     }
+
+    public CpuMappedCopyResult TryReadMappedCopy(ulong footprintAddress, ulong footprintByteCount,
+        ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)
+    {
+        observation = null;
+        var space = _backedSpace;
+        if (Volatile.Read(ref _disposed) || space is not ICpuMappedCopySource source)
+            return CpuMappedCopyResult.Unavailable;
+        // The participating provider resolves its actual immutable mapping and
+        // copies only through the pinned alias. No lazy commit/protection repair
+        // and no PVM gate is held across the copy or any lifetime drain.
+        var result = source.TryReadMappedCopy(footprintAddress, footprintByteCount, sourceAddress, destination, out observation);
+        if (Volatile.Read(ref _disposed) || !ReferenceEquals(_backedSpace, space))
+        { observation = null; return CpuMappedCopyResult.Rejected; }
+        return result;
+    }
+    public bool IsMappedCopyObservationCurrent(CpuMappedCopyObservation observation) =>
+        !Volatile.Read(ref _disposed) && _backedSpace is ICpuMappedCopySource source &&
+        source.IsMappedCopyObservationCurrent(observation);
 
     public bool TryWriteBacking(ulong address, ReadOnlySpan<byte> data)
     {

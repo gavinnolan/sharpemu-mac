@@ -3,6 +3,7 @@
 #if SHARPEMU_HOST_MACOS
 using System.Collections;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.Versioning;
 using SharpEmu.HLE.Host;
 using SharpEmu.Host.MacOS;
@@ -21,6 +22,12 @@ public sealed class MacOwnedOperationContractTests
     private const BindingFlags StaticPrivate = BindingFlags.Static | BindingFlags.NonPublic;
     private const BindingFlags InstanceFields = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
     private static object? Call(string method, object?[] arguments) => Darwin.GetMethod(method, StaticPrivate)!.Invoke(null, arguments);
+
+    // These controls inspect only provider metadata/private scalar guards.
+    // Ordinary composition now measures kernel geometry; avoid invoking its
+    // constructor and do not label that native query as a pure managed row.
+    private static IHostMemoryRaw MetadataProvider() =>
+        (IHostMemoryRaw)RuntimeHelpers.GetUninitializedObject(Provider);
 
     [Theory]
     [InlineData(1, 4096UL, true, 4096UL)]
@@ -75,7 +82,7 @@ public sealed class MacOwnedOperationContractTests
             var nativePage = (ulong)Environment.SystemPageSize;
             var ownerType = Darwin.GetNestedType("OwnedAnonymousAllocation", BindingFlags.Public)!;
             var owner = Activator.CreateInstance(ownerType, BindingFlags.Instance | BindingFlags.NonPublic, null,
-                [MacOSHost.CreateMemory(), 1, nativePage, 2U, false], null)!;
+                [MetadataProvider(), 1, nativePage, 2U, false], null)!;
             var region = ownerType.GetField("_region", InstanceFields)!.GetValue(owner)!;
             region.GetType().GetField("Base")!.SetValue(region, 0x20000UL);
             list.Add(owner); count.SetValue(null, before + 1);
@@ -97,7 +104,7 @@ public sealed class MacOwnedOperationContractTests
     [Fact]
     public void NoncanonicalFactoryCannotAdoptMemoryOrEmitNativeReceiptAndTypesStayPrivate()
     {
-        var provider = MacOSHost.CreateMemory(); // constructor only, no safe-startup native probe
+        var provider = MetadataProvider(); // no constructor/composition/native geometry query
         var initialized = HostMemoryAuthority.IsInitialized;
         object?[] arguments = [3, true, 4U, null, null];
         Assert.Equal(false, Provider.GetMethod("TryCreateOwnedAnonymousControl", BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -119,7 +126,7 @@ public sealed class MacOwnedOperationContractTests
             var before = (int)count.GetValue(null)!;
             var pageSize = (ulong)Environment.SystemPageSize;
             var type = Darwin.GetNestedType("OwnedAnonymousAllocation", BindingFlags.Public)!;
-            var provider = MacOSHost.CreateMemory();
+            var provider = MetadataProvider();
             var owner = Activator.CreateInstance(type, BindingFlags.Instance | BindingFlags.NonPublic, null,
                 [provider, 2, pageSize, 2U, false], null)!;
             var region = type.GetField("_region", InstanceFields)!.GetValue(owner)!;

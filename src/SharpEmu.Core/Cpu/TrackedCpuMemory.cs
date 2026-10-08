@@ -5,7 +5,7 @@ using SharpEmu.HLE;
 
 namespace SharpEmu.Core.Cpu;
 
-public sealed class TrackedCpuMemory : ICpuMemory, ITrackedCpuMemory, IGuestMemoryAllocator, ICpuMemoryWrapper
+public sealed class TrackedCpuMemory : ICpuMemory, ITrackedCpuMemory, IGuestMemoryAllocator, ICpuMemoryWrapper, ICpuMappedCopySource
 {
     private readonly ICpuMemory _inner;
 
@@ -19,6 +19,17 @@ public sealed class TrackedCpuMemory : ICpuMemory, ITrackedCpuMemory, IGuestMemo
     public ICpuMemory Inner => _inner;
 
     public string DescribeReadRange(ulong address, ulong size) => _inner.DescribeReadRange(address, size);
+
+    public CpuMappedCopyResult TryReadMappedCopy(ulong footprintAddress, ulong footprintByteCount,
+        ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)
+    {
+        observation = null;
+        return _inner is ICpuMappedCopySource source
+            ? source.TryReadMappedCopy(footprintAddress, footprintByteCount, sourceAddress, destination, out observation)
+            : CpuMappedCopyResult.Unavailable;
+    }
+    public bool IsMappedCopyObservationCurrent(CpuMappedCopyObservation observation) =>
+        _inner is ICpuMappedCopySource source && source.IsMappedCopyObservationCurrent(observation);
 
     public bool TryRead(ulong virtualAddress, Span<byte> destination)
     {

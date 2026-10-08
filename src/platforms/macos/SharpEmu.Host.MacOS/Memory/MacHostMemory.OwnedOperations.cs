@@ -210,6 +210,7 @@ internal sealed unsafe partial class MacHostMemory
             public bool ExecuteOnce()
             {
                 lock (Gate)
+                lock (HostViewRegions.Gate)
                 {
                     if (!ExactPending() || _phase != OperationPhase.Ready || !(_oldDomain?.IsClosed ?? true) ||
                         (_oldDomain?.ActivePins ?? 0) != 0) return false;
@@ -227,6 +228,12 @@ internal sealed unsafe partial class MacHostMemory
                                     PageOutcome.AlreadyReleased, NativeErrorDomain.None, 0, 0);
                                 continue;
                             }
+                            // Exact provider participation precedes every native effect.
+                            // A guard decline is bookkeeping failure, never a fabricated
+                            // syscall result; the old view incarnation stays revoked.
+                            if (MacMappedCopyState.Ledger is { } ledger &&
+                                !ledger.BeforeNativeEffect(address, _allocation.NativePageSize))
+                                throw new InvalidOperationException("Owned effect overlaps a canonical backing alias.");
                             int nativeReturn, error; NativeErrorDomain errorDomain;
                             inFlightPage = page;
                             if (_kind == OperationKind.RestrictMaximum)
@@ -361,8 +368,10 @@ internal sealed unsafe partial class MacHostMemory
             if (!HostMemoryAuthority.IsInitialized || !ReferenceEquals(provider, HostMemoryAuthority.Current) ||
                 !OwnedGeometry(pages, pageSize, out var bytes) || !SupportedOwnedProtection(protection)) return false;
             lock (Gate)
+            lock (HostViewRegions.Gate)
             {
-                if (NewAnonymousPlacementExcludedLocked()) return false;
+                if (NewAnonymousPlacementExcludedLocked() ||
+                    MacMappedCopyState.Ledger is { } ledger && !ledger.CanMakeAnonymousPlacement()) return false;
                 var owner = new OwnedAnonymousAllocation(provider, pages, pageSize, protection, reserveOnly);
                 if (Regions.Count == int.MaxValue) return false;
                 if (Regions.Capacity < Regions.Count + 1) Regions.Capacity = Regions.Count + 1;

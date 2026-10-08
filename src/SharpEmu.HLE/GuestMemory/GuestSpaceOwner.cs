@@ -14,7 +14,7 @@ public enum RangeKind
 
 public readonly record struct OwnedRange(ulong Address, ulong Size, RangeKind Kind);
 
-public sealed class GuestSpaceOwner : IDisposable
+public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource
 {
     internal static Action<string> OnFatal = message => Environment.FailFast(message);
 
@@ -60,6 +60,18 @@ public sealed class GuestSpaceOwner : IDisposable
     public ulong AliasBase => _views.AliasBase;
 
     public ulong BackingSize => _views.Size;
+
+    public CpuMappedCopyResult TryReadMappedCopy(ulong footprintAddress, ulong footprintByteCount,
+        ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)
+    {
+        observation = null;
+        if (Volatile.Read(ref _disposed)) return CpuMappedCopyResult.Rejected;
+        var result = _views.TryReadMappedCopy(footprintAddress, footprintByteCount, sourceAddress, destination, out observation);
+        if (Volatile.Read(ref _disposed)) { observation = null; return CpuMappedCopyResult.Rejected; }
+        return result;
+    }
+    public bool IsMappedCopyObservationCurrent(CpuMappedCopyObservation observation) =>
+        !Volatile.Read(ref _disposed) && _views.IsMappedCopyObservationCurrent(observation);
 
     public bool TryClearBacking(ulong offset, ulong size) => _views.Clear(offset, size);
 
