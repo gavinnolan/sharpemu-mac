@@ -19,7 +19,7 @@ public sealed partial class MetalTextureMaterializationTests
             struct P { float4 color [[flat]]; };
             using Quad = mesh<V, P, 4, 2, topology::triangle>;
             [[mesh, max_total_threads_per_threadgroup(32)]]
-            void quad(Quad geometry, uint lane [[thread_index_in_threadgroup]]) {
+            void entry_mesh_quad(Quad geometry, uint lane [[thread_index_in_threadgroup]]) {
                 const float2 positions[4] = { float2(-1,-1), float2(1,-1), float2(-1,1), float2(1,1) };
                 const uint indices[6] = { 0,1,2,1,3,2 };
                 if (lane < 4) geometry.set_vertex(lane, V{float4(positions[lane], 0, 1)});
@@ -39,7 +39,7 @@ public sealed partial class MetalTextureMaterializationTests
             library = (nint)compiled[2]!;
             var native = Presenter.Assembly.GetType("SharpEmu.Gpu.Metal.MetalNative")!;
             nint String(string value) => (nint)native.GetMethod("NsString", Methods)!.Invoke(null, [value])!;
-            mesh = MeshSend(library, Selector("newFunctionWithName:"), String("quad"));
+            mesh = MeshSend(library, Selector("newFunctionWithName:"), String("entry_mesh_quad"));
             fragment = MeshSend(library, Selector("newFunctionWithName:"), String("color"));
             Assert.NotEqual(0, mesh); Assert.NotEqual(0, fragment);
             var transport = Presenter.Assembly.GetType("SharpEmu.Gpu.Metal.MetalMeshPipeline")!;
