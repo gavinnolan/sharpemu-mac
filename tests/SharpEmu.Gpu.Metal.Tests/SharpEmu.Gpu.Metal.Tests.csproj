@@ -29,5 +29,8 @@
   <ItemGroup>
     <Compile Include="../Fixtures/Bgra1024Array/Bgra1024Oracle.cs" Link="Fixtures/Bgra1024Oracle.cs" />
     <Compile Include="../Fixtures/R8FourKArray/R8FourKOracle.cs" Link="Fixtures/R8FourKOracle.cs" />
+    <Compile Include="../Fixtures/R16SelectedMip/R16SelectedMipOracle.cs" Link="Fixtures/R16SelectedMipOracle.cs" />
+    <EmbeddedResource Include="../Fixtures/R16SelectedMip/block-offsets.bin" LogicalName="R16SelectedMip.block-offsets.bin" />
+    <EmbeddedResource Include="../Fixtures/R16SelectedMip/block-origins.bin" LogicalName="R16SelectedMip.block-origins.bin" />
   </ItemGroup>
 </Project>

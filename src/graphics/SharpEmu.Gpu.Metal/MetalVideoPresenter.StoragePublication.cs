@@ -25,7 +25,16 @@ internal static partial class MetalVideoPresenter
                 _selectedStorageMipImages.Add(selected.Key, image);
                 nativeAdded = true;
                 _storageImageBeforeMetadataPublication?.Invoke(image.Texture);
+                if (MetalR16FloatSelectedMip.TryPlacement(selected.Key.Resource, selected.Key.Mip, out _))
+                {
+                    ValidateSelectedStorageMipOwner(selected);
+                    RejectConflictingSelectedStorageConstructionLocked(selected);
+                    if (!_selectedStorageMipImages.TryGetValue(selected.Key, out var current) || !ReferenceEquals(current, image))
+                        throw new InvalidOperationException("Metal R16Float publication lost its exact construction owner.");
+                }
                 ownerAdded = _selectedStorageMipOwners.TryAdd(selected.Key, selected);
+                if (MetalR16FloatSelectedMip.TryPlacement(selected.Key.Resource, selected.Key.Mip, out _))
+                    image.R16SelectedOwnsRetain = true;
             }
             else
             {
@@ -41,7 +50,9 @@ internal static partial class MetalVideoPresenter
             // admitted owner, or a preexisting extent record, remains intact.
             if (selected is not null)
             {
-                if (nativeAdded) _selectedStorageMipImages.Remove(selected.Key);
+                if (nativeAdded && (!MetalR16FloatSelectedMip.TryPlacement(selected.Key.Resource, selected.Key.Mip, out _) ||
+                    _selectedStorageMipImages.TryGetValue(selected.Key, out var current) && ReferenceEquals(current, image)))
+                    _selectedStorageMipImages.Remove(selected.Key);
                 if (ownerAdded) _selectedStorageMipOwners.Remove(selected.Key);
             }
             else if (nativeAdded)

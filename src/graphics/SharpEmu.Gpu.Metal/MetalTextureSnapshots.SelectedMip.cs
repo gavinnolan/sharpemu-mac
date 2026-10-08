@@ -17,6 +17,14 @@ internal static partial class MetalTextureSnapshots
     private static bool TryCreateSelectedStorageMip(CpuContext context, Binding binding, out GuestDrawTexture texture)
     {
         texture = default!;
+        // Mip0 of this captured resource is physically after the smaller mips,
+        // so it must not enter the generic base-address upload path either.
+        if (MetalR16FloatSelectedMip.IsCandidate(binding.Descriptor))
+        {
+            if (!binding.IsStorage)
+                throw new NotSupportedException("Metal R16Float selected storage cannot use a sampled or allocation-wide alias.");
+            return TryCreateR16FloatSelectedStorageMip(context, binding, out texture);
+        }
         if (!binding.IsStorage || binding.MipLevel == 0) return false;
         var d = binding.Descriptor;
         if (binding.ResourceDescriptor is not { Count: >= 8 } raw ||
@@ -69,6 +77,39 @@ internal static partial class MetalTextureSnapshots
             return true;
         }
         throw new InvalidOperationException("Metal selected storage mip changed during all three owned-copy attempts.");
+    }
+
+    private static bool TryCreateR16FloatSelectedStorageMip(CpuContext context, Binding binding, out GuestDrawTexture texture)
+    {
+        var d = binding.Descriptor;
+        if (binding.IsArrayed || binding.DynamicMip ||
+            !MetalR16FloatSelectedMip.TryQualified(d, binding.ResourceDescriptor, binding.MipLevel,
+                binding.Shape, binding.Access, out var selected))
+            throw new NotSupportedException("Metal R16Float selected storage requires the exact captured 2048x2048/mode27/11-mip write-only static view0..3.");
+        texture = SelectedMipTexture(binding, selected.Width, selected.Width, selected.End, []);
+        if (MetalVideoPresenter.TryAttachLiveSelectedStorageMip(context.Memory, d, texture)) return true;
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            var epoch = HostMemory.MappingGeneration;
+            var read = GuestImageWriteTracker.BeginReadSnapshot(d.Address, selected.End, source: "agc.r16-selected-storage-mip");
+            var observation = MetalVideoPresenter.ObserveCpuTextureSnapshot(d.Address, selected.End, epoch);
+            var hasToken = GuestImageWriteTracker.TryGetContentToken(d.Address, out var token);
+            var source = new byte[checked((int)selected.Bytes)];
+            if (!context.Memory.TryRead(d.Address + selected.Offset, source))
+                throw new InvalidOperationException($"Metal R16Float selected storage is unreadable: addr=0x{d.Address:X} mip={binding.MipLevel} offset={selected.Offset} bytes={selected.Bytes}.");
+            var pixels = new byte[source.Length];
+            if (!GnmTiling.TryDetile(source, pixels, 27, (int)selected.Width, (int)selected.Width, 2))
+                throw new NotSupportedException("Metal R16Float selected storage cannot reinterpret failed detiling as linear bytes.");
+            if (!GuestImageWriteTracker.IsReadSnapshotStable(read) ||
+                !MetalVideoPresenter.IsCpuTextureSnapshotAdmissionStable(d.Address, observation) ||
+                hasToken && (!GuestImageWriteTracker.TryGetContentToken(d.Address, out var after) || after != token)) continue;
+            texture = SelectedMipTexture(binding, selected.Width, selected.Width, selected.End, pixels) with
+                { WriteGeneration = read.Active ? read.Generation : -1 };
+            MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(texture, observation);
+            MetalVideoPresenter.RegisterSelectedStorageMip(context.Memory, d, texture, epoch, token, hasToken, observation);
+            return true;
+        }
+        throw new InvalidOperationException("Metal R16Float selected storage changed during all three owned-copy attempts.");
     }
     private static GuestDrawTexture SelectedMipTexture(Binding binding, uint width, uint height, ulong end, byte[] pixels)
     {

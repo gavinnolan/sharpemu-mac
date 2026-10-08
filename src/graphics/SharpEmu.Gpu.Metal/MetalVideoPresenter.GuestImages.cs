@@ -61,6 +61,9 @@ internal static partial class MetalVideoPresenter
         public uint ArrayLength = 1;
         public MtlPixelFormat Format;
         public bool Initialized;
+        // Only the finite R16 selected class transfers its construction retain
+        // after exact-owner/post-hook validation. Not a guest backing lease.
+        public bool R16SelectedOwnsRetain;
 
         /// <summary>True once GPU work (draw, blit, dispatch) or an explicit
         /// guest write produced this content; false while it only holds a

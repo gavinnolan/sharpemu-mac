@@ -280,9 +280,7 @@ internal static partial class MetalVideoPresenter
         _selectedStorageMipAssociations.TryGetValue(descriptor, out var selected);
         lock (_gate)
         {
-            if (selected is not null && (_guestImages.ContainsKey(descriptor.Address) ||
-                _selectedStorageMipImages.Keys.Any(key => key.Domain == selected.Key.Domain && key.Resource.Address == descriptor.Address && key != selected.Key)))
-                throw new NotSupportedException("Metal selected storage view conflicts with an address-only live image.");
+            if (selected is not null) RejectConflictingSelectedStorageConstructionLocked(selected);
             if (selected is not null ? _selectedStorageMipImages.TryGetValue(selected.Key, out var existing) :
                 _guestImages.TryGetValue(descriptor.Address, out existing))
             {
@@ -351,6 +349,7 @@ internal static partial class MetalVideoPresenter
             throw new InvalidOperationException($"Metal cannot allocate storage image 0x{descriptor.Address:X} with format {format}.");
 
         var installed = false;
+        Exception? r16ConstructionFailure = null;
         try
         {
             // CPU replace owns its source bytes synchronously; native binding
@@ -360,6 +359,7 @@ internal static partial class MetalVideoPresenter
             image.ContentVersion++;
             lock (_gate)
             {
+                if (selected is not null) RejectConflictingSelectedStorageConstructionLocked(selected);
                 if (selected is not null ? _selectedStorageMipImages.TryGetValue(selected.Key, out var raced) :
                     _guestImages.TryGetValue(descriptor.Address, out raced))
                 {
@@ -376,17 +376,30 @@ internal static partial class MetalVideoPresenter
             }
             return image;
         }
+        catch (Exception failure) { r16ConstructionFailure = failure; throw; }
         finally
         {
             // All construction, upload, raced lookup, and publication failures
             // flow through the same one-retain cleanup. A raced image is owned
             // by its registry; only this call's new texture is released here.
-            if (!installed) MetalNative.SendVoid(image.Texture, MetalNative.Selector("release"));
+            if (!installed)
+            {
+                if (selected is not null && MetalR16FloatSelectedMip.TryPlacement(selected.Key.Resource, selected.Key.Mip, out _))
+                {
+                    var owned = image.Texture; image.Texture = 0;
+                    ReleaseR16SelectedConstructionRetain(owned, r16ConstructionFailure);
+                }
+                else MetalNative.SendVoid(image.Texture, MetalNative.Selector("release"));
+            }
         }
     }
 
     private static void ValidateStorageImageView(GuestImage image, GuestDrawTexture descriptor, MetalTextureFormat format)
     {
+        if (_selectedStorageMipAssociations.TryGetValue(descriptor, out var selected) &&
+            MetalR16FloatSelectedMip.TryPlacement(selected.Key.Resource, selected.Key.Mip, out _) &&
+            (!image.R16SelectedOwnsRetain || image.Texture == 0))
+            throw new InvalidOperationException("Metal R16Float selected live image lacks its accepted native retain.");
         var shape = GuestTextureShape(descriptor);
         var observed = (image.Width, image.Height, image.Format, image.TextureType, image.Depth, image.ArrayLength);
         var requested = (descriptor.Width, descriptor.Height, format.Format, shape.TextureType, shape.Depth, shape.ArrayLength);
@@ -407,6 +420,9 @@ internal static partial class MetalVideoPresenter
         if (descriptor.Width == 0 || descriptor.Height == 0 || descriptor.Width > 16384 || descriptor.Height > 16384)
             throw new NotSupportedException($"Metal storage image 0x{descriptor.Address:X} has unsupported extent {descriptor.Width}x{descriptor.Height}.");
         var format = MetalGuestFormats.DecodeTextureFormat(descriptor.Format, descriptor.NumberType);
+        if (descriptor.Format == 2 && descriptor.NumberType == 7 && descriptor.ResourceMipLevels > 1 &&
+            !IsQualifiedSelectedStorageMip(descriptor))
+            throw new NotSupportedException("Metal R16Float mip-chain storage requires its exact qualified selected physical view, including mip0.");
         if (format.IsBlockCompressed)
             throw new NotSupportedException($"Metal block-compressed storage image format {descriptor.Format}/{descriptor.NumberType} is unsupported.");
         // The descriptor and compiled shader must agree on native dimension,
