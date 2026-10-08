@@ -19,6 +19,10 @@ names. No persisted argument-layout migration is introduced.
 Managed sources check uniqueness for every45 image kinds and unchanged numeric
 layout, then exercise actual extraction→runtime descriptor materialization→
 specialization→binding allocation→MSL for ordinary Float2D plus Dref2D. A separate
-required-device source compiles that generated fragment shader. Build and native
-execution remain pending. It does not establish scene rendering, depth compare
-numerical correctness or resolve the later strict live storage view mismatch.
+required-device source compiles that generated fragment shader. Exact frozen
+f73f7b6a passed this actual Metal parser case on ARM64 and Rosetta, along with
+four helper-collision cases, with no rebuild and required-device1. Full source,
+managed/native manifests and execution limits are in
+[the helper collision proof](msl-sample-helper-collision-20261008.md). It does
+not establish scene rendering, depth compare numerical correctness or repair
+the later strict live storage view mismatch.
