@@ -53,6 +53,17 @@ Keys deliberately absent:
 	<key>LSMinimumSystemVersion</key>
 	<string>@SHARPEMU_MIN_MACOS@</string>
 
+	<!-- Declare eligibility for macOS Game Mode. macOS controls activation
+	     for native full-screen windows and preserves the user's setting.
+	     The GC spelling serves older supported systems; LS is the current key.
+	     These declarations do not force a scheduling policy or certify FPS. -->
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.games</string>
+	<key>LSSupportsGameMode</key>
+	<true/>
+	<key>GCSupportsGameMode</key>
+	<true/>
+
 	<!-- The CPU backend executes guest x86-64 instructions natively, so the
 	     host process must itself be x86-64: on Apple silicon the bundle runs
 	     under Rosetta 2. The binary is x86_64-only, which makes this key

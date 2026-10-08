@@ -217,8 +217,13 @@ its log is preserved, and the corrected command passes12/12.
 The three integer descriptors have raw words
 `<address> 01400000 00000000 D1B00204 00000000 00700000 00000000 00000000`,
 with addresses8010700000/8030B20000/8011530000. They require R32Uint and Uint
-shader typing, not RGBA/Float reinterpretation. The next source candidate remains
-separate from game and native qualification.
+shader typing, not RGBA/Float reinterpretation. The exact qualifier is now
+integrated through `4f9e94ec`. Root Libs controls pass93/93 per CLR. The isolated
+frozen numerical proof passes4/4 required-device cases per CLR: native R32Uint,
+explicit singleton array bounds, asymmetric seed/store and logical X001 reads.
+See [R32Uint qualification](r32uint-singleton-array-20261008.md). These are device
+fixtures; the signed DF game binary predates this fix, so title progression is
+still pending a new signed bundle.
 
 Superliminal's next exact raw descriptor is
 `701529A0 C0100000 0000C000 A0500800 0000000F 00700000 00000000 00000000`:
@@ -264,3 +269,22 @@ runs after borrow/pool/gate release; default stays off. Actual surface restore,
 HUD and same-build on/off gameplay pacing are still required before promotion. Runtime patch upgrades,
 ReadyToRun, display-link integration, pipeline archives and deep SIMD/GC changes
 remain measured experiments rather than claimed gains.
+
+## Allocation instrumentation and Game Mode metadata
+
+Opt-in `SHARPEMU_PROFILE_ALLOCATIONS=1` is integrated in `f48e7b4e`; it measures
+managed allocation on the actual presenter drain thread and correlates with the
+existing wall trace without changing its schema. Fresh integrated Release
+processes execute54/54 controls per CLR with zero skips (enabled8, disabled1,
+legacy43, mixed2); decoder9/9 passes. The first root command selected an older
+Debug DLL and executed zero tests despite exit0. Its logs are retained separately
+and excluded; the corrected commands validate actual TRX execution counts.
+No game allocation result or allocation rewrite is established yet.
+
+The Mac bundle now declares `public.app-category.games`, `LSSupportsGameMode=true`
+and the older `GCSupportsGameMode=true` compatibility spelling. Apple documents
+[Game Mode eligibility](https://developer.apple.com/documentation/bundleresources/information-property-list/lssupportsgamemode)
+and [native full-screen activation](https://support.apple.com/en-euro/105118).
+The template passes `plutil -lint`. This metadata enables OS eligibility; it
+does not force Game Mode, override a user's setting, or demonstrate an FPS gain.
+Actual activation and same-scene comparison remain unqualified.
