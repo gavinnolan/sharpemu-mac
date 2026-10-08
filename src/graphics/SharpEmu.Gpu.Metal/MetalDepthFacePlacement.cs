@@ -89,21 +89,58 @@ internal static class MetalDepthFacePlacement
         // Mapping lifetime covers the complete original resource; content belongs
         // to the exact selected physical layer. Tracking a growing prefix at
         // the same base would replace earlier immutable protected owners.
-        _ = GuestImageWriteTracker.BeginReadSnapshot(address, FaceBytes, source: "metal.depth-face.original");
+        var read = GuestImageWriteTracker.BeginReadSnapshot(address, FaceBytes, source: "metal.depth-face.original");
         var epoch = HostMemory.MappingGeneration;
         var content = MetalVideoPresenter.ObserveCpuTextureSnapshot(address, FaceBytes, epoch);
         var probe = new byte[8];
-        if (source.TryReadMappedCopy(resolution.DepthAddress, resolution.DepthSize, address, probe, out var mapping) != CpuMappedCopyResult.Copied ||
-            mapping is null || mapping.FootprintAddress != resolution.DepthAddress || mapping.FootprintByteCount != resolution.DepthSize ||
-            mapping.SourceAddress != address || mapping.SourceByteCount != 8 || !content.Observed ||
-            originalSession != MetalVideoPresenter.CurrentNativeDepthFaceSession || !source.IsMappedCopyObservationCurrent(mapping) ||
-            !MetalVideoPresenter.IsCpuTextureSnapshotObservationStable(address, content))
-            throw new NotSupportedException("Metal native depth face original mapping/session/content changed before admission.");
+        var result = source.TryReadMappedCopy(resolution.DepthAddress, resolution.DepthSize, address, probe, out var mapping);
+        long? sessionNow = null, epochNow = null;
+        bool? mappingCurrent = null, tokenPresent = null;
+        GuestImageWriteTracker.ContentToken tokenNow = default;
+        string? reason = null;
+        // Preserve original short-circuit order and reuse each queried value.
+        // These labels diagnose the first veto; they cannot establish authority.
+        if (result != CpuMappedCopyResult.Copied) reason = "mapped-copy-result";
+        else if (mapping is null) reason = "missing-mapping";
+        else if (mapping.FootprintAddress != resolution.DepthAddress || mapping.FootprintByteCount != resolution.DepthSize ||
+            mapping.SourceAddress != address || mapping.SourceByteCount != 8) reason = "mapping-geometry";
+        else if (!content.Observed) reason = "original-content-unobserved";
+        else if ((sessionNow = MetalVideoPresenter.CurrentNativeDepthFaceSession) != originalSession) reason = "presenter-session";
+        else if (!(mappingCurrent = source.IsMappedCopyObservationCurrent(mapping)).Value) reason = "original-mapping-currentness";
+        else if ((epochNow = HostMemory.MappingGeneration) != content.MappingEpoch) reason = "global-mapping-epoch";
+        else if (!(tokenPresent = GuestImageWriteTracker.TryGetObservedContentToken(address, content.ByteCount, out tokenNow)).Value)
+            reason = "current-content-unobserved";
+        else if (tokenNow != content.Token) reason = "original-content-token";
+        if (reason is not null)
+            throw OriginalAdmissionFailure(reason, result, address, resolution.DepthAddress, resolution.DepthSize,
+                words, read, content, mapping, originalSession, sessionNow, mappingCurrent, epochNow, tokenPresent, tokenNow);
         var projected = target with { ReadAddress = address, WriteAddress = address };
         Targets.Add(projected, new(memory, source, mapping, content, originalSession, words,
             resolution.DepthAddress, resolution.DepthSize, address, words.SliceStart));
         Depths.Add(projected, new(memory, address, FaceBytes));
         return projected;
+    }
+
+    // Failure-only scalar formatting; no extra tracker/provider/native queries.
+    private static NotSupportedException OriginalAdmissionFailure(string reason, CpuMappedCopyResult result,
+        ulong address, ulong backingAddress, ulong backingBytes, DepthTargetWords words,
+        GuestImageWriteTracker.ReadSnapshot read, CpuTextureSnapshotObservation content,
+        CpuMappedCopyObservation? mapping, long session, long? sessionNow, bool? mappingCurrent,
+        long? epochNow, bool? tokenPresent, GuestImageWriteTracker.ContentToken tokenNow)
+    {
+        const string primary = "Metal native depth face original mapping/session/content changed before admission.";
+        try
+        {
+            return new NotSupportedException($"{primary} reason={reason} stage=project " +
+                $"selected_addr=0x{address:X} selected_bytes={FaceBytes} layer={words.SliceStart} " +
+                $"backing_addr=0x{backingAddress:X} backing_bytes={backingBytes} " +
+                $"mapped_result={result} mapping_present={mapping is not null} mapping_current={mappingCurrent} " +
+                $"session_before={session} session_now={sessionNow} mapping_before={content.MappingEpoch} mapping_now={epochNow} " +
+                $"snapshot_active={read.Active} snapshot_generation={read.Generation} observed_before={content.Observed} observed_now={tokenPresent} " +
+                $"token_before=[{content.Token}] token_now=[{tokenNow}] " +
+                $"zinfo=0x{words.ZInfo:X8} slice_max={words.SliceMax}");
+        }
+        catch (Exception) { return new NotSupportedException(primary); }
     }
 
     internal static void RequireOriginalCurrent(Observation original)
