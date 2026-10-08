@@ -325,3 +325,30 @@ Proactive R32Float exact arrays integrate through438cfd28 with111/111 managed
 and12/12 source/codegen controls per CLR plus4/4 actual native Float cases each.
 No actual game R32Float descriptor was captured here. R32Sint remains blocked by
 shared legacy numeric normalization; no global policy or fallback was introduced.
+
+
+## Signed d756 typed formats, sampler ownership and shader names
+
+The next clean signed bundle includes exact RGBA16Float full8-byte Half array seeds,
+R32Float, sampler descriptor/duplicate-state ownership, Metal-qualified sample
+modifiers and distinct sampled_compare argument fields. Compare binding IDs,
+offsets, native types and numeric behavior are unchanged. Strict storage view
+rejection now records both metadata tuples; it does not allow reinterpretation.
+Combined root Release qualification:116 Libs,71 genuine presenter and119 shader
+managed controls each CLR;28 actual native numerical cases and5 actual native
+fragment-parser cases each, zero skips. Frozen93-file source/DLL/TRX archive:
+`typed-shader-integrated-a790ff0d/manifest.json`. Build profiles keep test outputs
+separate from app publication. Prior first manifest script syntax typo is retained
+and excluded; corrected exact TRX counts passed.
+
+Signed d756a2b3 reruns advance all previous targeted blockers. SH25s/2004MiB
+and Octopath34s/3247MiB now reject R8Uint1x1 mode24 array descriptors, while
+Oregon29s/2013MiB rejects RGBA16Uint1x1 mode27. Superliminal42s/3440MiB no
+longer logs its MSL collision errors but stops at address706B7D0000: existing
+512x512 versus requested128x64, both native RGBA16Float115/type2/depth1/layer1.
+The title/loading hallway renders; no menu/gameplay/FPS acceptance. Every run
+exits134 before its150-second cap. Evidence, actual raw records, screenshots,
+inputs and payload provenance: `compat-d756a2b3-game-replays/{REPORT.md,manifest.json}`.
+Next work must qualify the two unsigned format families and diagnose alias/view
+lifetime without discarding live GPU-written contents. Ordinary backing change
+remains outside this bundle pending corrected race and native provider proof.
