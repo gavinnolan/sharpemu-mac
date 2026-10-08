@@ -396,10 +396,18 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
     {
         lock (HostViewRegions.Gate)
         {
-            if (MacMappedCopyState.Ledger is { } ledger && !ledger.BeforeNativeEffect(address, size)) return false;
-            if (mprotect((nint)address, (nuint)size, GetNativeProtection(protection)) != 0) return false;
-            HostViewRegions.ChangeProtection(address, size, HostViewRegions.RawProtection(protection));
-            return true;
+            var ledger = MacMappedCopyState.Ledger;
+            var prepared = ledger?.PrepareProtectionChange(address, size, protection);
+            if (ledger is not null && !ledger.BeginProtectionChange(prepared, address, size)) return false;
+            var complete = false;
+            try
+            {
+                if (mprotect((nint)address, (nuint)size, GetNativeProtection(protection)) != 0) return false;
+                HostViewRegions.ChangeProtection(address, size, HostViewRegions.RawProtection(protection));
+                complete = true;
+                return true;
+            }
+            finally { ledger?.CompleteProtectionChange(prepared, complete); }
         }
     }
 

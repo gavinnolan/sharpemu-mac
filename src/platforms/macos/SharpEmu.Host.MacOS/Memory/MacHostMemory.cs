@@ -400,15 +400,21 @@ internal sealed unsafe partial class MacHostMemory : IHostMemoryRaw
                     return false;
                 }
 
-                if (MacMappedCopyState.Ledger is { } ledger && !ledger.BeforeNativeEffect(start, end - start)) return false;
-                oldProtect = region.ProtectAt(start);
-                if (mprotect((nint)start, (nuint)(end - start), ToPosixProtect(newProtect)) != 0)
+                var ledger = MacMappedCopyState.Ledger;
+                var prepared = newProtect is PAGE_NOACCESS or PAGE_READONLY or PAGE_READWRITE or
+                    PAGE_EXECUTE or PAGE_EXECUTE_READ or PAGE_EXECUTE_READWRITE
+                    ? ledger?.PrepareProtectionChange(start, end - start, ToHostProtection(newProtect)) : null;
+                if (ledger is not null && !ledger.BeginProtectionChange(prepared, start, end - start)) return false;
+                var complete = false;
+                try
                 {
-                    return false;
+                    oldProtect = region.ProtectAt(start);
+                    if (mprotect((nint)start, (nuint)(end - start), ToPosixProtect(newProtect)) != 0) return false;
+                    SetProtectRangeLocked(region, start, end - start, newProtect);
+                    complete = true;
+                    return true;
                 }
-
-                SetProtectRangeLocked(region, start, end - start, newProtect);
-                return true;
+                finally { ledger?.CompleteProtectionChange(prepared, complete); }
             }
         }
 

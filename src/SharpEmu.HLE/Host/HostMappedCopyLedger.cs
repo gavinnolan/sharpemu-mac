@@ -121,6 +121,8 @@ public sealed unsafe partial class HostMappedCopyLedger
             HasOverlappingPublicationLocked(effect.Address, effect.Size)) return false;
         foreach (var alias in aliases.Values)
             if (Overlaps(effect, alias.Range)) return false;
+        if (protectionEffectSequence == long.MaxValue) { RevokeAll(); return false; }
+        protectionEffectSequence++;
         Revoke(effect);
         return true;
     }
