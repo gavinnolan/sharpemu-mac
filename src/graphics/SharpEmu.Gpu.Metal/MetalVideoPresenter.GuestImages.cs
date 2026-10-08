@@ -72,6 +72,8 @@ internal static partial class MetalVideoPresenter
         /// composite by sampling their render target otherwise force a
         /// full-texture blit on every draw.</summary>
         public int ContentVersion;
+        public ImageDiagnosticOrigin DiagnosticOrigin;
+        public ImageDiagnosticWork DiagnosticMutation;
 
         /// <summary>Cached feedback-read snapshot (one retain held here) and
         /// the content version it captured. Command buffers that sampled it
@@ -79,11 +81,14 @@ internal static partial class MetalVideoPresenter
         public nint SnapshotTexture;
         public int SnapshotVersion;
 
-        public void MarkContentChanged()
+        public void MarkContentChanged() => MarkContentChangedWithDiagnostic("unspecified");
+
+        public void MarkContentChangedWithDiagnostic(string diagnosticKind)
         {
             Initialized = true;
             GpuWritten = true;
             ContentVersion++;
+            if (_imageProvenanceEnabled) DiagnosticMutation = ImageDiagnosticContext(diagnosticKind);
         }
 
         public void ReleaseSnapshot()
@@ -867,6 +872,7 @@ internal static partial class MetalVideoPresenter
                 using var guestQueueScope = EnterGuestQueue(
                     pendingGuestWork.Queue.Name,
                     pendingGuestWork.Queue.SubmissionId);
+                BeginImageDiagnosticWork(pendingGuestWork.Sequence);
                 _enqueueAsImmediateQueueFollowup = true;
                 _immediateFollowupTail = null;
                 if (_textureSourceGraphEnabled) _executingTextureSourceWork = pendingGuestWork.Work;
@@ -939,6 +945,7 @@ internal static partial class MetalVideoPresenter
                     _enqueueAsImmediateQueueFollowup = false;
                     _immediateFollowupTail = null;
                     if (_textureSourceGraphEnabled) _executingTextureSourceWork = null;
+                    EndImageDiagnosticWork();
                     Volatile.Write(ref _executingGuestWorkSequence, 0);
                 }
 
@@ -1033,7 +1040,7 @@ internal static partial class MetalVideoPresenter
         // The pixel path swapped the texture out entirely; either way the
         // cached snapshot no longer reflects this image.
         image.ReleaseSnapshot();
-        image.MarkContentChanged();
+        image.MarkContentChangedWithDiagnostic(write.Pixels is null ? "guest-clear" : "guest-pixel-write");
     }
 
     private static void ExecuteOrderedGuestFlip(nint device, nint queue, OrderedGuestFlip flip)
@@ -1136,7 +1143,7 @@ internal static partial class MetalVideoPresenter
         Require2DGuestImage(source, "guest image blit source");
         Require2DGuestImage(destination, "guest image blit destination");
         CopyTexture(queue, source.Texture, destination.Texture);
-        destination.MarkContentChanged();
+        destination.MarkContentChangedWithDiagnostic("guest-blit");
     }
 
     private static bool _tracedFlipAlias;
@@ -1235,6 +1242,7 @@ internal static partial class MetalVideoPresenter
             Width = width,
             Height = height,
             Format = format,
+            DiagnosticOrigin = CaptureDisplayImageOrigin(address, width, height, pitchInPixel, formatTag),
         };
         if (image.Texture == 0)
         {

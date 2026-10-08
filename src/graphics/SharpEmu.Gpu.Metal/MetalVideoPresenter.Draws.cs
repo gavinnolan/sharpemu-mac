@@ -615,7 +615,7 @@ internal static partial class MetalVideoPresenter
         MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
         if (_textureSourceGraphEnabled)
         {
-            foreach (var image in publishedTargets) image!.MarkContentChanged();
+            foreach (var image in publishedTargets) image!.MarkContentChangedWithDiagnostic("color-draw");
             // Must precede ANY writeback flush, and run only after the real
             // render-pass clear/raster encoder has successfully ended.
             EncodeTextureSourceOutputCopies(device, commandBuffer);
@@ -636,7 +636,7 @@ internal static partial class MetalVideoPresenter
         {
             if (!_textureSourceGraphEnabled && publishedTargets[index] is { } published)
             {
-                published.MarkContentChanged();
+                published.MarkContentChangedWithDiagnostic("color-draw");
             }
         }
 
@@ -1367,6 +1367,7 @@ internal static partial class MetalVideoPresenter
             Width = target.Width,
             Height = target.Height,
             Format = format,
+            DiagnosticOrigin = CaptureColorImageOrigin(target),
         };
         if (image.Texture == 0)
         {

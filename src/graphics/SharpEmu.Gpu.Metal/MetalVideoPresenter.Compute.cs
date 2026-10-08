@@ -256,11 +256,11 @@ internal static partial class MetalVideoPresenter
                     if (_selectedStorageMipAssociations.TryGetValue(descriptor, out var selected))
                     {
                         if ((selectedChanged ??= new()).Add(selected.Key) &&
-                            _selectedStorageMipImages.TryGetValue(selected.Key, out var selectedImage)) selectedImage.MarkContentChanged();
+                            _selectedStorageMipImages.TryGetValue(selected.Key, out var selectedImage)) selectedImage.MarkContentChangedWithDiagnostic("storage-dispatch");
                         if (_selectedStorageMipPending.TryGetValue(selected.Key, out var pending) && pending.Sequence == _executingGuestWorkSequence)
                             _selectedStorageMipPending.Remove(selected.Key);
                     }
-                    else if (changed.Add(descriptor.Address) && _guestImages.TryGetValue(descriptor.Address, out var image)) image.MarkContentChanged();
+                    else if (changed.Add(descriptor.Address) && _guestImages.TryGetValue(descriptor.Address, out var image)) image.MarkContentChangedWithDiagnostic("storage-dispatch");
                 }
         }
     }
@@ -345,6 +345,7 @@ internal static partial class MetalVideoPresenter
             Depth = shape.Depth,
             ArrayLength = shape.ArrayLength,
             Format = format,
+            DiagnosticOrigin = CaptureStorageImageOrigin(descriptor),
         };
         if (image.Texture == 0)
             throw new InvalidOperationException($"Metal cannot allocate storage image 0x{descriptor.Address:X} with format {format}.");
@@ -390,13 +391,13 @@ internal static partial class MetalVideoPresenter
         var observed = (image.Width, image.Height, image.Format, image.TextureType, image.Depth, image.ArrayLength);
         var requested = (descriptor.Width, descriptor.Height, format.Format, shape.TextureType, shape.Depth, shape.ArrayLength);
         if (observed != requested)
-            throw new NotSupportedException($"Metal storage image view does not match live image at 0x{descriptor.Address:X}: " +
+            throw StorageImageMismatch($"Metal storage image view does not match live image at 0x{descriptor.Address:X}: " +
                 $"observed_width={observed.Width} observed_height={observed.Height} observed_format={(uint)observed.Format} " +
                 $"observed_type={observed.TextureType} observed_depth={observed.Depth} observed_layers={observed.ArrayLength} " +
                 $"requested_width={requested.Width} requested_height={requested.Height} requested_format={(uint)requested.Format} " +
                 $"requested_type={requested.TextureType} requested_depth={requested.Depth} requested_layers={requested.ArrayLength} " +
                 $"guest_format={descriptor.Format}/{descriptor.NumberType} guest_type={descriptor.Type} " +
-                $"base_mip={descriptor.BaseMipLevel} selected_mip={descriptor.MipLevel} numeric_class={descriptor.Shape.NumericClass}.");
+                $"base_mip={descriptor.BaseMipLevel} selected_mip={descriptor.MipLevel} numeric_class={descriptor.Shape.NumericClass}.", image, descriptor);
         if (!image.Initialized)
             throw new InvalidOperationException($"Metal storage image 0x{descriptor.Address:X} has no initialized contents.");
     }
