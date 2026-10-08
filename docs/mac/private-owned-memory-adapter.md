@@ -58,3 +58,28 @@ permission-error, partial-unmap and bookkeeping-failure controls require a
 separate bounded worker grant. Native ARM ordinary memory controls would not
 qualify ARM guest CPU execution. Callback, alias, view and tracker participation
 remain prerequisites before any recovery acceptance change.
+
+## Source-only native worker qualification plan
+
+`MacOwnedNativeOperationTests` is a separately selected, explicit opt-in suite
+(`SHARPEMU_TEST_REQUIRE_OWNED_NATIVE=1`). Each case starts a fresh process with
+three full native pages and a 45-second harness deadline. The worker does not
+install signal handlers, execute guest code or initialize the shared registry.
+It exercises real provider-owned allocation, reserve/commit, RO/RW transitions,
+canonical raw/neutral/legacy exclusions, held-pin close/drain timeout, and
+per-page release. Mach maximum-protection reduction goes through the same
+owned close/drain operation before producing real first/middle/last mprotect
+failures. Kernel protection readback is separate from logical provider query.
+
+Partial release cleanup invokes only positively retained surviving pages; it
+never calls full-extent unmap over a released hole. The reflection-only
+bookkeeping failure control fires after a recorded real syscall result and
+checks quarantine, without forging native receipts. These cases do not force
+an mmap allocation failure, native munmap failure, setup rollback failure or
+unknown native-call outcome. They cannot establish alias/view participation,
+trap ordering, write-permission authorization or callback recovery safety.
+
+The initial fixture checkpoint is build-only. Native outcomes remain
+unqualified until the frozen source is reviewed and separately executed on
+the 4KiB Rosetta and 16KiB native ARM CLRs. The dormant factory and production
+retry/fault acceptance remain unchanged.
