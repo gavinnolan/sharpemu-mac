@@ -145,7 +145,14 @@ do not establish a whole-game FPS or loading improvement.
 The [4K R8 array](validation/r8-fourk-array-20261008.md) is also integrated after
 full independent layout and actual native typed store/load checks on both CLRs.
 Its separate signed game replay passes that rejection in Silent Hill and
-Octopath, then reaches unsupported selected mips of a2048² R16Float resource.
+Octopath. The [R16 selected-mip increment](validation/r16-selected-main-20261008.md)
+is now integrated too: combined376 library/117 managed Metal/55 actual native
+Metal checks pass on each CLR architecture. Fresh signed3ae game replays clear
+the R16 format rejection, then encounter a global mapping-epoch veto in Silent
+Hill and unsupported typed-array CPU synchronization in Octopath. Neither reaches
+gameplay. The [Poppy instruction probe](validation/poppy-rosetta-store-probe-20261008.md)
+reproduces concurrent Disarmed-decline failures with both streaming and ordinary
+stores; it does not activate an unconditional recovery workaround.
 Bounded indexed vertex-prefix reduction is now imported locally after genuine
 managed/native qualification and a [Sarah runtime comparison](validation/vertex-prefix-abba-20261008.md).
 Actual producer payload fell99.988%; observed commit cadence increased, with
@@ -156,7 +163,8 @@ unqualified source graph and owned-frame idle policy remain disabled by default.
 Signed apps are source-specific artifacts. `artifacts/macos/compat-2adf328d`
 contains the all-nine replay source; the isolatedR8 app is in
 `.claude/worktrees/root-metal-r8-4k/artifacts/macos/r8-4k-qualified`. The default
-`artifacts/macos/SharpEmu.app` is an older snapshot. Check embedded build-info
+`artifacts/macos/SharpEmu.app` is an older snapshot. The newer combined R16/vertex
+app is in `artifacts/macos/compat-r16-3ae88a16`. Check embedded build-info
 and actual payload hashes. ARM64 CLR checks qualify host code, not ARM guest
 execution. Fetched upstreamb02c061 remains integrated locally. No remote push,
 PR or remote merge was performed.

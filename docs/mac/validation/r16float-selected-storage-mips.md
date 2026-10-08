@@ -1,5 +1,10 @@
 # Finite R16Float selected storage mips
 
+Latest: integrated clean main3ae88a16 passes the combined managed/native checks
+on both CLR architectures and has separate signed Silent Hill/Octopath replays.
+See [current qualification and blockers](r16-selected-main-20261008.md). The
+prepared/pending statements below describe preserved earlier source checkpoints.
+
 This increment admits the captured SH/Octo 2048×2048 R16Float resource only as four independent static, write-only selected storage views. It preserves the original guest base and eight-word descriptor; mip 0 is physically after the smaller mips and must use the selected physical upload path too. Mips 4..10, sampled views, allocation-wide aliases, dynamic selection, and other raw descriptor classes remain unsupported.
 
 The exact admitted raw words are `[address>>8, C0D00000 | address>>40, 01FFC1FF, 91B00204 | mip<<12 | mip<<16, 0, 007000A0, 0, 0]`, for a nonzero 64 KiB-aligned base without chain-end overflow. Decoded requirements additionally pin type 9, mode 27, pitch 2048, depth 1, backing 11, X001 destination selection, single selected view, zero metadata/flags/LOD/BC swizzle, Float storage shape and exactly Write access. The native view is R16Float, 2D, one native mip.
