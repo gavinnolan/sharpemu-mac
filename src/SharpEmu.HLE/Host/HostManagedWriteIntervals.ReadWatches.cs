@@ -10,20 +10,35 @@ internal sealed partial class HostManagedWriteIntervals
     {
         internal readonly PhysicalRun[] Runs = runs;
         internal int Slot = -1, Revoked, Released;
-        internal void TraceDecline(string reason, long originalRevision)
+        internal void TraceDecline(string reason, long originalRevision, long primaryAdmission = -1,
+            ulong originalSourceAddress = 0, ulong originalSourceBytes = 0)
         {
             try
             {
-                HostPublicationDiagnostics.Declined("read-watch", reason +
-                    $";secondaryReleased={Volatile.Read(ref Released)};secondaryRevoked={Volatile.Read(ref Revoked)}",
+                HostPublicationDiagnostics.Declined(primaryAdmission >= 0 && (primaryAdmission & PublicationBit) != 0
+                    ? "read-watch-held-publication" : "read-watch", reason,
                     originalRevision, Volatile.Read(ref owner.nextIdentity),
-                    Volatile.Read(ref owner.admission), Volatile.Read(ref owner.coverageIncomplete));
+                    Volatile.Read(ref owner.admission), Volatile.Read(ref owner.coverageIncomplete),
+                    Volatile.Read(ref Released), Volatile.Read(ref Revoked), primaryAdmission,
+                    originalSourceAddress, originalSourceBytes);
             }
             catch (Exception) { } // Even formatting must preserve the refusal.
         }
-        internal bool IsCurrent => Volatile.Read(ref Released) == 0 && Volatile.Read(ref Revoked) == 0 &&
-            Volatile.Read(ref owner.coverageIncomplete) == 0 && Volatile.Read(ref owner.admission) == 0 &&
-            Volatile.Read(ref Revoked) == 0 && Volatile.Read(ref Released) == 0;
+        internal bool IsCurrent => TryIsCurrent(out _, out _);
+        internal bool TryIsCurrent(out string reason, out long primaryAdmission)
+        {
+            // Exactly the original reads, short-circuit order and final checks.
+            // The primary admission is the actual guard value, never a later sample.
+            primaryAdmission = -1;
+            reason = "released"; if (Volatile.Read(ref Released) != 0) return false;
+            reason = "revoked"; if (Volatile.Read(ref Revoked) != 0) return false;
+            reason = "coverage-incomplete"; if (Volatile.Read(ref owner.coverageIncomplete) != 0) return false;
+            primaryAdmission = Volatile.Read(ref owner.admission);
+            reason = "admission-nonzero"; if (primaryAdmission != 0) return false;
+            reason = "revoked-final"; if (Volatile.Read(ref Revoked) != 0) return false;
+            reason = "released-final"; if (Volatile.Read(ref Released) != 0) return false;
+            reason = "current"; return true;
+        }
         // Only the exact prepared provider ticket may use this scalar predicate.
         // Ordinary reads and new-watch admission still require admission == 0.
         internal bool IsUnrevokedDuringPublication(HostManagedWriteIntervals expected) =>

@@ -28,16 +28,18 @@ public sealed unsafe partial class HostMappedCopyLedger
         if (!IsCurrent(backing, observation)) return ReadWatchDeclined("mapping-not-current", observation);
         if (observation.OwnerIdentity is not Capture capture) return ReadWatchDeclined("capture-missing", observation);
         if (capture.ReadWatch is not { } watch) return ReadWatchDeclined("watch-missing", observation);
-        if (!watch.IsCurrent) return ReadWatchDeclined("watch-not-current", observation);
+        if (!watch.TryIsCurrent(out var reason, out var primaryAdmission))
+            return ReadWatchDeclined(reason, observation, primaryAdmission);
         return true;
     }
 
-    private static bool ReadWatchDeclined(string reason, CpuMappedCopyObservation observation)
+    private static bool ReadWatchDeclined(string reason, CpuMappedCopyObservation observation, long primaryAdmission = -1)
     {
         if (HostPublicationDiagnostics.Enabled)
         {
             var capture = observation?.OwnerIdentity as Capture;
-            capture?.ReadWatch?.TraceDecline(reason, capture.WriterRevision);
+            capture?.ReadWatch?.TraceDecline(reason, capture.WriterRevision, primaryAdmission,
+                observation.SourceAddress, observation.SourceByteCount);
             if (capture?.ReadWatch is null)
                 HostPublicationDiagnostics.Declined("read-watch", reason, capture?.WriterRevision ?? -1, -1, -1, -1);
         }
