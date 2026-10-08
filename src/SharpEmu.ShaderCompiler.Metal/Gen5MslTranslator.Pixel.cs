@@ -461,11 +461,11 @@ public static partial class Gen5MslTranslator
             var samplerArguments = !imageClass.SupportsSampleLod
                 ? string.Empty
                 : hasGradients
-                    ? $", {gradientType}({gradientX}, {gradientY})"
+                    ? $", metal::{gradientType}({gradientX}, {gradientY})"
                     : explicitLod
-                        ? $", level({lod})"
+                        ? $", metal::level({lod})"
                         : hasBias
-                            ? $", bias({bias})"
+                            ? $", metal::bias({bias})"
                             : string.Empty;
             sampled = Temp(
                 $"vec<{kind}, 4>",
@@ -603,10 +603,10 @@ public static partial class Gen5MslTranslator
 
             var first = Temp(
                 $"vec<{kind}, 4>",
-                $"{texture}.sample({samplerName}, float2(({left} + 0.5f) / {width}, 0.5f), level(0.0f))");
+                $"{texture}.sample({samplerName}, float2(({left} + 0.5f) / {width}, 0.5f), metal::level(0.0f))");
             var second = Temp(
                 $"vec<{kind}, 4>",
-                $"{texture}.sample({samplerName}, float2(({left} + 1.5f) / {width}, 0.5f), level(0.0f))");
+                $"{texture}.sample({samplerName}, float2(({left} + 1.5f) / {width}, 0.5f), metal::level(0.0f))");
             return Temp(
                 $"vec<{kind}, 4>",
                 $"{VectorLiteral(kind)}({first}[{component}], {second}[{component}], " +
