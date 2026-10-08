@@ -13,7 +13,9 @@ internal static class HostPublicationDiagnostics
     internal static void Declined(string route, string reason, long originalRevision,
         long sampledRevision, long sampledAdmission, int sampledCoverage)
     {
-        if (!Enabled || Interlocked.Increment(ref count) > 64) return;
+        if (!Enabled) return;
+        var previous = Volatile.Read(ref count);
+        if (previous >= 64 || Interlocked.CompareExchange(ref count, previous + 1, previous) != previous) return;
         try
         {
             Console.Error.WriteLine($"[publication-decline] route={route} reason={reason} " +
