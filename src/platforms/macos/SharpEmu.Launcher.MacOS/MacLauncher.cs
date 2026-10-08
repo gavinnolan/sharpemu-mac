@@ -48,6 +48,11 @@ public sealed partial class MacLauncher : IDisposable
         strings.Load(settings.Language);
         watcher.RefreshRequested += (_, _) => Post(Refresh);
         child.Output += (session, line, error) => pending.PostOutput(session, line);
+        child.CleanupFailed += (session, message) => Post(() => DispatchChildCleanupFailure(session, () =>
+        {
+            Append($"Owned emulator cleanup: {message}");
+            SetStatus("Cleanup failed; owned emulator retained. Retry Stop before launching or quitting.");
+        }));
         child.Exited += (session, code) => Post(() => DispatchChildNotification(session, () => { Append($"Emulator exited ({code})."); fileLog?.Dispose(); fileLog = null; SetStatus(strings.Get("Launch.Launch"));
             if (closeAfterChildExit) { closeAfterChildExit = false; RequestQuit(); }
         }));
@@ -59,6 +64,11 @@ public sealed partial class MacLauncher : IDisposable
     {
         if (!closed && session == activeChildSession) action();
     }
+    private void DispatchChildCleanupFailure(long session, Action diagnostic) => DispatchChildNotification(session, () =>
+    {
+        closeAfterChildExit = false; // a failed owned stop cannot silently hold Quit pending
+        diagnostic();
+    });
     private sealed class QuitSequence
     {
         private bool requested;

@@ -247,6 +247,106 @@ public sealed class LauncherOwnershipTests
     }
 
     [Fact]
+    public void CleanupDiagnosticCancelsOnlyItsOwnPendingQuit()
+    {
+        var frontend = System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(MacLauncher));
+        var type = typeof(MacLauncher); var flags = BindingFlags.NonPublic | BindingFlags.Instance;
+        type.GetField("activeChildSession",flags)!.SetValue(frontend,2L);
+        var pending = type.GetField("closeAfterChildExit",flags)!; pending.SetValue(frontend,true);
+        var messages = new List<string>(); var report = type.GetMethod("DispatchChildCleanupFailure",flags)!;
+        report.Invoke(frontend,[1L,(Action)(() => messages.Add("stale"))]); Assert.True((bool)pending.GetValue(frontend)!); Assert.Empty(messages);
+        report.Invoke(frontend,[2L,(Action)(() => messages.Add("visible failure"))]); Assert.False((bool)pending.GetValue(frontend)!); Assert.Equal(new[] {"visible failure"},messages);
+    }
+
+    [Fact]
+    public async Task FailedTermAndKillKeepSessionOwnedAndExplicitRetryCompletes()
+    {
+        if (!OperatingSystem.IsMacOS()) return;
+        var type = typeof(MacLauncher).Assembly.GetType("SharpEmu.Launcher.MacOS.OwnedEmulatorProcess")!;
+        using var owner = (IDisposable)Activator.CreateInstance(type,BindingFlags.Instance|BindingFlags.NonPublic,null,[TimeSpan.FromMilliseconds(250)],null)!;
+        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var failure = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var exited = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        type.GetEvent("Output")!.AddEventHandler(owner,(Action<long,string,bool>)((_,line,_) => { if (line == "READY") ready.TrySetResult(); }));
+        type.GetEvent("CleanupFailed")!.AddEventHandler(owner,(Action<long,string>)((_,message) => { if (message.Contains("deadline expired")) failure.TrySetResult(message); }));
+        type.GetEvent("Exited")!.AddEventHandler(owner,(Action<long,int>)((_,code) => exited.TrySetResult(code)));
+        var env = new ReadOnlyDictionary<string,string>(new Dictionary<string,string>());
+        var plan = new LauncherLaunchPlan(Array.AsReadOnly(new[] {"-c","trap '' TERM; printf 'READY\n'; sleep 30"}),env);
+        type.GetMethod("Start")!.Invoke(owner,["/bin/sh",plan]); await ready.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var run = type.GetField("current",BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(owner)!;
+        var seam = type.GetField("signalFailureForTesting",BindingFlags.Instance|BindingFlags.NonPublic)!;
+        seam.SetValue(owner,(Func<int,int,int>)((_,signal) => signal is 15 or 9 ? 1 : 0));
+        try
+        {
+            type.GetMethod("Stop")!.Invoke(owner,null);
+            Assert.Contains("owned session retained",await failure.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.False(exited.Task.IsCompleted); Assert.True((bool)type.GetProperty("IsRunning")!.GetValue(owner)!);
+            await ((Task)run.GetType().GetField("Cleanup")!.GetValue(run)!).WaitAsync(TimeSpan.FromSeconds(2)); // failure is handled, not an unobserved task fault
+            Assert.IsType<InvalidOperationException>(Assert.Throws<TargetInvocationException>(() => type.GetMethod("Start")!.Invoke(owner,["/bin/sh",plan])).InnerException);
+        }
+        finally { seam.SetValue(owner,null); type.GetMethod("Stop")!.Invoke(owner,null); }
+        Assert.Equal(-2,await exited.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+        await ((Task)run.GetType().GetField("Observation")!.GetValue(run)!).WaitAsync(TimeSpan.FromSeconds(2));
+        await ((Task)run.GetType().GetField("Cleanup")!.GetValue(run)!).WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.False((bool)type.GetProperty("IsRunning")!.GetValue(owner)!);
+    }
+    [Fact]
+    public async Task FailureObserverCanRetryBeforeTheFailedCleanupTaskReturns()
+    {
+        if (!OperatingSystem.IsMacOS()) return;
+        var type = typeof(MacLauncher).Assembly.GetType("SharpEmu.Launcher.MacOS.OwnedEmulatorProcess")!;
+        using var owner = (IDisposable)Activator.CreateInstance(type,BindingFlags.Instance|BindingFlags.NonPublic,null,[TimeSpan.FromMilliseconds(250)],null)!;
+        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var exited = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var seam = type.GetField("signalFailureForTesting",BindingFlags.Instance|BindingFlags.NonPublic)!;
+        var retryCount = 0;
+        type.GetEvent("Output")!.AddEventHandler(owner,(Action<long,string,bool>)((_,line,_) => { if (line == "READY") ready.TrySetResult(); }));
+        type.GetEvent("Exited")!.AddEventHandler(owner,(Action<long,int>)((_,code) => exited.TrySetResult(code)));
+        type.GetEvent("CleanupFailed")!.AddEventHandler(owner,(Action<long,string>)((_,message) =>
+        {
+            if (!message.Contains("deadline expired") || Interlocked.Increment(ref retryCount) != 1) return;
+            seam.SetValue(owner,null);
+            type.GetMethod("Stop")!.Invoke(owner,null); // synchronous, inside first task's notification
+        }));
+        var plan = new LauncherLaunchPlan(Array.AsReadOnly(new[] {"-c","trap '' TERM; printf 'READY\n'; sleep 30"}),new ReadOnlyDictionary<string,string>(new Dictionary<string,string>()));
+        type.GetMethod("Start")!.Invoke(owner,["/bin/sh",plan]); await ready.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        seam.SetValue(owner,(Func<int,int,int>)((_,signal) => signal is 15 or 9 ? 1 : 0));
+        try { type.GetMethod("Stop")!.Invoke(owner,null); Assert.Equal(-2,await exited.Task.WaitAsync(TimeSpan.FromSeconds(5))); Assert.Equal(1,retryCount); }
+        finally { seam.SetValue(owner,null); type.GetMethod("Stop")!.Invoke(owner,null); }
+    }
+
+    [Fact]
+    public async Task ActualPumpReaderFailureIsVisibleAndNaturalRootCodeIsPreserved()
+    {
+        if (!OperatingSystem.IsMacOS()) return;
+        var type = typeof(MacLauncher).Assembly.GetType("SharpEmu.Launcher.MacOS.OwnedEmulatorProcess")!;
+        using var owner = (IDisposable)Activator.CreateInstance(type,BindingFlags.Instance|BindingFlags.NonPublic,null,[TimeSpan.FromMilliseconds(250)],null)!;
+        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var failure = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var exited = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var errors = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        type.GetEvent("Output")!.AddEventHandler(owner,(Action<long,string,bool>)((_,line,_) => { if (line == "READY") ready.TrySetResult(); }));
+        type.GetEvent("CleanupFailed")!.AddEventHandler(owner,(Action<long,string>)((_,message) => { errors.Enqueue(message); if (message.Contains("reader failed")) failure.TrySetResult(message); }));
+        type.GetEvent("Exited")!.AddEventHandler(owner,(Action<long,int>)((_,code) => exited.TrySetResult(code)));
+        var signalSeam = type.GetField("signalFailureForTesting",BindingFlags.Instance|BindingFlags.NonPublic)!;
+        // Leave the real root time to exit 7 independently of the failed reader.
+        signalSeam.SetValue(owner,(Func<int,int,int>)((_,signal) => signal == 15 ? 1 : 0));
+        var readSeam = type.GetField("readerFailureForTesting",BindingFlags.Instance|BindingFlags.NonPublic)!;
+        var plan = new LauncherLaunchPlan(Array.AsReadOnly(new[] {"-c","trap '' TERM; sleep 30 & printf 'READY\n'; sleep 0.4; printf 'TICK\n'; exit 7"}),new ReadOnlyDictionary<string,string>(new Dictionary<string,string>()));
+        type.GetMethod("Start")!.Invoke(owner,["/bin/sh",plan]); await ready.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var injected = 0;
+        readSeam.SetValue(owner,(Action<bool>)(error => { if (!error && Interlocked.Exchange(ref injected,1) == 0) throw new IOException("controlled reader failure"); }));
+        try
+        {
+            Assert.Contains("controlled reader failure",await failure.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Equal(7,await exited.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.False((bool)type.GetProperty("IsRunning")!.GetValue(owner)!);
+            var runErrors = errors.ToArray(); Assert.Contains(runErrors,message => message.Contains("signal 15 failed"));
+        }
+        finally { readSeam.SetValue(owner,null); signalSeam.SetValue(owner,null); type.GetMethod("Stop")!.Invoke(owner,null); }
+    }
+
+    [Fact]
     public async Task QueuedNotificationsFromExitedSessionCannotMutateANewerLaunch()
     {
         if (!OperatingSystem.IsMacOS()) return;
