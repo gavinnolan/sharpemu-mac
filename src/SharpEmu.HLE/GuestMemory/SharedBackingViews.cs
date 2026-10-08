@@ -118,6 +118,13 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
     public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation observation) =>
         IsAvailable && _backing is not null && _host is IHostMappedReadWatchMemory provider &&
         provider.IsMappedCopyWriteWatchCurrent(_backing, observation);
+    public CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(CpuMappedCopyObservation observation)
+    {
+        if (!IsAvailable || _backing is not { } backing || _host is not IHostMappedReadWatchMemory provider)
+            return CpuMappedReadWatchStatus.Stale;
+        var status = provider.GetMappedCopyWriteWatchStatus(backing, observation);
+        return IsAvailable && ReferenceEquals(_backing, backing) ? status : CpuMappedReadWatchStatus.Stale;
+    }
     public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation observation)
     { if (_host is IHostMappedReadWatchMemory provider) provider.ReleaseMappedCopyWriteWatch(observation); }
 

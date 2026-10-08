@@ -1195,6 +1195,13 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     }
     public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation observation) =>
         !Volatile.Read(ref _disposed) && _backedSpace is ICpuMappedReadWatchSource source && source.IsMappedCopyWriteWatchCurrent(observation);
+    public CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(CpuMappedCopyObservation observation)
+    {
+        var space = _backedSpace;
+        if (Volatile.Read(ref _disposed) || space is not ICpuMappedReadWatchSource source) return CpuMappedReadWatchStatus.Stale;
+        var status = source.GetMappedCopyWriteWatchStatus(observation);
+        return !Volatile.Read(ref _disposed) && ReferenceEquals(_backedSpace, space) ? status : CpuMappedReadWatchStatus.Stale;
+    }
     public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation observation)
     { if (_backedSpace is ICpuMappedReadWatchSource source) source.ReleaseMappedCopyWriteWatch(observation); }
 

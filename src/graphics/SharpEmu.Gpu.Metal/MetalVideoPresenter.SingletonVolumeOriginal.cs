@@ -225,6 +225,18 @@ internal static partial class MetalVideoPresenter
         image.Width == origin.Layout.Width && image.Height == origin.Layout.Height && image.Format == origin.Layout.NativeFormat.Format &&
         origin.Session == CurrentStorageCpuSeedSession;
 
+    // Metadata-only refusal classification. This never grants a native owner
+    // Currentness; caller must keep the complete drain/frame deferred on Busy.
+    private static bool IsSingletonVolumeNativeOwnerMetadataCurrentLocked(GuestImage image, StorageCpuSeedOrigin origin) =>
+        !_closed && _guestWorkFailure is null && _singletonVolumeOriginalCleanupFailure is null &&
+        ReferenceEquals(_guestMemory, origin.Memory) && origin.Session == CurrentStorageCpuSeedSession &&
+        origin.VolumeWatch is { } watch && Volatile.Read(ref watch.State) == 1 && !Volatile.Read(ref watch.UnknownProducer) &&
+        ReferenceEquals(watch.Image, image) && ReferenceEquals(image.StorageCpuOrigin, origin) &&
+        image.Initialized && ReferenceEquals(image.StorageCpuLayout, origin.Layout) &&
+        image.Texture != 0 && image.Texture == watch.Texture && image.ContentVersion == watch.Version &&
+        image.TextureType == MtlTextureType3D && image.Depth == origin.Layout.Depth && image.ArrayLength == 1 &&
+        image.Width == origin.Layout.Width && image.Height == origin.Layout.Height && image.Format == origin.Layout.NativeFormat.Format;
+
     private static void TransferSingletonVolumeOriginalWatchLocked(GuestImage image, StorageCpuSeedOrigin origin)
     {
         if (origin.VolumeWatch is not { } watch) return;

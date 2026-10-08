@@ -53,6 +53,8 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
     }
     public bool IsMappedCopyWriteWatchCurrent(HostBackingObject backing, CpuMappedCopyObservation observation) =>
         MacMappedCopyState.Ledger?.IsMappedCopyWriteWatchCurrent(backing, observation) == true;
+    public CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(HostBackingObject backing, CpuMappedCopyObservation observation) =>
+        MacMappedCopyState.Ledger?.GetMappedCopyWriteWatchStatus(backing, observation) ?? CpuMappedReadWatchStatus.Stale;
     public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation observation) =>
         MacMappedCopyState.Ledger?.ReleaseMappedCopyWriteWatch(observation);
 

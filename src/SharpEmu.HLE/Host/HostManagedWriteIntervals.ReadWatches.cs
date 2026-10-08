@@ -28,6 +28,20 @@ internal sealed partial class HostManagedWriteIntervals
             catch (Exception) { } // Even formatting must preserve the refusal.
         }
         internal bool IsCurrent => TryIsCurrent(out _, out _);
+        internal CpuMappedReadWatchStatus Status
+        {
+            get
+            {
+                if (TryIsCurrent(out var reason, out var primaryAdmission)) return CpuMappedReadWatchStatus.Current;
+                // Only a pristine ORIGINAL watch refused by ordinary writer
+                // admission may defer. Publication/unknown/retired states never
+                // gain authority from this classification.
+                if (reason != "admission-nonzero" || primaryAdmission <= 0 || primaryAdmission >= PublicationBit ||
+                    Volatile.Read(ref Released) != 0 || Volatile.Read(ref Revoked) != 0 ||
+                    Volatile.Read(ref owner.coverageIncomplete) != 0) return CpuMappedReadWatchStatus.Stale;
+                return CpuMappedReadWatchStatus.Busy;
+            }
+        }
         internal bool TryIsCurrent(out string reason, out long primaryAdmission)
         {
             // Exactly the original reads, short-circuit order and final checks.

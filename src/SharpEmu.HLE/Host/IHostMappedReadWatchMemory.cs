@@ -8,5 +8,7 @@ public interface IHostMappedReadWatchMemory : IHostMappedCopyMemory
         ulong footprintAddress, ulong footprintByteCount, ulong sourceAddress,
         Span<byte> destination, out CpuMappedCopyObservation? observation);
     bool IsMappedCopyWriteWatchCurrent(HostBackingObject backing, CpuMappedCopyObservation observation);
+    CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(HostBackingObject backing,
+        CpuMappedCopyObservation observation) => CpuMappedReadWatchStatus.Stale;
     void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation observation);
 }

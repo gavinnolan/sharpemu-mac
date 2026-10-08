@@ -33,6 +33,14 @@ public sealed unsafe partial class HostMappedCopyLedger
         return true;
     }
 
+    public CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(HostBackingObject backing, CpuMappedCopyObservation observation)
+    {
+        if (!IsCurrent(backing, observation) || observation.OwnerIdentity is not Capture capture ||
+            capture.ReadWatch is not { } watch) return CpuMappedReadWatchStatus.Stale;
+        var status = watch.Status;
+        return IsCurrent(backing, observation) ? status : CpuMappedReadWatchStatus.Stale;
+    }
+
     private static bool ReadWatchDeclined(string reason, CpuMappedCopyObservation observation, long primaryAdmission = -1)
     {
         if (HostPublicationDiagnostics.Enabled)

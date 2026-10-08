@@ -487,7 +487,7 @@ internal static partial class MetalVideoPresenter
             }
 
             using (MetalPresentationProfile.Measure(MetalPresentationProfile.Phase.DrainGuestWork))
-                DrainGuestWork(_device, _commandQueue);
+                if (!TryDrainGuestWork(_device, _commandQueue)) return;
 
             using (MetalPresentationProfile.Measure(MetalPresentationProfile.Phase.MaterializePresentation))
             {

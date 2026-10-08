@@ -779,7 +779,7 @@ internal static partial class MetalVideoPresenter
     {
         lock (_gate)
         {
-            if (_guestWorkFailure is not null)
+            if (_guestWorkFailure is not null || _deferredCanonicalDirty is not null)
             {
                 work = default;
                 return false;
@@ -907,32 +907,33 @@ internal static partial class MetalVideoPresenter
 
     /// <summary>Drains queued guest work on the render loop, bounded by count and a
     /// wall-clock budget so a backlog cannot starve the event pump or the present.</summary>
-    internal static void DrainGuestWork(nint device, nint queue)
+    internal static void DrainGuestWork(nint device, nint queue) => _ = TryDrainGuestWork(device, queue);
+
+    internal static bool TryDrainGuestWork(nint device, nint queue)
     {
         _guestWorkDrainDepth++;
-        try { DrainGuestWorkWithOwner(device, queue); }
+        try { return DrainGuestWorkWithOwner(device, queue); }
         finally { _guestWorkDrainDepth--; }
     }
 
-    private static void DrainGuestWorkWithOwner(nint device, nint queue)
+    private static bool DrainGuestWorkWithOwner(nint device, nint queue)
     {
         if (!MetalPresentationProfile.AllocationsEnabled)
         {
-            DrainGuestWorkCore(device, queue, _renderWorkBudgetTicks);
-            return;
+            return DrainGuestWorkCore(device, queue, _renderWorkBudgetTicks);
         }
 
         var allocationScope = MetalPresentationProfile.MeasureDrainAllocations();
         var completed = false;
         try
         {
-            DrainGuestWorkCore(device, queue, _renderWorkBudgetTicks);
-            completed = true;
+            completed = DrainGuestWorkCore(device, queue, _renderWorkBudgetTicks);
+            return completed;
         }
         finally { allocationScope.Finish(completed); }
     }
 
-    private static void DrainGuestWorkCore(nint device, nint queue, long budgetTicks)
+    private static bool DrainGuestWorkCore(nint device, nint queue, long budgetTicks)
     {
         lock (_gate) WaitForInitialGuestCompletionLocked("guest queue execution");
         if (_guestWorkFailure is { } previousFailure)
@@ -940,6 +941,7 @@ internal static partial class MetalVideoPresenter
             throw new GpuFatalException("Metal guest execution has already failed.", previousFailure);
         }
 
+        if (!CanonicalDirtyDrainReady()) return false;
         var deadline = System.Diagnostics.Stopwatch.GetTimestamp() + budgetTicks;
         var completedWork = 0;
         try
@@ -948,7 +950,7 @@ internal static partial class MetalVideoPresenter
             RecycleCompletedUploadPages();
             RecycleCompletedSnapshotResources();
             ScanCompletedFaultBitmaps();
-            DrainGuestImageCpuSync(device);
+            if (!DrainGuestImageCpuSync(device)) return false;
         }
         catch (Exception exception) when (_textureSourceGraphEnabled)
         {
@@ -965,7 +967,7 @@ internal static partial class MetalVideoPresenter
             {
                 if (!TryTakeGuestWork(out var pendingGuestWork))
                 {
-                    return;
+                    return true;
                 }
 
                 TraceGuestWork("started", pendingGuestWork);
@@ -1075,9 +1077,10 @@ internal static partial class MetalVideoPresenter
                     });
                 if (System.Diagnostics.Stopwatch.GetTimestamp() >= deadline)
                 {
-                    return;
+                    return true;
                 }
             }
+            return true;
         }
         catch (Exception exception) when (_textureSourceGraphEnabled && _guestWorkFailure is null)
         {

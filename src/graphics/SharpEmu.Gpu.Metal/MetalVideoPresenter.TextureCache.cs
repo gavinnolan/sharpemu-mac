@@ -95,8 +95,9 @@ internal static partial class MetalVideoPresenter
     /// Single dirty consumer per drain: re-upload CPU-written guest images,
     /// evict matching draw-texture cache entries, then re-arm once per address.
     /// </summary>
-    private static void DrainGuestImageCpuSync(nint device)
+    private static bool DrainGuestImageCpuSync(nint device)
     {
+        if (RetryDeferredCanonicalDirty() == CanonicalDirtyResult.Deferred) return false;
         _ = Interlocked.Exchange(ref _cpuWrittenGuestImageSyncRequested, 0);
 
         HashSet<ulong>? dirtyAddresses = null;
@@ -118,12 +119,21 @@ internal static partial class MetalVideoPresenter
         }
 
         var memory = _guestMemory;
+        HashSet<ulong>? canonicalAddresses = null;
         if (extents is not null)
         {
-            foreach (var (address, width, height, byteCount) in extents)
+            // Discover canonical deferral before consuming any unrelated dirty
+            // flag or altering caches that would require a later rearm/eviction.
+            foreach (var (address, _, _, _) in extents)
             {
                 TraceStorageDirtyBeforeConsume(address);
-                if (TryAcknowledgeFiniteCanonicalDirty(address)) continue;
+                var canonical = TryAcknowledgeFiniteCanonicalDirty(address);
+                if (canonical == CanonicalDirtyResult.Deferred) return false;
+                if (canonical == CanonicalDirtyResult.Acknowledged) (canonicalAddresses ??= []).Add(address);
+            }
+            foreach (var (address, width, height, byteCount) in extents)
+            {
+                if (canonicalAddresses?.Contains(address) == true) continue;
                 if (!GuestImageWriteTracker.ConsumeDirty(address))
                 {
                     continue;
@@ -184,7 +194,7 @@ internal static partial class MetalVideoPresenter
                 }
             }
 
-            return;
+            return true;
         }
 
         // Evict by address rather than by identity: several identities can
@@ -207,7 +217,7 @@ internal static partial class MetalVideoPresenter
 
         if (dirtyAddresses is null && _drawTextureCache.Count <= MaxCachedDrawTextures)
         {
-            return;
+            return true;
         }
 
         if (_drawTextureCache.Count > MaxCachedDrawTextures)
@@ -235,7 +245,7 @@ internal static partial class MetalVideoPresenter
                 }
             }
 
-            return;
+            return true;
         }
 
         List<TextureContentIdentity>? evicted = null;
@@ -277,6 +287,7 @@ internal static partial class MetalVideoPresenter
         {
             GuestImageWriteTracker.Rearm(address);
         }
+        return true;
     }
 
     /// <summary>Legacy empty-payload recovery supports only linear base-level

@@ -93,6 +93,12 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMap
     }
     public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation observation) =>
         !Volatile.Read(ref _disposed) && _views.IsMappedCopyWriteWatchCurrent(observation);
+    public CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(CpuMappedCopyObservation observation)
+    {
+        if (Volatile.Read(ref _disposed)) return CpuMappedReadWatchStatus.Stale;
+        var status = _views.GetMappedCopyWriteWatchStatus(observation);
+        return Volatile.Read(ref _disposed) ? CpuMappedReadWatchStatus.Stale : status;
+    }
     public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation observation) => _views.ReleaseMappedCopyWriteWatch(observation);
 
     public CpuMappedCopyResult TryReadMappedCopy(ulong footprintAddress, ulong footprintByteCount,
