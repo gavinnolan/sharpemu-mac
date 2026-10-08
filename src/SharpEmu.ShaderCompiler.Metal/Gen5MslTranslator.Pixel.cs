@@ -362,10 +362,13 @@ public static partial class Gen5MslTranslator
             var opcode = instruction.Opcode;
             var hasOffset = opcode.EndsWith("O", StringComparison.Ordinal);
             var hasCompare = opcode.Contains("SampleC", StringComparison.Ordinal);
-            var hasGradients = opcode.Contains("SampleD", StringComparison.Ordinal);
+            // The C comparison marker precedes D/L/B. Decode the remaining
+            // family so CL reads its trailing LOD and CD consumes derivatives.
+            var sampleFamily = hasCompare ? opcode.Replace("SampleC", "Sample", StringComparison.Ordinal) : opcode;
+            var hasGradients = sampleFamily.Contains("SampleD", StringComparison.Ordinal);
             var hasZeroLod = opcode.Contains("Lz", StringComparison.Ordinal);
-            var hasLod = !hasZeroLod && opcode.Contains("SampleL", StringComparison.Ordinal);
-            var hasBias = opcode.Contains("SampleB", StringComparison.Ordinal);
+            var hasLod = !hasZeroLod && sampleFamily.Contains("SampleL", StringComparison.Ordinal);
+            var hasBias = sampleFamily.Contains("SampleB", StringComparison.Ordinal);
             var spatialComponents = imageClass.SpatialComponents;
 
             // RDNA MIMG address operands are ordered

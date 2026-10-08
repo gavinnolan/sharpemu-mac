@@ -85,6 +85,28 @@ public sealed class MslDepthCompareFieldTests(ITestOutputHelper output)
         Assert.Contains(".sample_compare(", shader.Source);
     }
 
+    [Theory]
+    [InlineData("ImageSampleCL", 9u, ".sample_compare(", "metal::level(")]
+    [InlineData("ImageSampleCD", 9u, ".sample_compare(", "metal::gradient2d(")]
+    [InlineData("ImageSampleCB", 9u, ".sample_compare(", "metal::bias(")]
+    [InlineData("ImageSampleCLzO", 13u, ".sample_compare(", "metal::level(")]
+    [InlineData("ImageGather4C", 13u, ".gather_compare(", "int2(0)")]
+    public void NativeDepthComparisonUsesCorrectOperandFamilyAndCompiles(string opcode, uint type, string operation, string operand)
+    {
+        Assert.True(Gen5ImageFixtures.TryCompile(opcode, type, out var shader, out var error,
+            unifiedFormat: 22, stage: ShaderStage.Pixel), error);
+        Assert.Contains(type == 9 ? "depth2d<float>" : "depth2d_array<float>", shader!.Source);
+        Assert.Contains(operation, shader.Source); Assert.Contains(operand, shader.Source);
+        if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") != "1") return;
+        nint library = 0;
+        try
+        {
+            Assert.True(MetalNative.IsAvailable, "Required depth compiler needs a device.");
+            Assert.True(MetalNative.TryCompileLibrary(shader.Source, out library, out error), error + "\n" + shader.Source);
+        }
+        finally { if (library != 0) MetalNative.ReleaseCollisionLibrary(library); }
+    }
+
     [Fact]
     public void ActualNormalizedMixedColorAndDrefFragmentCompilesWithRuntimeMetalCompiler()
     {
