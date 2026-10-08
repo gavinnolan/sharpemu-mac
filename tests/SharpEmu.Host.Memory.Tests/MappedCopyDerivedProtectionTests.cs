@@ -20,11 +20,10 @@ public sealed unsafe partial class MappedCopyProtectionTests
     public void TemporaryReadonlyKeepsGuestWriteEntitlementButOldCaptureNeverBecomesCurrent()
     {
         Marker(); using var state = new State(); var old = state.Copy();
-        lock (state.Gate)
-        {
-            var receipt = BeginDerived(state); state.Rejected();
-            state.Ledger.CompleteDerivedProtection(receipt, true); // synthetic, no native receipt claim
-        }
+        HostMappedCopyLedger.DerivedProtectionReceipt receipt;
+        lock (state.Gate) receipt = BeginDerived(state);
+        state.Rejected(); // synthetic pending receipt, no copy under provider gate
+        lock (state.Gate) state.Ledger.CompleteDerivedProtection(receipt, true); // synthetic, no native receipt claim
         var current = state.Copy(); Assert.Equal(RW, Assert.Single(current.Segments).GuestAccess);
         Assert.NotEqual(old.Segments[0].MappingIncarnation, current.Segments[0].MappingIncarnation);
         Assert.False(state.Ledger.IsCurrent(state.Backing, old));
@@ -52,11 +51,9 @@ public sealed unsafe partial class MappedCopyProtectionTests
     public void FailedTransientReceiptRetainsPhysicalFactsForSeparateSuccessfulRestore()
     {
         Marker(); using var state = new State(); var original = state.Copy();
-        lock (state.Gate)
-        {
-            state.Ledger.CompleteDerivedProtection(BeginDerived(state), false); state.Rejected();
-            state.Ledger.CompleteDerivedProtection(BeginDerived(state, native: HostPageProtection.ReadWrite), true);
-        }
+        lock (state.Gate) state.Ledger.CompleteDerivedProtection(BeginDerived(state), false);
+        state.Rejected();
+        lock (state.Gate) state.Ledger.CompleteDerivedProtection(BeginDerived(state, native: HostPageProtection.ReadWrite), true);
         Assert.NotNull(state.Copy()); Assert.False(state.Ledger.IsCurrent(state.Backing, original));
     }
 
@@ -74,9 +71,10 @@ public sealed unsafe partial class MappedCopyProtectionTests
     public void GuestPermissionChangeCannotBeMisclassifiedAsTemporaryReadonly()
     {
         Marker(); using var state = new State();
+        lock (state.Gate) state.Ledger.CompleteDerivedProtection(BeginDerived(state, GuestPageProtection.Read), true);
+        state.Rejected();
         lock (state.Gate)
         {
-            state.Ledger.CompleteDerivedProtection(BeginDerived(state, GuestPageProtection.Read), true); state.Rejected();
             var prepared = state.Ledger.PrepareProtectionChange(State.Address, State.Size, HostPageProtection.ReadOnly, GuestPageProtection.Read);
             Assert.NotNull(prepared); Assert.True(state.Ledger.BeginProtectionChange(prepared, State.Address, State.Size));
             state.Ledger.CompleteProtectionChange(prepared, true);
@@ -141,9 +139,9 @@ public sealed unsafe partial class MappedCopyProtectionTests
             state.Ledger.CompleteDerivedProtection(overflow, true);
             for (var index = receipts.Length - 1; index >= 0; index--)
                 state.Ledger.CompleteDerivedProtection(receipts[index], true);
-            state.Rejected();
-            state.Ledger.CompleteDerivedProtection(BeginDerived(state), true);
         }
+        state.Rejected();
+        lock (state.Gate) state.Ledger.CompleteDerivedProtection(BeginDerived(state), true);
         Assert.NotNull(state.Copy()); Assert.False(state.Ledger.IsCurrent(state.Backing, old));
     }
 
@@ -151,15 +149,17 @@ public sealed unsafe partial class MappedCopyProtectionTests
     public void ReplayedAndForeignReceiptsCannotConsumeANewerOperationInTheSameSlot()
     {
         Marker(); using var state = new State(); using var foreign = new State();
+        HostMappedCopyLedger.DerivedProtectionReceipt current;
         lock (state.Gate)
         {
             var old = BeginDerived(state); state.Ledger.CompleteDerivedProtection(old, false);
-            var current = BeginDerived(state);
+            current = BeginDerived(state);
             Assert.Throws<InvalidOperationException>(() => state.Ledger.CompleteDerivedProtection(old, true));
             lock (foreign.Gate)
                 Assert.Throws<InvalidOperationException>(() => foreign.Ledger.CompleteDerivedProtection(current, true));
-            state.Rejected(); state.Ledger.CompleteDerivedProtection(current, true);
         }
+        state.Rejected();
+        lock (state.Gate) state.Ledger.CompleteDerivedProtection(current, true);
         Assert.NotNull(state.Copy());
     }
 
@@ -171,9 +171,10 @@ public sealed unsafe partial class MappedCopyProtectionTests
         {
             var receipt = BeginDerived(state);
             Assert.True(state.Ledger.BeforeNativeEffect(State.Address + State.Size * 2, State.Page));
-            state.Ledger.CompleteDerivedProtection(receipt, true); state.Rejected();
-            state.Ledger.CompleteDerivedProtection(BeginDerived(state), true);
+            state.Ledger.CompleteDerivedProtection(receipt, true);
         }
+        state.Rejected();
+        lock (state.Gate) state.Ledger.CompleteDerivedProtection(BeginDerived(state), true);
         Assert.NotNull(state.Copy());
     }
 

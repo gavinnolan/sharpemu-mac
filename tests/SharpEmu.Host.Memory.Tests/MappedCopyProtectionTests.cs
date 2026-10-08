@@ -64,12 +64,14 @@ public sealed unsafe partial class MappedCopyProtectionTests(ITestOutputHelper o
     public void SuccessfulWholeProtectionMintsFreshMappingWithExactAccess(HostPageProtection access, GuestPageProtection expected)
     {
         Marker(); using var state = new State(); var original = state.Copy();
+        HostMappedCopyLedger.ProtectionChange? operation;
         lock (state.Gate)
         {
-            var operation = state.Begin(State.Address, State.Size, access);
-            Assert.NotNull(operation); Assert.False(state.Ledger.IsCurrent(state.Backing, original)); state.Rejected();
-            state.Ledger.CompleteProtectionChange(operation, true); // synthetic success, no syscall
+            operation = state.Begin(State.Address, State.Size, access);
+            Assert.NotNull(operation); Assert.False(state.Ledger.IsCurrent(state.Backing, original));
         }
+        state.Rejected(); // actual optional copy outside provider gate; synthetic receipt remains pending
+        lock (state.Gate) state.Ledger.CompleteProtectionChange(operation, true); // synthetic success, no syscall
         var current = state.Copy(); Assert.Equal(expected, Assert.Single(current.Segments).GuestAccess);
         Assert.NotEqual(original.Segments[0].MappingIncarnation, current.Segments[0].MappingIncarnation);
         Assert.False(state.Ledger.IsCurrent(state.Backing, original));
@@ -95,9 +97,10 @@ public sealed unsafe partial class MappedCopyProtectionTests(ITestOutputHelper o
     {
         Marker(); using var state = new State(); var original = state.Copy();
         lock (state.Gate)
-        {
             state.Ledger.CompleteProtectionChange(state.Begin(State.Address, State.Size, HostPageProtection.ReadOnly), false);
-            state.Rejected();
+        state.Rejected();
+        lock (state.Gate)
+        {
             var later = state.Begin(State.Address, State.Size, HostPageProtection.ReadWrite);
             Assert.NotNull(later); state.Ledger.CompleteProtectionChange(later, true);
         }
