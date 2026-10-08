@@ -111,7 +111,7 @@ internal static partial class MetalVideoPresenter
                 MetalNative.SendVoid(encoder, MetalNative.Selector("setComputePipelineState:"), pipeline);
                 MetalNative.SendSetAtIndex(encoder, MetalNative.Selector("setTexture:atIndex:"), source, 0);
                 MetalNative.SendSetBuffer(encoder, MetalNative.Selector("setBuffer:offset:atIndex:"), staging, 0, 0);
-                MetalNative.SendSetBuffer(encoder, MetalNative.Selector("setBuffer:offset:atIndex:"), parametersBuffer, parametersOffset, 1);
+                MetalNative.SendSetBuffer(encoder, MetalNative.Selector("setBuffer:offset:atIndex:"), parametersBuffer, checked((nuint)parametersOffset), 1);
                 MetalNative.SendDispatch(encoder, MetalNative.Selector("dispatchThreadgroups:threadsPerThreadgroup:"),
                     new MtlSize { Width = (mipWidth + 7u) / 8u, Height = (mipHeight + 7u) / 8u, Depth = layers },
                     new MtlSize { Width = 8, Height = 8, Depth = 1 });
