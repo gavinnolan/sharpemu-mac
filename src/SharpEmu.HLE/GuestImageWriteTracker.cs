@@ -1283,10 +1283,13 @@ public static unsafe partial class GuestImageWriteTracker
                 continue;
             }
 
-            if (Interlocked.Exchange(ref range.Dirty, 1) == 0)
-            {
-                Interlocked.Increment(ref range.WriteGeneration);
-            }
+            // Dirty is a coalesced notification; a copied-byte observation
+            // must be revoked by EVERY overlapping managed write, including
+            // later writes while another owner has not consumed Dirty yet.
+            // This counter observes notifications, not write completion or
+            // coverage of raw/native writers through untracked aliases.
+            Interlocked.Exchange(ref range.Dirty, 1);
+            Interlocked.Increment(ref range.WriteGeneration);
         }
     }
 
