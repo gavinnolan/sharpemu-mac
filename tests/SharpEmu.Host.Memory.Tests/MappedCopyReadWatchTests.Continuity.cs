@@ -88,4 +88,36 @@ public sealed unsafe partial class MappedCopyReadWatchTests
         var all = Enumerable.Range(0, 128).Select(_ => state.Capture()).ToArray();
         foreach (var item in all) state.Ledger.ReleaseMappedCopyWriteWatch(item);
     }
+
+    [Fact]
+    public void ExplicitOriginalReleaseAfterPrepareCannotExposePrivateSuccessorOrWriteBytes()
+    {
+        using var state = new State(); var original = state.Capture();
+        var before = new ReadOnlySpan<byte>((void*)(state.Backing.AliasBase + 32), 16).ToArray();
+        using var publication = Prepare(state, original, original.SourceAddress);
+        state.Ledger.ReleaseMappedCopyWriteWatch(original);
+        Assert.Equal(CpuMappedPublicationResult.Rejected, publication.TryCommit());
+        Assert.Null(publication.SuccessfulObservation);
+        Assert.Equal(before, new ReadOnlySpan<byte>((void*)(state.Backing.AliasBase + 32), 16).ToArray());
+        Assert.Equal(0, state.Backing.ActiveAccesses);
+        var all = Enumerable.Range(0, 128).Select(_ => state.Capture()).ToArray();
+        foreach (var item in all) state.Ledger.ReleaseMappedCopyWriteWatch(item);
+    }
+
+    [Fact]
+    public void FullWatchInventoryRefusesSuccessorBeforeBytesAndBalancesItsCharge()
+    {
+        using var state = new State(); var all = Enumerable.Range(0, 128).Select(_ => state.Capture()).ToArray();
+        var before = new ReadOnlySpan<byte>((void*)(state.Backing.AliasBase + 32), 16).ToArray();
+        Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
+            state.Ledger.TryPrepareMappedPublication(state.Backing, all[0], [new(all[0].SourceAddress, new byte[4])], out var rejected));
+        Assert.Null(rejected); Assert.True(state.Current(all[0])); Assert.Equal(0, state.Backing.ActiveAccesses);
+        Assert.Equal(before, new ReadOnlySpan<byte>((void*)(state.Backing.AliasBase + 32), 16).ToArray());
+        state.Ledger.ReleaseMappedCopyWriteWatch(all[1]);
+        using var publication = Prepare(state, all[0], all[0].SourceAddress);
+        publication.Dispose(); Assert.True(state.Current(all[0]));
+        var replacement = state.Capture();
+        foreach (var item in all) state.Ledger.ReleaseMappedCopyWriteWatch(item);
+        state.Ledger.ReleaseMappedCopyWriteWatch(replacement);
+    }
 }
