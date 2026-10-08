@@ -53,6 +53,7 @@ public sealed partial class RenderExecutor
     private readonly IRenderHost _host;
     private readonly IShaderPipelineProvider _pipelines;
     private readonly bool _strictDrawResources;
+    private readonly bool _dumpSkippedGraphics = Environment.GetEnvironmentVariable("SHARPEMU_DUMP_SKIPPED_GRAPHICS") == "1";
     private readonly HashSet<(ulong ShaderHash, GpuImageType ImageType, GpuImageViewType ViewType)> _reportedDrawImageTypeMismatches = [];
 
     public RenderExecutor(IRenderHost host, IShaderPipelineProvider pipelines)
@@ -496,7 +497,7 @@ public sealed partial class RenderExecutor
     private static bool IsKnownGeometryOutputPrimitiveType(uint value) => value <= 4;
 
     // Only the plain vertex path and the primitive-shader vertex path with default geometry state run.
-    private static bool IsUnsupportedGeometryStage(RegisterBanks banks)
+    private bool IsUnsupportedGeometryStage(RegisterBanks banks)
     {
         var context = banks.Context;
         var shaderInterface = context.ShaderInterface;
@@ -530,6 +531,9 @@ public sealed partial class RenderExecutor
                 $"unsupportedMask={unsupportedStageMask} unsupportedGeometry={unsupportedGeometryStage} " +
                 $"unsupportedRegisters={geometryRegisters}.");
         }
+
+        if (_dumpSkippedGraphics)
+            _pipelines.RecordUnsupportedGraphics(vertex, context);
 
         if (RenderTrace.Enabled && RenderTrace.GeometryStageSkip())
         {

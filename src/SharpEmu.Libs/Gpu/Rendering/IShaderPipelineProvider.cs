@@ -54,6 +54,9 @@ public sealed class ComputeProgram
 // The shader and pipeline caches behind the executor.
 public interface IShaderPipelineProvider
 {
+    // Optional capture of rejected stage inputs; it never admits or executes the draw.
+    void RecordUnsupportedGraphics(VertexStageRegisters vertex, ContextRegisters context) { }
+
     GraphicsPrograms GetGraphicsPrograms(
         VertexStageRegisters vertex,
         PixelStageRegisters pixel,
