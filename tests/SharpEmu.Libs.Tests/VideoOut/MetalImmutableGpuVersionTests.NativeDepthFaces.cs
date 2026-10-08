@@ -113,6 +113,28 @@ public sealed partial class MetalImmutableGpuVersionTests
                 state.AdmitNativeFace(shaders.Vertex, shaders.Pixel, target);
             }
             Assert.Equal(6, memory.MappedCopies); Assert.Equal(0, memory.DirectReads);
+            // Real unrelated canonical mapping effects must not invalidate the
+            // retained face mappings or replace any original content token.
+            var capturedEpoch = HostMemory.MappingGeneration;
+            const ulong unrelatedBytes = 65536;
+            NativeDepthAssert(physical.TryHoldRangeAtOrAbove(address + totalBytes, unrelatedBytes, 65536, out var unrelatedAddress));
+            NativeDepthAssert(unrelatedAddress >= address + totalBytes);
+            NativeDepthAssert(physical.TryHoldRange(unrelatedAddress, unrelatedBytes));
+            NativeDepthAssert(physical.TryMapBacked(unrelatedAddress, unrelatedBytes, totalBytes,
+                GuestPageProtection.Read | GuestPageProtection.Write, out var unrelatedMapFailure),
+                $"unrelated_map_failure={unrelatedMapFailure}");
+            var unrelatedEpoch = HostMemory.MappingGeneration;
+            Assert.NotEqual(capturedEpoch, unrelatedEpoch);
+            foreach (var original in originals)
+            {
+                Assert.NotEqual(original.Content.MappingEpoch, unrelatedEpoch);
+                NativeDepthAssert(memory.IsMappedCopyObservationCurrent(original.Mapping));
+                NativeDepthAssert(GuestImageWriteTracker.TryGetObservedContentToken(original.Address,
+                    original.Content.ByteCount, out var unchangedToken));
+                Assert.Equal(original.Content.Token, unchangedToken);
+                MetalDepthFacePlacement.RequireOriginalCurrent(original);
+            }
+            output.WriteLine($"native-depth-faces unrelated_mapping_epoch_before={capturedEpoch} after={unrelatedEpoch} original_mapping_and_token_unchanged=1");
             memory.RejectDirectReads = true;
             uint[] raw = [(uint)(address >> 8), (uint)(address >> 40) | 0xC0700000,
                 0x00FFC0FF, 0xB1800924, 5, 0x00700000, 0, 0];
