@@ -113,7 +113,7 @@ public sealed partial class MetalStorageCpuSyncTests
         if(change=="depth") Set(image,"Depth",1u);
         if(change=="width") Set(image,"Width",1u);
         if(change=="format") Set(image,"Format",MtlPixelFormat.Rgba8Unorm);
-        try { Assert.Throws<TargetInvocationException>(()=>PublishLinearVolume(snapshot,image)); Assert.False(Images.Contains(Address)); Assert.Equal(1,memory.Releases); // rejected publication consumes its unaccepted original watch }
+        try { Assert.Throws<TargetInvocationException>(()=>PublishLinearVolume(snapshot,image)); Assert.False(Images.Contains(Address)); Assert.Equal(1,memory.Releases); } // rejected publication consumes its unaccepted original watch
         finally { Images.Remove(Address); MetalVideoPresenter.ReleasePreparedTextureSources([snapshot]); }
         Assert.Equal(1,memory.Releases);
     }
