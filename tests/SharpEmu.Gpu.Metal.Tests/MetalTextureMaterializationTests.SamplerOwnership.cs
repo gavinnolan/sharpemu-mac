@@ -24,28 +24,38 @@ public sealed partial class MetalTextureMaterializationTests
     [InlineData(3)] // nil native state
     [InlineData(4)] // accepted state retains ownership after descriptor release
     [InlineData(5)] // descriptor release failure also releases new state
+    [InlineData(6)] // configuration and descriptor cleanup failure
+    [InlineData(7)] // descriptor and new-state cleanup failure
     public void SamplerOwnershipProductionCreationHelperReleasesExactlyOwnedObjects(int kind)
     {
         var events = new List<string>(); var failure = new InvalidOperationException("creation/configuration sentinel");
         var releaseFailure = new InvalidOperationException("descriptor-release sentinel");
+        var stateReleaseFailure = new InvalidOperationException("state-release sentinel");
         Func<nint> descriptor = () => { events.Add("descriptor"); return kind == 0 ? 0 : 11; };
-        Action<nint> configure = value => { Assert.Equal((nint)11, value); events.Add("configure"); if (kind == 1) throw failure; };
+        Action<nint> configure = value => { Assert.Equal((nint)11, value); events.Add("configure"); if (kind is 1 or 6) throw failure; };
         Func<nint, nint> state = value => { Assert.Equal((nint)11, value); events.Add("state"); if (kind == 2) throw failure; return kind == 3 ? 0 : 22; };
-        Action<nint> release = value => { events.Add("release" + value); if (kind == 5 && value == 11) throw releaseFailure; };
+        Action<nint> release = value =>
+        {
+            events.Add("release" + value);
+            if (kind is 5 or 6 or 7 && value == 11) throw releaseFailure;
+            if (kind == 7 && value == 22) throw stateReleaseFailure;
+        };
         if (kind == 4)
             Assert.Equal((nint)22, SamplerOwnershipCall("CreateOwnedSamplerState", descriptor, configure, state, release));
         else
         {
             var caught = Assert.Throws<InvalidOperationException>(() => SamplerOwnershipCall("CreateOwnedSamplerState", descriptor, configure, state, release));
-            if (kind is 1 or 2) Assert.Same(failure, caught);
-            if (kind == 5) Assert.Same(releaseFailure, caught);
+            if (kind is 1 or 2 or 6) Assert.Same(failure, caught);
+            if (kind is 5 or 7) Assert.Same(releaseFailure, caught);
+            if (kind == 6) Assert.Same(releaseFailure, caught.Data["Metal sampler descriptor cleanup failure"]);
+            if (kind == 7) Assert.Same(stateReleaseFailure, caught.Data["Metal sampler state cleanup failure"]);
             if (kind is 0 or 3) Assert.Contains("nil", caught.Message);
         }
         var expected = kind switch
         {
             0 => new[] { "descriptor" },
-            1 => ["descriptor", "configure", "release11"],
-            5 => ["descriptor", "configure", "state", "release11", "release22"],
+            1 or 6 => ["descriptor", "configure", "release11"],
+            5 or 7 => ["descriptor", "configure", "state", "release11", "release22"],
             _ => ["descriptor", "configure", "state", "release11"],
         };
         Assert.Equal(expected, events);
@@ -107,6 +117,25 @@ public sealed partial class MetalTextureMaterializationTests
             Assert.Throws<InvalidOperationException>(() => SamplerOwnershipCall("PublishOwnedSamplerState", key, (nint)303, release));
             Assert.Equal(new nint[] { 303 }, releases);
             Assert.Throws<InvalidOperationException>(() => SamplerOwnershipCall("GetOrCreateSampler", nint.Zero, key));
+            lock (cache) Assert.Equal(nint.Zero, (nint)cache[key]!);
+        }
+        finally { lock (cache) cache.Remove(key); }
+    }
+
+    [Fact]
+    public void SamplerOwnershipNilWinnerFailureRetainsCauseDespiteLoserCleanupFailure()
+    {
+        var key = new GuestSampler(0, 0, 0, 0x52584D34);
+        var cache = (IDictionary)Presenter.GetField("_samplerCache", Methods)!.GetValue(null)!;
+        var cleanupFailure = new InvalidOperationException("loser-release sentinel"); var releases = new List<nint>();
+        Action<nint> release = value => { releases.Add(value); throw cleanupFailure; };
+        lock (cache) { Assert.False(cache.Contains(key)); cache.Add(key, nint.Zero); }
+        try
+        {
+            var caught = Assert.Throws<InvalidOperationException>(() => SamplerOwnershipCall("PublishOwnedSamplerState", key, (nint)404, release));
+            Assert.Contains("cache contains a nil", caught.Message); Assert.NotSame(cleanupFailure, caught);
+            Assert.Same(cleanupFailure, caught.Data["Metal sampler state cleanup failure"]);
+            Assert.Equal(new nint[] { 404 }, releases);
             lock (cache) Assert.Equal(nint.Zero, (nint)cache[key]!);
         }
         finally { lock (cache) cache.Remove(key); }

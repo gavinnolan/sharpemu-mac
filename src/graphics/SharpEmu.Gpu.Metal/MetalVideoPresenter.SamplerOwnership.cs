@@ -20,29 +20,28 @@ internal static partial class MetalVideoPresenter
             throw new InvalidOperationException("Metal sampler descriptor creation returned nil.");
 
         nint ownedState = 0;
+        Exception? failure = null, descriptorCleanupFailure = null, stateCleanupFailure = null;
         try
         {
-            try
-            {
-                configureDescriptor(descriptor);
-                ownedState = createState(descriptor);
-                if (ownedState == 0)
-                    throw new InvalidOperationException("Metal sampler state creation returned nil.");
-            }
-            finally
-            {
-                release(descriptor);
-            }
-
-            var result = ownedState;
-            ownedState = 0;
-            return result;
+            configureDescriptor(descriptor);
+            ownedState = createState(descriptor);
+            if (ownedState == 0)
+                throw new InvalidOperationException("Metal sampler state creation returned nil.");
         }
-        finally
+        catch (Exception ex) { failure = ex; }
+        try { release(descriptor); }
+        catch (Exception ex) { descriptorCleanupFailure = ex; failure ??= ex; }
+        if (failure is not null)
         {
             // Includes descriptor-release failure after successful newState.
-            if (ownedState != 0) release(ownedState);
+            if (ownedState != 0)
+            {
+                try { release(ownedState); }
+                catch (Exception ex) { stateCleanupFailure = ex; }
+            }
+            ThrowSamplerFailure(failure, descriptorCleanupFailure, stateCleanupFailure);
         }
+        return ownedState;
     }
 
     private static nint CreateNativeSamplerDescriptor() => MetalNative.Send(
@@ -56,6 +55,8 @@ internal static partial class MetalVideoPresenter
     {
         if (ownedState == 0)
             throw new InvalidOperationException("Metal cannot publish a nil sampler state.");
+        nint result = 0;
+        Exception? failure = null, stateCleanupFailure = null;
         try
         {
             lock (_samplerCache)
@@ -64,20 +65,36 @@ internal static partial class MetalVideoPresenter
                 {
                     if (winner == 0)
                         throw new InvalidOperationException("Metal sampler cache contains a nil state.");
-                    return winner;
+                    result = winner;
                 }
-
-                _samplerCache.Add(key, ownedState);
-                var result = ownedState;
-                ownedState = 0; // Exact accepted transfer to the cache.
-                return result;
+                else
+                {
+                    _samplerCache.Add(key, ownedState);
+                    result = ownedState;
+                    ownedState = 0; // Exact accepted transfer to the cache.
+                }
             }
         }
-        finally
+        catch (Exception ex) { failure = ex; }
+        // A duplicate winner or failed dictionary publication leaves only
+        // this new state's retain owned by the current call.
+        if (ownedState != 0)
         {
-            // A duplicate winner or failed dictionary publication leaves only
-            // this new state's retain owned by the current call.
-            if (ownedState != 0) release(ownedState);
+            try { release(ownedState); }
+            catch (Exception ex) { stateCleanupFailure = ex; failure ??= ex; }
         }
+        if (failure is not null) ThrowSamplerFailure(failure, null, stateCleanupFailure);
+        return result;
+    }
+
+    private static void ThrowSamplerFailure(Exception failure, Exception? descriptorCleanupFailure, Exception? stateCleanupFailure)
+    {
+        // Preserve the first cause and stack. Diagnostics follow all owned
+        // cleanup attempts, so recording a secondary cause cannot skip one.
+        if (descriptorCleanupFailure is not null && !ReferenceEquals(failure, descriptorCleanupFailure))
+            failure.Data["Metal sampler descriptor cleanup failure"] = descriptorCleanupFailure;
+        if (stateCleanupFailure is not null && !ReferenceEquals(failure, stateCleanupFailure))
+            failure.Data["Metal sampler state cleanup failure"] = stateCleanupFailure;
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
 }
