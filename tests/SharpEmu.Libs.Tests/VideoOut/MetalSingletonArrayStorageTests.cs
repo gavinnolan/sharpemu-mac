@@ -14,7 +14,7 @@ using Xunit;
 namespace SharpEmu.Libs.Tests.VideoOut;
 
 [Collection(SchedulingStateCollection.Name)]
-public sealed class MetalSingletonArrayStorageTests
+public sealed partial class MetalSingletonArrayStorageTests
 {
     private const ulong Address = 0x71F5_0000_00;
     private const BindingFlags Private = BindingFlags.Static | BindingFlags.NonPublic;

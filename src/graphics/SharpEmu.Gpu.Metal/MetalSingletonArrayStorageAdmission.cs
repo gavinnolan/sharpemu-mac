@@ -22,6 +22,11 @@ internal static class MetalSingletonArrayStorageAdmission
         // storage as float or normalize unqualified selectors/hints.
         (descriptor.Format == 4 && descriptor.NumberType == 4 &&
             shape.NumericClass == TextureNumericClass.Uint && (raw[1] & 0xFFFF_FF00u) == (20u << 20) &&
+            descriptor.DstSelect == 0x204 && raw[5] == 0x0070_0000u) ||
+        // Proactive canonical R32Float class, not additional captured game T#s.
+        // Exact unified/number/shader-class agreement; no numeric conversion.
+        (descriptor.Format == 4 && descriptor.NumberType == 7 &&
+            shape.NumericClass == TextureNumericClass.Float && (raw[1] & 0xFFFF_FF00u) == (22u << 20) &&
             descriptor.DstSelect == 0x204 && raw[5] == 0x0070_0000u);
 
     internal static bool IsQualified(TextureDescriptor descriptor, IReadOnlyList<uint>? raw,
