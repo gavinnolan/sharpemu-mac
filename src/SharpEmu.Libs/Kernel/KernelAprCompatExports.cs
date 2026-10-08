@@ -54,7 +54,7 @@ public static class KernelAprCompatExports
             out var errorOffset);
         if (completionResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
         {
-            AprFailureDiagnostics.Failed("submit-command-state", commandBuffer, commandBuffer, 0x18,
+            AprFailureDiagnostics.Failed("submit-command-state", commandBuffer, commandBuffer, 0,
                 completionResult, executionResult, errorOffset);
             return completionResult;
         }
