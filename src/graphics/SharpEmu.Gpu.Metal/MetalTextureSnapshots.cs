@@ -1012,6 +1012,9 @@ internal static partial class MetalTextureSnapshots
             }
         }
 
+        // This source is already a private copy made for this snapshot.
+        // Transfer the complete array when it is exactly the linear payload;
+        // a shorter logical view still needs its separately owned prefix.
         var rgba = TryDetileTextureSource(
             descriptor,
             sourceWidth,
@@ -1019,7 +1022,8 @@ internal static partial class MetalTextureSnapshots
             source,
             baseMipInTail,
             mipTailElementX,
-            mipTailElementY) ?? source.AsSpan(0, checked((int)sourceByteCount)).ToArray();
+            mipTailElementY) ?? (source.Length == checked((int)sourceByteCount)
+                ? source : source.AsSpan(0, checked((int)sourceByteCount)).ToArray());
         DumpLinearTextureIfRequested(descriptor, sourceWidth, rgba);
         texture = new GuestDrawTexture(
             descriptor.Address,
