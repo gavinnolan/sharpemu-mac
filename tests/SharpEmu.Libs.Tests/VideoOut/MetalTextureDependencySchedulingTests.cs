@@ -16,7 +16,7 @@ using Xunit;
 namespace SharpEmu.Libs.Tests.VideoOut;
 
 [Collection(SchedulingStateCollection.Name)]
-public sealed class MetalTextureDependencySchedulingTests
+public sealed partial class MetalTextureDependencySchedulingTests
 {
     [Fact]
     public void BlockedHeadKeepsItsFollowerHiddenWhileOtherQueueAndProducerProgress()

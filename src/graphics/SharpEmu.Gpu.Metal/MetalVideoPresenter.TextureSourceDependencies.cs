@@ -19,12 +19,34 @@ internal static partial class MetalVideoPresenter
     // command-completion retention are integrated; it is not hardware completion.
     private static TextureSourceDependency[] GetGuestTextureSourceDependenciesLocked(object work)
     {
+        var hasOwner = _textureSourceWorkOwners.TryGetValue(work, out var owner);
+        if (!hasOwner)
+        {
+            // Most work carries only private CPU snapshots. Check the actual
+            // associations under the caller's gate before allocating the
+            // iterator, uniqueness set and dependency pipeline. Keep the
+            // existing validation path for every captured source or owner.
+            var textures = work switch
+            {
+                OffscreenGuestDraw draw => draw.Draw.Textures,
+                ComputeGuestDispatch dispatch => dispatch.Textures,
+                _ => [],
+            };
+            var hasSource = false;
+            for (var index = 0; index < textures.Length; index++)
+            {
+                if (!_textureSourceLeases.TryGetValue(textures[index], out _)) continue;
+                hasSource = true;
+                break;
+            }
+            if (!hasSource) return [];
+        }
         IEnumerable<TextureSourceVersion> versions = TextureSourcesOf(work).Select(static lease =>
         {
             if (lease.References <= 0) throw new InvalidOperationException("Metal captured texture input owner was released.");
             return lease.Version;
         });
-        if (_textureSourceWorkOwners.TryGetValue(work, out var owner))
+        if (hasOwner)
         {
             if (owner.Released) throw new InvalidOperationException("Metal texture work owner was already released.");
             versions = versions.Concat(owner.Predecessors);
