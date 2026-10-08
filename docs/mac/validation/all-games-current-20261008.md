@@ -63,3 +63,11 @@ the same guest context-label timeout after three presentations. Traced EOP
 labels are admitted before the abort and applied afterward, directing the next
 investigation toward startup/readiness and delayed queue drain. An ordinary
 overwrite is not observed in the bounded trace. No new game is accepted.
+
+The [protection-intent runtime checkpoint](protection-intent-runtime-20261008.md)
+passes71 managed and four fresh actual Mac cases per CLR at7a286abb. Combined
+typed/protection sourcec24c327a additionally passes647 managed and78 native
+Metal/compiler cases per runtime configuration. Its signed Octopath replay
+clears the earlier mapping-copy rejection, then exits134 after38s at8030300000
+because GPU-produced/pending-write ownership cannot authorize a dirty CPU seed.
+It remains isolated; no gameplay or performance gate is met.
