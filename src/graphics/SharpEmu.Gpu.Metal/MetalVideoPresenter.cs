@@ -220,10 +220,17 @@ internal static partial class MetalVideoPresenter
         }
         finally
         {
-            CompletePresenterShutdown();
-            MetalPresentationProfile.End();
-            if (_ownedFrameIdleEnabled)
-                WriteOwnedIdleDiagnostic($"[METAL-PRESENT] owned_frame_idle_summary skipped_ticks={_ownedFrameSkippedTicks}");
+            try { CompletePresenterShutdown(); }
+            finally
+            {
+                try { ReleaseSelectedStorageMipImages(); }
+                finally
+                {
+                    MetalPresentationProfile.End();
+                    if (_ownedFrameIdleEnabled)
+                        WriteOwnedIdleDiagnostic($"[METAL-PRESENT] owned_frame_idle_summary skipped_ticks={_ownedFrameSkippedTicks}");
+                }
+            }
         }
     }
 

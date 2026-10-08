@@ -178,3 +178,14 @@ Evidence logs are preserved in
 (351 shader tests), `sharpemu-metal-production-device.log` (19 production
 texture cases with the required-device gate), and
 `sharpemu-metal-production-managed-final4.log` (31 subsequent managed cases).
+
+### Selected storage mip1 candidate (2026-10-08, isolated)
+
+Fresh DS8c19 fails first on static2D storage512x256 fmt4/7 tile9 with
+base/selected mip1 and9 backing levels. The isolated candidate selects resource
+placement1 from full base geometry, owns/detiles those bytes, and binds native
+one-level256x128. Exact domain+resource+mip native storage reuse is separate from
+address-only images. Unsupported overlapping/base/sampled aliases fail explicitly;
+no whole-allocation coherence or graph activation is claimed. See
+[scope, placement and fixture limits](validation/selected-storage-mip-20261008.md).
+Native required-device qualification and actual DS progression remain pending.

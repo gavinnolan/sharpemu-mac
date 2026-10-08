@@ -1345,6 +1345,7 @@ internal static partial class MetalVideoPresenter
         GuestRenderTarget target,
         MtlPixelFormat format)
     {
+        RejectAddressOnlySelectedStorageAlias(target.Address, checked((ulong)target.Width * target.Height * 16));
         lock (_gate)
         {
             if (_guestImages.TryGetValue(target.Address, out var existing))
@@ -1521,6 +1522,10 @@ internal static partial class MetalVideoPresenter
             return captured;
         }
         RequireNoUncapturedGpuTextureSource(texture);
+        RejectAddressOnlySelectedStorageAlias(texture.Address, Math.Max(texture.SourceByteCount,
+            checked((ulong)texture.Width * texture.Height * Math.Max(texture.Depth, 1u) * 16)));
+        if (_selectedStorageMipAssociations.TryGetValue(texture, out _))
+            throw new NotSupportedException("Metal selected storage mip cannot use the generic sampled/draw materializer.");
 
         if (texture.Width == 0 || texture.Height == 0)
         {

@@ -258,10 +258,16 @@ internal static partial class MetalVideoPresenter
             if (_textureSourceLeases.TryGetValue(copy, out _) || _cpuTextureSnapshotProvenance.TryGetValue(copy, out _))
                 throw new InvalidOperationException("Metal texture copy already has a provenance association.");
             if (lease is not null) _textureSourceLeases.Add(copy, lease);
-            try { if (provenance is not null) _cpuTextureSnapshotProvenance.Add(copy, provenance); }
+            try
+            {
+                if (provenance is not null) _cpuTextureSnapshotProvenance.Add(copy, provenance);
+                CopySelectedStorageMip(source, copy);
+            }
             catch
             {
                 if (lease is not null) _textureSourceLeases.Remove(copy);
+                _cpuTextureSnapshotProvenance.Remove(copy);
+                _selectedStorageMipAssociations.Remove(copy);
                 throw;
             }
         }

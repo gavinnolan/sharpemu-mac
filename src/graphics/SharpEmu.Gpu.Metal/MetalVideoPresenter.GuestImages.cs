@@ -593,6 +593,7 @@ internal static partial class MetalVideoPresenter
         var queue = _submittingGuestQueue ?? GuestQueueIdentity.Default;
         if (_textureSourceGraphEnabled)
             return EnqueueTextureSourceWorkLocked(work, payloadBytes, queue);
+        var selectedMipAdmission = PrepareSelectedStorageMipAdmissionLocked(work, queue);
         var sequence = ++_enqueuedGuestWorkSequence;
         _lastEnqueuedGuestWorkByQueue[queue.Name] = sequence;
         if (!_pendingGuestWorkByQueue.TryGetValue(queue.Name, out var pendingQueue))
@@ -618,6 +619,7 @@ internal static partial class MetalVideoPresenter
             pendingQueue.AddLast(pending);
         }
 
+        PublishSelectedStorageMipAdmissionLocked(selectedMipAdmission);
         _pendingGuestWorkCount++;
         var total = _pendingGuestWorkBytes + payloadBytes;
         _pendingGuestWorkBytes = total < _pendingGuestWorkBytes ? ulong.MaxValue : total;
@@ -966,6 +968,7 @@ internal static partial class MetalVideoPresenter
 
     private static void ExecuteGuestImageWrite(nint device, nint queue, GuestImageWrite write)
     {
+        RejectAddressOnlySelectedStorageAlias(write.Address);
         GuestImage? image;
         lock (_gate)
         {
@@ -1094,6 +1097,8 @@ internal static partial class MetalVideoPresenter
 
     private static void ExecuteGuestImageBlit(nint queue, GuestImageBlit blit)
     {
+        RejectAddressOnlySelectedStorageAlias(blit.SourceAddress);
+        RejectAddressOnlySelectedStorageAlias(blit.DestinationAddress);
         GuestImage? source, destination;
         lock (_gate)
         {
@@ -1177,6 +1182,7 @@ internal static partial class MetalVideoPresenter
         uint height,
         uint pitchInPixel)
     {
+        RejectAddressOnlySelectedStorageAlias(address);
         uint formatTag;
         byte[]? initialData;
         lock (_gate)

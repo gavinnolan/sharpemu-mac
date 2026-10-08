@@ -83,6 +83,7 @@ internal static partial class MetalVideoPresenter
             foreach (var texture in textures)
             {
                 if (!StorageImageWrites(texture) || texture.Address == 0) continue;
+                if (_selectedStorageMipAssociations.TryGetValue(texture, out _)) continue;
                 var guestFormat = GetGuestTextureFormat(texture.Format, texture.NumberType);
                 if (guestFormat != 0) _availableGuestImages[texture.Address] = guestFormat;
                 _guestImageWorkSequences[texture.Address] = sequence;
@@ -96,6 +97,8 @@ internal static partial class MetalVideoPresenter
     {
         if (_skipAllCompute)
         {
+            if (dispatch.Textures.Any(texture => _selectedStorageMipAssociations.TryGetValue(texture, out _)))
+                throw new NotSupportedException("Metal selected storage mip writes cannot be skipped.");
             ReturnPooledComputeData(dispatch);
             return;
         }
@@ -117,6 +120,8 @@ internal static partial class MetalVideoPresenter
 
         if (!TryGetComputePipeline(device, dispatch.Shader, out var pipeline))
         {
+            if (dispatch.Textures.Any(texture => _selectedStorageMipAssociations.TryGetValue(texture, out _)))
+                throw new InvalidOperationException("Metal selected storage mip dispatch pipeline could not be created.");
             ReturnPooledComputeData(dispatch);
             return;
         }
@@ -134,6 +139,10 @@ internal static partial class MetalVideoPresenter
             if (descriptor.IsStorage && descriptor.Address != 0 &&
                 (!_textureSourceGraphEnabled || StorageImageWrites(descriptor)))
             {
+                ValidateSelectedStorageMipExecution(descriptor, queue);
+                if (_selectedStorageMipAssociations.TryGetValue(descriptor, out _) &&
+                    MetalNative.Send(commandBuffer, MetalNative.Selector("retainedReferences")) == 0)
+                    throw new NotSupportedException("Metal selected storage resources require native command-buffer retention through completion.");
                 textureHandles[index] = EnsureStorageImage(device, descriptor).Texture;
                 textureOwned[index] = false;
             }
@@ -216,9 +225,19 @@ internal static partial class MetalVideoPresenter
         lock (_gate)
         {
             var changed = new HashSet<ulong>();
+            HashSet<SelectedStorageMipKey>? selectedChanged = null;
             foreach (var descriptor in textures)
-                if (descriptor.Address != 0 && StorageImageWrites(descriptor) && changed.Add(descriptor.Address) &&
-                    _guestImages.TryGetValue(descriptor.Address, out var image)) image.MarkContentChanged();
+                if (descriptor.Address != 0 && StorageImageWrites(descriptor))
+                {
+                    if (_selectedStorageMipAssociations.TryGetValue(descriptor, out var selected))
+                    {
+                        if ((selectedChanged ??= new()).Add(selected.Key) &&
+                            _selectedStorageMipImages.TryGetValue(selected.Key, out var selectedImage)) selectedImage.MarkContentChanged();
+                        if (_selectedStorageMipPending.TryGetValue(selected.Key, out var pending) && pending.Sequence == _executingGuestWorkSequence)
+                            _selectedStorageMipPending.Remove(selected.Key);
+                    }
+                    else if (changed.Add(descriptor.Address) && _guestImages.TryGetValue(descriptor.Address, out var image)) image.MarkContentChanged();
+                }
         }
     }
 
@@ -230,17 +249,40 @@ internal static partial class MetalVideoPresenter
         // Render-target codes are a different namespace; substituting RGBA8
         // here changes both native binding type and the seed's byte layout.
         var nativeFormat = StorageTextureFormat(descriptor);
+        if (!_selectedStorageMipAssociations.TryGetValue(descriptor, out _))
+            RejectAddressOnlySelectedStorageAlias(descriptor.Address);
         descriptor = PrepareDrawTextureUpload(descriptor);
         var seedLayout = StorageTextureSeedLayout(descriptor, nativeFormat);
+        _selectedStorageMipAssociations.TryGetValue(descriptor, out var selected);
         lock (_gate)
         {
-            if (_guestImages.TryGetValue(descriptor.Address, out var existing))
+            if (selected is not null && (_guestImages.ContainsKey(descriptor.Address) ||
+                _selectedStorageMipImages.Keys.Any(key => key.Domain == selected.Key.Domain && key.Resource.Address == descriptor.Address && key != selected.Key)))
+                throw new NotSupportedException("Metal selected storage view conflicts with an address-only live image.");
+            if (selected is not null ? _selectedStorageMipImages.TryGetValue(selected.Key, out var existing) :
+                _guestImages.TryGetValue(descriptor.Address, out existing))
             {
+                if (selected is not null)
+                {
+                    ValidateSelectedStorageMipOwner(_selectedStorageMipOwners[selected.Key]);
+                    ValidateSelectedStorageMipOwner(selected);
+                }
                 ValidateStorageImageView(existing, descriptor, nativeFormat);
                 return existing;
             }
         }
 
+        if (selected is not null)
+        {
+            ValidateSelectedStorageMipOwner(selected);
+            lock (_gate)
+            {
+                if (_selectedStorageMipImages.Count >= 128)
+                    throw new NotSupportedException("Metal selected storage native owner limit exceeded.");
+                _selectedStorageMipImages.EnsureCapacity(_selectedStorageMipImages.Count + 1);
+                _selectedStorageMipOwners.EnsureCapacity(_selectedStorageMipOwners.Count + 1);
+            }
+        }
         if (descriptor.RgbaPixels.Length == 0)
             throw new InvalidOperationException($"Metal storage image 0x{descriptor.Address:X} has no complete initialization source.");
         var format = nativeFormat.Format;
@@ -295,13 +337,35 @@ internal static partial class MetalVideoPresenter
 
         lock (_gate)
         {
-            if (_guestImages.TryGetValue(descriptor.Address, out var raced))
+            if (selected is not null ? _selectedStorageMipImages.TryGetValue(selected.Key, out var raced) :
+                _guestImages.TryGetValue(descriptor.Address, out raced))
             {
                 MetalNative.SendVoid(image.Texture, MetalNative.Selector("release"));
+                if (selected is not null)
+                {
+                    ValidateSelectedStorageMipOwner(selected);
+                    ValidateSelectedStorageMipOwner(_selectedStorageMipOwners[selected.Key]);
+                }
                 ValidateStorageImageView(raced, descriptor, nativeFormat);
                 return raced;
             }
 
+            if (selected is not null)
+            {
+                try
+                {
+                    ValidateSelectedStorageMipOwner(selected);
+                    _selectedStorageMipImages.Add(selected.Key, image);
+                    _selectedStorageMipOwners.TryAdd(selected.Key, selected);
+                }
+                catch
+                {
+                    _selectedStorageMipImages.Remove(selected.Key);
+                    MetalNative.SendVoid(image.Texture, MetalNative.Selector("release"));
+                    throw;
+                }
+                return image;
+            }
             _guestImages[descriptor.Address] = image;
             _guestImageExtents[descriptor.Address] =
                 (descriptor.Width, descriptor.Height,
@@ -351,12 +415,12 @@ internal static partial class MetalVideoPresenter
             (!volume && descriptor.Depth != 1) || descriptor.Depth == 0 ||
             (volume && (descriptor.Width > 2048 || descriptor.Height > 2048 || descriptor.Depth > 2048)) ||
             descriptor.MipLevels != 1 || descriptor.MipUploads is { Length: > 0 } ||
-            descriptor.BaseMipLevel != 0 || descriptor.MipLevel != 0 ||
+            (descriptor.BaseMipLevel != 0 || descriptor.MipLevel != 0) && !IsQualifiedSelectedStorageMip(descriptor) ||
             !descriptor.Shape.Storage || descriptor.Shape.NumericClass == TextureNumericClass.Unsupported ||
             descriptor.Shape.DynamicMip || descriptor.Shape.Arrayed != singletonArray || descriptor.Shape.Cube ||
             descriptor.Shape.OneDimensional || descriptor.Shape.Multisampled || descriptor.Shape.DepthCompare || descriptor.Shape.R128 || descriptor.Shape.Atomic)
             throw new NotSupportedException(
-                "Metal storage image materialization supports only a single selected base mip, non-array 2D/3D or qualified singleton 2D-array view (3D extent <=2048): " +
+                "Metal storage image materialization supports a single base mip, the qualified 2D/mip1 view, non-array 3D or qualified singleton 2D-array (3D extent <=2048): " +
                 $"addr=0x{descriptor.Address:X} type={descriptor.Type} size={descriptor.Width}x{descriptor.Height} " +
                 $"arrayed={descriptor.ArrayedView} layers={descriptor.ArrayLayers} depth={descriptor.Depth} " +
                 $"view_mips={descriptor.MipLevels} base_mip={descriptor.BaseMipLevel} selected_mip={descriptor.MipLevel} " +

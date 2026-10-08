@@ -16,7 +16,7 @@ using TextureDescriptor = SharpEmu.Libs.Agc.AgcExports.TextureDescriptor;
 
 namespace SharpEmu.Gpu.Metal;
 
-internal static class MetalTextureSnapshots
+internal static partial class MetalTextureSnapshots
 {
     private const ulong MaximumSnapshotBytes = 128UL * 1024UL * 1024UL;
     private static readonly ConcurrentDictionary<ulong, byte> _arrayUploadUnsupported = new();
@@ -108,6 +108,7 @@ internal static class MetalTextureSnapshots
                         $"Metal array storage snapshots require a matching complete mode27 RGBA8Unorm single-mip 1x1 layer-zero descriptor and compiled 2D-array shape: " +
                         $"descriptor={binding.Descriptor} shape={binding.Shape} access={binding.Access} selected_mip={binding.MipLevel} " +
                         $"raw=[{string.Join(",", binding.ResourceDescriptor?.Select(static word => $"{word:X8}") ?? [])}].");
+                MetalVideoPresenter.RejectSelectedStorageAlias(context.Memory, binding.Descriptor, binding.IsStorage, binding.MipLevel);
                 var profileStart = TexturePreparationProfile.Begin();
                 var reuseKey = new GuestTextureSnapshotReuseKey(
                     binding.Descriptor,
@@ -127,6 +128,11 @@ internal static class MetalTextureSnapshots
                     TexturePreparationProfile.RecordBinding(
                         TexturePreparationProfile.BindingOutcome.Reused,
                         profileStart);
+                }
+                else if (TryCreateSelectedStorageMip(context, binding, out texture))
+                {
+                    unreturnedTexture = texture;
+                    TexturePreparationProfile.RecordBinding(TexturePreparationProfile.BindingOutcome.Linear, profileStart, texture.RgbaPixels.LongLength);
                 }
                 else if (TryCreateCapturedTextureSource(binding, out texture))
                 {
