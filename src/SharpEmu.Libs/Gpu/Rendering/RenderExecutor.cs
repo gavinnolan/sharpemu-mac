@@ -209,7 +209,8 @@ public sealed partial class RenderExecutor
             return;
         }
 
-        if (!HasValidVertexShader(shader) || IsUnsupportedGeometryStage(banks))
+        if (!HasValidVertexShader(shader) || IsUnsupportedGeometryStage(banks,
+            new TargetlessDrawArguments(submitId, true, arguments, default)))
         {
             return;
         }
@@ -337,7 +338,8 @@ public sealed partial class RenderExecutor
             return;
         }
 
-        if (!HasValidVertexShader(shader) || IsUnsupportedGeometryStage(banks))
+        if (!HasValidVertexShader(shader) || IsUnsupportedGeometryStage(banks,
+            new TargetlessDrawArguments(submitId, false, default, arguments)))
         {
             return;
         }
@@ -497,7 +499,7 @@ public sealed partial class RenderExecutor
     private static bool IsKnownGeometryOutputPrimitiveType(uint value) => value <= 4;
 
     // Only the plain vertex path and the primitive-shader vertex path with default geometry state run.
-    private bool IsUnsupportedGeometryStage(RegisterBanks banks)
+    private bool IsUnsupportedGeometryStage(RegisterBanks banks, in TargetlessDrawArguments draw)
     {
         var context = banks.Context;
         var shaderInterface = context.ShaderInterface;
@@ -533,7 +535,7 @@ public sealed partial class RenderExecutor
         }
 
         if (_dumpSkippedGraphics)
-            _pipelines.RecordUnsupportedGraphics(vertex, context);
+            _pipelines.RecordUnsupportedGraphics(vertex, context, banks.UserConfig, in draw);
 
         if (RenderTrace.Enabled && RenderTrace.GeometryStageSkip())
         {

@@ -4,6 +4,7 @@
 using System.Security.Cryptography;
 using System.Text.Json;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
+using SharpEmu.Libs.Gpu.Rendering;
 
 namespace SharpEmu.Libs.Gpu.Pipelines;
 
@@ -12,6 +13,14 @@ internal sealed partial class ShaderPipelineCache
     private readonly HashSet<ulong> _diagnosedSkippedExports = [];
 
     public void RecordUnsupportedGraphics(VertexStageRegisters vertex, ContextRegisters context)
+        => RecordUnsupportedGraphicsCore(vertex, context, null, null);
+
+    public void RecordUnsupportedGraphics(VertexStageRegisters vertex, ContextRegisters context,
+        UserConfigRegisters userConfig, in TargetlessDrawArguments draw)
+        => RecordUnsupportedGraphicsCore(vertex, context, userConfig, draw);
+
+    private void RecordUnsupportedGraphicsCore(VertexStageRegisters vertex, ContextRegisters context,
+        UserConfigRegisters? userConfig, TargetlessDrawArguments? draw)
     {
         try
         {
@@ -51,6 +60,29 @@ internal sealed partial class ShaderPipelineCache
                     maxOutput = context.ShaderInterface.MaxOutputPerSubgroup,
                     maxVerticesOut = context.ShaderInterface.GeometryMaxVerticesOut,
                     outputPrimitive = context.ShaderInterface.GeometryOutputPrimitiveType,
+                    originalDraw = draw,
+                    primitiveAssembly = userConfig is null ? null : new
+                    {
+                        userConfig.PrimitiveType,
+                        userConfig.IndexOffset,
+                        userConfig.ObjectId,
+                        userConfig.PrimitiveResetControl,
+                        context.PrimitiveResetIndex,
+                        userConfig.GeometryEngineControl,
+                        userConfig.GeometryEngineUserVectorEnable,
+                    },
+                    inputGeometry = new
+                    {
+                        context.ShaderInterface.GeometryOnChipControl,
+                        context.ShaderInterface.ExportVerticesPerSubgroup,
+                        context.ShaderInterface.GeometryPrimitivesPerSubgroup,
+                        context.ShaderInterface.GeometryInstancedPrimitivesInSubgroup,
+                        context.ShaderInterface.GeometryInstanceCount,
+                        context.ShaderInterface.ExportRingItemSize,
+                        context.ShaderInterface.PrimitiveIdEnable,
+                        context.ShaderInterface.VertexReuseOff,
+                        context.ShaderInterface.IndexExportFormat,
+                    },
                     geometryResource1 = vertex.GeometryResource1,
                     geometryResource2 = vertex.GeometryResource2,
                     userData = vertex.GeometryUserScalars.Values.AsSpan().ToArray(),

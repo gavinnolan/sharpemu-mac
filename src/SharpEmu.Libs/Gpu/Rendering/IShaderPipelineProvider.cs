@@ -57,6 +57,12 @@ public interface IShaderPipelineProvider
     // Optional capture of rejected stage inputs; it never admits or executes the draw.
     void RecordUnsupportedGraphics(VertexStageRegisters vertex, ContextRegisters context) { }
 
+    // Original packet and primitive-assembly state at the rejection boundary.
+    // Legacy diagnostic implementers retain their existing optional callback.
+    void RecordUnsupportedGraphics(VertexStageRegisters vertex, ContextRegisters context,
+        UserConfigRegisters userConfig, in TargetlessDrawArguments draw) =>
+        RecordUnsupportedGraphics(vertex, context);
+
     GraphicsPrograms GetGraphicsPrograms(
         VertexStageRegisters vertex,
         PixelStageRegisters pixel,
