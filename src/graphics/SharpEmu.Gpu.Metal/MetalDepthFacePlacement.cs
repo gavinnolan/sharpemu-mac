@@ -150,20 +150,29 @@ internal static class MetalDepthFacePlacement
         bool? mappingCurrent = null, tokenPresent = null;
         GuestImageWriteTracker.ContentToken tokenNow = default;
         string? reason = null;
-        // Inline the existing nested stability predicate in its exact query
-        // order. The earlier Observed check excludes its !Observed shortcut.
-        // Reuse the values which actually caused this veto; never query again
-        // for diagnostics or replace the original stamp.
+        // This route retains the original complete provider mapping, rather
+        // than relying on a process-wide epoch shared by unrelated mappings.
+        // Keep the original content token and recheck the exact mapping after
+        // querying it. Neither observation is replaced or restamped.
         if (!original.Content.Observed) reason = "original-content-unobserved";
         else if (original.Content.ByteCount != FaceBytes) reason = "original-content-size";
+        else if (original.Mapping.FootprintAddress != original.BackingAddress ||
+            original.Mapping.FootprintByteCount != original.BackingBytes ||
+            original.Mapping.SourceAddress != original.Address || original.Mapping.SourceByteCount != 8 ||
+            original.Address < original.BackingAddress ||
+            original.Address - original.BackingAddress > original.BackingBytes ||
+            FaceBytes > original.BackingBytes - (original.Address - original.BackingAddress)) reason = "original-mapping-geometry";
         else if ((sessionNow = MetalVideoPresenter.CurrentNativeDepthFaceSession) != original.Session) reason = "presenter-session";
         else if (!(mappingCurrent = original.Source.IsMappedCopyObservationCurrent(original.Mapping)).Value) reason = "original-mapping-currentness";
-        else if ((epochNow = HostMemory.MappingGeneration) != original.Content.MappingEpoch) reason = "global-mapping-epoch";
         else if (!(tokenPresent = GuestImageWriteTracker.TryGetObservedContentToken(
             original.Address, original.Content.ByteCount, out tokenNow)).Value) reason = "current-content-unobserved";
         else if (tokenNow != original.Content.Token) reason = "original-content-token";
+        else if (!(mappingCurrent = original.Source.IsMappedCopyObservationCurrent(original.Mapping)).Value) reason = "original-mapping-currentness-final";
         if (reason is not null)
+        {
+            epochNow = HostMemory.MappingGeneration; // failure diagnostic only
             throw OriginalCurrentFailure(original, invocation, reason, sessionNow, mappingCurrent, epochNow, tokenPresent, tokenNow);
+        }
     }
 
     private static NotSupportedException OriginalCurrentFailure(Observation original, string invocation, string reason,
