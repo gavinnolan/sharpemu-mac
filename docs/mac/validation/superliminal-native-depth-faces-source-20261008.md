@@ -23,8 +23,8 @@ The finite qualifier requires actual 256-square Z16/mode24 single selected layer
 complete normalized backing/pitch/layout agreement, single mip, no stencil.
 Its 0x20000 face placement follows that actual normalized backing/view tuple.
 The original provider mapping observation covers the COMPLETE normalized backing;
-the discarded eight-byte probe never supplies sampled depth. Original session is
-captured before setup, epoch after BeginReadSnapshot but before observation/bytes,
+the discarded eight-byte probe never supplies sampled depth. Original existing presenter-owner lifetime (`_selectedStorageMipSession`,
+advanced by actual owner release) is captured before setup, epoch after BeginReadSnapshot but before observation/bytes,
 and the original protected content/mapping checks remain immutable.
 
 Ordinary graphfalse public draw admission records exact original work, sequence,

@@ -1568,7 +1568,7 @@ internal static partial class MetalVideoPresenter
             lock (_gate)
             {
                 if (finite && (_closed || _guestWorkFailure is not null ||
-                    !ReferenceEquals(_guestMemory, original.Memory) || original.Session != CurrentStorageCpuSeedSession ||
+                    !ReferenceEquals(_guestMemory, original.Memory) || original.Session != CurrentNativeDepthFaceSession ||
                     (_guestDepthImages.TryGetValue(address, out var raced) ? !ReferenceEquals(raced, previous) : previous is not null)))
                     throw new NotSupportedException("Metal native depth face publication changed its exact original owner/lifetime.");
                 if (_guestDepthImages.Remove(address, out var replaced))

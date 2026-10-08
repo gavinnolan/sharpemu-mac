@@ -11,6 +11,10 @@ namespace SharpEmu.Gpu.Metal;
 
 internal static partial class MetalVideoPresenter
 {
+    // Reuse the actual existing presenter-owner lifetime, advanced by the real
+    // ReleaseSelectedStorageMipImages exit path. This base has no typed CPU seed
+    // API. Mapping/provider and exact memory identity remain separate vetoes.
+    internal static long CurrentNativeDepthFaceSession => Volatile.Read(ref _selectedStorageMipSession);
     // Accepted logical producer and sealed native encoder identity are distinct.
     // Encoded/Committed are NOT status4 or guest completion receipts. Sampling
     // uses later encoders in that SAME CB, or an actual successful status4
@@ -46,7 +50,7 @@ internal static partial class MetalVideoPresenter
         if (!MetalDepthFacePlacement.Enabled || work is not OffscreenGuestDraw { DepthTarget: { } target } draw ||
             !MetalDepthFacePlacement.TryGet(target, out var original)) return null;
         if (_closed || _guestWorkFailure is not null || !ReferenceEquals(_guestMemory, original.Memory) ||
-            original.Session != CurrentStorageCpuSeedSession || _nativeDepthFaces.Count >= 128 && !_nativeDepthFaces.ContainsKey(original.Address))
+            original.Session != CurrentNativeDepthFaceSession || _nativeDepthFaces.Count >= 128 && !_nativeDepthFaces.ContainsKey(original.Address))
             throw new NotSupportedException("Metal native depth face admission is closed, changed or saturated.");
         if (draw.Targets.Length == 0 || draw.Targets.Any(color => color.Width != 256 || color.Height != 256) ||
             target.Width != 256 || target.Height != 256 || target.Address != original.Address ||
@@ -105,7 +109,7 @@ internal static partial class MetalVideoPresenter
         lock (_gate)
         {
             if (_closed || _guestWorkFailure is not null || producer.Encoded ||
-                !ReferenceEquals(_guestMemory, producer.Original.Memory) || producer.Original.Session != CurrentStorageCpuSeedSession ||
+                !ReferenceEquals(_guestMemory, producer.Original.Memory) || producer.Original.Session != CurrentNativeDepthFaceSession ||
                 !_guestDepthImages.TryGetValue(producer.Original.Address, out var owner) || !ReferenceEquals(owner, image) ||
                 !_nativeDepthImageOrigins.TryGetValue(image, out var original) || original.Address != producer.Original.Address ||
                 commandBuffer != _batchCommandBuffer || queue == 0 || queue != _batchQueue ||
@@ -243,7 +247,7 @@ internal static partial class MetalVideoPresenter
                 var address = checked(d.Address + (ulong)face * MetalDepthFacePlacement.FaceBytes);
                 if (!_nativeDepthFaces.TryGetValue(address, out var producer)) return false;
                 if (_closed || _guestWorkFailure is not null || !ReferenceEquals(producer.Original.Memory, memory) ||
-                    producer.Original.Session != CurrentStorageCpuSeedSession || producer.Queue.Name != queue.Name || producer.Sequence <= 0)
+                    producer.Original.Session != CurrentNativeDepthFaceSession || producer.Queue.Name != queue.Name || producer.Sequence <= 0)
                     throw new NotSupportedException("Metal native cube capture lost its original six accepted same-queue face producers.");
                 MetalDepthFacePlacement.RequireOriginalCurrent(producer.Original);
                 faces[face] = producer;
@@ -253,7 +257,7 @@ internal static partial class MetalVideoPresenter
                 ArrayedView: true, Type: Gen5TextureTypeCube, Depth: 1, ArrayLayers: 6,
                 SourceByteCount: 6 * MetalDepthFacePlacement.FaceBytes, Descriptor: binding.ResourceDescriptor.ToArray(),
                 Shape: binding.Shape, Access: binding.Access, ResourceMipLevels: 1);
-            _nativeDepthCubeCaptures.Add(texture, new(memory, CurrentStorageCpuSeedSession, faces));
+            _nativeDepthCubeCaptures.Add(texture, new(memory, CurrentNativeDepthFaceSession, faces));
             return true;
         }
     }
@@ -375,7 +379,7 @@ internal static partial class MetalVideoPresenter
         {
             lock (_gate)
             {
-                if (_closed || _guestWorkFailure is not null || !ReferenceEquals(_guestMemory, capture.Memory) || capture.Session != CurrentStorageCpuSeedSession)
+                if (_closed || _guestWorkFailure is not null || !ReferenceEquals(_guestMemory, capture.Memory) || capture.Session != CurrentNativeDepthFaceSession)
                     throw new NotSupportedException("Metal native cube consumer lifetime changed.");
                 RejectNativeDepthCubeSiblingWritersLocked(capture.Memory, texture.Address, texture.SourceByteCount);
                 for (var face = 0; face < 6; face++)
@@ -416,7 +420,7 @@ internal static partial class MetalVideoPresenter
             foreach (var face in capture.Faces) MetalDepthFacePlacement.RequireOriginalCurrent(face.Original);
             lock (_gate)
             {
-                if (_closed || _guestWorkFailure is not null || capture.Session != CurrentStorageCpuSeedSession ||
+                if (_closed || _guestWorkFailure is not null || capture.Session != CurrentNativeDepthFaceSession ||
                     !ReferenceEquals(_guestMemory, capture.Memory) || capture.Faces.Any(face => face.Image is null ||
                         face.Image.Texture != face.Texture || face.Image.ContentVersion != face.Version))
                     throw new NotSupportedException("Metal native depth cube changed during ordered assembly.");
