@@ -70,7 +70,7 @@ Local main now includes the native AppKit launcher, modeless settings, bounded
 console output and private child-process groups. macOS composition references
 `SharpEmu.Launcher.MacOS`; Windows/Linux retain their GUI adapter. Mac publish
 policy rejects Avalonia, SkiaSharp, HarfBuzz and portable font/UI packages as
-well as Vulkan, MoltenVK and SDL. The latest signed default bundle contains clean `e627027`, with the native
+well as Vulkan, MoltenVK and SDL. The latest signed default bundle contains clean `8c19cd7`, with the native
 AppKit launcher and no portable UI dependencies.
 
 The integrated signed `e627027` launcher passes a 139s visible synthetic session:
@@ -116,3 +116,11 @@ Poppy's traced Invalidating recovery race, Demon's Souls GPU alias failure,
 DualSense behavior remain unqualified. See the
 [ownership/runtime journal](validation/w13-ownership-iteration-20261007.md) for
 exact revisions, failed preparation/regression runs and retained evidence.
+
+Presentation payload borrowers integrate next in `8c19cd7`: active frame reads
+pin original pool receipts, and uncertain pool returns cannot become successful
+close on retry. Integrated controls pass 332/332 Rosetta and 306/306 ARM64, no
+skips; existing native Metal subset passes 25/25. Signed Sarah150s movement,
+jump and landing pass, peak1208MiB, no KILL. These cases do not qualify a native
+borrowed upload or native frame teardown; graph activation remains disabled.
+See `artifacts/validation/integrated-20261007/presentation-borrow-integrated-8c19cd7/`.

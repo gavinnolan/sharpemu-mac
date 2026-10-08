@@ -712,3 +712,25 @@ No game ran through this synthetic launcher session. Evidence:
 `package-agent/root-native-e627-window/`. Typed settings/disk-failure retry, full
 frontend parity and minimum resize remain separate pending work. GPU graph and
 fault-domain activation remain disabled; no 3D progression/performance claim.
+
+## Integrated pooled presentation borrower — 8c19cd7
+
+Reviewed fbd4cba→52507af→97fdd7f+a64bb71 integrates locally. Selected readers pin
+exact accepted pool receipts independently from queue/publication owners; close
+drains CPU borrowers outside gates, retains incomplete owners and serializes
+accepted native teardown. Consumed but unconfirmed pool returns remain sticky
+across retry; later rerents cannot be stolen. Graph remains hard-disabled.
+
+Integrated build124warnings0errors; controls332/332 Rosetta and306/306 ARM64,
+zero skips and unchanged assemblies. Existing native ownership/color subset
+25/25 Rosetta passes with no timeout and lock/process group cleaned. It does
+not establish real borrowed CPU upload/native command-buffer teardown.
+
+Fresh signed8c19 Sarah150s stays alive, peak1208MiB; scene/right-left movement/
+airborne jump/landing reviewed. No agent builds during run. TERM needs no KILL,
+owned89429 absent and shared lock released. Host-stop reason/CPU_TRAP correct;
+join interruption persists. Captures are runtime evidence, not controlled
+before/after FPS acceptance. Exact signed bundle/run archive and hashes:
+`presentation-borrow-integrated-8c19cd7/`. Native launcher source is unchanged
+from visible-qualified e627; later typed settings/atomic persistence and
+exclusive Mac memory/owned-BGRA prototypes remain isolated and unactivated.
