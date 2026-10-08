@@ -98,14 +98,25 @@ internal static unsafe class MacMappedPublicationWorker
                 held = Prepare(original, [13, 27, 91, 203]);
                 Assert.Equal(CpuMappedPublicationResult.Applied, held.TryCommit());
                 var own = Assert.IsType<CpuMappedCopyObservation>(held.SuccessfulObservation);
+                Assert.True(views.TryWriteBacking(second.Address + 40, new byte[] { 101 }));
+                // Preserve the exact original receipt across a disjoint enrolled
+                // EOP-like destination. Do not read/capture a new seed baseline.
+                Assert.Same(own, held.SuccessfulObservation);
                 held.Dispose(); held = Prepare(own, [11, 31, 79, 211]);
                 Assert.Equal(CpuMappedPublicationResult.Applied, held.TryCommit());
                 var next = Assert.IsType<CpuMappedCopyObservation>(held.SuccessfulObservation);
                 held.Dispose(); held = null;
-                Assert.True(views.TryWriteBacking(second.Address + 40, new byte[] { 101 }));
+                var expected = (byte[])seed.Clone();
+                new byte[] { 11, 31, 79, 211 }.CopyTo(expected, 31); expected[40] = 101;
+                Assert.Equal(expected, new ReadOnlySpan<byte>((void*)first.Address, (int)page).ToArray());
+                Assert.Equal(expected, new ReadOnlySpan<byte>((void*)second.Address, (int)page).ToArray());
+                Assert.True(views.TryWriteBacking(second.Address + 31, new byte[] { 103 }));
                 Assert.True(views.IsMappedCopyObservationCurrent(next));
                 Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
                     views.TryPrepareMappedPublication(next, [new(first.Address + 31, new byte[] { 1 })], out _));
+                expected[31] = 103;
+                Assert.Equal(expected, new ReadOnlySpan<byte>((void*)first.Address, (int)page).ToArray());
+                Assert.Equal(expected, new ReadOnlySpan<byte>((void*)second.Address, (int)page).ToArray());
                 Assert.Equal((byte)101, new ReadOnlySpan<byte>((void*)first.Address, (int)page)[40]);
             }
             else if (scenario == 2)

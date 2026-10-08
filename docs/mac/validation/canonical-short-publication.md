@@ -36,16 +36,33 @@ accesses the alias; no transient-count revalidation is used after reservation.
 
 An original copy retains a private writer revision only if participating writers
 were quiescent at both boundaries and the revision stayed unchanged. Mapping-only
-IsCurrent is unchanged. A completed participating alias write since that original
-copy vetoes publication even if the texture tracker did not see it. Publication
-increments that revision. The first-use checkpoint rejects a second publication using the old observation.
-Its separate continuity successor preallocates a provider-owned observation from
-those SAME original view identities. Only an exact Applied ticket exposes it,
-with the revision returned by its own write. There is no fresh lookup, writer
-recapture, content-token update or restored mapping identity. A subsequent external
-participating write still vetoes prepare; cancelled/rejected/unknown tickets expose
-no observation. Any Metal origin/content-token transition remains a separately
-reviewed caller responsibility, with missing raw/native writers still uncertified.
+IsCurrent is unchanged. This source-only successor retains a fixed 512-revision
+history of completed physical destination intervals. An ordinary successful
+operation envelope records no guessed whole-backing range: all actual destination
+chunks are recorded by the existing clear/copy helpers. Failed/unresolved envelopes
+or chunks remain unknown and cannot be called disjoint. Active writers still
+exclude preparation across the entire backing.
+
+While whole-backing publication admission is held, preparation resolves the exact
+canonical offsets of the detached runs and checks every record since the ORIGINAL
+private revision. Overlap, unknown/missing entries, a history older than the bound,
+or sticky saturation/identity/recording loss rejects. A completed enrolled EOP-like
+label write outside those runs can therefore be accepted without refreshing the
+original observation. Ring records use a bounded exact CAS; a delayed completion
+cannot overwrite a newer record and instead loses coverage. History storage is one
+preallocated inline-array-backed buffer; ordinary Begin/End add no heap allocation,
+wait, callback, native query or timer.
+
+Publication records only its own exact touched runs. Its preallocated successful
+observation carries those SAME immutable original view identities and the revision
+returned by the exact Applied transaction. There is no fresh writer capture,
+content-token update, restored mapping identity or refreshed session. An old seed
+still rejects after an overlapping own publication. Successful own continuity can
+cross ring wrap provided the recent original-to-current history remains complete.
+Cancelled/rejected/unknown tickets expose no successful observation. Full original
+mapping/lifetime footprint exclusion stays separate from texel conflict history.
+Any Metal origin/content-token transition remains a separately reviewed caller
+responsibility, with missing raw/native writers still uncertified.
 
 Raw cached AliasBase/Descriptor access, native/JIT guest stores, tracker direct
 mprotect, external syscalls and unsupported providers remain outside this writer
@@ -76,3 +93,17 @@ requires `SHARPEMU_TEST_REQUIRE_MAPPED_PUBLICATION_NATIVE=1` and exact
 `SHARPEMU_TEST_EXPECT_ARCH=Arm64` or `X64`. Normal suites declare the native theory
 skipped; that must not be counted as native qualification. Zero-byte operations keep
 original validation and no-op behavior even while publication is held.
+
+## Range-history source checkpoint
+
+Based on frozen qualified first-use `1b3d5e0a` (production `3c10cae5`), whose
+actual 30 managed cases and four Mac ordinary-memory workers passed on each CLR.
+This range successor is **source-only, unbuilt and unexecuted**. The earlier failed
+ARM fixture run remains preserved; no earlier results qualify this new history.
+Prepared additional managed controls cover disjoint clear/write/copy, exact
+half-open texel boundaries, shared-alias physical offsets, cross-view staged
+memmove, unknown/failed envelopes, history age and delayed completion, concurrent
+disjoint writes, and repeated exact own continuity through ring wrap. The existing
+native continuity proposal now inserts a disjoint alias label between two own
+publications and checks both entire aliases before an overlapping-write veto.
+No native/GPU/game activation or generic content certification is claimed.

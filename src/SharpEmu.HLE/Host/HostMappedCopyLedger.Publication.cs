@@ -36,6 +36,7 @@ public sealed unsafe partial class HostMappedCopyLedger
         // buffers, callbacks or caller-generated native outcome receipts.
         var detached = new DetachedRun[runs.Count];
         var aliasesToWrite = new AliasRun[runs.Count];
+        var physicalRuns = new HostManagedWriteIntervals.PhysicalRun[runs.Count];
         var bytes = 0;
         for (var index = 0; index < detached.Length; index++)
         {
@@ -58,7 +59,7 @@ public sealed unsafe partial class HostMappedCopyLedger
         var successfulObservation = new CpuMappedCopyObservation(successfulCapture,
             original.FootprintAddress, original.FootprintByteCount, original.SourceAddress,
             original.SourceByteCount, original.Segments.ToArray());
-        var transaction = new Publication(this, backing, original, writers, aliasesToWrite, successfulObservation);
+        var transaction = new Publication(this, backing, original, writers, aliasesToWrite, physicalRuns, successfulObservation);
         var wrapper = new CpuMappedPublication(transaction);
         if (!backing.TryEnterAccess()) return CpuMappedPublicationPreparationResult.Rejected;
         try
@@ -85,8 +86,9 @@ public sealed unsafe partial class HostMappedCopyLedger
                             new(aliasesToWrite[previous].Offset, (ulong)aliasesToWrite[previous].Bytes.Length)))
                             return CpuMappedPublicationPreparationResult.Rejected;
                     aliasesToWrite[index] = new(offset, run.Bytes);
+                    physicalRuns[index] = new(offset, (ulong)run.Bytes.Length);
                 }
-                reserved = writers.TryReservePublication(Volatile.Read(ref capture.WriterRevision));
+                reserved = writers.TryReservePublication(Volatile.Read(ref capture.WriterRevision), physicalRuns);
                 if (!reserved || !IsCurrent(backing, original)) return CpuMappedPublicationPreparationResult.Rejected;
                 transaction.Next = publications; publications = transaction; publicationCount++;
                 installed = true; publication = wrapper;
@@ -118,6 +120,7 @@ public sealed unsafe partial class HostMappedCopyLedger
 
     private sealed class Publication(HostMappedCopyLedger owner, HostBackingObject backing,
         CpuMappedCopyObservation original, HostManagedWriteIntervals writers, AliasRun[] runs,
+        HostManagedWriteIntervals.PhysicalRun[] physicalRuns,
         CpuMappedCopyObservation successfulObservation)
         : CpuMappedPublicationTransaction
     {
@@ -148,7 +151,7 @@ public sealed unsafe partial class HostMappedCopyLedger
                 lock (owner.gate)
                 {
                     if (!owner.IsCurrent(backing, Original)) return QuarantineLocked();
-                    var revision = writers.RecordPublicationWrite();
+                    var revision = writers.RecordPublicationWrite(physicalRuns);
                     Volatile.Write(ref ((Capture)successfulObservation.OwnerIdentity).WriterRevision, revision);
                     owner.RemovePublicationLocked(this); state = 2;
                 }

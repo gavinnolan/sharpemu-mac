@@ -237,10 +237,166 @@ public sealed class MappedPublicationTests
         Assert.Equal(CpuMappedPublicationResult.Applied, second.TryCommit());
         var next = Assert.IsType<CpuMappedCopyObservation>(second.SuccessfulObservation);
         Assert.Equal(27, state.Bytes()[0]);
-        Assert.True(state.Views.TryWriteBacking(State.Address + 4, new byte[] { 91 }));
+        Assert.True(state.Views.TryWriteBacking(State.Address, new byte[] { 91 }));
         Assert.True(state.Views.IsMappedCopyObservationCurrent(next));
         Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
             state.Views.TryPrepareMappedPublication(next, [new(State.Address, new byte[] { 14 })], out _));
+    }
+
+    [Theory]
+    [InlineData(0)] [InlineData(1)] [InlineData(2)]
+    public void CompletedDisjointPhysicalWriterPermitsExactOwnContinuationWithoutRecapture(int kind)
+    {
+        using var state = new State(); var original = state.Capture();
+        using var first = state.Prepare(original, State.Address, [13]);
+        Assert.Equal(CpuMappedPublicationResult.Applied, first.TryCommit());
+        var own = Assert.IsType<CpuMappedCopyObservation>(first.SuccessfulObservation);
+        // A participating ordinary EOP-like label destination outside the texel.
+        Assert.True(kind switch
+        {
+            0 => state.Views.Clear(32, 4),
+            1 => state.Views.TryWriteBacking(State.Address + 32, new byte[] { 21, 22, 23, 24 }),
+            _ => state.Views.TryCopyBacking(State.Address + 32, State.Address, 1),
+        });
+        Assert.Same(own, first.SuccessfulObservation); // no replacement/recapture of the original baseline
+        using var second = state.Prepare(own, State.Address, [27]);
+        Assert.Equal(CpuMappedPublicationResult.Applied, second.TryCommit());
+        Assert.Equal(27, state.Bytes()[0]);
+        Assert.Equal(original.Segments, second.SuccessfulObservation!.Segments);
+        Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
+            state.Views.TryPrepareMappedPublication(original, [new(State.Address, new byte[] { 31 })], out _));
+    }
+
+    [Theory]
+    [InlineData(7, false)] [InlineData(8, true)]
+    public void ExactPhysicalConflictUsesHalfOpenTexelBounds(int offset, bool expected)
+    {
+        using var state = new State(); var original = state.Capture();
+        Assert.True(state.Views.TryWriteBacking(State.Address + (ulong)offset, new byte[] { 91 }));
+        var result = state.Views.TryPrepareMappedPublication(original, [new(State.Address, new byte[8])], out var receipt);
+        using (receipt)
+        {
+            Assert.Equal(expected ? CpuMappedPublicationPreparationResult.Prepared : CpuMappedPublicationPreparationResult.Rejected, result);
+            if (expected) Assert.Equal(CpuMappedPublicationResult.Applied, receipt!.TryCommit());
+        }
+    }
+
+    [Fact]
+    public void BoundedHistoryEvictionRejectsOldBaselineButExactOwnContinuityCrossesRingWrap()
+    {
+        using var state = new State(); var old = state.Capture(); var current = old;
+        for (var iteration = 0; iteration < 600; iteration++)
+        {
+            using var receipt = state.Prepare(current, State.Address, [(byte)iteration]);
+            Assert.Equal(CpuMappedPublicationResult.Applied, receipt.TryCommit());
+            current = Assert.IsType<CpuMappedCopyObservation>(receipt.SuccessfulObservation);
+            Assert.True(state.Views.TryWriteBacking(State.Address + 32, new byte[] { (byte)iteration }));
+        }
+        Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
+            state.Views.TryPrepareMappedPublication(old, [new(State.Address, new byte[] { 14 })], out _));
+        using var last = state.Prepare(current, State.Address, [57]);
+        Assert.Equal(CpuMappedPublicationResult.Applied, last.TryCommit());
+        Assert.Equal(57, state.Bytes()[0]);
+    }
+
+    [Fact]
+    public void UnknownCompletedWriterCannotBeRelabeledDisjoint()
+    {
+        using var state = new State(); var original = state.Capture(); var writers = state.Enroll();
+        var begin = writers.GetType().GetMethod("Begin", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var end = writers.GetType().GetMethod("End", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var token = begin.Invoke(writers, [32UL, 4UL])!;
+        Assert.True((bool)end.Invoke(writers, [token, false])!);
+        Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
+            state.Views.TryPrepareMappedPublication(original, [new(State.Address, new byte[] { 13 })], out _));
+    }
+
+    [Theory]
+    [InlineData(0)] [InlineData(32)]
+    public void OtherVirtualAliasConflictsByCanonicalPhysicalOffset(int offset)
+    {
+        using var state = new State();
+        Assert.True(state.Views.Unmap(State.Address + State.Page, State.Page, out var preserved)); Assert.True(preserved);
+        Assert.True(state.Views.TryMapReservedRange(State.Address + State.Page, State.Page, 0, HostPageProtection.ReadWrite, out _));
+        var original = state.Capture();
+        Assert.True(state.Views.TryWriteBacking(State.Address + State.Page + (ulong)offset, new byte[] { 99 }));
+        var result = state.Views.TryPrepareMappedPublication(original, [new(State.Address, new byte[] { 13 })], out var receipt);
+        using (receipt)
+        {
+            Assert.Equal(offset == 0 ? CpuMappedPublicationPreparationResult.Rejected : CpuMappedPublicationPreparationResult.Prepared, result);
+            if (offset != 0) Assert.Equal(CpuMappedPublicationResult.Applied, receipt!.TryCommit());
+        }
+    }
+
+    [Fact]
+    public void CrossViewStagedCopyRecordsActualDestinationsAndPreservesMemmoveBytes()
+    {
+        using var state = new State();
+        var seed = Enumerable.Range(0, (int)(State.Page * 2)).Select(i => (byte)(i * 31)).ToArray();
+        Assert.True(state.Views.TryWriteBacking(State.Address, seed));
+        var original = state.Capture();
+        var expected = (byte[])seed.Clone();
+        Array.Copy(expected, (int)State.Page - 4, expected, (int)State.Page - 2, 8);
+        Assert.True(state.Views.TryCopyBacking(State.Address + State.Page - 2, State.Address + State.Page - 4, 8));
+        Assert.Equal(expected, state.Bytes());
+        using var receipt = state.Prepare(original, State.Address, [57]);
+        Assert.Equal(CpuMappedPublicationResult.Applied, receipt.TryCommit());
+        expected[0] = 57; Assert.Equal(expected, state.Bytes());
+    }
+
+    [Fact]
+    public void FailedUnresolvedOperationEnvelopeNeverBecomesDisjointHistory()
+    {
+        using var state = new State(); var original = state.Capture();
+        Assert.False(state.Views.TryWriteBacking(State.Address + State.Page * 3, new byte[] { 99 }));
+        Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
+            state.Views.TryPrepareMappedPublication(original, [new(State.Address, new byte[] { 13 })], out _));
+    }
+
+    [Fact]
+    public void DisjointHistoryOlderThanBoundedWindowDeclinesWithoutRecapture()
+    {
+        using var state = new State(); var original = state.Capture();
+        for (var iteration = 0; iteration < 257; iteration++)
+            Assert.True(state.Views.TryWriteBacking(State.Address + 32, new byte[] { (byte)iteration }));
+        Assert.True(state.Views.IsMappedCopyObservationCurrent(original));
+        Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
+            state.Views.TryPrepareMappedPublication(original, [new(State.Address, new byte[] { 13 })], out _));
+    }
+
+    [Fact]
+    public void DelayedCompletionCannotOverwriteNewerWrappedHistory()
+    {
+        using var state = new State(); var original = state.Capture(); var writers = state.Enroll();
+        var begin = writers.GetType().GetMethod("Begin", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var end = writers.GetType().GetMethod("End", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var delayed = begin.Invoke(writers, [32UL, 1UL])!;
+        try
+        {
+            for (var iteration = 0; iteration < 600; iteration++)
+            {
+                var token = begin.Invoke(writers, [64UL, 1UL])!;
+                Assert.True((bool)end.Invoke(writers, [token, true])!);
+            }
+        }
+        finally { Assert.True((bool)end.Invoke(writers, [delayed, true])!); }
+        Assert.Equal(1, writers.GetType().GetField("coverageIncomplete", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(writers));
+        Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
+            state.Views.TryPrepareMappedPublication(original, [new(State.Address, new byte[] { 13 })], out _));
+        // Scalar delayed completion only, no forged bytes/native result.
+    }
+
+    [Fact]
+    public async Task ConcurrentCompletedDisjointWritesPreserveOriginalRangeHistory()
+    {
+        using var state = new State(); var original = state.Capture();
+        var writes = Enumerable.Range(0, 32).Select(index => Task.Run(() =>
+            state.Views.TryWriteBacking(State.Address + 32 + (ulong)index, new byte[] { (byte)index }))).ToArray();
+        Assert.All(await Task.WhenAll(writes).WaitAsync(TimeSpan.FromSeconds(5)), succeeded => Assert.True(succeeded));
+        using var receipt = state.Prepare(original, State.Address, [57]);
+        Assert.Equal(CpuMappedPublicationResult.Applied, receipt.TryCommit());
+        Assert.Equal(57, state.Bytes()[0]);
+        for (var index = 0; index < 32; index++) Assert.Equal((byte)index, state.Bytes()[32 + index]);
     }
 
     [Fact]

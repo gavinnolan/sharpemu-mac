@@ -4,7 +4,7 @@ namespace SharpEmu.HLE.Host;
 
 // Ordinary participating alias writes only. Internal bookkeeping, never content
 // authority: pre-enrollment/raw/native stores and copy serialization are absent.
-internal sealed class HostManagedWriteIntervals
+internal sealed partial class HostManagedWriteIntervals
 {
     internal const int Capacity = 128;
     private sealed class Slot
@@ -35,7 +35,7 @@ internal sealed class HostManagedWriteIntervals
         { Interlocked.Exchange(ref coverageIncomplete, 1); Interlocked.Decrement(ref admission); return default; }
         if (Volatile.Read(ref coverageIncomplete) != 0) { Interlocked.Decrement(ref admission); return default; }
         var identity = Interlocked.Increment(ref nextIdentity);
-        if (identity <= 0) { Interlocked.Exchange(ref coverageIncomplete, 1); Interlocked.Decrement(ref admission); return default; }
+        if (identity <= 0 || identity == long.MaxValue) { Interlocked.Exchange(ref coverageIncomplete, 1); Interlocked.Decrement(ref admission); return default; }
         var first = (int)((ulong)identity % Capacity);
         for (var visited = 0; visited < Capacity; visited++)
         {
@@ -65,8 +65,13 @@ internal sealed class HostManagedWriteIntervals
         // Consume this exact operation before reuse. A copied/stale token cannot
         // release a later operation or repeat an unknown completion.
         var operation = slots[token.Slot].Operation;
+        var offset = slots[token.Slot].Offset;
+        var count = slots[token.Slot].Count;
         if (Interlocked.CompareExchange(ref slots[token.Slot].State, 0, token.Identity) != token.Identity)
             return false;
+        // Copy the owned slot's fields before consuming it: a later operation
+        // may immediately reuse the slot. Admission stays held through history.
+        RecordCompletedHistory(token.Identity, offset, count, operation, succeeded);
         if (!operation)
         {
             Interlocked.Decrement(ref active);
@@ -91,17 +96,18 @@ internal sealed class HostManagedWriteIntervals
         if (found < 0 || Volatile.Read(ref admission) != 0 || Volatile.Read(ref coverageIncomplete) != 0) return false;
         revision = found; return true;
     }
-    internal bool TryReservePublication(long originalRevision)
+    internal bool TryReservePublication(long originalRevision, ReadOnlySpan<PhysicalRun> runs)
     {
         if (originalRevision < 0 || originalRevision == long.MaxValue || Volatile.Read(ref coverageIncomplete) != 0 ||
             Interlocked.CompareExchange(ref admission, PublicationBit, 0) != 0) return false;
-        if (Volatile.Read(ref nextIdentity) == originalRevision && Volatile.Read(ref coverageIncomplete) == 0) return true;
+        if (HasDisjointCompletedHistory(originalRevision, runs) && Volatile.Read(ref coverageIncomplete) == 0) return true;
         ReleasePublication(); return false;
     }
-    internal long RecordPublicationWrite()
+    internal long RecordPublicationWrite(ReadOnlySpan<PhysicalRun> runs)
     {
         var revision = Interlocked.Increment(ref nextIdentity);
-        if (revision <= 0) Interlocked.Exchange(ref coverageIncomplete, 1);
+        if (revision <= 0 || revision == long.MaxValue) Interlocked.Exchange(ref coverageIncomplete, 1);
+        else RecordHistory(revision, runs, false);
         return revision;
     }
     internal void ReleasePublication() => Interlocked.Add(ref admission, -PublicationBit);
