@@ -1526,6 +1526,9 @@ internal static partial class MetalVideoPresenter
             checked((ulong)texture.Width * texture.Height * Math.Max(texture.Depth, 1u) * 16)));
         if (_selectedStorageMipAssociations.TryGetValue(texture, out _))
             throw new NotSupportedException("Metal selected storage mip cannot use the generic sampled/draw materializer.");
+        var sampledSingletonVolume = !texture.IsStorage && texture.Type == 10 && texture.TileMode != 0;
+        if (sampledSingletonVolume)
+            MetalTextureSnapshots.ValidateSampledSingletonVolumeUpload(texture);
 
         if (texture.Width == 0 || texture.Height == 0)
         {
@@ -1544,7 +1547,9 @@ internal static partial class MetalVideoPresenter
             throw new InvalidOperationException(
                 $"Metal cannot upload unstable texture snapshot at 0x{texture.Address:X}.");
 
-        var cacheable = IsCacheableDrawTexture(texture);
+        // This bounded owned-origin path does not authorize address/cache reuse
+        // across unobserved writer or tracker lifetimes.
+        var cacheable = !sampledSingletonVolume && IsCacheableDrawTexture(texture);
 
         // Feedback reads of a live guest render target sample an ordered
         // snapshot, resolved like the Vulkan presenter: a guest depth image

@@ -85,8 +85,11 @@ internal static partial class MetalTextureSnapshots
                 // No general XYZ sampled-volume path is qualified. In particular,
                 // cached/known upload shortcuts cannot authorize an XY-only decode.
                 if (!binding.IsStorage && binding.Descriptor.Type == Gen5TextureType3D && binding.Descriptor.TileMode != 0)
-                    throw new NotSupportedException("Metal sampled tiled volumes require a qualified 3D source and sampled-view consumer; XY detiling is unsupported.");
-                if (binding.Descriptor.Type == Gen5TextureType3D && binding.Descriptor.TileMode == 5)
+                {
+                    RequireSampledSingletonVolume(binding);
+                    MetalVideoPresenter.RequireCpuOnlySampledSingletonVolume(binding.Descriptor.Address);
+                }
+                if (binding.IsStorage && binding.Descriptor.Type == Gen5TextureType3D && binding.Descriptor.TileMode == 5)
                 {
                     var d = binding.Descriptor;
                     if (!binding.IsStorage || binding.MipLevel != 0 || binding.IsArrayed ||
@@ -133,6 +136,13 @@ internal static partial class MetalTextureSnapshots
                 {
                     unreturnedTexture = texture;
                     TexturePreparationProfile.RecordBinding(TexturePreparationProfile.BindingOutcome.Linear, profileStart, texture.RgbaPixels.LongLength);
+                }
+                else if (TryCreateSampledSingletonVolume(context, binding, out texture))
+                {
+                    unreturnedTexture = texture;
+                    snapshots?.Add(reuseKey, texture);
+                    TexturePreparationProfile.RecordBinding(TexturePreparationProfile.BindingOutcome.Linear,
+                        profileStart, texture.RgbaPixels.LongLength);
                 }
                 else if (TryCreateCapturedTextureSource(binding, out texture))
                 {
