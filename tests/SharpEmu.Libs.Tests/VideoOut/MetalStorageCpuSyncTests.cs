@@ -325,6 +325,46 @@ public sealed class MetalStorageCpuSyncTests
         Images.Add(Address, image); MetalVideoPresenter.AttachGuestMemory(memory); return image;
     }
 
+    [Theory]
+    [InlineData("unknown")] [InlineData("overlap")] [InlineData("stale")] [InlineData("overflow")]
+    public void RemovingOldGpuOwnerCannotEraseItsCanonicalPhysicalRefusal(string kind)
+    {
+        ActualArchitecture(); using var state = new State(); var memory = new MappedMemory(Physical(0));
+        var snapshot = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [Binding(0)], out _));
+        var origin = GetOrigin(snapshot); var image = InstallImage(origin, memory);
+        var histories = Field("_finiteStorageRetiredOrigins"); var count = Field("_finiteStorageRetiredOriginCount"); var unknown = Field("_finiteStorageRetiredUnknown");
+        var oldHistory = histories.GetValue(null); var oldCount = count.GetValue(null); var oldUnknown = unknown.GetValue(null);
+        try
+        {
+            histories.SetValue(null, null); count.SetValue(null, 0); unknown.SetValue(null, false);
+            Set(image, "GpuWritten", true);
+            if (kind == "unknown") Set(image, "StorageCpuOrigin", null!);
+            if (kind == "overflow")
+            {
+                var full = Array.CreateInstance(origin.GetType(), 128);
+                var clone = origin.GetType().GetMethod("<Clone>$", BindingFlags.Instance | BindingFlags.Public)!;
+                for (var index = 0; index < full.Length; index++) full.SetValue(clone.Invoke(origin, null), index);
+                histories.SetValue(null, full); count.SetValue(null, 128);
+            }
+            lock (Field("_gate").GetValue(null)!)
+            {
+                // Actual bookkeeping core, followed by removal of its live entry.
+                // Synthetic mapping bytes qualify refusal only, never native rights.
+                Presenter.GetMethod("RecordFiniteStorageOwnerRetirementLocked", Private)!.Invoke(null, [image]);
+                Images.Remove(Address);
+                if (kind == "stale") memory.Current = false;
+                object?[] args = [image, origin, null];
+                Assert.False((bool)Presenter.GetMethod("IsFiniteStorageNativeCohortCurrentLocked", Private)!.Invoke(null, args)!);
+                Assert.Contains("retired-native-owner", Assert.IsType<string>(args[2]));
+            }
+            Assert.Equal((nint)123, image.GetType().GetField("Texture")!.GetValue(image));
+        }
+        finally
+        {
+            Images.Remove(Address); histories.SetValue(null, oldHistory); count.SetValue(null, oldCount); unknown.SetValue(null, oldUnknown);
+        }
+    }
+
     private class Memory(byte[] bytes) : ICpuMemory
     {
         internal byte[] Bytes = bytes; internal int Reads;

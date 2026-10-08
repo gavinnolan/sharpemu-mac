@@ -14,7 +14,15 @@ internal static partial class MetalVideoPresenter
     // Missing/overflow debt is process-sticky: session reset is not teardown.
     private static void NoteFiniteStorageOwnerRetirementLocked(GuestImage retired)
     {
-        if (!_rgbaStorageRuntimePublicationRequested || !retired.GpuWritten) return;
+        if (!_rgbaStorageRuntimePublicationRequested) return;
+        RecordFiniteStorageOwnerRetirementLocked(retired);
+    }
+
+    // Shared ordinary bookkeeping core allows managed refusal controls without
+    // enabling the runtime/native route. It never supplies positive authority.
+    private static void RecordFiniteStorageOwnerRetirementLocked(GuestImage retired)
+    {
+        if (!retired.GpuWritten) return;
         if (_finiteStorageDebts.TryGetValue(retired, out var debt) &&
             !debt.Failed && !debt.Pending && debt.CanonicalVersion == retired.ContentVersion &&
             debt.CanonicalOrigin is { } canonical &&
@@ -30,7 +38,7 @@ internal static partial class MetalVideoPresenter
         if (_finiteStorageRetiredOriginCount == MaximumFiniteRetiredOrigins)
         { _finiteStorageRetiredUnknown = true; return; }
         try { _finiteStorageRetiredOrigins ??= new StorageCpuSeedOrigin?[MaximumFiniteRetiredOrigins]; }
-        catch { _finiteStorageRetiredUnknown = true; throw; }
+        catch { _finiteStorageRetiredUnknown = true; return; } // optional bookkeeping must preserve an in-flight primary
         _finiteStorageRetiredOrigins[_finiteStorageRetiredOriginCount++] = original;
     }
 
