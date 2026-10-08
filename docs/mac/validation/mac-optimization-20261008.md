@@ -187,6 +187,65 @@ are not game/loading/FPS evidence, and do not justify replacing runtime3 yet.
 Exact payload/runtime hashes, host traces, commands and results:
 `artifacts/validation/integrated-20261007/dotnet10-patch-controls-20261008/`.
 
+## Latest signed DF replay batch
+
+`artifacts/macos/compat-df173172/SharpEmu.app` has clean exact source
+`df173172e8aeda6d7a31720bad794274f6864628`, SDK10.0.103/runtime10.0.3,
+native-only closure/architecture checks and valid ad-hoc signing. Source and
+bundle stayed frozen through the six serialized runs. Foreign REmu was observed;
+these establish blockers, not measured FPS/load improvements. Agent compilers
+were paused during the game batch.
+
+Before this bundle, combined root `e4117548` passed81/81 Libs controls and38/38
+non-native Metal controls per CLR, plus12/12 required-device numerical cases per
+CLR (selected mip/publication, BGRA singleton array and sRGB singleton volume).
+The frozen75-file archive is `compat-e4117548-frozen/manifest.json`. The later
+DF diagnostic-only additions pass43/43 non-native Metal controls per CLR and
+15/15 native-range metadata controls per CLR; offline decoder12/12 passes. The
+first decoder invocation used a nonexistent filename and exited2 before testing;
+its log is preserved, and the corrected command passes12/12.
+
+| Title | Actual DF result | Next blocker |
+| --- | --- | --- |
+| Silent Hill | Exit134,26s,1921MiB | RGBA descriptor gate advances; R32Uint mode27 singleton array now rejected |
+| Octopath II | Exit134,32s,3190MiB | Same next R32Uint class |
+| Oregon Trail | Exit134,30s,2045MiB | Same next R32Uint class |
+| Superliminal | Alive90s,3665MiB, TERM0s without KILL | Singleton sRGB volume advances; sampled R8Unorm4x4x16 tiled volume rejected, loading screen persists |
+| Demon’s Souls | Alive90s,4628MiB, TERM0s without KILL | Admission veto identifies global mapping epoch324087→324134, before any guest frame |
+| Poppy | Exit138,22s,1631MiB | Fatal native write fault persists; refined schema3 capture retains85 records/zero drops |
+
+The three integer descriptors have raw words
+`<address> 01400000 00000000 D1B00204 00000000 00700000 00000000 00000000`,
+with addresses8010700000/8030B20000/8011530000. They require R32Uint and Uint
+shader typing, not RGBA/Float reinterpretation. The next source candidate remains
+separate from game and native qualification.
+
+Superliminal's next exact raw descriptor is
+`701529A0 C0100000 0000C000 A0500800 0000000F 00700000 00000000 00000000`:
+R8Unorm, mode5,4x4x16, pitch4, one mip, sampled Float3D, selectors000X.
+An independent CPU-only AMD AddrLib oracle agrees with Kairo equation118 for
+all256 voxel coordinates across six modeled configurations. Physical footprint
+4096B, logical256B, maximum addressed byte1215; stacked XY decoding differs at
+248/256 coordinates. This is layout evidence; no production R8 volume or native
+filter/game qualification exists yet.
+
+DS's scalar veto does not establish a mutation of its resource at7092C80000.
+Its memory-domain reference and tracker token are not a per-range mapping lease.
+Tracker arming calls direct Mprotect, without publishing the HostMemory epoch;
+the new values therefore do not establish self-invalidating tracker arming.
+The global gate remains intact pending an ownership-safe solution. Final window
+is black/zero guest frames.
+
+Poppy's filtered trace records four actual target-RIP invocations. The first
+returns Armed from CAS, restores the full2211840-byte owner RW (op13 result0),
+then disarms and reports recovered. Three following entries return Disarmed from
+CAS and are declined, with no own permission syscall. They arrive approximately
+90/190/476 microseconds after the restore-return observation. Rearm to epoch2
+occurs about14.55ms later, before their delayed final declines. This confirms the
+historical Disarmed branch with exact CAS evidence, not a busy-Invalidating race.
+Kernel trap time, all permission owners and backing lifetime remain unproved;
+no unconditional retry or instruction workaround is justified by these records.
+
 ## References and next gates
 
 The read-only [REmu/Kairo audit](metal-reference-audit-20261008.md) records exact
@@ -194,8 +253,9 @@ reference SHAs and the tile-mode-24 topology disagreement. Do not blindly copy
 GPU equations or zero-copy paths without this emulator's current backing authority.
 
 The next bundle must have its own frozen provenance and output directory. Repeat
-SH/Octopath/Oregon after exact-descriptor qualification; add scalar DS admission
-reasons before considering any ownership change.
+SH/Octopath/Oregon after typed R32Uint qualification, and Superliminal after
+full XYZ R8 qualification. DS now requires a solution to overly broad mapping
+vetoes that preserves actual per-range backing authority.
 Owned-frame idle experimenta31c112c (candidate2576429d) has6/6 policy controls
 per CLR,19 retained source/DLL/result hashes and independent source review.
 Persistent restore/minimize/hidden invalidation, externally enabled HUD veto and

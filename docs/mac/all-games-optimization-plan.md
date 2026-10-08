@@ -27,15 +27,15 @@ execution remains x64/Rosetta; ARM64 CLR tests qualify host code only.
    Promote defaults only after correctness, native lifecycle and pacing checks.
 5. Re-run the collection before presenting a release as broadly compatible.
 
-| Title | Earliest frozen baseline blocker / evidence | Next qualified change |
+| Title | Current blocker / evidence | Next qualified change |
 | --- | --- | --- |
 | Dreaming Sarah | Controllable outdoor scene; fresh b7 capture averages 57.96 guest commits/s with p99 38.693 ms | Reduce unnecessary drawable acquisition; then queue-drain attribution and controlled same-build pacing comparison |
-| Demon’s Souls | AE passes old selected-mip snapshot gate, then fails backing observation at queue admission; zero guest frames | Scalar session/epoch/token veto reasons; preserve original-resource identity and content authority |
-| Silent Hill: The Short Message | Singleton mode-27 RGBA8 array; AE rejects actual PERF_MOD7 / BGRA selectors | Exact raw replay and asymmetric native BGRA store/read; explicit slice bounds and owned physical copy |
-| Octopath Traveler II | Same singleton array family, actual PERF_MOD7 / BGRA selectors | Exact raw replay and asymmetric physical/store/sampled-channel oracle; separate title evidence |
-| The Oregon Trail | Same singleton array family | Same implementation; separate title progression/rendering evidence |
-| Poppy Playtime Chapter 1 | Fatal write fault; later b7 record observes tracker Disarmed after a successful RW restore | Schema3 actual capture saturated; refine bounded capture, classify fatal per-range decisions, then mapping lifetime/rearm ordering; no unconditional retry |
-| Superliminal | First rejected sampled tiled 3D image, then cancelled queue spam and loading stall | Actual raw type-10 mode-5 RGBA8sRGB singleton volume (unified format130); owned origin texel and native sampled-3D sRGB/alpha oracle before broader volume geometry |
+| Demon’s Souls | DF identifies global mapping epoch change at admission; zero guest frames | Preserve content authority while replacing broad vetoes with qualified per-range lifetime/operation ownership |
+| Silent Hill: The Short Message | DF advances RGBA8/PERF7/BGRA and rejects next R32Uint singleton array | Exact Uint/native R32Uint seed/store/load, explicit slice bounds and owned physical copy |
+| Octopath Traveler II | Same next R32Uint array family | Exact typed raw replay and native integer oracle; separate title evidence |
+| The Oregon Trail | Same next R32Uint array family | Same typed qualification; separate title progression/rendering evidence |
+| Poppy Playtime Chapter 1 | Fatal write fault; later b7 record observes tracker Disarmed after a successful RW restore | Filtered schema3 retains85/0drops and three actual Disarmed CAS declines after successful RW restore; require permission/lifetime ownership, no unconditional retry |
+| Superliminal | DF advances singleton sRGB gate, then rejects R8Unorm4x4x16/mode5 | Full XYZ owned4KiB source and native R8/000X typed load/filter oracle |
 | Quake | Native movie plays; first 8192² R32 tiled depth image exceeds 128 MiB snapshot bound | Independent PS5 tile-mode-24 address oracle, bounded upload staging and correctly filtered depth comparison |
 | Void Terrarium | Scene visible but progression and gameplay unverified under contention | Input/checkpoint qualification on quiet host, first visual discrepancy and scene-specific GPU/producer attribution |
 
