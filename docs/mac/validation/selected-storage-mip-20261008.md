@@ -61,7 +61,12 @@ an authoritative GPU writer and falling back to guest bytes.
 
 The original copied seed retains before-copy tracker identity/generation and
 mapping epoch. Native view selection/reuse conservatively vetoes a changed token,
-tracker ABA or process mapping epoch. These observations are not backing leases,
+tracker ABA or process mapping epoch. Exact live selected-view reuse additionally
+requires the original complete observed-state token to remain observed and equal;
+ordinary watch-only, unknown or failed-arm identity alone cannot authorize reuse.
+This restriction is selected-view-only: ordinary/array base0 storage behavior is
+unchanged. First creation still uses the existing graph-disabled owned-copy
+consistency checks. These observations are not backing leases,
 kernel receipts, or copy/writer serialization. Managed writer/fault publication
 can precede the actual write. This candidate does not qualify arbitrary concurrent
 CPU replacement or enable the broader immutable-source graph. A real-game run
@@ -79,7 +84,10 @@ controls reject malformed raw metadata, unknown geometry/dynamic mip, incomplete
 selected source, cross-queue admission, tracker lifetime ABA, old presenter session,
 native-queue mismatch, and overlapping alias reads before guest-memory access.
 
-The required-device fixture is compiled but initially unexecuted. It uses actual
+The four required-device cases are compiled but initially unexecuted. Two
+store/load cases explicitly establish managed-writer coverage of serial owned
+test memory; this is a test premise, not native guest store coverage. The
+store/load fixture It uses actual
 production snapshot→`EnsureStorageImage`, then actual translated MIMG store/load
 through a native argument buffer. It compares all32768 selected texels, every
 unchanged guest-chain byte, a repeated native view after the GPU store, and zero
@@ -87,3 +95,20 @@ new guest reads during exact live-view preparation. A second case addresses
 (300,200), outside256x128 but inside512x256 base geometry, to detect accidentally
 binding mip0. The fixture is not a runtime Drain/ISA-game corpus proof and does not
 claim native command-buffer teardown qualification from managed cleanup controls.
+
+## Storage publication exception-safety successor
+
+`EnsureStorageImage` precomputes extent/capacity before allocating a native handle.
+One installed-state `finally` releases the newly created texture after upload,
+raced-lookup validation, or registry publication failure. `PublishStorageImageLocked`
+rolls back only the exact entries from this construction, preserving prior extent
+and previously admitted selected metadata. The array candidate can add its native
+ArrayLength fields without changing this cleanup authority.
+
+Two managed controls inject a real helper failure after the native registry entry
+but before metadata publication, verifying exact rollback and original cause.
+Two additional required-device cases run production allocation/upload, inject the
+same publication failure, verify no ghost owner, independently retain/read every
+uploaded byte, release that test retain, and retry successfully. The test retain
+keeps its probe safe: reference-count/deallocation timing is not measured, and
+native command-buffer teardown is not claimed from this construction test.

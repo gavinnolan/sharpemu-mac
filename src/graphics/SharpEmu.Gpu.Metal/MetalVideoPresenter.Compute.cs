@@ -264,7 +264,7 @@ internal static partial class MetalVideoPresenter
             {
                 if (selected is not null)
                 {
-                    ValidateSelectedStorageMipOwner(_selectedStorageMipOwners[selected.Key]);
+                    ValidateSelectedStorageMipOwner(_selectedStorageMipOwners[selected.Key], requireObserved: true);
                     ValidateSelectedStorageMipOwner(selected);
                 }
                 ValidateStorageImageView(existing, descriptor, nativeFormat);
@@ -287,6 +287,14 @@ internal static partial class MetalVideoPresenter
             throw new InvalidOperationException($"Metal storage image 0x{descriptor.Address:X} has no complete initialization source.");
         var format = nativeFormat.Format;
         var shape = GuestTextureShape(descriptor);
+        var extent = (descriptor.Width, descriptor.Height,
+            checked((ulong)descriptor.Width * descriptor.Height * shape.Depth * shape.ArrayLength * nativeFormat.BytesPerPixel));
+        if (selected is null)
+            lock (_gate)
+            {
+                _guestImages.EnsureCapacity(_guestImages.Count + 1);
+                _guestImageExtents.EnsureCapacity(_guestImageExtents.Count + 1);
+            }
         var textureDescriptor = MetalNative.SendTextureDescriptor(
             MetalNative.Class("MTLTextureDescriptor"),
             MetalNative.Selector("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"),
@@ -317,62 +325,39 @@ internal static partial class MetalVideoPresenter
         if (image.Texture == 0)
             throw new InvalidOperationException($"Metal cannot allocate storage image 0x{descriptor.Address:X} with format {format}.");
 
-        var bytesPerPixel = nativeFormat.BytesPerPixel;
-        // Snapshot copies arrive in the image's native texel layout; only
-        // 4-byte texels can be RGBA8 verbatim, wider ones carry native bytes.
-        if (descriptor.RgbaPixels.Length != 0)
+        var installed = false;
+        try
         {
-            try
+            // CPU replace owns its source bytes synchronously; native binding
+            // commands independently retain the installed texture.
+            ReplaceDrawTextureContents(image.Texture, descriptor, seedLayout.Pitch, nativeFormat);
+            image.Initialized = true;
+            image.ContentVersion++;
+            lock (_gate)
             {
-                ReplaceDrawTextureContents(image.Texture, descriptor, seedLayout.Pitch, nativeFormat);
-                image.Initialized = true;
-                image.ContentVersion++;
+                if (selected is not null ? _selectedStorageMipImages.TryGetValue(selected.Key, out var raced) :
+                    _guestImages.TryGetValue(descriptor.Address, out raced))
+                {
+                    if (selected is not null)
+                    {
+                        ValidateSelectedStorageMipOwner(selected);
+                        ValidateSelectedStorageMipOwner(_selectedStorageMipOwners[selected.Key], requireObserved: true);
+                    }
+                    ValidateStorageImageView(raced, descriptor, nativeFormat);
+                    return raced;
+                }
+                PublishStorageImageLocked(descriptor, selected, image, extent);
+                installed = true;
             }
-            catch
-            {
-                MetalNative.SendVoid(image.Texture, MetalNative.Selector("release"));
-                throw;
-            }
+            return image;
         }
-
-        lock (_gate)
+        finally
         {
-            if (selected is not null ? _selectedStorageMipImages.TryGetValue(selected.Key, out var raced) :
-                _guestImages.TryGetValue(descriptor.Address, out raced))
-            {
-                MetalNative.SendVoid(image.Texture, MetalNative.Selector("release"));
-                if (selected is not null)
-                {
-                    ValidateSelectedStorageMipOwner(selected);
-                    ValidateSelectedStorageMipOwner(_selectedStorageMipOwners[selected.Key]);
-                }
-                ValidateStorageImageView(raced, descriptor, nativeFormat);
-                return raced;
-            }
-
-            if (selected is not null)
-            {
-                try
-                {
-                    ValidateSelectedStorageMipOwner(selected);
-                    _selectedStorageMipImages.Add(selected.Key, image);
-                    _selectedStorageMipOwners.TryAdd(selected.Key, selected);
-                }
-                catch
-                {
-                    _selectedStorageMipImages.Remove(selected.Key);
-                    MetalNative.SendVoid(image.Texture, MetalNative.Selector("release"));
-                    throw;
-                }
-                return image;
-            }
-            _guestImages[descriptor.Address] = image;
-            _guestImageExtents[descriptor.Address] =
-                (descriptor.Width, descriptor.Height,
-                    checked((ulong)descriptor.Width * descriptor.Height * shape.Depth * shape.ArrayLength * bytesPerPixel));
+            // All construction, upload, raced lookup, and publication failures
+            // flow through the same one-retain cleanup. A raced image is owned
+            // by its registry; only this call's new texture is released here.
+            if (!installed) MetalNative.SendVoid(image.Texture, MetalNative.Selector("release"));
         }
-
-        return image;
     }
 
     private static void ValidateStorageImageView(GuestImage image, GuestDrawTexture descriptor, MetalTextureFormat format)

@@ -194,6 +194,40 @@ public sealed partial class MetalTextureMaterializationTests
         Assert.IsType<NotSupportedException>(ex.InnerException);
     }
 
+    [Fact]
+    public void SelectedMipUnobservedOwnerCannotAuthorizeLiveReuse()
+    {
+        var enabled = GuestImageWriteTracker.Enabled;
+        GuestImageWriteTracker.Configure(false);
+        try
+        {
+            var (guest, _) = SelectedMipSeed();
+            var texture = Assert.Single(SelectedMipSnapshots(new CountingSelectedMemory(guest)));
+            var ex = Assert.Throws<System.Reflection.TargetInvocationException>(() =>
+                Presenter.GetMethod("ValidateSelectedStorageMipOwner", Methods)!.Invoke(null, [SelectedMipAssociation(texture), true]));
+            Assert.IsType<InvalidOperationException>(ex.InnerException);
+            Assert.Contains("complete content observation", ex.InnerException!.Message);
+        }
+        finally { GuestImageWriteTracker.Untrack(SelectedMipAddress); GuestImageWriteTracker.Configure(enabled); }
+    }
+
+    private sealed class SelectedMipObservationScope : IDisposable
+    {
+        private readonly bool enabled = GuestImageWriteTracker.Enabled;
+        public SelectedMipObservationScope()
+        {
+            // Explicit serial test-memory premise, not a claim about arbitrary
+            // native guest stores or managed-copy serialization.
+            GuestImageWriteTracker.Configure(true);
+            GuestImageWriteTracker.TrackManagedWriter(SelectedMipAddress, 786432);
+        }
+        public void Dispose()
+        {
+            GuestImageWriteTracker.Untrack(SelectedMipAddress);
+            GuestImageWriteTracker.Configure(enabled);
+        }
+    }
+
     private static long EnqueueSelectedMipInQueue(GuestDrawTexture texture, string name)
     {
         using var queue = (IDisposable)Presenter.GetMethod("EnterGuestQueue", Methods)!.Invoke(null, [name, 1UL])!;
@@ -252,6 +286,7 @@ public sealed partial class MetalTextureMaterializationTests
     [InlineData(true)]
     public void SelectedMipNativeStoreLoadPreservesEveryOtherSelectedTexelAndGuestNeighbor(bool outsideSelectedMip)
     {
+        using var observation = new SelectedMipObservationScope();
         var (guest, expected) = SelectedMipSeed(); var original = guest.ToArray();
         var memory = new CountingSelectedMemory(guest);
         var snapshot = Assert.Single(SelectedMipSnapshots(memory));

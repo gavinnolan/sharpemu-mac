@@ -14,7 +14,7 @@ internal static partial class MetalVideoPresenter
     private sealed record SelectedStorageMipDomain(long Id);
     private readonly record struct SelectedStorageMipKey(long Domain, Descriptor Resource, uint Mip);
     private sealed record SelectedStorageMipAssociation(SelectedStorageMipKey Key,
-        long MappingEpoch, GuestImageWriteTracker.ContentToken Token, bool HasToken, long Session);
+        long MappingEpoch, GuestImageWriteTracker.ContentToken Token, bool HasToken, long Session, CpuTextureSnapshotObservation Observation);
     private sealed record SelectedStorageMipPending(string Queue, long Sequence);
     private static readonly Dictionary<SelectedStorageMipKey, SelectedStorageMipAssociation> _selectedStorageMipOwners = new();
     private static readonly Dictionary<SelectedStorageMipKey, SelectedStorageMipPending> _selectedStorageMipPending = new();
@@ -26,11 +26,11 @@ internal static partial class MetalVideoPresenter
     private static readonly Dictionary<SelectedStorageMipKey, nint> _selectedStorageMipNativeQueues = new();
 
     internal static void RegisterSelectedStorageMip(ICpuMemory memory, Descriptor resource, GuestDrawTexture texture,
-        long epoch, GuestImageWriteTracker.ContentToken token, bool hasToken)
+        long epoch, GuestImageWriteTracker.ContentToken token, bool hasToken, CpuTextureSnapshotObservation observation)
     {
         var domain = _selectedStorageMipDomains.GetValue(memory,
             static _ => new SelectedStorageMipDomain(Interlocked.Increment(ref _nextSelectedStorageMipDomain)));
-        _selectedStorageMipAssociations.Add(texture, new(new(domain.Id, resource, texture.MipLevel), epoch, token, hasToken, Volatile.Read(ref _selectedStorageMipSession)));
+        _selectedStorageMipAssociations.Add(texture, new(new(domain.Id, resource, texture.MipLevel), epoch, token, hasToken, Volatile.Read(ref _selectedStorageMipSession), observation));
     }
 
     internal static bool TryAttachLiveSelectedStorageMip(ICpuMemory memory, Descriptor resource, GuestDrawTexture texture)
@@ -43,14 +43,17 @@ internal static partial class MetalVideoPresenter
             if (image.Texture == 0 || !image.Initialized)
                 throw new InvalidOperationException("Metal selected storage mip has no initialized native owner.");
             var owner = _selectedStorageMipOwners[key];
-            ValidateSelectedStorageMipOwner(owner);
+            ValidateSelectedStorageMipOwner(owner, requireObserved: true);
             _selectedStorageMipAssociations.Add(texture, owner);
             return true; // Never re-read guest bytes to initialize an existing GPU writer.
         }
     }
 
-    private static void ValidateSelectedStorageMipOwner(SelectedStorageMipAssociation selected)
+    private static void ValidateSelectedStorageMipOwner(SelectedStorageMipAssociation selected, bool requireObserved = false)
     {
+        if (requireObserved && (!selected.Observation.Observed ||
+            !IsCpuTextureSnapshotObservationStable(selected.Key.Resource.Address, selected.Observation)))
+            throw new InvalidOperationException("Metal selected storage mip live reuse requires unchanged complete content observation; tracker identity alone cannot authorize unobserved CPU writers.");
         if (selected.Session != Volatile.Read(ref _selectedStorageMipSession) || selected.MappingEpoch != HostMemory.MappingGeneration ||
             (selected.HasToken && (!GuestImageWriteTracker.TryGetContentToken(selected.Key.Resource.Address, out var current) || current != selected.Token)))
             throw new InvalidOperationException("Metal selected storage mip backing observation changed; native-only contents cannot be replaced by stale guest bytes.");

@@ -65,7 +65,7 @@ internal static partial class MetalTextureSnapshots
             texture = SelectedMipTexture(binding, width, height, end, pixels) with
             { WriteGeneration = read.Active ? read.Generation : -1 };
             MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(texture, observation);
-            MetalVideoPresenter.RegisterSelectedStorageMip(context.Memory, d, texture, epoch, token, hasToken);
+            MetalVideoPresenter.RegisterSelectedStorageMip(context.Memory, d, texture, epoch, token, hasToken, observation);
             return true;
         }
         throw new InvalidOperationException("Metal selected storage mip changed during all three owned-copy attempts.");
