@@ -27,6 +27,32 @@ public sealed partial class MetalTextureMaterializationTests
         Assert.IsType<NotSupportedException>(failure.InnerException);
     }
 
+    [Theory]
+    [InlineData("uint")]
+    [InlineData("storage")]
+    [InlineData("volume")]
+    [InlineData("array-disagreement")]
+    [InlineData("one-dimensional")]
+    [InlineData("unknown-type")]
+    [InlineData("cube-disagreement")]
+    public void NativeDepthComparisonRejectsCompiledShapeDescriptorDisagreementBeforeNativeAllocation(string mismatch)
+    {
+        var guest = ComparisonGuest(4, 7, false, 1, 1);
+        guest = mismatch switch
+        {
+            "uint" => guest with { Shape = guest.Shape with { NumericClass = TextureNumericClass.Uint } },
+            "storage" => guest with { Shape = guest.Shape with { Storage = true } },
+            "volume" => guest with { Shape = guest.Shape with { Volume = true } },
+            "array-disagreement" => guest with { Shape = guest.Shape with { Arrayed = true } },
+            "one-dimensional" => guest with { Type = 8 },
+            "unknown-type" => guest with { Type = 123 },
+            _ => guest with { Shape = guest.Shape with { Cube = true } },
+        };
+        var failure = Assert.Throws<System.Reflection.TargetInvocationException>(() =>
+            Presenter.GetMethod("CreateDrawTexture", Methods)!.Invoke(null, [nint.Zero, (nint)1, guest, false]));
+        Assert.IsType<NotSupportedException>(failure.InnerException);
+    }
+
     [Fact]
     public void NativeDepthComparisonRequiresConsumingCommandBufferBeforeMaterialization()
     {
@@ -72,6 +98,15 @@ public sealed partial class MetalTextureMaterializationTests
     }
 
     [Fact]
+    public void ActualNativeDepthPcfPreservesCubeFaceResolvedAsArrayLayer()
+    {
+        if (!RequireDevice()) return;
+        var guest = ComparisonGuest(4, 7, true, 6, 2);
+        guest = guest with { Type = 11, Shape = guest.Shape with { Cube = true } };
+        RunDepthComparison(guest, 3, "ImageSampleCL", [0.5f, 0.5f, 0.5f, 1f, 1f], [1f, 1f, 1f, 1f]);
+    }
+
+    [Fact]
     public void ActualNativeDepthGatherComparesEachTexelWithGuestFunction()
     {
         if (!RequireDevice()) return;
@@ -111,6 +146,7 @@ public sealed partial class MetalTextureMaterializationTests
         var pendingStart = pending.Count;
         nint queue = 0, command = 0, library = 0, sampler = 0;
         var samplerKey = new GuestSampler(function << 12, 0x0FFF000u, (1u << 20) | (1u << 22) | (1u << 26), 0);
+        Exception? failure = null;
         try
         {
             queue = NullSend(Device.Value, Selector("newCommandQueue")); Assert.NotEqual(0, queue);
@@ -135,23 +171,35 @@ public sealed partial class MetalTextureMaterializationTests
                 Assert.Equal(expected[component], BitConverter.ToSingle(result, component * 4), precision: 5);
             output.WriteLine($"Actual native depth PCF: format={guest.Format}/{guest.NumberType} array={guest.ArrayedView} mips={guest.MipLevels} compare={function} opcode={opcode}; result={string.Join(',', expected)}. Conversion status4, generated guest shader executed against production depth/sampler.");
         }
+        catch (Exception ex) { failure = ex; }
         finally
         {
-            if (library != 0) SendVoid(library, Selector("release"));
-            if (queue != 0) SendVoid(queue, Selector("release"));
-            // This fixture has waited both conversion and consumer command buffers.
-            // Release only snapshot retains acquired by this exact fixture.
+            void Cleanup(Action action)
+            {
+                try { action(); }
+                catch (Exception ex)
+                {
+                    if (failure is null) failure = ex;
+                    else { try { failure.Data["Depth fixture cleanup " + Guid.NewGuid()] = ex; } catch (Exception) { } }
+                }
+            }
+            if (library != 0) Cleanup(() => SendVoid(library, Selector("release")));
+            if (queue != 0) Cleanup(() => SendVoid(queue, Selector("release")));
+            // Normal execution waits conversion and consumer completion. Before
+            // commit, encoded resources are retained by the unsent command buffer.
             while (pending.Count > pendingStart)
             {
                 var last = pending[pending.Count - 1]!;
                 var handle = (nint)last.GetType().GetField("Handle")!.GetValue(last)!;
-                pending.RemoveAt(pending.Count - 1); SendVoid(handle, Selector("release"));
+                pending.RemoveAt(pending.Count - 1);
+                Cleanup(() => SendVoid(handle, Selector("release")));
             }
-            if (sampler != 0)
+            if (sampler != 0) Cleanup(() =>
             {
                 var cache = (IDictionary)Presenter.GetField("_samplerCache", Methods)!.GetValue(null)!;
                 if (cache.Contains(samplerKey) && (nint)cache[samplerKey]! == sampler) { cache.Remove(samplerKey); SendVoid(sampler, Selector("release")); }
-            }
+            });
         }
+        if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
 }

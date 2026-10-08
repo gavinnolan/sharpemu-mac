@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.Gpu.Images;
 
 namespace SharpEmu.Gpu.Metal;
 
@@ -48,24 +49,27 @@ internal static partial class MetalVideoPresenter
         var source = CreateDrawColorTexture(device, blitCommandBuffer, texture, out var ownsSource);
         if (source == 0)
             throw new InvalidOperationException("Metal depth comparison requires a materialized source texture.");
-        try
-        {
-            var depth = EncodeDepthComparisonTexture(device, blitCommandBuffer, source);
-            ownedByCaller = false; // Snapshot pool retains through consuming completion.
-            return depth;
-        }
-        finally
-        {
-            // The ordinary command buffer retains every encoded input. This
-            // does not release a cache, live image or snapshot pool's ownership.
-            if (ownsSource) MetalNative.SendVoid(source, MetalNative.Selector("release"));
-        }
+        nint depth = 0;
+        Exception? failure = null;
+        try { depth = EncodeDepthComparisonTexture(device, blitCommandBuffer, source); }
+        catch (Exception ex) { failure = ex; }
+        // Ordinary command buffers retain encoded inputs. Only this call's
+        // source retain is released; cache/live/pool ownership remains intact.
+        ReleaseDepthObjectsPreservingFailure(failure, ownsSource ? source : 0);
+        ownedByCaller = false; // Snapshot pool retains through consuming completion.
+        return depth;
     }
 
     internal static void ValidateDepthComparisonTexture(GuestDrawTexture texture, nint commandBuffer)
     {
         var shape = GuestTextureShape(texture);
-        if (texture.IsStorage || texture.Shape.Multisampled || texture.Shape.Atomic || texture.Shape.R128 ||
+        if (!texture.Shape.DepthCompare || texture.Shape.NumericClass != TextureNumericClass.Float ||
+            texture.IsStorage || texture.Shape.Storage || texture.Shape.Volume || texture.Shape.OneDimensional ||
+            texture.Shape.Arrayed != texture.ArrayedView || texture.Shape.Cube != (texture.Type == Gen5TextureTypeCube) ||
+            texture.Type is not (Gen5TextureType2D or Gen5TextureType2DArray or Gen5TextureTypeCube) ||
+            texture.ArrayLayers == 0 || texture.Depth != 1 ||
+            (texture.Type == Gen5TextureTypeCube && (!texture.ArrayedView || texture.ArrayLayers % 6 != 0)) ||
+            texture.Shape.Multisampled || texture.Shape.Atomic || texture.Shape.R128 ||
             shape.TextureType is not (MtlTextureType2D or MtlTextureType2DArray) || shape.Depth != 1 ||
             !((texture.Format == 4 && texture.NumberType == 7) || (texture.Format == 2 && texture.NumberType == 0)))
             throw new NotSupportedException($"Metal native depth comparison requires a Float R32 or Unorm R16 2D/array source; descriptor={texture.Format}/{texture.NumberType} type={texture.Type}.");
@@ -139,7 +143,8 @@ internal static partial class MetalVideoPresenter
         lock (_depthConversionPipelines)
         {
             if (_depthConversionPipelines.TryGetValue(key, out var cached)) return cached;
-            nint library = 0, function = 0, options = 0;
+            nint library = 0, function = 0, options = 0, pipeline = 0;
+            Exception? failure = null;
             try
             {
                 options = MetalNative.Send(MetalNative.Send(MetalNative.Class("MTLCompileOptions"), MetalNative.Selector("alloc")), MetalNative.Selector("init"));
@@ -152,18 +157,36 @@ internal static partial class MetalVideoPresenter
                 function = MetalNative.Send(library, MetalNative.Selector("newFunctionWithName:"),
                     MetalNative.NsString(arrayed ? "depth_red_array" : "depth_red_2d"));
                 if (function == 0) throw new InvalidOperationException("Metal depth conversion function creation failed.");
-                var pipeline = MetalNative.Send(device, MetalNative.Selector("newComputePipelineStateWithFunction:error:"), function, ref error);
+                pipeline = MetalNative.Send(device, MetalNative.Selector("newComputePipelineStateWithFunction:error:"), function, ref error);
                 if (pipeline == 0) throw new InvalidOperationException("Metal depth conversion pipeline: " + MetalNative.DescribeError(error));
-                try { _depthConversionPipelines.Add(key, pipeline); }
-                catch { MetalNative.SendVoid(pipeline, MetalNative.Selector("release")); throw; }
-                return pipeline;
             }
-            finally
+            catch (Exception ex) { failure = ex; }
+            try { ReleaseDepthObjectsPreservingFailure(failure, function, library, options); }
+            catch (Exception ex) { ReleaseDepthObjectsPreservingFailure(ex, pipeline); throw; }
+            // Transfer only after temporary owned objects have all been released.
+            try { _depthConversionPipelines.Add(key, pipeline); }
+            catch (Exception ex) { ReleaseDepthObjectsPreservingFailure(ex, pipeline); throw; }
+            return pipeline;
+        }
+    }
+
+    private static void ReleaseDepthObjectsPreservingFailure(Exception? failure, nint first, nint second = 0, nint third = 0)
+    {
+        Span<nint> owned = stackalloc nint[] { first, second, third };
+        for (var index = 0; index < owned.Length; index++)
+        {
+            if (owned[index] == 0) continue;
+            try { MetalNative.SendVoid(owned[index], MetalNative.Selector("release")); }
+            catch (Exception ex)
             {
-                if (function != 0) MetalNative.SendVoid(function, MetalNative.Selector("release"));
-                if (library != 0) MetalNative.SendVoid(library, MetalNative.Selector("release"));
-                if (options != 0) MetalNative.SendVoid(options, MetalNative.Selector("release"));
+                if (failure is null) failure = ex;
+                else
+                {
+                    try { failure.Data[$"Metal depth cleanup {index}"] = ex; }
+                    catch (Exception) { } // Diagnostics cannot suppress remaining releases.
+                }
             }
         }
+        if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
 }
