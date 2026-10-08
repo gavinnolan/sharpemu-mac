@@ -117,3 +117,16 @@ participate in native mapping mutations or fault recovery. The default signed
 Mac bundle now matches clean b6fe8f7; its archived evidence preserves the
 separate source revisions of earlier runtime checks. Poppy's fault-recovery
 race, native launcher activation and GPU producer/backing lifetime remain open.
+
+
+Latest integrated color source passes298/298 Rosetta and281/281 ARM64 managed
+checks plus25/25 required-device ownership cases under Rosetta. Fresh signed
+4a088e3 Sarah150s verifies movement, an airborne jump and landing, peak1191MiB;
+TERM process stop needs no KILL but guest join/unwind diagnostics remain.
+[Latest screenshots](../../artifacts/validation/integrated-20261007/SCREENSHOTS.md).
+Canonical startup host-memory routing and accepted dormant-graph payload
+receipts are locally integrated at104a614:309/309 Rosetta and292/292 ARM64
+combined controls,16/16 native memory controls per CLR and25/25 required-device
+cases under Rosetta pass. A rebuilt signed app and game are still pending. Native AppKit
+modeless settings/private-child-group successors remain separately qualified
+candidates; main launcher activation and GPU graph activation are still open.

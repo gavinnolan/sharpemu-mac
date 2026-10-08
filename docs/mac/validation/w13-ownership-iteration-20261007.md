@@ -602,6 +602,47 @@ hashes are under `metal-agent/immutable-color-ebc986d-{arm,x64}/` and
 
 The source graph is still hard-disabled. Actual backing lifetime/copy leases,
 guest coherence, storage/presentation writers and partially returned in-flight
-CPU payloads remain separate activation requirements. The default signed app
-still contains b6fe8f7 until the next integrated bundle build; no game is
-claimed at dce6f22.
+CPU payloads remain separate activation requirements. A refreshed signed bundle contains clean4a088e3 (the integrated color source
+plus evidence documentation). Its publish closure excludes Vulkan/MoltenVK/SDL;
+the launcher still carries Avalonia/Skia. See the fresh game run below.
+
+
+## Integrated Sarah movement and airborne jump —4a088e3
+
+The signed clean4a088e3 app stays alive for150s under the native Mac runner,
+peak1191MiB. Native-window captures show the opening scene, right/D movement
+into the adjacent area, return after left/A, then an airborne Z jump and landing.
+The burst before/after samples are134-00,134-02 and134-04; the ordinary134s
+capture is grounded before input. Sixty burst attempts produce47 captures;
+actual timing/outcomes are retained rather than assuming the requested cadence.
+
+Shutdown completes on the first poll after TERM with no KILL. The owned runner
+and guest PIDs are absent and the shared lock is released. pthread_join and
+forced-unwind/NOT_IMPLEMENTED diagnostics remain; this is bounded process-stop
+evidence, not clean guest teardown. The source, app and HEAD stay frozen during
+the run. Concurrent builds and dense captures prevent a performance benchmark
+claim. This 2D run does not qualify the dormant graph, 3D title progression or
+guest CoreText calls. Report and hashes: `game-sarah-color-4a088e3/REPORT.md` and
+`manifest.json`; signed archive: `integrated-color-4a088e3/`.
+
+## Canonical memory routing and accepted Metal payload receipts
+
+Reviewed authority7822d92 and payload chainbcab6cc/a528897/fecc97f are locally
+integrated. Legacy HostMemory and injected host services now share one immutable
+provider, initialized and warmed before guest work. Candidate native controls
+pass16/16 on each CLR; Windows/Linux provider libraries crossbuild successfully.
+This does not activate backing/domain leases or the fault recovery registry.
+
+Accepted dormant-graph CPU payloads retain exact receipts through queue removal,
+presentation replacement and fatal cleanup. Shared arrays return once at the
+last holder; failed admission leaves caller ownership intact. All presentation
+publishers retire the previous owner. Candidate managed controls pass148/148
+on each CLR. Native presentation borrowing and guest coherence remain open,
+and graph activation remains hard-disabled. Integrated104a614 checks pass309/309 Rosetta and292/292 ARM64, zero skips;
+ARM excludes the17 x64-only cases. The build reports111 warnings, zero errors.
+The canonical provider suite passes16/16 on each CLR, including actual native
+4KiB/16KiB pages, and its build has zero warnings/errors. Required-device
+ownership/color fixtures pass25/25 under Rosetta; the owned runner group is
+absent and the shared lock released. Logs, source/assembly hashes and TRX are
+`w13-20261007/authority-payload-integrated-*` and `authority-integrated-*`.
+A fresh authority-source signed app/game run is still required.
