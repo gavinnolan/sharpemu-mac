@@ -338,6 +338,10 @@ public sealed partial class MetalTextureMaterializationTests(ITestOutputHelper o
             return false;
         }
         Assert.True(OperatingSystem.IsMacOS());
+        var expectedArchitecture = Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_ARCH");
+        var actualArchitecture = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString();
+        if (!string.IsNullOrEmpty(expectedArchitecture)) Assert.Equal(expectedArchitecture, actualArchitecture);
+        output.WriteLine($"native-materialization architecture={actualArchitecture} framework={System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription}; expected={expectedArchitecture ?? "unspecified"}");
         Assert.NotEqual(0, Device.Value);
         return true;
     }
