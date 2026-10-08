@@ -12,10 +12,11 @@ internal sealed class OwnedEmulatorProcess : IDisposable
     private Process? process;
     private bool disposed;
     private bool stopRequested;
-    public event Action<string, bool>? Output;
-    public event Action<int>? Exited;
+    private long session;
+    public event Action<long, string, bool>? Output;
+    public event Action<long, int>? Exited;
     public bool IsRunning { get { lock (gate) return process is not null; } }
-    public void Start(string executable, LauncherLaunchPlan plan)
+    public long Start(string executable, LauncherLaunchPlan plan)
     {
         lock (gate)
         {
@@ -29,16 +30,18 @@ internal sealed class OwnedEmulatorProcess : IDisposable
             };
             foreach (var argument in plan.Arguments) info.ArgumentList.Add(argument);
             foreach (var pair in plan.Environment) info.Environment[pair.Key] = pair.Value;
+            var currentSession = checked(++session);
             var child = new Process { StartInfo = info, EnableRaisingEvents = true };
-            child.OutputDataReceived += (_, args) => { if (args.Data is { } line) Output?.Invoke(line, false); };
-            child.ErrorDataReceived += (_, args) => { if (args.Data is { } line) Output?.Invoke(line, true); };
-            child.Exited += (_, _) => OnExited(child);
+            child.OutputDataReceived += (_, args) => { if (args.Data is { } line) Output?.Invoke(currentSession, line, false); };
+            child.ErrorDataReceived += (_, args) => { if (args.Data is { } line) Output?.Invoke(currentSession, line, true); };
+            child.Exited += (_, _) => OnExited(child, currentSession);
             var started = false;
             try
             {
                 if (!(started = child.Start())) throw new InvalidOperationException("Could not start the owned emulator.");
                 process = child; stopRequested = false;
                 child.BeginOutputReadLine(); child.BeginErrorReadLine();
+                return currentSession;
             }
             catch
             {
@@ -48,7 +51,7 @@ internal sealed class OwnedEmulatorProcess : IDisposable
             }
         }
     }
-    private void OnExited(Process child)
+    private void OnExited(Process child, long currentSession)
     {
         // Process exit can precede the redirected readers' final callbacks.
         // This ordinary callback thread waits; the AppKit main loop does not.
@@ -62,8 +65,8 @@ internal sealed class OwnedEmulatorProcess : IDisposable
             process = null;
         }
         // The native frontend marshals this managed callback to its main loop.
-        Exited?.Invoke(code);
-        child.Dispose();
+        try { Exited?.Invoke(currentSession, code); }
+        finally { child.Dispose(); }
     }
     public void Stop()
     {

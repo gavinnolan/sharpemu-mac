@@ -27,7 +27,7 @@ public sealed partial class MacLauncher
             foreach (var title in new[] { "Global", "This Game", "Launch Once", "Cancel" }) Send(selection, Selector("addButtonWithTitle:"), String(title));
             result = Send(selection, Selector("runModal"));
         }
-        finally { Release(selection); }
+        finally { Release(selection); ContinueQuit(); }
         if (result == 1000)
         {
             var values = new EnvironmentEditor { EnvironmentVariables = [.. GlobalCustomEnvironmentSettings.Load()] };
@@ -83,6 +83,7 @@ public sealed partial class MacLauncher
             if (modalWindow != 0) { Send(modalWindow, Selector("setDelegate:"), 0); Send(modalWindow, Selector("orderOut:"), 0); }
             foreach (var handle in owned.Skip(before).Reverse()) { actions.Remove(handle); Release(handle); }
             owned.RemoveRange(before, owned.Count - before); modalWindow = editorTable = 0; editorRows = [];
+            ContinueQuit();
         }
     }
     private static string DisplayValue(object? value) => value switch
@@ -119,6 +120,6 @@ public sealed partial class MacLauncher
             Send(alert, Selector("setAccessoryView:"), scroll); Send(alert, Selector("addButtonWithTitle:"), String("Apply")); Send(alert, Selector("addButtonWithTitle:"), String("Cancel"));
             if (Send(alert, Selector("runModal")) == 1000) { item.Value = Text(Send(text, Selector("string"))); Send(editorTable, Selector("reloadData")); }
         }
-        finally { Release(alert); Release(scroll); Release(text); }
+        finally { Release(alert); Release(scroll); Release(text); ContinueQuit(); }
     }
 }

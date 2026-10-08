@@ -28,6 +28,8 @@ public sealed partial class MacLauncher : IDisposable
     private nint app, target, window, table, search, cover, status, timer, consoleWindow, consoleText;
     private StreamWriter? fileLog;
     private bool closed, scanRunning;
+    private long activeChildSession;
+    private readonly QuitSequence quit = new();
     private CatalogGame? selected;
     private const int MaximumConsoleLines = 5000;
 
@@ -46,8 +48,33 @@ public sealed partial class MacLauncher : IDisposable
     {
         strings.Load(settings.Language);
         watcher.RefreshRequested += (_, _) => Post(Refresh);
-        child.Output += (line, error) => Post(() => Append(line));
-        child.Exited += code => Post(() => { Append($"Emulator exited ({code})."); fileLog?.Dispose(); fileLog = null; SetStatus(strings.Get("Launch.Launch")); });
+        child.Output += (session, line, error) => Post(() => DispatchChildNotification(session, () => Append(line)));
+        child.Exited += (session, code) => Post(() => DispatchChildNotification(session, () => { Append($"Emulator exited ({code})."); fileLog?.Dispose(); fileLog = null; SetStatus(strings.Get("Launch.Launch")); }));
+    }
+    // A child may finish and free its slot before its UI notifications are drained.
+    // Only the selected session may mutate the current console/log/status.
+    private void SelectChildSession(long session) => activeChildSession = session;
+    private void DispatchChildNotification(long session, Action action)
+    {
+        if (!closed && session == activeChildSession) action();
+    }
+    private sealed class QuitSequence
+    {
+        private bool requested;
+        public int Request(bool modal) { requested = true; return Continue(modal); }
+        public int Continue(bool modal)
+        {
+            if (!requested) return 0;
+            if (modal) return 1; // unwind one Cocoa modal loop, keeping the quit request
+            requested = false; return 2; // consume before main close, which may be canceled
+        }
+    }
+    private void RequestQuit() => ApplyQuitAction(quit.Request(Send(app, Selector("modalWindow")) != 0));
+    private void ContinueQuit() => ApplyQuitAction(quit.Continue(Send(app, Selector("modalWindow")) != 0));
+    private void ApplyQuitAction(int action)
+    {
+        if (action == 1) { modalAccepted = false; Send(app, Selector("abortModal")); }
+        else if (action == 2) Send(window, Selector("performClose:"), 0);
     }
     private string L(string key, string fallback) { var value = strings.Get(key); return value == key ? fallback : value; }
     private nint Own(nint obj) { if (obj == 0) throw new InvalidOperationException("AppKit object creation failed."); owned.Add(obj); return obj; }
@@ -55,6 +82,7 @@ public sealed partial class MacLauncher : IDisposable
     private void Tick()
     {
         if (closed) return;
+        ContinueQuit();
         for (var count = 0; count < 128 && pending.TryDequeue(out var action); count++)
             try { action(); } catch (Exception exception) { Append(exception.Message); }
     }

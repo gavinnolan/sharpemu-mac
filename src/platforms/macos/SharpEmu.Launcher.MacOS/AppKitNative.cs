@@ -10,6 +10,7 @@ internal static class AppKitNative
     private static readonly Lazy<nint> AppKit = new(() => NativeLibrary.Load("/System/Library/Frameworks/AppKit.framework/AppKit"));
     private static readonly Lazy<nint> Foundation = new(() => NativeLibrary.Load("/System/Library/Frameworks/Foundation.framework/Foundation"));
     internal static nint CommonRunLoopMode => Marshal.ReadIntPtr(NativeLibrary.GetExport(Foundation.Value, "NSRunLoopCommonModes"));
+    [StructLayout(LayoutKind.Sequential)] internal readonly record struct Point(double X, double Y);
     [StructLayout(LayoutKind.Sequential)] internal readonly record struct Rect(double X, double Y, double Width, double Height);
     [DllImport(ObjC, EntryPoint="objc_getClass")] private static extern nint GetClass([MarshalAs(UnmanagedType.LPUTF8Str)] string name);
     [DllImport(ObjC, EntryPoint="sel_registerName")] internal static extern nint Selector([MarshalAs(UnmanagedType.LPUTF8Str)] string name);
@@ -23,6 +24,15 @@ internal static class AppKitNative
     [DllImport(ObjC, EntryPoint="objc_msgSend")] internal static extern nint InitRect(nint obj, nint sel, Rect rect);
     [DllImport(ObjC, EntryPoint="objc_msgSend")] internal static extern nint InitWindow(nint obj, nint sel, Rect rect, nuint style, nuint backing, byte defer);
     [DllImport(ObjC, EntryPoint="objc_msgSend")] internal static extern void SetDouble(nint obj, nint sel, double value);
+    [DllImport(ObjC, EntryPoint="objc_msgSend")] private static extern nint OtherEvent(nint cls, nint sel, nuint type, Point location, nuint flags, double timestamp, nint windowNumber, nint context, short subtype, nint data1, nint data2);
+    internal static void StopOuterLoop(nint app)
+    {
+        Send(app, Selector("stop:"), 0);
+        // stop: is observed after event processing. Wake a main run that was
+        // stopped by a timer or after a modal loop returned without a new event.
+        var wake = OtherEvent(Class("NSEvent"), Selector("otherEventWithType:location:modifierFlags:timestamp:windowNumber:context:subtype:data1:data2:"), 15, new(0, 0), 0, 0, 0, 0, 0, 0, 0);
+        if (wake != 0) Send(app, Selector("postEvent:atStart:"), wake, 1);
+    }
     [DllImport(ObjC, EntryPoint="objc_msgSend")] private static extern nint StringUtf8(nint cls, nint sel, [MarshalAs(UnmanagedType.LPUTF8Str)] string value);
     [DllImport("/usr/lib/libSystem.B.dylib")] internal static extern int pthread_main_np();
     internal static nint Class(string name) { _ = AppKit.Value; return GetClass(name); }

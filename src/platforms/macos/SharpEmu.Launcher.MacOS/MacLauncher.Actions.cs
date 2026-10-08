@@ -23,7 +23,7 @@ public sealed partial class MacLauncher
         MenuAction(application, "About SharpEmu", () => Alert("SharpEmu", "Native macOS launcher · Metal graphics · CoreText fonts\nGuest x64 execution uses Rosetta on Apple Silicon."));
         MenuAction(application, "Settings…", EditGlobalSettings, ",");
         MenuAction(application, "Check for Updates…", () => _ = CheckUpdatesAsync(true));
-        MenuAction(application, "Quit SharpEmu", () => Send(window, Selector("performClose:"), 0), "q");
+        MenuAction(application, "Quit SharpEmu", RequestQuit, "q");
         var file = Menu(menu, "File");
         MenuAction(file, "Open Executable…", OpenExecutable, "o"); MenuAction(file, "Add Game Folder…", AddFolder);
         MenuAction(file, "Launch Selected", LaunchSelected, "r"); MenuAction(file, "Stop Owned Game", () => child.Stop());
@@ -67,7 +67,7 @@ public sealed partial class MacLauncher
             if (Send(panel, Selector("runModal")) != 1) return null;
             return Text(Send(Send(panel, Selector("URL")), Selector("path")));
         }
-        finally { Release(panel); }
+        finally { Release(panel); ContinueQuit(); }
     }
     private void AddFolder()
     {
@@ -104,7 +104,7 @@ public sealed partial class MacLauncher
         }
         try
         {
-            child.Start(executable, plan); SetStatus($"Running: {game.Name}"); Append($"Launching {game.Path}");
+            SelectChildSession(child.Start(executable, plan)); SetStatus($"Running: {game.Name}"); Append($"Launching {game.Path}");
             Send(Send(Class("NSDocumentController"), Selector("sharedDocumentController")), Selector("noteNewRecentDocumentURL:"), Send(Class("NSURL"), Selector("fileURLWithPath:"), String(game.Path)));
         }
         catch (Exception exception) { fileLog?.Dispose(); fileLog = null; Alert("Could not launch emulator", exception.Message); }
@@ -159,6 +159,6 @@ public sealed partial class MacLauncher
     }
     private void Alert(string title, string text)
     {
-        var alert = New("NSAlert"); try { Send(alert, Selector("setMessageText:"), String(title)); Send(alert, Selector("setInformativeText:"), String(text)); Send(alert, Selector("runModal")); } finally { Release(alert); }
+        var alert = New("NSAlert"); try { Send(alert, Selector("setMessageText:"), String(title)); Send(alert, Selector("setInformativeText:"), String(text)); Send(alert, Selector("runModal")); } finally { Release(alert); ContinueQuit(); }
     }
 }

@@ -7,9 +7,12 @@ namespace SharpEmu.Launcher.MacOS;
 public sealed partial class MacLauncher
 {
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void ActionCallback(nint self, nint selector, nint sender);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate byte BoolCallback(nint self, nint selector, nint window);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate nuint UnsignedCallback(nint self, nint selector, nint sender);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate nint CountCallback(nint self, nint selector, nint table);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate nint ValueCallback(nint self, nint selector, nint table, nint column, nint row);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void SetValueCallback(nint self, nint selector, nint table, nint value, nint column, nint row);
+    private static string WindowCloseEncoding => RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? "B@:@" : "c@:@";
     private static nint RegisterTargetClass()
     {
         var cls = AllocateClass(Class("NSObject"), "SharpEmuNativeLauncherTarget", 0);
@@ -38,12 +41,13 @@ public sealed partial class MacLauncher
             var index = (int)row;
             if (table == owner.editorTable && index >= 0 && index < owner.editorRows.Count && Text(Send(column, Selector("identifier"))) == "value") owner.editorRows[index].Value = Text(value);
         })), "v@:@@@q");
-        Add(cls, "windowShouldClose:", new CountCallback((_, _, window) =>
+        Add(cls, "windowShouldClose:", new BoolCallback((_, _, window) =>
         {
             try
             {
                 if (active is not { } owner) return 1;
                 if (window == owner.modalWindow) { owner.modalAccepted = false; Send(owner.app, Selector("stopModal")); return 1; }
+                if (window == owner.window && Send(owner.app, Selector("modalWindow")) != 0) { owner.RequestQuit(); return 0; }
                 if (window != owner.window || !owner.child.IsRunning) return 1;
                 var alert = New("NSAlert");
                 try
@@ -56,16 +60,17 @@ public sealed partial class MacLauncher
                 finally { Release(alert); }
             }
             catch { return 0; }
-        }), "c@:@");
-        Add(cls, "applicationShouldTerminate:", new CountCallback((_, _, _) =>
+        }), WindowCloseEncoding);
+        Add(cls, "applicationShouldTerminate:", new UnsignedCallback((_, _, _) =>
         {
-            Dispatch(owner => Send(owner.window, Selector("performClose:"), 0));
+            Dispatch(owner => owner.RequestQuit());
             return 0; // Own Quit through window close/stop, preserving managed disposal.
-        }), "q@:@");
+        }), "Q@:@");
         Add(cls, "windowWillClose:", new ActionCallback((_, _, notification) => Dispatch(owner =>
         {
             if (Send(notification, Selector("object")) != owner.window) return;
-            owner.child.Stop(); owner.settings.Save(); Send(owner.app, Selector("stop:"), 0);
+            try { owner.child.Stop(); owner.settings.Save(); }
+            finally { StopOuterLoop(owner.app); }
         })), "v@:@");
         RegisterClass(cls); return cls;
     }
