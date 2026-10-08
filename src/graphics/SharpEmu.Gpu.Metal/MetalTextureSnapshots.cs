@@ -108,9 +108,11 @@ internal static partial class MetalTextureSnapshots
                     !MetalSingletonArrayStorageAdmission.IsQualified(binding.Descriptor, binding.ResourceDescriptor,
                         binding.IsArrayed, binding.MipLevel, binding.Shape, binding.Access) &&
                     !MetalBgra1024ArrayStorageAdmission.IsQualified(binding.Descriptor, binding.ResourceDescriptor,
+                        binding.IsArrayed, binding.MipLevel, binding.Shape, binding.Access) &&
+                    !MetalR8FourKArrayStorageAdmission.IsQualified(binding.Descriptor, binding.ResourceDescriptor,
                         binding.IsArrayed, binding.MipLevel, binding.Shape, binding.Access))
                     throw new NotSupportedException(
-                        $"Metal array storage snapshots require a matching complete qualified mode24 R8Uint X001 or mode27 RGBA8Unorm/Float, R32 Uint/Float X001, RGBA8Uint/RGBA16Float identity PERF_MOD7 single-mip 1x1 layer-zero descriptor or exact1024x1024 RGBA8Unorm BGRA PERF_MOD7 write-only descriptor and compiled 2D-array shape: " +
+                        $"Metal array storage snapshots require a matching complete qualified mode24 R8Uint X001 or mode27 RGBA8Unorm/Float, R32 Uint/Float X001, RGBA8Uint/RGBA16Float identity PERF_MOD7 single-mip 1x1 layer-zero descriptor or exact1024x1024 RGBA8Unorm BGRA or3840x2160 R8Uint X001 PERF_MOD7 write-only descriptor and compiled 2D-array shape: " +
                         $"descriptor={binding.Descriptor} shape={binding.Shape} access={binding.Access} selected_mip={binding.MipLevel} " +
                         $"raw=[{string.Join(",", binding.ResourceDescriptor?.Select(static word => $"{word:X8}") ?? [])}].");
                 MetalVideoPresenter.RejectSelectedStorageAlias(context.Memory, binding.Descriptor, binding.IsStorage, binding.MipLevel);

@@ -413,7 +413,8 @@ internal static partial class MetalVideoPresenter
         // including depth-one texture3d. No array/cube/mip reinterpretation.
         var volume = descriptor.Type == Gen5TextureType3D;
         var qualifiedArray = MetalSingletonArrayStorageAdmission.IsQualified(descriptor) ||
-            MetalBgra1024ArrayStorageAdmission.IsQualified(descriptor);
+            MetalBgra1024ArrayStorageAdmission.IsQualified(descriptor) ||
+            MetalR8FourKArrayStorageAdmission.IsQualified(descriptor);
         if (volume && (descriptor.TiledSource is not null || descriptor.Detile is not null))
             throw new NotSupportedException("Metal storage volumes require owned linear seed bytes; deferred XY-only detiling is not a volume source proof.");
         if (volume && (descriptor.Descriptor is not { Length: >= 8 } raw ||
