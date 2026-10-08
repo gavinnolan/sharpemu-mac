@@ -28,6 +28,76 @@ public sealed class MetalSingletonArrayStorageTests
             Shape: new ShaderImageShape(false, true, true, false, TextureNumericClass.Float), Access: GuestImageAccess.Write);
     }
 
+    private static uint[] UintRaw(uint addressWord = 0x80107000) =>
+        [addressWord, 0x01400000, 0, 0xD1B00204, 0, 0x00700000, 0, 0];
+    private static AgcExports.TranslatedImageBinding UintBinding(uint[]? raw = null)
+    {
+        raw ??= UintRaw();
+        Assert.True(AgcExports.TryDecodeTextureDescriptor(raw, out var descriptor));
+        return new(descriptor, true, 0, [], IsArrayed: true, ResourceDescriptor: raw,
+            Shape: new ShaderImageShape(false, true, true, false, TextureNumericClass.Uint), Access: GuestImageAccess.Write);
+    }
+
+    [Theory]
+    [InlineData(0x80107000u, 0x87654321u)] // exact SH raw words
+    [InlineData(0x8030B200u, 0u)] // exact Octopath raw words, successful zero seed
+    [InlineData(0x80115300u, 0xDEADBEEFu)] // exact Oregon raw words
+    public void ActualR32UintArrayDescriptorOwnsPhysicalSeedWithoutFloatConversion(uint addressWord, uint value)
+    {
+        using var state = new State(); var raw = UintRaw(addressWord); var binding = UintBinding(raw);
+        var source = Enumerable.Repeat((byte)0xD3, 65536).ToArray();
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(source, value);
+        var original = source.ToArray(); var memory = new Memory(source, binding.Descriptor.Address);
+        try
+        {
+            var snapshot = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [binding], out var fallbacks));
+            Assert.Equal(0, fallbacks); Assert.Equal(1, memory.Reads); Assert.Equal(65536, memory.LastReadBytes);
+            Assert.Equal(original.AsSpan(0, 4).ToArray(), snapshot.RgbaPixels);
+            Assert.Equal(raw, snapshot.Descriptor); Assert.NotSame(raw, snapshot.Descriptor);
+            Assert.Equal(65536UL, snapshot.SourceByteCount);
+            Assert.Equal((3u, 1u, 1u), MetalVideoPresenter.GuestTextureShape(snapshot));
+            var format = MetalVideoPresenter.StorageTextureFormat(snapshot);
+            Assert.Equal(MtlPixelFormat.R32Uint, format.Format); Assert.Equal(4u, format.BytesPerPixel);
+            Assert.Equal((1u, 4UL), MetalVideoPresenter.StorageTextureSeedLayout(snapshot, format));
+            source[0] ^= 0xFF; raw[3] = 0xD1B00FAC;
+            Assert.Equal(original.AsSpan(0, 4).ToArray(), snapshot.RgbaPixels);
+            Assert.Equal(0xD1B00204u, snapshot.Descriptor![3]);
+            Assert.Throws<InvalidOperationException>(() => Ensure(snapshot with { RgbaPixels = new byte[3] }));
+            Assert.Throws<InvalidOperationException>(() => Ensure(snapshot with { RgbaPixels = [] }));
+            Assert.Throws<InvalidOperationException>(() => Ensure(snapshot with { CpuSnapshotStable = false }));
+            Assert.Throws<NotSupportedException>(() => Ensure(snapshot with { Shape = snapshot.Shape with { NumericClass = TextureNumericClass.Float } }));
+        }
+        finally { GuestImageWriteTracker.Untrack(binding.Descriptor.Address); }
+    }
+
+    [Theory]
+    [InlineData(0)] // integer descriptor with float shader
+    [InlineData(1)] // different integer format
+    [InlineData(2)] // R32Float descriptor with Uint shader
+    [InlineData(3)] // identity selector not qualified X001
+    [InlineData(4)] // missing PERF_MOD7 qualification
+    [InlineData(5)] // adjacent corner-sample flag
+    [InlineData(6)] // metadata
+    [InlineData(7)] // missing complete raw descriptor
+    [InlineData(8)] // native 2D class cannot substitute singleton array
+    public void UnqualifiedR32UintArrayMetadataRejectsBeforeGuestRead(int kind)
+    {
+        using var state = new State(); var raw = UintRaw();
+        if (kind == 1) raw[1] = 0x01500000;
+        if (kind == 2) raw[1] = 0x01600000;
+        if (kind == 3) raw[3] = 0xD1B00FAC;
+        if (kind == 4) raw[5] = 0;
+        if (kind == 5) raw[5] |= 1u << 23;
+        if (kind == 6) raw[7] = 1;
+        var binding = UintBinding(raw);
+        if (kind == 0) binding = binding with { Shape = binding.Shape with { NumericClass = TextureNumericClass.Float } };
+        if (kind == 7) binding = binding with { ResourceDescriptor = raw[..4] };
+        if (kind == 8) binding = binding with { Shape = binding.Shape with { Arrayed = false } };
+        var memory = new Memory(new byte[65536], binding.Descriptor.Address);
+        Assert.Throws<NotSupportedException>(() => MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [binding], out _));
+        Assert.Equal(0, memory.Reads);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
