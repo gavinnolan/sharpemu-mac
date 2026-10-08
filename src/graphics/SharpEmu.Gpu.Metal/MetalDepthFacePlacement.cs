@@ -86,15 +86,18 @@ internal static class MetalDepthFacePlacement
         if (memory is not ICpuMappedCopySource source)
             throw new NotSupportedException("Metal native depth cube producer requires an original full-footprint mapping observation.");
         var originalSession = MetalVideoPresenter.CurrentNativeDepthFaceSession;
-        _ = GuestImageWriteTracker.BeginReadSnapshot(resolution.DepthAddress, resolution.DepthSize, source: "metal.depth-face.original");
+        // Mapping lifetime covers the complete original resource; content belongs
+        // to the exact selected physical layer. Tracking a growing prefix at
+        // the same base would replace earlier immutable protected owners.
+        _ = GuestImageWriteTracker.BeginReadSnapshot(address, FaceBytes, source: "metal.depth-face.original");
         var epoch = HostMemory.MappingGeneration;
-        var content = MetalVideoPresenter.ObserveCpuTextureSnapshot(resolution.DepthAddress, resolution.DepthSize, epoch);
+        var content = MetalVideoPresenter.ObserveCpuTextureSnapshot(address, FaceBytes, epoch);
         var probe = new byte[8];
-        if (source.TryReadMappedCopy(resolution.DepthAddress, resolution.DepthSize, resolution.DepthAddress, probe, out var mapping) != CpuMappedCopyResult.Copied ||
+        if (source.TryReadMappedCopy(resolution.DepthAddress, resolution.DepthSize, address, probe, out var mapping) != CpuMappedCopyResult.Copied ||
             mapping is null || mapping.FootprintAddress != resolution.DepthAddress || mapping.FootprintByteCount != resolution.DepthSize ||
-            mapping.SourceAddress != resolution.DepthAddress || mapping.SourceByteCount != 8 || !content.Observed ||
+            mapping.SourceAddress != address || mapping.SourceByteCount != 8 || !content.Observed ||
             originalSession != MetalVideoPresenter.CurrentNativeDepthFaceSession || !source.IsMappedCopyObservationCurrent(mapping) ||
-            !MetalVideoPresenter.IsCpuTextureSnapshotObservationStable(resolution.DepthAddress, content))
+            !MetalVideoPresenter.IsCpuTextureSnapshotObservationStable(address, content))
             throw new NotSupportedException("Metal native depth face original mapping/session/content changed before admission.");
         var projected = target with { ReadAddress = address, WriteAddress = address };
         Targets.Add(projected, new(memory, source, mapping, content, originalSession, words,
@@ -105,9 +108,9 @@ internal static class MetalDepthFacePlacement
 
     internal static void RequireOriginalCurrent(Observation original)
     {
-        if (!original.Content.Observed || original.Session != MetalVideoPresenter.CurrentNativeDepthFaceSession ||
+        if (!original.Content.Observed || original.Content.ByteCount != FaceBytes || original.Session != MetalVideoPresenter.CurrentNativeDepthFaceSession ||
             !original.Source.IsMappedCopyObservationCurrent(original.Mapping) ||
-            !MetalVideoPresenter.IsCpuTextureSnapshotObservationStable(original.BackingAddress, original.Content))
+            !MetalVideoPresenter.IsCpuTextureSnapshotObservationStable(original.Address, original.Content))
             throw new NotSupportedException("Metal native depth face lost its ORIGINAL mapping/session/content observation.");
     }
 }

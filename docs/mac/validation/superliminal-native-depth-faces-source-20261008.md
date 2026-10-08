@@ -23,7 +23,11 @@ The finite qualifier requires actual 256-square Z16/mode24 single selected layer
 complete normalized backing/pitch/layout agreement, single mip, no stencil.
 Its 0x20000 face placement follows that actual normalized backing/view tuple.
 The original provider mapping observation covers the COMPLETE normalized backing;
-the discarded eight-byte probe never supplies sampled depth. Original existing presenter-owner lifetime (`_selectedStorageMipSession`,
+its discarded eight-byte probe lies in the original selected physical face and
+never supplies sampled depth. Content protection covers that SAME complete selected
+face, not an expanding prefix at a shared base; every distinct original face keeps
+its own immutable protected token. Mapping-footprint and selected-content scopes
+are deliberately different and neither is inferred from a later cube lookup. Original existing presenter-owner lifetime (`_selectedStorageMipSession`,
 advanced by actual owner release) is captured before setup, epoch after BeginReadSnapshot but before observation/bytes,
 and the original protected content/mapping checks remain immutable.
 
