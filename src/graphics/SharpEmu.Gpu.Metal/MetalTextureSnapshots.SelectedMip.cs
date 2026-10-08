@@ -55,6 +55,7 @@ internal static partial class MetalTextureSnapshots
 
         texture = SelectedMipTexture(binding, width, height, end, []);
         if (MetalVideoPresenter.TryAttachLiveSelectedStorageMip(context.Memory, d, texture)) return true;
+        var seedSession = MetalVideoPresenter.CurrentSelectedStorageMipSeedSession;
         for (var attempt = 0; attempt < 3; attempt++)
         {
             var epoch = HostMemory.MappingGeneration;
@@ -62,18 +63,19 @@ internal static partial class MetalTextureSnapshots
             var observation = MetalVideoPresenter.ObserveCpuTextureSnapshot(d.Address, end, epoch);
             var hasToken = GuestImageWriteTracker.TryGetContentToken(d.Address, out var token);
             var source = new byte[checked((int)selected.ByteCount)];
-            if (!context.Memory.TryRead(d.Address + selected.ByteOffset, source))
-                throw new InvalidOperationException($"Metal selected storage mip is unreadable: addr=0x{d.Address:X} mip={binding.MipLevel} offset={selected.ByteOffset} bytes={selected.ByteCount}.");
+            if (!MetalVideoPresenter.TryReadInitialSelectedStorageMipSource(context.Memory, d.Address, end,
+                d.Address + selected.ByteOffset, source, out var mappedSource, out var mapping)) continue;
             var pixels = new byte[checked((int)(width * height * 4))];
             if (!GnmTiling.TryDetile(source, pixels, d.TileMode, (int)width, (int)height, 4))
                 throw new NotSupportedException("Metal selected storage mip cannot reinterpret failed detiling as linear bytes.");
             if (!GuestImageWriteTracker.IsReadSnapshotStable(read) ||
-                !MetalVideoPresenter.IsCpuTextureSnapshotAdmissionStable(d.Address, observation) ||
+                !MetalVideoPresenter.IsInitialSelectedStorageMipSeedStable(d.Address, observation, mappedSource, mapping) ||
                 (hasToken && (!GuestImageWriteTracker.TryGetContentToken(d.Address, out var after) || after != token))) continue;
             texture = SelectedMipTexture(binding, width, height, end, pixels) with
             { WriteGeneration = read.Active ? read.Generation : -1 };
             MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(texture, observation);
             MetalVideoPresenter.RegisterSelectedStorageMip(context.Memory, d, texture, epoch, token, hasToken, observation);
+            MetalVideoPresenter.RegisterInitialSelectedStorageMipSeed(texture, context.Memory, mappedSource, mapping, read, seedSession);
             return true;
         }
         throw new InvalidOperationException("Metal selected storage mip changed during all three owned-copy attempts.");
@@ -88,6 +90,7 @@ internal static partial class MetalTextureSnapshots
             throw new NotSupportedException("Metal R16Float selected storage requires the exact captured 2048x2048/mode27/11-mip write-only static view0..3.");
         texture = SelectedMipTexture(binding, selected.Width, selected.Width, selected.End, []);
         if (MetalVideoPresenter.TryAttachLiveSelectedStorageMip(context.Memory, d, texture)) return true;
+        var seedSession = MetalVideoPresenter.CurrentSelectedStorageMipSeedSession;
         for (var attempt = 0; attempt < 3; attempt++)
         {
             var epoch = HostMemory.MappingGeneration;
@@ -95,18 +98,19 @@ internal static partial class MetalTextureSnapshots
             var observation = MetalVideoPresenter.ObserveCpuTextureSnapshot(d.Address, selected.End, epoch);
             var hasToken = GuestImageWriteTracker.TryGetContentToken(d.Address, out var token);
             var source = new byte[checked((int)selected.Bytes)];
-            if (!context.Memory.TryRead(d.Address + selected.Offset, source))
-                throw new InvalidOperationException($"Metal R16Float selected storage is unreadable: addr=0x{d.Address:X} mip={binding.MipLevel} offset={selected.Offset} bytes={selected.Bytes}.");
+            if (!MetalVideoPresenter.TryReadInitialSelectedStorageMipSource(context.Memory, d.Address, selected.End,
+                d.Address + selected.Offset, source, out var mappedSource, out var mapping)) continue;
             var pixels = new byte[source.Length];
             if (!GnmTiling.TryDetile(source, pixels, 27, (int)selected.Width, (int)selected.Width, 2))
                 throw new NotSupportedException("Metal R16Float selected storage cannot reinterpret failed detiling as linear bytes.");
             if (!GuestImageWriteTracker.IsReadSnapshotStable(read) ||
-                !MetalVideoPresenter.IsCpuTextureSnapshotAdmissionStable(d.Address, observation) ||
+                !MetalVideoPresenter.IsInitialSelectedStorageMipSeedStable(d.Address, observation, mappedSource, mapping) ||
                 hasToken && (!GuestImageWriteTracker.TryGetContentToken(d.Address, out var after) || after != token)) continue;
             texture = SelectedMipTexture(binding, selected.Width, selected.Width, selected.End, pixels) with
                 { WriteGeneration = read.Active ? read.Generation : -1 };
             MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(texture, observation);
             MetalVideoPresenter.RegisterSelectedStorageMip(context.Memory, d, texture, epoch, token, hasToken, observation);
+            MetalVideoPresenter.RegisterInitialSelectedStorageMipSeed(texture, context.Memory, mappedSource, mapping, read, seedSession);
             return true;
         }
         throw new InvalidOperationException("Metal R16Float selected storage changed during all three owned-copy attempts.");

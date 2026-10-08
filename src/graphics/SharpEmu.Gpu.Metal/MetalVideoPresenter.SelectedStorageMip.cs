@@ -70,8 +70,10 @@ internal static partial class MetalVideoPresenter
         if (selected.Session != currentSession)
             throw SelectedStorageMipObservationFailure(selected, stage, "presenter-session",
                 $"session_before={selected.Session} session_now={currentSession}");
+        ValidateOriginalSelectedStorageMipSeedStage(selected, requireObserved, stage);
         var currentMappingEpoch = HostMemory.MappingGeneration;
-        if (selected.MappingEpoch != currentMappingEpoch)
+        if (selected.MappingEpoch != currentMappingEpoch &&
+            (requireObserved || !CanUseOriginalSelectedStorageMipSeed(selected, stage)))
             throw SelectedStorageMipObservationFailure(selected, stage, "global-mapping-epoch",
                 $"mapping_before={selected.MappingEpoch} mapping_now={currentMappingEpoch}");
         if (selected.HasToken)
@@ -95,7 +97,8 @@ internal static partial class MetalVideoPresenter
         $"watch_identity_{suffix}={token.WatchIdentity} watch_generation_{suffix}={token.WatchGeneration} " +
         $"protected_bytes_{suffix}={token.ProtectedByteCount} watch_bytes_{suffix}={token.WatchByteCount}";
 
-    private readonly record struct SelectedStorageMipAdmission(SelectedStorageMipAssociation Owner, SelectedStorageMipPending Pending);
+    private readonly record struct SelectedStorageMipAdmission(SelectedStorageMipAssociation Owner,
+        SelectedStorageMipPending Pending, SelectedStorageMipSeedAdmission? Seed);
 
     private static SelectedStorageMipAdmission[] PrepareSelectedStorageMipAdmissionLocked(object work, GuestQueueIdentity queue)
     {
@@ -113,7 +116,10 @@ internal static partial class MetalVideoPresenter
                 throw new NotSupportedException("Metal selected storage admission conflicts with an incompatible native-only resource view.");
             if (_selectedStorageMipPending.TryGetValue(association.Key, out var pending) && pending.Queue != queue.Name)
                 throw new NotSupportedException("Metal selected storage mip has an outstanding producer on another logical queue.");
-            if (StorageImageWrites(texture)) selected.TryAdd(association.Key, association);
+            if (StorageImageWrites(texture) && !selected.TryAdd(association.Key, association) &&
+                !ReferenceEquals(selected[association.Key], association) &&
+                (_selectedStorageMipSeeds.TryGetValue(association, out _) || _selectedStorageMipSeeds.TryGetValue(selected[association.Key], out _)))
+                throw new NotSupportedException("Metal first-use selected seeds cannot alias distinct original proofs in one dispatch.");
         }
         var added = selected.Keys.Count(key => !_selectedStorageMipOwners.ContainsKey(key));
         if (_selectedStorageMipOwners.Count + added > 128)
@@ -123,7 +129,8 @@ internal static partial class MetalVideoPresenter
         // Construct every metadata object before queue admission mutates its
         // sequence/list. Publication below has no allocating iterator/object.
         return selected.Values.Select(owner => new SelectedStorageMipAdmission(owner,
-            new(queue.Name, _enqueuedGuestWorkSequence + 1))).ToArray();
+            new(queue.Name, _enqueuedGuestWorkSequence + 1),
+            PrepareInitialSelectedStorageMipSeedAdmission(owner, work, _enqueuedGuestWorkSequence + 1))).ToArray();
     }
 
     private static void PublishSelectedStorageMipAdmissionLocked(SelectedStorageMipAdmission[] admission)
@@ -132,6 +139,7 @@ internal static partial class MetalVideoPresenter
         {
             _selectedStorageMipOwners.TryAdd(item.Owner.Key, item.Owner);
             _selectedStorageMipPending[item.Owner.Key] = item.Pending;
+            PublishInitialSelectedStorageMipSeedAdmission(item.Seed);
         }
     }
 
