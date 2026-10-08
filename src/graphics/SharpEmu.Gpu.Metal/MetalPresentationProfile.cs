@@ -31,6 +31,7 @@ internal static partial class MetalPresentationProfile
 
     internal static void Begin()
     {
+        MetalGpuCompletionProfile.Begin();
         if (AllocationsEnabled) BeginAllocations();
         if (!Enabled) return;
         Array.Clear(Storage.Pending);
@@ -77,7 +78,11 @@ internal static partial class MetalPresentationProfile
         }
         catch (IOException) { }
         catch (ObjectDisposedException) { }
-        finally { MetalVertexPrefixProfile.EndReport(); }
+        finally
+        {
+            MetalGpuCompletionProfile.End();
+            MetalVertexPrefixProfile.EndReport();
+        }
     }
 
     private static void WriteReport()

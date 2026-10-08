@@ -2399,14 +2399,24 @@ internal static partial class MetalVideoPresenter
     private static void WaitForCommittedCommandBuffer(nint commandBuffer)
     {
         if (commandBuffer == 0) return; // no preceding native commands
+        var profileStart = _guestCommandBufferStatusOverride is null && _guestCommandBufferWaitOverride is null
+            ? MetalGpuCompletionProfile.StartWait() : 0;
         var status = ReadGuestCommandBufferStatus(commandBuffer);
-        if (status == 4) return;
+        if (status == 4)
+        {
+            MetalGpuCompletionProfile.RecordSuccessfulWait(commandBuffer, profileStart);
+            return;
+        }
         if (status is >= 0 and < 4)
         {
             if (_guestCommandBufferWaitOverride is { } wait) wait(commandBuffer);
             else MetalNative.SendVoid(commandBuffer, MetalNative.Selector("waitUntilCompleted"));
             status = ReadGuestCommandBufferStatus(commandBuffer);
-            if (status == 4) return;
+            if (status == 4)
+            {
+                MetalGpuCompletionProfile.RecordSuccessfulWait(commandBuffer, profileStart);
+                return;
+            }
         }
         throw GuestCommandBufferCompletionFailure(commandBuffer, status);
     }
