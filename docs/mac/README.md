@@ -182,3 +182,9 @@ signed app is in
 `.claude/worktrees/root-metal-completion-combined/artifacts/macos/compat-completion-724d906d`.
 Late reported Sarah windows were around59Hz; full sustained60+ and all-title
 acceptance remain incomplete. Typed GPU texture publication is the next blocker.
+
+The [native depth comparison qualification](validation/native-depth-comparison-20261008.md)
+now integrates native R32/R16 depth sampling and guest comparison functions locally
+at8783b897. Actual PCF, array/mip/cube/gather and fragment compiler checks pass
+on both CLRs; its signed Sarah replay preserves directional movement. Quake's
+256MiB tiled image, sustained60+ FPS and all-title acceptance remain incomplete.

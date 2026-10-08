@@ -37,7 +37,7 @@ execution remains x64/Rosetta; ARM64 CLR tests qualify host code only.
 | The Oregon Trail | 2ad passes BGRA; GPU-written1×1 RGBA8 sampled alias lacks captured provenance | Capture exact retained GPU-owner/view provenance before admitting sampled aliases |
 | Poppy Playtime Chapter 1 | Fatal write fault; later b7 record observes tracker Disarmed after a successful RW restore | Filtered schema3 retains85/0drops and three actual Disarmed CAS declines after successful RW restore; require permission/lifetime ownership, no unconditional retry |
 | Superliminal | 2ad retains the ten-mip512² color and disjoint128×64 storage collision | Preserve normalized physical selected-mip placement; actual production clear/Drain and disjoint-tail proof before integration |
-| Quake | Native movie plays; first 8192² R32 tiled depth image exceeds 128 MiB snapshot bound | Independent PS5 tile-mode-24 address oracle, bounded upload staging and correctly filtered depth comparison |
+| Quake | Native movie plays; first 8192² R32 tiled depth image exceeds 128 MiB snapshot bound | Qualified physical placement and bounded upload staging; native depth comparison now qualified separately at8783b897 |
 | Void Terrarium | 2ad Move prompt visible; extra direction replay overlaps loading, progression unverified | Input/checkpoint qualification on quiet host, first visual discrepancy and scene-specific GPU/producer attribution |
 
 ## Ownership before speed
