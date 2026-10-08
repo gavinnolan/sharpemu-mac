@@ -27,26 +27,7 @@ internal static partial class MetalVideoPresenter
             debt.CanonicalDescriptor is not { } descriptor || !MetalBgra1024ArrayStorageAdmission.IsQualified(descriptor) ||
             !origin.Layout.Matches(descriptor) || image.Width != origin.Layout.Width || image.Height != origin.Layout.Height ||
             image.Format != origin.Layout.NativeFormat.Format) return false;
-        reason = "selected-owner-overlap";
-        if (_selectedStorageMipOwners.Keys.Any(key => SelectedStorageMipOverlaps(key, address, origin.Layout.PhysicalBytes))) return false;
-        reason = "unknown-texture-source-or-depth-alias";
-        if (_latestTextureSources.Count != 0 || _guestDepthImages.Count != 0 || _guestDepthReadAliases.Count != 0) return false;
-        reason = "image-inventory-bound";
-        if (_guestImages.Count > 128) return false;
-        foreach (var other in _guestImages.Values)
-        {
-            if (ReferenceEquals(other, image)) continue;
-            // Unknown physical native aliases cannot be made disjoint by address.
-            reason = "other-image-original-provenance-unavailable-or-stale";
-            if (other.StorageCpuOrigin is not { } otherOrigin ||
-                !ReferenceEquals(otherOrigin.Memory, origin.Memory) ||
-                otherOrigin.Session != origin.Session ||
-                !otherOrigin.Source.IsMappedCopyObservationCurrent(otherOrigin.Mapping)) return false;
-            reason = "other-image-physical-overlap";
-            if (PhysicalMappingOverlaps(origin.Mapping, otherOrigin.Mapping)) return false;
-        }
-        reason = "qualified";
-        return true;
+        return IsFiniteStorageNativeCohortCurrentLocked(image, origin, out reason);
     }
 
     // Before the ordinary dirty consumer. Historical GpuWritten is never cleared;

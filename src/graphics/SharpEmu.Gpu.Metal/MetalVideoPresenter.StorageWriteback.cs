@@ -105,6 +105,7 @@ internal static partial class MetalVideoPresenter
 
     private static void ValidateFiniteStorageDispatch(GuestDrawTexture[] textures)
     {
+        RequireGuestCompletionHealthy(); // sticky/current unordered presentation writers must refuse
         if (textures.Length > MaximumFiniteStorageWritebacks)
             throw new NotSupportedException("Metal finite storage dispatch exceeds its bounded texture inventory.");
         if (_guestMemory is not ICpuMappedPublicationSource)
@@ -167,6 +168,7 @@ internal static partial class MetalVideoPresenter
         {
             if (_closed || _guestWorkFailure is not null)
                 throw new InvalidOperationException("Metal finite storage publication cannot acquire a closed or failed presenter owner.");
+            RequireFiniteStorageNativeCohortLocked(image, origin); // before retain/encoder acquisition
             ValidateStorageImageView(image, descriptor, StorageTextureFormat(descriptor));
             if (image.TextureType != MtlTextureType2DArray || image.ArrayLength != 1 || image.Depth != 1 || image.Texture == 0 ||
                 !_guestImages.TryGetValue(descriptor.Address, out var current) || !ReferenceEquals(current, image))
@@ -213,6 +215,7 @@ internal static partial class MetalVideoPresenter
     {
         lock (_gate)
         {
+            RequireFiniteStorageNativeCohortLocked(receipt.Image, receipt.Origin);
             if (_closed || _guestWorkFailure is not null || receipt.Consumed || receipt.Published || receipt.Image.Texture == 0 ||
                 receipt.Image.Texture != receipt.Texture || receipt.Image.ContentVersion != receipt.Version ||
                 !ReferenceEquals(receipt.Image.StorageCpuOrigin, receipt.Origin) ||
@@ -316,6 +319,7 @@ internal static partial class MetalVideoPresenter
                 lock (_gate)
                 {
                     ValidateFiniteStorageFinalizationContext(receipt.Origin);
+                    RequireFiniteStorageNativeCohortLocked(receipt.Image, nextOrigin);
                     if (receipt.Image.Texture != receipt.Texture || receipt.Image.ContentVersion != receipt.Version ||
                         !ReferenceEquals(receipt.Image.StorageCpuOrigin, receipt.Origin) ||
                         !_guestImages.TryGetValue(receipt.Descriptor.Address, out var current) || !ReferenceEquals(current, receipt.Image) ||
@@ -442,6 +446,7 @@ internal static partial class MetalVideoPresenter
             lock (_gate)
             {
                 ValidateFiniteStorageFinalizationContext(receipt.Origin);
+                RequireFiniteStorageNativeCohortLocked(receipt.Image, next);
                 if (!receipt.Published || receipt.Consumed || !receipt.SuccessfullyCompleted ||
                     receipt.Debt.Failed || !receipt.Debt.Pending || receipt.Debt.Work != receipt.Work ||
                     receipt.Image.Texture != receipt.Texture || receipt.Image.ContentVersion != checked(receipt.Version + 1) ||
