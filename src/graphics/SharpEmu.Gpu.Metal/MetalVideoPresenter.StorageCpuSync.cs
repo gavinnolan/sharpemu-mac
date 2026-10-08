@@ -60,19 +60,27 @@ internal static partial class MetalVideoPresenter
             StorageCpuSeedOrigin? origin;
             int version;
             long session;
+            GuestImageWriteTracker.DirtyImageDiagnosticState state;
             lock (_gate)
             {
                 _guestImages.TryGetValue(address, out var image);
                 origin = image?.StorageCpuOrigin;
                 version = image?.ContentVersion ?? -1;
                 session = CurrentStorageCpuSeedSession;
+                var layout = image?.StorageCpuLayout;
+                state = new(image is not null, image?.GpuWritten ?? false,
+                    image?.Initialized ?? false, image is not null && image.Texture != 0,
+                    _pendingGuestWorkCount, _batchOpen, image?.TextureType ?? 0,
+                    (uint)(image?.Format ?? default), image?.Depth ?? 0, image?.ArrayLength ?? 0,
+                    image?.Width ?? 0, image?.Height ?? 0, layout?.Pitch ?? 0,
+                    layout?.PhysicalBytes ?? 0, layout?.NativeFormat.BytesPerPixel ?? 0);
             }
             // No presenter gate while observing tracker scalars. These separately
             // sampled diagnostics do not certify mapping/content currentness.
             GuestImageWriteTracker.TraceDirtyBeforeConsume(address, session,
                 origin?.Observation.Token, origin?.Observation.MappingEpoch ?? -1,
                 HostMemory.MappingGeneration, origin?.Session ?? -1,
-                origin?.Observation.Observed ?? false, origin?.Mapping.FootprintByteCount ?? 0, version);
+                origin?.Observation.Observed ?? false, origin?.Mapping.FootprintByteCount ?? 0, version, state);
         }
         catch { } // Optional causality diagnostics cannot replace the original sync result.
     }

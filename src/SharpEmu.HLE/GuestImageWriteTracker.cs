@@ -452,12 +452,19 @@ public static unsafe partial class GuestImageWriteTracker
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGE_DIRTY") == "1";
     private static int _dirtyCausalityCount;
 
+    // Detached diagnostic scalars, never a native-content or ownership receipt.
+    public readonly record struct DirtyImageDiagnosticState(bool Present, bool GpuWritten,
+        bool Initialized, bool NativeHandlePresent, int PendingGuestWork, bool BatchOpen,
+        uint NativeType, uint NativeFormat, uint Depth, uint Layers, uint Width, uint Height,
+        uint Pitch, ulong PhysicalBytes, uint BytesPerPixel);
+
     // Ordinary diagnostic only. Called before ConsumeDirty, never from a fault
     // callback; a first trap/pre-notification is not completed write coverage.
     public static void TraceDirtyBeforeConsume(ulong address, long session,
         ContentToken? originalToken = null, long originalMappingEpoch = -1,
         long currentMappingEpoch = -1, long originalSession = -1,
-        bool originalObserved = false, ulong originalFootprintBytes = 0, int imageVersion = -1)
+        bool originalObserved = false, ulong originalFootprintBytes = 0, int imageVersion = -1,
+        DirtyImageDiagnosticState image = default)
     {
         if (!_dirtyCausalityEnabled) return;
         lock (_gate)
@@ -478,6 +485,12 @@ public static unsafe partial class GuestImageWriteTracker
                 Console.Error.WriteLine($"[WT][DIRTY] event=before-consume address=0x{address:X} session={session}" +
                     $" original_seed_present={originalToken.HasValue} original_observed={originalObserved}" +
                     $" original_session={originalSession} image_version={imageVersion}" +
+                    $" image_present={image.Present} gpu_written={image.GpuWritten}" +
+                    $" initialized={image.Initialized} native_handle_present={image.NativeHandlePresent}" +
+                    $" pending_guest_work={image.PendingGuestWork} batch_open={image.BatchOpen}" +
+                    $" native_type={image.NativeType} native_format={image.NativeFormat}" +
+                    $" depth={image.Depth} layers={image.Layers} image_size={image.Width}x{image.Height}" +
+                    $" layout_pitch={image.Pitch} layout_physical_bytes={image.PhysicalBytes} layout_bpp={image.BytesPerPixel}" +
                     $" original_mapping_epoch={originalMappingEpoch} current_mapping_epoch={currentMappingEpoch}" +
                     $" original_footprint_bytes={originalFootprintBytes}" +
                     $" original_protected_identity={originalToken?.ProtectedIdentity ?? 0}" +
