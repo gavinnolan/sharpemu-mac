@@ -27,7 +27,12 @@ internal static class MetalSingletonArrayStorageAdmission
         // Exact unified/number/shader-class agreement; no numeric conversion.
         (descriptor.Format == 4 && descriptor.NumberType == 7 &&
             shape.NumericClass == TextureNumericClass.Float && (raw[1] & 0xFFFF_FF00u) == (22u << 20) &&
-            descriptor.DstSelect == 0x204 && raw[5] == 0x0070_0000u);
+            descriptor.DstSelect == 0x204 && raw[5] == 0x0070_0000u) ||
+        // Exact SH/Octopath/Oregon RGBA16Float identity/PERF7 class.
+        // Its origin texel is eight owned bytes, never a four-byte conversion.
+        (descriptor.Format == 12 && descriptor.NumberType == 7 &&
+            shape.NumericClass == TextureNumericClass.Float && (raw[1] & 0xFFFF_FF00u) == (71u << 20) &&
+            descriptor.DstSelect == 0xFAC && raw[5] == 0x0070_0000u);
 
     internal static bool IsQualified(TextureDescriptor descriptor, IReadOnlyList<uint>? raw,
         bool arrayed, uint selectedMip, ShaderImageShape shape, GuestImageAccess access) =>

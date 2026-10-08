@@ -108,7 +108,7 @@ internal static partial class MetalTextureSnapshots
                     !MetalSingletonArrayStorageAdmission.IsQualified(binding.Descriptor, binding.ResourceDescriptor,
                         binding.IsArrayed, binding.MipLevel, binding.Shape, binding.Access))
                     throw new NotSupportedException(
-                        $"Metal array storage snapshots require a matching complete mode27 RGBA8Unorm/Float or qualified R32 Uint/Float X001 PERF_MOD7 single-mip 1x1 layer-zero descriptor and compiled 2D-array shape: " +
+                        $"Metal array storage snapshots require a matching complete mode27 RGBA8Unorm/Float or qualified R32 Uint/Float X001 or RGBA16Float identity PERF_MOD7 single-mip 1x1 layer-zero descriptor and compiled 2D-array shape: " +
                         $"descriptor={binding.Descriptor} shape={binding.Shape} access={binding.Access} selected_mip={binding.MipLevel} " +
                         $"raw=[{string.Join(",", binding.ResourceDescriptor?.Select(static word => $"{word:X8}") ?? [])}].");
                 MetalVideoPresenter.RejectSelectedStorageAlias(context.Memory, binding.Descriptor, binding.IsStorage, binding.MipLevel);
