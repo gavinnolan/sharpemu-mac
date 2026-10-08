@@ -83,7 +83,7 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
                     return false;
                 }
 
-                NativeMemory.Clear((void*)(AliasBase + offset), (nuint)size);
+                ClearCanonicalAlias(offset, size);
                 return true;
             }
             finally { ExitAliasAccess(); }
@@ -96,7 +96,7 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
         {
             try
             {
-                data.CopyTo(new Span<byte>((void*)target, data.Length));
+                CopyToCanonicalAlias(target, data);
                 return true;
             }
             finally
@@ -118,7 +118,7 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
                         return false;
                     }
 
-                    data.CopyTo(new Span<byte>((void*)(AliasBase + offset), data.Length));
+                    CopyToCanonicalAlias(AliasBase + offset, data);
                     return true;
                 }
 
@@ -129,13 +129,39 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
 
                 foreach (var (backing, dataOffset, bytes) in pieces)
                 {
-                    data.Slice(dataOffset, bytes).CopyTo(new Span<byte>((void*)backing, bytes));
+                    CopyToCanonicalAlias(backing, data.Slice(dataOffset, bytes));
                 }
 
                 return true;
             }
             finally { ExitAliasAccess(); }
         }
+    }
+
+    // Each destination chunk keeps its original copy/overlap semantics and
+    // existing alias pin. These helpers add ordinary bookkeeping only: an
+    // incomplete ledger never prevents the legacy write or authorizes content.
+    private void ClearCanonicalAlias(ulong offset, ulong count)
+    {
+        var interval = _backing!.BeginManagedWrite(offset, count); var succeeded = false;
+        try { NativeMemory.Clear((void*)(AliasBase + offset), (nuint)count); succeeded = true; }
+        finally { HostBackingObject.EndManagedWrite(interval, succeeded); }
+    }
+
+    private void CopyToCanonicalAlias(ulong destination, ReadOnlySpan<byte> source)
+    {
+        var interval = _backing!.BeginManagedWrite(destination - AliasBase, (ulong)source.Length);
+        var succeeded = false;
+        try { source.CopyTo(new Span<byte>((void*)destination, source.Length)); succeeded = true; }
+        finally { HostBackingObject.EndManagedWrite(interval, succeeded); }
+    }
+
+    private void CopyCanonicalAliasChunk(ulong source, ulong destination, int bytes)
+    {
+        var interval = _backing!.BeginManagedWrite(destination - AliasBase, (ulong)bytes);
+        var succeeded = false;
+        try { Buffer.MemoryCopy((void*)source, (void*)destination, bytes, bytes); succeeded = true; }
+        finally { HostBackingObject.EndManagedWrite(interval, succeeded); }
     }
 
     // The lock-free single-view read only; false (with nothing read) for anything else.
@@ -226,8 +252,8 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
                     }
 
                     // Use the backing alias so CopyTo can detect overlap between different guest views.
-                    new ReadOnlySpan<byte>((void*)(AliasBase + sourceOffset), (int)size)
-                        .CopyTo(new Span<byte>((void*)(AliasBase + destinationOffset), (int)size));
+                    CopyToCanonicalAlias(AliasBase + destinationOffset,
+                        new ReadOnlySpan<byte>((void*)(AliasBase + sourceOffset), (int)size));
                     return true;
                 }
 
@@ -241,7 +267,7 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
                 {
                     foreach (var (fromPtr, toPtr, bytes) in chunks)
                     {
-                        Buffer.MemoryCopy((void*)fromPtr, (void*)toPtr, bytes, bytes);
+                        CopyCanonicalAliasChunk(fromPtr, toPtr, bytes);
                     }
 
                     return true;
@@ -255,7 +281,7 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
 
                 foreach (var (backing, dataOffset, bytes) in to)
                 {
-                    staging.AsSpan(dataOffset, bytes).CopyTo(new Span<byte>((void*)backing, bytes));
+                    CopyToCanonicalAlias(backing, staging.AsSpan(dataOffset, bytes));
                 }
 
                 return true;

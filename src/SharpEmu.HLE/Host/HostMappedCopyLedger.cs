@@ -160,9 +160,13 @@ public sealed unsafe class HostMappedCopyLedger
             sourceAddress < footprintAddress || sourceAddress - footprintAddress > footprintByteCount ||
             (ulong)destination.Length > footprintByteCount - (sourceAddress - footprintAddress))
             return CpuMappedCopyResult.Rejected;
+        if (Monitor.IsEntered(gate)) throw new InvalidOperationException("Mapped copy must not run under the provider gate.");
         if (!backing.TryEnterAccess()) return CpuMappedCopyResult.Rejected;
         try
         {
+            // Enrollment does not certify pre-existing/native writers, serialize
+            // the copy, or change mapping-only IsCurrent semantics.
+            backing.EnrollManagedWrites();
             View[] selected;
             CpuMappedCopyObservation captured;
             lock (gate)
