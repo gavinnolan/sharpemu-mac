@@ -609,45 +609,81 @@ internal static partial class MetalVideoPresenter
         if (_textureSourceGraphEnabled)
             return EnqueueTextureSourceWorkLocked(work, payloadBytes, queue);
         var selectedMipAdmission = PrepareSelectedStorageMipAdmissionLocked(work, queue);
-        var sequence = ++_enqueuedGuestWorkSequence;
-        _lastEnqueuedGuestWorkByQueue[queue.Name] = sequence;
-        if (!_pendingGuestWorkByQueue.TryGetValue(queue.Name, out var pendingQueue))
+        var retainedVolume = RetainQueuedSingletonVolumeOriginalsLocked(work);
+        var oldSequence = _enqueuedGuestWorkSequence;
+        var oldCount = _pendingGuestWorkCount;
+        var oldBytes = _pendingGuestWorkBytes;
+        var oldTail = _immediateFollowupTail;
+        var hadLast = _lastEnqueuedGuestWorkByQueue.TryGetValue(queue.Name, out var oldLast);
+        var newQueue = !_pendingGuestWorkByQueue.TryGetValue(queue.Name, out var pendingQueue);
+        LinkedListNode<PendingGuestWork>? node = null;
+        try
         {
-            pendingQueue = new LinkedList<PendingGuestWork>();
-            _pendingGuestWorkByQueue.Add(queue.Name, pendingQueue);
-            _pendingGuestQueueSchedule.Add(queue.Name);
-        }
+            var sequence = ++_enqueuedGuestWorkSequence;
+            _lastEnqueuedGuestWorkByQueue[queue.Name] = sequence;
+            if (newQueue)
+            {
+                pendingQueue = new LinkedList<PendingGuestWork>();
+                _pendingGuestWorkByQueue.Add(queue.Name, pendingQueue);
+                _pendingGuestQueueSchedule.Add(queue.Name);
+            }
 
-        var pending = new PendingGuestWork(work, payloadBytes, sequence, queue);
-        if (_enqueueAsImmediateQueueFollowup &&
-            _immediateFollowupTail is { List: not null } tail &&
-            ReferenceEquals(tail.List, pendingQueue))
-        {
-            _immediateFollowupTail = pendingQueue.AddAfter(tail, pending);
-        }
-        else if (_enqueueAsImmediateQueueFollowup)
-        {
-            _immediateFollowupTail = pendingQueue.AddFirst(pending);
-        }
-        else
-        {
-            pendingQueue.AddLast(pending);
-        }
+            var pending = new PendingGuestWork(work, payloadBytes, sequence, queue);
+            node = new LinkedListNode<PendingGuestWork>(pending);
+            if (_enqueueAsImmediateQueueFollowup &&
+                _immediateFollowupTail is { List: not null } tail &&
+                ReferenceEquals(tail.List, pendingQueue))
+            {
+                pendingQueue!.AddAfter(tail, node);
+                _immediateFollowupTail = node;
+            }
+            else if (_enqueueAsImmediateQueueFollowup)
+            {
+                pendingQueue!.AddFirst(node);
+                _immediateFollowupTail = node;
+            }
+            else
+            {
+                pendingQueue!.AddLast(node);
+            }
 
-        PublishSelectedStorageMipAdmissionLocked(selectedMipAdmission);
-        _pendingGuestWorkCount++;
-        var total = _pendingGuestWorkBytes + payloadBytes;
-        _pendingGuestWorkBytes = total < _pendingGuestWorkBytes ? ulong.MaxValue : total;
-        if (!_enqueueAsImmediateQueueFollowup)
-        {
-            // Drain promptly: guests that submit work and then wait on its
-            // side effects (release-mem labels, write-backs) round-trip
-            // through this queue several times per frame, and a timer-tick
-            // drain cadence turns each round-trip into a full frame interval.
-            ScheduleGuestWorkDrain();
-        }
+            if (retainedVolume) _singletonVolumeAfterOrdinaryQueueInsert?.Invoke();
+            PublishSelectedStorageMipAdmissionLocked(selectedMipAdmission);
+            _pendingGuestWorkCount++;
+            var total = _pendingGuestWorkBytes + payloadBytes;
+            _pendingGuestWorkBytes = total < _pendingGuestWorkBytes ? ulong.MaxValue : total;
+            if (!_enqueueAsImmediateQueueFollowup)
+            {
+                // Drain promptly: guests that submit work and then wait on its
+                // side effects (release-mem labels, write-backs) round-trip
+                // through this queue several times per frame, and a timer-tick
+                // drain cadence turns each round-trip into a full frame interval.
+                ScheduleGuestWorkDrain();
+            }
 
-        return sequence;
+            return sequence;
+        }
+        catch (Exception failure) when (retainedVolume)
+        {
+            if (node?.List is { } admittedQueue) admittedQueue.Remove(node);
+            if (newQueue)
+            {
+                _pendingGuestWorkByQueue.Remove(queue.Name);
+                _pendingGuestQueueSchedule.Remove(queue.Name);
+            }
+            if (hadLast) _lastEnqueuedGuestWorkByQueue[queue.Name] = oldLast;
+            else _lastEnqueuedGuestWorkByQueue.Remove(queue.Name);
+            _enqueuedGuestWorkSequence = oldSequence;
+            _pendingGuestWorkCount = oldCount;
+            _pendingGuestWorkBytes = oldBytes;
+            _immediateFollowupTail = oldTail;
+            // Selected metadata may already be installed. Fatal admission
+            // forbids its execution rather than publishing a partial success.
+            _guestWorkFailure ??= failure;
+            CancelQueuedSingletonVolumeOriginalsLocked(failure);
+            Monitor.PulseAll(_gate);
+            throw;
+        }
     }
 
     internal static ulong GetGuestWorkPayloadBytes(object work)
@@ -803,6 +839,22 @@ internal static partial class MetalVideoPresenter
                 ReleaseGuestPayloadWork(pending.Work);
                 ReleaseTextureSourceWorkOwnerLocked(pending.Work);
             }
+            else
+            {
+                try
+                {
+                    if (_singletonVolumeOriginalCleanupFailure is { } priorCleanup)
+                        System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(priorCleanup).Throw();
+                    ReleaseQueuedSingletonVolumeOriginalsLocked(pending.Work);
+                }
+                catch (Exception failure)
+                {
+                    _guestWorkFailure ??= failure;
+                    CancelQueuedSingletonVolumeOriginalsLocked(failure);
+                    Monitor.PulseAll(_gate);
+                    throw; // no completed-sequence acknowledgement
+                }
+            }
             _pendingGuestWorkBytes = pending.PayloadBytes >= _pendingGuestWorkBytes
                 ? 0
                 : _pendingGuestWorkBytes - pending.PayloadBytes;
@@ -936,6 +988,7 @@ internal static partial class MetalVideoPresenter
                         else
                         {
                             _guestWorkFailure = exception;
+                            CancelQueuedSingletonVolumeOriginalsLocked(exception);
                             Monitor.PulseAll(_gate);
                         }
                     }

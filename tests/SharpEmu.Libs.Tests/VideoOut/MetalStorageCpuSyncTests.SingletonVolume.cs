@@ -7,6 +7,8 @@ using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.ShaderCompiler.Metal;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.VideoOut;
@@ -190,25 +192,134 @@ public sealed partial class MetalStorageCpuSyncTests
         Assert.Equal(1, memory.Releases);
     }
 
+    private static long SubmitVolume(IReadOnlyList<GuestDrawTexture> textures, bool draw = false)
+    {
+        var shader = new MetalCompiledGuestShader(new Gen5MslShader("", "volume_queue_ownership", Gen5MslStage.Compute, 0));
+        if (!draw) return MetalVideoPresenter.SubmitComputeDispatch(0, shader, textures, [], 1, 1, 1, 0, 0, 0, false, null);
+        MetalVideoPresenter.SubmitOffscreenTranslatedDraw(shader, textures, [], 0,
+            [new GuestRenderTarget(Address + 0x20000, 4, 4, 10, 0)], null, 3, 1, 4, null, null, null, null, 0);
+        return (long)Field("_enqueuedGuestWorkSequence").GetValue(null)!;
+    }
+    private static object TakeVolumeWork()
+    {
+        object?[] arguments = [null];
+        Assert.True((bool)Presenter.GetMethod("TryTakeGuestWork", Private)!.Invoke(null, arguments)!);
+        return arguments[0]!;
+    }
+
     [Theory]
     [InlineData(false)] [InlineData(true)]
-    public void SingletonVolumeQueuedPreparationReleaseCannotStealPendingOwnerAndCancelBalancesOnce(bool closeBeforeCancel)
+    public void SingletonVolumeActualSubmissionRetainsPreparationThroughTakeAndCompletion(bool draw)
     {
         ActualArchitecture(); using var state = new VolumeState(); var memory = new VolumeMemory(VolumePhysical());
-        var snapshot = VolumeSnapshot(memory);
-        // This actual queue-ownership hook is metadata-only, no fake GPU dispatch success.
-        var type = Presenter.GetNestedType("ComputeGuestDispatch", BindingFlags.NonPublic)!;
-        var work = Activator.CreateInstance(type, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public,
-            null, [0UL, null, new[] { snapshot }, Array.Empty<GuestMemoryBuffer>(), 1u, 1u, 1u, 0u, 0u, 0u, null], null)!;
-        lock (Field("_gate").GetValue(null)!) InvokeVolume("RetainQueuedTextureSourcesLocked", work);
+        var snapshot = VolumeSnapshot(memory); var watch = VolumeWatch(GetOrigin(snapshot));
+        var sequence = SubmitVolume([snapshot, snapshot], draw);
+        Assert.True(sequence > 0); Assert.False(MetalVideoPresenter.TextureSourceGraphEnabled);
+        Assert.Equal(1, watch.GetType().GetField("QueuedReferences", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(watch));
+        // Actual frontend cleanup after Submit, not direct invocation of the retain helper.
         MetalVideoPresenter.ReleasePreparedTextureSources([snapshot]); Assert.Equal(0, memory.Releases);
-        if (closeBeforeCancel) { InvokeVolume("ReleaseSingletonVolumeNativeOriginals"); Assert.Equal(1, memory.Releases); }
-        lock (Field("_gate").GetValue(null)!)
+        var pending = TakeVolumeWork();
+        Assert.Equal(sequence, pending.GetType().GetProperty("Sequence")!.GetValue(pending));
+        Assert.Equal(0, memory.Releases);
+        InvokeVolume("CompleteGuestWork", pending); // queue bookkeeping only; no encoded/GPU success claim
+        Assert.Equal(1, memory.Releases); Assert.Equal(sequence, Field("_completedGuestWorkSequence").GetValue(null));
+        Assert.Equal(0, watch.GetType().GetField("QueuedReferences", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(watch));
+        Assert.Empty((IEnumerable)Field("_pendingSingletonVolumeOriginalWorks").GetValue(null)!);
+        MetalVideoPresenter.ReleasePreparedTextureSources([snapshot]); Assert.Equal(1, memory.Releases);
+    }
+
+    [Theory]
+    [InlineData(false)] [InlineData(true)]
+    public void SingletonVolumeActualShutdownCancelsQueuedOrTakenPreparationWithoutCompletion(bool taken)
+    {
+        ActualArchitecture(); using var state = new VolumeState(); var memory = new VolumeMemory(VolumePhysical());
+        var snapshot = VolumeSnapshot(memory); Assert.True(SubmitVolume([snapshot]) > 0);
+        MetalVideoPresenter.ReleasePreparedTextureSources([snapshot]);
+        if (taken) _ = TakeVolumeWork();
+        Assert.Equal(0, memory.Releases);
+        InvokeVolume("CompletePresenterShutdown"); InvokeVolume("CompletePresenterShutdown");
+        Assert.Equal(1, memory.Releases); Assert.Equal(0L, Field("_completedGuestWorkSequence").GetValue(null));
+        Assert.Empty((IEnumerable)Field("_pendingSingletonVolumeOriginalWorks").GetValue(null)!);
+    }
+
+    [Fact]
+    public void SingletonVolumeActualAdmissionFailureRollsBackQueueAndPreservesPrimary()
+    {
+        ActualArchitecture(); using var state = new VolumeState(); var memory = new VolumeMemory(VolumePhysical());
+        var snapshot = VolumeSnapshot(memory); var primary = new InvalidOperationException("inserted work cannot publish");
+        var hook = Field("_singletonVolumeAfterOrdinaryQueueInsert"); var old = hook.GetValue(null);
+        try
         {
-            InvokeVolume("ReleaseQueuedTextureSourcesLocked", work);
-            InvokeVolume("ReleaseQueuedTextureSourcesLocked", work);
+            hook.SetValue(null, (Action)(() => throw primary));
+            Assert.Same(primary, Assert.Throws<InvalidOperationException>(() => SubmitVolume([snapshot])));
+            Assert.Same(primary, Field("_guestWorkFailure").GetValue(null));
+            Assert.Equal(0L, Field("_enqueuedGuestWorkSequence").GetValue(null));
+            Assert.Equal(0, Field("_pendingGuestWorkCount").GetValue(null));
+            Assert.Equal(0UL, Field("_pendingGuestWorkBytes").GetValue(null));
+            Assert.Empty((IEnumerable)Field("_pendingGuestWorkByQueue").GetValue(null)!);
+            Assert.Empty((IEnumerable)Field("_pendingSingletonVolumeOriginalWorks").GetValue(null)!);
+            Assert.Equal(0, memory.Releases); // original preparation is still caller-owned
+            MetalVideoPresenter.ReleasePreparedTextureSources([snapshot]); Assert.Equal(1, memory.Releases);
         }
-        Assert.Equal(1, memory.Releases);
+        finally { hook.SetValue(null, old); MetalVideoPresenter.ReleasePreparedTextureSources([snapshot]); }
+    }
+
+    [Fact]
+    public void SingletonVolumeActualDrainFailureCancelsPendingWatchAndRetainsOriginalCause()
+    {
+        ActualArchitecture(); using var state = new VolumeState(); var memory = new VolumeMemory(VolumePhysical());
+        var primary = new InvalidOperationException("earlier ordinary action failed");
+        GpuFatal.OnFatal = _ => { }; // actual fatal exception, never process FailFast in this control
+        Assert.True(MetalVideoPresenter.SubmitOrderedGuestAction(() => throw primary, "before volume") > 0);
+        var snapshot = VolumeSnapshot(memory); var sequence = SubmitVolume([snapshot]);
+        Assert.True(sequence > 0); MetalVideoPresenter.ReleasePreparedTextureSources([snapshot]);
+        Assert.Equal(0, memory.Releases);
+        var error = Assert.Throws<GpuFatalException>(() => MetalVideoPresenter.DrainGuestWork(0, 0));
+        Assert.Same(primary, error.InnerException); Assert.Same(primary, Field("_guestWorkFailure").GetValue(null));
+        Assert.Equal(1, memory.Releases); Assert.False(MetalVideoPresenter.WaitForGuestWork(sequence, 0));
+        Assert.Empty((IEnumerable)Field("_pendingSingletonVolumeOriginalWorks").GetValue(null)!);
+        InvokeVolume("CompletePresenterShutdown"); Assert.Equal(1, memory.Releases);
+    }
+
+    [Fact]
+    public void SingletonVolumeActualFollowupAdmissionHasFinite65WorkOwnershipAndNo66thRetain()
+    {
+        ActualArchitecture(); using var state = new VolumeState(); var memory = new VolumeMemory(VolumePhysical());
+        var snapshot = VolumeSnapshot(memory); var watch = VolumeWatch(GetOrigin(snapshot));
+        Field("_enqueueAsImmediateQueueFollowup").SetValue(null, true); // real consumer follow-up bypasses ordinary backpressure
+        for (var index = 0; index < 65; index++) Assert.True(SubmitVolume([snapshot]) > 0);
+        var error = Assert.Throws<InvalidOperationException>(() => SubmitVolume([snapshot]));
+        Assert.Contains("finite bound", error.Message);
+        Assert.Equal(65L, Field("_enqueuedGuestWorkSequence").GetValue(null));
+        Assert.Equal(65, Field("_pendingGuestWorkCount").GetValue(null));
+        Assert.Equal(65, watch.GetType().GetField("QueuedReferences", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(watch));
+        MetalVideoPresenter.ReleasePreparedTextureSources([snapshot]); Assert.Equal(0, memory.Releases);
+        InvokeVolume("CompletePresenterShutdown"); Assert.Equal(1, memory.Releases);
+        Assert.Empty((IEnumerable)Field("_pendingSingletonVolumeOriginalWorks").GetValue(null)!);
+    }
+
+    [Fact]
+    public void SingletonVolumePriorPreparationCleanupFailureLatchesOrdinaryCompletionAndCancelsOtherOwners()
+    {
+        ActualArchitecture(); using var state = new VolumeState();
+        var first = new VolumeMemory(VolumePhysical()); var second = new VolumeMemory(VolumePhysical());
+        var firstSnapshot = VolumeSnapshot(first); var secondSnapshot = VolumeSnapshot(second);
+        var primary = new InvalidOperationException("a different preparation release is unknown");
+        var failing = new VolumeMemory(VolumePhysical()) { ReleaseFailure = primary };
+        var failedPreparation = VolumeSnapshot(failing); var executed = 0;
+        var action = MetalVideoPresenter.SubmitOrderedGuestAction(() => executed++, "before sticky cleanup");
+        Assert.True(action > 0); Assert.True(SubmitVolume([firstSnapshot]) > 0); Assert.True(SubmitVolume([secondSnapshot]) > 0);
+        MetalVideoPresenter.ReleasePreparedTextureSources([firstSnapshot, secondSnapshot]);
+        Assert.Same(primary, Assert.Throws<InvalidOperationException>(() =>
+            MetalVideoPresenter.ReleasePreparedTextureSources([failedPreparation])));
+        Assert.Null(Field("_guestWorkFailure").GetValue(null)); // optional cleanup is sticky, not yet a drain failure
+        Assert.Same(primary, Assert.Throws<InvalidOperationException>(() => MetalVideoPresenter.DrainGuestWork(0, 0)));
+        Assert.Equal(1, executed); Assert.Equal(0L, Field("_completedGuestWorkSequence").GetValue(null));
+        Assert.Same(primary, Field("_guestWorkFailure").GetValue(null));
+        Assert.False(MetalVideoPresenter.WaitForGuestWork(action, 0));
+        Assert.Equal(1, first.Releases); Assert.Equal(1, second.Releases); Assert.Equal(1, failing.Releases);
+        Assert.Empty((IEnumerable)Field("_pendingSingletonVolumeOriginalWorks").GetValue(null)!);
+        InvokeVolume("CompletePresenterShutdown"); Assert.Equal(1, failing.Releases); // no uncertain cleanup retry
     }
 
     [Fact]
@@ -257,17 +368,16 @@ public sealed partial class MetalStorageCpuSyncTests
         var first = new VolumeMemory(VolumePhysical()) { ReleaseFailure = new InvalidOperationException("first exact release unknown") };
         var second = new VolumeMemory(VolumePhysical());
         var snapshots = new[] { VolumeSnapshot(first), VolumeSnapshot(second) };
-        var type = Presenter.GetNestedType("ComputeGuestDispatch", BindingFlags.NonPublic)!;
-        var work = Activator.CreateInstance(type, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public,
-            null, [0UL, null, snapshots, Array.Empty<GuestMemoryBuffer>(), 1u, 1u, 1u, 0u, 0u, 0u, null], null)!;
-        lock (Field("_gate").GetValue(null)!) InvokeVolume("RetainQueuedTextureSourcesLocked", work);
+        Assert.True(SubmitVolume(snapshots) > 0);
         MetalVideoPresenter.ReleasePreparedTextureSources(snapshots);
-        lock (Field("_gate").GetValue(null)!)
-        {
-            var error = Assert.Throws<TargetInvocationException>(() => InvokeVolume("ReleaseQueuedTextureSourcesLocked", work));
-            Assert.Same(first.ReleaseFailure, error.InnerException);
-            InvokeVolume("ReleaseQueuedTextureSourcesLocked", work);
-        }
+        var pending = TakeVolumeWork();
+        var error = Assert.Throws<TargetInvocationException>(() => InvokeVolume("CompleteGuestWork", pending));
+        Assert.Same(first.ReleaseFailure, error.InnerException);
+        Assert.Equal(0L, Field("_completedGuestWorkSequence").GetValue(null));
+        Assert.Same(first.ReleaseFailure, Field("_guestWorkFailure").GetValue(null));
+        var repeat = Assert.Throws<TargetInvocationException>(() => InvokeVolume("CompleteGuestWork", pending));
+        Assert.Same(first.ReleaseFailure, repeat.InnerException); // cannot acknowledge after uncertain cleanup
+
         Assert.Equal(1, first.Releases); Assert.Equal(1, second.Releases);
         Assert.Same(first.ReleaseFailure, Field("_singletonVolumeOriginalCleanupFailure").GetValue(null));
         MetalVideoPresenter.ReleasePreparedTextureSources(snapshots);
@@ -340,8 +450,11 @@ public sealed partial class MetalStorageCpuSyncTests
         private readonly string[] names = ["_finiteStorageWritebackEnabled", "_singletonVolumeOriginalCleanupFailure", "_finiteStorageRetiredOrigins", "_finiteStorageRetiredOriginCount", "_finiteStorageRetiredUnknown"];
         private readonly object?[] values;
         private readonly object[] oldWatches;
+        private readonly HashSet<object> pendingWorks = (HashSet<object>)Field("_pendingSingletonVolumeOriginalWorks").GetValue(null)!;
+        private readonly object[] oldPendingWorks;
         internal VolumeState()
         {
+            oldPendingWorks = pendingWorks.ToArray(); pendingWorks.Clear();
             var watches = (IEnumerable)Field("_singletonVolumeOriginalWatches").GetValue(null)!;
             oldWatches = watches.Cast<object>().ToArray();
             watches.GetType().GetMethod("Clear")!.Invoke(watches, []);
@@ -355,6 +468,7 @@ public sealed partial class MetalStorageCpuSyncTests
         public void Dispose()
         {
             Images.Remove(Address);
+            pendingWorks.Clear(); pendingWorks.UnionWith(oldPendingWorks);
             var watches = Field("_singletonVolumeOriginalWatches").GetValue(null)!;
             watches.GetType().GetMethod("Clear")!.Invoke(watches, []);
             foreach (var watch in oldWatches) watches.GetType().GetMethod("Add")!.Invoke(watches, [watch]);

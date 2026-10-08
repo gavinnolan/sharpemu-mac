@@ -215,7 +215,6 @@ internal static partial class MetalVideoPresenter
         foreach (var lease in leases)
             if (lease.References <= 0 || lease.PreparationReleased)
                 throw new InvalidOperationException("Metal texture source preparation has already been released.");
-        RetainQueuedSingletonVolumeOriginalsLocked(work);
         if (leases.Length == 0) return;
         // Establish a distinct owner before acquiring references. Allocation or
         // duplicate-key failure cannot leak partial retains, and release is
@@ -230,15 +229,11 @@ internal static partial class MetalVideoPresenter
 
     private static void ReleaseQueuedTextureSourcesLocked(object work)
     {
-        Exception? volumeCleanup = null;
-        try { ReleaseQueuedSingletonVolumeOriginalsLocked(work); }
-        catch (Exception failure) { volumeCleanup = failure; }
         if (_queuedTextureSourceOwners.TryGetValue(work, out var owner) && !owner.Released)
         {
             owner.Released = true;
             foreach (var lease in owner.Leases) ReleaseTextureSourceLeaseLocked(lease);
         }
-        if (volumeCleanup is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(volumeCleanup).Throw();
     }
 
     private static IEnumerable<TextureSourceLease> TextureSourcesOf(object work)

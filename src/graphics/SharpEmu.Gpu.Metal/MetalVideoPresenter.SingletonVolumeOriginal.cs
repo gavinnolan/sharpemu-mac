@@ -11,6 +11,7 @@ internal static partial class MetalVideoPresenter
     internal static bool SingletonVolumeOriginalCaptureEnabled =>
         (_rgbaStorageRuntimePublicationRequested || _finiteStorageWritebackEnabled) && !TextureSourceGraphEnabled;
     private static Exception? _singletonVolumeOriginalCleanupFailure;
+    private static Action? _singletonVolumeAfterOrdinaryQueueInsert; // optional ordinary-path fixture seam
     private static readonly HashSet<SingletonVolumeOriginalWatch> _singletonVolumeOriginalWatches = new(ReferenceEqualityComparer.Instance);
 
     private static void TrackSingletonVolumeOriginalWatch(SingletonVolumeOriginalWatch watch, long originalSession)
@@ -79,27 +80,40 @@ internal static partial class MetalVideoPresenter
         internal bool Released;
     }
     private static readonly ConditionalWeakTable<object, QueuedSingletonVolumeOriginals> _queuedSingletonVolumeOriginals = new();
+    private const int MaximumSingletonVolumeQueuedOwners = MaxPendingGuestWork + 1; // pending capacity plus the taken consumer
+    private static readonly HashSet<object> _pendingSingletonVolumeOriginalWorks = new(ReferenceEqualityComparer.Instance);
 
-    private static void RetainQueuedSingletonVolumeOriginalsLocked(object work)
+    private static bool RetainQueuedSingletonVolumeOriginalsLocked(object work)
     {
-        if (!SingletonVolumeOriginalCaptureEnabled) return;
-        IReadOnlyList<GuestDrawTexture> textures = work is ComputeGuestDispatch dispatch ? dispatch.Textures : [];
-        if (!textures.Any(texture => StorageCpuOrigin(texture)?.VolumeWatch is not null)) return;
+        if (!SingletonVolumeOriginalCaptureEnabled) return false;
+        IReadOnlyList<GuestDrawTexture> textures = work switch
+        {
+            ComputeGuestDispatch dispatch => dispatch.Textures,
+            OffscreenGuestDraw draw => draw.Draw.Textures,
+            _ => [],
+        };
+        if (!textures.Any(texture => StorageCpuOrigin(texture)?.VolumeWatch is not null)) return false;
         if (textures.Count > 128) throw new NotSupportedException("Singleton volume queue preparation exceeds its finite bound.");
+        if (_pendingSingletonVolumeOriginalWorks.Count >= MaximumSingletonVolumeQueuedOwners)
+            throw new InvalidOperationException("Singleton volume pending work inventory exceeds its finite bound.");
         if (_queuedSingletonVolumeOriginals.TryGetValue(work, out _))
             throw new InvalidOperationException("Singleton volume work already owns its original watches.");
         var watches = textures.Select(texture => StorageCpuOrigin(texture)?.VolumeWatch)
             .Where(watch => watch is not null).Cast<SingletonVolumeOriginalWatch>().Distinct().ToArray();
         if (watches.Length > 128 || watches.Any(watch => !watch.IsCurrent || watch.PreparationReleased && Volatile.Read(ref watch.State) == 0 || watch.QueuedReferences == int.MaxValue))
             throw new InvalidOperationException("Singleton volume queue admission lost original watch preparation.");
-        _queuedSingletonVolumeOriginals.Add(work, new(watches)); // allocate before changing counters
+        _pendingSingletonVolumeOriginalWorks.Add(work);
+        try { _queuedSingletonVolumeOriginals.Add(work, new(watches)); } // allocate before changing counters
+        catch { _pendingSingletonVolumeOriginalWorks.Remove(work); throw; }
         foreach (var watch in watches) watch.QueuedReferences++;
+        return true;
     }
 
     private static void ReleaseQueuedSingletonVolumeOriginalsLocked(object work)
     {
         if (!_queuedSingletonVolumeOriginals.TryGetValue(work, out var owner) || owner.Released) return;
         owner.Released = true;
+        _pendingSingletonVolumeOriginalWorks.Remove(work);
         Exception? cleanup = null;
         foreach (var watch in owner.Watches)
         {
@@ -112,6 +126,32 @@ internal static partial class MetalVideoPresenter
             }
         }
         if (cleanup is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(cleanup).Throw();
+    }
+
+    // Ordinary queued and taken work only; exact consume precedes callbacks.
+    // Called on failure/close, never acknowledges canceled work or native bytes.
+    private static void CancelQueuedSingletonVolumeOriginalsLocked(Exception? primary = null)
+    {
+        Exception? cleanup = null;
+        while (_pendingSingletonVolumeOriginalWorks.Count != 0)
+        {
+            // Struct enumerator and scalar removal: cancellation cannot fail
+            // allocating a snapshot after the original admission/drain error.
+            var iterator = _pendingSingletonVolumeOriginalWorks.GetEnumerator();
+            if (!iterator.MoveNext()) break;
+            var work = iterator.Current;
+            iterator.Dispose();
+            _pendingSingletonVolumeOriginalWorks.Remove(work);
+            try { ReleaseQueuedSingletonVolumeOriginalsLocked(work); }
+            catch (Exception later)
+            {
+                cleanup ??= later;
+                if (primary is not null)
+                    try { primary.Data["MetalSingletonVolumeQueueCleanup"] = later; } catch { }
+            }
+        }
+        if (primary is null && cleanup is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(cleanup).Throw();
     }
 
     internal static void ReleaseUnregisteredSingletonVolumeWatch(ICpuMappedCopySource source,
