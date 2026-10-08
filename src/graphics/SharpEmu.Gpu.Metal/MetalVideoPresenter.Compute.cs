@@ -98,7 +98,7 @@ internal static partial class MetalVideoPresenter
         var selectedSeedExecution = BeginSelectedStorageMipSeedExecution(dispatch);
         Exception? primary = null;
         try { ExecuteComputeDispatchCore(device, queue, dispatch); }
-        catch (Exception failure) { primary = failure; throw; }
+        catch (Exception failure) { primary = failure; TraceFiniteStorageDispatchRefusal(dispatch, failure); throw; }
         finally { selectedSeedExecution.Finish(primary); }
     }
 
@@ -179,7 +179,11 @@ internal static partial class MetalVideoPresenter
                     textureHandles[index] = storageImage.Texture;
                     textureOwned[index] = false;
                     if (storageWritebacks is not null && StorageImageWrites(descriptor))
-                        storageWritebacks.Add(CaptureFiniteStorageWriteback(descriptor, storageImage));
+                    {
+                        var receipt = CaptureFiniteStorageWriteback(descriptor, storageImage);
+                        storageWritebacks.Add(receipt);
+                        TraceFiniteStorageRuntime("producer-retained", descriptor.Address, "exact-first-or-own-canonical-version", receipt.Origin);
+                    }
                 }
                 else
                 {

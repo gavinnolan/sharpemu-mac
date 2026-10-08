@@ -309,6 +309,7 @@ internal static partial class MetalVideoPresenter
                 throw new InvalidOperationException("Metal finite storage publication applied without its exact provider continuity; GPU debt remains pending.");
             ValidateFiniteStorageMappingContinuation(receipt.Origin.Mapping, mapping);
             var nextOrigin = receipt.Origin with { Mapping = mapping };
+            TraceFiniteStorageRuntime("provider-applied", receipt.Descriptor.Address, "exact-own-mapping-continuity", receipt.Origin);
             _finiteStorageAfterAppliedForControl?.Invoke();
             WithFiniteStorageValidation(receipt, nextOrigin, () =>
             {
@@ -455,6 +456,7 @@ internal static partial class MetalVideoPresenter
             }
             _finiteStorageAfterCanonicalVersionForControl?.Invoke();
         });
+        TraceFiniteStorageRuntime("canonical-completed", receipt.Descriptor.Address, "version-installed-and-final-original-veto-passed", next);
     }
 
     // Called under _gate at both post-effect metadata boundaries. Applied bytes

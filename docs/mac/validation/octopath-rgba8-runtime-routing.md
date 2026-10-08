@@ -25,6 +25,8 @@ This source-only runtime route is NOT Octopath gameplay qualification and NOT pr
 
 The current guard checks original observed tracker generation and participating physical writer history; it cannot serialize an unhooked raw/JIT writer. Publication is not atomic4MiB visibility or rollback. Further activation qualification requires actual game traces and native mixed/order/unknown refusal controls under the root's serialized grant. No game/build/device worker has run for this checkpoint.
 
+The runtime opt-in emits at most64 ordinary diagnostic rows, outside presenter/provider gates. Rows distinguish producer retention, actual provider Applied and final canonical-version completion; those stage counters are observations, not completion receipts or performance samples. Dirty refusals identify pending work/batch, canonical debt/version, selected overlap, unknown depth/source aliases, inventory bound, other-image missing/stale original physical metadata, physical overlap, reservation refusal and original token/owner veto. Original/current protected and watch identities/generations are sampled outside the presenter gate; equality is not an atomic native-writer certificate. Counters can include later successful stages after the row cap; contended diagnostic rows may be dropped. Formatter/sink errors are best effort and never replace the original failure. Missing initial seed/debt remains strict legacy refusal. No diagnostic alters dirty consumption or promotes unknown aliases.
+
 The optional writer-attribution combined-import adapter, only where Metal's partial declaration exists, is:
 
 ```csharp
