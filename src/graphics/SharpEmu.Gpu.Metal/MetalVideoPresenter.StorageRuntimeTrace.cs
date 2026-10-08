@@ -13,7 +13,8 @@ internal static partial class MetalVideoPresenter
         int Version, bool GpuWritten, bool Initialized, bool OriginPresent,
         long? OriginalSession, ulong? LayoutAddress, ulong? LayoutBytes,
         ulong? SourceAddress, ulong? SourceBytes, ulong? FootprintAddress, ulong? FootprintBytes,
-        ImageDiagnosticOrigin Creation, ImageDiagnosticWork Mutation);
+        ImageDiagnosticOrigin Creation, ImageDiagnosticWork Mutation,
+        int? VolumeState, bool? VolumeUnknownProducer, string? VolumeUnknownReason, int? VolumeVersion);
 
     private sealed class FiniteStorageCohortRefusal(string message, FiniteStorageCohortOffender offender)
         : NotSupportedException(message)
@@ -31,7 +32,11 @@ internal static partial class MetalVideoPresenter
             original?.Mapping.SourceAddress, original?.Mapping.SourceByteCount,
             original?.Mapping.FootprintAddress, original?.Mapping.FootprintByteCount,
             _imageProvenanceEnabled ? image.DiagnosticOrigin : default,
-            _imageProvenanceEnabled ? image.DiagnosticMutation : default);
+            _imageProvenanceEnabled ? image.DiagnosticMutation : default,
+            _volumeOwnerDeclineDiagnostics && original?.VolumeWatch is { } watch ? Volatile.Read(ref watch.State) : null,
+            _volumeOwnerDeclineDiagnostics ? original?.VolumeWatch?.UnknownProducer : null,
+            _volumeOwnerDeclineDiagnostics ? original?.VolumeWatch?.DiagnosticUnknownProducerReason : null,
+            _volumeOwnerDeclineDiagnostics ? original?.VolumeWatch?.Version : null);
     }
 
     private static int _finiteStorageRuntimeTraceRows;
@@ -85,7 +90,9 @@ internal static partial class MetalVideoPresenter
                 $"; offender_creation_tile={other.Creation.Tile}; offender_creation_format={other.Creation.Format}/{other.Creation.Number}" +
                 $"; offender_creation_type={other.Creation.Type}; offender_creation_raw={other.Creation.Raw?.ToString() ?? "unavailable"}" +
                 $"; offender_creation_color=[{other.Creation.Color?.ToString() ?? "unavailable"}]" +
-                $"; offender_mutation_kind={other.Mutation.Kind ?? "unrecorded"}; offender_mutation_sequence={other.Mutation.Sequence}" : "";
+                $"; offender_mutation_kind={other.Mutation.Kind ?? "unrecorded"}; offender_mutation_sequence={other.Mutation.Sequence}" +
+                $"; offender_volume_state={other.VolumeState}; offender_volume_unknown={other.VolumeUnknownProducer}" +
+                $"; offender_volume_unknown_reason={other.VolumeUnknownReason}; offender_volume_version={other.VolumeVersion}" : "";
             Console.Error.WriteLine($"finite-storage-runtime stage={stage}; address=0x{address:X}; reason={reason[..Math.Min(reason.Length, 192)]}; " +
                 $"producer_count={Volatile.Read(ref _finiteStorageRuntimeProducers)}; applied_count={Volatile.Read(ref _finiteStorageRuntimeApplied)}; canonical_count={Volatile.Read(ref _finiteStorageRuntimeCanonical)}; " +
                 $"original_session={origin?.Session}; original_protected_id={original?.ProtectedIdentity}; original_protected_generation={original?.ProtectedGeneration}; " +

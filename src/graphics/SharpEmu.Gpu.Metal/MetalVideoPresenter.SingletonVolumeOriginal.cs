@@ -11,6 +11,8 @@ internal static partial class MetalVideoPresenter
     internal static bool SingletonVolumeOriginalCaptureEnabled =>
         (_rgbaStorageRuntimePublicationRequested || _finiteStorageWritebackEnabled) && !TextureSourceGraphEnabled;
     private static Exception? _singletonVolumeOriginalCleanupFailure;
+    private static readonly bool _volumeOwnerDeclineDiagnostics =
+        Environment.GetEnvironmentVariable("SHARPEMU_CANONICAL_PUBLICATION_DIAGNOSTICS") == "1";
     private static Action? _singletonVolumeAfterOrdinaryQueueInsert; // optional ordinary-path fixture seam
     private static readonly HashSet<SingletonVolumeOriginalWatch> _singletonVolumeOriginalWatches = new(ReferenceEqualityComparer.Instance);
 
@@ -39,6 +41,7 @@ internal static partial class MetalVideoPresenter
         internal nint Texture;
         internal int Version;
         internal bool UnknownProducer;
+        internal string? DiagnosticUnknownProducerReason;
         internal bool PreparationReleased; // presenter gate
         internal int QueuedReferences; // presenter gate; separate from native acceptance
 
@@ -243,10 +246,19 @@ internal static partial class MetalVideoPresenter
     private static void NoteSingletonVolumeOriginalVersion(GuestImage image, string kind)
     {
         if (image.StorageCpuOrigin?.VolumeWatch is not { } watch) return;
-        if (Volatile.Read(ref watch.State) != 1 || !ReferenceEquals(watch.Image, image) || image.Texture != watch.Texture ||
-            watch.Version == int.MaxValue || image.ContentVersion != watch.Version + 1 || kind != "storage-dispatch" ||
-            _executingGuestWorkSequence <= 0 || !watch.IsCurrent)
-        { Volatile.Write(ref watch.UnknownProducer, true); return; }
+        // Preserve each original guard and its evaluation order. Capture the
+        // primary failing branch before setting the existing sticky veto.
+        var reason = Volatile.Read(ref watch.State) != 1 ? "state" :
+            !ReferenceEquals(watch.Image, image) ? "image" : image.Texture != watch.Texture ? "texture" :
+            watch.Version == int.MaxValue ? "version-exhausted" :
+            image.ContentVersion != watch.Version + 1 ? "version-step" : kind != "storage-dispatch" ? "producer-kind" :
+            _executingGuestWorkSequence <= 0 ? "work-sequence" : !watch.IsCurrent ? "original-watch-not-current" : null;
+        if (reason is not null)
+        {
+            if (_volumeOwnerDeclineDiagnostics && watch.DiagnosticUnknownProducerReason is null)
+                watch.DiagnosticUnknownProducerReason = reason;
+            Volatile.Write(ref watch.UnknownProducer, true); return;
+        }
         watch.Version = image.ContentVersion; // exact known queued producer, never new CPU provenance
     }
 

@@ -21,9 +21,28 @@ public sealed unsafe partial class HostMappedCopyLedger
         Span<byte> destination, out CpuMappedCopyObservation? observation) =>
         TryReadMappedCopyCore(backing, footprintAddress, footprintByteCount, sourceAddress, destination, true, out observation);
 
-    public bool IsMappedCopyWriteWatchCurrent(HostBackingObject backing, CpuMappedCopyObservation observation) =>
-        IsCurrent(backing, observation) && observation.OwnerIdentity is Capture capture &&
-        capture.ReadWatch is { IsCurrent: true };
+    public bool IsMappedCopyWriteWatchCurrent(HostBackingObject backing, CpuMappedCopyObservation observation)
+    {
+        // Keep the original short-circuit query order. Failure samples below
+        // describe this refusal; they cannot authorize or refresh a watch.
+        if (!IsCurrent(backing, observation)) return ReadWatchDeclined("mapping-not-current", observation);
+        if (observation.OwnerIdentity is not Capture capture) return ReadWatchDeclined("capture-missing", observation);
+        if (capture.ReadWatch is not { } watch) return ReadWatchDeclined("watch-missing", observation);
+        if (!watch.IsCurrent) return ReadWatchDeclined("watch-not-current", observation);
+        return true;
+    }
+
+    private static bool ReadWatchDeclined(string reason, CpuMappedCopyObservation observation)
+    {
+        if (HostPublicationDiagnostics.Enabled)
+        {
+            var capture = observation?.OwnerIdentity as Capture;
+            capture?.ReadWatch?.TraceDecline(reason, capture.WriterRevision);
+            if (capture?.ReadWatch is null)
+                HostPublicationDiagnostics.Declined("read-watch", reason, capture?.WriterRevision ?? -1, -1, -1, -1);
+        }
+        return false;
+    }
 
 
     // No gate, allocation, native query or current-View reconstruction. The

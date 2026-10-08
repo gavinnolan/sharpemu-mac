@@ -10,6 +10,17 @@ internal sealed partial class HostManagedWriteIntervals
     {
         internal readonly PhysicalRun[] Runs = runs;
         internal int Slot = -1, Revoked, Released;
+        internal void TraceDecline(string reason, long originalRevision)
+        {
+            try
+            {
+                HostPublicationDiagnostics.Declined("read-watch", reason +
+                    $";secondaryReleased={Volatile.Read(ref Released)};secondaryRevoked={Volatile.Read(ref Revoked)}",
+                    originalRevision, Volatile.Read(ref owner.nextIdentity),
+                    Volatile.Read(ref owner.admission), Volatile.Read(ref owner.coverageIncomplete));
+            }
+            catch (Exception) { } // Even formatting must preserve the refusal.
+        }
         internal bool IsCurrent => Volatile.Read(ref Released) == 0 && Volatile.Read(ref Revoked) == 0 &&
             Volatile.Read(ref owner.coverageIncomplete) == 0 && Volatile.Read(ref owner.admission) == 0 &&
             Volatile.Read(ref Revoked) == 0 && Volatile.Read(ref Released) == 0;
