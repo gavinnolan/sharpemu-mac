@@ -44,6 +44,8 @@ public sealed unsafe partial class HostMappedCopyLedger
     // Ordinary test-only pause, default null. Never called under provider Gate,
     // on a signal path, or by legacy reads. No public setter/callback contract.
     private Action? afterCaptureForControl = null;
+    // Ordinary-copy control seam: initial revision sample, before enrollment or bytes.
+    private Action<bool, long>? afterWriterRevisionForControl = null;
 
     public HostMappedCopyLedger(object providerGate, ulong nativePageSize)
     {
@@ -218,6 +220,7 @@ public sealed unsafe partial class HostMappedCopyLedger
             CpuMappedCopyObservation captured;
             var writers = backing.ManagedWrites!;
             var hasWriterRevision = writers.TryCaptureRevision(out var writerRevision);
+            afterWriterRevisionForControl?.Invoke(hasWriterRevision, writerRevision);
             lock (gate)
             {
                 if (unknownAlias) return Refuse(ref diagnostic, "unknown-alias", CpuMappedCopyResult.Unavailable);
@@ -281,11 +284,21 @@ public sealed unsafe partial class HostMappedCopyLedger
                     .CopyTo(destination.Slice(checked((int)(first - sourceAddress))));
             }
             if (!IsCurrent(backing, captured)) return Refuse(ref diagnostic, "post-copy-original-mapping", CpuMappedCopyResult.Rejected);
-            // Mapping-only copies still succeed if participating writes raced.
-            // Such an observation has no publication history, permanently.
-            if (hasWriterRevision && writers.TryCaptureRevision(out var afterRevision) && afterRevision == writerRevision)
-                Volatile.Write(ref ((Capture)captured.OwnerIdentity).WriterRevision, writerRevision);
-            if (withWriteWatch && !ownedCapture.ReadWatch!.IsCurrent) return Refuse(ref diagnostic, "post-copy-original-watch", CpuMappedCopyResult.Rejected);
+            if (withWriteWatch)
+            {
+                var originalWatch = ownedCapture.ReadWatch!;
+                if (!originalWatch.IsCurrent) return Refuse(ref diagnostic, "post-copy-original-watch", CpuMappedCopyResult.Rejected);
+                // This value was fixed under exclusive watch enrollment BEFORE
+                // bytes, including when the earlier ordinary sample was busy.
+                Volatile.Write(ref ownedCapture.WriterRevision, originalWatch.EnrollmentRevision);
+            }
+            else
+            {
+                // Mapping-only copies still succeed if participating writes raced.
+                // Such an observation has no publication history, permanently.
+                if (hasWriterRevision && writers.TryCaptureRevision(out var afterRevision) && afterRevision == writerRevision)
+                    Volatile.Write(ref ownedCapture.WriterRevision, writerRevision);
+            }
             observation = captured;
             keepWatch = true;
             return CpuMappedCopyResult.Copied;

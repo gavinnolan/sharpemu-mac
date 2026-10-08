@@ -6,9 +6,12 @@ internal sealed partial class HostManagedWriteIntervals
 {
     private ReadWatch?[]? readWatches; // Allocated only by the optional cold watched-copy path.
     private int activeReadWatches;
-    internal sealed class ReadWatch(HostManagedWriteIntervals owner, PhysicalRun[] runs)
+    internal sealed class ReadWatch(HostManagedWriteIntervals owner, PhysicalRun[] runs, long enrollmentRevision)
     {
         internal readonly PhysicalRun[] Runs = runs;
+        // Original exclusive enrollment, before copied bytes. Never resampled
+        // after a copy or substituted for an Applied publication's own revision.
+        internal readonly long EnrollmentRevision = enrollmentRevision;
         internal int Slot = -1, Revoked, Released;
         internal void TraceDecline(string reason, long originalRevision, long primaryAdmission = -1,
             ulong originalSourceAddress = 0, ulong originalSourceBytes = 0)
@@ -70,7 +73,6 @@ internal sealed partial class HostManagedWriteIntervals
     internal ReadWatch? TryCreateReadWatch(PhysicalRun[] runs)
     {
         if (runs.Length is 0 or > CpuMappedCopyObservation.MaximumSegments) return null;
-        var watch = new ReadWatch(this, runs); // Cold preparation only, never writer path.
         var installed = Volatile.Read(ref readWatches);
         if (installed is null)
         {
@@ -82,6 +84,9 @@ internal sealed partial class HostManagedWriteIntervals
         try
         {
             if (Volatile.Read(ref coverageIncomplete) != 0) return null;
+            var revision = Volatile.Read(ref nextIdentity);
+            if (revision < 0 || revision == long.MaxValue) return null;
+            var watch = new ReadWatch(this, runs, revision); // Exact exclusive enrollment, cold path only.
             for (var index = 0; index < installed.Length; index++)
             {
                 watch.Slot = index;
@@ -100,7 +105,9 @@ internal sealed partial class HostManagedWriteIntervals
         if (!original.IsUnrevokedDuringPublication(this)) return null;
         var installed = Volatile.Read(ref readWatches);
         if (installed is null) return null;
-        var successor = new ReadWatch(this, original.Runs);
+        var revision = Volatile.Read(ref nextIdentity);
+        if (revision < 0 || revision == long.MaxValue) return null;
+        var successor = new ReadWatch(this, original.Runs, revision);
         for (var index = 0; index < installed.Length; index++)
         {
             successor.Slot = index;
