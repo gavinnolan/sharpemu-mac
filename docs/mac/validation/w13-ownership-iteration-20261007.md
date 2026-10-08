@@ -547,3 +547,27 @@ an ad hoc signed local bundle; notarization did not run. No game or device
 qualification is claimed at b6fe8f7. Its archive and hashed evidence manifest
 are under `integrated-b6fe8f7/`; the manifest preserves the earlier cf2b3d6
 source provenance of lifecycle/Application/cross-platform build results.
+
+## Isolated native AppKit window qualification
+
+Clean candidate3b54f79 remains outside main. Independent ABI/session/modal
+review and14/14 ARM64 plus14/14 Rosetta controls pass. A signed frozen candidate
+runs against an ephemeral synthetic catalogue/data root under the shared lock.
+The bounded visible session exits0 after278.59s without timing out. Native
+catalogue/search, per-game/global settings saves, folder-picker cancellation,
+settings-window modal close and owned-child Stop & Quit confirmation are
+observed. Console captures stdout/stderr and the synthetic TERM handler's
+final output. The displayed exit -2 is the launcher's stop-request tag; the
+synthetic handler exits0. This is not a guest CPU exit result.
+
+Root visually reviews catalogue and console screenshots. Signed app hashes
+remain unchanged; the shared lock is released and all three owned synthetic
+PIDs are dead. No game or GPU fixture runs in this qualification. Evidence is
+`package-agent/native-launcher-3b54f79/qualification-manifest.json` and the
+separate `appkit-independent-review-3b54f79/` source review.
+
+The Quit menu is disabled by Cocoa while settings are modal; that path remains
+unqualified. Minimum resize bounds, full frontend parity, bounded notification
+backlog and parent-exits-first inherited-pipe descendants also remain open.
+The candidate has no forbidden UI assets, but main retains the earlier
+Avalonia launcher until lifecycle and integration acceptance are complete.
