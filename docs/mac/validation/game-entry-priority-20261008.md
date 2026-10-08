@@ -42,15 +42,30 @@ The closed archive is
 manifest `b10eea22464d00fa6352f16d20370ed6ff1967f14e14e2e51de2567964b1a4fd`.
 All 27 owned groups and the shared lock were absent at archive closure.
 
-Source successor `2fdabb5c` separates expired completed-write history from
+Qualified successor `2fdabb5c` separates expired completed-write history from
 lost physical writer coverage. Original watched ranges remain invalidated
 before overlapping bytes; failed or unknown writes still invalidate every
 original watch. Unwatched publication retains the strict history window and
 missing/unknown-record vetoes. Invalid bounds, exhausted identities, active
 writer slot exhaustion and quarantined publication remain sticky failures.
-Eight additional controls and first-coverage-loss diagnostics are prepared;
-qualification and the next Demon’s Souls replay are in progress. This has not
-been promoted to main or accepted as a game-entry fix.
+Eight additional controls passed. All 653 managed cases passed on each actual
+CLR, and all ten fresh native workers passed their complete byte/status-4
+oracles. Three builds, 104 compiled closure files and the signed 239-file app
+were stable. The Demon’s Souls replay exited 134 after 53 seconds, peak RSS
+3294 MiB. It recorded seven expired history records and no writer coverage
+loss. Original copy attempt 1 qualified with unchanged original mapping,
+watch, read generation, protected content token and session. The former
+all-attempt coverage refusal is cleared. The next primary failure is compute
+sequence 177: an address-only image read at `7092C80000` cannot consume the
+native-only selected storage mip. There is still no scene or gameplay.
+The closed archive is
+`artifacts/validation/all-games-20261009/history-watch-coverage-2fdabb5c-prepared`,
+manifest `b2861eac33f2a03e59192f9795ce96f700dafbf912220a778a7c743bfd880d34`.
+All 27 owned groups and the shared lock were absent at archive closure.
+Local merge `100838fc` promotes this qualified source and the earlier APR/color
+diagnostics unchanged; only this progress document differs from the candidate.
+No remote push or merge was performed. Clearing this veto is not game-entry
+acceptance.
 
 ## Earlier combined qualification and first failures
 
