@@ -38,8 +38,12 @@ internal static partial class MetalTextureSnapshots
         {
             if (originalSession != MetalVideoPresenter.CurrentStorageCpuSeedSession)
                 throw new InvalidOperationException("Metal typed storage session changed before the original copy.");
-            var epoch = HostMemory.MappingGeneration;
             var read = GuestImageWriteTracker.BeginReadSnapshot(d.Address, physical, source: "agc.typed-storage-mapped-copy");
+            // Initial tracking may establish native page protection and publish
+            // that setup effect as a mapping change. Retain the original epoch
+            // after setup, BEFORE token observation and copied bytes; never
+            // refresh it after the copy or a later publication.
+            var epoch = HostMemory.MappingGeneration;
             var observation = MetalVideoPresenter.ObserveCpuTextureSnapshot(d.Address, physical, epoch);
             var bytes = new byte[checked((int)physical)];
             var result = source.TryReadMappedCopy(d.Address, physical, d.Address, bytes, out var mapping);
