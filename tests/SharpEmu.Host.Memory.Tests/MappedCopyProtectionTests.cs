@@ -10,7 +10,7 @@ namespace SharpEmu.Host.Memory.Tests;
 
 // Synthetic ledger completion only. These controls do not forge a production
 // provider receipt or qualify actual mprotect, permissions or native geometry.
-public sealed unsafe class MappedCopyProtectionTests(ITestOutputHelper output)
+public sealed unsafe partial class MappedCopyProtectionTests(ITestOutputHelper output)
 {
     private sealed class State : IDisposable
     {
@@ -91,16 +91,17 @@ public sealed unsafe class MappedCopyProtectionTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public void FailedProtectionCannotReconstructLostIdentityFromEqualMetadata()
+    public void FailedProtectionNeedsASeparateSuccessfulReceiptToRestoreRetainedPhysicalFacts()
     {
         Marker(); using var state = new State(); var original = state.Copy();
         lock (state.Gate)
         {
             state.Ledger.CompleteProtectionChange(state.Begin(State.Address, State.Size, HostPageProtection.ReadOnly), false);
-            var missing = state.Begin(State.Address, State.Size, HostPageProtection.ReadWrite);
-            Assert.Null(missing); state.Ledger.CompleteProtectionChange(missing, true);
+            state.Rejected();
+            var later = state.Begin(State.Address, State.Size, HostPageProtection.ReadWrite);
+            Assert.NotNull(later); state.Ledger.CompleteProtectionChange(later, true);
         }
-        state.Rejected(); Assert.False(state.Ledger.IsCurrent(state.Backing, original));
+        Assert.NotNull(state.Copy()); Assert.False(state.Ledger.IsCurrent(state.Backing, original));
     }
 
     [Fact]

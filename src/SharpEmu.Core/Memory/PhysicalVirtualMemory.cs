@@ -13,7 +13,7 @@ using SharpEmu.Logging;
 
 namespace SharpEmu.Core.Memory;
 
-public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryAllocator, IGuestAddressSpace, IGuestBackedSpace, IDisposable, ICpuMappedCopySource, ICpuMappedPublicationSource
+public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryAllocator, IGuestAddressSpace, IGuestBackedSpace, IDisposable, ICpuMappedCopySource, ICpuMappedPublicationSource, IGuestDerivedProtectionAddressSpace
 {
     private static readonly SharpEmuLogger Log = SharpEmuLog.For("VMEM");
 
@@ -1492,6 +1492,18 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     }
 
     public bool TryProtect(ulong address, ulong size, GuestPageProtection protection)
+        => TryProtectCore(address, size, protection, null, false);
+
+    public bool TryApplyDerivedProtection(ulong address, ulong size, GuestPageProtection guestAccess,
+        GuestPageProtection derivedAccess, bool ordinaryEnrollment)
+    {
+        if ((guestAccess & ~(GuestPageProtection.Read | GuestPageProtection.Write | GuestPageProtection.Execute)) != 0 ||
+            (derivedAccess & ~guestAccess) != 0) return false;
+        return TryProtectCore(address, size, derivedAccess, guestAccess, ordinaryEnrollment);
+    }
+
+    private bool TryProtectCore(ulong address, ulong size, GuestPageProtection protection,
+        GuestPageProtection? originalGuestAccess, bool ordinaryEnrollment)
     {
         if (GuestGpuMemoryHook.Traces(address, size))
             GuestGpuMemoryHook.Trace(address, size, $"address-space-protect access={protection}");
@@ -1504,7 +1516,9 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         try
         {
             var access = ResolveProtection(protection);
-            if (_backedSpace is not null && !_backedSpace.SetTransientAccess(address, size, access))
+            if (_backedSpace is not null && !(originalGuestAccess.HasValue
+                ? _backedSpace.SetDerivedAccess(address, size, originalGuestAccess.Value, access, ordinaryEnrollment)
+                : _backedSpace.SetTransientAccess(address, size, access)))
             {
                 return false;
             }

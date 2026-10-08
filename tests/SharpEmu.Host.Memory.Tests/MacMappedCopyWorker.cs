@@ -16,7 +16,7 @@ namespace SharpEmu.Host.Memory.Tests;
 // Source-prepared, separately granted fresh ordinary workers. No GPU, guest
 // code, signals, tracker arming, permission probes or content certification.
 [SupportedOSPlatform("macos")]
-internal static unsafe class MacMappedCopyWorker
+internal static unsafe partial class MacMappedCopyWorker
 {
     internal static int Run(string scenario)
     {
@@ -38,6 +38,10 @@ internal static unsafe class MacMappedCopyWorker
                 case "map-aba": Execute(host, ledger, page, 1); break;
                 case "alias-exclusion": Execute(host, ledger, page, 2); break;
                 case "raced-copy": Execute(host, ledger, page, 3); break;
+                case "derived-rw": ExecuteProtection(host, ledger, page, 0); break;
+                case "guest-readonly": ExecuteProtection(host, ledger, page, 1); break;
+                case "partial-derived": ExecuteProtection(host, ledger, page, 2); break;
+                case "maximum-failure": ExecuteProtection(host, ledger, page, 3); break;
                 default: return 82;
             }
             Console.WriteLine($"mapped-copy-native-pass case={scenario} architecture={RuntimeInformation.ProcessArchitecture} framework={RuntimeInformation.FrameworkDescription}; kernel_page={page}; provider_page={host.PageSize}; mapping-lifetime-only");
@@ -129,33 +133,36 @@ internal static unsafe class MacMappedCopyWorker
 
     private sealed class Hole : IDisposable
     {
-        private const ulong Extent = 32768;
+        private readonly ulong extent;
         private readonly IHostViewMemory host;
         private readonly ulong allocated;
         private bool consumed;
         internal ulong Address { get; }
-        internal Hole(IHostViewMemory host, ulong page)
+        internal Hole(IHostViewMemory host, ulong page, ulong window = 0)
         {
-            this.host = host; ulong address = 0;
-            var result = mach_vm_allocate(mach_task_self(), ref address, Extent, 1);
+            this.host = host; window = window == 0 ? page : window;
+            extent = window <= page ? 32768UL : 131072UL;
+            if (window > 65536 || page > 16384) throw new ArgumentOutOfRangeException(nameof(window));
+            ulong address = 0;
+            var result = mach_vm_allocate(mach_task_self(), ref address, extent, 1);
             if (result != 0) throw new IOException($"Fixture Mach allocation declined: {result}.");
             allocated = address; var attempted = false;
             try
             {
                 Assert.NotEqual(0ul, allocated); Address = checked((allocated + page - 1) & ~(page - 1));
-                Assert.True(Address >= allocated && Address - allocated <= Extent - page);
+                Assert.True(Address >= allocated && Address - allocated <= extent - window);
                 // Never relinquish ownership before MAP_FIXED. Convert the WHOLE
                 // successful Mach extent into the provider's owned placeholder.
                 attempted = true;
-                if (!host.UnmapView(allocated, Extent)) throw new IOException("Owned placeholder conversion uncertain.");
-                Console.WriteLine($"mapped-copy-fixture-owned extent={Extent}; page={page}; native_allocation_return={result}");
+                if (!host.UnmapView(allocated, extent)) throw new IOException("Owned placeholder conversion uncertain.");
+                Console.WriteLine($"mapped-copy-fixture-owned extent={extent}; page={page}; native_allocation_return={result}");
             }
             catch (Exception error)
             {
                 if (attempted) consumed = true; // unknown conversion: retain full extent, never retry
                 else
                 {
-                    consumed = true; var release = mach_vm_deallocate(mach_task_self(), allocated, Extent);
+                    consumed = true; var release = mach_vm_deallocate(mach_task_self(), allocated, extent);
                     if (release != 0) try { error.Data["MachSetupCleanup"] = release; } catch { }
                 }
                 throw;
@@ -166,7 +173,7 @@ internal static unsafe class MacMappedCopyWorker
         {
             if (consumed) return;
             consumed = true; // consume before uncertain native/kernel+bookkeeping outcome
-            if (!host.FreeHole(allocated, Extent)) throw new IOException("Owned full Mach extent cleanup uncertain; never retry.");
+            if (!host.FreeHole(allocated, extent)) throw new IOException("Owned full Mach extent cleanup uncertain; never retry.");
         }
     }
     [DllImport("libSystem.dylib")] private static extern uint mach_task_self();

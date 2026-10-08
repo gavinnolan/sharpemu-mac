@@ -1,5 +1,7 @@
 # Mapping-copy successors after canonical protection
 
+Historical c9 checkpoint semantics below are preserved. The source-only retained-identity/explicit intent successor is described in [guest-derived-protection-intent.md](guest-derived-protection-intent.md): failed protection now retains physical facts with copy unavailable, and a separate successful qualified receipt can restore availability. c9 alone conflates watcher host rights with original guest entitlement and is not cold-publication readiness.
+
 Source-only, unbuilt and unexecuted checkpoint based on integrated typed source 3986109a. Actual Octopath 7e46 original-copy diagnostics reported provider Rejected/no observation with unchanged content snapshot/token. This identifies the provider stage; it does not identify the precise prior protection call in that game.
 
 The source gap is concrete: canonical Mac ChangeAccess and raw Darwin.Protect used BeforeNativeEffect to remove every intersecting enrolled shared view, then updated only logical protection metadata after successful mprotect. Later mapping-bound copies could not regain eligibility until an actual remap. The successor preserves pre-effect revocation and prepares new immutable intervals from ORIGINAL recorded View/backing/offset identities before the effect. No Query, address-tuple reconstruction, new mapping or retry creates identity.

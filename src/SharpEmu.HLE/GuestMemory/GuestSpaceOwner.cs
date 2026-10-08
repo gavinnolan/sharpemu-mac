@@ -270,6 +270,14 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMap
         return SetAccessLocked(address, size, protection);
     }
 
+    public bool SetDerivedAccess(ulong address, ulong size, GuestPageProtection guestAccess,
+        HostPageProtection derivedHostAccess, bool ordinaryEnrollment)
+    {
+        if (!IsValidRange(address, size) || address % _host.PageSize != 0 || size % _host.PageSize != 0) return false;
+        using var protectionScope = new ProtectionRangeScope(_protectionLocks, address, size);
+        return SetAccessLocked(address, size, derivedHostAccess, guestAccess, ordinaryEnrollment);
+    }
+
     private MappingLockScope EnterMappingLock() => new(_mappingLock, _protectionLocks);
 
     // Mapping changes own every address lock before they inspect or change the range tables.
@@ -619,7 +627,8 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMap
     private bool OverlapsOwnedLocked(ulong address, ulong size) =>
         _owned.Any(range => address < range.Address + range.Size && range.Address < address + size);
 
-    private bool SetAccessLocked(ulong address, ulong size, HostPageProtection protection)
+    private bool SetAccessLocked(ulong address, ulong size, HostPageProtection protection,
+        GuestPageProtection? originalGuestAccess = null, bool ordinaryEnrollment = false)
     {
         if (_disposed) return false;
         var end = address + size;
@@ -632,7 +641,10 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMap
             if (start < stop)
             {
                 using var profile = GpuMemoryAccessProfile.MeasureHostProtectionCall(stop - start);
-                if (!_host.ChangeAccess(start, stop - start, protection)) return false;
+                var changed = originalGuestAccess.HasValue && _host is IHostDerivedProtectionMemory explicitHost
+                    ? explicitHost.ChangeDerivedAccess(start, stop - start, originalGuestAccess.Value, protection, ordinaryEnrollment)
+                    : _host.ChangeAccess(start, stop - start, protection);
+                if (!changed) return false;
             }
         }
 

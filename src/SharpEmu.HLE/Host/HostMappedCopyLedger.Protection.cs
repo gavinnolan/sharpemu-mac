@@ -22,24 +22,26 @@ public sealed unsafe partial class HostMappedCopyLedger
         { Owner = owner; Original = original; Successors = successors; Address = address; Size = size; }
     }
 
-    public ProtectionChange? PrepareProtectionChange(ulong address, ulong size, HostPageProtection protection)
+    public ProtectionChange? PrepareProtectionChange(ulong address, ulong size, HostPageProtection protection,
+        GuestPageProtection? originalGuestAccess = null)
     {
         RequireGate();
         // Preserve existing 4K logical effects on Rosetta, but do not claim an
         // aligned 16K identity/rights successor from a sub-kernel-page request.
         if (unknownAlias || !HostViewMemory.IsValidRange(address, size) ||
-            address % pageSize != 0 || size % pageSize != 0 || !IsKnownProtection(protection)) return null;
+            address % pageSize != 0 || size % pageSize != 0 || !IsKnownProtection(protection) ||
+            (originalGuestAccess.HasValue && !ValidGuestAccess(originalGuestAccess.Value))) return null;
         var end = address + size;
-        var originals = new List<View>();
+        List<View>? originals = null;
         for (var index = FindAtOrBelow(end - 1); index >= 0; index--)
         {
             var view = views.Values[index];
             if (view.Address + view.Size <= address) break;
-            if (originals.Count == MaximumProtectionViews || view.Revoked != 0 ||
+            if (originals?.Count == MaximumProtectionViews || view.Revoked != 0 ||
                 view.Backing.IsClosing || view.Backing.IsDisposed) return null;
-            originals.Add(view);
+            (originals ??= new()).Add(view);
         }
-        if (originals.Count == 0) return null;
+        if (originals is null) return null;
         // At most three pieces per original. Reserve all storage/identities
         // before revocation/native effect; exhaustion only loses optional copy.
         var successorCount = 0;
@@ -58,15 +60,18 @@ public sealed unsafe partial class HostMappedCopyLedger
         {
             var first = Math.Max(address, view.Address);
             var last = Math.Min(end, view.Address + view.Size);
-            if (view.Address < first) Add(view, view.Address, first - view.Address, view.Access);
-            Add(view, first, last - first, AccessOf(protection));
-            if (last < view.Address + view.Size) Add(view, last, view.Address + view.Size - last, view.Access);
+            if (view.Address < first) Add(view, view.Address, first - view.Address, view.Access, view.GuestAccessKnown);
+            Add(view, first, last - first, originalGuestAccess ?? AccessOf(protection), true);
+            if (last < view.Address + view.Size) Add(view, last, view.Address + view.Size - last, view.Access, view.GuestAccessKnown);
         }
         return new(this, originals.ToArray(), successors, address, size);
 
-        void Add(View old, ulong start, ulong count, GuestPageProtection access) =>
-            successors[next++] = new(this, old.Backing, start, count,
-                old.Offset + start - old.Address, access, ++nextIncarnation);
+        void Add(View old, ulong start, ulong count, GuestPageProtection access, bool known)
+        {
+            var piece = new View(this, old.Backing, start, count, old.Offset + start - old.Address, access, ++nextIncarnation);
+            piece.GuestAccessKnown = known; piece.CopyAvailable = known ? 1 : 0;
+            successors[next++] = piece;
+        }
     }
 
     public bool BeginProtectionChange(ProtectionChange? prepared, ulong address, ulong size)
@@ -77,7 +82,8 @@ public sealed unsafe partial class HostMappedCopyLedger
             prepared.Original.Any(view => view.Revoked != 0 ||
                 !views.TryGetValue(view.Address, out var current) || !ReferenceEquals(current, view))))
             throw new InvalidOperationException("Protection preparation has no exact original mapping identities.");
-        if (!BeforeNativeEffect(address, size)) return false;
+        if (!TryBeginNativeEffect(address, size, out var effect)) return false;
+        InvalidateProtectionCopies(effect, guestRightsUnknown: true);
         if (prepared is not null) { prepared.EffectSequence = protectionEffectSequence; prepared.State = 1; }
         return true;
     }
@@ -92,6 +98,8 @@ public sealed unsafe partial class HostMappedCopyLedger
         if (!nativeSuccess || prepared.EffectSequence != protectionEffectSequence) return;
         try
         {
+            foreach (var old in prepared.Original)
+                if (!views.TryGetValue(old.Address, out var current) || !ReferenceEquals(current, old)) return;
             foreach (var next in prepared.Successors)
             {
                 // A provider must not drop Gate or reenter another effect while
@@ -101,10 +109,13 @@ public sealed unsafe partial class HostMappedCopyLedger
                 {
                     var current = views.Values[index];
                     if (current.Address + current.Size <= next.Address) break;
+                    if (Array.IndexOf(prepared.Original, current) >= 0) continue;
                     return; // never overwrite or revoke a competing identity
                 }
                 if (next.Backing.IsClosing || next.Backing.IsDisposed || unknownAlias) return;
             }
+            foreach (var old in prepared.Original)
+            { Volatile.Write(ref old.Revoked, 1); views.Remove(old.Address); }
             foreach (var next in prepared.Successors) PublishView(next);
         }
         catch
@@ -124,4 +135,18 @@ public sealed unsafe partial class HostMappedCopyLedger
         HostPageProtection.NoAccess or HostPageProtection.ReadOnly or HostPageProtection.ReadWrite or
         HostPageProtection.Execute or HostPageProtection.ReadExecute or HostPageProtection.ReadWriteExecute or
         HostPageProtection.ExecuteWriteCopy;
+
+    private static bool ValidGuestAccess(GuestPageProtection access) =>
+        (access & ~(GuestPageProtection.Read | GuestPageProtection.Write | GuestPageProtection.Execute)) == 0;
+
+    private void InvalidateProtectionCopies(HostAddressRange effect, bool guestRightsUnknown)
+    {
+        for (var index = FindAtOrBelow(effect.Address + effect.Size - 1); index >= 0; index--)
+        {
+            var view = views.Values[index];
+            if (view.Address + view.Size <= effect.Address) break;
+            Volatile.Write(ref view.CopyAvailable, 0);
+            if (guestRightsUnknown) view.GuestAccessKnown = false;
+        }
+    }
 }

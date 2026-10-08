@@ -55,7 +55,7 @@ public sealed unsafe partial class HostMappedCopyLedger
         var installed = false;
         // Preallocate continuity from the SAME immutable original view identities,
         // before admission. Its revision is filled only from this exact commit.
-        var successfulCapture = new Capture(this, capture.States);
+        var successfulCapture = new Capture(this, capture.States, capture.Incarnations);
         var successfulObservation = new CpuMappedCopyObservation(successfulCapture,
             original.FootprintAddress, original.FootprintByteCount, original.SourceAddress,
             original.SourceByteCount, original.Segments.ToArray());

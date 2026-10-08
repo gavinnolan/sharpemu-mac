@@ -19,11 +19,19 @@ public sealed unsafe partial class HostMappedCopyLedger
         internal int ReleaseState; // 0 active, 1 pending, 2 consumed/unknown
     }
     private readonly Dictionary<HostBackingObject, Alias> aliases = new();
-    private sealed class Capture(HostMappedCopyLedger owner, View[] states)
+    private sealed class Capture
     {
-        internal readonly HostMappedCopyLedger Owner = owner;
-        internal readonly View[] States = states;
+        internal readonly HostMappedCopyLedger Owner;
+        internal readonly View[] States;
+        internal readonly long[] Incarnations;
         internal long WriterRevision = -1;
+        internal Capture(HostMappedCopyLedger owner, View[] states, long[]? originalIncarnations = null)
+        {
+            Owner = owner; States = states;
+            Incarnations = originalIncarnations is null ? new long[states.Length] : (long[])originalIncarnations.Clone();
+            if (originalIncarnations is null)
+                for (var index = 0; index < states.Length; index++) Incarnations[index] = states[index].Incarnation;
+        }
     }
     private long nextIncarnation;
     private bool unknownAlias;
@@ -51,7 +59,9 @@ public sealed unsafe partial class HostMappedCopyLedger
         internal readonly HostBackingObject Backing;
         internal readonly ulong Address, Size, Offset;
         internal readonly GuestPageProtection Access;
-        internal readonly long Incarnation;
+        internal long Incarnation; // monotonic copy incarnation; physical facts above never mutate
+        internal int CopyAvailable = 1;
+        internal bool GuestAccessKnown = true;
         internal int Revoked;
     }
 
@@ -116,14 +126,21 @@ public sealed unsafe partial class HostMappedCopyLedger
     /// excluded; failed effects do not reopen old view incarnations.</summary>
     public bool BeforeNativeEffect(ulong address, ulong size)
     {
+        if (!TryBeginNativeEffect(address, size, out var effect)) return false;
+        Revoke(effect);
+        return true;
+    }
+
+    private bool TryBeginNativeEffect(ulong address, ulong size, out HostAddressRange effect)
+    {
         RequireGate();
-        if (unknownAlias || !TryEffectRange(address, size, out var effect) ||
+        effect = default;
+        if (unknownAlias || !TryEffectRange(address, size, out effect) ||
             HasOverlappingPublicationLocked(effect.Address, effect.Size)) return false;
         foreach (var alias in aliases.Values)
             if (Overlaps(effect, alias.Range)) return false;
         if (protectionEffectSequence == long.MaxValue) { RevokeAll(); return false; }
         protectionEffectSequence++;
-        Revoke(effect);
         return true;
     }
 
@@ -186,7 +203,7 @@ public sealed unsafe partial class HostMappedCopyLedger
                     var index = FindAtOrBelow(cursor);
                     if (index < 0) return CpuMappedCopyResult.Rejected;
                     var view = views.Values[index];
-                    if (view.Revoked != 0 || !ReferenceEquals(view.Backing, backing) ||
+                    if (view.Revoked != 0 || view.CopyAvailable == 0 || !view.GuestAccessKnown || !ReferenceEquals(view.Backing, backing) ||
                         cursor < view.Address || cursor - view.Address >= view.Size ||
                         (view.Access & GuestPageProtection.Read) == 0 || states.Count == CpuMappedCopyObservation.MaximumSegments)
                         return CpuMappedCopyResult.Rejected;
@@ -229,8 +246,12 @@ public sealed unsafe partial class HostMappedCopyLedger
     {
         if (observation is null || observation.OwnerIdentity is not Capture captured ||
             !ReferenceEquals(captured.Owner, this) || Volatile.Read(ref unknownAlias) || backing.IsClosing || backing.IsDisposed) return false;
-        foreach (var view in captured.States)
-            if (!ReferenceEquals(view.Backing, backing) || Volatile.Read(ref view.Revoked) != 0) return false;
+        for (var index = 0; index < captured.States.Length; index++)
+        {
+            var view = captured.States[index];
+            if (!ReferenceEquals(view.Backing, backing) || Volatile.Read(ref view.Revoked) != 0 ||
+                Volatile.Read(ref view.CopyAvailable) == 0 || Volatile.Read(ref view.Incarnation) != captured.Incarnations[index]) return false;
+        }
         return true;
     }
 
