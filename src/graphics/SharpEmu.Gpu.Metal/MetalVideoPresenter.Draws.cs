@@ -1516,6 +1516,9 @@ internal static partial class MetalVideoPresenter
         out bool ownedByCaller)
     {
         ownedByCaller = true;
+        var sampledSingletonVolume = !texture.IsStorage && texture.Type == 10 && texture.TileMode != 0;
+        if (sampledSingletonVolume)
+            MetalTextureSnapshots.ValidateSampledSingletonVolumeUpload(texture);
         if (_textureSourceGraphEnabled && TryResolveCapturedTextureSource(blitCommandBuffer, texture, out var captured))
         {
             ownedByCaller = false;
@@ -1526,9 +1529,6 @@ internal static partial class MetalVideoPresenter
             checked((ulong)texture.Width * texture.Height * Math.Max(texture.Depth, 1u) * 16)));
         if (_selectedStorageMipAssociations.TryGetValue(texture, out _))
             throw new NotSupportedException("Metal selected storage mip cannot use the generic sampled/draw materializer.");
-        var sampledSingletonVolume = !texture.IsStorage && texture.Type == 10 && texture.TileMode != 0;
-        if (sampledSingletonVolume)
-            MetalTextureSnapshots.ValidateSampledSingletonVolumeUpload(texture);
 
         if (texture.Width == 0 || texture.Height == 0)
         {

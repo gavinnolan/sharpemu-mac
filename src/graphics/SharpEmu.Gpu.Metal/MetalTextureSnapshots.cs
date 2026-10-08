@@ -87,7 +87,7 @@ internal static partial class MetalTextureSnapshots
                 if (!binding.IsStorage && binding.Descriptor.Type == Gen5TextureType3D && binding.Descriptor.TileMode != 0)
                 {
                     RequireSampledSingletonVolume(binding);
-                    MetalVideoPresenter.RequireCpuOnlySampledSingletonVolume(binding.Descriptor.Address);
+                    MetalVideoPresenter.RejectKnownSampledSingletonVolumeGpuAlias(binding.Descriptor.Address);
                 }
                 if (binding.IsStorage && binding.Descriptor.Type == Gen5TextureType3D && binding.Descriptor.TileMode == 5)
                 {

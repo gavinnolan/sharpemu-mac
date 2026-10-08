@@ -50,7 +50,7 @@ internal static partial class MetalTextureSnapshots
             texture.RgbaPixels.Length != 4 || texture.TiledSource is not null || texture.Detile is not null ||
             texture.MipUploads is { Length: > 0 } || texture.IsFallback)
             throw new NotSupportedException("Metal sampled singleton volume upload requires its four owned origin bytes and exact native 3D view; deferred or empty source recovery is unsupported.");
-        MetalVideoPresenter.RequireCpuOnlySampledSingletonVolume(texture.Address);
+        MetalVideoPresenter.RejectKnownSampledSingletonVolumeGpuAlias(texture.Address);
     }
 
     private static bool TryCreateSampledSingletonVolume(CpuContext context, Binding binding, out GuestDrawTexture texture)
@@ -61,7 +61,7 @@ internal static partial class MetalTextureSnapshots
         var d = binding.Descriptor;
         for (var attempt = 0; attempt < 3; attempt++)
         {
-            MetalVideoPresenter.RequireCpuOnlySampledSingletonVolume(d.Address);
+            MetalVideoPresenter.RejectKnownSampledSingletonVolumeGpuAlias(d.Address);
             var epoch = HostMemory.MappingGeneration;
             var read = GuestImageWriteTracker.BeginReadSnapshot(d.Address, 4, source: "agc.sampled-singleton-volume");
             var observation = MetalVideoPresenter.ObserveCpuTextureSnapshot(d.Address, 4, epoch);
@@ -74,7 +74,7 @@ internal static partial class MetalTextureSnapshots
                 throw new InvalidOperationException($"Metal sampled singleton volume origin is unreadable: addr=0x{d.Address:X} required=4.");
             if (!GuestImageWriteTracker.IsReadSnapshotStable(read) ||
                 !MetalVideoPresenter.IsCpuTextureSnapshotAdmissionStable(d.Address, observation)) continue;
-            MetalVideoPresenter.RequireCpuOnlySampledSingletonVolume(d.Address);
+            MetalVideoPresenter.RejectKnownSampledSingletonVolumeGpuAlias(d.Address);
             texture = new GuestDrawTexture(d.Address, 1, 1, 10, 9, pixels, IsFallback: false,
                 IsStorage: false, MipLevels: 1, MipLevel: 0, BaseMipLevel: 0, ResourceMipLevels: 1,
                 Pitch: 1, TileMode: 5, DstSelect: d.DstSelect, Sampler: ToGuestSampler(binding.SamplerDescriptor),
@@ -89,10 +89,11 @@ internal static partial class MetalTextureSnapshots
 
 internal static partial class MetalVideoPresenter
 {
-    // The new capability is CPU-origin only. Advertised or materialized GPU
-    // aliases cannot become stale RAM snapshots merely because the origin has
-    // four bytes. Check before copying and again at materialization.
-    internal static void RequireCpuOnlySampledSingletonVolume(ulong address)
+    // Veto known GPU aliases before copying and at materialization. Registry
+    // extents are reported logical/observed ranges, not universal tiled physical
+    // footprints or guest allocation ownership. This is not a backing lease or
+    // a proof that unknown GPU writers cannot alias these four guest bytes.
+    internal static void RejectKnownSampledSingletonVolumeGpuAlias(ulong address)
     {
         lock (_gate)
         {
