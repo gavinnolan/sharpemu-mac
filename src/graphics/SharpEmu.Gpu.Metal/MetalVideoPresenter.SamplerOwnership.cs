@@ -91,10 +91,18 @@ internal static partial class MetalVideoPresenter
     {
         // Preserve the first cause and stack. Diagnostics follow all owned
         // cleanup attempts, so recording a secondary cause cannot skip one.
-        if (descriptorCleanupFailure is not null && !ReferenceEquals(failure, descriptorCleanupFailure))
-            failure.Data["Metal sampler descriptor cleanup failure"] = descriptorCleanupFailure;
-        if (stateCleanupFailure is not null && !ReferenceEquals(failure, stateCleanupFailure))
-            failure.Data["Metal sampler state cleanup failure"] = stateCleanupFailure;
+        try
+        {
+            if (descriptorCleanupFailure is not null && !ReferenceEquals(failure, descriptorCleanupFailure))
+                failure.Data["Metal sampler descriptor cleanup failure"] = descriptorCleanupFailure;
+            if (stateCleanupFailure is not null && !ReferenceEquals(failure, stateCleanupFailure))
+                failure.Data["Metal sampler state cleanup failure"] = stateCleanupFailure;
+        }
+        catch (Exception)
+        {
+            // Exception.Data may itself allocate or be overridden. Diagnostic
+            // recording is best effort and cannot replace the original cause.
+        }
         System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
 }
