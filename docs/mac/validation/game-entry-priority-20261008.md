@@ -44,13 +44,16 @@ The latest observations below supersede the older next-step list. Dreaming
 Sarah remains the only title with prior verified directional control; none of
 these runs accepts an additional title.
 
-- **Octopath and Silent Hill:** isolated `9e3adfcb` passed 132 managed cases
-  and two real native GPU cases on each host architecture. Its original volume
-  snapshots and disjoint publication controls passed. Signed same-bundle game
-  replays still exited 134 at 37 and 24 seconds respectively. Both identify
-  the same display image at `0xEFC0000000`, 3840-by-2160 RGBA8, without original
-  physical ownership provenance. The next source change captures that provenance
-  at the actual initial display copy, with no lookup-time reconstruction.
+- **Octopath and Silent Hill:** successor `1610948d` captures original display
+  ownership at the initial copy and passed 150 managed cases on each host
+  architecture. Both signed game replays passed the former display-provenance
+  refusal. Octopath retained its first native storage producer at `0x80302C0000`,
+  then exited 134 after 35 seconds because provider publication preparation
+  was rejected. Silent Hill completed two native-producer-to-canonical
+  publications before its parser rejected an original selected storage seed's
+  first-use receipt. It remained alive for 60 seconds with a black capture and
+  zero guest frames. Bounded provider diagnostics are being qualified to
+  identify the actual rejection before changing admission rules.
 - **Demon's Souls:** the same signed `9e3adfcb` bundle remained alive for 60
   seconds but had zero guest frames and a black capture. Shutdown exposed a
   prior worker failure: selected storage mip copy changed during all three
@@ -61,7 +64,10 @@ these runs accepts an additional title.
   existing native depth producer. The successor must retain each original
   selected depth face and its ordered native producer; it cannot substitute a
   CPU copy over that producer. Cold, previously untracked faces must retain
-  independent original content tokens.
+  independent original content tokens. The actual captured cube descriptor is
+  1024-by-1024, with 2 MiB per D16 face. The earlier native successor's finite
+  256-by-256 qualifier rejected that descriptor. Corrected source `82186483`
+  has passed semantic review; native qualification and game replay remain pending.
 - **Void Terrarium:** the 600-second entry run and a separate 300-second shader
   diagnostic run did not verify control. The actual rejected shader contains
   LDS operations, six barriers, GS allocation and primitive export target 20.
@@ -86,6 +92,7 @@ these runs accepts an additional title.
 
 Current immutable evidence:
 `artifacts/validation/all-games-20261008/octopath-volume-publication-watch-9e3adfcb-qualified`,
+`artifacts/validation/all-games-20261008/display-original-1610948d-prepared`,
 `artifacts/validation/all-games-20261008/depth-cube-entry-f4ebd249-qualified`,
 `artifacts/validation/void-skipped-shader-400e5c64`,
 `artifacts/validation/native-mesh-entry-d2639278`,
