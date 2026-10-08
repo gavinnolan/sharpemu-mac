@@ -646,3 +646,48 @@ ownership/color fixtures pass25/25 under Rosetta; the owned runner group is
 absent and the shared lock released. Logs, source/assembly hashes and TRX are
 `w13-20261007/authority-payload-integrated-*` and `authority-integrated-*`.
 A fresh authority-source signed app/game run is still required.
+
+
+## Canonical-memory game and native frontend integration
+
+Clean signedadf8297 Sarah150s stays alive, peak1204MiB. Root reviews the105s
+scene,120s adjacent area after right/D, then burst134-00 airborne and134-04
+landing after left/A return. Sixty burst attempts yield54 captures. Source,
+HEAD and app remain frozen; TERM stops on first poll without KILL, owned
+PID56788 is absent and lock released. Join/forced-unwind/NOT_IMPLEMENTED remains.
+This is compatibility/process-stop evidence, not a contended FPS comparison.
+Report/hashes: `game-sarah-authority-adf8297/`; archive and prior combined
+checks: `integrated-authority-adf8297/`.
+
+The full native launcher2b856d8→b1b9ff8 chain integrates locally as9ea30c4,
+following exact independent review and source-frozen signed visible qualification.
+The240.28s synthetic window session exits0 after a second CmdQ. Natural root7
+and inherited-pipe descendant cleanup, bounded20,000-line console output,
+modeless settings saves and Quit are observed. A real subsequent TERM receipt
+returns EPERM after synthetic FINAL output; error presentation cancels automatic
+Quit. Later actual group/process completion is separate evidence. Root visually
+reviews settings and diagnostic-tail captures. All ownedPIDs are absent, lock
+released and signed payload hashes unchanged. Minimum resize attempts do not
+alter frame; that path remains unqualified. Evidence: `package-agent/native-
+launcher-b1b9ff8-window/`; source review: `appkit-independent-review-b1b9ff8/`.
+
+Mac publish closure now rejects Avalonia/Skia/HarfBuzz and portable UI/font
+packages. Bundle output isolation343779d integrates as37d3ffe: a global
+macos-bundle profile isolates all dependency obj/bin paths; Aerolib build task
+uses that same output root. Default developer paths stay unchanged. An isolated
+signed profile bundle passes; profile memory controls16/16, default build0/0
+and a real CLI profile rebuild leaves all default assembly hashes unchanged.
+Initial invalid XML comment and hard-coded task-path failures are preserved;
+only corrected source qualifies. Logs: `w13-20261007/build-profile-*`.
+
+Confirmed host-stop diagnosticd399151 integrates as eb334c1. First reason
+survives callback LastError restoration. Completion requires accepted original
+main-context redirect during exact native call, actual return and no native/
+execution error. Dispatcher uses HostShutdownRequested, retains CPU_TRAP/false;
+known errors and normal zero/nonzero returns are preserved. Candidate15/15 x64
+controls and actual normal-return worker1/1 pass. No real forced-stop or clean
+guest teardown claim yet. Integratedeb334c1 checks pass318/318 Rosetta and292/292 ARM64 with zero skips;
+ARM excludes26 x64-only cases. Build111 warnings, zero errors. Launcher
+controls25/25 each CLR pass, build0/0; seven native output-policy cases pass.
+Exact logs/TRX/command assembly hashes: `w13-20261007/native-frontend-*` and
+`native-launcher-integrated-*`. A new signed app/game remains pending.

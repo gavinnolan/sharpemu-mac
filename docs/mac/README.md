@@ -64,69 +64,52 @@ exit remain separate acceptance checks.
 Extracted package namespaces and friend-access cleanup are documented in
 [package contracts](package-contracts.md).
 
-## Latest runtime status (2026-10-08)
+## Latest status (2026-10-08)
 
-The local `4b5e0fa` build integrates a bounded, independently checked tile5 R16Uint
-volume path and a disabled GPU texture ownership graph. Combined managed checks
-pass200/200 on ARM64 and Rosetta; integrated native materialization passes40/40
-under Rosetta. The separate actual compute consumer oracle passes4/4 on each
-architecture, while production graph activation remains unfinished.
+Local main now includes the native AppKit launcher, modeless settings, bounded
+console output and private child-process groups. macOS composition references
+`SharpEmu.Launcher.MacOS`; Windows/Linux retain their GUI adapter. Mac publish
+policy rejects Avalonia, SkiaSharp, HarfBuzz and portable font/UI packages as
+well as Vulkan, MoltenVK and SDL. The latest signed default bundle still
+contains cleanadf8297 until the integrated native frontend build completes.
 
-Game verification caught a regression: the added CPU snapshot freshness guard
-rejects three attempts in both Poppy and Sarah. Poppy aborts before any frame;
-Sarah presents eight initial logo frames and stalls, without the earlier
-dd19db6 scene/movement/jump progression. That earlier evidence is historical,
-not current acceptance. Snapshot diagnosis/fix and fresh game verification are
-required before claiming the current build improves compatibility. See the
-[ownership/runtime journal](validation/w13-ownership-iteration-20261007.md).
+The isolated signedb1b9ff8 launcher passes a240s visible synthetic session:
+modeless settings, sustained20,000-line output, natural root exit7 with
+inherited-pipe descendant cleanup and CmdQ/owned Stop&Quit. A real TERM EPERM
+receipt displays an error and cancels auto-Quit; later actual group/process
+completion is recorded separately. A second CmdQ exits0. Minimum resize and
+full frontend parity remain open. Candidate controls pass25/25 per CLR.
 
-Guest font isolation is integrated at `d231b6d`: shared font contracts, native
-CoreText/CoreGraphics on macOS, and a separate Skia adapter for Windows/Linux.
-Combined checks pass220/220 on ARM64 and Rosetta; the13 font checks include8
-actual CoreText CPU cases. The Avalonia launcher still carries Skia; native
-AppKit launcher/settings extraction remains in progress. A fresh signed Sarah
-run stays alive150s with coherent scene and right/left movement, peak1169MiB.
-Dense captures still do not verify an airborne jump; clean guest exit remains
-unfinished. Guest-font ABI calls are verified separately from that title run.
+Canonical startup host-memory routing is integrated: legacy HostMemory and
+host services share one immutable selected provider. Integrated104a614
+controls pass309/309 Rosetta and292/292 ARM64, zero skips; ARM excludes17
+x64-only cases. Native memory controls pass16/16 per CLR on actual4KiB/16KiB
+pages. Metal required-device ownership/color cases pass25/25 under Rosetta.
+The final actual native return/fault/telemetry workers pass4/4 after bundle
+publish with unchanged assembly hashes. Mapping/domain leases, alias retirement
+and fault retry receipts remain unactivated.
 
-The snapshot regression is corrected at `ba83361`. Graph-disabled owned copies
-retain generation/content-identity checks; strict mapping checks still govern
-GPU provenance and graph-enabled admission. Combined checks pass210/210 on
-ARM64 and Rosetta; integrated required-device ownership/materialization checks
-pass14+40 under Rosetta. Fresh Sarah150s again reaches a coherent scene and
-responds to right/left movement, peak1215MiB. Jump input was delivered but its
-airborne phase was not captured. Shutdown still uses forced guest unwind.
-Poppy advances beyond the snapshot veto to SIGBUS at24s; the native trace shows
-an Invalidating handler reporting recovery before a peer's restore syscall
-returns. CPU lifetime/permission-receipt recovery remains unresolved. Earlier
-failing builds and diagnostic runs are retained for comparison.
-
-Shared launcher settings/catalogue/localization services now live in
-`SharpEmu.Application`, with73/73 checks passing on each CLR architecture.
-The native AppKit frontend is being qualified separately. The host shutdown
-import-boundary fix is integrated; fresh Sarah150s stops within the first
-shutdown poll, but join/forced-unwind error classification remains unresolved.
-Latest combined checks pass247/247 under Rosetta and230/230 on ARM64 (x64-only
-cases excluded), plus21/21 required-device ownership cases under Rosetta.
-The GPU source graph stays disabled pending producer and backing-lifetime
-qualification.
-
-Unused mapping owner/registry contracts are integrated at `b6fe8f7`, with
-101/101 owner, registry and architecture checks on each CLR. They do not yet
-participate in native mapping mutations or fault recovery. The default signed
-Mac bundle now matches clean b6fe8f7; its archived evidence preserves the
-separate source revisions of earlier runtime checks. Poppy's fault-recovery
-race, native launcher activation and GPU producer/backing lifetime remain open.
-
-
-Latest integrated color source passes298/298 Rosetta and281/281 ARM64 managed
-checks plus25/25 required-device ownership cases under Rosetta. Fresh signed
-4a088e3 Sarah150s verifies movement, an airborne jump and landing, peak1191MiB;
-TERM process stop needs no KILL but guest join/unwind diagnostics remain.
+Fresh signedadf8297 Sarah150s verifies coherent scene, right/left movement,
+airborne jump and landing, peak1204MiB. TERM process stop needs no KILL; guest
+join and forced-unwind/NOT_IMPLEMENTED diagnostics remain at this source.
+Concurrent builds and dense capture prevent a performance comparison.
 [Latest screenshots](../../artifacts/validation/integrated-20261007/SCREENSHOTS.md).
-Canonical startup host-memory routing and accepted dormant-graph payload
-receipts are locally integrated at104a614:309/309 Rosetta and292/292 ARM64
-combined controls,16/16 native memory controls per CLR and25/25 required-device
-cases under Rosetta pass. A rebuilt signed app and game are still pending. Native AppKit
-modeless settings/private-child-group successors remain separately qualified
-candidates; main launcher activation and GPU graph activation are still open.
+
+A separately reviewed host-stop correction is integrated next: accepted main
+entry redirect, actual native return and absence of execution error are required
+for HostShutdownRequested. It retains CPU_TRAP/false and preserves known errors;
+it does not declare successful guest exit or clean teardown. Candidate15/15
+x64 controls and an actual normal-return worker pass. Integratedeb334c1 checks pass318/318 Rosetta and292/292 ARM64; ARM excludes26
+x64-only cases. Launcher lifecycle controls pass25/25 on each CLR and seven
+output-policy cases pass. Signed app/game qualification of this source is pending.
+
+CoreText/CoreGraphics guest fonts and neutral `SharpEmu.Application` services
+are integrated. Their earlier CPU/ABI controls remain distinct from title
+usage. The GPU graph stays hard-disabled despite qualified native offscreen
+color producers and accepted CPU payload receipts. Native presentation borrowing,
+backing leases/coherence and broader storage/presentation writers remain open.
+Poppy's traced Invalidating recovery race, Demon's Souls GPU alias failure,
+3D visual/progression coverage, Windows/Linux native runtime and physical
+DualSense behavior remain unqualified. See the
+[ownership/runtime journal](validation/w13-ownership-iteration-20261007.md) for
+exact revisions, failed preparation/regression runs and retained evidence.
