@@ -1,0 +1,11 @@
+# Native compute dispatch readiness
+
+The presenter rejects a missing native command buffer before resolving any texture, and rejects a missing compute encoder before binding resources or dispatching. A failed dispatch exits through the existing ordered drain fatal path; it cannot advance `RecordStorageImageWrites` or acknowledge completion, and the drain discards its borrowed uncommitted command buffer.
+
+Each temporary texture returned with an owned retain is recorded in an explicitly initialized slot. The dispatch finally consumes that slot before attempting release, then attempts every remaining owned slot. Registry-owned storage textures and borrowed sampled images are excluded. Equal native handles can represent separate retains and therefore receive one release per owned slot, rather than address deduplication. A cleanup failure is retained as a secondary diagnostic when a primary dispatch failure already exists; it cannot replace that cause. Successful encoding retains resources through the native command buffer; the temporary presenter retain now lasts through dispatch/writeback rather than ending immediately after bindings.
+
+The default-null private controls exercise command-buffer/encoder creation, sampled materialization and temporary release. Managed tests run the real accepted queue, take, dispatch, fatal and repeated-drain paths with synthetic native handles. They prove failed work stays incomplete, following work does not execute, storage content versions do not advance, and owned temporary release attempts occur once. They do not execute Metal, validate the native retain implementation, compile guest shaders, or qualify a game. No production friend or public API is added.
+
+Pooled dispatch data follows the existing success/graph-receipt ownership rules. This change adds no early pooled return on failure, and does not claim to resolve default-graph in-flight pooled payload cleanup. The managed fixture returns its own retained failed payload when restoring isolated scheduling state.
+
+Native device qualification, including successful dispatch binding and writeback after this ownership adjustment, remains pending a separate serialized runtime grant. Selected-mip and singleton-array format/shape admission are unchanged; the texture source graph remains disabled.

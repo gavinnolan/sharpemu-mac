@@ -126,81 +126,105 @@ internal static partial class MetalVideoPresenter
             return;
         }
 
-        var commandBuffer = BeginBatchedGuestCommands(queue);
+        var commandBuffer = _computeBeginCommandsOverride is { } beginCommands
+            ? beginCommands(queue) : BeginBatchedGuestCommands(queue);
+        if (commandBuffer == 0)
+            throw new InvalidOperationException("Metal compute dispatch cannot create its command buffer.");
 
         // Pre-resolve textures before the compute encoder opens: snapshot
         // blits for feedback reads encode into the batch and encoder order
         // must place them ahead of this dispatch.
         Span<nint> textureHandles = stackalloc nint[dispatch.Textures.Length];
         Span<bool> textureOwned = stackalloc bool[dispatch.Textures.Length];
-        for (var index = 0; index < dispatch.Textures.Length; index++)
+        // stackalloc storage is not an ownership receipt until explicitly set.
+        textureHandles.Clear();
+        textureOwned.Clear();
+        Exception? dispatchFailure = null;
+        try
         {
-            var descriptor = dispatch.Textures[index];
-            if (descriptor.IsStorage && descriptor.Address != 0 &&
-                (!_textureSourceGraphEnabled || StorageImageWrites(descriptor)))
+            for (var index = 0; index < dispatch.Textures.Length; index++)
             {
-                ValidateSelectedStorageMipExecution(descriptor, queue);
-                if (_selectedStorageMipAssociations.TryGetValue(descriptor, out _) &&
-                    MetalNative.Send(commandBuffer, MetalNative.Selector("retainedReferences")) == 0)
-                    throw new NotSupportedException("Metal selected storage resources require native command-buffer retention through completion.");
-                textureHandles[index] = EnsureStorageImage(device, descriptor).Texture;
-                textureOwned[index] = false;
+                var descriptor = dispatch.Textures[index];
+                if (descriptor.IsStorage && descriptor.Address != 0 &&
+                    (!_textureSourceGraphEnabled || StorageImageWrites(descriptor)))
+                {
+                    ValidateSelectedStorageMipExecution(descriptor, queue);
+                    if (_selectedStorageMipAssociations.TryGetValue(descriptor, out _) &&
+                        MetalNative.Send(commandBuffer, MetalNative.Selector("retainedReferences")) == 0)
+                        throw new NotSupportedException("Metal selected storage resources require native command-buffer retention through completion.");
+                    textureHandles[index] = EnsureStorageImage(device, descriptor).Texture;
+                    textureOwned[index] = false;
+                }
+                else
+                {
+                    if (_computeTextureCreationOverride is { } createTexture)
+                    {
+                        var created = createTexture(device, commandBuffer, descriptor);
+                        textureHandles[index] = created.Handle;
+                        textureOwned[index] = created.Owned;
+                    }
+                    else
+                    {
+                        textureHandles[index] = CreateDrawTexture(
+                            device, commandBuffer, descriptor, out var ownedTexture);
+                        textureOwned[index] = ownedTexture;
+                    }
+                }
             }
-            else
+
+            var encoder = _computeEncoderCreationOverride is { } createEncoder
+                ? createEncoder(commandBuffer)
+                : MetalNative.Send(commandBuffer, MetalNative.Selector("computeCommandEncoder"));
+            if (encoder == 0)
+                throw new InvalidOperationException("Metal compute dispatch cannot create its compute encoder.");
+            MetalNative.SendVoid(encoder, MetalNative.Selector("setComputePipelineState:"), pipeline);
+
+            var writeBackBuffers = new List<(nint Pointer, GuestMemoryBuffer Guest)>();
+            var uploads = UploadDrawBuffers(device, dispatch.GlobalMemoryBuffers, writeBackBuffers);
+            var stages = dispatch.StageBindings is { } bindings ? new[] { bindings } : [];
+            if (FindStageBindings(stages, GuestStageKind.Compute, dispatch.Shader) is { } computeBindings)
             {
-                textureHandles[index] = CreateDrawTexture(
-                    device, commandBuffer, descriptor, out var ownedTexture);
-                textureOwned[index] = ownedTexture;
+                EncodeStageResources(
+                    device, new StageEncoder(encoder, MetalNative.Selector("setBuffer:offset:atIndex:"), 0), dispatch.Shader.Shader.ArgumentLayout,
+                    computeBindings, uploads, textureHandles, MergePushData(stages));
+            }
+
+            var shader = dispatch.Shader.Shader;
+            MetalNative.SendDispatch(
+                encoder,
+                MetalNative.Selector("dispatchThreadgroups:threadsPerThreadgroup:"),
+                new MtlSize
+                {
+                    Width = dispatch.GroupCountX,
+                    Height = dispatch.GroupCountY,
+                    Depth = dispatch.GroupCountZ,
+                },
+                new MtlSize
+                {
+                    Width = Math.Max(shader.ThreadgroupSizeX, 1),
+                    Height = Math.Max(shader.ThreadgroupSizeY, 1),
+                    Depth = Math.Max(shader.ThreadgroupSizeZ, 1),
+                });
+            MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
+
+            // CPU-visible writes are ordering points (see the draw path): flush
+            // the batch and wait so the write-back lands before this work item
+            // completes. Pure-GPU dispatches stay in the open batch.
+            if (writeBackBuffers.Count > 0)
+            {
+                var committed = FlushBatchedGuestCommands();
+                WaitForCommittedCommandBuffer(committed);
+                WriteBuffersBackToGuest(writeBackBuffers);
             }
         }
-
-        var encoder = MetalNative.Send(commandBuffer, MetalNative.Selector("computeCommandEncoder"));
-        MetalNative.SendVoid(encoder, MetalNative.Selector("setComputePipelineState:"), pipeline);
-
-        var writeBackBuffers = new List<(nint Pointer, GuestMemoryBuffer Guest)>();
-        var uploads = UploadDrawBuffers(device, dispatch.GlobalMemoryBuffers, writeBackBuffers);
-        var stages = dispatch.StageBindings is { } bindings ? new[] { bindings } : [];
-        if (FindStageBindings(stages, GuestStageKind.Compute, dispatch.Shader) is { } computeBindings)
+        catch (Exception exception)
         {
-            EncodeStageResources(
-                device, new StageEncoder(encoder, MetalNative.Selector("setBuffer:offset:atIndex:"), 0), dispatch.Shader.Shader.ArgumentLayout,
-                computeBindings, uploads, textureHandles, MergePushData(stages));
+            dispatchFailure = exception;
+            throw;
         }
-
-        for (var index = 0; index < textureHandles.Length; index++)
+        finally
         {
-            if (textureHandles[index] != 0 && textureOwned[index])
-            {
-                MetalNative.SendVoid(textureHandles[index], MetalNative.Selector("release"));
-            }
-        }
-
-        var shader = dispatch.Shader.Shader;
-        MetalNative.SendDispatch(
-            encoder,
-            MetalNative.Selector("dispatchThreadgroups:threadsPerThreadgroup:"),
-            new MtlSize
-            {
-                Width = dispatch.GroupCountX,
-                Height = dispatch.GroupCountY,
-                Depth = dispatch.GroupCountZ,
-            },
-            new MtlSize
-            {
-                Width = Math.Max(shader.ThreadgroupSizeX, 1),
-                Height = Math.Max(shader.ThreadgroupSizeY, 1),
-                Depth = Math.Max(shader.ThreadgroupSizeZ, 1),
-            });
-        MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
-
-        // CPU-visible writes are ordering points (see the draw path): flush
-        // the batch and wait so the write-back lands before this work item
-        // completes. Pure-GPU dispatches stay in the open batch.
-        if (writeBackBuffers.Count > 0)
-        {
-            var committed = FlushBatchedGuestCommands();
-            WaitForCommittedCommandBuffer(committed);
-            WriteBuffersBackToGuest(writeBackBuffers);
+            ReleaseComputeTemporaryTextures(textureHandles, textureOwned, dispatchFailure);
         }
 
         RecordStorageImageWrites(dispatch.Textures);
