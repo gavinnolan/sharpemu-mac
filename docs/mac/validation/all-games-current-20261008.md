@@ -95,3 +95,10 @@ Native pipeline creation is1.393ms; cached later draws are4.084/2.467ms.
 Library preparation/readiness is now the production fix target. The106 focused
 controls pass on each CLR; this diagnostic changes no execution/completion
 policy and remains isolated.
+
+A new [Poppy store continuation experiment](poppy-store-continuation-probe-20261008.md)
+passes nine fresh Rosetta processes, including three32-thread cases. Saved
+RFLAGS single stepping delivers notification after the exact retried store;
+an owned standalone handler can fence before ending its diagnostic continuation.
+This supplies a candidate mechanism for a lifetime lease across signal return,
+but no production provider/CLR bridge recovery or Poppy gameplay is qualified.
