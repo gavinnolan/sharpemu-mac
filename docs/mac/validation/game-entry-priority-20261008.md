@@ -52,8 +52,16 @@ these runs accepts an additional title.
   was rejected. Silent Hill completed two native-producer-to-canonical
   publications before its parser rejected an original selected storage seed's
   first-use receipt. It remained alive for 60 seconds with a black capture and
-  zero guest frames. Bounded provider diagnostics are being qualified to
-  identify the actual rejection before changing admission rules.
+  zero guest frames. Successor diagnostics `cbbf7cc3` passed 196 managed cases
+  per host architecture. Its Octopath replay refused the retained singleton
+  volume's watch/version earlier, before any publication preparation. Its
+  Silent Hill replay completed two publications, then dirty validation refused
+  writer-history continuity: original revision 157585 versus 159138, a distance
+  of 1553 exceeding the 512-record ring. That run had no new first-use error.
+  Original-watch continuity candidate `4b39506d` is source-reviewed, with runtime
+  qualification pending. It retains the original physical veto and creates
+  private successor watches only for exact applied provider writes; unwatched
+  receipts retain the existing history limit.
 - **Demon's Souls:** the same signed `9e3adfcb` bundle remained alive for 60
   seconds but had zero guest frames and a black capture. Shutdown exposed a
   prior worker failure: selected storage mip copy changed during all three
@@ -93,6 +101,7 @@ these runs accepts an additional title.
 Current immutable evidence:
 `artifacts/validation/all-games-20261008/octopath-volume-publication-watch-9e3adfcb-qualified`,
 `artifacts/validation/all-games-20261008/display-original-1610948d-prepared`,
+`artifacts/validation/all-games-20261008/canonical-publication-decline-cbbf7cc3-prepared`,
 `artifacts/validation/all-games-20261008/depth-cube-entry-f4ebd249-qualified`,
 `artifacts/validation/void-skipped-shader-400e5c64`,
 `artifacts/validation/native-mesh-entry-d2639278`,
