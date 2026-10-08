@@ -26,6 +26,14 @@ public sealed partial class MetalStorageCpuSyncTests
     private static GuestDrawTexture LinearVolumeSnapshot(VolumeMemory memory) => Assert.Single(
         MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [LinearVolumeBinding()], out _));
 
+    private static void PublishLinearVolume(GuestDrawTexture snapshot, object image)
+    {
+        Images.Remove(Address);
+        var nativeBytes=checked((ulong)snapshot.Width*snapshot.Height*snapshot.Depth*4);
+        lock(Field("_gate").GetValue(null)!) InvokeVolume("PublishStorageImageLocked",snapshot,null,image,
+            (snapshot.Width,snapshot.Height,nativeBytes));
+    }
+
     [Fact]
     public void LinearVolumeActualProducerPreservesEveryPitchedSliceAndFinalPaddingByte()
     {
@@ -85,7 +93,7 @@ public sealed partial class MetalStorageCpuSyncTests
         var image=VolumeImage(origin,memory); Set(image,"Width",16u); Set(image,"Height",16u); Set(image,"Depth",16u);
         try
         {
-            PublishVolume(snapshot,image); MetalVideoPresenter.ReleasePreparedTextureSources([snapshot]); Assert.Equal(0,memory.Releases);
+            PublishLinearVolume(snapshot,image); MetalVideoPresenter.ReleasePreparedTextureSources([snapshot]); Assert.Equal(0,memory.Releases);
             lock(Field("_gate").GetValue(null)!) Assert.True((bool)InvokeVolume("IsSingletonVolumeNativeOwnerCurrentLocked",image,origin)!);
             Field("_executingGuestWorkSequence").SetValue(null,26L); MetalVideoPresenter.RecordStorageImageWrites([snapshot]);
             lock(Field("_gate").GetValue(null)!) Assert.True((bool)InvokeVolume("IsSingletonVolumeNativeOwnerCurrentLocked",image,origin)!);
@@ -105,7 +113,7 @@ public sealed partial class MetalStorageCpuSyncTests
         if(change=="depth") Set(image,"Depth",1u);
         if(change=="width") Set(image,"Width",1u);
         if(change=="format") Set(image,"Format",MtlPixelFormat.Rgba8Unorm);
-        try { Assert.Throws<TargetInvocationException>(()=>PublishVolume(snapshot,image)); Assert.False(Images.Contains(Address)); Assert.Equal(0,memory.Releases); }
+        try { Assert.Throws<TargetInvocationException>(()=>PublishLinearVolume(snapshot,image)); Assert.False(Images.Contains(Address)); Assert.Equal(0,memory.Releases); }
         finally { Images.Remove(Address); MetalVideoPresenter.ReleasePreparedTextureSources([snapshot]); }
         Assert.Equal(1,memory.Releases);
     }
