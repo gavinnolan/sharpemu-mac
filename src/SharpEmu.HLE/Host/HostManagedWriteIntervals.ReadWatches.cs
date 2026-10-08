@@ -71,21 +71,33 @@ internal sealed partial class HostManagedWriteIntervals
     }
 
     internal ReadWatch? TryCreateReadWatch(PhysicalRun[] runs)
+        => TryCreateReadWatch(runs, out _, out _);
+
+    // First actual rejection scalars only. This overload changes neither
+    // enrollment policy nor its original reads, reservation or finite bounds.
+    internal ReadWatch? TryCreateReadWatch(PhysicalRun[] runs, out string? rejection, out long originalAdmission)
     {
-        if (runs.Length is 0 or > CpuMappedCopyObservation.MaximumSegments) return null;
+        rejection = null; originalAdmission = -1;
+        if (runs.Length is 0 or > CpuMappedCopyObservation.MaximumSegments)
+        { rejection = "watch-enrollment-run-bound"; return null; }
         var installed = Volatile.Read(ref readWatches);
         if (installed is null)
         {
             var candidate = new ReadWatch?[Capacity];
             installed = Interlocked.CompareExchange(ref readWatches, candidate, null) ?? candidate;
         }
-        if (Volatile.Read(ref coverageIncomplete) != 0 ||
-            Interlocked.CompareExchange(ref admission, PublicationBit, 0) != 0) return null;
+        if (Volatile.Read(ref coverageIncomplete) != 0)
+        { rejection = "watch-enrollment-coverage-incomplete"; return null; }
+        originalAdmission = Interlocked.CompareExchange(ref admission, PublicationBit, 0);
+        if (originalAdmission != 0)
+        { rejection = "watch-enrollment-admission-busy"; return null; }
         try
         {
-            if (Volatile.Read(ref coverageIncomplete) != 0) return null;
+            if (Volatile.Read(ref coverageIncomplete) != 0)
+            { rejection = "watch-enrollment-coverage-incomplete-final"; return null; }
             var revision = Volatile.Read(ref nextIdentity);
-            if (revision < 0 || revision == long.MaxValue) return null;
+            if (revision < 0 || revision == long.MaxValue)
+            { rejection = "watch-enrollment-invalid-revision"; return null; }
             var watch = new ReadWatch(this, runs, revision); // Exact exclusive enrollment, cold path only.
             for (var index = 0; index < installed.Length; index++)
             {
@@ -93,6 +105,7 @@ internal sealed partial class HostManagedWriteIntervals
                 if (Interlocked.CompareExchange(ref installed[index], watch, null) is null)
                 { Interlocked.Increment(ref activeReadWatches); return watch; }
             }
+            rejection = "watch-enrollment-slot-capacity";
             return null; // Finite watch capacity; never synthesize a current receipt.
         }
         finally { ReleasePublication(); }

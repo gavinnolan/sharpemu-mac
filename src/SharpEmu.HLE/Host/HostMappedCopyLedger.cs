@@ -267,8 +267,9 @@ public sealed unsafe partial class HostMappedCopyLedger
                     var last = Math.Min(lastSource, view.Address + view.Size);
                     if (first < last) physical.Add(new(view.Offset + first - view.Address, last - first));
                 }
-                watchOwnership.Watch = writers.TryCreateReadWatch(physical.ToArray());
-                if (ownedCapture.ReadWatch is null) return Refuse(ref diagnostic, "watch-enrollment", CpuMappedCopyResult.Rejected);
+                watchOwnership.Watch = writers.TryCreateReadWatch(physical.ToArray(), out var enrollmentReason, out var enrollmentAdmission);
+                if (ownedCapture.ReadWatch is null) return Refuse(ref diagnostic, enrollmentReason!, CpuMappedCopyResult.Rejected,
+                    enrollmentAdmission: enrollmentAdmission);
             }
             // No virtual pointer, permission repair, provider query, callback or
             // mapping gate is used here. The exact backing pin owns the alias.
@@ -306,12 +307,12 @@ public sealed unsafe partial class HostMappedCopyLedger
         finally { if (!keepWatch) ownedCapture?.ReleaseWatch(); backing.ExitAccess(); }
 
         CpuMappedCopyResult Refuse(ref CpuMappedCopyDiagnostics.Failure target, string reason,
-            CpuMappedCopyResult result, ulong cursor = 0, int count = 0, View? view = null)
+            CpuMappedCopyResult result, ulong cursor = 0, int count = 0, View? view = null, long enrollmentAdmission = -1)
         {
             if (CpuMappedCopyDiagnostics.Enabled)
                 target = new("ledger", reason, result, footprintAddress, footprintByteCount, sourceAddress,
                     copyBytes, withWriteWatch, backing.Identity, cursor, count,
-                    view?.Address ?? 0, view?.Size ?? 0, view?.Backing.Identity ?? 0);
+                    view?.Address ?? 0, view?.Size ?? 0, view?.Backing.Identity ?? 0, enrollmentAdmission);
             return result;
         }
     }
