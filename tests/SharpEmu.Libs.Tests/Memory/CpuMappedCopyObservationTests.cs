@@ -7,8 +7,8 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.Memory;
 
-// Shape/immutability controls only. No producer, native mapping or currentness
-// implementation exists; these do not qualify mapping retention or content.
+// Shape/immutability controls only. These exercise no provider, native mapping
+// or currentness implementation; they do not qualify retention or content.
 public sealed class CpuMappedCopyObservationTests
 {
     private const ulong Base = 0x7092_C80000;

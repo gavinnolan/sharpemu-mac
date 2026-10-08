@@ -164,7 +164,13 @@ Signed apps are source-specific artifacts. `artifacts/macos/compat-2adf328d`
 contains the all-nine replay source; the isolatedR8 app is in
 `.claude/worktrees/root-metal-r8-4k/artifacts/macos/r8-4k-qualified`. The default
 `artifacts/macos/SharpEmu.app` is an older snapshot. The newer combined R16/vertex
-app is in `artifacts/macos/compat-r16-3ae88a16`. Check embedded build-info
+app is in `artifacts/macos/compat-r16-3ae88a16`. The [mapped-copy integration](validation/mapping-copy-main-20261008.md)
+adds403 library/60 managed host/4 native mapped-copy checks per CLR and a newer
+signed app at `artifacts/macos/compat-mapped-copy-115316f0`. Its Sarah replay
+verifies right/left movement; the mapping capability has no Metal consumer yet.
+The separate diagnostic app at `artifacts/macos/compat-typed-diagnostic-073d7bb9`
+retains two black Octopath replays that fail earlier at mapping-epoch admission.
+Check embedded build-info
 and actual payload hashes. ARM64 CLR checks qualify host code, not ARM guest
 execution. Fetched upstreamb02c061 remains integrated locally. No remote push,
 PR or remote merge was performed.
