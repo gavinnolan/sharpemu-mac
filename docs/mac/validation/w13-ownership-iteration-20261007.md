@@ -478,3 +478,45 @@ Production mapping/fault/recovery behavior is unchanged. Native cases return
 early outside macOS and do not establish portable runtime qualification.
 See [prototype scope](../page-restoration-bookkeeping-prototype.md) and
 `cpu-page-restoration-prototype-b0647d7/` for exact source/results/hashes.
+
+## Shutdown redirect, shared Application package and actual Metal Drain
+
+Reviewed shutdown b20ebac integrates asf994192. The import guard was unreachable
+because ActiveForcedGuestExit includes the global request it was asked to
+negate. Global volatile request and current-slice state are now checked
+separately. Original-guard differential controls fail the positive case; final
+6/6 x64 helper simulations pass, as does a separate actual synthetic native
+guest normal-return worker. The helper controls use simulated ICpuMemory
+return slots and do not qualify native guest teardown by themselves.
+
+Signed isolated b20ebac Sarah150s stays alive, peak1126MiB, and stops within
+the first harness poll without KILL. Guest return1 is consistent with the
+shutdown redirect; join error and forced-unwind/NOT_IMPLEMENTED classification
+remain. Scene/right/left response stay coherent. Z at134s produces a change
+from grounded134s to platform-top135/136s; upward response is verified, but
+no airborne frame is captured. Reported8948frames over142.341s (62.86/s) is
+not a controlled performance comparison. See `host-shutdown-slice/`.
+
+Neutral Application source654af7e integrates as76d840d: existing settings JSON
+filenames/schema, catalogue/cache/watch, localization and update/link services
+move out of the GUI. Root Application73/73 passes on both CLR architectures.
+The native AppKit frontend is separate and not active in main yet; Mac still
+carries Avalonia/Skia through the current launcher.
+
+Metal lifecycle chain6ac4bef/72750f1/2192f71/0fdd049 merges ascf2b3d6. Actual
+Drain/Complete owner release, fatal cancellation, gate-free close wait and
+final-flush exception latching are conditional on the hard-disabled graph.
+Pool cleanup preserves the original GPU cause, retains secondary failure and
+always wakes admission waiters. Controlled native cases qualify consumer
+execution and precommit failure; real driver-error injection and actual
+producer pipeline activation remain separate. Unwired runtime producers are
+explicitly rejected. Pending queue payload returns are tested; in-flight
+partial-return and presentation ownership still need their own audit.
+
+Combined cf2b3d6 selection247/247 passes on Rosetta, including six shutdown and
+eleven test-only restoration cases. ARM64 selection230/230 passes; it excludes
+those17 x64-qualified cases. Integrated required-device ownership cases21/21
+pass under Rosetta without skips, including the seven new actual Drain/final
+precommit controls. Earlier ARM/x64 native candidate proofs remain exact727
+and219 revisions. Evidence is under `w13-20261007/lifecycle-integrated-*` and
+`application-integrated-*`. The source graph remains disabled.

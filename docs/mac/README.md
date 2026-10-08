@@ -100,3 +100,13 @@ Poppy advances beyond the snapshot veto to SIGBUS at24s; the native trace shows
 an Invalidating handler reporting recovery before a peer's restore syscall
 returns. CPU lifetime/permission-receipt recovery remains unresolved. Earlier
 failing builds and diagnostic runs are retained for comparison.
+
+Shared launcher settings/catalogue/localization services now live in
+`SharpEmu.Application`, with73/73 checks passing on each CLR architecture.
+The native AppKit frontend is being qualified separately. The host shutdown
+import-boundary fix is integrated; fresh Sarah150s stops within the first
+shutdown poll, but join/forced-unwind error classification remains unresolved.
+Latest combined checks pass247/247 under Rosetta and230/230 on ARM64 (x64-only
+cases excluded), plus21/21 required-device ownership cases under Rosetta.
+The GPU source graph stays disabled pending producer and backing-lifetime
+qualification.
