@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""Offline schema compatibility and fatal-tail tests; no application/device."""
+import importlib.util
+import pathlib
+import struct
+import tempfile
+import unittest
+import uuid
+
+spec = importlib.util.spec_from_file_location('native_trace', pathlib.Path(__file__).with_name('read-native-fault-trace.py'))
+trace = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(trace)
+
+
+class NativeTraceReaderTests(unittest.TestCase):
+    def read(self, version, records):
+        fmt = trace.RECORDS[version]
+        capacity = len(records) + 1
+        data = bytearray(128 + capacity * fmt.size)
+        struct.pack_into('<Q6i', data, 0, trace.MAGIC, version, 128, fmt.size, capacity, 4096, 1)
+        data[32:48] = uuid.uuid4().bytes_le
+        for index, fields in enumerate(records):
+            values = {field: 0 for field in trace.FIELDS}
+            values.update(published=1, sequence=index + 1, invocation=7)
+            values.update(fields)
+            fmt.pack_into(data, 128 + index * fmt.size,
+                          *(values[field] for field in trace.FIELDS[:len(fmt.unpack(bytes(fmt.size)))]))
+        with tempfile.TemporaryDirectory() as folder:
+            path = pathlib.Path(folder, 'trace.bin')
+            path.write_bytes(data)
+            return trace.read_trace(path)
+
+    def test_retained_schema 1_has_no_final_collection_claim(self):
+        parsed = self.read(1, [{'kind': 1}, {'kind': 2, 'result': 0}])
+        self.assertEqual(152, parsed['recordBytes'])
+        self.assertEqual('not-collected-schema 1', parsed['invocations'][0]['bridgeFinalStatus'])
+        self.assertEqual(1, parsed['unpublishedSlots'])
+
+    def test_schema 2_pairs_declined_early_with_recovered_bridge(self):
+        parsed = self.read(2, [{'kind': 1, 'signal': 4}, {'kind': 2, 'result': 0},
+                              {'kind': 7, 'result': 1, 'route': 4, 'reason': 0}])
+        self.assertEqual(160, parsed['recordBytes'])
+        self.assertEqual('native-signal-entry', parsed['records'][0]['event'])
+        self.assertEqual('core-recovery-callback', parsed['records'][2]['recoveryRoute'])
+        self.assertEqual('recorded', parsed['invocations'][0]['bridgeFinalStatus'])
+        self.assertEqual([3], parsed['invocations'][0]['bridgeFinalSequences'])
+
+    def test_missing_final_is_unknown_instead_of_declined(self):
+        parsed = self.read(2, [{'kind': 1}, {'kind': 2, 'result': 0}])
+        self.assertEqual('missing', parsed['invocations'][0]['bridgeFinalStatus'])
+        self.assertEqual([], parsed['invocations'][0]['bridgeFinalSequences'])
+
+    def test_unpublished_fatal_tail_is_never_decoded(self):
+        parsed = self.read(2, [{'kind': 1}, {'published': 0, 'kind': 999}])
+        self.assertEqual(1, len(parsed['records']))
+        self.assertEqual(2, parsed['unpublishedSlots'])
+        self.assertEqual('missing', parsed['invocations'][0]['bridgeFinalStatus'])
+
+    def test_duplicate_final_remains_visible(self):
+        parsed = self.read(2, [{'kind': 1}, {'kind': 7, 'route': 5, 'reason': 1},
+                              {'kind': 7, 'route': 5, 'reason': 1}])
+        self.assertEqual('duplicate', parsed['invocations'][0]['bridgeFinalStatus'])
+
+    def test_unknown_disposition_is_rejected(self):
+        for fields in ({'route': 99, 'reason': 0}, {'route': 3, 'reason': 99}):
+            with self.subTest(fields=fields), self.assertRaisesRegex(ValueError, 'unknown final disposition'):
+                self.read(2, [{'kind': 7, **fields}])
+
+    def test_schema 3_range_cas_state_is_distinct_from_owner_observation(self):
+        parsed = self.read(3, [{'kind': 1, 'address': 0x8120},
+                              {'kind': 8, 'address': 0x8120, 'route': 1, 'reason': 3,
+                               'reserved': 2, 'ownerState': 0, 'ownerIdentity': 11,
+                               'armEpoch': 8, 'ownerObservation': 2, 'size': 4096, 'result': 1,
+                               'rawAddress': 16, 'errorCode': 0x8000, 'ownerEnd': 0x9000},
+                              {'kind': 2, 'result': 0}, {'kind': 7, 'route': 4, 'reason': 1}])
+        decision = parsed['records'][1]
+        self.assertEqual(160, parsed['recordBytes'])
+        self.assertEqual('busy-invalidating', decision['decisionReason'])
+        self.assertEqual('invalidating', decision['casPreviousStateName'])
+        self.assertEqual('disarmed', decision['observedOwnerStateName'])
+        self.assertTrue(decision['branchHandled'])
+        self.assertEqual(4096, decision['trackingPageBytes'])
+        self.assertEqual(16, decision['requestedRangeBytes'])
+        self.assertEqual(0x8000, decision['trackingStart'])
+        self.assertEqual(0x9000, decision['trackingEnd'])
+        self.assertEqual([2], parsed['invocations'][0]['rangeDecisionSequences'])
+        self.assertEqual('recorded', parsed['invocations'][0]['bridgeFinalStatus'])
+        self.assertEqual(0, parsed['records'][2]['result']) # branch is not final acceptance
+
+    def test_schema 3_all_range_reasons_and_passes_decode(self):
+        for reason, name in trace.RANGE_REASONS.items():
+            for route, pass_name in trace.RANGE_PASSES.items():
+                with self.subTest(reason=reason, route=route):
+                    record = self.read(3, [{'kind': 8, 'route': route, 'reason': reason}])['records'][0]
+                    self.assertEqual(name, record['decisionReason'])
+                    self.assertEqual(pass_name, record['decisionPass'])
+
+    def test_schema 2_cannot_claim_new_range_decisions(self):
+        with self.assertRaisesRegex(ValueError, 'unknown tracker range decision'):
+            self.read(2, [{'kind': 8, 'route': 1, 'reason': 3}])
+        old = self.read(2, [{'kind': 1}])
+        self.assertEqual('not-collected-before-schema 3', old['invocations'][0]['rangeDecisionStatus'])
+
+    def test_schema 3_missing_range_decisions_are_not_inferred(self):
+        parsed = self.read(3, [{'kind': 1}, {'kind': 2, 'result': 0}])
+        self.assertEqual('missing', parsed['invocations'][0]['rangeDecisionStatus'])
+        self.assertEqual('missing', parsed['invocations'][0]['bridgeFinalStatus'])
+
+    def test_schema 3_rejects_unknown_range_enums(self):
+        for fields in ({'route': 99, 'reason': 3}, {'route': 1, 'reason': 99}):
+            with self.subTest(fields=fields), self.assertRaisesRegex(ValueError, 'unknown tracker range decision'):
+                self.read(3, [{'kind': 8, **fields}])
+
+
+if __name__ == '__main__':
+    unittest.main()

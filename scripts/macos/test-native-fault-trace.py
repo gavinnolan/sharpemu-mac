@@ -66,6 +66,57 @@ class NativeTraceReaderTests(unittest.TestCase):
             with self.subTest(fields=fields), self.assertRaisesRegex(ValueError, 'unknown final disposition'):
                 self.read(2, [{'kind': 7, **fields}])
 
+    def test_schema3_range_cas_state_is_distinct_from_owner_observation(self):
+        parsed = self.read(3, [{'kind': 1, 'address': 0x8120},
+                              {'kind': 8, 'address': 0x8120, 'route': 1, 'reason': 3,
+                               'reserved': 2, 'ownerState': 0, 'ownerIdentity': 11,
+                               'armEpoch': 8, 'ownerObservation': 2, 'size': 4096, 'result': 1,
+                               'rawAddress': 16, 'errorCode': 0x8000, 'ownerAddress': 0x8120, 'ownerEnd': 0x9000},
+                              {'kind': 2, 'result': 0}, {'kind': 7, 'route': 4, 'reason': 1}])
+        decision = parsed['records'][1]
+        self.assertEqual(160, parsed['recordBytes'])
+        self.assertEqual('busy-invalidating', decision['decisionReason'])
+        self.assertEqual('invalidating', decision['casPreviousStateName'])
+        self.assertEqual('disarmed', decision['observedOwnerStateName'])
+        self.assertTrue(decision['branchHandled'])
+        self.assertEqual(4096, decision['trackingPageBytes'])
+        self.assertEqual(16, decision['requestedRangeBytes'])
+        self.assertEqual(0x8130, decision['requestedRangeEnd'])
+        self.assertEqual(0x8000, decision['trackingStart'])
+        self.assertEqual(0x9000, decision['trackingEnd'])
+        self.assertEqual([2], parsed['invocations'][0]['rangeDecisionSequences'])
+        self.assertEqual('recorded', parsed['invocations'][0]['bridgeFinalStatus'])
+        self.assertEqual(0, parsed['records'][2]['result']) # branch is not final acceptance
+
+    def test_schema3_exact_range_end_saturates_like_tracker_predicate(self):
+        record = self.read(3, [{'kind': 8, 'route': 1, 'reason': 5,
+                               'ownerAddress': 0xFFFFFFFFFFFFFFF0, 'rawAddress': 32}])['records'][0]
+        self.assertEqual(0xFFFFFFFFFFFFFFFF, record['requestedRangeEnd'])
+
+    def test_schema3_all_range_reasons_and_passes_decode(self):
+        for reason, name in trace.RANGE_REASONS.items():
+            for route, pass_name in trace.RANGE_PASSES.items():
+                with self.subTest(reason=reason, route=route):
+                    record = self.read(3, [{'kind': 8, 'route': route, 'reason': reason}])['records'][0]
+                    self.assertEqual(name, record['decisionReason'])
+                    self.assertEqual(pass_name, record['decisionPass'])
+
+    def test_schema2_cannot_claim_new_range_decisions(self):
+        with self.assertRaisesRegex(ValueError, 'unknown tracker range decision'):
+            self.read(2, [{'kind': 8, 'route': 1, 'reason': 3}])
+        old = self.read(2, [{'kind': 1}])
+        self.assertEqual('not-collected-before-schema3', old['invocations'][0]['rangeDecisionStatus'])
+
+    def test_schema3_missing_range_decisions_are_not_inferred(self):
+        parsed = self.read(3, [{'kind': 1}, {'kind': 2, 'result': 0}])
+        self.assertEqual('missing', parsed['invocations'][0]['rangeDecisionStatus'])
+        self.assertEqual('missing', parsed['invocations'][0]['bridgeFinalStatus'])
+
+    def test_schema3_rejects_unknown_range_enums(self):
+        for fields in ({'route': 99, 'reason': 3}, {'route': 1, 'reason': 99}):
+            with self.subTest(fields=fields), self.assertRaisesRegex(ValueError, 'unknown tracker range decision'):
+                self.read(3, [{'kind': 8, **fields}])
+
 
 if __name__ == '__main__':
     unittest.main()

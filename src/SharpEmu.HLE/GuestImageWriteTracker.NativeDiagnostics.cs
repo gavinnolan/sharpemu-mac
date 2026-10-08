@@ -41,6 +41,8 @@ public static unsafe partial class GuestImageWriteTracker
                     var invocation = RecordNativeImageFaultEntry(0, 0, 0, 0, -1, 0, 0);
                     RecordNativeImageFaultResult(false, invocation);
                     RecordNativeFaultDisposition(invocation, false, 5, 4);
+                    RecordNativeRangeDecision(null, 0, invocation, NativeRangeDecisionPass.EntryGuard,
+                        NativeRangeDecisionReason.PreflightWarmup, -1, false);
                     RecordNativeProtection(0, 0, 0, 0, 0, false, 0, 0, null);
                     RecordNativeProtection(0, 0, 0, 0, 0, true, 0, 0, null);
                 }
@@ -103,6 +105,61 @@ public static unsafe partial class GuestImageWriteTracker
         record.Result = recovered ? 1 : 0;
         record.Route = route;
         record.Reason = reason;
+        _ = buffer.Write(record);
+    }
+
+    // Schema3 Kind8 reuses Route/Reason/Reserved as kind-specific scalars. These
+    // reasons describe existing branch choices, never permission/lifetime receipts.
+    private enum NativeRangeDecisionPass
+    {
+        EntryGuard = 0,
+        ExactByteRange = 1,
+        SharedBoundaryPage = 2,
+        Completion = 3,
+    }
+
+    private enum NativeRangeDecisionReason
+    {
+        Disabled = 1,
+        ZeroAddress = 2,
+        BusyInvalidating = 3,
+        BusyArming = 4,
+        NonArmedSkipped = 5,
+        WatcherRemovalFailed = 6,
+        WatcherRemovalSucceeded = 7,
+        NoHandledRange = 8,
+        PreflightWarmup = 9,
+    }
+
+    private static void RecordNativeRangeDecision(
+        TrackedRange? range, ulong address, long invocation, NativeRangeDecisionPass pass,
+        NativeRangeDecisionReason reason, int casPreviousState, bool branchHandled)
+    {
+        var buffer = Volatile.Read(ref _nativeDiagnosticBuffer);
+        if (buffer is null) return; // default-off path: no clock or owner observation
+        // The initiating range is already known. Do not rescan the snapshot
+        // per owner (which would make diagnostic fault handling quadratic).
+        var record = new NativeFaultTraceRecord
+        {
+            Kind = 8,
+            Nanoseconds = GetMonotonicNanoseconds(),
+            Invocation = invocation,
+            Address = address,
+            OwnerState = -1,
+            Size = TrackingPageSize, // logical tracker page, NOT native syscall extent
+        };
+        record.Route = (int)pass;
+        record.Reason = (int)reason;
+        record.Reserved = casPreviousState; // exact CAS return, unlike later OwnerState
+        record.Result = branchHandled ? 1 : 0; // per-branch only, NOT the invocation result
+        // No-range guard/completion records retain zero owner identity/extent.
+        if (range is not null)
+        {
+            DescribeDiagnosticOwner(ref record, range);
+            record.RawAddress = range.ByteCount; // Kind8 only: exact requested byte count
+            record.ErrorCode = range.Start; // Kind8 only: aligned tracking start
+            record.OwnerObservation = 2; // exact initiating range, observation only
+        }
         _ = buffer.Write(record);
     }
 

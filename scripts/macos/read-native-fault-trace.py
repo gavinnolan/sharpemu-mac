@@ -7,16 +7,22 @@ import struct
 import uuid
 
 MAGIC = 0x53454D554641554C
-RECORDS = {1: struct.Struct('<4q7Q3q10i'), 2: struct.Struct('<4q7Q3q12i')}
+RECORDS = {1: struct.Struct('<4q7Q3q10i'), 2: struct.Struct('<4q7Q3q12i'), 3: struct.Struct('<4q7Q3q12i')}
 FIELDS = ['published', 'sequence', 'nanoseconds', 'invocation', 'rawAddress',
           'address', 'errorCode', 'rip', 'ownerAddress', 'ownerEnd', 'size',
           'ownerIdentity', 'armEpoch', 'operation', 'kind', 'signal', 'signalCode', 'access',
           'ownerState', 'protection', 'result', 'errno', 'ownerObservation', 'reserved', 'route', 'reason']
 KINDS = {1: 'early-tracker-entry', 2: 'early-tracker-result', 3: 'protection-begin',
-         4: 'protection-return', 5: 'range-state', 6: 'range-retire', 7: 'final-disposition'}
+         4: 'protection-return', 5: 'range-state', 6: 'range-retire', 7: 'final-disposition', 8: 'tracker-range-decision'}
 ROUTES = {1: 'early-image-tracker', 2: 'gpu-fast-path', 3: 'raw-core-callback',
           4: 'core-recovery-callback', 5: 'no-core-callback', 6: 'bridge-exception'}
 REASONS = {0: 'recovered', 1: 'declined', 2: 'missing-context', 3: 'caught-handler-exception', 4: 'preflight-warmup'}
+
+RANGE_PASSES = {0: 'entry-guard', 1: 'exact-byte-range', 2: 'shared-boundary-page', 3: 'completion'}
+RANGE_REASONS = {1: 'disabled', 2: 'zero-address', 3: 'busy-invalidating', 4: 'busy-arming',
+                 5: 'non-armed-skipped', 6: 'watcher-removal-failed', 7: 'watcher-removal-succeeded',
+                 8: 'no-handled-range', 9: 'preflight-warmup'}
+RANGE_STATES = {-1: 'not-applicable', 0: 'disarmed', 1: 'armed', 2: 'invalidating', 3: 'arming'}
 
 
 def read_trace(path):
@@ -51,6 +57,20 @@ def read_trace(path):
                 raise ValueError('unknown final disposition')
             record['recoveryRoute'] = ROUTES[record['route']]
             record['dispositionReason'] = REASONS[record['reason']]
+        if record['kind'] == 8:
+            if version < 3 or record['route'] not in RANGE_PASSES or record['reason'] not in RANGE_REASONS:
+                raise ValueError('unknown tracker range decision')
+            record['decisionPass'] = RANGE_PASSES[record['route']]
+            record['decisionReason'] = RANGE_REASONS[record['reason']]
+            record['casPreviousState'] = record['reserved']
+            record['casPreviousStateName'] = RANGE_STATES.get(record['reserved'], 'unknown-state')
+            record['observedOwnerStateName'] = RANGE_STATES.get(record['ownerState'], 'unknown-state')
+            record['trackingPageBytes'] = record['size']
+            record['requestedRangeBytes'] = record['rawAddress']
+            record['requestedRangeEnd'] = min(0xFFFFFFFFFFFFFFFF, record['ownerAddress'] + record['rawAddress'])
+            record['trackingStart'] = record['errorCode']
+            record['trackingEnd'] = record['ownerEnd']
+            record['branchHandled'] = record['result'] == 1
         records.append(record)
     invocations = []
     invocation_ids = sorted({record['invocation'] for record in records if record['invocation'] > 0})
@@ -59,8 +79,12 @@ def read_trace(path):
         entries = [record['sequence'] for record in paired if record['kind'] == 1]
         early = [record['sequence'] for record in paired if record['kind'] == 2]
         final = [record['sequence'] for record in paired if record['kind'] == 7]
+        decisions = [record['sequence'] for record in paired if record['kind'] == 8]
         invocations.append({'invocation': invocation, 'entrySequences': entries,
                             'earlyResultSequences': early, 'bridgeFinalSequences': final,
+                            'rangeDecisionSequences': decisions,
+                            'rangeDecisionStatus': 'not-collected-before-schema3' if version < 3 else
+                            'recorded' if decisions else 'missing',
                             'bridgeFinalStatus': 'not-collected-schema1' if version == 1 else
                             'recorded' if len(final) == 1 else 'missing' if not final else 'duplicate'})
     return {'schemaVersion': version, 'session': str(uuid.UUID(bytes_le=data[32:48])),
@@ -72,6 +96,10 @@ def read_trace(path):
                        'timestamps precede owner-field observations; fields are not an atomic owner reservation',
                        'published MAP_SHARED slots are not a fatal-tail durability guarantee',
                        'owner observations never authorize recovery',
+                       'range CAS prior state is the branch input; owner state/epoch are later separate observations',
+                       'range branchHandled is not the early or final invocation disposition or a permission receipt',
+                       'watcher-removal-succeeded can have zero native operations; pair actual protection records separately',
+                       'range trackingPageBytes is not the native protection operation extent',
                        'final disposition is the emulator POSIX bridge outcome before previous-handler chaining',
                        'missing final records are unknown; abrupt callback termination, recursion or diagnostic loss can omit them',
                        'warmup success labels preflight control flow, not repair of a real kernel fault']}

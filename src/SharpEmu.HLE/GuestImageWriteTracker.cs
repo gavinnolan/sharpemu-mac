@@ -671,6 +671,8 @@ public static unsafe partial class GuestImageWriteTracker
     {
         if (!_enabled || faultAddress == 0)
         {
+            RecordNativeRangeDecision(null, faultAddress, invocation, NativeRangeDecisionPass.EntryGuard,
+                !_enabled ? NativeRangeDecisionReason.Disabled : NativeRangeDecisionReason.ZeroAddress, -1, false);
             return false;
         }
 
@@ -700,11 +702,16 @@ public static unsafe partial class GuestImageWriteTracker
                 RangeArmed);
             if (previousState is RangeInvalidating or RangeArming)
             {
+                RecordNativeRangeDecision(range, faultAddress, invocation, NativeRangeDecisionPass.ExactByteRange,
+                    previousState == RangeInvalidating ? NativeRangeDecisionReason.BusyInvalidating : NativeRangeDecisionReason.BusyArming,
+                    previousState, true);
                 handled = true;
                 continue;
             }
             if (previousState != RangeArmed)
             {
+                RecordNativeRangeDecision(range, faultAddress, invocation, NativeRangeDecisionPass.ExactByteRange,
+                    NativeRangeDecisionReason.NonArmedSkipped, previousState, false);
                 continue;
             }
 
@@ -712,6 +719,8 @@ public static unsafe partial class GuestImageWriteTracker
             {
                 Volatile.Write(ref range.Armed, RangeDisarmed);
                 RecordNativeRangeState(range, invocation: invocation);
+                RecordNativeRangeDecision(range, faultAddress, invocation, NativeRangeDecisionPass.ExactByteRange,
+                    NativeRangeDecisionReason.WatcherRemovalFailed, previousState, false);
                 return false;
             }
 
@@ -724,6 +733,8 @@ public static unsafe partial class GuestImageWriteTracker
             MarkFaultedRange(range, faultAddress);
             Volatile.Write(ref range.Armed, RangeDisarmed);
             RecordNativeRangeState(range, invocation: invocation);
+            RecordNativeRangeDecision(range, faultAddress, invocation, NativeRangeDecisionPass.ExactByteRange,
+                NativeRangeDecisionReason.WatcherRemovalSucceeded, previousState, true);
             handled = true;
         }
 
@@ -749,11 +760,16 @@ public static unsafe partial class GuestImageWriteTracker
                     RangeArmed);
                 if (previousState is RangeInvalidating or RangeArming)
                 {
+                    RecordNativeRangeDecision(range, faultAddress, invocation, NativeRangeDecisionPass.SharedBoundaryPage,
+                        previousState == RangeInvalidating ? NativeRangeDecisionReason.BusyInvalidating : NativeRangeDecisionReason.BusyArming,
+                        previousState, true);
                     handled = true;
                     continue;
                 }
                 if (previousState != RangeArmed)
                 {
+                    RecordNativeRangeDecision(range, faultAddress, invocation, NativeRangeDecisionPass.SharedBoundaryPage,
+                        NativeRangeDecisionReason.NonArmedSkipped, previousState, false);
                     continue;
                 }
 
@@ -761,6 +777,8 @@ public static unsafe partial class GuestImageWriteTracker
                 {
                     Volatile.Write(ref range.Armed, RangeDisarmed);
                     RecordNativeRangeState(range, invocation: invocation);
+                    RecordNativeRangeDecision(range, faultAddress, invocation, NativeRangeDecisionPass.SharedBoundaryPage,
+                        NativeRangeDecisionReason.WatcherRemovalFailed, previousState, false);
                     return false;
                 }
 
@@ -773,12 +791,16 @@ public static unsafe partial class GuestImageWriteTracker
                 MarkFaultedRange(range, faultAddress);
                 Volatile.Write(ref range.Armed, RangeDisarmed);
                 RecordNativeRangeState(range, invocation: invocation);
+                RecordNativeRangeDecision(range, faultAddress, invocation, NativeRangeDecisionPass.SharedBoundaryPage,
+                    NativeRangeDecisionReason.WatcherRemovalSucceeded, previousState, true);
                 handled = true;
             }
         }
 
         if (!handled)
         {
+            RecordNativeRangeDecision(null, faultAddress, invocation, NativeRangeDecisionPass.Completion,
+                NativeRangeDecisionReason.NoHandledRange, -1, false);
             return false;
         }
 
