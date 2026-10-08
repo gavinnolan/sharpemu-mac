@@ -50,14 +50,45 @@ internal static partial class MetalVideoPresenter
     }
 
     private static void ValidateSelectedStorageMipOwner(SelectedStorageMipAssociation selected, bool requireObserved = false)
+        => ValidateSelectedStorageMipOwnerAtStage(selected, requireObserved, "owner-validation");
+
+    private static void ValidateSelectedStorageMipOwnerAtStage(SelectedStorageMipAssociation selected,
+        bool requireObserved, string stage)
     {
         if (requireObserved && (!selected.Observation.Observed ||
             !IsCpuTextureSnapshotObservationStable(selected.Key.Resource.Address, selected.Observation)))
             throw new InvalidOperationException("Metal selected storage mip live reuse requires unchanged complete content observation; tracker identity alone cannot authorize unobserved CPU writers.");
-        if (selected.Session != Volatile.Read(ref _selectedStorageMipSession) || selected.MappingEpoch != HostMemory.MappingGeneration ||
-            (selected.HasToken && (!GuestImageWriteTracker.TryGetContentToken(selected.Key.Resource.Address, out var current) || current != selected.Token)))
-            throw new InvalidOperationException("Metal selected storage mip backing observation changed; native-only contents cannot be replaced by stale guest bytes.");
+        // Preserve the original session -> global epoch -> token short circuit.
+        // Diagnostics reuse exactly the observation that vetoed admission; no
+        // extra tracker/host query runs on either success or rejection.
+        var currentSession = Volatile.Read(ref _selectedStorageMipSession);
+        if (selected.Session != currentSession)
+            throw SelectedStorageMipObservationFailure(selected, stage, "presenter-session",
+                $"session_before={selected.Session} session_now={currentSession}");
+        var currentMappingEpoch = HostMemory.MappingGeneration;
+        if (selected.MappingEpoch != currentMappingEpoch)
+            throw SelectedStorageMipObservationFailure(selected, stage, "global-mapping-epoch",
+                $"mapping_before={selected.MappingEpoch} mapping_now={currentMappingEpoch}");
+        if (selected.HasToken)
+        {
+            var present = GuestImageWriteTracker.TryGetContentToken(selected.Key.Resource.Address, out var current);
+            if (!present || current != selected.Token)
+                throw SelectedStorageMipObservationFailure(selected, stage,
+                    present ? "content-token-changed" : "content-token-missing",
+                    $"token_present={present} {DescribeSelectedStorageMipToken("before", selected.Token)} {DescribeSelectedStorageMipToken("now", current)}");
+        }
     }
+
+    private static InvalidOperationException SelectedStorageMipObservationFailure(
+        SelectedStorageMipAssociation selected, string stage, string reason, string scalars) =>
+        new($"Metal selected storage mip backing observation changed; native-only contents cannot be replaced by stale guest bytes. " +
+            $"reason={reason} stage={stage} addr=0x{selected.Key.Resource.Address:X} selected_mip={selected.Key.Mip} domain={selected.Key.Domain} {scalars}. " +
+            "These scalar observations are conservative vetoes, not backing ownership or proof of a range mutation.");
+
+    private static string DescribeSelectedStorageMipToken(string suffix, GuestImageWriteTracker.ContentToken token) =>
+        $"protected_identity_{suffix}={token.ProtectedIdentity} protected_generation_{suffix}={token.ProtectedGeneration} " +
+        $"watch_identity_{suffix}={token.WatchIdentity} watch_generation_{suffix}={token.WatchGeneration} " +
+        $"protected_bytes_{suffix}={token.ProtectedByteCount} watch_bytes_{suffix}={token.WatchByteCount}";
 
     private readonly record struct SelectedStorageMipAdmission(SelectedStorageMipAssociation Owner, SelectedStorageMipPending Pending);
 
@@ -71,7 +102,7 @@ internal static partial class MetalVideoPresenter
         foreach (var texture in dispatch.Textures)
         {
             if (!_selectedStorageMipAssociations.TryGetValue(texture, out var association)) continue;
-            ValidateSelectedStorageMipOwner(association);
+            ValidateSelectedStorageMipOwnerAtStage(association, false, "admission");
             if (_selectedStorageMipPending.TryGetValue(association.Key, out var pending) && pending.Queue != queue.Name)
                 throw new NotSupportedException("Metal selected storage mip has an outstanding producer on another logical queue.");
             if (StorageImageWrites(texture)) selected.TryAdd(association.Key, association);
