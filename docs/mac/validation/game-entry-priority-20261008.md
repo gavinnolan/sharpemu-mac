@@ -139,10 +139,36 @@ capture, native mesh transport and Quake snapshot budget with the current main
 command-stream and failure handling. The first build at `d8267dc9` exposed two
 missing arguments to the revised snapshot-budget error helper. Successor
 `420b33e2` supplies the existing 128 MiB limit at both sites; admission bounds
-are unchanged. Qualification is in progress against 532 distinct managed
-cases per host architecture, followed by five actual native cases per
-architecture and signed game replays. These are planned checks, not passed
-results. No combined production code has been promoted to main yet.
+are unchanged. Successor `0e0e76a4` additionally grants the Metal test assembly
+access to its internal layout type. All three builds, 532 distinct managed
+cases and five fresh actual native cases passed on each host architecture.
+The signed native-only bundle retained all 239 file hashes through four runs.
+
+These combined replays supersede the earlier isolated runtime results:
+
+- Superliminal ran for 150 seconds and rendered loading artwork. The earlier
+  mapped-probe refusal did not recur; the first failure is now
+  `RequireOriginalCurrent` during depth-face enqueue. The final capture remains
+  at loading. No menu or control is accepted.
+- Octopath exited 134 after 32 seconds. Original writer revision `-1` is the
+  first publication-preparation refusal; sampled admission and coverage loss
+  were both zero. No canonical publication completed in this run. A successful
+  watch enrollment must record its original revision before copy bytes; a
+  younger post-copy sample cannot replace that original event.
+- Silent Hill exited 134 after 26 seconds, after two canonical publications.
+  The exact original volume watch fails on admission `2`, while released,
+  revoked and coverage-loss flags are zero. Its native owner, version and
+  volume state match. An active writer must not be treated as a successful
+  ordinary currentness check.
+- Void Terrarium ran for 300 seconds with no fatal. Captures at 205 and 245
+  seconds show the main menu with New Game selected. The later capture is dark
+  after selection; movement/control and gameplay remain unverified. The two
+  original rejected shaders and draw metadata are retained for mesh work.
+
+All owned processes exited and the shared run lock was released. No additional
+title is accepted for gameplay. No combined production code has been promoted
+to main yet. Complete receipts are in
+`artifacts/validation/all-games-20261009/game-entry-integrated-0e0e76a4-prepared`.
 
 ## Earlier entry checks (superseded by the observations above)
 
