@@ -32,10 +32,13 @@ internal static partial class MetalVideoPresenter
             original.Mapping.FootprintByteCount != original.Layout.PhysicalBytes ||
             original.Mapping.SourceAddress != original.Layout.Address ||
             original.Mapping.SourceByteCount != original.Layout.PhysicalBytes)
-        { _finiteStorageRetiredUnknown = true; return; }
+        {
+            if (!RecordRetiredDisplayOriginalLocked(retired)) _finiteStorageRetiredUnknown = true;
+            return;
+        }
         for (var index = 0; index < _finiteStorageRetiredOriginCount; index++)
             if (ReferenceEquals(_finiteStorageRetiredOrigins![index], original)) return;
-        if (_finiteStorageRetiredOriginCount == MaximumFiniteRetiredOrigins)
+        if (_finiteStorageRetiredOriginCount + _finiteRetiredDisplayOriginCount >= MaximumFiniteRetiredOrigins)
         { _finiteStorageRetiredUnknown = true; return; }
         try { _finiteStorageRetiredOrigins ??= new StorageCpuSeedOrigin?[MaximumFiniteRetiredOrigins]; }
         catch { _finiteStorageRetiredUnknown = true; return; } // optional bookkeeping must preserve an in-flight primary
@@ -62,6 +65,15 @@ internal static partial class MetalVideoPresenter
             _latestPresentation is { } presentation && PresentationHasUnorderedGuestWrites(presentation)) return false;
         reason = "retired-native-owner-unknown-or-overflow";
         if (_finiteStorageRetiredUnknown) return false;
+        for (var index = 0; index < _finiteRetiredDisplayOriginCount; index++)
+        {
+            var retired = _finiteRetiredDisplayOrigins![index]!;
+            reason = "retired-display-original-provenance-stale";
+            if (!ReferenceEquals(retired.Memory, origin.Memory) || retired.Session != origin.Session ||
+                !retired.Source.IsMappedCopyObservationCurrent(retired.Mapping)) return false;
+            reason = "retired-display-original-physical-overlap";
+            if (PhysicalMappingOverlaps(origin.Mapping, retired.Mapping)) return false;
+        }
         for (var index = 0; index < _finiteStorageRetiredOriginCount; index++)
         {
             var retired = _finiteStorageRetiredOrigins![index]!;
@@ -100,6 +112,14 @@ internal static partial class MetalVideoPresenter
             if (ReferenceEquals(other, image)) continue;
             reason = "other-image-original-provenance-unavailable-or-stale";
             var otherOrigin = other.StorageCpuOrigin;
+            if (otherOrigin is null && _displayOriginalOwners.TryGetValue(other, out var display))
+            {
+                reason = "other-display-original-owner-or-provenance-stale";
+                if (!IsDisplayOriginalOwnerCurrentLocked(other, display, origin.Memory, origin.Session)) return false;
+                reason = "other-display-original-physical-overlap";
+                if (PhysicalMappingOverlaps(origin.Mapping, display.Copy.Mapping)) return false;
+                continue;
+            }
             string? branch = otherOrigin is null ? "origin-missing" :
                 !ReferenceEquals(otherOrigin.Memory, origin.Memory) ? "memory-mismatch" :
                 otherOrigin.Session != origin.Session ? "session-mismatch" :

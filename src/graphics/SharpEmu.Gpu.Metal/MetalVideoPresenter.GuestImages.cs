@@ -1278,6 +1278,10 @@ internal static partial class MetalVideoPresenter
         RejectAddressOnlySelectedStorageAlias(address);
         uint formatTag;
         byte[]? initialData;
+        ICpuMemory? originalMemory = null;
+        var originalSession = 0L;
+        var captureDisplayOriginal = _rgbaStorageRuntimePublicationRequested;
+        (uint Width, uint Height, ulong ByteCount)? originalExtent = null;
         lock (_gate)
         {
             if (_guestImages.TryGetValue(address, out var existing))
@@ -1292,6 +1296,12 @@ internal static partial class MetalVideoPresenter
             }
 
             _pendingGuestImageInitialData.Remove(address, out initialData);
+            if (captureDisplayOriginal)
+            {
+                originalMemory = _guestMemory;
+                originalSession = CurrentStorageCpuSeedSession;
+                if (_guestImageExtents.TryGetValue(address, out var extent)) originalExtent = extent;
+            }
         }
 
         if (width == 0 || height == 0 || width > 16384 || height > 16384)
@@ -1313,49 +1323,87 @@ internal static partial class MetalVideoPresenter
             return null;
         }
 
-        var pitch = pitchInPixel == 0 ? width : Math.Max(pitchInPixel, width);
-        var bytesPerPixel = MetalRenderTargetFormat.GetBytesPerPixel(format);
-        if (initialData is not null &&
-            bytesPerPixel == 4 &&
-            (ulong)initialData.Length >= (ulong)width * height * 4)
+        var installed = false;
+        Exception? primary = null;
+        DisplayOriginalCopy? displayOriginal = null;
+        try
         {
-            // Pending initial data is RGBA8; only 4-byte-texel images can take
-            // it verbatim. Wider formats seed from guest memory below, whose
-            // layout is the image's native one.
-            ReplaceTextureContents(image.Texture, width, height, initialData, width, bytesPerPixel);
-            image.Initialized = true;
-            image.ContentVersion++;
-        }
-        else if (_guestMemory is { } memory)
-        {
-            // PS5 render targets alias guest memory: CPU-prefilled pixels are
-            // visible before the first draw, so the first use seeds from there.
-            var byteCount = checked((int)((ulong)pitch * height * bytesPerPixel));
-            var guestPixels = GuestDataPool.Shared.Rent(byteCount);
-            try
+            var pitch = pitchInPixel == 0 ? width : Math.Max(pitchInPixel, width);
+            var bytesPerPixel = MetalRenderTargetFormat.GetBytesPerPixel(format);
+            if (initialData is not null &&
+                bytesPerPixel == 4 &&
+                (ulong)initialData.Length >= (ulong)width * height * 4)
             {
-                if (memory.TryRead(address, guestPixels.AsSpan(0, byteCount)))
+                // Pending initial data is RGBA8; only 4-byte-texel images can take
+                // it verbatim. Wider formats seed from guest memory below, whose
+                // layout is the image's native one.
+                ReplaceTextureContents(image.Texture, width, height, initialData, width, bytesPerPixel);
+                image.Initialized = true;
+                image.ContentVersion++;
+            }
+            else if ((captureDisplayOriginal ? originalMemory : _guestMemory) is { } memory)
+            {
+                // PS5 render targets alias guest memory: CPU-prefilled pixels are
+                // visible before the first draw, so the first use seeds from there.
+                var byteCount = checked((int)((ulong)pitch * height * bytesPerPixel));
+                var guestPixels = GuestDataPool.Shared.Rent(byteCount);
+                try
                 {
-                    ReplaceTextureContents(image.Texture, width, height, guestPixels, pitch, bytesPerPixel);
-                    image.Initialized = true;
-                    image.ContentVersion++;
+                    if (ReadDisplayOriginalSource(memory, address, width, height, pitch,
+                        bytesPerPixel, format, originalSession, guestPixels, byteCount, out displayOriginal))
+                    {
+                        ReplaceTextureContents(image.Texture, width, height, guestPixels, pitch, bytesPerPixel);
+                        image.Initialized = true;
+                        image.ContentVersion++;
+                    }
+                }
+                finally
+                {
+                    GuestDataPool.Shared.Return(guestPixels);
                 }
             }
-            finally
+
+            if (displayOriginal is not null)
             {
-                GuestDataPool.Shared.Return(guestPixels);
+                ValidateDisplayOriginalCopy(displayOriginal);
+                _displayOriginalOwners.Add(image, new(displayOriginal, image.Texture, image.ContentVersion));
+            }
+            lock (_gate)
+            {
+                if (captureDisplayOriginal && (_closed || _guestWorkFailure is not null ||
+                    !ReferenceEquals(_guestMemory, originalMemory) || originalSession != CurrentStorageCpuSeedSession ||
+                    _guestImages.ContainsKey(address) || displayOriginal is not null &&
+                    !displayOriginal.Source.IsMappedCopyObservationCurrent(displayOriginal.Mapping)))
+                    throw new NotSupportedException("Metal display original native publication changed its exact memory/session/owner.");
+                if (_guestImages.TryGetValue(address, out var retired) && !ReferenceEquals(retired, image))
+                    NoteFiniteStorageOwnerRetirementLocked(retired);
+                _guestImages[address] = image;
+                _guestImageExtents[address] = (width, height, (ulong)pitch * height * bytesPerPixel);
+                installed = true;
+            }
+
+            return image;
+        }
+        catch (Exception error) { primary = error; throw; }
+        finally
+        {
+            if (captureDisplayOriginal && !installed)
+            {
+                lock (_gate)
+                {
+                    if (_guestImages.TryGetValue(address, out var published) && ReferenceEquals(published, image))
+                    {
+                        _guestImages.Remove(address);
+                        if (originalExtent is { } extent) _guestImageExtents[address] = extent;
+                        else _guestImageExtents.Remove(address);
+                    }
+                }
+                _displayOriginalOwners.Remove(image);
+                var owned = image.Texture;
+                image.Texture = 0;
+                ReleaseDepthObjectsPreservingFailure(primary, owned);
             }
         }
-
-        lock (_gate)
-        {
-            if (_guestImages.TryGetValue(address, out var retired) && !ReferenceEquals(retired, image))
-                NoteFiniteStorageOwnerRetirementLocked(retired);
-            _guestImages[address] = image;
-            _guestImageExtents[address] = (width, height, (ulong)pitch * height * bytesPerPixel);
-        }
-
-        return image;
     }
 
     private static void RetireSkippedPresentationLocked(Presentation presentation)
