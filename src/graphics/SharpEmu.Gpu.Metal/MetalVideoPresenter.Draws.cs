@@ -1644,8 +1644,7 @@ internal static partial class MetalVideoPresenter
             return captured;
         }
         RequireNoUncapturedGpuTextureSource(texture);
-        RejectAddressOnlySelectedStorageAlias(texture.Address, Math.Max(texture.SourceByteCount,
-            checked((ulong)texture.Width * texture.Height * Math.Max(texture.Depth, 1u) * 16)));
+        RejectSelectedStorageMaterializerAlias(texture);
         if (_selectedStorageMipAssociations.TryGetValue(texture, out _))
             throw new NotSupportedException("Metal selected storage mip cannot use the generic sampled/draw materializer.");
 

@@ -314,6 +314,43 @@ internal static partial class MetalVideoPresenter
                 throw new NotSupportedException($"Metal address-only image use at 0x{address:X} cannot consume native-only selected storage mip contents.");
     }
 
+    // Same original materializer veto, with failure-only request metadata.
+    // No provider/content/native query, replacement owner lookup or admission.
+    private static void RejectSelectedStorageMaterializerAlias(GuestDrawTexture texture)
+    {
+        var bytes = Math.Max(texture.SourceByteCount,
+            checked((ulong)texture.Width * texture.Height * Math.Max(texture.Depth, 1u) * 16));
+        lock (_gate)
+            foreach (var owner in _selectedStorageMipOwners.Keys)
+                if (SelectedStorageMipOverlaps(owner, texture.Address, bytes))
+                {
+                    var message = $"Metal address-only image use at 0x{texture.Address:X} cannot consume native-only selected storage mip contents.";
+                    if (_selectedCopyDiagnostics)
+                    {
+                        try
+                        {
+                            _selectedStorageMipImages.TryGetValue(owner, out var image);
+                            _selectedStorageMipPending.TryGetValue(owner, out var pending);
+                            var associated = _selectedStorageMipAssociations.TryGetValue(texture, out var original);
+                            message += $" request={texture.Width}x{texture.Height}x{texture.Depth} request_format={texture.Format}/{texture.NumberType} " +
+                                $"request_type={texture.Type} request_storage={texture.IsStorage} request_access={texture.Access} " +
+                                $"request_pitch={texture.Pitch} request_tile={texture.TileMode} request_selected={texture.MipLevel} " +
+                                $"request_levels={texture.MipLevels} request_base_level={texture.BaseMipLevel} request_resource_levels={texture.ResourceMipLevels} " +
+                                $"request_source_bytes={texture.SourceByteCount} request_overlap_bytes={bytes} request_shape={texture.Shape} " +
+                                $"request_raw=[{string.Join(",", texture.Descriptor?.Select(static word => $"{word:X8}") ?? [])}] " +
+                                $"request_associated={associated} request_same_owner={associated && original!.Key == owner} " +
+                                $"original_domain={owner.Domain} original_resource={owner.Resource} original_selected={owner.Mip} " +
+                                $"native_present={image is not null} native_initialized={image?.Initialized} native_written={image?.GpuWritten} " +
+                                $"native_version={image?.ContentVersion} native_width={image?.Width} native_height={image?.Height} " +
+                                $"native_type={image?.TextureType} native_format={image?.Format} " +
+                                $"pending_queue={pending?.Queue} pending_sequence={pending?.Sequence}";
+                        }
+                        catch (Exception) { } // Preserve the original refusal if formatting fails.
+                    }
+                    throw new NotSupportedException(message);
+                }
+    }
+
     internal static void RejectSelectedStorageAlias(ICpuMemory memory, Descriptor resource, bool storage, uint mip)
     {
         if (!_selectedStorageMipDomains.TryGetValue(memory, out var domain)) return;
