@@ -59,7 +59,7 @@ The signed25s Quake probe still reaches the same abort, peaks1150MiB and stops
 normally. Work1 is ComputeGuestDispatch (39.286ms wall time). Work2 is
 OffscreenGuestDraw (166.551ms); the guest abort appears between its recorded
 start and finish. EOP3 is admitted before that draw finishes and waits about
-177.566ms before its ordered action starts. All three belong to the same
+178.092ms before its ordered action starts. All three belong to the same
 dcb.graphics submission1. This identifies a slow preceding draw during the
 timeout; it does not distinguish managed JIT, shader translation, native pipeline
 compilation, resource preparation, GPU execution or waits inside that draw.
