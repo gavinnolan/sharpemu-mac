@@ -207,6 +207,7 @@ internal static partial class MetalVideoPresenter
 
     private static void Run()
     {
+        MetalPresentationProfile.Begin();
         try
         {
             RunWindowLoop();
@@ -218,6 +219,7 @@ internal static partial class MetalVideoPresenter
         finally
         {
             CompletePresenterShutdown();
+            MetalPresentationProfile.End();
         }
     }
 
@@ -416,92 +418,97 @@ internal static partial class MetalVideoPresenter
                 return;
             }
 
-            DrainGuestWork(_device, _commandQueue);
+            using (MetalPresentationProfile.Measure(MetalPresentationProfile.Phase.DrainGuestWork))
+                DrainGuestWork(_device, _commandQueue);
 
-            if (TryTakePresentationWithPayloadBorrow(_presentedSequence, out var presentation, out presentationBorrow))
+            using (MetalPresentationProfile.Measure(MetalPresentationProfile.Phase.MaterializePresentation))
             {
-                _presentedSequence = presentation.Sequence;
-                if (presentation.Pixels is not null)
+                if (TryTakePresentationWithPayloadBorrow(_presentedSequence, out var presentation, out presentationBorrow))
                 {
-                    UploadFrame(
-                        _device,
-                        presentation,
-                        ref _frameTexture,
-                        ref _frameTextureWidth,
-                        ref _frameTextureHeight);
-                    SwitchPresentSource(
-                        _frameTexture,
-                        _frameTextureWidth,
-                        _frameTextureHeight,
-                        ownsTexture: false,
-                        ref _presentTexture,
-                        ref _presentTextureWidth,
-                        ref _presentTextureHeight,
-                        ref _ownedVersionTexture);
-                    _presentGuestAddress = 0;
-                    _guestFrameSequence = presentation.IsGuestFrame && _frameTexture != 0 ? presentation.Sequence : -1;
-                }
-                else if (presentation.TranslatedDraw is not null ||
-                         presentation.DrawKind != GuestDrawKind.None)
-                {
-                    var drawTarget = ExecutePresentationDraw(_device, _commandQueue, presentation);
-                    if (drawTarget != 0)
+                    _presentedSequence = presentation.Sequence;
+                    if (presentation.Pixels is not null)
                     {
-                        // Transient targets are pooled by the presenter; the
-                        // present source borrows them.
+                        UploadFrame(
+                            _device,
+                            presentation,
+                            ref _frameTexture,
+                            ref _frameTextureWidth,
+                            ref _frameTextureHeight);
                         SwitchPresentSource(
-                            drawTarget,
-                            presentation.Width,
-                            presentation.Height,
+                            _frameTexture,
+                            _frameTextureWidth,
+                            _frameTextureHeight,
                             ownsTexture: false,
                             ref _presentTexture,
                             ref _presentTextureWidth,
                             ref _presentTextureHeight,
                             ref _ownedVersionTexture);
                         _presentGuestAddress = 0;
+                        _guestFrameSequence = presentation.IsGuestFrame && _frameTexture != 0 ? presentation.Sequence : -1;
                     }
-                }
-                else if (TryResolveGuestPresentation(
-                             _device,
-                             presentation,
-                             out var guestTexture,
-                             out var guestWidth,
-                             out var guestHeight,
-                             out var ownsGuestTexture))
-                {
-                    // Captured versions are immutable and owned here; mutable
-                    // address-keyed images are re-resolved at encode time so a
-                    // write swapping the texture never leaves a stale handle.
-                    SwitchPresentSource(
-                        ownsGuestTexture ? guestTexture : 0,
-                        guestWidth,
-                        guestHeight,
-                        ownsGuestTexture,
-                        ref _presentTexture,
-                        ref _presentTextureWidth,
-                        ref _presentTextureHeight,
-                        ref _ownedVersionTexture);
-                    _presentGuestAddress = ownsGuestTexture ? 0 : presentation.GuestImageAddress;
-                    _guestFrameSequence = presentation.IsGuestFrame ? presentation.Sequence : -1;
-                }
-            }
-
-            if (_presentGuestAddress != 0)
-            {
-                // Re-resolve every frame: a guest-image write swaps the texture
-                // behind the address.
-                _presentTexture = 0;
-                lock (_gate)
-                {
-                    if (_guestImages.TryGetValue(_presentGuestAddress, out var borrowed) &&
-                        borrowed.Initialized)
+                    else if (presentation.TranslatedDraw is not null ||
+                             presentation.DrawKind != GuestDrawKind.None)
                     {
-                        Require2DGuestImage(borrowed, "per-frame guest presentation");
-                        _presentTexture = borrowed.Texture;
-                        _presentTextureWidth = borrowed.Width;
-                        _presentTextureHeight = borrowed.Height;
+                        var drawTarget = ExecutePresentationDraw(_device, _commandQueue, presentation);
+                        if (drawTarget != 0)
+                        {
+                            // Transient targets are pooled by the presenter; the
+                            // present source borrows them.
+                            SwitchPresentSource(
+                                drawTarget,
+                                presentation.Width,
+                                presentation.Height,
+                                ownsTexture: false,
+                                ref _presentTexture,
+                                ref _presentTextureWidth,
+                                ref _presentTextureHeight,
+                                ref _ownedVersionTexture);
+                            _presentGuestAddress = 0;
+                        }
+                    }
+                    else if (TryResolveGuestPresentation(
+                                 _device,
+                                 presentation,
+                                 out var guestTexture,
+                                 out var guestWidth,
+                                 out var guestHeight,
+                                 out var ownsGuestTexture))
+                    {
+                        // Captured versions are immutable and owned here; mutable
+                        // address-keyed images are re-resolved at encode time so a
+                        // write swapping the texture never leaves a stale handle.
+                        SwitchPresentSource(
+                            ownsGuestTexture ? guestTexture : 0,
+                            guestWidth,
+                            guestHeight,
+                            ownsGuestTexture,
+                            ref _presentTexture,
+                            ref _presentTextureWidth,
+                            ref _presentTextureHeight,
+                            ref _ownedVersionTexture);
+                        _presentGuestAddress = ownsGuestTexture ? 0 : presentation.GuestImageAddress;
+                        _guestFrameSequence = presentation.IsGuestFrame ? presentation.Sequence : -1;
                     }
                 }
+
+                if (_presentGuestAddress != 0)
+                {
+                    // Re-resolve every frame: a guest-image write swaps the texture
+                    // behind the address.
+                    _presentTexture = 0;
+                    lock (_gate)
+                    {
+                        if (_guestImages.TryGetValue(_presentGuestAddress, out var borrowed) &&
+                            borrowed.Initialized)
+                        {
+                            Require2DGuestImage(borrowed, "per-frame guest presentation");
+                            _presentTexture = borrowed.Texture;
+                            _presentTextureWidth = borrowed.Width;
+                            _presentTextureHeight = borrowed.Height;
+                        }
+                    }
+                }
+
             }
 
             // The window title reflects late guest state (the game registers its
@@ -536,7 +543,9 @@ internal static partial class MetalVideoPresenter
                 return;
             }
 
-            var drawable = MetalNative.Send(_metalLayer, MetalNative.Selector("nextDrawable"));
+            nint drawable;
+            using (MetalPresentationProfile.Measure(MetalPresentationProfile.Phase.AcquireDrawable))
+                drawable = MetalNative.Send(_metalLayer, MetalNative.Selector("nextDrawable"));
             if (drawable == 0)
             {
                 // No free drawable this tick; the next timer fire retries.
@@ -550,40 +559,44 @@ internal static partial class MetalVideoPresenter
                     $"[LOADER][INFO] Metal VideoOut presenting {_presentTextureWidth}x{_presentTextureHeight}.");
             }
 
-            var drawableTexture = MetalNative.Send(drawable, MetalNative.Selector("texture"));
-            var commandBuffer = MetalNative.Send(_commandQueue, MetalNative.Selector("commandBuffer"));
-            var pass = CreateClearPass(
-                drawableTexture,
-                new MtlClearColor { Red = 0, Green = 0, Blue = 0, Alpha = 1 });
-            var encoder = MetalNative.Send(
-                commandBuffer, MetalNative.Selector("renderCommandEncoderWithDescriptor:"), pass);
-            if (_presentTexture != 0)
+            using (MetalPresentationProfile.Measure(MetalPresentationProfile.Phase.EncodeAndCommit))
             {
-                EncodePresent(
-                    encoder,
-                    _presentPipeline,
-                    _presentSampler,
-                    _presentTexture,
-                    _presentTextureWidth,
-                    _presentTextureHeight,
-                    _drawableWidth,
-                    _drawableHeight);
-            }
+                var drawableTexture = MetalNative.Send(drawable, MetalNative.Selector("texture"));
+                var commandBuffer = MetalNative.Send(_commandQueue, MetalNative.Selector("commandBuffer"));
+                var pass = CreateClearPass(
+                    drawableTexture,
+                    new MtlClearColor { Red = 0, Green = 0, Blue = 0, Alpha = 1 });
+                var encoder = MetalNative.Send(
+                    commandBuffer, MetalNative.Selector("renderCommandEncoderWithDescriptor:"), pass);
+                if (_presentTexture != 0)
+                {
+                    EncodePresent(
+                        encoder,
+                        _presentPipeline,
+                        _presentSampler,
+                        _presentTexture,
+                        _presentTextureWidth,
+                        _presentTextureHeight,
+                        _drawableWidth,
+                        _drawableHeight);
+                }
 
-            if (PerfOverlay.DrawOnScreen)
-            {
-                EncodeOverlay(encoder);
-            }
+                if (PerfOverlay.DrawOnScreen)
+                {
+                    EncodeOverlay(encoder);
+                }
 
-            MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
-            MetalNative.SendVoid(commandBuffer, MetalNative.Selector("presentDrawable:"), drawable);
-            MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
+                MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
+                MetalNative.SendVoid(commandBuffer, MetalNative.Selector("presentDrawable:"), drawable);
+                MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
+            }
             PerfOverlay.RecordPresent();
             if (_presentTexture != 0 && _guestFrameSequence >= 0 &&
                 _guestFrameSequence != _lastCountedGuestFrameSequence)
             {
                 _lastCountedGuestFrameSequence = _guestFrameSequence;
                 PerfOverlay.RecordGuestPresent();
+                MetalPresentationProfile.RecordGuestCommit();
                 _guestFramesInStatsWindow++;
             }
             _hostPresentsInStatsWindow++;
