@@ -42,6 +42,9 @@ public static class WindowsHost
         return new WindowsHostPlatform(audio ?? new WindowsWaveOutAudio());
     }
 
+    /// <summary>Creates plain host memory without requiring an x64 guest process.</summary>
+    public static IHostMemoryRaw CreateMemory() => new WindowsHostMemory();
+
     /// <summary>
     /// Creates a Windows placeholder/view memory backend. Not gated on the
     /// process architecture: this is plain host virtual memory, usable in

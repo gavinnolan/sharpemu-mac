@@ -9,7 +9,7 @@ internal sealed class WindowsHostPlatform : IHostPlatform
 {
     internal WindowsHostPlatform(IHostAudioOutput audio) => Audio = audio;
 
-    public IHostMemory Memory { get; } = new WindowsHostMemory();
+    public IHostMemory Memory => HostMemoryAuthority.Current;
 
     public IHostThreading Threading { get; } = new WindowsHostThreading();
 

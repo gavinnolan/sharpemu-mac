@@ -9,7 +9,7 @@ internal sealed class LinuxHostPlatform : IHostPlatform
 {
     internal LinuxHostPlatform(IHostAudioOutput audio) => Audio = audio;
 
-    public IHostMemory Memory { get; } = new LinuxHostMemory();
+    public IHostMemory Memory => HostMemoryAuthority.Current;
 
     public IHostThreading Threading { get; } = new LinuxHostThreading();
 

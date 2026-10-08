@@ -38,6 +38,9 @@ public static class MacOSHost
         return new MacOSHostPlatform(audio ?? new MacCoreAudioOutput());
     }
 
+    /// <summary>Creates plain host memory without requiring an x64 guest process.</summary>
+    public static IHostMemoryRaw CreateMemory() => new MacHostMemory();
+
     /// <summary>
     /// Creates a macOS placeholder/view memory backend. Not gated on the
     /// process architecture: this is plain host virtual memory, usable in

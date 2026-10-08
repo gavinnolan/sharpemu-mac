@@ -43,6 +43,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <Project Path="tests/SharpEmu.Application.Tests/SharpEmu.Application.Tests.csproj" />
     <Project Path="tests/SharpEmu.Fonts.Tests/SharpEmu.Fonts.Tests.csproj" />
     <Project Path="tests/SharpEmu.Gpu.Metal.Tests/SharpEmu.Gpu.Metal.Tests.csproj" />
+    <Project Path="tests/SharpEmu.Host.Memory.Tests/SharpEmu.Host.Memory.Tests.csproj" />
     <Project Path="tests/SharpEmu.Libs.Tests/SharpEmu.Libs.Tests.csproj" />
     <Project Path="tests/SharpEmu.ShaderCompiler.Metal.Tests/SharpEmu.ShaderCompiler.Metal.Tests.csproj" />
     <Project Path="tests/SharpEmu.ShaderCompiler.Tests/SharpEmu.ShaderCompiler.Tests.csproj" />

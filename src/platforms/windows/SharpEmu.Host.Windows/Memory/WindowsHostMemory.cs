@@ -3,6 +3,7 @@
 
 using System.Runtime.InteropServices;
 
+using SharpEmu.HLE;
 using SharpEmu.HLE.Host;
 
 namespace SharpEmu.Host.Windows;
@@ -11,7 +12,7 @@ namespace SharpEmu.Host.Windows;
 /// Windows implementation over VirtualAlloc/VirtualFree/VirtualProtect/VirtualQuery.
 /// Sealed so the JIT can devirtualize interface calls on fault-handling hot paths.
 /// </summary>
-internal sealed unsafe partial class WindowsHostMemory : IHostMemory
+internal sealed unsafe partial class WindowsHostMemory : IHostMemoryRaw
 {
     private const uint MEM_COMMIT = 0x1000;
     private const uint MEM_RESERVE = 0x2000;
@@ -26,6 +27,19 @@ internal sealed unsafe partial class WindowsHostMemory : IHostMemory
     private const uint PAGE_EXECUTE_READ = 0x20;
     private const uint PAGE_EXECUTE_READWRITE = 0x40;
     private const uint PAGE_EXECUTE_WRITECOPY = 0x80;
+
+    public ulong AllocateRaw(ulong desiredAddress, ulong size, uint allocationType, uint rawProtection) =>
+        (ulong)VirtualAlloc((void*)desiredAddress, (nuint)size, allocationType, rawProtection);
+
+    public bool FreeRaw(ulong address, ulong size, uint freeType) =>
+        VirtualFree((void*)address, (nuint)size, freeType);
+
+    public nuint QueryRaw(ulong address, out HostMemory.BasicInfo info)
+    {
+        info = default;
+        fixed (HostMemory.BasicInfo* buffer = &info)
+            return VirtualQuery((void*)address, buffer, (nuint)sizeof(HostMemory.BasicInfo));
+    }
 
     public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection)
     {
@@ -59,7 +73,7 @@ internal sealed unsafe partial class WindowsHostMemory : IHostMemory
 
     public bool Query(ulong address, out HostRegionInfo info)
     {
-        if (VirtualQuery((void*)address, out var mbi, (nuint)sizeof(MemoryBasicInformation64)) == 0)
+        if (QueryRaw(address, out var mbi) == 0)
         {
             info = default;
             return false;
@@ -131,7 +145,7 @@ internal sealed unsafe partial class WindowsHostMemory : IHostMemory
     private static partial bool VirtualProtect(void* lpAddress, nuint dwSize, uint flNewProtect, out uint lpflOldProtect);
 
     [LibraryImport("kernel32.dll")]
-    private static partial nuint VirtualQuery(void* lpAddress, out MemoryBasicInformation64 lpBuffer, nuint dwLength);
+    private static partial nuint VirtualQuery(void* lpAddress, HostMemory.BasicInfo* lpBuffer, nuint dwLength);
 
     [LibraryImport("kernel32.dll")]
     private static partial void* GetCurrentProcess();
@@ -140,16 +154,4 @@ internal sealed unsafe partial class WindowsHostMemory : IHostMemory
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool FlushInstructionCache(void* hProcess, void* lpBaseAddress, nuint dwSize);
 
-    private struct MemoryBasicInformation64
-    {
-        public ulong BaseAddress;
-        public ulong AllocationBase;
-        public uint AllocationProtect;
-        public uint Alignment1;
-        public ulong RegionSize;
-        public uint State;
-        public uint Protect;
-        public uint Type;
-        public uint Alignment2;
-    }
 }

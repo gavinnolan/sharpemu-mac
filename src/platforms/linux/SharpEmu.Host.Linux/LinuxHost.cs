@@ -41,6 +41,9 @@ public static class LinuxHost
         return new LinuxHostPlatform(audio ?? new LinuxAlsaAudio());
     }
 
+    /// <summary>Creates plain host memory without requiring an x64 guest process.</summary>
+    public static IHostMemoryRaw CreateMemory() => new LinuxHostMemory();
+
     /// <summary>
     /// Creates a Linux placeholder/view memory backend. Not gated on the
     /// process architecture: this is plain host virtual memory, usable in
