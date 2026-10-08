@@ -75,9 +75,30 @@ internal static partial class MetalVideoPresenter
             texture.Shape.Multisampled || texture.Shape.Atomic || texture.Shape.R128 ||
             shape.TextureType is not (MtlTextureType2D or MtlTextureType2DArray) || shape.Depth != 1 ||
             !((texture.Format == 4 && texture.NumberType == 7) || (texture.Format == 2 && texture.NumberType == 0)))
-            throw new NotSupportedException($"Metal native depth comparison requires a Float R32 or Unorm R16 2D/array source; descriptor={texture.Format}/{texture.NumberType} type={texture.Type}.");
+            throw DepthComparisonDescriptorRejected(texture);
         if (commandBuffer == 0)
             throw new InvalidOperationException("Metal native depth conversion requires the consuming command buffer.");
+    }
+
+    // Only the existing rejection formats metadata. A diagnostic failure cannot
+    // replace the original refusal or trigger native queries/materialization.
+    private static NotSupportedException DepthComparisonDescriptorRejected(GuestDrawTexture texture)
+    {
+        var failure = new NotSupportedException($"Metal native depth comparison requires a Float R32 or Unorm R16 2D/array source; descriptor={texture.Format}/{texture.NumberType} type={texture.Type}.");
+        try
+        {
+            return new NotSupportedException(failure.Message +
+                $" addr=0x{texture.Address:X} size={texture.Width}x{texture.Height} pitch={texture.Pitch}" +
+                $" depth={texture.Depth} arrayed={texture.ArrayedView} layers={texture.ArrayLayers}" +
+                $" tile={texture.TileMode} mip={texture.MipLevel} base_mip={texture.BaseMipLevel}" +
+                $" mips={texture.MipLevels} resource_mips={texture.ResourceMipLevels}" +
+                $" shape={texture.Shape} access={texture.Access} fallback={texture.IsFallback}" +
+                $" cpu_stable={texture.CpuSnapshotStable} source_bytes={texture.SourceByteCount}" +
+                $" linear_bytes={texture.RgbaPixels.LongLength} tiled_bytes={texture.TiledSource?.LongLength ?? 0}" +
+                $" sampler=[{texture.Sampler.Word0:X8},{texture.Sampler.Word1:X8},{texture.Sampler.Word2:X8},{texture.Sampler.Word3:X8}]" +
+                $" raw=[{string.Join(",", texture.Descriptor?.Select(static word => $"{word:X8}") ?? [])}].");
+        }
+        catch (Exception) { return failure; }
     }
 
     private static nint EncodeDepthComparisonTexture(nint device, nint commandBuffer, nint source)
