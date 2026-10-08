@@ -82,7 +82,7 @@ internal static partial class MetalVideoPresenter
     // request proves placement; it does NOT prove fresh CPU bytes after a writer.
     internal static void ValidateColorPhysicalSnapshotBinding(ICpuMemory memory, Binding binding)
     {
-        if (!MetalColorMipPlacement.Enabled) return;
+        if (!MetalColorMipPlacement.Enabled || binding.Descriptor.Address == 0) return;
         lock (_gate)
         {
             if (_colorPhysicalAllocations.Count == 0) return;

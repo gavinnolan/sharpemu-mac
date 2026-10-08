@@ -141,6 +141,18 @@ public sealed partial class MetalRenderHostTests
         Assert.Equal(0, memory.Reads); Assert.Equal(0, actualMemory.Reads);
     }
 
+    [Fact]
+    public void ColorPhysicalNullResourceRemainsAReadFreeFallback()
+    {
+        using var enabled = new ColorPhysicalFlagScope();
+        var memory = new ColorPhysicalNeverReadMemory();
+        using var inventory = new ColorPhysicalInventoryScope(memory);
+        var binding = ColorPhysicalTailBinding() with { Descriptor = default, ResourceDescriptor = null };
+        var texture = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(
+            new CpuContext(memory, Generation.Gen5), [binding], out var fallback));
+        Assert.Equal(1, fallback); Assert.True(texture.IsFallback); Assert.Equal(0, memory.Reads);
+    }
+
     private static AgcExports.TranslatedImageBinding ColorPhysicalTailBinding()
     {
         uint[] raw = [(uint)(ColorBase >> 8), 0xC4700000, 0x000FC01F, 0x91B00FAC, 0, 0x00700000, 0, 0];
