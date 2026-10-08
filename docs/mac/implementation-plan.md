@@ -38,9 +38,9 @@ evidence: [architecture-roadmap.md](architecture-roadmap.md),
 | M1 | Metal startup independent of MoltenVK; enforceable host/adapter boundaries | W05-W09, W11-W12 | Metal startup with no Vulkan dependency; OS host contract checks |
 | M2 | Separate OS execution integrations and backend-free shared engine | W10, W13-W15 | ABI/alias/order fixtures plus real launch/stop evidence |
 | M3 | Qualified native Metal with measured common-engine improvements | W16-W24 | Defined correctness/progression matrix and controlled performance comparisons |
-| M4 | Reliable Mac application and distributable bundle | W25-W28 | Packaged launch, lifecycle, relocation and distribution checks |
+| M4 | Native AppKit application and distributable Mac bundle | W25-W28 | Packaged native launcher, lifecycle, relocation and distribution checks; Mac closure excludes Avalonia/Skia |
 | M5 | Upstream-ready boundary changes and ongoing sync | W29 throughout | Small independent changes, cross-platform evidence, tracked accepted fixes |
-| Later | Native ARM64 execution and optional native shell | W30 | Separate design/qualification; no ARM64 support claim from publish alone |
+| Later | Native ARM64 CPU execution | W30 | Separate design/qualification; no ARM64 guest support claim from host-only tests or publish alone |
 
 Milestones are dependency gates, not calendar promises. M3 optimizations can be
 investigated while M2 extraction proceeds, but behavior changes need isolated
