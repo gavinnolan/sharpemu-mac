@@ -58,3 +58,21 @@ was left untouched; this run makes no performance claim.
 Dreaming Sarah is the only title with prior verified directional control.
 No additional title is accepted by this checkpoint. The original rendering,
 loading and sustained-frame-rate goal remains outstanding after entry works.
+
+## Octopath: actual missing owner identified
+
+Diagnostic source `ddba460f249dc4e1cd6ff60707940271f458b0a2` passed the same
+52 focused managed cases on ARM64 and Rosetta/x64, then was published as a
+signed native-only app. Actual replay
+`artifacts/runs/20261008-201706-octo-canonical-cohort-offender-ddba460f`
+exited 134 after 34 seconds, peak RSS 2231 MiB. It does not qualify gameplay.
+
+The bounded original-cache diagnostic identifies the other image at
+`0x8030BE0000`: initialized, GPU-written, content version 2, 1×1×1,
+native type 7, native format 73. Its original creation was storage dispatch
+24, queue `dcb.graphics`, submission 2, mode 27, guest format 10/4, type 10;
+raw descriptor `[8030BE00,03C00000,00000000,A1B00FAC,00000000,00700000,00000000,00000000]`.
+The failure branch is `origin-missing`, not a demonstrated mutation of the
+target's original protected token. The next fix must capture original mapping
+and ownership at this singleton volume's creation; it must not manufacture
+provenance at lookup or ignore this GPU writer.
