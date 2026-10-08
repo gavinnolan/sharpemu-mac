@@ -101,6 +101,13 @@ internal static class MetalTextureSnapshots
                         actual != d)
                         throw new NotSupportedException("Metal mode5 volume snapshot requires the exact qualified raw R16Uint 16x16x16 descriptor.");
                 }
+                if (binding.IsStorage && binding.Descriptor.Type == Gen5TextureType2DArray &&
+                    !MetalSingletonArrayStorageAdmission.IsQualified(binding.Descriptor, binding.ResourceDescriptor,
+                        binding.IsArrayed, binding.MipLevel, binding.Shape, binding.Access))
+                    throw new NotSupportedException(
+                        $"Metal array storage snapshots require a matching complete mode27 RGBA8Unorm single-mip 1x1 layer-zero descriptor and compiled 2D-array shape: " +
+                        $"descriptor={binding.Descriptor} shape={binding.Shape} access={binding.Access} selected_mip={binding.MipLevel} " +
+                        $"raw=[{string.Join(",", binding.ResourceDescriptor?.Select(static word => $"{word:X8}") ?? [])}].");
                 var profileStart = TexturePreparationProfile.Begin();
                 var reuseKey = new GuestTextureSnapshotReuseKey(
                     binding.Descriptor,
@@ -625,6 +632,8 @@ internal static class MetalTextureSnapshots
                         throw new NotSupportedException(
                             $"Metal volume snapshot cannot reinterpret failed detiling as linear data: " +
                             $"addr=0x{descriptor.Address:X} depth={descriptor.Depth} tile={descriptor.TileMode}.");
+                    if (linearStorage is null && descriptor.Type == Gen5TextureType2DArray)
+                        throw new NotSupportedException("Metal singleton array snapshot requires successful physical mode27 detiling; raw bytes are not a linear seed.");
                     linearStorage ??= storageSource.AsSpan(0, checked((int)sourceByteCount)).ToArray();
                     linearNonzero = linearStorage.AsSpan().IndexOfAnyExcept((byte)0) >= 0;
                     // A successful zero-filled read is still a complete snapshot.

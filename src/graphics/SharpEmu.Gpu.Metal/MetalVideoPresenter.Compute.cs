@@ -255,6 +255,7 @@ internal static partial class MetalVideoPresenter
         MetalNative.Send(textureDescriptor, MetalNative.Selector("setStorageMode:"), (nint)0);
         MetalNative.Send(textureDescriptor, MetalNative.Selector("setTextureType:"), (nint)shape.TextureType);
         MetalNative.Send(textureDescriptor, MetalNative.Selector("setDepth:"), (nint)shape.Depth);
+        MetalNative.Send(textureDescriptor, MetalNative.Selector("setArrayLength:"), (nint)shape.ArrayLength);
         MetalNative.Send(
             textureDescriptor,
             MetalNative.Selector("setUsage:"),
@@ -268,6 +269,7 @@ internal static partial class MetalVideoPresenter
             Height = descriptor.Height,
             TextureType = shape.TextureType,
             Depth = shape.Depth,
+            ArrayLength = shape.ArrayLength,
             Format = format,
         };
         if (image.Texture == 0)
@@ -303,7 +305,7 @@ internal static partial class MetalVideoPresenter
             _guestImages[descriptor.Address] = image;
             _guestImageExtents[descriptor.Address] =
                 (descriptor.Width, descriptor.Height,
-                    checked((ulong)descriptor.Width * descriptor.Height * shape.Depth * bytesPerPixel));
+                    checked((ulong)descriptor.Width * descriptor.Height * shape.Depth * shape.ArrayLength * bytesPerPixel));
         }
 
         return image;
@@ -313,7 +315,7 @@ internal static partial class MetalVideoPresenter
     {
         var shape = GuestTextureShape(descriptor);
         if (image.Width != descriptor.Width || image.Height != descriptor.Height || image.Format != format.Format ||
-            image.TextureType != shape.TextureType || image.Depth != shape.Depth)
+            image.TextureType != shape.TextureType || image.Depth != shape.Depth || image.ArrayLength != shape.ArrayLength)
             throw new NotSupportedException($"Metal storage image view does not match live image at 0x{descriptor.Address:X}.");
         if (!image.Initialized)
             throw new InvalidOperationException($"Metal storage image 0x{descriptor.Address:X} has no initialized contents.");
@@ -329,6 +331,7 @@ internal static partial class MetalVideoPresenter
         // The descriptor and compiled shader must agree on native dimension,
         // including depth-one texture3d. No array/cube/mip reinterpretation.
         var volume = descriptor.Type == Gen5TextureType3D;
+        var singletonArray = MetalSingletonArrayStorageAdmission.IsQualified(descriptor);
         if (volume && (descriptor.TiledSource is not null || descriptor.Detile is not null))
             throw new NotSupportedException("Metal storage volumes require owned linear seed bytes; deferred XY-only detiling is not a volume source proof.");
         if (volume && (descriptor.Descriptor is not { Length: >= 8 } raw ||
@@ -343,17 +346,17 @@ internal static partial class MetalVideoPresenter
             throw new NotSupportedException(
                 $"Metal volume storage requires a matching complete single-mip uncompressed descriptor with zero metadata/flags/BC swizzle: " +
                 $"addr=0x{descriptor.Address:X} raw=[{string.Join(",", descriptor.Descriptor?.Select(static word => $"{word:X8}") ?? [])}].");
-        if ((descriptor.Type != 9 && !volume) || descriptor.Shape.Volume != volume ||
-            descriptor.ArrayedView || descriptor.ArrayLayers != 1 ||
+        if ((descriptor.Type != 9 && !volume && !singletonArray) || descriptor.Shape.Volume != volume ||
+            descriptor.ArrayedView != singletonArray || descriptor.ArrayLayers != 1 ||
             (!volume && descriptor.Depth != 1) || descriptor.Depth == 0 ||
             (volume && (descriptor.Width > 2048 || descriptor.Height > 2048 || descriptor.Depth > 2048)) ||
             descriptor.MipLevels != 1 || descriptor.MipUploads is { Length: > 0 } ||
             descriptor.BaseMipLevel != 0 || descriptor.MipLevel != 0 ||
             !descriptor.Shape.Storage || descriptor.Shape.NumericClass == TextureNumericClass.Unsupported ||
-            descriptor.Shape.DynamicMip || descriptor.Shape.Arrayed || descriptor.Shape.Cube ||
+            descriptor.Shape.DynamicMip || descriptor.Shape.Arrayed != singletonArray || descriptor.Shape.Cube ||
             descriptor.Shape.OneDimensional || descriptor.Shape.Multisampled || descriptor.Shape.DepthCompare || descriptor.Shape.R128 || descriptor.Shape.Atomic)
             throw new NotSupportedException(
-                "Metal storage image materialization supports only a single selected base mip, non-array 2D or 3D view (3D extent <=2048): " +
+                "Metal storage image materialization supports only a single selected base mip, non-array 2D/3D or qualified singleton 2D-array view (3D extent <=2048): " +
                 $"addr=0x{descriptor.Address:X} type={descriptor.Type} size={descriptor.Width}x{descriptor.Height} " +
                 $"arrayed={descriptor.ArrayedView} layers={descriptor.ArrayLayers} depth={descriptor.Depth} " +
                 $"view_mips={descriptor.MipLevels} base_mip={descriptor.BaseMipLevel} selected_mip={descriptor.MipLevel} " +
@@ -391,17 +394,17 @@ internal static partial class MetalVideoPresenter
     internal static (uint Pitch, ulong RequiredBytes) StorageTextureSeedLayout(GuestDrawTexture descriptor, MetalTextureFormat format)
     {
         var pitch = Math.Max(descriptor.Width, descriptor.Pitch);
-        // 3D upload walks full padded image strides, including depth one.
+        // Array/3D slice uploads walk full padded image strides, even at one slice.
         // A short final row is sufficient only for the 2D region API.
-        var required = descriptor.Type == Gen5TextureType3D
-            ? checked((ulong)pitch * descriptor.Height * descriptor.Depth * format.BytesPerPixel)
+        var required = descriptor.Type == Gen5TextureType3D || descriptor.ArrayedView
+            ? checked((ulong)pitch * descriptor.Height * descriptor.Depth * descriptor.ArrayLayers * format.BytesPerPixel)
             : descriptor.Height == 0 ? 0 : checked(
                 ((ulong)(descriptor.Height - 1) * pitch + descriptor.Width) * format.BytesPerPixel);
         if (required > int.MaxValue)
             throw new NotSupportedException("Metal storage image seed exceeds the bounded managed snapshot size.");
         if (descriptor.RgbaPixels.Length != 0 &&
             (!descriptor.CpuSnapshotStable || (ulong)descriptor.RgbaPixels.LongLength < required))
-            throw new InvalidOperationException("Metal storage image seed must contain every complete stable native row and padded volume slice.");
+            throw new InvalidOperationException("Metal storage image seed must contain every complete stable native row and padded array/volume slice.");
         return (pitch, required);
     }
 

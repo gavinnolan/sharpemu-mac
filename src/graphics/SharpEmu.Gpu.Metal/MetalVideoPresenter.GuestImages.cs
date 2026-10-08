@@ -58,6 +58,7 @@ internal static partial class MetalVideoPresenter
         public uint Height;
         public uint TextureType = MtlTextureType2D;
         public uint Depth = 1;
+        public uint ArrayLength = 1;
         public MtlPixelFormat Format;
         public bool Initialized;
 

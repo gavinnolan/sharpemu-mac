@@ -217,6 +217,24 @@ public sealed class MetalTextureSourceAdmissionTests
         Assert.Equal(0, memory.Reads);
     }
     [Fact]
+    public void SingletonArrayRawGuardFailureReleasesEarlierCapturedSourceBeforeAnyGuestRead()
+    {
+        using var state = new State();
+        SubmitColor(ColorTarget());
+        var memory = new NeverReadMemory();
+        var source = state.LatestSource(Address)!;
+        Assert.True(AgcBackendServices.TryDecodeTextureDescriptor(MetalSingletonArrayStorageTests.Raw(), out var array));
+        var invalid = new AgcExports.TranslatedImageBinding(array, true, 0, [], IsArrayed: true,
+            Shape: new ShaderImageShape(false, true, true, false, TextureNumericClass.Float), Access: GuestImageAccess.Write);
+        var failure = Assert.Throws<NotSupportedException>(() => MetalTextureSnapshots.CreateTextureSnapshots(
+            new CpuContext(memory, Generation.Gen5), [SourceBinding(), invalid], out _));
+        Assert.Contains("layer-zero descriptor", failure.Message);
+        Assert.Equal(0, source.GetType().GetField("References")!.GetValue(source));
+        Assert.Equal(0UL, state.ReservedBytes);
+        Assert.Equal(0, memory.Reads);
+    }
+
+    [Fact]
     public void ActualMaterializerRejectsGpuAddressWithoutCapturedAssociationBeforeNativeAccess()
     {
         using var state = new State();

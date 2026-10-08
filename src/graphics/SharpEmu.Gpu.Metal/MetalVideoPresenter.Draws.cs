@@ -2035,7 +2035,7 @@ internal static partial class MetalVideoPresenter
         var nativeShape = GuestTextureShape(texture);
         void Consider(GuestImage candidate, bool isActive)
         {
-            if (candidate.TextureType != nativeShape.TextureType || candidate.Depth != nativeShape.Depth) return;
+            if (candidate.TextureType != nativeShape.TextureType || candidate.Depth != nativeShape.Depth || candidate.ArrayLength != nativeShape.ArrayLength) return;
             // Exact extent always qualifies; a larger image qualifies only for
             // tiled descriptors, mirroring IsCompatibleGuestImageAlias.
             var sizeMatch = candidate.Width == texture.Width &&
@@ -2162,7 +2162,8 @@ internal static partial class MetalVideoPresenter
         sample = 0;
         // Identity channel select only; swizzled depth reads keep the
         // unresolved-texture warning until a title needs them.
-        if (texture.Type == Gen5TextureType3D || texture.DstSelect != 0xFAC || blitCommandBuffer == 0)
+        if (texture.Type is Gen5TextureType3D or Gen5TextureType2DArray or Gen5TextureType1DArray or Gen5TextureTypeCube ||
+            texture.ArrayedView || texture.DstSelect != 0xFAC || blitCommandBuffer == 0)
         {
             return false;
         }
