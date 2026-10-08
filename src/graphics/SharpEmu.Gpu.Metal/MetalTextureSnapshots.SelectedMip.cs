@@ -58,13 +58,16 @@ internal static partial class MetalTextureSnapshots
         var seedSession = MetalVideoPresenter.CurrentSelectedStorageMipSeedSession;
         for (var attempt = 0; attempt < 3; attempt++)
         {
-            var epoch = HostMemory.MappingGeneration;
             var read = GuestImageWriteTracker.BeginReadSnapshot(d.Address, end, source: "agc.selected-storage-mip");
+            var epoch = HostMemory.MappingGeneration; // ORIGINAL after observation setup, before bytes.
             var observation = MetalVideoPresenter.ObserveCpuTextureSnapshot(d.Address, end, epoch);
             var hasToken = GuestImageWriteTracker.TryGetContentToken(d.Address, out var token);
             var source = new byte[checked((int)selected.ByteCount)];
             if (!MetalVideoPresenter.TryReadInitialSelectedStorageMipSource(context.Memory, d.Address, end,
                 d.Address + selected.ByteOffset, source, out var mappedSource, out var mapping)) continue;
+            var registered = false;
+            try
+            {
             var pixels = new byte[checked((int)(width * height * 4))];
             if (!GnmTiling.TryDetile(source, pixels, d.TileMode, (int)width, (int)height, 4))
                 throw new NotSupportedException("Metal selected storage mip cannot reinterpret failed detiling as linear bytes.");
@@ -76,7 +79,10 @@ internal static partial class MetalTextureSnapshots
             MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(texture, observation);
             MetalVideoPresenter.RegisterSelectedStorageMip(context.Memory, d, texture, epoch, token, hasToken, observation);
             MetalVideoPresenter.RegisterInitialSelectedStorageMipSeed(texture, context.Memory, mappedSource, mapping, read, seedSession);
+            registered = true;
             return true;
+            }
+            finally { if (!registered) MetalVideoPresenter.ReleaseOriginalSelectedWriteWatch(mappedSource, mapping); }
         }
         throw new InvalidOperationException("Metal selected storage mip changed during all three owned-copy attempts.");
     }
@@ -93,13 +99,16 @@ internal static partial class MetalTextureSnapshots
         var seedSession = MetalVideoPresenter.CurrentSelectedStorageMipSeedSession;
         for (var attempt = 0; attempt < 3; attempt++)
         {
-            var epoch = HostMemory.MappingGeneration;
             var read = GuestImageWriteTracker.BeginReadSnapshot(d.Address, selected.End, source: "agc.r16-selected-storage-mip");
+            var epoch = HostMemory.MappingGeneration; // ORIGINAL after observation setup, before bytes.
             var observation = MetalVideoPresenter.ObserveCpuTextureSnapshot(d.Address, selected.End, epoch);
             var hasToken = GuestImageWriteTracker.TryGetContentToken(d.Address, out var token);
             var source = new byte[checked((int)selected.Bytes)];
             if (!MetalVideoPresenter.TryReadInitialSelectedStorageMipSource(context.Memory, d.Address, selected.End,
                 d.Address + selected.Offset, source, out var mappedSource, out var mapping)) continue;
+            var registered = false;
+            try
+            {
             var pixels = new byte[source.Length];
             if (!GnmTiling.TryDetile(source, pixels, 27, (int)selected.Width, (int)selected.Width, 2))
                 throw new NotSupportedException("Metal R16Float selected storage cannot reinterpret failed detiling as linear bytes.");
@@ -111,7 +120,10 @@ internal static partial class MetalTextureSnapshots
             MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(texture, observation);
             MetalVideoPresenter.RegisterSelectedStorageMip(context.Memory, d, texture, epoch, token, hasToken, observation);
             MetalVideoPresenter.RegisterInitialSelectedStorageMipSeed(texture, context.Memory, mappedSource, mapping, read, seedSession);
+            registered = true;
             return true;
+            }
+            finally { if (!registered) MetalVideoPresenter.ReleaseOriginalSelectedWriteWatch(mappedSource, mapping); }
         }
         throw new InvalidOperationException("Metal R16Float selected storage changed during all three owned-copy attempts.");
     }

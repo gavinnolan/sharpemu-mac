@@ -557,6 +557,28 @@ public static unsafe partial class GuestImageWriteTracker
         }
     }
 
+    /// <summary>Native-protected complete observation, excluding managed-only
+    /// coverage. Still a conservative veto, not a kernel receipt or write-completion lease.</summary>
+    public static bool TryGetProtectedObservedContentToken(ulong address, ulong byteCount, out ContentToken token)
+    {
+        token = default;
+        if (!_enabled || address == 0 || byteCount == 0 || address > ulong.MaxValue - byteCount) return false;
+        lock (_gate)
+        {
+            if (!_enabled || !_rangesByAddress.TryGetValue(address, out var range) || !range.Protect ||
+                range.ByteCount < byteCount || Volatile.Read(ref range.Armed) != RangeArmed) return false;
+            _watchRangesByAddress.TryGetValue(address, out var watch);
+            // Both owner identities/extents come from THIS same registry lock;
+            // never combine a formerly sampled watch with a later protected owner.
+            var found = new ContentToken(range.DiagnosticIdentity, Volatile.Read(ref range.WriteGeneration),
+                watch?.DiagnosticIdentity ?? 0, watch is null ? -1 : Volatile.Read(ref watch.WriteGeneration),
+                range.ByteCount, watch?.ByteCount ?? 0);
+            if (Volatile.Read(ref range.Armed) != RangeArmed) return false;
+            token = found;
+            return true;
+        }
+    }
+
     /// <summary>
     /// Returns the monotonic first-write generation for a tracked allocation.
     /// Unlike the consuming dirty flag, this remains changed after another

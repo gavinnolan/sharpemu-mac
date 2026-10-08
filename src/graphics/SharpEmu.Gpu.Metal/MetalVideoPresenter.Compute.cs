@@ -257,7 +257,12 @@ internal static partial class MetalVideoPresenter
                     if (_selectedStorageMipAssociations.TryGetValue(descriptor, out var selected))
                     {
                         if ((selectedChanged ??= new()).Add(selected.Key) &&
-                            _selectedStorageMipImages.TryGetValue(selected.Key, out var selectedImage)) selectedImage.MarkContentChangedWithDiagnostic("storage-dispatch");
+                            _selectedStorageMipImages.TryGetValue(selected.Key, out var selectedImage))
+                        {
+                            _ = HasCurrentSelectedNativeOriginalProofLocked(selected);
+                            selectedImage.MarkContentChangedWithDiagnostic("storage-dispatch");
+                            AdvanceSelectedNativeOriginalVersionLocked(selected, selectedImage);
+                        }
                         if (_selectedStorageMipPending.TryGetValue(selected.Key, out var pending) && pending.Sequence == _executingGuestWorkSequence)
                             _selectedStorageMipPending.Remove(selected.Key);
                     }

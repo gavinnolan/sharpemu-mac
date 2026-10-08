@@ -8,14 +8,16 @@ namespace SharpEmu.Gpu.Metal;
 
 internal static partial class MetalVideoPresenter
 {
-    // This proof belongs to detached original CPU bytes. It is never copied
-    // into the native owner's epoch/token or used by requireObserved/live reuse.
+    // Initial CPU bytes have a one-use execution receipt. Only successful native
+    // publication may separately transfer ORIGINAL mapping/content/write-watch
+    // provenance into an exact native owner; no epoch/token is refreshed.
     private sealed class SelectedStorageMipSeed(ICpuMappedCopySource source,
         CpuMappedCopyObservation mapping, GuestImageWriteTracker.ReadSnapshot read)
     {
         internal readonly ICpuMappedCopySource Source = source;
         internal readonly CpuMappedCopyObservation Mapping = mapping;
         internal readonly GuestImageWriteTracker.ReadSnapshot Read = read;
+        internal bool NativeOwnerTransferred;
         internal int Phase; // 0 original, 1 admitted, 2 exact execution, 3 consumed
         internal object? Work;
         internal long Sequence;
@@ -34,14 +36,21 @@ internal static partial class MetalVideoPresenter
         mapping = null;
         if (memory is ICpuMappedCopySource optional)
         {
-            var result = optional.TryReadMappedCopy(address, footprintBytes, sourceAddress, destination, out var original);
+            CpuMappedCopyObservation? original;
+            var result = _selectedNativeOriginalReuseEnabled && optional is ICpuMappedReadWatchSource watched
+                ? watched.TryReadMappedCopyWithWriteWatch(address, footprintBytes, sourceAddress, destination, out original)
+                : optional.TryReadMappedCopy(address, footprintBytes, sourceAddress, destination, out original);
             if (result == CpuMappedCopyResult.Rejected) return false; // discard; never ordinary-read fallback
             if (result == CpuMappedCopyResult.Copied)
             {
                 if (original is null || original.FootprintAddress != address || original.FootprintByteCount != footprintBytes ||
                     original.SourceAddress != sourceAddress || original.SourceByteCount != (ulong)destination.Length)
+                {
+                    ReleaseOriginalSelectedWriteWatch(optional, original);
                     throw new InvalidOperationException("Metal initial selected seed copy returned inconsistent original mapping metadata.");
-                if (!optional.IsMappedCopyObservationCurrent(original)) return false;
+                }
+                if (!optional.IsMappedCopyObservationCurrent(original))
+                { ReleaseOriginalSelectedWriteWatch(optional, original); return false; }
                 mappedSource = optional;
                 mapping = original;
                 return true;
@@ -56,11 +65,15 @@ internal static partial class MetalVideoPresenter
         return true;
     }
 
+    internal static void ReleaseOriginalSelectedWriteWatch(ICpuMappedCopySource? source, CpuMappedCopyObservation? mapping)
+    { if (source is ICpuMappedReadWatchSource watched && mapping is not null) watched.ReleaseMappedCopyWriteWatch(mapping); }
+
     internal static bool IsInitialSelectedStorageMipSeedStable(ulong address,
         in CpuTextureSnapshotObservation observation, ICpuMappedCopySource? source, CpuMappedCopyObservation? mapping)
     {
         if (source is null || mapping is null) return IsCpuTextureSnapshotAdmissionStable(address, observation);
-        if (!source.IsMappedCopyObservationCurrent(mapping)) return false;
+        if (!source.IsMappedCopyObservationCurrent(mapping) ||
+            _selectedNativeOriginalReuseEnabled && source is ICpuMappedReadWatchSource watched && !watched.IsMappedCopyWriteWatchCurrent(mapping)) return false;
         if (observation.MappingEpoch != HostMemory.MappingGeneration)
             return !TextureSourceGraphEnabled && observation.Observed &&
                 IsCpuTextureSnapshotContentObservationStable(address, observation);
@@ -140,6 +153,7 @@ internal static partial class MetalVideoPresenter
                     if (seed.Phase == 2 && ReferenceEquals(seed.Work, work) && ReferenceEquals(seed.Thread, System.Threading.Thread.CurrentThread))
                     {
                         seed.Phase = 3;
+                        if (!seed.NativeOwnerTransferred) ReleaseOriginalSelectedWriteWatch(seed.Source, seed.Mapping);
                         seed.Thread = null;
                         seed.Work = null;
                     }
@@ -193,7 +207,8 @@ internal static partial class MetalVideoPresenter
                 foreach (var texture in dispatch.Textures)
                     if (_selectedStorageMipAssociations.TryGetValue(texture, out var owner) &&
                         _selectedStorageMipSeeds.TryGetValue(owner, out var seed) && ReferenceEquals(seed.Work, dispatch))
-                    { seed.Phase = 3; seed.Thread = null; seed.Work = null; }
+                    { seed.Phase = 3; if (!seed.NativeOwnerTransferred) ReleaseOriginalSelectedWriteWatch(seed.Source, seed.Mapping);
+                      seed.Thread = null; seed.Work = null; }
                 throw;
             }
         }

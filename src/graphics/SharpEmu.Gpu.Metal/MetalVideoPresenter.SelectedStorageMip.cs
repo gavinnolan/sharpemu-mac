@@ -60,19 +60,22 @@ internal static partial class MetalVideoPresenter
     private static void ValidateSelectedStorageMipOwnerAtStage(SelectedStorageMipAssociation selected,
         bool requireObserved, string stage)
     {
-        if (requireObserved && (!selected.Observation.Observed ||
+        var originalNative = false;
+        if (_selectedNativeOriginalReuseEnabled && !TextureSourceGraphEnabled)
+            lock (_gate) originalNative = HasCurrentSelectedNativeOriginalProofLocked(selected);
+        if (requireObserved && !originalNative && (!selected.Observation.Observed ||
             !IsCpuTextureSnapshotObservationStable(selected.Key.Resource.Address, selected.Observation)))
             throw new InvalidOperationException("Metal selected storage mip live reuse requires unchanged complete content observation; tracker identity alone cannot authorize unobserved CPU writers.");
-        // Preserve the original session -> global epoch -> token short circuit.
-        // Diagnostics reuse exactly the observation that vetoed admission; no
-        // extra tracker/host query runs on either success or rejection.
+        // Legacy owners retain session -> aggregate epoch -> token policy.
+        // Qualified native owners carry ORIGINAL exact mapping/content watches;
+        // unrelated aggregate drift never replaces or retimestamps those proofs.
         var currentSession = Volatile.Read(ref _selectedStorageMipSession);
         if (selected.Session != currentSession)
             throw SelectedStorageMipObservationFailure(selected, stage, "presenter-session",
                 $"session_before={selected.Session} session_now={currentSession}");
         ValidateOriginalSelectedStorageMipSeedStage(selected, requireObserved, stage);
         var currentMappingEpoch = HostMemory.MappingGeneration;
-        if (selected.MappingEpoch != currentMappingEpoch &&
+        if (selected.MappingEpoch != currentMappingEpoch && !originalNative &&
             (requireObserved || !CanUseOriginalSelectedStorageMipSeed(selected, stage)))
             throw SelectedStorageMipObservationFailure(selected, stage, "global-mapping-epoch",
                 $"mapping_before={selected.MappingEpoch} mapping_now={currentMappingEpoch}");
@@ -160,6 +163,10 @@ internal static partial class MetalVideoPresenter
         lock (_gate)
         {
             ValidateSelectedStorageMipOwner(selected);
+            if (_selectedNativeOriginalProofs.TryGetValue(selected.Key, out var original) &&
+                original.ProducerSequence > 0 && original.ProducerSequence < _executingGuestWorkSequence &&
+                !IsGuestWorkCompletedLocked(original.ProducerSequence))
+                throw new NotSupportedException("Metal original selected native owner requires its exact earlier producer acknowledgment.");
             if (_selectedStorageMipNativeQueues.TryGetValue(selected.Key, out var nativeQueue) && nativeQueue != queue)
                 throw new NotSupportedException("Metal selected storage mip cannot cross native command queues without a qualified completion dependency.");
             _selectedStorageMipNativeQueues[selected.Key] = queue;
@@ -201,6 +208,7 @@ internal static partial class MetalVideoPresenter
     {
         lock (_gate)
         {
+            ReleaseSelectedNativeOriginalProofsLocked(); // Invalidate before native release/reentrant close.
             // Snapshot the bounded new class before a release callback can
             // reenter close and clear the dictionary. Consume only exact owners.
             var r16 = _selectedStorageMipImages.Where(entry =>
