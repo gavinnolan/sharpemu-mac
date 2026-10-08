@@ -520,3 +520,30 @@ pass under Rosetta without skips, including the seven new actual Drain/final
 precommit controls. Earlier ARM/x64 native candidate proofs remain exact727
 and219 revisions. Evidence is under `w13-20261007/lifecycle-integrated-*` and
 `application-integrated-*`. The source graph remains disabled.
+
+## Mapping registry scaffold and refreshed integrated bundle
+
+Owner ef49e43 and registry c166e99 merge as b6fe8f7. The immutable mapping
+domain uses DomainEpoch independently of tracker arm/page epochs. Safe-side
+transactions preallocate replacement records, close affected domains, drain
+outside the registry gate, bind exact reported kernel scopes and quarantine
+failed or partial outcomes. These contracts have no production provider or
+fault callback callers and grant no permission to retry a protected store.
+Canonical backing identity, every native mutation path and actual per-page
+permission receipts remain prerequisites for activation. Poppy's Invalidating
+recovery race is still unresolved.
+
+The integrated owner/registry/architecture selection passes 101/101 on both
+ARM64 and Rosetta without declared skips: 30 ordinary-thread bookkeeping
+controls and 71 architecture rules. No kernel mapping operation, signal
+callback, device or game ran in that selection. The Release build has 110
+warnings and zero errors. Exact logs/TRX are `mapping-registry-integrated-*`.
+
+The default signed Mac app now contains clean b6fe8f7, built at
+2026-10-08T00:12:00Z, upstream b02c061, osx-x64 with native Metal host stack.
+The publish closure excludes Vulkan, MoltenVK and SDL. The launcher still
+includes Avalonia/Skia pending separate AppKit window qualification. This is
+an ad hoc signed local bundle; notarization did not run. No game or device
+qualification is claimed at b6fe8f7. Its archive and hashed evidence manifest
+are under `integrated-b6fe8f7/`; the manifest preserves the earlier cf2b3d6
+source provenance of lifecycle/Application/cross-platform build results.

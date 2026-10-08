@@ -110,3 +110,10 @@ Latest combined checks pass247/247 under Rosetta and230/230 on ARM64 (x64-only
 cases excluded), plus21/21 required-device ownership cases under Rosetta.
 The GPU source graph stays disabled pending producer and backing-lifetime
 qualification.
+
+Unused mapping owner/registry contracts are integrated at `b6fe8f7`, with
+101/101 owner, registry and architecture checks on each CLR. They do not yet
+participate in native mapping mutations or fault recovery. The default signed
+Mac bundle now matches clean b6fe8f7; its archived evidence preserves the
+separate source revisions of earlier runtime checks. Poppy's fault-recovery
+race, native launcher activation and GPU producer/backing lifetime remain open.
