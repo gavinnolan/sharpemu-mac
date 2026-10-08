@@ -11,9 +11,10 @@ namespace SharpEmu.Launcher.MacOS;
 
 public sealed partial class MacLauncher
 {
-    private nint modalWindow, editorTable;
+    private nint editorWindow, editorTable;
+    private nint[] editorOwned = [];
+    private SettingsEditSession? editorSession;
     private List<EditorRow> editorRows = [];
-    private bool modalAccepted;
     private sealed record EditorRow(PropertyInfo Property, string Label) { public string Value = string.Empty; }
     private sealed class EnvironmentEditor { public List<string> EnvironmentVariables { get; set; } = []; }
     private void BuildMenu()

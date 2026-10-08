@@ -46,7 +46,7 @@ public sealed partial class MacLauncher
             try
             {
                 if (active is not { } owner) return 1;
-                if (window == owner.modalWindow) { owner.modalAccepted = false; Send(owner.app, Selector("stopModal")); return 1; }
+                if (window == owner.editorWindow) { owner.CloseEditor(); return 0; }
                 if (window == owner.window && Send(owner.app, Selector("modalWindow")) != 0) { owner.RequestQuit(); return 0; }
                 if (window != owner.window || !owner.child.IsRunning) return 1;
                 if (owner.closeAfterChildExit) return 0;

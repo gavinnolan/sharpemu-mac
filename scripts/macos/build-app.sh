@@ -165,6 +165,9 @@ check_args=("${app_dir}")
 if [ "${SHARPEMU_MAC_FORBID_SDL:-1}" = "1" ]; then
     check_args+=(--forbid-sdl)
 fi
+if [ "${SHARPEMU_MAC_FORBID_PORTABLE_UI:-1}" = "1" ]; then
+    check_args+=(--forbid-portable-ui)
+fi
 "${platform_dir}/check-macos-output.sh" "${check_args[@]}"
 
 # ----------------------------------------------------------------- sign ------

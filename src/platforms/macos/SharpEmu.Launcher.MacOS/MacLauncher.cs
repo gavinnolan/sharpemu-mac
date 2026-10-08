@@ -74,7 +74,7 @@ public sealed partial class MacLauncher : IDisposable
     private void ContinueQuit() => ApplyQuitAction(quit.Continue(Send(app, Selector("modalWindow")) != 0));
     private void ApplyQuitAction(int action)
     {
-        if (action == 1) { modalAccepted = false; Send(app, Selector("stopModal")); }
+        if (action == 1) Send(app, Selector("stopModal"));
         else if (action == 2) Send(window, Selector("performClose:"), 0);
     }
     private string L(string key, string fallback) { var value = strings.Get(key); return value == key ? fallback : value; }
@@ -180,7 +180,19 @@ public sealed partial class MacLauncher : IDisposable
         var query = Text(Send(search, Selector("stringValue")));
         visible = games.Where(game => game.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
             game.TitleId?.Contains(query, StringComparison.OrdinalIgnoreCase) == true).ToList();
-        Send(table, Selector("reloadData")); selected = null; Send(cover, Selector("setImage:"), 0);
+        var selectedIndex = PreservedSelectionIndex(visible, selected?.Path);
+        Send(table, Selector("reloadData"));
+        if (selectedIndex >= 0)
+            Send(table, Selector("selectRowIndexes:byExtendingSelection:"), Send(Class("NSIndexSet"), Selector("indexSetWithIndex:"), selectedIndex), 0);
+        else Send(table, Selector("deselectAll:"), 0);
+        Select();
+    }
+    private static int PreservedSelectionIndex(IReadOnlyList<CatalogGame> filtered, string? path)
+    {
+        if (path is null) return -1;
+        for (var index = 0; index < filtered.Count; index++)
+            if (GameLibraryPath.Comparer.Equals(filtered[index].Path, path)) return index;
+        return -1;
     }
     private void Select()
     {
@@ -226,6 +238,7 @@ public sealed partial class MacLauncher : IDisposable
     public void Dispose()
     {
         if (closed && owned.Count == 0) return;
+        CloseEditor();
         closed = true; pending.Close(); watcher.Dispose(); child.Dispose(); fileLog?.Dispose(); fileLog = null;
         if (timer != 0) Send(timer, Selector("invalidate"));
         if (app != 0) Send(app, Selector("setDelegate:"), 0);

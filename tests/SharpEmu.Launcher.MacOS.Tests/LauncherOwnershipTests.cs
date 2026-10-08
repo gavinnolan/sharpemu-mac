@@ -39,6 +39,41 @@ public sealed class LauncherOwnershipTests
         Assert.IsType<FormatException>(Assert.Throws<TargetInvocationException>(() => parse.Invoke(null, [typeof(double), text])).InnerException);
     }
 
+    private sealed class EditorModel { public int Count { get; set; } = 7; public double Scale { get; set; } = 1; }
+    [Fact]
+    public void ModelessEditorValidatesAllValuesBeforeMutationAndCloseRevokesSave()
+    {
+        var type = typeof(MacLauncher).GetNestedType("SettingsEditSession", BindingFlags.NonPublic)!;
+        var model = new EditorModel(); var saves = 0;
+        var session = Activator.CreateInstance(type, [model, null, (Action)(() => saves++)])!;
+        var rows = (System.Collections.IEnumerable)type.GetProperty("Rows")!.GetValue(session)!;
+        foreach (var row in rows)
+        {
+            var property = (PropertyInfo)row.GetType().GetProperty("Property")!.GetValue(row)!;
+            row.GetType().GetField("Value")!.SetValue(row, property.Name == "Count" ? "19" : "NaN");
+        }
+        var save = type.GetMethod("Save")!; var close = type.GetMethod("Close")!;
+        Assert.IsType<FormatException>(Assert.Throws<TargetInvocationException>(() => save.Invoke(session, null)).InnerException);
+        Assert.Equal(7, model.Count); Assert.Equal(1, model.Scale); Assert.Equal(0, saves);
+        foreach (var row in rows)
+            if (((PropertyInfo)row.GetType().GetProperty("Property")!.GetValue(row)!).Name == "Scale") row.GetType().GetField("Value")!.SetValue(row, "2.5");
+        save.Invoke(session, null); Assert.Equal(19, model.Count); Assert.Equal(2.5, model.Scale); Assert.Equal(1, saves);
+        Assert.Equal(true, close.Invoke(session, null)); Assert.Equal(false, close.Invoke(session, null));
+        Assert.IsType<InvalidOperationException>(Assert.Throws<TargetInvocationException>(() => save.Invoke(session, null)).InnerException);
+        Assert.Equal(1, saves);
+    }
+    [Fact]
+    public void RefreshedCatalogSelectionUsesPathAcrossReorderAndClearsWhenFilteredOut()
+    {
+        var select = typeof(MacLauncher).GetMethod("PreservedSelectionIndex", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var first = new CatalogGame("Alpha", "A", "1", "/fixture/alpha/eboot.bin", 0, null, null);
+        var refreshed = first with { Name = "New Alpha" };
+        var beta = first with { Name = "Beta", Path = "/fixture/beta/eboot.bin" };
+        Assert.Equal(1, select.Invoke(null, [new[] { beta, refreshed }, first.Path]));
+        Assert.Equal(-1, select.Invoke(null, [new[] { beta }, first.Path]));
+        Assert.Equal(-1, select.Invoke(null, [new[] { first }, null]));
+    }
+
     [Fact]
     public async Task OwnedSyntheticChildDrainsBothStreamsAndReportsExitOnce()
     {

@@ -43,48 +43,74 @@ public sealed partial class MacLauncher
             var values = new EnvironmentEditor(); EditFields(values, null, () => Launch(selectedGame, values.EnvironmentVariables));
         }
     }
+    // One modeless editor at a time. Cocoa's application menu remains active;
+    // no nested runModalForWindow loop owns application shutdown.
     private void EditFields(object model, string[]? fields, Action saved)
     {
-        if (modalWindow != 0) return;
+        if (editorWindow != 0) { Send(editorWindow, Selector("makeKeyAndOrderFront:"), 0); return; }
         var before = owned.Count;
-        var properties = model.GetType().GetProperties(BindingFlags.Instance | BindingFlags.Public)
-            .Where(property => property.CanWrite && (fields is null || fields.Contains(property.Name))).ToArray();
-        editorRows = properties.Select(property => new EditorRow(property, Regex.Replace(property.Name, "([a-z])([A-Z])", "$1 $2")) { Value = DisplayValue(property.GetValue(model)) }).ToList();
-        modalAccepted = false;
+        editorSession = new(model, fields, saved);
+        editorRows = editorSession.Rows;
         try
         {
-            modalWindow = Own(InitWindow(Send(Class("NSWindow"), Selector("alloc")), Selector("initWithContentRect:styleMask:backing:defer:"), new(0, 0, 820, 660), 3, 2, 0));
-            Send(modalWindow, Selector("setReleasedWhenClosed:"), 0); Send(modalWindow, Selector("setTitle:"), String(model is PerGameSettings ? "Game Settings" : "Settings"));
-            Send(modalWindow, Selector("setDelegate:"), target);
-            var content = Send(modalWindow, Selector("contentView"));
+            editorWindow = Own(InitWindow(Send(Class("NSWindow"), Selector("alloc")), Selector("initWithContentRect:styleMask:backing:defer:"), new(0, 0, 820, 660), 3, 2, 0));
+            Send(editorWindow, Selector("setReleasedWhenClosed:"), 0); Send(editorWindow, Selector("setTitle:"), String(model is PerGameSettings ? "Game Settings" : "Settings"));
+            Send(editorWindow, Selector("setDelegate:"), target);
+            var content = Send(editorWindow, Selector("contentView"));
             Label(content, new(18, 598, 784, 48), "Edit a value by double-clicking. Lists use one entry per line.\n[inherit] keeps global values; [empty] is an explicit empty list.");
             editorTable = CreateTable(content, new(18, 64, 784, 524), [("setting", "Setting", 320d), ("value", "Value", 430d)], true);
             Send(editorTable, Selector("setDoubleAction:"), Selector("editList:"));
-            Button(content, "Cancel", new(574, 16, 104, 32), () => { modalAccepted = false; Send(app, Selector("stopModal")); });
+            Button(content, "Cancel", new(574, 16, 104, 32), CloseEditor);
             Button(content, "Save", new(688, 16, 104, 32), () =>
             {
-                // End in-progress cell editing before reading its owned value.
-                Send(modalWindow, Selector("makeFirstResponder:"), 0);
-                try
-                {
-                    var values = editorRows.Select(row => ParseValue(row.Property.PropertyType, row.Value)).ToArray();
-                    for (var index = 0; index < values.Length; index++) editorRows[index].Property.SetValue(model, values[index]);
-                    modalAccepted = true; Send(app, Selector("stopModal"));
-                }
+                // Commit in-progress cell editing before parsing the detached rows.
+                Send(editorWindow, Selector("makeFirstResponder:"), 0);
+                try { editorSession!.Save(); CloseEditor(); }
                 catch (Exception exception) { Alert("Invalid Setting", exception.Message); }
             });
-            Send(editorTable, Selector("reloadData")); Send(modalWindow, Selector("center"));
-            Send(app, Selector("runModalForWindow:"), modalWindow);
-            if (modalAccepted) saved();
+            editorOwned = owned.Skip(before).ToArray();
+            Send(editorTable, Selector("reloadData")); Send(editorWindow, Selector("center"));
+            Send(editorWindow, Selector("makeKeyAndOrderFront:"), 0);
         }
-        finally
+        catch
         {
-            if (editorTable != 0) { Send(editorTable, Selector("setDelegate:"), 0); Send(editorTable, Selector("setDataSource:"), 0); }
-            if (modalWindow != 0) { Send(modalWindow, Selector("setDelegate:"), 0); Send(modalWindow, Selector("orderOut:"), 0); }
-            foreach (var handle in owned.Skip(before).Reverse()) { actions.Remove(handle); Release(handle); }
-            owned.RemoveRange(before, owned.Count - before); modalWindow = editorTable = 0; editorRows = [];
-            ContinueQuit();
+            editorOwned = owned.Skip(before).ToArray();
+            CloseEditor(); throw;
         }
+    }
+    private void CloseEditor()
+    {
+        if (editorSession is null || !editorSession.Close()) return;
+        if (editorTable != 0) { Send(editorTable, Selector("setDelegate:"), 0); Send(editorTable, Selector("setDataSource:"), 0); Send(editorTable, Selector("setTarget:"), 0); }
+        if (editorWindow != 0) { Send(editorWindow, Selector("setDelegate:"), 0); Send(editorWindow, Selector("orderOut:"), 0); Send(editorWindow, Selector("close")); }
+        var handles = editorOwned;
+        foreach (var handle in handles) if (actions.Remove(handle)) Send(handle, Selector("setTarget:"), 0);
+        editorWindow = editorTable = 0; editorRows = []; editorOwned = []; editorSession = null;
+        // A Cancel/Save sender or delegate is still on Cocoa's callback stack.
+        // Release after returning; Dispose also owns these handles if the loop ends first.
+        Post(() => { foreach (var handle in handles.Reverse()) if (owned.Remove(handle)) Release(handle); });
+    }
+    private sealed class SettingsEditSession
+    {
+        private readonly object model;
+        private readonly Action saved;
+        private bool closed;
+        public List<EditorRow> Rows { get; }
+        public SettingsEditSession(object model, string[]? fields, Action saved)
+        {
+            this.model = model; this.saved = saved;
+            Rows = model.GetType().GetProperties(BindingFlags.Instance | BindingFlags.Public)
+                .Where(property => property.CanWrite && (fields is null || fields.Contains(property.Name)))
+                .Select(property => new EditorRow(property, Regex.Replace(property.Name, "([a-z])([A-Z])", "$1 $2")) { Value = DisplayValue(property.GetValue(model)) }).ToList();
+        }
+        public void Save()
+        {
+            if (closed) throw new InvalidOperationException("The settings editor is closed.");
+            var values = Rows.Select(row => ParseValue(row.Property.PropertyType, row.Value)).ToArray();
+            for (var index = 0; index < values.Length; index++) Rows[index].Property.SetValue(model, values[index]);
+            saved();
+        }
+        public bool Close() { if (closed) return false; closed = true; return true; }
     }
     private static string DisplayValue(object? value) => value switch
     {
