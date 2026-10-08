@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using SharpEmu.Gpu.Metal;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Tests.Fixtures;
 using Xunit;
 namespace SharpEmu.Libs.Tests.VideoOut;
@@ -81,7 +82,7 @@ public sealed partial class MetalSingletonArrayStorageTests
         finally { GuestImageWriteTracker.Untrack(binding.Descriptor.Address); }
     }
     [Theory]
-    [InlineData(0)] [InlineData(1)] [InlineData(2)] [InlineData(3)] [InlineData(4)] [InlineData(5)] [InlineData(6)] [InlineData(7)] [InlineData(8)] [InlineData(9)] [InlineData(10)] [InlineData(11)] [InlineData(12)] [InlineData(13)]
+    [InlineData(0)] [InlineData(1)] [InlineData(2)] [InlineData(3)] [InlineData(4)] [InlineData(5)] [InlineData(6)] [InlineData(7)] [InlineData(8)] [InlineData(9)] [InlineData(10)] [InlineData(11)] [InlineData(12)] [InlineData(13)] [InlineData(14)] [InlineData(15)]
     public void R8FourKNearMissesRejectBeforeGuestRead(int kind)
     {
         using var state = new State(); var raw = R8FourKRaw(); var binding = UintBinding(raw);
@@ -99,10 +100,12 @@ public sealed partial class MetalSingletonArrayStorageTests
             11 => binding with { ResourceDescriptor = raw.Concat(new uint[] { 0 }).ToArray() },
             _ => binding,
         };
-        if (kind == 8) raw[5] ^= 1;
-        if (kind == 9) raw[6] = 1;
+        if (kind == 8) { raw[5] ^= 0x00100000; binding = UintBinding(raw); }
+        if (kind == 9) { raw[6] = 1; binding = UintBinding(raw); }
         if (kind == 12) { raw[0] |= 1; binding = UintBinding(raw); }
         if (kind == 13) { raw[4] = 1; binding = UintBinding(raw); }
+        if (kind == 14) { raw[1] &= ~(1u << 30); binding = UintBinding(raw); }
+        if (kind == 15) { raw[2] += 1u << 14; binding = UintBinding(raw); }
         var memory = new Memory([], binding.Descriptor.Address);
         Assert.Throws<NotSupportedException>(() => MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [binding], out _));
         Assert.Equal(0, memory.Reads);
