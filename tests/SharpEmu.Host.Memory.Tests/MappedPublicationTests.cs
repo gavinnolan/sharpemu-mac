@@ -538,7 +538,8 @@ public sealed class MappedPublicationTests
             }
         }
         finally { Assert.True((bool)end.Invoke(writers, [delayed, true])!); }
-        Assert.Equal(1, writers.GetType().GetField("coverageIncomplete", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(writers));
+        Assert.Equal(0, writers.GetType().GetField("coverageIncomplete", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(writers));
+        Assert.True((long)writers.GetType().GetProperty("HistoryRecordLosses", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(writers)! > 0);
         Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
             state.Views.TryPrepareMappedPublication(original, [new(State.Address, new byte[] { 13 })], out _));
         // Scalar delayed completion only, no forged bytes/native result.

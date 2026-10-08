@@ -13,7 +13,8 @@ internal static class CpuMappedCopyDiagnostics
     internal readonly record struct Failure(string? Stage, string? Reason, CpuMappedCopyResult Result,
         ulong Footprint, ulong FootprintBytes, ulong Source, int CopyBytes, bool Watched,
         long BackingIdentity = 0, ulong Cursor = 0, int Segments = 0,
-        ulong ViewAddress = 0, ulong ViewBytes = 0, long ViewBacking = 0);
+        ulong ViewAddress = 0, ulong ViewBytes = 0, long ViewBacking = 0, long EnrollmentAdmission = -1,
+        int WriterCoverageLoss = 0, long WriterHistoryLosses = 0);
 
     internal static void Emit(in Failure failure)
     {
@@ -31,7 +32,9 @@ internal static class CpuMappedCopyDiagnostics
                 $"footprint=0x{failure.Footprint:X} footprint_bytes={failure.FootprintBytes} " +
                 $"source=0x{failure.Source:X} copy_bytes={failure.CopyBytes} watched={failure.Watched} " +
                 $"backing={failure.BackingIdentity} cursor=0x{failure.Cursor:X} segments={failure.Segments} " +
-                $"view_addr=0x{failure.ViewAddress:X} view_bytes={failure.ViewBytes} view_backing={failure.ViewBacking}";
+                $"view_addr=0x{failure.ViewAddress:X} view_bytes={failure.ViewBytes} view_backing={failure.ViewBacking} " +
+                $"enrollment_admission={failure.EnrollmentAdmission} writer_coverage_loss={failure.WriterCoverageLoss} " +
+                $"writer_history_losses={failure.WriterHistoryLosses}";
             if (sinkForControl is { } sink) sink(line);
             else Console.Error.WriteLine(line);
         }

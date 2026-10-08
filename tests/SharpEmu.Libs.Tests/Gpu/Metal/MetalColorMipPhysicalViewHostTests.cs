@@ -141,6 +141,32 @@ public sealed partial class MetalRenderHostTests
         Assert.Equal(0, memory.Reads); Assert.Equal(0, actualMemory.Reads);
     }
 
+    [Theory]
+    [InlineData(false)] [InlineData(true)]
+    public void ColorPhysicalSelectedStandaloneDescriptorReportsOriginalPhysicalOverlapBeforeRead(bool storage)
+    {
+        using var enabled = new ColorPhysicalFlagScope();
+        var memory = new ColorPhysicalNeverReadMemory();
+        using var inventory = new ColorPhysicalInventoryScope(memory);
+        var selected = ColorBase + 0xB0000;
+        uint[] raw = [(uint)(selected >> 8), 0xC4700000, 0x007FC07F, 0x91B00FAC, 0, 0x00700000, 0, 0];
+        Assert.True(AgcBackendServices.TryDecodeTextureDescriptor(raw, out var descriptor));
+        var binding = ColorPhysicalTailBinding() with
+        {
+            Descriptor = descriptor, ResourceDescriptor = raw, IsStorage = storage,
+            Shape = ColorPhysicalTailBinding().Shape with { Storage = storage },
+            Access = storage ? GuestImageAccess.Write : GuestImageAccess.Read,
+        };
+        var failure = Assert.Throws<NotSupportedException>(() =>
+            MetalVideoPresenter.ValidateColorPhysicalSnapshotBinding(memory, binding));
+        Assert.Contains("request_addr=0x1000B0000 request_bytes=2097152", failure.Message);
+        Assert.Contains("request_extent=512x512x1", failure.Message);
+        Assert.Contains("original_base=0x100000000 original_backing_bytes=2818048", failure.Message);
+        Assert.Contains("original_selected=0x1000B0000 original_selected_bytes=2097152", failure.Message);
+        Assert.Contains("selected_overlap=True", failure.Message);
+        Assert.Equal(0, memory.Reads); Assert.Empty(_backend.Draws);
+    }
+
     [Fact]
     public void ColorPhysicalNullResourceRemainsAReadFreeFallback()
     {
