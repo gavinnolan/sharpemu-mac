@@ -24,6 +24,16 @@ The finite producer optionally uses the real `ICpuMappedCopySource` for its
 ORIGINAL physical copy, detiles those owned bytes, retains the original opaque
 mapping observation and propagates it through descriptor/sampler copies. It
 does not reread at native creation or reconstruct an observation from Query.
+The session is captured before the original copy, retained across all attempts,
+and checked after copying and before/after origin registration. A session reset
+rejects the original bytes without recapture or stamping them with the new
+session; the original-session association remains an immutable later veto.
+Native creation resolves that original association before allocation and
+revalidates after upload. For this typed association only, the safe publication
+callback runs while the new retain is still constructor-owned, before registry
+transfer, and session is revalidated afterward; reentrant reset/close cannot
+release a prospective registry owner that failure cleanup would release again.
+Existing generic and selected publication paths are unchanged.
 Unavailable uses the unchanged legacy producer; that native image has layout
 metadata but no dirty-sync mapping capability. Rejected discards/retries at
 most three original captures, never falls back to an ordinary virtual read.
@@ -74,9 +84,11 @@ those write rights. The finite writeback/completion owner is separate work.
 
 ## Prepared controls (unbuilt/unrun)
 
-`MetalStorageCpuSyncTests` contains 19 managed case rows: three actual producer /
+`MetalStorageCpuSyncTests` contains 22 managed case rows: three actual producer /
 independent full-byte layouts and zeros, six invalid layouts, two optional-copy
-decline routes, original retirement, six real capture refusals and zero-copy
+decline routes, original retirement, actual session release during the original
+mapped-copy callback, stale seed refusal before native allocation, actual typed
+publication-hook reset refusal before retain transfer, six real capture refusals and zero-copy
 capture without device/publication. Its synthetic mapping adapter proves branch
 and byte behavior only; it is explicitly not a native receipt or content lease.
 Every row prints actual architecture/framework and checks an optional expected

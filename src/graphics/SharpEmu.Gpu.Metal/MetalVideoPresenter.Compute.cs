@@ -273,6 +273,8 @@ internal static partial class MetalVideoPresenter
         // Render-target codes are a different namespace; substituting RGBA8
         // here changes both native binding type and the seed's byte layout.
         var nativeFormat = StorageTextureFormat(descriptor);
+        var storageCpuOrigin = StorageCpuOrigin(descriptor);
+        ValidateStorageCpuSeedSession(storageCpuOrigin); // before any native allocation or live reuse
         if (!_selectedStorageMipAssociations.TryGetValue(descriptor, out _))
             RejectAddressOnlySelectedStorageAlias(descriptor.Address);
         descriptor = PrepareDrawTextureUpload(descriptor);
@@ -280,10 +282,12 @@ internal static partial class MetalVideoPresenter
         _selectedStorageMipAssociations.TryGetValue(descriptor, out var selected);
         lock (_gate)
         {
+            ValidateStorageCpuSeedSession(storageCpuOrigin); // revalidate incoming seed after acquiring the live-owner gate
             if (selected is not null) RejectConflictingSelectedStorageConstructionLocked(selected);
             if (selected is not null ? _selectedStorageMipImages.TryGetValue(selected.Key, out var existing) :
                 _guestImages.TryGetValue(descriptor.Address, out existing))
             {
+                ValidateStorageCpuSeedSession(existing.StorageCpuOrigin);
                 if (selected is not null)
                 {
                     ValidateSelectedStorageMipOwner(_selectedStorageMipOwners[selected.Key], requireObserved: true);
@@ -344,8 +348,8 @@ internal static partial class MetalVideoPresenter
             ArrayLength = shape.ArrayLength,
             Format = format,
             DiagnosticOrigin = CaptureStorageImageOrigin(descriptor),
-            StorageCpuLayout = StorageCpuOrigin(descriptor)?.Layout ?? MetalStorageCpuLayout.TryCreate(descriptor),
-            StorageCpuOrigin = StorageCpuOrigin(descriptor),
+            StorageCpuLayout = storageCpuOrigin?.Layout ?? MetalStorageCpuLayout.TryCreate(descriptor),
+            StorageCpuOrigin = storageCpuOrigin,
         };
         if (image.Texture == 0)
             throw new InvalidOperationException($"Metal cannot allocate storage image 0x{descriptor.Address:X} with format {format}.");
@@ -361,10 +365,12 @@ internal static partial class MetalVideoPresenter
             image.ContentVersion++;
             lock (_gate)
             {
+                ValidateStorageCpuSeedSession(storageCpuOrigin); // native upload cannot refresh original ownership
                 if (selected is not null) RejectConflictingSelectedStorageConstructionLocked(selected);
                 if (selected is not null ? _selectedStorageMipImages.TryGetValue(selected.Key, out var raced) :
                     _guestImages.TryGetValue(descriptor.Address, out raced))
                 {
+                    ValidateStorageCpuSeedSession(raced.StorageCpuOrigin);
                     if (selected is not null)
                     {
                         ValidateSelectedStorageMipOwner(selected);
@@ -386,7 +392,18 @@ internal static partial class MetalVideoPresenter
             // by its registry; only this call's new texture is released here.
             if (!installed)
             {
-                if (selected is not null && MetalR16FloatSelectedMip.TryPlacement(selected.Key.Resource, selected.Key.Mip, out _))
+                if (storageCpuOrigin is not null)
+                {
+                    var owned = image.Texture; image.Texture = 0;
+                    try { MetalNative.SendVoid(owned, MetalNative.Selector("release")); }
+                    catch (Exception cleanup)
+                    {
+                        lock (_gate) _typedCpuSyncCleanupFailure ??= cleanup;
+                        if (r16ConstructionFailure is null) throw;
+                        try { r16ConstructionFailure.Data["TypedStorageOriginalSeedCleanup"] = cleanup; } catch { }
+                    }
+                }
+                else if (selected is not null && MetalR16FloatSelectedMip.TryPlacement(selected.Key.Resource, selected.Key.Mip, out _))
                 {
                     var owned = image.Texture; image.Texture = 0;
                     ReleaseR16SelectedConstructionRetain(owned, r16ConstructionFailure);

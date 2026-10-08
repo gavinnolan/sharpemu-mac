@@ -114,6 +114,58 @@ public sealed class MetalStorageCpuSyncTests
         Assert.Equal(3, memory.Copies); Assert.Equal(0, memory.Reads);
     }
 
+    [Fact]
+    public void ActualProducerRejectsSessionResetDuringOriginalMappedCopyWithoutRecapture()
+    {
+        ActualArchitecture(); using var state = new State();
+        var before = MetalVideoPresenter.CurrentStorageCpuSeedSession;
+        var memory = new MappedMemory(Physical(0))
+        {
+            AfterCopy = () => Presenter.GetMethod("ReleaseSelectedStorageMipImages", Private)!.Invoke(null, null),
+        };
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [Binding(0)], out _));
+        Assert.Contains("session changed during the original copy", error.Message);
+        Assert.Equal(before + 1, MetalVideoPresenter.CurrentStorageCpuSeedSession);
+        Assert.Equal(1, memory.Copies); Assert.Equal(0, memory.Reads);
+        Assert.False(Images.Contains(Address)); // no native owner or seed accepted into the newer session
+    }
+
+    [Fact]
+    public void OriginalMappedSeedResetRejectsEnsureStorageBeforeAnyNativeAllocation()
+    {
+        ActualArchitecture(); using var state = new State(); var memory = new MappedMemory(Physical(0));
+        var snapshot = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [Binding(0)], out _));
+        Presenter.GetMethod("ReleaseSelectedStorageMipImages", Private)!.Invoke(null, null);
+        var error = Assert.Throws<TargetInvocationException>(() =>
+            Presenter.GetMethod("EnsureStorageImage", Private)!.Invoke(null, [(nint)0, snapshot]));
+        Assert.Contains("original-seed-session-changed", Assert.IsType<InvalidOperationException>(error.InnerException).Message);
+        Assert.False(Images.Contains(Address)); Assert.Equal(1, memory.Copies); Assert.Equal(0, memory.Reads);
+    }
+
+    [Fact]
+    public void PublicationSessionResetRejectsBeforeTypedConstructorRetainTransfers()
+    {
+        ActualArchitecture(); using var state = new State(); var memory = new MappedMemory(Physical(0));
+        var snapshot = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [Binding(0)], out _));
+        var image = InstallImage(GetOrigin(snapshot), memory); Images.Remove(Address);
+        var hook = Field("_storageImageBeforeMetadataPublication"); var previous = hook.GetValue(null);
+        try
+        {
+            hook.SetValue(null, (Action<nint>)(_ => Presenter.GetMethod("ReleaseSelectedStorageMipImages", Private)!.Invoke(null, null)));
+            var error = Assert.Throws<TargetInvocationException>(() =>
+            {
+                lock (Field("_gate").GetValue(null)!)
+                    Presenter.GetMethod("PublishStorageImageLocked", Private)!.Invoke(null, [snapshot, null, image, (1u, 1u, 4UL)]);
+            });
+            Assert.Contains("original-seed-session-changed", Assert.IsType<InvalidOperationException>(error.InnerException).Message);
+            Assert.False(Images.Contains(Address));
+            Assert.False(((IDictionary)Field("_guestImageExtents").GetValue(null)!).Contains(Address));
+            Assert.Equal((nint)123, image.GetType().GetField("Texture")!.GetValue(image)); // still constructor-owned, no native call
+        }
+        finally { hook.SetValue(null, previous); Images.Remove(Address); }
+    }
+
     [Theory]
     [InlineData("gpu-debt")] [InlineData("pending")] [InlineData("version")]
     [InlineData("session")] [InlineData("unobserved")] [InlineData("retired")]
@@ -191,6 +243,7 @@ public sealed class MetalStorageCpuSyncTests
     private sealed class MappedMemory(byte[] bytes) : Memory(bytes), ICpuMappedCopySource
     {
         internal CpuMappedCopyResult Result = CpuMappedCopyResult.Copied; internal bool Current = true; internal int Copies;
+        internal Action? AfterCopy;
         public CpuMappedCopyResult TryReadMappedCopy(ulong footprintAddress, ulong footprintByteCount, ulong sourceAddress,
             Span<byte> destination, out CpuMappedCopyObservation? observation)
         {
@@ -198,6 +251,7 @@ public sealed class MetalStorageCpuSyncTests
             Assert.Equal(Address, footprintAddress); Assert.Equal(65536UL, footprintByteCount);
             Assert.Equal(Address, sourceAddress); Assert.Equal(Bytes.Length, destination.Length);
             Bytes.CopyTo(destination);
+            AfterCopy?.Invoke();
             observation = new(this, Address, 65536, Address, 65536,
                 [new(Address, 65536, Address, 65536, 1, 1, 65536, 0, 16384, GuestPageProtection.Read | GuestPageProtection.Write)]);
             return Result;

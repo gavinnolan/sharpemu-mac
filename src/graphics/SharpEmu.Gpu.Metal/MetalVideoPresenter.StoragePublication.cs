@@ -38,6 +38,19 @@ internal static partial class MetalVideoPresenter
             }
             else
             {
+                if (image.StorageCpuOrigin is { } originalSeed)
+                {
+                    // Keep this construction's retain private across the safe
+                    // callback. Reentrant close must not release it before the
+                    // original session is revalidated and ownership transfers.
+                    ValidateStorageCpuSeedSession(originalSeed);
+                    _storageImageBeforeMetadataPublication?.Invoke(image.Texture);
+                    ValidateStorageCpuSeedSession(originalSeed);
+                    _guestImages.Add(descriptor.Address, image);
+                    nativeAdded = true;
+                    _guestImageExtents[descriptor.Address] = extent;
+                    return;
+                }
                 _guestImages.Add(descriptor.Address, image);
                 nativeAdded = true;
                 _storageImageBeforeMetadataPublication?.Invoke(image.Texture);

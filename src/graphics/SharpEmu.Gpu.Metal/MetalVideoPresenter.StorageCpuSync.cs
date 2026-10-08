@@ -12,17 +12,24 @@ internal static partial class MetalVideoPresenter
         ICpuMappedCopySource Source, CpuMappedCopyObservation Mapping,
         CpuTextureSnapshotObservation Observation, long Session);
     private static readonly ConditionalWeakTable<GuestDrawTexture, StorageCpuSeedOrigin> _storageCpuSeedOrigins = new();
+    internal static long CurrentStorageCpuSeedSession => Volatile.Read(ref _selectedStorageMipSession);
 
     internal static void RegisterStorageCpuSeedOrigin(GuestDrawTexture texture, MetalStorageCpuLayout layout,
         ICpuMemory memory, ICpuMappedCopySource source, CpuMappedCopyObservation mapping,
-        CpuTextureSnapshotObservation observation)
+        CpuTextureSnapshotObservation observation, long originalSession)
     {
         if (!layout.Matches(texture) || !ReferenceEquals(memory, source) ||
             mapping.FootprintAddress != layout.Address || mapping.FootprintByteCount != layout.PhysicalBytes ||
             mapping.SourceAddress != layout.Address || mapping.SourceByteCount != layout.PhysicalBytes)
             throw new InvalidOperationException("Typed storage original copy does not match its immutable creation footprint.");
-        _storageCpuSeedOrigins.Add(texture, new(layout, memory, source, mapping, observation,
-            Volatile.Read(ref _selectedStorageMipSession)));
+        if (originalSession != CurrentStorageCpuSeedSession)
+            throw TypedCpuSyncRejected(layout.Address, "session-changed-during-original-copy");
+        _storageCpuSeedOrigins.Add(texture, new(layout, memory, source, mapping, observation, originalSession));
+        if (originalSession != CurrentStorageCpuSeedSession)
+        {
+            _storageCpuSeedOrigins.Remove(texture);
+            throw TypedCpuSyncRejected(layout.Address, "session-changed-during-original-registration");
+        }
     }
 
     private static void CopyStorageCpuSeedOrigin(GuestDrawTexture source, GuestDrawTexture copy)
@@ -35,6 +42,12 @@ internal static partial class MetalVideoPresenter
 
     private static StorageCpuSeedOrigin? StorageCpuOrigin(GuestDrawTexture descriptor) =>
         _storageCpuSeedOrigins.TryGetValue(descriptor, out var origin) && origin.Layout.Matches(descriptor) ? origin : null;
+
+    private static void ValidateStorageCpuSeedSession(StorageCpuSeedOrigin? origin)
+    {
+        if (origin is not null && origin.Session != CurrentStorageCpuSeedSession)
+            throw TypedCpuSyncRejected(origin.Layout.Address, "original-seed-session-changed");
+    }
 
     private static InvalidOperationException TypedCpuSyncRejected(ulong address, string reason) =>
         new($"Metal typed storage CPU synchronization rejected at 0x{address:X}: reason={reason}. " +

@@ -30,26 +30,36 @@ internal static partial class MetalTextureSnapshots
             MipLevel: binding.MipLevel, BaseMipLevel: d.BaseLevel, ResourceMipLevels: d.MaxMip + 1);
         var layout = MetalStorageCpuLayout.TryCreate(template);
         if (layout is null) return false;
+        // The original copy belongs to this session even if a reset races a
+        // later capture attempt. Never stamp old bytes with a newer session.
+        var originalSession = MetalVideoPresenter.CurrentStorageCpuSeedSession;
         for (var attempt = 0; attempt < 3; attempt++)
         {
+            if (originalSession != MetalVideoPresenter.CurrentStorageCpuSeedSession)
+                throw new InvalidOperationException("Metal typed storage session changed before the original copy.");
             var epoch = HostMemory.MappingGeneration;
             var read = GuestImageWriteTracker.BeginReadSnapshot(d.Address, physical, source: "agc.typed-storage-mapped-copy");
             var observation = MetalVideoPresenter.ObserveCpuTextureSnapshot(d.Address, physical, epoch);
             var bytes = new byte[checked((int)physical)];
             var result = source.TryReadMappedCopy(d.Address, physical, d.Address, bytes, out var mapping);
+            if (originalSession != MetalVideoPresenter.CurrentStorageCpuSeedSession)
+                throw new InvalidOperationException("Metal typed storage session changed during the original copy.");
             if (result == CpuMappedCopyResult.Unavailable) return false; // unchanged legacy owned-copy path; no dirty authority
             if (result != CpuMappedCopyResult.Copied || mapping is null) continue;
             var linear = layout.Decode(bytes);
             if (!source.IsMappedCopyObservationCurrent(mapping) ||
                 !GuestImageWriteTracker.IsReadSnapshotStable(read) ||
                 !MetalVideoPresenter.IsCpuTextureSnapshotAdmissionStable(d.Address, observation)) continue;
-            texture = layout.Upload(linear) with
+            var captured = layout.Upload(linear) with
             {
                 Sampler = ToGuestSampler(binding.SamplerDescriptor),
                 WriteGeneration = read.Active ? read.Generation : -1,
             };
-            MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(texture, observation);
-            MetalVideoPresenter.RegisterStorageCpuSeedOrigin(texture, layout, context.Memory, source, mapping, observation);
+            MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(captured, observation);
+            MetalVideoPresenter.RegisterStorageCpuSeedOrigin(captured, layout, context.Memory, source, mapping, observation, originalSession);
+            if (originalSession != MetalVideoPresenter.CurrentStorageCpuSeedSession)
+                throw new InvalidOperationException("Metal typed storage session changed after original-copy registration.");
+            texture = captured;
             return true;
         }
         throw new InvalidOperationException($"Metal typed storage mapping/content changed across three original-copy attempts at 0x{d.Address:X}.");
