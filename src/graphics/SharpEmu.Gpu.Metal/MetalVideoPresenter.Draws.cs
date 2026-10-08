@@ -1682,7 +1682,7 @@ internal static partial class MetalVideoPresenter
                 return depthSample;
             }
 
-            var live = ResolveGuestImageAlias(texture);
+            var live = ResolveGuestImageAlias(texture, captureFirstRefusal: true, out var aliasFirstRefusal);
             if (live is { Initialized: true } && blitCommandBuffer != 0)
             {
                 Require2DGuestImage(live, "feedback snapshot");
@@ -1729,12 +1729,12 @@ internal static partial class MetalVideoPresenter
             catch (NotSupportedException exception) when (exception.GetType() == typeof(NotSupportedException))
             {
                 throw new NotSupportedException(
-                    exception.Message + " " + DescribeUnresolvedGuestTexture(texture), exception);
+                    exception.Message + " " + DescribeUnresolvedGuestTexture(texture, aliasFirstRefusal), exception);
             }
             catch (InvalidOperationException exception) when (exception.GetType() == typeof(InvalidOperationException))
             {
                 throw new InvalidOperationException(
-                    exception.Message + " " + DescribeUnresolvedGuestTexture(texture), exception);
+                    exception.Message + " " + DescribeUnresolvedGuestTexture(texture, aliasFirstRefusal), exception);
             }
             if (refreshed is null)
             {
@@ -1749,7 +1749,7 @@ internal static partial class MetalVideoPresenter
 
                 throw new InvalidOperationException(
                     $"Metal cannot resolve required texture 0x{texture.Address:X}. " +
-                    DescribeUnresolvedGuestTexture(texture));
+                    DescribeUnresolvedGuestTexture(texture, aliasFirstRefusal));
             }
 
             texture = texture with { RgbaPixels = refreshed };
@@ -2157,7 +2157,12 @@ internal static partial class MetalVideoPresenter
     /// presenter's guest-image variants: exact extent outranks format, format
     /// outranks initialization, and the active image breaks ties.</summary>
     private static GuestImage? ResolveGuestImageAlias(GuestDrawTexture texture)
+        => ResolveGuestImageAlias(texture, captureFirstRefusal: false, out _);
+
+    private static GuestImage? ResolveGuestImageAlias(GuestDrawTexture texture,
+        bool captureFirstRefusal, out SampledAliasFirstRefusal? firstRefusal)
     {
+        SampledAliasFirstRefusal? captured = null;
         var hasViewFormat = MetalGuestFormats.TryDecodeRenderTargetFormat(
             texture.Format, texture.NumberType, out var viewFormat);
         GuestImage? best = null;
@@ -2166,7 +2171,13 @@ internal static partial class MetalVideoPresenter
         var nativeShape = GuestTextureShape(texture);
         void Consider(GuestImage candidate, bool isActive)
         {
-            if (candidate.TextureType != nativeShape.TextureType || candidate.Depth != nativeShape.Depth || candidate.ArrayLength != nativeShape.ArrayLength) return;
+            // Preserve the original OR's type -> depth -> layer short circuit.
+            if (candidate.TextureType != nativeShape.TextureType)
+            { Capture("native-type"); return; }
+            if (candidate.Depth != nativeShape.Depth)
+            { Capture("native-depth"); return; }
+            if (candidate.ArrayLength != nativeShape.ArrayLength)
+            { Capture("native-layers"); return; }
             // Exact extent always qualifies; a larger image qualifies only for
             // tiled descriptors, mirroring IsCompatibleGuestImageAlias.
             var sizeMatch = candidate.Width == texture.Width &&
@@ -2178,6 +2189,10 @@ internal static partial class MetalVideoPresenter
                  texture.Width > candidate.Width ||
                  texture.Height > candidate.Height))
             {
+                if (captureFirstRefusal && _sampledAliasDiagnosticsEnabled)
+                    Capture(texture.TileMode == 0 ? "linear-extent" :
+                        texture.Width == 0 ? "zero-width" : texture.Height == 0 ? "zero-height" :
+                        texture.Width > candidate.Width ? "width-outside-owner" : "height-outside-owner");
                 return;
             }
 
@@ -2207,6 +2222,12 @@ internal static partial class MetalVideoPresenter
                 best = candidate;
                 bestScore = score;
             }
+
+            void Capture(string reason)
+            {
+                if (captureFirstRefusal)
+                    CaptureSampledAliasFirstRefusalLocked(candidate, isActive, reason, ref captured);
+            }
         }
 
         lock (_gate)
@@ -2225,13 +2246,19 @@ internal static partial class MetalVideoPresenter
             }
         }
 
+        firstRefusal = captured;
         return best;
     }
 
     // Failure-only managed inspection. These are current registry observations,
     // not a captured ownership reservation or proof of the producer at prepare time.
     internal static string DescribeUnresolvedGuestTexture(GuestDrawTexture texture)
+        => DescribeUnresolvedGuestTexture(texture, null);
+
+    private static string DescribeUnresolvedGuestTexture(GuestDrawTexture texture,
+        SampledAliasFirstRefusal? firstRefusal)
     {
+        string message;
         lock (_gate)
         {
             var advertised = _availableGuestImages.TryGetValue(texture.Address, out var advertisedFormat);
@@ -2263,7 +2290,7 @@ internal static partial class MetalVideoPresenter
                 $"{image.Width}x{image.Height}/format={image.Format}/initialized={image.Initialized}/" +
                 $"gpu_written={image.GpuWritten}/version={image.ContentVersion}";
 
-            return $"unresolved_alias addr=0x{texture.Address:X} type={texture.Type} " +
+            message = $"unresolved_alias addr=0x{texture.Address:X} type={texture.Type} " +
                 $"shape={texture.Shape} size={texture.Width}x{texture.Height} depth={texture.Depth} " +
                 $"arrayed={texture.ArrayedView} layers={texture.ArrayLayers} " +
                 $"format={texture.Format}/{texture.NumberType} tile={texture.TileMode} pitch={texture.Pitch} " +
@@ -2278,6 +2305,7 @@ internal static partial class MetalVideoPresenter
                 $"current_producer_queue='{producerQueue}' current_producer_submission={producerSubmission} " +
                 $"executing_sequence={_executingGuestWorkSequence} captured_alias_provenance=unavailable.";
         }
+        return AppendSampledAliasFirstRefusal(message, firstRefusal);
     }
 
     /// <summary>Snapshots a guest depth image for sampling when the texture
