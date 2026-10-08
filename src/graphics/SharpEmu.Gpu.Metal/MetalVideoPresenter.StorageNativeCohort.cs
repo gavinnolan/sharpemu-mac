@@ -46,8 +46,14 @@ internal static partial class MetalVideoPresenter
     // probe a new mapping, query tracker content under _gate, or use distinct
     // virtual addresses as evidence that two native resources cannot alias.
     private static bool IsFiniteStorageNativeCohortCurrentLocked(GuestImage image,
-        StorageCpuSeedOrigin origin, out string reason)
+        StorageCpuSeedOrigin origin, out string reason) =>
+        InspectFiniteStorageNativeCohortLocked(image, origin, out reason, out _, captureOffender: false);
+
+    private static bool InspectFiniteStorageNativeCohortLocked(GuestImage image,
+        StorageCpuSeedOrigin origin, out string reason, out FiniteStorageCohortOffender? offender,
+        bool captureOffender)
     {
+        offender = null;
         reason = "sticky-native-cleanup-failure";
         if (_textureSourceCleanupFailure is not null || _typedCpuSyncCleanupFailure is not null ||
             _r16SelectedRetainCleanupFailure is not null || _selectedNativeOriginalCleanupFailure is not null) return false;
@@ -88,19 +94,33 @@ internal static partial class MetalVideoPresenter
             reason = "selected-owner-physical-overlap";
             if (PhysicalMappingOverlaps(origin.Mapping, proof.Seed.Mapping)) return false;
         }
-        foreach (var other in _guestImages.Values)
+        foreach (var pair in _guestImages)
         {
+            var other = pair.Value;
             if (ReferenceEquals(other, image)) continue;
             reason = "other-image-original-provenance-unavailable-or-stale";
-            if (other.StorageCpuOrigin is not { } otherOrigin ||
-                !ReferenceEquals(otherOrigin.Memory, origin.Memory) || otherOrigin.Session != origin.Session ||
-                otherOrigin.Mapping.FootprintAddress != otherOrigin.Layout.Address ||
-                otherOrigin.Mapping.FootprintByteCount != otherOrigin.Layout.PhysicalBytes ||
-                otherOrigin.Mapping.SourceAddress != otherOrigin.Layout.Address ||
-                otherOrigin.Mapping.SourceByteCount != otherOrigin.Layout.PhysicalBytes ||
-                !otherOrigin.Source.IsMappedCopyObservationCurrent(otherOrigin.Mapping)) return false;
+            var otherOrigin = other.StorageCpuOrigin;
+            string? branch = otherOrigin is null ? "origin-missing" :
+                !ReferenceEquals(otherOrigin.Memory, origin.Memory) ? "memory-mismatch" :
+                otherOrigin.Session != origin.Session ? "session-mismatch" :
+                otherOrigin.Mapping.FootprintAddress != otherOrigin.Layout.Address ? "footprint-address" :
+                otherOrigin.Mapping.FootprintByteCount != otherOrigin.Layout.PhysicalBytes ? "footprint-bytes" :
+                otherOrigin.Mapping.SourceAddress != otherOrigin.Layout.Address ? "source-address" :
+                otherOrigin.Mapping.SourceByteCount != otherOrigin.Layout.PhysicalBytes ? "source-bytes" :
+                !otherOrigin.Source.IsMappedCopyObservationCurrent(otherOrigin.Mapping) ? "mapping-stale" : null;
+            if (branch is not null)
+            {
+                if (captureOffender && _rgbaStorageRuntimePublicationRequested)
+                    offender = CaptureFiniteStorageCohortOffender(pair.Key, other, branch);
+                return false;
+            }
             reason = "other-image-physical-overlap";
-            if (PhysicalMappingOverlaps(origin.Mapping, otherOrigin.Mapping)) return false;
+            if (PhysicalMappingOverlaps(origin.Mapping, otherOrigin!.Mapping))
+            {
+                if (captureOffender && _rgbaStorageRuntimePublicationRequested)
+                    offender = CaptureFiniteStorageCohortOffender(pair.Key, other, "physical-overlap");
+                return false;
+            }
         }
         reason = "qualified";
         return true;
@@ -108,7 +128,12 @@ internal static partial class MetalVideoPresenter
 
     private static void RequireFiniteStorageNativeCohortLocked(GuestImage image, StorageCpuSeedOrigin origin)
     {
-        if (!IsFiniteStorageNativeCohortCurrentLocked(image, origin, out var reason))
-            throw new NotSupportedException("Metal finite canonical publication native cohort is unavailable: " + reason);
+        if (!InspectFiniteStorageNativeCohortLocked(image, origin, out var reason, out var offender,
+            captureOffender: _rgbaStorageRuntimePublicationRequested))
+        {
+            var message = "Metal finite canonical publication native cohort is unavailable: " + reason;
+            if (offender is { } captured) throw new FiniteStorageCohortRefusal(message, captured);
+            throw new NotSupportedException(message);
+        }
     }
 }
