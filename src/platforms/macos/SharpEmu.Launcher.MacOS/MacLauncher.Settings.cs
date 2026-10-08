@@ -10,7 +10,22 @@ namespace SharpEmu.Launcher.MacOS;
 
 public sealed partial class MacLauncher
 {
-    private void EditGlobalSettings() => EditFields(settings, null, () => { settings = ApplicationSettings.NormalizeFromJson(JsonSerializer.Serialize(settings)); settings.Save(); strings.Load(settings.Language); WatchAndRefresh(); });
+    private void EditGlobalSettings()
+    {
+        var edited = settings;
+        EditFields(edited, null, GlobalSettingsSaveAction(edited, normalized => normalized.Save(), normalized =>
+        {
+            settings = normalized; strings.Load(settings.Language); WatchAndRefresh();
+        }));
+    }
+    private static Action GlobalSettingsSaveAction(ApplicationSettings edited, Action<ApplicationSettings> persist,
+        Action<ApplicationSettings> accepted) => () =>
+    {
+        // The open editor retains its original model even if persistence fails.
+        // Publish only after saving, and normalize that same edited model on retry.
+        var normalized = ApplicationSettings.NormalizeFromJson(JsonSerializer.Serialize(edited));
+        persist(normalized); accepted(normalized);
+    };
     private void EditGameSettings()
     {
         if (selected?.TitleId is not { Length: > 0 } title) { Alert("Game Settings", "Select a game with a title ID first."); return; }
@@ -57,9 +72,10 @@ public sealed partial class MacLauncher
             Send(editorWindow, Selector("setReleasedWhenClosed:"), 0); Send(editorWindow, Selector("setTitle:"), String(model is PerGameSettings ? "Game Settings" : "Settings"));
             Send(editorWindow, Selector("setDelegate:"), target);
             var content = Send(editorWindow, Selector("contentView"));
-            Label(content, new(18, 598, 784, 48), "Edit a value by double-clicking. Lists use one entry per line.\n[inherit] keeps global values; [empty] is an explicit empty list.");
-            editorTable = CreateTable(content, new(18, 64, 784, 524), [("setting", "Setting", 320d), ("value", "Value", 430d)], true);
+            Label(content, new(18, 598, 784, 48), "Select a setting to edit below, or double-click its value. Lists use one entry per line.\n[inherit] keeps global values; [empty] is an explicit empty list.");
+            editorTable = CreateTable(content, new(18, 130, 784, 458), [("setting", "Setting", 320d), ("value", "Value", 430d)], true);
             Send(editorTable, Selector("setDoubleAction:"), Selector("editList:"));
+            BuildSettingsControls(content);
             Button(content, "Cancel", new(574, 16, 104, 32), CloseEditor);
             Button(content, "Save", new(688, 16, 104, 32), () =>
             {
@@ -69,7 +85,7 @@ public sealed partial class MacLauncher
                 catch (Exception exception) { Alert("Invalid Setting", exception.Message); }
             });
             editorOwned = owned.Skip(before).ToArray();
-            Send(editorTable, Selector("reloadData")); Send(editorWindow, Selector("center"));
+            Send(editorTable, Selector("reloadData")); UpdateSettingsControls(); Send(editorWindow, Selector("center"));
             Send(editorWindow, Selector("makeKeyAndOrderFront:"), 0);
         }
         catch
@@ -82,10 +98,12 @@ public sealed partial class MacLauncher
     {
         if (editorSession is null || !editorSession.Close()) return;
         if (editorTable != 0) { Send(editorTable, Selector("setDelegate:"), 0); Send(editorTable, Selector("setDataSource:"), 0); Send(editorTable, Selector("setTarget:"), 0); }
+        if (editorValue != 0) Send(editorValue, Selector("setDelegate:"), 0);
         if (editorWindow != 0) { Send(editorWindow, Selector("setDelegate:"), 0); Send(editorWindow, Selector("orderOut:"), 0); Send(editorWindow, Selector("close")); }
         var handles = editorOwned;
         foreach (var handle in handles) if (actions.Remove(handle)) Send(handle, Selector("setTarget:"), 0);
         editorWindow = editorTable = 0; editorRows = []; editorOwned = []; editorSession = null;
+        editorValue = editorChoice = editorSwitch = editorHint = editorList = 0;
         // A Cancel/Save sender or delegate is still on Cocoa's callback stack.
         // Release after returning; Dispose also owns these handles if the loop ends first.
         Post(() => { foreach (var handle in handles.Reverse()) if (owned.Remove(handle)) Release(handle); });
@@ -135,6 +153,10 @@ public sealed partial class MacLauncher
     private void EditList()
     {
         var row = (int)Send(editorTable, Selector("clickedRow"));
+        EditListRow(row);
+    }
+    private void EditListRow(int row)
+    {
         if (row < 0 || row >= editorRows.Count || editorRows[row].Property.PropertyType != typeof(List<string>)) return;
         var item = editorRows[row];
         var alert = New("NSAlert"); var scroll = New("NSScrollView", new(0, 0, 560, 260)); var text = New("NSTextView", new(0, 0, 540, 260));
@@ -144,7 +166,7 @@ public sealed partial class MacLauncher
             Send(alert, Selector("setInformativeText:"), String("One entry per line. [inherit] uses global values; [empty] removes all entries for this override."));
             Send(text, Selector("setString:"), String(item.Value)); Send(scroll, Selector("setHasVerticalScroller:"), 1); Send(scroll, Selector("setDocumentView:"), text);
             Send(alert, Selector("setAccessoryView:"), scroll); Send(alert, Selector("addButtonWithTitle:"), String("Apply")); Send(alert, Selector("addButtonWithTitle:"), String("Cancel"));
-            if (Send(alert, Selector("runModal")) == 1000) { item.Value = Text(Send(text, Selector("string"))); Send(editorTable, Selector("reloadData")); }
+            if (Send(alert, Selector("runModal")) == 1000) { item.Value = Text(Send(text, Selector("string"))); Send(editorTable, Selector("reloadData")); UpdateSettingsControls(); }
         }
         finally { Release(alert); Release(scroll); Release(text); ContinueQuit(); }
     }

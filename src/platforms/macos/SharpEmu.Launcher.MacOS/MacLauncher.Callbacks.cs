@@ -21,8 +21,18 @@ public sealed partial class MacLauncher
         Add(cls, "tick:", new ActionCallback((_, _, _) => Dispatch(owner => owner.Tick())), "v@:@");
         Add(cls, "launch:", new ActionCallback((_, _, sender) => Dispatch(owner => { if (sender == owner.table) owner.LaunchSelected(); })), "v@:@");
         Add(cls, "editList:", new ActionCallback((_, _, _) => Dispatch(owner => owner.EditList())), "v@:@");
-        Add(cls, "controlTextDidChange:", new ActionCallback((_, _, notification) => Dispatch(owner => { if (Send(notification, Selector("object")) == owner.search) owner.Filter(); })), "v@:@");
-        Add(cls, "tableViewSelectionDidChange:", new ActionCallback((_, _, notification) => Dispatch(owner => { if (Send(notification, Selector("object")) == owner.table) owner.Select(); })), "v@:@");
+        Add(cls, "controlTextDidChange:", new ActionCallback((_, _, notification) => Dispatch(owner =>
+        {
+            var control = Send(notification, Selector("object"));
+            if (control == owner.search) owner.Filter();
+            else if (control == owner.editorValue) owner.SettingsTextChanged();
+        })), "v@:@");
+        Add(cls, "tableViewSelectionDidChange:", new ActionCallback((_, _, notification) => Dispatch(owner =>
+        {
+            var control = Send(notification, Selector("object"));
+            if (control == owner.table) owner.Select();
+            else if (control == owner.editorTable) owner.UpdateSettingsControls();
+        })), "v@:@");
         Add(cls, "numberOfRowsInTableView:", new CountCallback((_, _, table) => active is { closed: false } owner ? table == owner.editorTable ? owner.editorRows.Count : table == owner.table ? owner.visible.Count : 0 : 0), "q@:@");
         Add(cls, "tableView:objectValueForTableColumn:row:", new ValueCallback((_, _, table, column, row) =>
         {
@@ -39,7 +49,8 @@ public sealed partial class MacLauncher
         Add(cls, "tableView:setObjectValue:forTableColumn:row:", new SetValueCallback((_, _, table, value, column, row) => Dispatch(owner =>
         {
             var index = (int)row;
-            if (table == owner.editorTable && index >= 0 && index < owner.editorRows.Count && Text(Send(column, Selector("identifier"))) == "value") owner.editorRows[index].Value = Text(value);
+            if (table == owner.editorTable && index >= 0 && index < owner.editorRows.Count && Text(Send(column, Selector("identifier"))) == "value")
+            { owner.editorRows[index].Value = Text(value); owner.UpdateSettingsControls(); }
         })), "v@:@@@q");
         Add(cls, "windowShouldClose:", new BoolCallback((_, _, window) =>
         {

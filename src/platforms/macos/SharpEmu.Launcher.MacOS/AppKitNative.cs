@@ -23,6 +23,7 @@ internal static class AppKitNative
     [DllImport(ObjC, EntryPoint="objc_msgSend")] internal static extern nint Send(nint obj, nint sel, nint a, nint b, nint c);
     [DllImport(ObjC, EntryPoint="objc_msgSend")] internal static extern nint InitRect(nint obj, nint sel, Rect rect);
     [DllImport(ObjC, EntryPoint="objc_msgSend")] internal static extern nint InitWindow(nint obj, nint sel, Rect rect, nuint style, nuint backing, byte defer);
+    [DllImport(ObjC, EntryPoint="objc_msgSend")] internal static extern nint InitPopUpButton(nint obj, nint sel, Rect rect, byte pullsDown);
     [DllImport(ObjC, EntryPoint="objc_msgSend")] internal static extern void SetDouble(nint obj, nint sel, double value);
     [DllImport(ObjC, EntryPoint="objc_msgSend")] private static extern nint OtherEvent(nint cls, nint sel, nuint type, Point location, nuint flags, double timestamp, nint windowNumber, nint context, short subtype, nint data1, nint data2);
     internal static void StopOuterLoop(nint app)
