@@ -53,11 +53,11 @@ public sealed class MslDepthCompareFieldTests(ITestOutputHelper output)
         }
         var snapshot = new ResourceSnapshot(); var specialization = new ResourceSpecialization();
         Assert.True(ResourceMaterializer.Materialize(plan, new ResourceRuntimeInputs { UserData = userData },
-            ref snapshot, ref specialization, out var failure), failure);
+            ref snapshot, ref specialization, out var failure), $"Descriptor materialization failed: {failure}");
         var resources = ResourceMaterializer.ApplyTo(plan, specialization);
         Assert.Equal(2, resources.Info.Images.Count);
-        Assert.Single(resources.Info.Images.Where(static image => image.DepthCompare));
-        Assert.Single(resources.Info.Images.Where(static image => !image.DepthCompare));
+        Assert.Single(resources.Info.Images, static image => image.DepthCompare);
+        Assert.Single(resources.Info.Images, static image => !image.DepthCompare);
         var binding = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(program, 0, 40),
             false, ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
         var request = new ShaderCompileRequest(plan, resources, binding)
