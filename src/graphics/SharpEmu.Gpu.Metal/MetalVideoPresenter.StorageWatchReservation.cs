@@ -12,11 +12,14 @@ internal static partial class MetalVideoPresenter
     {
         private readonly CpuMappedPublication? publication;
         private readonly CpuMappedPublicationValidation? validation;
+        private readonly CpuMappedReadValidation? originalRead;
         internal StorageWatchReservation(CpuMappedPublication publication) => this.publication = publication;
         internal StorageWatchReservation(CpuMappedPublicationValidation validation) => this.validation = validation;
+        internal StorageWatchReservation(CpuMappedReadValidation originalRead) => this.originalRead = originalRead;
         internal bool IsCurrent(SingletonVolumeOriginalWatch watch) =>
             Volatile.Read(ref watch.State) != 2 && !Volatile.Read(ref watch.UnknownProducer) &&
-            (watch.Source.IsMappedCopyWriteWatchCurrent(watch.Mapping) ||
+            (originalRead is not null ? originalRead.IsOriginalCurrent(watch.Mapping) :
+                watch.Source.IsMappedCopyWriteWatchCurrent(watch.Mapping) ||
                 publication?.IsOriginalDisjointReadWatchCurrent(watch.Mapping) == true ||
                 validation?.IsOriginalDisjointReadWatchCurrent(watch.Mapping) == true);
     }

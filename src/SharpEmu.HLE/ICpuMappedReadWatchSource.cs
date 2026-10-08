@@ -10,6 +10,11 @@ public enum CpuMappedReadWatchStatus { Stale = 0, Current, Busy }
 /// No fresh observation may be substituted for an invalidated original watch.</summary>
 public interface ICpuMappedReadWatchSource : ICpuMappedCopySource
 {
+    // Cancel-only exclusion for the SAME original watched source. It is not a
+    // publication/disjoint-watch reservation and has no bytes or continuity.
+    CpuMappedPublicationPreparationResult TryPrepareMappedReadValidation(
+        CpuMappedCopyObservation original, out CpuMappedReadValidation? validation)
+    { validation = null; return CpuMappedPublicationPreparationResult.Unavailable; }
     CpuMappedCopyResult TryReadMappedCopyWithWriteWatch(ulong footprintAddress,
         ulong footprintByteCount, ulong sourceAddress, Span<byte> destination,
         out CpuMappedCopyObservation? observation);

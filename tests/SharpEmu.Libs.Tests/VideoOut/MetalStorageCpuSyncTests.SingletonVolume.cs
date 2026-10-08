@@ -426,6 +426,21 @@ public sealed partial class MetalStorageCpuSyncTests
         internal int Copies, Releases;
         internal CpuMappedCopyObservation? LastMapping;
         internal Exception? ReleaseFailure; internal Action? AfterCopy;
+        internal CpuMappedPublicationPreparationResult ReadPreparation = CpuMappedPublicationPreparationResult.Unavailable;
+        internal CpuMappedReadValidation? ReadValidation;
+        internal Action? BeforeReadPreparation;
+        internal Exception? ReadPreparationFailure;
+        internal int ReadPreparations;
+        public CpuMappedPublicationPreparationResult TryPrepareMappedReadValidation(CpuMappedCopyObservation original,
+            out CpuMappedReadValidation? validation)
+        {
+            ReadPreparations++; Assert.Same(LastMapping, original);
+            BeforeReadPreparation?.Invoke();
+            if (ReadPreparationFailure is not null) throw ReadPreparationFailure;
+            validation = ReadValidation; return ReadPreparation;
+        }
+        public CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(CpuMappedCopyObservation original) =>
+            WatchCurrent ? CpuMappedReadWatchStatus.Current : CpuMappedReadWatchStatus.Stale;
         public CpuMappedCopyResult TryReadMappedCopyWithWriteWatch(ulong footprintAddress, ulong footprintByteCount,
             ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)
         {

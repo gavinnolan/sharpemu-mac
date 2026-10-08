@@ -357,13 +357,28 @@ internal static partial class MetalVideoPresenter
     /// draws, blits, and flips of the same address all see one texture.</summary>
     private static GuestImage EnsureStorageImage(nint device, GuestDrawTexture descriptor)
     {
+        var construction = PrepareSingletonVolumeConstructionRead(descriptor);
+        Exception? primary = null;
+        try
+        {
+            var image = EnsureStorageImageCore(device, descriptor, construction?.Reservation ?? default);
+            construction?.SetNativeOwner(image);
+            return image;
+        }
+        catch (Exception failure) { primary = failure; throw; }
+        finally { construction?.Finish(primary); }
+    }
+
+    private static GuestImage EnsureStorageImageCore(nint device, GuestDrawTexture descriptor,
+        StorageWatchReservation originalRead)
+    {
         // Decode texture descriptor semantics before looking up a live image.
         // Render-target codes are a different namespace; substituting RGBA8
         // here changes both native binding type and the seed's byte layout.
         var nativeFormat = StorageTextureFormat(descriptor);
         var storageCpuOrigin = StorageCpuOrigin(descriptor);
         ValidateStorageCpuSeedSession(storageCpuOrigin); // before any native allocation or live reuse
-        ValidateSingletonVolumeForMaterialization(descriptor, storageCpuOrigin); // tracker checks outside _gate
+        ValidateSingletonVolumeForMaterialization(descriptor, storageCpuOrigin, originalRead); // tracker checks outside _gate
         if (!_selectedStorageMipAssociations.TryGetValue(descriptor, out _))
             RejectAddressOnlySelectedStorageAlias(descriptor.Address);
         descriptor = PrepareDrawTextureUpload(descriptor);
@@ -471,7 +486,7 @@ internal static partial class MetalVideoPresenter
             ReplaceDrawTextureContents(image.Texture, descriptor, seedLayout.Pitch, nativeFormat);
             image.Initialized = true;
             image.ContentVersion++;
-            ValidateSingletonVolumeOriginalContent(storageCpuOrigin); // completed synchronous CPU upload, no restamp
+            ValidateSingletonVolumeOriginalContentWithReservation(storageCpuOrigin, originalRead); // completed CPU upload, original receipt
             lock (_gate)
             {
                 ValidateStorageCpuSeedSession(storageCpuOrigin); // native upload cannot refresh original ownership
@@ -493,10 +508,10 @@ internal static partial class MetalVideoPresenter
                     ValidateStorageImageView(raced, descriptor, nativeFormat);
                     return raced;
                 }
-                PublishStorageImageLocked(descriptor, selected, image, extent);
+                PublishStorageImageWithOriginalReadLocked(descriptor, selected, image, extent, originalRead);
                 installed = true;
             }
-            ValidateSingletonVolumeOriginalContent(storageCpuOrigin); // post-publication original veto, no new tuple
+            ValidateSingletonVolumeOriginalContentWithReservation(storageCpuOrigin, originalRead); // same original, held read exclusion
             return image;
         }
         catch (Exception failure)

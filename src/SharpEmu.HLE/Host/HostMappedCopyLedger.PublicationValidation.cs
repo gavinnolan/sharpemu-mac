@@ -28,7 +28,7 @@ public sealed unsafe partial class HostMappedCopyLedger
         {
             lock (gate)
             {
-                if (!IsCurrent(backing, original) || publicationCount + validationCount >= MaximumPublications ||
+                if (!IsCurrent(backing, original) || publicationCount + validationCount + readValidationCount >= MaximumPublications ||
                     HasOverlappingPublicationLocked(original.FootprintAddress, original.FootprintByteCount))
                     return CpuMappedPublicationPreparationResult.Rejected;
                 var cursor = original.SourceAddress;

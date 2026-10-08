@@ -25,6 +25,8 @@ public sealed unsafe partial class HostMappedCopyLedger
             if (Overlaps(effect, new(item.Original.FootprintAddress, item.Original.FootprintByteCount))) return true;
         for (var item = validations; item is not null; item = item.Next)
             if (Overlaps(effect, new(item.Original.FootprintAddress, item.Original.FootprintByteCount))) return true;
+        for (var item = readValidations; item is not null; item = item.Next)
+            if (Overlaps(effect, new(item.Original.FootprintAddress, item.Original.FootprintByteCount))) return true;
         return false;
     }
 
@@ -73,7 +75,7 @@ public sealed unsafe partial class HostMappedCopyLedger
             {
                 if (!IsCurrent(backing, original))
                     return PublicationDeclined("original-mapping-not-current", capture.WriterRevision);
-                if (publicationCount + validationCount >= MaximumPublications)
+                if (publicationCount + validationCount + readValidationCount >= MaximumPublications)
                     return PublicationDeclined("publication-slot-budget", capture.WriterRevision);
                 if (bytes > MaximumRetainedPublicationBytes - retainedPublicationBytes)
                     return PublicationDeclined("publication-retained-byte-budget", capture.WriterRevision);

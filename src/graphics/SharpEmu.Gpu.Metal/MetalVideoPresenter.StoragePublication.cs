@@ -12,7 +12,12 @@ internal static partial class MetalVideoPresenter
 
     private static void PublishStorageImageLocked(GuestDrawTexture descriptor,
         SelectedStorageMipAssociation? selected, GuestImage image,
-        (uint Width, uint Height, ulong ByteCount) extent)
+        (uint Width, uint Height, ulong ByteCount) extent) =>
+        PublishStorageImageWithOriginalReadLocked(descriptor, selected, image, extent, default);
+
+    private static void PublishStorageImageWithOriginalReadLocked(GuestDrawTexture descriptor,
+        SelectedStorageMipAssociation? selected, GuestImage image,
+        (uint Width, uint Height, ulong ByteCount) extent, StorageWatchReservation originalRead)
     {
         var originalNativeProof = selected is null ? null : PrepareSelectedNativeOriginalProofLocked(selected, image);
         var ownerAdded = false;
@@ -59,7 +64,7 @@ internal static partial class MetalVideoPresenter
                     _guestImages.Add(descriptor.Address, image);
                     nativeAdded = true;
                     _guestImageExtents[descriptor.Address] = extent;
-                    TransferSingletonVolumeOriginalWatchLocked(image, originalSeed);
+                    TransferSingletonVolumeOriginalWatchLocked(image, originalSeed, originalRead);
                     return;
                 }
                 _guestImages.Add(descriptor.Address, image);

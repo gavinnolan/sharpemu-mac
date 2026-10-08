@@ -200,9 +200,10 @@ internal static partial class MetalVideoPresenter
             throw new InvalidOperationException("Metal singleton volume lost its ORIGINAL full mapping/read/watch/protected token/session.");
     }
 
-    private static void ValidateSingletonVolumeForMaterialization(GuestDrawTexture descriptor, StorageCpuSeedOrigin? incoming)
+    private static void ValidateSingletonVolumeForMaterialization(GuestDrawTexture descriptor, StorageCpuSeedOrigin? incoming,
+        StorageWatchReservation reservation = default)
     {
-        ValidateSingletonVolumeOriginalContent(incoming);
+        ValidateSingletonVolumeOriginalContentWithReservation(incoming, reservation);
         StorageCpuSeedOrigin? existing = null;
         lock (_gate)
             if (_guestImages.TryGetValue(descriptor.Address, out var image) && image.StorageCpuOrigin?.VolumeWatch is not null)
@@ -237,11 +238,12 @@ internal static partial class MetalVideoPresenter
         image.TextureType == MtlTextureType3D && image.Depth == origin.Layout.Depth && image.ArrayLength == 1 &&
         image.Width == origin.Layout.Width && image.Height == origin.Layout.Height && image.Format == origin.Layout.NativeFormat.Format;
 
-    private static void TransferSingletonVolumeOriginalWatchLocked(GuestImage image, StorageCpuSeedOrigin origin)
+    private static void TransferSingletonVolumeOriginalWatchLocked(GuestImage image, StorageCpuSeedOrigin origin,
+        StorageWatchReservation reservation = default)
     {
         if (origin.VolumeWatch is not { } watch) return;
         if (_closed || _guestWorkFailure is not null || _singletonVolumeOriginalCleanupFailure is not null ||
-            !ReferenceEquals(_guestMemory, origin.Memory) || !watch.IsCurrent || watch.Image is not null ||
+            !ReferenceEquals(_guestMemory, origin.Memory) || !reservation.IsCurrent(watch) || watch.Image is not null ||
             !image.Initialized || image.Texture == 0 || image.ContentVersion != 1 ||
             image.TextureType != MtlTextureType3D || image.Format != origin.Layout.NativeFormat.Format ||
             image.Width != origin.Layout.Width || image.Height != origin.Layout.Height || image.Depth != origin.Layout.Depth || image.ArrayLength != 1 ||
