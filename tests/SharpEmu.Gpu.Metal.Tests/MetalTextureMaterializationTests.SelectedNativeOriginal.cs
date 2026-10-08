@@ -116,7 +116,7 @@ public sealed partial class MetalTextureMaterializationTests
             {
                 var refused = Assert.Throws<TargetInvocationException>(() => native.Dispatch(next!, false, -17.25f, address + 524288));
                 Assert.IsType<InvalidOperationException>(refused.InnerException);
-                output.WriteLine("selected-native case=session; released native handle never inspected; stale DTO admission veto");
+                output.WriteLine("selected-native case=session; first production upload/dispatch CBstatus=4; released native handle never inspected; stale DTO admission veto");
                 return;
             }
             next = Assert.Single(SelectedMipSnapshots(memory, raw, access: GuestImageAccess.Read));
