@@ -105,6 +105,135 @@ public sealed class MetalGuestAliasDiagnosticsTests
         }
     }
 
+    [Theory]
+    [InlineData(false, 3u, 4u, 2u, "native-type")]
+    [InlineData(true, 3u, 4u, 2u, "native-type")]
+    [InlineData(true, 2u, 4u, 2u, "native-depth")]
+    [InlineData(true, 2u, 1u, 2u, "native-layers")]
+    public void ActualSampledRefusalKeepsFirstShapePredicateAndDefaultOffPolicy(
+        bool enabled, uint type, uint depth, uint layers, string reason)
+    {
+        using var state = new MetalGuestFailureTests.PresenterState();
+        using var diagnostic = new AliasDiagnosticState(enabled);
+        var memory = new NoReadMemory();
+        using var attached = new GuestMemoryState(memory);
+        using var image = new AliasImage(1, 1, type, depth, layers);
+        var error = Reject(SingletonTexture());
+        Assert.Contains("tiled or mip-range snapshot required", error.Message);
+        Assert.Contains("current_selected=[absent]", error.Message);
+        if (enabled)
+        {
+            Assert.Contains("sampled_alias_first_refusal=" + reason, error.Message);
+            Assert.Contains($"candidate_native_type={type} candidate_depth={depth} candidate_layers={layers}", error.Message);
+            Assert.Contains("candidate_original_present=False", error.Message);
+        }
+        else
+        {
+            Assert.DoesNotContain("sampled_alias_first_refusal", error.Message);
+            Assert.Equal(0, diagnostic.Count);
+        }
+        Assert.Equal(0, memory.Reads);
+    }
+
+    [Theory]
+    [InlineData(2u, 1u, "width-outside-owner")]
+    [InlineData(1u, 2u, "height-outside-owner")]
+    public void ActualSampledRefusalKeepsFirstTiledExtentPredicate(uint width, uint height, string reason)
+    {
+        using var state = new MetalGuestFailureTests.PresenterState();
+        using var diagnostic = new AliasDiagnosticState(true);
+        using var attached = new GuestMemoryState(new NoReadMemory());
+        using var image = new AliasImage(1, 1, 2, 1, 1);
+        var error = Reject(SingletonTexture() with { Width = width, Height = height, Pitch = width });
+        Assert.Contains("sampled_alias_first_refusal=" + reason, error.Message);
+        Assert.Contains("current_selected=[absent]", error.Message);
+    }
+
+    [Fact]
+    public void FirstMatcherSnapshotIncludesActualCachedCreationContextWithoutReadingProducerBytes()
+    {
+        using var state = new MetalGuestFailureTests.PresenterState();
+        using var diagnostic = new AliasDiagnosticState(true);
+        var memory = new NoReadMemory();
+        using var attached = new GuestMemoryState(memory);
+        using var image = new AliasImage(1, 1, 3, 1, 1);
+        uint[] words = [0x80115200, 0x03800000, 0, 0xD1B00F2E, 0, 0x00700000, 0, 0];
+        var producer = SingletonTexture() with { IsStorage = true, Type = 13, SourceByteCount = 65536, Descriptor = words };
+        long sequence;
+        using (MetalVideoPresenter.EnterGuestQueue("oregon.original.producer", 6))
+            sequence = MetalVideoPresenter.SubmitOrderedGuestAction(() =>
+            {
+                var cached = typeof(MetalVideoPresenter).GetMethod("CaptureStorageImageOrigin", BindingFlags.Static | BindingFlags.NonPublic)!
+                    .Invoke(null, [producer]);
+                image.Set("DiagnosticOrigin", cached);
+            }, "capture ordinary diagnostic context");
+        MetalVideoPresenter.DrainGuestWork(0, 0);
+        var error = Reject(SingletonTexture());
+        Assert.Contains($"candidate_creation_kind=storage candidate_creation_sequence={sequence}", error.Message);
+        Assert.Contains("candidate_creation_queue='oregon.original.producer' candidate_creation_submission=6", error.Message);
+        Assert.Contains("candidate_creation_type=13", error.Message);
+        Assert.Contains("candidate_creation_source_bytes=65536", error.Message);
+        Assert.Contains("candidate_creation_raw=[80115200,03800000,00000000,D1B00F2E,00000000,00700000,00000000,00000000]", error.Message);
+        Assert.Contains("candidate_metadata_observation_only=True", error.Message);
+        Assert.Equal(0, memory.Reads);
+    }
+
+    [Fact]
+    public void FirstMatcherSnapshotSaturatesBeforeOptionalFormatting()
+    {
+        using var state = new MetalGuestFailureTests.PresenterState();
+        using var diagnostic = new AliasDiagnosticState(true, 63);
+        using var attached = new GuestMemoryState(new NoReadMemory());
+        using var image = new AliasImage(1, 1, 3, 1, 1);
+        Assert.Contains("sampled_alias_first_refusal=native-type", Reject(SingletonTexture()).Message);
+        Assert.Equal(64, diagnostic.Count);
+        Assert.DoesNotContain("sampled_alias_first_refusal", Reject(SingletonTexture()).Message);
+        Assert.Equal(64, diagnostic.Count);
+    }
+
+    private static GuestDrawTexture SingletonTexture() => new(Address, 1, 1, 10, 0, [], false, false,
+        Type: 9, Pitch: 1, TileMode: 27, ResourceMipLevels: 1);
+
+    private sealed class AliasImage : IDisposable
+    {
+        private readonly IDictionary images = Dictionary("_guestImages");
+        private readonly object? previous;
+        private readonly bool hadPrevious;
+        private readonly object image;
+        internal AliasImage(uint width, uint height, uint type, uint depth, uint layers)
+        {
+            hadPrevious = images.Contains(Address); previous = images[Address];
+            image = Activator.CreateInstance(typeof(MetalVideoPresenter).GetNestedType("GuestImage", BindingFlags.NonPublic)!, true)!;
+            Set("Width", width); Set("Height", height); Set("TextureType", type); Set("Depth", depth);
+            Set("ArrayLength", layers); Set("Initialized", true); Set("GpuWritten", true); Set("ContentVersion", 2);
+            images[Address] = image; // Scalar failure metadata only; no native handle or ownership claim.
+        }
+        internal void Set(string name, object? value) => image.GetType().GetField(name)!.SetValue(image, value);
+        public void Dispose() { if (hadPrevious) images[Address] = previous; else images.Remove(Address); }
+    }
+    private sealed class AliasDiagnosticState : IDisposable
+    {
+        private readonly Dictionary<FieldInfo, object?> saved = new();
+        internal AliasDiagnosticState(bool enabled, int count = 0)
+        {
+            Set("_sampledAliasDiagnosticsEnabled", enabled); Set("_sampledAliasDiagnosticCount", count);
+            Set("_imageProvenanceEnabled", true);
+        }
+        private void Set(string name, object value)
+        {
+            var field = typeof(MetalVideoPresenter).GetField(name, BindingFlags.Static | BindingFlags.NonPublic)!;
+            saved.Add(field, field.GetValue(null)); field.SetValue(null, value);
+        }
+        internal int Count => (int)typeof(MetalVideoPresenter).GetField("_sampledAliasDiagnosticCount", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+        public void Dispose() { foreach (var entry in saved) entry.Key.SetValue(null, entry.Value); }
+    }
+    private sealed class NoReadMemory : ICpuMemory
+    {
+        internal int Reads;
+        public bool TryRead(ulong address, Span<byte> destination) { Reads++; throw new InvalidOperationException("Alias failure must not read producer bytes."); }
+        public bool TryWrite(ulong address, ReadOnlySpan<byte> source) => throw new InvalidOperationException("No alias write allowed.");
+    }
+
     private static NotSupportedException Reject(GuestDrawTexture texture)
     {
         return Assert.Throws<NotSupportedException>(() =>
