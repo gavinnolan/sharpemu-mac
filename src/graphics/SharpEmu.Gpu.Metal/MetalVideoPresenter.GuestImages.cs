@@ -80,6 +80,7 @@ internal static partial class MetalVideoPresenter
         /// full-texture blit on every draw.</summary>
         public int ContentVersion;
         public ImageDiagnosticOrigin DiagnosticOrigin;
+        public MetalColorMipPlacement.Observation? ColorPhysicalView;
         public ImageDiagnosticWork DiagnosticMutation;
         // Always-present creation layout; independent of diagnostic opt-in.
         public MetalStorageCpuLayout? StorageCpuLayout;
@@ -136,6 +137,7 @@ internal static partial class MetalVideoPresenter
         new(StringComparer.Ordinal);
     private static long _executingGuestWorkSequence;
     private static long _takenGuestWorkSequence;
+    private static object? _takenDepthCubeProducerWork; // exact accepted DTO, not a native completion receipt
     private static long _takenGuestPrefixProducerSequence;
     private static Exception? _guestWorkFailure;
     [ThreadStatic]
@@ -619,7 +621,9 @@ internal static partial class MetalVideoPresenter
             return accepted;
         }
         var prefixProducer = GuestPrefixProducerForAdmission(checked(_enqueuedGuestWorkSequence + 1), queue);
+        var nativeDepthFaceAdmission = PrepareNativeDepthFaceLocked(work, checked(_enqueuedGuestWorkSequence + 1), queue);
         var selectedMipAdmission = PrepareSelectedStorageMipAdmissionLocked(work, queue);
+        var colorPhysicalAdmission = PrepareColorPhysicalAdmissionLocked(work);
         var retainedVolume = RetainQueuedSingletonVolumeOriginalsLocked(work);
         var oldSequence = _enqueuedGuestWorkSequence;
         var oldCount = _pendingGuestWorkCount;
@@ -664,6 +668,8 @@ internal static partial class MetalVideoPresenter
 
             if (retainedVolume) _singletonVolumeAfterOrdinaryQueueInsert?.Invoke();
             PublishSelectedStorageMipAdmissionLocked(selectedMipAdmission);
+            PublishColorPhysicalAdmissionLocked(colorPhysicalAdmission);
+            PublishNativeDepthFaceLocked(nativeDepthFaceAdmission);
             _pendingGuestWorkCount++;
             var total = _pendingGuestWorkBytes + payloadBytes;
             _pendingGuestWorkBytes = total < _pendingGuestWorkBytes ? ulong.MaxValue : total;
@@ -680,7 +686,7 @@ internal static partial class MetalVideoPresenter
             RecordGuestSubmissionPrefixAdmission(sequence, queue);
             return sequence;
         }
-        catch (Exception failure) when (retainedVolume)
+        catch (Exception failure) when (retainedVolume || nativeDepthFaceAdmission is not null)
         {
             if (node?.List is { } admittedQueue) admittedQueue.Remove(node);
             if (newQueue)
@@ -824,6 +830,7 @@ internal static partial class MetalVideoPresenter
                 // Exact take ownership spans the gaps before execution begins
                 // and after it ends but before its completion is published.
                 _takenGuestWorkSequence = work.Sequence;
+                _takenDepthCubeProducerWork = work.Work;
                 _takenGuestPrefixProducerSequence = work.PrefixProducerSequence;
                 queue.RemoveFirst();
                 _pendingGuestWorkCount--;
@@ -856,7 +863,7 @@ internal static partial class MetalVideoPresenter
         lock (_gate)
         {
             if (_takenGuestWorkSequence == pending.Sequence)
-            { _takenGuestWorkSequence = 0; _takenGuestPrefixProducerSequence = 0; }
+            { _takenGuestWorkSequence = 0; _takenGuestPrefixProducerSequence = 0; _takenDepthCubeProducerWork = null; }
             if (_textureSourceGraphEnabled)
             {
                 ReleaseGuestPayloadWork(pending.Work);
@@ -1023,7 +1030,7 @@ internal static partial class MetalVideoPresenter
                     lock (_gate)
                     {
                         if (_takenGuestWorkSequence == pendingGuestWork.Sequence)
-                        { _takenGuestWorkSequence = 0; _takenGuestPrefixProducerSequence = 0; }
+                        { _takenGuestWorkSequence = 0; _takenGuestPrefixProducerSequence = 0; _takenDepthCubeProducerWork = null; }
                         if (_textureSourceGraphEnabled) LatchTextureSourceDrainFailureLocked(exception);
                         else
                         {
@@ -1106,6 +1113,7 @@ internal static partial class MetalVideoPresenter
     private static void ExecuteGuestImageWrite(nint device, nint queue, GuestImageWrite write)
     {
         RejectAddressOnlySelectedStorageAlias(write.Address);
+        RejectColorPhysicalAddressOnly(write.Address);
         GuestImage? image;
         lock (_gate)
         {
@@ -1118,6 +1126,7 @@ internal static partial class MetalVideoPresenter
         }
 
         Require2DGuestImage(image, "CPU image write/clear");
+        RejectColorPhysicalAddressOnly(write.Address, checked((ulong)image.Width * image.Height * MetalRenderTargetFormat.GetBytesPerPixel(image.Format)));
         if (write.Pixels is { } pixels)
         {
             var bytesPerPixel = MetalRenderTargetFormat.GetBytesPerPixel(image.Format);
@@ -1153,6 +1162,7 @@ internal static partial class MetalVideoPresenter
 
     private static void ExecuteOrderedGuestFlip(nint device, nint queue, OrderedGuestFlip flip)
     {
+        RejectColorPhysicalAddressOnly(flip.Address);
         // The flipped VideoOut address is the display buffer's start, but games
         // render into the pixel surface, which sits past the buffer's surface
         // metadata (64KB+ on PS5). Prefer a drawn image inside the buffer's
@@ -1170,6 +1180,7 @@ internal static partial class MetalVideoPresenter
         }
 
         Require2DGuestImage(image, "VideoOut flip");
+        RejectColorPhysicalAddressOnly(flip.Address, checked((ulong)image.Width * image.Height * MetalRenderTargetFormat.GetBytesPerPixel(image.Format)));
         // Capture the mutable image into an immutable generation at this exact
         // queue position; later work cannot change the frame this flip selected.
         var captured = new GuestImage
@@ -1235,7 +1246,9 @@ internal static partial class MetalVideoPresenter
     private static void ExecuteGuestImageBlit(nint queue, GuestImageBlit blit)
     {
         RejectAddressOnlySelectedStorageAlias(blit.SourceAddress);
+        RejectColorPhysicalAddressOnly(blit.SourceAddress);
         RejectAddressOnlySelectedStorageAlias(blit.DestinationAddress);
+        RejectColorPhysicalAddressOnly(blit.DestinationAddress);
         GuestImage? source, destination;
         lock (_gate)
         {
@@ -1250,6 +1263,8 @@ internal static partial class MetalVideoPresenter
 
         Require2DGuestImage(source, "guest image blit source");
         Require2DGuestImage(destination, "guest image blit destination");
+        RejectColorPhysicalAddressOnly(blit.SourceAddress, checked((ulong)source.Width * source.Height * MetalRenderTargetFormat.GetBytesPerPixel(source.Format)));
+        RejectColorPhysicalAddressOnly(blit.DestinationAddress, checked((ulong)destination.Width * destination.Height * MetalRenderTargetFormat.GetBytesPerPixel(destination.Format)));
         CopyTexture(queue, source.Texture, destination.Texture);
         destination.MarkContentChangedWithDiagnostic("guest-blit");
     }
@@ -1320,6 +1335,7 @@ internal static partial class MetalVideoPresenter
         uint pitchInPixel)
     {
         RejectAddressOnlySelectedStorageAlias(address);
+        RejectColorPhysicalAddressOnly(address);
         uint formatTag;
         byte[]? initialData;
         ICpuMemory? originalMemory = null;
@@ -1331,6 +1347,11 @@ internal static partial class MetalVideoPresenter
             if (_guestImages.TryGetValue(address, out var existing))
             {
                 Require2DGuestImage(existing, "display image materialization");
+                if (MetalColorMipPlacement.Enabled)
+                {
+                    var sourcePitch = pitchInPixel == 0 ? width : Math.Max(pitchInPixel, width);
+                    RejectColorPhysicalAddressOnly(address, checked((ulong)sourcePitch * height * MetalRenderTargetFormat.GetBytesPerPixel(existing.Format)));
+                }
                 return existing;
             }
 
@@ -1339,6 +1360,15 @@ internal static partial class MetalVideoPresenter
                 return null;
             }
 
+            // Guard the full source BEFORE taking pending bytes, allocating a
+            // native texture, or reading the guest seed. A start point below a
+            // finite allocation does not prove its pitched rows miss that range.
+            if (MetalColorMipPlacement.Enabled)
+            {
+                var sourcePitch = pitchInPixel == 0 ? width : Math.Max(pitchInPixel, width);
+                var sourceFormat = DecodeGuestFormatTag(formatTag);
+                RejectColorPhysicalAddressOnly(address, checked((ulong)sourcePitch * height * MetalRenderTargetFormat.GetBytesPerPixel(sourceFormat)));
+            }
             _pendingGuestImageInitialData.Remove(address, out initialData);
             if (captureDisplayOriginal)
             {

@@ -217,6 +217,11 @@ internal static partial class MetalNative
     public static partial void SendVoidCopyTexture(nint receiver, nint selector, nint source, nint destination);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendCopyTextureSlice(nint receiver, nint selector, nint source,
+        nuint sourceSlice, nuint sourceLevel, MtlOrigin sourceOrigin, MtlSize sourceSize,
+        nint destination, nuint destinationSlice, nuint destinationLevel, MtlOrigin destinationOrigin);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint SendBuffer(nint receiver, nint selector, nint bytes, nuint length, nuint options);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]

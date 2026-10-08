@@ -257,8 +257,14 @@ internal static partial class MetalVideoPresenter
                 try
                 {
                     Exception? volumeCleanup = null;
-                    try { ReleaseSingletonVolumeNativeOriginals(); }
+                    try { RetireNativeDepthCubeFromRenderOwner(); }
                     catch (Exception failure) { volumeCleanup = failure; }
+                    try { ReleaseSingletonVolumeNativeOriginals(); }
+                    catch (Exception failure)
+                    {
+                        if (volumeCleanup is null) volumeCleanup = failure;
+                        else try { volumeCleanup.Data["MetalSingletonVolumeSecondaryCleanup"] = failure; } catch { }
+                    }
                     try { ReleaseSelectedStorageMipImages(); }
                     catch (Exception later) when (volumeCleanup is not null || shutdownFailure is not null)
                     {

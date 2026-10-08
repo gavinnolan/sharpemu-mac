@@ -15,6 +15,7 @@ namespace SharpEmu.Gpu.Metal;
 internal static partial class MetalVideoPresenter
 {
     private static nint _batchCommandBuffer;
+    private static nint _batchQueue;
     private static bool _batchOpen;
     private static nint _lastFlushedCommandBuffer;
 
@@ -27,6 +28,7 @@ internal static partial class MetalVideoPresenter
             return _batchCommandBuffer;
         }
 
+        _batchQueue = queue;
         _batchCommandBuffer = MetalNative.Send(queue, MetalNative.Selector("commandBuffer"));
         _batchOpen = _batchCommandBuffer != 0;
         return _batchCommandBuffer;
@@ -47,6 +49,7 @@ internal static partial class MetalVideoPresenter
         _batchCommandBuffer = 0;
         if (_textureSourceGraphEnabled) CommitTextureSourceNativeCommands(commandBuffer);
         else MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
+        MarkNativeDepthFaceBatchCommitted(commandBuffer);
         TagUploadPages(commandBuffer);
         TagSnapshotResources(commandBuffer);
         TagFaultScan(commandBuffer);

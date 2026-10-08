@@ -267,6 +267,7 @@ internal static partial class MetalVideoPresenter
                 if (provenance is not null) _cpuTextureSnapshotProvenance.Add(copy, provenance);
                 CopySelectedStorageMip(source, copy);
                 CopyStorageCpuSeedOrigin(source, copy);
+                CopyNativeDepthCubeCapture(source, copy);
             }
             catch
             {
