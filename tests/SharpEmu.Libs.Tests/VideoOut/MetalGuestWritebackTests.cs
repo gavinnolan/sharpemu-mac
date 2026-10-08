@@ -316,6 +316,7 @@ public sealed class MetalGuestWritebackTests
             Set("_guestPrefixCapture", null);
             Set("_guestPrefixExecution", false);
             Set("_takenGuestWorkSequence", 0L);
+            Set("_takenDepthCubeProducerWork", null);
             Set("_takenGuestPrefixProducerSequence", 0L);
             Set("_guestPrefixProducerSequence", 0L);
             Set("_guestPrefixProducerQueue", null);

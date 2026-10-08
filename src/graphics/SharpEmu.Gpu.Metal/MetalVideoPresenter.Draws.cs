@@ -467,6 +467,7 @@ internal static partial class MetalVideoPresenter
                     target.ComponentSwap,
                     out targetFormats[index]))
             {
+                RequireNativeDepthFaceExecution(work, false, "unsupported color target format");
                 RequireGuestPrefixExecution(false, "unsupported color target format");
                 if (_textureSourceGraphEnabled)
                     throw new NotSupportedException("Metal ordered color producer has an unsupported render-target format.");
@@ -480,6 +481,7 @@ internal static partial class MetalVideoPresenter
 
         if (draw.RenderState.Blends.Count != targetFormats.Length)
         {
+            RequireNativeDepthFaceExecution(work, false, "blend/target count mismatch");
             RequireGuestPrefixExecution(false, "blend/target count mismatch");
             if (_textureSourceGraphEnabled) throw new NotSupportedException("Metal ordered color producer blend/target count mismatch.");
             ReturnPooledGuestData(draw);
@@ -523,6 +525,7 @@ internal static partial class MetalVideoPresenter
             var image = EnsureGuestRenderTarget(device, target, targetFormats[index].Format);
             if (image is null)
             {
+                RequireNativeDepthFaceExecution(work, false, "missing color attachment");
                 RequireGuestPrefixExecution(false, "missing color attachment");
                 if (_textureSourceGraphEnabled) throw new InvalidOperationException("Metal ordered color producer has no actual attachment.");
                 ReturnPooledGuestData(draw);
@@ -537,6 +540,7 @@ internal static partial class MetalVideoPresenter
 
         if (targetTextures[0] == 0)
         {
+            RequireNativeDepthFaceExecution(work, false, "empty color attachment");
             RequireGuestPrefixExecution(false, "empty color attachment");
             if (_textureSourceGraphEnabled) throw new InvalidOperationException("Metal ordered color producer has an empty actual attachment.");
             ReturnPooledGuestData(draw);
@@ -568,6 +572,7 @@ internal static partial class MetalVideoPresenter
         var pipeline = graphPipeline;
         if (!_textureSourceGraphEnabled && !TryGetDrawPipeline(device, draw, targetFormats, depth is not null, out pipeline))
         {
+            RequireNativeDepthFaceExecution(work, false, "draw pipeline creation failed");
             RequireGuestPrefixExecution(false, "draw pipeline creation failed");
             ReturnPooledGuestData(draw);
             return;
@@ -576,6 +581,7 @@ internal static partial class MetalVideoPresenter
         TraceGuestWorkStage("draw.pipeline.end");
         TraceGuestWorkStage("draw.textures.begin");
         if (!_textureSourceGraphEnabled) commandBuffer = BeginBatchedGuestCommands(queue);
+        RequireNativeDepthFaceExecution(work, commandBuffer != 0, "missing draw command buffer");
         RequireGuestPrefixExecution(commandBuffer != 0, "missing draw command buffer");
         Span<nint> textureHandles = stackalloc nint[draw.Textures.Length];
         Span<bool> textureOwned = stackalloc bool[draw.Textures.Length];
@@ -623,7 +629,7 @@ internal static partial class MetalVideoPresenter
 
         var encoder = MetalNative.Send(
             commandBuffer, MetalNative.Selector("renderCommandEncoderWithDescriptor:"), pass);
-        if (_guestPrefixExecution && encoder == 0)
+        if ((_guestPrefixExecution || MetalDepthFacePlacement.Enabled && _nativeDepthFaceWorks.TryGetValue(work, out _)) && encoder == 0)
         {
             var failure = new InvalidOperationException("Metal completed submission prefix has no draw encoder.");
             // These per-call retains have not reached EncodeDrawBindings' normal
@@ -644,6 +650,11 @@ internal static partial class MetalVideoPresenter
         EncodeDrawCall(encoder, draw);
 
         MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
+        if (depth is not null && MetalDepthFacePlacement.Enabled && _nativeDepthFaceWorks.TryGetValue(work, out _))
+        {
+            depth.MarkContentChanged();
+            SealNativeDepthFace(work, depth, commandBuffer, queue);
+        }
         TraceGuestWorkStage("draw.raster_encoding.end");
         if (_textureSourceGraphEnabled)
         {
@@ -678,7 +689,7 @@ internal static partial class MetalVideoPresenter
             }
         }
 
-        depth?.MarkContentChanged();
+        if (!MetalDepthFacePlacement.Enabled || !_nativeDepthFaceWorks.TryGetValue(work, out _)) depth?.MarkContentChanged();
         ReturnPooledGuestData(draw);
     }
 
@@ -1405,11 +1416,14 @@ internal static partial class MetalVideoPresenter
         MtlPixelFormat format)
     {
         RejectAddressOnlySelectedStorageAlias(target.Address, checked((ulong)target.Width * target.Height * 16));
+        if (MetalColorMipPlacement.TryGet(target, out _) && format != MtlPixelFormat.Rgba16Float)
+            throw new NotSupportedException("Metal selected color physical target requires the original RGBA16Float native format.");
         lock (_gate)
         {
             if (_guestImages.TryGetValue(target.Address, out var existing))
             {
                 Require2DGuestImage(existing, "render target");
+                ValidateColorPhysicalNativeTarget(target, existing, format);
                 if (existing.Width == target.Width && existing.Height == target.Height)
                     return existing;
             }
@@ -1427,6 +1441,7 @@ internal static partial class MetalVideoPresenter
             Height = target.Height,
             Format = format,
             DiagnosticOrigin = CaptureColorImageOrigin(target),
+            ColorPhysicalView = MetalColorMipPlacement.TryGet(target, out var physicalView) ? physicalView : null,
         };
         if (image.Texture == 0)
         {
@@ -1443,7 +1458,8 @@ internal static partial class MetalVideoPresenter
             }
 
             _guestImages[target.Address] = image;
-            _guestImageExtents[target.Address] = (target.Width, target.Height, (ulong)target.Width * target.Height * 4);
+            _guestImageExtents[target.Address] = (target.Width, target.Height, MetalColorMipPlacement.TryGet(target, out var extentView)
+                ? extentView.ByteCount : (ulong)target.Width * target.Height * 4);
         }
 
         // Pending initial data is RGBA8; only 4-byte-texel targets take it verbatim.
@@ -1464,6 +1480,7 @@ internal static partial class MetalVideoPresenter
 
     private static void RetireGuestImageVariantLocked(ulong address, GuestImage retired)
     {
+        NoteFiniteStorageOwnerRetirementLocked(retired);
         var key = (address, retired.Width, retired.Height, retired.Format);
         if (_guestImageVariants.Remove(key, out var previous))
         {
@@ -1495,6 +1512,12 @@ internal static partial class MetalVideoPresenter
         uint height)
     {
         var address = target.Address;
+        GuestImage? previous = null;
+        if (MetalDepthFacePlacement.TryGet(target, out _))
+        {
+            lock (_gate) _guestDepthImages.TryGetValue(address, out previous);
+            ValidateNativeDepthFaceOwner(target, previous);
+        }
         lock (_gate)
         {
             if (target.ReadAddress != 0 && target.ReadAddress != address)
@@ -1506,6 +1529,8 @@ internal static partial class MetalVideoPresenter
                 existing.Width == width &&
                 existing.Height == height)
             {
+                if (MetalDepthFacePlacement.TryGet(target, out _) && !ReferenceEquals(existing, previous))
+                    throw new NotSupportedException("Metal native depth face registry owner changed during original validation.");
                 return existing;
             }
         }
@@ -1528,15 +1553,49 @@ internal static partial class MetalVideoPresenter
             Height = height,
             Format = MtlPixelFormat.Depth32Float,
         };
-        lock (_gate)
+        var finite = MetalDepthFacePlacement.TryGet(target, out var original);
+        if (MetalDepthFacePlacement.TryGetDepthSpan(target, out var depthSpan))
+            _nativeDepthImageSpans.Add(image, depthSpan);
+        var installed = false;
+        Exception? primary = null;
+        try
         {
-            if (_guestDepthImages.Remove(address, out var replaced))
+            if (finite)
             {
-                replaced.ReleaseSnapshot();
-                MetalNative.SendVoid(replaced.Texture, MetalNative.Selector("release"));
+                if (image.Texture == 0) throw new InvalidOperationException("Metal native depth face allocation failed.");
+                MetalDepthFacePlacement.RequireOriginalCurrent(original);
+                _nativeDepthImageOrigins.Add(image, original);
             }
-
-            _guestDepthImages[address] = image;
+            lock (_gate)
+            {
+                if (finite && (_closed || _guestWorkFailure is not null ||
+                    !ReferenceEquals(_guestMemory, original.Memory) || original.Session != CurrentNativeDepthFaceSession ||
+                    (_guestDepthImages.TryGetValue(address, out var raced) ? !ReferenceEquals(raced, previous) : previous is not null)))
+                    throw new NotSupportedException("Metal native depth face publication changed its exact original owner/lifetime.");
+                if (_guestDepthImages.Remove(address, out var replaced))
+                {
+                    if (!ReleaseOriginalNativeDepthImage(replaced))
+                    {
+                        // Existing generic retirement behavior remains separate.
+                        replaced.ReleaseSnapshot();
+                        MetalNative.SendVoid(replaced.Texture, MetalNative.Selector("release"));
+                    }
+                }
+                _guestDepthImages[address] = image;
+                installed = true;
+            }
+        }
+        catch (Exception error) { primary = error; throw; }
+        finally
+        {
+            if (finite && !installed)
+            {
+                _nativeDepthImageOrigins.Remove(image);
+                _nativeDepthImageSpans.Remove(image);
+                var owned = image.Texture;
+                image.Texture = 0;
+                ReleaseDepthObjectsPreservingFailure(primary, owned);
+            }
         }
 
         return image;
@@ -1623,7 +1682,7 @@ internal static partial class MetalVideoPresenter
                 return depthSample;
             }
 
-            var live = ResolveGuestImageAlias(texture);
+            var live = ResolveGuestImageAlias(texture, captureFirstRefusal: true, out var aliasFirstRefusal);
             if (live is { Initialized: true } && blitCommandBuffer != 0)
             {
                 Require2DGuestImage(live, "feedback snapshot");
@@ -1670,12 +1729,12 @@ internal static partial class MetalVideoPresenter
             catch (NotSupportedException exception) when (exception.GetType() == typeof(NotSupportedException))
             {
                 throw new NotSupportedException(
-                    exception.Message + " " + DescribeUnresolvedGuestTexture(texture), exception);
+                    exception.Message + " " + DescribeUnresolvedGuestTexture(texture, aliasFirstRefusal), exception);
             }
             catch (InvalidOperationException exception) when (exception.GetType() == typeof(InvalidOperationException))
             {
                 throw new InvalidOperationException(
-                    exception.Message + " " + DescribeUnresolvedGuestTexture(texture), exception);
+                    exception.Message + " " + DescribeUnresolvedGuestTexture(texture, aliasFirstRefusal), exception);
             }
             if (refreshed is null)
             {
@@ -1690,7 +1749,7 @@ internal static partial class MetalVideoPresenter
 
                 throw new InvalidOperationException(
                     $"Metal cannot resolve required texture 0x{texture.Address:X}. " +
-                    DescribeUnresolvedGuestTexture(texture));
+                    DescribeUnresolvedGuestTexture(texture, aliasFirstRefusal));
             }
 
             texture = texture with { RgbaPixels = refreshed };
@@ -2098,7 +2157,12 @@ internal static partial class MetalVideoPresenter
     /// presenter's guest-image variants: exact extent outranks format, format
     /// outranks initialization, and the active image breaks ties.</summary>
     private static GuestImage? ResolveGuestImageAlias(GuestDrawTexture texture)
+        => ResolveGuestImageAlias(texture, captureFirstRefusal: false, out _);
+
+    private static GuestImage? ResolveGuestImageAlias(GuestDrawTexture texture,
+        bool captureFirstRefusal, out SampledAliasFirstRefusal? firstRefusal)
     {
+        SampledAliasFirstRefusal? captured = null;
         var hasViewFormat = MetalGuestFormats.TryDecodeRenderTargetFormat(
             texture.Format, texture.NumberType, out var viewFormat);
         GuestImage? best = null;
@@ -2107,7 +2171,13 @@ internal static partial class MetalVideoPresenter
         var nativeShape = GuestTextureShape(texture);
         void Consider(GuestImage candidate, bool isActive)
         {
-            if (candidate.TextureType != nativeShape.TextureType || candidate.Depth != nativeShape.Depth || candidate.ArrayLength != nativeShape.ArrayLength) return;
+            // Preserve the original OR's type -> depth -> layer short circuit.
+            if (candidate.TextureType != nativeShape.TextureType)
+            { Capture("native-type"); return; }
+            if (candidate.Depth != nativeShape.Depth)
+            { Capture("native-depth"); return; }
+            if (candidate.ArrayLength != nativeShape.ArrayLength)
+            { Capture("native-layers"); return; }
             // Exact extent always qualifies; a larger image qualifies only for
             // tiled descriptors, mirroring IsCompatibleGuestImageAlias.
             var sizeMatch = candidate.Width == texture.Width &&
@@ -2119,6 +2189,10 @@ internal static partial class MetalVideoPresenter
                  texture.Width > candidate.Width ||
                  texture.Height > candidate.Height))
             {
+                if (captureFirstRefusal && _sampledAliasDiagnosticsEnabled)
+                    Capture(texture.TileMode == 0 ? "linear-extent" :
+                        texture.Width == 0 ? "zero-width" : texture.Height == 0 ? "zero-height" :
+                        texture.Width > candidate.Width ? "width-outside-owner" : "height-outside-owner");
                 return;
             }
 
@@ -2148,6 +2222,12 @@ internal static partial class MetalVideoPresenter
                 best = candidate;
                 bestScore = score;
             }
+
+            void Capture(string reason)
+            {
+                if (captureFirstRefusal)
+                    CaptureSampledAliasFirstRefusalLocked(candidate, isActive, reason, ref captured);
+            }
         }
 
         lock (_gate)
@@ -2166,13 +2246,19 @@ internal static partial class MetalVideoPresenter
             }
         }
 
+        firstRefusal = captured;
         return best;
     }
 
     // Failure-only managed inspection. These are current registry observations,
     // not a captured ownership reservation or proof of the producer at prepare time.
     internal static string DescribeUnresolvedGuestTexture(GuestDrawTexture texture)
+        => DescribeUnresolvedGuestTexture(texture, null);
+
+    private static string DescribeUnresolvedGuestTexture(GuestDrawTexture texture,
+        SampledAliasFirstRefusal? firstRefusal)
     {
+        string message;
         lock (_gate)
         {
             var advertised = _availableGuestImages.TryGetValue(texture.Address, out var advertisedFormat);
@@ -2204,7 +2290,7 @@ internal static partial class MetalVideoPresenter
                 $"{image.Width}x{image.Height}/format={image.Format}/initialized={image.Initialized}/" +
                 $"gpu_written={image.GpuWritten}/version={image.ContentVersion}";
 
-            return $"unresolved_alias addr=0x{texture.Address:X} type={texture.Type} " +
+            message = $"unresolved_alias addr=0x{texture.Address:X} type={texture.Type} " +
                 $"shape={texture.Shape} size={texture.Width}x{texture.Height} depth={texture.Depth} " +
                 $"arrayed={texture.ArrayedView} layers={texture.ArrayLayers} " +
                 $"format={texture.Format}/{texture.NumberType} tile={texture.TileMode} pitch={texture.Pitch} " +
@@ -2219,6 +2305,7 @@ internal static partial class MetalVideoPresenter
                 $"current_producer_queue='{producerQueue}' current_producer_submission={producerSubmission} " +
                 $"executing_sequence={_executingGuestWorkSequence} captured_alias_provenance=unavailable.";
         }
+        return AppendSampledAliasFirstRefusal(message, firstRefusal);
     }
 
     /// <summary>Snapshots a guest depth image for sampling when the texture
@@ -2404,6 +2491,7 @@ internal static partial class MetalVideoPresenter
         var status = ReadGuestCommandBufferStatus(commandBuffer);
         if (status == 4)
         {
+            ObserveNativeDepthBatchCompleted(commandBuffer);
             MetalGpuCompletionProfile.RecordSuccessfulWait(commandBuffer, profileStart);
             return;
         }
@@ -2414,6 +2502,7 @@ internal static partial class MetalVideoPresenter
             status = ReadGuestCommandBufferStatus(commandBuffer);
             if (status == 4)
             {
+                ObserveNativeDepthBatchCompleted(commandBuffer);
                 MetalGpuCompletionProfile.RecordSuccessfulWait(commandBuffer, profileStart);
                 return;
             }

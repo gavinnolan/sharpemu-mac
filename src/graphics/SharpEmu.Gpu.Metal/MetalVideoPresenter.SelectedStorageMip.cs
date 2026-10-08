@@ -20,6 +20,7 @@ internal static partial class MetalVideoPresenter
     private static readonly Dictionary<SelectedStorageMipKey, SelectedStorageMipPending> _selectedStorageMipPending = new();
     private static long _nextSelectedStorageMipDomain;
     private static long _selectedStorageMipSession;
+    private static bool _selectedStorageMipCloseInProgress;
     private static readonly ConditionalWeakTable<ICpuMemory, SelectedStorageMipDomain> _selectedStorageMipDomains = new();
     private static readonly ConditionalWeakTable<GuestDrawTexture, SelectedStorageMipAssociation> _selectedStorageMipAssociations = new();
     private static readonly Dictionary<SelectedStorageMipKey, GuestImage> _selectedStorageMipImages = new();
@@ -60,18 +61,27 @@ internal static partial class MetalVideoPresenter
     private static void ValidateSelectedStorageMipOwnerAtStage(SelectedStorageMipAssociation selected,
         bool requireObserved, string stage)
     {
-        if (requireObserved && (!selected.Observation.Observed ||
+        var originalNative = false;
+        if (_selectedNativeOriginalReuseEnabled && !TextureSourceGraphEnabled)
+        {
+            if (Volatile.Read(ref _selectedNativeOriginalCleanupFailure) is { } unknown)
+                throw new InvalidOperationException("Metal selected original watch cleanup has an unknown outcome; native reuse is unavailable.", unknown);
+            lock (_gate) originalNative = HasCurrentSelectedNativeOriginalProofLocked(selected);
+        }
+        if (requireObserved && !originalNative && (!selected.Observation.Observed ||
             !IsCpuTextureSnapshotObservationStable(selected.Key.Resource.Address, selected.Observation)))
             throw new InvalidOperationException("Metal selected storage mip live reuse requires unchanged complete content observation; tracker identity alone cannot authorize unobserved CPU writers.");
-        // Preserve the original session -> global epoch -> token short circuit.
-        // Diagnostics reuse exactly the observation that vetoed admission; no
-        // extra tracker/host query runs on either success or rejection.
+        // Legacy owners retain session -> aggregate epoch -> token policy.
+        // Qualified native owners carry ORIGINAL exact mapping/content watches;
+        // unrelated aggregate drift never replaces or retimestamps those proofs.
         var currentSession = Volatile.Read(ref _selectedStorageMipSession);
         if (selected.Session != currentSession)
             throw SelectedStorageMipObservationFailure(selected, stage, "presenter-session",
                 $"session_before={selected.Session} session_now={currentSession}");
+        ValidateOriginalSelectedStorageMipSeedStage(selected, requireObserved, stage);
         var currentMappingEpoch = HostMemory.MappingGeneration;
-        if (selected.MappingEpoch != currentMappingEpoch)
+        if (selected.MappingEpoch != currentMappingEpoch && !originalNative &&
+            (requireObserved || !CanUseOriginalSelectedStorageMipSeed(selected, stage)))
             throw SelectedStorageMipObservationFailure(selected, stage, "global-mapping-epoch",
                 $"mapping_before={selected.MappingEpoch} mapping_now={currentMappingEpoch}");
         if (selected.HasToken)
@@ -95,7 +105,8 @@ internal static partial class MetalVideoPresenter
         $"watch_identity_{suffix}={token.WatchIdentity} watch_generation_{suffix}={token.WatchGeneration} " +
         $"protected_bytes_{suffix}={token.ProtectedByteCount} watch_bytes_{suffix}={token.WatchByteCount}";
 
-    private readonly record struct SelectedStorageMipAdmission(SelectedStorageMipAssociation Owner, SelectedStorageMipPending Pending);
+    private readonly record struct SelectedStorageMipAdmission(SelectedStorageMipAssociation Owner,
+        SelectedStorageMipPending? Pending, SelectedStorageMipSeedAdmission? Seed);
 
     private static SelectedStorageMipAdmission[] PrepareSelectedStorageMipAdmissionLocked(object work, GuestQueueIdentity queue)
     {
@@ -103,7 +114,7 @@ internal static partial class MetalVideoPresenter
             !dispatch.Textures.Any(texture => _selectedStorageMipAssociations.TryGetValue(texture, out _))) return [];
         if (_enqueueAsImmediateQueueFollowup && dispatch.Textures.Any(texture => _selectedStorageMipAssociations.TryGetValue(texture, out _)))
             throw new NotSupportedException("Metal selected storage mip immediate queue follow-up ordering is not qualified.");
-        var selected = new Dictionary<SelectedStorageMipKey, SelectedStorageMipAssociation>();
+        var selected = new Dictionary<SelectedStorageMipKey, (SelectedStorageMipAssociation Owner, bool Writes)>();
         foreach (var texture in dispatch.Textures)
         {
             if (!_selectedStorageMipAssociations.TryGetValue(texture, out var association)) continue;
@@ -113,25 +124,41 @@ internal static partial class MetalVideoPresenter
                 throw new NotSupportedException("Metal selected storage admission conflicts with an incompatible native-only resource view.");
             if (_selectedStorageMipPending.TryGetValue(association.Key, out var pending) && pending.Queue != queue.Name)
                 throw new NotSupportedException("Metal selected storage mip has an outstanding producer on another logical queue.");
-            if (StorageImageWrites(texture)) selected.TryAdd(association.Key, association);
+            var writes = StorageImageWrites(texture);
+            var initialSeed = _selectedStorageMipSeeds.TryGetValue(association, out var seed) && seed.Phase == 0 &&
+                !_selectedStorageMipOwners.ContainsKey(association.Key);
+            if (!writes && !initialSeed) continue;
+            if (!selected.TryAdd(association.Key, (association, writes)))
+            {
+                var existing = selected[association.Key];
+                if (!ReferenceEquals(existing.Owner, association) &&
+                    (_selectedStorageMipSeeds.TryGetValue(association, out _) || _selectedStorageMipSeeds.TryGetValue(existing.Owner, out _)))
+                    throw new NotSupportedException("Metal first-use selected seeds cannot alias distinct original proofs in one dispatch.");
+                if (writes && !existing.Writes) selected[association.Key] = (existing.Owner, true);
+            }
         }
-        var added = selected.Keys.Count(key => !_selectedStorageMipOwners.ContainsKey(key));
-        if (_selectedStorageMipOwners.Count + added > 128)
+        var added = selected.Count(item => item.Value.Writes && !_selectedStorageMipOwners.ContainsKey(item.Key));
+        if (selected.Count > 128 || _selectedStorageMipOwners.Count + added > 128)
             throw new NotSupportedException("Metal selected storage mip owner limit exceeded.");
         _selectedStorageMipOwners.EnsureCapacity(_selectedStorageMipOwners.Count + added);
-        _selectedStorageMipPending.EnsureCapacity(_selectedStorageMipPending.Count + selected.Count);
+        _selectedStorageMipPending.EnsureCapacity(_selectedStorageMipPending.Count + selected.Count(item => item.Value.Writes));
         // Construct every metadata object before queue admission mutates its
         // sequence/list. Publication below has no allocating iterator/object.
-        return selected.Values.Select(owner => new SelectedStorageMipAdmission(owner,
-            new(queue.Name, _enqueuedGuestWorkSequence + 1))).ToArray();
+        return selected.Values.Select(item => new SelectedStorageMipAdmission(item.Owner,
+            item.Writes ? new(queue.Name, _enqueuedGuestWorkSequence + 1) : null,
+            PrepareInitialSelectedStorageMipSeedAdmission(item.Owner, work, _enqueuedGuestWorkSequence + 1))).ToArray();
     }
 
     private static void PublishSelectedStorageMipAdmissionLocked(SelectedStorageMipAdmission[] admission)
     {
         foreach (var item in admission)
         {
-            _selectedStorageMipOwners.TryAdd(item.Owner.Key, item.Owner);
-            _selectedStorageMipPending[item.Owner.Key] = item.Pending;
+            if (item.Pending is { } pending)
+            {
+                _selectedStorageMipOwners.TryAdd(item.Owner.Key, item.Owner);
+                _selectedStorageMipPending[item.Owner.Key] = pending;
+            }
+            PublishInitialSelectedStorageMipSeedAdmission(item.Seed);
         }
     }
 
@@ -141,6 +168,10 @@ internal static partial class MetalVideoPresenter
         lock (_gate)
         {
             ValidateSelectedStorageMipOwner(selected);
+            if (_selectedNativeOriginalProofs.TryGetValue(selected.Key, out var original) &&
+                original.ProducerSequence > 0 && original.ProducerSequence < _executingGuestWorkSequence &&
+                !IsGuestWorkCompletedLocked(original.ProducerSequence))
+                throw new NotSupportedException("Metal original selected native owner requires its exact earlier producer acknowledgment.");
             if (_selectedStorageMipNativeQueues.TryGetValue(selected.Key, out var nativeQueue) && nativeQueue != queue)
                 throw new NotSupportedException("Metal selected storage mip cannot cross native command queues without a qualified completion dependency.");
             _selectedStorageMipNativeQueues[selected.Key] = queue;
@@ -182,36 +213,50 @@ internal static partial class MetalVideoPresenter
     {
         lock (_gate)
         {
-            // Snapshot the bounded new class before a release callback can
-            // reenter close and clear the dictionary. Consume only exact owners.
-            var r16 = _selectedStorageMipImages.Where(entry =>
-                MetalR16FloatSelectedMip.TryPlacement(entry.Key.Resource, entry.Key.Mip, out _)).ToArray();
-            foreach (var entry in r16)
-                if (_selectedStorageMipImages.TryGetValue(entry.Key, out var current) && ReferenceEquals(current, entry.Value))
-                    ReleaseAcceptedR16SelectedRetain(entry.Value);
+            // Optional bookkeeping cleanup may reenter ordinary close. The
+            // admitted outer close alone owns native releases/session advance.
+            if (_selectedStorageMipCloseInProgress) return;
+            _selectedStorageMipCloseInProgress = true;
             try
             {
-                foreach (var entry in _selectedStorageMipImages)
-                    if (!MetalR16FloatSelectedMip.TryPlacement(entry.Key.Resource, entry.Key.Mip, out _))
-                        MetalNative.SendVoid(entry.Value.Texture, MetalNative.Selector("release"));
+                foreach (var image in _selectedStorageMipImages.Values)
+                    NoteFiniteStorageOwnerRetirementLocked(image);
+                var watchCleanup = ReleaseSelectedNativeOriginalProofsLocked(); // Consume before release/reentrant close; attempt every watch.
+                // Snapshot the bounded new class before a release callback can
+                // reenter close and clear the dictionary. Consume only exact owners.
+                var r16 = _selectedStorageMipImages.Where(entry =>
+                    MetalR16FloatSelectedMip.TryPlacement(entry.Key.Resource, entry.Key.Mip, out _)).ToArray();
+                foreach (var entry in r16)
+                    if (_selectedStorageMipImages.TryGetValue(entry.Key, out var current) && ReferenceEquals(current, entry.Value))
+                        ReleaseAcceptedR16SelectedRetain(entry.Value);
+                try
+                {
+                    foreach (var entry in _selectedStorageMipImages)
+                        if (!MetalR16FloatSelectedMip.TryPlacement(entry.Key.Resource, entry.Key.Mip, out _))
+                            MetalNative.SendVoid(entry.Value.Texture, MetalNative.Selector("release"));
+                }
+                catch (Exception later) when (watchCleanup is not null || _r16SelectedRetainCleanupFailure is not null)
+                {
+                    var primary = watchCleanup ?? _r16SelectedRetainCleanupFailure!;
+                    // Keep standalone DS behavior unchanged. In a mixed failure,
+                    // preserve the earlier watch/R16 cause; DS's uncertain cleanup and
+                    // incomplete metadata close remain explicitly unqualified.
+                    try { primary.Data["MetalSelectedMipSecondaryCleanupFailure"] = later; }
+                    catch { /* Secondary diagnostics cannot replace first cause. */ }
+                    System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
+                    throw;
+                }
+                Interlocked.Increment(ref _selectedStorageMipSession);
+                _selectedStorageMipImages.Clear();
+                _selectedStorageMipOwners.Clear();
+                _selectedStorageMipPending.Clear();
+                _selectedStorageMipNativeQueues.Clear();
+                if (watchCleanup is not null)
+                    System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(watchCleanup).Throw();
+                if (_r16SelectedRetainCleanupFailure is not null)
+                    System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(_r16SelectedRetainCleanupFailure).Throw();
             }
-            catch (Exception later) when (_r16SelectedRetainCleanupFailure is { } primary)
-            {
-                // Keep standalone DS behavior unchanged. In a mixed failure,
-                // preserve the earlier R16 cause; DS's uncertain cleanup and
-                // incomplete metadata close remain explicitly unqualified.
-                try { primary.Data["MetalSelectedMipSecondaryCleanupFailure"] = later; }
-                catch { /* Secondary diagnostics cannot replace first cause. */ }
-                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
-                throw;
-            }
-            Interlocked.Increment(ref _selectedStorageMipSession);
-            _selectedStorageMipImages.Clear();
-            _selectedStorageMipOwners.Clear();
-            _selectedStorageMipPending.Clear();
-            _selectedStorageMipNativeQueues.Clear();
-            if (_r16SelectedRetainCleanupFailure is not null)
-                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(_r16SelectedRetainCleanupFailure).Throw();
+            finally { _selectedStorageMipCloseInProgress = false; }
         }
     }
 

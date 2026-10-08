@@ -68,7 +68,8 @@ public readonly record struct CpuMappingFootprintSegment(
     GuestPageProtection GuestAccess);
 
 /// <summary>
-/// Opaque owner-bound metadata from a completed owned copy. Constructed only by
+/// Opaque owner-bound metadata from a completed owned copy or its exact confirmed
+/// own-publication continuation. Constructed only by
 /// the neutral participating owner, never accepted as caller-provided authority.
 /// It retains no pointer, lock, access pin, native permission or content token.
 /// Holding this CLR object does not prevent explicit backing/mapping disposal.

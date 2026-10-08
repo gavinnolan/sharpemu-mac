@@ -54,6 +54,25 @@ public sealed partial class MetalTextureMaterializationTests
     }
 
     [Fact]
+    public void NativeDepthCubeRefusalIncludesOriginalSnapshotShapeAndRawWordsBeforeNativeCalls()
+    {
+        uint[] raw = [0x706B1500, 0x00700000, 0x003FC03F, 0xB1B80204, 5, 0x00700080, 0, 0];
+        var guest = ComparisonGuest(2, 0, true, 6, 2) with
+        {
+            Type = 11, ArrayLayers = 1, Descriptor = raw.ToArray(),
+            Shape = ComparisonGuest(2, 0, true, 6, 2).Shape with { Cube = true },
+        };
+        raw[4] = 0; // The prepared DTO owns its original descriptor words.
+        var failure = Assert.Throws<System.Reflection.TargetInvocationException>(() =>
+            Presenter.GetMethod("CreateDrawTexture", Methods)!.Invoke(null, [nint.Zero, (nint)1, guest, false]));
+        var refused = Assert.IsType<NotSupportedException>(failure.InnerException);
+        Assert.Contains("type=11", refused.Message);
+        Assert.Contains("arrayed=True layers=1", refused.Message);
+        Assert.Contains("00000005,00700080", refused.Message);
+        Assert.Contains("Cube = True", refused.Message);
+    }
+
+    [Fact]
     public void NativeDepthComparisonRequiresConsumingCommandBufferBeforeMaterialization()
     {
         var guest = ComparisonGuest(4, 7, false, 1, 1);

@@ -14,6 +14,27 @@ public sealed class HostBackingObject : IDisposable
     private bool _terminalReleaseFailure;
     private HostBackingReleaseResult _lastRelease;
     private bool _isDisposed;
+    private HostManagedWriteIntervals? _managedWrites;
+
+    // Optional ordinary bookkeeping only. No wait or callback during enrollment;
+    // a concurrent first copy may allocate a discarded candidate, while warmed
+    // ordinary writers only read the published reference and bounded scalar slots.
+    internal void EnrollManagedWrites()
+    {
+        if (Volatile.Read(ref _managedWrites) is not null) return;
+        var candidate = new HostManagedWriteIntervals(this);
+        _ = Interlocked.CompareExchange(ref _managedWrites, candidate, null);
+    }
+    internal HostManagedWriteIntervals.Token BeginManagedWrite(ulong offset, ulong count) =>
+        Volatile.Read(ref _managedWrites)?.Begin(offset, count) ?? default;
+    internal HostManagedWriteIntervals.Token BeginManagedWriteOperation() =>
+        Volatile.Read(ref _managedWrites)?.BeginOperation() ?? default;
+    internal HostManagedWriteIntervals? ManagedWrites => Volatile.Read(ref _managedWrites);
+    internal static void EndManagedWrite(HostManagedWriteIntervals.Token token, bool succeeded)
+    {
+        // Failure means stale/foreign bookkeeping, never repeat actual bytes.
+        _ = token.Owner?.End(token, succeeded);
+    }
 
     /// <summary>
     /// The lock the owning backend holds while it maps, unmaps or disposes this

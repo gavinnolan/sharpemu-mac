@@ -14,7 +14,7 @@ public enum RangeKind
 
 public readonly record struct OwnedRange(ulong Address, ulong Size, RangeKind Kind);
 
-public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource
+public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMappedReadWatchSource, ICpuMappedPublicationSource
 {
     internal static Action<string> OnFatal = message => Environment.FailFast(message);
 
@@ -60,6 +60,40 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource
     public ulong AliasBase => _views.AliasBase;
 
     public ulong BackingSize => _views.Size;
+
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(CpuMappedCopyObservation original,
+        out CpuMappedPublicationValidation? validation)
+    {
+        validation = null;
+        if (Volatile.Read(ref _disposed)) return CpuMappedPublicationPreparationResult.Rejected;
+        var result = _views.TryPrepareMappedPublicationValidation(original, out validation);
+        if (!Volatile.Read(ref _disposed)) return result;
+        validation?.Dispose(); validation = null; return CpuMappedPublicationPreparationResult.Rejected;
+    }
+
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(CpuMappedCopyObservation original,
+        IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication)
+    {
+        publication = null;
+        if (Volatile.Read(ref _disposed)) return CpuMappedPublicationPreparationResult.Rejected;
+        var result = _views.TryPrepareMappedPublication(original, runs, out publication);
+        if (!Volatile.Read(ref _disposed)) return result;
+        publication?.Dispose(); publication = null; return CpuMappedPublicationPreparationResult.Rejected;
+    }
+
+    public CpuMappedCopyResult TryReadMappedCopyWithWriteWatch(ulong footprintAddress, ulong footprintByteCount,
+        ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)
+    {
+        observation = null;
+        if (Volatile.Read(ref _disposed)) return CpuMappedCopyResult.Rejected;
+        var result = _views.TryReadMappedCopyWithWriteWatch(footprintAddress, footprintByteCount, sourceAddress, destination, out observation);
+        if (!Volatile.Read(ref _disposed)) return result;
+        if (observation is not null) _views.ReleaseMappedCopyWriteWatch(observation);
+        observation = null; return CpuMappedCopyResult.Rejected;
+    }
+    public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation observation) =>
+        !Volatile.Read(ref _disposed) && _views.IsMappedCopyWriteWatchCurrent(observation);
+    public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation observation) => _views.ReleaseMappedCopyWriteWatch(observation);
 
     public CpuMappedCopyResult TryReadMappedCopy(ulong footprintAddress, ulong footprintByteCount,
         ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)
@@ -258,6 +292,14 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource
 
         using var protectionScope = new ProtectionRangeScope(_protectionLocks, address, size);
         return SetAccessLocked(address, size, protection);
+    }
+
+    public bool SetDerivedAccess(ulong address, ulong size, GuestPageProtection guestAccess,
+        HostPageProtection derivedHostAccess, bool ordinaryEnrollment)
+    {
+        if (!IsValidRange(address, size) || address % _host.PageSize != 0 || size % _host.PageSize != 0) return false;
+        using var protectionScope = new ProtectionRangeScope(_protectionLocks, address, size);
+        return SetAccessLocked(address, size, derivedHostAccess, guestAccess, ordinaryEnrollment);
     }
 
     private MappingLockScope EnterMappingLock() => new(_mappingLock, _protectionLocks);
@@ -609,7 +651,8 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource
     private bool OverlapsOwnedLocked(ulong address, ulong size) =>
         _owned.Any(range => address < range.Address + range.Size && range.Address < address + size);
 
-    private bool SetAccessLocked(ulong address, ulong size, HostPageProtection protection)
+    private bool SetAccessLocked(ulong address, ulong size, HostPageProtection protection,
+        GuestPageProtection? originalGuestAccess = null, bool ordinaryEnrollment = false)
     {
         if (_disposed) return false;
         var end = address + size;
@@ -622,7 +665,10 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource
             if (start < stop)
             {
                 using var profile = GpuMemoryAccessProfile.MeasureHostProtectionCall(stop - start);
-                if (!_host.ChangeAccess(start, stop - start, protection)) return false;
+                var changed = originalGuestAccess.HasValue && _host is IHostDerivedProtectionMemory explicitHost
+                    ? explicitHost.ChangeDerivedAccess(start, stop - start, originalGuestAccess.Value, protection, ordinaryEnrollment)
+                    : _host.ChangeAccess(start, stop - start, protection);
+                if (!changed) return false;
             }
         }
 

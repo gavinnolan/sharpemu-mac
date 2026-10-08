@@ -19,6 +19,7 @@ namespace SharpEmu.Gpu.Metal;
 internal static partial class MetalTextureSnapshots
 {
     private const ulong MaximumSnapshotBytes = 128UL * 1024UL * 1024UL;
+    private const ulong MaximumSingleMip2DSnapshotBytes = 256UL * 1024UL * 1024UL;
     private static readonly ConcurrentDictionary<ulong, byte> _arrayUploadUnsupported = new();
 
     // Send supported tiled data to the GPU; decode other layouts on the CPU.
@@ -116,6 +117,8 @@ internal static partial class MetalTextureSnapshots
                         $"descriptor={binding.Descriptor} shape={binding.Shape} access={binding.Access} selected_mip={binding.MipLevel} " +
                         $"raw=[{string.Join(",", binding.ResourceDescriptor?.Select(static word => $"{word:X8}") ?? [])}].");
                 MetalVideoPresenter.RejectSelectedStorageAlias(context.Memory, binding.Descriptor, binding.IsStorage, binding.MipLevel);
+                MetalVideoPresenter.ValidateColorPhysicalSnapshotBinding(context.Memory, binding);
+                var depthCubeFaces = RequireDepthCubeSnapshot(binding);
                 var profileStart = TexturePreparationProfile.Begin();
                 var reuseKey = new GuestTextureSnapshotReuseKey(
                     binding.Descriptor,
@@ -136,6 +139,11 @@ internal static partial class MetalTextureSnapshots
                         TexturePreparationProfile.BindingOutcome.Reused,
                         profileStart);
                 }
+                else if (depthCubeFaces && MetalVideoPresenter.TryCaptureNativeDepthCube(context.Memory, binding, out texture))
+                {
+                    unreturnedTexture = texture;
+                    TexturePreparationProfile.RecordBinding(TexturePreparationProfile.BindingOutcome.Empty, profileStart);
+                }
                 else if (TryCreateSelectedStorageMip(context, binding, out texture))
                 {
                     unreturnedTexture = texture;
@@ -143,6 +151,13 @@ internal static partial class MetalTextureSnapshots
                 }
                 else if (TryCreateSampledR8Volume(context, binding, out texture) ||
                     TryCreateSampledSingletonVolume(context, binding, out texture))
+                {
+                    unreturnedTexture = texture;
+                    snapshots?.Add(reuseKey, texture);
+                    TexturePreparationProfile.RecordBinding(TexturePreparationProfile.BindingOutcome.Linear,
+                        profileStart, texture.RgbaPixels.LongLength);
+                }
+                else if (TryCreateStorageCpuCopy(context, binding, out texture))
                 {
                     unreturnedTexture = texture;
                     snapshots?.Add(reuseKey, texture);
@@ -161,7 +176,8 @@ internal static partial class MetalTextureSnapshots
                         binding.MipLevel,
                         binding.SamplerDescriptor,
                         binding.IsArrayed,
-                        out texture))
+                        out texture,
+                        depthCubeFaces: depthCubeFaces))
                 {
                     unreturnedTexture = texture;
                     // Share faithful payloads within this work item; sampler state
@@ -211,8 +227,9 @@ internal static partial class MetalTextureSnapshots
 
             return textures;
         }
-        catch
+        catch (Exception failure)
         {
+            MetalVideoPresenter.ReleaseFailedPreparedSingletonVolumeOriginals(textures, unreturnedTexture, failure);
             MetalVideoPresenter.ReleasePreparedTextureSources(textures);
             if (unreturnedTexture is not null)
                 MetalVideoPresenter.ReleasePreparedTextureSource(unreturnedTexture);
@@ -404,7 +421,8 @@ internal static partial class MetalTextureSnapshots
         IReadOnlyList<uint> samplerDescriptor,
         bool isArrayed,
         out GuestDrawTexture texture,
-        int snapshotAttempt = 0)
+        int snapshotAttempt = 0,
+        bool depthCubeFaces = false)
     {
         var mappingEpochBeforeSnapshot = HostMemory.MappingGeneration;
         texture = default!;
@@ -454,6 +472,7 @@ internal static partial class MetalTextureSnapshots
             }
         }
 
+        var snapshotByteLimit = SnapshotByteLimit(descriptor);
         var sourceWidth = descriptor.TileMode == 0
             ? GetLinearTexturePitch(
                 Math.Max(descriptor.Width, descriptor.Pitch),
@@ -469,8 +488,8 @@ internal static partial class MetalTextureSnapshots
             sourceWidth,
             descriptor.Height,
             textureDepth);
-        if (sourceByteCount > MaximumSnapshotBytes)
-            throw SnapshotBudgetExceeded(descriptor, sourceByteCount, "logical");
+        if (sourceByteCount > snapshotByteLimit)
+            throw SnapshotBudgetExceeded(descriptor, sourceByteCount, "logical", snapshotByteLimit);
         if (sourceByteCount == 0)
         {
             TraceTextureFallback(
@@ -538,17 +557,24 @@ internal static partial class MetalTextureSnapshots
         physicalSourceByteCount = qualifiedThickVolume
             ? Gfx10StandardVolumeLayout.ByteCount
             : checked(physicalSourceByteCount * textureDepth);
-        if (physicalSourceByteCount > MaximumSnapshotBytes)
-            throw SnapshotBudgetExceeded(descriptor, physicalSourceByteCount, "tiled");
+        if (physicalSourceByteCount > snapshotByteLimit)
+            throw SnapshotBudgetExceeded(descriptor, physicalSourceByteCount, "tiled", snapshotByteLimit);
 
         var wantsArrayUpload = isArrayed &&
             !isStorage &&
             descriptor.Address != 0 &&
             (descriptor.Type == Gen5TextureType2DArray ||
-             descriptor.Type == Gen5TextureType1DArray) &&
+             descriptor.Type == Gen5TextureType1DArray || depthCubeFaces) &&
             descriptor.Depth > 1 &&
-            !_arrayUploadUnsupported.ContainsKey(descriptor.Address);
+            (depthCubeFaces || !_arrayUploadUnsupported.ContainsKey(descriptor.Address));
         var arrayUploadLayers = wantsArrayUpload ? descriptor.Depth : 1u;
+        if (depthCubeFaces)
+        {
+            var fullBytes = checked(chainSliceBytes * arrayUploadLayers);
+            if (fullBytes > MaximumSnapshotBytes)
+                throw SnapshotBudgetExceeded(descriptor, fullBytes, "complete-cube-face-chains", MaximumSnapshotBytes);
+            MetalVideoPresenter.RejectDepthCubeCpuSourceGpuOverlap(descriptor.Address, fullBytes);
+        }
         var isVideoBuffer =
             SharpEmu.Libs.Media.MoviePresentationServices.IsVideoBufferAddress(
                 descriptor.Address);
@@ -676,7 +702,7 @@ internal static partial class MetalTextureSnapshots
                             samplerDescriptor,
                             isArrayed,
                             out texture,
-                            snapshotAttempt + 1);
+                            snapshotAttempt + 1, depthCubeFaces);
                     }
 
                     throw new InvalidOperationException(
@@ -790,8 +816,11 @@ internal static partial class MetalTextureSnapshots
                     cpuObservation,
                     snapshotAttempt,
                     texture,
-                    out texture);
+                    out texture, depthCubeFaces);
             }
+
+            if (depthCubeFaces && resourceMipLevels > 1)
+                throw new NotSupportedException("Metal depth cube requires a complete qualified face mip-chain decode; a base-only array cannot replace it.");
 
             // Pack tiled array slices for one GPU decode per layer; decode unsupported layouts on the CPU.
             if (_gpuDetileEnabled && hasElementLayout && !baseMipInTail &&
@@ -857,7 +886,7 @@ internal static partial class MetalTextureSnapshots
                             cpuObservation,
                             snapshotAttempt,
                             texture,
-                            out texture);
+                            out texture, depthCubeFaces);
                     }
                 }
             }
@@ -883,7 +912,10 @@ internal static partial class MetalTextureSnapshots
                         sliceSource,
                         baseMipInTail,
                         mipTailElementX,
-                        mipTailElementY) ?? sliceSource.AsSpan(0, layerBytes).ToArray();
+                        mipTailElementY);
+                    if (depthCubeFaces && descriptor.TileMode != 0 && sliceLinear is null)
+                        throw new NotSupportedException("Metal depth cube requires successful face detiling; raw tiled bytes are not a linear depth seed.");
+                    sliceLinear ??= sliceSource.AsSpan(0, layerBytes).ToArray();
                     sliceLinear.AsSpan(0, layerBytes)
                         .CopyTo(layered.AsSpan(checked((int)(layer * layerBytes))));
                     uploadedLayers++;
@@ -925,10 +957,12 @@ internal static partial class MetalTextureSnapshots
                         cpuObservation,
                         snapshotAttempt,
                         texture,
-                        out texture);
+                        out texture, depthCubeFaces);
                 }
             }
 
+            if (depthCubeFaces)
+                throw new InvalidOperationException("Metal depth cube cannot capture every original face; refusing a partial/base-face snapshot.");
             _arrayUploadUnsupported.TryAdd(descriptor.Address, 0);
         }
 
@@ -1012,7 +1046,7 @@ internal static partial class MetalTextureSnapshots
                     cpuObservation,
                     snapshotAttempt,
                     texture,
-                    out texture);
+                    out texture, depthCubeFaces);
             }
         }
 
@@ -1062,7 +1096,7 @@ internal static partial class MetalTextureSnapshots
             cpuObservation,
             snapshotAttempt,
             texture,
-            out texture);
+            out texture, depthCubeFaces);
     }
 
     private static bool FinalizeGuestTextureSnapshot(
@@ -1076,7 +1110,8 @@ internal static partial class MetalTextureSnapshots
         MetalVideoPresenter.CpuTextureSnapshotObservation observation,
         int snapshotAttempt,
         GuestDrawTexture candidate,
-        out GuestDrawTexture texture)
+        out GuestDrawTexture texture,
+        bool depthCubeFaces = false)
     {
         if (SharpEmu.HLE.GuestImageWriteTracker.IsReadSnapshotStable(snapshot) &&
             MetalVideoPresenter.IsCpuTextureSnapshotAdmissionStable(descriptor.Address, observation))
@@ -1088,7 +1123,8 @@ internal static partial class MetalTextureSnapshots
                     CpuSnapshotStable = true,
                 }
                 : candidate;
-            MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(texture, observation);
+            if (depthCubeFaces) MetalVideoPresenter.RegisterDepthCubeCpuSnapshot(texture, observation);
+            else MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(texture, observation);
             return true;
         }
 
@@ -1102,7 +1138,7 @@ internal static partial class MetalTextureSnapshots
                 samplerDescriptor,
                 isArrayed,
                 out texture,
-                snapshotAttempt + 1);
+                snapshotAttempt + 1, depthCubeFaces);
         }
 
         // An empty payload cannot promise that an older cached native image
@@ -1114,12 +1150,22 @@ internal static partial class MetalTextureSnapshots
             MetalVideoPresenter.DescribeCpuTextureSnapshotStability(descriptor.Address, snapshot, observation));
     }
 
-    private static Exception SnapshotBudgetExceeded(TextureDescriptor descriptor, ulong bytes, string layout) =>
+    // One complete 8K four-byte 2D image is 256 MiB. Larger slices are not
+    // admitted for arrays, volumes or mip chains: their aggregate allocations
+    // need separate budgeting. This changes no backing or content authority.
+    private static ulong SnapshotByteLimit(TextureDescriptor descriptor) =>
+        descriptor.Type == Gen5TextureType2D && descriptor.Depth == 1 &&
+        descriptor.BaseArray == 0 && descriptor.HasExtendedDescriptor &&
+        descriptor.ResourceMipLevels == 1 && descriptor.MipLevels == 1 &&
+        descriptor.BaseLevel == 0 && descriptor.LastLevel == 0
+            ? MaximumSingleMip2DSnapshotBytes : MaximumSnapshotBytes;
+
+    private static Exception SnapshotBudgetExceeded(TextureDescriptor descriptor, ulong bytes, string layout, ulong limit) =>
         new NotSupportedException(
             $"Metal texture snapshot exceeds budget: addr=0x{descriptor.Address:X} " +
             $"size={descriptor.Width}x{descriptor.Height} format={descriptor.Format}/{descriptor.NumberType} " +
             $"tile={descriptor.TileMode} layout={layout} required_bytes={bytes} " +
-            $"maximum_snapshot_bytes={MaximumSnapshotBytes}.");
+            $"maximum_snapshot_bytes={limit}.");
 
     private static bool TryCreateTiledArrayMipChain(
         CpuContext context,

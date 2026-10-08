@@ -1,0 +1,133 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+namespace SharpEmu.HLE.Host;
+
+internal sealed partial class HostManagedWriteIntervals
+{
+    private ReadWatch?[]? readWatches; // Allocated only by the optional cold watched-copy path.
+    private int activeReadWatches;
+    internal sealed class ReadWatch(HostManagedWriteIntervals owner, PhysicalRun[] runs, long enrollmentRevision)
+    {
+        internal readonly PhysicalRun[] Runs = runs;
+        // Original exclusive enrollment, before copied bytes. Never resampled
+        // after a copy or substituted for an Applied publication's own revision.
+        internal readonly long EnrollmentRevision = enrollmentRevision;
+        internal int Slot = -1, Revoked, Released;
+        internal void TraceDecline(string reason, long originalRevision, long primaryAdmission = -1,
+            ulong originalSourceAddress = 0, ulong originalSourceBytes = 0)
+        {
+            try
+            {
+                HostPublicationDiagnostics.Declined(primaryAdmission >= 0 && (primaryAdmission & PublicationBit) != 0
+                    ? "read-watch-held-publication" : "read-watch", reason,
+                    originalRevision, Volatile.Read(ref owner.nextIdentity),
+                    Volatile.Read(ref owner.admission), Volatile.Read(ref owner.coverageIncomplete),
+                    Volatile.Read(ref Released), Volatile.Read(ref Revoked), primaryAdmission,
+                    originalSourceAddress, originalSourceBytes);
+            }
+            catch (Exception) { } // Even formatting must preserve the refusal.
+        }
+        internal bool IsCurrent => TryIsCurrent(out _, out _);
+        internal bool TryIsCurrent(out string reason, out long primaryAdmission)
+        {
+            // Exactly the original reads, short-circuit order and final checks.
+            // The primary admission is the actual guard value, never a later sample.
+            primaryAdmission = -1;
+            reason = "released"; if (Volatile.Read(ref Released) != 0) return false;
+            reason = "revoked"; if (Volatile.Read(ref Revoked) != 0) return false;
+            reason = "coverage-incomplete"; if (Volatile.Read(ref owner.coverageIncomplete) != 0) return false;
+            primaryAdmission = Volatile.Read(ref owner.admission);
+            reason = "admission-nonzero"; if (primaryAdmission != 0) return false;
+            reason = "revoked-final"; if (Volatile.Read(ref Revoked) != 0) return false;
+            reason = "released-final"; if (Volatile.Read(ref Released) != 0) return false;
+            reason = "current"; return true;
+        }
+        // Only the exact prepared provider ticket may use this scalar predicate.
+        // Ordinary reads and new-watch admission still require admission == 0.
+        internal bool IsUnrevokedDuringPublication(HostManagedWriteIntervals expected) =>
+            ReferenceEquals(owner, expected) && Volatile.Read(ref Released) == 0 && Volatile.Read(ref Revoked) == 0 &&
+            Volatile.Read(ref owner.coverageIncomplete) == 0 && Volatile.Read(ref owner.admission) == PublicationBit &&
+            Volatile.Read(ref Revoked) == 0 && Volatile.Read(ref Released) == 0;
+        internal bool CoversDuringPublication(HostManagedWriteIntervals expected, ReadOnlySpan<PhysicalRun> requested)
+        {
+            if (!IsUnrevokedDuringPublication(expected) || requested.IsEmpty) return false;
+            foreach (var run in requested)
+            {
+                if (run.Count == 0 || run.Offset > owner.backing.Size || run.Count > owner.backing.Size - run.Offset) return false;
+                var covered = false;
+                foreach (var original in Runs)
+                    if (run.Offset >= original.Offset && run.Offset - original.Offset <= original.Count &&
+                        run.Count <= original.Count - (run.Offset - original.Offset)) { covered = true; break; }
+                if (!covered) return false;
+            }
+            return IsUnrevokedDuringPublication(expected);
+        }
+        internal void Release()
+        {
+            if (Interlocked.Exchange(ref Released, 1) != 0) return;
+            if (Slot >= 0 && Interlocked.CompareExchange(ref owner.readWatches![Slot], null, this) == this)
+                Interlocked.Decrement(ref owner.activeReadWatches);
+        }
+    }
+
+    internal ReadWatch? TryCreateReadWatch(PhysicalRun[] runs)
+    {
+        if (runs.Length is 0 or > CpuMappedCopyObservation.MaximumSegments) return null;
+        var installed = Volatile.Read(ref readWatches);
+        if (installed is null)
+        {
+            var candidate = new ReadWatch?[Capacity];
+            installed = Interlocked.CompareExchange(ref readWatches, candidate, null) ?? candidate;
+        }
+        if (Volatile.Read(ref coverageIncomplete) != 0 ||
+            Interlocked.CompareExchange(ref admission, PublicationBit, 0) != 0) return null;
+        try
+        {
+            if (Volatile.Read(ref coverageIncomplete) != 0) return null;
+            var revision = Volatile.Read(ref nextIdentity);
+            if (revision < 0 || revision == long.MaxValue) return null;
+            var watch = new ReadWatch(this, runs, revision); // Exact exclusive enrollment, cold path only.
+            for (var index = 0; index < installed.Length; index++)
+            {
+                watch.Slot = index;
+                if (Interlocked.CompareExchange(ref installed[index], watch, null) is null)
+                { Interlocked.Increment(ref activeReadWatches); return watch; }
+            }
+            return null; // Finite watch capacity; never synthesize a current receipt.
+        }
+        finally { ReleasePublication(); }
+    }
+
+    // Cold allocation under the exact exclusive reservation. This successor
+    // remains private until the transaction fully applies its own bytes.
+    internal ReadWatch? TryCreatePublicationSuccessor(ReadWatch original)
+    {
+        if (!original.IsUnrevokedDuringPublication(this)) return null;
+        var installed = Volatile.Read(ref readWatches);
+        if (installed is null) return null;
+        var revision = Volatile.Read(ref nextIdentity);
+        if (revision < 0 || revision == long.MaxValue) return null;
+        var successor = new ReadWatch(this, original.Runs, revision);
+        for (var index = 0; index < installed.Length; index++)
+        {
+            successor.Slot = index;
+            if (Interlocked.CompareExchange(ref installed[index], successor, null) is null)
+            { Interlocked.Increment(ref activeReadWatches); return successor; }
+        }
+        return null;
+    }
+
+    private void InvalidateReadWatches(ulong offset, ulong count, bool unknown = false, ReadWatch? unpublishedSuccessor = null)
+    {
+        if (Volatile.Read(ref activeReadWatches) == 0) return;
+        var installed = Volatile.Read(ref readWatches)!;
+        for (var index = 0; index < installed.Length; index++)
+        {
+            var watch = Volatile.Read(ref installed[index]);
+            if (watch is null || Volatile.Read(ref watch.Released) != 0 || ReferenceEquals(watch, unpublishedSuccessor)) continue;
+            foreach (var run in watch.Runs)
+                if (unknown || offset < run.Offset + run.Count && run.Offset < offset + count)
+                { Volatile.Write(ref watch.Revoked, 1); break; }
+        }
+    }
+}

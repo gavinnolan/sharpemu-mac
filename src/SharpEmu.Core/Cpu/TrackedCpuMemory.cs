@@ -5,7 +5,7 @@ using SharpEmu.HLE;
 
 namespace SharpEmu.Core.Cpu;
 
-public sealed class TrackedCpuMemory : ICpuMemory, ITrackedCpuMemory, IGuestMemoryAllocator, ICpuMemoryWrapper, ICpuMappedCopySource
+public sealed class TrackedCpuMemory : ICpuMemory, ITrackedCpuMemory, IGuestMemoryAllocator, ICpuMemoryWrapper, ICpuMappedCopySource, ICpuMappedReadWatchSource, ICpuMappedPublicationSource
 {
     private readonly ICpuMemory _inner;
 
@@ -19,6 +19,37 @@ public sealed class TrackedCpuMemory : ICpuMemory, ITrackedCpuMemory, IGuestMemo
     public ICpuMemory Inner => _inner;
 
     public string DescribeReadRange(ulong address, ulong size) => _inner.DescribeReadRange(address, size);
+
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(CpuMappedCopyObservation original,
+        out CpuMappedPublicationValidation? validation)
+    {
+        validation = null;
+        return _inner is ICpuMappedPublicationSource source
+            ? source.TryPrepareMappedPublicationValidation(original, out validation)
+            : CpuMappedPublicationPreparationResult.Unavailable;
+    }
+
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(CpuMappedCopyObservation original,
+        IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication)
+    {
+        publication = null;
+        return _inner is ICpuMappedPublicationSource source
+            ? source.TryPrepareMappedPublication(original, runs, out publication)
+            : CpuMappedPublicationPreparationResult.Unavailable;
+    }
+
+    public CpuMappedCopyResult TryReadMappedCopyWithWriteWatch(ulong footprintAddress, ulong footprintByteCount,
+        ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)
+    {
+        observation = null;
+        return _inner is ICpuMappedReadWatchSource source
+            ? source.TryReadMappedCopyWithWriteWatch(footprintAddress, footprintByteCount, sourceAddress, destination, out observation)
+            : CpuMappedCopyResult.Unavailable;
+    }
+    public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation observation) =>
+        _inner is ICpuMappedReadWatchSource source && source.IsMappedCopyWriteWatchCurrent(observation);
+    public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation observation)
+    { if (_inner is ICpuMappedReadWatchSource source) source.ReleaseMappedCopyWriteWatch(observation); }
 
     public CpuMappedCopyResult TryReadMappedCopy(ulong footprintAddress, ulong footprintByteCount,
         ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)

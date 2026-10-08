@@ -11,7 +11,7 @@ namespace SharpEmu.Host.Memory.Tests;
 
 // Pinned managed-array ledger controls. No provider/composition/syscalls,
 // permission receipt, content certification or native page measurement.
-public sealed unsafe class MappedCopyLedgerTests
+public sealed unsafe partial class MappedCopyLedgerTests
 {
     public MappedCopyLedgerTests(ITestOutputHelper output)
     {

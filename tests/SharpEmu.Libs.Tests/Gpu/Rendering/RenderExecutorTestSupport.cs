@@ -415,6 +415,14 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
 
     public List<string> Calls { get; } = new();
 
+    public List<(VertexStageRegisters Vertex, ContextRegisters Context, UserConfigRegisters UserConfig,
+        TargetlessDrawArguments Draw, DrawIndexedArguments? OriginalIndirect)> UnsupportedGraphics { get; } = new();
+
+    public void RecordUnsupportedGraphics(VertexStageRegisters vertex, ContextRegisters context,
+        UserConfigRegisters userConfig, in TargetlessDrawArguments draw,
+        DrawIndexedArguments? originalIndirectIndexedDraw = null) =>
+        UnsupportedGraphics.Add((vertex, context, userConfig, draw, originalIndirectIndexedDraw));
+
     public List<RenderingState> PipelineRenderings { get; } = new();
 
     public List<(GpuPrimitiveTopology Topology, bool Restart, bool PixelActive)> PipelineRequests { get; } = new();

@@ -1,0 +1,29 @@
+# Finite Octopath RGBA8 canonical publication checkpoint
+
+This isolated source checkpoint is based on ab9dedeb/c24. The signed ab9 replay rejected a native RGBA8 singleton array marked GPU-written by storage dispatch sequence 41, content version 2. Pending work and open batch were both false. It did not prove the dirty event occurred after the original CPU seed. The separate 28bb509e diagnostic compares original/current token generations before consumption; no conditional dirty acknowledgment is implemented here.
+
+## Exact supported byte placement
+
+The existing strict `MetalBgra1024ArrayStorageAdmission` retains the full captured raw8, type13, 1024-square/pitch1024, guest10/0, mode27/PERF7/F2E, single native 2D-array layer and native RGBA8Unorm70. Its physical extent and complete linear texels are both 4,194,304 bytes. The production inverse derives from the qualified existing detiler and verifies all 1,048,576 four-byte offsets are aligned, unique and in bounds. Independent pinned PAL/conditional0x344 fixture compares every physical byte, including interior and last texel mutations. This is not a new topology claim or general tiled image support.
+
+One producer receipt is acquired before native dispatch. It retains the exact original image/version/texture/session/layout, mapped copy and observed content token. Actual status4 readback supplies every native byte; retile uses only that image's immutable original layout. Runs are split ONLY at the original mapped observation boundaries, then one provider transaction publishes the complete physical image. No old CPU bytes, zero seed fabrication, host Query, current mapping recapture or refreshed tracker token is used. Existing completed-version continuity is preserved. An old GPU-written image without this producer receipt is not retroactively accepted. Historical GpuWritten remains true.
+
+## Bounded provider transaction
+
+Separate caps are 4 MiB aggregate bytes, 64 runs, 128 transaction identities and 16 MiB aggregate retained publication payload. Total subtraction bounds are checked before detached clones. Installed exact tickets charge once; successful completion or cancellation debit once. Unknown outcomes retain their payload charge, footprint exclusion, writer exclusion and backing pin. The history InlineArray is bounded by 64 RUNS, not the byte cap (about512KiB fixed enrolled backing history). Transient preparation may allocate one detached4MiB payload per call before installation; the16MiB cap bounds retained installed tickets, not concurrent pre-admission transient allocations.
+
+All byte copying occurs outside provider/presenter gates. All-or-none refers to admission and full success/acknowledgment of ONE transaction; the4MiB copy is not atomic visibility and has no rollback guarantee. Partial/unknown is consumed and quarantined. The original view access/physical offset/incarnation, full footprint mapping exclusion and participating writer history remain strict. Readonly guest mappings are not made writable by alias availability. Releasing a retained version does not authorize raw/JIT writers.
+
+The inverse caches4MiB of offsets on first ordinary Encode. Initial setup uses two additional4MiB arrays and a128KiB uniqueness bitmap; each publication creates4MiB linear/native,4MiB retiled physical and a detached provider payload. No performance/startup gain is claimed or measured.
+
+## Source controls and future execution
+
+Eight additional provider managed rows cover full4MiB with1/64 original segments, detached caller mutation, whole neighbor comparison, aggregate4MiB+1 inside an otherwise valid original source,65 runs, readonly/history vetoes, exact cancel/success charge release, and synthetic unknown metadata retention. The unknown row explicitly injects private bookkeeping only and retains its pinned scope to process exit; it is not a native partial-copy failure proof.
+
+Five retile managed rows compare varied/zero full4MiB, independent interior/edge placements and incomplete/unqualified rejection. Two additional genuine producer controls distinguish dirty state already absorbed in the original seed from an actual later managed byte mutation without modifying dirty policy. The existing four actual translated BGRA native rows now additionally compare full retiled physical bytes. Two new opt-in real Mac/PVM/Tracked native rows test full canonical4MiB +64KiB neighbors/EOP across two native publications and reject an overlapping participating CPU writer before the second publication/ack. The original singleton two-publication rows are retained. The provider/production pipeline fixture uses handwritten native MSL, not guest-translated MIMG; the separate existing BGRA fixture supplies translated shader coverage. Every fresh native worker must assert actual architecture/framework/kernel geometry, retain source/DLL hashes, and be separately granted/serialized.
+
+None of these new rows has been built or executed at this checkpoint. No root source, game, GPU or native permission execution occurred. Existing7ddb proofs remain evidence for the singleton path only.
+
+## Activation requirements
+
+The finite publisher remains hardfalse outside opted-in fixtures. Game enablement needs actual dirty-cause replay and exact qualifying writer/debt routing: an old dirty generation may need a separate race-safe acknowledgment, while new CPU effects require strict original mapping/owner/session/version and settled canonical native version. Raw/JIT guest writes are not fully serialized or completion-certified by participating managed intervals; pre-notification/native-trap counters alone do not supply that authority. Mixed nonempty writable global-buffer/image cohorts remain rejected. No dirty GpuWritten veto is relaxed in this checkpoint and no Octopath gameplay/Poppy recovery claim is made.

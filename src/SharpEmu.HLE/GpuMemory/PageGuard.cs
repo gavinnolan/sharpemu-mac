@@ -280,13 +280,17 @@ public sealed class PageGuard : IDisposable
 
     private GuestPageProtection Derive(ulong address, in PageCounts counts) => Derive(Permissions.Lookup(address), counts.GetAllowedAccess());
 
-    private void ApplyAccess(ulong address, ulong size, GuestPageProtection allowedAccess)
+    private void ApplyAccess(ulong address, ulong size, GuestPageProtection allowedAccess,
+        GuestPageProtection guestAccess, bool ordinaryEnrollment)
     {
         using var profile = GpuMemoryAccessProfile.MeasureAccess(
             GpuMemoryAccessProfile.Operation.HostProtection, GpuMemoryAccessProfile.Operation.FaultHostProtection, size);
         if (GuestGpuMemoryHook.Traces(address, size))
             GuestGpuMemoryHook.Trace(address, size, $"host-protect derived={allowedAccess}");
-        if (!_addressSpace.TryProtect(address, size, allowedAccess))
+        var changed = _addressSpace is IGuestDerivedProtectionAddressSpace explicitSpace
+            ? explicitSpace.TryApplyDerivedProtection(address, size, guestAccess, allowedAccess, ordinaryEnrollment)
+            : _addressSpace.TryProtect(address, size, allowedAccess);
+        if (!changed)
         {
             OnFatal($"Could not change page access at 0x{address:X16}, new=0x{(uint)allowedAccess:X8}.");
         }
@@ -296,19 +300,22 @@ public sealed class PageGuard : IDisposable
     {
         var runStart = begin;
         var runAllowedAccess = GuestPageProtection.None;
+        var runGuestAccess = GuestPageProtection.None;
         for (var address = begin; address < end; address += PageBytes)
         {
-            var allowedAccess = Derive(address, block.Pages[(int)(address % BlockBytes / PageBytes)]);
-            if (address != begin && allowedAccess != runAllowedAccess)
+            var guestAccess = Permissions.Lookup(address);
+            var allowedAccess = Derive(guestAccess, block.Pages[(int)(address % BlockBytes / PageBytes)].GetAllowedAccess());
+            if (address != begin && (allowedAccess != runAllowedAccess || guestAccess != runGuestAccess))
             {
-                ApplyAccess(runStart, address - runStart, runAllowedAccess);
+                ApplyAccess(runStart, address - runStart, runAllowedAccess, runGuestAccess, ordinaryEnrollment: true);
                 runStart = address;
             }
 
             runAllowedAccess = allowedAccess;
+            runGuestAccess = guestAccess;
         }
 
-        ApplyAccess(runStart, end - runStart, runAllowedAccess);
+        ApplyAccess(runStart, end - runStart, runAllowedAccess, runGuestAccess, ordinaryEnrollment: true);
     }
 
     private void UpdateBlock(PageBlock block, ulong blockBase, int first, int last, bool track, bool isRead, bool masked, in PageMask mask)
@@ -318,7 +325,8 @@ public sealed class PageGuard : IDisposable
         // Allocate before adding protection, never while resolving a fault.
         if (track) block.WriteRestorations ??= new long[PagesPerBlock];
         var restorationVersion = 0L;
-        var allowedAccess = Derive(blockBase + (ulong)first * PageBytes, pages[first]);
+        var runGuestAccess = Permissions.Lookup(blockBase + (ulong)first * PageBytes);
+        var allowedAccess = Derive(runGuestAccess, pages[first].GetAllowedAccess());
         var rangeBegin = 0;
         var rangeBytes = 0UL;
         var potentialRangeBytes = 0UL;
@@ -327,7 +335,8 @@ public sealed class PageGuard : IDisposable
         {
             if (rangeBytes != 0)
             {
-                ApplyAccess(blockBase + (ulong)rangeBegin * PageBytes, rangeBytes, allowedAccess);
+                ApplyAccess(blockBase + (ulong)rangeBegin * PageBytes, rangeBytes, allowedAccess, runGuestAccess,
+                    ordinaryEnrollment: false);
                 rangeBytes = 0;
                 potentialRangeBytes = 0;
             }
@@ -359,10 +368,11 @@ public sealed class PageGuard : IDisposable
                 GuestGpuMemoryHook.Trace(address, PageBytes,
                     $"watch track={track} block_reads={isRead} guest={guest} read_watch={pages[pageIndex].ReadWatchCount} write_watch={pages[pageIndex].WriteWatchCount} old={oldAllowedAccess} new={newAllowedAccess}");
 
-            if (newAllowedAccess != allowedAccess)
+            if (newAllowedAccess != allowedAccess || guest != runGuestAccess)
             {
                 ReleasePending();
                 allowedAccess = newAllowedAccess;
+                runGuestAccess = guest;
             }
             else if (rangeBytes != 0)
             {

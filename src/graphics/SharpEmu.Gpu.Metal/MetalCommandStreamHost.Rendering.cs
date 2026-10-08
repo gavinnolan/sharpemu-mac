@@ -693,8 +693,20 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
             }
 
             var size = ClampMappedSize(descriptor.Address, requested);
-            var bytes = ReadGuestBytes(descriptor.Address, size, "storage buffer", program);
+            var capture = info.Buffers[index].Written && size == requested &&
+                MetalVideoPresenter.WantsFiniteStorageBufferCapture(prepared.Textures);
+            var bytes = new byte[checked((int)size)];
+            CpuMappedCopyObservation? mapping = null;
+            long session = -1;
+            var copied = capture ? MetalVideoPresenter.TryReadFiniteStorageBuffer(Memory, descriptor.Address,
+                bytes, out mapping, out session) : CpuMappedCopyResult.Unavailable;
+            if (copied == CpuMappedCopyResult.Rejected)
+                throw Fatal($"A finite writable storage buffer original mapped copy was rejected: address=0x{descriptor.Address:X} size={size}.");
+            if (copied != CpuMappedCopyResult.Copied && !Memory.TryRead(descriptor.Address, bytes))
+                throw Fatal($"The storage buffer is unreadable: address=0x{descriptor.Address:X} size={size} hash=0x{program.Hash:X16}.");
             buffers[index] = new GuestMemoryBuffer(descriptor.Address, bytes, bytes.Length, size, Pooled: false, Writable: info.Buffers[index].Written);
+            if (copied == CpuMappedCopyResult.Copied)
+                MetalVideoPresenter.RegisterFiniteStorageBufferOrigin(buffers[index], Memory, mapping!, session);
         }
 
         return buffers;
@@ -755,12 +767,20 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
             var start = first << DeviceAddressPaging.PageBits;
             var pageCount = last - first + 1;
             var bytes = new byte[checked((int)(pageCount * DeviceAddressPageSize))];
-            for (var page = 0UL; page < pageCount; page++)
-            {
-                ReadMappedPage(start + (page * DeviceAddressPageSize), bytes.AsSpan((int)(page * DeviceAddressPageSize), (int)DeviceAddressPageSize));
-            }
+            CpuMappedCopyObservation? mapping = null;
+            long session = -1;
+            var capture = written && MetalVideoPresenter.WantsFiniteStorageBufferCapture(prepared.Textures);
+            var copied = capture ? MetalVideoPresenter.TryReadFiniteStorageBuffer(Memory, start,
+                bytes, out mapping, out session) : CpuMappedCopyResult.Unavailable;
+            if (copied == CpuMappedCopyResult.Rejected)
+                throw Fatal($"A finite writable device-address original mapped copy was rejected: address=0x{start:X} bytes={bytes.Length}.");
+            if (copied != CpuMappedCopyResult.Copied)
+                for (var page = 0UL; page < pageCount; page++)
+                    ReadMappedPage(start + (page * DeviceAddressPageSize), bytes.AsSpan((int)(page * DeviceAddressPageSize), (int)DeviceAddressPageSize));
 
             buffers[index] = new GuestMemoryBuffer(start, bytes, bytes.Length, (ulong)bytes.Length, Pooled: false, Writable: written, WriteBackToGuest: written);
+            if (copied == CpuMappedCopyResult.Copied)
+                MetalVideoPresenter.RegisterFiniteStorageBufferOrigin(buffers[index], Memory, mapping!, session);
             table[index] = new GuestAddressRange((uint)first, (uint)pageCount, index);
         }
 
@@ -973,8 +993,9 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         return new GuestIndexBuffer(bytes, bytes.Length, _indexType == GpuIndexType.Uint32, Pooled: false) { GuestAddress = buffer.Bytes is null ? buffer.Address + binding.Offset : 0 };
     }
 
-    private static GuestRenderTarget GuestTargetOf(in ColorTargetState target, in ColorTargetWords words, uint writeMask) =>
-        new(
+    private GuestRenderTarget GuestTargetOf(in ColorTargetState target, in ColorTargetWords words, uint writeMask)
+    {
+        var guest = new GuestRenderTarget(
             target.Resolution.BaseAddress,
             target.Resolution.Extent.Width,
             target.Resolution.Extent.Height,
@@ -985,6 +1006,9 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
             TileMode: (uint)words.TileMode,
             Registers: words,
             WriteMask: writeMask);
+        return MetalDepthFacePlacement.RecordColorSpan(Memory, target.Resolution,
+            MetalColorMipPlacement.Project(Memory, target.Resolution, words, guest));
+    }
 
     private GuestDepthTarget? GuestDepthOf(ContextRegisters context)
     {
@@ -996,7 +1020,7 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         var resolution = _depth.Target.Target;
         var state = _depth.Target.State;
         var words = context.DepthTarget;
-        return new GuestDepthTarget(
+        var guest = new GuestDepthTarget(
             words.ZReadBase,
             words.ZWriteBase,
             resolution.Width,
@@ -1013,6 +1037,7 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
             StencilWriteAddress: words.StencilWriteBase,
             StencilReadOnly: words.StencilWriteDisabled || words.StencilWriteBase == 0,
             Registers: words);
+        return MetalDepthFacePlacement.Project(Memory, resolution, words, guest);
     }
 
     private static GuestStencilFaceState StencilFaceOf(in StencilOperations operations, in StencilMasks masks, byte operationValue) =>

@@ -12,11 +12,42 @@ namespace SharpEmu.Host.MacOS;
 /// guest address space with MAP_FIXED, tracked in the neutral
 /// <see cref="HostViewRegions"/> table so VirtualQuery-style lookups see them.
 /// </summary>
-internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMappedCopyMemory
+internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMappedCopyMemory, IHostMappedReadWatchMemory, IHostMappedPublicationMemory, IHostDerivedProtectionMemory
 {
     internal static bool FailAliasMapForTests;
 
     public MacHostViews() => MacMappedCopyState.Initialize();
+
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(HostBackingObject backing,
+        CpuMappedCopyObservation original, out CpuMappedPublicationValidation? validation)
+    {
+        validation = null;
+        return MacMappedCopyState.Ledger is { } ledger
+            ? ledger.TryPrepareMappedPublicationValidation(backing, original, out validation)
+            : CpuMappedPublicationPreparationResult.Unavailable;
+    }
+
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(HostBackingObject backing,
+        CpuMappedCopyObservation original, IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication)
+    {
+        publication = null;
+        return MacMappedCopyState.Ledger is { } ledger
+            ? ledger.TryPrepareMappedPublication(backing, original, runs, out publication)
+            : CpuMappedPublicationPreparationResult.Unavailable;
+    }
+
+    public CpuMappedCopyResult TryReadMappedCopyWithWriteWatch(HostBackingObject backing, ulong footprintAddress,
+        ulong footprintByteCount, ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)
+    {
+        observation = null;
+        return MacMappedCopyState.Ledger is { } ledger
+            ? ledger.TryReadMappedCopyWithWriteWatch(backing, footprintAddress, footprintByteCount, sourceAddress, destination, out observation)
+            : CpuMappedCopyResult.Unavailable;
+    }
+    public bool IsMappedCopyWriteWatchCurrent(HostBackingObject backing, CpuMappedCopyObservation observation) =>
+        MacMappedCopyState.Ledger?.IsMappedCopyWriteWatchCurrent(backing, observation) == true;
+    public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation observation) =>
+        MacMappedCopyState.Ledger?.ReleaseMappedCopyWriteWatch(observation);
 
     public CpuMappedCopyResult TryReadMappedCopy(HostBackingObject backing, ulong footprintAddress,
         ulong footprintByteCount, ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)
@@ -387,10 +418,84 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
     {
         lock (HostViewRegions.Gate)
         {
-            if (MacMappedCopyState.Ledger is { } ledger && !ledger.BeforeNativeEffect(address, size)) return false;
-            if (mprotect((nint)address, (nuint)size, GetNativeProtection(protection)) != 0) return false;
-            HostViewRegions.ChangeProtection(address, size, HostViewRegions.RawProtection(protection));
-            return true;
+            var ledger = MacMappedCopyState.Ledger;
+            var prepared = ledger?.PrepareProtectionChange(address, size, protection);
+            if (ledger is not null && !ledger.BeginProtectionChange(prepared, address, size)) return false;
+            var complete = false;
+            try
+            {
+                if (mprotect((nint)address, (nuint)size, GetNativeProtection(protection)) != 0) return false;
+                HostViewRegions.ChangeProtection(address, size, HostViewRegions.RawProtection(protection));
+                complete = true;
+                return true;
+            }
+            finally { ledger?.CompleteProtectionChange(prepared, complete); }
+        }
+    }
+
+    public bool ChangeDerivedAccess(ulong address, ulong size, GuestPageProtection guestAccess,
+        HostPageProtection derivedHostAccess, bool ordinaryEnrollment)
+        => ChangeDerivedAccessCore(address, size, guestAccess, derivedHostAccess, ordinaryEnrollment, out _, out _);
+
+    // Exact same syscall/receipt path used by the public interface. Private
+    // scalar outputs let separately authorized fixtures retain native outcomes;
+    // no caller can supply a successful completion to this provider.
+    private bool ChangeDerivedAccessCore(ulong address, ulong size, GuestPageProtection guestAccess,
+        HostPageProtection derivedHostAccess, bool ordinaryEnrollment, out int nativeResult, out int nativeError)
+    {
+        nativeResult = int.MinValue; nativeError = 0;
+        if (!HostMappedCopyLedger.IsValidDerivedProtection(guestAccess, derivedHostAccess)) return false;
+        lock (HostViewRegions.Gate)
+        {
+            var ledger = MacMappedCopyState.Ledger;
+            HostMappedCopyLedger.ProtectionChange? prepared = null;
+            HostMappedCopyLedger.DerivedProtectionReceipt receipt = default;
+            if (ledger is not null)
+            {
+                if (ordinaryEnrollment)
+                {
+                    prepared = ledger.PrepareProtectionChange(address, size, derivedHostAccess, guestAccess);
+                    if (!ledger.BeginProtectionChange(prepared, address, size)) return false;
+                }
+                else if (!ledger.BeginDerivedProtection(address, size, guestAccess, derivedHostAccess, out receipt)) return false;
+            }
+            var complete = false;
+            try
+            {
+                nativeResult = mprotect((nint)address, (nuint)size, GetNativeProtection(derivedHostAccess));
+                nativeError = nativeResult == 0 ? 0 : Marshal.GetLastPInvokeError(); // before any helper/call
+                if (nativeResult != 0) return false;
+                HostViewRegions.ChangeProtection(address, size, HostViewRegions.RawProtection(derivedHostAccess));
+                complete = true;
+                return true;
+            }
+            finally
+            {
+                if (ordinaryEnrollment) ledger?.CompleteProtectionChange(prepared, complete);
+                else ledger?.CompleteDerivedProtection(receipt, complete);
+            }
+        }
+    }
+
+    // Private ordinary-fixture control only: real Mach maximum protection,
+    // never an externally applied mutation that bypasses the mapping ledger.
+    // No production caller, signal callback, or public fake-outcome hook.
+    private bool SetReadonlyMaximumForControl(ulong address, ulong size, GuestPageProtection guestAccess, out int nativeResult)
+    {
+        nativeResult = int.MinValue;
+        lock (HostViewRegions.Gate)
+        {
+            var ledger = MacMappedCopyState.Ledger;
+            if (ledger is null || address % ledger.NativePageSize != 0 || size == 0 || size % ledger.NativePageSize != 0 ||
+                !ledger.BeginDerivedProtection(address, size, guestAccess, HostPageProtection.ReadOnly, out var receipt)) return false;
+            var complete = false;
+            try
+            {
+                nativeResult = mach_vm_protect(mach_task_self(), address, size, 1, PROT_READ);
+                complete = nativeResult == KERN_SUCCESS;
+                return complete;
+            }
+            finally { ledger.CompleteDerivedProtection(receipt, complete); }
         }
     }
 
@@ -495,6 +600,9 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
 
     [LibraryImport("libSystem.B.dylib")]
     private static partial int mach_vm_allocate(uint task, ref ulong address, ulong size, int flags);
+
+    [LibraryImport("libSystem.B.dylib")]
+    private static partial int mach_vm_protect(uint task, ulong address, ulong size, int setMaximum, int protection);
 
     [LibraryImport("libSystem.B.dylib")]
     private static partial int mach_vm_deallocate(uint task, ulong address, ulong size);

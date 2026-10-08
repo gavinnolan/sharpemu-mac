@@ -95,10 +95,37 @@ internal static partial class MetalVideoPresenter
 
     private static void ExecuteComputeDispatch(nint device, nint queue, ComputeGuestDispatch dispatch)
     {
+        var selectedSeedExecution = BeginSelectedStorageMipSeedExecution(dispatch);
+        Exception? primary = null;
+        try { ExecuteComputeDispatchCore(device, queue, dispatch); }
+        catch (Exception failure) { primary = failure; TraceFiniteStorageDispatchRefusal(dispatch, failure); throw; }
+        finally
+        {
+            var volumeCleanup = ReleasePreparedSingletonVolumeOriginals(dispatch.Textures, primary);
+            try { selectedSeedExecution.Finish(primary ?? volumeCleanup); }
+            catch (Exception later) when (primary is not null || volumeCleanup is not null)
+            {
+                try { (primary ?? volumeCleanup)!.Data["MetalSelectedSeedSecondaryCleanup"] = later; } catch { }
+            }
+            if (primary is null && volumeCleanup is not null)
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(volumeCleanup).Throw();
+        }
+    }
+
+    private static void ExecuteComputeDispatchCore(nint device, nint queue, ComputeGuestDispatch dispatch)
+    {
         TraceGuestWorkStage("compute.entry");
+        var publishFiniteStorage = RequiresFiniteStoragePublication(dispatch.Textures);
+        if (publishFiniteStorage)
+        {
+            ValidateFiniteStorageDispatch(dispatch.Textures);
+            ValidateFiniteStorageBufferCohort(dispatch.Textures, dispatch.GlobalMemoryBuffers);
+        }
         if (_skipAllCompute)
         {
             RequireGuestPrefixExecution(false, "compute execution is disabled");
+            if (publishFiniteStorage)
+                throw new NotSupportedException("Metal finite storage publication cannot acknowledge a skipped compute dispatch.");
             if (dispatch.Textures.Any(texture => _selectedStorageMipAssociations.TryGetValue(texture, out _)))
                 throw new NotSupportedException("Metal selected storage mip writes cannot be skipped.");
             ReturnPooledComputeData(dispatch);
@@ -124,6 +151,8 @@ internal static partial class MetalVideoPresenter
         if (!TryGetComputePipeline(device, dispatch.Shader, out var pipeline))
         {
             RequireGuestPrefixExecution(false, "compute pipeline creation failed");
+            if (publishFiniteStorage)
+                throw new InvalidOperationException("Metal finite storage publication cannot acknowledge a dispatch without its native pipeline.");
             if (dispatch.Textures.Any(texture => _selectedStorageMipAssociations.TryGetValue(texture, out _)))
                 throw new InvalidOperationException("Metal selected storage mip dispatch pipeline could not be created.");
             ReturnPooledComputeData(dispatch);
@@ -136,6 +165,8 @@ internal static partial class MetalVideoPresenter
             ? beginCommands(queue) : BeginBatchedGuestCommands(queue);
         if (commandBuffer == 0)
             throw new InvalidOperationException("Metal compute dispatch cannot create its command buffer.");
+        if (publishFiniteStorage && MetalNative.Send(commandBuffer, MetalNative.Selector("retainedReferences")) == 0)
+            throw new NotSupportedException("Metal finite storage publication requires command-buffer resource retention before dispatch.");
 
         TraceGuestWorkStage("compute.command_buffer.end");
         // Pre-resolve textures before the compute encoder opens: snapshot
@@ -146,6 +177,8 @@ internal static partial class MetalVideoPresenter
         // stackalloc storage is not an ownership receipt until explicitly set.
         textureHandles.Clear();
         textureOwned.Clear();
+        List<FiniteStorageWriteback>? storageWritebacks = publishFiniteStorage
+            ? new(dispatch.Textures.Length) : null;
         Exception? dispatchFailure = null;
         try
         {
@@ -160,8 +193,15 @@ internal static partial class MetalVideoPresenter
                     if (_selectedStorageMipAssociations.TryGetValue(descriptor, out _) &&
                         MetalNative.Send(commandBuffer, MetalNative.Selector("retainedReferences")) == 0)
                         throw new NotSupportedException("Metal selected storage resources require native command-buffer retention through completion.");
-                    textureHandles[index] = EnsureStorageImage(device, descriptor).Texture;
+                    var storageImage = EnsureStorageImage(device, descriptor);
+                    textureHandles[index] = storageImage.Texture;
                     textureOwned[index] = false;
+                    if (storageWritebacks is not null && StorageImageWrites(descriptor))
+                    {
+                        var receipt = CaptureFiniteStorageWriteback(descriptor, storageImage);
+                        storageWritebacks.Add(receipt);
+                        TraceFiniteStorageRuntime("producer-retained", descriptor.Address, "exact-first-or-own-canonical-version", receipt.Origin);
+                    }
                 }
                 else
                 {
@@ -179,6 +219,9 @@ internal static partial class MetalVideoPresenter
                     }
                 }
             }
+
+            if (publishFiniteStorage)
+                ValidateFiniteStorageBuffersAgainstImage(storageWritebacks, dispatch.GlobalMemoryBuffers);
 
             TraceGuestWorkStage("compute.textures.end");
             TraceGuestWorkStage("compute.encoder.begin");
@@ -221,11 +264,14 @@ internal static partial class MetalVideoPresenter
                 });
             MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
             TraceGuestWorkStage("compute.dispatch_encoding.end");
+            if (storageWritebacks is not null)
+                foreach (var receipt in storageWritebacks)
+                    EncodeFiniteStorageReadback(device, commandBuffer, receipt);
 
             // CPU-visible writes are ordering points (see the draw path): flush
             // the batch and wait so the write-back lands before this work item
             // completes. Pure-GPU dispatches stay in the open batch.
-            if (writeBackBuffers.Count > 0)
+            if (writeBackBuffers.Count > 0 || storageWritebacks is { Count: > 0 })
             {
                 TraceGuestWorkStage("compute.writeback_flush.begin");
                 var committed = FlushBatchedGuestCommands();
@@ -234,8 +280,19 @@ internal static partial class MetalVideoPresenter
                 WaitForCommittedGuestBufferWriteback(committed);
                 TraceGuestWorkStage("compute.writeback_wait.end");
                 TraceGuestWorkStage("compute.writeback_copy.begin");
-                WriteBuffersBackToGuest(writeBackBuffers);
+                if (publishFiniteStorage)
+                    PublishFiniteStorageBuffers(writeBackBuffers, storageWritebacks, dispatch.GlobalMemoryBuffers);
+                else
+                    WriteBuffersBackToGuest(writeBackBuffers);
+                if (storageWritebacks is not null)
+                    foreach (var receipt in storageWritebacks)
+                        CompleteFiniteStorageWriteback(committed, receipt);
                 TraceGuestWorkStage("compute.writeback_copy.end");
+            }
+            if (storageWritebacks is not null)
+            {
+                RecordStorageImageWrites(dispatch.Textures);
+                FinalizeFiniteStorageWrites(storageWritebacks);
             }
         }
         catch (Exception exception)
@@ -245,10 +302,15 @@ internal static partial class MetalVideoPresenter
         }
         finally
         {
-            ReleaseComputeTemporaryTextures(textureHandles, textureOwned, dispatchFailure);
+            Exception? storageCleanupFailure = null;
+            try { ReleaseFiniteStorageWritebacks(storageWritebacks, dispatchFailure); }
+            catch (Exception cleanup) { storageCleanupFailure = cleanup; }
+            ReleaseComputeTemporaryTextures(textureHandles, textureOwned, dispatchFailure ?? storageCleanupFailure);
+            if (storageCleanupFailure is not null)
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(storageCleanupFailure).Throw();
         }
 
-        RecordStorageImageWrites(dispatch.Textures);
+        if (storageWritebacks is null) RecordStorageImageWrites(dispatch.Textures);
 
         ReturnPooledComputeData(dispatch);
     }
@@ -277,7 +339,12 @@ internal static partial class MetalVideoPresenter
                     if (_selectedStorageMipAssociations.TryGetValue(descriptor, out var selected))
                     {
                         if ((selectedChanged ??= new()).Add(selected.Key) &&
-                            _selectedStorageMipImages.TryGetValue(selected.Key, out var selectedImage)) selectedImage.MarkContentChangedWithDiagnostic("storage-dispatch");
+                            _selectedStorageMipImages.TryGetValue(selected.Key, out var selectedImage))
+                        {
+                            _ = HasCurrentSelectedNativeOriginalProofLocked(selected);
+                            selectedImage.MarkContentChangedWithDiagnostic("storage-dispatch");
+                            AdvanceSelectedNativeOriginalVersionLocked(selected, selectedImage);
+                        }
                         if (_selectedStorageMipPending.TryGetValue(selected.Key, out var pending) && pending.Sequence == _executingGuestWorkSequence)
                             _selectedStorageMipPending.Remove(selected.Key);
                     }
@@ -294,25 +361,49 @@ internal static partial class MetalVideoPresenter
         // Render-target codes are a different namespace; substituting RGBA8
         // here changes both native binding type and the seed's byte layout.
         var nativeFormat = StorageTextureFormat(descriptor);
+        var storageCpuOrigin = StorageCpuOrigin(descriptor);
+        ValidateStorageCpuSeedSession(storageCpuOrigin); // before any native allocation or live reuse
+        ValidateSingletonVolumeForMaterialization(descriptor, storageCpuOrigin); // tracker checks outside _gate
         if (!_selectedStorageMipAssociations.TryGetValue(descriptor, out _))
             RejectAddressOnlySelectedStorageAlias(descriptor.Address);
         descriptor = PrepareDrawTextureUpload(descriptor);
         var seedLayout = StorageTextureSeedLayout(descriptor, nativeFormat);
         _selectedStorageMipAssociations.TryGetValue(descriptor, out var selected);
+        GuestImage? volumeLive = null;
         lock (_gate)
         {
+            ValidateStorageCpuSeedSession(storageCpuOrigin); // revalidate incoming seed after acquiring the live-owner gate
             if (selected is not null) RejectConflictingSelectedStorageConstructionLocked(selected);
             if (selected is not null ? _selectedStorageMipImages.TryGetValue(selected.Key, out var existing) :
                 _guestImages.TryGetValue(descriptor.Address, out existing))
             {
+                ValidateStorageCpuSeedSession(existing.StorageCpuOrigin);
+                if (storageCpuOrigin?.VolumeWatch is not null && !ReferenceEquals(storageCpuOrigin, existing.StorageCpuOrigin))
+                    throw new InvalidOperationException("Metal singleton volume cannot adopt another live owner's original seed.");
+                if (existing.StorageCpuOrigin?.VolumeWatch is not null &&
+                    !IsSingletonVolumeNativeOwnerCurrentLocked(existing, existing.StorageCpuOrigin))
+                    throw new InvalidOperationException("Metal singleton volume live owner lost its exact original watch/version.");
                 if (selected is not null)
                 {
                     ValidateSelectedStorageMipOwner(_selectedStorageMipOwners[selected.Key], requireObserved: true);
                     ValidateSelectedStorageMipOwner(selected);
                 }
                 ValidateStorageImageView(existing, descriptor, nativeFormat);
-                return existing;
+                if (existing.StorageCpuOrigin?.VolumeWatch is null) return existing;
+                volumeLive = existing;
             }
+        }
+        if (volumeLive is not null)
+        {
+            ValidateSingletonVolumeOriginalContent(volumeLive.StorageCpuOrigin);
+            lock (_gate)
+            {
+                ValidateStorageCpuSeedSession(storageCpuOrigin);
+                if (!_guestImages.TryGetValue(descriptor.Address, out var current) || !ReferenceEquals(current, volumeLive) ||
+                    !IsSingletonVolumeNativeOwnerCurrentLocked(volumeLive, volumeLive.StorageCpuOrigin!))
+                    throw new InvalidOperationException("Metal singleton volume live lookup lost its exact original owner.");
+            }
+            return volumeLive;
         }
 
         if (selected is not null)
@@ -365,6 +456,8 @@ internal static partial class MetalVideoPresenter
             ArrayLength = shape.ArrayLength,
             Format = format,
             DiagnosticOrigin = CaptureStorageImageOrigin(descriptor),
+            StorageCpuLayout = storageCpuOrigin?.Layout ?? MetalStorageCpuLayout.TryCreate(descriptor),
+            StorageCpuOrigin = storageCpuOrigin,
         };
         if (image.Texture == 0)
             throw new InvalidOperationException($"Metal cannot allocate storage image 0x{descriptor.Address:X} with format {format}.");
@@ -378,12 +471,20 @@ internal static partial class MetalVideoPresenter
             ReplaceDrawTextureContents(image.Texture, descriptor, seedLayout.Pitch, nativeFormat);
             image.Initialized = true;
             image.ContentVersion++;
+            ValidateSingletonVolumeOriginalContent(storageCpuOrigin); // completed synchronous CPU upload, no restamp
             lock (_gate)
             {
+                ValidateStorageCpuSeedSession(storageCpuOrigin); // native upload cannot refresh original ownership
                 if (selected is not null) RejectConflictingSelectedStorageConstructionLocked(selected);
                 if (selected is not null ? _selectedStorageMipImages.TryGetValue(selected.Key, out var raced) :
                     _guestImages.TryGetValue(descriptor.Address, out raced))
                 {
+                    ValidateStorageCpuSeedSession(raced.StorageCpuOrigin);
+                    // A newly raced volume owner has not passed this call's
+                    // outside-gate original content check. Retry at the ordinary
+                    // producer boundary rather than adopt it by address.
+                    if (storageCpuOrigin?.VolumeWatch is not null || raced.StorageCpuOrigin?.VolumeWatch is not null)
+                        throw new InvalidOperationException("Metal singleton volume construction raced a different original owner.");
                     if (selected is not null)
                     {
                         ValidateSelectedStorageMipOwner(selected);
@@ -395,9 +496,15 @@ internal static partial class MetalVideoPresenter
                 PublishStorageImageLocked(descriptor, selected, image, extent);
                 installed = true;
             }
+            ValidateSingletonVolumeOriginalContent(storageCpuOrigin); // post-publication original veto, no new tuple
             return image;
         }
-        catch (Exception failure) { r16ConstructionFailure = failure; throw; }
+        catch (Exception failure)
+        {
+            r16ConstructionFailure = failure;
+            if (installed && storageCpuOrigin?.VolumeWatch is { } watch) Volatile.Write(ref watch.UnknownProducer, true);
+            throw;
+        }
         finally
         {
             // All construction, upload, raced lookup, and publication failures
@@ -405,7 +512,18 @@ internal static partial class MetalVideoPresenter
             // by its registry; only this call's new texture is released here.
             if (!installed)
             {
-                if (selected is not null && MetalR16FloatSelectedMip.TryPlacement(selected.Key.Resource, selected.Key.Mip, out _))
+                if (storageCpuOrigin is not null)
+                {
+                    var owned = image.Texture; image.Texture = 0;
+                    try { MetalNative.SendVoid(owned, MetalNative.Selector("release")); }
+                    catch (Exception cleanup)
+                    {
+                        lock (_gate) _typedCpuSyncCleanupFailure ??= cleanup;
+                        if (r16ConstructionFailure is null) throw;
+                        try { r16ConstructionFailure.Data["TypedStorageOriginalSeedCleanup"] = cleanup; } catch { }
+                    }
+                }
+                else if (selected is not null && MetalR16FloatSelectedMip.TryPlacement(selected.Key.Resource, selected.Key.Mip, out _))
                 {
                     var owned = image.Texture; image.Texture = 0;
                     ReleaseR16SelectedConstructionRetain(owned, r16ConstructionFailure);
@@ -417,6 +535,8 @@ internal static partial class MetalVideoPresenter
 
     private static void ValidateStorageImageView(GuestImage image, GuestDrawTexture descriptor, MetalTextureFormat format)
     {
+        if (image.StorageCpuLayout is { } creation && !creation.Matches(descriptor))
+            throw new NotSupportedException($"Metal typed storage image cannot reuse a different immutable creation descriptor at 0x{descriptor.Address:X}.");
         if (_selectedStorageMipAssociations.TryGetValue(descriptor, out var selected) &&
             MetalR16FloatSelectedMip.TryPlacement(selected.Key.Resource, selected.Key.Mip, out _) &&
             (!image.R16SelectedOwnsRetain || image.Texture == 0))
