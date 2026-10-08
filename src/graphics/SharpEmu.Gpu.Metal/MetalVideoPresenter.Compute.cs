@@ -95,7 +95,15 @@ internal static partial class MetalVideoPresenter
 
     private static void ExecuteComputeDispatch(nint device, nint queue, ComputeGuestDispatch dispatch)
     {
-        using var selectedSeedExecution = BeginSelectedStorageMipSeedExecution(dispatch);
+        var selectedSeedExecution = BeginSelectedStorageMipSeedExecution(dispatch);
+        Exception? primary = null;
+        try { ExecuteComputeDispatchCore(device, queue, dispatch); }
+        catch (Exception failure) { primary = failure; throw; }
+        finally { selectedSeedExecution.Finish(primary); }
+    }
+
+    private static void ExecuteComputeDispatchCore(nint device, nint queue, ComputeGuestDispatch dispatch)
+    {
         if (_skipAllCompute)
         {
             if (dispatch.Textures.Any(texture => _selectedStorageMipAssociations.TryGetValue(texture, out _)))

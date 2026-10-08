@@ -18,6 +18,7 @@ internal static partial class MetalVideoPresenter
         internal readonly CpuMappedCopyObservation Mapping = mapping;
         internal readonly GuestImageWriteTracker.ReadSnapshot Read = read;
         internal bool NativeOwnerTransferred;
+        internal int WriteWatchConsumed;
         internal int Phase; // 0 original, 1 admitted, 2 exact execution, 3 consumed
         internal object? Work;
         internal long Sequence;
@@ -46,10 +47,15 @@ internal static partial class MetalVideoPresenter
                 if (original is null || original.FootprintAddress != address || original.FootprintByteCount != footprintBytes ||
                     original.SourceAddress != sourceAddress || original.SourceByteCount != (ulong)destination.Length)
                 {
-                    ReleaseOriginalSelectedWriteWatch(optional, original);
-                    throw new InvalidOperationException("Metal initial selected seed copy returned inconsistent original mapping metadata.");
+                    var primary = new InvalidOperationException("Metal initial selected seed copy returned inconsistent original mapping metadata.");
+                    ReleaseOriginalSelectedWriteWatch(optional, original, primary);
+                    throw primary;
                 }
-                if (!optional.IsMappedCopyObservationCurrent(original))
+                bool current;
+                try { current = optional.IsMappedCopyObservationCurrent(original); }
+                catch (Exception primary)
+                { ReleaseOriginalSelectedWriteWatch(optional, original, primary); throw; }
+                if (!current)
                 { ReleaseOriginalSelectedWriteWatch(optional, original); return false; }
                 mappedSource = optional;
                 mapping = original;
@@ -65,8 +71,17 @@ internal static partial class MetalVideoPresenter
         return true;
     }
 
-    internal static void ReleaseOriginalSelectedWriteWatch(ICpuMappedCopySource? source, CpuMappedCopyObservation? mapping)
-    { if (source is ICpuMappedReadWatchSource watched && mapping is not null) watched.ReleaseMappedCopyWriteWatch(mapping); }
+    internal static void ReleaseOriginalSelectedWriteWatch(ICpuMappedCopySource? source, CpuMappedCopyObservation? mapping,
+        Exception? primary = null)
+    {
+        if (source is not ICpuMappedReadWatchSource watched || mapping is null) return;
+        try { watched.ReleaseMappedCopyWriteWatch(mapping); }
+        catch (Exception cleanup) when (primary is not null)
+        {
+            try { primary.Data["MetalSelectedOriginalWatchCleanup"] = cleanup; }
+            catch { }
+        }
+    }
 
     internal static bool IsInitialSelectedStorageMipSeedStable(ulong address,
         in CpuTextureSnapshotObservation observation, ICpuMappedCopySource? source, CpuMappedCopyObservation? mapping)
@@ -145,21 +160,54 @@ internal static partial class MetalVideoPresenter
 
     private readonly struct SelectedStorageMipSeedExecutionScope(object work, SelectedStorageMipSeed[] seeds) : IDisposable
     {
-        public void Dispose()
+        public void Dispose() => Finish(null);
+        internal void Finish(Exception? primary)
         {
             if (seeds is null) return;
-            lock (_gate)
+            Exception? cleanup = null;
+            try
+            {
                 foreach (var seed in seeds)
-                    if (seed.Phase == 2 && ReferenceEquals(seed.Work, work) && ReferenceEquals(seed.Thread, System.Threading.Thread.CurrentThread))
-                    {
-                        seed.Phase = 3;
-                        if (!seed.NativeOwnerTransferred) ReleaseOriginalSelectedWriteWatch(seed.Source, seed.Mapping);
-                        seed.Thread = null;
-                        seed.Work = null;
-                    }
-            if (ReferenceEquals(_selectedStorageMipSeedExecutingWork, work)) _selectedStorageMipSeedExecutingWork = null;
-            // No callback/revalidation/throw during unwinding; preserve the
-            // first dispatch failure. Consumed proofs can never be rearmed.
+                {
+                    var release = false;
+                    lock (_gate)
+                        if (seed.Phase == 2 && ReferenceEquals(seed.Work, work) && ReferenceEquals(seed.Thread, System.Threading.Thread.CurrentThread))
+                        {
+                            seed.Phase = 3;
+                            release = !seed.NativeOwnerTransferred;
+                            seed.Thread = null;
+                            seed.Work = null;
+                        }
+                    if (release) TryReleaseSelectedSeedWatch(seed, ref cleanup);
+                }
+            }
+            finally
+            {
+                if (ReferenceEquals(_selectedStorageMipSeedExecutingWork, work)) _selectedStorageMipSeedExecutingWork = null;
+            }
+            if (cleanup is not null)
+            {
+                lock (_gate) _selectedNativeOriginalCleanupFailure ??= cleanup;
+                if (primary is null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(cleanup).Throw();
+                else
+                    try { primary.Data["MetalSelectedSeedWatchCleanup"] = cleanup; }
+                    catch { }
+            }
+            // Exact phase/thread/work and watch authority are consumed BEFORE
+            // optional release; all attempts run and TLS clears even on failure.
+        }
+    }
+
+    private static void TryReleaseSelectedSeedWatch(SelectedStorageMipSeed seed, ref Exception? cleanup)
+    {
+        if (Interlocked.Exchange(ref seed.WriteWatchConsumed, 1) != 0) return;
+        try { ReleaseOriginalSelectedWriteWatch(seed.Source, seed.Mapping); }
+        catch (Exception error)
+        {
+            if (cleanup is null) cleanup = error;
+            else
+                try { cleanup.Data[$"SelectedWatchSecondary{seed.Sequence}"] = error; }
+                catch { }
         }
     }
 
@@ -202,13 +250,24 @@ internal static partial class MetalVideoPresenter
                 _selectedStorageMipSeedExecutingWork = dispatch;
                 return new(dispatch, seeds);
             }
-            catch
+            catch (Exception primary)
             {
+                Exception? cleanup = null;
                 foreach (var texture in dispatch.Textures)
                     if (_selectedStorageMipAssociations.TryGetValue(texture, out var owner) &&
                         _selectedStorageMipSeeds.TryGetValue(owner, out var seed) && ReferenceEquals(seed.Work, dispatch))
-                    { seed.Phase = 3; if (!seed.NativeOwnerTransferred) ReleaseOriginalSelectedWriteWatch(seed.Source, seed.Mapping);
-                      seed.Thread = null; seed.Work = null; }
+                    {
+                        seed.Phase = 3;
+                        seed.Thread = null;
+                        seed.Work = null;
+                        if (!seed.NativeOwnerTransferred) TryReleaseSelectedSeedWatch(seed, ref cleanup);
+                    }
+                if (cleanup is not null)
+                {
+                    _selectedNativeOriginalCleanupFailure ??= cleanup;
+                    try { primary.Data["MetalSelectedSeedWatchCleanup"] = cleanup; }
+                    catch { }
+                }
                 throw;
             }
         }

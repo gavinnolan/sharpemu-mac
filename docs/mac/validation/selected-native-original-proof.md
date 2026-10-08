@@ -58,3 +58,17 @@ machine lock. A bounded outer worker must terminate on unknown native completion
 the fixture quarantines native handles rather than freeing beneath pending GPU
 work. No device execution, game advancement, performance or PS5 topology claim
 has been made from this source checkpoint.
+
+The cleanup successor prepares four additional managed negative rows (two scope
+unwind cases, native-proof registry close, and original-copy error preservation).
+These controls use private cleanup-only objects and a refusing source, not native
+receipts or positive currentness. Execution phase/thread/work and exact watch
+authority are consumed before optional release; release attempts continue after
+failure, execution TLS clears in finally, and the original dispatch cause survives.
+A cleanup failure after an otherwise successful dispatch is thrown before work
+acknowledgement. Native close removes original proof entries before callbacks,
+attempts every watch, and keeps unknown cleanup sticky. Reentrant close delegates
+to the admitted outer close, preventing a second native-release/session pass.
+Snapshot and failed-entry
+cleanup likewise preserve the original failure. These new controls remain
+unbuilt/unexecuted until a separately granted compiler slot.

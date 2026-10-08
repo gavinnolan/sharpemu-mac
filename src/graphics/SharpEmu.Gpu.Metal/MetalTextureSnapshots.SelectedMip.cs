@@ -66,6 +66,7 @@ internal static partial class MetalTextureSnapshots
             if (!MetalVideoPresenter.TryReadInitialSelectedStorageMipSource(context.Memory, d.Address, end,
                 d.Address + selected.ByteOffset, source, out var mappedSource, out var mapping)) continue;
             var registered = false;
+            Exception? primary = null;
             try
             {
             var pixels = new byte[checked((int)(width * height * 4))];
@@ -82,7 +83,8 @@ internal static partial class MetalTextureSnapshots
             registered = true;
             return true;
             }
-            finally { if (!registered) MetalVideoPresenter.ReleaseOriginalSelectedWriteWatch(mappedSource, mapping); }
+            catch (Exception failure) { primary = failure; throw; }
+            finally { if (!registered) MetalVideoPresenter.ReleaseOriginalSelectedWriteWatch(mappedSource, mapping, primary); }
         }
         throw new InvalidOperationException("Metal selected storage mip changed during all three owned-copy attempts.");
     }
@@ -107,6 +109,7 @@ internal static partial class MetalTextureSnapshots
             if (!MetalVideoPresenter.TryReadInitialSelectedStorageMipSource(context.Memory, d.Address, selected.End,
                 d.Address + selected.Offset, source, out var mappedSource, out var mapping)) continue;
             var registered = false;
+            Exception? primary = null;
             try
             {
             var pixels = new byte[source.Length];
@@ -123,7 +126,8 @@ internal static partial class MetalTextureSnapshots
             registered = true;
             return true;
             }
-            finally { if (!registered) MetalVideoPresenter.ReleaseOriginalSelectedWriteWatch(mappedSource, mapping); }
+            catch (Exception failure) { primary = failure; throw; }
+            finally { if (!registered) MetalVideoPresenter.ReleaseOriginalSelectedWriteWatch(mappedSource, mapping, primary); }
         }
         throw new InvalidOperationException("Metal R16Float selected storage changed during all three owned-copy attempts.");
     }

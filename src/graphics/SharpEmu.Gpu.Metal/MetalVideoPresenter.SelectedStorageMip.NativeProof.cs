@@ -19,6 +19,7 @@ internal static partial class MetalVideoPresenter
         internal long ProducerSequence;
     }
     private static readonly Dictionary<SelectedStorageMipKey, SelectedNativeOriginalProof> _selectedNativeOriginalProofs = new();
+    private static Exception? _selectedNativeOriginalCleanupFailure;
 
     private static bool OriginalSelectedNativeContentCurrent(SelectedStorageMipAssociation owner, SelectedStorageMipSeed seed) =>
         _selectedNativeOriginalReuseEnabled && !TextureSourceGraphEnabled && !_closed && _guestWorkFailure is null &&
@@ -56,7 +57,12 @@ internal static partial class MetalVideoPresenter
 
     private static bool HasCurrentSelectedNativeOriginalProofLocked(SelectedStorageMipAssociation owner)
     {
-        if (!_selectedNativeOriginalProofs.TryGetValue(owner.Key, out var proof)) return false;
+        if (!_selectedNativeOriginalProofs.TryGetValue(owner.Key, out var proof))
+        {
+            if (_selectedStorageMipSeeds.TryGetValue(owner, out var consumed) && consumed.NativeOwnerTransferred)
+                throw new InvalidOperationException("Metal selected original native watch ownership has already been consumed.");
+            return false;
+        }
         if (!ReferenceEquals(proof.Owner, owner) || owner.Session != _selectedStorageMipSession ||
             !_selectedStorageMipImages.TryGetValue(owner.Key, out var current) || !ReferenceEquals(current, proof.Image) ||
             !_selectedStorageMipOwners.TryGetValue(owner.Key, out var accepted) || !ReferenceEquals(accepted, owner) ||
@@ -78,10 +84,14 @@ internal static partial class MetalVideoPresenter
         proof.ProducerSequence = _executingGuestWorkSequence;
     }
 
-    private static void ReleaseSelectedNativeOriginalProofsLocked()
+    private static Exception? ReleaseSelectedNativeOriginalProofsLocked()
     {
-        foreach (var proof in _selectedNativeOriginalProofs.Values)
-            ReleaseOriginalSelectedWriteWatch(proof.Seed.Source, proof.Seed.Mapping);
+        if (_selectedNativeOriginalProofs.Count == 0) return null;
+        var proofs = _selectedNativeOriginalProofs.Values.ToArray();
         _selectedNativeOriginalProofs.Clear();
+        Exception? cleanup = null;
+        foreach (var proof in proofs) TryReleaseSelectedSeedWatch(proof.Seed, ref cleanup);
+        _selectedNativeOriginalCleanupFailure ??= cleanup;
+        return cleanup;
     }
 }
