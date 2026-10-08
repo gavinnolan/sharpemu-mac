@@ -31,5 +31,32 @@ The independent pinned AddrLib driver at source1e996df4 reports a65536-byte
 physical surface/alignment,128x128 block/pitch and origin byte offset0. This is
 modeled source/layout evidence, not PS5 topology or native execution. CSV/source
 hashes and reproduction command are in the retained fixture README. Managed
-build/tests and native tests remain pending; no native capability or title
-progression is claimed from source/oracle alone.
+fixtures separately exercise the typed native path; no title progression is
+claimed from source/oracle alone.
+
+## Exact-source managed and native proof
+
+Clean source59fac2ba built Libs with154 existing warnings/zero errors and Metal
+fixtures with zero warnings/errors. The genuine managed selection passed93/93
+ARM64 and93/93 Rosetta x64, including12 new exact Uint replay/rejection controls.
+The four fixture codegen cases also passed on each CLR with required-device0;
+these early returns are explicitly separate from device coverage. Managed
+manifest SHA256 `bf1a484ec256c9448649a1249eb9405f9417d5d72e6af4b7a6ced7763451506a`
+is retained under `artifacts/validation/r32uint-array/59fac2ba/manifest.json`.
+
+A separately granted shared-lock batch used the exact frozen Debug/net10.0 DLL,
+fresh ARM and Rosetta workers, required-device1 and60-second watchdogs. Actual
+4/4 cases passed on each architecture with zero failed/notExecuted cases. Native
+type3/arrayLength1/format53/usage3 were asserted. The high-bit uint seed survived
+detached upload, valid store produced0xDEADBEEF, all four load channels matched
+X001, and negative/slice1/X1 stores preserved0x87654321. Each TRX retains four
+actual execution markers; all65532 guest neighbor bytes remained unchanged.
+The sampled X001 view is explicit test setup, not game resolver or shared
+coherence qualification. No actual title scene/FPS or lifetime lease is claimed.
+
+Source/DLL/helper/import/hardware/command/log/TRX hashes and owned process scans
+are retained in `artifacts/validation/r32uint-array/59fac2ba/native/native-manifest.json`
+(SHA256 `aceea5ce4cf44314d1e09815dd3226b768da281aaff25f78563c3cb0ed27de15`).
+Both workers exited0 without watchdog intervention; owned groups8516/8524 and
+the shared lock were absent afterwards. Pre/post comm-only scans found no other
+emulator. This remains numerical correctness evidence, not a performance run.
