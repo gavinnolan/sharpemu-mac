@@ -11,23 +11,31 @@ internal sealed class HostManagedWriteIntervals
     {
         internal long State; // 0 empty, -identity reserved, +identity published
         internal ulong Offset, Count;
+        internal bool Operation;
     }
     private readonly HostBackingObject backing;
     private readonly Slot[] slots = Enumerable.Range(0, Capacity).Select(_ => new Slot()).ToArray();
+    private const long PublicationBit = 1L << 32;
+    private long admission;
     private long nextIdentity, active, begun, completed, aborted;
     private int coverageIncomplete;
 
     internal HostManagedWriteIntervals(HostBackingObject backing) => this.backing = backing;
     internal readonly record struct Token(HostManagedWriteIntervals? Owner, int Slot, long Identity);
 
-    internal Token Begin(ulong offset, ulong count)
+    internal Token Begin(ulong offset, ulong count) => BeginCore(offset, count, false);
+    internal Token BeginOperation() => BeginCore(0, backing.Size, true);
+    private Token BeginCore(ulong offset, ulong count, bool operation)
     {
         if (count == 0) return default;
+        var admitted = Interlocked.Increment(ref admission);
+        if ((admitted & PublicationBit) != 0 || admitted >= PublicationBit)
+        { Interlocked.Decrement(ref admission); return new(this, -1, 0); }
         if (offset > backing.Size || count > backing.Size - offset)
-        { Interlocked.Exchange(ref coverageIncomplete, 1); return default; }
-        if (Volatile.Read(ref coverageIncomplete) != 0) return default;
+        { Interlocked.Exchange(ref coverageIncomplete, 1); Interlocked.Decrement(ref admission); return default; }
+        if (Volatile.Read(ref coverageIncomplete) != 0) { Interlocked.Decrement(ref admission); return default; }
         var identity = Interlocked.Increment(ref nextIdentity);
-        if (identity <= 0) { Interlocked.Exchange(ref coverageIncomplete, 1); return default; }
+        if (identity <= 0) { Interlocked.Exchange(ref coverageIncomplete, 1); Interlocked.Decrement(ref admission); return default; }
         var first = (int)((ulong)identity % Capacity);
         for (var visited = 0; visited < Capacity; visited++)
         {
@@ -35,13 +43,17 @@ internal sealed class HostManagedWriteIntervals
             // One bounded attempt per preallocated slot; no spin, wait, query,
             // callback or allocation while the caller holds an outer gate.
             if (Interlocked.CompareExchange(ref slot.State, -identity, 0) != 0) continue;
-            Interlocked.Increment(ref active);
-            slot.Offset = offset; slot.Count = count;
-            if (Interlocked.Increment(ref begun) <= 0) Interlocked.Exchange(ref coverageIncomplete, 1);
+            slot.Offset = offset; slot.Count = count; slot.Operation = operation;
+            if (!operation)
+            {
+                Interlocked.Increment(ref active);
+                if (Interlocked.Increment(ref begun) <= 0) Interlocked.Exchange(ref coverageIncomplete, 1);
+            }
             Volatile.Write(ref slot.State, identity);
             return new(this, index, identity);
         }
         Interlocked.Exchange(ref coverageIncomplete, 1);
+        Interlocked.Decrement(ref admission);
         return default; // preserve legacy write, explicitly lose bookkeeping coverage
     }
 
@@ -52,13 +64,46 @@ internal sealed class HostManagedWriteIntervals
             return false;
         // Consume this exact operation before reuse. A copied/stale token cannot
         // release a later operation or repeat an unknown completion.
+        var operation = slots[token.Slot].Operation;
         if (Interlocked.CompareExchange(ref slots[token.Slot].State, 0, token.Identity) != token.Identity)
             return false;
-        Interlocked.Decrement(ref active);
-        var total = succeeded ? Interlocked.Increment(ref completed) : Interlocked.Increment(ref aborted);
-        if (total <= 0) Interlocked.Exchange(ref coverageIncomplete, 1);
+        if (!operation)
+        {
+            Interlocked.Decrement(ref active);
+            var total = succeeded ? Interlocked.Increment(ref completed) : Interlocked.Increment(ref aborted);
+            if (total <= 0) Interlocked.Exchange(ref coverageIncomplete, 1);
+        }
+        Interlocked.Decrement(ref admission);
         return true;
     }
+
+
+    internal static bool AllowsBytes(Token token) => token.Owner is null || token.Slot >= 0;
+
+    // Participating writers only, never a certificate for native/JIT/raw stores.
+    // The count is acquired before allocating an interval identity; late losing
+    // writers may transiently increment under PublicationBit but cannot use bytes.
+    internal bool TryCaptureRevision(out long revision)
+    {
+        revision = -1;
+        if (Volatile.Read(ref coverageIncomplete) != 0 || Volatile.Read(ref admission) != 0) return false;
+        var found = Volatile.Read(ref nextIdentity);
+        if (found < 0 || Volatile.Read(ref admission) != 0 || Volatile.Read(ref coverageIncomplete) != 0) return false;
+        revision = found; return true;
+    }
+    internal bool TryReservePublication(long originalRevision)
+    {
+        if (originalRevision < 0 || originalRevision == long.MaxValue || Volatile.Read(ref coverageIncomplete) != 0 ||
+            Interlocked.CompareExchange(ref admission, PublicationBit, 0) != 0) return false;
+        if (Volatile.Read(ref nextIdentity) == originalRevision && Volatile.Read(ref coverageIncomplete) == 0) return true;
+        ReleasePublication(); return false;
+    }
+    internal void RecordPublicationWrite()
+    {
+        if (Interlocked.Increment(ref nextIdentity) <= 0) Interlocked.Exchange(ref coverageIncomplete, 1);
+    }
+    internal void ReleasePublication() => Interlocked.Add(ref admission, -PublicationBit);
+    internal void QuarantinePublication() => Interlocked.Exchange(ref coverageIncomplete, 1);
 
     // Test-only ordinary observation. Never used for publication, permission,
     // GPU/fault admission or content-currentness. Concurrent snapshot is fuzzy:
@@ -69,7 +114,7 @@ internal sealed class HostManagedWriteIntervals
         foreach (var slot in slots)
         {
             var identity = Volatile.Read(ref slot.State);
-            if (identity <= 0) continue;
+            if (identity <= 0 || slot.Operation) continue;
             var offset = slot.Offset; var count = slot.Count;
             if (Volatile.Read(ref slot.State) == identity) found.Add((offset, count, identity));
         }

@@ -27,6 +27,9 @@ public sealed class HostBackingObject : IDisposable
     }
     internal HostManagedWriteIntervals.Token BeginManagedWrite(ulong offset, ulong count) =>
         Volatile.Read(ref _managedWrites)?.Begin(offset, count) ?? default;
+    internal HostManagedWriteIntervals.Token BeginManagedWriteOperation() =>
+        Volatile.Read(ref _managedWrites)?.BeginOperation() ?? default;
+    internal HostManagedWriteIntervals? ManagedWrites => Volatile.Read(ref _managedWrites);
     internal static void EndManagedWrite(HostManagedWriteIntervals.Token token, bool succeeded)
     {
         // Failure means stale/foreign bookkeeping, never repeat actual bytes.

@@ -13,7 +13,7 @@ using SharpEmu.Logging;
 
 namespace SharpEmu.Core.Memory;
 
-public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryAllocator, IGuestAddressSpace, IGuestBackedSpace, IDisposable, ICpuMappedCopySource
+public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryAllocator, IGuestAddressSpace, IGuestBackedSpace, IDisposable, ICpuMappedCopySource, ICpuMappedPublicationSource
 {
     private static readonly SharpEmuLogger Log = SharpEmuLog.For("VMEM");
 
@@ -1146,6 +1146,18 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 HostPageProtection.ReadExecute or HostPageProtection.ReadWriteExecute or HostPageProtection.ExecuteWriteCopy,
             _ => false,
         };
+    }
+
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(CpuMappedCopyObservation original,
+        IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication)
+    {
+        publication = null;
+        var space = _backedSpace;
+        if (Volatile.Read(ref _disposed) || space is not ICpuMappedPublicationSource source)
+            return CpuMappedPublicationPreparationResult.Unavailable;
+        var result = source.TryPrepareMappedPublication(original, runs, out publication);
+        if (!Volatile.Read(ref _disposed) && ReferenceEquals(_backedSpace, space)) return result;
+        publication?.Dispose(); publication = null; return CpuMappedPublicationPreparationResult.Rejected;
     }
 
     public CpuMappedCopyResult TryReadMappedCopy(ulong footprintAddress, ulong footprintByteCount,

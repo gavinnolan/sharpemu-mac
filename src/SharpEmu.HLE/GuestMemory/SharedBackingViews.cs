@@ -11,7 +11,7 @@ public readonly record struct ViewRecord(ulong Address, ulong Size, ulong Offset
     public bool WasRestored { get; init; }
 }
 
-public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySource
+public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySource, ICpuMappedPublicationSource
 {
     internal static Action<string> OnFatal = message => Environment.FailFast(message);
 
@@ -40,6 +40,9 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
     {
         _host = host;
         _ = host.TryCreateBacking(size, out _backing, out _);
+        // Outside the provider gate and before this wrapper is published: all
+        // of its participating writes have history from the first operation.
+        if (host is IHostMappedPublicationMemory) _backing?.EnrollManagedWrites();
     }
 
     public bool IsAvailable => _backing != null && !Volatile.Read(ref _disposeRequested) && !Volatile.Read(ref _disposed) && !_backing.IsClosing && !_backing.IsDisposed;
@@ -49,6 +52,23 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
     public ulong AliasBase => _backing?.AliasBase ?? 0;
 
     public ulong Size => _backing?.Size ?? 0;
+
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(CpuMappedCopyObservation original,
+        IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication)
+    {
+        publication = null;
+        if (_host is not IHostMappedPublicationMemory provider || _backing is null)
+            return CpuMappedPublicationPreparationResult.Unavailable;
+        if (!TryEnterAliasAccess()) return CpuMappedPublicationPreparationResult.Rejected;
+        try
+        {
+            var result = provider.TryPrepareMappedPublication(_backing, original, runs, out publication);
+            if (IsAvailable) return result;
+            publication?.Dispose(); publication = null;
+            return CpuMappedPublicationPreparationResult.Rejected;
+        }
+        finally { ExitAliasAccess(); }
+    }
 
     public CpuMappedCopyResult TryReadMappedCopy(ulong footprintAddress, ulong footprintByteCount,
         ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)
@@ -73,6 +93,17 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
 
     public bool Clear(ulong offset, ulong size)
     {
+        // One admission spans the complete multi-chunk operation, including
+        // staged/memmove reads. Publication cannot enter between its chunks.
+        var interval = _backing?.BeginManagedWriteOperation() ?? default;
+        if (!HostManagedWriteIntervals.AllowsBytes(interval)) return false;
+        var succeeded = false;
+        try { succeeded = ClearCore(offset, size); return succeeded; }
+        finally { HostBackingObject.EndManagedWrite(interval, succeeded); }
+    }
+
+    private bool ClearCore(ulong offset, ulong size)
+    {
         lock (_lock)
         {
             if (!TryEnterAliasAccess()) return false;
@@ -91,6 +122,17 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
     }
 
     public bool TryWriteBacking(ulong address, ReadOnlySpan<byte> data)
+    {
+        // One admission spans the complete multi-chunk operation, including
+        // staged/memmove reads. Publication cannot enter between its chunks.
+        var interval = _backing?.BeginManagedWriteOperation() ?? default;
+        if (!HostManagedWriteIntervals.AllowsBytes(interval)) return false;
+        var succeeded = false;
+        try { succeeded = TryWriteBackingCore(address, data); return succeeded; }
+        finally { HostBackingObject.EndManagedWrite(interval, succeeded); }
+    }
+
+    private bool TryWriteBackingCore(ulong address, ReadOnlySpan<byte> data)
     {
         if (TryAccessSingleView(address, (ulong)data.Length, out var target))
         {
@@ -144,6 +186,7 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
     private void ClearCanonicalAlias(ulong offset, ulong count)
     {
         var interval = _backing!.BeginManagedWrite(offset, count); var succeeded = false;
+        if (!HostManagedWriteIntervals.AllowsBytes(interval)) throw new InvalidOperationException("Participating write lost admission.");
         try { NativeMemory.Clear((void*)(AliasBase + offset), (nuint)count); succeeded = true; }
         finally { HostBackingObject.EndManagedWrite(interval, succeeded); }
     }
@@ -152,6 +195,7 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
     {
         var interval = _backing!.BeginManagedWrite(destination - AliasBase, (ulong)source.Length);
         var succeeded = false;
+        if (!HostManagedWriteIntervals.AllowsBytes(interval)) throw new InvalidOperationException("Participating write lost admission.");
         try { source.CopyTo(new Span<byte>((void*)destination, source.Length)); succeeded = true; }
         finally { HostBackingObject.EndManagedWrite(interval, succeeded); }
     }
@@ -160,6 +204,7 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
     {
         var interval = _backing!.BeginManagedWrite(destination - AliasBase, (ulong)bytes);
         var succeeded = false;
+        if (!HostManagedWriteIntervals.AllowsBytes(interval)) throw new InvalidOperationException("Participating write lost admission.");
         try { Buffer.MemoryCopy((void*)source, (void*)destination, bytes, bytes); succeeded = true; }
         finally { HostBackingObject.EndManagedWrite(interval, succeeded); }
     }
@@ -234,6 +279,17 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
 
     // Use temporary storage if a copy segment can overwrite another segment's source.
     public bool TryCopyBacking(ulong destination, ulong source, ulong size)
+    {
+        // One admission spans the complete multi-chunk operation, including
+        // staged/memmove reads. Publication cannot enter between its chunks.
+        var interval = _backing?.BeginManagedWriteOperation() ?? default;
+        if (!HostManagedWriteIntervals.AllowsBytes(interval)) return false;
+        var succeeded = false;
+        try { succeeded = TryCopyBackingCore(destination, source, size); return succeeded; }
+        finally { HostBackingObject.EndManagedWrite(interval, succeeded); }
+    }
+
+    private bool TryCopyBackingCore(ulong destination, ulong source, ulong size)
     {
         lock (_lock)
         {

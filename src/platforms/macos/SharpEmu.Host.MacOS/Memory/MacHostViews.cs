@@ -12,11 +12,20 @@ namespace SharpEmu.Host.MacOS;
 /// guest address space with MAP_FIXED, tracked in the neutral
 /// <see cref="HostViewRegions"/> table so VirtualQuery-style lookups see them.
 /// </summary>
-internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMappedCopyMemory
+internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMappedCopyMemory, IHostMappedPublicationMemory
 {
     internal static bool FailAliasMapForTests;
 
     public MacHostViews() => MacMappedCopyState.Initialize();
+
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(HostBackingObject backing,
+        CpuMappedCopyObservation original, IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication)
+    {
+        publication = null;
+        return MacMappedCopyState.Ledger is { } ledger
+            ? ledger.TryPrepareMappedPublication(backing, original, runs, out publication)
+            : CpuMappedPublicationPreparationResult.Unavailable;
+    }
 
     public CpuMappedCopyResult TryReadMappedCopy(HostBackingObject backing, ulong footprintAddress,
         ulong footprintByteCount, ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)

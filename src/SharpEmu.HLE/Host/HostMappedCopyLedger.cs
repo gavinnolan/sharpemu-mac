@@ -6,7 +6,7 @@ namespace SharpEmu.HLE.Host;
 /// <summary>Provider-private participation ledger. The provider holds Gate across each
 /// native mapping effect and its publication. Copies release Gate before touching bytes.
 /// Public scalar metadata never authorizes an operation on a different ledger.</summary>
-public sealed unsafe class HostMappedCopyLedger
+public sealed unsafe partial class HostMappedCopyLedger
 {
     public const int MaximumMappings = 65536;
     public const int MaximumCopyBytes = 64 * 1024 * 1024;
@@ -23,6 +23,7 @@ public sealed unsafe class HostMappedCopyLedger
     {
         internal readonly HostMappedCopyLedger Owner = owner;
         internal readonly View[] States = states;
+        internal long WriterRevision = -1;
     }
     private long nextIncarnation;
     private bool unknownAlias;
@@ -92,7 +93,7 @@ public sealed unsafe class HostMappedCopyLedger
         if (unknownAlias || !aliases.ContainsKey(backing) || backing.IsClosing || backing.IsDisposed ||
             !HostViewMemory.IsValidRange(address, size) || address % pageSize != 0 || size % pageSize != 0 ||
             offset % pageSize != 0 || offset > backing.Size || size > backing.Size - offset ||
-            access == GuestPageProtection.None || views.Count >= MaximumMappings)
+            access == GuestPageProtection.None || HasOverlappingPublicationLocked(address, size) || views.Count >= MaximumMappings)
             return null;
         if (nextIncarnation == long.MaxValue)
         { RevokeAll(); return null; } // No process-local wrap/reuse.
@@ -116,7 +117,8 @@ public sealed unsafe class HostMappedCopyLedger
     public bool BeforeNativeEffect(ulong address, ulong size)
     {
         RequireGate();
-        if (unknownAlias || !TryEffectRange(address, size, out var effect)) return false;
+        if (unknownAlias || !TryEffectRange(address, size, out var effect) ||
+            HasOverlappingPublicationLocked(effect.Address, effect.Size)) return false;
         foreach (var alias in aliases.Values)
             if (Overlaps(effect, alias.Range)) return false;
         Revoke(effect);
@@ -169,6 +171,8 @@ public sealed unsafe class HostMappedCopyLedger
             backing.EnrollManagedWrites();
             View[] selected;
             CpuMappedCopyObservation captured;
+            var writers = backing.ManagedWrites!;
+            var hasWriterRevision = writers.TryCaptureRevision(out var writerRevision);
             lock (gate)
             {
                 if (unknownAlias || !aliases.ContainsKey(backing)) return CpuMappedCopyResult.Unavailable;
@@ -208,6 +212,10 @@ public sealed unsafe class HostMappedCopyLedger
                     .CopyTo(destination.Slice(checked((int)(first - sourceAddress))));
             }
             if (!IsCurrent(backing, captured)) return CpuMappedCopyResult.Rejected;
+            // Mapping-only copies still succeed if participating writes raced.
+            // Such an observation has no publication history, permanently.
+            if (hasWriterRevision && writers.TryCaptureRevision(out var afterRevision) && afterRevision == writerRevision)
+                Volatile.Write(ref ((Capture)captured.OwnerIdentity).WriterRevision, writerRevision);
             observation = captured;
             return CpuMappedCopyResult.Copied;
         }
