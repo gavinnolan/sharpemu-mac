@@ -107,6 +107,15 @@ internal static partial class MetalVideoPresenter
     {
         lock (_gate)
         {
+            foreach (var pendingQueue in _pendingGuestWorkByQueue.Values)
+                foreach (var pending in pendingQueue)
+                    RejectDepthCubeAcceptedWriterLocked(address, bytes, pending.Work);
+            if (_takenGuestWorkSequence != 0)
+            {
+                if (_takenDepthCubeProducerWork is null)
+                    throw new NotSupportedException("Metal depth cube CPU snapshot has an unknown taken producer extent.");
+                RejectDepthCubeAcceptedWriterLocked(address, bytes, _takenDepthCubeProducerWork);
+            }
             foreach (var entry in _guestDepthImages)
             {
                 var image = entry.Value;
@@ -122,6 +131,79 @@ internal static partial class MetalVideoPresenter
                     DepthCubeOverlap(address, bytes, entry.Key, extent.ByteCount))
                     throw new NotSupportedException("Metal depth cube CPU snapshot cannot replace overlapping or unknown native image contents with guest bytes.");
             }
+        }
+    }
+
+    // Publication repeats the overlap veto after the complete CPU copy, under
+    // the same admission gate as accepted/taken ownership. This does not invent
+    // a native source or certify retired/all-alias CPU ownership.
+    internal static void RegisterDepthCubeCpuSnapshot(GuestDrawTexture texture,
+        in CpuTextureSnapshotObservation observation)
+    {
+        lock (_gate)
+        {
+            RejectDepthCubeCpuSourceGpuOverlap(texture.Address, texture.SourceByteCount);
+            RegisterCpuTextureSnapshotProvenance(texture, observation);
+        }
+    }
+
+    private static void RejectDepthCubeAcceptedWriterLocked(ulong address, ulong bytes, object work)
+    {
+        void Range(ulong writer, ulong count)
+        {
+            if (writer == 0) return;
+            if (count == 0 || count > ulong.MaxValue - writer || DepthCubeOverlap(address, bytes, writer, count))
+                throw new NotSupportedException("Metal depth cube CPU snapshot overlaps an accepted pending/taken writer or its extent is unknown.");
+        }
+        void Buffers(IReadOnlyList<GuestMemoryBuffer> buffers)
+        {
+            foreach (var buffer in buffers)
+                if (buffer.Writable && buffer.WriteBackToGuest && buffer.Length != 0)
+                    Range(buffer.BaseAddress, buffer.Length > 0 ? checked((ulong)buffer.Length) : 0);
+        }
+        void Storage(IReadOnlyList<GuestDrawTexture> textures)
+        {
+            foreach (var texture in textures)
+                if (StorageImageWrites(texture)) Range(texture.Address, texture.SourceByteCount);
+        }
+        void Image(ulong writer)
+        {
+            if (writer != 0)
+                Range(writer, _guestImageExtents.TryGetValue(writer, out var extent) ? extent.ByteCount : 0);
+        }
+        switch (work)
+        {
+            case OffscreenGuestDraw draw:
+                foreach (var target in draw.Targets)
+                {
+                    if (target.Address == 0) continue;
+                    if (MetalColorMipPlacement.TryGet(target, out var placement))
+                        Range(placement.Registers.BaseAddress, placement.BackingByteCount);
+                    else if (target.TileMode == 0 && target.MipLevels == 1 &&
+                        MetalGuestFormats.TryDecodeRenderTargetFormat(target.Format, target.NumberType, target.ComponentSwap, out var format))
+                        Range(target.Address, checked((ulong)target.Width * target.Height * MetalRenderTargetFormat.GetBytesPerPixel(format.Format)));
+                    else Range(target.Address, 0); // no tiled footprint inferred from logical dimensions
+                }
+                if (draw.DepthTarget is { } depth)
+                {
+                    // Native first-use clear may write even a read-only bound
+                    // target. Raw tiled/stencil/metadata extents need a separate
+                    // normalized footprint; do not call them disjoint here.
+                    var width = Math.Max(depth.Width, draw.Targets.FirstOrDefault()?.Width ?? 0);
+                    var height = Math.Max(depth.Height, draw.Targets.FirstOrDefault()?.Height ?? 0);
+                    var count = depth.SwizzleMode == 0 && !depth.HasStencil && !depth.HtileAcceleration &&
+                        !depth.MetadataClear ? checked((ulong)width * height * 4) : 0;
+                    Range(depth.Address, count);
+                    if (depth.ReadAddress != depth.Address) Range(depth.ReadAddress, count);
+                }
+                Storage(draw.Draw.Textures); Buffers(draw.Draw.GlobalMemoryBuffers);
+                break;
+            case ComputeGuestDispatch dispatch:
+                Storage(dispatch.Textures); Buffers(dispatch.GlobalMemoryBuffers);
+                break;
+            case GuestImageWrite write: Image(write.Address); break;
+            case GuestImageBlit blit: Image(blit.DestinationAddress); break;
+            case GlobalDataShareCopyToGuest copy: Range(copy.GuestAddress, copy.Size); break;
         }
     }
 

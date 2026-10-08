@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 using System.Buffers.Binary;
+using System.Reflection;
+using SharpEmu.ShaderCompiler.Metal;
 using SharpEmu.HLE;
 using SharpEmu.Gpu.Metal;
 using SharpEmu.Libs.Agc;
@@ -92,4 +94,85 @@ public sealed partial class MetalRenderHostTests
         Assert.Throws<InvalidOperationException>(() => MetalTextureSnapshots.CreateTextureSnapshots(
             new CpuContext(memory, Generation.Gen5), [DepthCubeLinearBinding()], out _));
     }
+    private static void SubmitDepthCubePrecedingDraw(GuestDepthTarget? depth, GuestRenderTarget? color = null) =>
+        MetalVideoPresenter.SubmitOffscreenTranslatedDraw(Shader("cube queued writer", Gen5MslStage.Pixel), [], [], 0,
+            [color ?? new GuestRenderTarget(IndexBase, 4, 4, 10, 0)], null, 3, 1, 4, null, null, null, depth, 0);
+
+    [Theory]
+    [InlineData(false)] [InlineData(true)]
+    public void DepthCubePublicPendingOrTakenDepthProducerRejectsBeforeCpuRead(bool taken)
+    {
+        using var state = CompletionState();
+        SubmitDepthCubePrecedingDraw(new(VertexBase + 3 * 1024, VertexBase + 3 * 1024, 4, 4, 3, 0, 0, false));
+        Assert.Equal(1L, ReadCompletionState("_enqueuedGuestWorkSequence"));
+        if (taken)
+        {
+            object?[] arguments = [null];
+            Assert.True((bool)typeof(MetalVideoPresenter).GetMethod("TryTakeGuestWork", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, arguments)!);
+            Assert.NotNull(ReadCompletionState("_takenDepthCubeProducerWork"));
+        }
+        var memory = new ColorPhysicalNeverReadMemory();
+        Assert.Throws<NotSupportedException>(() => MetalTextureSnapshots.CreateTextureSnapshots(
+            new CpuContext(memory, Generation.Gen5), [DepthCubeLinearBinding()], out _));
+        Assert.Equal(0, memory.Reads);
+        Assert.Equal(0L, ReadCompletionState("_completedGuestWorkSequence")); // no GPU completion fabricated
+    }
+
+    [Fact]
+    public void DepthCubePublicUnknownTiledColorProducerRefusesBeforeCpuRead()
+    {
+        using var state = CompletionState();
+        SubmitDepthCubePrecedingDraw(null, new GuestRenderTarget(IndexBase, 4, 4, 10, 0, TileMode: 27));
+        var memory = new ColorPhysicalNeverReadMemory();
+        Assert.Throws<NotSupportedException>(() => MetalTextureSnapshots.CreateTextureSnapshots(
+            new CpuContext(memory, Generation.Gen5), [DepthCubeLinearBinding()], out _));
+        Assert.Equal(0, memory.Reads); // logical disjointness cannot certify unknown tiled extent
+    }
+
+    [Fact]
+    public void DepthCubePublicDisjointCompleteLinearProducerDoesNotRejectCpuFaces()
+    {
+        using var state = CompletionState();
+        SubmitDepthCubePrecedingDraw(null);
+        var physical = new byte[6144];
+        Assert.True(_memory.TryWrite(VertexBase, physical));
+        var snapshot = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(
+            new CpuContext(_memory, Generation.Gen5), [DepthCubeLinearBinding()], out _));
+        Assert.Equal(6u, snapshot.ArrayLayers); Assert.Equal(physical, snapshot.RgbaPixels);
+        Assert.Equal(0L, ReadCompletionState("_completedGuestWorkSequence"));
+    }
+
+    [Fact]
+    public void DepthCubeNativeOwnerAppearingDuringCopyRefusesBeforeSnapshotPublication()
+    {
+        using var state = CompletionState();
+        var flags = BindingFlags.NonPublic | BindingFlags.Static;
+        var registry = (System.Collections.IDictionary)typeof(MetalVideoPresenter).GetField("_guestDepthImages", flags)!.GetValue(null)!;
+        var imageType = typeof(MetalVideoPresenter).GetNestedType("GuestImage", BindingFlags.NonPublic)!;
+        var image = System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(imageType);
+        imageType.GetField("Width")!.SetValue(image, 4u); imageType.GetField("Height")!.SetValue(image, 4u);
+        var address = VertexBase + 3 * 1024;
+        var had = registry.Contains(address); var previous = registry[address];
+        var memory = new DepthCubeOwnerDuringReadMemory(() => registry[address] = image);
+        try
+        {
+            Assert.Throws<NotSupportedException>(() => MetalTextureSnapshots.CreateTextureSnapshots(
+                new CpuContext(memory, Generation.Gen5), [DepthCubeLinearBinding()], out _));
+            Assert.Equal(6, memory.Reads); // initial veto passed; final publication veto caught actual registry change
+        }
+        finally { if (had) registry[address] = previous; else registry.Remove(address); }
+    }
+
+    private sealed class DepthCubeOwnerDuringReadMemory(Action afterCompleteCopy) : ICpuMemory
+    {
+        internal int Reads;
+        public bool TryRead(ulong address, Span<byte> bytes)
+        {
+            Reads++; bytes.Fill(0x71);
+            if (Reads == 6) afterCompleteCopy();
+            return true;
+        }
+        public bool TryWrite(ulong address, ReadOnlySpan<byte> bytes) => throw new NotSupportedException();
+    }
+
 }

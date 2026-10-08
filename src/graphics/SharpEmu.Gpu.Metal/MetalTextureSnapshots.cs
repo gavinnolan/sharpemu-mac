@@ -1108,7 +1108,8 @@ internal static partial class MetalTextureSnapshots
                     CpuSnapshotStable = true,
                 }
                 : candidate;
-            MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(texture, observation);
+            if (depthCubeFaces) MetalVideoPresenter.RegisterDepthCubeCpuSnapshot(texture, observation);
+            else MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(texture, observation);
             return true;
         }
 

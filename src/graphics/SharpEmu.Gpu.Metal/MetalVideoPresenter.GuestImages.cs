@@ -132,6 +132,7 @@ internal static partial class MetalVideoPresenter
         new(StringComparer.Ordinal);
     private static long _executingGuestWorkSequence;
     private static long _takenGuestWorkSequence;
+    private static object? _takenDepthCubeProducerWork; // exact accepted DTO, not a native completion receipt
     private static long _takenGuestPrefixProducerSequence;
     private static Exception? _guestWorkFailure;
     [ThreadStatic]
@@ -786,6 +787,7 @@ internal static partial class MetalVideoPresenter
                 // Exact take ownership spans the gaps before execution begins
                 // and after it ends but before its completion is published.
                 _takenGuestWorkSequence = work.Sequence;
+                _takenDepthCubeProducerWork = work.Work;
                 _takenGuestPrefixProducerSequence = work.PrefixProducerSequence;
                 queue.RemoveFirst();
                 _pendingGuestWorkCount--;
@@ -818,7 +820,7 @@ internal static partial class MetalVideoPresenter
         lock (_gate)
         {
             if (_takenGuestWorkSequence == pending.Sequence)
-            { _takenGuestWorkSequence = 0; _takenGuestPrefixProducerSequence = 0; }
+            { _takenGuestWorkSequence = 0; _takenGuestPrefixProducerSequence = 0; _takenDepthCubeProducerWork = null; }
             if (_textureSourceGraphEnabled)
             {
                 ReleaseGuestPayloadWork(pending.Work);
@@ -969,7 +971,7 @@ internal static partial class MetalVideoPresenter
                     lock (_gate)
                     {
                         if (_takenGuestWorkSequence == pendingGuestWork.Sequence)
-                        { _takenGuestWorkSequence = 0; _takenGuestPrefixProducerSequence = 0; }
+                        { _takenGuestWorkSequence = 0; _takenGuestPrefixProducerSequence = 0; _takenDepthCubeProducerWork = null; }
                         if (_textureSourceGraphEnabled) LatchTextureSourceDrainFailureLocked(exception);
                         else
                         {
