@@ -39,5 +39,35 @@ command-buffer teardown remain separate. Existing GetOrCreateSampler descriptor
 retention is outside this bounded texture proof; fixture removes its exact cached
 sampler handles without claiming leak-free sampler lifecycle.
 
-Sources await build and separately authorized device execution. No managed count,
-native capability, title correctness or FPS is inferred from this source alone.
+Frozen source `c554bf5e1cfc61f854ae79bf641937a50a983f56` built in Debug/net10.0
+with36 existing warnings and zero errors. Both ARM64 and Rosetta x64 passed33
+genuine managed cases (17 new R8 controls and16 existing singleton controls),
+without skips. Four source/codegen cases per CLR are recorded separately; these
+return before device query with RequireDevice disabled. Initial30-case results
+are retained because their filter accidentally omitted three pre-native guards.
+
+The separately authorized numerical batch then executed all four native cases
+on each CLR with `SHARPEMU_TEST_REQUIRE_DEVICE=1`:4/4 ARM64 and4/4 x64, zero
+failures/skips, no timeout. The unchanged DLL and every original source/helper
+hash were checked before and after execution. Real native readbacks verified
+all256 uploaded voxels and all256 controlled load/point/linear sample results,
+including clamped edge neighborhoods; the translated interior sample returned
+alpha118/255 with RGB zero. Signed-negative and z16 translated MIMG loads
+returned zero. Only one full4096-byte guest read occurred per case, and native
+read-only work left the caller-mutated guest block unchanged.
+
+Evidence is retained under
+`artifacts/validation/sampled-r8-volume/c554bf5e/` in the isolated
+`agent-metal-sampled-r8-volume` worktree. Managed/source manifest SHA256:
+`485baf944fe5e00a0f3dc51c45a65563ba58f8909a0ed749416ff6494cef259e`.
+`native/native-manifest.json` SHA256:
+`90e7356f81b3db84ec8bfa3080543356dba9e3888001019f2070310b6a13fcf0`.
+Test DLL SHA256:
+`327bb5a1fe7cf5462d6d279fddee27ef8ec84f669b2f2c7aaaf52bc962374b4f`.
+The manifests retain commands, actual gate output, hardware/kernel metadata,
+TRX/log hashes and comm-only process scans. The shared lock was released and
+both owned worker groups were absent afterward. No foreign REmu, SharpEmu or
+testhost was observed at either boundary; existing launcher daemons were left
+alone. No performance, actual Pixel draw, gameplay or60FPS claim follows from
+these numerical fixtures. This documentation successor does not change the
+tested runtime source or activate the private graph.
