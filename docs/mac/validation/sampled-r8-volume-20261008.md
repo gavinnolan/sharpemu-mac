@@ -28,7 +28,8 @@ verify owned data/raw copies and reject malformed metadata/access/mips/shape,
 short/partial/empty/deferred source and known alias before guest/native reads.
 Native fixture sources separately assert every uploaded voxel/native type10
 pixel format and actual production000R view. Two actual translated signed/outside
-MIMG loads and translated origin sampling use the native argument buffer.
+MIMG loads and translated nonzero interior sampling use the native argument buffer
+(voxel2,1,7/index118: selected alpha118/255, RGB zero).
 An appended independent native MSL consumer checks all256 integer reads, sample
 centres and point/linear weighted neighborhoods against CPU weights with explicit
 clamp-to-edge sampler state. The all-voxel filter kernel is controlled native MSL,

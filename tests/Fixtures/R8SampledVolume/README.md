@@ -11,7 +11,8 @@ case. This does not identify actual PS5 topology or prove backing ownership.
 `offsets.csv` is the independently emitted Navi21/16pipe/4packer CSV, x/y/z/byte
 offset. The4KiB physical block has16x16x16 padded geometry; logical4x4x16 has256
 bytes, max addressed offset1215. Origin0, z1offset4, z8offset1024 prove true XYZ
-addressing. Equation118 orders bits x0,x1,z0,y0,z1,y1,x2,z2,y2,x3,z3,y3.
+addressing. PAL equation70 (Navi10)/equation80 (Navi21) orders bits
+x0,x1,z0,y0,z1,y1,x2,z2,y2,x3,z3,y3.
 Kairo's equation118 matches all256 offsets, while a hypothetical stacked-XY
 implementation disagrees on248. No production decoder generates the fixture.
 

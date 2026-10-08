@@ -161,7 +161,10 @@ public sealed partial class MetalTextureMaterializationTests
     public void SampledR8VolumeNativeAllVoxelUpload000RLoadSampleFilterAndSignedBounds(int kind)
     {
         var sampling = kind < 2;
-        uint[] coords = sampling ? [0x3E000000, 0x3E000000, 0x3D000000] : kind == 2 ? [uint.MaxValue, 0, 0] : [0, 0, 16];
+        // Interior voxel(2,1,7), index118, ensures translated sampling must
+        // preserve a nonzero normalized R value in selected alpha.
+        uint[] coords = sampling ? [BitConverter.SingleToUInt32Bits(.625f), BitConverter.SingleToUInt32Bits(.375f), BitConverter.SingleToUInt32Bits(.46875f)]
+            : kind == 2 ? [uint.MaxValue, 0, 0] : [0, 0, 16];
         Assert.True(Gen5ImageFixtures.TryCompile(sampling ? "ImageSampleLz" : "ImageLoad", 10,
             out var shader, out var error, unifiedFormat: 1, dstSelect: 0x800, addressValues: coords, storeResults: true), error);
         Assert.Contains("texture3d<float", shader!.Source);
@@ -217,7 +220,8 @@ public sealed partial class MetalTextureMaterializationTests
             for (var c = 0; c < 4; c++)
             {
                 var value = BitConverter.UInt32BitsToSingle(BinaryPrimitives.ReadUInt32LittleEndian(translated.AsSpan(c * 4)));
-                Assert.Equal(0f, value); // origin value0 or rejected signed/outside load
+                var want = sampling && c == 3 ? 118 / 255f : 0f;
+                Assert.InRange(Math.Abs(value - want), 0, 1e-5f); // nonzero interior sample or rejected signed/outside load
             }
             if (sampling)
             {

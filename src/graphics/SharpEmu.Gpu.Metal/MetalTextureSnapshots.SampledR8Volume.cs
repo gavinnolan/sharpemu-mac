@@ -76,7 +76,8 @@ internal static class Gfx10SampledR8VolumeLayout
     {
         if (physical.Length != 4096) throw new InvalidOperationException("The qualified R8 volume requires its full4096-byte physical block.");
         var linear = new byte[256];
-        // Primary AddrLib equation118: x0,x1,z0,y0,z1,y1,x2,z2,y2,x3,z3,y3.
+        // PAL AddrLib eq70 (Navi10)/eq80 (Navi21), Kairo SDK eq118:
+        // x0,x1,z0,y0,z1,y1,x2,z2,y2,x3,z3,y3.
         // X/Y higher bits are zero for this exact4x4x16 shape. Never stack XY slices.
         for (uint z = 0; z < 16; z++) for (uint y = 0; y < 4; y++) for (uint x = 0; x < 4; x++)
         {
