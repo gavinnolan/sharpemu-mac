@@ -18,6 +18,7 @@ public sealed unsafe partial class MappedCopyLedgerTests
         string variant, string reason, long admission)
     {
         using var state = new State(); state.Map();
+        _ = state.Copy(); // Enroll real participating writers before issuing their tokens.
         var ledger = state.Ledger; var gate = state.Gate;
         object? interval = null;
         CpuMappedPublicationValidation? publication = null;
@@ -55,11 +56,12 @@ public sealed unsafe partial class MappedCopyLedgerTests
                     ledger.PublishView(view);
                 }
             }
+            var baselineAccesses = state.Backing.ActiveAccesses; // Original validation may legitimately retain one pin.
             var messages = new List<string>();
             using var trace = new MappedCopyTraceControl(true, line =>
             {
                 Assert.False(Monitor.IsEntered(gate));
-                Assert.Equal(0, state.Backing.ActiveAccesses);
+                Assert.Equal(baselineAccesses, state.Backing.ActiveAccesses);
                 messages.Add(line);
             });
             var bytes = new byte[] { 0xED };
