@@ -10,7 +10,7 @@ The same frozen neutral DLLs passed, separately on both CLRs:
 
 - 277 genuine Libs checks: 21 new R8 rows and 256 existing regressions.
 - 77 genuine GPU metadata, ownership and admission controls.
-- Four actual Metal cases with required device and architecture assertion. Full seed/post-write readback, translated Uint writes at interior/last texel, invalid width/layer bounds and explicit X001 sampled output all match.
+- Four actual Metal cases with required device; in-process architecture qualification is supplied by the later44 rerun below. Full seed/post-write readback, translated Uint writes at interior/last texel, invalid width/layer bounds and explicit X001 sampled output all match.
 
 The actual native path is production snapshot → `EnsureStorageImage` plus translated shaders. It does not establish production sampled-alias resolution, whole presenter ordering, guest tiled-RAM publication, gameplay or FPS. DLL hashes match before/after; all runners returned0 with no skips/timeouts. An initial missing test import build failure is retained; final Libs build has126 existing warnings/0errors and GPU build0warnings/0errors.
 
@@ -19,3 +19,5 @@ Evidence: `artifacts/validation/all-games-20261008/r8-fourk-594dfbb5` (full sour
 The candidate remains limited to the qualified R8 descriptor; no additional mip/alias/mapping policy was relaxed. All-nine acceptance remains incomplete.
 
 Descriptor decode clarifies original resource2048×2048, with selected views0/1/2/3 at2048²/1024²/512²/256². The initial report inferred1024² from selected mip1; raw words are retained unchanged.
+
+At integrated main `44ddbba3`, the shared required-device helper now explicitly asserts the actual CLR process architecture. The expanded47-case native set (prior43 plus4R8) passes47/47 on assertedArm64 and47/47 on assertedX64, zero skips/failures; frozen DLL hashes match. Earlier594 candidate runners selected both drivers and set EXPECT_ARCH, but the old helper did not assert that flag in process. The preserved44 rerun closes this evidence gap for unchanged production code. Evidence: `artifacts/validation/all-games-20261008/r8-main-arch-asserted`.
