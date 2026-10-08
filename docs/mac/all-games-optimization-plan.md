@@ -32,8 +32,8 @@ execution remains x64/Rosetta; ARM64 CLR tests qualify host code only.
 | --- | --- | --- |
 | Dreaming Sarah | Controllable outdoor scene; same-binary876 ABBA: off63.34/65.86Hz; idle-on73.34/69.41Hz, tails remain33.8–36.2ms | Reduce unnecessary drawable acquisition; then queue-drain attribution and controlled same-build pacing comparison |
 | Demon’s Souls | DF identifies global mapping epoch change at admission; zero guest frames | Preserve content authority while replacing broad vetoes with qualified per-range lifetime/operation ownership |
-| Silent Hill: The Short Message | 2ad passes1024² BGRA; exact3840×2160 R8Uint mode24 array rejects; one early frame, then zero | 4K R8 full-layout/byte/native candidate qualified in isolation; actual SH replay pending |
-| Octopath Traveler II | 2ad reaches the same4K R8Uint array rejection | Shared4K R8 candidate; separate exact title replay and progression |
+| Silent Hill: The Short Message | 2ad passes1024² BGRA; exact3840×2160 R8Uint mode24 array rejects; one early frame, then zero | 4K R8 integrated; replay advances to2048² R16Float eleven-level resource/views0–3; subresource layout/coherence next |
+| Octopath Traveler II | 2ad reaches the same4K R8Uint array rejection | Shared4K R8 now passed; qualify2048² R16Float subresources and separate title progression |
 | The Oregon Trail | 2ad passes BGRA; GPU-written1×1 RGBA8 sampled alias lacks captured provenance | Capture exact retained GPU-owner/view provenance before admitting sampled aliases |
 | Poppy Playtime Chapter 1 | Fatal write fault; later b7 record observes tracker Disarmed after a successful RW restore | Filtered schema3 retains85/0drops and three actual Disarmed CAS declines after successful RW restore; require permission/lifetime ownership, no unconditional retry |
 | Superliminal | 2ad retains the ten-mip512² color and disjoint128×64 storage collision | Preserve normalized physical selected-mip placement; actual production clear/Drain and disjoint-tail proof before integration |

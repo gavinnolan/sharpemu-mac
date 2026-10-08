@@ -128,26 +128,32 @@ See `artifacts/validation/integrated-20261007/presentation-borrow-integrated-8c1
 
 ## All-games optimization work (2026-10-08)
 
-The [all-nine frozen baseline](validation/all-games-baseline-20261008.md) and
-[new optimization evidence](validation/mac-optimization-20261008.md) supersede
-older per-title status summaries above. Every installed title has a retained
-native-only run; none has passed the full requested rendering/gameplay/60+FPS/
-fast-loading gate. Sarah has controllable gameplay, but a fresh instrumented
-capture averages57.96 guest commits/s with p99 38.693ms. Poppy's current schema2
-trace observes a Disarmed/declined callback after a separate successful RW
-restore; its older Invalidating observation is a separate trace.
+The [current all-nine replay](validation/all-games-current-20261008.md) records the
+signed2ad source and supersedes the older baseline/status snapshots. Every title
+has a retained native-only run; none passes the full rendering, controllable
+gameplay, sustained60+FPS and fast-loading gate. Sarah reaches its outdoor scene
+and has short reporting windows above60Hz, but slower windows remain. Void
+reaches its Move tutorial scene; input response/progression is unqualified.
 
-[All-games optimization plan](all-games-optimization-plan.md) prioritizes texture
-compatibility and authoritative fault ordering before performance comparisons.
-Selector caching has measured warmed per-call gains and actual Tier1 instruction
-inspection. Balanced HLE wall timings, bounded unique-guest-commit phase tracing,
-atomic native settings, singleton-array storage and diagnostic-only per-range
-fault tracing are integrated locally. An owned-frame idle policy is off by
-default until native surface and controlled pacing qualification. None of those
-source/fixture results establishes all-game compatibility or a game FPS gain.
+The [optimization plan](all-games-optimization-plan.md) prioritizes exact texture
+subresource/coherence and CPU fault blockers before controlled performance
+comparisons. Local accepted changes include native allocation lifetime handling,
+selector caching, one fewer owned linear texture copy, allocation-free empty
+dependencies and filtered loader import capacity. Their numerical/JIT results
+do not establish a whole-game FPS or loading improvement.
 
-The default signed bundle still contains8c19cd7. A separate signed b7c0df4e
-bundle in artifacts/macos/game-opt-20261008 was used for the new Sarah/Poppy
-captures. Use embedded build-info and actual payload hashes for provenance.
-Fetched upstream main remainsb02c061 and is already integrated locally. No
-remote push, PR or remote merge was performed.
+The [4K R8 array](validation/r8-fourk-array-20261008.md) is also integrated after
+full independent layout and actual native typed store/load checks on both CLRs.
+Its separate signed game replay passes that rejection in Silent Hill and
+Octopath, then reaches unsupported selected mips of a2048² R16Float resource.
+Indexed vertex-prefix reduction and finite color-mip projection remain isolated
+candidates with retained failed native fixtures/review findings. The
+unqualified source graph and owned-frame idle policy remain disabled by default.
+
+Signed apps are source-specific artifacts. `artifacts/macos/compat-2adf328d`
+contains the all-nine replay source; the isolatedR8 app is in
+`.claude/worktrees/root-metal-r8-4k/artifacts/macos/r8-4k-qualified`. The default
+`artifacts/macos/SharpEmu.app` is an older snapshot. Check embedded build-info
+and actual payload hashes. ARM64 CLR checks qualify host code, not ARM guest
+execution. Fetched upstreamb02c061 remains integrated locally. No remote push,
+PR or remote merge was performed.
