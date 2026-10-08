@@ -43,6 +43,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <BaseIntermediateOutputPath>$(RepoRoot)artifacts/obj/$(MSBuildProjectName)/</BaseIntermediateOutputPath>
     <BaseOutputPath>$(RepoRoot)artifacts/bin/</BaseOutputPath>
 
+    <!-- A bundle publish recompiles neutral project references too. Give that
+         whole graph its own output/cache profile so it cannot replace a DLL
+         being exercised by a developer's already-built test run. The ordinary
+         developer layout stays upstream-compatible when no profile is set. -->
+    <BaseIntermediateOutputPath Condition="'$(SharpEmuBuildProfile)' != ''">$(RepoRoot)artifacts/profiles/$(SharpEmuBuildProfile)/obj/$(MSBuildProjectName)/</BaseIntermediateOutputPath>
+    <BaseOutputPath Condition="'$(SharpEmuBuildProfile)' != ''">$(RepoRoot)artifacts/profiles/$(SharpEmuBuildProfile)/bin/</BaseOutputPath>
+
     <AppendConfigurationToOutputPath>true</AppendConfigurationToOutputPath>
     <AppendTargetFrameworkToOutputPath>true</AppendTargetFrameworkToOutputPath>
     <AppendRuntimeIdentifierToOutputPath>true</AppendRuntimeIdentifierToOutputPath>

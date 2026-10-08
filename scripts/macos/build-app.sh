@@ -89,7 +89,8 @@ source_snapshot="${output_dir}/build-source.json"
 sdk_version="$(dotnet --version)"
 python3 "${script_dir}/build-metadata.py" snapshot \
     --repo "${repo_root}" --snapshot "${source_snapshot}"
-MSBUILDDISABLENODEREUSE=1 dotnet "${publish_args[@]}" -m:"${build_workers}" -nr:false
+MSBUILDDISABLENODEREUSE=1 dotnet "${publish_args[@]}" -m:"${build_workers}" -nr:false \
+    -p:UseSharedCompilation=false -p:SharpEmuBuildProfile=macos-bundle
 
 if [ ! -x "${publish_dir}/${executable_name}" ]; then
     echo "build-app.sh: expected ${publish_dir}/${executable_name} to exist after publish." >&2
