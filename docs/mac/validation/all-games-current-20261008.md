@@ -1,6 +1,6 @@
 # Current all-games native Mac qualification
 
-Latest integrated main checkpoint: [prefix completion and measured submission waits](main-prefix-and-wait-profile-20261008.md). Quake's initial frame-start timeout is fixed on 5b; 7bc includes the corrected caller wait timings. The table below remains the original all-nine 2ad replay, not a fresh nine-title qualification of current main.
+Latest integrated main checkpoints: [prefix completion and measured submission waits](main-prefix-and-wait-profile-20261008.md), followed by [actual native GPU timing](native-completion-profile-20261008.md). Quake's initial frame-start timeout is fixed on 5b; 7bc includes corrected caller waits and 57f distinguishes waited guest GPU intervals from those waits. The table below remains the original all-nine 2ad replay, not a fresh nine-title qualification of current main.
 
 The complete nine-title collection was replayed sequentially on clean signed source `2adf328d231d3e2c67c8dfe951f61939a60395a1`, SDK10.0.103/runtime10.0.3, osx-x64/Rosetta on Apple M4/24GiB. The bundle uses Metal, AppKit, CoreAudio and GameController; no Vulkan/MoltenVK fallback. All-nine rendering, gameplay, sustained60+ FPS and fast-loading acceptance remains incomplete.
 
