@@ -100,10 +100,30 @@ internal sealed partial class HostManagedWriteIntervals
     }
     internal bool TryReservePublication(long originalRevision, ReadOnlySpan<PhysicalRun> runs)
     {
-        if (originalRevision < 0 || originalRevision == long.MaxValue || Volatile.Read(ref coverageIncomplete) != 0 ||
-            Interlocked.CompareExchange(ref admission, PublicationBit, 0) != 0) return false;
+        if (originalRevision < 0 || originalRevision == long.MaxValue || Volatile.Read(ref coverageIncomplete) != 0)
+        {
+            TracePublicationDecline("invalid-original-revision-or-incomplete", originalRevision);
+            return false;
+        }
+        var previousAdmission = Interlocked.CompareExchange(ref admission, PublicationBit, 0);
+        if (previousAdmission != 0)
+        {
+            if (HostPublicationDiagnostics.Enabled)
+                HostPublicationDiagnostics.Declined("writer-reservation", "admission-busy", originalRevision,
+                    Volatile.Read(ref nextIdentity), previousAdmission, Volatile.Read(ref coverageIncomplete));
+            return false;
+        }
         if (HasDisjointCompletedHistory(originalRevision, runs) && Volatile.Read(ref coverageIncomplete) == 0) return true;
-        ReleasePublication(); return false;
+        ReleasePublication();
+        TracePublicationDecline("completed-history-or-incomplete", originalRevision);
+        return false;
+    }
+
+    private void TracePublicationDecline(string reason, long originalRevision)
+    {
+        if (!HostPublicationDiagnostics.Enabled) return;
+        HostPublicationDiagnostics.Declined("writer-reservation", reason, originalRevision,
+            Volatile.Read(ref nextIdentity), Volatile.Read(ref admission), Volatile.Read(ref coverageIncomplete));
     }
     internal long RecordPublicationWrite(ReadOnlySpan<PhysicalRun> runs)
     {

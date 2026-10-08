@@ -36,7 +36,7 @@ public sealed unsafe partial class HostMappedCopyLedger
         if (Monitor.IsEntered(gate)) throw new InvalidOperationException("Publication cannot prepare under the provider gate.");
         if (original is null || runs is null || original.OwnerIdentity is not Capture capture ||
             !ReferenceEquals(capture.Owner, this) || runs.Count is < 1 or > MaximumPublicationRuns)
-            return CpuMappedPublicationPreparationResult.Rejected;
+            return PublicationDeclined("original-identity-or-run-count");
         // Caller memory is detached before any admission. No retained caller
         // buffers, callbacks or caller-generated native outcome receipts.
         var detached = new DetachedRun[runs.Count];
@@ -50,12 +50,12 @@ public sealed unsafe partial class HostMappedCopyLedger
                 !HostViewMemory.IsValidRange(run.Address, (ulong)run.Bytes.Length) ||
                 run.Address < original.SourceAddress || run.Address - original.SourceAddress > original.SourceByteCount ||
                 (ulong)run.Bytes.Length > original.SourceByteCount - (run.Address - original.SourceAddress))
-                return CpuMappedPublicationPreparationResult.Rejected;
+                return PublicationDeclined("logical-run-outside-original-or-budget", capture.WriterRevision);
             bytes += run.Bytes.Length;
             detached[index] = new(run.Address, run.Bytes.ToArray());
         }
         var writers = backing.ManagedWrites;
-        if (writers is null) return CpuMappedPublicationPreparationResult.Rejected;
+        if (writers is null) return PublicationDeclined("writer-ledger-unavailable", capture.WriterRevision);
         var reserved = false;
         var installed = false;
         // Preallocate continuity from the SAME immutable original view identities,
@@ -66,15 +66,19 @@ public sealed unsafe partial class HostMappedCopyLedger
             original.SourceByteCount, original.Segments.ToArray());
         var transaction = new Publication(this, backing, original, writers, aliasesToWrite, physicalRuns, successfulObservation, bytes);
         var wrapper = new CpuMappedPublication(transaction);
-        if (!backing.TryEnterAccess()) return CpuMappedPublicationPreparationResult.Rejected;
+        if (!backing.TryEnterAccess()) return PublicationDeclined("backing-access-declined", capture.WriterRevision);
         try
         {
             lock (gate)
             {
-                if (!IsCurrent(backing, original) || publicationCount + validationCount >= MaximumPublications ||
-                    bytes > MaximumRetainedPublicationBytes - retainedPublicationBytes ||
-                    HasOverlappingPublicationLocked(original.FootprintAddress, original.FootprintByteCount))
-                    return CpuMappedPublicationPreparationResult.Rejected;
+                if (!IsCurrent(backing, original))
+                    return PublicationDeclined("original-mapping-not-current", capture.WriterRevision);
+                if (publicationCount + validationCount >= MaximumPublications)
+                    return PublicationDeclined("publication-slot-budget", capture.WriterRevision);
+                if (bytes > MaximumRetainedPublicationBytes - retainedPublicationBytes)
+                    return PublicationDeclined("publication-retained-byte-budget", capture.WriterRevision);
+                if (HasOverlappingPublicationLocked(original.FootprintAddress, original.FootprintByteCount))
+                    return PublicationDeclined("overlapping-reservation", capture.WriterRevision);
                 for (var index = 0; index < detached.Length; index++)
                 {
                     var run = detached[index];
@@ -83,19 +87,20 @@ public sealed unsafe partial class HostMappedCopyLedger
                         if (run.Address >= view.Address && run.Address - view.Address < view.Size &&
                             (ulong)run.Bytes.Length <= view.Size - (run.Address - view.Address)) { selected = view; break; }
                     if (selected is null || (selected.Access & GuestPageProtection.Write) == 0 ||
-                        !ReferenceEquals(selected.Backing, backing)) return CpuMappedPublicationPreparationResult.Rejected;
+                        !ReferenceEquals(selected.Backing, backing)) return PublicationDeclined("original-view-or-guest-write-rights", capture.WriterRevision);
                     var offset = selected.Offset + run.Address - selected.Address;
                     if (offset > backing.Size || (ulong)run.Bytes.Length > backing.Size - offset)
-                        return CpuMappedPublicationPreparationResult.Rejected;
+                        return PublicationDeclined("physical-run-outside-backing", capture.WriterRevision);
                     for (var previous = 0; previous < index; previous++)
                         if (Overlaps(new(offset, (ulong)run.Bytes.Length),
                             new(aliasesToWrite[previous].Offset, (ulong)aliasesToWrite[previous].Bytes.Length)))
-                            return CpuMappedPublicationPreparationResult.Rejected;
+                            return PublicationDeclined("physical-runs-overlap", capture.WriterRevision);
                     aliasesToWrite[index] = new(offset, run.Bytes);
                     physicalRuns[index] = new(offset, (ulong)run.Bytes.Length);
                 }
                 reserved = writers.TryReservePublication(Volatile.Read(ref capture.WriterRevision), physicalRuns);
-                if (!reserved || !IsCurrent(backing, original)) return CpuMappedPublicationPreparationResult.Rejected;
+                if (!reserved || !IsCurrent(backing, original))
+                    return PublicationDeclined(reserved ? "mapping-changed-after-own-reservation" : "writer-reservation-declined", capture.WriterRevision);
                 transaction.Next = publications; publications = transaction; publicationCount++;
                 retainedPublicationBytes += bytes;
                 installed = true; publication = wrapper;

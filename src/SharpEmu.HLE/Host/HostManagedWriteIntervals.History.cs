@@ -55,20 +55,27 @@ internal sealed partial class HostManagedWriteIntervals
     {
         var current = Volatile.Read(ref nextIdentity);
         if (current == long.MaxValue || current < originalRevision || current - originalRevision > HistoryCapacity || requested.IsEmpty)
+        {
+            TracePublicationDecline("history-window-or-empty-runs", originalRevision);
             return false;
+        }
         foreach (var run in requested)
-            if (run.Count == 0 || run.Offset > backing.Size || run.Count > backing.Size - run.Offset) return false;
+            if (run.Count == 0 || run.Offset > backing.Size || run.Count > backing.Size - run.Offset)
+            { TracePublicationDecline("history-requested-run-invalid", originalRevision); return false; }
         for (var identity = originalRevision + 1; identity <= current; identity++)
         {
             ref var entry = ref history[(int)((ulong)identity % HistoryCapacity)];
-            if (Volatile.Read(ref entry.State) != identity || entry.Unknown) return false;
+            if (Volatile.Read(ref entry.State) != identity || entry.Unknown)
+            { TracePublicationDecline("history-record-missing-or-unknown", originalRevision); return false; }
             for (var index = 0; index < entry.Count; index++)
             {
                 var changed = entry.Runs[index];
                 foreach (var run in requested)
-                    if (changed.Offset < run.Offset + run.Count && run.Offset < changed.Offset + changed.Count) return false;
+                    if (changed.Offset < run.Offset + run.Count && run.Offset < changed.Offset + changed.Count)
+                    { TracePublicationDecline("history-overlapping-completed-write", originalRevision); return false; }
             }
-            if (Volatile.Read(ref entry.State) != identity) return false;
+            if (Volatile.Read(ref entry.State) != identity)
+            { TracePublicationDecline("history-record-changed", originalRevision); return false; }
         }
         return true;
     }
