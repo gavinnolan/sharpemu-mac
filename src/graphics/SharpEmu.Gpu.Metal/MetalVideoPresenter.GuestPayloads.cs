@@ -113,8 +113,12 @@ internal static partial class MetalVideoPresenter
         if (!owner.Accepted || owner.Released) return;
         owner.Released = true;
         _activeGuestPayloadOwners.Remove(owner);
+        ReleaseGuestPayloadReceiptsLocked(owner.Receipts);
+    }
+    private static void ReleaseGuestPayloadReceiptsLocked(GuestPayloadReceipt[] receipts)
+    {
         Exception? failure = null;
-        foreach (var receipt in owner.Receipts)
+        foreach (var receipt in receipts)
         {
             if (--receipt.References != 0) continue;
             // Consume before pool return (which may throw after removing its
@@ -152,6 +156,8 @@ internal static partial class MetalVideoPresenter
     private static void PublishGuestPresentationLocked(Presentation presentation)
     {
         if (!_textureSourceGraphEnabled) { _latestPresentation = presentation; return; }
+        if (_closed || _guestWorkFailure is not null)
+            throw new InvalidOperationException("Metal cannot publish a presentation after close or failure.");
         var owner = PrepareGuestPayloadOwnerLocked(presentation);
         try { RegisterGuestPayloadOwnerLocked(owner); CommitGuestPayloadOwnerLocked(owner); }
         catch { RollbackGuestPayloadOwnerLocked(owner); throw; }

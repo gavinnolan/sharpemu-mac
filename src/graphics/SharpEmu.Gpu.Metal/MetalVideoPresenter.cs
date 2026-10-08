@@ -389,6 +389,11 @@ internal static partial class MetalVideoPresenter
         {
             renderFrame();
         }
+        catch (Exception exception) when (_textureSourceGraphEnabled && _guestWorkFailure is null && exception is not GpuFatalException)
+        {
+            lock (_gate) LatchTextureSourceDrainFailureLocked(exception);
+            throw GpuFatal.Fatal("Metal render frame failed.", exception);
+        }
         catch (Exception exception) when (_guestWorkFailure is null && exception is not GpuFatalException)
         {
             // Minimized windows and unavailable drawables return normally.
@@ -401,6 +406,8 @@ internal static partial class MetalVideoPresenter
     {
         PerfOverlay.UsePresentedGuestFrameTiming();
         var pool = MetalNative.objc_autoreleasePoolPush();
+        GuestPresentationPayloadBorrow? presentationBorrow = null;
+        Exception? frameFailure = null;
         try
         {
             if (Volatile.Read(ref _closeRequested))
@@ -410,7 +417,7 @@ internal static partial class MetalVideoPresenter
 
             DrainGuestWork(_device, _commandQueue);
 
-            if (TryTakePresentation(_presentedSequence, out var presentation))
+            if (TryTakePresentationWithPayloadBorrow(_presentedSequence, out var presentation, out presentationBorrow))
             {
                 _presentedSequence = presentation.Sequence;
                 if (presentation.Pixels is not null)
@@ -594,9 +601,15 @@ internal static partial class MetalVideoPresenter
                 _hostPresentsInStatsWindow = 0;
             }
         }
+        catch (Exception exception)
+        {
+            frameFailure = exception;
+            throw;
+        }
         finally
         {
-            MetalNative.objc_autoreleasePoolPop(pool);
+            try { ReleaseGuestPresentationPayloadBorrow(presentationBorrow, frameFailure); }
+            finally { MetalNative.objc_autoreleasePoolPop(pool); }
         }
     }
 

@@ -450,3 +450,40 @@ Nine new no-device production-path controls exercise real shared pool operations
 Independent review found the first receipt commit (`bcab6cc`, 146/146 ARM64 and x64 managed controls) had not routed the main BGRA/splash publications through the owner-aware publisher. The followup covers every `_latestPresentation` publication, including initial splash, HideSplash and public BGRA Submit, with two additional leased-draw replacement controls. The splash control invokes the actual common publisher because EnsureStarted preserves an existing presentation, then exercises public HideSplash. A translated presentation CPU read-pin/renderer borrowing protocol remains a pre-activation requirement: current graph-enabled ExecutePresentationDraw rejects before pipeline, binding or pooled CPU payload reads; other selected production presentation variants carry no transferred Pooled draw payload. The managed per-frame return helper retention tests do not qualify concurrent native presentation rendering. Graph remains disabled in production.
 
 The complete payload followup at clean `fecc97f7ef480527867d9194c55ddaa0fef83f50` passed **148/148 selected no-device controls on ARM64 and 148/148 on Rosetta x64**, zero skipped cases (219ms/632ms). Eleven added cases cover pool receipt lifetime and the BGRA/splash publication gap; existing original-cause and actual gate-waiter wake controls also remain green. Final test teardown closes accepted owners before raw pool returns while the owned pool gate remains held, including assertion failure paths. Source/assembly and log/TRX hashes, case identities/outcomes, build commands' worker constraints and zero-error build logs are archived in `artifacts/validation/metal-agent/payload-lifetime-fecc97f/source-results.json`. No device/game ran for this increment. Native renderer borrowing, graph activation and guest ISA/runtime progression remain outside these results.
+
+### Dormant presentation CPU borrower prerequisite (2026-10-08)
+
+Presentation selection now pins the exact accepted pooled-payload receipts under
+`_gate`, before `RenderFrame` can read the selected presentation outside the gate.
+The frame releases those independent pins in its outer `finally`. Publisher/work
+cancellation and replacement release their own references; they cannot release a
+live reader's reference. Canonical shared index/global/vertex return authority
+remains consumed once, and late release never looks up a newer array rent.
+
+Graph-only close revokes selection/admission, cancels queue/publication owners,
+and waits for CPU readers with `Monitor.Wait` releasing `_gate` before native
+owner shutdown. The deadline is two seconds. Own-thread readers and deadline
+failures retain/quarantine the borrowed receipts **and native owners**, record a
+secondary cleanup diagnostic, and leave the accepted close receipt incomplete.
+A later safe close can retry. Concurrent close calls join the one accepted close
+attempt; timeout/self-wait cannot claim its completion or duplicate native
+teardown. A completed attempt owns a metadata-only completion receipt.
+
+Twelve added managed cases exercise actual selection/publication/close methods,
+real pooled Return/Rent and canonical index leases: repeated/shared readers,
+replacement, an observed close waiter, deadline/self-close quarantine, concurrent
+close/join and incomplete receipts, original frame rejection plus partial return
+failure, cleanup-only fatal/wakeup, unregistered/duplicate borrow rejection and
+pin limit, and graph-disabled selection. The selected existing lifecycle,
+scheduler, frontend, host/failure and graph-disabled controls passed 160/160 on
+ARM64 before the frozen-source verification. The first preliminary run's three
+failures were fixture assertions expecting the valid replacement BGRA metadata
+owner to disappear before close; its actual pooled return/rerent checks passed.
+Failed build/test logs and TRX are preserved with qualification evidence.
+
+These are CPU lifetime/coordination controls. The translated presentation path
+still explicitly rejects before reading pooled payloads with the graph enabled.
+No native repeated-frame rendering, GPU completion, guest shader translation,
+game progression, mutable presentation-image/backing lifetime or graph activation
+is qualified by these controls. Production `_textureSourceGraphEnabled` remains
+hardfalse. The immutable GPU source and CPU alias/backing contracts remain separate.

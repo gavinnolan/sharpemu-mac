@@ -16,7 +16,7 @@ internal static partial class MetalVideoPresenter
     {
         _guestWorkFailure = failure;
         try { AbortQueuedTextureSourceWorkLocked(); }
-        catch (Exception cleanupFailure) { _textureSourceCleanupFailure = cleanupFailure; }
+        catch (Exception cleanupFailure) { _textureSourceCleanupFailure ??= cleanupFailure; }
         finally
         {
             _batchOpen = false;
@@ -57,16 +57,47 @@ internal static partial class MetalVideoPresenter
     }
 
     // Shared with Run's actual exit path; native waits occur after releasing gate.
+    private sealed class GuestPresentationShutdownAttempt
+    {
+        public readonly int ThreadId = Environment.CurrentManagedThreadId;
+        public bool Finished, Completed;
+    }
+    private static GuestPresentationShutdownAttempt? _guestPresentationShutdownAttempt;
+    private static int _guestPresentationShutdownJoinWaiters;
+
     private static void CompletePresenterShutdown()
     {
+        GuestPresentationShutdownAttempt? attempt = null;
         lock (_gate)
         {
+            // A successful receipt belongs to its closed presenter lifetime;
+            // it cannot authorize teardown of a newly opened lifetime.
+            if (!_closed) _guestPresentationShutdownAttempt = null;
             _closed = true;
             _thread = null;
             Monitor.PulseAll(_gate);
+            if (_textureSourceGraphEnabled)
+            {
+                if (_guestPresentationShutdownAttempt is { Finished: false } running)
+                {
+                    JoinGuestPresentationShutdownLocked(running);
+                    return; // This caller never owns native teardown.
+                }
+                if (_guestPresentationShutdownAttempt is { Completed: true }) return;
+                attempt = new GuestPresentationShutdownAttempt();
+                _guestPresentationShutdownAttempt = attempt;
+            }
         }
-        if (_textureSourceGraphEnabled)
+        if (attempt is null) return; // Existing graph-disabled behavior.
+        var completed = false;
+        try
         {
+            // Revoke publication and cancellable CPU owners first. Active
+            // render readers own independent pins, never force-returned here.
+            lock (_gate)
+                try { DropCanceledGuestQueueReferencesLocked(); }
+                catch (Exception cleanupFailure) { _textureSourceCleanupFailure ??= cleanupFailure; }
+            if (!WaitForGuestPresentationPayloadBorrows()) return;
             ShutdownTextureSourceNativeOwners();
             _batchOpen = false;
             _batchCommandBuffer = 0;
@@ -74,7 +105,44 @@ internal static partial class MetalVideoPresenter
             _touchedUploadPages.Clear();
             _uploadTouchStamp++;
             lock (_gate) DropCanceledGuestQueueReferencesLocked();
+            completed = true;
         }
+        finally
+        {
+            lock (_gate)
+            {
+                attempt.Completed = completed;
+                attempt.Finished = true;
+                Monitor.PulseAll(_gate);
+            }
+        }
+    }
+
+    // Only the accepted attempt can mutate its completion receipt. Joiners
+    // wait outside the gate's critical section and never duplicate teardown.
+    private static void JoinGuestPresentationShutdownLocked(GuestPresentationShutdownAttempt attempt)
+    {
+        var selfWait = attempt.ThreadId == Environment.CurrentManagedThreadId ||
+            _activeGuestPresentationPayloadBorrows.Any(borrow => borrow.ThreadId == Environment.CurrentManagedThreadId);
+        var deadline = Environment.TickCount64 + _guestPresentationBorrowShutdownTimeoutMilliseconds;
+        _guestPresentationShutdownJoinWaiters++;
+        try
+        {
+            while (!attempt.Finished)
+            {
+                var remaining = (int)Math.Max(0, deadline - Environment.TickCount64);
+                if (selfWait || remaining == 0)
+                {
+                    _textureSourceCleanupFailure ??= new InvalidOperationException(selfWait
+                        ? "Metal concurrent shutdown cannot wait on its own active close/CPU borrow; accepted teardown remains in progress."
+                        : "Metal concurrent shutdown timed out joining the accepted close; completion is still unconfirmed.");
+                    Console.Error.WriteLine($"[LOADER][ERROR] {_textureSourceCleanupFailure.Message}");
+                    return;
+                }
+                Monitor.Wait(_gate, remaining);
+            }
+        }
+        finally { _guestPresentationShutdownJoinWaiters--; }
     }
 
     private static void DropCanceledGuestQueueReferencesLocked()
