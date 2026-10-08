@@ -183,6 +183,7 @@ internal static partial class MetalVideoPresenter
 
     internal static void ReleasePreparedTextureSources(IReadOnlyList<GuestDrawTexture> textures)
     {
+        var volumeCleanup = ReleasePreparedSingletonVolumeOriginals(textures, null);
         lock (_gate)
         {
             foreach (var texture in textures)
@@ -193,6 +194,7 @@ internal static partial class MetalVideoPresenter
                 ReleaseTextureSourceLeaseLocked(lease);
             }
         }
+        if (volumeCleanup is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(volumeCleanup).Throw();
     }
 
     private static void ReleaseTextureSourceLeaseLocked(TextureSourceLease lease)
@@ -227,9 +229,11 @@ internal static partial class MetalVideoPresenter
 
     private static void ReleaseQueuedTextureSourcesLocked(object work)
     {
-        if (!_queuedTextureSourceOwners.TryGetValue(work, out var owner) || owner.Released) return;
-        owner.Released = true;
-        foreach (var lease in owner.Leases) ReleaseTextureSourceLeaseLocked(lease);
+        if (_queuedTextureSourceOwners.TryGetValue(work, out var owner) && !owner.Released)
+        {
+            owner.Released = true;
+            foreach (var lease in owner.Leases) ReleaseTextureSourceLeaseLocked(lease);
+        }
     }
 
     private static IEnumerable<TextureSourceLease> TextureSourcesOf(object work)
@@ -262,12 +266,14 @@ internal static partial class MetalVideoPresenter
             {
                 if (provenance is not null) _cpuTextureSnapshotProvenance.Add(copy, provenance);
                 CopySelectedStorageMip(source, copy);
+                CopyStorageCpuSeedOrigin(source, copy);
             }
             catch
             {
                 if (lease is not null) _textureSourceLeases.Remove(copy);
                 _cpuTextureSnapshotProvenance.Remove(copy);
                 _selectedStorageMipAssociations.Remove(copy);
+                _storageCpuSeedOrigins.Remove(copy);
                 throw;
             }
         }

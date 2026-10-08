@@ -129,6 +129,7 @@ internal static partial class MetalVideoPresenter
                 _guestImages.EnsureCapacity(_guestImages.Count + 1);
                 _guestImageExtents.EnsureCapacity(_guestImageExtents.Count + 1);
                 var hadPrevious = _guestImages.TryGetValue(source.View.Address, out var previous);
+                if (hadPrevious) NoteFiniteStorageOwnerRetirementLocked(previous!);
                 var hadExtent = _guestImageExtents.TryGetValue(source.View.Address, out var previousExtent);
                 var extent = (source.View.Width, source.View.Height, source.ObservedGuestByteCount);
                 MetalNative.Send(texture, MetalNative.Selector("retain"));
@@ -139,6 +140,8 @@ internal static partial class MetalVideoPresenter
                 }
                 catch
                 {
+                    if (_guestImages.TryGetValue(source.View.Address, out var discarded) && !ReferenceEquals(discarded, previous))
+                        NoteFiniteStorageOwnerRetirementLocked(discarded);
                     if (hadPrevious) _guestImages[source.View.Address] = previous!;
                     else _guestImages.Remove(source.View.Address);
                     if (hadExtent) _guestImageExtents[source.View.Address] = previousExtent;
@@ -343,6 +346,7 @@ internal static partial class MetalVideoPresenter
     {
         if (source.Image is { } owned && _guestImages.TryGetValue(source.View.Address, out var current) && ReferenceEquals(owned, current))
         {
+            NoteFiniteStorageOwnerRetirementLocked(owned);
             _guestImages.Remove(source.View.Address);
             _guestImageExtents.Remove(source.View.Address);
             owned.ReleaseSnapshot();

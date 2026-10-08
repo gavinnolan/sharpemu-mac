@@ -82,6 +82,8 @@ internal static partial class MetalVideoPresenter
             _closed = true;
             _thread = null;
             Monitor.PulseAll(_gate);
+            if (!_textureSourceGraphEnabled)
+                CancelQueuedSingletonVolumeOriginalsLocked();
             if (_textureSourceGraphEnabled)
             {
                 if (_guestPresentationShutdownAttempt is { Finished: false } running)

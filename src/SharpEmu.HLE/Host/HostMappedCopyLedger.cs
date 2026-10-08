@@ -6,7 +6,7 @@ namespace SharpEmu.HLE.Host;
 /// <summary>Provider-private participation ledger. The provider holds Gate across each
 /// native mapping effect and its publication. Copies release Gate before touching bytes.
 /// Public scalar metadata never authorizes an operation on a different ledger.</summary>
-public sealed unsafe class HostMappedCopyLedger
+public sealed unsafe partial class HostMappedCopyLedger
 {
     public const int MaximumMappings = 65536;
     public const int MaximumCopyBytes = 64 * 1024 * 1024;
@@ -19,12 +19,26 @@ public sealed unsafe class HostMappedCopyLedger
         internal int ReleaseState; // 0 active, 1 pending, 2 consumed/unknown
     }
     private readonly Dictionary<HostBackingObject, Alias> aliases = new();
-    private sealed class Capture(HostMappedCopyLedger owner, View[] states)
+    private sealed class Capture
     {
-        internal readonly HostMappedCopyLedger Owner = owner;
-        internal readonly View[] States = states;
+        internal readonly HostMappedCopyLedger Owner;
+        internal readonly View[] States;
+        internal readonly long[] Incarnations;
+        internal long WriterRevision = -1;
+        internal ReadWatchOwnership? WatchOwnership;
+        internal HostManagedWriteIntervals.ReadWatch? ReadWatch => WatchOwnership?.Watch;
+        internal void ReleaseWatch() => WatchOwnership?.Release();
+        internal Capture(HostMappedCopyLedger owner, View[] states, long[]? originalIncarnations = null)
+        {
+            Owner = owner; States = states;
+            Incarnations = originalIncarnations is null ? new long[states.Length] : (long[])originalIncarnations.Clone();
+            if (originalIncarnations is null)
+                for (var index = 0; index < states.Length; index++) Incarnations[index] = states[index].Incarnation;
+        }
     }
     private long nextIncarnation;
+    private int readWatchCount;
+    private const int MaximumReadWatches = 128;
     private bool unknownAlias;
     private int aliasEffectsInFlight;
     // Ordinary test-only pause, default null. Never called under provider Gate,
@@ -50,7 +64,9 @@ public sealed unsafe class HostMappedCopyLedger
         internal readonly HostBackingObject Backing;
         internal readonly ulong Address, Size, Offset;
         internal readonly GuestPageProtection Access;
-        internal readonly long Incarnation;
+        internal long Incarnation; // monotonic copy incarnation; physical facts above never mutate
+        internal int CopyAvailable = 1;
+        internal bool GuestAccessKnown = true;
         internal int Revoked;
     }
 
@@ -92,7 +108,7 @@ public sealed unsafe class HostMappedCopyLedger
         if (unknownAlias || !aliases.ContainsKey(backing) || backing.IsClosing || backing.IsDisposed ||
             !HostViewMemory.IsValidRange(address, size) || address % pageSize != 0 || size % pageSize != 0 ||
             offset % pageSize != 0 || offset > backing.Size || size > backing.Size - offset ||
-            access == GuestPageProtection.None || views.Count >= MaximumMappings)
+            access == GuestPageProtection.None || HasOverlappingPublicationLocked(address, size) || views.Count >= MaximumMappings)
             return null;
         if (nextIncarnation == long.MaxValue)
         { RevokeAll(); return null; } // No process-local wrap/reuse.
@@ -115,11 +131,21 @@ public sealed unsafe class HostMappedCopyLedger
     /// excluded; failed effects do not reopen old view incarnations.</summary>
     public bool BeforeNativeEffect(ulong address, ulong size)
     {
+        if (!TryBeginNativeEffect(address, size, out var effect)) return false;
+        Revoke(effect);
+        return true;
+    }
+
+    private bool TryBeginNativeEffect(ulong address, ulong size, out HostAddressRange effect)
+    {
         RequireGate();
-        if (unknownAlias || !TryEffectRange(address, size, out var effect)) return false;
+        effect = default;
+        if (unknownAlias || !TryEffectRange(address, size, out effect) ||
+            HasOverlappingPublicationLocked(effect.Address, effect.Size)) return false;
         foreach (var alias in aliases.Values)
             if (Overlaps(effect, alias.Range)) return false;
-        Revoke(effect);
+        if (protectionEffectSequence == long.MaxValue) { RevokeAll(); return false; }
+        protectionEffectSequence++;
         return true;
     }
 
@@ -153,18 +179,31 @@ public sealed unsafe class HostMappedCopyLedger
     public CpuMappedCopyResult TryReadMappedCopy(HostBackingObject backing, ulong footprintAddress,
         ulong footprintByteCount, ulong sourceAddress, Span<byte> destination,
         out CpuMappedCopyObservation? observation)
+        => TryReadMappedCopyCore(backing, footprintAddress, footprintByteCount, sourceAddress, destination, false, out observation);
+
+    private CpuMappedCopyResult TryReadMappedCopyCore(HostBackingObject backing, ulong footprintAddress,
+        ulong footprintByteCount, ulong sourceAddress, Span<byte> destination, bool withWriteWatch,
+        out CpuMappedCopyObservation? observation)
     {
+        Capture? ownedCapture = null;
+        var keepWatch = false;
         observation = null;
         if (!HostViewMemory.IsValidRange(footprintAddress, footprintByteCount) || destination.Length == 0 ||
             destination.Length > MaximumCopyBytes || !HostViewMemory.IsValidRange(sourceAddress, (ulong)destination.Length) ||
             sourceAddress < footprintAddress || sourceAddress - footprintAddress > footprintByteCount ||
             (ulong)destination.Length > footprintByteCount - (sourceAddress - footprintAddress))
             return CpuMappedCopyResult.Rejected;
+        if (Monitor.IsEntered(gate)) throw new InvalidOperationException("Mapped copy must not run under the provider gate.");
         if (!backing.TryEnterAccess()) return CpuMappedCopyResult.Rejected;
         try
         {
+            // Enrollment does not certify pre-existing/native writers, serialize
+            // the copy, or change mapping-only IsCurrent semantics.
+            backing.EnrollManagedWrites();
             View[] selected;
             CpuMappedCopyObservation captured;
+            var writers = backing.ManagedWrites!;
+            var hasWriterRevision = writers.TryCaptureRevision(out var writerRevision);
             lock (gate)
             {
                 if (unknownAlias || !aliases.ContainsKey(backing)) return CpuMappedCopyResult.Unavailable;
@@ -176,7 +215,7 @@ public sealed unsafe class HostMappedCopyLedger
                     var index = FindAtOrBelow(cursor);
                     if (index < 0) return CpuMappedCopyResult.Rejected;
                     var view = views.Values[index];
-                    if (view.Revoked != 0 || !ReferenceEquals(view.Backing, backing) ||
+                    if (view.Revoked != 0 || view.CopyAvailable == 0 || !view.GuestAccessKnown || !ReferenceEquals(view.Backing, backing) ||
                         cursor < view.Address || cursor - view.Address >= view.Size ||
                         (view.Access & GuestPageProtection.Read) == 0 || states.Count == CpuMappedCopyObservation.MaximumSegments)
                         return CpuMappedCopyResult.Rejected;
@@ -189,6 +228,26 @@ public sealed unsafe class HostMappedCopyLedger
                 selected = states.ToArray();
                 captured = new(new Capture(this, selected), footprintAddress, footprintByteCount, sourceAddress,
                     (ulong)destination.Length, segments.ToArray());
+            }
+            ownedCapture = (Capture)captured.OwnerIdentity;
+            if (withWriteWatch)
+            {
+                // Reserve a bounded ledger owner before exposing a receipt.
+                var watchOwnership = new ReadWatchOwnership(this); // Only watched copies are finalizable.
+                ownedCapture.WatchOwnership = watchOwnership;
+                if (Interlocked.Increment(ref readWatchCount) > MaximumReadWatches)
+                { Interlocked.Decrement(ref readWatchCount); return CpuMappedCopyResult.Rejected; }
+                watchOwnership.Charged = 1;
+                var physical = new List<HostManagedWriteIntervals.PhysicalRun>();
+                var lastSource = sourceAddress + (ulong)destination.Length;
+                foreach (var view in selected)
+                {
+                    var first = Math.Max(sourceAddress, view.Address);
+                    var last = Math.Min(lastSource, view.Address + view.Size);
+                    if (first < last) physical.Add(new(view.Offset + first - view.Address, last - first));
+                }
+                watchOwnership.Watch = writers.TryCreateReadWatch(physical.ToArray());
+                if (ownedCapture.ReadWatch is null) return CpuMappedCopyResult.Rejected;
             }
             // No virtual pointer, permission repair, provider query, callback or
             // mapping gate is used here. The exact backing pin owns the alias.
@@ -204,10 +263,16 @@ public sealed unsafe class HostMappedCopyLedger
                     .CopyTo(destination.Slice(checked((int)(first - sourceAddress))));
             }
             if (!IsCurrent(backing, captured)) return CpuMappedCopyResult.Rejected;
+            // Mapping-only copies still succeed if participating writes raced.
+            // Such an observation has no publication history, permanently.
+            if (hasWriterRevision && writers.TryCaptureRevision(out var afterRevision) && afterRevision == writerRevision)
+                Volatile.Write(ref ((Capture)captured.OwnerIdentity).WriterRevision, writerRevision);
+            if (withWriteWatch && !ownedCapture.ReadWatch!.IsCurrent) return CpuMappedCopyResult.Rejected;
             observation = captured;
+            keepWatch = true;
             return CpuMappedCopyResult.Copied;
         }
-        finally { backing.ExitAccess(); }
+        finally { if (!keepWatch) ownedCapture?.ReleaseWatch(); backing.ExitAccess(); }
     }
 
     // Bounded scalar validation, without taking Gate or consulting native state.
@@ -215,8 +280,12 @@ public sealed unsafe class HostMappedCopyLedger
     {
         if (observation is null || observation.OwnerIdentity is not Capture captured ||
             !ReferenceEquals(captured.Owner, this) || Volatile.Read(ref unknownAlias) || backing.IsClosing || backing.IsDisposed) return false;
-        foreach (var view in captured.States)
-            if (!ReferenceEquals(view.Backing, backing) || Volatile.Read(ref view.Revoked) != 0) return false;
+        for (var index = 0; index < captured.States.Length; index++)
+        {
+            var view = captured.States[index];
+            if (!ReferenceEquals(view.Backing, backing) || Volatile.Read(ref view.Revoked) != 0 ||
+                Volatile.Read(ref view.CopyAvailable) == 0 || Volatile.Read(ref view.Incarnation) != captured.Incarnations[index]) return false;
+        }
         return true;
     }
 

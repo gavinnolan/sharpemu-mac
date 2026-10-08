@@ -149,6 +149,13 @@ internal static partial class MetalTextureSnapshots
                     TexturePreparationProfile.RecordBinding(TexturePreparationProfile.BindingOutcome.Linear,
                         profileStart, texture.RgbaPixels.LongLength);
                 }
+                else if (TryCreateStorageCpuCopy(context, binding, out texture))
+                {
+                    unreturnedTexture = texture;
+                    snapshots?.Add(reuseKey, texture);
+                    TexturePreparationProfile.RecordBinding(TexturePreparationProfile.BindingOutcome.Linear,
+                        profileStart, texture.RgbaPixels.LongLength);
+                }
                 else if (TryCreateCapturedTextureSource(binding, out texture))
                 {
                     unreturnedTexture = texture;
@@ -211,8 +218,9 @@ internal static partial class MetalTextureSnapshots
 
             return textures;
         }
-        catch
+        catch (Exception failure)
         {
+            MetalVideoPresenter.ReleaseFailedPreparedSingletonVolumeOriginals(textures, unreturnedTexture, failure);
             MetalVideoPresenter.ReleasePreparedTextureSources(textures);
             if (unreturnedTexture is not null)
                 MetalVideoPresenter.ReleasePreparedTextureSource(unreturnedTexture);

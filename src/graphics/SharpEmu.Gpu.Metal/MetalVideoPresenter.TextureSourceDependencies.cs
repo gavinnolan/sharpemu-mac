@@ -102,6 +102,7 @@ internal static partial class MetalVideoPresenter
         else
         {
             _guestWorkFailure = failure;
+            CancelQueuedSingletonVolumeOriginalsLocked(failure);
             Monitor.PulseAll(_gate);
         }
         // The creating autorelease pool owns this borrowed command buffer.

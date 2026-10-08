@@ -13,7 +13,7 @@ using SharpEmu.Logging;
 
 namespace SharpEmu.Core.Memory;
 
-public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryAllocator, IGuestAddressSpace, IGuestBackedSpace, IDisposable, ICpuMappedCopySource
+public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryAllocator, IGuestAddressSpace, IGuestBackedSpace, IDisposable, ICpuMappedCopySource, ICpuMappedReadWatchSource, ICpuMappedPublicationSource, IGuestDerivedProtectionAddressSpace
 {
     private static readonly SharpEmuLogger Log = SharpEmuLog.For("VMEM");
 
@@ -1148,6 +1148,47 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         };
     }
 
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(CpuMappedCopyObservation original,
+        out CpuMappedPublicationValidation? validation)
+    {
+        validation = null;
+        var space = _backedSpace;
+        if (Volatile.Read(ref _disposed) || space is not ICpuMappedPublicationSource source)
+            return CpuMappedPublicationPreparationResult.Unavailable;
+        var result = source.TryPrepareMappedPublicationValidation(original, out validation);
+        if (!Volatile.Read(ref _disposed) && ReferenceEquals(_backedSpace, space)) return result;
+        validation?.Dispose(); validation = null; return CpuMappedPublicationPreparationResult.Rejected;
+    }
+
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(CpuMappedCopyObservation original,
+        IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication)
+    {
+        publication = null;
+        var space = _backedSpace;
+        if (Volatile.Read(ref _disposed) || space is not ICpuMappedPublicationSource source)
+            return CpuMappedPublicationPreparationResult.Unavailable;
+        var result = source.TryPrepareMappedPublication(original, runs, out publication);
+        if (!Volatile.Read(ref _disposed) && ReferenceEquals(_backedSpace, space)) return result;
+        publication?.Dispose(); publication = null; return CpuMappedPublicationPreparationResult.Rejected;
+    }
+
+    public CpuMappedCopyResult TryReadMappedCopyWithWriteWatch(ulong footprintAddress, ulong footprintByteCount,
+        ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)
+    {
+        observation = null;
+        var space = _backedSpace;
+        if (Volatile.Read(ref _disposed) || space is not ICpuMappedReadWatchSource source)
+            return CpuMappedCopyResult.Unavailable;
+        var result = source.TryReadMappedCopyWithWriteWatch(footprintAddress, footprintByteCount, sourceAddress, destination, out observation);
+        if (!Volatile.Read(ref _disposed) && ReferenceEquals(_backedSpace, space)) return result;
+        if (observation is not null) source.ReleaseMappedCopyWriteWatch(observation);
+        observation = null; return CpuMappedCopyResult.Rejected;
+    }
+    public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation observation) =>
+        !Volatile.Read(ref _disposed) && _backedSpace is ICpuMappedReadWatchSource source && source.IsMappedCopyWriteWatchCurrent(observation);
+    public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation observation)
+    { if (_backedSpace is ICpuMappedReadWatchSource source) source.ReleaseMappedCopyWriteWatch(observation); }
+
     public CpuMappedCopyResult TryReadMappedCopy(ulong footprintAddress, ulong footprintByteCount,
         ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)
     {
@@ -1220,6 +1261,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     private void NotifyBackedWriteWatch(ulong address, ulong length)
     {
+        GuestImageWriteTracker.TraceManagedDirtyCompletion(address, length);
         if (!GuestWriteWatch.Armed)
         {
             return;
@@ -1480,6 +1522,18 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     }
 
     public bool TryProtect(ulong address, ulong size, GuestPageProtection protection)
+        => TryProtectCore(address, size, protection, null, false);
+
+    public bool TryApplyDerivedProtection(ulong address, ulong size, GuestPageProtection guestAccess,
+        GuestPageProtection derivedAccess, bool ordinaryEnrollment)
+    {
+        if ((guestAccess & ~(GuestPageProtection.Read | GuestPageProtection.Write | GuestPageProtection.Execute)) != 0 ||
+            (derivedAccess & ~guestAccess) != 0) return false;
+        return TryProtectCore(address, size, derivedAccess, guestAccess, ordinaryEnrollment);
+    }
+
+    private bool TryProtectCore(ulong address, ulong size, GuestPageProtection protection,
+        GuestPageProtection? originalGuestAccess, bool ordinaryEnrollment)
     {
         if (GuestGpuMemoryHook.Traces(address, size))
             GuestGpuMemoryHook.Trace(address, size, $"address-space-protect access={protection}");
@@ -1492,7 +1546,9 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         try
         {
             var access = ResolveProtection(protection);
-            if (_backedSpace is not null && !_backedSpace.SetTransientAccess(address, size, access))
+            if (_backedSpace is not null && !(originalGuestAccess.HasValue
+                ? _backedSpace.SetDerivedAccess(address, size, originalGuestAccess.Value, access, ordinaryEnrollment)
+                : _backedSpace.SetTransientAccess(address, size, access)))
             {
                 return false;
             }
@@ -2180,6 +2236,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     private static void NotifyGuestWriteWatch(ulong virtualAddress, ReadOnlySpan<byte> source)
     {
+        GuestImageWriteTracker.TraceManagedDirtyCompletion(virtualAddress, (ulong)source.Length);
         if (GuestWriteWatch.Armed)
         {
             GuestWriteWatch.Check(virtualAddress, source);

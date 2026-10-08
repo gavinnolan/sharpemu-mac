@@ -44,13 +44,13 @@ public sealed partial class MetalTextureMaterializationTests
     }
 
     private static IReadOnlyList<GuestDrawTexture> SelectedMipSnapshots(ICpuMemory memory, uint[]? raw = null,
-        uint mip = 1, ShaderImageShape? shape = null)
+        uint mip = 1, ShaderImageShape? shape = null, GuestImageAccess access = GuestImageAccess.Read | GuestImageAccess.Write)
     {
         raw ??= SelectedMipRaw();
         Assert.True(AgcBackendServices.TryDecodeTextureDescriptor(raw, out var descriptor));
         var binding = new AgcExports.TranslatedImageBinding(descriptor, true, mip, [], ResourceDescriptor: raw,
             Shape: shape ?? new ShaderImageShape(false, false, true, false, TextureNumericClass.Float),
-            Access: GuestImageAccess.Read | GuestImageAccess.Write);
+            Access: access);
         var snapshots = Presenter.Assembly.GetTypes().Single(static type => type.Name == "MetalTextureSnapshots");
         return (IReadOnlyList<GuestDrawTexture>)snapshots.GetMethod("CreateTextureSnapshots", Methods)!.Invoke(null,
             [new CpuContext(memory, Generation.Gen5), new[] { binding }, 0])!;
