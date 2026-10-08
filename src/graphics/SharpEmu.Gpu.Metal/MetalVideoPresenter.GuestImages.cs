@@ -872,7 +872,7 @@ internal static partial class MetalVideoPresenter
                 using var guestQueueScope = EnterGuestQueue(
                     pendingGuestWork.Queue.Name,
                     pendingGuestWork.Queue.SubmissionId);
-                BeginImageDiagnosticWork(pendingGuestWork.Sequence);
+                var previousDiagnosticWork = BeginImageDiagnosticWork(pendingGuestWork.Sequence);
                 _enqueueAsImmediateQueueFollowup = true;
                 _immediateFollowupTail = null;
                 if (_textureSourceGraphEnabled) _executingTextureSourceWork = pendingGuestWork.Work;
@@ -945,7 +945,7 @@ internal static partial class MetalVideoPresenter
                     _enqueueAsImmediateQueueFollowup = false;
                     _immediateFollowupTail = null;
                     if (_textureSourceGraphEnabled) _executingTextureSourceWork = null;
-                    EndImageDiagnosticWork();
+                    EndImageDiagnosticWork(previousDiagnosticWork);
                     Volatile.Write(ref _executingGuestWorkSequence, 0);
                 }
 

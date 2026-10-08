@@ -30,13 +30,14 @@ public sealed partial class MetalTextureMaterializationTests
         lock (gate)
         {
             var previousFlag = flag.GetValue(null); var previousSequence = sequence.GetValue(null);
+            object? previousDiagnostic = null;
             Assert.False(registry.Contains(address));
             try
             {
                 flag.SetValue(null, enabled); sequence.SetValue(null, 100L);
                 using ((IDisposable)Presenter.GetMethod("EnterGuestQueue", Methods)!.Invoke(null, ["fixture.creation", 12UL])!)
                 {
-                    Presenter.GetMethod("BeginImageDiagnosticWork", Methods)!.Invoke(null, [100L]);
+                    previousDiagnostic = Presenter.GetMethod("BeginImageDiagnosticWork", Methods)!.Invoke(null, [100L]);
                     type.GetField("DiagnosticOrigin")!.SetValue(image,
                         Presenter.GetMethod("CaptureStorageImageOrigin", Methods)!.Invoke(null, [origin]));
                 }
@@ -59,6 +60,15 @@ public sealed partial class MetalTextureMaterializationTests
                 Assert.Same(image, registry[address]); Assert.Equal(43, type.GetField("ContentVersion")!.GetValue(image));
                 if (enabled)
                 {
+                    // A nested diagnostic work scope restores the exact outer receipt.
+                    var prior = Presenter.GetMethod("BeginImageDiagnosticWork", Methods)!.Invoke(null, [600L]);
+                    var nested = Presenter.GetMethod("CaptureStorageImageOrigin", Methods)!.Invoke(null, [requested])!;
+                    var nestedWork = nested.GetType().GetProperty("Work")!.GetValue(nested)!;
+                    Assert.Equal(600L, nestedWork.GetType().GetProperty("Sequence")!.GetValue(nestedWork));
+                    Presenter.GetMethod("EndImageDiagnosticWork", Methods)!.Invoke(null, [prior]);
+                    var restored = Presenter.GetMethod("CaptureStorageImageOrigin", Methods)!.Invoke(null, [requested])!;
+                    var restoredWork = restored.GetType().GetProperty("Work")!.GetValue(restored)!;
+                    Assert.Equal(101L, restoredWork.GetType().GetProperty("Sequence")!.GetValue(restoredWork));
                     Assert.Contains("diagnostic_creation_kind=storage creation_sequence=100 creation_queue='fixture.creation' creation_submission=12", cause.Message);
                     Assert.Contains("creation_pitch=512 creation_tile=9", cause.Message);
                     Assert.Contains("creation_raw=[71F56000,44700000,007FC07F,90900FAC,00000000,00700000,00000000,00000000]", cause.Message);
@@ -73,7 +83,7 @@ public sealed partial class MetalTextureMaterializationTests
                 Assert.Same(image, Presenter.GetMethod("EnsureStorageImage", Methods)!.Invoke(null, [nint.Zero, matching]));
                 Assert.Equal(43, type.GetField("ContentVersion")!.GetValue(image));
             }
-            finally { Presenter.GetMethod("EndImageDiagnosticWork", Methods)!.Invoke(null, []); registry.Remove(address); flag.SetValue(null, previousFlag); sequence.SetValue(null, previousSequence); }
+            finally { if (previousDiagnostic is not null) Presenter.GetMethod("EndImageDiagnosticWork", Methods)!.Invoke(null, [previousDiagnostic]); registry.Remove(address); flag.SetValue(null, previousFlag); sequence.SetValue(null, previousSequence); }
         }
     }
 

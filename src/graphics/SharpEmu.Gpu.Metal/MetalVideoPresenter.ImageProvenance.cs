@@ -22,12 +22,17 @@ internal static partial class MetalVideoPresenter
         uint Type, uint BaseMip, uint SelectedMip, uint ResourceMips, ulong SourceBytes,
         ImageDiagnosticWords? Raw, ColorTargetWords? Color);
 
-    private static void BeginImageDiagnosticWork(long sequence)
+    private static ImageDiagnosticWork BeginImageDiagnosticWork(long sequence)
     {
-        if (_imageProvenanceEnabled)
-            _imageDiagnosticExecutingWork = new(sequence, _submittingGuestQueue ?? GuestQueueIdentity.Default, null);
+        if (!_imageProvenanceEnabled) return default;
+        var previous = _imageDiagnosticExecutingWork;
+        _imageDiagnosticExecutingWork = new(sequence, _submittingGuestQueue ?? GuestQueueIdentity.Default, null);
+        return previous;
     }
-    private static void EndImageDiagnosticWork() => _imageDiagnosticExecutingWork = default;
+    private static void EndImageDiagnosticWork(ImageDiagnosticWork previous)
+    {
+        if (_imageProvenanceEnabled) _imageDiagnosticExecutingWork = previous;
+    }
     private static ImageDiagnosticWork ImageDiagnosticContext(string kind) =>
         _imageDiagnosticExecutingWork with { Kind = kind };
     private static ImageDiagnosticWords? ImageDiagnosticRaw(uint[]? raw) => raw is { Length: 8 }

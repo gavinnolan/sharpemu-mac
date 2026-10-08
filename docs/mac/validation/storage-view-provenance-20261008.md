@@ -24,7 +24,9 @@ last mutation metadata, initialized/GPU-written/content-version flags, plus
 incoming raw words/pitch/tiling/source byte count/generation/access. Formatting
 is best effort: optional diagnostic failure returns the original exception.
 Success paths, mismatch predicate, native lookups/bindings, cache retirement and
-CPU upload policy are unchanged. Default off avoids capture and failure suffix.
+CPU upload policy are unchanged. Default off avoids capture, thread-local context reads/writes and failure suffix.
+Diagnostic Drain context saves/restores the exact previous value for nested
+work scopes; these scopes are observations, not queue or native ownership.
 The old parameterless content marker remains available for existing fixtures.
 
 Reference checkouts were inspected read-only at fresh REmu e343053222cb67bf291d9ee7ec46240aab1b0b9f
