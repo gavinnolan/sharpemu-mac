@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 using SharpEmu.Gpu.Metal;
+using SharpEmu.HLE;
+using System.Reflection;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.Abstractions;
@@ -91,6 +93,54 @@ public sealed partial class MetalRenderHostTests
         Assert.Throws<NotSupportedException>(() => MetalDepthFacePlacement.Project(memory, ResolveNativeFace(3), words, target));
         Assert.Equal(0, memory.Reads); Assert.False(MetalDepthFacePlacement.TryGet(target, out _));
         Assert.Empty(_backend.Draws);
+    }
+
+    [Theory]
+    [InlineData(CpuMappedCopyResult.Rejected, "mapped-copy-result")]
+    [InlineData(CpuMappedCopyResult.Unavailable, "mapped-copy-result")]
+    [InlineData(CpuMappedCopyResult.Copied, "missing-mapping")]
+    public void NativeDepthFaceAdmissionDiagnosticPreservesFirstRejectedMappingPredicate(
+        CpuMappedCopyResult result, string reason)
+    {
+        using var flag = new NativeDepthFaceFlag(true);
+        // Managed negative only: disable native page tracking. No synthetic
+        // mapping/content proof can reach a positive admission in these rows.
+        var enabled = typeof(GuestImageWriteTracker).GetField("_enabled", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var before = enabled.GetValue(null);
+        enabled.SetValue(null, false);
+        try
+        {
+            var words = NativeFaceWords(3);
+            var target = new GuestDepthTarget(MemoryBase, MemoryBase, 1024, 1024,
+                (uint)GuestDepthFormat.Z16, 24, 0.25f, false, Registers: words);
+            var memory = new DepthFaceRefusedMappingMemory(result);
+            var error = Assert.Throws<NotSupportedException>(() =>
+                MetalDepthFacePlacement.Project(memory, ResolveNativeFace(3), words, target));
+            Assert.Contains("reason=" + reason, error.Message);
+            Assert.Contains("selected_addr=0x100600000", error.Message);
+            Assert.Contains("backing_bytes=8388608", error.Message);
+            Assert.Contains("mapped_result=" + result, error.Message);
+            Assert.Equal(1, memory.Probes); Assert.Equal(0, memory.CurrentQueries);
+            Assert.Equal((MemoryBase, 0x800000UL, MemoryBase + 0x600000UL, 8), memory.Probe);
+            Assert.False(MetalDepthFacePlacement.TryGet(target, out _)); Assert.Empty(_backend.Draws);
+        }
+        finally { enabled.SetValue(null, before); }
+    }
+
+    private sealed class DepthFaceRefusedMappingMemory(CpuMappedCopyResult result) : ICpuMemory, ICpuMappedCopySource
+    {
+        internal int Probes, CurrentQueries;
+        internal (ulong, ulong, ulong, int) Probe;
+        public bool TryRead(ulong address, Span<byte> bytes) => throw new InvalidOperationException("No CPU shadow fallback.");
+        public bool TryWrite(ulong address, ReadOnlySpan<byte> bytes) => throw new NotSupportedException();
+        public CpuMappedCopyResult TryReadMappedCopy(ulong footprintAddress, ulong footprintBytes,
+            ulong sourceAddress, Span<byte> bytes, out CpuMappedCopyObservation? observation)
+        {
+            Probes++; Probe = (footprintAddress, footprintBytes, sourceAddress, bytes.Length);
+            observation = null; return result;
+        }
+        public bool IsMappedCopyObservationCurrent(CpuMappedCopyObservation observation)
+        { CurrentQueries++; throw new InvalidOperationException("Later predicate must remain short-circuited."); }
     }
 
     private sealed class NativeDepthFaceFlag : IDisposable
