@@ -449,6 +449,7 @@ internal static partial class MetalVideoPresenter
 
     private static void ReturnPooledComputeData(ComputeGuestDispatch dispatch)
     {
+        if (_textureSourceGraphEnabled) { ReleaseGuestPayloadWork(dispatch); return; }
         foreach (var buffer in dispatch.GlobalMemoryBuffers)
         {
             if (buffer.Pooled)

@@ -201,6 +201,9 @@ public sealed class GuestIndexBufferLease
 
     public bool Returned => Volatile.Read(ref _returned) != 0;
 
+    /// <summary>Descriptor/lease array identity only; this is not an exclusive lifetime proof.</summary>
+    public bool Owns(byte[] data) => ReferenceEquals(_data, data);
+
     public bool TryReturn()
     {
         if (Interlocked.Exchange(ref _returned, 1) != 0)

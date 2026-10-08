@@ -471,7 +471,7 @@ internal static partial class MetalVideoPresenter
                 GuestImageAddress: address,
                 GuestImagePitch: pitchInPixel,
                 RequiredGuestWorkSequence: requiredWorkSequence);
-            _latestPresentation = presentation;
+            PublishGuestPresentationLocked(presentation);
             _pendingGuestImagePresentations.Enqueue(presentation);
             while (_pendingGuestImagePresentations.Count > MaxPendingGuestWork)
             {
@@ -780,7 +780,11 @@ internal static partial class MetalVideoPresenter
     {
         lock (_gate)
         {
-            if (_textureSourceGraphEnabled) ReleaseTextureSourceWorkOwnerLocked(pending.Work);
+            if (_textureSourceGraphEnabled)
+            {
+                ReleaseGuestPayloadWork(pending.Work);
+                ReleaseTextureSourceWorkOwnerLocked(pending.Work);
+            }
             _pendingGuestWorkBytes = pending.PayloadBytes >= _pendingGuestWorkBytes
                 ? 0
                 : _pendingGuestWorkBytes - pending.PayloadBytes;
@@ -1078,7 +1082,7 @@ internal static partial class MetalVideoPresenter
                 IsGuestFrame: true,
                 GuestImageAddress: flip.Address,
                 GuestImageVersion: flip.Version);
-            _latestPresentation = presentation;
+            PublishGuestPresentationLocked(presentation);
             _pendingGuestImagePresentations.Enqueue(presentation);
             while (_pendingGuestImagePresentations.Count > MaxPendingGuestWork)
             {

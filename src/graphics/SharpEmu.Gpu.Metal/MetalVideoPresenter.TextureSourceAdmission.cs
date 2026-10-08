@@ -166,6 +166,7 @@ internal static partial class MetalVideoPresenter
         // Every throwing descriptor/provenance/layout/budget/allocation step is
         // before linked-list admission and producer publication.
         var owner = PrepareTextureSourceWorkLocked(work, sequence, queue);
+        var payloadOwner = PrepareGuestPayloadOwnerLocked(work);
         if (_textureSourceWorkOwners.TryGetValue(work, out _))
             throw new InvalidOperationException("Metal work already has an ordered source owner.");
         var pending = new PendingGuestWork(work, payloadBytes, sequence, queue);
@@ -192,6 +193,7 @@ internal static partial class MetalVideoPresenter
         _textureSourceWorkOwners.Add(work, owner);
         try
         {
+            RegisterGuestPayloadOwnerLocked(payloadOwner);
             RetainQueuedTextureSourcesLocked(work);
             RetainTextureSourcePredecessorsLocked(owner);
             if (newQueue)
@@ -224,9 +226,11 @@ internal static partial class MetalVideoPresenter
                 _gpuTextureSourceAddresses.Add(source.View.Address);
                 _textureSourceVersions.Add(source);
             }
+            CommitGuestPayloadOwnerLocked(payloadOwner);
         }
         catch
         {
+            RollbackGuestPayloadOwnerLocked(payloadOwner);
             if (node.List is not null) pendingQueue.Remove(node);
             if (newQueue)
             {

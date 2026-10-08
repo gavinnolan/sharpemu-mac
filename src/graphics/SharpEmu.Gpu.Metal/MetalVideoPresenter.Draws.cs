@@ -171,7 +171,7 @@ internal static partial class MetalVideoPresenter
             }
 
             var sequence = (_latestPresentation?.Sequence ?? 0) + 1;
-            _latestPresentation = new Presentation(
+            PublishGuestPresentationLocked(new Presentation(
                 null,
                 width,
                 height,
@@ -189,7 +189,7 @@ internal static partial class MetalVideoPresenter
                     instanceCount,
                     primitiveType,
                     indexBuffer,
-                    renderState ?? GuestRenderState.Default));
+                    renderState ?? GuestRenderState.Default)));
             if (_thread is not null)
             {
                 return;
@@ -220,14 +220,14 @@ internal static partial class MetalVideoPresenter
             }
 
             var sequence = (_latestPresentation?.Sequence ?? 0) + 1;
-            _latestPresentation = new Presentation(
+            PublishGuestPresentationLocked(new Presentation(
                 null,
                 width,
                 height,
                 sequence,
                 IsSplash: false,
                 RequiredGuestWorkSequence: CurrentSubmittingQueueTailLocked(),
-                DrawKind: drawKind);
+                DrawKind: drawKind));
             if (_thread is not null)
             {
                 return;
@@ -978,7 +978,7 @@ internal static partial class MetalVideoPresenter
                 buffer,
                 (nuint)offset,
                 Math.Max(draw.InstanceCount, 1));
-            if (indexBuffer.Pooled)
+            if (indexBuffer.Pooled && !_textureSourceGraphEnabled)
             {
                 indexBuffer.TryReturnPooledData();
             }
@@ -2344,6 +2344,13 @@ internal static partial class MetalVideoPresenter
 
     private static void ReturnPooledGuestData(TranslatedGuestDraw draw)
     {
+        if (_textureSourceGraphEnabled)
+        {
+            // Presentation reuses CPU snapshots until replacement/close.
+            if (_guestPayloadOwners.TryGetValue(draw, out var owner) && owner.Keys.Any(static key => key is Presentation)) return;
+            ReleaseGuestPayloadWork(draw);
+            return;
+        }
         foreach (var buffer in draw.GlobalMemoryBuffers)
         {
             if (buffer.Pooled)
