@@ -1,0 +1,24 @@
+# Actual PVM/Tracked forwarding worker preparation
+
+Status: source-only, based on root `115316f0`. No build, native execution or successful forwarding result is claimed. The separately frozen ordinary writer slice is not part of this candidate.
+
+`SharpEmu.Core.Memory.Tests` is a dedicated executable test project referencing production Core/HLE/Mac. It neither references nor imports `SharpEmu.Libs.Tests`, its module initializers, the Host.Memory.Tests composition, a guest execution backend or graphics package. Core's production Libs dependency remains. No production friend assembly, API, observation policy or capability changes are needed.
+
+Each of four opt-in tests launches the same neutral DLL under the current test process's actual .NET host in a fresh process. The worker asserts `SHARPEMU_TEST_EXPECT_ARCH`, exact `SHARPEMU_TEST_EXPECT_FRAMEWORK` and `SHARPEMU_TEST_EXPECT_KERNEL_PAGE`, and records actual geometry. On the qualification machine the intended kernel measurement is 16384; provider page size is expected to differ between Arm64 and Rosetta X64 and is checked against the current CLR's Environment.SystemPageSize. Geometry is read from the real provider's startup measurement and validated again against the returned original copy observation, never reconstructed or fabricated.
+
+Composition explicitly registers plain Mac memory authority, creates the real Mac view provider, constructs `PhysicalVirtualMemory` with 128KiB backing and no aperture pre-reservation, and constructs `TrackedCpuMemory`. The native PVM constructor's ordinary backing self-test and low-address reservation search run unchanged. Stages are flushed before and after this constructor. A directed failure, fail-fast or deadline is preserved; there is no fake PVM, owner injection, foreign MAP_FIXED, alternate search strategy or skipped self-test. If a constructor fails before returning an owner, its unknown cleanup is retained until fresh process exit rather than reported as successful disposal.
+
+After construction the worker obtains an owned 32KiB range through actual `TryHoldRangeAtOrAbove`, checks `TryHoldRange`, and maps it through `TryMapBacked` with physical offset 16KiB. No address is read or written before successful mapping. Distinct per-kernel-page seed bytes prevent an incorrect physical page offset from accidentally matching a repeating seed.
+
+The four scenarios are:
+
+- Full mapped footprint through Tracked, exact original physical offset/identity/incarnation/kernel geometry, second-page small payload, later participating alias mutation leaves detached bytes unchanged, and actual direct-PVM copy sees the new bytes. Observation currentness after bytes change is explicitly mapping-only.
+- Unrelated canonical allocation, read-only/read-write protections and release preserve the original observation; no released pointer is dereferenced.
+- Actual unmap and same-address remap to a different backing offset reject the old observation and return a new incarnation. Successful disposal rejects both currentness and forwarding without touching the released address.
+- A real ordinary wrapper that omits the optional interface makes Tracked return Unavailable, leaves destination sentinels untouched and never calls the wrapper's ordinary read as a fallback.
+
+Each child has a 40s total deadline including composition, constructor, search, actions and disposal. Owned-child TERM gets 10s; owned-tree KILL is used only after that deadline. Output/read tasks are bounded and captured even on failure. Parent qualification must additionally hold the shared machine lock, forbid simultaneous emulator/native workers, use an outer 60s owned process-group wrapper and archive pre/post source and DLL hashes. The worker itself creates no subprocesses. Native cleanup failures preserve the primary test failure as primary; uncertain unrelated release is consumed before calling Free and is not retried. Failed PVM disposal is not retried by this fixture.
+
+Pending qualification requires separate build and native grants. Suggested frozen-DLL selection is `FullyQualifiedName~PvmMappedCopyNativeTests`; opt-in variable is `SHARPEMU_TEST_REQUIRE_PVM_MAPPED_COPY_NATIVE=1`. Without opt-in or off macOS the Theory is declared skipped, never a native pass. Expected framework must be set to the measured qualification CLR, e.g. `.NET 10.0.3`, and architecture separately to `Arm64` or `X64`.
+
+These controls establish only actual wrapper forwarding, owned alias copy and mapping/lifetime veto semantics if they execute successfully. They do not certify atomic content, raw/native writer participation, page permission ownership, signal/guest recovery, GPU publication or any game behavior. Existing backing constructor search may fail on this OS; that is a concrete qualification outcome rather than justification to bypass it.
