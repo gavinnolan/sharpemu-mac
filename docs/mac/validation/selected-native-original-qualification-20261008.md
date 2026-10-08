@@ -19,8 +19,11 @@ without losing the primary cause. Runtime use remains an opt-in candidate.
 
 These scenarios do not exercise the complete PhysicalVirtualMemory forwarding
 path, guest/JIT writers, general GPU-to-guest RAM publication, game progression,
-rendering fidelity, FPS or loading. Signed app/game replay is the next check;
-this candidate is not integrated into main.
+rendering fidelity, FPS or loading. Its subsequent signed Octopath replay exits
+after 33 seconds at GPU-produced/pending-write ownership, peak 3216 MiB, with
+one early guest frame and no gameplay. See the [latest integrated and isolated
+runtime checkpoint](main-prefix-and-wait-profile-20261008.md). This candidate
+is not integrated into main.
 
 The earlier ARM output-marker failure remains preserved. A GPU-only rebuild
 also changed ten production DLL hashes through revision metadata; the attempted

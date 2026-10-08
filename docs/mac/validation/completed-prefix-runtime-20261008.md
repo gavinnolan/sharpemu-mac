@@ -42,9 +42,11 @@ The terminal command-worker exception promptly reaches the presenter failure
 loop. No artificial depth bytes, partial snapshot or budget increase is used.
 Producer/native ownership needs tracing before choosing the next render path.
 
-This candidate remains isolated from local main pending integration and healthy
-scene regression checks. No sustained FPS, loading-time or all-games acceptance
-is inferred. No remote publication or upstream merge occurred.
+This candidate is now selectively integrated into local main at 5b54e07f,
+preserving newer main worker-failure cleanup. Actual main Quake and healthy
+Sarah scene replays are recorded in the [integrated checkpoint](main-prefix-and-wait-profile-20261008.md).
+No sustained FPS, loading-time or all-games acceptance is inferred. No remote
+publication or upstream merge occurred.
 
 Root archive:
 `artifacts/validation/all-games-20261008/completed-prefix-71b05e8c` (83 files).
