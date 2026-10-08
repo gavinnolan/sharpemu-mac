@@ -183,6 +183,14 @@ public sealed partial class MetalImmutableGpuVersionTests
                 for (var pixel = 0; pixel < 1024 * 1024; pixel++)
                     Assert.Equal((face + 1) / 8f, BitConverter.ToSingle(actual, (face * 1024 * 1024 + pixel) * 4));
             Assert.Equal(6, memory.MappedCopies); Assert.Equal(0, memory.DirectReads);
+            // A later readback receipt does not consume the earlier producer's
+            // retained receipt. Observe that exact original CB through the real
+            // status4 path before asserting its owned batch was retired.
+            if (!completedFirst)
+            {
+                Assert.Equal((nint)4, MetalNative.Send(producerCommand, MetalNative.Selector("status")));
+                Call("WaitForCommittedCommandBuffer", producerCommand); // consumes its owned retain; do not use this pointer again
+            }
             Assert.Empty((IDictionary)Field("_nativeDepthBatches").GetValue(null)!);
             // Refused logical queue cannot replace the original captured cohort.
             using (MetalVideoPresenter.EnterGuestQueue("other.depth.queue", 2))
