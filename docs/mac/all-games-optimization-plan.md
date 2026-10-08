@@ -29,13 +29,13 @@ execution remains x64/Rosetta; ARM64 CLR tests qualify host code only.
 
 | Title | Current blocker / evidence | Next qualified change |
 | --- | --- | --- |
-| Dreaming Sarah | Controllable outdoor scene; fresh b7 capture averages 57.96 guest commits/s with p99 38.693 ms | Reduce unnecessary drawable acquisition; then queue-drain attribution and controlled same-build pacing comparison |
+| Dreaming Sarah | Controllable outdoor scene; same-binary876 ABBA: off63.34/65.86Hz; idle-on73.34/69.41Hz, tails remain33.8–36.2ms | Reduce unnecessary drawable acquisition; then queue-drain attribution and controlled same-build pacing comparison |
 | Demon’s Souls | DF identifies global mapping epoch change at admission; zero guest frames | Preserve content authority while replacing broad vetoes with qualified per-range lifetime/operation ownership |
-| Silent Hill: The Short Message | DF advances RGBA8/PERF7/BGRA and rejects next R32Uint singleton array | Exact Uint/native R32Uint seed/store/load, explicit slice bounds and owned physical copy |
-| Octopath Traveler II | Same next R32Uint array family | Exact typed raw replay and native integer oracle; separate title evidence |
-| The Oregon Trail | Same next R32Uint array family | Same typed qualification; separate title progression/rendering evidence |
+| Silent Hill: The Short Message | 876 advances R32Uint and rejects next RGBA16Float singleton array | Qualify exact full8-byte Half seed/Float load and explicit native array bounds |
+| Octopath Traveler II | Same next RGBA16Float array family | Exact full8-byte raw replay and native Half/Float oracle; separate title evidence |
+| The Oregon Trail | Same next RGBA16Float array family | Same typed qualification; separate title progression/rendering evidence |
 | Poppy Playtime Chapter 1 | Fatal write fault; later b7 record observes tracker Disarmed after a successful RW restore | Filtered schema3 retains85/0drops and three actual Disarmed CAS declines after successful RW restore; require permission/lifetime ownership, no unconditional retry |
-| Superliminal | DF advances singleton sRGB gate, then rejects R8Unorm4x4x16/mode5 | Full XYZ owned4KiB source and native R8/000X typed load/filter oracle |
+| Superliminal | 876 passes R8 preparation, then MSL name collisions/storage-view mismatch; loading hallway | Qualify Metal helper namespace/unique compare-field names; diagnose storage-view tuple |
 | Quake | Native movie plays; first 8192² R32 tiled depth image exceeds 128 MiB snapshot bound | Independent PS5 tile-mode-24 address oracle, bounded upload staging and correctly filtered depth comparison |
 | Void Terrarium | Scene visible but progression and gameplay unverified under contention | Input/checkpoint qualification on quiet host, first visual discrepancy and scene-specific GPU/producer attribution |
 

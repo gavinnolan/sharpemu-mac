@@ -288,3 +288,40 @@ and [native full-screen activation](https://support.apple.com/en-euro/105118).
 The template passes `plutil -lint`. This metadata enables OS eligibility; it
 does not force Game Mode, override a user's setting, or demonstrate an FPS gain.
 Actual activation and same-scene comparison remain unqualified.
+
+## Signed876 compatibility and Sarah ABBA follow-up
+
+The new `artifacts/macos/compat-87616e29/SharpEmu.app` includes exact R32Uint
+and R8 volume fixes plus optional drain allocation capture and Game Mode
+eligibility metadata. It remains runtime10.0.3, clean source87616e29, native-only
+closure/architecture/signature verified. Root integrated required-device tests
+pass20/20 per CLR; targeted genuine mip/R8/sRGB managed controls52/52 per CLR.
+The broader84 device-disabled runner includes early-return source paths and is
+excluded from genuine managed/native execution counts. Archive96 copied
+source/DLL/result files: `r8-integrated-87616e29-frozen/manifest.json`.
+
+Fresh SH24s/1944MiB, Octopath33s/3171MiB and Oregon31s/2388MiB now pass the old
+Uint gate and reject RGBA16Float mode27 singleton arrays. Superliminal41s/3231MiB
+passes R8 preparation and shows its loading hallway, then exits134 with MSL
+name collisions and a storage-view mismatch. All four exit134; no gameplay/FPS
+acceptance. Exact logs/screenshots/build/provenance are under
+`compat-87616e29-game-replays/{REPORT.md,manifest.json}`.
+
+Sarah off/on/on/off uses this same signed binary and identical timed inputs in
+four serialized150-second runs, compilers/test/device workers paused. Effective
+retained guest-commit rates: off63.337/65.857Hz, on73.345/69.406Hz. Each ring
+retains4096 commits, not the whole run. Median drawable wait is10.36/10.56ms
+off versus0.032/0.033ms on. p99 gaps off36.155/33.811ms versus on35.003/34.828ms
+do not consistently improve. All rows have zero discarded scopes/failed drains;
+mean Drain allocation is41.8–48.2KB per retained commit. Each run reaches the
+coherent outdoor world and stops on TERM without KILL; guest pthread_join
+error persists. Final camera/sprite positions differ despite timed-input equality.
+This is commit cadence, not GPU/scanout or matched fixed-scene/guest-clock
+qualification. Default idle stays off pending surface lifecycle and timing checks.
+Detailed metrics/sampled host observations/112 hashed evidence files:
+`sarah-abba-87616e29/{REPORT.md,comparison.json,manifest.json}`.
+
+Proactive R32Float exact arrays integrate through438cfd28 with111/111 managed
+and12/12 source/codegen controls per CLR plus4/4 actual native Float cases each.
+No actual game R32Float descriptor was captured here. R32Sint remains blocked by
+shared legacy numeric normalization; no global policy or fallback was introduced.
