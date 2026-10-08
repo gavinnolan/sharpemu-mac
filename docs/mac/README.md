@@ -146,8 +146,11 @@ The [4K R8 array](validation/r8-fourk-array-20261008.md) is also integrated afte
 full independent layout and actual native typed store/load checks on both CLRs.
 Its separate signed game replay passes that rejection in Silent Hill and
 Octopath, then reaches unsupported selected mips of a2048² R16Float resource.
-Indexed vertex-prefix reduction and finite color-mip projection remain isolated
-candidates with retained failed native fixtures/review findings. The
+Bounded indexed vertex-prefix reduction is now imported locally after genuine
+managed/native qualification and a [Sarah runtime comparison](validation/vertex-prefix-abba-20261008.md).
+Actual producer payload fell99.988%; observed commit cadence increased, with
+window-focus differences still limiting performance attribution. Finite color-mip
+projection remains isolated pending memory-currentness authority. The
 unqualified source graph and owned-frame idle policy remain disabled by default.
 
 Signed apps are source-specific artifacts. `artifacts/macos/compat-2adf328d`

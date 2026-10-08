@@ -905,7 +905,7 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         return (dataFormat, numberFormat);
     }
 
-    private IReadOnlyList<GuestVertexBuffer> CopyVertexBuffers(GraphicsPipelineRecord pipeline)
+    private IReadOnlyList<GuestVertexBuffer> CopyVertexBuffers(GraphicsPipelineRecord pipeline, int[]? prefixBytes, ref MetalVertexPrefixProfile.CopyScope profile)
     {
         var input = _vertexInput ?? throw Fatal("The draw has no bound vertex input.");
         var buffers = input.Buffers;
@@ -916,13 +916,12 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         {
             if (submitted is not null)
             {
-                bytes[index] = submitted.CopyBuffer(index);
-                continue;
+                bytes[index] = prefixBytes is null ? submitted.CopyBuffer(index) : submitted.CopyBufferPrefix(index, prefixBytes[index]);
             }
-
-            bytes[index] = index < _vertexBindings.Length && _vertexBindings[index].Handle != 0 && buffers[index].Size != 0
-                ? ReadBound(RequireBuffer(in _vertexBindings[index]), _vertexBindings[index].Offset, buffers[index].Size)
+            else bytes[index] = index < _vertexBindings.Length && _vertexBindings[index].Handle != 0 && buffers[index].Size != 0
+                ? ReadBound(RequireBuffer(in _vertexBindings[index]), _vertexBindings[index].Offset, prefixBytes is null ? buffers[index].Size : (ulong)prefixBytes[index])
                 : [];
+            profile.Stream(buffers[index].Size, bytes[index].Length);
         }
 
         var result = new GuestVertexBuffer[attributes.Length];
@@ -1127,13 +1126,33 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         return (textures.ToArray(), buffers.ToArray(), bindings, writesGlobalMemory);
     }
 
-    private void SubmitDraw(uint vertexCount, uint instanceCount, int baseVertex, bool indexed)
+    private void SubmitDraw(uint vertexCount, uint instanceCount, int baseVertex, bool indexed, uint firstIndex = 0, uint firstInstance = 0)
     {
         var pipeline = RequireGraphicsPipeline();
         var context = RequireContext();
         var (textures, globals, stages, _) = CollectResources(_committedStages);
-        var vertexBuffers = CopyVertexBuffers(pipeline);
-        var indexBuffer = indexed ? CopyIndexBuffer(vertexCount) : null;
+        GuestIndexBuffer? indexBuffer = null;
+        int[]? prefixBytes = null;
+        var packetEligible = indexed && _directIndexedVertexPrefix && firstIndex == 0 && firstInstance == 0 && baseVertex == 0;
+        var profile = MetalVertexPrefixProfile.BeginCopy(packetEligible);
+        IReadOnlyList<GuestVertexBuffer> vertexBuffers;
+        var capturedIndexFirst = false;
+        try
+        {
+            capturedIndexFirst = MetalVertexPrefixProfile.PrefixEnabled && indexed && firstIndex == 0 && firstInstance == 0 && baseVertex == 0 &&
+                TryPrepareIndexedVertexPrefixes(pipeline, vertexCount, instanceCount, out prefixBytes);
+            if (capturedIndexFirst)
+            {
+                profile.Qualify(); // Metadata qualified; data bounds can still veto the prefix.
+                indexBuffer = CopyIndexBuffer(vertexCount);
+                if (indexBuffer is null || !TryFinishIndexedVertexPrefixes(indexBuffer, vertexCount, instanceCount, prefixBytes!))
+                    prefixBytes = null;
+            }
+            vertexBuffers = CopyVertexBuffers(pipeline, prefixBytes, ref profile);
+            profile.Complete(prefixBytes is not null);
+        }
+        finally { profile.Finish(); }
+        if (indexed && !capturedIndexFirst) indexBuffer = CopyIndexBuffer(vertexCount);
         var topology = pipeline.Parameters.Topology;
         var primitiveType = PrimitiveTypeOf(topology);
         var count = topology == GpuPrimitiveTopology.PatchList && !indexed && vertexCount is 1 or 3 or 4 ? SingleRectangleVertexCount : vertexCount;
@@ -1186,8 +1205,7 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
 
     void IRenderHost.DrawIndexed(uint indexCount, uint instanceCount, uint firstIndex, int vertexOffset, uint firstInstance)
     {
-        _ = (firstIndex, firstInstance);
-        SubmitDraw(indexCount, instanceCount, vertexOffset, indexed: true);
+        SubmitDraw(indexCount, instanceCount, vertexOffset, indexed: true, firstIndex, firstInstance);
     }
 
     void IRenderHost.Dispatch(uint groupsX, uint groupsY, uint groupsZ)

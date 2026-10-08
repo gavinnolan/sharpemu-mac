@@ -77,6 +77,7 @@ internal static partial class MetalPresentationProfile
         }
         catch (IOException) { }
         catch (ObjectDisposedException) { }
+        finally { MetalVertexPrefixProfile.EndReport(); }
     }
 
     private static void WriteReport()

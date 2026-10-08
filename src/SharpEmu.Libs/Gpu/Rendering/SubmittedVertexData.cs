@@ -73,4 +73,8 @@ public sealed class SubmittedVertexData
 
     // Draw records own their copies; a replay cannot modify the submission snapshot.
     public byte[] CopyBuffer(int index) => (byte[])_data[index].Clone();
+
+    // A bounded draw copy still starts at the captured origin and owns new bytes.
+    // This never exposes or modifies the submission's private full snapshot.
+    public byte[] CopyBufferPrefix(int index, int byteCount) => _data[index].AsSpan(0, byteCount).ToArray();
 }

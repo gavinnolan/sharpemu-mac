@@ -17,10 +17,13 @@ internal sealed partial class MetalCommandStreamHost : AgcExports.TranslatingCom
     private readonly IGuestImageSnapshotBackend _snapshots;
     private readonly IGuestGpuBackend _backend;
     private IDisposable? _queueScope;
+    private int _vertexPrefixQueueId;
+    private bool _directIndexedVertexPrefix;
 
     public MetalCommandStreamHost(ICpuMemory memory, IGuestGpuBackend backend, IGuestImageSnapshotBackend snapshots)
         : base(memory)
     {
+        MetalVertexPrefixProfile.WarmUp();
         _backend = backend;
         _snapshots = snapshots;
         _context = new CpuContext(memory, Generation.Gen5);
@@ -28,10 +31,35 @@ internal sealed partial class MetalCommandStreamHost : AgcExports.TranslatingCom
 
     public override void BeginSubmission(int queueId, ulong submissionId, object? geometrySnapshots)
     {
+        _vertexPrefixQueueId = queueId;
         _queueScope?.Dispose();
         var queueName = queueId == 0 ? "dcb.graphics" : $"acb.compute[{GpuCommandInterpreter.ComputeQueueBase + queueId - 1}]";
         _queueScope = MetalVideoPresenter.EnterGuestQueue(queueName, submissionId);
         base.BeginSubmission(queueId, submissionId, geometrySnapshots);
+    }
+
+    // Only this synchronous packet→executor invocation may qualify an indexed prefix.
+    // Retained replay and indirect/resolved-indirect draws do not carry that proof.
+    public override void DrawIndexed(ulong submitId, in DrawIndexedArguments arguments)
+    {
+        var previous = _directIndexedVertexPrefix;
+        var user = Queue.GetInterpreter(_vertexPrefixQueueId).TypedRegisters.UserConfig;
+        _directIndexedVertexPrefix = IsDirectIndexedVertexPrefix(in arguments, user.PrimitiveType, user.PrimitiveResetControl);
+        try { base.DrawIndexed(submitId, in arguments); }
+        finally { _directIndexedVertexPrefix = previous; }
+    }
+
+    private static bool IsDirectIndexedVertexPrefix(in DrawIndexedArguments arguments, uint primitiveType, uint restartControl) =>
+        arguments.OffsetSource == DrawOffsetSource.Packet && arguments.IndirectArgumentsAddress == 0 &&
+        !arguments.UnboundedIndexBuffer && arguments.IndexTypeAndSize is 0 or 1 && arguments.BaseVertex == 0 &&
+        arguments.FirstInstance == 0 && (restartControl & 1) == 0 && primitiveType is 1 or 2 or 3 or 4 or 5 or 6;
+
+    public override void DrawAuto(ulong submitId, in DrawAutoArguments arguments)
+    {
+        var previous = _directIndexedVertexPrefix;
+        _directIndexedVertexPrefix = false;
+        try { base.DrawAuto(submitId, in arguments); }
+        finally { _directIndexedVertexPrefix = previous; }
     }
 
     // The global data share lives on the GPU; its transfers queue behind the draws before them.
