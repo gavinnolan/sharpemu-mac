@@ -23,10 +23,13 @@ internal static class MetalSingletonArrayStorageAdmission
         descriptor.BaseLevel == 0 && descriptor.LastLevel == 0 && descriptor.MaxMip == 0 && selectedMip == 0 &&
         descriptor.BaseArray == 0 && descriptor.ArrayPitch == 0 && descriptor.MinLod == 0 && descriptor.MinLodWarn == 0 &&
         descriptor.MetadataAddress == 0 && descriptor.DescriptorFlags == 0 && descriptor.BcSwizzle == 0 &&
+        // Mesa GFX10 SQ_IMG_RSRC_WORD5 names bits20..22 PERF_MOD.
+        // Qualify only the previously captured 0 and observed SH/Octopath 7;
+        // adjacent flags/reserved bits stay rejected by exact-word matching.
         // Reserved/non-content fields are not qualified by a lossy decoder.
         (raw[1] & 0xFFFF_FF00u) == (56u << 20) && raw[2] == 0 &&
         raw[3] == ((13u << 28) | (27u << 20) | descriptor.DstSelect) &&
-        raw[4] == 0 && raw[5] == 0 && raw[6] == 0 && raw[7] == 0 &&
+        raw[4] == 0 && (raw[5] == 0 || raw[5] == 0x0070_0000u) && raw[6] == 0 && raw[7] == 0 &&
         access != GuestImageAccess.Unknown && (access & ~(GuestImageAccess.Read | GuestImageAccess.Write)) == 0 &&
         arrayed && shape.Arrayed && shape.Storage && shape.NumericClass == TextureNumericClass.Float &&
         !shape.Volume && !shape.Cube && !shape.DynamicMip && !shape.OneDimensional &&

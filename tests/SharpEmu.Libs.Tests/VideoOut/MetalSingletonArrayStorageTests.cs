@@ -18,8 +18,8 @@ public sealed class MetalSingletonArrayStorageTests
 {
     private const ulong Address = 0x71F5_0000_00;
     private const BindingFlags Private = BindingFlags.Static | BindingFlags.NonPublic;
-    internal static uint[] Raw(ulong address = Address) =>
-        [(uint)(address >> 8), (uint)(address >> 40) | (56u << 20), 0, (13u << 28) | (27u << 20) | 0xFAC, 0, 0, 0, 0];
+    internal static uint[] Raw(ulong address = Address, uint perfModWord = 0, uint dstSelect = 0xFAC) =>
+        [(uint)(address >> 8), (uint)(address >> 40) | (56u << 20), 0, (13u << 28) | (27u << 20) | dstSelect, 0, perfModWord, 0, 0];
     private static AgcExports.TranslatedImageBinding Binding(uint[]? raw = null)
     {
         raw ??= Raw();
@@ -52,6 +52,54 @@ public sealed class MetalSingletonArrayStorageTests
         Assert.Equal(expected, snapshot.RgbaPixels); Assert.Equal(Raw(), snapshot.Descriptor);
         foreach (var invalid in new[] { snapshot with { RgbaPixels = new byte[3] }, snapshot with { CpuSnapshotStable = false } })
             Assert.Throws<InvalidOperationException>(() => Ensure(invalid));
+    }
+
+    [Theory]
+    [InlineData(0x80106E00u)] // SH actual T#
+    [InlineData(0x8030F000u)] // Octopath actual T#, same admitted layout
+    public void ActualPerfModSevenBgraDescriptorPreservesOwnedPhysicalTexel(uint addressWord)
+    {
+        using var state = new State();
+        uint[] raw = [addressWord, 0x03800000, 0, 0xD1B00F2E, 0, 0x00700000, 0, 0];
+        var binding = Binding(raw); var address = binding.Descriptor.Address;
+        byte[] physical = [17, 83, 149, 227];
+        var source = Enumerable.Repeat((byte)0xD3, 65536).ToArray(); physical.CopyTo(source, 0);
+        var memory = new Memory(source, address);
+        try
+        {
+            var snapshot = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [binding], out var fallbacks));
+            Assert.Equal(0, fallbacks); Assert.Equal(1, memory.Reads); Assert.Equal(65536, memory.LastReadBytes);
+            Assert.Equal(physical, snapshot.RgbaPixels); Assert.Equal(0xF2Eu, snapshot.DstSelect);
+            Assert.Equal(raw, snapshot.Descriptor); Assert.NotSame(raw, snapshot.Descriptor);
+            Assert.Equal((3u, 1u, 1u), MetalVideoPresenter.GuestTextureShape(snapshot));
+            Assert.Equal(MtlPixelFormat.Rgba8Unorm, MetalVideoPresenter.StorageTextureFormat(snapshot).Format);
+            raw[5] = 0; source[0] ^= 0xFF;
+            Assert.Equal(0x00700000u, snapshot.Descriptor![5]); Assert.Equal(physical, snapshot.RgbaPixels);
+        }
+        finally { GuestImageWriteTracker.Untrack(address); }
+    }
+
+    [Theory]
+    [InlineData(0x00100000u)]
+    [InlineData(0x00200000u)]
+    [InlineData(0x00300000u)]
+    [InlineData(0x00400000u)]
+    [InlineData(0x00500000u)]
+    [InlineData(0x00600000u)]
+    [InlineData(0x00700001u)] // array pitch
+    [InlineData(0x00700010u)] // max mip
+    [InlineData(0x00700100u)] // min LOD warn
+    [InlineData(0x00F00000u)] // CORNER_SAMPLES
+    [InlineData(0x01700000u)] // reserved bit24
+    [InlineData(0x02700000u)] // LOD_HDW_CNT_EN
+    [InlineData(0x04700000u)] // PRT_DEFAULT
+    [InlineData(0x80700000u)] // BIG_PAGE
+    public void UnqualifiedPerfModOrNeighboringFlagsRejectBeforeRead(uint word5)
+    {
+        using var state = new State();
+        var raw = Raw(perfModWord: word5, dstSelect: 0xF2E); var memory = new Memory(new byte[65536]);
+        Assert.Throws<NotSupportedException>(() => MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [Binding(raw)], out _));
+        Assert.Equal(0, memory.Reads);
     }
 
     [Theory]
@@ -117,13 +165,13 @@ public sealed class MetalSingletonArrayStorageTests
         catch (TargetInvocationException exception) when (exception.InnerException is not null)
         { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(exception.InnerException).Throw(); throw; }
     }
-    private sealed class Memory(byte[] bytes) : ICpuMemory
+    private sealed class Memory(byte[] bytes, ulong baseAddress = Address) : ICpuMemory
     {
         public int Reads, LastReadBytes;
         public bool TryRead(ulong address, Span<byte> destination)
         {
             Reads++; LastReadBytes = destination.Length;
-            if (address != Address || destination.Length != bytes.Length) return false;
+            if (address != baseAddress || destination.Length != bytes.Length) return false;
             bytes.CopyTo(destination); return true;
         }
         public bool TryWrite(ulong address, ReadOnlySpan<byte> source) => throw new InvalidOperationException("Snapshot may not modify guest neighbors.");
