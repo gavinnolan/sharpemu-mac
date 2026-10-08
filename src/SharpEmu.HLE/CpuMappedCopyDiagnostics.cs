@@ -20,7 +20,13 @@ internal static class CpuMappedCopyDiagnostics
         if (!enabled || failure.Reason is null) return;
         try
         {
-            if (Interlocked.Increment(ref rows) > 64) return;
+            // Saturate rather than wrap after a long failed polling loop.
+            while (true)
+            {
+                var current = Volatile.Read(ref rows);
+                if (current >= 64) return;
+                if (Interlocked.CompareExchange(ref rows, current + 1, current) == current) break;
+            }
             var line = $"[MAPPED-COPY] stage={failure.Stage} reason={failure.Reason} result={failure.Result} " +
                 $"footprint=0x{failure.Footprint:X} footprint_bytes={failure.FootprintBytes} " +
                 $"source=0x{failure.Source:X} copy_bytes={failure.CopyBytes} watched={failure.Watched} " +

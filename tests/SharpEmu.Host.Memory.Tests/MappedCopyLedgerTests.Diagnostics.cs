@@ -93,7 +93,7 @@ public sealed unsafe partial class MappedCopyLedgerTests
         for (var i = 0; i < 70; i++)
             Assert.Equal(CpuMappedCopyResult.Rejected, state.Ledger.TryReadMappedCopy(state.Backing,
                 State.Address, State.Page, State.Address, new byte[1], out _));
-        Assert.Equal(64, lines); Assert.Equal(70, trace.RowCount);
+        Assert.Equal(64, lines); Assert.Equal(64, trace.RowCount);
     }
 
     // Assembly is serialized. Mutate only private diagnostic fields, restore
