@@ -973,8 +973,9 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         return new GuestIndexBuffer(bytes, bytes.Length, _indexType == GpuIndexType.Uint32, Pooled: false) { GuestAddress = buffer.Bytes is null ? buffer.Address + binding.Offset : 0 };
     }
 
-    private static GuestRenderTarget GuestTargetOf(in ColorTargetState target, in ColorTargetWords words, uint writeMask) =>
-        new(
+    private GuestRenderTarget GuestTargetOf(in ColorTargetState target, in ColorTargetWords words, uint writeMask)
+    {
+        var guest = new GuestRenderTarget(
             target.Resolution.BaseAddress,
             target.Resolution.Extent.Width,
             target.Resolution.Extent.Height,
@@ -985,6 +986,8 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
             TileMode: (uint)words.TileMode,
             Registers: words,
             WriteMask: writeMask);
+        return MetalColorMipPlacement.Project(Memory, target.Resolution, words, guest);
+    }
 
     private GuestDepthTarget? GuestDepthOf(ContextRegisters context)
     {

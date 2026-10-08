@@ -80,6 +80,7 @@ internal static partial class MetalVideoPresenter
         /// full-texture blit on every draw.</summary>
         public int ContentVersion;
         public ImageDiagnosticOrigin DiagnosticOrigin;
+        public MetalColorMipPlacement.Observation? ColorPhysicalView;
         public ImageDiagnosticWork DiagnosticMutation;
 
         /// <summary>Cached feedback-read snapshot (one retain held here) and
@@ -615,6 +616,7 @@ internal static partial class MetalVideoPresenter
         }
         var prefixProducer = GuestPrefixProducerForAdmission(checked(_enqueuedGuestWorkSequence + 1), queue);
         var selectedMipAdmission = PrepareSelectedStorageMipAdmissionLocked(work, queue);
+        var colorPhysicalAdmission = PrepareColorPhysicalAdmissionLocked(work);
         var sequence = ++_enqueuedGuestWorkSequence;
         _lastEnqueuedGuestWorkByQueue[queue.Name] = sequence;
         if (!_pendingGuestWorkByQueue.TryGetValue(queue.Name, out var pendingQueue))
@@ -645,6 +647,7 @@ internal static partial class MetalVideoPresenter
         }
 
         PublishSelectedStorageMipAdmissionLocked(selectedMipAdmission);
+        PublishColorPhysicalAdmissionLocked(colorPhysicalAdmission);
         _pendingGuestWorkCount++;
         var total = _pendingGuestWorkBytes + payloadBytes;
         _pendingGuestWorkBytes = total < _pendingGuestWorkBytes ? ulong.MaxValue : total;
@@ -1048,6 +1051,7 @@ internal static partial class MetalVideoPresenter
     private static void ExecuteGuestImageWrite(nint device, nint queue, GuestImageWrite write)
     {
         RejectAddressOnlySelectedStorageAlias(write.Address);
+        RejectColorPhysicalAddressOnly(write.Address);
         GuestImage? image;
         lock (_gate)
         {
@@ -1095,6 +1099,7 @@ internal static partial class MetalVideoPresenter
 
     private static void ExecuteOrderedGuestFlip(nint device, nint queue, OrderedGuestFlip flip)
     {
+        RejectColorPhysicalAddressOnly(flip.Address);
         // The flipped VideoOut address is the display buffer's start, but games
         // render into the pixel surface, which sits past the buffer's surface
         // metadata (64KB+ on PS5). Prefer a drawn image inside the buffer's
@@ -1177,7 +1182,9 @@ internal static partial class MetalVideoPresenter
     private static void ExecuteGuestImageBlit(nint queue, GuestImageBlit blit)
     {
         RejectAddressOnlySelectedStorageAlias(blit.SourceAddress);
+        RejectColorPhysicalAddressOnly(blit.SourceAddress);
         RejectAddressOnlySelectedStorageAlias(blit.DestinationAddress);
+        RejectColorPhysicalAddressOnly(blit.DestinationAddress);
         GuestImage? source, destination;
         lock (_gate)
         {
@@ -1262,6 +1269,7 @@ internal static partial class MetalVideoPresenter
         uint pitchInPixel)
     {
         RejectAddressOnlySelectedStorageAlias(address);
+        RejectColorPhysicalAddressOnly(address);
         uint formatTag;
         byte[]? initialData;
         lock (_gate)

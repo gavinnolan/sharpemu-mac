@@ -1405,11 +1405,14 @@ internal static partial class MetalVideoPresenter
         MtlPixelFormat format)
     {
         RejectAddressOnlySelectedStorageAlias(target.Address, checked((ulong)target.Width * target.Height * 16));
+        if (MetalColorMipPlacement.TryGet(target, out _) && format != MtlPixelFormat.Rgba16Float)
+            throw new NotSupportedException("Metal selected color physical target requires the original RGBA16Float native format.");
         lock (_gate)
         {
             if (_guestImages.TryGetValue(target.Address, out var existing))
             {
                 Require2DGuestImage(existing, "render target");
+                ValidateColorPhysicalNativeTarget(target, existing, format);
                 if (existing.Width == target.Width && existing.Height == target.Height)
                     return existing;
             }
@@ -1427,6 +1430,7 @@ internal static partial class MetalVideoPresenter
             Height = target.Height,
             Format = format,
             DiagnosticOrigin = CaptureColorImageOrigin(target),
+            ColorPhysicalView = MetalColorMipPlacement.TryGet(target, out var physicalView) ? physicalView : null,
         };
         if (image.Texture == 0)
         {
@@ -1443,7 +1447,8 @@ internal static partial class MetalVideoPresenter
             }
 
             _guestImages[target.Address] = image;
-            _guestImageExtents[target.Address] = (target.Width, target.Height, (ulong)target.Width * target.Height * 4);
+            _guestImageExtents[target.Address] = (target.Width, target.Height, MetalColorMipPlacement.TryGet(target, out var extentView)
+                ? extentView.ByteCount : (ulong)target.Width * target.Height * 4);
         }
 
         // Pending initial data is RGBA8; only 4-byte-texel targets take it verbatim.
