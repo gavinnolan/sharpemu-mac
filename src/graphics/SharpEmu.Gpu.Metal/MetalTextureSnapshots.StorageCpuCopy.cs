@@ -1,0 +1,57 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+using SharpEmu.HLE;
+using SharpEmu.Libs.Agc;
+using SharpEmu.Libs.Gpu;
+using Binding = SharpEmu.Libs.Agc.AgcExports.TranslatedImageBinding;
+
+namespace SharpEmu.Gpu.Metal;
+
+internal static partial class MetalTextureSnapshots
+{
+    // Capture the ORIGINAL mapping incarnation alongside the original bytes,
+    // not by rereading/reconstructing a mapping at native creation or dirty sync.
+    private static bool TryCreateStorageCpuCopy(CpuContext context, Binding binding, out GuestDrawTexture texture)
+    {
+        texture = null!;
+        if (!binding.IsStorage || MetalVideoPresenter.TextureSourceGraphEnabled ||
+            context.Memory is not ICpuMappedCopySource source) return false;
+        var d = binding.Descriptor;
+        // Preserve native-owner/queued upload selection. Do not capture stale
+        // guest bytes over a previously admitted storage producer.
+        if (GuestGpu.Current is IGuestImageSnapshotBackend snapshots &&
+            snapshots.IsGuestImageUploadKnown(d.Address, d.Format, d.NumberType)) return false;
+        var physical = d.Width == 3840 && d.Height == 2160 ? 8847360UL :
+            d.Width == 1024 && d.Height == 1024 ? 4194304UL : 65536UL;
+        var template = new GuestDrawTexture(d.Address, d.Width, d.Height, d.Format, d.NumberType, [],
+            IsFallback: false, IsStorage: true, Pitch: d.Pitch, TileMode: d.TileMode, DstSelect: d.DstSelect,
+            ArrayedView: binding.IsArrayed, Type: d.Type, Depth: 1, SourceByteCount: physical,
+            Descriptor: binding.ResourceDescriptor?.ToArray(), Shape: binding.Shape, Access: binding.Access,
+            MipLevel: binding.MipLevel, BaseMipLevel: d.BaseLevel, ResourceMipLevels: d.MaxMip + 1);
+        var layout = MetalStorageCpuLayout.TryCreate(template);
+        if (layout is null) return false;
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            var epoch = HostMemory.MappingGeneration;
+            var read = GuestImageWriteTracker.BeginReadSnapshot(d.Address, physical, source: "agc.typed-storage-mapped-copy");
+            var observation = MetalVideoPresenter.ObserveCpuTextureSnapshot(d.Address, physical, epoch);
+            var bytes = new byte[checked((int)physical)];
+            var result = source.TryReadMappedCopy(d.Address, physical, d.Address, bytes, out var mapping);
+            if (result == CpuMappedCopyResult.Unavailable) return false; // unchanged legacy owned-copy path; no dirty authority
+            if (result != CpuMappedCopyResult.Copied || mapping is null) continue;
+            var linear = layout.Decode(bytes);
+            if (!source.IsMappedCopyObservationCurrent(mapping) ||
+                !GuestImageWriteTracker.IsReadSnapshotStable(read) ||
+                !MetalVideoPresenter.IsCpuTextureSnapshotAdmissionStable(d.Address, observation)) continue;
+            texture = layout.Upload(linear) with
+            {
+                Sampler = ToGuestSampler(binding.SamplerDescriptor),
+                WriteGeneration = read.Active ? read.Generation : -1,
+            };
+            MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(texture, observation);
+            MetalVideoPresenter.RegisterStorageCpuSeedOrigin(texture, layout, context.Memory, source, mapping, observation);
+            return true;
+        }
+        throw new InvalidOperationException($"Metal typed storage mapping/content changed across three original-copy attempts at 0x{d.Address:X}.");
+    }
+}

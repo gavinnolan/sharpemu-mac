@@ -344,6 +344,8 @@ internal static partial class MetalVideoPresenter
             ArrayLength = shape.ArrayLength,
             Format = format,
             DiagnosticOrigin = CaptureStorageImageOrigin(descriptor),
+            StorageCpuLayout = StorageCpuOrigin(descriptor)?.Layout ?? MetalStorageCpuLayout.TryCreate(descriptor),
+            StorageCpuOrigin = StorageCpuOrigin(descriptor),
         };
         if (image.Texture == 0)
             throw new InvalidOperationException($"Metal cannot allocate storage image 0x{descriptor.Address:X} with format {format}.");
@@ -396,6 +398,8 @@ internal static partial class MetalVideoPresenter
 
     private static void ValidateStorageImageView(GuestImage image, GuestDrawTexture descriptor, MetalTextureFormat format)
     {
+        if (image.StorageCpuLayout is { } creation && !creation.Matches(descriptor))
+            throw new NotSupportedException($"Metal typed storage image cannot reuse a different immutable creation descriptor at 0x{descriptor.Address:X}.");
         if (_selectedStorageMipAssociations.TryGetValue(descriptor, out var selected) &&
             MetalR16FloatSelectedMip.TryPlacement(selected.Key.Resource, selected.Key.Mip, out _) &&
             (!image.R16SelectedOwnsRetain || image.Texture == 0))

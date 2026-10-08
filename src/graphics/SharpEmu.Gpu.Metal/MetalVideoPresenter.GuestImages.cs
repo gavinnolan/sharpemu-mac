@@ -77,6 +77,10 @@ internal static partial class MetalVideoPresenter
         public int ContentVersion;
         public ImageDiagnosticOrigin DiagnosticOrigin;
         public ImageDiagnosticWork DiagnosticMutation;
+        // Always-present creation layout; independent of diagnostic opt-in.
+        public MetalStorageCpuLayout? StorageCpuLayout;
+        // Optional ORIGINAL mapping copy and observation, never synthesized at drain.
+        public StorageCpuSeedOrigin? StorageCpuOrigin;
 
         /// <summary>Cached feedback-read snapshot (one retain held here) and
         /// the content version it captured. Command buffers that sampled it

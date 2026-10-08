@@ -149,6 +149,13 @@ internal static partial class MetalTextureSnapshots
                     TexturePreparationProfile.RecordBinding(TexturePreparationProfile.BindingOutcome.Linear,
                         profileStart, texture.RgbaPixels.LongLength);
                 }
+                else if (TryCreateStorageCpuCopy(context, binding, out texture))
+                {
+                    unreturnedTexture = texture;
+                    snapshots?.Add(reuseKey, texture);
+                    TexturePreparationProfile.RecordBinding(TexturePreparationProfile.BindingOutcome.Linear,
+                        profileStart, texture.RgbaPixels.LongLength);
+                }
                 else if (TryCreateCapturedTextureSource(binding, out texture))
                 {
                     unreturnedTexture = texture;

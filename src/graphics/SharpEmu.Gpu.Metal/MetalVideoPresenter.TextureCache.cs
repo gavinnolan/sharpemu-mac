@@ -146,6 +146,11 @@ internal static partial class MetalVideoPresenter
                     continue;
                 }
 
+                if (image.StorageCpuLayout is not null)
+                {
+                    SynchronizeTypedStorageCpuSeed(device, address, image);
+                    continue;
+                }
                 if (image.TextureType != MtlTextureType2D || image.Depth != 1)
                     throw CpuDirtyImageShapeMismatch(image, address, width, height, byteCount);
                 var pixels = new byte[byteCount];

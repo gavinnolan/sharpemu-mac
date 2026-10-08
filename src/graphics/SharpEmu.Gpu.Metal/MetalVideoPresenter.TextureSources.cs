@@ -262,12 +262,14 @@ internal static partial class MetalVideoPresenter
             {
                 if (provenance is not null) _cpuTextureSnapshotProvenance.Add(copy, provenance);
                 CopySelectedStorageMip(source, copy);
+                CopyStorageCpuSeedOrigin(source, copy);
             }
             catch
             {
                 if (lease is not null) _textureSourceLeases.Remove(copy);
                 _cpuTextureSnapshotProvenance.Remove(copy);
                 _selectedStorageMipAssociations.Remove(copy);
+                _storageCpuSeedOrigins.Remove(copy);
                 throw;
             }
         }
