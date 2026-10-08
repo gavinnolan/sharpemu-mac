@@ -25,6 +25,7 @@ public sealed partial class MetalTextureMaterializationTests
     [InlineData("wrong-thread")]
     [InlineData("wrong-sequence")]
     [InlineData("consumed-owner")]
+    [InlineData("readonly")]
     public void ActualMacOriginalMappedSeedAndFirstUseVetoes(string kind)
     {
         SelectedMappedSeedAssertClr();
@@ -56,7 +57,7 @@ public sealed partial class MetalTextureMaterializationTests
             var memory = new ActualSelectedMappedMemory(views);
             memory.AfterCopy = () =>
             {
-                if (kind is "unrelated" or "unobserved" or "wrong-thread" or "wrong-sequence" or "consumed-owner")
+                if (kind is "unrelated" or "unobserved" or "wrong-thread" or "wrong-sequence" or "consumed-owner" or "readonly")
                 {
                     var raw = HostMemoryAuthority.Current;
                     var unrelated = raw.Allocate(0, 16384, HostPageProtection.ReadWrite);
@@ -85,7 +86,8 @@ public sealed partial class MetalTextureMaterializationTests
                 Assert.Equal(0, Presenter.GetField("_pendingGuestWorkCount", Methods)!.GetValue(null));
                 return;
             }
-            var texture = Assert.Single(SelectedMipSnapshots(memory, rawDescriptor));
+            var texture = Assert.Single(SelectedMipSnapshots(memory, rawDescriptor,
+                access: kind == "readonly" ? GuestImageAccess.Read : GuestImageAccess.Read | GuestImageAccess.Write));
             Assert.Equal(expected, texture.RgbaPixels); Assert.Equal(0, memory.OrdinaryReads);
             Assert.Equal(address, memory.Original!.FootprintAddress);
             Assert.Equal(262144ul, memory.Original.FootprintByteCount);
@@ -103,12 +105,18 @@ public sealed partial class MetalTextureMaterializationTests
             object?[] provenanceArgs = [texture, null];
             Assert.True((bool)provenanceTable.GetType().GetMethod("TryGetValue")!.Invoke(provenanceTable, provenanceArgs)!);
             Assert.False((bool)provenanceArgs[1]!.GetType().GetProperty("Stable")!.GetValue(provenanceArgs[1])!);
-            var workType = Presenter.GetNestedType("ComputeGuestDispatch", BindingFlags.NonPublic)!;
-            var work = Activator.CreateInstance(workType, [0UL, null, new[] { texture }, Array.Empty<GuestMemoryBuffer>(),
-                1u, 1u, 1u, 0u, 0u, 0u, null])!;
+            object work;
             long sequence;
-            lock (Presenter.GetField("_gate", Methods)!.GetValue(null)!)
-                sequence = (long)Presenter.GetMethod("EnqueueGuestWorkLocked", Methods)!.Invoke(null, [work])!;
+            if (kind == "readonly")
+                (work, sequence) = SubmitReadonlySelectedWithGlobalWriter(texture, address + 524288);
+            else
+            {
+                var workType = Presenter.GetNestedType("ComputeGuestDispatch", BindingFlags.NonPublic)!;
+                work = Activator.CreateInstance(workType, [0UL, null, new[] { texture }, Array.Empty<GuestMemoryBuffer>(),
+                    1u, 1u, 1u, 0u, 0u, 0u, null])!;
+                lock (Presenter.GetField("_gate", Methods)!.GetValue(null)!)
+                    sequence = (long)Presenter.GetMethod("EnqueueGuestWorkLocked", Methods)!.Invoke(null, [work])!;
+            }
             Assert.True(sequence > 0);
             sequenceField.SetValue(null, kind == "wrong-sequence" ? sequence + 1 : sequence);
             var begin = Presenter.GetMethod("BeginSelectedStorageMipSeedExecution", Methods)!;
@@ -137,6 +145,11 @@ public sealed partial class MetalTextureMaterializationTests
             var consumed = Assert.Throws<TargetInvocationException>(() => validate.Invoke(null, [association, false]));
             Assert.IsType<InvalidOperationException>(consumed.InnerException);
             Assert.Equal(epoch, association.GetType().GetProperty("MappingEpoch")!.GetValue(association));
+            if (kind == "readonly")
+            {
+                AssertSelectedWriterMetadataEmpty();
+                output.WriteLine("actual-readonly-selected-copy public-submit/take/exact-first-use/finally-consumed; other global buffer writable; selected image writer/pending debt remained empty; no GPU execution or global-byte-write claim");
+            }
         }
         catch (Exception error) { primary = error; throw; }
         finally

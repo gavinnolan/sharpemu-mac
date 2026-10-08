@@ -98,7 +98,7 @@ internal static partial class MetalVideoPresenter
         $"protected_bytes_{suffix}={token.ProtectedByteCount} watch_bytes_{suffix}={token.WatchByteCount}";
 
     private readonly record struct SelectedStorageMipAdmission(SelectedStorageMipAssociation Owner,
-        SelectedStorageMipPending Pending, SelectedStorageMipSeedAdmission? Seed);
+        SelectedStorageMipPending? Pending, SelectedStorageMipSeedAdmission? Seed);
 
     private static SelectedStorageMipAdmission[] PrepareSelectedStorageMipAdmissionLocked(object work, GuestQueueIdentity queue)
     {
@@ -106,7 +106,7 @@ internal static partial class MetalVideoPresenter
             !dispatch.Textures.Any(texture => _selectedStorageMipAssociations.TryGetValue(texture, out _))) return [];
         if (_enqueueAsImmediateQueueFollowup && dispatch.Textures.Any(texture => _selectedStorageMipAssociations.TryGetValue(texture, out _)))
             throw new NotSupportedException("Metal selected storage mip immediate queue follow-up ordering is not qualified.");
-        var selected = new Dictionary<SelectedStorageMipKey, SelectedStorageMipAssociation>();
+        var selected = new Dictionary<SelectedStorageMipKey, (SelectedStorageMipAssociation Owner, bool Writes)>();
         foreach (var texture in dispatch.Textures)
         {
             if (!_selectedStorageMipAssociations.TryGetValue(texture, out var association)) continue;
@@ -116,29 +116,40 @@ internal static partial class MetalVideoPresenter
                 throw new NotSupportedException("Metal selected storage admission conflicts with an incompatible native-only resource view.");
             if (_selectedStorageMipPending.TryGetValue(association.Key, out var pending) && pending.Queue != queue.Name)
                 throw new NotSupportedException("Metal selected storage mip has an outstanding producer on another logical queue.");
-            if (StorageImageWrites(texture) && !selected.TryAdd(association.Key, association) &&
-                !ReferenceEquals(selected[association.Key], association) &&
-                (_selectedStorageMipSeeds.TryGetValue(association, out _) || _selectedStorageMipSeeds.TryGetValue(selected[association.Key], out _)))
-                throw new NotSupportedException("Metal first-use selected seeds cannot alias distinct original proofs in one dispatch.");
+            var writes = StorageImageWrites(texture);
+            var initialSeed = _selectedStorageMipSeeds.TryGetValue(association, out var seed) && seed.Phase == 0 &&
+                !_selectedStorageMipOwners.ContainsKey(association.Key);
+            if (!writes && !initialSeed) continue;
+            if (!selected.TryAdd(association.Key, (association, writes)))
+            {
+                var existing = selected[association.Key];
+                if (!ReferenceEquals(existing.Owner, association) &&
+                    (_selectedStorageMipSeeds.TryGetValue(association, out _) || _selectedStorageMipSeeds.TryGetValue(existing.Owner, out _)))
+                    throw new NotSupportedException("Metal first-use selected seeds cannot alias distinct original proofs in one dispatch.");
+                if (writes && !existing.Writes) selected[association.Key] = (existing.Owner, true);
+            }
         }
-        var added = selected.Keys.Count(key => !_selectedStorageMipOwners.ContainsKey(key));
-        if (_selectedStorageMipOwners.Count + added > 128)
+        var added = selected.Count(item => item.Value.Writes && !_selectedStorageMipOwners.ContainsKey(item.Key));
+        if (selected.Count > 128 || _selectedStorageMipOwners.Count + added > 128)
             throw new NotSupportedException("Metal selected storage mip owner limit exceeded.");
         _selectedStorageMipOwners.EnsureCapacity(_selectedStorageMipOwners.Count + added);
-        _selectedStorageMipPending.EnsureCapacity(_selectedStorageMipPending.Count + selected.Count);
+        _selectedStorageMipPending.EnsureCapacity(_selectedStorageMipPending.Count + selected.Count(item => item.Value.Writes));
         // Construct every metadata object before queue admission mutates its
         // sequence/list. Publication below has no allocating iterator/object.
-        return selected.Values.Select(owner => new SelectedStorageMipAdmission(owner,
-            new(queue.Name, _enqueuedGuestWorkSequence + 1),
-            PrepareInitialSelectedStorageMipSeedAdmission(owner, work, _enqueuedGuestWorkSequence + 1))).ToArray();
+        return selected.Values.Select(item => new SelectedStorageMipAdmission(item.Owner,
+            item.Writes ? new(queue.Name, _enqueuedGuestWorkSequence + 1) : null,
+            PrepareInitialSelectedStorageMipSeedAdmission(item.Owner, work, _enqueuedGuestWorkSequence + 1))).ToArray();
     }
 
     private static void PublishSelectedStorageMipAdmissionLocked(SelectedStorageMipAdmission[] admission)
     {
         foreach (var item in admission)
         {
-            _selectedStorageMipOwners.TryAdd(item.Owner.Key, item.Owner);
-            _selectedStorageMipPending[item.Owner.Key] = item.Pending;
+            if (item.Pending is { } pending)
+            {
+                _selectedStorageMipOwners.TryAdd(item.Owner.Key, item.Owner);
+                _selectedStorageMipPending[item.Owner.Key] = pending;
+            }
             PublishInitialSelectedStorageMipSeedAdmission(item.Seed);
         }
     }
