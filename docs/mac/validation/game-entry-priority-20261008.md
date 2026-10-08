@@ -79,3 +79,24 @@ The failure branch is `origin-missing`, not a demonstrated mutation of the
 target's original protected token. The next fix must capture original mapping
 and ownership at this singleton volume's creation; it must not manufacture
 provenance at lookup or ignore this GPU writer.
+
+## Superliminal: next depth-comparison entry blocker
+
+Signed native-only `aa38ff5a5f18e46ba6e0a8e40feb97667715a7b4` passed its
+18 managed cases per host architecture and retained all 239 bundle hashes
+across the actual game replay. Run
+`.claude/worktrees/agent-metal-color-physical-view/artifacts/runs/20261008-202353-superl-color-view-entry-aa38ff5a`
+exited 134 after 71 seconds, peak RSS 3924 MiB. The inspected 55-second
+screenshot shows the title and loading indicator over a corridor scene;
+controllable gameplay was not reached.
+
+The first fatal is now depth-comparison admission at graphics sequence 2540,
+submission 84: guest format 2/0, type 11 is rejected by the current
+Float-R32/Unorm-R16 2D/array-only gate. The color/storage conflict did not
+appear before that failure, but execution of the revised color-view path
+has not been established. Native depth-cube support is the next entry target;
+this observation does not authorize treating a cube as an ordinary 2D image.
+
+The wrapper returned zero despite the game's exit 134. The owned game exited
+without KILL and no owned process group or shared lock remained. No new title
+is accepted by this replay.
