@@ -37,6 +37,7 @@ switch (args[0])
         var restored = PerGameSettings.Load(title);
         if (restored?.LogLevel != "Critical" || restored.VSync != false || restored.EnvironmentToggles?.Count != 0 || restored.CustomEnvironmentVariables?.Single() != "VALUE=one")
             throw new Exception("Per-game retry changed override/inheritance schema.");
+        PreserveEmptyOverrideRemovalFailure(title);
         new PerGameSettings().SaveOrThrow(title);
         if (File.Exists(PerGameSettings.PathFor(title))) throw new Exception("Empty override was not removed.");
         try { settings.SaveOrThrow(" "); throw new Exception("Invalid title accepted."); } catch (ArgumentException) { }
@@ -121,4 +122,22 @@ static void PreservePriorFileOnReplacementAndCleanupFailure(string path, Action 
         throw new Exception("Primary replacement error lost its actual secondary cleanup failure.");
     File.Delete(staged); // only the exact fixture-owned temporary file after permissions are restored
     Console.WriteLine($"REPLACEMENT_AND_CLEANUP_FAILURE_PRESERVED:{failure.GetType().Name}");
+}
+
+static void PreserveEmptyOverrideRemovalFailure(string title)
+{
+    if (OperatingSystem.IsWindows()) return; // real directory-search permission fixture is POSIX-only
+    var path = PerGameSettings.PathFor(title); var before = File.ReadAllBytes(path);
+    var directory = Path.GetDirectoryName(path)!; var mode = File.GetUnixFileMode(directory);
+    try
+    {
+        File.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite); // no search permission
+        MustFail(() => new PerGameSettings().SaveOrThrow(title));
+        new PerGameSettings().Save(title); // best-effort remains nonthrowing
+    }
+    finally { File.SetUnixFileMode(directory, mode); }
+    if (!before.SequenceEqual(File.ReadAllBytes(path))) throw new Exception("Failed empty removal damaged prior override.");
+    new PerGameSettings().SaveOrThrow(title);
+    if (File.Exists(path)) throw new Exception("Empty override retry failed.");
+    Console.WriteLine("EMPTY_OVERRIDE_REMOVAL_DENIAL_PRESERVED");
 }

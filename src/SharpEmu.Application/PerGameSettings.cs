@@ -217,7 +217,7 @@ public sealed class PerGameSettings
         var path = PathFor(titleId);
         if (IsEmpty)
         {
-            if (File.Exists(path)) File.Delete(path);
+            File.Delete(path); // missing file is harmless; permission/query failure must reach the explicit caller
             return;
         }
         SettingsFilePersistence.Write(path, JsonSerializer.Serialize(this, SerializerOptions));

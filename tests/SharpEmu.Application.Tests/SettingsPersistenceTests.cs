@@ -31,6 +31,7 @@ public sealed class SettingsPersistenceTests(Xunit.Abstractions.ITestOutputHelpe
             Assert.Contains("EXPECTED_FILESYSTEM_FAILURE:", stdout);
             Assert.Contains("PRIOR_VALID_FILE_PRESERVED", stdout);
             if (!OperatingSystem.IsWindows()) Assert.Contains("REPLACEMENT_AND_CLEANUP_FAILURE_PRESERVED:", stdout);
+            if (!OperatingSystem.IsWindows() && kind == "game") Assert.Contains("EMPTY_OVERRIDE_REMOVAL_DENIAL_PRESERVED", stdout);
             Assert.Contains($"ACTUAL_PERSISTENCE_FAILURE_AND_RETRY:{kind}", stdout);
             Assert.Equal(string.Empty, stderr);
         }
