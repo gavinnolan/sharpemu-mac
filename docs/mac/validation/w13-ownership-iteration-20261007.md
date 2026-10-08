@@ -571,3 +571,37 @@ unqualified. Minimum resize bounds, full frontend parity, bounded notification
 backlog and parent-exits-first inherited-pipe descendants also remain open.
 The candidate has no forbidden UI assets, but main retains the earlier
 Avalonia launcher until lifecycle and integration acceptance are complete.
+
+## Bounded real Metal color producer
+
+Reviewed f585b59/152c570/ebc986d merge as dce6f22. The dormant graph now admits
+one exact offscreen 2D target with explicit vertex/pixel shaders, nonindexed
+triangles, no depth, image-storage or presentation writer. Output allocation
+precedes attachment lookup. Successful render encoder completion precedes
+MarkContentChanged and immutable copy, which must precede buffer writeback
+flush. Fresh host clear initializes every pixel; later partial draws retain an
+immutable predecessor. Pending CPU seeds and initialized contents without that
+predecessor reject. Host first-use clear is not decoded guest clear intent.
+
+Exact ebc986d required-device fixtures pass4/4 on ARM64 and4/4 on Rosetta:
+captured old/new all64-byte consumer oracles, full and scissored/red-masked
+first draws, right-half green-only preservation, native pixel compilation
+failure and copying before real writeback flush. Independent native shaders
+qualify the pipeline/scheduling ABI, not guest ISA translation. Earlier152c570
+passes2/4: the old-byte oracle passes but a premature completion metadata
+assertion fails. The corrected fixture invokes real recycle after real GPU
+wait; no production completion policy changes. Failed results are retained.
+
+Integrated dce6f22 controls pass298/298 Rosetta and281/281 ARM64 without declared
+skips; ARM excludes the17 x64-qualified shutdown/restoration cases. Required
+device ownership selection passes25/25 under Rosetta, including the four new
+color cases. Build110 warnings, zero errors. Root evidence is
+`w13-20261007/color-integrated-*`; exact candidate native/managed results and
+hashes are under `metal-agent/immutable-color-ebc986d-{arm,x64}/` and
+`metal-agent/color-managed-ebc986d/`.
+
+The source graph is still hard-disabled. Actual backing lifetime/copy leases,
+guest coherence, storage/presentation writers and partially returned in-flight
+CPU payloads remain separate activation requirements. The default signed app
+still contains b6fe8f7 until the next integrated bundle build; no game is
+claimed at dce6f22.
