@@ -59,8 +59,16 @@ these runs accepts an additional title.
   writer-history continuity: original revision 157585 versus 159138, a distance
   of 1553 exceeding the 512-record ring. That run had no new first-use error.
   Original-watch continuity candidate `4b39506d` passed 205 managed cases and
-  two real native publication cases on each host architecture. Signed game
-  replays are pending. It retains the original physical veto and creates
+  two real native publication cases on each host architecture. Its signed
+  Octopath replay completed one canonical publication and multiple dirty
+  acknowledgments, then exited 134 after 33 seconds. Silent Hill completed two
+  publications and exited 134 after 26 seconds. Both now fail the ordinary
+  post-release volume-owner check; no history-window failure was logged.
+  The earlier diagnostic budget was exhausted by expected ordinary reads under
+  the held publication reservation, so it does not identify the later watch
+  predicate. Source-only diagnostic `a8f3803b` separates those bounded budgets
+  and records the actual admission guard value without changing policy.
+  The continuity fix retains the original physical veto and creates
   private successor watches only for exact applied provider writes; unwatched
   receipts retain the existing history limit.
 - **Demon's Souls:** the same signed `9e3adfcb` bundle remained alive for 60
@@ -108,6 +116,7 @@ Current immutable evidence:
 `artifacts/validation/all-games-20261008/octopath-volume-publication-watch-9e3adfcb-qualified`,
 `artifacts/validation/all-games-20261008/display-original-1610948d-prepared`,
 `artifacts/validation/all-games-20261008/canonical-publication-decline-cbbf7cc3-prepared`,
+`artifacts/validation/all-games-20261009/persistent-publication-watch-4b39506d-prepared`,
 `artifacts/validation/all-games-20261008/depth-cube-entry-f4ebd249-qualified`,
 `artifacts/validation/all-games-20261009/superliminal-native-depth-faces-f71dbdb7`,
 `artifacts/validation/void-skipped-shader-400e5c64`,
