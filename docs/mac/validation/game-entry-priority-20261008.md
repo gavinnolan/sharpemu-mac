@@ -8,6 +8,31 @@ survival do not satisfy this milestone.
 
 ## Latest combined qualification and first failures
 
+Successor `d5d198f7` passed 639 managed cases per CLR and all ten fresh native
+workers. The initial native depth capture now selects its original full provider
+mapping before arming the selected-face observation; it requires an active,
+unchanged read generation, immutable content token, original mapping before and
+after token comparison, and unchanged presenter session. Real Metal fixtures
+changed an unrelated PVM mapping inside initial validation for all six faces;
+both full six-face byte oracles passed. The aggregate mapping epoch remains
+diagnostic metadata on this scoped route, without weakening generic snapshot
+validation or replacing an original observation.
+
+The signed Superliminal replay remained alive for 150 seconds, peak 5163 MiB,
+and shut down gracefully. Both prior depth epoch failures were cleared. The
+next first failure is a finite color-allocation overlap at compute shader
+`9CA5D69E4285127A`, sampled descriptor `7068DC0000` and storage descriptor
+`7069010000`. Loading artwork still stalled, so there was no 600-second
+extension or gameplay acceptance. Complete evidence is in
+`artifacts/validation/all-games-20261009/entry-watch-fixes-d5d198f7-prepared`,
+manifest `aa68de84fd602cdad835be43cc9b659371493c1adf79abe6fad8c372c48b389e`.
+All 27 owned groups, the shared lock and source/binary/payload closure checks
+were clear at archive closure.
+
+Local main integration `153ac2ce` includes the qualified `d5d198f7` production,
+tests, scripts and build inputs unchanged; its only tree difference from that
+candidate is this progress document. No remote push or merge was performed.
+
 Candidate `43a89254` passed 634 managed cases per actual ARM64 and Rosetta/x64
 CLR, plus five fresh real Metal cases per CLR. Both depth cases checked all
 6,291,456 float texels after an actual unrelated PVM mapping changed the global
@@ -39,8 +64,8 @@ at archive closure. This is qualification of the candidate, not gameplay.
   bypassing the original watch is not justified by this result.
 
 No additional title has reached verified controllable gameplay. Void Terrarium
-has reached its main menu, as recorded below. These production candidates remain
-isolated from main while the next fixes are qualified.
+has reached its main menu, as recorded below. The qualified fixes are now in
+local main; the subsequent APR, read-watch and retry candidates remain isolated.
 
 Immutable evidence:
 `artifacts/validation/all-games-20261009/entry-watch-fixes-43a89254-prepared`
@@ -208,8 +233,8 @@ These combined replays supersede the earlier isolated runtime results:
   original rejected shaders and draw metadata are retained for mesh work.
 
 All owned processes exited and the shared run lock was released. No additional
-title is accepted for gameplay. No combined production code has been promoted
-to main yet. Complete receipts are in
+title is accepted for gameplay. This earlier combined candidate was subsequently
+qualified and integrated through the successor described above. Complete receipts are in
 `artifacts/validation/all-games-20261009/game-entry-integrated-0e0e76a4-prepared`.
 
 ## Earlier entry checks (superseded by the observations above)
