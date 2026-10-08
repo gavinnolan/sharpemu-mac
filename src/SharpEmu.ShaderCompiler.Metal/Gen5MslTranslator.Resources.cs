@@ -67,6 +67,7 @@ public static partial class Gen5MslTranslator
             string TextureType,
             string ComponentKind,
             bool IsStorage,
+            bool DepthCompare,
             bool Multisampled,
             bool Arrayed,
             bool Cube,
@@ -218,9 +219,10 @@ public static partial class Gen5MslTranslator
             var arrayed = dimension is ImageDimension.Dim1DArray or ImageDimension.Dim2DArray or ImageDimension.Dim2DMsaaArray;
             _imageClasses[binding.Kind] = new MslImageClass(
                 Gen5MslArgumentLayout.ImageClassName(binding.Kind),
-                Gen5MslArgumentLayout.TextureType(dimension, componentKind, access),
+                Gen5MslArgumentLayout.TextureType(dimension, componentKind, access, ImageDescriptorBinding.IsDepthCompare(binding.Kind)),
                 componentKind,
                 isStorage,
+                ImageDescriptorBinding.IsDepthCompare(binding.Kind),
                 multisampled,
                 arrayed,
                 cube,

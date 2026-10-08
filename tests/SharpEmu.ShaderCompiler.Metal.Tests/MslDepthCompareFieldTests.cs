@@ -78,9 +78,11 @@ public sealed class MslDepthCompareFieldTests(ITestOutputHelper output)
         Assert.Contains(fields, static field => field.Name == "sampled_compare_float_2d");
         foreach (var field in fields)
         {
-            Assert.Contains($"array<texture2d<float>, 1> {field.Name} [[id({field.FirstId})]]", shader.Source);
+            var type = ImageDescriptorBinding.IsDepthCompare(field.Kind) ? "depth2d<float>" : "texture2d<float>";
+            Assert.Contains($"array<{type}, 1> {field.Name} [[id({field.FirstId})]]", shader.Source);
             Assert.Contains("sharpemu_resources." + field.Name, shader.Source);
         }
+        Assert.Contains(".sample_compare(", shader.Source);
     }
 
     [Fact]
@@ -98,7 +100,7 @@ public sealed class MslDepthCompareFieldTests(ITestOutputHelper output)
         {
             Assert.True(MetalNative.TryCompileLibrary(shader.Source, out library, out var error), error + "\n" + shader.Source);
             Assert.NotEqual((nint)0, library);
-            output.WriteLine("Actual runtime Metal fragment compiler accepted normalized ordinary Float2D and separate Dref2D argument arrays with distinct names and unchanged IDs/offsets/types.");
+            output.WriteLine("Actual runtime Metal fragment compiler accepted normalized ordinary Float2D and separate Dref2D argument arrays with distinct names, native depth type and unchanged IDs/offsets.");
         }
         finally { if (library != 0) MetalNative.ReleaseCollisionLibrary(library); }
     }

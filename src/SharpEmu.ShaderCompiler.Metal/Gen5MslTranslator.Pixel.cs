@@ -467,12 +467,25 @@ public static partial class Gen5MslTranslator
                         : hasBias
                             ? $", metal::bias({bias})"
                             : string.Empty;
+            if (imageClass.DepthCompare)
+            {
+                // Native depth samplers compare each contributing texel before
+                // filtering. Comparing an already filtered color value loses PCF.
+                var comparison = hasCompare
+                    ? Temp("float", $"{texture}.sample_compare({samplerName}, {coordinates}{layerArgument}, {reference}{samplerArguments})")
+                    : Temp("float", $"{texture}.sample({samplerName}, {coordinates}{layerArgument}{samplerArguments})");
+                sampled = Temp("float4", hasCompare
+                    ? $"float4({comparison}, {comparison}, {comparison}, 1.0f)"
+                    : $"float4({comparison}, 0.0f, 0.0f, 1.0f)");
+                return true;
+            }
+
             sampled = Temp(
                 $"vec<{kind}, 4>",
                 $"{texture}.sample({samplerName}, {coordinates}{layerArgument}{samplerArguments})");
             if (hasCompare)
             {
-                // Manual PCF: reference passes when <= texel, broadcast (r,r,r,1).
+                // Existing non-depth-equivalent color comparison path.
                 var passes = Temp("bool", $"{reference} <= (float){sampled}[0]");
                 var one = kind == "float" ? "1.0f" : "1";
                 var zero = kind == "float" ? "0.0f" : "0";
@@ -560,6 +573,12 @@ public static partial class Gen5MslTranslator
                 2 => "z",
                 _ => "w",
             };
+            if (imageClass.DepthCompare && hasCompare)
+            {
+                sampled = Temp("float4",
+                    $"{texture}.gather_compare({samplerName}, {coordinates}{layerArgument}, {reference}, {offset})");
+                return true;
+            }
             sampled = Temp(
                 $"vec<{kind}, 4>",
                 $"{texture}.gather({samplerName}, {coordinates}{layerArgument}, {offset}, component::{componentName})");

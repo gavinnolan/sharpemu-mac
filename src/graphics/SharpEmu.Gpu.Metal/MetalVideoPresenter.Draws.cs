@@ -1512,7 +1512,7 @@ internal static partial class MetalVideoPresenter
     /// called before the consuming render or compute encoder opens on that
     /// same command buffer — encoder order is what keeps the snapshot after
     /// earlier batched passes that render to the source image.</summary>
-    internal static nint CreateDrawTexture(
+    private static nint CreateDrawColorTexture(
         nint device,
         nint blitCommandBuffer,
         GuestDrawTexture texture,
@@ -2305,6 +2305,8 @@ internal static partial class MetalVideoPresenter
             mipFilter == 0 ? 0.0f : (sampler.Word1 & 0xFFF) / 256.0f);
         MetalNative.SendVoidFloat(descriptor, MetalNative.Selector("setLodMaxClamp:"),
             mipFilter == 0 ? 0.0f : ((sampler.Word1 >> 12) & 0xFFF) / 256.0f);
+        MetalNative.Send(descriptor, MetalNative.Selector("setCompareFunction:"),
+            (nint)((sampler.Word0 >> 12) & 0x7));
         // The stage argument buffer stores the sampler's resource id; Metal refuses one without this flag.
         MetalNative.SendVoidBool(descriptor, MetalNative.Selector("setSupportArgumentBuffers:"), true);
 

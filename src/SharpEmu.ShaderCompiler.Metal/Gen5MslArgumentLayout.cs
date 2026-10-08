@@ -147,8 +147,15 @@ public sealed class Gen5MslArgumentLayout
     // describes every cube binding as Dim2DArray and the host binds a 2D-array view.
     // A texturecube declaration would instead demand a float3 direction vector. This
     // mirrors the SPIR-V backend, which likewise declares cube bindings Dim2D+Arrayed.
-    public static string TextureType(ImageDimension dimension, string componentType, string? access)
+    public static string TextureType(ImageDimension dimension, string componentType, string? access, bool depthCompare = false)
     {
+        if (depthCompare)
+        {
+            if (componentType != "float" || access is not null ||
+                dimension is not (ImageDimension.Dim2D or ImageDimension.Dim2DArray))
+                throw new NotSupportedException($"Metal depth comparison does not support {dimension}/{componentType}/{access}.");
+            return dimension == ImageDimension.Dim2D ? "depth2d<float>" : "depth2d_array<float>";
+        }
         var typeName = dimension switch
         {
             ImageDimension.Dim1D => "texture2d",

@@ -28,6 +28,10 @@ internal static partial class MetalVideoPresenter
         public uint Width;
         public uint Height;
         public nint Usage;
+        public uint TextureType = MtlTextureType2D;
+        public uint ArrayLength = 1;
+        public uint MipLevels = 1;
+        public bool PrivateStorage;
 
         /// <summary>Buffer capacity in bytes (unused for textures).</summary>
         public nuint Capacity;
@@ -82,7 +86,11 @@ internal static partial class MetalVideoPresenter
         MtlPixelFormat format,
         uint width,
         uint height,
-        nint usage)
+        nint usage,
+        uint textureType = MtlTextureType2D,
+        uint arrayLength = 1,
+        uint mipLevels = 1,
+        bool privateStorage = false)
     {
         for (var index = 0; index < _freeSnapshotResources.Count; index++)
         {
@@ -91,7 +99,11 @@ internal static partial class MetalVideoPresenter
                 candidate.Format == (uint)format &&
                 candidate.Width == width &&
                 candidate.Height == height &&
-                candidate.Usage == usage)
+                candidate.Usage == usage &&
+                candidate.TextureType == textureType &&
+                candidate.ArrayLength == arrayLength &&
+                candidate.MipLevels == mipLevels &&
+                candidate.PrivateStorage == privateStorage)
             {
                 _freeSnapshotResources.RemoveAt(index);
                 _pendingSnapshotResources.Add(candidate);
@@ -107,6 +119,11 @@ internal static partial class MetalVideoPresenter
             height,
             mipmapped: false);
         MetalNative.Send(descriptor, MetalNative.Selector("setUsage:"), usage);
+        MetalNative.Send(descriptor, MetalNative.Selector("setTextureType:"), (nint)textureType);
+        MetalNative.Send(descriptor, MetalNative.Selector("setArrayLength:"), (nint)arrayLength);
+        MetalNative.Send(descriptor, MetalNative.Selector("setMipmapLevelCount:"), (nint)mipLevels);
+        if (privateStorage)
+            MetalNative.Send(descriptor, MetalNative.Selector("setStorageMode:"), (nint)2);
         var handle = MetalNative.Send(
             device, MetalNative.Selector("newTextureWithDescriptor:"), descriptor);
         if (handle == 0)
@@ -121,6 +138,10 @@ internal static partial class MetalVideoPresenter
             Width = width,
             Height = height,
             Usage = usage,
+            TextureType = textureType,
+            ArrayLength = arrayLength,
+            MipLevels = mipLevels,
+            PrivateStorage = privateStorage,
         });
         return handle;
     }
