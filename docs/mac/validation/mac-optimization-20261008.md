@@ -343,7 +343,7 @@ and excluded; corrected exact TRX counts passed.
 
 Signed d756a2b3 reruns advance all previous targeted blockers. SH25s/2004MiB
 and Octopath34s/3247MiB now reject R8Uint1x1 mode24 array descriptors, while
-Oregon29s/2013MiB rejects RGBA16Uint1x1 mode27. Superliminal42s/3440MiB no
+Oregon29s/2013MiB rejects RGBA8Uint1x1 mode27. Superliminal42s/3440MiB no
 longer logs its MSL collision errors but stops at address706B7D0000: existing
 512x512 versus requested128x64, both native RGBA16Float115/type2/depth1/layer1.
 The title/loading hallway renders; no menu/gameplay/FPS acceptance. Every run
