@@ -49,6 +49,34 @@ internal static partial class MetalVideoPresenter
             throw TypedCpuSyncRejected(origin.Layout.Address, "original-seed-session-changed");
     }
 
+    private static readonly bool _storageDirtyCausalityEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGE_DIRTY") == "1";
+
+    private static void TraceStorageDirtyBeforeConsume(ulong address)
+    {
+        if (!_storageDirtyCausalityEnabled) return;
+        try
+        {
+            StorageCpuSeedOrigin? origin;
+            int version;
+            long session;
+            lock (_gate)
+            {
+                _guestImages.TryGetValue(address, out var image);
+                origin = image?.StorageCpuOrigin;
+                version = image?.ContentVersion ?? -1;
+                session = CurrentStorageCpuSeedSession;
+            }
+            // No presenter gate while observing tracker scalars. These separately
+            // sampled diagnostics do not certify mapping/content currentness.
+            GuestImageWriteTracker.TraceDirtyBeforeConsume(address, session,
+                origin?.Observation.Token, origin?.Observation.MappingEpoch ?? -1,
+                HostMemory.MappingGeneration, origin?.Session ?? -1,
+                origin?.Observation.Observed ?? false, origin?.Mapping.FootprintByteCount ?? 0, version);
+        }
+        catch { } // Optional causality diagnostics cannot replace the original sync result.
+    }
+
     private static InvalidOperationException TypedCpuSyncRejected(ulong address, string reason) =>
         new($"Metal typed storage CPU synchronization rejected at 0x{address:X}: reason={reason}. " +
             "A dirty flag is not full CPU replacement coverage or completion of GPU/native guest writes.");

@@ -75,6 +75,7 @@ public static unsafe partial class GuestImageWriteTracker
         public bool Executable;
         public PageState[] Pages = [];
         public int FirstCpuWriteSeen;
+        public long FirstCpuWriteInvocation;
         public int PendingFirstCpuWrite;
         public long WriteGeneration;
         public bool TraceLifetime;
@@ -447,6 +448,60 @@ public static unsafe partial class GuestImageWriteTracker
         }
     }
 
+    private static readonly bool _dirtyCausalityEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGE_DIRTY") == "1";
+    private static int _dirtyCausalityCount;
+
+    // Ordinary diagnostic only. Called before ConsumeDirty, never from a fault
+    // callback; a first trap/pre-notification is not completed write coverage.
+    public static void TraceDirtyBeforeConsume(ulong address, long session,
+        ContentToken? originalToken = null, long originalMappingEpoch = -1,
+        long currentMappingEpoch = -1, long originalSession = -1,
+        bool originalObserved = false, ulong originalFootprintBytes = 0, int imageVersion = -1)
+    {
+        if (!_dirtyCausalityEnabled) return;
+        lock (_gate)
+        {
+            _rangesByAddress.TryGetValue(address, out var range);
+            _watchRangesByAddress.TryGetValue(address, out var watch);
+            var protectedDirty = range is not null && Volatile.Read(ref range.Dirty) != 0;
+            var watchDirty = watch is not null && Volatile.Read(ref watch.Dirty) != 0;
+            if ((!protectedDirty && !watchDirty) || _dirtyCausalityCount >= 64) return;
+            _dirtyCausalityCount++;
+            try
+            {
+                var current = new ContentToken(range?.DiagnosticIdentity ?? 0,
+                    range is null ? -1 : Volatile.Read(ref range.WriteGeneration),
+                    watch?.DiagnosticIdentity ?? 0,
+                    watch is null ? -1 : Volatile.Read(ref watch.WriteGeneration),
+                    range?.ByteCount ?? 0, watch?.ByteCount ?? 0);
+                Console.Error.WriteLine($"[WT][DIRTY] event=before-consume address=0x{address:X} session={session}" +
+                    $" original_seed_present={originalToken.HasValue} original_observed={originalObserved}" +
+                    $" original_session={originalSession} image_version={imageVersion}" +
+                    $" original_mapping_epoch={originalMappingEpoch} current_mapping_epoch={currentMappingEpoch}" +
+                    $" original_footprint_bytes={originalFootprintBytes}" +
+                    $" original_protected_identity={originalToken?.ProtectedIdentity ?? 0}" +
+                    $" original_protected_generation={originalToken?.ProtectedGeneration ?? -1}" +
+                    $" original_protected_bytes={originalToken?.ProtectedByteCount ?? 0}" +
+                    $" original_watch_identity={originalToken?.WatchIdentity ?? 0}" +
+                    $" original_watch_generation={originalToken?.WatchGeneration ?? -1}" +
+                    $" original_watch_bytes={originalToken?.WatchByteCount ?? 0}" +
+                    $" token_equal_to_original={originalToken.HasValue && current == originalToken.Value}" +
+                    $" protected_dirty={protectedDirty} watch_dirty={watchDirty}" +
+                    $" protected_bytes={range?.ByteCount ?? 0} protected_generation={current.ProtectedGeneration}" +
+                    $" protected_identity={range?.DiagnosticIdentity ?? 0} arm_epoch={range?.DiagnosticArmEpoch ?? 0}" +
+                    $" watch_identity={watch?.DiagnosticIdentity ?? 0}" +
+                    $" watch_bytes={watch?.ByteCount ?? 0} watch_generation={current.WatchGeneration}" +
+                    $" protected_start=0x{range?.Start ?? 0:X} protected_end=0x{range?.End ?? 0:X}" +
+                    $" protected_source='{range?.Source}' protected_source_sequence={range?.SourceSequence ?? 0}" +
+                    $" first_record_published={range is not null && Volatile.Read(ref range.FirstCpuWriteSeen) == 2}" +
+                    $" first_fault=0x{(range is not null && Volatile.Read(ref range.FirstCpuWriteSeen) == 2 ? range.FirstCpuWriteAddress : 0):X}" +
+                    $" first_invocation={(range is not null && Volatile.Read(ref range.FirstCpuWriteSeen) == 2 ? range.FirstCpuWriteInvocation : -1)}");
+            }
+            catch { } // Diagnostics must not consume/change the dirty event.
+        }
+    }
+
     /// <summary>
     /// Non-consuming variant of <see cref="ConsumeDirty"/>: reports whether
     /// the range has been written since it was last re-armed, leaving the
@@ -752,7 +807,7 @@ public static unsafe partial class GuestImageWriteTracker
                 Interlocked.Increment(ref range.ProfileFaultCount);
                 Interlocked.Add(ref range.ProfileFaultBytes, changedBytes);
             }
-            MarkFaultedRange(range, faultAddress);
+            MarkFaultedRange(range, faultAddress, invocation);
             Volatile.Write(ref range.Armed, RangeDisarmed);
             RecordNativeRangeState(range, invocation: invocation);
             RecordNativeRangeDecision(range, faultAddress, invocation, NativeRangeDecisionPass.ExactByteRange,
@@ -810,7 +865,7 @@ public static unsafe partial class GuestImageWriteTracker
                     Interlocked.Increment(ref range.ProfileFaultCount);
                     Interlocked.Add(ref range.ProfileFaultBytes, changedBytes);
                 }
-                MarkFaultedRange(range, faultAddress);
+                MarkFaultedRange(range, faultAddress, invocation);
                 Volatile.Write(ref range.Armed, RangeDisarmed);
                 RecordNativeRangeState(range, invocation: invocation);
                 RecordNativeRangeDecision(range, faultAddress, invocation, NativeRangeDecisionPass.SharedBoundaryPage,
@@ -1135,11 +1190,11 @@ public static unsafe partial class GuestImageWriteTracker
         return false;
     }
 
-    private static void MarkFaultedRange(TrackedRange range, ulong faultAddress)
+    private static void MarkFaultedRange(TrackedRange range, ulong faultAddress, long invocation)
     {
         Interlocked.Exchange(ref range.Dirty, 1);
         Interlocked.Increment(ref range.WriteGeneration);
-        if (!range.TraceLifetime ||
+        if ((!range.TraceLifetime && !_dirtyCausalityEnabled) ||
             Interlocked.CompareExchange(ref range.FirstCpuWriteSeen, 1, 0) != 0)
         {
             return;
@@ -1147,11 +1202,12 @@ public static unsafe partial class GuestImageWriteTracker
 
         // Signal context: capture preallocated scalar fields only. Formatting
         // and I/O are deferred to a locked safe path.
-        range.FirstCpuWriteTraceSequence = Interlocked.Increment(ref _lifetimeTraceSequence);
-        range.FirstCpuWriteTimestampNanoseconds = GetMonotonicNanoseconds();
+        range.FirstCpuWriteTraceSequence = range.TraceLifetime ? Interlocked.Increment(ref _lifetimeTraceSequence) : 0;
+        range.FirstCpuWriteTimestampNanoseconds = range.TraceLifetime ? GetMonotonicNanoseconds() : 0;
         range.FirstCpuWriteAddress = faultAddress;
+        range.FirstCpuWriteInvocation = invocation;
         range.FirstCpuWritePage = faultAddress & ~(TrackingPageSize - 1);
-        Volatile.Write(ref range.PendingFirstCpuWrite, 1);
+        Volatile.Write(ref range.PendingFirstCpuWrite, range.TraceLifetime ? 1 : 0);
         Volatile.Write(ref range.FirstCpuWriteSeen, 2);
     }
 
