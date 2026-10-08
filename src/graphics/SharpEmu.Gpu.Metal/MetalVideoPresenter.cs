@@ -210,6 +210,8 @@ internal static partial class MetalVideoPresenter
         MetalPresentationProfile.Begin();
         try
         {
+            if (_ownedFrameIdleEnabled)
+                WriteOwnedIdleDiagnostic("[METAL-PRESENT] owned_frame_idle=enabled idle_ms=1 mutable_images=always_present");
             RunWindowLoop();
         }
         catch (Exception exception)
@@ -220,6 +222,8 @@ internal static partial class MetalVideoPresenter
         {
             CompletePresenterShutdown();
             MetalPresentationProfile.End();
+            if (_ownedFrameIdleEnabled)
+                WriteOwnedIdleDiagnostic($"[METAL-PRESENT] owned_frame_idle_summary skipped_ticks={_ownedFrameSkippedTicks}");
         }
     }
 
@@ -278,7 +282,8 @@ internal static partial class MetalVideoPresenter
             hostWindow.Run(
                 static () => { },
                 static _ => RenderFrameSafely(),
-                static () => { });
+                static () => { },
+                _ownedFrameIdleEnabled ? IdleAfterOwnedFrameSkip : null);
         }
         finally
         {
@@ -407,6 +412,7 @@ internal static partial class MetalVideoPresenter
 
     private static void RenderFrame()
     {
+        _idleAfterOwnedFrameSkip = false;
         PerfOverlay.UsePresentedGuestFrameTiming();
         var pool = MetalNative.objc_autoreleasePoolPush();
         GuestPresentationPayloadBorrow? presentationBorrow = null;
@@ -530,17 +536,39 @@ internal static partial class MetalVideoPresenter
             // resolution and Core Animation stretches it (blurry, mis-scaled
             // overlay). No-op when the size is unchanged, i.e. almost every tick.
             var hostWindow = Volatile.Read(ref _hostWindow);
-            if (hostWindow?.ConsumeSurfaceRestore() == true)
+            var previousDrawableWidth = _drawableWidth;
+            var previousDrawableHeight = _drawableHeight;
+            var surfaceRestored = hostWindow?.ConsumeSurfaceRestore() == true;
+            if (surfaceRestored)
             {
                 _drawableWidth = 0;
                 _drawableHeight = 0;
             }
 
             SyncDrawableSizeToLayer();
+            if (_ownedFrameIdleEnabled && (surfaceRestored || previousDrawableWidth != _drawableWidth || previousDrawableHeight != _drawableHeight))
+                _ownedFrameIdle.Invalidate(); // survives minimized / unavailable-drawable retries until a commit
 
             if (hostWindow?.IsMinimized == true)
             {
+                if (_ownedFrameIdleEnabled) _ownedFrameIdle.Invalidate();
                 return;
+            }
+
+            // Drain work, process host state and materialize a new source before
+            // deciding this. Only this thread's unchanged CPU upload or immutable
+            // captured version can keep the previous drawable. Mutable guest
+            // images and pooled draw targets still acquire/encode every tick.
+            var overlayVisible = PerfOverlay.DrawOnScreen;
+            if (_ownedFrameIdleEnabled && _ownedFrameIdle.CanSkip(
+                _guestFrameSequence, _presentTexture, _drawableWidth, _drawableHeight,
+                _presentGuestAddress == 0 && _presentTexture != 0 &&
+                    (_presentTexture == _frameTexture || _presentTexture == _ownedVersionTexture),
+                surfaceRestored, overlayVisible, _metalHudVisible))
+            {
+                _ownedFrameSkippedTicks++;
+                _idleAfterOwnedFrameSkip = true;
+                return; // finally releases the CPU borrow and autorelease pool
             }
 
             nint drawable;
@@ -548,7 +576,8 @@ internal static partial class MetalVideoPresenter
                 drawable = MetalNative.Send(_metalLayer, MetalNative.Selector("nextDrawable"));
             if (drawable == 0)
             {
-                // No free drawable this tick; the next timer fire retries.
+                if (_ownedFrameIdleEnabled) _ownedFrameIdle.Invalidate();
+                // No free drawable this tick; the next host iteration retries.
                 return;
             }
 
@@ -563,11 +592,17 @@ internal static partial class MetalVideoPresenter
             {
                 var drawableTexture = MetalNative.Send(drawable, MetalNative.Selector("texture"));
                 var commandBuffer = MetalNative.Send(_commandQueue, MetalNative.Selector("commandBuffer"));
+                if (drawableTexture == 0 || commandBuffer == 0)
+                    throw new InvalidOperationException("Metal presentation requires a drawable texture and command buffer.");
                 var pass = CreateClearPass(
                     drawableTexture,
                     new MtlClearColor { Red = 0, Green = 0, Blue = 0, Alpha = 1 });
+                if (pass == 0)
+                    throw new InvalidOperationException("Metal presentation cannot create its render pass.");
                 var encoder = MetalNative.Send(
                     commandBuffer, MetalNative.Selector("renderCommandEncoderWithDescriptor:"), pass);
+                if (encoder == 0)
+                    throw new InvalidOperationException("Metal presentation cannot create its render encoder.");
                 if (_presentTexture != 0)
                 {
                     EncodePresent(
@@ -581,7 +616,7 @@ internal static partial class MetalVideoPresenter
                         _drawableHeight);
                 }
 
-                if (PerfOverlay.DrawOnScreen)
+                if (overlayVisible)
                 {
                     EncodeOverlay(encoder);
                 }
@@ -590,6 +625,8 @@ internal static partial class MetalVideoPresenter
                 MetalNative.SendVoid(commandBuffer, MetalNative.Selector("presentDrawable:"), drawable);
                 MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
             }
+            if (_ownedFrameIdleEnabled)
+                _ownedFrameIdle.Commit(_guestFrameSequence, _presentTexture, _drawableWidth, _drawableHeight, overlayVisible, _metalHudVisible);
             PerfOverlay.RecordPresent();
             if (_presentTexture != 0 && _guestFrameSequence >= 0 &&
                 _guestFrameSequence != _lastCountedGuestFrameSequence)

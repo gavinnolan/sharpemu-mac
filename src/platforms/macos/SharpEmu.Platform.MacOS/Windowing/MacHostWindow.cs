@@ -92,6 +92,7 @@ public sealed class MacHostWindow : IMetalHostWindow
     private bool _cursorVisible = true;
     private long _cursorHideDeadline;
     private bool _surfaceRestorePending = true;
+    private bool _surfaceWasUnavailable;
     private bool _disposed;
     private double _contentsScale;
     private MacSize _layerSize;
@@ -492,9 +493,13 @@ public sealed class MacHostWindow : IMetalHostWindow
         // -[NSWindow isVisible] also reports NO while the window is in the Dock
         // or the whole app is hidden (Cmd+H), neither of which is a close; only
         // a genuinely gone window ends the session.
-        if (!MacObjC.SendBool(_window, MacObjC.Selector("isVisible")) &&
-            !MacObjC.SendBool(_window, MacObjC.Selector("isMiniaturized")) &&
-            !MacObjC.SendBool(_application, MacObjC.Selector("isHidden")))
+        var visible = MacObjC.SendBool(_window, MacObjC.Selector("isVisible"));
+        var miniaturized = MacObjC.SendBool(_window, MacObjC.Selector("isMiniaturized"));
+        var hidden = MacObjC.SendBool(_application, MacObjC.Selector("isHidden"));
+        var unavailable = !visible || miniaturized || hidden;
+        if (_surfaceWasUnavailable && !unavailable) _surfaceRestorePending = true;
+        _surfaceWasUnavailable = unavailable;
+        if (!visible && !miniaturized && !hidden)
         {
             RequestUserClose();
             return;
