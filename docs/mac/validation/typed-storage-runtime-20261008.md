@@ -140,11 +140,15 @@ the full original mapping footprint still excludes retirement. Its native
 archive manifest is
 `1fa1dbd0960c0f6c1ab90ddc7a6ded097f48c945238f864179039a5d71521360`
 in `agent-canonical-range-publication/artifacts/validation/canonical-range-publication/615ecc17`.
-Native/JIT writer participation and actual two-dispatch GPU publication remain
-necessary work; these ordinary-memory controls do not certify a game.
+Native/JIT writer participation remains necessary work; these ordinary-memory
+controls do not certify a game. The subsequent isolated
+[actual two-dispatch Metal checkpoint](finite-storage-two-publications-20261008.md)
+now verifies controlled canonical publication and disjoint end-of-pipe ordering
+on both CLRs, while refusing an overlapping ordinary write.
 
-Successful-protection candidate `c9dc5d9f` and original read-snapshot epoch
-ordering correction `34eedda4` are source-reviewed but unexecuted. The latter
+Successful-protection candidate `c9dc5d9f` is source-reviewed but unexecuted.
+Original read-snapshot epoch ordering correction `34eedda4` is now included in
+the actual cold two-dispatch checkpoint linked above. That correction
 captures the original epoch after read tracking is armed and before original
 observation/bytes; it does not restamp a copied result. A genuine cold-entry
 two-dispatch Metal fixture is prepared without manual pre-arming. Its tracker

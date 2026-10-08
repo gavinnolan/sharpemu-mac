@@ -30,9 +30,20 @@ replay. The non-SharpEmu payloads of the current 2ad and 724 apps are byte-equal
 
 Read-only disassembly of the supplied Quake SELF identifies the reported abort
 return address `8002C9F65` immediately after the call to its abort import. It is
-the game's generic fatal-error route, which prints a message and opens a dialog;
-that callsite alone does not identify the earlier failing operation. No game
-files, reference repositories, save/config data or foreign processes changed.
+the game's generic fatal-error route, which prints a message and opens a dialog.
+A separate 25-second replay uses the existing import return-address/frame probe,
+with the same unchanged signed 724 app. Its actual frame chain identifies caller
+`80034F011` from `80034EF6C`; read-only disassembly finds the timeout branch and
+the exact source literal: `kexRHIStateGnm::StartFrame: GPU hanged while waiting
+for m_pContextLabel to be cleared`. That branch retries a zero-valued context
+label and then calls the fatal route. The host remains alive at 25 s, peak
+1100 MiB, and stops with owned TERM without KILL. This establishes a missing
+context-label completion; the particular label address and why its write was
+lost or delayed still require command-queue evidence. The displayed blank error
+message is not the only available diagnosis.
+
+No game files, reference repositories, save/config data or foreign processes
+changed.
 
 Evidence is retained in
 `artifacts/validation/all-games-20261008/quake-completion-regression`: exact
