@@ -175,7 +175,7 @@ public sealed partial class MetalRenderHostTests
         private readonly DictionaryEntry[] previous;
         internal ColorPhysicalInventoryScope(ICpuMemory memory)
         {
-            previous = values.Cast<DictionaryEntry>().ToArray(); values.Clear();
+            previous = values.Keys.Cast<ulong>().Select(key => new DictionaryEntry(key, values[key])).ToArray(); values.Clear();
             var words = PhysicalViewColor(ColorBase);
             var resolution = ImageRequestBuilders.ColorTarget(words, 0xF, 0, false)!.Value;
             var original = new GuestRenderTarget(ColorBase, 512, 512, (uint)words.Layout,
