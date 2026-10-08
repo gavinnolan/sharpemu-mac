@@ -55,3 +55,11 @@ The [typed storage runtime checkpoint](typed-storage-runtime-20261008.md) is sep
 [Current signed Quake controls](quake-completion-regression-20261008.md) narrow an early-abort regression to the completion increment: 2ad and115 still reach the256MiB depth-image limit, whereas724,878 and diagnostic7e46 abort inside guest code after only three presentations. The old all-nine observation does not certify current-main Quake progression. Completion ordering must be repaired before its large depth producer can be traced on current source; no depth-cap increase or gameplay acceptance has been made.
 
 The isolated [actual two-dispatch storage checkpoint](finite-storage-two-publications-20261008.md) now passes32 staging/22 typed managed and two fresh actual Metal cases per CLR. It verifies full128KiB padding-preserving canonical publication, disjoint EOP ordering and an overlapping CPU-write refusal. Production flags remain inactive; it does not certify game/JIT writers, general protection changes or Octopath's different format. The Quake abort probe identifies its actual frame-start GPU context-label timeout; command-memory ordering is being corrected before replay.
+
+The [command-memory ordering replay](command-memory-order-runtime-20261008.md)
+at isolated49e424a2 passes104 focused managed rows on each runtime configuration
+and publishes a signed native-only app. Its100s Quake replay still aborts through
+the same guest context-label timeout after three presentations. Traced EOP
+labels are admitted before the abort and applied afterward, directing the next
+investigation toward startup/readiness and delayed queue drain. An ordinary
+overwrite is not observed in the bounded trace. No new game is accepted.
