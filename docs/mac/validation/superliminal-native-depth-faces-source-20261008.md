@@ -91,3 +91,16 @@ renderer depth-stencil descriptor/state cleanup limitations remain outside this
 finite source fixture and it makes no total renderer leak/teardown qualification.
 The existing presenter session is deliberately not reset after retirement.
 No prepared native row is included in the genuine managed count.
+
+
+The first ac7 actual worker failed one unnamed assertion; its TRX/log and clean
+lock/process release are preserved separately. Source inspection proved that
+Drain always flushes on successful exit, so the old post-Drain open-batch assertion
+was invalid. The corrected same-CB control captures original accepted producers,
+publicly admits a following texture consumer BEFORE the actual Drain, and checks
+the real pooled assembly's retained commit CB equals the original producer CB.
+The independent complete layered readback runs after this real production
+resolution; it does not claim guest cube-comparison shader translation. The
+prior-completed branch resolves after a real successful wait. Caller argument
+expressions name failing assertions without reevaluating their conditions.
+Production source and all29 managed identities remain unchanged.

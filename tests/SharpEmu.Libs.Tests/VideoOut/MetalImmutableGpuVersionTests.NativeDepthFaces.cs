@@ -3,6 +3,7 @@
 using System.Collections;
 using System.Reflection;
 using System.Runtime.ExceptionServices;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using SharpEmu.Core.Cpu;
 using SharpEmu.Core.Memory;
@@ -32,7 +33,7 @@ public sealed partial class MetalImmutableGpuVersionTests
 
     private void RunNativeDepthFaces(bool completedFirst)
     {
-        Assert.True(DeviceRequested());
+        NativeDepthAssert(DeviceRequested());
         Assert.Equal(Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_ARCH"), RuntimeInformation.ProcessArchitecture.ToString());
         Assert.Equal(Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_FRAMEWORK"), RuntimeInformation.FrameworkDescription);
         Assert.Null(nativeDepthFixtureQuarantine);
@@ -67,12 +68,12 @@ public sealed partial class MetalImmutableGpuVersionTests
             physical = new PhysicalVirtualMemory(HostMemoryAuthority.Current, HostViewMemory.Create(),
                 backingBytes: 16 * 65536UL, preReserveGuestAddressSpace: false);
             const ulong totalBytes = 6 * MetalDepthFacePlacement.FaceBytes;
-            Assert.True(physical.TryHoldRangeAtOrAbove(0x71F8_0000_00, totalBytes, 65536, out address));
-            Assert.True(address != 0 && (address & 65535) == 0 && address >> 48 == 0);
-            Assert.True(physical.TryHoldRange(address, totalBytes));
-            Assert.True(physical.TryMapBacked(address, totalBytes, 0,
+            NativeDepthAssert(physical.TryHoldRangeAtOrAbove(0x71F8_0000_00, totalBytes, 65536, out address));
+            NativeDepthAssert(address != 0 && (address & 65535) == 0 && address >> 48 == 0);
+            NativeDepthAssert(physical.TryHoldRange(address, totalBytes));
+            NativeDepthAssert(physical.TryMapBacked(address, totalBytes, 0,
                 GuestPageProtection.Read | GuestPageProtection.Write, out var mapFailure), $"map_failure={mapFailure}");
-            Assert.True(physical.TryWriteBacking(address, Enumerable.Repeat((byte)0xED, (int)totalBytes).ToArray()));
+            NativeDepthAssert(physical.TryWriteBacking(address, Enumerable.Repeat((byte)0xED, (int)totalBytes).ToArray()));
             memory = new NativeDepthCheckedMemory(new TrackedCpuMemory(physical));
             var backend = new MetalGuestGpuBackend(); backendField.SetValue(null, backend);
             MetalVideoPresenter.AttachGuestMemory(memory);
@@ -93,16 +94,16 @@ public sealed partial class MetalImmutableGpuVersionTests
                     (face + 1) / 8f, false, Registers: words);
                 // Actual normalizer and original provider capture, not CWT insertion/prearm.
                 target = MetalDepthFacePlacement.Project(memory, normalized, words, target);
-                Assert.True(MetalDepthFacePlacement.TryGet(target, out var original));
+                NativeDepthAssert(MetalDepthFacePlacement.TryGet(target, out var original));
                 Assert.Equal(selected, target.Address);
                 Assert.Equal(address, original.Mapping.FootprintAddress);
                 Assert.Equal((face + 1UL) * MetalDepthFacePlacement.FaceBytes, original.Mapping.FootprintByteCount);
                 Assert.Equal(selected, original.Mapping.SourceAddress); Assert.Equal(8UL, original.Mapping.SourceByteCount);
                 Assert.Equal(MetalDepthFacePlacement.FaceBytes, original.Content.ByteCount);
-                Assert.True(original.Content.Observed);
+                NativeDepthAssert(original.Content.Observed);
                 Assert.All(original.Mapping.Segments, segment =>
                 {
-                    Assert.True(segment.BackingIdentity > 0 && segment.MappingIncarnation > 0);
+                    NativeDepthAssert(segment.BackingIdentity > 0 && segment.MappingIncarnation > 0);
                     Assert.Equal(GuestPageProtection.Read | GuestPageProtection.Write, segment.GuestAccess);
                     Assert.Equal(ulong.Parse(Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_KERNEL_PAGE")!), segment.ProviderPageSize);
                 });
@@ -113,13 +114,9 @@ public sealed partial class MetalImmutableGpuVersionTests
             }
             Assert.Equal(6, memory.MappedCopies); Assert.Equal(0, memory.DirectReads);
             memory.RejectDirectReads = true;
-            state.DrainWithControlledBudget(); // actual public queue -> take -> native pipeline/render -> Complete
-            Assert.True((bool)Field("_batchOpen").GetValue(null)!);
-            if (completedFirst) Call("WaitForFlushedGuestCommands"); // actual status4 before capture
-            foreach (var original in originals) MetalDepthFacePlacement.RequireOriginalCurrent(original);
             uint[] raw = [(uint)(address >> 8), (uint)(address >> 40) | 0xC0700000,
                 0x00FFC0FF, 0xB1800924, 5, 0x00700000, 0, 0];
-            Assert.True(AgcBackendServices.TryDecodeTextureDescriptor(raw, out var descriptor));
+            NativeDepthAssert(AgcBackendServices.TryDecodeTextureDescriptor(raw, out var descriptor));
             var binding = new AgcExports.TranslatedImageBinding(descriptor, false, 0, [], true, ResourceDescriptor: raw,
                 Shape: new ShaderImageShape(false, true, true, false, false, TextureNumericClass.Float, DepthCompare: true),
                 Access: GuestImageAccess.Read);
@@ -127,11 +124,35 @@ public sealed partial class MetalImmutableGpuVersionTests
                 new CpuContext(memory, Generation.Gen5), [binding], out var fallbacks));
             Assert.Equal(0, fallbacks); Assert.Empty(snapshot.RgbaPixels); Assert.Null(snapshot.TiledSource);
             Assert.Equal(6, memory.MappedCopies); Assert.Equal(0, memory.DirectReads);
+            // Drain commits in its finally. Enroll the consumer BEFORE drain
+            // so production texture resolution is a later encoder in that CB.
+            if (!completedFirst) state.AdmitNativeFaceConsumer(shaders.Vertex, shaders.Pixel, snapshot);
+            state.DrainWithControlledBudget();
+            var producerCommand = (nint)Field("_lastFlushedCommandBuffer").GetValue(null)!;
+            Assert.NotEqual((nint)0, producerCommand);
+            Assert.False((bool)Field("_batchOpen").GetValue(null)!);
+            foreach (var original in originals) MetalDepthFacePlacement.RequireOriginalCurrent(original);
+            nint depth;
+            if (completedFirst)
+            {
+                Call("WaitForFlushedGuestCommands");
+                var consumerCommand = (nint)Call("BeginBatchedGuestCommands", state.NativeFaceQueue)!;
+                object?[] create = [state.NativeFaceDevice, consumerCommand, snapshot, false];
+                depth = (nint)Call("CreateDrawTexture", create)!;
+                Assert.False((bool)create[3]!);
+            }
+            else
+            {
+                // The actual resolved assembly was tagged by the real drain's
+                // commit, on the SAME retaining CB as its six producers.
+                var resources = ((IEnumerable)Field("_retiredSnapshotResources").GetValue(null)!).Cast<object>();
+                var assembly = Assert.Single(resources, entry => (uint)Get(entry, "Format")! == (uint)MtlPixelFormat.Depth32Float);
+                Assert.Equal(producerCommand, (nint)Get(assembly, "LastCommandBuffer")!);
+                depth = (nint)Get(assembly, "Handle")!;
+            }
             var command = (nint)Call("BeginBatchedGuestCommands", state.NativeFaceQueue)!;
-            Assert.NotEqual(0, command);
-            object?[] create = [state.NativeFaceDevice, command, snapshot, false];
-            var depth = (nint)Call("CreateDrawTexture", create)!;
-            Assert.NotEqual(0, depth); Assert.False((bool)create[3]!); // pool owns, no unrelated construction retain
+            Assert.NotEqual((nint)0, command);
+            Assert.NotEqual((nint)0, depth); // pool owns, no unrelated construction retain
             Assert.Equal((nint)MtlPixelFormat.Depth32Float, MetalNative.Send(depth, MetalNative.Selector("pixelFormat")));
             Assert.Equal((nint)3, MetalNative.Send(depth, MetalNative.Selector("textureType")));
             Assert.Equal((nint)6, MetalNative.Send(depth, MetalNative.Selector("arrayLength")));
@@ -209,6 +230,9 @@ public sealed partial class MetalImmutableGpuVersionTests
         if (primary is not null) ExceptionDispatchInfo.Capture(primary).Throw();
     }
 
+    private static void NativeDepthAssert(bool condition, string? message = null,
+        [CallerArgumentExpression("condition")] string expression = "") => Assert.True(condition, message ?? expression);
+
     private static void NativeDepthPreserve(ref Exception? primary, Exception cleanup)
     {
         if (primary is null) primary = cleanup;
@@ -263,6 +287,9 @@ public sealed partial class MetalImmutableGpuVersionTests
             MetalVideoPresenter.SubmitOffscreenTranslatedDraw(pixel, [], [], 0,
                 [new GuestRenderTarget(0, 256, 256, 10, 0)], vertex, 3, 1, 4, null, [], render, target, 0);
         }
+        public void AdmitNativeFaceConsumer(MetalCompiledGuestShader vertex, MetalCompiledGuestShader pixel, GuestDrawTexture snapshot) =>
+            MetalVideoPresenter.SubmitOffscreenTranslatedDraw(pixel, [snapshot], [], 0,
+                [new GuestRenderTarget(0, 256, 256, 10, 0)], vertex, 3, 1, 4, null, [], GuestRenderState.Default, null, 0);
         public void DisposeNativeDepthFixture()
         {
             if (nativeDepthDisposed) return; nativeDepthDisposed = true;
