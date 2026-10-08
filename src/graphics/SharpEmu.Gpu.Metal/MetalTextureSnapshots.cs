@@ -106,9 +106,11 @@ internal static partial class MetalTextureSnapshots
                 }
                 if (binding.IsStorage && binding.Descriptor.Type == Gen5TextureType2DArray &&
                     !MetalSingletonArrayStorageAdmission.IsQualified(binding.Descriptor, binding.ResourceDescriptor,
+                        binding.IsArrayed, binding.MipLevel, binding.Shape, binding.Access) &&
+                    !MetalBgra1024ArrayStorageAdmission.IsQualified(binding.Descriptor, binding.ResourceDescriptor,
                         binding.IsArrayed, binding.MipLevel, binding.Shape, binding.Access))
                     throw new NotSupportedException(
-                        $"Metal array storage snapshots require a matching complete qualified mode24 R8Uint X001 or mode27 RGBA8Unorm/Float, R32 Uint/Float X001, RGBA8Uint/RGBA16Float identity PERF_MOD7 single-mip 1x1 layer-zero descriptor and compiled 2D-array shape: " +
+                        $"Metal array storage snapshots require a matching complete qualified mode24 R8Uint X001 or mode27 RGBA8Unorm/Float, R32 Uint/Float X001, RGBA8Uint/RGBA16Float identity PERF_MOD7 single-mip 1x1 layer-zero descriptor or exact1024x1024 RGBA8Unorm BGRA PERF_MOD7 write-only descriptor and compiled 2D-array shape: " +
                         $"descriptor={binding.Descriptor} shape={binding.Shape} access={binding.Access} selected_mip={binding.MipLevel} " +
                         $"raw=[{string.Join(",", binding.ResourceDescriptor?.Select(static word => $"{word:X8}") ?? [])}].");
                 MetalVideoPresenter.RejectSelectedStorageAlias(context.Memory, binding.Descriptor, binding.IsStorage, binding.MipLevel);
@@ -650,7 +652,7 @@ internal static partial class MetalTextureSnapshots
                             $"Metal volume snapshot cannot reinterpret failed detiling as linear data: " +
                             $"addr=0x{descriptor.Address:X} depth={descriptor.Depth} tile={descriptor.TileMode}.");
                     if (linearStorage is null && descriptor.Type == Gen5TextureType2DArray)
-                        throw new NotSupportedException("Metal singleton array snapshot requires successful physical qualified-mode detiling; raw bytes are not a linear seed.");
+                        throw new NotSupportedException("Metal qualified array snapshot requires successful physical qualified-mode detiling; raw bytes are not a linear seed.");
                     linearStorage ??= storageSource.AsSpan(0, checked((int)sourceByteCount)).ToArray();
                     linearNonzero = linearStorage.AsSpan().IndexOfAnyExcept((byte)0) >= 0;
                     // A successful zero-filled read is still a complete snapshot.

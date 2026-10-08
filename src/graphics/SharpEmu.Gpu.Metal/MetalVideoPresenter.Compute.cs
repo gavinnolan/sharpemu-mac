@@ -412,7 +412,8 @@ internal static partial class MetalVideoPresenter
         // The descriptor and compiled shader must agree on native dimension,
         // including depth-one texture3d. No array/cube/mip reinterpretation.
         var volume = descriptor.Type == Gen5TextureType3D;
-        var singletonArray = MetalSingletonArrayStorageAdmission.IsQualified(descriptor);
+        var qualifiedArray = MetalSingletonArrayStorageAdmission.IsQualified(descriptor) ||
+            MetalBgra1024ArrayStorageAdmission.IsQualified(descriptor);
         if (volume && (descriptor.TiledSource is not null || descriptor.Detile is not null))
             throw new NotSupportedException("Metal storage volumes require owned linear seed bytes; deferred XY-only detiling is not a volume source proof.");
         if (volume && (descriptor.Descriptor is not { Length: >= 8 } raw ||
@@ -427,17 +428,17 @@ internal static partial class MetalVideoPresenter
             throw new NotSupportedException(
                 $"Metal volume storage requires a matching complete single-mip uncompressed descriptor with zero metadata/flags/BC swizzle: " +
                 $"addr=0x{descriptor.Address:X} raw=[{string.Join(",", descriptor.Descriptor?.Select(static word => $"{word:X8}") ?? [])}].");
-        if ((descriptor.Type != 9 && !volume && !singletonArray) || descriptor.Shape.Volume != volume ||
-            descriptor.ArrayedView != singletonArray || descriptor.ArrayLayers != 1 ||
+        if ((descriptor.Type != 9 && !volume && !qualifiedArray) || descriptor.Shape.Volume != volume ||
+            descriptor.ArrayedView != qualifiedArray || descriptor.ArrayLayers != 1 ||
             (!volume && descriptor.Depth != 1) || descriptor.Depth == 0 ||
             (volume && (descriptor.Width > 2048 || descriptor.Height > 2048 || descriptor.Depth > 2048)) ||
             descriptor.MipLevels != 1 || descriptor.MipUploads is { Length: > 0 } ||
             (descriptor.BaseMipLevel != 0 || descriptor.MipLevel != 0) && !IsQualifiedSelectedStorageMip(descriptor) ||
             !descriptor.Shape.Storage || descriptor.Shape.NumericClass == TextureNumericClass.Unsupported ||
-            descriptor.Shape.DynamicMip || descriptor.Shape.Arrayed != singletonArray || descriptor.Shape.Cube ||
+            descriptor.Shape.DynamicMip || descriptor.Shape.Arrayed != qualifiedArray || descriptor.Shape.Cube ||
             descriptor.Shape.OneDimensional || descriptor.Shape.Multisampled || descriptor.Shape.DepthCompare || descriptor.Shape.R128 || descriptor.Shape.Atomic)
             throw new NotSupportedException(
-                "Metal storage image materialization supports a single base mip, the qualified 2D/mip1 view, non-array 3D or qualified singleton 2D-array (3D extent <=2048): " +
+                "Metal storage image materialization supports a single base mip, the qualified 2D/mip1 view, non-array 3D or qualified singleton or exact1024 BGRA 2D-array (3D extent <=2048): " +
                 $"addr=0x{descriptor.Address:X} type={descriptor.Type} size={descriptor.Width}x{descriptor.Height} " +
                 $"arrayed={descriptor.ArrayedView} layers={descriptor.ArrayLayers} depth={descriptor.Depth} " +
                 $"view_mips={descriptor.MipLevels} base_mip={descriptor.BaseMipLevel} selected_mip={descriptor.MipLevel} " +

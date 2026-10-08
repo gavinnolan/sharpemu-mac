@@ -26,4 +26,7 @@
     <EmbeddedResource Include="../Fixtures/Tile5Volume/offsets.csv" LogicalName="Tile5Volume.offsets.csv" />
     <EmbeddedResource Include="../Fixtures/R8SampledVolume/offsets.csv" LogicalName="R8SampledVolume.offsets.csv" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../Fixtures/Bgra1024Array/Bgra1024Oracle.cs" Link="Fixtures/Bgra1024Oracle.cs" />
+  </ItemGroup>
 </Project>

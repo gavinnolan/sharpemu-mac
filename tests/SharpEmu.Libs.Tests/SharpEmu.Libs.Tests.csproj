@@ -95,4 +95,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <Compile Include="../Fixtures/Tile5Volume/Tile5VolumeOracle.cs" Link="Fixtures/Tile5VolumeOracle.cs" />
     <EmbeddedResource Include="../Fixtures/Tile5Volume/offsets.csv" LogicalName="Tile5Volume.offsets.csv" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../Fixtures/Bgra1024Array/Bgra1024Oracle.cs" Link="Fixtures/Bgra1024Oracle.cs" />
+  </ItemGroup>
 </Project>
