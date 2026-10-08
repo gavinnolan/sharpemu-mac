@@ -6,7 +6,53 @@ visual polish are deferred. Renderer changes remain in scope when they remove
 a crash or prevent progression. Intro playback, an automatic demo and process
 survival do not satisfy this milestone.
 
-## Latest combined qualification and first failures
+## Latest signed game replays
+
+Candidate `8aca3731` passed 643 managed cases on each actual CLR, five fresh
+native cases per CLR, three builds and the signed 239-file native-only bundle.
+Its 120-second Dreaming Sarah run reached the starting scene. Independent
+screenshots at 65, 85 and 105 seconds show the scheduled right movement and
+camera scroll, followed by left movement and facing response. Directional
+control is verified again; isolated title-bar FPS samples do not establish a
+sustained performance result. The run shut down gracefully, peak RSS 930 MiB.
+
+Demon's Souls at 150 seconds still had no scene. All three original selected
+copy attempts failed because writer coverage was already incomplete, not
+because the watch inventory was full or a writer was merely busy. The exact
+cause of that earlier loss is not established by this run. Octopath's first
+failure in this candidate is original singleton-volume watch admission 2
+during constructor transfer, before any logged APR failure. The earlier APR
+abort remains a separate observed failure; its cause is not considered fixed.
+The closed archive is
+`artifacts/validation/all-games-20261009/entry-ds-apr-first-refusals-8aca3731-prepared`,
+manifest `943f63ebf9ce8df2ac57ca847c98375b32e86b73a934962bb8bf589edcc4bfb0`.
+All 31 owned groups and the shared lock were absent at archive closure.
+
+Diagnostic successor `ddc045ab` passed 645 managed cases per CLR and all ten
+fresh native cases. Superliminal stayed alive for 150 seconds and shut down
+gracefully, peak RSS 4141 MiB, but remained at loading with no gameplay. Its
+first color refusal now identifies the exact selected 512-by-512 RGBA16Float
+native image: request `706A6C0000` for 2 MiB, original ten-mip allocation
+`706A610000` for `0x2B0000` bytes, selected mip offset `0xB0000`. The retained
+image is initialized, GPU-written, version 1, and has the same original
+placement. These diagnostic inventory facts do not authorize borrowing it.
+That requires original mapping/content and ordered native producer receipts.
+The closed archive is
+`artifacts/validation/all-games-20261009/color-overlap-first-view-ddc045ab-prepared`,
+manifest `b10eea22464d00fa6352f16d20370ed6ff1967f14e14e2e51de2567964b1a4fd`.
+All 27 owned groups and the shared lock were absent at archive closure.
+
+Source successor `2fdabb5c` separates expired completed-write history from
+lost physical writer coverage. Original watched ranges remain invalidated
+before overlapping bytes; failed or unknown writes still invalidate every
+original watch. Unwatched publication retains the strict history window and
+missing/unknown-record vetoes. Invalid bounds, exhausted identities, active
+writer slot exhaustion and quarantined publication remain sticky failures.
+Eight additional controls and first-coverage-loss diagnostics are prepared;
+qualification and the next Demon’s Souls replay are in progress. This has not
+been promoted to main or accepted as a game-entry fix.
+
+## Earlier combined qualification and first failures
 
 Successor `d5d198f7` passed 639 managed cases per CLR and all ten fresh native
 workers. The initial native depth capture now selects its original full provider
