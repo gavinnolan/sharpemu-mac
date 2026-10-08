@@ -46,8 +46,10 @@ signals. Native workers assert process architecture, exact framework and
 measured 16 KiB kernel pages; provider page geometry differs between CLRs.
 Original DLL hashes match after execution. The 117 managed Metal and 55 native
 Metal checks from the earlier R16 integration were **not rerun at this source**.
-Actual PVM/Tracked native forwarding workers are prepared separately; the four
-native rows above exercise shared views/provider composition.
+Actual PVM/Tracked native forwarding workers were subsequently [qualified
+separately](pvm-mapped-copy-forwarding-workers.md), four fresh scenarios per CLR
+at754a7637, then imported locally as test-onlyef8d4f20. The four native rows above
+remain the earlier shared views/provider composition checks.
 
 Evidence is retained at
 `artifacts/validation/all-games-20261008/mapping-copy-main-115316f0/`, including
