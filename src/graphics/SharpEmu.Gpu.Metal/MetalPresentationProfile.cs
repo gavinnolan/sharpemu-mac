@@ -10,7 +10,7 @@ namespace SharpEmu.Gpu.Metal;
 /// presentation's command-buffer commit, not GPU completion or display scanout.
 /// Host redraws accumulate work but never create guest frame samples.
 /// </summary>
-internal static class MetalPresentationProfile
+internal static partial class MetalPresentationProfile
 {
     internal enum Phase { DrainGuestWork, MaterializePresentation, AcquireDrawable, EncodeAndCommit, Count }
     private const int Capacity = 4096;
@@ -31,6 +31,7 @@ internal static class MetalPresentationProfile
 
     internal static void Begin()
     {
+        if (AllocationsEnabled) BeginAllocations();
         if (!Enabled) return;
         Array.Clear(Storage.Pending);
         Array.Clear(Storage.Rows);
@@ -50,8 +51,9 @@ internal static class MetalPresentationProfile
 
     internal static Scope Measure(Phase phase) => Enabled ? new Scope(phase) : default;
 
-    internal static void RecordGuestCommit()
+    internal static void RecordGuestCommit(long guestSequence)
     {
+        if (AllocationsEnabled) RecordAllocationGuestCommit(guestSequence);
         if (!Enabled) return;
         var now = Stopwatch.GetTimestamp();
         var offset = (int)(Storage.Count % Capacity) * Stride;
@@ -65,10 +67,14 @@ internal static class MetalPresentationProfile
 
     internal static void End()
     {
-        if (!Enabled) return;
+        if (!Enabled && !AllocationsEnabled) return;
         // A closed diagnostic output stream cannot turn window shutdown into
         // an emulator failure. Native window/overlay cleanup precedes this call.
-        try { WriteReport(); }
+        try
+        {
+            if (Enabled) WriteReport();
+            if (AllocationsEnabled) WriteAllocationReport();
+        }
         catch (IOException) { }
         catch (ObjectDisposedException) { }
     }

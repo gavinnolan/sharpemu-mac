@@ -640,7 +640,7 @@ internal static partial class MetalVideoPresenter
             {
                 _lastCountedGuestFrameSequence = _guestFrameSequence;
                 PerfOverlay.RecordGuestPresent();
-                MetalPresentationProfile.RecordGuestCommit();
+                MetalPresentationProfile.RecordGuestCommit(_guestFrameSequence);
                 _guestFramesInStatsWindow++;
             }
             _hostPresentsInStatsWindow++;

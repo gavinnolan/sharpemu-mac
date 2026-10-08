@@ -810,8 +810,23 @@ internal static partial class MetalVideoPresenter
 
     /// <summary>Drains queued guest work on the render loop, bounded by count and a
     /// wall-clock budget so a backlog cannot starve the event pump or the present.</summary>
-    internal static void DrainGuestWork(nint device, nint queue) =>
-        DrainGuestWorkCore(device, queue, _renderWorkBudgetTicks);
+    internal static void DrainGuestWork(nint device, nint queue)
+    {
+        if (!MetalPresentationProfile.AllocationsEnabled)
+        {
+            DrainGuestWorkCore(device, queue, _renderWorkBudgetTicks);
+            return;
+        }
+
+        var allocationScope = MetalPresentationProfile.MeasureDrainAllocations();
+        var completed = false;
+        try
+        {
+            DrainGuestWorkCore(device, queue, _renderWorkBudgetTicks);
+            completed = true;
+        }
+        finally { allocationScope.Finish(completed); }
+    }
 
     private static void DrainGuestWorkCore(nint device, nint queue, long budgetTicks)
     {
@@ -929,6 +944,13 @@ internal static partial class MetalVideoPresenter
 
                 CompleteGuestWork(pendingGuestWork);
                 completedWork++;
+                if (MetalPresentationProfile.AllocationsEnabled)
+                    MetalPresentationProfile.RecordCompletedDrainWork(pendingGuestWork.Work switch
+                    {
+                        OffscreenGuestDraw => MetalPresentationProfile.DrainWorkKind.Draw,
+                        ComputeGuestDispatch => MetalPresentationProfile.DrainWorkKind.Compute,
+                        _ => MetalPresentationProfile.DrainWorkKind.Other,
+                    });
                 if (System.Diagnostics.Stopwatch.GetTimestamp() >= deadline)
                 {
                     return;
