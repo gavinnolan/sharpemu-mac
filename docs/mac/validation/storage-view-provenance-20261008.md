@@ -37,7 +37,19 @@ retirement. Kairo render/resident_image.rs requires exact dimensions plus native
 layout/level compatibility for a live alias and checks the authored epoch. Their
 mechanisms do not authorize address-only reuse or replacement in SharpEmu.
 
-Managed helper/actual pre-native mismatch controls are pending. No device or
-game run is authorized by this diagnostic. Next run must capture original and
+Exact clean source382f047fb37c1bfe8ea8fbfd86a772170a98cd8f built with zero
+errors and passed nine managed controls on ARM64 and the same nine on Rosetta
+(three new, six prior; zero skips). The actual Device0 path keeps mismatch
+rejection and exact matching-view reuse unchanged; fixed-value original raw
+words survive caller mutation, actual storage mutation records retain their
+work history, nested context restores its outer receipt, flagoff omits the
+suffix, and invalid extent still rejects before native access. These are
+managed helper/pre-native controls, not native creation or kernel execution.
+
+Evidence: `artifacts/validation/integrated-20261007/storage-view-provenance-382f047f/`.
+Refined manifest SHA256:
+`2b743b06b63b470a05d4d238998d4832d5756fb226bf7cc7043d0e4902135a96`.
+Prior c46 evidence is retained separately. No device or game run is authorized
+by this diagnostic. Next run must capture original and
 incoming descriptors before any view, guest-arena replacement or lifetime fix
 is designed; stale CPU bytes cannot replace GPU-written contents by assumption.
