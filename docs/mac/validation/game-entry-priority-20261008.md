@@ -58,8 +58,17 @@ these runs accepts an additional title.
   Silent Hill replay completed two publications, then dirty validation refused
   writer-history continuity: original revision 157585 versus 159138, a distance
   of 1553 exceeding the 512-record ring. That run had no new first-use error.
-  Original-watch continuity candidate `4b39506d` is source-reviewed, with runtime
-  qualification pending. It retains the original physical veto and creates
+  Original-watch continuity candidate `4b39506d` passed 205 managed cases and
+  two real native publication cases on each host architecture. Its signed
+  Octopath replay completed one canonical publication and multiple dirty
+  acknowledgments, then exited 134 after 33 seconds. Silent Hill completed two
+  publications and exited 134 after 26 seconds. Both now fail the ordinary
+  post-release volume-owner check; no history-window failure was logged.
+  The earlier diagnostic budget was exhausted by expected ordinary reads under
+  the held publication reservation, so it does not identify the later watch
+  predicate. Source-only diagnostic `a8f3803b` separates those bounded budgets
+  and records the actual admission guard value without changing policy.
+  The continuity fix retains the original physical veto and creates
   private successor watches only for exact applied provider writes; unwatched
   receipts retain the existing history limit.
 - **Demon's Souls:** the same signed `9e3adfcb` bundle remained alive for 60
@@ -74,8 +83,13 @@ these runs accepts an additional title.
   CPU copy over that producer. Cold, previously untracked faces must retain
   independent original content tokens. The actual captured cube descriptor is
   1024-by-1024, with 2 MiB per D16 face. The earlier native successor's finite
-  256-by-256 qualifier rejected that descriptor. Corrected source `82186483`
-  has passed semantic review; native qualification and game replay remain pending.
+  256-by-256 qualifier rejected that descriptor. Corrected successor `f71dbdb7`
+  passed 30 managed cases and two actual native cases per host architecture,
+  checking all six faces and 6,291,456 float texels in each native case. Its
+  signed 150-second game replay reached title/loading, then failed original
+  depth-face mapping/session/content admission. It remained alive with zero
+  later guest frames; no control or gameplay is accepted. The next diagnostic
+  identifies the first failing predicate without refreshing the original receipt.
 - **Void Terrarium:** the 600-second entry run and a separate 300-second shader
   diagnostic run did not verify control. The actual rejected shader contains
   LDS operations, six barriers, GS allocation and primitive export target 20.
@@ -102,7 +116,9 @@ Current immutable evidence:
 `artifacts/validation/all-games-20261008/octopath-volume-publication-watch-9e3adfcb-qualified`,
 `artifacts/validation/all-games-20261008/display-original-1610948d-prepared`,
 `artifacts/validation/all-games-20261008/canonical-publication-decline-cbbf7cc3-prepared`,
+`artifacts/validation/all-games-20261009/persistent-publication-watch-4b39506d-prepared`,
 `artifacts/validation/all-games-20261008/depth-cube-entry-f4ebd249-qualified`,
+`artifacts/validation/all-games-20261009/superliminal-native-depth-faces-f71dbdb7`,
 `artifacts/validation/void-skipped-shader-400e5c64`,
 `artifacts/validation/native-mesh-entry-d2639278`,
 `artifacts/validation/quake-entry-decd4910`, and
