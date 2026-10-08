@@ -55,7 +55,7 @@ public sealed partial class MetalTextureSourceRuntimeDrainTests
                 Assert.Equal(before + 1, GuestDataPool.DiagnosticStats().LeaseCount);
                 Call("CompletePresenterShutdown"); Assert.Equal(before + 1, GuestDataPool.DiagnosticStats().LeaseCount);
             }
-            finally { GuestDataPool.Shared.Return(rerented ?? data); }
+            finally { Call("CompletePresenterShutdown"); GuestDataPool.Shared.Return(rerented ?? data); }
         }
     }
 
@@ -97,6 +97,7 @@ public sealed partial class MetalTextureSourceRuntimeDrainTests
             {
                 Field("_textureSourceAfterCanceledPayloadReturn").SetValue(null, oldHook);
                 Field("_textureSourceCleanupFailure").SetValue(null, oldCleanup);
+                Call("CompletePresenterShutdown");
                 if (rerented is not null) GuestDataPool.Shared.Return(rerented);
                 // Originals may now name a newer rent; that rent was released
                 // above first. Only final test teardown, never production retry.
@@ -124,7 +125,7 @@ public sealed partial class MetalTextureSourceRuntimeDrainTests
                 AssertNoLivePayloadReceipts();
                 Call("CompletePresenterShutdown"); Assert.Equal(before, GuestDataPool.DiagnosticStats().LeaseCount);
             }
-            finally { GuestDataPool.Shared.Return(data); }
+            finally { Call("CompletePresenterShutdown"); GuestDataPool.Shared.Return(data); }
         }
     }
 
@@ -150,7 +151,7 @@ public sealed partial class MetalTextureSourceRuntimeDrainTests
                 Call("CompletePresenterShutdown"); AssertNoLivePayloadReceipts();
                 Assert.Equal(alreadyReturned ? before + 1 : before, GuestDataPool.DiagnosticStats().LeaseCount);
             }
-            finally { GuestDataPool.Shared.Return(rerented ?? data); }
+            finally { Call("CompletePresenterShutdown"); GuestDataPool.Shared.Return(rerented ?? data); }
         }
     }
 
@@ -174,7 +175,7 @@ public sealed partial class MetalTextureSourceRuntimeDrainTests
                 Assert.False((bool)Get(PayloadOwner(current), "Released")!);
                 Call("CompletePresenterShutdown"); Assert.Equal(before, GuestDataPool.DiagnosticStats().LeaseCount); AssertNoLivePayloadReceipts();
             }
-            finally { GuestDataPool.Shared.Return(rerented ?? data); }
+            finally { Call("CompletePresenterShutdown"); GuestDataPool.Shared.Return(rerented ?? data); }
         }
     }
 
@@ -199,7 +200,7 @@ public sealed partial class MetalTextureSourceRuntimeDrainTests
                 Assert.Equal(before, GuestDataPool.DiagnosticStats().LeaseCount);
                 Call("CompletePresenterShutdown"); AssertNoLivePayloadReceipts();
             }
-            finally { GuestDataPool.Shared.Return(data); }
+            finally { Call("CompletePresenterShutdown"); GuestDataPool.Shared.Return(data); }
         }
     }
     [Fact]
@@ -223,7 +224,7 @@ public sealed partial class MetalTextureSourceRuntimeDrainTests
                 Call("CompletePresenterShutdown");
                 Assert.Equal(before + 1, GuestDataPool.DiagnosticStats().LeaseCount); AssertNoLivePayloadReceipts();
             }
-            finally { GuestDataPool.Shared.Return(data); }
+            finally { Call("CompletePresenterShutdown"); GuestDataPool.Shared.Return(data); }
         }
     }
 
@@ -244,7 +245,7 @@ public sealed partial class MetalTextureSourceRuntimeDrainTests
                 AssertNoLivePayloadReceipts(); Assert.Equal(before + 2, GuestDataPool.DiagnosticStats().LeaseCount);
                 Call("CompletePresenterShutdown"); Assert.Equal(before + 2, GuestDataPool.DiagnosticStats().LeaseCount);
             }
-            finally { GuestDataPool.Shared.Return(data); lease.TryReturn(); }
+            finally { Call("CompletePresenterShutdown"); GuestDataPool.Shared.Return(data); lease.TryReturn(); }
         }
     }
 
@@ -284,7 +285,7 @@ public sealed partial class MetalTextureSourceRuntimeDrainTests
                 Assert.Equal(before, GuestDataPool.DiagnosticStats().LeaseCount);
                 Call("CompletePresenterShutdown"); AssertNoLivePayloadReceipts();
             }
-            finally { Field("_splashHidden").SetValue(null, oldSplashHidden); GuestDataPool.Shared.Return(data); }
+            finally { Field("_splashHidden").SetValue(null, oldSplashHidden); Call("CompletePresenterShutdown"); GuestDataPool.Shared.Return(data); }
         }
     }
 
