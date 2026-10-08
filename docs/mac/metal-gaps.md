@@ -192,3 +192,13 @@ Clean cdc source passed4/4 required-device cases on ARM64 and4/4 under Rosetta,
 including translated selected-level stores/loads, all-texel/neighbor oracles and
 native publication rollback. Actual DS descriptor acceptance/progression and
 downstream sampled aliases remain pending; this does not qualify gameplay/FPS.
+
+### Exact sampled singleton RGBA8sRGB volume (2026-10-08)
+
+Observed Superliminal type10/mode5 RGBA8sRGB1x1x1 now has an owned four-byte
+origin path, true native3D/depth1 upload and known-GPU-alias vetoes. Clean42 source
+passed4/4 actual required-device cases on ARM64 and4/4 under Rosetta: translated
+point sample/load, linear alpha and signed bounds. GeneralXYZ tiling, unknown
+writer/backing ownership, sampledGPUaliases, game Pixel draws/visual progression
+and performance remain unqualified. See
+[exact descriptor, primary oracle and proof limits](validation/sampled-singleton-volume-20261008.md).
