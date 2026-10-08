@@ -79,3 +79,11 @@ identifies the preceding slow draw, without assigning its time to CPU or GPU.
 For Octopath, the rejection guard combines image GPU-written, global pending
 work and open-batch flags; the current log does not identify the triggering
 term. Exact per-resource ownership and completion remain the next checks.
+
+Diagnostic successorab9dedeb now identifies a true GPU-written1024x1024 RGBA8
+storage array at805E490000 in a separate signed Octopath run: dispatch41,
+`dcb.graphics` submission3, content version2, no pending work/open batch at
+rejection. It exits134 after35s, peak2359MiB, with a black30-second screenshot
+and one reported guest frame. This does not identify the prior c24 resource's
+trigger or authorize CPU seed replacement. Exact dirty causality and canonical
+GPU publication remain incomplete; see the protection-intent checkpoint.

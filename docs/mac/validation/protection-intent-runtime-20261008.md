@@ -53,6 +53,31 @@ no gameplay, rendering-fidelity, loading-time or sustained-FPS acceptance.
 No window screenshot is produced in this run. The combined source stays
 isolated; source provenance/dirty ownership is the next runtime investigation.
 
+## Exact dirty-guard diagnostic replay
+
+Diagnostic-only successor `ab9dedeb925d3098b8a9082860f6c3948a638d9b`
+passes the same 22 typed controls on both actual CLR architectures. Its signed
+239-file native-only bundle publishes in42.70 seconds and remains byte-identical
+before/after the run. The diagnostic flag leaves rejection policy unchanged.
+
+The next Octopath run exits134 after35 seconds, peak2359MiB, at a different
+resource: `805E490000`. Here the exact guard reports GPU-written=true,
+pending-work=false/count0 and batch-open=false. The1024x1024 RGBA8Unorm singleton
+storage array (pitch1024, mode27, guest format10/0, native type3) was created and
+mutated by storage dispatch41 on `dcb.graphics`, submission3; content version2.
+The original/current seed sessions both remain0. This proves the recorded image
+has GPU production history; it does not prove CPU dirty causality, completed
+native writes or safe canonical publication. The prior c24 resource's triggering
+term remains unknown because that run lacked these diagnostic fields.
+
+The captured30-second window is black. Only one guest frame is reported; no
+menu/gameplay, visual correctness, loading or sustained-FPS gate is met. The
+next change must preserve GPU-produced contents and establish exact dirty/writer
+ownership rather than replace them from an unqualified CPU seed.
+
+Source/build/test and full signed runtime evidence is retained under
+`artifacts/validation/all-games-20261008/typed-cpu-diagnostics-ab9dedeb`.
+
 Evidence:
 `artifacts/validation/all-games-20261008/protection-intent-7a286abb`
 (104 files; transfer manifest
