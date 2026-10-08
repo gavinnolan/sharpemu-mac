@@ -1721,7 +1721,7 @@ internal static partial class MetalVideoPresenter
 
         var handle = MetalNative.Send(device, MetalNative.Selector("newTextureWithDescriptor:"), descriptor);
         if (sampledSingletonVolume && handle == 0)
-            throw new NotSupportedException($"Metal cannot allocate the qualified native3D RGBA8sRGB singleton at 0x{texture.Address:X}; substituting another texture type or pixel format is unsupported.");
+            throw new NotSupportedException($"Metal cannot allocate the qualified sampled native3D {texture.Format}/{texture.NumberType} {texture.Width}x{texture.Height}x{texture.Depth} view at 0x{texture.Address:X}; substituting another texture type or pixel format is unsupported.");
         if (handle != 0)
         {
             try

@@ -137,7 +137,8 @@ internal static partial class MetalTextureSnapshots
                     unreturnedTexture = texture;
                     TexturePreparationProfile.RecordBinding(TexturePreparationProfile.BindingOutcome.Linear, profileStart, texture.RgbaPixels.LongLength);
                 }
-                else if (TryCreateSampledSingletonVolume(context, binding, out texture))
+                else if (TryCreateSampledR8Volume(context, binding, out texture) ||
+                    TryCreateSampledSingletonVolume(context, binding, out texture))
                 {
                     unreturnedTexture = texture;
                     snapshots?.Add(reuseKey, texture);

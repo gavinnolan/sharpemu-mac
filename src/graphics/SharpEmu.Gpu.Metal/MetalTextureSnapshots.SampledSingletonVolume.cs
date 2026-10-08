@@ -31,9 +31,10 @@ internal static partial class MetalTextureSnapshots
 
     private static void RequireSampledSingletonVolume(Binding binding)
     {
+        if (IsQualifiedSampledR8Volume(binding)) return;
         if (!IsQualifiedSampledSingletonVolume(binding))
             throw new NotSupportedException(
-                $"Metal sampled tiled volume requires the complete static mode5 RGBA8sRGB 1x1x1 origin descriptor and Float read-only 3D shape: descriptor={binding.Descriptor} shape={binding.Shape} access={binding.Access} selected={binding.MipLevel} raw=[{string.Join(",", binding.ResourceDescriptor?.Select(static word => $"{word:X8}") ?? [])}].");
+                $"Metal sampled tiled volume requires the qualified complete static mode5 RGBA8sRGB 1x1x1 or R8Unorm 4x4x16 descriptor and Float read-only 3D shape: descriptor={binding.Descriptor} shape={binding.Shape} access={binding.Access} selected={binding.MipLevel} raw=[{string.Join(",", binding.ResourceDescriptor?.Select(static word => $"{word:X8}") ?? [])}].");
     }
 
     internal static void ValidateSampledSingletonVolumeUpload(GuestDrawTexture texture)
@@ -41,6 +42,12 @@ internal static partial class MetalTextureSnapshots
         if (texture.Descriptor is not { Length: >= 8 } raw ||
             !AgcBackendServices.TryDecodeTextureDescriptor(raw, out var descriptor))
             throw new NotSupportedException("Metal sampled tiled volume upload requires complete original raw descriptor words.");
+        if (descriptor.Format == 1)
+        {
+            ValidateSampledR8VolumeUpload(texture, new Binding(descriptor, false, texture.MipLevel, [],
+                IsArrayed: texture.ArrayedView, ResourceDescriptor: raw, Shape: texture.Shape, Access: texture.Access));
+            return;
+        }
         RequireSampledSingletonVolume(new Binding(descriptor, false, texture.MipLevel, [],
             IsArrayed: texture.ArrayedView, ResourceDescriptor: raw, Shape: texture.Shape, Access: texture.Access));
         if (texture.Address != descriptor.Address || texture.Width != 1 || texture.Height != 1 || texture.Depth != 1 ||
@@ -56,6 +63,7 @@ internal static partial class MetalTextureSnapshots
     private static bool TryCreateSampledSingletonVolume(CpuContext context, Binding binding, out GuestDrawTexture texture)
     {
         texture = default!;
+        if (IsQualifiedSampledR8Volume(binding)) return false;
         if (binding.IsStorage || binding.Descriptor.Type != Gen5TextureType3D || binding.Descriptor.TileMode == 0) return false;
         RequireSampledSingletonVolume(binding);
         var d = binding.Descriptor;
@@ -92,7 +100,7 @@ internal static partial class MetalVideoPresenter
     // Veto known GPU aliases before copying and at materialization. Registry
     // extents are reported logical/observed ranges, not universal tiled physical
     // footprints or guest allocation ownership. This is not a backing lease or
-    // a proof that unknown GPU writers cannot alias these four guest bytes.
+    // a proof that unknown GPU writers cannot alias the qualified sampled block.
     internal static void RejectKnownSampledSingletonVolumeGpuAlias(ulong address)
     {
         lock (_gate)
@@ -106,7 +114,7 @@ internal static partial class MetalVideoPresenter
                 _guestImageExtents.Any(pair => Overlaps(pair.Key, pair.Value.ByteCount)) ||
                 _latestTextureSources.Values.Any(source => Overlaps(source.View.Address,
                     Math.Max(source.ByteCount, source.ObservedGuestByteCount))))
-                throw new NotSupportedException($"Metal sampled singleton volume at 0x{address:X} has a GPU alias in its physical block; ordered native volume alias ownership is unsupported.");
+                throw new NotSupportedException($"Metal qualified sampled tiled volume at 0x{address:X} has a GPU alias in its physical block; ordered native volume alias ownership is unsupported.");
         }
     }
 }

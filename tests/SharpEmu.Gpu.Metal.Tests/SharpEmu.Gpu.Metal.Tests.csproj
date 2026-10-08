@@ -24,5 +24,6 @@
   <ItemGroup>
     <Compile Include="../Fixtures/Tile5Volume/Tile5VolumeOracle.cs" Link="Fixtures/Tile5VolumeOracle.cs" />
     <EmbeddedResource Include="../Fixtures/Tile5Volume/offsets.csv" LogicalName="Tile5Volume.offsets.csv" />
+    <EmbeddedResource Include="../Fixtures/R8SampledVolume/offsets.csv" LogicalName="R8SampledVolume.offsets.csv" />
   </ItemGroup>
 </Project>

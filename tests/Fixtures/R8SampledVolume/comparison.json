@@ -1,0 +1,217 @@
+{
+  "scope": "Source-expression comparison only. Sharp currently rejects sampled tiled3D except qualified singleton; its shared16bit16cube primitive does not admit this8bit shape. Hypothetical stackedXY is explicitly rejected production behavior, not an active layout.",
+  "kairoEquationIndex": 118,
+  "kairoSourceSha256": "442cac6fcdcd90838b54b1717d37c915d1e003a385445be98c271f77c98145e9",
+  "cases": [
+    {
+      "case": "navi10-16pipes",
+      "voxels": 256,
+      "kairoMismatchCount": 0,
+      "hypotheticalRejectedStackedXYMismatchCount": 248,
+      "physicalByteExtent": 4096,
+      "minOffset": 0,
+      "maxOffset": 1215,
+      "selectedPoints": [
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          1,
+          4
+        ],
+        [
+          0,
+          0,
+          8,
+          1024
+        ],
+        [
+          3,
+          3,
+          15,
+          1215
+        ]
+      ]
+    },
+    {
+      "case": "navi21-16pipes-4pkrs",
+      "voxels": 256,
+      "kairoMismatchCount": 0,
+      "hypotheticalRejectedStackedXYMismatchCount": 248,
+      "physicalByteExtent": 4096,
+      "minOffset": 0,
+      "maxOffset": 1215,
+      "selectedPoints": [
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          1,
+          4
+        ],
+        [
+          0,
+          0,
+          8,
+          1024
+        ],
+        [
+          3,
+          3,
+          15,
+          1215
+        ]
+      ]
+    },
+    {
+      "case": "navi21-16pipes-8pkrs",
+      "voxels": 256,
+      "kairoMismatchCount": 0,
+      "hypotheticalRejectedStackedXYMismatchCount": 248,
+      "physicalByteExtent": 4096,
+      "minOffset": 0,
+      "maxOffset": 1215,
+      "selectedPoints": [
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          1,
+          4
+        ],
+        [
+          0,
+          0,
+          8,
+          1024
+        ],
+        [
+          3,
+          3,
+          15,
+          1215
+        ]
+      ]
+    },
+    {
+      "case": "navi21-32pipes-8pkrs",
+      "voxels": 256,
+      "kairoMismatchCount": 0,
+      "hypotheticalRejectedStackedXYMismatchCount": 248,
+      "physicalByteExtent": 4096,
+      "minOffset": 0,
+      "maxOffset": 1215,
+      "selectedPoints": [
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          1,
+          4
+        ],
+        [
+          0,
+          0,
+          8,
+          1024
+        ],
+        [
+          3,
+          3,
+          15,
+          1215
+        ]
+      ]
+    },
+    {
+      "case": "navi21-4pipes-2pkrs",
+      "voxels": 256,
+      "kairoMismatchCount": 0,
+      "hypotheticalRejectedStackedXYMismatchCount": 248,
+      "physicalByteExtent": 4096,
+      "minOffset": 0,
+      "maxOffset": 1215,
+      "selectedPoints": [
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          1,
+          4
+        ],
+        [
+          0,
+          0,
+          8,
+          1024
+        ],
+        [
+          3,
+          3,
+          15,
+          1215
+        ]
+      ]
+    },
+    {
+      "case": "navi21-8pipes-8pkrs",
+      "voxels": 256,
+      "kairoMismatchCount": 0,
+      "hypotheticalRejectedStackedXYMismatchCount": 248,
+      "physicalByteExtent": 4096,
+      "minOffset": 0,
+      "maxOffset": 1215,
+      "selectedPoints": [
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          1,
+          4
+        ],
+        [
+          0,
+          0,
+          8,
+          1024
+        ],
+        [
+          3,
+          3,
+          15,
+          1215
+        ]
+      ]
+    }
+  ]
+}
