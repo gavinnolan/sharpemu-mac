@@ -32,7 +32,7 @@ public sealed partial class MetalTextureMaterializationTests
         var cause = new InvalidOperationException("injected metadata publication failure");
         var calls = 0;
         extents[descriptor.Address] = (17u, 19u, 1292UL);
-        hook.SetValue(null, (Action<nint>)(_ => { calls++; Assert.Single(images.Cast<DictionaryEntry>()); throw cause; }));
+        hook.SetValue(null, (Action<nint>)(_ => { calls++; Assert.Single(images.Keys); throw cause; }));
         try
         {
             lock (Presenter.GetField("_gate", Methods)!.GetValue(null)!)
