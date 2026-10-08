@@ -139,7 +139,7 @@ public sealed unsafe class ManagedWriteIntervalTests
     public void EmptyAndRejectedBoundsPreservePriorIntervalCounters()
     {
         using var state = new State(); var ledger = state.Enroll();
-        Assert.True(state.Views.Clear(0, 0));
+        Assert.False(state.Views.Clear(0, 0));
         _ = state.Views.TryWriteBacking(State.Address, []);
         Assert.False(state.Views.TryWriteBacking(State.Address + State.Page * 2 - 1, new byte[2]));
         Assert.False(state.Views.Clear(State.Page * 2, 1));

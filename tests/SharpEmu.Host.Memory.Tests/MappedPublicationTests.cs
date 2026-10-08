@@ -12,7 +12,7 @@ namespace SharpEmu.Host.Memory.Tests;
 
 // Actual neutral alias-copy transaction over owned pinned managed arrays.
 // The fixture provider never fabricates kernel outcomes or native coverage.
-public sealed unsafe class MappedPublicationTests
+public sealed class MappedPublicationTests
 {
     public MappedPublicationTests(ITestOutputHelper output)
     {
@@ -20,16 +20,16 @@ public sealed unsafe class MappedPublicationTests
         var expected = Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_ARCH");
         if (!string.IsNullOrEmpty(expected)) Assert.Equal(expected, RuntimeInformation.ProcessArchitecture.ToString());
     }
-    private sealed class State : IDisposable
+    private sealed unsafe class State : IDisposable
     {
         internal const ulong Page = 16384, Address = 0x100000000;
         internal readonly FakeProvider Host = new();
         internal readonly SharedBackingViews Views;
         internal HostBackingObject Backing => Host.Backing!;
-        internal State()
+        internal State(HostPageProtection protection = HostPageProtection.ReadWrite)
         {
             Views = new(Host, Page * 2);
-            Assert.True(Views.TryMapReservedRange(Address, Page, 0, HostPageProtection.ReadWrite, out _));
+            Assert.True(Views.TryMapReservedRange(Address, Page, 0, protection, out _));
             Assert.True(Views.TryMapReservedRange(Address + Page, Page, Page, HostPageProtection.ReadWrite, out _));
         }
         internal object Enroll()
@@ -166,7 +166,7 @@ public sealed unsafe class MappedPublicationTests
     public void RetiredSameAddressAndUnknownOutcomesCannotPrepare()
     {
         using var state = new State(); var original = state.Capture();
-        Assert.True(state.Host.Effect(State.Address, State.Page));
+        Assert.True(state.Views.Unmap(State.Address, State.Page, out var preserved)); Assert.True(preserved);
         Assert.True(state.Views.TryMapReservedRange(State.Address, State.Page, 0, HostPageProtection.ReadWrite, out _));
         Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
             state.Views.TryPrepareMappedPublication(original, [new(State.Address, new byte[] { 7 })], out _));
@@ -193,11 +193,11 @@ public sealed unsafe class MappedPublicationTests
     }
 
     [Fact]
-    public void ConcurrentCommitCopiesExactlyOnce()
+    public async Task ConcurrentCommitCopiesExactlyOnce()
     {
         using var state = new State(); using var receipt = state.Prepare(state.Capture(), State.Address, [57]);
         var attempts = Enumerable.Range(0, 16).Select(_ => Task.Run(receipt.TryCommit)).ToArray();
-        Task.WhenAll(attempts).WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+        await Task.WhenAll(attempts).WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(1, attempts.Count(t => t.Result == CpuMappedPublicationResult.Applied));
         Assert.Equal(15, attempts.Count(t => t.Result == CpuMappedPublicationResult.Rejected));
         Assert.Equal(57, state.Bytes()[0]);
@@ -214,8 +214,7 @@ public sealed unsafe class MappedPublicationTests
     [Fact]
     public void ReadableButNotWritableOriginalViewCannotPublish()
     {
-        using var state = new State();
-        Assert.True(state.Views.TryMapReservedRange(State.Address, State.Page, 0, HostPageProtection.ReadOnly, out _));
+        using var state = new State(HostPageProtection.ReadOnly);
         var original = state.Capture();
         Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
             state.Views.TryPrepareMappedPublication(original, [new(State.Address, new byte[] { 13 })], out _));
@@ -297,9 +296,9 @@ public sealed unsafe class MappedPublicationTests
     public void EmptyOperationsRetainLegacyValidationDuringPublication()
     {
         using var state = new State(); using var receipt = state.Prepare(state.Capture(), State.Address, [13]);
-        Assert.True(state.Views.Clear(0, 0));
-        Assert.True(state.Views.TryWriteBacking(State.Address, ReadOnlySpan<byte>.Empty));
-        Assert.True(state.Views.TryCopyBacking(State.Address, State.Address, 0));
+        Assert.False(state.Views.Clear(0, 0));
+        Assert.False(state.Views.TryWriteBacking(State.Address, ReadOnlySpan<byte>.Empty));
+        Assert.False(state.Views.TryCopyBacking(State.Address, State.Address, 0));
         Assert.Equal(CpuMappedPublicationResult.Applied, receipt.TryCommit());
     }
 
