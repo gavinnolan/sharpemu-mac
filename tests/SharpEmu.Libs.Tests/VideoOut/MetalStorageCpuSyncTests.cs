@@ -16,7 +16,7 @@ using Xunit;
 namespace SharpEmu.Libs.Tests.VideoOut;
 
 [Collection(SchedulingStateCollection.Name)]
-public sealed class MetalStorageCpuSyncTests
+public sealed partial class MetalStorageCpuSyncTests
 {
     private const ulong Address = 0x71F5_3000_00;
     private const BindingFlags Private = BindingFlags.Static | BindingFlags.NonPublic;

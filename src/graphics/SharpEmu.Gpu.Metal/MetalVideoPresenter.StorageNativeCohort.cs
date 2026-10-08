@@ -14,8 +14,8 @@ internal static partial class MetalVideoPresenter
     // Missing/overflow debt is process-sticky: session reset is not teardown.
     private static void NoteFiniteStorageOwnerRetirementLocked(GuestImage retired)
     {
-        if (!_rgbaStorageRuntimePublicationRequested) return;
-        RecordFiniteStorageOwnerRetirementLocked(retired);
+        if (_rgbaStorageRuntimePublicationRequested) RecordFiniteStorageOwnerRetirementLocked(retired);
+        retired.StorageCpuOrigin?.VolumeWatch?.Release(preparationOnly: false, primary: _guestWorkFailure);
     }
 
     // Shared ordinary bookkeeping core allows managed refusal controls without
@@ -55,7 +55,7 @@ internal static partial class MetalVideoPresenter
     {
         offender = null;
         reason = "sticky-native-cleanup-failure";
-        if (_textureSourceCleanupFailure is not null || _typedCpuSyncCleanupFailure is not null ||
+        if (_singletonVolumeOriginalCleanupFailure is not null || _textureSourceCleanupFailure is not null || _typedCpuSyncCleanupFailure is not null ||
             _r16SelectedRetainCleanupFailure is not null || _selectedNativeOriginalCleanupFailure is not null) return false;
         reason = "unordered-presentation-write-debt";
         if (_unorderedPresentationWriteSequence != 0 ||
@@ -112,6 +112,14 @@ internal static partial class MetalVideoPresenter
             {
                 if (captureOffender && _rgbaStorageRuntimePublicationRequested)
                     offender = CaptureFiniteStorageCohortOffender(pair.Key, other, branch);
+                return false;
+            }
+            reason = "other-image-original-volume-watch-or-version";
+            if (other.TextureType == MtlTextureType3D &&
+                (otherOrigin!.VolumeWatch is null || !IsSingletonVolumeNativeOwnerCurrentLocked(other, otherOrigin)))
+            {
+                if (captureOffender && _rgbaStorageRuntimePublicationRequested)
+                    offender = CaptureFiniteStorageCohortOffender(pair.Key, other, "original-volume-watch-or-version");
                 return false;
             }
             reason = "other-image-physical-overlap";

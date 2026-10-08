@@ -99,7 +99,17 @@ internal static partial class MetalVideoPresenter
         Exception? primary = null;
         try { ExecuteComputeDispatchCore(device, queue, dispatch); }
         catch (Exception failure) { primary = failure; TraceFiniteStorageDispatchRefusal(dispatch, failure); throw; }
-        finally { selectedSeedExecution.Finish(primary); }
+        finally
+        {
+            var volumeCleanup = ReleasePreparedSingletonVolumeOriginals(dispatch.Textures, primary);
+            try { selectedSeedExecution.Finish(primary ?? volumeCleanup); }
+            catch (Exception later) when (primary is not null || volumeCleanup is not null)
+            {
+                try { (primary ?? volumeCleanup)!.Data["MetalSelectedSeedSecondaryCleanup"] = later; } catch { }
+            }
+            if (primary is null && volumeCleanup is not null)
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(volumeCleanup).Throw();
+        }
     }
 
     private static void ExecuteComputeDispatchCore(nint device, nint queue, ComputeGuestDispatch dispatch)
@@ -332,11 +342,13 @@ internal static partial class MetalVideoPresenter
         var nativeFormat = StorageTextureFormat(descriptor);
         var storageCpuOrigin = StorageCpuOrigin(descriptor);
         ValidateStorageCpuSeedSession(storageCpuOrigin); // before any native allocation or live reuse
+        ValidateSingletonVolumeForMaterialization(descriptor, storageCpuOrigin); // tracker checks outside _gate
         if (!_selectedStorageMipAssociations.TryGetValue(descriptor, out _))
             RejectAddressOnlySelectedStorageAlias(descriptor.Address);
         descriptor = PrepareDrawTextureUpload(descriptor);
         var seedLayout = StorageTextureSeedLayout(descriptor, nativeFormat);
         _selectedStorageMipAssociations.TryGetValue(descriptor, out var selected);
+        GuestImage? volumeLive = null;
         lock (_gate)
         {
             ValidateStorageCpuSeedSession(storageCpuOrigin); // revalidate incoming seed after acquiring the live-owner gate
@@ -345,14 +357,32 @@ internal static partial class MetalVideoPresenter
                 _guestImages.TryGetValue(descriptor.Address, out existing))
             {
                 ValidateStorageCpuSeedSession(existing.StorageCpuOrigin);
+                if (storageCpuOrigin?.VolumeWatch is not null && !ReferenceEquals(storageCpuOrigin, existing.StorageCpuOrigin))
+                    throw new InvalidOperationException("Metal singleton volume cannot adopt another live owner's original seed.");
+                if (existing.StorageCpuOrigin?.VolumeWatch is not null &&
+                    !IsSingletonVolumeNativeOwnerCurrentLocked(existing, existing.StorageCpuOrigin))
+                    throw new InvalidOperationException("Metal singleton volume live owner lost its exact original watch/version.");
                 if (selected is not null)
                 {
                     ValidateSelectedStorageMipOwner(_selectedStorageMipOwners[selected.Key], requireObserved: true);
                     ValidateSelectedStorageMipOwner(selected);
                 }
                 ValidateStorageImageView(existing, descriptor, nativeFormat);
-                return existing;
+                if (existing.StorageCpuOrigin?.VolumeWatch is null) return existing;
+                volumeLive = existing;
             }
+        }
+        if (volumeLive is not null)
+        {
+            ValidateSingletonVolumeOriginalContent(volumeLive.StorageCpuOrigin);
+            lock (_gate)
+            {
+                ValidateStorageCpuSeedSession(storageCpuOrigin);
+                if (!_guestImages.TryGetValue(descriptor.Address, out var current) || !ReferenceEquals(current, volumeLive) ||
+                    !IsSingletonVolumeNativeOwnerCurrentLocked(volumeLive, volumeLive.StorageCpuOrigin!))
+                    throw new InvalidOperationException("Metal singleton volume live lookup lost its exact original owner.");
+            }
+            return volumeLive;
         }
 
         if (selected is not null)
@@ -420,6 +450,7 @@ internal static partial class MetalVideoPresenter
             ReplaceDrawTextureContents(image.Texture, descriptor, seedLayout.Pitch, nativeFormat);
             image.Initialized = true;
             image.ContentVersion++;
+            ValidateSingletonVolumeOriginalContent(storageCpuOrigin); // completed synchronous CPU upload, no restamp
             lock (_gate)
             {
                 ValidateStorageCpuSeedSession(storageCpuOrigin); // native upload cannot refresh original ownership
@@ -428,6 +459,11 @@ internal static partial class MetalVideoPresenter
                     _guestImages.TryGetValue(descriptor.Address, out raced))
                 {
                     ValidateStorageCpuSeedSession(raced.StorageCpuOrigin);
+                    // A newly raced volume owner has not passed this call's
+                    // outside-gate original content check. Retry at the ordinary
+                    // producer boundary rather than adopt it by address.
+                    if (storageCpuOrigin?.VolumeWatch is not null || raced.StorageCpuOrigin?.VolumeWatch is not null)
+                        throw new InvalidOperationException("Metal singleton volume construction raced a different original owner.");
                     if (selected is not null)
                     {
                         ValidateSelectedStorageMipOwner(selected);
@@ -439,9 +475,15 @@ internal static partial class MetalVideoPresenter
                 PublishStorageImageLocked(descriptor, selected, image, extent);
                 installed = true;
             }
+            ValidateSingletonVolumeOriginalContent(storageCpuOrigin); // post-publication original veto, no new tuple
             return image;
         }
-        catch (Exception failure) { r16ConstructionFailure = failure; throw; }
+        catch (Exception failure)
+        {
+            r16ConstructionFailure = failure;
+            if (installed && storageCpuOrigin?.VolumeWatch is { } watch) Volatile.Write(ref watch.UnknownProducer, true);
+            throw;
+        }
         finally
         {
             // All construction, upload, raced lookup, and publication failures

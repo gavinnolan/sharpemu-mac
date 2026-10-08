@@ -227,10 +227,27 @@ internal static partial class MetalVideoPresenter
         }
         finally
         {
+            Exception? shutdownFailure = null;
             try { CompletePresenterShutdown(); }
+            catch (Exception failure) { shutdownFailure = failure; throw; }
             finally
             {
-                try { ReleaseSelectedStorageMipImages(); }
+                try
+                {
+                    Exception? volumeCleanup = null;
+                    try { ReleaseSingletonVolumeNativeOriginals(); }
+                    catch (Exception failure) { volumeCleanup = failure; }
+                    try { ReleaseSelectedStorageMipImages(); }
+                    catch (Exception later) when (volumeCleanup is not null || shutdownFailure is not null)
+                    {
+                        try { (shutdownFailure ?? volumeCleanup)!.Data["MetalSelectedMipSecondaryCleanup"] = later; } catch { }
+                    }
+                    if (volumeCleanup is not null)
+                    {
+                        if (shutdownFailure is null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(volumeCleanup).Throw();
+                        try { shutdownFailure.Data["MetalSingletonVolumeShutdownCleanup"] = volumeCleanup; } catch { }
+                    }
+                }
                 finally
                 {
                     MetalPresentationProfile.End();

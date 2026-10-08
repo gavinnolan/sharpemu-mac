@@ -59,6 +59,7 @@ internal static partial class MetalVideoPresenter
                     _guestImages.Add(descriptor.Address, image);
                     nativeAdded = true;
                     _guestImageExtents[descriptor.Address] = extent;
+                    TransferSingletonVolumeOriginalWatchLocked(image, originalSeed);
                     return;
                 }
                 _guestImages.Add(descriptor.Address, image);

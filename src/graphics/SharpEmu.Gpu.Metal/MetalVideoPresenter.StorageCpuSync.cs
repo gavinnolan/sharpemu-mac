@@ -10,13 +10,32 @@ internal static partial class MetalVideoPresenter
 {
     private sealed record StorageCpuSeedOrigin(MetalStorageCpuLayout Layout, ICpuMemory Memory,
         ICpuMappedCopySource Source, CpuMappedCopyObservation Mapping,
-        CpuTextureSnapshotObservation Observation, long Session);
+        CpuTextureSnapshotObservation Observation, long Session)
+    {
+        internal SingletonVolumeOriginalWatch? VolumeWatch { get; init; }
+    }
     private static readonly ConditionalWeakTable<GuestDrawTexture, StorageCpuSeedOrigin> _storageCpuSeedOrigins = new();
     internal static long CurrentStorageCpuSeedSession => Volatile.Read(ref _selectedStorageMipSession);
 
     internal static void RegisterStorageCpuSeedOrigin(GuestDrawTexture texture, MetalStorageCpuLayout layout,
         ICpuMemory memory, ICpuMappedCopySource source, CpuMappedCopyObservation mapping,
         CpuTextureSnapshotObservation observation, long originalSession)
+        => RegisterStorageCpuSeedOriginCore(texture, layout, memory, source, mapping, observation, originalSession, null);
+
+    internal static void RegisterSingletonVolumeStorageCpuSeedOrigin(GuestDrawTexture texture, MetalStorageCpuLayout layout,
+        ICpuMemory memory, ICpuMappedReadWatchSource source, CpuMappedCopyObservation mapping,
+        CpuTextureSnapshotObservation observation, long originalSession, GuestImageWriteTracker.ReadSnapshot read)
+    {
+        if (!MetalSingletonVolumeStorageAdmission.IsQualified(texture) || layout.PhysicalBytes != 65536 ||
+            layout.LinearBytes != 4 || layout.NativeFormat.Format != MtlPixelFormat.Rgba8Uint)
+            throw new InvalidOperationException("Singleton volume origin registration requires its exact original layout.");
+        RegisterStorageCpuSeedOriginCore(texture, layout, memory, source, mapping, observation, originalSession,
+            new SingletonVolumeOriginalWatch(source, mapping, read));
+    }
+
+    private static void RegisterStorageCpuSeedOriginCore(GuestDrawTexture texture, MetalStorageCpuLayout layout,
+        ICpuMemory memory, ICpuMappedCopySource source, CpuMappedCopyObservation mapping,
+        CpuTextureSnapshotObservation observation, long originalSession, SingletonVolumeOriginalWatch? volumeWatch)
     {
         if (!layout.Matches(texture) || !ReferenceEquals(memory, source) ||
             mapping.FootprintAddress != layout.Address || mapping.FootprintByteCount != layout.PhysicalBytes ||
@@ -24,12 +43,14 @@ internal static partial class MetalVideoPresenter
             throw new InvalidOperationException("Typed storage original copy does not match its immutable creation footprint.");
         if (originalSession != CurrentStorageCpuSeedSession)
             throw TypedCpuSyncRejected(layout.Address, "session-changed-during-original-copy");
-        _storageCpuSeedOrigins.Add(texture, new(layout, memory, source, mapping, observation, originalSession));
+        _storageCpuSeedOrigins.Add(texture, new(layout, memory, source, mapping, observation, originalSession)
+            { VolumeWatch = volumeWatch });
         if (originalSession != CurrentStorageCpuSeedSession)
         {
             _storageCpuSeedOrigins.Remove(texture);
             throw TypedCpuSyncRejected(layout.Address, "session-changed-during-original-registration");
         }
+        if (volumeWatch is not null) TrackSingletonVolumeOriginalWatch(volumeWatch, originalSession);
     }
 
     private static void CopyStorageCpuSeedOrigin(GuestDrawTexture source, GuestDrawTexture copy)

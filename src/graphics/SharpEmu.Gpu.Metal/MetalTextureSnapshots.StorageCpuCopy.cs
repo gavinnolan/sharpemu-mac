@@ -18,6 +18,13 @@ internal static partial class MetalTextureSnapshots
         if (!binding.IsStorage || MetalVideoPresenter.TextureSourceGraphEnabled ||
             context.Memory is not ICpuMappedCopySource source) return false;
         var d = binding.Descriptor;
+        var volume = MetalVideoPresenter.SingletonVolumeOriginalCaptureEnabled &&
+            MetalSingletonVolumeStorageAdmission.IsCandidate(d);
+        if (volume && !MetalSingletonVolumeStorageAdmission.IsQualified(d, binding.ResourceDescriptor,
+                binding.IsArrayed, binding.MipLevel, binding.Shape, binding.Access))
+            throw new NotSupportedException("Original singleton volume capture requires the exact captured RGBA8Uint mode27/raw8 origin class.");
+        if (MetalSingletonVolumeStorageAdmission.IsCandidate(d) &&
+            (!volume || source is not ICpuMappedReadWatchSource)) return false; // legacy bytes; no positive cohort proof
         // Preserve native-owner/queued upload selection. Do not capture stale
         // guest bytes over a previously admitted storage producer.
         if (GuestGpu.Current is IGuestImageSnapshotBackend snapshots &&
@@ -46,26 +53,46 @@ internal static partial class MetalTextureSnapshots
             var epoch = HostMemory.MappingGeneration;
             var observation = MetalVideoPresenter.ObserveCpuTextureSnapshot(d.Address, physical, epoch);
             var bytes = new byte[checked((int)physical)];
-            var result = source.TryReadMappedCopy(d.Address, physical, d.Address, bytes, out var mapping);
-            if (originalSession != MetalVideoPresenter.CurrentStorageCpuSeedSession)
-                throw new InvalidOperationException("Metal typed storage session changed during the original copy.");
-            if (result == CpuMappedCopyResult.Unavailable) return false; // unchanged legacy owned-copy path; no dirty authority
-            if (result != CpuMappedCopyResult.Copied || mapping is null) continue;
-            var linear = layout.Decode(bytes);
-            if (!source.IsMappedCopyObservationCurrent(mapping) ||
-                !GuestImageWriteTracker.IsReadSnapshotStable(read) ||
-                !MetalVideoPresenter.IsCpuTextureSnapshotAdmissionStable(d.Address, observation)) continue;
-            var captured = layout.Upload(linear) with
+            CpuMappedCopyObservation? mapping = null;
+            var registered = false;
+            Exception? primary = null;
+            try
             {
-                Sampler = ToGuestSampler(binding.SamplerDescriptor),
-                WriteGeneration = read.Active ? read.Generation : -1,
-            };
-            MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(captured, observation);
-            MetalVideoPresenter.RegisterStorageCpuSeedOrigin(captured, layout, context.Memory, source, mapping, observation, originalSession);
-            if (originalSession != MetalVideoPresenter.CurrentStorageCpuSeedSession)
-                throw new InvalidOperationException("Metal typed storage session changed after original-copy registration.");
-            texture = captured;
-            return true;
+                var result = volume
+                    ? ((ICpuMappedReadWatchSource)source).TryReadMappedCopyWithWriteWatch(d.Address, physical, d.Address, bytes, out mapping)
+                    : source.TryReadMappedCopy(d.Address, physical, d.Address, bytes, out mapping);
+                if (originalSession != MetalVideoPresenter.CurrentStorageCpuSeedSession)
+                    throw new InvalidOperationException("Metal typed storage session changed during the original copy.");
+                if (result == CpuMappedCopyResult.Unavailable) return false; // unchanged legacy owned-copy path; no dirty authority
+                if (result != CpuMappedCopyResult.Copied || mapping is null) continue;
+                if (volume && (mapping.FootprintAddress != d.Address || mapping.FootprintByteCount != physical ||
+                    mapping.SourceAddress != d.Address || mapping.SourceByteCount != physical))
+                    throw new InvalidOperationException("Original singleton volume copy returned inconsistent full-block metadata.");
+                var linear = layout.Decode(bytes);
+                if (!source.IsMappedCopyObservationCurrent(mapping) ||
+                    volume && !((ICpuMappedReadWatchSource)source).IsMappedCopyWriteWatchCurrent(mapping) ||
+                    !GuestImageWriteTracker.IsReadSnapshotStable(read) ||
+                    !MetalVideoPresenter.IsCpuTextureSnapshotAdmissionStable(d.Address, observation)) continue;
+                var captured = layout.Upload(linear) with
+                {
+                    Sampler = ToGuestSampler(binding.SamplerDescriptor),
+                    WriteGeneration = read.Active ? read.Generation : -1,
+                };
+                MetalVideoPresenter.RegisterCpuTextureSnapshotProvenance(captured, observation);
+                if (volume) MetalVideoPresenter.RegisterSingletonVolumeStorageCpuSeedOrigin(captured, layout, context.Memory,
+                    (ICpuMappedReadWatchSource)source, mapping, observation, originalSession, read);
+                else MetalVideoPresenter.RegisterStorageCpuSeedOrigin(captured, layout, context.Memory, source, mapping, observation, originalSession);
+                if (originalSession != MetalVideoPresenter.CurrentStorageCpuSeedSession)
+                    throw new InvalidOperationException("Metal typed storage session changed after original-copy registration.");
+                texture = captured;
+                registered = true;
+                return true;
+            }
+            catch (Exception failure) { primary = failure; throw; }
+            finally
+            {
+                if (volume && !registered) MetalVideoPresenter.ReleaseUnregisteredSingletonVolumeWatch(source, mapping, primary);
+            }
         }
         throw new InvalidOperationException($"Metal typed storage mapping/content changed across three original-copy attempts at 0x{d.Address:X}.");
     }

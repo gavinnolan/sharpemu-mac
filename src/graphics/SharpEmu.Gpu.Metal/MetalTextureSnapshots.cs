@@ -218,8 +218,9 @@ internal static partial class MetalTextureSnapshots
 
             return textures;
         }
-        catch
+        catch (Exception failure)
         {
+            MetalVideoPresenter.ReleaseFailedPreparedSingletonVolumeOriginals(textures, unreturnedTexture, failure);
             MetalVideoPresenter.ReleasePreparedTextureSources(textures);
             if (unreturnedTexture is not null)
                 MetalVideoPresenter.ReleasePreparedTextureSource(unreturnedTexture);

@@ -95,6 +95,7 @@ internal static partial class MetalVideoPresenter
             Initialized = true;
             GpuWritten = true;
             ContentVersion++;
+            NoteSingletonVolumeOriginalVersion(this, diagnosticKind);
             if (_imageProvenanceEnabled) DiagnosticMutation = ImageDiagnosticContext(diagnosticKind);
         }
 

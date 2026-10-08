@@ -33,7 +33,8 @@ internal sealed class MetalStorageCpuLayout
     {
         if (!MetalSingletonArrayStorageAdmission.IsQualified(texture) &&
             !MetalBgra1024ArrayStorageAdmission.IsQualified(texture) &&
-            !MetalR8FourKArrayStorageAdmission.IsQualified(texture)) return null;
+            !MetalR8FourKArrayStorageAdmission.IsQualified(texture) &&
+            (!MetalVideoPresenter.SingletonVolumeOriginalCaptureEnabled || !MetalSingletonVolumeStorageAdmission.IsQualified(texture))) return null;
         var format = MetalVideoPresenter.StorageTextureFormat(texture);
         var physical = MetalR8FourKArrayStorageAdmission.IsQualified(texture) ? 8847360UL :
             MetalBgra1024ArrayStorageAdmission.IsQualified(texture) ? 4194304UL : 65536UL;
@@ -51,6 +52,15 @@ internal sealed class MetalStorageCpuLayout
     {
         if ((ulong)physical.Length != PhysicalBytes)
             throw new InvalidOperationException("Typed CPU image copy does not contain its exact physical footprint.");
+        if (MetalSingletonVolumeStorageAdmission.IsQualified(_template with { Descriptor = _raw }))
+        {
+            // The already accepted aligned 1x1x1 class owns a whole64KiB block,
+            // but uploads exactly its four origin bytes. Never use XY detiling
+            // as a general XYZ layout or normalize Uint through display RGBA.
+            if (LinearBytes != 4 || NativeFormat.Format != MtlPixelFormat.Rgba8Uint)
+                throw new InvalidOperationException("Qualified singleton volume lost its exact Uint origin layout.");
+            return physical[..4].ToArray();
+        }
         var linear = new byte[LinearBytes];
         if (!GnmTiling.TryDetile(physical, linear, _template.TileMode,
                 checked((int)Pitch), checked((int)Height), checked((int)NativeFormat.BytesPerPixel)))
