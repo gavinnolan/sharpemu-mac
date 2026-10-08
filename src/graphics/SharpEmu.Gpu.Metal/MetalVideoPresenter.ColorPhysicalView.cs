@@ -105,7 +105,7 @@ internal static partial class MetalVideoPresenter
                     raw[1] == (0xC4700000u | (uint)((d.Address >> 40) & 0xFF)) &&
                     raw[2] == 0x000FC01F && raw[3] == 0x91B00FAC && raw[4] == 0 &&
                     raw[5] == 0x00700000 && raw[6] == 0 && raw[7] == 0 &&
-                    !binding.DynamicMip && binding.MipLevel == 0 && !binding.IsArrayed &&
+                    !binding.DynamicMip && binding.MipLevel == 0 && binding.Dimension == 1 && !binding.IsArrayed &&
                     binding.Access != GuestImageAccess.Unknown &&
                     (binding.Access & ~(GuestImageAccess.Read | GuestImageAccess.Write)) == 0 &&
                     (binding.IsStorage || binding.Access == GuestImageAccess.Read) &&

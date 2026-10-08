@@ -118,7 +118,7 @@ public sealed partial class MetalRenderHostTests
 
     [Theory]
     [InlineData("raw-flags")] [InlineData("incomplete")] [InlineData("dynamic")]
-    [InlineData("overlap")] [InlineData("domain")]
+    [InlineData("overlap")] [InlineData("domain")] [InlineData("dimension")]
     public void ColorPhysicalUnsupportedViewRejectsBeforeAnyCpuRead(string kind)
     {
         using var enabled = new ColorPhysicalFlagScope();
@@ -134,7 +134,7 @@ public sealed partial class MetalRenderHostTests
             Assert.True(AgcBackendServices.TryDecodeTextureDescriptor(raw, out var decoded));
             binding = binding with { Descriptor = decoded };
         }
-        binding = binding with { ResourceDescriptor = raw, DynamicMip = kind == "dynamic" };
+        binding = binding with { ResourceDescriptor = raw, DynamicMip = kind == "dynamic", Dimension = kind == "dimension" ? 2u : 1u };
         var actualMemory = kind == "domain" ? new ColorPhysicalNeverReadMemory() : memory;
         Assert.Throws<NotSupportedException>(() => MetalTextureSnapshots.CreateTextureSnapshots(
             new CpuContext(actualMemory, Generation.Gen5), [binding], out _));
