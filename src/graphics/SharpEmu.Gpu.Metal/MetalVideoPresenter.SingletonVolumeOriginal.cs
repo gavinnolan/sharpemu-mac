@@ -210,8 +210,8 @@ internal static partial class MetalVideoPresenter
         ReferenceEquals(watch.Image, image) && ReferenceEquals(image.StorageCpuOrigin, origin) &&
         image.Initialized && ReferenceEquals(image.StorageCpuLayout, origin.Layout) &&
         image.Texture != 0 && image.Texture == watch.Texture && image.ContentVersion == watch.Version &&
-        image.TextureType == MtlTextureType3D && image.Depth == 1 && image.ArrayLength == 1 &&
-        image.Width == 1 && image.Height == 1 && image.Format == MtlPixelFormat.Rgba8Uint &&
+        image.TextureType == MtlTextureType3D && image.Depth == origin.Layout.Depth && image.ArrayLength == 1 &&
+        image.Width == origin.Layout.Width && image.Height == origin.Layout.Height && image.Format == origin.Layout.NativeFormat.Format &&
         origin.Session == CurrentStorageCpuSeedSession;
 
     private static void TransferSingletonVolumeOriginalWatchLocked(GuestImage image, StorageCpuSeedOrigin origin)
@@ -220,8 +220,8 @@ internal static partial class MetalVideoPresenter
         if (_closed || _guestWorkFailure is not null || _singletonVolumeOriginalCleanupFailure is not null ||
             !ReferenceEquals(_guestMemory, origin.Memory) || !watch.IsCurrent || watch.Image is not null ||
             !image.Initialized || image.Texture == 0 || image.ContentVersion != 1 ||
-            image.TextureType != MtlTextureType3D || image.Format != MtlPixelFormat.Rgba8Uint ||
-            image.Width != 1 || image.Height != 1 || image.Depth != 1 || image.ArrayLength != 1 ||
+            image.TextureType != MtlTextureType3D || image.Format != origin.Layout.NativeFormat.Format ||
+            image.Width != origin.Layout.Width || image.Height != origin.Layout.Height || image.Depth != origin.Layout.Depth || image.ArrayLength != 1 ||
             !ReferenceEquals(image.StorageCpuLayout, origin.Layout) ||
             !ReferenceEquals(image.StorageCpuOrigin, origin) || origin.Session != CurrentStorageCpuSeedSession ||
             _guestImages.Count > 128 || !_guestImages.TryGetValue(origin.Layout.Address, out var current) ||

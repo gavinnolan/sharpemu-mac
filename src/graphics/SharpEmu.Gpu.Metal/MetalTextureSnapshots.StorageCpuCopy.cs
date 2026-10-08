@@ -18,12 +18,14 @@ internal static partial class MetalTextureSnapshots
         if (!binding.IsStorage || MetalVideoPresenter.TextureSourceGraphEnabled ||
             context.Memory is not ICpuMappedCopySource source) return false;
         var d = binding.Descriptor;
-        var volume = MetalVideoPresenter.SingletonVolumeOriginalCaptureEnabled &&
+        var linearVolume = MetalVideoPresenter.SingletonVolumeOriginalCaptureEnabled && d.Type == 10 && d.TileMode == 0;
+        var tiledSingleton = MetalVideoPresenter.SingletonVolumeOriginalCaptureEnabled &&
             MetalSingletonVolumeStorageAdmission.IsCandidate(d);
-        if (volume && !MetalSingletonVolumeStorageAdmission.IsQualified(d, binding.ResourceDescriptor,
+        var volume = linearVolume || tiledSingleton;
+        if (tiledSingleton && !MetalSingletonVolumeStorageAdmission.IsQualified(d, binding.ResourceDescriptor,
                 binding.IsArrayed, binding.MipLevel, binding.Shape, binding.Access))
             throw new NotSupportedException("Original singleton volume capture requires the exact captured RGBA8Uint mode27/raw8 origin class.");
-        if (MetalSingletonVolumeStorageAdmission.IsCandidate(d) &&
+        if ((linearVolume || MetalSingletonVolumeStorageAdmission.IsCandidate(d)) &&
             (!volume || source is not ICpuMappedReadWatchSource)) return false; // legacy bytes; no positive cohort proof
         // Preserve native-owner/queued upload selection. Do not capture stale
         // guest bytes over a previously admitted storage producer.
@@ -31,11 +33,20 @@ internal static partial class MetalTextureSnapshots
             snapshots.IsGuestImageUploadKnown(d.Address, d.Format, d.NumberType)) return false;
         var physical = d.Width == 3840 && d.Height == 2160 ? 8847360UL :
             d.Width == 1024 && d.Height == 1024 ? 4194304UL : 65536UL;
+        var pitch = linearVolume ? GetLinearTexturePitch(Math.Max(d.Width, d.Pitch), d.Height, d.Format) : d.Pitch;
         var template = new GuestDrawTexture(d.Address, d.Width, d.Height, d.Format, d.NumberType, [],
-            IsFallback: false, IsStorage: true, Pitch: d.Pitch, TileMode: d.TileMode, DstSelect: d.DstSelect,
-            ArrayedView: binding.IsArrayed, Type: d.Type, Depth: 1, SourceByteCount: physical,
+            IsFallback: false, IsStorage: true, Pitch: pitch, TileMode: d.TileMode, DstSelect: d.DstSelect,
+            ArrayedView: binding.IsArrayed, Type: d.Type, Depth: volume ? d.Depth : 1, SourceByteCount: physical,
             Descriptor: binding.ResourceDescriptor?.ToArray(), Shape: binding.Shape, Access: binding.Access,
             MipLevel: binding.MipLevel, BaseMipLevel: d.BaseLevel, ResourceMipLevels: d.MaxMip + 1);
+        if (linearVolume)
+        {
+            var nativeFormat = MetalVideoPresenter.StorageTextureFormat(template);
+            physical = MetalVideoPresenter.StorageTextureSeedLayout(template, nativeFormat).RequiredBytes;
+            if (physical == 0 || physical > MaximumSnapshotBytes)
+                throw SnapshotBudgetExceeded(d, physical, "linear storage-volume original");
+            template = template with { SourceByteCount = physical };
+        }
         var layout = MetalStorageCpuLayout.TryCreate(template);
         if (layout is null) return false;
         // The original copy belongs to this session even if a reset races a
@@ -67,7 +78,7 @@ internal static partial class MetalTextureSnapshots
                 if (result != CpuMappedCopyResult.Copied || mapping is null) continue;
                 if (volume && (mapping.FootprintAddress != d.Address || mapping.FootprintByteCount != physical ||
                     mapping.SourceAddress != d.Address || mapping.SourceByteCount != physical))
-                    throw new InvalidOperationException("Original singleton volume copy returned inconsistent full-block metadata.");
+                    throw new InvalidOperationException("Original storage volume copy returned inconsistent full pitched/block metadata.");
                 var linear = layout.Decode(bytes);
                 if (!source.IsMappedCopyObservationCurrent(mapping) ||
                     volume && !((ICpuMappedReadWatchSource)source).IsMappedCopyWriteWatchCurrent(mapping) ||

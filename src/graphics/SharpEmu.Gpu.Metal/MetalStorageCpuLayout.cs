@@ -15,6 +15,9 @@ internal sealed class MetalStorageCpuLayout
     internal ulong Address => _template.Address;
     internal uint Width => _template.Width;
     internal uint Height => _template.Height;
+    internal uint Depth => _template.Depth;
+    internal bool IsLinearVolume => _template.IsStorage && _template.Type == 10 && _template.TileMode == 0;
+    internal bool IsVolume => IsLinearVolume || MetalSingletonVolumeStorageAdmission.IsQualified(_template with { Descriptor = _raw });
     internal uint Pitch => _template.Pitch;
     internal ulong PhysicalBytes { get; }
     internal int LinearBytes { get; }
@@ -26,11 +29,26 @@ internal sealed class MetalStorageCpuLayout
         _template = texture with { Descriptor = null, RgbaPixels = [], Sampler = default };
         NativeFormat = format;
         PhysicalBytes = texture.SourceByteCount;
-        LinearBytes = checked((int)((ulong)texture.Width * texture.Height * format.BytesPerPixel));
+        // Linear 3D replaceRegion walks complete pitched image/slice strides.
+        // Retain padded bytes, not a tight XY plane or tight native texel count.
+        LinearBytes = texture.Type == 10 && texture.TileMode == 0
+            ? checked((int)MetalVideoPresenter.StorageTextureSeedLayout(texture, format).RequiredBytes)
+            : checked((int)((ulong)texture.Width * texture.Height * format.BytesPerPixel));
     }
 
     internal static MetalStorageCpuLayout? TryCreate(GuestDrawTexture texture)
     {
+        if (MetalVideoPresenter.SingletonVolumeOriginalCaptureEnabled && texture.IsStorage && texture.Type == 10 && texture.TileMode == 0)
+        {
+            // Reuse the accepted storage/native format and shape policy. This
+            // original-copy association neither admits a new format nor layout.
+            var linearFormat = MetalVideoPresenter.StorageTextureFormat(texture);
+            var seed = MetalVideoPresenter.StorageTextureSeedLayout(texture, linearFormat);
+            if (seed.RequiredBytes == 0 || seed.RequiredBytes > 128UL * 1024 * 1024 ||
+                texture.SourceByteCount != seed.RequiredBytes || texture.Address > ulong.MaxValue - seed.RequiredBytes ||
+                !texture.CpuSnapshotStable) return null;
+            return new(texture, linearFormat);
+        }
         if (!MetalSingletonArrayStorageAdmission.IsQualified(texture) &&
             !MetalBgra1024ArrayStorageAdmission.IsQualified(texture) &&
             !MetalR8FourKArrayStorageAdmission.IsQualified(texture) &&
@@ -52,6 +70,14 @@ internal sealed class MetalStorageCpuLayout
     {
         if ((ulong)physical.Length != PhysicalBytes)
             throw new InvalidOperationException("Typed CPU image copy does not contain its exact physical footprint.");
+        if (IsLinearVolume)
+        {
+            // Existing linear-volume upload consumes every pitched row/slice,
+            // including final padding. Keep the original bytes and native stride.
+            if ((ulong)LinearBytes != PhysicalBytes)
+                throw new InvalidOperationException("Linear volume copy lost its full pitched/sliced footprint.");
+            return physical.ToArray();
+        }
         if (MetalSingletonVolumeStorageAdmission.IsQualified(_template with { Descriptor = _raw }))
         {
             // The already accepted aligned 1x1x1 class owns a whole64KiB block,

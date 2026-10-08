@@ -35,6 +35,8 @@ public sealed partial class MetalImmutableGpuVersionTests
         public TrackedCpuMemory? Memory;
         public object? OriginalOrigin;
         public object? Image;
+        public readonly List<GuestDrawTexture> VolumeSeeds = [];
+        public readonly List<object> VolumeImages = [];
     }
 
     [FiniteStoragePublicationNativeFact]
@@ -65,11 +67,11 @@ public sealed partial class MetalImmutableGpuVersionTests
     public void ActualRuntimeLateDirtyGenerationAfterCanonicalVersionKeepsStickyDebtAndNoEop() =>
         RunActualRuntimeTwoTypedPublications(false, rgba: true, lateFailure: "generation");
 
-    private void RunActualRuntimeTwoTypedPublications(bool overlappingCpuWrite, bool rgba = false, bool mixedBuffer = false, string? lateFailure = null)
+    private void RunActualRuntimeTwoTypedPublications(bool overlappingCpuWrite, bool rgba = false, bool mixedBuffer = false, string? lateFailure = null, bool originalVolumes = false)
     {
         Assert.True(DeviceRequested());
         var imageBytes = rgba ? 4194304 : 65536;
-        var allocationBytes = imageBytes + 65536;
+        var allocationBytes = imageBytes + (originalVolumes ? 3 : 1) * 65536;
         var storeOffset = rgba ? Bgra1024Oracle.Offset(257, 511) : 0;
         Assert.Equal(RuntimeInformation.ProcessArchitecture.ToString(), Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_ARCH"));
         Assert.Equal(RuntimeInformation.FrameworkDescription, Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_FRAMEWORK"));
@@ -129,6 +131,8 @@ public sealed partial class MetalImmutableGpuVersionTests
             var binding = new AgcExports.TranslatedImageBinding(descriptor, true, 0, [], IsArrayed: true,
                 ResourceDescriptor: raw, Shape: new ShaderImageShape(false, true, true, false, rgba ? TextureNumericClass.Float : TextureNumericClass.Uint),
                 Access: GuestImageAccess.Write);
+            Assert.True(ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_KERNEL_PAGE"), out var kernelPage));
+            if (originalVolumes) MaterializeOriginalVolumes();
             var first = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [binding], out _));
             Assert.Equal(rgba ? Bgra1024Oracle.LinearSeed() : expected.AsSpan(0, 4).ToArray(), first.RgbaPixels);
             var originalOrigin = Call("StorageCpuOrigin", first)!;
@@ -140,7 +144,6 @@ public sealed partial class MetalImmutableGpuVersionTests
             Assert.All(originalMapping.Segments, segment => Assert.True(segment.BackingIdentity > 0 && segment.MappingIncarnation > 0));
             Assert.All(originalMapping.Segments, segment => Assert.Equal(
                 GuestPageProtection.Read | GuestPageProtection.Write, segment.GuestAccess));
-            Assert.True(ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_KERNEL_PAGE"), out var kernelPage));
             Assert.All(originalMapping.Segments, segment => Assert.Equal(kernelPage, segment.ProviderPageSize));
             output.WriteLine($"finite-storage-native provider_kernel_page={kernelPage}; original_footprint={originalMapping.FootprintByteCount}");
             var observation = StorageMember(originalOrigin, "Observation")!;
@@ -196,6 +199,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             owners.Image = image;
             Assert.NotNull(image);
             AssertFiniteDebtSettled(image);
+            if (originalVolumes) ValidateOriginalVolumes();
             var ownOrigin = StorageMember(image, "StorageCpuOrigin")!;
             var ownMapping = (CpuMappedCopyObservation)StorageMember(ownOrigin, "Mapping")!;
             Assert.NotSame(originalMapping, ownMapping);
@@ -244,6 +248,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                 Assert.Equal(expected, ReadCanonical());
                 state.AssertFinitePipelineCompleted(secondShader);
                 AssertFiniteDebtSettled(image);
+                if (originalVolumes) ValidateOriginalVolumes();
                 var secondOrigin = StorageMember(image, "StorageCpuOrigin")!;
                 Assert.NotSame(ownMapping, StorageMember(secondOrigin, "Mapping"));
                 Assert.Equal(originalMapping.Segments, ((CpuMappedCopyObservation)StorageMember(secondOrigin, "Mapping")!).Segments);
@@ -252,6 +257,71 @@ public sealed partial class MetalImmutableGpuVersionTests
                 output.WriteLine("finite-storage-native second status=4; all-owned canonical bytes including disjoint EOP verified");
             }
             output.WriteLine($"Actual Mac/PVM/Tracked original-copy→SubmitCompute→Drain→typedGPU staging→status4→checked canonical scatter→EOP; two-publication overlap={overlappingCpuWrite}; exact typed array; all-owned canonical bytes compared. Ordinary participating route only; no native/JIT writer or guest ISA qualification.");
+
+            void MaterializeOriginalVolumes()
+            {
+                // Both source scopes remain within the continuously owned PVM
+                // mapping. Their native writes are deliberately NOT published;
+                // the tested canonical publisher remains the RGBA1024 class.
+                using var volumeQueue = MetalVideoPresenter.EnterGuestQueue("finite.volume.native", 1);
+                for (var kind = 0; kind < 2; kind++)
+                {
+                    var volumeAddress = address + (ulong)imageBytes + (ulong)(kind + 1) * 65536;
+                    uint[] volumeRaw = kind == 0
+                        ? [(uint)(volumeAddress >> 8), (uint)(volumeAddress >> 40) | 0x03C00000, 0, 0xA1B00FAC, 0, 0x00700000, 0, 0]
+                        : [(uint)(volumeAddress >> 8), (uint)(volumeAddress >> 40) | 0xC3C00000, 0x0003C003, 0xA0000FAC, 15, 0x00700000, 0, 0];
+                    Assert.True(AgcBackendServices.TryDecodeTextureDescriptor(volumeRaw, out var volumeDescriptor));
+                    var volumeBinding = new AgcExports.TranslatedImageBinding(volumeDescriptor, true, 0, [], IsArrayed: false,
+                        ResourceDescriptor: volumeRaw, Shape: new ShaderImageShape(true, false, true, false, TextureNumericClass.Uint), Access: GuestImageAccess.Write);
+                    var seed = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [volumeBinding], out _));
+                    owners.VolumeSeeds.Add(seed);
+                    Assert.Equal(65536UL, seed.SourceByteCount);
+                    var initial = expected.AsSpan(imageBytes + (kind + 1) * 65536, 65536);
+                    Assert.Equal(initial[..(kind == 0 ? 4 : 65536)].ToArray(), seed.RgbaPixels);
+                    var original = Call("StorageCpuOrigin", seed)!;
+                    var mapping = (CpuMappedCopyObservation)StorageMember(original, "Mapping")!;
+                    Assert.Equal(volumeAddress, mapping.FootprintAddress); Assert.Equal(65536UL, mapping.FootprintByteCount);
+                    Assert.All(mapping.Segments, part => Assert.Equal(kernelPage, part.ProviderPageSize));
+                    var shader = state.VolumeOriginalShader(seed.Width, seed.Height, seed.Depth);
+                    var sequence = state.AdmitFiniteStorage(seed, shader);
+                    Assert.True(sequence > 0);
+                    // Actual frontend disposal after public Submit, BEFORE the
+                    // real Drain transfers ownership to the native image.
+                    MetalVideoPresenter.ReleasePreparedTextureSources([seed]);
+                    Assert.True(((ICpuMappedReadWatchSource)memory).IsMappedCopyWriteWatchCurrent(mapping));
+                    Field("_finiteStorageWritebackEnabled").SetValue(null, false);
+                    try { state.DrainWithControlledBudget(); }
+                    finally { Field("_finiteStorageWritebackEnabled").SetValue(null, true); }
+                    Call("WaitForFlushedGuestCommands");
+                    Assert.True(MetalVideoPresenter.WaitForGuestWork(sequence, 0));
+                    state.AssertFinitePipelineCompleted(shader);
+                    var nativeImage = ((IDictionary)Field("_guestImages").GetValue(null)!)[volumeAddress]!;
+                    owners.VolumeImages.Add(nativeImage);
+                    Assert.Same(original, StorageMember(nativeImage, "StorageCpuOrigin"));
+                    Assert.Equal(7u, StorageMember(nativeImage,"TextureType")); Assert.Equal(73u,(uint)(MtlPixelFormat)StorageMember(nativeImage,"Format")!);
+                    Assert.Equal(2, StorageMember(nativeImage,"ContentVersion"));
+                    var tight = new byte[checked((int)(seed.Width*seed.Height*seed.Depth*4))];
+                    for (uint z=0;z<seed.Depth;z++) for(uint y=0;y<seed.Height;y++)
+                        initial.Slice(checked((int)((z*seed.Height+y)*seed.Pitch*4)), checked((int)(seed.Width*4)))
+                            .CopyTo(tight.AsSpan(checked((int)((z*seed.Height+y)*seed.Width*4))));
+                    new byte[]{17,34,51,68}.CopyTo(tight,tight.Length-4);
+                    Assert.Equal(tight, ReadOriginalVolume((nint)StorageMember(nativeImage,"Texture")!,seed.Width,seed.Height,seed.Depth));
+                    Assert.Equal(expected,ReadCanonical()); // full backing/padding and neighboring scopes untouched
+                    output.WriteLine($"original-volume-native kind={kind}; shape={seed.Width}x{seed.Height}x{seed.Depth}; pitch={seed.Pitch}; original=65536; native_status=4; all_native_bytes=true; all_canonical_neighbors=true; frontend_release_before_drain=true");
+                }
+            }
+
+            void ValidateOriginalVolumes()
+            {
+                foreach(var nativeImage in owners.VolumeImages)
+                {
+                    var original = StorageMember(nativeImage,"StorageCpuOrigin")!;
+                    var mapping = (CpuMappedCopyObservation)StorageMember(original,"Mapping")!;
+                    Assert.True(((ICpuMappedReadWatchSource)memory).IsMappedCopyWriteWatchCurrent(mapping));
+                    lock(Field("_gate").GetValue(null)!) Assert.True((bool)Call("IsSingletonVolumeNativeOwnerCurrentLocked",nativeImage,original)!);
+                }
+                output.WriteLine("original-volume-native disjoint canonical Applied/publication/EOP retained BOTH exact native watch owners");
+            }
 
             GuestMemoryBuffer CaptureBuffer()
             {
@@ -313,6 +383,30 @@ public sealed partial class MetalImmutableGpuVersionTests
                         if (handle != 0) Attempt(() => MetalNative.SendVoid(handle, MetalNative.Selector("release")));
                     }
                 });
+                // Consume each exact native/watch retain only after all own
+                // command buffers completed. Unknown cleanup retains all PVM
+                // backing; never release mappings after an uncertain outcome.
+                foreach(var seed in owners.VolumeSeeds)
+                {
+                    Attempt(() =>
+                    {
+                        lock(Field("_gate").GetValue(null)!)
+                        {
+                            var registry=(IDictionary)Field("_guestImages").GetValue(null)!;
+                            var candidate=registry[seed.Address];
+                            var original=Call("StorageCpuOrigin",seed);
+                            if(candidate is null || original is null || !ReferenceEquals(StorageMember(candidate,"StorageCpuOrigin"),original)) return;
+                            Call("NoteFiniteStorageOwnerRetirementLocked",candidate);
+                            registry.Remove(seed.Address); ((IDictionary)Field("_guestImageExtents").GetValue(null)!).Remove(seed.Address);
+                            var handle=(nint)StorageMember(candidate,"Texture")!;
+                            candidate.GetType().GetField("Texture")!.SetValue(candidate,(nint)0);
+                            Attempt(()=>candidate.GetType().GetMethod("ReleaseSnapshot")!.Invoke(candidate,[]));
+                            if(handle!=0) Attempt(()=>MetalNative.SendVoid(handle,MetalNative.Selector("release")));
+                        }
+                    });
+                    Attempt(()=>MetalVideoPresenter.ReleasePreparedTextureSources([seed]));
+                    Attempt(()=>GuestImageWriteTracker.Untrack(seed.Address));
+                }
                 if (address != 0) Attempt(() => GuestImageWriteTracker.Untrack(address));
                 if (state is not null) Attempt(state.Dispose);
                 // Do not free its mappings after uncertain native teardown.

@@ -26,9 +26,9 @@ internal static partial class MetalVideoPresenter
         ICpuMemory memory, ICpuMappedReadWatchSource source, CpuMappedCopyObservation mapping,
         CpuTextureSnapshotObservation observation, long originalSession, GuestImageWriteTracker.ReadSnapshot read)
     {
-        if (!MetalSingletonVolumeStorageAdmission.IsQualified(texture) || layout.PhysicalBytes != 65536 ||
-            layout.LinearBytes != 4 || layout.NativeFormat.Format != MtlPixelFormat.Rgba8Uint)
-            throw new InvalidOperationException("Singleton volume origin registration requires its exact original layout.");
+        if (!layout.IsVolume || !layout.Matches(texture) || texture.Type != 10 ||
+            texture.Depth != layout.Depth || texture.RgbaPixels.Length != layout.LinearBytes)
+            throw new InvalidOperationException("Storage volume origin registration requires its exact complete original layout.");
         RegisterStorageCpuSeedOriginCore(texture, layout, memory, source, mapping, observation, originalSession,
             new SingletonVolumeOriginalWatch(source, mapping, read));
     }
