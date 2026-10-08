@@ -30,6 +30,20 @@ internal sealed partial class HostManagedWriteIntervals
             ReferenceEquals(owner, expected) && Volatile.Read(ref Released) == 0 && Volatile.Read(ref Revoked) == 0 &&
             Volatile.Read(ref owner.coverageIncomplete) == 0 && Volatile.Read(ref owner.admission) == PublicationBit &&
             Volatile.Read(ref Revoked) == 0 && Volatile.Read(ref Released) == 0;
+        internal bool CoversDuringPublication(HostManagedWriteIntervals expected, ReadOnlySpan<PhysicalRun> requested)
+        {
+            if (!IsUnrevokedDuringPublication(expected) || requested.IsEmpty) return false;
+            foreach (var run in requested)
+            {
+                if (run.Count == 0 || run.Offset > owner.backing.Size || run.Count > owner.backing.Size - run.Offset) return false;
+                var covered = false;
+                foreach (var original in Runs)
+                    if (run.Offset >= original.Offset && run.Offset - original.Offset <= original.Count &&
+                        run.Count <= original.Count - (run.Offset - original.Offset)) { covered = true; break; }
+                if (!covered) return false;
+            }
+            return IsUnrevokedDuringPublication(expected);
+        }
         internal void Release()
         {
             if (Interlocked.Exchange(ref Released, 1) != 0) return;
@@ -64,14 +78,31 @@ internal sealed partial class HostManagedWriteIntervals
         finally { ReleasePublication(); }
     }
 
-    private void InvalidateReadWatches(ulong offset, ulong count, bool unknown = false)
+    // Cold allocation under the exact exclusive reservation. This successor
+    // remains private until the transaction fully applies its own bytes.
+    internal ReadWatch? TryCreatePublicationSuccessor(ReadWatch original)
+    {
+        if (!original.IsUnrevokedDuringPublication(this)) return null;
+        var installed = Volatile.Read(ref readWatches);
+        if (installed is null) return null;
+        var successor = new ReadWatch(this, original.Runs);
+        for (var index = 0; index < installed.Length; index++)
+        {
+            successor.Slot = index;
+            if (Interlocked.CompareExchange(ref installed[index], successor, null) is null)
+            { Interlocked.Increment(ref activeReadWatches); return successor; }
+        }
+        return null;
+    }
+
+    private void InvalidateReadWatches(ulong offset, ulong count, bool unknown = false, ReadWatch? unpublishedSuccessor = null)
     {
         if (Volatile.Read(ref activeReadWatches) == 0) return;
         var installed = Volatile.Read(ref readWatches)!;
         for (var index = 0; index < installed.Length; index++)
         {
             var watch = Volatile.Read(ref installed[index]);
-            if (watch is null || Volatile.Read(ref watch.Released) != 0) continue;
+            if (watch is null || Volatile.Read(ref watch.Released) != 0 || ReferenceEquals(watch, unpublishedSuccessor)) continue;
             foreach (var run in watch.Runs)
                 if (unknown || offset < run.Offset + run.Count && run.Offset < offset + count)
                 { Volatile.Write(ref watch.Revoked, 1); break; }

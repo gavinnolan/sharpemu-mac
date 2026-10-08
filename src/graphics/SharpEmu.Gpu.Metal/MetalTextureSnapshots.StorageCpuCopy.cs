@@ -49,6 +49,8 @@ internal static partial class MetalTextureSnapshots
         }
         var layout = MetalStorageCpuLayout.TryCreate(template);
         if (layout is null) return false;
+        var withWriteWatch = volume || MetalVideoPresenter.RgbaStorageRuntimePublicationRequested &&
+            MetalBgra1024ArrayStorageAdmission.IsQualified(template) && source is ICpuMappedReadWatchSource;
         // The original copy belongs to this session even if a reset races a
         // later capture attempt. Never stamp old bytes with a newer session.
         var originalSession = MetalVideoPresenter.CurrentStorageCpuSeedSession;
@@ -69,19 +71,19 @@ internal static partial class MetalTextureSnapshots
             Exception? primary = null;
             try
             {
-                var result = volume
+                var result = withWriteWatch
                     ? ((ICpuMappedReadWatchSource)source).TryReadMappedCopyWithWriteWatch(d.Address, physical, d.Address, bytes, out mapping)
                     : source.TryReadMappedCopy(d.Address, physical, d.Address, bytes, out mapping);
                 if (originalSession != MetalVideoPresenter.CurrentStorageCpuSeedSession)
                     throw new InvalidOperationException("Metal typed storage session changed during the original copy.");
                 if (result == CpuMappedCopyResult.Unavailable) return false; // unchanged legacy owned-copy path; no dirty authority
                 if (result != CpuMappedCopyResult.Copied || mapping is null) continue;
-                if (volume && (mapping.FootprintAddress != d.Address || mapping.FootprintByteCount != physical ||
+                if (withWriteWatch && (mapping.FootprintAddress != d.Address || mapping.FootprintByteCount != physical ||
                     mapping.SourceAddress != d.Address || mapping.SourceByteCount != physical))
                     throw new InvalidOperationException("Original storage volume copy returned inconsistent full pitched/block metadata.");
                 var linear = layout.Decode(bytes);
                 if (!source.IsMappedCopyObservationCurrent(mapping) ||
-                    volume && !((ICpuMappedReadWatchSource)source).IsMappedCopyWriteWatchCurrent(mapping) ||
+                    withWriteWatch && !((ICpuMappedReadWatchSource)source).IsMappedCopyWriteWatchCurrent(mapping) ||
                     !GuestImageWriteTracker.IsReadSnapshotStable(read) ||
                     !MetalVideoPresenter.IsCpuTextureSnapshotAdmissionStable(d.Address, observation)) continue;
                 var captured = layout.Upload(linear) with
@@ -102,7 +104,7 @@ internal static partial class MetalTextureSnapshots
             catch (Exception failure) { primary = failure; throw; }
             finally
             {
-                if (volume && !registered) MetalVideoPresenter.ReleaseUnregisteredSingletonVolumeWatch(source, mapping, primary);
+                if (withWriteWatch && !registered) MetalVideoPresenter.ReleaseUnregisteredSingletonVolumeWatch(source, mapping, primary);
             }
         }
         throw new InvalidOperationException($"Metal typed storage mapping/content changed across three original-copy attempts at 0x{d.Address:X}.");

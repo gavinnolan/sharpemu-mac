@@ -98,7 +98,7 @@ internal sealed partial class HostManagedWriteIntervals
         if (found < 0 || Volatile.Read(ref admission) != 0 || Volatile.Read(ref coverageIncomplete) != 0) return false;
         revision = found; return true;
     }
-    internal bool TryReservePublication(long originalRevision, ReadOnlySpan<PhysicalRun> runs)
+    internal bool TryReservePublication(long originalRevision, ReadOnlySpan<PhysicalRun> runs, ReadWatch? originalWatch = null)
     {
         if (originalRevision < 0 || originalRevision == long.MaxValue || Volatile.Read(ref coverageIncomplete) != 0)
         {
@@ -113,7 +113,10 @@ internal sealed partial class HostManagedWriteIntervals
                     Volatile.Read(ref nextIdentity), previousAdmission, Volatile.Read(ref coverageIncomplete));
             return false;
         }
-        if (HasDisjointCompletedHistory(originalRevision, runs) && Volatile.Read(ref coverageIncomplete) == 0) return true;
+        // Validate an enrolled ORIGINAL physical veto only AFTER excluding
+        // writers. A revoked/released/foreign watch cannot borrow newer history.
+        if ((originalWatch is not null ? originalWatch.CoversDuringPublication(this, runs) :
+            HasDisjointCompletedHistory(originalRevision, runs)) && Volatile.Read(ref coverageIncomplete) == 0) return true;
         ReleasePublication();
         TracePublicationDecline("completed-history-or-incomplete", originalRevision);
         return false;
@@ -125,9 +128,9 @@ internal sealed partial class HostManagedWriteIntervals
         HostPublicationDiagnostics.Declined("writer-reservation", reason, originalRevision,
             Volatile.Read(ref nextIdentity), Volatile.Read(ref admission), Volatile.Read(ref coverageIncomplete));
     }
-    internal long RecordPublicationWrite(ReadOnlySpan<PhysicalRun> runs)
+    internal long RecordPublicationWrite(ReadOnlySpan<PhysicalRun> runs, ReadWatch? unpublishedSuccessor = null)
     {
-        foreach (var run in runs) InvalidateReadWatches(run.Offset, run.Count);
+        foreach (var run in runs) InvalidateReadWatches(run.Offset, run.Count, unpublishedSuccessor: unpublishedSuccessor);
         var revision = Interlocked.Increment(ref nextIdentity);
         if (revision <= 0 || revision == long.MaxValue) Interlocked.Exchange(ref coverageIncomplete, 1);
         else RecordHistory(revision, runs, false);

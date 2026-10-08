@@ -98,9 +98,19 @@ public sealed unsafe partial class HostMappedCopyLedger
                     aliasesToWrite[index] = new(offset, run.Bytes);
                     physicalRuns[index] = new(offset, (ulong)run.Bytes.Length);
                 }
-                reserved = writers.TryReservePublication(Volatile.Read(ref capture.WriterRevision), physicalRuns);
+                reserved = writers.TryReservePublication(Volatile.Read(ref capture.WriterRevision), physicalRuns, capture.ReadWatch);
                 if (!reserved || !IsCurrent(backing, original))
                     return PublicationDeclined(reserved ? "mapping-changed-after-own-reservation" : "writer-reservation-declined", capture.WriterRevision);
+                if (capture.ReadWatch is { } originalWatch)
+                {
+                    var ownership = new ReadWatchOwnership(this);
+                    successfulCapture.WatchOwnership = ownership;
+                    if (Interlocked.Increment(ref readWatchCount) > MaximumReadWatches)
+                    { Interlocked.Decrement(ref readWatchCount); return PublicationDeclined("successor-watch-owner-budget", capture.WriterRevision); }
+                    ownership.Charged = 1;
+                    ownership.Watch = writers.TryCreatePublicationSuccessor(originalWatch);
+                    if (ownership.Watch is null) return PublicationDeclined("successor-watch-slot-budget", capture.WriterRevision);
+                }
                 transaction.Next = publications; publications = transaction; publicationCount++;
                 retainedPublicationBytes += bytes;
                 installed = true; publication = wrapper;
@@ -111,6 +121,7 @@ public sealed unsafe partial class HostMappedCopyLedger
         {
             if (!installed)
             {
+                successfulCapture.ReleaseWatch();
                 if (reserved) writers.ReleasePublication();
                 backing.ExitAccess();
             }
@@ -157,7 +168,9 @@ public sealed unsafe partial class HostMappedCopyLedger
             try
             {
                 lock (owner.gate)
-                    if (!owner.IsCurrent(backing, Original))
+                    if (!owner.IsCurrent(backing, Original) ||
+                        Original.OwnerIdentity is Capture originalCapture && originalCapture.ReadWatch is { } originalWatch &&
+                        !originalWatch.CoversDuringPublication(writers, physicalRuns))
                     { owner.RemovePublicationLocked(this); state = 2; }
                 if (state == 2)
                 { Release(); return CpuMappedPublicationResult.Rejected; }
@@ -169,11 +182,12 @@ public sealed unsafe partial class HostMappedCopyLedger
                 lock (owner.gate)
                 {
                     if (!owner.IsCurrent(backing, Original)) return QuarantineLocked();
-                    var revision = writers.RecordPublicationWrite(physicalRuns);
+                    var revision = writers.RecordPublicationWrite(physicalRuns, ((Capture)successfulObservation.OwnerIdentity).ReadWatch);
                     Volatile.Write(ref ((Capture)successfulObservation.OwnerIdentity).WriterRevision, revision);
+                    ((Capture)Original.OwnerIdentity).ReleaseWatch(); // consumed by this exact own write
                     owner.RemovePublicationLocked(this); state = 2;
                 }
-                Release(); Volatile.Write(ref applied, 1); return CpuMappedPublicationResult.Applied;
+                Release(keepSuccessor: true); Volatile.Write(ref applied, 1); return CpuMappedPublicationResult.Applied;
             }
             catch
             {
@@ -202,9 +216,10 @@ public sealed unsafe partial class HostMappedCopyLedger
             lock (owner.gate) owner.RemovePublicationLocked(this);
             Release();
         }
-        private void Release()
+        private void Release(bool keepSuccessor = false)
         {
             if (Interlocked.Exchange(ref released, 1) != 0) return;
+            if (!keepSuccessor) ((Capture)successfulObservation.OwnerIdentity).ReleaseWatch();
             try { writers.ReleasePublication(); }
             finally { backing.ExitAccess(); }
         }

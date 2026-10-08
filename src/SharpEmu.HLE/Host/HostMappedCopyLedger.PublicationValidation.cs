@@ -55,7 +55,7 @@ public sealed unsafe partial class HostMappedCopyLedger
                     if (cursor == end) break;
                 }
                 if (cursor != end || count == 0) return CpuMappedPublicationPreparationResult.Rejected;
-                reserved = writers.TryReservePublication(Volatile.Read(ref capture.WriterRevision), physical.AsSpan(0, count));
+                reserved = writers.TryReservePublication(Volatile.Read(ref capture.WriterRevision), physical.AsSpan(0, count), capture.ReadWatch);
                 if (!reserved || !IsCurrent(backing, original)) return CpuMappedPublicationPreparationResult.Rejected;
                 transaction.PhysicalCount = count; // exact resolved original prefix, never trailing entries
                 transaction.Next = validations; validations = transaction; validationCount++;
