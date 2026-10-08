@@ -2253,17 +2253,28 @@ internal static partial class MetalVideoPresenter
 
     private static nint GetOrCreateSampler(nint device, GuestSampler sampler)
     {
+        var mipFilter = (sampler.Word2 >> 26) & 0x3;
+        if (mipFilter == 3)
+            throw new NotSupportedException("Metal sampler uses a reserved guest mip-filter encoding.");
         lock (_samplerCache)
         {
             if (_samplerCache.TryGetValue(sampler, out var cached))
             {
+                if (cached == 0)
+                    throw new InvalidOperationException("Metal sampler cache contains a nil state.");
                 return cached;
             }
         }
 
-        var descriptor = MetalNative.Send(
-            MetalNative.Send(MetalNative.Class("MTLSamplerDescriptor"), MetalNative.Selector("alloc")),
-            MetalNative.Selector("init"));
+        var handle = CreateOwnedSamplerState(CreateNativeSamplerDescriptor,
+            descriptor => ConfigureGuestSamplerDescriptor(descriptor, sampler, mipFilter),
+            descriptor => MetalNative.Send(device, MetalNative.Selector("newSamplerStateWithDescriptor:"), descriptor),
+            ReleaseOwnedSamplerObject);
+        return PublishOwnedSamplerState(sampler, handle, ReleaseOwnedSamplerObject);
+    }
+
+    private static void ConfigureGuestSamplerDescriptor(nint descriptor, GuestSampler sampler, uint mipFilter)
+    {
         MetalNative.Send(
             descriptor,
             MetalNative.Selector("setSAddressMode:"),
@@ -2286,9 +2297,6 @@ internal static partial class MetalVideoPresenter
             descriptor,
             MetalNative.Selector("setMinFilter:"),
             minFilter is 1 or 3 ? 1 : 0);
-        var mipFilter = (sampler.Word2 >> 26) & 0x3;
-        if (mipFilter == 3)
-            throw new NotSupportedException("Metal sampler uses a reserved guest mip-filter encoding.");
         MetalNative.Send(descriptor, MetalNative.Selector("setMipFilter:"), (nint)mipFilter);
         MetalNative.SendVoidFloat(descriptor, MetalNative.Selector("setLodMinClamp:"),
             mipFilter == 0 ? 0.0f : (sampler.Word1 & 0xFFF) / 256.0f);
@@ -2297,14 +2305,6 @@ internal static partial class MetalVideoPresenter
         // The stage argument buffer stores the sampler's resource id; Metal refuses one without this flag.
         MetalNative.SendVoidBool(descriptor, MetalNative.Selector("setSupportArgumentBuffers:"), true);
 
-        var handle = MetalNative.Send(
-            device, MetalNative.Selector("newSamplerStateWithDescriptor:"), descriptor);
-        lock (_samplerCache)
-        {
-            _samplerCache[sampler] = handle;
-        }
-
-        return handle;
     }
 
     private static void WriteBuffersBackToGuest(

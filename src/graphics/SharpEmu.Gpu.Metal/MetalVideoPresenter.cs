@@ -884,12 +884,15 @@ internal static partial class MetalVideoPresenter
 
     private static nint CreateLinearSampler(nint device)
     {
-        var descriptor = MetalNative.Send(
-            MetalNative.Send(MetalNative.Class("MTLSamplerDescriptor"), MetalNative.Selector("alloc")),
-            MetalNative.Selector("init"));
+        return CreateOwnedSamplerState(CreateNativeSamplerDescriptor, ConfigureLinearSamplerDescriptor,
+            descriptor => MetalNative.Send(device, MetalNative.Selector("newSamplerStateWithDescriptor:"), descriptor),
+            ReleaseOwnedSamplerObject);
+    }
+
+    private static void ConfigureLinearSamplerDescriptor(nint descriptor)
+    {
         MetalNative.Send(descriptor, MetalNative.Selector("setMinFilter:"), (nint)SamplerMinMagFilterLinear);
         MetalNative.Send(descriptor, MetalNative.Selector("setMagFilter:"), (nint)SamplerMinMagFilterLinear);
-        return MetalNative.Send(device, MetalNative.Selector("newSamplerStateWithDescriptor:"), descriptor);
     }
 
     private static void UploadFrame(
