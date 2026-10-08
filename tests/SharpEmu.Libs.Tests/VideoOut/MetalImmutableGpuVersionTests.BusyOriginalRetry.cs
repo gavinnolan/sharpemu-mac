@@ -86,6 +86,9 @@ public sealed partial class MetalImmutableGpuVersionTests
                 Assert.False(pvmGate.IsReadLockHeld || pvmGate.IsWriteLockHeld || pvmGate.IsUpgradeableReadLockHeld);
                 Assert.Equal(2L, StorageMember(writerLedger, "admission")); // real envelope + physical chunk
                 Assert.Equal(0, StorageMember(writerLedger, "coverageIncomplete"));
+                // Only this exact real admitted chunk is paused. Later EOP
+                // canonical writes must execute with their ordinary behavior.
+                writeHook.SetValue(views, oldWriteHook);
                 // The real ordinary envelope and exact physical chunk, plus
                 // the canonical alias lifetime pin, are held BEFORE any byte.
                 pause.Admitted.Set();
