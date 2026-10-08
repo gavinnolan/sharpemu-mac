@@ -38,7 +38,7 @@ internal static class HleDispatchTiming
             return new(frame.Name, inclusive, Math.Max(0, inclusive - frame.Children));
         }
     }
-    internal readonly record struct Elapsed(string? Name, long InclusiveTicks, long ExclusiveTicks);
+    internal readonly record struct Elapsed(string? Name, long InclusiveTicks, long ExclusiveTicks, bool Recorded = true);
     internal readonly struct Scope(ThreadState thread, int depth, long start)
     {
         internal Elapsed Complete(long end) => thread.Pop(depth, Math.Max(0, end - start));

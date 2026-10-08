@@ -38,6 +38,7 @@ public sealed partial class DirectExecutionBackend
 
 	private static void RecordPerfHleDispatchTime(HleDispatchTiming.Elapsed elapsed)
 	{
+		if (!elapsed.Recorded) return; // omitted nesting must not enter the measured denominator
 		var total = System.Threading.Interlocked.Add(ref _perfHleDispatchTicks, elapsed.InclusiveTicks);
 		var exclusive = System.Threading.Interlocked.Add(ref _perfHleExclusiveTicks, elapsed.ExclusiveTicks);
 		var completed = System.Threading.Interlocked.Increment(ref _perfHleCompleted);
@@ -62,7 +63,7 @@ public sealed partial class DirectExecutionBackend
 			System.Console.Error.WriteLine(
 				$"[PERF][HLE] inclusive_dispatch_avg={avgUs:F3}us " +
 				$"inclusive_wall_s={(double)total / frequency:F2} exclusive_wall_s={(double)exclusive / frequency:F2} " +
-				$"wall_s={wallSeconds:F2} completed={completed} window=process_cumulative " +
+				$"wall_s={wallSeconds:F2} recorded_completed={completed} window=process_cumulative " +
 				$"units=elapsed_wall_not_cpu omitted_nested_scopes={HleDispatchTiming.OmittedScopes}");
 
 			var snapshot = new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<string, PerfHleExportCost>>(_perfHleCosts.Count + 16);

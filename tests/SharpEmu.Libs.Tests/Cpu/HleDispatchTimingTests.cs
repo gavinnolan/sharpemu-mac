@@ -30,15 +30,23 @@ public sealed class HleDispatchTimingTests
     public void BoundedOverflowCannotOverwriteOrChargeTheOuterName()
     {
         var before = HleDispatchTiming.OmittedScopes;
+        var completed = typeof(DirectExecutionBackend).GetField("_perfHleCompleted", Statics)!;
+        var exclusive = typeof(DirectExecutionBackend).GetField("_perfHleExclusiveTicks", Statics)!;
+        var record = typeof(DirectExecutionBackend).GetMethod("RecordPerfHleDispatchTime", Statics)!;
+        var completedBefore = (long)completed.GetValue(null)!;
+        var exclusiveBefore = (long)exclusive.GetValue(null)!;
         var scopes = Enumerable.Range(0, 130).Select(index => HleDispatchTiming.Begin(index)).ToArray();
         for (var index = 129; index >= 0; index--)
         {
             HleDispatchTiming.NameCurrent($"scope{index}");
             var elapsed = scopes[index].Complete(260 - index);
             if (index >= 128) Assert.Equal(default, elapsed);
-            else { Assert.Equal($"scope{index}", elapsed.Name); Assert.True(elapsed.ExclusiveTicks >= 0); }
+            else { Assert.Equal($"scope{index}", elapsed.Name); Assert.True(elapsed.Recorded); Assert.Equal(2, elapsed.ExclusiveTicks); }
+            record.Invoke(null, [elapsed]);
         }
         Assert.Equal(before + 2, HleDispatchTiming.OmittedScopes);
+        Assert.Equal(completedBefore + 128, (long)completed.GetValue(null)!);
+        Assert.Equal(exclusiveBefore + 256, (long)exclusive.GetValue(null)!);
     }
 
     [Theory]
