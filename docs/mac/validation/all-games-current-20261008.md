@@ -102,3 +102,18 @@ RFLAGS single stepping delivers notification after the exact retried store;
 an owned standalone handler can fence before ending its diagnostic continuation.
 This supplies a candidate mechanism for a lifetime lease across signal return,
 but no production provider/CLR bridge recovery or Poppy gameplay is qualified.
+
+The original dirty-seed diagnostic28bb509e passes22 focused typed controls per
+actual host runtime. Its signed90s Octopath replay stays black atFPS0 after an
+earlier selected-storage-mip global-epoch admission failure at8073D60000;
+no dirty causality record is reached. The worker failure is logged early but
+only rethrown at host shutdown, exposing missing prompt presenter notification.
+The original-seed causality question therefore remains open.
+
+Shader preparation candidatec5f5d80e passes158 focused managed controls per
+actual host runtime and moves native library compilation before draw admission.
+Its signed25s Quake replay still aborts through the same context-label timeout:
+first draw47.047ms, EOP3 admission-to-start58.667ms. Library preparation alone
+is insufficient. Exact runnable-prefix completion backpressure and immediate
+worker-failure notification are the next changes. This isolated candidate does
+not replace the all-nine baseline or qualify new gameplay/FPS/loading gates.

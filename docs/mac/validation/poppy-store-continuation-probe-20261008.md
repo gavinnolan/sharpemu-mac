@@ -36,8 +36,17 @@ or dirty/content stability. Those need actual provider and signal-bridge tests
 before a Poppy game replay can qualify any recovery change. No unconditional
 Disarmed retry or guest instruction skip is justified.
 
-Both bounded drivers hold the existing shared game/native lock. All nine native
-processes exit normally with no watchdog signals. Full source, driver, binary,
+All nine bounded native processes exit normally with no watchdog signals. They
+ran in the root's serialized heavy slot. The original drivers incorrectly used
+an advisory file lock at the harness's directory-lock path, leaving an empty
+file that prevented the subsequent Sarah run from starting. No Sarah game
+process launched. The owned file is removed and future drivers use the harness's
+directory/pid protocol; original drivers/results remain retained. This correction
+does not claim that the original runs acquired the shared directory lock.
+The same nine cases were then repeated in fresh `directory-lock-rerun` folders
+using the actual directory/pid lock protocol; all exit0 with matching full bytes
+and zero watchdog signals. Each lock is released by its exact owning driver.
+Full source, driver, binary,
 disassembly, byte checks and process receipts are retained under
 `artifacts/validation/all-games-20261008/poppy-rosetta-single-step` and
 `poppy-rosetta-store-retirement`. Poppy gameplay remains unqualified.

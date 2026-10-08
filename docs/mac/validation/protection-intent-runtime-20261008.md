@@ -84,3 +84,34 @@ Evidence:
 `ced978296c13dca4596baccb8af1f697a395625a80e7f52df6f7ae8e5284831c`)
 and `artifacts/validation/all-games-20261008/typed-protection-combined-c24c327a`
 (combined builds, TRXs, native compiler/device checks, signed closure and run).
+
+## Original dirty-seed diagnostic qualification
+
+Isolated diagnostic `28bb509ecbd117ccb83fa39aaa86aa3428976fd2` adds bounded,
+default-off dirty-generation records comparing current tracker state to the
+original uploaded seed. It changes neither ConsumeDirty nor image ownership.
+An initial restore failed with ENOSPC before compilation; that failure and exact
+cache cleanup plans remain in evidence. The retry uses one verified shared
+package cache and succeeds in31.40s with128 warnings/zero errors. An owned idle
+compiler child receives TERM after exit0; no KILL or remaining workers. The
+same22 typed controls pass on actual ARM64/x64 runtimes with no skips/failures,
+stable source and DLL hashes.
+
+The separately signed239-file app publishes in28.20s without cleanup signals.
+Its90s Octopath replay stays open, peaks3576MiB, and stops on owned TERM without
+KILL. The final screenshot is visually verified black, FPS0. One early guest
+frame is followed by zero; this is not runtime progression. No dirty diagnostic
+record or typed synchronization rejection is reached. Instead the command
+worker logs a selected-storage-mip admission failure at8073D60000:
+`global-mapping-epoch`,1095792 to1096679, selected mip0/domain1. Stop rethrows
+that earlier cause during shutdown. Host redraw continues after worker failure,
+so prompt failure propagation is a separate necessary repair.
+
+Whether the prior ab9 dirty event occurred before or after the seed upload
+remains unanswered. The new per-resource original mapping/content proof must
+first clear this admission failure; no stale-dirty bypass is authorized by this
+run. Evidence retains44 files under
+`artifacts/validation/all-games-20261008/typed-dirty-original-28bb509e`, transfer
+manifest `9ec535914afb81358a273857b009e5edd119961b34f1353d583a411356e85883`.
+Original run: `artifacts/runs/20261008-161346-octo-typed-dirty-original-28b`.
+The full signed bundle matches before/after. No additional title is accepted.
