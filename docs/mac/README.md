@@ -124,3 +124,30 @@ skips; existing native Metal subset passes 25/25. Signed Sarah150s movement,
 jump and landing pass, peak1208MiB, no KILL. These cases do not qualify a native
 borrowed upload or native frame teardown; graph activation remains disabled.
 See `artifacts/validation/integrated-20261007/presentation-borrow-integrated-8c19cd7/`.
+
+
+## All-games optimization work (2026-10-08)
+
+The [all-nine frozen baseline](validation/all-games-baseline-20261008.md) and
+[new optimization evidence](validation/mac-optimization-20261008.md) supersede
+older per-title status summaries above. Every installed title has a retained
+native-only run; none has passed the full requested rendering/gameplay/60+FPS/
+fast-loading gate. Sarah has controllable gameplay, but a fresh instrumented
+capture averages57.96 guest commits/s with p99 38.693ms. Poppy's current schema2
+trace observes a Disarmed/declined callback after a separate successful RW
+restore; its older Invalidating observation is a separate trace.
+
+[All-games optimization plan](all-games-optimization-plan.md) prioritizes texture
+compatibility and authoritative fault ordering before performance comparisons.
+Selector caching has measured warmed per-call gains and actual Tier1 instruction
+inspection. Balanced HLE wall timings, bounded unique-guest-commit phase tracing,
+atomic native settings, singleton-array storage and diagnostic-only per-range
+fault tracing are integrated locally. An owned-frame idle policy is off by
+default until native surface and controlled pacing qualification. None of those
+source/fixture results establishes all-game compatibility or a game FPS gain.
+
+The default signed bundle still contains8c19cd7. A separate signed b7c0df4e
+bundle in artifacts/macos/game-opt-20261008 was used for the new Sarah/Poppy
+captures. Use embedded build-info and actual payload hashes for provenance.
+Fetched upstream main remainsb02c061 and is already integrated locally. No
+remote push, PR or remote merge was performed.
