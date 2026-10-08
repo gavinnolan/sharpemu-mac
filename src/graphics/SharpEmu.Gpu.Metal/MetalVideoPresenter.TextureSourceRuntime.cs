@@ -27,9 +27,14 @@ internal static partial class MetalVideoPresenter
 
     private static void RequireQualifiedTextureSourceConsumerWork(object work)
     {
+        if (work is OffscreenGuestDraw color)
+        {
+            RequireQualifiedColorTextureSourceWork(color);
+            return;
+        }
         lock (_gate)
             if (_textureSourceWorkOwners.TryGetValue(work, out var owner) && owner.Outputs.Length != 0)
-                throw new NotSupportedException("Metal runtime texture-source producer encoding/post-encoder immutable copy is not qualified yet.");
+                throw new NotSupportedException("Metal runtime texture-source storage producer encoding is not qualified yet.");
     }
 
     // Called under the presenter gate. Never waits or discards committed work.
