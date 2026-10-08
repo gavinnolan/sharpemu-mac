@@ -174,3 +174,11 @@ Check embedded build-info
 and actual payload hashes. ARM64 CLR checks qualify host code, not ARM guest
 execution. Fetched upstreamb02c061 remains integrated locally. No remote push,
 PR or remote merge was performed.
+
+The [combined completion source724](validation/metal-completion-main-20261008.md)
+is now integrated locally after489 library/117 managed Metal/55 native Metal
+regression checks per CLR and a90 s Sarah movement replay. Its source-specific
+signed app is in
+`.claude/worktrees/root-metal-completion-combined/artifacts/macos/compat-completion-724d906d`.
+Late reported Sarah windows were around59Hz; full sustained60+ and all-title
+acceptance remain incomplete. Typed GPU texture publication is the next blocker.
