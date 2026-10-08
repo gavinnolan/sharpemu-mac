@@ -68,3 +68,26 @@ Distinct face depths and all 393216 texels must be checked, plus version/session
 wrong-queue/refused-owner controls and consumed-retain cleanup. A fixture cannot
 inject CWT origins or prearm away a cold observation defect. A real signed title
 replay is required to confirm actual DB geometry and entry advancement.
+
+
+Two prepared actual-device Facts run in separate fresh workers: cold six-face
+public producer admission and production Drain/snapshot/assembly on the same
+command buffer, and the same flow after original successful native completion.
+Neither prearms nor enrolls managed-writer coverage on the six source faces.
+After each new selected capture every earlier original token is revalidated.
+The initial CPU backing is 0xED; the source wrapper refuses CPU shadow reads,
+while all six native faces use distinct nonzero depth clears. All 393216 native
+Depth32 texels (1572864 bytes) are read back after actual status4. Wrong logical
+queue and original-session retirement remain refusal controls.
+
+The fixture uses handwritten controlled VS/PS through the production draw path;
+it does not claim guest shader translation or the actual title's DB metadata.
+Actual face mapping/protection and native handles are required. Unknown native
+completion or cleanup quarantines owned objects until that fresh worker exits;
+there is no retry. Known completed finite faces, command-buffer retains, pooled
+assembly, transient target, fixture libraries/pipelines/readback and backing are
+consumed independently with the original exception preserved. Preexisting generic
+renderer depth-stencil descriptor/state cleanup limitations remain outside this
+finite source fixture and it makes no total renderer leak/teardown qualification.
+The existing presenter session is deliberately not reset after retirement.
+No prepared native row is included in the genuine managed count.
