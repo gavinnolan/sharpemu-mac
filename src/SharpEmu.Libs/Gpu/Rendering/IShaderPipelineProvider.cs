@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.Abstractions;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
 
@@ -60,7 +61,8 @@ public interface IShaderPipelineProvider
     // Original packet and primitive-assembly state at the rejection boundary.
     // Legacy diagnostic implementers retain their existing optional callback.
     void RecordUnsupportedGraphics(VertexStageRegisters vertex, ContextRegisters context,
-        UserConfigRegisters userConfig, in TargetlessDrawArguments draw) =>
+        UserConfigRegisters userConfig, in TargetlessDrawArguments draw,
+        DrawIndexedArguments? originalIndirectIndexedDraw = null) =>
         RecordUnsupportedGraphics(vertex, context);
 
     GraphicsPrograms GetGraphicsPrograms(

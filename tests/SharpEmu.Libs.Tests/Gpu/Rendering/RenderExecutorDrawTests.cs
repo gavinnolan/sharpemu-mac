@@ -243,12 +243,42 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.Same(banks.UserConfig, captured.UserConfig);
         Assert.Equal(indexed, captured.Draw.Indexed);
         Assert.Equal(indexed ? 71UL : 73UL, captured.Draw.SubmitId);
+        Assert.Null(captured.OriginalIndirect);
         if (indexed) { Assert.Equal(indexedArguments, captured.Draw.Indexed_); Assert.Equal(default, captured.Draw.Auto); }
         else { Assert.Equal(autoArguments, captured.Draw.Auto); Assert.Equal(default, captured.Draw.Indexed_); }
         Assert.Equal(28u, captured.Context.ShaderInterface.ExportRingItemSize);
         Assert.Equal(19u, captured.UserConfig.IndexOffset);
         Assert.Equal((ushort)31, captured.UserConfig.GeometryEngineControl.PrimitiveGroupSize);
         Assert.Equal((ushort)63, captured.UserConfig.GeometryEngineControl.VertexGroupSize);
+    }
+
+    [Fact]
+    public void RejectedIndirectGeometryDiagnosticKeepsOriginalAndExistingCpuResolvedArguments()
+    {
+        typeof(RenderExecutor).GetField("_dumpSkippedGraphics",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(_executor, true);
+        var banks = Banks();
+        banks.UserConfig.PrimitiveType = (uint)GuestPrimitiveType.TriangleStrip; // existing CPU indirect route
+        banks.Context.ShaderStages = 0x00402020;
+        WriteIndirectArguments(6, 2, 4, unchecked((uint)-3), 7);
+        var original = Indexed(40, source: DrawOffsetSource.IndirectArguments) with
+        { IndirectArgumentsAddress = IndirectArguments };
+        _executor.DrawIndexed(79, banks, original);
+        var captured = Assert.Single(_pipelines.UnsupportedGraphics);
+        Assert.Equal(original, captured.OriginalIndirect!.Value);
+        Assert.True(captured.Draw.Indexed);
+        Assert.Equal(79UL, captured.Draw.SubmitId);
+        Assert.Equal(6u, captured.Draw.Indexed_.IndexCount);
+        Assert.Equal(2u, captured.Draw.Indexed_.InstanceCount);
+        Assert.Equal(-3, captured.Draw.Indexed_.BaseVertex);
+        Assert.Equal(7u, captured.Draw.Indexed_.FirstInstance);
+        Assert.Equal(original.IndexAddress + 8, captured.Draw.Indexed_.IndexAddress); // fixture's 16-bit index type
+        Assert.Equal(0UL, captured.Draw.Indexed_.IndirectArgumentsAddress);
+        Assert.Equal(1, _host.GuestReads); // existing 20-byte argument read only; no diagnostic index/descriptor read
+        Assert.Empty(_pipelines.Calls);
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("find_image", StringComparison.Ordinal) ||
+            c.StartsWith("draw_", StringComparison.Ordinal));
     }
 
     [Theory]

@@ -178,10 +178,11 @@ public sealed partial class RenderExecutor
             return;
         }
 
-        DrawIndexedCore(submitId, banks, in resolved);
+        DrawIndexedCore(submitId, banks, in resolved, arguments);
     }
 
-    private void DrawIndexedCore(ulong submitId, RegisterBanks banks, in DrawIndexedArguments arguments)
+    private void DrawIndexedCore(ulong submitId, RegisterBanks banks, in DrawIndexedArguments arguments,
+        DrawIndexedArguments? originalIndirectIndexedDraw = null)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawExecutor);
         if (!_host.IsRecording)
@@ -210,7 +211,7 @@ public sealed partial class RenderExecutor
         }
 
         if (!HasValidVertexShader(shader) || IsUnsupportedGeometryStage(banks,
-            new TargetlessDrawArguments(submitId, true, arguments, default)))
+            new TargetlessDrawArguments(submitId, true, arguments, default), originalIndirectIndexedDraw))
         {
             return;
         }
@@ -499,7 +500,8 @@ public sealed partial class RenderExecutor
     private static bool IsKnownGeometryOutputPrimitiveType(uint value) => value <= 4;
 
     // Only the plain vertex path and the primitive-shader vertex path with default geometry state run.
-    private bool IsUnsupportedGeometryStage(RegisterBanks banks, in TargetlessDrawArguments draw)
+    private bool IsUnsupportedGeometryStage(RegisterBanks banks, in TargetlessDrawArguments draw,
+        DrawIndexedArguments? originalIndirectIndexedDraw = null)
     {
         var context = banks.Context;
         var shaderInterface = context.ShaderInterface;
@@ -535,7 +537,7 @@ public sealed partial class RenderExecutor
         }
 
         if (_dumpSkippedGraphics)
-            _pipelines.RecordUnsupportedGraphics(vertex, context, banks.UserConfig, in draw);
+            _pipelines.RecordUnsupportedGraphics(vertex, context, banks.UserConfig, in draw, originalIndirectIndexedDraw);
 
         if (RenderTrace.Enabled && RenderTrace.GeometryStageSkip())
         {

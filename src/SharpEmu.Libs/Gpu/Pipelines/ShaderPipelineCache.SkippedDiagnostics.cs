@@ -3,6 +3,7 @@
 
 using System.Security.Cryptography;
 using System.Text.Json;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Rendering;
 
@@ -16,11 +17,13 @@ internal sealed partial class ShaderPipelineCache
         => RecordUnsupportedGraphicsCore(vertex, context, null, null);
 
     public void RecordUnsupportedGraphics(VertexStageRegisters vertex, ContextRegisters context,
-        UserConfigRegisters userConfig, in TargetlessDrawArguments draw)
-        => RecordUnsupportedGraphicsCore(vertex, context, userConfig, draw);
+        UserConfigRegisters userConfig, in TargetlessDrawArguments draw,
+        DrawIndexedArguments? originalIndirectIndexedDraw = null)
+        => RecordUnsupportedGraphicsCore(vertex, context, userConfig, draw, originalIndirectIndexedDraw);
 
     private void RecordUnsupportedGraphicsCore(VertexStageRegisters vertex, ContextRegisters context,
-        UserConfigRegisters? userConfig, TargetlessDrawArguments? draw)
+        UserConfigRegisters? userConfig, TargetlessDrawArguments? draw,
+        DrawIndexedArguments? originalIndirectIndexedDraw = null)
     {
         try
         {
@@ -61,6 +64,7 @@ internal sealed partial class ShaderPipelineCache
                     maxVerticesOut = context.ShaderInterface.GeometryMaxVerticesOut,
                     outputPrimitive = context.ShaderInterface.GeometryOutputPrimitiveType,
                     originalDraw = draw,
+                    originalIndirectIndexedDraw,
                     primitiveAssembly = userConfig is null ? null : new
                     {
                         userConfig.PrimitiveType,
