@@ -40,9 +40,12 @@ was left untouched; this run makes no performance claim.
 
 ## Next entry checks
 
-- Superliminal: qualify isolated `c5beabf1`, which separates selected color
+- Superliminal: qualify isolated `aa38ff5a`, which separates selected color
   mip 0 from the disjoint storage view that currently causes startup failure,
-  then replay the signed game with the opt-in enabled.
+  then replay the signed game with the opt-in enabled. The successor guards
+  complete crossing-start image spans before seed consumption/allocation/read;
+  its 18 focused managed cases passed on both host architectures. Actual
+  game entry remains unqualified.
 - Octopath: isolated `3d49ba8e` passed managed and native publication controls,
   but its real game replay still failed before the first canonical producer.
   Diagnostic successor `ddba460f` records the exact other image whose original
