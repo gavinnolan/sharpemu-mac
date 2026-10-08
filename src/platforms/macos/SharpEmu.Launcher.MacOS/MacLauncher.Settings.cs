@@ -10,14 +10,17 @@ namespace SharpEmu.Launcher.MacOS;
 
 public sealed partial class MacLauncher
 {
-    private void EditGlobalSettings()
+    private void EditGlobalSettings() => EditGlobalSettingsFields(null);
+    private void EditGlobalSettingsFields(string[]? fields)
     {
-        var edited = settings;
-        EditFields(edited, null, GlobalSettingsSaveAction(edited, normalized => normalized.Save(), normalized =>
+        var edited = CloneGlobalSettingsForEditing(settings);
+        EditFields(edited, fields, GlobalSettingsSaveAction(edited, normalized => normalized.SaveOrThrow(), normalized =>
         {
             settings = normalized; strings.Load(settings.Language); WatchAndRefresh();
         }));
     }
+    private static ApplicationSettings CloneGlobalSettingsForEditing(ApplicationSettings current) =>
+        JsonSerializer.Deserialize<ApplicationSettings>(JsonSerializer.Serialize(current))!;
     private static Action GlobalSettingsSaveAction(ApplicationSettings edited, Action<ApplicationSettings> persist,
         Action<ApplicationSettings> accepted) => () =>
     {
@@ -30,7 +33,7 @@ public sealed partial class MacLauncher
     {
         if (selected?.TitleId is not { Length: > 0 } title) { Alert("Game Settings", "Select a game with a title ID first."); return; }
         var game = PerGameSettings.Load(title) ?? new();
-        EditFields(game, null, () => { game.RemoveInheritedValues(settings); game.Save(title); });
+        EditFields(game, null, () => { game.RemoveInheritedValues(settings); game.SaveOrThrow(title); });
     }
     private void EditCustomEnvironment()
     {
@@ -46,12 +49,12 @@ public sealed partial class MacLauncher
         if (result == 1000)
         {
             var values = new EnvironmentEditor { EnvironmentVariables = [.. GlobalCustomEnvironmentSettings.Load()] };
-            EditFields(values, null, () => GlobalCustomEnvironmentSettings.Save(values.EnvironmentVariables));
+            EditFields(values, null, () => GlobalCustomEnvironmentSettings.SaveOrThrow(values.EnvironmentVariables));
         }
         else if (result == 1001 && selected?.TitleId is { Length: > 0 } id)
         {
             var game = PerGameSettings.Load(id) ?? new();
-            EditFields(game, [nameof(game.CustomEnvironmentVariables)], () => game.Save(id));
+            EditFields(game, [nameof(game.CustomEnvironmentVariables)], () => game.SaveOrThrow(id));
         }
         else if (result == 1002 && selected is { } selectedGame)
         {
@@ -82,7 +85,7 @@ public sealed partial class MacLauncher
                 // Commit in-progress cell editing before parsing the detached rows.
                 Send(editorWindow, Selector("makeFirstResponder:"), 0);
                 try { editorSession!.Save(); CloseEditor(); }
-                catch (Exception exception) { Alert("Invalid Setting", exception.Message); }
+                catch (Exception exception) { Alert(exception is FormatException ? "Invalid Setting" : "Could Not Save Settings", exception.Message); }
             });
             editorOwned = owned.Skip(before).ToArray();
             Send(editorTable, Selector("reloadData")); UpdateSettingsControls(); Send(editorWindow, Selector("center"));

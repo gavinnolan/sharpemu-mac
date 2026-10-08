@@ -41,6 +41,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <Project Path="src/platforms/windows/SharpEmu.Host.Windows/SharpEmu.Host.Windows.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/SharpEmu.Application.Persistence.Worker/SharpEmu.Application.Persistence.Worker.csproj" />
     <Project Path="tests/SharpEmu.Launcher.MacOS.Tests/SharpEmu.Launcher.MacOS.Tests.csproj" />
     <Project Path="tests/SharpEmu.Application.Tests/SharpEmu.Application.Tests.csproj" />
     <Project Path="tests/SharpEmu.Fonts.Tests/SharpEmu.Fonts.Tests.csproj" />

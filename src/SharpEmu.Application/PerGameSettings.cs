@@ -203,23 +203,24 @@ public sealed class PerGameSettings
 
         try
         {
-            var path = PathFor(titleId);
-            if (IsEmpty)
-            {
-                if (File.Exists(path))
-                {
-                    File.Delete(path);
-                }
-
-                return;
-            }
-
-            Directory.CreateDirectory(DirectoryPath);
-            File.WriteAllText(path, JsonSerializer.Serialize(this, SerializerOptions));
+            SaveOrThrow(titleId);
         }
         catch (Exception)
         {
         }
+    }
+
+    /// <summary>Writes overrides or removes an empty override, propagating persistence failures.</summary>
+    public void SaveOrThrow(string titleId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(titleId);
+        var path = PathFor(titleId);
+        if (IsEmpty)
+        {
+            if (File.Exists(path)) File.Delete(path);
+            return;
+        }
+        SettingsFilePersistence.Write(path, JsonSerializer.Serialize(this, SerializerOptions));
     }
 
     private static string SanitizeTitleId(string titleId)

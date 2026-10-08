@@ -42,16 +42,18 @@ public sealed class GlobalCustomEnvironmentSettings
     {
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
-            var settings = new GlobalCustomEnvironmentSettings
-            {
-                EnvironmentVariables = Normalize(entries).ToList(),
-            };
-            File.WriteAllText(FilePath, JsonSerializer.Serialize(settings, SerializerOptions));
+            SaveOrThrow(entries);
         }
         catch (Exception)
         {
         }
+    }
+
+    /// <summary>Persists normalized global environment entries, propagating failures to the caller.</summary>
+    public static void SaveOrThrow(IEnumerable<string> entries)
+    {
+        var settings = new GlobalCustomEnvironmentSettings { EnvironmentVariables = Normalize(entries).ToList() };
+        SettingsFilePersistence.Write(FilePath, JsonSerializer.Serialize(settings, SerializerOptions));
     }
 
     private static IReadOnlyList<string> Normalize(IEnumerable<string>? entries) =>

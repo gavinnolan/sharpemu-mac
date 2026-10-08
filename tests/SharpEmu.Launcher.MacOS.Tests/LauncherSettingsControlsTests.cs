@@ -38,8 +38,24 @@ public sealed class LauncherSettingsControlsTests
         // Editing menu state cannot rewrite the saved model or future presentations.
         Field<string[]>(presentation, "Choices")[0] = "mutated";
         Assert.Equal("FutureWindowMode", Field<string[]>(Presentation(property, "FutureWindowMode"), "Choices")[0]);
-        Assert.Equal(new[] { "Warn", "Trace", "Debug", "Info", "Warning", "Error", "Critical" },
+        Assert.Equal(new[] { "Warn", "Trace", "Debug", "Info", "Warning", "Error", "Critical", "None" },
             Field<string[]>(Presentation(typeof(ApplicationSettings).GetProperty(nameof(ApplicationSettings.LogLevel))!, "Warn"), "Choices"));
+    }
+
+    [Fact]
+    public void EverySuggestedGlobalChoiceSurvivesTheActualSaveNormalization()
+    {
+        foreach (var property in typeof(ApplicationSettings).GetProperties().Where(property => property.PropertyType == typeof(string)))
+        {
+            var defaults = new ApplicationSettings();
+            foreach (var choice in Field<string[]>(Presentation(property, (string)property.GetValue(defaults)!), "Choices"))
+            {
+                var draft = new ApplicationSettings(); property.SetValue(draft, choice);
+                var normalized = ApplicationSettings.NormalizeFromJson(JsonSerializer.Serialize(draft));
+                Assert.Equal(choice, property.GetValue(normalized));
+            }
+        }
+        Assert.Equal(new[] { "PS5" }, Field<string[]>(Presentation(typeof(ApplicationSettings).GetProperty(nameof(ApplicationSettings.ConsoleType))!, "PS5"), "Choices"));
     }
 
     [Fact]
@@ -77,6 +93,16 @@ public sealed class LauncherSettingsControlsTests
         }
         sessionType.GetMethod("Save")!.Invoke(session, null);
         Assert.Equal(before, JsonSerializer.Serialize(model, schema)); Assert.Equal(1, persisted);
+    }
+
+    [Fact]
+    public void GlobalEditorHasDetachedListsAndPreservesCustomValuesBeforeSave()
+    {
+        var active = new ApplicationSettings { LogLevel = "Warn", GameFolders = ["/saved/folder"] };
+        var edited = (ApplicationSettings)typeof(MacLauncher).GetMethod("CloneGlobalSettingsForEditing", PrivateStatic)!.Invoke(null, [active])!;
+        Assert.Equal("Warn", edited.LogLevel); Assert.NotSame(active, edited); Assert.NotSame(active.GameFolders, edited.GameFolders);
+        edited.LogLevel = "Critical"; edited.GameFolders.Add("/edited/folder");
+        Assert.Equal("Warn", active.LogLevel); Assert.Single(active.GameFolders);
     }
 
     [Fact]

@@ -244,17 +244,17 @@ public sealed class ApplicationSettings
     {
         try
         {
-            var directory = Path.GetDirectoryName(SettingsPath);
-            if (!string.IsNullOrEmpty(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
-
-            File.WriteAllText(SettingsPath, JsonSerializer.Serialize(this, SerializerOptions));
+            SaveOrThrow();
         }
         catch (Exception)
         {
             // Settings persistence is best-effort.
         }
+    }
+
+    /// <summary>Persists the existing settings schema, propagating failures to an explicit save UI.</summary>
+    public void SaveOrThrow()
+    {
+        SettingsFilePersistence.Write(SettingsPath, JsonSerializer.Serialize(this, SerializerOptions));
     }
 }

@@ -134,7 +134,7 @@ public sealed partial class MacLauncher : IDisposable
         Button(content, "Copy Title ID", new(830, 159, 160, 32), () => Copy(selected?.TitleId));
         Button(content, "Hide from Library", new(996, 159, 160, 32), HideSelected);
         Button(content, "Refresh", new(830, 119, 160, 32), Refresh);
-        Button(content, "Manage Folders…", new(996, 119, 160, 32), () => EditFields(settings, [nameof(settings.GameFolders), nameof(settings.ExcludedGames)], () => { settings.Save(); WatchAndRefresh(); }));
+        Button(content, "Manage Folders…", new(996, 119, 160, 32), () => EditGlobalSettingsFields([nameof(settings.GameFolders), nameof(settings.ExcludedGames)]));
         status = Label(content, new(16, 20, 1142, 28), L("Launch.Idle", "Idle"));
         Send(app, Selector("finishLaunching")); Send(window, Selector("center"));
         Send(window, Selector("makeKeyAndOrderFront:"), 0); Send(app, Selector("activateIgnoringOtherApps:"), 1);

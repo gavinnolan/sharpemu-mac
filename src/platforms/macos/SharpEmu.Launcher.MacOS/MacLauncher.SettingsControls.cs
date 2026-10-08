@@ -23,7 +23,7 @@ public sealed partial class MacLauncher
             actual == typeof(int) ? SettingsControlKind.Integer : actual == typeof(double) ? SettingsControlKind.Number : SettingsControlKind.Text;
         string[] choices = property.Name switch
         {
-            nameof(ApplicationSettings.LogLevel) => ["Trace", "Debug", "Info", "Warning", "Error", "Critical"],
+            nameof(ApplicationSettings.LogLevel) => ["Trace", "Debug", "Info", "Warning", "Error", "Critical", "None"],
             nameof(ApplicationSettings.WindowMode) => ["Windowed", "Borderless", "Exclusive"],
             nameof(ApplicationSettings.ScalingMode) => ["Fit", "Cover", "Stretch", "Integer"],
             nameof(ApplicationSettings.HdrMode) => ["Auto", "On", "Off"],
@@ -31,7 +31,7 @@ public sealed partial class MacLauncher
             nameof(ApplicationSettings.OverlayCorner) => ["TopLeft", "TopRight", "BottomRight", "BottomLeft"],
             nameof(ApplicationSettings.BinkPlaybackMode) => ["Host", "Guest", "Skip"],
             nameof(ApplicationSettings.LibraryLayout) => ["Carousel", "Grid"],
-            nameof(ApplicationSettings.ConsoleType) => ["PS5", "PS4"],
+            nameof(ApplicationSettings.ConsoleType) => ["PS5"],
             _ => [],
         };
         if (choices.Length != 0)
