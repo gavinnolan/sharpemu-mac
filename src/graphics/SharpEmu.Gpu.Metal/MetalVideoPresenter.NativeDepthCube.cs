@@ -52,8 +52,8 @@ internal static partial class MetalVideoPresenter
         if (_closed || _guestWorkFailure is not null || !ReferenceEquals(_guestMemory, original.Memory) ||
             original.Session != CurrentNativeDepthFaceSession || _nativeDepthFaces.Count >= 128 && !_nativeDepthFaces.ContainsKey(original.Address))
             throw new NotSupportedException("Metal native depth face admission is closed, changed or saturated.");
-        if (draw.Targets.Length == 0 || draw.Targets.Any(color => color.Width != 256 || color.Height != 256) ||
-            target.Width != 256 || target.Height != 256 || target.Address != original.Address ||
+        if (draw.Targets.Length == 0 || draw.Targets.Any(color => color.Width != 1024 || color.Height != 1024) ||
+            target.Width != 1024 || target.Height != 1024 || target.Address != original.Address ||
             target.HasStencil || target.MetadataClear)
             throw new NotSupportedException("Metal native cube face draw cannot expand the normalized depth attachment or write stencil/metadata.");
         MetalDepthFacePlacement.RequireOriginalCurrent(original);
@@ -113,7 +113,7 @@ internal static partial class MetalVideoPresenter
                 !_guestDepthImages.TryGetValue(producer.Original.Address, out var owner) || !ReferenceEquals(owner, image) ||
                 !_nativeDepthImageOrigins.TryGetValue(image, out var original) || original.Address != producer.Original.Address ||
                 commandBuffer != _batchCommandBuffer || queue == 0 || queue != _batchQueue ||
-                image.Texture == 0 || !image.Initialized || image.Width != 256 || image.Height != 256 ||
+                image.Texture == 0 || !image.Initialized || image.Width != 1024 || image.Height != 1024 ||
                 image.Format != MtlPixelFormat.Depth32Float || image.TextureType != MtlTextureType2D || image.Depth != 1 || image.ArrayLength != 1 ||
                 _nativeDepthUncommitted.Count >= MaxPendingGuestWork + 1)
                 throw new NotSupportedException("Metal native depth producer owner/session/encoder receipt changed.");
@@ -231,8 +231,8 @@ internal static partial class MetalVideoPresenter
         texture = null!;
         if (!MetalDepthFacePlacement.Enabled || !binding.Shape.DepthCompare || !binding.Shape.Cube) return false;
         var d = binding.Descriptor;
-        if (d.Width != 256 || d.Height != 256 || d.Depth != 6 || d.Format != 2 || d.NumberType != 0 ||
-            d.Type != Gen5TextureTypeCube || d.TileMode != 24 || d.Pitch != 256 || d.ResourceMipLevels != 1 ||
+        if (d.Width != 1024 || d.Height != 1024 || d.Depth != 6 || d.Format != 2 || d.NumberType != 0 ||
+            d.Type != Gen5TextureTypeCube || d.TileMode != 24 || d.Pitch != 1024 || d.ResourceMipLevels != 1 ||
             d.BaseLevel != 0 || d.LastLevel != 0 || d.BaseArray != 0 || d.DstSelect != 0x924 ||
             binding.ResourceDescriptor is not { Count: 8 } raw ||
             raw[0] != (uint)(d.Address >> 8) || raw[1] != ((uint)(d.Address >> 40) | 0xC0700000) ||
@@ -252,8 +252,8 @@ internal static partial class MetalVideoPresenter
                 MetalDepthFacePlacement.RequireOriginalCurrent(producer.Original);
                 faces[face] = producer;
             }
-            texture = new GuestDrawTexture(d.Address, 256, 256, 2, 0, [], IsFallback: false, IsStorage: false,
-                Pitch: 256, TileMode: 24, Sampler: ToGuestSampler(binding.SamplerDescriptor), DstSelect: d.DstSelect,
+            texture = new GuestDrawTexture(d.Address, 1024, 1024, 2, 0, [], IsFallback: false, IsStorage: false,
+                Pitch: 1024, TileMode: 24, Sampler: ToGuestSampler(binding.SamplerDescriptor), DstSelect: d.DstSelect,
                 ArrayedView: true, Type: Gen5TextureTypeCube, Depth: 1, ArrayLayers: 6,
                 SourceByteCount: 6 * MetalDepthFacePlacement.FaceBytes, Descriptor: binding.ResourceDescriptor.ToArray(),
                 Shape: binding.Shape, Access: binding.Access, ResourceMipLevels: 1);
@@ -396,7 +396,7 @@ internal static partial class MetalVideoPresenter
                     owns[face] = true;
                 }
             }
-            result = AcquireSnapshotTexture(device, MtlPixelFormat.Depth32Float, 256, 256,
+            result = AcquireSnapshotTexture(device, MtlPixelFormat.Depth32Float, 1024, 1024,
                 (nint)UsageShaderRead, MtlTextureType2DArray, 6, 1, privateStorage: true);
             if (result == 0) throw new InvalidOperationException("Metal native depth cube array allocation failed.");
             var blit = MetalNative.Send(commandBuffer, MetalNative.Selector("blitCommandEncoder"));
@@ -407,7 +407,7 @@ internal static partial class MetalVideoPresenter
                 for (var face = 0; face < 6; face++)
                     MetalNative.SendCopyTextureSlice(blit, MetalNative.Selector(
                         "copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toTexture:destinationSlice:destinationLevel:destinationOrigin:"),
-                        handles[face], 0, 0, default, new MtlSize { Width = 256, Height = 256, Depth = 1 }, result, (nuint)face, 0, default);
+                        handles[face], 0, 0, default, new MtlSize { Width = 1024, Height = 1024, Depth = 1 }, result, (nuint)face, 0, default);
             }
             catch (Exception error) { blitFailure = error; }
             try { MetalNative.SendVoid(blit, MetalNative.Selector("endEncoding")); }

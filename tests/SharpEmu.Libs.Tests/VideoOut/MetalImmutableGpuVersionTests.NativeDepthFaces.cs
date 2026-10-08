@@ -66,7 +66,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             foreach (var name in new[] { "_pendingSnapshotResources", "_retiredSnapshotResources", "_freeSnapshotResources" })
                 Assert.Empty((IEnumerable)Field(name).GetValue(null)!); // fresh worker owns every new pooled retain
             physical = new PhysicalVirtualMemory(HostMemoryAuthority.Current, HostViewMemory.Create(),
-                backingBytes: 16 * 65536UL, preReserveGuestAddressSpace: false);
+                backingBytes: 16 * 1024 * 1024UL, preReserveGuestAddressSpace: false);
             const ulong totalBytes = 6 * MetalDepthFacePlacement.FaceBytes;
             NativeDepthAssert(physical.TryHoldRangeAtOrAbove(0x71F8_0000_00, totalBytes, 65536, out address));
             NativeDepthAssert(address != 0 && (address & 65535) == 0 && address >> 48 == 0);
@@ -87,10 +87,10 @@ public sealed partial class MetalImmutableGpuVersionTests
                 var selected = address + face * MetalDepthFacePlacement.FaceBytes;
                 Assert.False(GuestImageWriteTracker.TryGetContentToken(selected, out _));
                 var words = new DepthTargetWords((uint)GuestDepthFormat.Z16 | 24u << 4, 0,
-                    face | face << 13, 255 | 255u << 16, true, 0, 1, 2 | 4 | 7u << 4,
+                    face | face << 13, 1023 | 1023u << 16, true, 0, 1, 2 | 4 | 7u << 4,
                     address, address, 0, 0, 0);
                 var normalized = ImageRequestBuilders.DepthTarget(words, ((IRenderHost)host).FormatSupport)!.Value;
-                var target = new GuestDepthTarget(address, address, 256, 256, (uint)GuestDepthFormat.Z16, 24,
+                var target = new GuestDepthTarget(address, address, 1024, 1024, (uint)GuestDepthFormat.Z16, 24,
                     (face + 1) / 8f, false, Registers: words);
                 // Actual normalizer and original provider capture, not CWT insertion/prearm.
                 target = MetalDepthFacePlacement.Project(memory, normalized, words, target);
@@ -156,7 +156,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             Assert.Equal((nint)MtlPixelFormat.Depth32Float, MetalNative.Send(depth, MetalNative.Selector("pixelFormat")));
             Assert.Equal((nint)3, MetalNative.Send(depth, MetalNative.Selector("textureType")));
             Assert.Equal((nint)6, MetalNative.Send(depth, MetalNative.Selector("arrayLength")));
-            readback = MetalNative.SendNewBuffer(state.NativeFaceDevice, MetalNative.Selector("newBufferWithLength:options:"), 6 * 256 * 256 * 4, 0);
+            readback = MetalNative.SendNewBuffer(state.NativeFaceDevice, MetalNative.Selector("newBufferWithLength:options:"), 6 * 1024 * 1024 * 4, 0);
             Assert.NotEqual(0, readback);
             var blit = MetalNative.Send(command, MetalNative.Selector("blitCommandEncoder")); Assert.NotEqual(0, blit);
             Exception? blitFailure = null;
@@ -165,8 +165,8 @@ public sealed partial class MetalImmutableGpuVersionTests
                 for (uint face = 0; face < 6; face++)
                     MetalNative.SendCopyTextureToBuffer(blit, MetalNative.Selector(
                         "copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toBuffer:destinationOffset:destinationBytesPerRow:destinationBytesPerImage:"),
-                        depth, face, 0, default, new MtlSize { Width = 256, Height = 256, Depth = 1 },
-                        readback, face * 256 * 256 * 4, 256 * 4, 256 * 256 * 4);
+                        depth, face, 0, default, new MtlSize { Width = 1024, Height = 1024, Depth = 1 },
+                        readback, face * 1024 * 1024 * 4, 1024 * 4, 1024 * 1024 * 4);
             }
             catch (Exception error) { blitFailure = error; }
             try { MetalNative.SendVoid(blit, MetalNative.Selector("endEncoding")); }
@@ -175,13 +175,13 @@ public sealed partial class MetalImmutableGpuVersionTests
             Call("WaitForFlushedGuestCommands");
             Assert.Equal((nint)4, MetalNative.Send(command, MetalNative.Selector("status")));
             safeToRelease = true;
-            var actual = new byte[6 * 256 * 256 * 4];
+            var actual = new byte[6 * 1024 * 1024 * 4];
             var contents = MetalNative.Send(readback, MetalNative.Selector("contents"));
             Assert.NotEqual((nint)0, contents);
             Marshal.Copy(contents, actual, 0, actual.Length);
             for (var face = 0; face < 6; face++)
-                for (var pixel = 0; pixel < 256 * 256; pixel++)
-                    Assert.Equal((face + 1) / 8f, BitConverter.ToSingle(actual, (face * 256 * 256 + pixel) * 4));
+                for (var pixel = 0; pixel < 1024 * 1024; pixel++)
+                    Assert.Equal((face + 1) / 8f, BitConverter.ToSingle(actual, (face * 1024 * 1024 + pixel) * 4));
             Assert.Equal(6, memory.MappedCopies); Assert.Equal(0, memory.DirectReads);
             Assert.Empty((IDictionary)Field("_nativeDepthBatches").GetValue(null)!);
             // Refused logical queue cannot replace the original captured cohort.
@@ -193,7 +193,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             var rejectCommand = state.Buffer();
             var stale = Assert.Throws<TargetInvocationException>(() => Call("CreateDrawTexture", state.NativeFaceDevice, rejectCommand, snapshot, false));
             Assert.IsType<NotSupportedException>(stale.InnerException);
-            output.WriteLine($"native-depth-faces status=4 faces=6 full_float_texels=393216 bytes=1572864 original_cold_watches=6 original_mapped_probes=6 zero_CPU_shadow_reads=1 same_CB={!completedFirst} stale_session_veto=1 wrong_queue_veto=1");
+            output.WriteLine($"native-depth-faces status=4 faces=6 full_float_texels=6291456 bytes=25165824 original_cold_watches=6 original_mapped_probes=6 zero_CPU_shadow_reads=1 same_CB={!completedFirst} stale_session_veto=1 wrong_queue_veto=1");
         }
         catch (Exception failure) { primary = failure; }
         finally
@@ -285,11 +285,11 @@ public sealed partial class MetalImmutableGpuVersionTests
         {
             var render = GuestRenderState.Default with { Depth = new(true, true, 7, ClearEnable: true) };
             MetalVideoPresenter.SubmitOffscreenTranslatedDraw(pixel, [], [], 0,
-                [new GuestRenderTarget(0, 256, 256, 10, 0)], vertex, 3, 1, 4, null, [], render, target, 0);
+                [new GuestRenderTarget(0, 1024, 1024, 10, 0)], vertex, 3, 1, 4, null, [], render, target, 0);
         }
         public void AdmitNativeFaceConsumer(MetalCompiledGuestShader vertex, MetalCompiledGuestShader pixel, GuestDrawTexture snapshot) =>
             MetalVideoPresenter.SubmitOffscreenTranslatedDraw(pixel, [snapshot], [], 0,
-                [new GuestRenderTarget(0, 256, 256, 10, 0)], vertex, 3, 1, 4, null, [], GuestRenderState.Default, null, 0);
+                [new GuestRenderTarget(0, 1024, 1024, 10, 0)], vertex, 3, 1, 4, null, [], GuestRenderState.Default, null, 0);
         public void DisposeNativeDepthFixture()
         {
             if (nativeDepthDisposed) return; nativeDepthDisposed = true;

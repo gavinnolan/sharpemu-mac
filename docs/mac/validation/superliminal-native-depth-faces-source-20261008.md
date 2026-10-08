@@ -9,7 +9,7 @@ PS5 tile topology, all-alias CPU writer participation, or native teardown.
 The f4eb replay first rejects the actual cube at 0x707B7D0000 because an existing
 native depth producer overlaps its CPU snapshot. Pixel hash31B6963E7997EF6E,
 image5, raw `[707B7D00,C0700000,00FFC0FF,B1800924,00000005,00700000,0,0]`:
-256-square R16Unorm/type11/mode24, six faces, pitch256, one mip, select0x924.
+1024-square R16Unorm/type11/mode24, six faces, pitch256, one mip, select0x924.
 The existing native producer must be preserved; guest CPU bytes cannot replace it.
 The preceding DB raw registers have not yet been observed in this run. This
 checkpoint must explicitly reject any DB shape that its normalized contract does
@@ -19,9 +19,9 @@ not cover. The earlier color placement path was not reached/qualified by this ru
 
 Host GuestDepthOf now projects the selected original normalized DB layer into
 its physical address without mutating its raw registers or original resource.
-The finite qualifier requires actual 256-square Z16/mode24 single selected layer,
+The finite qualifier requires actual 1024-square Z16/mode24 single selected layer,
 complete normalized backing/pitch/layout agreement, single mip, no stencil.
-Its 0x20000 face placement follows that actual normalized backing/view tuple.
+Its 0x200000 face placement follows that actual normalized backing/view tuple.
 The original provider mapping observation covers the COMPLETE normalized backing;
 its discarded eight-byte probe lies in the original selected physical face and
 never supplies sampled depth. Content protection covers that SAME complete selected
@@ -56,7 +56,7 @@ separate; this adds no successful guest completion from close.
 
 ## Prepared controls and next qualification
 
-15 genuine Libs rows: six actual normalized selected-face placements, seven forged
+16 genuine Libs rows: actual captured raw1024 geometry replay, six actual normalized selected-face placements, seven forged
 normalized placement rejections, default-off/no-probe behavior, and missing provider
 rejection before CPU reads. These are source/helper controls, not GPU producer proof.
 No build/test/native/game execution has occurred at this checkpoint.
@@ -64,7 +64,7 @@ No build/test/native/game execution has occurred at this checkpoint.
 Next native fixture must use real Mac/PVM original mapped backing, actual normalized
 DB requests through public draw admission, real production Drain and cube
 CreateTextureSnapshots, then actual six-face producer-to-layered-consumer readback.
-Distinct face depths and all 393216 texels must be checked, plus version/session/
+Distinct face depths and all 6291456 texels must be checked, plus version/session/
 wrong-queue/refused-owner controls and consumed-retain cleanup. A fixture cannot
 inject CWT origins or prearm away a cold observation defect. A real signed title
 replay is required to confirm actual DB geometry and entry advancement.
@@ -76,8 +76,8 @@ command buffer, and the same flow after original successful native completion.
 Neither prearms nor enrolls managed-writer coverage on the six source faces.
 After each new selected capture every earlier original token is revalidated.
 The initial CPU backing is 0xED; the source wrapper refuses CPU shadow reads,
-while all six native faces use distinct nonzero depth clears. All 393216 native
-Depth32 texels (1572864 bytes) are read back after actual status4. Wrong logical
+while all six native faces use distinct nonzero depth clears. All 6291456 native
+Depth32 texels (25165824 bytes) are read back after actual status4. Wrong logical
 queue and original-session retirement remain refusal controls.
 
 The fixture uses handwritten controlled VS/PS through the production draw path;
@@ -103,4 +103,16 @@ The independent complete layered readback runs after this real production
 resolution; it does not claim guest cube-comparison shader translation. The
 prior-completed branch resolves after a real successful wait. Caller argument
 expressions name failing assertions without reevaluating their conditions.
-Production source and all29 managed identities remain unchanged.
+At e0, production source and all29 managed identities remained unchanged. The geometry successor adds one actual-raw replay identity (30 planned genuine managed rows including prior controls).
+
+
+The original256 geometry was incorrect. The actual captured rawT# word1=C0700000
+andword2=00FFC0FF decode width=((0xFF<<2)|3)+1=1024 andheight=(0x3FF)+1=1024.
+The e0 native worker reached the pending-GPU CPU-overlap veto because its production
+finite256 qualifier declined that exact1024 descriptor. Its failure remains
+preserved; no native success/title advancement is inferred. This successor pins
+1024-square actualnormalized DB metadata and 0x200000 selected D16 face spans,
+keeps the same exact rawcube contract, and prepares the complete6291456 Depth32
+texel/25165824-byte oracle. Actual preceding titleDB words remain unobserved:
+only the actualnormalizer agreement can authorize selected placement. No general
+cube dimension expansion or CPU fallback is introduced.

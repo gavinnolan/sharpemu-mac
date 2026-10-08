@@ -17,7 +17,7 @@ internal static class MetalDepthFacePlacement
 {
     internal static bool Enabled = string.Equals(Environment.GetEnvironmentVariable(
         "SHARPEMU_METAL_NATIVE_DEPTH_CUBE"), "1", StringComparison.Ordinal);
-    internal const ulong FaceBytes = 0x20000;
+    internal const ulong FaceBytes = 0x200000;
     internal sealed record Observation(ICpuMemory Memory, ICpuMappedCopySource Source,
         CpuMappedCopyObservation Mapping, CpuTextureSnapshotObservation Content,
         long Session, DepthTargetWords Registers, ulong BackingAddress,
@@ -55,19 +55,19 @@ internal static class MetalDepthFacePlacement
     {
         var d = resolution.Request.Description;
         var view = resolution.Request.View;
-        if (resolution.Width != 256 || resolution.Height != 256 || resolution.Samples != 1 ||
+        if (resolution.Width != 1024 || resolution.Height != 1024 || resolution.Samples != 1 ||
             resolution.HasStencil || words.DepthFormat != GuestDepthFormat.Z16 ||
             ((words.ZInfo >> 4) & 31) != 24 || words.MaxMip != 0 || words.ViewMipLevel != 0 ||
             words.SliceStart != words.SliceMax || words.SliceStart >= 6 ||
             words.ZReadBase == 0 || words.ZReadBase != words.ZWriteBase || (words.ZReadBase & 0xFFFF) != 0 ||
             d.Data.Address != words.ZReadBase || d.Data.Size != FaceBytes * (words.SliceMax + 1UL) ||
             resolution.DepthAddress != d.Data.Address || resolution.DepthSize != d.Data.Size ||
-            d.BytesPerBlock != 2 || d.Pitch != 256 || d.Resources.Levels != 1 || d.Resources.Layers != words.SliceMax + 1 ||
-            d.PixelFormat != GpuFormat.D16Unorm || d.Extent.Width != 256 || d.Extent.Height != 256 || d.Extent.Depth != 1 ||
+            d.BytesPerBlock != 2 || d.Pitch != 1024 || d.Resources.Levels != 1 || d.Resources.Layers != words.SliceMax + 1 ||
+            d.PixelFormat != GpuFormat.D16Unorm || d.Extent.Width != 1024 || d.Extent.Height != 1024 || d.Extent.Depth != 1 ||
             d.MipLayout[0].Offset != 0 || d.MipLayout[0].Size != d.Data.Size ||
             view.BaseLayer != words.SliceStart || view.LayerCount != 1 || view.BaseLevel != 0 || view.LevelCount != 1 ||
             words.ZReadBase > ulong.MaxValue - d.Data.Size)
-            throw new NotSupportedException("Metal native depth cube face requires the original normalized 256-square Z16 mode24 single selected DB layer and complete backing footprint.");
+            throw new NotSupportedException("Metal native depth cube face requires the original normalized 1024-square Z16 mode24 single selected DB layer and complete backing footprint.");
         return checked(d.Data.Address + words.SliceStart * FaceBytes);
     }
 
@@ -75,7 +75,7 @@ internal static class MetalDepthFacePlacement
         DepthTargetWords words, GuestDepthTarget target)
     {
         if (!Enabled) return target;
-        if (resolution.Width != 256 || resolution.Height != 256 || words.DepthFormat != GuestDepthFormat.Z16 || ((words.ZInfo >> 4) & 31) != 24)
+        if (resolution.Width != 1024 || resolution.Height != 1024 || words.DepthFormat != GuestDepthFormat.Z16 || ((words.ZInfo >> 4) & 31) != 24)
         {
             if (resolution.DepthAddress == 0 || resolution.DepthSize == 0 || resolution.DepthAddress > ulong.MaxValue - resolution.DepthSize)
                 throw new NotSupportedException("Native cube sibling depth writer lacks its original normalized full span.");
