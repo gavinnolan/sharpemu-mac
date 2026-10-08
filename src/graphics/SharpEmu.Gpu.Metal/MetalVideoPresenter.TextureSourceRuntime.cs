@@ -64,6 +64,7 @@ internal static partial class MetalVideoPresenter
     }
     private static GuestPresentationShutdownAttempt? _guestPresentationShutdownAttempt;
     private static int _guestPresentationShutdownJoinWaiters;
+    private static bool _guestPresentationNativeOwnersDrained;
 
     private static void CompletePresenterShutdown()
     {
@@ -72,7 +73,11 @@ internal static partial class MetalVideoPresenter
         {
             // A successful receipt belongs to its closed presenter lifetime;
             // it cannot authorize teardown of a newly opened lifetime.
-            if (!_closed) _guestPresentationShutdownAttempt = null;
+            if (!_closed)
+            {
+                _guestPresentationShutdownAttempt = null;
+                _guestPresentationNativeOwnersDrained = false;
+            }
             _closed = true;
             _thread = null;
             Monitor.PulseAll(_gate);
@@ -90,22 +95,32 @@ internal static partial class MetalVideoPresenter
         }
         if (attempt is null) return; // Existing graph-disabled behavior.
         var completed = false;
+        var cleanupFailed = false;
         try
         {
             // Revoke publication and cancellable CPU owners first. Active
             // render readers own independent pins, never force-returned here.
             lock (_gate)
                 try { DropCanceledGuestQueueReferencesLocked(); }
-                catch (Exception cleanupFailure) { _textureSourceCleanupFailure ??= cleanupFailure; }
+                catch (Exception cleanupFailure)
+                {
+                    cleanupFailed = true;
+                    _textureSourceCleanupFailure ??= cleanupFailure;
+                    Console.Error.WriteLine($"[LOADER][ERROR] Metal shutdown CPU payload cleanup failed: {cleanupFailure}");
+                }
             if (!WaitForGuestPresentationPayloadBorrows()) return;
-            ShutdownTextureSourceNativeOwners();
+            if (!_guestPresentationNativeOwnersDrained)
+            {
+                ShutdownTextureSourceNativeOwners();
+                _guestPresentationNativeOwnersDrained = true;
+            }
             _batchOpen = false;
             _batchCommandBuffer = 0;
             _executingTextureSourceWork = null;
             _touchedUploadPages.Clear();
             _uploadTouchStamp++;
             lock (_gate) DropCanceledGuestQueueReferencesLocked();
-            completed = true;
+            completed = !cleanupFailed && _guestPayloadUnconfirmedReturnCount == 0;
         }
         finally
         {

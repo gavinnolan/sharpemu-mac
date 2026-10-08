@@ -487,3 +487,21 @@ No native repeated-frame rendering, GPU completion, guest shader translation,
 game progression, mutable presentation-image/backing lifetime or graph activation
 is qualified by these controls. Production `_textureSourceGraphEnabled` remains
 hardfalse. The immutable GPU source and CPU alias/backing contracts remain separate.
+
+The close review additionally distinguishes consumed return authority from a
+confirmed return call. A sticky unconfirmed-return count/cause survives every
+retry; an old receipt is never retried or rediscovered by array identity. Native
+owner drain is recorded independently and is not repeated after success. A
+whole-close receipt remains incomplete when a consumed return is unconfirmed,
+even if native drain succeeded. A diagnostic after a confirmed call can fail its
+own attempt without introducing uncertainty; a later clean close may finish,
+while preserving the original GPU failure and historical cleanup diagnostic.
+
+Two additional controls use three real accepted pooled arrays. The first actual
+return is immediately rerented; a controlled pre-return callback fails the second
+after backend authority consumption, and the third cleanup is still attempted.
+Test-only external reconciliation then rerents the second array. Repeated close
+and late work release cannot return either new rent or clear uncertainty. The
+separate post-return-only case proves normal-call confirmation versus diagnostic.
+This fault seam does not claim an actual allocator OOM or hardware failure.
+The successor's preliminary combined ARM64 selection passed 162/162.

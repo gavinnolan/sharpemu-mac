@@ -15,7 +15,7 @@ internal static partial class MetalVideoPresenter
         public readonly byte[] Data = data;
         public GuestIndexBufferLease? IndexLease;
         public int References;
-        public bool Returned;
+        public bool Returned, ReturnConfirmed;
     }
     private sealed class GuestPayloadOwner(object[] keys, GuestPayloadReceipt[] receipts, GuestIndexBufferLease?[] leases)
     {
@@ -29,6 +29,11 @@ internal static partial class MetalVideoPresenter
     private static readonly ConditionalWeakTable<object, GuestPayloadOwner> _guestPayloadOwners = new();
     private static readonly Dictionary<byte[], GuestPayloadReceipt> _activeGuestPayloadReceipts = new(ReferenceEqualityComparer.Instance);
     private static readonly HashSet<GuestPayloadOwner> _activeGuestPayloadOwners = new();
+    // Sticky uncertainty, distinct from a diagnostic after a confirmed call.
+    // Consumed historical receipts never regain return authority on close retry.
+    private static int _guestPayloadUnconfirmedReturnCount;
+    private static Exception? _guestPayloadUnconfirmedReturnCause;
+    private static Action? _textureSourceBeforeGuestPayloadPoolReturn;
 
     // Caller holds _gate. Preparation changes no ownership; all allocations and
     // lease validation happen before successful queue/presentation publication.
@@ -131,10 +136,23 @@ internal static partial class MetalVideoPresenter
                 {
                     if (!lease.TryReturn()) throw new InvalidOperationException("Metal accepted index return authority was consumed externally.");
                 }
-                else GuestDataPool.Shared.Return(receipt.Data);
+                else
+                {
+                    _textureSourceBeforeGuestPayloadPoolReturn?.Invoke();
+                    GuestDataPool.Shared.Return(receipt.Data);
+                }
+                receipt.ReturnConfirmed = true;
                 _textureSourceAfterCanceledPayloadReturn?.Invoke();
             }
-            catch (Exception exception) { failure ??= exception; }
+            catch (Exception exception)
+            {
+                if (!receipt.ReturnConfirmed)
+                {
+                    if (_guestPayloadUnconfirmedReturnCount != int.MaxValue) _guestPayloadUnconfirmedReturnCount++;
+                    _guestPayloadUnconfirmedReturnCause ??= exception;
+                }
+                failure ??= exception;
+            }
         }
         if (failure is not null) ExceptionDispatchInfo.Capture(failure).Throw();
     }

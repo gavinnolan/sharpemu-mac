@@ -38,15 +38,18 @@ public sealed partial class MetalTextureSourceRuntimeDrainTests
         public BorrowState()
         {
             Assert.Equal(0, ActiveBorrows);
-            foreach (var name in new[] { "_textureSourceCleanupFailure", "_textureSourceAfterCanceledPayloadReturn", "_guestPresentationBorrowShutdownTimeoutMilliseconds", "_guestPresentationBorrowShutdownIncomplete" })
+            foreach (var name in new[] { "_textureSourceCleanupFailure", "_textureSourceAfterCanceledPayloadReturn", "_guestPresentationBorrowShutdownTimeoutMilliseconds", "_guestPresentationBorrowShutdownIncomplete", "_guestPayloadUnconfirmedReturnCount", "_guestPayloadUnconfirmedReturnCause", "_textureSourceBeforeGuestPayloadPoolReturn", "_guestPresentationNativeOwnersDrained" })
                 saved.Add(Field(name), Field(name).GetValue(null));
             Field("_textureSourceCleanupFailure").SetValue(null, null);
+            Field("_guestPayloadUnconfirmedReturnCount").SetValue(null, 0);
+            Field("_guestPayloadUnconfirmedReturnCause").SetValue(null, null);
             Field("_guestPresentationBorrowShutdownTimeoutMilliseconds").SetValue(null, 2000);
         }
         public GuestDrawTexture AdmitPendingSource() => state.AdmitPendingSource();
         public void Dispose()
         {
             Field("_textureSourceAfterCanceledPayloadReturn").SetValue(null, null);
+            Field("_textureSourceBeforeGuestPayloadPoolReturn").SetValue(null, null);
             var borrows = ((IEnumerable)Field("_activeGuestPresentationPayloadBorrows").GetValue(null)!).Cast<object>().ToArray();
             foreach (var borrow in borrows) ReleaseBorrow(borrow);
             state.Dispose();
@@ -339,6 +342,85 @@ public sealed partial class MetalTextureSourceRuntimeDrainTests
             foreach (var borrow in ((IEnumerable)Field("_activeGuestPresentationPayloadBorrows").GetValue(null)!).Cast<object>().ToArray()) ReleaseBorrow(borrow);
             if (first is not null) Assert.True(first.Wait(3000));
             GuestDataPool.Shared.Return(data);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void WholeCloseCannotEraseConsumedReturnUncertaintyOrStealRerents(bool unconfirmed)
+    {
+        using var state = new BorrowState(); lock (PoolGate)
+        {
+            var before = GuestDataPool.DiagnosticStats().LeaseCount;
+            var first = GuestDataPool.Shared.Rent(64); var second = GuestDataPool.Shared.Rent(128); var third = GuestDataPool.Shared.Rent(256);
+            byte[]? firstRerent = null, secondRerent = null;
+            var cause = new InvalidOperationException("original GPU failure before whole close");
+            var cleanup = new InvalidOperationException(unconfirmed ? "controlled failure before second actual pool return" : "diagnostic after first confirmed pool return");
+            try
+            {
+                var work = new StatePayloadSubmission(first, second, third).Work;
+                var receipts = ((IEnumerable)Get(PayloadOwner(work), "Receipts")!).Cast<object>().ToArray();
+                var attempts = 0; var confirmations = 0;
+                Field("_textureSourceBeforeGuestPayloadPoolReturn").SetValue(null, (Action)(() =>
+                {
+                    if (++attempts == 2 && unconfirmed) throw cleanup;
+                }));
+                Field("_textureSourceAfterCanceledPayloadReturn").SetValue(null, (Action)(() =>
+                {
+                    if (++confirmations != 1) return;
+                    firstRerent = GuestDataPool.Shared.Rent(64); Assert.Same(first, firstRerent);
+                    if (!unconfirmed) throw cleanup;
+                }));
+                Field("_guestWorkFailure").SetValue(null, cause);
+                Call("CompletePresenterShutdown");
+                var attempt = Field("_guestPresentationShutdownAttempt").GetValue(null)!;
+                Assert.True((bool)Get(attempt, "Finished")!); Assert.False((bool)Get(attempt, "Completed")!);
+                Assert.True((bool)Field("_guestPresentationNativeOwnersDrained").GetValue(null)!);
+                Assert.Same(cause, Field("_guestWorkFailure").GetValue(null)); Assert.Same(cleanup, Field("_textureSourceCleanupFailure").GetValue(null));
+                Assert.Equal(3, attempts); Assert.Equal(unconfirmed ? 2 : 3, confirmations);
+                Assert.All(receipts, receipt => Assert.True((bool)Get(receipt, "Returned")!));
+                Assert.Equal(!unconfirmed, Get(receipts[1], "ReturnConfirmed"));
+                Assert.Equal(unconfirmed ? 1 : 0, Field("_guestPayloadUnconfirmedReturnCount").GetValue(null));
+                if (unconfirmed)
+                {
+                    Assert.Same(cleanup, Field("_guestPayloadUnconfirmedReturnCause").GetValue(null));
+                    Assert.Equal(before + 2, GuestDataPool.DiagnosticStats().LeaseCount);
+                    // Test teardown knows the injected call did not run. This
+                    // is external reconciliation, never backend retry authority.
+                    GuestDataPool.Shared.Return(second);
+                }
+                secondRerent = GuestDataPool.Shared.Rent(128); Assert.Same(second, secondRerent);
+                Assert.Equal(before + 2, GuestDataPool.DiagnosticStats().LeaseCount);
+                Field("_textureSourceBeforeGuestPayloadPoolReturn").SetValue(null, null);
+                Field("_textureSourceAfterCanceledPayloadReturn").SetValue(null, null);
+                for (var i = 0; i < 2; i++)
+                {
+                    Call("CompletePresenterShutdown"); Call("ReturnPooledComputeData", work);
+                    Assert.Equal(!unconfirmed, Get(Field("_guestPresentationShutdownAttempt").GetValue(null)!, "Completed"));
+                    Assert.Equal(unconfirmed ? 1 : 0, Field("_guestPayloadUnconfirmedReturnCount").GetValue(null));
+                    Assert.Equal(before + 2, GuestDataPool.DiagnosticStats().LeaseCount);
+                }
+                Assert.Same(cause, Field("_guestWorkFailure").GetValue(null)); AssertNoLivePayloadReceipts();
+            }
+            finally
+            {
+                Field("_textureSourceBeforeGuestPayloadPoolReturn").SetValue(null, null);
+                Field("_textureSourceAfterCanceledPayloadReturn").SetValue(null, null);
+                GuestDataPool.Shared.Return(firstRerent ?? first); GuestDataPool.Shared.Return(secondRerent ?? second); GuestDataPool.Shared.Return(third);
+            }
+        }
+    }
+    // Actual accepted compute transfer without introducing nested presenter
+    // state or fake completion; close cancels it before any native execution.
+    private sealed class StatePayloadSubmission
+    {
+        public readonly object Work;
+        public StatePayloadSubmission(params byte[][] data)
+        {
+            MetalVideoPresenter.SubmitComputeDispatch(0, new(new Gen5MslShader("", "close return proof", Gen5MslStage.Compute, 0)), [],
+                data.Select(bytes => new GuestMemoryBuffer(0, bytes, bytes.Length, (ulong)bytes.Length, true)).ToArray(), 1, 1, 1, 0, 0, 0, true, null);
+            Work = LastQueuedWork();
         }
     }
 
