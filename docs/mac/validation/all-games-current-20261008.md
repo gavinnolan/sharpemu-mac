@@ -71,3 +71,11 @@ Metal/compiler cases per runtime configuration. Its signed Octopath replay
 clears the earlier mapping-copy rejection, then exits134 after38s at8030300000
 because GPU-produced/pending-write ownership cannot authorize a dirty CPU seed.
 It remains isolated; no gameplay or performance gate is met.
+
+Timed successor46b3de48 passes106 focused managed rows per runtime. Its25s
+signed Quake probe still aborts during queued OffscreenGuestDraw2, whose measured
+startup wall time is166.551ms; EOP3 starts about177.566ms after admission. This
+identifies the preceding slow draw, without assigning its time to CPU or GPU.
+For Octopath, the rejection guard combines image GPU-written, global pending
+work and open-batch flags; the current log does not identify the triggering
+term. Exact per-resource ownership and completion remain the next checks.

@@ -44,3 +44,29 @@ bundle manifest and native process sample). The late sample occurs after guest
 abort, so it is not a profile of the failing frame-start wait. The attempted
 managed stack tool fails to load an incompatible host runtime and contributes
 no managed stack evidence. This candidate stays isolated from main.
+
+## Timed cold-work diagnostic
+
+Clean successor46b3de48 separates the actual Run/render owner from the startup
+requester's thread marker and adds bounded monotonic work tracing. All106
+focused managed rows pass on both runtime configurations, stable source/DLLs
+and no test cleanup signals. Its initial no-restore build fails before compiling
+because the fresh worktree has no assets; the restored compiler succeeds but
+requires residual-child TERM. Those receipts are preserved. A separate signed
+239-file app publish succeeds in28.06s with no cleanup signals.
+
+The signed25s Quake probe still reaches the same abort, peaks1150MiB and stops
+normally. Work1 is ComputeGuestDispatch (39.286ms wall time). Work2 is
+OffscreenGuestDraw (166.551ms); the guest abort appears between its recorded
+start and finish. EOP3 is admitted before that draw finishes and waits about
+177.566ms before its ordered action starts. All three belong to the same
+dcb.graphics submission1. This identifies a slow preceding draw during the
+timeout; it does not distinguish managed JIT, shader translation, native pipeline
+compilation, resource preparation, GPU execution or waits inside that draw.
+The next investigation targets those stages and a valid preparation/readiness
+boundary, retaining genuine native completion before labels become visible.
+
+Evidence: `artifacts/validation/command-memory-startup-46b3`, including complete
+run, signed closure, `timed-work-summary.json` and runtime manifest; managed
+source/binary/TRX proof is under
+`artifacts/validation/all-games-20261008/command-memory-startup-46b3de48`.

@@ -44,8 +44,11 @@ publish completes in29.67 seconds with no signals or remaining workers.
 
 The signed Octopath replay clears the earlier provider mapping-copy rejection
 at `8030F00000`, then exits134 after38 seconds, peak2767MiB. It fails at
-`8030300000` with `gpu-produced-or-pending-write-debt`: a dirty flag cannot
-establish complete CPU replacement of a GPU-produced image. The replay provides
+`8030300000` with `gpu-produced-or-pending-write-debt`. The guard tests an OR of
+image GPU-written state, global pending-work count and an open native batch;
+this log does not identify the triggering term or prove an actual image writer.
+A dirty flag alone cannot establish full CPU replacement or completed writers.
+The replay provides
 no gameplay, rendering-fidelity, loading-time or sustained-FPS acceptance.
 No window screenshot is produced in this run. The combined source stays
 isolated; source provenance/dirty ownership is the next runtime investigation.
