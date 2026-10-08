@@ -101,6 +101,33 @@ internal static partial class MetalVideoPresenter
         catch (Exception) { return failure; }
     }
 
+    // The new CPU face path cannot reconstruct any known native depth/color
+    // producer from guest bytes. A layered native producer route is separate.
+    internal static void RejectDepthCubeCpuSourceGpuOverlap(ulong address, ulong bytes)
+    {
+        lock (_gate)
+        {
+            foreach (var entry in _guestDepthImages)
+            {
+                var image = entry.Value;
+                var extent = checked((ulong)image.Width * image.Height * 4);
+                if (DepthCubeOverlap(address, bytes, entry.Key, extent) ||
+                    _guestDepthReadAliases.Any(alias => alias.Value == entry.Key && DepthCubeOverlap(address, bytes, alias.Key, extent)))
+                    throw new NotSupportedException("Metal depth cube CPU snapshot overlaps a native depth producer; an exact ordered layered producer source is required.");
+            }
+            foreach (var entry in _guestImages)
+            {
+                if (!entry.Value.GpuWritten) continue;
+                if (!_guestImageExtents.TryGetValue(entry.Key, out var extent) || extent.ByteCount == 0 ||
+                    DepthCubeOverlap(address, bytes, entry.Key, extent.ByteCount))
+                    throw new NotSupportedException("Metal depth cube CPU snapshot cannot replace overlapping or unknown native image contents with guest bytes.");
+            }
+        }
+    }
+
+    private static bool DepthCubeOverlap(ulong a, ulong bytesA, ulong b, ulong bytesB) =>
+        (UInt128)a < (UInt128)b + bytesB && (UInt128)b < (UInt128)a + bytesA;
+
     private static nint EncodeDepthComparisonTexture(nint device, nint commandBuffer, nint source)
     {
         var type = checked((uint)MetalNative.Send(source, MetalNative.Selector("textureType")));
