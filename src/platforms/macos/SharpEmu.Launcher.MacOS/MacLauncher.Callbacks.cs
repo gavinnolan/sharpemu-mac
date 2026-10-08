@@ -49,13 +49,14 @@ public sealed partial class MacLauncher
                 if (window == owner.modalWindow) { owner.modalAccepted = false; Send(owner.app, Selector("stopModal")); return 1; }
                 if (window == owner.window && Send(owner.app, Selector("modalWindow")) != 0) { owner.RequestQuit(); return 0; }
                 if (window != owner.window || !owner.child.IsRunning) return 1;
+                if (owner.closeAfterChildExit) return 0;
                 var alert = New("NSAlert");
                 try
                 {
                     Send(alert, Selector("setMessageText:"), String("Stop the running game and quit?"));
                     Send(alert, Selector("addButtonWithTitle:"), String("Stop and Quit")); Send(alert, Selector("addButtonWithTitle:"), String("Cancel"));
                     if (Send(alert, Selector("runModal")) != 1000) return 0;
-                    owner.child.Stop(); return 1;
+                    owner.child.Stop(); owner.closeAfterChildExit = true; owner.SetStatus("Stopping owned emulator…"); return 0;
                 }
                 finally { Release(alert); }
             }

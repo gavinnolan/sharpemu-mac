@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 using System.Diagnostics;
 using System.Text;
+using System.Runtime.InteropServices;
 using SharpEmu.Application;
 namespace SharpEmu.Launcher.MacOS;
 
@@ -13,6 +14,15 @@ internal sealed class OwnedEmulatorProcess : IDisposable
     private bool disposed;
     private bool stopRequested;
     private long session;
+    private readonly TimeSpan stopGracePeriod;
+    public OwnedEmulatorProcess() : this(TimeSpan.FromSeconds(10)) { }
+    private OwnedEmulatorProcess(TimeSpan grace)
+    {
+        if (grace <= TimeSpan.Zero || grace > TimeSpan.FromSeconds(10)) throw new ArgumentOutOfRangeException(nameof(grace));
+        stopGracePeriod = grace;
+    }
+    [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "kill", SetLastError = true)]
+    private static extern int Signal(int pid, int signal);
     public event Action<long, string, bool>? Output;
     public event Action<long, int>? Exited;
     public bool IsRunning { get { lock (gate) return process is not null; } }
@@ -70,13 +80,32 @@ internal sealed class OwnedEmulatorProcess : IDisposable
     }
     public void Stop()
     {
+        Process child;
         lock (gate)
         {
-            if (process is null) return;
+            if (process is null || stopRequested) return;
+            child = process;
+            // Request cooperative host shutdown before any forced termination.
+            // Only this retained child is targeted; never search for emulator names.
+            if (!child.HasExited && Signal(child.Id, 15) != 0 && !child.HasExited)
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
             stopRequested = true;
-            try { process.Kill(entireProcessTree: true); }
-            catch (InvalidOperationException) { } // already exited
-            catch (System.ComponentModel.Win32Exception) when (process.HasExited) { }
+        }
+        _ = ForceStopAfterGraceAsync(child);
+    }
+    private async Task ForceStopAfterGraceAsync(Process child)
+    {
+        try { await child.WaitForExitAsync().WaitAsync(stopGracePeriod).ConfigureAwait(false); }
+        catch (ObjectDisposedException) { }
+        catch (TimeoutException)
+        {
+            lock (gate)
+            {
+                if (!ReferenceEquals(process, child)) return;
+                try { child.Kill(entireProcessTree: true); }
+                catch (InvalidOperationException) { } // exit won the race
+                catch (System.ComponentModel.Win32Exception) when (child.HasExited) { }
+            }
         }
     }
     public void Dispose()

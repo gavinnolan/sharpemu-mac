@@ -27,7 +27,7 @@ public sealed partial class MacLauncher : IDisposable
     private readonly Queue<string> lines = new();
     private nint app, target, window, table, search, cover, status, timer, consoleWindow, consoleText;
     private StreamWriter? fileLog;
-    private bool closed, scanRunning;
+    private bool closed, scanRunning, closeAfterChildExit;
     private long activeChildSession;
     private readonly QuitSequence quit = new();
     private CatalogGame? selected;
@@ -49,7 +49,9 @@ public sealed partial class MacLauncher : IDisposable
         strings.Load(settings.Language);
         watcher.RefreshRequested += (_, _) => Post(Refresh);
         child.Output += (session, line, error) => Post(() => DispatchChildNotification(session, () => Append(line)));
-        child.Exited += (session, code) => Post(() => DispatchChildNotification(session, () => { Append($"Emulator exited ({code})."); fileLog?.Dispose(); fileLog = null; SetStatus(strings.Get("Launch.Launch")); }));
+        child.Exited += (session, code) => Post(() => DispatchChildNotification(session, () => { Append($"Emulator exited ({code})."); fileLog?.Dispose(); fileLog = null; SetStatus(strings.Get("Launch.Launch"));
+            if (closeAfterChildExit) { closeAfterChildExit = false; RequestQuit(); }
+        }));
     }
     // A child may finish and free its slot before its UI notifications are drained.
     // Only the selected session may mutate the current console/log/status.
@@ -73,7 +75,7 @@ public sealed partial class MacLauncher : IDisposable
     private void ContinueQuit() => ApplyQuitAction(quit.Continue(Send(app, Selector("modalWindow")) != 0));
     private void ApplyQuitAction(int action)
     {
-        if (action == 1) { modalAccepted = false; Send(app, Selector("abortModal")); }
+        if (action == 1) { modalAccepted = false; Send(app, Selector("stopModal")); }
         else if (action == 2) Send(window, Selector("performClose:"), 0);
     }
     private string L(string key, string fallback) { var value = strings.Get(key); return value == key ? fallback : value; }

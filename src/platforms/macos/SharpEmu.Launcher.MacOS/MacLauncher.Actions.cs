@@ -77,7 +77,7 @@ public sealed partial class MacLauncher
     }
     private void OpenExecutable()
     {
-        if (child.IsRunning) { Alert("Game is running", "Stop the owned game before launching another executable."); return; }
+        if (closeAfterChildExit || child.IsRunning) { Alert("Game is running", "Stop the owned game before launching another executable."); return; }
         var file = Choose(false); if (string.IsNullOrWhiteSpace(file)) return;
         var meta = GameCatalog.TryReadParamJson(file);
         Launch(new(meta.Title ?? GameCatalog.GameNameFor(file), meta.TitleId, meta.Version, Path.GetFullPath(file), 0,
@@ -86,7 +86,7 @@ public sealed partial class MacLauncher
     private void LaunchSelected() { if (selected is { } game) Launch(game); }
     private void Launch(CatalogGame game, IReadOnlyList<string>? oneShot = null)
     {
-        if (child.IsRunning) { Alert("Game is running", "Stop the owned game before launching another executable."); return; }
+        if (closeAfterChildExit || child.IsRunning) { Alert("Game is running", "Stop the owned game before launching another executable."); return; }
         var executable = FindEmulator();
         if (executable is null) { Alert("Emulator executable not found", "Choose Emulator Path in Settings, or launch the installed SharpEmu application."); return; }
         var perGame = PerGameSettings.Load(game.TitleId);

@@ -79,6 +79,61 @@ public sealed class LauncherOwnershipTests
     }
 
     [Fact]
+    public async Task CooperativeTermPreservesFinalOutputAndDoesNotWaitForForcedDeadline()
+    {
+        if (!OperatingSystem.IsMacOS()) return;
+        var type = typeof(MacLauncher).Assembly.GetType("SharpEmu.Launcher.MacOS.OwnedEmulatorProcess")!;
+        using var owner = (IDisposable)Activator.CreateInstance(type)!;
+        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var exited = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var lines = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        type.GetEvent("Output")!.AddEventHandler(owner, (Action<long, string, bool>)((_, line, _) => { lines.Enqueue(line); if (line == "ready") ready.TrySetResult(); }));
+        type.GetEvent("Exited")!.AddEventHandler(owner, (Action<long, int>)((_, code) => exited.TrySetResult(code)));
+        var plan = new LauncherLaunchPlan(Array.AsReadOnly(new[] { "-c", "trap 'printf \"term-final\\n\"; exit 0' TERM; printf 'ready\\n'; while :; do sleep 0.1; done" }),
+            new ReadOnlyDictionary<string, string>(new Dictionary<string, string>()));
+        type.GetMethod("Start")!.Invoke(owner, ["/bin/sh", plan]);
+        await ready.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        var elapsed = System.Diagnostics.Stopwatch.StartNew(); type.GetMethod("Stop")!.Invoke(owner, null);
+        Assert.Equal(-2, await exited.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Contains("term-final", lines); Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public async Task TermIgnoringOwnedTreeReachesForcedDeadlineAndCompletesInheritedReaders()
+    {
+        if (!OperatingSystem.IsMacOS()) return;
+        var type = typeof(MacLauncher).Assembly.GetType("SharpEmu.Launcher.MacOS.OwnedEmulatorProcess")!;
+        using var owner = (IDisposable)Activator.CreateInstance(type, BindingFlags.Instance | BindingFlags.NonPublic, null, [TimeSpan.FromMilliseconds(250)], null)!;
+        var descendantPid = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var exited = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        type.GetEvent("Output")!.AddEventHandler(owner, (Action<long, string, bool>)((_, line, _) =>
+        {
+            if (line.StartsWith("descendant:", StringComparison.Ordinal) && int.TryParse(line[11..], out var pid)) descendantPid.TrySetResult(pid);
+        }));
+        type.GetEvent("Exited")!.AddEventHandler(owner, (Action<long, int>)((_, code) => exited.TrySetResult(code)));
+        var plan = new LauncherLaunchPlan(Array.AsReadOnly(new[] { "-c", "trap '' TERM; sleep 30 & child=$!; printf 'descendant:%s\\n' \"$child\"; wait \"$child\"" }),
+            new ReadOnlyDictionary<string, string>(new Dictionary<string, string>()));
+        type.GetMethod("Start")!.Invoke(owner, ["/bin/sh", plan]);
+        var pid = await descendantPid.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        using var descendant = System.Diagnostics.Process.GetProcessById(pid);
+        try
+        {
+            Assert.False(descendant.HasExited);
+            type.GetMethod("Stop")!.Invoke(owner, null);
+            // OnExited waits for the redirected readers before notifying; an
+            // orphan inheriting stdout/stderr would keep this completion pending.
+            Assert.Equal(-2, await exited.Task.WaitAsync(TimeSpan.FromSeconds(10)));
+            await descendant.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.True(descendant.HasExited);
+            Assert.False((bool)type.GetProperty("IsRunning")!.GetValue(owner)!);
+        }
+        finally
+        {
+            if (!descendant.HasExited) descendant.Kill(entireProcessTree: true); // this fixture's exact retained child only
+        }
+    }
+
+    [Fact]
     public async Task QueuedNotificationsFromExitedSessionCannotMutateANewerLaunch()
     {
         if (!OperatingSystem.IsMacOS()) return;
