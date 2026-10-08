@@ -1,0 +1,13 @@
+<!-- Copyright (C) 2026 SharpEmu Emulator Project; SPDX-License-Identifier: GPL-2.0-or-later -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><IsPackable>false</IsPackable><AllowUnsafeBlocks>true</AllowUnsafeBlocks><GenerateDocumentationFile>false</GenerateDocumentationFile><OutputType>Exe</OutputType><GenerateProgramFile>false</GenerateProgramFile></PropertyGroup>
+  <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('OSX'))"><DefineConstants>$(DefineConstants);SHARPEMU_HOST_MACOS</DefineConstants></PropertyGroup>
+  <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('Linux'))"><DefineConstants>$(DefineConstants);SHARPEMU_HOST_LINUX</DefineConstants></PropertyGroup>
+  <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))"><DefineConstants>$(DefineConstants);SHARPEMU_HOST_WINDOWS</DefineConstants></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../../src/SharpEmu.HLE/SharpEmu.HLE.csproj" /></ItemGroup>
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('OSX'))"><ProjectReference Include="../../src/platforms/macos/SharpEmu.Host.MacOS/SharpEmu.Host.MacOS.csproj" /></ItemGroup>
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Linux'))"><ProjectReference Include="../../src/platforms/linux/SharpEmu.Host.Linux/SharpEmu.Host.Linux.csproj" /></ItemGroup>
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))"><ProjectReference Include="../../src/platforms/windows/SharpEmu.Host.Windows/SharpEmu.Host.Windows.csproj" /></ItemGroup>
+  <ItemGroup><PackageReference Include="Microsoft.NET.Test.Sdk" /><PackageReference Include="xunit" /><PackageReference Include="xunit.runner.visualstudio"><PrivateAssets>all</PrivateAssets></PackageReference></ItemGroup>
+  <ItemGroup><Compile Include="../SharpEmu.Libs.Tests/Memory/NativePageProtection.cs" Link="NativePageProtection.cs" /></ItemGroup>
+</Project>

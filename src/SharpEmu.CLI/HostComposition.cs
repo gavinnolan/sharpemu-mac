@@ -35,15 +35,18 @@ internal static class HostComposition
     public static void Register()
     {
 #if SHARPEMU_HOST_MACOS
+        HostMemoryAuthority.Initialize(SharpEmu.Host.MacOS.MacOSHost.CreateMemory);
         SharpEmu.Libs.Font.GuestFontServices.Initialize(new SharpEmu.Fonts.CoreTextMac.CoreTextFontFactory());
         HostPlatform.Initialize(static () => SharpEmu.Host.MacOS.MacOSHost.Create());
         HostViewMemory.Initialize(SharpEmu.Host.MacOS.MacOSHost.CreateViewMemory);
 #elif SHARPEMU_HOST_LINUX
+        HostMemoryAuthority.Initialize(SharpEmu.Host.Linux.LinuxHost.CreateMemory);
         SharpEmu.Libs.Font.GuestFontServices.Initialize(new SharpEmu.Fonts.Skia.SkiaFontFactory());
         HostPlatform.Initialize(static () =>
             SharpEmu.Host.Linux.LinuxHost.Create(new SharpEmu.Adapters.Sdl.Audio.SdlHostAudio()));
         HostViewMemory.Initialize(SharpEmu.Host.Linux.LinuxHost.CreateViewMemory);
 #elif SHARPEMU_HOST_WINDOWS
+        HostMemoryAuthority.Initialize(SharpEmu.Host.Windows.WindowsHost.CreateMemory);
         SharpEmu.Libs.Font.GuestFontServices.Initialize(new SharpEmu.Fonts.Skia.SkiaFontFactory());
         HostPlatform.Initialize(static () =>
             SharpEmu.Host.Windows.WindowsHost.Create(new SharpEmu.Adapters.Sdl.Audio.SdlHostAudio()));

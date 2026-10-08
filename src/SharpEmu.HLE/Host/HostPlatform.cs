@@ -32,6 +32,7 @@ public static class HostPlatform
     public static void Initialize(IHostPlatform platform)
     {
         ArgumentNullException.ThrowIfNull(platform);
+        HostMemoryAuthority.VerifyPlatformMemory(platform);
         Volatile.Write(ref _instance, new Lazy<IHostPlatform>(platform));
     }
 
@@ -45,7 +46,12 @@ public static class HostPlatform
     public static void Initialize(Func<IHostPlatform> factory)
     {
         ArgumentNullException.ThrowIfNull(factory);
-        Volatile.Write(ref _instance, new Lazy<IHostPlatform>(factory));
+        Volatile.Write(ref _instance, new Lazy<IHostPlatform>(() =>
+        {
+            var platform = factory() ?? throw new InvalidOperationException("The registered host platform factory returned null.");
+            HostMemoryAuthority.VerifyPlatformMemory(platform);
+            return platform;
+        }));
     }
 
     public static IHostPlatform Current

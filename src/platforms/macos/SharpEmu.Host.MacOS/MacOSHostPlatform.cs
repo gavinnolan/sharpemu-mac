@@ -9,7 +9,7 @@ internal sealed class MacOSHostPlatform : IHostPlatform
 {
     internal MacOSHostPlatform(IHostAudioOutput audio) => Audio = audio;
 
-    public IHostMemory Memory { get; } = new MacHostMemory();
+    public IHostMemory Memory => HostMemoryAuthority.Current;
 
     public IHostThreading Threading { get; } = new MacHostThreading();
 

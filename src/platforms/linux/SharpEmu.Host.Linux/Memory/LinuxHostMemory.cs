@@ -15,7 +15,7 @@ namespace SharpEmu.Host.Linux;
 /// "reserve-only" regions are mapped as committed memory directly and
 /// commit requests become protection changes.
 /// </summary>
-internal sealed unsafe class LinuxHostMemory : IHostMemory
+internal sealed unsafe class LinuxHostMemory : IHostMemoryRaw
 {
     private const uint MEM_COMMIT = 0x1000;
     private const uint MEM_RESERVE = 0x2000;
@@ -32,15 +32,16 @@ internal sealed unsafe class LinuxHostMemory : IHostMemory
 
     private const ulong PageSize = 0x1000;
 
-    private struct BasicInfo
+    public ulong AllocateRaw(ulong desiredAddress, ulong size, uint allocationType, uint rawProtection) =>
+        (ulong)Linux.Alloc((void*)desiredAddress, (nuint)size, allocationType, rawProtection);
+
+    public bool FreeRaw(ulong address, ulong size, uint freeType) =>
+        Linux.Free((void*)address, (nuint)size, freeType);
+
+    public nuint QueryRaw(ulong address, out HostMemory.BasicInfo info)
     {
-        public ulong BaseAddress;
-        public ulong AllocationBase;
-        public uint AllocationProtect;
-        public ulong RegionSize;
-        public uint State;
-        public uint Protect;
-        public uint Type;
+        if (HostViewRegions.TryQuery(address, out info)) return (nuint)sizeof(HostMemory.BasicInfo);
+        return Linux.Query((void*)address, out info);
     }
 
     public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection)
@@ -103,14 +104,7 @@ internal sealed unsafe class LinuxHostMemory : IHostMemory
 
     public bool Query(ulong address, out HostRegionInfo info)
     {
-        if (HostViewRegions.TryQuery(address, out var view))
-        {
-            info = new HostRegionInfo(view.BaseAddress, view.AllocationBase, view.RegionSize,
-                view.State == HostMemory.MEM_RESERVE ? HostRegionState.Reserved : HostRegionState.Committed,
-                view.State, ToHostProtection(view.Protect), view.Protect, view.AllocationProtect);
-            return true;
-        }
-        if (Linux.Query((void*)address, out var nativeInfo) == 0)
+        if (QueryRaw(address, out var nativeInfo) == 0)
         {
             info = default;
             return false;
@@ -364,7 +358,7 @@ internal sealed unsafe class LinuxHostMemory : IHostMemory
             }
         }
 
-        public static nuint Query(void* address, out BasicInfo info)
+        public static nuint Query(void* address, out HostMemory.BasicInfo info)
         {
             info = default;
             var pageAddress = AlignDown((ulong)address, PageSize);
@@ -375,11 +369,37 @@ internal sealed unsafe class LinuxHostMemory : IHostMemory
                 {
                     // Win32 VirtualQuery reports a run of pages sharing the
                     // same protection, so stop the run where it changes.
-                    var protect = region.ProtectAt(pageAddress);
-                    var runEnd = pageAddress + PageSize;
-                    while (runEnd < region.End && region.ProtectAt(runEnd) == protect)
+                    // Preserve the legacy sparse run query: huge guest apertures
+                    // must not scan every logical page when overrides are sparse.
+                    var pageProtects = region.PageProtects;
+                    uint protect;
+                    ulong runEnd;
+                    if (pageProtects is null || pageProtects.Count == 0)
                     {
-                        runEnd += PageSize;
+                        protect = region.DefaultProtect;
+                        runEnd = region.End;
+                    }
+                    else if (pageProtects.TryGetValue(pageAddress, out protect))
+                    {
+                        runEnd = pageAddress + PageSize;
+                        while (runEnd < region.End &&
+                            pageProtects.TryGetValue(runEnd, out var nextProtect) &&
+                            nextProtect == protect)
+                        {
+                            runEnd += PageSize;
+                        }
+                    }
+                    else
+                    {
+                        protect = region.DefaultProtect;
+                        runEnd = region.End;
+                        foreach (var overrideAddress in pageProtects.Keys)
+                        {
+                            if (overrideAddress > pageAddress && overrideAddress < runEnd)
+                            {
+                                runEnd = overrideAddress;
+                            }
+                        }
                     }
 
                     info.BaseAddress = pageAddress;
@@ -389,7 +409,7 @@ internal sealed unsafe class LinuxHostMemory : IHostMemory
                     info.State = MEM_COMMIT;
                     info.Protect = protect;
                     info.Type = MEM_PRIVATE;
-                    return (nuint)sizeof(BasicInfo);
+                    return (nuint)sizeof(HostMemory.BasicInfo);
                 }
 
                 // Untracked host memory (runtime heaps, stacks, libraries) is
@@ -412,7 +432,7 @@ internal sealed unsafe class LinuxHostMemory : IHostMemory
                 info.State = MEM_FREE_STATE;
                 info.Protect = PAGE_NOACCESS;
                 info.Type = 0;
-                return (nuint)sizeof(BasicInfo);
+                return (nuint)sizeof(HostMemory.BasicInfo);
             }
         }
 

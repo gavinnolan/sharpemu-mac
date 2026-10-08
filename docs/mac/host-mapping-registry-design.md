@@ -56,20 +56,21 @@ and performance are later work after ownership correctness is demonstrated.
 
 ## Canonical identity before provider hooks
 
-The current code has two independent anonymous-memory region tables: legacy
-HLE `HostMemory.Posix` and per-OS `IHostMemory` providers. View metadata lives in
-`HostViewRegions` and each `SharedBackingViews` instance; backing release uses
-`HostBackingObject.Gate`. Merely wrapping one provider would leave alternate
-mutators free to change its pages under a captured pin.
+The bounded [host-memory routing migration](host-memory-authority-design.md)
+replaces the independent HLE anonymous-memory table with the exact provider used
+by the process-wide IHostPlatform.Memory. The provider is selected at safe
+startup independently of x64 guest execution and cannot be replaced. This closes
+one alternate routing seam, but it does not register mapping-domain identities
+or hook any registry transaction. View metadata still lives in HostViewRegions
+and each SharedBackingViews instance; backing release uses HostBackingObject.Gate.
 
-The first real provider integration must establish one host-memory authority
-independent of the CPU execution platform registration, as `HostViewMemory`
-already does for plain ARM64 memory tests. Legacy `HostMemory` and injected
-`IHostMemory` must resolve the same allocation/mapping identity rather than
-creating separate registry records for the same native address. Preserve exact
-Win32 allocate/reserve/commit semantics, raw protection modifiers, allocation
-extent and reserved/committed state before removing either existing table.
-The current registry spec does not represent these raw/state details yet.
+Exact raw Windows flags/state/protection/query fields remain forwarded to the OS.
+POSIX 4KiB logical allocation/protection bookkeeping is preserved, including in
+native ARM64 tests with 16KiB kernel pages. Actual physical extent, reserved/committed
+representation and raw modifiers must still be reconciled before native domains
+can use these records. Native control fixtures operate on full kernel-page sizes;
+they do not certify sub-page lifetime or aliases. The registry spec does not yet
+represent all raw/state details.
 
 Anonymous allocations need one backing identity per actual allocation. Views
 must use the owning `HostBackingObject` identity and exact backing offset; its
@@ -89,7 +90,7 @@ kernel-success accounting; the aggregate registry refuses them in this stage.
 
 | Surface | Required next integration |
 | --- | --- |
-| `HostMemory.Posix.Alloc/Free/Protect`, Win32 wrappers | Replace independent identity table with canonical service; commit/native cleanup/free/protect must prepare before kernel work. Legacy POSIX Free currently removes metadata before munmap. |
+| `HostMemory` facade and canonical anonymous provider | Common routing is implemented; commit/native cleanup/free/protect still need expected identity, pre-kernel close/drain and exact native outcomes. No registry hooks are active. |
 | `MacHostMemory.Darwin` and `LinuxHostMemory` allocate/commit/free/protect/raw-protect | Capture canonical expected allocation under ordinary gate, release gate, revoke/drain, reacquire and verify exact identity before syscall. Avoid draining inside current provider Gate. |
 | `WindowsHostMemory` VirtualAlloc/Free/Protect | Same canonical identity plus exact reserved/committed and raw modifier behavior. |
 | Mac/Linux `HostViews` fixed maps and `RestoreHole`, private commit/release, ChangeAccess, FreeOwnedRange | Register holes, views and alias windows; include native rollback/cleanup calls. Do not drain under backing Gate. |
@@ -99,7 +100,7 @@ kernel-success accounting; the aggregate registry refuses them in this stage.
 | `GuestImageWriteTracker` direct mprotect, arm/rearm/untrack/retirement, PageGuard/GPU protection | Join canonical mapping pin lifetime and transactional per-page restoration before changing any fault acceptance. Dirty state/epochs/shadow writable metadata do not authorize retry. |
 | CPU stub/trampoline HostMemory calls | Register exact code allocation/protection/free identities with the same service. |
 
-No row is hooked by this commit. See the
+No row is hooked to the registry by either scaffold or routing migration. See the
 [owner-contract mutation graph](host-recovery-owner-contract.md),
 [reservation design](write-fault-reservation-design.md), and
 [test-only per-page ledger](page-restoration-bookkeeping-prototype.md).
