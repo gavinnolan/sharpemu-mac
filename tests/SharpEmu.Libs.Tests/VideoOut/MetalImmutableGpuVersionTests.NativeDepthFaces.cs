@@ -92,6 +92,20 @@ public sealed partial class MetalImmutableGpuVersionTests
                 var normalized = ImageRequestBuilders.DepthTarget(words, ((IRenderHost)host).FormatSupport)!.Value;
                 var target = new GuestDepthTarget(address, address, 1024, 1024, (uint)GuestDepthFormat.Z16, 24,
                     (face + 1) / 8f, false, Registers: words);
+                // Inject a real unrelated mapping after the ORIGINAL token
+                // and mapping have been captured, during first currentness
+                // validation. Initial Project must retain both observations.
+                var mappingEpochBeforeProject = HostMemory.MappingGeneration;
+                var unrelatedOffset = totalBytes + face * 65536UL;
+                memory.OnNextCurrentQuery = () =>
+                {
+                    NativeDepthAssert(physical.TryHoldRangeAtOrAbove(address + unrelatedOffset, 65536, 65536, out var extraAddress));
+                    NativeDepthAssert(extraAddress >= address + totalBytes);
+                    NativeDepthAssert(physical.TryHoldRange(extraAddress, 65536));
+                    NativeDepthAssert(physical.TryMapBacked(extraAddress, 65536, unrelatedOffset,
+                        GuestPageProtection.Read | GuestPageProtection.Write, out var extraMapFailure),
+                        $"initial_unrelated_map_failure={extraMapFailure}");
+                };
                 // Actual normalizer and original provider capture, not CWT insertion/prearm.
                 target = MetalDepthFacePlacement.Project(memory, normalized, words, target);
                 NativeDepthAssert(MetalDepthFacePlacement.TryGet(target, out var original));
@@ -101,6 +115,12 @@ public sealed partial class MetalImmutableGpuVersionTests
                 Assert.Equal(selected, original.Mapping.SourceAddress); Assert.Equal(8UL, original.Mapping.SourceByteCount);
                 Assert.Equal(MetalDepthFacePlacement.FaceBytes, original.Content.ByteCount);
                 NativeDepthAssert(original.Content.Observed);
+                Assert.NotEqual(mappingEpochBeforeProject, HostMemory.MappingGeneration);
+                Assert.NotEqual(original.Content.MappingEpoch, HostMemory.MappingGeneration);
+                NativeDepthAssert(memory.IsMappedCopyObservationCurrent(original.Mapping));
+                NativeDepthAssert(GuestImageWriteTracker.TryGetObservedContentToken(selected,
+                    MetalDepthFacePlacement.FaceBytes, out var originalToken));
+                Assert.Equal(original.Content.Token, originalToken);
                 Assert.All(original.Mapping.Segments, segment =>
                 {
                     NativeDepthAssert(segment.BackingIdentity > 0 && segment.MappingIncarnation > 0);
@@ -112,6 +132,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                 foreach (var prior in originals) MetalDepthFacePlacement.RequireOriginalCurrent(prior);
                 state.AdmitNativeFace(shaders.Vertex, shaders.Pixel, target);
             }
+            output.WriteLine("native-depth-faces initial_project_unrelated_mapping_inside_validation=6 original_mapping_and_token_unchanged=1");
             Assert.Equal(6, memory.MappedCopies); Assert.Equal(0, memory.DirectReads);
             // Real unrelated canonical mapping effects must not invalidate the
             // retained face mappings or replace any original content token.
@@ -279,12 +300,20 @@ public sealed partial class MetalImmutableGpuVersionTests
     {
         public int DirectReads, MappedCopies;
         public bool RejectDirectReads;
+        public Action? OnNextCurrentQuery;
         public bool TryRead(ulong address, Span<byte> bytes)
         { DirectReads++; if (RejectDirectReads) throw new InvalidOperationException("Native cube must not recover CPU shadow bytes."); return actual.TryRead(address, bytes); }
         public bool TryWrite(ulong address, ReadOnlySpan<byte> bytes) => actual.TryWrite(address, bytes);
         public CpuMappedCopyResult TryReadMappedCopy(ulong footprint, ulong extent, ulong source, Span<byte> bytes, out CpuMappedCopyObservation? observation)
         { MappedCopies++; return actual.TryReadMappedCopy(footprint, extent, source, bytes, out observation); }
-        public bool IsMappedCopyObservationCurrent(CpuMappedCopyObservation observation) => actual.IsMappedCopyObservationCurrent(observation);
+        public bool IsMappedCopyObservationCurrent(CpuMappedCopyObservation observation)
+        {
+            var current = actual.IsMappedCopyObservationCurrent(observation);
+            var callback = OnNextCurrentQuery;
+            OnNextCurrentQuery = null;
+            callback?.Invoke();
+            return current;
+        }
     }
 
     private sealed partial class NativeState

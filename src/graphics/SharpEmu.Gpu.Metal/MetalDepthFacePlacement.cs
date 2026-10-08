@@ -89,31 +89,42 @@ internal static class MetalDepthFacePlacement
         // Mapping lifetime covers the complete original resource; content belongs
         // to the exact selected physical layer. Tracking a growing prefix at
         // the same base would replace earlier immutable protected owners.
-        var read = GuestImageWriteTracker.BeginReadSnapshot(address, FaceBytes, source: "metal.depth-face.original");
         var epoch = HostMemory.MappingGeneration;
-        var content = MetalVideoPresenter.ObserveCpuTextureSnapshot(address, FaceBytes, epoch);
         var probe = new byte[8];
         var result = source.TryReadMappedCopy(resolution.DepthAddress, resolution.DepthSize, address, probe, out var mapping);
+        // Choose the original complete mapping BEFORE arming observation or
+        // capturing the first token. Remapping during either operation revokes
+        // this exact mapping; a younger mapping is never captured in its place.
+        // The discarded probe never supplies native depth contents.
+        var read = GuestImageWriteTracker.BeginReadSnapshot(address, FaceBytes, source: "metal.depth-face.original");
+        var content = MetalVideoPresenter.ObserveCpuTextureSnapshot(address, FaceBytes, epoch);
         long? sessionNow = null, epochNow = null;
         bool? mappingCurrent = null, tokenPresent = null;
         GuestImageWriteTracker.ContentToken tokenNow = default;
         string? reason = null;
-        // Preserve original short-circuit order and reuse each queried value.
-        // These labels diagnose the first veto; they cannot establish authority.
+        // Scope lifetime validation to the original provider mapping. The
+        // process-wide epoch includes unrelated mappings/protection changes;
+        // retain it only as a diagnostic, never restamp either observation.
         if (result != CpuMappedCopyResult.Copied) reason = "mapped-copy-result";
         else if (mapping is null) reason = "missing-mapping";
         else if (mapping.FootprintAddress != resolution.DepthAddress || mapping.FootprintByteCount != resolution.DepthSize ||
             mapping.SourceAddress != address || mapping.SourceByteCount != 8) reason = "mapping-geometry";
         else if (!content.Observed) reason = "original-content-unobserved";
+        else if (!read.Active || !GuestImageWriteTracker.IsReadSnapshotStable(read)) reason = "original-read-generation";
         else if ((sessionNow = MetalVideoPresenter.CurrentNativeDepthFaceSession) != originalSession) reason = "presenter-session";
         else if (!(mappingCurrent = source.IsMappedCopyObservationCurrent(mapping)).Value) reason = "original-mapping-currentness";
-        else if ((epochNow = HostMemory.MappingGeneration) != content.MappingEpoch) reason = "global-mapping-epoch";
         else if (!(tokenPresent = GuestImageWriteTracker.TryGetObservedContentToken(address, content.ByteCount, out tokenNow)).Value)
             reason = "current-content-unobserved";
         else if (tokenNow != content.Token) reason = "original-content-token";
+        else if (!(mappingCurrent = source.IsMappedCopyObservationCurrent(mapping)).Value) reason = "original-mapping-currentness-final";
+        else if (!GuestImageWriteTracker.IsReadSnapshotStable(read)) reason = "original-read-generation-final";
+        else if ((sessionNow = MetalVideoPresenter.CurrentNativeDepthFaceSession) != originalSession) reason = "presenter-session-final";
         if (reason is not null)
+        {
+            epochNow = HostMemory.MappingGeneration; // failure diagnostic only
             throw OriginalAdmissionFailure(reason, result, address, resolution.DepthAddress, resolution.DepthSize,
                 words, read, content, mapping, originalSession, sessionNow, mappingCurrent, epochNow, tokenPresent, tokenNow);
+        }
         var projected = target with { ReadAddress = address, WriteAddress = address };
         Targets.Add(projected, new(memory, source, mapping, content, originalSession, words,
             resolution.DepthAddress, resolution.DepthSize, address, words.SliceStart));

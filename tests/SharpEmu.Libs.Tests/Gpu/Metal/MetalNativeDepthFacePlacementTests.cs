@@ -143,6 +143,87 @@ public sealed partial class MetalRenderHostTests
         { CurrentQueries++; throw new InvalidOperationException("Later predicate must remain short-circuited."); }
     }
 
+    [Theory]
+    [InlineData("unrelated-epoch", null, 2)]
+    [InlineData("mapping-first", "original-mapping-currentness", 1)]
+    [InlineData("mapping-final", "original-mapping-currentness-final", 2)]
+    [InlineData("content-write", "original-content-token", 1)]
+    [InlineData("final-write", "original-read-generation-final", 2)]
+    public void NativeDepthInitialCaptureKeepsOneOriginalMappingAndReadGeneration(
+        string variant, string? reason, int queries)
+    {
+        using var flag = new NativeDepthFaceFlag(true);
+        var enabled = typeof(GuestImageWriteTracker).GetField("_enabled", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var before = enabled.GetValue(null);
+        enabled.SetValue(null, true);
+        var address = MemoryBase;
+        try
+        {
+            // Managed-only control: never installs native page protection or
+            // creates a Metal handle. Real provider/native proof is separate.
+            GuestImageWriteTracker.TrackManagedWriter(address, MetalDepthFacePlacement.FaceBytes,
+                source: "depth-initial-scope-managed-control");
+            var memory = new DepthFaceCaptureMemory(address, variant);
+            var words = NativeFaceWords(0);
+            var target = new GuestDepthTarget(address, address, 1024, 1024,
+                (uint)GuestDepthFormat.Z16, 24, 0.25f, false, Registers: words);
+            if (reason is null)
+            {
+                var projected = MetalDepthFacePlacement.Project(memory, ResolveNativeFace(0), words, target);
+                Assert.True(MetalDepthFacePlacement.TryGet(projected, out var original));
+                Assert.Same(memory.Mapping, original.Mapping);
+                Assert.Equal(memory.OriginalToken, original.Content.Token);
+                Assert.NotEqual(HostMemory.MappingGeneration, original.Content.MappingEpoch);
+            }
+            else
+            {
+                var error = Assert.Throws<NotSupportedException>(() =>
+                    MetalDepthFacePlacement.Project(memory, ResolveNativeFace(0), words, target));
+                Assert.Contains("reason=" + reason + " stage=project", error.Message);
+                Assert.False(MetalDepthFacePlacement.TryGet(target, out _));
+            }
+            Assert.Equal(1, memory.Probes);
+            Assert.Equal(queries, memory.CurrentQueries);
+            Assert.Empty(_backend.Draws);
+        }
+        finally
+        {
+            GuestImageWriteTracker.UntrackWatchOnly(address);
+            enabled.SetValue(null, before);
+        }
+    }
+
+    private sealed class DepthFaceCaptureMemory(ulong address, string variant) : ICpuMemory, ICpuMappedCopySource
+    {
+        internal readonly CpuMappedCopyObservation Mapping = OriginalVetoMapping(address);
+        internal GuestImageWriteTracker.ContentToken OriginalToken;
+        internal int Probes, CurrentQueries;
+        public bool TryRead(ulong source, Span<byte> bytes) => throw new InvalidOperationException("No CPU shadow read.");
+        public bool TryWrite(ulong destination, ReadOnlySpan<byte> bytes) => throw new InvalidOperationException("No byte write.");
+        public CpuMappedCopyResult TryReadMappedCopy(ulong footprint, ulong count, ulong source,
+            Span<byte> bytes, out CpuMappedCopyObservation? observation)
+        {
+            Probes++;
+            Assert.Equal((address, MetalDepthFacePlacement.FaceBytes, address, 8), (footprint, count, source, bytes.Length));
+            observation = Mapping;
+            return CpuMappedCopyResult.Copied;
+        }
+        public bool IsMappedCopyObservationCurrent(CpuMappedCopyObservation observation)
+        {
+            Assert.Same(Mapping, observation);
+            CurrentQueries++;
+            if (CurrentQueries == 1)
+            {
+                Assert.True(GuestImageWriteTracker.TryGetObservedContentToken(address,
+                    MetalDepthFacePlacement.FaceBytes, out OriginalToken));
+                if (variant == "unrelated-epoch") HostMemory.OnMappingChanged(); // scalar simulation only
+                if (variant == "content-write") GuestImageWriteTracker.NotifyManagedWrite(address, 1);
+            }
+            if (CurrentQueries == 2 && variant == "final-write") GuestImageWriteTracker.NotifyManagedWrite(address, 1);
+            return variant != "mapping-first" && !(variant == "mapping-final" && CurrentQueries == 2);
+        }
+    }
+
     private sealed class NativeDepthFaceFlag : IDisposable
     {
         private readonly bool _original = MetalDepthFacePlacement.Enabled;
