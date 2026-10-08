@@ -77,6 +77,85 @@ public sealed class MetalStorageCpuSyncTests
     }
 
     [Theory]
+    [InlineData(false)] [InlineData(true)]
+    public void ActualRgba1024PublicationInverseMatchesEveryIndependentPhysicalByte(bool zero)
+    {
+        ActualArchitecture(); using var state = new State();
+        var original = Physical(1);
+        var texture = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(
+            new CpuContext(new Memory(original), Generation.Gen5), [Binding(1)], out _));
+        var layout = Assert.IsType<MetalStorageCpuLayout>(MetalStorageCpuLayout.TryCreate(texture));
+        var linear = zero ? new byte[4194304] : Linear(1);
+        var physical = layout.Encode(linear);
+        Assert.Equal(zero ? new byte[4194304] : original, physical);
+        Assert.Equal(linear, layout.Decode(physical));
+        Assert.Equal(Physical(1), original); // no old seed mutation or padding fabrication
+    }
+
+    [Theory]
+    [InlineData(257, 511)] [InlineData(1023, 1023)]
+    public void ActualRgba1024PublicationChangesOnlyIndependentSelectedPhysicalTexel(int x, int y)
+    {
+        ActualArchitecture(); using var state = new State();
+        var original = Physical(1);
+        var texture = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(
+            new CpuContext(new Memory(original), Generation.Gen5), [Binding(1)], out _));
+        var layout = Assert.IsType<MetalStorageCpuLayout>(MetalStorageCpuLayout.TryCreate(texture));
+        var linear = Linear(1);
+        byte[] nativeBytes = [0, 128, 255, 64];
+        nativeBytes.CopyTo(linear, (y * 1024 + x) * 4);
+        var expected = original.ToArray();
+        nativeBytes.CopyTo(expected, Bgra1024Oracle.Offset(x, y));
+        Assert.Equal(expected, layout.Encode(linear));
+        Assert.Equal(Physical(1), original);
+    }
+
+    [Fact]
+    public void ActualRgbaPublicationInverseRejectsIncompleteOrUnqualifiedLayouts()
+    {
+        ActualArchitecture(); using var state = new State();
+        var rgba = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(
+            new CpuContext(new Memory(Physical(1)), Generation.Gen5), [Binding(1)], out _));
+        var layout = Assert.IsType<MetalStorageCpuLayout>(MetalStorageCpuLayout.TryCreate(rgba));
+        Assert.Throws<NotSupportedException>(() => layout.Encode(new byte[4194303]));
+        var singleton = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(
+            new CpuContext(new Memory(Physical(0)), Generation.Gen5), [Binding(0)], out _));
+        var other = Assert.IsType<MetalStorageCpuLayout>(MetalStorageCpuLayout.TryCreate(singleton));
+        Assert.Throws<NotSupportedException>(() => other.Encode(new byte[4]));
+    }
+
+    [Theory]
+    [InlineData(false)] [InlineData(true)]
+    public void ActualProducerDistinguishesRetainedDirtySeedGenerationFromLaterManagedWrite(bool writeAfterSeed)
+    {
+        ActualArchitecture(); using var state = new State();
+        var memory = new MappedMemory(Physical(0));
+        GuestImageWriteTracker.NotifyManagedWrite(Address, 65536);
+        Assert.True(GuestImageWriteTracker.PeekDirty(Address));
+        var texture = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(
+            new CpuContext(memory, Generation.Gen5), [Binding(0)], out _));
+        var origin = GetOrigin(texture);
+        var observation = (MetalVideoPresenter.CpuTextureSnapshotObservation)origin.GetType().GetProperty("Observation")!.GetValue(origin)!;
+        Assert.True(observation.Observed);
+        Assert.True(GuestImageWriteTracker.TryGetContentToken(Address, out var afterSeed));
+        Assert.Equal(observation.Token, afterSeed);
+        Assert.True(GuestImageWriteTracker.PeekDirty(Address)); // no acknowledgment from the original copy
+        if (writeAfterSeed)
+        {
+            GuestImageWriteTracker.NotifyManagedWrite(Address + 31, 1);
+            memory.Bytes[31] ^= 0x5B; // an actual managed fixture byte effect after notification
+        }
+        Assert.True(GuestImageWriteTracker.TryGetContentToken(Address, out var current));
+        Assert.Equal(afterSeed.ProtectedIdentity, current.ProtectedIdentity);
+        Assert.Equal(afterSeed.WatchIdentity, current.WatchIdentity);
+        Assert.Equal(writeAfterSeed ? afterSeed.WatchGeneration + 1 : afterSeed.WatchGeneration, current.WatchGeneration);
+        Assert.Equal(!writeAfterSeed, observation.Token == current);
+        Assert.True(GuestImageWriteTracker.ConsumeDirty(Address));
+        Assert.False(GuestImageWriteTracker.PeekDirty(Address));
+        Assert.Equal(1, memory.Copies);
+    }
+
+    [Theory]
     [InlineData(0)] [InlineData(1)] [InlineData(2)] [InlineData(3)] [InlineData(4)] [InlineData(5)]
     public void NearCreationLayoutsCannotBecomeTypedDirtyUpload(int kind)
     {

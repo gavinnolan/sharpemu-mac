@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 namespace SharpEmu.HLE;
 
-/// <summary>Optional ordinary short publication into the original provider-owned
+/// <summary>Optional ordinary bounded publication into the original provider-owned
 /// mapping. This is separate from mapping-only IsCurrent, native guest write
 /// exclusion, permission ownership, GPU completion and signal recovery.</summary>
 public interface ICpuMappedPublicationSource

@@ -8,7 +8,7 @@ internal sealed partial class HostManagedWriteIntervals
 {
     internal const int HistoryCapacity = 512;
     internal readonly record struct PhysicalRun(ulong Offset, ulong Count);
-    [InlineArray(HostMappedCopyLedger.MaximumPublicationBytes)]
+    [InlineArray(HostMappedCopyLedger.MaximumPublicationRuns)]
     private struct HistoryRuns { private PhysicalRun element; }
     private struct HistoryEntry
     {
@@ -41,7 +41,7 @@ internal sealed partial class HostManagedWriteIntervals
         var previous = Volatile.Read(ref entry.State);
         // One bounded CAS, never spin or overwrite an in-progress/newer record.
         // A delayed completion that has fallen out of the ring loses coverage.
-        if (identity <= 0 || previous < 0 || previous >= identity || runs.Length > HostMappedCopyLedger.MaximumPublicationBytes ||
+        if (identity <= 0 || previous < 0 || previous >= identity || runs.Length > HostMappedCopyLedger.MaximumPublicationRuns ||
             Interlocked.CompareExchange(ref entry.State, -identity, previous) != previous)
         { Interlocked.Exchange(ref coverageIncomplete, 1); return; }
         entry.Count = runs.Length; entry.Unknown = unknown;

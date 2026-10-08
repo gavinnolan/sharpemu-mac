@@ -451,6 +451,8 @@ public static unsafe partial class GuestImageWriteTracker
     private static readonly bool _dirtyCausalityEnabled =
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGE_DIRTY") == "1";
     private static int _dirtyCausalityCount;
+    private static int _managedDirtyAttemptCount;
+    private static int _managedDirtyCompletionCount;
 
     // Detached diagnostic scalars, never a native-content or ownership receipt.
     public readonly record struct DirtyImageDiagnosticState(bool Present, bool GpuWritten,
@@ -512,6 +514,35 @@ public static unsafe partial class GuestImageWriteTracker
                     $" first_invocation={(range is not null && Volatile.Read(ref range.FirstCpuWriteSeen) == 2 ? range.FirstCpuWriteInvocation : -1)}");
             }
             catch { } // Diagnostics must not consume/change the dirty event.
+        }
+    }
+
+    public static void TraceManagedDirtyCompletion(ulong address, ulong byteCount) =>
+        TraceManagedDirtyWrite(address, SaturatingEnd(address, byteCount), completed: true);
+
+    private static void TraceManagedDirtyWrite(ulong address, ulong end, bool completed)
+    {
+        if (!_dirtyCausalityEnabled) return;
+        lock (_gate)
+        {
+            ref var count = ref (completed ? ref _managedDirtyCompletionCount : ref _managedDirtyAttemptCount);
+            if (count >= 64 || end <= address) return;
+            try
+            {
+                // First match only, not an inventory of all affected owners.
+                TrackedRange? range = null;
+                TrackedRange? watch = null;
+                foreach (var candidate in _rangesByAddress.Values)
+                    if (candidate.Start < end && address < candidate.End) { range = candidate; break; }
+                foreach (var candidate in _watchRangesByAddress.Values)
+                    if (candidate.Address < end && address < candidate.End) { watch = candidate; break; }
+                if (range is null && watch is null) return;
+                count++;
+                Console.Error.WriteLine($"[WT][DIRTY] event={(completed ? "managed-completed" : "managed-attempt-not-completed")} address=0x{address:X} bytes={end - address}" +
+                    $" first_matched_protected=0x{range?.Address ?? 0:X} first_matched_watch=0x{watch?.Address ?? 0:X}" +
+                    $"{Environment.NewLine}{Environment.StackTrace}");
+            }
+            catch { }
         }
     }
 
@@ -698,6 +729,7 @@ public static unsafe partial class GuestImageWriteTracker
         // bounds live inside the snapshot so they are always consistent with
         // the ranges the per-page visit below would consult.
         MarkManagedWatchRanges(address, end);
+        TraceManagedDirtyWrite(address, end, completed: false);
 
         if (!_enabled)
         {

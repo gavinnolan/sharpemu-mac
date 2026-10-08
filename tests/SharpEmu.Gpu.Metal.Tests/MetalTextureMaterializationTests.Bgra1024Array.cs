@@ -69,6 +69,10 @@ public sealed partial class MetalTextureMaterializationTests
             var expected = seed.ToArray();
             if (writes) new byte[] { 0, 128, 255, 64 }.CopyTo(expected, checked((int)((y * 1024 + x) * 4)));
             Assert.Equal(expected, ReadNativeRows(texture, 1024, 1024, 4));
+            var publicationLayout = Assert.IsType<MetalStorageCpuLayout>(MetalStorageCpuLayout.TryCreate(snapshot));
+            var expectedPhysical = original.ToArray();
+            if (writes) new byte[] { 0, 128, 255, 64 }.CopyTo(expectedPhysical, Bgra1024Oracle.Offset((int)x, (int)y));
+            Assert.Equal(expectedPhysical, publicationLayout.Encode(ReadNativeRows(texture, 1024, 1024, 4)));
             // ImageLoad-only normalizes to a sampled class; its read swizzle is
             // supplied by the native view, as the production sampled binding
             // contract requires. Keep the writable underlying array identity.

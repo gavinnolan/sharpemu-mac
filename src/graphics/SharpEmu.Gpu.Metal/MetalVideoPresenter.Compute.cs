@@ -104,8 +104,15 @@ internal static partial class MetalVideoPresenter
 
     private static void ExecuteComputeDispatchCore(nint device, nint queue, ComputeGuestDispatch dispatch)
     {
+        if (_finiteStorageWritebackEnabled)
+        {
+            ValidateFiniteStorageDispatch(dispatch.Textures);
+            ValidateFiniteStorageBufferCohort(dispatch.Textures, dispatch.GlobalMemoryBuffers);
+        }
         if (_skipAllCompute)
         {
+            if (_finiteStorageWritebackEnabled)
+                throw new NotSupportedException("Metal finite storage publication cannot acknowledge a skipped compute dispatch.");
             if (dispatch.Textures.Any(texture => _selectedStorageMipAssociations.TryGetValue(texture, out _)))
                 throw new NotSupportedException("Metal selected storage mip writes cannot be skipped.");
             ReturnPooledComputeData(dispatch);
@@ -129,6 +136,8 @@ internal static partial class MetalVideoPresenter
 
         if (!TryGetComputePipeline(device, dispatch.Shader, out var pipeline))
         {
+            if (_finiteStorageWritebackEnabled)
+                throw new InvalidOperationException("Metal finite storage publication cannot acknowledge a dispatch without its native pipeline.");
             if (dispatch.Textures.Any(texture => _selectedStorageMipAssociations.TryGetValue(texture, out _)))
                 throw new InvalidOperationException("Metal selected storage mip dispatch pipeline could not be created.");
             ReturnPooledComputeData(dispatch);
@@ -139,6 +148,8 @@ internal static partial class MetalVideoPresenter
             ? beginCommands(queue) : BeginBatchedGuestCommands(queue);
         if (commandBuffer == 0)
             throw new InvalidOperationException("Metal compute dispatch cannot create its command buffer.");
+        if (_finiteStorageWritebackEnabled && MetalNative.Send(commandBuffer, MetalNative.Selector("retainedReferences")) == 0)
+            throw new NotSupportedException("Metal finite storage publication requires command-buffer resource retention before dispatch.");
 
         // Pre-resolve textures before the compute encoder opens: snapshot
         // blits for feedback reads encode into the batch and encoder order
@@ -148,6 +159,8 @@ internal static partial class MetalVideoPresenter
         // stackalloc storage is not an ownership receipt until explicitly set.
         textureHandles.Clear();
         textureOwned.Clear();
+        List<FiniteStorageWriteback>? storageWritebacks = _finiteStorageWritebackEnabled
+            ? new(dispatch.Textures.Length) : null;
         Exception? dispatchFailure = null;
         try
         {
@@ -161,8 +174,11 @@ internal static partial class MetalVideoPresenter
                     if (_selectedStorageMipAssociations.TryGetValue(descriptor, out _) &&
                         MetalNative.Send(commandBuffer, MetalNative.Selector("retainedReferences")) == 0)
                         throw new NotSupportedException("Metal selected storage resources require native command-buffer retention through completion.");
-                    textureHandles[index] = EnsureStorageImage(device, descriptor).Texture;
+                    var storageImage = EnsureStorageImage(device, descriptor);
+                    textureHandles[index] = storageImage.Texture;
                     textureOwned[index] = false;
+                    if (storageWritebacks is not null && StorageImageWrites(descriptor))
+                        storageWritebacks.Add(CaptureFiniteStorageWriteback(descriptor, storageImage));
                 }
                 else
                 {
@@ -215,15 +231,26 @@ internal static partial class MetalVideoPresenter
                     Depth = Math.Max(shader.ThreadgroupSizeZ, 1),
                 });
             MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
+            if (storageWritebacks is not null)
+                foreach (var receipt in storageWritebacks)
+                    EncodeFiniteStorageReadback(device, commandBuffer, receipt);
 
             // CPU-visible writes are ordering points (see the draw path): flush
             // the batch and wait so the write-back lands before this work item
             // completes. Pure-GPU dispatches stay in the open batch.
-            if (writeBackBuffers.Count > 0)
+            if (writeBackBuffers.Count > 0 || storageWritebacks is { Count: > 0 })
             {
                 var committed = FlushBatchedGuestCommands();
                 WaitForCommittedGuestBufferWriteback(committed);
                 WriteBuffersBackToGuest(writeBackBuffers);
+                if (storageWritebacks is not null)
+                    foreach (var receipt in storageWritebacks)
+                        CompleteFiniteStorageWriteback(committed, receipt);
+            }
+            if (storageWritebacks is not null)
+            {
+                RecordStorageImageWrites(dispatch.Textures);
+                FinalizeFiniteStorageWrites(storageWritebacks);
             }
         }
         catch (Exception exception)
@@ -233,10 +260,15 @@ internal static partial class MetalVideoPresenter
         }
         finally
         {
-            ReleaseComputeTemporaryTextures(textureHandles, textureOwned, dispatchFailure);
+            Exception? storageCleanupFailure = null;
+            try { ReleaseFiniteStorageWritebacks(storageWritebacks, dispatchFailure); }
+            catch (Exception cleanup) { storageCleanupFailure = cleanup; }
+            ReleaseComputeTemporaryTextures(textureHandles, textureOwned, dispatchFailure ?? storageCleanupFailure);
+            if (storageCleanupFailure is not null)
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(storageCleanupFailure).Throw();
         }
 
-        RecordStorageImageWrites(dispatch.Textures);
+        if (storageWritebacks is null) RecordStorageImageWrites(dispatch.Textures);
 
         ReturnPooledComputeData(dispatch);
     }

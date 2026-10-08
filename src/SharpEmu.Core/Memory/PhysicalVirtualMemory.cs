@@ -1249,6 +1249,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     private void NotifyBackedWriteWatch(ulong address, ulong length)
     {
+        GuestImageWriteTracker.TraceManagedDirtyCompletion(address, length);
         if (!GuestWriteWatch.Armed)
         {
             return;
@@ -2223,6 +2224,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     private static void NotifyGuestWriteWatch(ulong virtualAddress, ReadOnlySpan<byte> source)
     {
+        GuestImageWriteTracker.TraceManagedDirtyCompletion(virtualAddress, (ulong)source.Length);
         if (GuestWriteWatch.Armed)
         {
             GuestWriteWatch.Check(virtualAddress, source);

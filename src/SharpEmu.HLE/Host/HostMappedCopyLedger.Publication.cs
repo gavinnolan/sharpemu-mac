@@ -4,10 +4,13 @@ namespace SharpEmu.HLE.Host;
 
 public sealed unsafe partial class HostMappedCopyLedger
 {
-    public const int MaximumPublicationBytes = 8;
+    public const int MaximumPublicationBytes = 4 * 1024 * 1024;
+    public const int MaximumPublicationRuns = CpuMappedCopyObservation.MaximumSegments;
+    public const int MaximumRetainedPublicationBytes = 16 * 1024 * 1024;
     private const int MaximumPublications = 128;
     private Publication? publications;
     private int publicationCount;
+    private int retainedPublicationBytes;
     private readonly record struct DetachedRun(ulong Address, byte[] Bytes);
     private readonly record struct AliasRun(ulong Offset, byte[] Bytes);
 
@@ -30,7 +33,7 @@ public sealed unsafe partial class HostMappedCopyLedger
         publication = null;
         if (Monitor.IsEntered(gate)) throw new InvalidOperationException("Publication cannot prepare under the provider gate.");
         if (original is null || runs is null || original.OwnerIdentity is not Capture capture ||
-            !ReferenceEquals(capture.Owner, this) || runs.Count is < 1 or > MaximumPublicationBytes)
+            !ReferenceEquals(capture.Owner, this) || runs.Count is < 1 or > MaximumPublicationRuns)
             return CpuMappedPublicationPreparationResult.Rejected;
         // Caller memory is detached before any admission. No retained caller
         // buffers, callbacks or caller-generated native outcome receipts.
@@ -59,7 +62,7 @@ public sealed unsafe partial class HostMappedCopyLedger
         var successfulObservation = new CpuMappedCopyObservation(successfulCapture,
             original.FootprintAddress, original.FootprintByteCount, original.SourceAddress,
             original.SourceByteCount, original.Segments.ToArray());
-        var transaction = new Publication(this, backing, original, writers, aliasesToWrite, physicalRuns, successfulObservation);
+        var transaction = new Publication(this, backing, original, writers, aliasesToWrite, physicalRuns, successfulObservation, bytes);
         var wrapper = new CpuMappedPublication(transaction);
         if (!backing.TryEnterAccess()) return CpuMappedPublicationPreparationResult.Rejected;
         try
@@ -67,6 +70,7 @@ public sealed unsafe partial class HostMappedCopyLedger
             lock (gate)
             {
                 if (!IsCurrent(backing, original) || publicationCount >= MaximumPublications ||
+                    bytes > MaximumRetainedPublicationBytes - retainedPublicationBytes ||
                     HasOverlappingPublicationLocked(original.FootprintAddress, original.FootprintByteCount))
                     return CpuMappedPublicationPreparationResult.Rejected;
                 for (var index = 0; index < detached.Length; index++)
@@ -91,6 +95,7 @@ public sealed unsafe partial class HostMappedCopyLedger
                 reserved = writers.TryReservePublication(Volatile.Read(ref capture.WriterRevision), physicalRuns);
                 if (!reserved || !IsCurrent(backing, original)) return CpuMappedPublicationPreparationResult.Rejected;
                 transaction.Next = publications; publications = transaction; publicationCount++;
+                retainedPublicationBytes += bytes;
                 installed = true; publication = wrapper;
                 return CpuMappedPublicationPreparationResult.Prepared;
             }
@@ -113,7 +118,7 @@ public sealed unsafe partial class HostMappedCopyLedger
         {
             if (!ReferenceEquals(found, exact)) { previous = found; continue; }
             if (previous is null) publications = found.Next; else previous.Next = found.Next;
-            publicationCount--; return;
+            publicationCount--; retainedPublicationBytes -= exact.Bytes; return;
         }
         throw new InvalidOperationException("No exact publication reservation remains.");
     }
@@ -121,10 +126,11 @@ public sealed unsafe partial class HostMappedCopyLedger
     private sealed class Publication(HostMappedCopyLedger owner, HostBackingObject backing,
         CpuMappedCopyObservation original, HostManagedWriteIntervals writers, AliasRun[] runs,
         HostManagedWriteIntervals.PhysicalRun[] physicalRuns,
-        CpuMappedCopyObservation successfulObservation)
+        CpuMappedCopyObservation successfulObservation, int bytes)
         : CpuMappedPublicationTransaction
     {
         internal readonly CpuMappedCopyObservation Original = original;
+        internal readonly int Bytes = bytes;
         internal Publication? Next;
         private int state; // prepared, committing, completed, unknown, cancelled
         private int released, applied;

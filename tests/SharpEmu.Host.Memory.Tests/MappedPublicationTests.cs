@@ -54,18 +54,24 @@ public sealed class MappedPublicationTests
 
     private sealed class FakeProvider : IHostViewMemory, IHostMappedCopyMemory, IHostMappedPublicationMemory, IDisposable
     {
-        private readonly byte[] storage = new byte[checked((int)(State.Page * 3))];
+        private readonly byte[] storage;
+        private readonly ulong backingBytes;
         private GCHandle pin;
-        private readonly object gate = new();
+        private readonly object gate;
         internal readonly HostMappedCopyLedger Ledger;
         internal HostBackingObject? Backing;
         internal bool Cleanup;
-        internal FakeProvider() { pin = GCHandle.Alloc(storage, GCHandleType.Pinned); Ledger = new(gate, State.Page); }
+        internal FakeProvider(ulong bytes = State.Page * 2, object? sharedGate = null, HostMappedCopyLedger? sharedLedger = null)
+        {
+            backingBytes = bytes; storage = new byte[checked((int)(bytes + State.Page))];
+            gate = sharedGate ?? new(); pin = GCHandle.Alloc(storage, GCHandleType.Pinned);
+            Ledger = sharedLedger ?? new(gate, State.Page);
+        }
         public ulong PageSize => State.Page;
         public ulong Granularity => PageSize;
         public bool TryCreateBacking(ulong size, out HostBackingObject? backing, out HostViewFailure failure)
         {
-            Assert.Equal(State.Page * 2, size);
+            Assert.Equal(backingBytes, size);
             var alias = ((ulong)pin.AddrOfPinnedObject() + PageSize - 1) & ~(PageSize - 1);
             Backing = backing = new(alias, size, PageSize, _ => new(HostBackingReleaseStatus.Released));
             lock (gate) Ledger.RegisterBacking(backing);
@@ -102,6 +108,155 @@ public sealed class MappedPublicationTests
         public void Dispose() { Backing?.Dispose(); if (pin.IsAllocated) pin.Free(); }
     }
 
+
+    private sealed unsafe class LargeState : IDisposable
+    {
+        internal const int Bytes = 4194304;
+        internal readonly FakeProvider Host;
+        internal readonly SharedBackingViews Views;
+        internal readonly ulong Address;
+        internal LargeState(int segments = 1, HostPageProtection protection = HostPageProtection.ReadWrite,
+            object? gate = null, HostMappedCopyLedger? ledger = null, ulong address = State.Address)
+        {
+            Address = address;
+            Host = new(Bytes + State.Page, gate, ledger);
+            Views = new(Host, Bytes + State.Page);
+            var part = (ulong)Bytes / (ulong)segments;
+            for (var index = 0; index < segments; index++)
+                Assert.True(Views.TryMapReservedRange(address + (ulong)index * part, part,
+                    (ulong)index * part, protection, out _));
+            Assert.True(Views.TryMapReservedRange(address + Bytes, State.Page, Bytes,
+                HostPageProtection.ReadWrite, out _));
+        }
+        internal CpuMappedCopyObservation Capture(bool includeNeighbor = false)
+        {
+            var count = includeNeighbor ? Bytes + (int)State.Page : Bytes;
+            Assert.Equal(CpuMappedCopyResult.Copied, Views.TryReadMappedCopy(Address, (ulong)count,
+                Address, new byte[count], out var observation));
+            return Assert.IsType<CpuMappedCopyObservation>(observation);
+        }
+        internal byte[] AllBytes() => new ReadOnlySpan<byte>((void*)Host.Backing!.AliasBase,
+            Bytes + (int)State.Page).ToArray();
+        public void Dispose() { Host.Cleanup = true; Views.Dispose(); Host.Dispose(); }
+    }
+
+    [Theory]
+    [InlineData(1)] [InlineData(64)]
+    public void FullFourMiBPublicationOwnsAllOriginalSegmentRunsAndPreservesLastNeighbor(int segments)
+    {
+        using var state = new LargeState(segments);
+        var original = state.Capture();
+        Assert.Equal(segments, original.Segments.Count);
+        var input = Enumerable.Range(0, LargeState.Bytes).Select(index => (byte)(index * 29 + index / 65536)).ToArray();
+        var expected = input.ToArray();
+        var part = LargeState.Bytes / segments;
+        var runs = Enumerable.Range(0, segments).Select(index => new CpuMappedWriteRun(
+            state.Address + (ulong)(index * part), input.AsMemory(index * part, part))).ToArray();
+        Assert.Equal(CpuMappedPublicationPreparationResult.Prepared,
+            state.Views.TryPrepareMappedPublication(original, runs, out var receipt));
+        using (receipt)
+        {
+            Array.Fill(input, (byte)0xEE);
+            Assert.Equal(CpuMappedPublicationResult.Applied, receipt!.TryCommit());
+            var all = state.AllBytes(); Assert.Equal(expected, all.AsSpan(0, LargeState.Bytes).ToArray());
+            Assert.All(all.AsSpan(LargeState.Bytes).ToArray(), value => Assert.Equal((byte)0, value));
+            Assert.Equal(original.Segments, receipt.SuccessfulObservation!.Segments);
+            Assert.Equal(CpuMappedPublicationResult.Rejected, receipt.TryCommit());
+        }
+    }
+
+    [Fact]
+    public void PublicationTotalBudgetIsAcrossRunsAndRejectsOneExtraByteWithoutEffects()
+    {
+        using var state = new LargeState(); var original = state.Capture(includeNeighbor: true); var before = state.AllBytes();
+        // Both runs are INSIDE the recorded source. Only their aggregate exceeds
+        // the transaction byte cap; range validity must not hide this case.
+        CpuMappedWriteRun[] over = [new(state.Address, new byte[LargeState.Bytes]), new(state.Address + LargeState.Bytes, new byte[1])];
+        Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
+            state.Views.TryPrepareMappedPublication(original, over, out _));
+        Assert.Equal(before, state.AllBytes());
+        var runs = Enumerable.Range(0, 65).Select(index => new CpuMappedWriteRun(state.Address + (ulong)index, new byte[1])).ToArray();
+        Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
+            state.Views.TryPrepareMappedPublication(original, runs, out _));
+        Assert.Equal(before, state.AllBytes());
+    }
+
+    [Theory]
+    [InlineData(false)] [InlineData(true)]
+    public void FullPublicationRejectsReadonlyOrOriginalPhysicalWriterWithoutChangingAnyByte(bool writer)
+    {
+        using var state = new LargeState(protection: writer ? HostPageProtection.ReadWrite : HostPageProtection.ReadOnly);
+        var original = state.Capture();
+        if (writer) Assert.True(state.Views.TryWriteBacking(state.Address + LargeState.Bytes - 1, new byte[] { 91 }));
+        var before = state.AllBytes();
+        Assert.Equal(CpuMappedPublicationPreparationResult.Rejected, state.Views.TryPrepareMappedPublication(
+            original, [new(state.Address, new byte[LargeState.Bytes])], out _));
+        Assert.Equal(before, state.AllBytes());
+    }
+
+    [Theory]
+    [InlineData(false)] [InlineData(true)]
+    public void RetainedFourTransactionByteBudgetReleasesExactlyOnCancelOrApplied(bool applied)
+    {
+        var gate = new object(); var ledger = new HostMappedCopyLedger(gate, State.Page);
+        var scopes = new List<LargeState>(); var tickets = new List<CpuMappedPublication>();
+        try
+        {
+            for (var index = 0; index < 5; index++)
+            {
+                var state = new LargeState(gate: gate, ledger: ledger, address: State.Address + (ulong)index * 16777216);
+                scopes.Add(state);
+                var result = state.Views.TryPrepareMappedPublication(state.Capture(),
+                    [new(state.Address, new byte[LargeState.Bytes])], out var ticket);
+                Assert.Equal(index < 4 ? CpuMappedPublicationPreparationResult.Prepared : CpuMappedPublicationPreparationResult.Rejected, result);
+                if (ticket is not null) tickets.Add(ticket);
+            }
+            Assert.Equal(16777216, RetainedBytes(ledger));
+            if (applied) Assert.Equal(CpuMappedPublicationResult.Applied, tickets[0].TryCommit());
+            else tickets[0].Dispose();
+            tickets[0].Dispose(); Assert.Equal(12582912, RetainedBytes(ledger));
+            Assert.Equal(CpuMappedPublicationPreparationResult.Prepared, scopes[4].Views.TryPrepareMappedPublication(
+                scopes[4].Capture(), [new(scopes[4].Address, new byte[LargeState.Bytes])], out var last));
+            tickets.Add(last!); Assert.Equal(16777216, RetainedBytes(ledger));
+        }
+        finally
+        {
+            foreach (var ticket in tickets) ticket.Dispose();
+            foreach (var state in scopes) state.Dispose();
+        }
+        Assert.Equal(0, RetainedBytes(ledger));
+    }
+
+    private static readonly List<object> SyntheticUnknownOwners = [];
+
+    [Fact]
+    public void SyntheticUnknownPublicationKeepsPayloadChargeAndOriginalExclusions()
+    {
+        // Deliberately inject only the private UNKNOWN bookkeeping state, not a
+        // caller-supplied native/copy receipt. No invalid pointer or kernel effect.
+        // Retain its pinned fixture scope to process exit because the production
+        // transaction intentionally keeps an unresolved alias access pin.
+        var state = new LargeState();
+        var original = state.Capture();
+        Assert.Equal(CpuMappedPublicationPreparationResult.Prepared, state.Views.TryPrepareMappedPublication(
+            original, [new(state.Address, new byte[LargeState.Bytes])], out var ticket));
+        var transaction = typeof(CpuMappedPublication).GetField("transaction", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(ticket)!;
+        var gate = typeof(HostMappedCopyLedger).GetField("gate", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(state.Host.Ledger)!;
+        lock (gate)
+            Assert.Equal(CpuMappedPublicationResult.PartialUnknown,
+                transaction.GetType().GetMethod("QuarantineLocked", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(transaction, null));
+        SyntheticUnknownOwners.Add(state);
+        ticket!.Dispose(); ticket.Dispose();
+        Assert.Equal(LargeState.Bytes, RetainedBytes(state.Host.Ledger));
+        Assert.Equal(CpuMappedPublicationResult.Rejected, ticket.TryCommit());
+        Assert.Null(ticket.SuccessfulObservation);
+        Assert.False(state.Host.Effect(state.Address, 1));
+        Assert.False(state.Views.TryWriteBacking(state.Address, new byte[] { 93 }));
+        Assert.All(state.AllBytes(), value => Assert.Equal((byte)0, value));
+    }
+
+    private static int RetainedBytes(HostMappedCopyLedger ledger) =>
+        (int)typeof(HostMappedCopyLedger).GetField("retainedPublicationBytes", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(ledger)!;
 
     [Theory]
     [InlineData(1)] [InlineData(4)] [InlineData(8)]
