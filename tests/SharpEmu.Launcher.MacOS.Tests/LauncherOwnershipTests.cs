@@ -133,6 +133,84 @@ public sealed class LauncherOwnershipTests
         }
     }
 
+    [System.Runtime.InteropServices.DllImport("/usr/lib/libSystem.B.dylib")] private static extern int getpgid(int pid);
+    [System.Runtime.InteropServices.DllImport("/usr/lib/libSystem.B.dylib")] private static extern int getsid(int pid);
+    [Fact]
+    public async Task ExitedRootCannotOrphanPipeHoldingGroupMemberOrAffectAnotherOwner()
+    {
+        if (!OperatingSystem.IsMacOS()) return;
+        var type = typeof(MacLauncher).Assembly.GetType("SharpEmu.Launcher.MacOS.OwnedEmulatorProcess")!;
+        using var owner = (IDisposable)Activator.CreateInstance(type, BindingFlags.Instance | BindingFlags.NonPublic, null, [TimeSpan.FromSeconds(2)], null)!;
+        using var unrelated = (IDisposable)Activator.CreateInstance(type)!;
+        var descendantPid = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var exited = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        type.GetEvent("Output")!.AddEventHandler(owner, (Action<long, string, bool>)((_, line, _) =>
+        {
+            if (line.StartsWith("descendant:",StringComparison.Ordinal)) descendantPid.TrySetResult(int.Parse(line[11..]));
+        }));
+        type.GetEvent("Exited")!.AddEventHandler(owner, (Action<long,int>)((_,code) => exited.TrySetResult(code)));
+        var env = new ReadOnlyDictionary<string,string>(new Dictionary<string,string>());
+        type.GetMethod("Start")!.Invoke(unrelated,["/bin/sleep",new LauncherLaunchPlan(Array.AsReadOnly(new[] {"30"}),env)]);
+        type.GetMethod("Start")!.Invoke(owner,["/bin/sh",new LauncherLaunchPlan(Array.AsReadOnly(new[] {"-c","trap '' TERM; sleep 30 & child=$!; printf 'descendant:%s\\n' \"$child\"; exit 7"}),env)]);
+        var pid = await descendantPid.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var run = type.GetField("current",BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(owner)!;
+        var parent = (System.Diagnostics.Process)run.GetType().GetField("Process")!.GetValue(run)!;
+        var parentPid = parent.Id;
+        // WaitForExitAsync can subscribe behind the owner's Exited callback,
+        // which intentionally waits for the inherited readers. Observe actual
+        // root exit independently; do not require those readers to complete yet.
+        var rootExitDeadline = System.Diagnostics.Stopwatch.StartNew();
+        while (!parent.HasExited && rootExitDeadline.Elapsed < TimeSpan.FromSeconds(5)) await Task.Delay(10);
+        Assert.True(parent.HasExited);
+        using var descendant = System.Diagnostics.Process.GetProcessById(pid);
+        try
+        {
+            Assert.True(parent.HasExited); Assert.False(descendant.HasExited);
+            Assert.Equal(parentPid,getpgid(pid)); Assert.Equal(parentPid,getsid(pid));
+            Assert.False(exited.Task.IsCompleted); // reader ownership outlives root PID
+            type.GetMethod("Stop")!.Invoke(owner,null);
+            Assert.Equal(-2,await exited.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+            await descendant.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.True(descendant.HasExited);
+            Assert.True((bool)type.GetProperty("IsRunning")!.GetValue(unrelated)!);
+            Assert.False((bool)type.GetProperty("IsRunning")!.GetValue(owner)!);
+        }
+        finally { if (!descendant.HasExited) descendant.Kill(entireProcessTree:true); }
+    }
+
+    [Fact]
+    public async Task NaturalRootExitAutomaticallyCleansPipeHoldingDescendantAndPreservesCode()
+    {
+        if (!OperatingSystem.IsMacOS()) return;
+        var type = typeof(MacLauncher).Assembly.GetType("SharpEmu.Launcher.MacOS.OwnedEmulatorProcess")!;
+        using var owner = (IDisposable)Activator.CreateInstance(type,BindingFlags.Instance|BindingFlags.NonPublic,null,[TimeSpan.FromMilliseconds(250)],null)!;
+        var descendantPid = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var exited = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        type.GetEvent("Output")!.AddEventHandler(owner,(Action<long,string,bool>)((_,line,_) => { if (line.StartsWith("descendant:",StringComparison.Ordinal)) descendantPid.TrySetResult(int.Parse(line[11..])); }));
+        type.GetEvent("Exited")!.AddEventHandler(owner,(Action<long,int>)((_,code) => exited.TrySetResult(code)));
+        var plan = new LauncherLaunchPlan(Array.AsReadOnly(new[] {"-c","trap '' TERM; sleep 30 & child=$!; printf 'descendant:%s\\n' \"$child\"; exit 7"}),new ReadOnlyDictionary<string,string>(new Dictionary<string,string>()));
+        type.GetMethod("Start")!.Invoke(owner,["/bin/sh",plan]);
+        var pid = await descendantPid.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        using var descendant = System.Diagnostics.Process.GetProcessById(pid);
+        try
+        {
+            Assert.Equal(7,await exited.Task.WaitAsync(TimeSpan.FromSeconds(5))); // no user Stop
+            await descendant.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)); Assert.True(descendant.HasExited);
+            Assert.False((bool)type.GetProperty("IsRunning")!.GetValue(owner)!);
+        }
+        finally { if (!descendant.HasExited) descendant.Kill(entireProcessTree:true); }
+    }
+
+    [Fact]
+    public async Task BoundedStreamReaderHandlesHugeUnterminatedLineCrLfAndFinalTail()
+    {
+        var reader = typeof(MacLauncher).Assembly.GetType("SharpEmu.Launcher.MacOS.OwnedEmulatorProcess")!.GetMethod("ReadBoundedLinesAsync",BindingFlags.Static|BindingFlags.NonPublic)!;
+        var lines = new List<string>();
+        using var input = new StringReader(new string('x',1000000)+"\r\nnext\r\nfinal");
+        await (Task)reader.Invoke(null,[input,(Action<string>)lines.Add])!;
+        Assert.Equal(new[] {new string('x',4096)+" [truncated]","next","final"},lines);
+    }
+
     [Fact]
     public async Task QueuedNotificationsFromExitedSessionCannotMutateANewerLaunch()
     {
