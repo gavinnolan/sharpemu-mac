@@ -27,5 +27,9 @@ The sampled view is explicit controlled fixture setup, not game binding or
 cross-queue/coherence qualification. Public primary AddrLib32bpp/mode27 origin
 reference source is retained under `tests/Fixtures/R32UintSingletonArray`.
 
-Builds, oracle execution and native tests are pending a serialized window. No
-test count, native capability or title progression is claimed from source alone.
+The independent pinned AddrLib driver at source1e996df4 reports a65536-byte
+physical surface/alignment,128x128 block/pitch and origin byte offset0. This is
+modeled source/layout evidence, not PS5 topology or native execution. CSV/source
+hashes and reproduction command are in the retained fixture README. Managed
+build/tests and native tests remain pending; no native capability or title
+progression is claimed from source/oracle alone.

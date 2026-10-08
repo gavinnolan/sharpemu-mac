@@ -8,5 +8,15 @@ placement/detiling code. Only pipeBankXor0 is supplied; the bounded aligned
 descriptor has no embedded within-block bits. This does not identify the actual
 PS5 hardware topology or qualify non-origin tiled offsets.
 
-The driver source and AMD license are retained here. Oracle execution and emitted
-CSV are pending the compiler window; no address result is claimed yet.
+The actual public API execution reports a128x128x1 physical block/pitch128,
+65536-byte surface/slice/alignment, zero mip/macro/tail offsets, equation67 and
+origin byte offset0 with bit position0. Only this addressed texel is qualified.
+The driver, emitted `offset.csv` and AMD license are retained here.
+
+```sh
+clang++ -std=c++17 -I pal/src/core/imported/addrlib/inc oracle.cpp build/libaddrlib.a -o oracle
+./oracle 0x28 0x244 > offset.csv
+```
+
+Driver SHA256 `7708e6a88ae96497a169b5129b221bef6a39f47779d9291dd1336691410cac24`;
+CSV SHA256 `bbecac12e2562db32f1443ee5c8e9b9883fe503056c88b4a8666b0ac3729d18a`.
