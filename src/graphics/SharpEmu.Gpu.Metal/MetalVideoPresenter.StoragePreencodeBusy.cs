@@ -23,7 +23,8 @@ internal static partial class MetalVideoPresenter
         KeyValuePair<SelectedStorageMipKey, SelectedStorageMipAssociation>[] selected,
         KeyValuePair<SelectedStorageMipKey, GuestImage>[] selectedImages,
         KeyValuePair<SelectedStorageMipKey, SelectedNativeOriginalProof>[] selectedProofs,
-        FiniteStorageBufferOrigin[] buffers, int retiredOrigins, int retiredDisplays)
+        FiniteStorageBufferOrigin[] buffers, FiniteStorageBufferPublication[] bufferPublications,
+        int retiredOrigins, int retiredDisplays)
     {
         internal readonly ComputeGuestDispatch Dispatch = dispatch;
         internal readonly FiniteStorageWriteback Receipt = receipt;
@@ -39,8 +40,7 @@ internal static partial class MetalVideoPresenter
         internal readonly (SelectedNativeOriginalProof Proof, int Version, long Producer)[] SelectedNativeVersions = selectedProofs
             .Select(pair => (pair.Value, pair.Value.Version, pair.Value.ProducerSequence)).ToArray();
         internal readonly FiniteStorageBufferOrigin[] Buffers = buffers;
-        internal readonly FiniteStorageBufferPublication[] BufferPublications =
-            CaptureFiniteStorageBufferPublications(dispatch.GlobalMemoryBuffers, buffers);
+        internal readonly FiniteStorageBufferPublication[] BufferPublications = bufferPublications;
         internal readonly int RetiredOrigins = retiredOrigins, RetiredDisplays = retiredDisplays;
         internal OriginalCanonicalDirtyBusy? FirstBusy;
         internal long BusyStarted;
@@ -57,6 +57,9 @@ internal static partial class MetalVideoPresenter
         nint commandBuffer, nint queue, List<FiniteStorageWriteback>? receipts)
     {
         var buffers = ValidateFiniteStorageBufferOriginalsAgainstImage(receipts, dispatch.GlobalMemoryBuffers);
+        // Capture provider-bound input slots before the presenter gate. The
+        // constructor only stores these exact originals; later checks stay strict.
+        var bufferPublications = CaptureFiniteStorageBufferPublications(dispatch.GlobalMemoryBuffers, buffers);
         var receipt = receipts![0];
         lock (_gate)
         {
@@ -72,7 +75,7 @@ internal static partial class MetalVideoPresenter
             return new(dispatch, receipt, commandBuffer, queue, _executingGuestWorkSequence, guestQueue,
                 _guestImages.Select(pair => CaptureFiniteStoragePrecommitImage(pair.Key, pair.Value)).ToArray(),
                 _selectedStorageMipOwners.ToArray(), _selectedStorageMipImages.ToArray(), _selectedNativeOriginalProofs.ToArray(),
-                buffers, _finiteStorageRetiredOriginCount, _finiteRetiredDisplayOriginCount);
+                buffers, bufferPublications, _finiteStorageRetiredOriginCount, _finiteRetiredDisplayOriginCount);
         }
     }
 

@@ -14,6 +14,11 @@ SuccessfulObservation is saved before any throwing continuity checks. The
 original CWT input is consumed exactly once. Continuity, completed notification
 and successful transaction disposal must all finish before the slot is complete.
 
+The slot capture runs beside the original buffer validation BEFORE entering the
+presenter gate. The phase constructor only stores those already captured slots;
+it performs no provider currentness query under the presenter gate. This narrow
+successor preserves the unexecuted b9 source and its gate-order review finding.
+
 Image post-Applied validation now checks the complete slots, their same original
 input bytes/identity/session, both original and exact successor mapping identity,
 and full physical disjointness against the image and other buffers. It performs
