@@ -6,6 +6,34 @@ Local main integrates qualified source `5016bc82`; its `src`, `tests` and `scrip
 
 ## Next source candidates and current runtime coordination
 
+Current lane: Kairo's one bounded v555 batch is terminal and the lane is back
+with SharpEmu. ROOT retains a fresh independent process/lock check at
+`artifacts/validation/all-games-20261009/kairo-v555-terminal-runtime-handoff`.
+Kairo remains source/light only. Its brightness setup and delivered movie
+frames establish neither a menu nor gameplay; the later black capture and
+`ds_write_b128` shader blocker remain Kairo observations.
+
+Combined source `bf7b3516` includes the reviewed Fill, pending-only canonical,
+first-installation diagnostic and cold first-capture enrollment candidates.
+Its first build passes Host but fails Libs with `CS0136`: a new test catch
+variable collides with an enclosing pattern variable. GPU build and every
+test, publication and game phase remain unrun. ROOT verifies the immutable
+13-artifact failure archive, all 2,016 unchanged source hashes and closure of
+owned roots `34305`/`34309`/`34345`/`34473`; manifest SHA-256
+`4e71f9698cd38e1ffc008efbd61a779f998faad9b642ef7980e9ee0177499f0d`.
+
+Successor `a27c011f` renames only that catch variable. Production code and test
+cleanup behavior are unchanged. ROOT verifies all 2,016 source hashes and all
+16 preparation artifacts, byte-identical inventories and the minimal driver
+substitutions. Preparation manifest SHA-256:
+`3b6eaaac59a69ba44467f70af5bd8e09ad209d837a6a35841203f24d69cd7fa4`.
+Expected ordinary cases per actual CLR are 238 Host, 793 Libs and 105 GPU;
+106 native/provider cases and 13 explicitly synthetic cold frontend cases
+run separately per CLR. Its first three-build phase is granted; no passing
+build or runtime result is claimed at this checkpoint. Local main remains
+the previously qualified `5016bc82` source. The historical checkpoints below
+retain their original source and lane state.
+
 After the four `8c4b352f` SharpEmu attempts closed, Kairo owned one bounded v4.554 validation and wall-clock Silent Hill replay batch. SharpEmu's heavy work was held while source implementation and review continued. The then-prepared SharpEmu candidate was DS+Void `bfc988ed`: ROOT verifies its clean exact HEAD, all 2,001 source hashes and all 12 prepared driver artifacts. Its 1,064 ordinary cases per CLR comprise 208 Host, 751 Libs and 105 GPU cases. Its 178 separate workers comprise 73 Metal/GPU and 16 ordinary Mac-provider cases per CLR. All original `8c4b352f` case identities remain present. Preparation manifest: `artifacts/validation/all-games-20261009/void-input-on-watched-ds-boot-bfc988ed-prepared/prepared-manifest.json`, SHA-256 `67950a64f5d2abcd1d97cebf615f4185fbd7b072608cfb91d092763c7d9ba2af`. At that preparation checkpoint, no build, test, publication or game result existed for BFC. Its first build failure is retained below.
 
 Kairo's bounded v4.554 batch subsequently closes through its owned AX window; the user hands the lane back and ROOT independently verifies runner `69115` and game `69119` absent by PID/PPID/process group, no actual game/compiler/test workers and no shared lock. Kairo stays source/light only during SharpEmu's next batch. Kairo's calibration image correctness remains unverified: two origami images are expected by the prompt, so their presence is not a confirmed duplication defect.
