@@ -243,6 +243,9 @@ public sealed partial class MetalStorageCpuSyncTests
     private sealed class BorrowColorState : IDisposable
     {
         private readonly State state = new();
+        private readonly object? takenSequence = Field("_takenGuestWorkSequence").GetValue(null);
+        private readonly object? takenPrefix = Field("_takenGuestPrefixProducerSequence").GetValue(null);
+        private readonly object? takenWork = Field("_takenDepthCubeProducerWork").GetValue(null);
         private readonly IDictionary ranges = (IDictionary)typeof(GuestImageWriteTracker).GetField("_rangesByAddress", Private)!.GetValue(null)!;
         private readonly object trackerGate = typeof(GuestImageWriteTracker).GetField("_gate", Private)!.GetValue(null)!;
         private readonly object? previousProtected;
@@ -251,6 +254,9 @@ public sealed partial class MetalStorageCpuSyncTests
         private readonly string[] emptyDictionaries = ["_nativeColorLatest", "_nativeColorQueued", "_nativeColorBatches"];
         internal BorrowColorState()
         {
+            Field("_takenGuestWorkSequence").SetValue(null, 0L);
+            Field("_takenGuestPrefixProducerSequence").SetValue(null, 0L);
+            Field("_takenDepthCubeProducerWork").SetValue(null, null);
             foreach (var name in emptyDictionaries) Assert.Empty((IDictionary)Field(name).GetValue(null)!);
             Assert.Empty((IEnumerable)Field("_nativeColorOriginals").GetValue(null)!);
             MetalColorMipPlacement.Enabled = true; MetalVideoPresenter.NativeColorBorrowEnabled = true;
@@ -277,6 +283,9 @@ public sealed partial class MetalStorageCpuSyncTests
             MetalColorMipPlacement.Enabled = placement; MetalVideoPresenter.NativeColorBorrowEnabled = borrow;
             Field("_textureSourceGraphEnabled").SetValue(null, graph);
             state.Dispose();
+            Field("_takenGuestWorkSequence").SetValue(null, takenSequence);
+            Field("_takenGuestPrefixProducerSequence").SetValue(null, takenPrefix);
+            Field("_takenDepthCubeProducerWork").SetValue(null, takenWork);
         }
     }
 }
