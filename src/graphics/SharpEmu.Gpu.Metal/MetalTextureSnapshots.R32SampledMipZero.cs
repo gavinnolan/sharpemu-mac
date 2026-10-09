@@ -4,6 +4,7 @@ using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.Images;
+using static SharpEmu.Libs.Agc.AgcBackendServices;
 using Binding = SharpEmu.Libs.Agc.AgcExports.TranslatedImageBinding;
 
 namespace SharpEmu.Gpu.Metal;
