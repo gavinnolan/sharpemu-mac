@@ -144,14 +144,20 @@ internal static partial class MetalVideoPresenter
                 return CpuMappedReadWatchStatus.Stale;
             }
             reason = "other-image-original-volume-watch-or-version";
-            if (other.TextureType == MtlTextureType3D &&
-                (otherOrigin!.VolumeWatch is null || !IsSingletonVolumeNativeOwnerCurrentWithReservationLocked(other, otherOrigin, reservation)))
+            if (other.TextureType == MtlTextureType3D)
             {
-                // Classification only: Busy never makes this cohort Current.
-                if (classifyBusy && IsSingletonVolumeNativeOwnerMetadataCurrentLocked(other, otherOrigin!) &&
-                    otherOrigin!.VolumeWatch!.Source.GetMappedCopyWriteWatchStatus(otherOrigin.VolumeWatch.Mapping) == CpuMappedReadWatchStatus.Busy)
-                    busy = true;
-                else
+                // Keep the actual first refusing status. A participating writer
+                // can finish between a Boolean check and a later status query;
+                // that must not turn a healthy Busy into Stale. Busy is still
+                // refusal only, and every remaining physical owner is checked.
+                var status = classifyBusy
+                    ? IsSingletonVolumeNativeOwnerMetadataCurrentLocked(other, otherOrigin!)
+                        ? reservation.GetStatus(otherOrigin!.VolumeWatch!) : CpuMappedReadWatchStatus.Stale
+                    : otherOrigin!.VolumeWatch is not null &&
+                        IsSingletonVolumeNativeOwnerCurrentWithReservationLocked(other, otherOrigin, reservation)
+                        ? CpuMappedReadWatchStatus.Current : CpuMappedReadWatchStatus.Stale;
+                if (status == CpuMappedReadWatchStatus.Busy) busy = true;
+                else if (status != CpuMappedReadWatchStatus.Current)
                 {
                     if (captureOffender && _rgbaStorageRuntimePublicationRequested)
                         offender = CaptureFiniteStorageCohortOffender(pair.Key, other, "original-volume-watch-or-version");
