@@ -19,7 +19,7 @@ internal static partial class MetalTextureSnapshots
             d.BaseLevel == 0 && d.LastLevel == 0;
     }
 
-    private static void RequireR32SampledMipZero(Binding binding)
+    internal static void RequireR32SampledMipZero(Binding binding)
     {
         var d = binding.Descriptor;
         if (!IsR32SampledMipZeroCandidate(binding) || d.Address == 0 || (d.Address & 0xFFFF) != 0 ||

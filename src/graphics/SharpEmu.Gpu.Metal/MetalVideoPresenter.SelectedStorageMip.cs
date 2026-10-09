@@ -278,15 +278,22 @@ internal static partial class MetalVideoPresenter
         SelectedStorageMipOverlaps(a, b.Resource.Address, SelectedStorageMipAllocationBytes(b)) &&
         !SelectedStorageMipKeysMayCoexist(a, b);
 
-    private static void RejectConflictingSelectedStorageConstructionLocked(SelectedStorageMipAssociation selected)
+    private static void RejectConflictingSelectedStorageConstructionLocked(SelectedStorageMipAssociation selected) =>
+        RejectConflictingSelectedStorageConstructionWithProofLocked(selected, null);
+
+    private static void RejectConflictingSelectedStorageConstructionWithProofLocked(SelectedStorageMipAssociation selected,
+        SelectedNativeOriginalProof? constructing)
     {
         if (_selectedStorageMipOwners.Keys.Concat(_selectedStorageMipImages.Keys).Any(key =>
             SelectedStorageMipR16Conflict(key, selected.Key)))
             throw new NotSupportedException("Metal selected construction overlaps an incompatible R16Float selected chain.");
         if (!MetalR16FloatSelectedMip.TryPlacement(selected.Key.Resource, selected.Key.Mip, out _))
         {
-            // Keep the existing DS class's construction admission unchanged.
-            if (_guestImages.ContainsKey(selected.Key.Resource.Address) ||
+            // A same-address ordinary image is not placement proof. Only the
+            // exact executing native R32 consumer may establish disjointness
+            // from its original full padded mip-zero physical writes.
+            if (_guestImages.TryGetValue(selected.Key.Resource.Address, out var ordinary) &&
+                    !TryAllowNativeR32SelectedConstructionLocked(selected, ordinary, constructing) ||
                 _selectedStorageMipImages.Keys.Any(key => key.Domain == selected.Key.Domain &&
                     key.Resource.Address == selected.Key.Resource.Address && key != selected.Key))
                 throw new NotSupportedException("Metal selected storage view conflicts with an address-only live image.");

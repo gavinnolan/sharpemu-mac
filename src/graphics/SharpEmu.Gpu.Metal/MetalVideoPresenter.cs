@@ -265,6 +265,12 @@ internal static partial class MetalVideoPresenter
                         if (volumeCleanup is null) volumeCleanup = failure;
                         else try { volumeCleanup.Data["MetalNativeColorSecondaryCleanup"] = failure; } catch { }
                     }
+                    try { RetireOrdinaryStorageNativeOriginals(); }
+                    catch (Exception failure)
+                    {
+                        if (volumeCleanup is null) volumeCleanup = failure;
+                        else try { volumeCleanup.Data["MetalOrdinaryStorageSecondaryCleanup"] = failure; } catch { }
+                    }
                     try { ReleaseSingletonVolumeNativeOriginals(); }
                     catch (Exception failure)
                     {

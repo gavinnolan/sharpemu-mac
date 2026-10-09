@@ -87,6 +87,7 @@ internal static partial class MetalVideoPresenter
                 Exception? cleanup = null;
                 try { CancelQueuedSingletonVolumeOriginalsLocked(); } catch (Exception failure) { cleanup = failure; }
                 try { CancelQueuedNativeColorLocked(cleanup); } catch (Exception failure) { cleanup ??= failure; }
+                try { CancelQueuedNativeR32SnapshotsLocked(cleanup); } catch (Exception failure) { cleanup ??= failure; }
                 if (cleanup is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(cleanup).Throw();
             }
             if (_textureSourceGraphEnabled)

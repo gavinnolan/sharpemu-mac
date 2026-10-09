@@ -134,7 +134,7 @@ internal static partial class MetalVideoPresenter
     }
 
     private static bool IsR32MipOneOriginal(SelectedStorageMipAssociation owner, ICpuMemory memory,
-        long session, out SelectedStorageMipSeed seed)
+        long session, out SelectedStorageMipSeed seed, SelectedNativeOriginalProof? constructing = null)
     {
         seed = null!;
         var d = owner.Key.Resource;
@@ -148,10 +148,23 @@ internal static partial class MetalVideoPresenter
         // If a native owner exists, bind its original creation proof rather than
         // assuming that an address registry still names that original mapping.
         if (_selectedStorageMipImages.TryGetValue(owner.Key, out var image) &&
-            (!_selectedNativeOriginalProofs.TryGetValue(owner.Key, out var proof) || !ReferenceEquals(proof.Owner, owner) ||
+            (!TrySelectedR32OriginalNativeProof(owner, image, constructing, out var proof) || !ReferenceEquals(proof.Owner, owner) ||
              !ReferenceEquals(proof.Seed, original) || !ReferenceEquals(proof.Image, image) || image.Texture != proof.Texture ||
              image.ContentVersion != proof.Version || !image.Initialized)) return false;
         seed = original; return true;
+    }
+
+    // The exact not-yet-transferred construction proof is supplied only by
+    // PublishStorageImageWithOriginalReadLocked. It cannot stand in for a
+    // different selected owner or replace an existing published proof.
+    private static bool TrySelectedR32OriginalNativeProof(SelectedStorageMipAssociation owner,
+        GuestImage image, SelectedNativeOriginalProof? constructing, out SelectedNativeOriginalProof proof)
+    {
+        if (_selectedNativeOriginalProofs.TryGetValue(owner.Key, out proof!)) return true;
+        proof = constructing!;
+        return constructing is not null && ReferenceEquals(constructing.Owner, owner) &&
+            ReferenceEquals(constructing.Image, image) && constructing.Texture == image.Texture &&
+            constructing.Version == image.ContentVersion;
     }
 
     private static IEnumerable<R32PhysicalSpan> SourcePhysicalSpans(CpuMappedCopyObservation mapping)

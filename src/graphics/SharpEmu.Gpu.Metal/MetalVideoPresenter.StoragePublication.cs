@@ -42,7 +42,7 @@ internal static partial class MetalVideoPresenter
                 if (originalNativeProof is not null || MetalR16FloatSelectedMip.TryPlacement(selected.Key.Resource, selected.Key.Mip, out _))
                 {
                     ValidateSelectedStorageMipOwner(selected);
-                    RejectConflictingSelectedStorageConstructionLocked(selected);
+                    RejectConflictingSelectedStorageConstructionWithProofLocked(selected, originalNativeProof);
                     if (!_selectedStorageMipImages.TryGetValue(selected.Key, out var current) || !ReferenceEquals(current, image))
                         throw new InvalidOperationException("Metal R16Float publication lost its exact construction owner.");
                 }
