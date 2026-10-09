@@ -151,7 +151,11 @@ public sealed partial class MetalImmutableGpuVersionTests
             owners.Memory = memory;
             Assert.IsAssignableFrom<ICpuMappedCopySource>(memory);
             Assert.IsAssignableFrom<ICpuMappedPublicationSource>(memory);
-            Field("_guestMemory").SetValue(null, memory);
+            // Use the real preparation attachment contract. The thread tracker
+            // remains the CPU owner; GPU preparation keeps the selected source.
+            Assert.Same(cpuSource, CpuGpuMemoryView.Resolve(memory));
+            MetalVideoPresenter.AttachGuestMemory(memory);
+            Assert.Same(cpuSource, Field("_guestMemory").GetValue(null));
             Field("_finiteStorageWritebackEnabled").SetValue(null, true);
             var expected = Enumerable.Range(0, allocationBytes).Select(i => (byte)(i * 19 + 7)).ToArray();
             if (rgba) Bgra1024Oracle.PhysicalSeed().CopyTo(expected, 0);
@@ -172,6 +176,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                 Access: GuestImageAccess.Write);
             Assert.True(ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_KERNEL_PAGE"), out var kernelPage), "finite setup: expected measured kernel-page environment parse");
             var host = new MetalCommandStreamHost(memory, backend, backend);
+            Assert.Same(cpuSource, host.Memory);
             var reports = new List<string>(); GpuFatal.OnFatal = reports.Add;
             if (originalVolumes && !MaterializeOriginalVolumes()) return;
             var first = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [binding], out _));
@@ -180,6 +185,8 @@ public sealed partial class MetalImmutableGpuVersionTests
             var originalOrigin = Call("StorageCpuOrigin", first)!;
             owners.OriginalOrigin = originalOrigin;
             Assert.NotNull(originalOrigin);
+            Assert.Same(cpuSource, StorageMember(originalOrigin, "Memory"));
+            Assert.Same(cpuSource, StorageMember(originalOrigin, "Source"));
             var originalMapping = (CpuMappedCopyObservation)StorageMember(originalOrigin, "Mapping")!;
             Assert.Equal(address, originalMapping.FootprintAddress);
             Assert.Equal((ulong)imageBytes, originalMapping.FootprintByteCount);
