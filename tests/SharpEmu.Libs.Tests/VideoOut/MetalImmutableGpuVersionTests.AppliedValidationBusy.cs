@@ -30,6 +30,20 @@ public sealed partial class MetalImmutableGpuVersionTests
     public void ActualAppliedValidationDeadlineRetainsExactPendingNativeOwners() => Applied("timeout");
     [FiniteStoragePublicationNativeFact]
     public void ActualAppliedValidationUnknownCancellationRetainsExactPendingNativeOwners() => Applied("cancel-unknown");
+    [FiniteStoragePublicationNativeFact]
+    public void ActualAcquiredValidationCancelsBeforeCallbackForDifferentBackingDisjointWriter() => Applied("acquired-disjoint");
+    [FiniteStoragePublicationNativeFact]
+    public void ActualAcquiredValidationLaterOverlapCannotReuseItsSavedBusy() => Applied("acquired-overlap");
+    [FiniteStoragePublicationNativeFact]
+    public void ActualAcquiredValidationFirstStaleCannotBorrowConcurrentBusy() => Applied("acquired-stale-first");
+    [FiniteStoragePublicationNativeFact]
+    public void ActualAcquiredValidationNativeVersionChangePreventsCallbackRetry() => Applied("acquired-version");
+    [FiniteStoragePublicationNativeFact]
+    public void ActualAcquiredValidationOriginalTokenChangePreventsCallbackRetry() => Applied("acquired-token");
+    [FiniteStoragePublicationNativeFact]
+    public void ActualAcquiredValidationDeadlineKeepsSameAppliedReceiptWithoutCallback() => Applied("acquired-timeout");
+    [FiniteStoragePublicationNativeFact]
+    public void ActualAcquiredValidationUnknownCancellationCannotWaitOrReprepare() => Applied("acquired-cancel-unknown");
     private void Applied(string scenario) =>
         RunActualRuntimeTwoTypedPublications(false, rgba: true, originalVolumes: true, appliedValidationWindow: scenario);
 
@@ -38,15 +52,24 @@ public sealed partial class MetalImmutableGpuVersionTests
         byte[] expected, long sequence, long eop, MetalCompiledGuestShader shader, Func<byte[]> canonical, string scenario)
     {
         const BindingFlags instance = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
-        var views = Assert.IsType<SharedBackingViews>(StorageMember(StorageMember(physical, "_backedSpace")!, "_views"));
-        var backing = StorageMember(views, "_backing")!; var writers = StorageMember(backing, "_managedWrites")!;
+        var requestedScenario = scenario;
+        var acquiredWindow = scenario.StartsWith("acquired-", StringComparison.Ordinal);
+        if (acquiredWindow) scenario = scenario[9..];
+        var ownViews = Assert.IsType<SharedBackingViews>(StorageMember(StorageMember(physical, "_backedSpace")!, "_views"));
+        var ownWriters = StorageMember(StorageMember(ownViews, "_backing")!, "_managedWrites")!;
         var volumePhysical = Assert.IsType<PhysicalVirtualMemory>(owners.BodyVolumePhysical);
         var volumeViews = Assert.IsType<SharedBackingViews>(StorageMember(StorageMember(volumePhysical, "_backedSpace")!, "_views"));
-        Assert.NotSame(writers, StorageMember(StorageMember(volumeViews, "_backing")!, "_managedWrites"));
+        var volumeWriters = StorageMember(StorageMember(volumeViews, "_backing")!, "_managedWrites")!;
+        Assert.NotSame(ownWriters, volumeWriters);
+        var views = acquiredWindow ? volumeViews : ownViews;
+        var writerPhysical = acquiredWindow ? volumePhysical : physical;
+        var writers = acquiredWindow ? volumeWriters : ownWriters;
         var volumeBytes = owners.VolumeImages.Select(ReadVolume).ToArray();
         var volumeOriginals = owners.VolumeImages.Select(image => StorageMember(image, "StorageCpuOrigin")).ToArray();
         var extraExpected = Enumerable.Range(imageBytes, 3 * 65536).Select(i => (byte)(i * 19 + 7)).ToArray();
-        var destination = scenario == "overlap" ? address : address + (ulong)imageBytes + 32768;
+        var destination = acquiredWindow
+            ? owners.BodyVolumeAddress + (scenario == "stale-first" ? 0ul : 2 * 65536ul + 32768)
+            : scenario == "overlap" ? address : address + (ulong)imageBytes + 32768;
         Assert.True(views.TryResolveAlias(destination, 1, out var alias));
         var writeHook = typeof(SharedBackingViews).GetField("_beforeCanonicalAliasCopyForControl", instance)!;
         var oldWrite = writeHook.GetValue(views);
@@ -54,6 +77,7 @@ public sealed partial class MetalImmutableGpuVersionTests
         var busyHook = Field("_finiteStorageAppliedValidationBusyForControl"); var oldBusy = busyHook.GetValue(null);
         var encoderHook = Field("_computeEncoderCreationOverride"); var oldEncoder = encoderHook.GetValue(null);
         var appliedHook = Field("_finiteStorageAfterAppliedForControl"); var oldApplied = appliedHook.GetValue(null);
+        var acquiredHook = Field("_finiteStorageAcquiredValidationForControl"); var oldAcquired = acquiredHook.GetValue(null);
         var pause = new BusyOrdinaryWriter(); owners.OrdinaryWriterOwner = pause;
         object? receipt = null; object? applied = null; nint producer = 0, staging = 0, texture = 0;
         var encoders = 0; var appliedEvents = 0; var starts = 0; var waits = 0; var completed = Field("_completedGuestWorkSequence").GetValue(null);
@@ -76,7 +100,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                 Assert.Equal(alias, target); Assert.Equal(1, count);
                 Assert.False(Monitor.IsEntered(Field("_gate").GetValue(null)!));
                 Assert.False(Monitor.IsEntered(StorageMember(views, "_lock")!));
-                var gate = Assert.IsType<ReaderWriterLockSlim>(StorageMember(physical, "_gate"));
+                var gate = Assert.IsType<ReaderWriterLockSlim>(StorageMember(writerPhysical, "_gate"));
                 Assert.False(gate.IsReadLockHeld || gate.IsWriteLockHeld || gate.IsUpgradeableReadLockHeld);
                 Assert.Equal(2L, StorageMember(writers, "admission"));
                 writeHook.SetValue(views, oldWrite); pause.Admitted.Set();
@@ -96,14 +120,16 @@ public sealed partial class MetalImmutableGpuVersionTests
                 Assert.NotSame(StorageMember(StorageMember(actual, "Origin")!, "Mapping"), applied);
                 Assert.Equal(published, canonical()); // actual Applied full bytes BEFORE callback/EOP
                 Assert.Null(StorageMember(actual, "PublishedOrigin"));
-                pause.Thread = new Thread(() =>
-                {
-                    try { pause.Written = views.TryWriteBacking(destination, new byte[] { 0xA9 }); }
-                    catch (Exception failure) { pause.Failure = failure; }
-                }) { IsBackground = true, Name = "post-Applied exact validation writer" };
-                pause.Thread.Start(); Assert.True(pause.Admitted.Wait(TimeSpan.FromSeconds(5)));
-                Assert.Equal(2L, StorageMember(writers, "admission"));
                 if (scenario == "cancel-unknown") Assert.IsType<BodyBusyRoutedMemory>(cpuSource).ArmValidationCancellation();
+                if (!acquiredWindow) StartWriter();
+            }));
+            if (acquiredWindow) acquiredHook.SetValue(null, (Action<object>)(actual =>
+            {
+                acquiredHook.SetValue(null, oldAcquired);
+                Assert.Same(receipt, actual);
+                Assert.Equal(4294967296L, StorageMember(ownWriters, "admission")); // actual own cancel-only exclusion
+                Assert.Null(StorageMember(actual, "PublishedOrigin"));
+                StartWriter(); // DIFFERENT actual backing; own ticket cannot exclude this writer
             }));
             busyHook.SetValue(null, (Action<object>)(actual =>
             {
@@ -112,6 +138,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                 Assert.Equal(producer, StorageMember(actual, "CommandBuffer")); Assert.Equal(staging, StorageMember(actual, "Staging"));
                 Assert.Equal(texture, StorageMember(actual, "Texture")); Assert.Equal(1, encoders);
                 Assert.False(Monitor.IsEntered(Field("_gate").GetValue(null)!));
+                if (acquiredWindow) Assert.Equal(0L, StorageMember(ownWriters, "admission")); // real cancellation BEFORE wait
                 Assert.Null(StorageMember(actual, "PublishedOrigin")); Assert.Equal(published, canonical());
                 Assert.Equal(completed, Field("_completedGuestWorkSequence").GetValue(null));
                 Assert.False(MetalVideoPresenter.WaitForGuestWork(sequence, 0)); Assert.False(MetalVideoPresenter.WaitForGuestWork(eop, 0));
@@ -124,7 +151,12 @@ public sealed partial class MetalImmutableGpuVersionTests
                     var image = StorageMember(actual, "Image")!;
                     image.GetType().GetField("ContentVersion", instance)!.SetValue(image, (int)StorageMember(image, "ContentVersion")! + 1);
                 }
-                if (scenario == "token") GuestImageWriteTracker.NotifyManagedWrite(address, 1);
+                if (scenario == "token") GuestImageWriteTracker.NotifyManagedWrite(acquiredWindow ? owners.BodyVolumeAddress : address, 1);
+                if (acquiredWindow && scenario == "overlap")
+                {
+                    Assert.True(volumeViews.TryWriteBacking(owners.BodyVolumeAddress, new byte[] { 0xA7 }));
+                    extraExpected[0] = 0xA7; // real later overlap invalidates the SAME original watch
+                }
                 FinishWriter();
             }));
             if (scenario == "disjoint")
@@ -132,7 +164,8 @@ public sealed partial class MetalImmutableGpuVersionTests
                 state.DrainWithControlledBudget(); Assert.Equal(1, waits);
                 Assert.True(MetalVideoPresenter.WaitForGuestWork(eop, 0));
                 BinaryPrimitives.WriteUInt32LittleEndian(published.AsSpan(imageBytes), 0x13579BDF);
-                published[checked((int)(destination - address))] = 0xA9;
+                if (acquiredWindow) extraExpected[checked((int)(destination - owners.BodyVolumeAddress))] = 0xA9;
+                else published[checked((int)(destination - address))] = 0xA9;
                 Assert.Equal(published, canonical()); AssertFiniteDebtSettled(StorageMember(receipt!, "Image")!);
                 Assert.False((bool)StorageMember(receipt!, "ValidationQuarantined")!);
                 state.AssertFinitePipelineCompleted(shader);
@@ -143,9 +176,13 @@ public sealed partial class MetalImmutableGpuVersionTests
                 Assert.IsType<GpuFatalException>(failure.InnerException);
                 Assert.False(MetalVideoPresenter.WaitForGuestWork(sequence, 0)); Assert.False(MetalVideoPresenter.WaitForGuestWork(eop, 0));
                 Assert.Equal(completed, Field("_completedGuestWorkSequence").GetValue(null));
-                Assert.True(waits > 0); FinishWriter();
-                published[checked((int)(destination - address))] = 0xA9;
+                if (acquiredWindow && (scenario is "stale-first" or "cancel-unknown")) Assert.Equal(0, waits);
+                else Assert.True(waits > 0);
+                FinishWriter();
+                if (acquiredWindow) extraExpected[checked((int)(destination - owners.BodyVolumeAddress))] = 0xA9;
+                else published[checked((int)(destination - address))] = 0xA9;
                 Assert.Equal(published, canonical()); // Applied happened ONCE; no EOP bytes
+                if (acquiredWindow) Assert.Null(StorageMember(receipt!, "PublishedOrigin")); // no callback ever entered
                 var debt = StorageMember(receipt!, "Debt")!;
                 Assert.True((bool)StorageMember(debt, "Failed")!); Assert.True((bool)StorageMember(debt, "Pending")!);
                 Assert.Equal(scenario is "timeout" or "cancel-unknown", (bool)StorageMember(receipt!, "ValidationQuarantined")!);
@@ -173,7 +210,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             for (var i = 0; i < owners.VolumeImages.Count; i++)
             { Assert.Same(volumeOriginals[i], StorageMember(owners.VolumeImages[i], "StorageCpuOrigin")); Assert.Equal(volumeBytes[i], ReadVolume(owners.VolumeImages[i])); }
             if (scenario is "timeout" or "cancel-unknown") owners.AppliedValidationQuarantineVerified = true;
-            output.WriteLine($"finite-storage-applied-validation-native scenario={scenario}; actual_status=4; actual_compute_encoders=1; actual_Applied_bytes_once=true; exact_originals=true; full_volume_native_bytes=true; full_canonical_neighbors=true; callback_retry=false; EOP={(scenario == "disjoint" ? "after-canonical" : "unacknowledged")}; quarantine={(scenario is "timeout" or "cancel-unknown")}");
+            output.WriteLine($"finite-storage-applied-validation-native scenario={requestedScenario}; actual_status=4; actual_compute_encoders=1; actual_Applied_bytes_once=true; exact_originals=true; full_volume_native_bytes=true; full_canonical_neighbors=true; callback_retry=false; EOP={(scenario == "disjoint" ? "after-canonical" : "unacknowledged")}; quarantine={(scenario is "timeout" or "cancel-unknown")}");
         }
         catch (Exception failure) { primary = failure; throw; }
         finally
@@ -185,9 +222,21 @@ public sealed partial class MetalImmutableGpuVersionTests
             Attempt(() => beforeHook.SetValue(null, oldBefore)); Attempt(() => busyHook.SetValue(null, oldBusy));
             Attempt(() => writeHook.SetValue(views, oldWrite)); Attempt(() => encoderHook.SetValue(null, oldEncoder));
             Attempt(() => appliedHook.SetValue(null, oldApplied));
+            Attempt(() => acquiredHook.SetValue(null, oldAcquired));
             if (!owners.OrdinaryWriterUnconfirmed) Attempt(pause.Dispose);
             if (cleanup is not null) { if (primary is null) ExceptionDispatchInfo.Capture(cleanup).Throw(); else try { primary.Data["AppliedValidationFixtureCleanup"] = cleanup; } catch { } }
             void Attempt(Action action) { try { action(); } catch (Exception failure) { cleanup ??= failure; } }
+        }
+        void StartWriter()
+        {
+            Assert.Null(pause.Thread);
+            pause.Thread = new Thread(() =>
+            {
+                try { pause.Written = views.TryWriteBacking(destination, new byte[] { 0xA9 }); }
+                catch (Exception failure) { pause.Failure = failure; }
+            }) { IsBackground = true, Name = "post-Applied exact validation writer" };
+            pause.Thread.Start(); Assert.True(pause.Admitted.Wait(TimeSpan.FromSeconds(5)));
+            Assert.Equal(2L, StorageMember(writers, "admission"));
         }
         void FinishWriter()
         {

@@ -134,7 +134,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                 Assert.True(volumePhysical.TryMapBacked(volumeBase, 3 * 65536, 65536,
                     GuestPageProtection.Read | GuestPageProtection.Write, out var volumeFailure), $"volume map failure={volumeFailure}");
                 cpuSource = new BodyBusyRoutedMemory(physical, volumePhysical, volumeBase, 3 * 65536,
-                    failValidationCancellation: bodyBusyWindow == "cancel-unknown" || appliedValidationWindow == "cancel-unknown");
+                    failValidationCancellation: bodyBusyWindow == "cancel-unknown" || appliedValidationWindow is "cancel-unknown" or "acquired-cancel-unknown");
             }
             var memory = new TrackedCpuMemory(cpuSource);
             owners.Memory = memory;

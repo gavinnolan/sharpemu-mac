@@ -10,6 +10,7 @@ internal static partial class MetalVideoPresenter
 {
     private static Action<object>? _finiteStorageAppliedValidationBusyForControl;
     private static Action<object>? _finiteStorageBeforeAppliedValidationForControl;
+    private static Action<object>? _finiteStorageAcquiredValidationForControl;
     // Reserved BEFORE native texture retention/dispatch. Fixed slots root the
     // exact receipt throughout completion and retain it on deadline/unknown.
     private static readonly FiniteStorageWriteback?[] _finiteStorageWritebackRoots =
@@ -67,7 +68,7 @@ internal static partial class MetalVideoPresenter
         internal readonly FiniteStoragePrecommitImage Image = image;
         internal readonly nint CommandBuffer = receipt.CommandBuffer, Staging = receipt.Staging;
         internal readonly StorageCpuSeedOrigin? PublishedOrigin = receipt.PublishedOrigin;
-        internal FiniteStorageAppliedValidationBusy? FirstBusy;
+        internal Exception? FirstBusy;
         internal long Started;
     }
 
@@ -139,7 +140,12 @@ internal static partial class MetalVideoPresenter
                 throw new InvalidOperationException("Finite Applied validation ORIGINAL selected producer changed.");
     }
 
-    private static void ValidateFiniteStorageAppliedOriginals(FiniteStorageAppliedValidation saved)
+    private sealed class FiniteStorageAppliedCohortBusy(FiniteStorageAppliedValidation saved) : OriginalCanonicalDirtyBusy(
+        "Finite Applied validation exact ORIGINAL cohort is busy before any finalization callback.")
+    { internal readonly FiniteStorageAppliedValidation Saved = saved; }
+
+    private static void ValidateFiniteStorageAppliedOriginals(FiniteStorageAppliedValidation saved,
+        StorageWatchReservation reservation = default, bool requireCurrent = false)
     {
         if (Monitor.IsEntered(_gate)) throw new InvalidOperationException("Applied original checks require a released presenter gate.");
         lock (_gate) ValidateFiniteStorageAppliedOwnersLocked(saved);
@@ -149,18 +155,21 @@ internal static partial class MetalVideoPresenter
         // Validate every original even if a healthy watch is Busy. Such Busy
         // does NOT authorize callback/publication; acquired validation below
         // retains all existing strict original-content/currentness predicates.
+        SingletonVolumeOriginalBusy? firstBusy = null;
         foreach (var image in saved.Phase.Images)
         {
             if (image.Origin?.VolumeWatch is null) continue;
-            try { ValidateSingletonVolumeOriginalContentWithReservation(image.Origin, default, classifyOrdinaryBusy: true); }
-            catch (SingletonVolumeOriginalBusy) { }
+            try { ValidateSingletonVolumeOriginalContentWithReservation(image.Origin, reservation, classifyOrdinaryBusy: true); }
+            catch (SingletonVolumeOriginalBusy busy) { firstBusy ??= busy; }
         }
         ValidateFiniteStorageOwnOrigin(saved.Next, saved.Receipt.Descriptor);
+        CpuMappedReadWatchStatus status;
         lock (_gate)
         {
             ValidateFiniteStorageAppliedOwnersLocked(saved);
-            var status = InspectFiniteStorageNativeCohortStatusLocked(saved.Receipt.Image, saved.Next,
-                out var reason, out var offender, captureOffender: _rgbaStorageRuntimePublicationRequested, classifyBusy: true);
+            status = InspectFiniteStorageNativeCohortStatusLocked(saved.Receipt.Image, saved.Next,
+                out var reason, out var offender, captureOffender: _rgbaStorageRuntimePublicationRequested,
+                reservation: reservation, classifyBusy: true);
             if (status == CpuMappedReadWatchStatus.Stale)
             {
                 var message = "Finite Applied validation ORIGINAL physical cohort is unavailable: " + reason;
@@ -168,6 +177,10 @@ internal static partial class MetalVideoPresenter
                 throw new NotSupportedException(message);
             }
         }
+        // Every original and physical inventory member was checked above.
+        // Only these saved first-refusal types can cancel an unstarted ticket.
+        if (requireCurrent && firstBusy is not null) throw firstBusy;
+        if (requireCurrent && status == CpuMappedReadWatchStatus.Busy) throw new FiniteStorageAppliedCohortBusy(saved);
     }
 
     private static CpuMappedPublicationValidation PrepareFiniteStorageAppliedValidation(FiniteStorageWriteback receipt,
@@ -185,7 +198,32 @@ internal static partial class MetalVideoPresenter
                 try
                 {
                     lock (_gate) ValidateFiniteStorageAppliedOwnersLocked(saved);
+                    _finiteStorageAcquiredValidationForControl?.Invoke(receipt);
+                    if (!validation.IsCurrent)
+                        throw new InvalidOperationException("Finite Applied ORIGINAL acquired validation changed before checks.");
+                    ValidateFiniteStorageAppliedOriginals(saved, new StorageWatchReservation(validation), requireCurrent: true);
+                    if (!validation.IsCurrent)
+                        throw new InvalidOperationException("Finite Applied ORIGINAL acquired validation changed after checks.");
                     return validation;
+                }
+                catch (OriginalCanonicalDirtyBusy busy) when (
+                    busy is SingletonVolumeOriginalBusy volume && saved.Phase.Images.Any(image => ReferenceEquals(image.Origin, volume.Original)) ||
+                    busy is FiniteStorageAppliedCohortBusy cohort && ReferenceEquals(cohort.Saved, saved))
+                {
+                    var firstBusy = saved.FirstBusy ??= busy;
+                    if (saved.Started == 0) saved.Started = Stopwatch.GetTimestamp();
+                    // No callback has been invoked. Consume THIS cancel-only
+                    // ticket once; unknown release forbids wait/reprepare.
+                    try { validation.Dispose(); }
+                    catch (Exception cleanup)
+                    {
+                        QuarantineFiniteStorageAppliedValidation(receipt, firstBusy);
+                        try { firstBusy.Data["FiniteStorageAppliedValidationCleanup"] = cleanup; } catch { }
+                        ExceptionDispatchInfo.Capture(firstBusy).Throw();
+                        throw;
+                    }
+                    WaitFiniteStorageAppliedValidation(saved, source);
+                    continue;
                 }
                 catch (Exception primary)
                 {
@@ -205,19 +243,26 @@ internal static partial class MetalVideoPresenter
             if (result != CpuMappedPublicationPreparationResult.Rejected || validation is not null ||
                 refusal.Kind != CpuMappedPublicationValidationRefusalKind.AdmissionBusy || refusal.RejectedAdmission <= 0)
                 throw new InvalidOperationException($"Finite canonical physical-history validation was refused: result={result}.");
-            saved.FirstBusy ??= new(refusal);
+            saved.FirstBusy ??= new FiniteStorageAppliedValidationBusy(refusal);
             if (saved.Started == 0) saved.Started = Stopwatch.GetTimestamp();
-            ValidateFiniteStorageAppliedOriginals(saved);
-            if (!source.CanWaitForMappedPublicationValidation || Monitor.IsEntered(_gate))
-                throw new InvalidOperationException("Finite Applied validation cannot wait under inherited or unknown gates.");
-            if (Stopwatch.GetElapsedTime(saved.Started).TotalMilliseconds >= 500)
-            {
-                try { saved.FirstBusy.Data["FiniteStorageAppliedValidationWait"] = "500ms; Applied is never repeated; original debt remains pending"; } catch { }
-                QuarantineFiniteStorageAppliedValidation(receipt, saved.FirstBusy);
-                ExceptionDispatchInfo.Capture(saved.FirstBusy).Throw();
-            }
-            _finiteStorageAppliedValidationBusyForControl?.Invoke(receipt);
-            Thread.Sleep(1);
+            WaitFiniteStorageAppliedValidation(saved, source);
         }
+    }
+
+    private static void WaitFiniteStorageAppliedValidation(FiniteStorageAppliedValidation saved,
+        ICpuMappedPublicationSource source)
+    {
+        var firstBusy = saved.FirstBusy ?? throw new InvalidOperationException("Applied validation has no saved first Busy refusal.");
+        ValidateFiniteStorageAppliedOriginals(saved); // no foreign ticket after known cancellation
+        if (!source.CanWaitForMappedPublicationValidation || Monitor.IsEntered(_gate))
+            throw new InvalidOperationException("Finite Applied validation cannot wait under inherited or unknown gates.");
+        if (Stopwatch.GetElapsedTime(saved.Started).TotalMilliseconds >= 500)
+        {
+            try { firstBusy.Data["FiniteStorageAppliedValidationWait"] = "500ms; Applied is never repeated; original debt remains pending"; } catch { }
+            QuarantineFiniteStorageAppliedValidation(saved.Receipt, firstBusy);
+            ExceptionDispatchInfo.Capture(firstBusy).Throw();
+        }
+        _finiteStorageAppliedValidationBusyForControl?.Invoke(saved.Receipt);
+        Thread.Sleep(1);
     }
 }
