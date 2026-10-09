@@ -151,7 +151,11 @@ public sealed partial class MetalImmutableGpuVersionTests
             owners.Memory = memory;
             Assert.IsAssignableFrom<ICpuMappedCopySource>(memory);
             Assert.IsAssignableFrom<ICpuMappedPublicationSource>(memory);
-            Field("_guestMemory").SetValue(null, memory);
+            // Use the real preparation attachment contract. The thread tracker
+            // remains the CPU owner; GPU preparation keeps the selected source.
+            Assert.Same(cpuSource, CpuGpuMemoryView.Resolve(memory));
+            MetalVideoPresenter.AttachGuestMemory(memory);
+            Assert.Same(cpuSource, Field("_guestMemory").GetValue(null));
             Field("_finiteStorageWritebackEnabled").SetValue(null, true);
             var expected = Enumerable.Range(0, allocationBytes).Select(i => (byte)(i * 19 + 7)).ToArray();
             if (rgba) Bgra1024Oracle.PhysicalSeed().CopyTo(expected, 0);
@@ -172,6 +176,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                 Access: GuestImageAccess.Write);
             Assert.True(ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_KERNEL_PAGE"), out var kernelPage), "finite setup: expected measured kernel-page environment parse");
             var host = new MetalCommandStreamHost(memory, backend, backend);
+            Assert.Same(cpuSource, host.Memory);
             var reports = new List<string>(); GpuFatal.OnFatal = reports.Add;
             if (originalVolumes && !MaterializeOriginalVolumes()) return;
             var first = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [binding], out _));
@@ -180,6 +185,8 @@ public sealed partial class MetalImmutableGpuVersionTests
             var originalOrigin = Call("StorageCpuOrigin", first)!;
             owners.OriginalOrigin = originalOrigin;
             Assert.NotNull(originalOrigin);
+            Assert.Same(cpuSource, StorageMember(originalOrigin, "Memory"));
+            Assert.Same(cpuSource, StorageMember(originalOrigin, "Source"));
             var originalMapping = (CpuMappedCopyObservation)StorageMember(originalOrigin, "Mapping")!;
             Assert.Equal(address, originalMapping.FootprintAddress);
             Assert.Equal((ulong)imageBytes, originalMapping.FootprintByteCount);
@@ -489,13 +496,18 @@ public sealed partial class MetalImmutableGpuVersionTests
 
             GuestMemoryBuffer CaptureBuffer()
             {
+                Assert.Same(cpuSource, host.Memory);
                 var bufferAddress = address + (ulong)imageBytes + 16384;
                 var bytes = new byte[16384];
-                Assert.Equal(CpuMappedCopyResult.Copied, MetalVideoPresenter.TryReadFiniteStorageBuffer(memory,
+                Assert.Equal(CpuMappedCopyResult.Copied, MetalVideoPresenter.TryReadFiniteStorageBuffer(host.Memory,
                     bufferAddress, bytes, out var mapping, out var session));
                 Assert.Equal(expected.AsSpan(imageBytes + 16384, 16384).ToArray(), bytes);
                 var buffer = new GuestMemoryBuffer(bufferAddress, bytes, bytes.Length, (ulong)bytes.Length, false, true);
-                MetalVideoPresenter.RegisterFiniteStorageBufferOrigin(buffer, memory, mapping!, session);
+                MetalVideoPresenter.RegisterFiniteStorageBufferOrigin(buffer, host.Memory, mapping!, session);
+                var original = Call("RequireFiniteStorageBufferOrigin", buffer)!;
+                Assert.Same(cpuSource, StorageMember(original, "Memory"));
+                Assert.Same(cpuSource, StorageMember(original, "Source"));
+                Assert.Same(mapping, StorageMember(original, "Mapping"));
                 output.WriteLine($"finite-storage-native original writable-global footprint={mapping!.FootprintByteCount}; segments={mapping.Segments.Count}; disjoint-physical=true");
                 return buffer;
             }
@@ -545,7 +557,8 @@ public sealed partial class MetalImmutableGpuVersionTests
                         // memory/session/layout owner, never an address alone.
                         if (candidate is not null && owners.OriginalOrigin is { } original &&
                             StorageMember(candidate, "StorageCpuOrigin") is { } origin &&
-                            ReferenceEquals(StorageMember(origin, "Memory"), owners.Memory) &&
+                            ReferenceEquals(StorageMember(origin, "Memory"), StorageMember(original, "Memory")) &&
+                            ReferenceEquals(StorageMember(origin, "Source"), StorageMember(original, "Source")) &&
                             ReferenceEquals(StorageMember(origin, "Layout"), StorageMember(original, "Layout")) &&
                             Equals(StorageMember(origin, "Session"), StorageMember(original, "Session")))
                             owners.Image ??= candidate;

@@ -19,8 +19,8 @@ public sealed unsafe partial class HostMappedCopyLedger
         { diagnostic = new() { MappingGuard = "capture-missing", BooleanCurrent = false }; return ReadWatchDeclined("capture-missing", observation); }
         if (capture.ReadWatch is not { } watch)
         { diagnostic = new() { WatchGuard = "watch-missing", BooleanCurrent = false }; return ReadWatchDeclined("watch-missing", observation); }
-        var current = watch.TryIsCurrent(out var reason, out var primaryAdmission);
-        diagnostic = new() { WatchGuard = reason, PrimaryAdmission = primaryAdmission >= 0 ? primaryAdmission : null, BooleanCurrent = current };
+        var current = watch.TryIsCurrent(out var reason, out var primaryAdmission, out var ownerDiagnostic);
+        diagnostic = new() { WatchGuard = reason, PrimaryAdmission = primaryAdmission >= 0 ? primaryAdmission : null, BooleanCurrent = current, AdmissionOwner = ownerDiagnostic };
         return current || ReadWatchDeclined(reason, observation, primaryAdmission);
     }
 

@@ -189,7 +189,7 @@ internal static partial class MetalVideoPresenter
             submissionId));
 
     public static void AttachGuestMemory(ICpuMemory memory) =>
-        _guestMemory = memory;
+        _guestMemory = CpuGpuMemoryView.Resolve(memory);
 
     private static int _cpuWrittenGuestImageSyncRequested;
     private static long _guestImageCpuSyncTraceCount;

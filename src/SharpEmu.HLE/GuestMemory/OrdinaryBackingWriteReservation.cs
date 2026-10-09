@@ -42,8 +42,17 @@ public sealed class OrdinaryBackingWriteReservation : IDisposable
 
     // Caller MUST drop all outer mapping/stripe/provider gates first. No native
     // pointers are read while waiting; the backing pin owns lifetime only.
-    public OrdinaryBackingWriteAdmission TryAcquire(TimeSpan timeout)
+    public OrdinaryBackingWriteAdmission TryAcquire(TimeSpan timeout) => TryAcquire(timeout, false, out _);
+
+    // Explicit attribution replaces the SAME first Boolean currentness check.
+    // A refused acquisition is never queried again to explain an older result.
+    public OrdinaryBackingWriteAdmission TryAcquire(TimeSpan timeout, out OrdinaryBackingWriteCurrentnessFailure failure)
+        => TryAcquire(timeout, true, out failure);
+
+    private OrdinaryBackingWriteAdmission TryAcquire(TimeSpan timeout, bool classify,
+        out OrdinaryBackingWriteCurrentnessFailure failure)
     {
+        failure = default;
         RequireThread(); owner.RequireOrdinaryWriteWaitOutsideGates();
         if (timeout < TimeSpan.Zero || timeout > TimeSpan.FromMilliseconds(500))
             throw new ArgumentOutOfRangeException(nameof(timeout));
@@ -54,12 +63,14 @@ public sealed class OrdinaryBackingWriteReservation : IDisposable
             var deadline = Stopwatch.GetTimestamp() + (long)(timeout.TotalSeconds * Stopwatch.Frequency);
             while (true)
             {
-                if (!IsOriginalCurrent) return OrdinaryBackingWriteAdmission.OriginalChanged;
+                if (!(classify ? TryIsOriginalCurrent(out failure) : IsOriginalCurrent))
+                    return OrdinaryBackingWriteAdmission.OriginalChanged;
                 operation = backing.BeginManagedWriteOperation();
                 if (operation.Owner is not null && operation.Slot >= 0 && operation.Identity > 0)
                 {
                     admitted = true;
-                    return IsOriginalCurrent ? OrdinaryBackingWriteAdmission.Admitted : OrdinaryBackingWriteAdmission.OriginalChanged;
+                    return (classify ? TryIsOriginalCurrent(out failure) : IsOriginalCurrent)
+                        ? OrdinaryBackingWriteAdmission.Admitted : OrdinaryBackingWriteAdmission.OriginalChanged;
                 }
                 if (!operation.IsPublicationBusy) return OrdinaryBackingWriteAdmission.Refused;
                 if (Stopwatch.GetTimestamp() >= deadline) return OrdinaryBackingWriteAdmission.TimedOut;

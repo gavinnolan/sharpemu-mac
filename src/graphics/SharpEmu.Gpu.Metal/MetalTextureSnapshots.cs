@@ -58,6 +58,12 @@ internal static partial class MetalTextureSnapshots
         IReadOnlyList<TranslatedImageBinding> bindings,
         out int fallbackTextureCount)
     {
+        // This entry uses only Memory from CpuContext across every partial
+        // snapshot helper. Keep caller CPU state untouched; one selected GPU
+        // reader feeds all alias checks, first copies and original receipts.
+        var gpuMemory = CpuGpuMemoryView.Resolve(context.Memory);
+        if (!ReferenceEquals(gpuMemory, context.Memory))
+            context = new CpuContext(gpuMemory, context.TargetGeneration);
         var textures = new List<GuestDrawTexture>(bindings.Count);
         fallbackTextureCount = 0;
         Dictionary<GuestTextureSnapshotReuseKey, GuestDrawTexture>? snapshots = null;

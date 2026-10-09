@@ -8,7 +8,12 @@ internal static partial class MetalVideoPresenter
 {
     private static int _originalReadWatchDiagnosticRows;
     private readonly record struct OriginalReadWatchDiagnostic(CpuMappedReadWatchDiagnostic Provider,
-        string? LocalGuard, bool? OriginalRead, bool? Publication, bool? Validation, bool? BooleanCurrent = null);
+        string? LocalGuard, bool? OriginalRead, bool? Publication, bool? Validation, bool? BooleanCurrent = null, string? LocalTicket = null, CpuMappedDisjointReadWatchDiagnostic? LocalValidation = null);
+    // A reporting label only. Never consumed by admission, retry or waiting.
+    private static string DescribeDiagnosticLocalTicket(bool publication, bool validation, bool originalRead) =>
+        originalRead ? "original-read-local-ticket-no-wait-authority" :
+        publication ? "publication-local-ticket-no-wait-authority" :
+        validation ? "validation-local-ticket-no-wait-authority" : "none-diagnostic-only-no-wait-authority";
     private static bool TryReserveOriginalReadWatchDiagnostic(ICpuMemory memory)
     {
         if (!_volumeOwnerDeclineDiagnostics || Monitor.IsEntered(_gate)) return false;
@@ -51,7 +56,7 @@ internal static partial class MetalVideoPresenter
         internal CpuMappedReadWatchStatus GetStatusWithDiagnostic(SingletonVolumeOriginalWatch watch,
             out OriginalReadWatchDiagnostic diagnostic)
         {
-            diagnostic = default;
+            diagnostic = new() { LocalTicket = DescribeDiagnosticLocalTicket(publication is not null, validation is not null, originalRead is not null) };
             if (Volatile.Read(ref watch.State) == 2)
             { diagnostic = diagnostic with { LocalGuard = "watch-consumed" }; return CpuMappedReadWatchStatus.Stale; }
             if (Volatile.Read(ref watch.UnknownProducer))
@@ -73,8 +78,8 @@ internal static partial class MetalVideoPresenter
             }
             if (validation is not null)
             {
-                var current = validation.IsOriginalDisjointReadWatchCurrent(watch.Mapping);
-                diagnostic = diagnostic with { Validation = current };
+                var current = validation.IsOriginalDisjointReadWatchCurrent(watch.Mapping, out var localValidation);
+                diagnostic = diagnostic with { Validation = current, LocalValidation = localValidation };
                 if (current) return CpuMappedReadWatchStatus.Current;
             }
             return status;
@@ -89,7 +94,7 @@ internal static partial class MetalVideoPresenter
         internal bool IsCurrentWithDiagnostic(SingletonVolumeOriginalWatch watch,
             out OriginalReadWatchDiagnostic diagnostic)
         {
-            diagnostic = default;
+            diagnostic = new() { LocalTicket = DescribeDiagnosticLocalTicket(publication is not null, validation is not null, originalRead is not null) };
             if (Volatile.Read(ref watch.State) == 2)
             { diagnostic = diagnostic with { LocalGuard = "watch-consumed", BooleanCurrent = false }; return false; }
             if (Volatile.Read(ref watch.UnknownProducer))
@@ -110,8 +115,8 @@ internal static partial class MetalVideoPresenter
             }
             if (validation is not null)
             {
-                var current = validation.IsOriginalDisjointReadWatchCurrent(watch.Mapping);
-                diagnostic = diagnostic with { Validation = current };
+                var current = validation.IsOriginalDisjointReadWatchCurrent(watch.Mapping, out var localValidation);
+                diagnostic = diagnostic with { Validation = current, LocalValidation = localValidation };
                 if (current) { diagnostic = diagnostic with { BooleanCurrent = true }; return true; }
             }
             diagnostic = diagnostic with { BooleanCurrent = false }; return false;

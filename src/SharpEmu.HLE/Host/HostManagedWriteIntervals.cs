@@ -115,11 +115,11 @@ internal sealed partial class HostManagedWriteIntervals
         if (found < 0 || Volatile.Read(ref admission) != 0 || Volatile.Read(ref coverageIncomplete) != 0) return false;
         revision = found; return true;
     }
-    internal bool TryReservePublication(long originalRevision, ReadOnlySpan<PhysicalRun> runs, ReadWatch? originalWatch = null)
-        => TryReservePublication(originalRevision, runs, originalWatch, out _);
+    internal bool TryReservePublication(long originalRevision, ReadOnlySpan<PhysicalRun> runs, ReadWatch? originalWatch, AdmissionOwner? owner)
+        => TryReservePublication(originalRevision, runs, originalWatch, owner, out _);
 
     internal bool TryReservePublication(long originalRevision, ReadOnlySpan<PhysicalRun> runs,
-        ReadWatch? originalWatch, out long rejectedAdmission)
+        ReadWatch? originalWatch, AdmissionOwner? owner, out long rejectedAdmission)
     {
         rejectedAdmission = 0;
         if (originalRevision < 0 || originalRevision == long.MaxValue || Volatile.Read(ref coverageIncomplete) != 0)
@@ -136,13 +136,18 @@ internal sealed partial class HostManagedWriteIntervals
                     Volatile.Read(ref nextIdentity), previousAdmission, Volatile.Read(ref coverageIncomplete));
             return false;
         }
-        // Validate an enrolled ORIGINAL physical veto only AFTER excluding
-        // writers. A revoked/released/foreign watch cannot borrow newer history.
-        if ((originalWatch is not null ? originalWatch.CoversDuringPublication(this, runs) :
-            HasDisjointCompletedHistory(originalRevision, runs)) && Volatile.Read(ref coverageIncomplete) == 0) return true;
-        ReleasePublication();
-        TracePublicationDecline("completed-history-or-incomplete", originalRevision);
-        return false;
+        PublishAdmissionOwner(owner, CpuMappedAdmissionOwnerPhase.Reserved);
+        try
+        {
+            // Validate an enrolled ORIGINAL physical veto only AFTER excluding
+            // writers. A revoked/released/foreign watch cannot borrow newer history.
+            if ((originalWatch is not null ? originalWatch.CoversDuringPublication(this, runs) :
+                HasDisjointCompletedHistory(originalRevision, runs)) && Volatile.Read(ref coverageIncomplete) == 0) return true;
+            ReleasePublication(owner);
+            TracePublicationDecline("completed-history-or-incomplete", originalRevision);
+            return false;
+        }
+        catch { owner?.Unknown(); throw; } // Preserve any existing uncertain exclusion.
     }
 
     private void TracePublicationDecline(string reason, long originalRevision)
@@ -159,7 +164,13 @@ internal sealed partial class HostManagedWriteIntervals
         else RecordHistory(revision, runs, false);
         return revision;
     }
-    internal void ReleasePublication() => Interlocked.Add(ref admission, -PublicationBit);
+    internal void ReleasePublication(AdmissionOwner? owner)
+    {
+        if (owner is not null) DetachAdmissionOwner(owner);
+        Interlocked.Add(ref admission, -PublicationBit); // unchanged count/release
+        if (owner is not null) Volatile.Write(ref owner.SubtractionReturned, 1);
+        // Terminal outcome belongs to the caller AFTER exact cleanup returns.
+    }
     internal void QuarantinePublication() => LoseCoverage(CoverageLoss.PublicationQuarantined);
 
     // Test-only ordinary observation. Never used for publication, permission,

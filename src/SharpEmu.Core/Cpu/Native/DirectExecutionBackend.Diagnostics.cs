@@ -163,12 +163,13 @@ public sealed partial class DirectExecutionBackend
 
 	private void DumpRecentImportTrace()
 	{
+		DumpFaultThreadImportTrace();
 		var trace = _recentImportTrace;
 		if (trace is null || _recentImportTraceCount == 0)
 		{
 			return;
 		}
-		Log.Info($"   Recent import calls for managed={Environment.CurrentManagedThreadId} guest=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16} ({_recentImportTraceCount}):");
+		Log.Info($"   Legacy backend import ring (guest workers and fast paths excluded; not fault-thread history) dump_context_managed={Environment.CurrentManagedThreadId} dump_context_guest=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16} ({_recentImportTraceCount}):");
 		int num = (_recentImportTraceWriteIndex - _recentImportTraceCount + trace.Length) % trace.Length;
 		for (int i = 0; i < _recentImportTraceCount; i++)
 		{

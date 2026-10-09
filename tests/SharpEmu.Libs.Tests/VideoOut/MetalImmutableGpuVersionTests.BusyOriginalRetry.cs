@@ -33,6 +33,24 @@ public sealed partial class MetalImmutableGpuVersionTests
         byte[] expected, object image, object origin, Func<byte[]> readCanonical, string scenario)
     {
         const BindingFlags instance = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+        // Freeze the selected reader and ORIGINAL identities before any scenario
+        // effect. Later checks must not resolve a new view or repair a receipt.
+        var selectedReader = host.Memory;
+        Assert.Same(physical, selectedReader);
+        Assert.Same(selectedReader, Field("_guestMemory").GetValue(null));
+        Assert.Equal(2, owners.VolumeImages.Count);
+        var originalVolumes = owners.VolumeImages.Select(volume =>
+        {
+            var original = StorageMember(volume, "StorageCpuOrigin")!;
+            var originalMemory = StorageMember(original, "Memory")!;
+            var originalSource = StorageMember(original, "Source")!;
+            Assert.Same(selectedReader, originalMemory);
+            Assert.Same(selectedReader, originalSource);
+            return (Image: volume, Origin: original, Memory: originalMemory, Source: originalSource,
+                Mapping: (CpuMappedCopyObservation)StorageMember(original, "Mapping")!,
+                CopySource: Assert.IsAssignableFrom<ICpuMappedCopySource>(originalSource),
+                WatchSource: Assert.IsAssignableFrom<ICpuMappedReadWatchSource>(originalSource));
+        }).ToArray();
         // This is the SAME real canonical backing used by the PVM. Invoke its
         // ordinary single-view write route directly: PVM.TryWriteBacking holds
         // a read gate across the copy, which must not be held while paused.
@@ -267,9 +285,16 @@ public sealed partial class MetalImmutableGpuVersionTests
 
         void CheckOriginalVolumes(CpuMappedReadWatchStatus expectedStatus, bool checkNativeOwner = true)
         {
-            foreach (var volume in owners.VolumeImages)
+            Assert.Equal(originalVolumes.Length, owners.VolumeImages.Count);
+            for (var index = 0; index < originalVolumes.Length; index++)
             {
+                var saved = originalVolumes[index];
+                var volume = saved.Image;
+                Assert.Same(volume, owners.VolumeImages[index]);
                 var volumeOrigin = StorageMember(volume, "StorageCpuOrigin")!;
+                Assert.Same(saved.Origin, volumeOrigin);
+                Assert.Same(saved.Memory, StorageMember(volumeOrigin, "Memory"));
+                Assert.Same(saved.Source, StorageMember(volumeOrigin, "Source"));
                 var volumeObservation = StorageMember(volumeOrigin, "Observation")!;
                 var volumeToken = (GuestImageWriteTracker.ContentToken)StorageMember(volumeObservation, "Token")!;
                 var layout = StorageMember(volumeOrigin, "Layout")!;
@@ -278,14 +303,14 @@ public sealed partial class MetalImmutableGpuVersionTests
                 var watch = StorageMember(volumeOrigin, "VolumeWatch")!;
                 var mapping = (CpuMappedCopyObservation)StorageMember(volumeOrigin, "Mapping")!;
                 Assert.Same(mapping, StorageMember(watch, "Mapping"));
-                Assert.Same(memory, StorageMember(volumeOrigin, "Memory"));
+                Assert.Same(saved.Mapping, mapping);
                 Assert.Equal(1, StorageMember(watch, "State"));
                 Assert.Equal(false, StorageMember(watch, "UnknownProducer"));
                 Assert.Same(volume, StorageMember(watch, "Image"));
                 Assert.Equal(StorageMember(volume, "ContentVersion"), StorageMember(watch, "Version"));
                 Assert.Equal(StorageMember(volume, "Texture"), StorageMember(watch, "Texture"));
-                Assert.True(((ICpuMappedCopySource)memory).IsMappedCopyObservationCurrent(mapping));
-                Assert.Equal(expectedStatus, ((ICpuMappedReadWatchSource)memory).GetMappedCopyWriteWatchStatus(mapping));
+                Assert.True(saved.CopySource.IsMappedCopyObservationCurrent(saved.Mapping));
+                Assert.Equal(expectedStatus, saved.WatchSource.GetMappedCopyWriteWatchStatus(saved.Mapping));
                 Assert.True(GuestImageWriteTracker.TryGetProtectedObservedContentToken(volumeAddress, physicalBytes, out var currentToken));
                 Assert.Equal(volumeToken, currentToken);
                 Assert.True(GuestImageWriteTracker.IsReadSnapshotStable((GuestImageWriteTracker.ReadSnapshot)StorageMember(watch, "Read")!));

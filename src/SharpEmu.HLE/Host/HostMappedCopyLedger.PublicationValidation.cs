@@ -61,7 +61,7 @@ public sealed unsafe partial class HostMappedCopyLedger
                 }
                 if (cursor != end || count == 0) return CpuMappedPublicationPreparationResult.Rejected;
                 var originalRevision = Volatile.Read(ref capture.WriterRevision);
-                reserved = writers.TryReservePublication(originalRevision, physical.AsSpan(0, count), capture.ReadWatch,
+                reserved = writers.TryReservePublication(originalRevision, physical.AsSpan(0, count), capture.ReadWatch, transaction.Admission,
                     out var rejectedAdmission);
                 if (!reserved)
                 {
@@ -74,6 +74,7 @@ public sealed unsafe partial class HostMappedCopyLedger
                 if (!IsCurrent(backing, original)) return CpuMappedPublicationPreparationResult.Rejected;
                 transaction.PhysicalCount = count; // exact resolved original prefix, never trailing entries
                 transaction.Next = validations; validations = transaction; validationCount++;
+                transaction.Admission?.SetPhase(CpuMappedAdmissionOwnerPhase.Prepared);
                 installed = true; validation = wrapper;
                 return CpuMappedPublicationPreparationResult.Prepared;
             }
@@ -82,8 +83,13 @@ public sealed unsafe partial class HostMappedCopyLedger
         {
             if (!installed)
             {
-                if (reserved) writers.ReleasePublication();
-                backing.ExitAccess();
+                try
+                {
+                    if (reserved) writers.ReleasePublication(transaction.Admission);
+                    backing.ExitAccess();
+                    HostManagedWriteIntervals.CompleteAdmissionRelease(transaction.Admission);
+                }
+                catch { transaction.Admission?.Unknown(); throw; }
             }
         }
     }
@@ -92,6 +98,7 @@ public sealed unsafe partial class HostMappedCopyLedger
         CpuMappedCopyObservation original, HostManagedWriteIntervals writers,
         HostManagedWriteIntervals.PhysicalRun[] physical) : CpuMappedPublicationValidationTransaction
     {
+        internal readonly HostManagedWriteIntervals.AdmissionOwner? Admission = writers.CreateAdmissionOwner(CpuMappedAdmissionOwnerKind.PublicationValidation);
         internal readonly CpuMappedCopyObservation Original = original;
         internal Validation? Next;
         private int consumed;
@@ -100,6 +107,28 @@ public sealed unsafe partial class HostMappedCopyLedger
             Volatile.Read(ref consumed) == 0 && PhysicalCount > 0 &&
             owner.IsOriginalDisjointReadWatchCurrent(backing, Original, writers,
                 physical.AsSpan(0, PhysicalCount), watchedOriginal) && Volatile.Read(ref consumed) == 0;
+        internal override bool IsOriginalDisjointReadWatchCurrent(CpuMappedCopyObservation watchedOriginal,
+            out CpuMappedDisjointReadWatchDiagnostic diagnostic)
+        {
+            if (!writers.AdmissionDiagnosticsEnabled)
+            {
+                var unchanged = IsOriginalDisjointReadWatchCurrent(watchedOriginal); // ONE original call
+                diagnostic = new() { Guard = "diagnostics-disabled", BooleanCurrent = unchanged };
+                return unchanged;
+            }
+            diagnostic = new() { Guard = "validation-consumed", ReservedBackingIdentity = backing.Identity,
+                LocalAdmissionOwnerIdentity = Admission is { Identity: > 0 } local ? local.Identity : null,
+                BooleanCurrent = false };
+            if (Volatile.Read(ref consumed) != 0) return false;
+            diagnostic = diagnostic with { Guard = "validation-physical-count" };
+            if (PhysicalCount <= 0) return false;
+            if (!owner.IsOriginalDisjointReadWatchCurrentWithDiagnostic(backing, Original, writers,
+                physical.AsSpan(0, PhysicalCount), watchedOriginal, ref diagnostic)) return false;
+            diagnostic = diagnostic with { Guard = "validation-consumed-final" };
+            if (Volatile.Read(ref consumed) != 0) return false;
+            diagnostic = diagnostic with { Guard = "current", BooleanCurrent = true };
+            return true;
+        }
         internal override bool IsCurrent
         {
             get
@@ -112,18 +141,24 @@ public sealed unsafe partial class HostMappedCopyLedger
         {
             if (Monitor.IsEntered(owner.gate)) throw new InvalidOperationException("Validation release must be outside provider gates.");
             if (Interlocked.CompareExchange(ref consumed, 1, 0) != 0) return;
+            Admission?.SetPhase(CpuMappedAdmissionOwnerPhase.Releasing);
             lock (owner.gate)
             {
                 Validation? previous = null;
                 var found = owner.validations;
                 while (found is not null && !ReferenceEquals(found, this)) { previous = found; found = found.Next; }
                 // Unknown bookkeeping retains the exact exclusion and pins.
-                if (found is null) throw new InvalidOperationException("Exact validation reservation was lost.");
+                if (found is null) { Admission?.Unknown(); throw new InvalidOperationException("Exact validation reservation was lost."); }
                 if (previous is null) owner.validations = found.Next; else previous.Next = found.Next;
                 owner.validationCount--;
             }
-            try { writers.ReleasePublication(); }
-            finally { backing.ExitAccess(); }
+            try
+            {
+                try { writers.ReleasePublication(Admission); }
+                finally { backing.ExitAccess(); }
+                HostManagedWriteIntervals.CompleteAdmissionRelease(Admission);
+            }
+            catch { Admission?.Unknown(); throw; }
         }
     }
 }

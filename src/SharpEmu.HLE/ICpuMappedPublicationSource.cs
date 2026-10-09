@@ -91,6 +91,26 @@ internal abstract class CpuMappedPublicationTransaction
     internal abstract CpuMappedCopyObservation? SuccessfulObservation { get; }
 }
 
+// Detached FIRST local proof attribution only; no handle, recapture or wait
+// authority. Nullable attribution fields remain unset when no corresponding
+// refusing lower guard supplies a value.
+public readonly record struct CpuMappedDisjointReadWatchDiagnostic
+{
+    public string? Guard { get; init; }
+    public string? MappingGuard { get; init; }
+    public string? WatchGuard { get; init; }
+    // Actual held-watch admission only when that scalar check refuses.
+    public long? PrimaryAdmission { get; init; }
+    public long? LocalAdmissionOwnerIdentity { get; init; }
+    public long? ReservedBackingIdentity { get; init; }
+    public long? WatchedBackingIdentity { get; init; }
+    public ulong? WatchedOffset { get; init; }
+    public ulong? WatchedCount { get; init; }
+    public ulong? ReservedOffset { get; init; }
+    public ulong? ReservedCount { get; init; }
+    public bool? BooleanCurrent { get; init; }
+}
+
 /// <summary>Opaque one-use ordinary validation reservation. No commit or byte
 /// payload exists. The producer validates its original tracker/image observations
 /// outside provider gates while mapping and participating writers are excluded.</summary>
@@ -104,11 +124,21 @@ public sealed class CpuMappedPublicationValidation : IDisposable
     /// observation is minted; committing or consumed tickets decline.</summary>
     public bool IsOriginalDisjointReadWatchCurrent(CpuMappedCopyObservation original) =>
         transaction.IsOriginalDisjointReadWatchCurrent(original);
+    public bool IsOriginalDisjointReadWatchCurrent(CpuMappedCopyObservation original,
+        out CpuMappedDisjointReadWatchDiagnostic diagnostic) =>
+        transaction.IsOriginalDisjointReadWatchCurrent(original, out diagnostic);
     public void Dispose() => transaction.Cancel();
 }
 internal abstract class CpuMappedPublicationValidationTransaction
 {
     internal abstract bool IsCurrent { get; }
     internal virtual bool IsOriginalDisjointReadWatchCurrent(CpuMappedCopyObservation original) => false;
+    internal virtual bool IsOriginalDisjointReadWatchCurrent(CpuMappedCopyObservation original,
+        out CpuMappedDisjointReadWatchDiagnostic diagnostic)
+    {
+        var current = IsOriginalDisjointReadWatchCurrent(original); // ONE exact original call
+        diagnostic = new() { Guard = "provider-unattributed", BooleanCurrent = current };
+        return current;
+    }
     internal abstract void Cancel();
 }

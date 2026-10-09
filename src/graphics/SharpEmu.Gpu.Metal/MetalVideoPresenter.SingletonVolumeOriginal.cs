@@ -266,13 +266,31 @@ internal static partial class MetalVideoPresenter
                     var first = firstWatchDiagnostic.Provider;
                     message += $" same_query_mapping_guard={first.MappingGuard ?? "not-reached"}; same_query_mapping_check={first.MappingCheck ?? "not-reached"};" +
                         $" same_query_watch_guard={first.WatchGuard ?? "not-reached"}; same_query_primary_admission={first.PrimaryAdmission?.ToString() ?? "not-reached"};" +
+                        $" same_query_admission_owner_id={first.AdmissionOwner?.Identity?.ToString() ?? "unknown-or-not-reached"};" +
+                        $" same_query_admission_owner_kind={first.AdmissionOwner?.Kind.ToString() ?? "not-reached"};" +
+                        $" same_query_admission_owner_thread={first.AdmissionOwner?.AcquiringThread?.ToString() ?? "unknown-or-not-reached"};" +
+                        $" same_query_admission_owner_phase={first.AdmissionOwner?.Phase.ToString() ?? "not-reached"};" +
+                        $" same_query_admission_owner_outcome={first.AdmissionOwner?.Outcome.ToString() ?? "not-reached"};" +
+                        $" same_query_admission_owner_refusal={first.AdmissionOwner?.Refusal ?? "not-reached"};" +
+                        $" same_query_local_ticket_context={firstWatchDiagnostic.LocalTicket ?? "not-reached"};" +
                         $" same_query_classification_guard={first.ClassificationGuard ?? "none-or-not-reached"}; same_query_watch_status={first.WatchStatus?.ToString() ?? "not-reached"};" +
                         $" same_query_provider_status={first.ProviderStatus?.ToString() ?? "not-reached"};" +
                         $" same_query_shared_closure={first.SharedClosure ?? "none-or-not-reached"}; same_query_owner_closure={first.OwnerClosure ?? "none-or-not-reached"};" +
                         $" same_query_virtual_closure={first.VirtualClosure ?? "none-or-not-reached"}; same_query_local_guard={firstWatchDiagnostic.LocalGuard ?? "none"};" +
                         $" same_query_read_ticket={firstWatchDiagnostic.OriginalRead?.ToString() ?? "not-queried"};" +
                         $" same_query_publication_ticket={firstWatchDiagnostic.Publication?.ToString() ?? "not-queried"};" +
-                        $" same_query_validation_ticket={firstWatchDiagnostic.Validation?.ToString() ?? "not-queried"}; attribution_not_authority=true";
+                        $" same_query_validation_ticket={firstWatchDiagnostic.Validation?.ToString() ?? "not-queried"};" +
+                        $" same_query_local_validation_guard={firstWatchDiagnostic.LocalValidation?.Guard ?? "not-queried"};" +
+                        $" same_query_local_validation_mapping_guard={firstWatchDiagnostic.LocalValidation?.MappingGuard ?? "not-reached"};" +
+                        $" same_query_local_validation_watch_guard={firstWatchDiagnostic.LocalValidation?.WatchGuard ?? "not-reached"};" +
+                        $" same_query_local_validation_admission={firstWatchDiagnostic.LocalValidation?.PrimaryAdmission?.ToString() ?? "not-reached"};" +
+                        $" same_query_local_validation_owner_id={firstWatchDiagnostic.LocalValidation?.LocalAdmissionOwnerIdentity?.ToString() ?? "unknown-or-not-reached"};" +
+                        $" same_query_local_validation_reserved_backing={firstWatchDiagnostic.LocalValidation?.ReservedBackingIdentity?.ToString() ?? "not-reached"};" +
+                        $" same_query_local_validation_watched_backing={firstWatchDiagnostic.LocalValidation?.WatchedBackingIdentity?.ToString() ?? "not-reached"};" +
+                        $" same_query_local_validation_watched_offset={firstWatchDiagnostic.LocalValidation?.WatchedOffset?.ToString() ?? "not-reached"};" +
+                        $" same_query_local_validation_watched_count={firstWatchDiagnostic.LocalValidation?.WatchedCount?.ToString() ?? "not-reached"};" +
+                        $" same_query_local_validation_reserved_offset={firstWatchDiagnostic.LocalValidation?.ReservedOffset?.ToString() ?? "not-reached"};" +
+                        $" same_query_local_validation_reserved_count={firstWatchDiagnostic.LocalValidation?.ReservedCount?.ToString() ?? "not-reached"}; attribution_not_authority=true";
                     message += $" same_query_boolean_current={firstWatchDiagnostic.BooleanCurrent?.ToString() ?? "not-queried"};" +
                         $" same_query_provider_boolean_current={first.BooleanCurrent?.ToString() ?? "not-queried"}";
                 }

@@ -100,7 +100,7 @@ public sealed unsafe partial class HostMappedCopyLedger
                     aliasesToWrite[index] = new(offset, run.Bytes);
                     physicalRuns[index] = new(offset, (ulong)run.Bytes.Length);
                 }
-                reserved = writers.TryReservePublication(Volatile.Read(ref capture.WriterRevision), physicalRuns, capture.ReadWatch);
+                reserved = writers.TryReservePublication(Volatile.Read(ref capture.WriterRevision), physicalRuns, capture.ReadWatch, transaction.Admission);
                 if (!reserved || !IsCurrent(backing, original))
                     return PublicationDeclined(reserved ? "mapping-changed-after-own-reservation" : "writer-reservation-declined", capture.WriterRevision);
                 if (capture.ReadWatch is { } originalWatch)
@@ -115,6 +115,7 @@ public sealed unsafe partial class HostMappedCopyLedger
                 }
                 transaction.Next = publications; publications = transaction; publicationCount++;
                 retainedPublicationBytes += bytes;
+                transaction.Admission?.SetPhase(CpuMappedAdmissionOwnerPhase.Prepared);
                 installed = true; publication = wrapper;
                 return CpuMappedPublicationPreparationResult.Prepared;
             }
@@ -123,9 +124,14 @@ public sealed unsafe partial class HostMappedCopyLedger
         {
             if (!installed)
             {
-                successfulCapture.ReleaseWatch();
-                if (reserved) writers.ReleasePublication();
-                backing.ExitAccess();
+                try
+                {
+                    successfulCapture.ReleaseWatch();
+                    if (reserved) writers.ReleasePublication(transaction.Admission);
+                    backing.ExitAccess();
+                    HostManagedWriteIntervals.CompleteAdmissionRelease(transaction.Admission);
+                }
+                catch { transaction.Admission?.Unknown(); throw; }
             }
         }
     }
@@ -140,6 +146,7 @@ public sealed unsafe partial class HostMappedCopyLedger
             if (previous is null) publications = found.Next; else previous.Next = found.Next;
             publicationCount--; retainedPublicationBytes -= exact.Bytes; return;
         }
+        exact.Admission?.Unknown();
         throw new InvalidOperationException("No exact publication reservation remains.");
     }
 
@@ -149,6 +156,7 @@ public sealed unsafe partial class HostMappedCopyLedger
         CpuMappedCopyObservation successfulObservation, int bytes)
         : CpuMappedPublicationTransaction
     {
+        internal readonly HostManagedWriteIntervals.AdmissionOwner? Admission = writers.CreateAdmissionOwner(CpuMappedAdmissionOwnerKind.Publication);
         internal readonly CpuMappedCopyObservation Original = original;
         internal readonly int Bytes = bytes;
         internal Publication? Next;
@@ -166,6 +174,7 @@ public sealed unsafe partial class HostMappedCopyLedger
         {
             if (Monitor.IsEntered(owner.gate)) throw new InvalidOperationException("Publication bytes cannot run under the provider gate.");
             if (Interlocked.CompareExchange(ref state, 1, 0) != 0) return CpuMappedPublicationResult.Rejected;
+            Admission?.SetPhase(CpuMappedAdmissionOwnerPhase.Committing);
             var touched = false;
             try
             {
@@ -206,6 +215,7 @@ public sealed unsafe partial class HostMappedCopyLedger
         }
         private CpuMappedPublicationResult QuarantineLocked()
         {
+            Admission?.Unknown();
             state = 3; writers.QuarantinePublication();
             if (Original.OwnerIdentity is Capture capture)
                 foreach (var view in capture.States) Volatile.Write(ref view.Revoked, 1);
@@ -215,15 +225,22 @@ public sealed unsafe partial class HostMappedCopyLedger
         {
             if (Monitor.IsEntered(owner.gate)) throw new InvalidOperationException("Publication cancellation cannot run under the provider gate.");
             if (Interlocked.CompareExchange(ref state, 4, 0) != 0) return;
+            Admission?.SetPhase(CpuMappedAdmissionOwnerPhase.Releasing);
             lock (owner.gate) owner.RemovePublicationLocked(this);
             Release();
         }
         private void Release(bool keepSuccessor = false)
         {
             if (Interlocked.Exchange(ref released, 1) != 0) return;
-            if (!keepSuccessor) ((Capture)successfulObservation.OwnerIdentity).ReleaseWatch();
-            try { writers.ReleasePublication(); }
-            finally { backing.ExitAccess(); }
+            try { if (!keepSuccessor) ((Capture)successfulObservation.OwnerIdentity).ReleaseWatch(); }
+            catch { Admission?.Unknown(); throw; }
+            try
+            {
+                try { writers.ReleasePublication(Admission); }
+                finally { backing.ExitAccess(); }
+                HostManagedWriteIntervals.CompleteAdmissionRelease(Admission);
+            }
+            catch { Admission?.Unknown(); throw; }
         }
     }
 }

@@ -80,8 +80,14 @@ public sealed class CommandMemoryOperation
                 runs[index] = new(segment.CoveredAddress,
                     payload!.AsMemory(checked((int)(segment.CoveredAddress - Address)), checked((int)segment.CoveredByteCount)));
             }
-            if (source.TryPrepareMappedPublication(original, runs, out ticket) != CpuMappedPublicationPreparationResult.Prepared || ticket is null)
-                throw new NotSupportedException("Command memory write could not reserve its ORIGINAL mapping and lifetime.");
+            var preparation = source.TryPrepareMappedPublication(original, runs, out ticket);
+            if (preparation != CpuMappedPublicationPreparationResult.Prepared || ticket is null)
+                // Failure-only metadata survives the earlier bounded command
+                // trace budget. It describes this SAME returned preparation;
+                // no later mapping/watch query explains or repairs the refusal.
+                throw new NotSupportedException($"Command memory write could not reserve its ORIGINAL mapping and lifetime: " +
+                    $"preparation={preparation}; ticket_present={ticket is not null}; kind={Kind}; debug_name='{DebugName}'; " +
+                    $"address=0x{Address:X16}; bytes={ByteCount}; original_has_write_watch={originalHasWriteWatch}.");
             requireOriginalOwner();
             // Same pre-write notifications as the ordinary physical memory path.
             // The original mapping is excluded and its backing pinned already;

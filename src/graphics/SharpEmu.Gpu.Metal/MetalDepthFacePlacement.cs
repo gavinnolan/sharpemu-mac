@@ -43,6 +43,7 @@ internal static class MetalDepthFacePlacement
     {
         if (Enabled)
         {
+            memory = CpuGpuMemoryView.Resolve(memory);
             var span = resolution.Request.Description.Data;
             if (!span.IsValid || span.Size == 0)
                 throw new NotSupportedException("Native depth cube sibling color writer lacks its complete normalized span.");
@@ -75,6 +76,7 @@ internal static class MetalDepthFacePlacement
         DepthTargetWords words, GuestDepthTarget target)
     {
         if (!Enabled) return target;
+        memory = CpuGpuMemoryView.Resolve(memory);
         if (resolution.Width != 1024 || resolution.Height != 1024 || words.DepthFormat != GuestDepthFormat.Z16 || ((words.ZInfo >> 4) & 31) != 24)
         {
             if (resolution.DepthAddress == 0 || resolution.DepthSize == 0 || resolution.DepthAddress > ulong.MaxValue - resolution.DepthSize)

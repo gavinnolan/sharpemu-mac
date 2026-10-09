@@ -105,4 +105,49 @@ public sealed partial class MappedPublicationTests
         Assert.False(reservation.IsOriginalCurrent);
         Assert.Throws<InvalidOperationException>(() => reservation.BeginWriteAttempt());
     }
+
+    [Theory]
+    [InlineData("snapshot")]
+    [InlineData("revoked")]
+    [InlineData("unknown")]
+    public void AcquisitionSavesFirstOriginalChangedPredicateBeforeWriterAdmission(string change)
+    {
+        using var state = new State(); var original = state.Capture();
+        using var publication = state.Prepare(original, State.Address, [7]);
+        using var reservation = Busy(state); publication.Dispose();
+        if (change == "snapshot") Assert.True(state.Views.Unmap(State.Address + State.Page, State.Page, out _));
+        else if (change == "revoked") Assert.True(state.Host.Effect(State.Address, State.Page));
+        else state.Host.Unknown();
+        Assert.Equal(OrdinaryBackingWriteAdmission.OriginalChanged,
+            reservation.TryAcquire(TimeSpan.Zero, out var first));
+        Assert.Equal(change == "snapshot" ? "original-shared-snapshot-replaced" :
+            "original-provider-identity-changed", first.Reason);
+        Assert.Equal(change switch { "snapshot" => null, "revoked" => "original-view-revoked",
+            _ => "provider-unknown-alias" }, first.Provider.Reason);
+        Assert.Null(first.Provider.ComparedIncarnation);
+        // A younger provider effect cannot replace this first detached reason.
+        state.Host.Unknown();
+        Assert.Equal(change switch { "snapshot" => null, "revoked" => "original-view-revoked",
+            _ => "provider-unknown-alias" }, first.Provider.Reason);
+        Assert.Throws<InvalidOperationException>(() => reservation.BeginWriteAttempt());
+        Assert.Throws<InvalidOperationException>(() => reservation.TryAcquire(TimeSpan.Zero));
+        Assert.All(state.Bytes(), value => Assert.Equal((byte)0, value));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AcquisitionAttributionPreservesAdmittedAndTimedOutDecisions(bool release)
+    {
+        using var state = new State(); var original = state.Capture();
+        using var publication = state.Prepare(original, State.Address, [7]);
+        using var reservation = Busy(state);
+        if (release) publication.Dispose();
+        Assert.Equal(release ? OrdinaryBackingWriteAdmission.Admitted : OrdinaryBackingWriteAdmission.TimedOut,
+            reservation.TryAcquire(TimeSpan.Zero, out var first));
+        Assert.Null(first.Reason); Assert.Null(first.Provider.Reason);
+        Assert.Throws<InvalidOperationException>(() => reservation.TryAcquire(TimeSpan.Zero));
+        Assert.All(state.Bytes(), value => Assert.Equal((byte)0, value));
+    }
+
 }

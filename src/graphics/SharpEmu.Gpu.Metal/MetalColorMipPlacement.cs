@@ -26,6 +26,9 @@ internal static class MetalColorMipPlacement
         ColorTargetWords words, GuestRenderTarget target)
     {
         if (!Enabled || words.MaxMip == 0) return target;
+        // Select the explicit GPU reader before any original observation or
+        // provider capture. Receipt identity is never rewritten afterward.
+        memory = CpuGpuMemoryView.Resolve(memory);
         var exact = new ColorTargetWords(words.BaseAddress, 0, 0x40730, 0,
             0x907FC1FF, 0x4DC6C000, 72, 0, 0, 0, 0);
         var description = resolution.Request.Description;

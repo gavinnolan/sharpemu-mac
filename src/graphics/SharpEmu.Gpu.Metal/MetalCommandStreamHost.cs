@@ -21,6 +21,14 @@ internal sealed partial class MetalCommandStreamHost : AgcExports.TranslatingCom
     private bool _directIndexedVertexPrefix;
 
     public MetalCommandStreamHost(ICpuMemory memory, IGuestGpuBackend backend, IGuestImageSnapshotBackend snapshots)
+        : this(CpuGpuMemoryView.Resolve(memory), backend, snapshots, gpuReaderSelected: true)
+    {
+    }
+
+    // Resolve once: base interpreter memory and GPU preparation context must
+    // retain the same exact reader even when an opt-in link is malformed.
+    private MetalCommandStreamHost(ICpuMemory memory, IGuestGpuBackend backend,
+        IGuestImageSnapshotBackend snapshots, bool gpuReaderSelected)
         : base(memory)
     {
         MetalVertexPrefixProfile.WarmUp();

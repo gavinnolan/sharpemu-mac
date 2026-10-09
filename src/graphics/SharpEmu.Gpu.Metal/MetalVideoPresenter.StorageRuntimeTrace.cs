@@ -115,9 +115,27 @@ internal static partial class MetalVideoPresenter
                 $"; offender_first_boolean_current={other.FirstWatch?.BooleanCurrent?.ToString() ?? "not-reached"}" +
                 $"; offender_first_mapping_guard={other.FirstWatch?.Provider.MappingGuard ?? "not-reached"}; offender_first_mapping_check={other.FirstWatch?.Provider.MappingCheck ?? "not-reached"}" +
                 $"; offender_first_watch_guard={other.FirstWatch?.Provider.WatchGuard ?? "not-reached"}; offender_first_primary_admission={other.FirstWatch?.Provider.PrimaryAdmission?.ToString() ?? "not-reached"}" +
+                $"; offender_first_admission_owner_id={other.FirstWatch?.Provider.AdmissionOwner?.Identity?.ToString() ?? "unknown-or-not-reached"}" +
+                $"; offender_first_admission_owner_kind={other.FirstWatch?.Provider.AdmissionOwner?.Kind.ToString() ?? "not-reached"}" +
+                $"; offender_first_admission_owner_thread={other.FirstWatch?.Provider.AdmissionOwner?.AcquiringThread?.ToString() ?? "unknown-or-not-reached"}" +
+                $"; offender_first_admission_owner_phase={other.FirstWatch?.Provider.AdmissionOwner?.Phase.ToString() ?? "not-reached"}" +
+                $"; offender_first_admission_owner_outcome={other.FirstWatch?.Provider.AdmissionOwner?.Outcome.ToString() ?? "not-reached"}" +
+                $"; offender_first_admission_owner_refusal={other.FirstWatch?.Provider.AdmissionOwner?.Refusal ?? "not-reached"}" +
+                $"; offender_first_local_ticket_context={other.FirstWatch?.LocalTicket ?? "not-reached"}" +
                 $"; offender_first_classification_guard={other.FirstWatch?.Provider.ClassificationGuard ?? "not-reached"}" +
                 $"; offender_first_provider_status={other.FirstWatch?.Provider.ProviderStatus?.ToString() ?? "not-reached"}; offender_first_local_guard={other.FirstWatch?.LocalGuard ?? "not-reached"}" +
                 $"; offender_first_original_read_ticket={other.FirstWatch?.OriginalRead?.ToString() ?? "not-reached"}; offender_first_publication_ticket={other.FirstWatch?.Publication?.ToString() ?? "not-reached"}; offender_first_validation_ticket={other.FirstWatch?.Validation?.ToString() ?? "not-reached"}" +
+                $"; offender_first_local_validation_guard={other.FirstWatch?.LocalValidation?.Guard ?? "not-queried"}" +
+                $"; offender_first_local_validation_mapping_guard={other.FirstWatch?.LocalValidation?.MappingGuard ?? "not-reached"}" +
+                $"; offender_first_local_validation_watch_guard={other.FirstWatch?.LocalValidation?.WatchGuard ?? "not-reached"}" +
+                $"; offender_first_local_validation_admission={other.FirstWatch?.LocalValidation?.PrimaryAdmission?.ToString() ?? "not-reached"}" +
+                $"; offender_first_local_validation_owner_id={other.FirstWatch?.LocalValidation?.LocalAdmissionOwnerIdentity?.ToString() ?? "unknown-or-not-reached"}" +
+                $"; offender_first_local_validation_reserved_backing={other.FirstWatch?.LocalValidation?.ReservedBackingIdentity?.ToString() ?? "not-reached"}" +
+                $"; offender_first_local_validation_watched_backing={other.FirstWatch?.LocalValidation?.WatchedBackingIdentity?.ToString() ?? "not-reached"}" +
+                $"; offender_first_local_validation_watched_offset={other.FirstWatch?.LocalValidation?.WatchedOffset?.ToString() ?? "not-reached"}" +
+                $"; offender_first_local_validation_watched_count={other.FirstWatch?.LocalValidation?.WatchedCount?.ToString() ?? "not-reached"}" +
+                $"; offender_first_local_validation_reserved_offset={other.FirstWatch?.LocalValidation?.ReservedOffset?.ToString() ?? "not-reached"}" +
+                $"; offender_first_local_validation_reserved_count={other.FirstWatch?.LocalValidation?.ReservedCount?.ToString() ?? "not-reached"}" +
                 $"; offender_first_shared_closure={other.FirstWatch?.Provider.SharedClosure ?? "not-reached"}; offender_first_owner_closure={other.FirstWatch?.Provider.OwnerClosure ?? "not-reached"}; offender_first_virtual_closure={other.FirstWatch?.Provider.VirtualClosure ?? "not-reached"}" : "";
             var preencodeFields = preencodeOwner is { } first ?
                 $"; preencode_first_address=0x{first.Address:X}; preencode_first_branch={first.Branch}; preencode_first_guard={first.Guard}" +
