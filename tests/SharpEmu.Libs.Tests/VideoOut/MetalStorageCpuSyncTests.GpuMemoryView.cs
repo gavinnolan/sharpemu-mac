@@ -4,6 +4,7 @@ using System.Reflection;
 using SharpEmu.Core.Cpu;
 using SharpEmu.Gpu.Metal;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.VideoOut;
