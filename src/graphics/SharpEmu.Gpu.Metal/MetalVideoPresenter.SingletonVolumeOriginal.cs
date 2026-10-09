@@ -221,13 +221,20 @@ internal static partial class MetalVideoPresenter
         if (origin?.VolumeWatch is not { } watch) return;
         if (Monitor.IsEntered(_gate)) throw new InvalidOperationException("Singleton volume content validation requires a released presenter gate.");
         var originalWatchStatus = CpuMappedReadWatchStatus.Stale;
-        if (_closed || _guestWorkFailure is not null || !ReferenceEquals(_guestMemory, origin.Memory) ||
-            _singletonVolumeOriginalCleanupFailure is not null || origin.Session != CurrentStorageCpuSeedSession ||
+        // Keep the exact short-circuit order and the status of its FIRST watch
+        // query. Diagnostic scalar sampling below is not a second validation.
+        var originalRefusal = _closed ? "closed" : _guestWorkFailure is not null ? "guest-work-failure" :
+            !ReferenceEquals(_guestMemory, origin.Memory) ? "memory" :
+            _singletonVolumeOriginalCleanupFailure is not null ? "original-cleanup-failure" :
+            origin.Session != CurrentStorageCpuSeedSession ? "session" :
             (classifyOrdinaryBusy ? (originalWatchStatus = reservation.GetStatus(watch)) != CpuMappedReadWatchStatus.Current :
-                !reservation.IsCurrent(watch)) || !origin.Source.IsMappedCopyObservationCurrent(origin.Mapping) ||
-            !GuestImageWriteTracker.IsReadSnapshotStable(watch.Read) || !origin.Observation.Observed ||
-            !GuestImageWriteTracker.TryGetProtectedObservedContentToken(origin.Layout.Address, origin.Layout.PhysicalBytes, out var token) ||
-            token != origin.Observation.Token)
+                !reservation.IsCurrent(watch)) ? "original-read-watch" :
+            !origin.Source.IsMappedCopyObservationCurrent(origin.Mapping) ? "mapping" :
+            !GuestImageWriteTracker.IsReadSnapshotStable(watch.Read) ? "read-snapshot" :
+            !origin.Observation.Observed ? "unobserved-token" :
+            !GuestImageWriteTracker.TryGetProtectedObservedContentToken(origin.Layout.Address, origin.Layout.PhysicalBytes, out var token) ? "protected-token-unavailable" :
+            token != origin.Observation.Token ? "protected-token-changed" : null;
+        if (originalRefusal is not null)
         {
             // Refusal only: the actual provider status must identify a pristine
             // ORIGINAL watch blocked by ordinary admission, not PublicationBit,
@@ -243,7 +250,17 @@ internal static partial class MetalVideoPresenter
                 originalToken == origin.Observation.Token &&
                 watch.Source.GetMappedCopyWriteWatchStatus(watch.Mapping) is CpuMappedReadWatchStatus.Current or CpuMappedReadWatchStatus.Busy)
                 throw new SingletonVolumeOriginalBusy(origin);
-            throw new InvalidOperationException("Metal singleton volume lost its ORIGINAL full mapping/read/watch/protected token/session.");
+            var message = "Metal singleton volume lost its ORIGINAL full mapping/read/watch/protected token/session.";
+            if (_volumeOwnerDeclineDiagnostics)
+                message += $" first_refusal={originalRefusal}; original_address=0x{origin.Layout.Address:X}; original_bytes={origin.Layout.PhysicalBytes};" +
+                    $" classified_watch={classifyOrdinaryBusy}; first_watch_status={originalWatchStatus};" +
+                    $" later_watch_state={Volatile.Read(ref watch.State)}; later_unknown_producer={Volatile.Read(ref watch.UnknownProducer)};" +
+                    $" historical_unknown_reason={watch.DiagnosticUnknownProducerReason ?? "none"}; diagnostic_samples_not_authority=true";
+            var failure = new InvalidOperationException(message);
+            failure.Data["SingletonVolumeOriginalFirstRefusal"] = originalRefusal;
+            failure.Data["SingletonVolumeOriginalFirstWatchStatus"] = classifyOrdinaryBusy && originalRefusal == "original-read-watch"
+                ? originalWatchStatus.ToString() : "not-classified";
+            throw failure;
         }
     }
 

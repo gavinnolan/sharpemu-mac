@@ -54,7 +54,20 @@ public sealed partial class MetalStorageCpuSyncTests
                 Assert.Same(origin, failure.InnerException.GetType().GetField("Original", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(failure.InnerException));
             }
             else if (variant == "provider-error") Assert.Same(providerFailure, failure.InnerException);
-            else Assert.IsType<InvalidOperationException>(failure.InnerException);
+            else
+            {
+                var refusal = Assert.IsType<InvalidOperationException>(failure.InnerException);
+                Assert.Equal(variant switch
+                {
+                    "session" => "session", "memory" => "memory", _ => "original-read-watch",
+                }, refusal.Data["SingletonVolumeOriginalFirstRefusal"]);
+                Assert.Equal(variant switch
+                {
+                    "session" or "memory" or "strict-default" => "not-classified",
+                    "unknown" or "released" or "stale" or "stale-then-busy" => "Stale",
+                    _ => "Busy",
+                }, refusal.Data["SingletonVolumeOriginalFirstWatchStatus"]);
+            }
             if (variant == "busy-clears") Assert.Equal(2, statusQueries);
             if (variant == "stale-then-busy") Assert.Equal(1, statusQueries);
             Assert.Equal(1, memory.Copies); Assert.Equal(0, memory.Reads);
