@@ -54,6 +54,9 @@ internal static partial class MetalTextureSnapshots
         // The original copy belongs to this session even if a reset races a
         // later capture attempt. Never stamp old bytes with a newer session.
         var originalSession = MetalVideoPresenter.CurrentStorageCpuSeedSession;
+        var lastResult = CpuMappedCopyResult.Unavailable;
+        var firstRejectedPredicate = "copy-not-attempted";
+        ulong lastFootprintAddress = 0, lastFootprintBytes = 0, lastSourceAddress = 0, lastSourceBytes = 0;
         for (var attempt = 0; attempt < 3; attempt++)
         {
             if (originalSession != MetalVideoPresenter.CurrentStorageCpuSeedSession)
@@ -74,18 +77,31 @@ internal static partial class MetalTextureSnapshots
                 var result = withWriteWatch
                     ? ((ICpuMappedReadWatchSource)source).TryReadMappedCopyWithWriteWatch(d.Address, physical, d.Address, bytes, out mapping)
                     : source.TryReadMappedCopy(d.Address, physical, d.Address, bytes, out mapping);
+                lastResult = result;
+                lastFootprintAddress = mapping?.FootprintAddress ?? 0;
+                lastFootprintBytes = mapping?.FootprintByteCount ?? 0;
+                lastSourceAddress = mapping?.SourceAddress ?? 0;
+                lastSourceBytes = mapping?.SourceByteCount ?? 0;
                 if (originalSession != MetalVideoPresenter.CurrentStorageCpuSeedSession)
                     throw new InvalidOperationException("Metal typed storage session changed during the original copy.");
                 if (result == CpuMappedCopyResult.Unavailable) return false; // unchanged legacy owned-copy path; no dirty authority
-                if (result != CpuMappedCopyResult.Copied || mapping is null) continue;
+                if (result != CpuMappedCopyResult.Copied || mapping is null)
+                { firstRejectedPredicate = "mapped-copy-refused-or-missing-original"; continue; }
                 if (withWriteWatch && (mapping.FootprintAddress != d.Address || mapping.FootprintByteCount != physical ||
                     mapping.SourceAddress != d.Address || mapping.SourceByteCount != physical))
                     throw new InvalidOperationException("Original storage volume copy returned inconsistent full pitched/block metadata.");
                 var linear = layout.Decode(bytes);
-                if (!source.IsMappedCopyObservationCurrent(mapping) ||
-                    withWriteWatch && !((ICpuMappedReadWatchSource)source).IsMappedCopyWriteWatchCurrent(mapping) ||
-                    !GuestImageWriteTracker.IsReadSnapshotStable(read) ||
-                    !MetalVideoPresenter.IsCpuTextureSnapshotAdmissionStable(d.Address, observation)) continue;
+                // Preserve the exact prior short-circuit predicate order and
+                // call count. Failure attribution never obtains a new probe,
+                // token, watch or mapping to replace the original admission.
+                if (!source.IsMappedCopyObservationCurrent(mapping))
+                { firstRejectedPredicate = "original-mapping-currentness"; continue; }
+                if (withWriteWatch && !((ICpuMappedReadWatchSource)source).IsMappedCopyWriteWatchCurrent(mapping))
+                { firstRejectedPredicate = "original-physical-write-watch"; continue; }
+                if (!GuestImageWriteTracker.IsReadSnapshotStable(read))
+                { firstRejectedPredicate = "original-read-generation"; continue; }
+                if (!MetalVideoPresenter.IsCpuTextureSnapshotAdmissionStable(d.Address, observation))
+                { firstRejectedPredicate = "original-content-or-epoch-admission"; continue; }
                 var captured = layout.Upload(linear) with
                 {
                     Sampler = ToGuestSampler(binding.SamplerDescriptor),
@@ -107,6 +123,9 @@ internal static partial class MetalTextureSnapshots
                 if (withWriteWatch && !registered) MetalVideoPresenter.ReleaseUnregisteredSingletonVolumeWatch(source, mapping, primary);
             }
         }
-        throw new InvalidOperationException($"Metal typed storage mapping/content changed across three original-copy attempts at 0x{d.Address:X}.");
+        throw new InvalidOperationException($"Metal typed storage mapping/content changed across three original-copy attempts at 0x{d.Address:X}. " +
+            $"last_result={lastResult} first_rejected_predicate={firstRejectedPredicate} requested_bytes={physical} original_session={originalSession} " +
+            $"write_watch_requested={withWriteWatch} last_original_footprint=0x{lastFootprintAddress:X}/{lastFootprintBytes} " +
+            $"last_original_source=0x{lastSourceAddress:X}/{lastSourceBytes}.");
     }
 }
