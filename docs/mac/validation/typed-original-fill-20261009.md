@@ -56,20 +56,29 @@ EnsureGuestImage, and MaterializeTextureSourceOutputs. Their native encoding is
 performed by the sole render-owner drain. Queue frontend admission and original
 snapshot preparation do not install a native extent. The typed execution guard
 requires the exact taken/executing DTO in that real drain; subsequent native
-materialization cannot overtake its callback. The direct initial path requires
-the existing initial-completion owner/barrier, which prevents take/admission
-from overtaking that callback. Reset/session changes refuse final ownership.
+materialization cannot overtake its callback. EnsureGuestImage is private and has only ExecuteOrderedGuestFlip and
+TryResolveGuestPresentation callers in GuestImages. The former runs from the
+real drain switch, the latter from RenderFrame on the same render owner. The
+direct initial path requires thread/device/native command queue to be zero in
+IsInitialEmptyGuestCompletionLocked; presenter initialization/startup and queue
+take/admission wait the existing exact initial owner/barrier. Thus there is no
+concurrent native render owner to materialize an extent during that callback. Reset/session changes refuse final ownership.
 Thus the repeated no-extent guard does not replace physical mapping exclusion:
 the actual write is still bound to the first provider transaction and pin.
 There is no new general native image mirroring proof or cache admission policy.
 
 ## Prepared qualification controls
 
-Nineteen new ordinary Libs rows: six unsupported shape/payload rows, three real
+Twenty new ordinary Libs rows: six unsupported shape/payload rows, three real
 ledger independent full-pattern Applied/once rows (4/4096/65536 bytes), five
 original watch/overlap/unknown/rights/ABA/release refusals, three actual-Applied
 missing-successor/accessor/return-loss no-ack/no-replay controls, and two
-scalar no-mirror-at-capture/later-registration refusals. Protection outcome in
+scalar no-mirror-at-capture/later-registration refusals, plus one actual initial
+public completion/real-ledger Applied mirror-boundary failure control. That last
+control throws only after the real once Applied/known release, checks exact
+root/host/original identity and no acknowledgement/replay, and restores fixture
+state only after synchronous callback exit and known provider cleanup. Unknown
+cleanup retains the preallocated fixture roots and does not restore globals. Protection outcome in
 the managed ledger control is explicitly synthetic; it proves no native syscall.
 
 Seven new actual-native source scenarios reuse the existing real selected color
@@ -85,8 +94,8 @@ Join-unknown teardown keeps real caller/native/provider owners quarantined.
 EOP is admitted after consumer/effect completion; queued-ahead opaque callbacks
 remain unknown, so this fixture does not qualify that different game topology.
 
-Source expectation over 8c: **1039 ordinary managed rows per CLR**
-(208 Host, 751 Libs, 80 GPU), **73 separate native workers per CLR**.
+Source expectation over 8c: **1040 ordinary managed rows per CLR**
+(208 Host, 752 Libs, 80 GPU), **73 separate native workers per CLR**.
 All old controls/oracles are retained. Nothing is compiled, discovered, tested,
 published, activated or replayed for this candidate. Frozen 8c/DS/Void candidates,
 main and prior failed/game evidence remain unchanged.

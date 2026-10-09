@@ -9,6 +9,7 @@ namespace SharpEmu.Gpu.Metal;
 internal static partial class MetalVideoPresenter
 {
     private static Action? _commandMemoryBeforeOriginalWriteForControl;
+    private static Action? _commandMemoryBeforeOriginalFillMirrorForControl;
     // A failed queue can drop its DTO. Retain the exact first uncertain scope,
     // including memory/backing ownership, independently of canceled callbacks.
     private static OrderedCommandMemoryOperation? _uncertainCommandMemoryWrite;
@@ -108,7 +109,11 @@ internal static partial class MetalVideoPresenter
                         originalHasWriteWatch: owned.OriginalWatch is not null);
                     if (operation.Kind == CommandMemoryOperation.OperationKind.Fill)
                     {
-                        try { host.CompleteOriginalFillAtQueuePosition(operation); }
+                        try
+                        {
+                            _commandMemoryBeforeOriginalFillMirrorForControl?.Invoke(); // default null; after known Applied, outside gates
+                            host.CompleteOriginalFillAtQueuePosition(operation);
+                        }
                         catch
                         {
                             // Applied may already be known, but a mirror hook

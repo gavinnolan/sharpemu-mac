@@ -6,6 +6,8 @@ using SharpEmu.Gpu.Metal;
 using SharpEmu.HLE;
 using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Gpu.GpuCommands;
+using SharpEmu.Libs.Gpu.Scheduling;
+using System.Runtime.ExceptionServices;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.VideoOut;
@@ -140,6 +142,107 @@ public sealed partial class MetalStorageCpuSyncTests
             lock (Field("_gate").GetValue(null)!) extents.Remove(TypedColorMemory.Destination);
             if (original is not null) InvokeVolume("ReleaseOriginalCommandMemoryWatch", original, 0L, null);
         }
+    }
+
+    private static object?[]? fillMirrorControlQuarantine;
+
+    [Fact]
+    public void ActualAppliedFillMirrorBoundaryFailureRetainsExactOwnerAndCannotAcknowledgeOrReplay()
+    {
+        ActualArchitecture(); BorrowColorState? state = new(); DisplayLedgerMemory? backing = new();
+        backing.Backing.EnrollManagedWrites(); var memory = new OriginalFillLedgerMemory(backing);
+        var quarantine = new object?[4]; // roots exist before any effect/cleanup uncertainty
+        var hookField = Field("_commandMemoryBeforeOriginalFillMirrorForControl"); var rootField = Field("_uncertainCommandMemoryWrite");
+        var oldHook = hookField.GetValue(null); var oldRoot = rootField.GetValue(null); Assert.Null(oldRoot);
+        var saved = new Dictionary<FieldInfo, object?>();
+        foreach (var name in new[] { "_thread", "_renderOwner", "_device", "_commandQueue", "_lastFlushedCommandBuffer" })
+        { var field = Field(name); saved.Add(field, field.GetValue(null)); field.SetValue(null, field.FieldType == typeof(nint) ? (object)(nint)0 : null); }
+        var priorFatal = GpuFatal.OnFatal; var reports = new List<string>(); GpuFatal.OnFatal = reports.Add;
+        IDisposable? queue = null; Exception? primary = null, cleanup = null; var boundaryCalls = 0;
+        var boundaryFailure = new IOException("controlled mirror boundary loss after actual original Fill Applied");
+        try
+        {
+            MetalVideoPresenter.AttachGuestMemory(memory); queue = MetalVideoPresenter.EnterGuestQueue("typed.fill.initial", 1);
+            var backend = new MetalGuestGpuBackend(); var host = new MetalCommandStreamHost(memory, backend, backend);
+            var expected = backing.Expected; expected.AsSpan(0, 4).Clear();
+            hookField.SetValue(null, (Action)(() =>
+            {
+                Assert.False(Monitor.IsEntered(Field("_gate").GetValue(null)!));
+                Assert.Equal(expected, backing.Expected); Assert.Equal(1, memory.Source.Transaction!.Commits);
+                Assert.Equal(1, memory.Source.Transaction.Cancellations); Assert.Equal(0, backing.Backing.ActiveAccesses);
+                boundaryCalls++; throw boundaryFailure;
+            }));
+            var fatal = Assert.Throws<GpuFatalException>(() => host.FillBuffer(Address, 4, 0, false));
+            Assert.Same(boundaryFailure, fatal.InnerException); Assert.Equal(1, boundaryCalls);
+            var retained = rootField.GetValue(null); Assert.NotNull(retained);
+            var actualFill = Assert.IsType<CommandMemoryOperation>(retained!.GetType().GetProperty("Operation")!.GetValue(retained));
+            Assert.Equal(CommandMemoryOperation.OperationKind.Fill, actualFill.Kind);
+            Assert.Same(memory, retained!.GetType().GetProperty("Memory")!.GetValue(retained));
+            Assert.Same(host, retained!.GetType().GetProperty("OriginalHost")!.GetValue(retained));
+            Assert.Same(memory.First, retained!.GetType().GetProperty("Mapping")!.GetValue(retained));
+            Assert.NotNull(retained!.GetType().GetProperty("OriginalWatch")!.GetValue(retained));
+            Assert.Equal(1, memory.Source.Releases); // exact Applied successor, not caller's retained original owner
+            Assert.Equal(0L, Field("_completedGuestWorkSequence").GetValue(null));
+            Assert.Equal(0, Field("_pendingGuestWorkCount").GetValue(null)); Assert.Equal(1, reports.Count);
+            Assert.Throws<InvalidOperationException>(() => actualFill.ExecuteOriginalWrite(memory, memory.First!, () => Assert.Fail("No replay."), true));
+            Assert.Equal(1, memory.Source.Transaction!.Commits); Assert.Equal(1, boundaryCalls); Assert.Equal(expected, backing.Expected);
+        }
+        catch (Exception error) { primary = error; }
+        finally
+        {
+            // No async caller exists: this is the actual synchronous initial
+            // completion route. Restore fake state only after known real provider
+            // completion/release and zero native/pending callback ownership.
+            var known = memory.Source.Transaction is { Commits: 1, Cancellations: 1 } transaction &&
+                transaction.Actual.SuccessfulObservation is not null && backing.Backing.ActiveAccesses == 0 &&
+                Field("_initialGuestCompletion").GetValue(null) is null;
+            if (known)
+            {
+                Attempt(() => hookField.SetValue(null, oldHook));
+                Attempt(() => { if (memory.First is not null) memory.ReleaseMappedCopyWriteWatch(memory.First); });
+                if (cleanup is null)
+                {
+                    Attempt(() => queue?.Dispose()); queue = null;
+                    Attempt(() => backing.Dispose()); backing = null;
+                    if (cleanup is null)
+                    {
+                        Attempt(() => rootField.SetValue(null, oldRoot));
+                        foreach (var entry in saved) Attempt(() => entry.Key.SetValue(null, entry.Value));
+                        Attempt(() => { GpuFatal.OnFatal = priorFatal; });
+                        Attempt(() => state.Dispose()); state = null;
+                    }
+                }
+            }
+            if (!known || cleanup is not null)
+            {
+                quarantine[0] = state; quarantine[1] = backing; quarantine[2] = memory; quarantine[3] = rootField.GetValue(null);
+                fillMirrorControlQuarantine = quarantine; // preserve root/hook/observer; no uncertain second close
+                cleanup ??= new InvalidOperationException("Mirror control did not prove exact synchronous owner cleanup.");
+            }
+            if (cleanup is not null)
+            { if (primary is null) primary = cleanup; else try { primary.Data["FillMirrorControlCleanup"] = cleanup; } catch { } }
+        }
+        if (primary is not null) ExceptionDispatchInfo.Capture(primary).Throw();
+        void Attempt(Action action) { try { action(); } catch (Exception error) { cleanup ??= error; } }
+    }
+
+    private sealed class OriginalFillLedgerMemory(DisplayLedgerMemory memory)
+        : ICpuMemory, ICpuMappedReadWatchSource, ICpuMappedPublicationSource
+    {
+        internal readonly CommandSuccessorSource Source = new(memory, "success");
+        internal CpuMappedCopyObservation? First;
+        public bool TryRead(ulong address, Span<byte> bytes) => memory.TryRead(address, bytes);
+        public bool TryWrite(ulong address, ReadOnlySpan<byte> bytes) => throw new InvalidOperationException("Original Fill cannot use ordinary TryWrite fallback.");
+        public CpuMappedCopyResult TryReadMappedCopy(ulong address, ulong footprint, ulong source, Span<byte> bytes,
+            out CpuMappedCopyObservation? original) => throw new InvalidOperationException("Capable Fill cannot use plain recapture.");
+        public CpuMappedCopyResult TryReadMappedCopyWithWriteWatch(ulong address, ulong footprint, ulong source, Span<byte> bytes,
+            out CpuMappedCopyObservation? original)
+        { var result = Source.TryReadMappedCopyWithWriteWatch(address, footprint, source, bytes, out original); First ??= original; return result; }
+        public bool IsMappedCopyObservationCurrent(CpuMappedCopyObservation original) => Source.IsMappedCopyObservationCurrent(original);
+        public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation original) => Source.IsMappedCopyWriteWatchCurrent(original);
+        public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation original) => Source.ReleaseMappedCopyWriteWatch(original);
+        public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(CpuMappedCopyObservation original,
+            IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication) => Source.TryPrepareMappedPublication(original, runs, out publication);
     }
 
 }
