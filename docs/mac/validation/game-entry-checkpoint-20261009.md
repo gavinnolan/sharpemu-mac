@@ -16,19 +16,126 @@ and cannot be relabelled as results of this implementation.
 Latest state: candidate `e2535177` passes all three builds and 1,246 ordinary
 cases on each actual CLR. All 246 separate workers pass, including the six
 formerly failing Busy-family workers. Signed publication passes. The first
-Demon's Souls replay stops before emulator launch because the external game disk
-is disconnected: `/Volumes/Untitled/games` is absent and macOS lists no external
-physical disk. Local main matches the qualified implementation.
+Demon's Souls attempt was rejected before emulator launch while the external disk
+was disconnected; that failure remains preserved. At 23:23 UTC on October 9 the
+volume returned, and all nine expected game executables are present. ROOT freshly
+reverified 2,042 source files, 104 compiled files, 239 signed app files and all
+1,818 qualification artifact rows. A fresh, separately tagged Demon's Souls
+180-second empty-input replay on that same qualified app ends naturally after
+57 seconds (guest exit 134, peak sampled RSS 2,479 MiB). The previous
+`guest-memory-replaced` failure is absent; the winning refusal now occurs at
+ordered action 177 / graphics submission 4 in `original-native-r32-immutable-copy`.
+Its exact read-watch guard observes ordinary admission 2; a later sample is zero.
+The source range is `0x7092CC0000 / 524288`. Four captures show only static launch
+artwork, with no guest frames or menu. Root independently confirms driver,
+harness, game and input roots absent by PID/PPID/PG at 23:33:20 UTC, no actual
+heavy worker and no shared lease. No signals or input were issued. No same-source
+DS retry is authorized. Immutable replay manifest:
+`556b35942d1bc11b5c1592e6bd623c488cfea117d538e6c3952c8d5e818a5db8`;
+ROOT verifies all 317 retained hashes. Bounded same-original Busy handling is being reviewed
+in isolated source. No rebuild or new provider/Metal fixture execution is granted.
 Accepted gameplay remains 1/9 (Dreaming Sarah); no new gameplay or performance
-acceptance follows from these fixtures. Kairo's one v557 offline window is
-terminal; SharpEmu takes the next lane and is preparing provider/Metal fixtures
-in source only while the corpus is missing.
+acceptance follows from these fixtures. Kairo's v557 offline window is terminal;
+SharpEmu holds the heavy lane for game entry. Kairo remains source/light until
+explicit coordinated return.
 Separate Poppy foundation `d69faf76` passes three builds, 53 focused controls and
 all 1,298 ordinary cases per actual CLR; it remains unqualified for native/provider
 or game execution and is not integrated. Void's `6f5d16d3` effect fixture remains
 source-only and unqualified.
 
 ## Next source candidates and current runtime coordination
+
+### Fresh reconnected-volume Superliminal replay
+
+The source-exact `e2535177` Superliminal replay `20261010-014132` renders the
+corridor/title loading scene and spinner, then exits 134 after 77 seconds,
+peak sampled RSS 4,027 MiB. The winning failure at log 7889/7890 is
+`other-native-image-original-missing`, image `0x7012540000`, 1920x1080
+RGBA16F, native version 136, during offscreen draw sequence 2683 / submission 91.
+The later command-memory completion failure is secondary to that image-provenance
+refusal. No menu, input or gameplay is observed. Root independently confirms
+all four roots absent and no actual heavy worker/shared lease at 23:43:19 UTC;
+no process signals were issued. Immutable archive manifest:
+`2ef3a688494513972729a3b6078c41f1bc549392314b5bb5bea5f36308ba76a9`;
+ROOT verifies all 324 retained hashes. Earlier telemetry intervals include guest
+frames; late zero-frame intervals cannot establish a cumulative zero. The
+qualification sidecar preserves that distinction without changing the archive:
+`35a7ad67f2400392c5581a54304f37f38861dfb2d1b99fb49174c0d3210edd94`.
+
+### Fresh reconnected-volume Silent Hill replay
+
+The source-exact `e2535177` Silent Hill replay `20261010-014521` exits 134
+after 25 seconds, peak sampled RSS 1,906 MiB. No capture is retained before exit;
+one telemetry interval reports one guest frame, which establishes no visible
+menu or scene. Log 2286 first records held publication admission at
+`0x8010BC0000 / 65536`; the winning log 2446/2448 refusal is canonical dirty
+acknowledgment's `other-image-original-volume-watch-or-version`. No input or
+process signal was issued. The winning log 2446 local fallback identifies a
+PublicationValidation ticket, owner 517, with reserved/watched backing 1 and
+`watched-watch-initial / admission-not-exclusive = 4294967297`. The offending
+sibling is `0x8010DF0000`; its native/version predicates passed before the watch
+refusal. This is the same transient PublicationBit+1 defect targeted by the CAS
+candidate; it does not demonstrate a distinct version replacement. Root
+independently confirms all four roots absent, no actual heavy worker and no
+shared lease at 23:47:50 UTC. Immutable manifest:
+`c455c636da93f7baf6b06e009d924d67f5fb8acfb24d94316897c7b8461ffa21`;
+ROOT verifies all 300 retained hashes.
+
+### Fresh reconnected-volume Octopath replay
+
+The source-exact `e2535177` Octopath replay `20261010-015114` exits 134 after
+32 seconds, peak sampled RSS 3,305 MiB. Its retained capture at 25 seconds is
+black; one earlier telemetry interval reports a guest frame. No menu or input is
+observed. The terminal exception at log 1355/1356 is deferred canonical dirty
+ORIGINAL receipt revalidation. The earlier log 1297 local validation sees the
+same PublicationBit+1 counter defect, but it is not the terminal exception;
+the receipt lifecycle requires separate source attribution. Root confirms all
+four roots/groups absent and no lease at 23:52 UTC. Immutable manifest:
+`9659b4fdd37e9012fa8dc695044ffcbc98bd1252bf2993135f6063bdf233a9ce`;
+ROOT verifies all 303 retained hashes. No unchanged retry is scheduled.
+
+### Reviewed memory fixes awaiting execution
+
+The DS candidate retains the same original snapshot and waits at most 500 ms
+only when its known provider reports temporary ordinary-writer Busy. Stale,
+publication and ownership failures remain final. Independent source review
+covers all ten production paths and 22 new test rows; execution is pending.
+CAS donor `a4fbe82c` admits ordinary writers only through a bounded compare and
+swap, so a refused writer cannot transiently increment an exclusive publication
+counter. Twelve new source rows cover held reservations and refusal boundaries.
+The reviewed union is frozen locally at `d914f004`, with 2,047 worktree/archive
+source hashes, exactly 16 donor paths and 2,031 unchanged parent paths verified
+by ROOT. Its source manifest is
+`a11eef0632e01b98eeb526574563014a2a55af49b7c5a88edfcc8fd39af11403`.
+These are unqualified source candidates, with no game recovery claim.
+
+The revised R3 process controller's 26 pure ownership regression controls pass
+once, with no failures, errors, skips or OS signals. ROOT verifies all 23 archive
+hashes and both roots/groups absent. The unsafe old-behavior demonstration is an
+expected passing signal-spy model, not an actual foreign signal or red execution.
+This establishes pure control behavior only; no actual Darwin path lookup,
+compiler, CLR/testhost, provider, Metal worker or game is qualified by it.
+Archive manifest:
+`5c43c2ed8a5c92bbe8f1f0043a55bb8cf71f6aed4115f9ef266f768269712adc`.
+
+### Fresh reconnected-volume Oregon replay
+
+The source-exact `e2535177` Oregon replay `20261010-013557` exits 134 after
+38 seconds, peak sampled RSS 2,237 MiB. Its one client capture is black and guest
+frames remain zero. The winning singleton-original failure is at log 1444,
+address `0x80115F0000 / 65536`, during deferred canonical-dirty acknowledgment.
+The provider reports Stale under publication admission `4294967296`; the exact
+local validation diagnostic names owner 371, PublicationValidation / Prepared,
+and rejects `watched-watch-final / admission-not-exclusive` at `4294967297`.
+Reserved and watched backing identities are both 1. This separately measured
+local guard is not ordinary Busy authority. Source investigation targets losing
+ordinary attempts incrementing the counter under an exclusive reservation;
+no stale/publication guard is relaxed. No input or process signal was issued.
+Root independently confirms all four roots absent and no actual heavy worker or
+shared lease at 23:37:27 UTC. Immutable archive manifest:
+`00851170936a4e512a4b62717c872a1ff64a415ea736da82ad220b9073c1b8d0`;
+ROOT verifies all 307 retained artifact hashes.
+
 
 Kairo's one offline v557 build/test window is terminal. Two helper pins pass,
 with one ignored capture diagnostic in that filter. Four separately activated
@@ -38,9 +145,9 @@ are fixture-resource limits, not new live-game bugs or LDS/gameplay qualificatio
 ROOT independently verifies all 62 observed identities and groups absent in a
 fresh wide process scan, no actual heavy worker and no shared lease. Evidence
 pins: `kairo-v557-terminal-runtime-handoff/root-preflight.json`.
-SharpEmu takes the next lane for source preparation of real Darwin-provider
-fixtures and capped supplied-wave Metal checks; neither new driver is yet granted.
-The game corpus remains absent. Kairo stays source/light pending explicit return.
+SharpEmu holds the next lane for a fresh game-entry replay after the corpus
+returns. The real Darwin-provider and supplied-wave Metal drivers remain held
+before execution. Kairo stays source/light pending explicit return.
 
 The eight real Darwin-provider fixtures are frozen separately at `81e10d48`,
 off the qualified ordinary foundation `d69faf76`. ROOT reviews all eight
