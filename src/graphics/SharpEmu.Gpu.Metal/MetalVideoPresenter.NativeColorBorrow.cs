@@ -467,8 +467,15 @@ internal static partial class MetalVideoPresenter
     // producer has not encoded and retains that prior as its predecessor.
     // All native handle/version/completion checks in the borrow remain strict.
     private static bool IsOrderedNativeColorSuccessorLocked(NativeColorProducer prior,
-        PendingGuestWork pending, NativeColorOriginal next)
+        PendingGuestWork pending, NativeColorOriginal next) =>
+        InspectOrderedNativeColorSuccessorLocked(prior, pending, next, out _);
+
+    // Literal first-refusal labels only. The predicate/query order is unchanged;
+    // no formatting, sampling, authority or acceptance comes from these labels.
+    private static bool InspectOrderedNativeColorSuccessorLocked(NativeColorProducer prior,
+        PendingGuestWork pending, NativeColorOriginal next, out string reason)
     {
+        reason = "taken-execution-sequence-queue-or-retained-prior";
         if (_takenGuestWorkSequence == 0 || _takenGuestWorkSequence != _executingGuestWorkSequence ||
             _takenGuestWorkSequence <= prior.Sequence || pending.Sequence <= _takenGuestWorkSequence ||
             _submittingGuestQueue is not { } queue || queue.Name != prior.Queue.Name || pending.Queue.Name != queue.Name ||
@@ -478,19 +485,23 @@ internal static partial class MetalVideoPresenter
             !prior.Original.ScalarCurrent || !_nativeColorProducers.Contains(prior)) return false;
         IEnumerable<GuestDrawTexture> reads = consumer switch
         { OffscreenGuestDraw draw => draw.Draw.Textures, ComputeGuestDispatch dispatch => dispatch.Textures, _ => [] };
+        reason = "taken-readonly-lease-is-not-exact-prior";
         if (!reads.Any(texture => texture.Access == GuestImageAccess.Read && !texture.IsStorage &&
             _nativeColorLeases.TryGetValue(texture, out var lease) && ReferenceEquals(lease.Producer, prior))) return false;
+        reason = "pending-work-owner-dependency-or-original";
         if (!_nativeColorWorks.TryGetValue(pending.Work, out var accepted) ||
             !_nativeColorQueued.TryGetValue(pending.Work, out var queued) || !queued.Dependencies.Contains(prior) ||
             !queued.Originals.Contains(next)) return false;
         var future = accepted.SingleOrDefault(candidate => ReferenceEquals(candidate.Original, next));
+        reason = "pending-accepted-sequence-predecessor-or-unencoded-owner";
         if (future is null || !ReferenceEquals(future.Work, pending.Work) || future.Sequence != pending.Sequence ||
             future.Queue != pending.Queue || !ReferenceEquals(future.Predecessor, prior) ||
             future.Encoded || future.Retired || future.CleanupUnknown || future.Texture != 0 || future.CommandBuffer != 0 ||
             future.Image is not null || future.Batch is not null || !future.OriginalReferenceOwned ||
             !_nativeColorProducers.Contains(future) || !next.ScalarCurrent) return false;
         var original = prior.Original;
-        return ReferenceEquals(next.Placement.Memory, original.Placement.Memory) && ReferenceEquals(next.Source, original.Source) &&
+        reason = "complete-original-source-session-placement-token-or-mapping";
+        var matches = ReferenceEquals(next.Placement.Memory, original.Placement.Memory) && ReferenceEquals(next.Source, original.Source) &&
             next.Session == original.Session && next.Placement.Registers == original.Placement.Registers &&
             next.Placement.PhysicalAddress == original.Placement.PhysicalAddress && next.Placement.ByteCount == original.Placement.ByteCount &&
             next.Placement.BackingByteCount == original.Placement.BackingByteCount && next.Content.Observed && original.Content.Observed &&
@@ -498,6 +509,8 @@ internal static partial class MetalVideoPresenter
             next.Mapping.FootprintAddress == original.Mapping.FootprintAddress && next.Mapping.FootprintByteCount == original.Mapping.FootprintByteCount &&
             next.Mapping.SourceAddress == original.Mapping.SourceAddress && next.Mapping.SourceByteCount == original.Mapping.SourceByteCount &&
             next.Mapping.Segments.SequenceEqual(original.Mapping.Segments);
+        if (matches) reason = "exact-ordered-pending-successor";
+        return matches;
     }
     private static void RequireNativeColorCohortLocked(NativeColorProducer producer)
     {

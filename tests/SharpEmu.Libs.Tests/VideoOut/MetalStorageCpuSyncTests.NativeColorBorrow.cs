@@ -239,7 +239,8 @@ public sealed partial class MetalStorageCpuSyncTests
             {
                 var old = (CpuMappedCopyObservation)Member(original, "Mapping");
                 Change(original, "Mapping", new CpuMappedCopyObservation(new object(), old.FootprintAddress, old.FootprintByteCount,
-                    old.SourceAddress, old.SourceByteCount, old.Segments.Select(segment => segment with { MappingBackingOffset = 1 }).ToArray()));
+                    old.SourceAddress, old.SourceByteCount, old.Segments.Select(segment => segment with {
+                        MappingBackingOffset = 1, BackingByteCount = checked(segment.BackingByteCount + 1) }).ToArray()));
             }
             if (variant == "different-original-token")
             {
@@ -249,7 +250,25 @@ public sealed partial class MetalStorageCpuSyncTests
             using var queue = MetalVideoPresenter.EnterGuestQueue(variant == "wrong-queue" ? "foreign.color.queue" : "host.default", 0);
             lock (Field("_gate").GetValue(null)!)
             {
-                if (variant == "ordered") InvokeVolume("RequireNativeColorCohortLocked", prior);
+                if (variant == "ordered")
+                {
+                    var queues = (IDictionary)Field("_pendingGuestWorkByQueue").GetValue(null)!;
+                    var future = queues.Values.Cast<IEnumerable>().SelectMany(queue => queue.Cast<object>())
+                        .Single(pending => ReferenceEquals(pending.GetType().GetProperty("Work")!.GetValue(pending), Member(successor, "Work")));
+                    object?[] inspection = [prior, future, original, null];
+                    var matches = (bool)Presenter.GetMethod("InspectOrderedNativeColorSuccessorLocked", Private)!.Invoke(null, inspection)!;
+                    var priorOriginal = Member(prior, "Original");
+                    var oldMapping = (CpuMappedCopyObservation)Member(priorOriginal, "Mapping");
+                    var newMapping = (CpuMappedCopyObservation)Member(original, "Mapping");
+                    Assert.True(matches, $"first={inspection[3]}; priorSequence={Member(prior, "Sequence")}; taken={sequence}; " +
+                        $"executing={Field("_executingGuestWorkSequence").GetValue(null)}; futureSequence={Member(successor, "Sequence")}; " +
+                        $"queue={Member(prior, "Queue")}/{Member(successor, "Queue")}; priorRetired={Member(prior, "Retired")}; " +
+                        $"priorDependencies={Member(prior, "DependentReferences")}; futureEncoded={Member(successor, "Encoded")}; " +
+                        $"exactPredecessor={ReferenceEquals(Member(successor, "Predecessor"), prior)}; " +
+                        $"sameToken={((MetalVideoPresenter.CpuTextureSnapshotObservation)Member(original, "Content")).Token == ((MetalVideoPresenter.CpuTextureSnapshotObservation)Member(priorOriginal, "Content")).Token}; " +
+                        $"sameSegments={oldMapping.Segments.SequenceEqual(newMapping.Segments)}; sourceCurrent={memory.Current}; watchCurrent={memory.WatchCurrent}");
+                    InvokeVolume("RequireNativeColorCohortLocked", prior);
+                }
                 else
                 {
                     var refused = Assert.Throws<TargetInvocationException>(() => InvokeVolume("RequireNativeColorCohortLocked", prior));
