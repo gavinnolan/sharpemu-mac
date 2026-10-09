@@ -40,6 +40,8 @@ public sealed partial class MetalImmutableGpuVersionTests
         public readonly List<object> VolumeImages = [];
         public bool OrdinaryWriterUnconfirmed;
         public object? OrdinaryWriterOwner;
+        public bool ConstructorReservationUnconfirmed;
+        public CpuMappedReadValidation? ConstructorReservation;
     }
 
     [FiniteStoragePublicationNativeFact]
@@ -70,7 +72,7 @@ public sealed partial class MetalImmutableGpuVersionTests
     public void ActualRuntimeLateDirtyGenerationAfterCanonicalVersionKeepsStickyDebtAndNoEop() =>
         RunActualRuntimeTwoTypedPublications(false, rgba: true, lateFailure: "generation");
 
-    private void RunActualRuntimeTwoTypedPublications(bool overlappingCpuWrite, bool rgba = false, bool mixedBuffer = false, string? lateFailure = null, bool originalVolumes = false, string? busyOriginalRetry = null, string? constructionBusyWindow = null)
+    private void RunActualRuntimeTwoTypedPublications(bool overlappingCpuWrite, bool rgba = false, bool mixedBuffer = false, string? lateFailure = null, bool originalVolumes = false, string? busyOriginalRetry = null, string? constructionBusyWindow = null, string? queueRetentionWindow = null)
     {
         Assert.True(DeviceRequested());
         var imageBytes = rgba ? 4194304 : 65536;
@@ -294,12 +296,63 @@ public sealed partial class MetalImmutableGpuVersionTests
                     Assert.Equal(volumeAddress, mapping.FootprintAddress); Assert.Equal(65536UL, mapping.FootprintByteCount);
                     Assert.All(mapping.Segments, part => Assert.Equal(kernelPage, part.ProviderPageSize));
                     var shader = state.VolumeOriginalShader(seed.Width, seed.Height, seed.Depth);
-                    var sequence = state.AdmitFiniteStorage(seed, shader);
+                    long sequence;
+                    if (queueRetentionWindow is not null)
+                    {
+                        var watchedSource = (ICpuMappedReadWatchSource)memory;
+                        var prepared = watchedSource.TryPrepareMappedReadValidation(mapping, out var held);
+                        if (held is not null)
+                        { owners.ConstructorReservation = held; owners.ConstructorReservationUnconfirmed = true; }
+                        Assert.Equal(CpuMappedPublicationPreparationResult.Prepared, prepared); Assert.NotNull(held);
+                        Exception? reservationFailure = null;
+                        // This is a REAL provider constructor exclusion. Queue
+                        // retention must not borrow its authority or require
+                        // generic watch currentness while it remains held.
+                        try
+                        {
+                            Assert.False(watchedSource.IsMappedCopyWriteWatchCurrent(mapping));
+                            Assert.True(held!.IsOriginalCurrent(mapping));
+                            sequence = state.AdmitFiniteStorage(seed, shader);
+                            Assert.True(sequence > 0);
+                        }
+                        catch (Exception failure) { reservationFailure = failure; throw; }
+                        finally
+                        {
+                            // Exact one attempt: a thrown release leaves the
+                            // original receipt and all owners quarantined.
+                            try
+                            {
+                                held!.Dispose(); owners.ConstructorReservationUnconfirmed = false;
+                                owners.ConstructorReservation = null;
+                            }
+                            catch (Exception cleanup)
+                            {
+                                if (reservationFailure is null) throw;
+                                try { reservationFailure.Data["HeldConstructorReservationCleanup"] = cleanup; } catch { }
+                            }
+                        }
+                        Assert.True(watchedSource.IsMappedCopyWriteWatchCurrent(mapping));
+                    }
+                    else sequence = state.AdmitFiniteStorage(seed, shader);
                     Assert.True(sequence > 0);
                     // Actual frontend disposal after public Submit, BEFORE the
                     // real Drain transfers ownership to the native image.
                     MetalVideoPresenter.ReleasePreparedTextureSources([seed]);
                     Assert.True(((ICpuMappedReadWatchSource)memory).IsMappedCopyWriteWatchCurrent(mapping));
+                    if (queueRetentionWindow == "overlap" && kind == 1)
+                    {
+                        var completedBefore = (long)Field("_completedGuestWorkSequence").GetValue(null)!;
+                        Assert.True(physical.TryWriteBacking(volumeAddress, new byte[] { 0xE7 }));
+                        expected[imageBytes + (kind + 1) * 65536] = 0xE7;
+                        var failed = Assert.Throws<TargetInvocationException>(() => state.DrainWithControlledBudget());
+                        Assert.IsType<GpuFatalException>(failed.InnerException);
+                        Assert.Equal(completedBefore, Field("_completedGuestWorkSequence").GetValue(null));
+                        Assert.False(MetalVideoPresenter.WaitForGuestWork(sequence, 0));
+                        Assert.False(((IDictionary)Field("_guestImages").GetValue(null)!).Contains(volumeAddress));
+                        Assert.Equal(expected, ReadCanonical());
+                        output.WriteLine("original-volume-queue held_constructor_submit=1 released_before_drain=1 actual_overlapping_writer_veto=1 no_native_owner=1 no_ack=1");
+                        return false;
+                    }
                     var controlKind = constructionBusyWindow == "overlap" ? 1 : 0;
                     var constructorControl = constructionBusyWindow is not null && kind == controlKind
                         ? new NativeConstructionBusyControl(physical, memory, host, owners, address, imageBytes,
@@ -345,7 +398,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                     new byte[]{17,34,51,68}.CopyTo(tight,tight.Length-4);
                     Assert.Equal(tight, ReadOriginalVolume((nint)StorageMember(nativeImage,"Texture")!,seed.Width,seed.Height,seed.Depth));
                     Assert.Equal(expected,ReadCanonical()); // full backing/padding and neighboring scopes untouched
-                    output.WriteLine($"original-volume-native kind={kind}; shape={seed.Width}x{seed.Height}x{seed.Depth}; pitch={seed.Pitch}; original=65536; native_status=4; all_native_bytes=true; all_canonical_neighbors=true; frontend_release_before_drain=true");
+                    output.WriteLine($"original-volume-native kind={kind}; shape={seed.Width}x{seed.Height}x{seed.Depth}; pitch={seed.Pitch}; original=65536; native_status=4; all_native_bytes=true; all_canonical_neighbors=true; frontend_release_before_drain=true; held_constructor_queue_retention={queueRetentionWindow is not null}");
                 }
                 return true;
             }
@@ -386,7 +439,7 @@ public sealed partial class MetalImmutableGpuVersionTests
         finally
         {
             Exception? cleanup = null;
-            var completionConfirmed = !owners.OrdinaryWriterUnconfirmed;
+            var completionConfirmed = !owners.OrdinaryWriterUnconfirmed && !owners.ConstructorReservationUnconfirmed;
             // This fresh fixture owns every newly opened batch. Discard only its
             // uncommitted encoding, then wait/status-check every committed buffer.
             // An unknown outcome keeps all exact owners quarantined, not freed.
@@ -397,7 +450,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                     state?.AbortFiniteStorageEncoding();
                     Call("WaitForFlushedGuestCommands");
                 }
-                else cleanup = new InvalidOperationException("Busy fixture ordinary writer did not terminate; exact owners remain quarantined.");
+                else cleanup = new InvalidOperationException("Fixture ordinary writer or constructor reservation outcome is unconfirmed; exact owners remain quarantined.");
             }
             catch (Exception failure) { cleanup = failure; completionConfirmed = false; }
             if (completionConfirmed)

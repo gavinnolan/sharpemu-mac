@@ -423,7 +423,8 @@ public sealed partial class MetalStorageCpuSyncTests
     {
         internal CpuMappedCopyResult Result = CpuMappedCopyResult.Copied;
         internal bool Current = true, WatchCurrent = true;
-        internal int Copies, Releases;
+        internal int Copies, Releases, MappingQueries, WatchQueries;
+        internal bool RejectCurrentnessQueries;
         internal CpuMappedCopyObservation? LastMapping;
         internal Exception? ReleaseFailure; internal Action? AfterCopy;
         internal CpuMappedPublicationPreparationResult ReadPreparation = CpuMappedPublicationPreparationResult.Unavailable;
@@ -455,8 +456,10 @@ public sealed partial class MetalStorageCpuSyncTests
         }
         public CpuMappedCopyResult TryReadMappedCopy(ulong footprintAddress, ulong footprintByteCount, ulong sourceAddress,
             Span<byte> destination, out CpuMappedCopyObservation? observation) => throw new InvalidOperationException("Volume original must use watched copy.");
-        public bool IsMappedCopyObservationCurrent(CpuMappedCopyObservation observation) => Current;
-        public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation observation) => WatchCurrent;
+        public bool IsMappedCopyObservationCurrent(CpuMappedCopyObservation observation)
+        { MappingQueries++; if (RejectCurrentnessQueries) throw new InvalidOperationException("Retention must not query mapping authority."); return Current; }
+        public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation observation)
+        { WatchQueries++; if (RejectCurrentnessQueries) throw new InvalidOperationException("Retention must not query watch authority."); return WatchCurrent; }
         public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation observation)
         { Releases++; if (ReleaseFailure is not null) throw ReleaseFailure; }
     }

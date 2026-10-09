@@ -101,15 +101,38 @@ internal static partial class MetalVideoPresenter
             throw new InvalidOperationException("Singleton volume pending work inventory exceeds its finite bound.");
         if (_queuedSingletonVolumeOriginals.TryGetValue(work, out _))
             throw new InvalidOperationException("Singleton volume work already owns its original watches.");
-        var watches = textures.Select(texture => StorageCpuOrigin(texture)?.VolumeWatch)
-            .Where(watch => watch is not null).Cast<SingletonVolumeOriginalWatch>().Distinct().ToArray();
-        if (watches.Length > 128 || watches.Any(watch => !watch.IsCurrent || watch.PreparationReleased && Volatile.Read(ref watch.State) == 0 || watch.QueuedReferences == int.MaxValue))
+        var origins = textures.Select(StorageCpuOrigin).Where(origin => origin?.VolumeWatch is not null)
+            .Cast<StorageCpuSeedOrigin>().ToArray();
+        var watches = origins.Select(origin => origin.VolumeWatch!).Distinct().ToArray();
+        // Retention transfers OWNERSHIP only. Another private constructor may
+        // hold PublicationBit, and provider currentness must stay false there.
+        // Preserve the exact original object for later strict construction /
+        // execution checks, or for cancellation if it really became stale.
+        // No provider/token query, waiting, new capture or byte authority here.
+        if (watches.Length > 128 || origins.Any(origin => !CanRetainSingletonVolumeOriginalLocked(origin)))
             throw new InvalidOperationException("Singleton volume queue admission lost original watch preparation.");
         _pendingSingletonVolumeOriginalWorks.Add(work);
         try { _queuedSingletonVolumeOriginals.Add(work, new(watches)); } // allocate before changing counters
         catch { _pendingSingletonVolumeOriginalWorks.Remove(work); throw; }
         foreach (var watch in watches) watch.QueuedReferences++;
         return true;
+    }
+
+    private static bool CanRetainSingletonVolumeOriginalLocked(StorageCpuSeedOrigin origin)
+    {
+        var watch = origin.VolumeWatch!;
+        var state = Volatile.Read(ref watch.State);
+        return !_closed && _guestWorkFailure is null && _singletonVolumeOriginalCleanupFailure is null &&
+            origin.Session == CurrentStorageCpuSeedSession && ReferenceEquals(origin.Memory, origin.Source) &&
+            ReferenceEquals(origin.Source, watch.Source) && ReferenceEquals(origin.Mapping, watch.Mapping) &&
+            _singletonVolumeOriginalWatches.Contains(watch) && state is 0 or 1 && !Volatile.Read(ref watch.UnknownProducer) &&
+            (state == 0 ? watch.Image is null && watch.Texture == 0 :
+                watch.Image is { } image && IsSingletonVolumeNativeOwnerMetadataCurrentLocked(image, origin) &&
+                _guestImages.TryGetValue(origin.Layout.Address, out var owner) && ReferenceEquals(owner, image)) &&
+            !(watch.PreparationReleased && state == 0) && watch.QueuedReferences >= 0 && watch.QueuedReferences < int.MaxValue &&
+            origin.Layout.IsVolume && origin.Mapping.FootprintAddress == origin.Layout.Address &&
+            origin.Mapping.FootprintByteCount == origin.Layout.PhysicalBytes &&
+            origin.Mapping.SourceAddress == origin.Layout.Address && origin.Mapping.SourceByteCount == origin.Layout.PhysicalBytes;
     }
 
     private static void ReleaseQueuedSingletonVolumeOriginalsLocked(object work)

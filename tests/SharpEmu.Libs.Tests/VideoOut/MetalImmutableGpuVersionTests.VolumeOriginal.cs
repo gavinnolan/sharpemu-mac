@@ -18,6 +18,14 @@ public sealed partial class MetalImmutableGpuVersionTests
     public void ActualSingletonAndLinearVolumeOriginalWatchesDoNotBypassOverlappingPublicationVeto() =>
         RunActualRuntimeTwoTypedPublications(true, rgba:true, originalVolumes:true);
 
+    [FiniteStoragePublicationNativeFact]
+    public void ActualVolumeQueueRetentionSurvivesHeldConstructorReservationThenNativeTransfer() =>
+        RunActualRuntimeTwoTypedPublications(false, rgba: true, originalVolumes: true, queueRetentionWindow: "release");
+
+    [FiniteStoragePublicationNativeFact]
+    public void ActualVolumeQueueRetentionDoesNotAuthorizeLaterOverlappingWriter() =>
+        RunActualRuntimeTwoTypedPublications(false, rgba: true, originalVolumes: true, queueRetentionWindow: "overlap");
+
     [DllImport("/usr/lib/libobjc.A.dylib", EntryPoint="objc_msgSend")]
     private static extern void GetOriginalVolumeBytes(nint texture,nint selector,nint bytes,nuint rowBytes,
         nuint imageBytes,MtlRegion region,nuint level,nuint slice);
