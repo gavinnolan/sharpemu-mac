@@ -11,6 +11,8 @@
 #   seconds  run length, capped at 150 (600 with SHARPEMU_GAME_ENTRY_RUN=1)
 #   keyplan  comma list "t:key[:hold]" pressed through SHARPEMU_INPUT_FILE, e.g. "20:enter,30:down:1",
 #            or "-" for none
+#            SHARPEMU_INPUT_START_AFTER_LOG makes these times relative to the first
+#            observed literal game-log marker, e.g. 'Quake Initialized'.
 #
 # Only one game runs on the machine at a time: runs take a machine-wide lock directory
 # ($SHARPEMU_GAME_LOCK) shared with other harnesses, and wait while any SharpEmu process is alive.
@@ -50,6 +52,7 @@ GAME="$(basename "$1" .bin)"
 TAG="$2"
 SECONDS_LIMIT="$3"
 PLAN="${4:--}"
+INPUT_ANCHOR="${SHARPEMU_INPUT_START_AFTER_LOG:-}"
 shift 3; [[ $# -gt 0 ]] && shift
 
 [[ -f "$EBOOT" ]] || { echo "eboot not found: $EBOOT" >&2; exit 2; }
@@ -60,6 +63,7 @@ MAX_SECONDS=150
   echo "refusing ${SECONDS_LIMIT}s (allowed 1..${MAX_SECONDS}; extended runs require SHARPEMU_GAME_ENTRY_RUN=1)" >&2
   exit 2
 }
+python3 "$REPO_ROOT/scripts/macos/input-plan.py" --plan "$PLAN" --start-after-log "$INPUT_ANCHOR" --validate || exit 2
 
 OUT="$REPO_ROOT/artifacts/runs/$(date +%Y%m%d-%H%M%S)-$GAME-$TAG"
 mkdir -p "$OUT"
@@ -71,6 +75,7 @@ KEYS="$OUT/keys.state"
   echo "commit=$(git -C "$REPO_ROOT" rev-parse --short HEAD)$(git -C "$REPO_ROOT" diff --quiet || echo -dirty)"
   echo "commit_scope=checkout (use build-info.json for binary source provenance)"
   echo "keyplan=$PLAN"
+  echo "input_start_after_log=$INPUT_ANCHOR"
   echo "entry_run=${SHARPEMU_GAME_ENTRY_RUN:-0}"
   echo "seconds_limit=$SECONDS_LIMIT"
   for e in "$@"; do echo "$e"; done
@@ -107,6 +112,7 @@ done
 while pgrep -x SharpEmu >/dev/null; do echo "waiting for another SharpEmu to exit" >&2; sleep 5; done
 
 GPID=""
+INPUT_PID=""
 stop_game() {
   local pid="$1" i
   kill -0 "$pid" 2>/dev/null || return 0
@@ -119,6 +125,11 @@ stop_game() {
   kill -KILL "$pid" 2>/dev/null
 }
 cleanup() {
+  if [[ -n "$INPUT_PID" ]]; then
+    kill -TERM "$INPUT_PID" 2>/dev/null || true
+    wait "$INPUT_PID" 2>/dev/null || true
+    INPUT_PID=""
+  fi
   [[ -n "$GPID" ]] && stop_game "$GPID"
   GPID=""
   if (( LOCK_HELD )) && [[ "$(cat "$SHARPEMU_GAME_LOCK/pid" 2>/dev/null)" == "$$" ]]; then rm -rf "$SHARPEMU_GAME_LOCK"; fi
@@ -140,10 +151,12 @@ shot() {
 ) > "$OUT/game.log" 2>&1 &
 GPID=$!
 start=$(date +%s)
+python3 "$REPO_ROOT/scripts/macos/input-plan.py" --plan "$PLAN" --keys "$KEYS" \
+  --events "$OUT/keys.log" --game-log "$OUT/game.log" --start-after-log "$INPUT_ANCHOR" \
+  --run-limit "$SECONDS_LIMIT" > "$OUT/input-plan.log" 2>&1 &
+INPUT_PID=$!
 next_shot=5
 shot_every="${SHARPEMU_SHOT_EVERY:-10}"
-IFS=',' read -ra STEPS <<< "$PLAN"
-step=0
 peak_mb=0
 status=""
 while :; do
@@ -154,13 +167,11 @@ while :; do
   (( rss_mb > peak_mb )) && peak_mb=$rss_mb
   if (( rss_mb > MEM_LIMIT_MB )); then status="memory limit ${rss_mb}MB > ${MEM_LIMIT_MB}MB at ${now}s"; break; fi
   if (( now >= next_shot )); then shot "$OUT/shot-$(printf %04d "$now").png"; next_shot=$(( now + shot_every )); fi
-  while (( step < ${#STEPS[@]} )) && [[ "${STEPS[$step]}" != "-" ]]; do
-    IFS=':' read -r t key hold <<< "${STEPS[$step]}"
-    (( now >= t )) || break
-    ( echo "$key" > "$KEYS"; sleep "${hold:-0.4}"; : > "$KEYS" ) &
-    echo "$now $key" >> "$OUT/keys.log"
-    step=$(( step + 1 ))
-  done
+  if [[ -n "$INPUT_PID" ]] && ! kill -0 "$INPUT_PID" 2>/dev/null; then
+    wait "$INPUT_PID"; input_rc=$?
+    INPUT_PID=""
+    if (( input_rc != 0 )); then status="input scheduler failed rc=$input_rc at ${now}s"; break; fi
+  fi
   sleep 1
 done
 if [[ -n "$GPID" ]]; then
