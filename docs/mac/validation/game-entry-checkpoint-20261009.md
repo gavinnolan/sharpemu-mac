@@ -24,6 +24,12 @@ Exact qualification passed three builds, all 838 managed cases on each actual AR
 
 Evidence: `artifacts/validation/all-games-20261009/game-entry-readback-color-188b9c28-prepared/qualification-manifest.json`, SHA-256 `629ea214dce4cc64a223c91bc983d589543a154795ef4fa5a2d4e13736415033`. That manifest closes the prerequisite workers before games; it is not an all-games acceptance report. This archive’s qualified executable source is exactly `188b9c28`; later diagnostic qualification does not relabel these game runs.
 
+## Typed command-write successor: first native fixture failure
+
+Combined source `28d0b8cc` passes all three builds and 970 managed cases on each actual ARM64/x64 CLR (199 Host, 691 Libs, 80 GPU). The first ARM64 native typed-write worker fails before applying the write: its fixture invokes `DrainGuestWorkCore` directly and bypasses the production `TryDrainGuestWork` drain-depth scope. The exact taken/executing receipt guard therefore refuses execution. No production check is relaxed; a separate fixture correction will use the actual production wrapper. The other 127 native workers, publication and game replays remain unrun.
+
+ROOT independently verifies 1,980 source hashes, 104 compiled hashes, all 44 managed artifacts and 86 failed-native artifacts, the six exact passing managed TRX counters, and absence of all twelve managed and two native worker roots. Only the exact dead singleton lock owner `46283` is removed after a fresh process check. The immutable failure remains at `artifacts/validation/all-games-20261009/boot-typed-original-diagnostic-28d0b8cc-prepared/failed-native-manifest.json`, SHA-256 `f55f2efa423d18b840d28e2c02b1ae98c9190015f8dffdfae296c50645ef2b0b`; verification and lock release are recorded in a separate sidecar. This is fixture localization, not an additional game-entry result.
+
 ## Fresh entry failures on the qualified payload
 
 Runs are under `.claude/worktrees/agent-package-ordered-queue-scope/artifacts/runs/`.
