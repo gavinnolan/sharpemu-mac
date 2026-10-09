@@ -6,9 +6,11 @@ internal sealed partial class HostManagedWriteIntervals
 {
     private ReadWatch?[]? readWatches; // Allocated only by the optional cold watched-copy path.
     private int activeReadWatches;
-    internal sealed class ReadWatch(HostManagedWriteIntervals owner, PhysicalRun[] runs, long enrollmentRevision)
+    internal sealed class ReadWatch(HostManagedWriteIntervals owner, PhysicalRun[] runs, long enrollmentRevision, AdmissionOwner? enrollmentOwner = null)
     {
         internal readonly PhysicalRun[] Runs = runs;
+        // Diagnostics only; does not retain a transaction, backing or admission.
+        internal readonly AdmissionOwner? EnrollmentOwner = enrollmentOwner;
         // Original exclusive enrollment, before copied bytes. Never resampled
         // after a copy or substituted for an Applied publication's own revision.
         internal readonly long EnrollmentRevision = enrollmentRevision;
@@ -43,14 +45,24 @@ internal sealed partial class HostManagedWriteIntervals
             }
         }
         internal bool TryIsCurrent(out string reason, out long primaryAdmission)
+            => TryIsCurrent(out reason, out primaryAdmission, out _, false);
+        internal bool TryIsCurrent(out string reason, out long primaryAdmission,
+            out CpuMappedAdmissionOwnerDiagnostic? ownerDiagnostic, bool diagnose = true)
         {
+            ownerDiagnostic = null;
             // Exactly the original reads, short-circuit order and final checks.
             // The primary admission is the actual guard value, never a later sample.
             primaryAdmission = -1;
             reason = "released"; if (Volatile.Read(ref Released) != 0) return false;
             reason = "revoked"; if (Volatile.Read(ref Revoked) != 0) return false;
             reason = "coverage-incomplete"; if (Volatile.Read(ref owner.coverageIncomplete) != 0) return false;
-            primaryAdmission = Volatile.Read(ref owner.admission);
+            var before = diagnose ? Volatile.Read(ref owner.admissionOwner) : null;
+            var phase = before is null ? 0 : Volatile.Read(ref before.Phase);
+            var outcome = before is null ? 0 : Volatile.Read(ref before.Outcome);
+            primaryAdmission = Volatile.Read(ref owner.admission); // actual original guard
+            if (diagnose && (primaryAdmission & PublicationBit) != 0)
+                ownerDiagnostic = FinishAdmissionOwnerSample(primaryAdmission, before, phase, outcome,
+                    Volatile.Read(ref owner.admissionOwner));
             reason = "admission-nonzero"; if (primaryAdmission != 0) return false;
             reason = "revoked-final"; if (Volatile.Read(ref Revoked) != 0) return false;
             reason = "released-final"; if (Volatile.Read(ref Released) != 0) return false;
@@ -58,8 +70,8 @@ internal sealed partial class HostManagedWriteIntervals
         }
         internal CpuMappedReadWatchStatus GetStatusWithDiagnostic(out CpuMappedReadWatchDiagnostic diagnostic)
         {
-            var current = TryIsCurrent(out var reason, out var primaryAdmission);
-            diagnostic = new() { WatchGuard = reason, PrimaryAdmission = primaryAdmission >= 0 ? primaryAdmission : null };
+            var current = TryIsCurrent(out var reason, out var primaryAdmission, out var ownerDiagnostic);
+            diagnostic = new() { WatchGuard = reason, PrimaryAdmission = primaryAdmission >= 0 ? primaryAdmission : null, AdmissionOwner = ownerDiagnostic };
             if (current) { diagnostic = diagnostic with { WatchStatus = CpuMappedReadWatchStatus.Current, ProviderStatus = CpuMappedReadWatchStatus.Current }; return CpuMappedReadWatchStatus.Current; }
             // Same checks/order as Status. The label refers to the actual
             // reached classification guard, never a later diagnostic sample.
@@ -119,9 +131,11 @@ internal sealed partial class HostManagedWriteIntervals
         }
         if (Volatile.Read(ref coverageIncomplete) != 0)
         { rejection = "watch-enrollment-coverage-incomplete"; return null; }
+        var exclusiveOwner = CreateAdmissionOwner(CpuMappedAdmissionOwnerKind.ReadWatchEnrollment);
         originalAdmission = Interlocked.CompareExchange(ref admission, PublicationBit, 0);
         if (originalAdmission != 0)
         { rejection = "watch-enrollment-admission-busy"; return null; }
+        PublishAdmissionOwner(exclusiveOwner, CpuMappedAdmissionOwnerPhase.Enrolling);
         try
         {
             if (Volatile.Read(ref coverageIncomplete) != 0)
@@ -129,7 +143,7 @@ internal sealed partial class HostManagedWriteIntervals
             var revision = Volatile.Read(ref nextIdentity);
             if (revision < 0 || revision == long.MaxValue)
             { rejection = "watch-enrollment-invalid-revision"; return null; }
-            var watch = new ReadWatch(this, runs, revision); // Exact exclusive enrollment, cold path only.
+            var watch = new ReadWatch(this, runs, revision, exclusiveOwner); // Exact exclusive enrollment, cold path only.
             for (var index = 0; index < installed.Length; index++)
             {
                 watch.Slot = index;
@@ -139,7 +153,7 @@ internal sealed partial class HostManagedWriteIntervals
             rejection = "watch-enrollment-slot-capacity";
             return null; // Finite watch capacity; never synthesize a current receipt.
         }
-        finally { ReleasePublication(); }
+        finally { ReleasePublication(exclusiveOwner); CompleteAdmissionRelease(exclusiveOwner); }
     }
 
     // Cold allocation under the exact exclusive reservation. This successor

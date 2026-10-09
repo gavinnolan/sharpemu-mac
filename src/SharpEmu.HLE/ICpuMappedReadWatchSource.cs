@@ -7,12 +7,22 @@ public enum CpuMappedReadWatchStatus { Stale = 0, Current, Busy }
 
 // Detached SAME-query observations only. Unreached predicates remain null;
 // none of these fields certify content, lifetime or permission authority.
+public enum CpuMappedAdmissionOwnerKind { Unspecified, ReadWatchEnrollment, Publication, PublicationValidation, OriginalReadValidation }
+public enum CpuMappedAdmissionOwnerPhase { Unspecified, Reserved, Prepared, Enrolling, Committing, Releasing, AdmissionReleased, Unknown }
+public enum CpuMappedAdmissionOwnerOutcome { None, AdmissionReleased, Unknown }
+
+// Detached scalars: no retained owner handle, wait capability or authority.
+public readonly record struct CpuMappedAdmissionOwnerDiagnostic(long? Identity,
+    CpuMappedAdmissionOwnerKind Kind, int? AcquiringThread, CpuMappedAdmissionOwnerPhase Phase,
+    CpuMappedAdmissionOwnerOutcome Outcome, string? Refusal);
+
 public readonly record struct CpuMappedReadWatchDiagnostic
 {
     public string? MappingGuard { get; init; }
     public string? MappingCheck { get; init; }
     public string? WatchGuard { get; init; }
     public long? PrimaryAdmission { get; init; }
+    public CpuMappedAdmissionOwnerDiagnostic? AdmissionOwner { get; init; }
     public string? ClassificationGuard { get; init; }
     public CpuMappedReadWatchStatus? WatchStatus { get; init; }
     public CpuMappedReadWatchStatus? ProviderStatus { get; init; }

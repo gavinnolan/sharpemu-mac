@@ -266,6 +266,13 @@ internal static partial class MetalVideoPresenter
                     var first = firstWatchDiagnostic.Provider;
                     message += $" same_query_mapping_guard={first.MappingGuard ?? "not-reached"}; same_query_mapping_check={first.MappingCheck ?? "not-reached"};" +
                         $" same_query_watch_guard={first.WatchGuard ?? "not-reached"}; same_query_primary_admission={first.PrimaryAdmission?.ToString() ?? "not-reached"};" +
+                        $" same_query_admission_owner_id={first.AdmissionOwner?.Identity?.ToString() ?? "unknown-or-not-reached"};" +
+                        $" same_query_admission_owner_kind={first.AdmissionOwner?.Kind.ToString() ?? "not-reached"};" +
+                        $" same_query_admission_owner_thread={first.AdmissionOwner?.AcquiringThread?.ToString() ?? "unknown-or-not-reached"};" +
+                        $" same_query_admission_owner_phase={first.AdmissionOwner?.Phase.ToString() ?? "not-reached"};" +
+                        $" same_query_admission_owner_outcome={first.AdmissionOwner?.Outcome.ToString() ?? "not-reached"};" +
+                        $" same_query_admission_owner_refusal={first.AdmissionOwner?.Refusal ?? "not-reached"};" +
+                        $" same_query_local_ticket_context={firstWatchDiagnostic.LocalTicket ?? "not-reached"};" +
                         $" same_query_classification_guard={first.ClassificationGuard ?? "none-or-not-reached"}; same_query_watch_status={first.WatchStatus?.ToString() ?? "not-reached"};" +
                         $" same_query_provider_status={first.ProviderStatus?.ToString() ?? "not-reached"};" +
                         $" same_query_shared_closure={first.SharedClosure ?? "none-or-not-reached"}; same_query_owner_closure={first.OwnerClosure ?? "none-or-not-reached"};" +
