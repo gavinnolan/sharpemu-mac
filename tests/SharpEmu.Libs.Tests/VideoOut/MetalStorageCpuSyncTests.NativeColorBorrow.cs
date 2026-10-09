@@ -253,7 +253,7 @@ public sealed partial class MetalStorageCpuSyncTests
                 if (variant == "ordered")
                 {
                     var queues = (IDictionary)Field("_pendingGuestWorkByQueue").GetValue(null)!;
-                    var future = queues.Values.Cast<IEnumerable>().SelectMany(queue => queue.Cast<object>())
+                    var future = queues.Values.Cast<IEnumerable>().SelectMany(pendingQueue => pendingQueue.Cast<object>())
                         .Single(pending => ReferenceEquals(pending.GetType().GetProperty("Work")!.GetValue(pending), Member(successor, "Work")));
                     object?[] inspection = [prior, future, original, null];
                     var matches = (bool)Presenter.GetMethod("InspectOrderedNativeColorSuccessorLocked", Private)!.Invoke(null, inspection)!;
