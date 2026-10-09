@@ -13,76 +13,107 @@ namespace SharpEmu.Libs.Tests.VideoOut;
 
 public sealed partial class MetalStorageCpuSyncTests
 {
+    private static object?[]? typedMemoryResetQuarantine;
+
     [Fact]
     public void RetainedUncertainOriginalWriteRefusesPublicReadmissionAfterPresenterReset()
     {
-        ActualArchitecture();
+        ActualArchitecture(); Assert.Null(typedMemoryResetQuarantine);
         var root = Field("_uncertainCommandMemoryWrite"); var previous = root.GetValue(null);
-        var previousFatal = GpuFatal.OnFatal;
-        Assert.Null(previous);
-        GpuFatal.OnFatal = _ => { }; // preserve real exception; no process FailFast in refusing controls
+        var previousFatal = GpuFatal.OnFatal; Assert.Null(previous);
+        GpuFatal.OnFatal = _ => { }; // real exception, no process FailFast in refusing controls
         object? retained = null;
-        // Bookkeeping only: retain a real publicly admitted closed DTO as a
-        // fake uncertain scope. No publication or native effect is performed.
-        // Production has no API that clears this process-lifetime root.
+        BorrowColorState? active = null; IDisposable? queue = null;
+        TypedColorMemory? memory = null; Task<Exception?>? caller = null;
+        var callerJoined = true; var closeAttempted = false; Exception? primary = null; Exception? cleanup = null;
+        // Bookkeeping only: a real publicly admitted DTO supplies a fake
+        // uncertain scope. No publication/native effect or unknown receipt is
+        // fabricated. Preallocated roots precede caller effects and survive
+        // uncertain join/cleanup without restoring presenter/root/observer.
         try
         {
-            using (var first = new BorrowColorState())
+            active = new BorrowColorState(); memory = new TypedColorMemory("disjoint");
+            typedMemoryResetQuarantine = new object?[] { active, memory, null, null, null };
+            MetalVideoPresenter.AttachGuestMemory(memory);
+            queue = MetalVideoPresenter.EnterGuestQueue("typed.color", 7); typedMemoryResetQuarantine[2] = queue;
+            var backend = new MetalGuestGpuBackend(); var host = new MetalCommandStreamHost(memory, backend, backend);
+            callerJoined = false;
+            caller = Task.Run(() =>
             {
-                var memory = new TypedColorMemory("disjoint"); MetalVideoPresenter.AttachGuestMemory(memory);
-                using var queue = MetalVideoPresenter.EnterGuestQueue("typed.color", 7);
-                var backend = new MetalGuestGpuBackend(); var host = new MetalCommandStreamHost(memory, backend, backend);
-                var caller = Task.Run(() =>
+                using var submitting = MetalVideoPresenter.EnterGuestQueue("typed.color", 7);
+                return Record.Exception(() => host.TryWriteGuest(TypedColorMemory.Destination, new byte[8]));
+            });
+            typedMemoryResetQuarantine[3] = caller;
+            var deadline = Environment.TickCount64 + 5000;
+            while (retained is null)
+            {
+                lock (Field("_gate").GetValue(null)!)
                 {
-                    using var submitting = MetalVideoPresenter.EnterGuestQueue("typed.color", 7);
-                    return Record.Exception(() => host.TryWriteGuest(TypedColorMemory.Destination, new byte[8]));
-                });
-                try
-                {
-                    var deadline = Environment.TickCount64 + 5000;
-                    while (retained is null)
-                    {
-                        lock (Field("_gate").GetValue(null)!)
-                        {
-                            var queues = (IDictionary)Field("_pendingGuestWorkByQueue").GetValue(null)!;
-                            retained = queues.Values.Cast<IEnumerable>().SelectMany(items => items.Cast<object>())
-                                .Select(item => item.GetType().GetProperty("Work")!.GetValue(item)!)
-                                .SingleOrDefault(item => item.GetType().Name == "OrderedCommandMemoryOperation");
-                            if (retained is not null) root.SetValue(null, retained);
-                        }
-                        Assert.False(caller.IsCompleted); Assert.True(Environment.TickCount64 < deadline); Thread.Yield();
-                    }
-                    Assert.Equal(1, memory.CommandCopies); Assert.Equal(0, memory.Writes);
+                    var queues = (IDictionary)Field("_pendingGuestWorkByQueue").GetValue(null)!;
+                    retained = queues.Values.Cast<IEnumerable>().SelectMany(items => items.Cast<object>())
+                        .Select(item => item.GetType().GetProperty("Work")!.GetValue(item)!)
+                        .SingleOrDefault(item => item.GetType().Name == "OrderedCommandMemoryOperation");
+                    if (retained is not null) { root.SetValue(null, retained); typedMemoryResetQuarantine[4] = retained; }
                 }
-                finally
-                {
-                    MetalVideoPresenter.LatchGuestCompletionFailure("fake uncertain scope reset control");
-                    Assert.True(caller.Wait(2000), "Do not reset an unjoined original caller.");
-                    InvokeVolume("CompletePresenterShutdown");
-                }
-                Assert.Same(retained, root.GetValue(null)); Assert.Equal(0L, Field("_completedGuestWorkSequence").GetValue(null));
+                Assert.False(caller.IsCompleted); Assert.True(Environment.TickCount64 < deadline); Thread.Yield();
             }
-            using (var reopened = new BorrowColorState())
+            Assert.Equal(1, memory.CommandCopies); Assert.Equal(0, memory.Writes);
+            CloseActive(); // exact caller joins BEFORE any presenter reset
+            if (cleanup is not null) throw cleanup;
+            Assert.Same(retained, root.GetValue(null));
+
+            closeAttempted = false;
+            active = new BorrowColorState(); memory = new TypedColorMemory("disjoint"); caller = null;
+            typedMemoryResetQuarantine = new object?[] { active, memory, null, null, retained };
+            MetalVideoPresenter.AttachGuestMemory(memory);
+            Field("_selectedStorageMipSession").SetValue(null, (long)Field("_selectedStorageMipSession").GetValue(null)! + 1);
+            queue = MetalVideoPresenter.EnterGuestQueue("typed.color", 8); typedMemoryResetQuarantine[2] = queue;
+            backend = new MetalGuestGpuBackend(); host = new MetalCommandStreamHost(memory, backend, backend);
+            var failure = Assert.IsType<GpuFatalException>(Record.Exception(
+                () => host.TryWriteGuest(TypedColorMemory.Destination, new byte[8])));
+            Assert.Contains("remains process-owned", failure.InnerException!.Message);
+            Assert.Same(retained, root.GetValue(null)); Assert.Equal(1, memory.CommandCopies); Assert.Equal(0, memory.Writes);
+            Assert.Equal(0, Field("_pendingGuestWorkCount").GetValue(null));
+            Assert.Equal(0L, Field("_enqueuedGuestWorkSequence").GetValue(null));
+            Assert.Equal(0L, Field("_completedGuestWorkSequence").GetValue(null));
+        }
+        catch (Exception failure) { primary = failure; }
+        finally
+        {
+            CloseActive();
+            if (typedMemoryResetQuarantine is null)
             {
-                var memory = new TypedColorMemory("disjoint"); MetalVideoPresenter.AttachGuestMemory(memory);
-                Field("_selectedStorageMipSession").SetValue(null, (long)Field("_selectedStorageMipSession").GetValue(null)! + 1);
-                using var queue = MetalVideoPresenter.EnterGuestQueue("typed.color", 8);
-                var backend = new MetalGuestGpuBackend(); var host = new MetalCommandStreamHost(memory, backend, backend);
-                try
-                {
-                    var failure = Assert.IsType<SharpEmu.Libs.Gpu.Scheduling.GpuFatalException>(Record.Exception(
-                        () => host.TryWriteGuest(TypedColorMemory.Destination, new byte[8])));
-                    Assert.Contains("remains process-owned", failure.InnerException!.Message);
-                    Assert.Same(retained, root.GetValue(null)); Assert.Equal(1, memory.CommandCopies); Assert.Equal(0, memory.Writes);
-                    Assert.Equal(0, Field("_pendingGuestWorkCount").GetValue(null));
-                    Assert.Equal(0L, Field("_enqueuedGuestWorkSequence").GetValue(null));
-                    Assert.Equal(0L, Field("_completedGuestWorkSequence").GetValue(null));
-                }
-                finally { InvokeVolume("CompletePresenterShutdown"); }
-                Assert.Same(retained, root.GetValue(null));
+                Attempt(() => root.SetValue(null, previous)); // only the fake fixture scope
+                Attempt(() => GpuFatal.OnFatal = previousFatal);
+            }
+            if (cleanup is not null)
+            {
+                if (primary is null) primary = cleanup;
+                else try { primary.Data["TypedMemoryResetCleanup"] = cleanup; } catch { }
             }
         }
-        finally { root.SetValue(null, previous); GpuFatal.OnFatal = previousFatal; } // restore only the fake fixture scope
+        if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
+
+        void CloseActive()
+        {
+            if (active is null || closeAttempted) return;
+            closeAttempted = true; // never repeat an uncertain join/shutdown/disposal attempt
+            if (!callerJoined)
+            {
+                Attempt(() => MetalVideoPresenter.LatchGuestCompletionFailure("fake uncertain scope reset control"));
+                try { callerJoined = caller is null || caller.Wait(2000); }
+                catch (Exception failure) { callerJoined = caller?.IsCompleted == true; cleanup ??= failure; }
+                if (!callerJoined) { cleanup ??= new TimeoutException("Original caller is still live; all fixture owners remain quarantined."); return; }
+            }
+            Attempt(() => InvokeVolume("CompletePresenterShutdown"));
+            if (cleanup is not null) return; // incomplete shutdown cannot restore presenter or release its root
+            Attempt(() => { Assert.Same(retained, root.GetValue(null)); Assert.Equal(0L, Field("_completedGuestWorkSequence").GetValue(null)); });
+            if (cleanup is not null) return;
+            var ownedQueue = queue; queue = null; Attempt(() => ownedQueue?.Dispose());
+            var ownedState = active; active = null; Attempt(ownedState.Dispose);
+            if (cleanup is null) typedMemoryResetQuarantine = null;
+        }
+        void Attempt(Action action) { try { action(); } catch (Exception failure) { cleanup ??= failure; } }
     }
 
     [Fact]
