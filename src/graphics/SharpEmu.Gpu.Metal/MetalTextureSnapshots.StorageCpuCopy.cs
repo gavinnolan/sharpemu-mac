@@ -124,7 +124,7 @@ internal static partial class MetalTextureSnapshots
             }
         }
         throw new InvalidOperationException($"Metal typed storage mapping/content changed across three original-copy attempts at 0x{d.Address:X}. " +
-            $"last_result={lastResult} first_rejected_predicate={firstRejectedPredicate} requested_bytes={physical} original_session={originalSession} " +
+            $"last_result={lastResult} last_attempt_first_rejected_predicate={firstRejectedPredicate} requested_bytes={physical} original_session={originalSession} " +
             $"write_watch_requested={withWriteWatch} last_original_footprint=0x{lastFootprintAddress:X}/{lastFootprintBytes} " +
             $"last_original_source=0x{lastSourceAddress:X}/{lastSourceBytes}.");
     }
