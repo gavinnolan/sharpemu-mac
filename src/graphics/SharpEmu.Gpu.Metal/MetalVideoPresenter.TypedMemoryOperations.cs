@@ -16,7 +16,8 @@ internal static partial class MetalVideoPresenter
     // the closed packet payload. Public arbitrary Action admission stays unknown.
     private sealed record OrderedCommandMemoryOperation(
         CommandMemoryOperation Operation, ICpuMemory Memory, long Session, GuestQueueIdentity Queue,
-        ICpuMappedCopySource? Source, CpuMappedCopyObservation? Mapping, Action Action, CommandMemoryReadWatch? OriginalWatch = null);
+        ICpuMappedCopySource? Source, CpuMappedCopyObservation? Mapping, Action Action, CommandMemoryReadWatch? OriginalWatch = null,
+        MetalCommandStreamHost? OriginalHost = null);
 
     private sealed class CommandMemoryReadWatch(ICpuMappedReadWatchSource source, CpuMappedCopyObservation original)
     {
@@ -35,7 +36,8 @@ internal static partial class MetalVideoPresenter
         var queue = _submittingGuestQueue ?? GuestQueueIdentity.Default;
         ICpuMappedCopySource? source = null; CpuMappedCopyObservation? mapping = null;
         CommandMemoryReadWatch? watch = null;
-        if (NativeColorBorrowEnabled && operation.Kind == CommandMemoryOperation.OperationKind.Write &&
+        if (NativeColorBorrowEnabled && operation.HasOriginalWritePayload &&
+            (operation.Kind != CommandMemoryOperation.OperationKind.Fill || host.UsesPresenterFillMirror && NoOriginalFillMirrorDestination(operation)) &&
             operation.TryGetGuestWriteRange(out var address, out var bytes) && bytes is > 0 and <= CommandMemoryOperation.MaximumOriginalWriteBytes &&
             memory is ICpuMappedCopySource mapped && memory is ICpuMappedPublicationSource)
         {
@@ -61,7 +63,7 @@ internal static partial class MetalVideoPresenter
             }
             catch { } // optional attribution failure leaves the writer UNKNOWN, never rebased
         }
-        var prepared = new OrderedCommandMemoryOperation(operation, memory, session, queue, source, mapping, execute, watch);
+        var prepared = new OrderedCommandMemoryOperation(operation, memory, session, queue, source, mapping, execute, watch, host);
         if (mapping is null && watch is not null)
         {
             // A rejected copy still returns its original bookkeeping owner on
@@ -71,6 +73,11 @@ internal static partial class MetalVideoPresenter
             prepared = prepared with { OriginalWatch = null };
         }
         return prepared;
+    }
+
+    private static bool NoOriginalFillMirrorDestination(CommandMemoryOperation operation)
+    {
+        lock (_gate) return !_guestImageExtents.ContainsKey(operation.Address);
     }
 
     internal static void ExecuteTypedGuestMemoryOperation(MetalCommandStreamHost host, CommandMemoryOperation operation)
@@ -99,6 +106,18 @@ internal static partial class MetalVideoPresenter
                     operation.ExecuteOriginalWrite((ICpuMappedPublicationSource)owned.Memory, original,
                         () => RequireCommandMemoryOriginal(owned, original, requireExecution: true),
                         originalHasWriteWatch: owned.OriginalWatch is not null);
+                    if (operation.Kind == CommandMemoryOperation.OperationKind.Fill)
+                    {
+                        try { host.CompleteOriginalFillAtQueuePosition(operation); }
+                        catch
+                        {
+                            // Applied may already be known, but a mirror hook
+                            // failure is not an acknowledgement. Retain this
+                            // exact effect/host scope; never replay the mirror.
+                            lock (_gate) _uncertainCommandMemoryWrite ??= owned;
+                            throw;
+                        }
+                    }
                 }
                 catch
                 {
@@ -135,7 +154,7 @@ internal static partial class MetalVideoPresenter
             // A global failure can wake the submitting caller before its exact
             // taken callback exits. Preserve that original rather than releasing
             // its physical veto beneath an in-flight/uncertain transaction.
-            if (owned.Operation.RetainsUncertainOriginalWrite ||
+            if (ReferenceEquals(_uncertainCommandMemoryWrite, owned) || owned.Operation.RetainsUncertainOriginalWrite ||
                 _takenDepthCubeProducerWork is OrderedCommandMemoryOperation taken &&
                 ReferenceEquals(taken.Operation, owned.Operation) ||
                 _guestWorkFailure is null && (sequence == 0 || !IsGuestWorkCompletedLocked(sequence)) &&
@@ -169,7 +188,7 @@ internal static partial class MetalVideoPresenter
             _takenDepthCubeProducerWork is not OrderedCommandMemoryOperation taken ||
             !ReferenceEquals(taken.Operation, original.Operation) || !ReferenceEquals(taken.Memory, original.Memory) ||
             !ReferenceEquals(taken.Source, original.Source) || !ReferenceEquals(taken.Mapping, original.Mapping) ||
-            !ReferenceEquals(taken.OriginalWatch, original.OriginalWatch) ||
+            !ReferenceEquals(taken.OriginalWatch, original.OriginalWatch) || !ReferenceEquals(taken.OriginalHost, original.OriginalHost) ||
             taken.Session != original.Session || taken.Queue != original.Queue || _submittingGuestQueue != original.Queue)
             throw new NotSupportedException("Command memory operation lacks its exact taken/executing original receipt.");
     }
@@ -183,9 +202,13 @@ internal static partial class MetalVideoPresenter
             !ReferenceEquals(work.Mapping, mapping) ||
             !work.Operation.TryGetGuestWriteRange(out var address, out var bytes) || bytes == 0 ||
             mapping.FootprintAddress != address || mapping.FootprintByteCount != bytes ||
-            work.Operation.Kind != CommandMemoryOperation.OperationKind.Write || work.Memory is not ICpuMappedPublicationSource ||
+            !work.Operation.HasOriginalWritePayload || work.Memory is not ICpuMappedPublicationSource ||
             mapping.SourceAddress != address || mapping.SourceByteCount != bytes)
             throw new NotSupportedException("Command memory operation lost its ORIGINAL complete writable mapping/session.");
+        if (work.Operation.Kind == CommandMemoryOperation.OperationKind.Fill &&
+            (work.OriginalHost is null || !ReferenceEquals(work.OriginalHost.Memory, work.Memory) ||
+             !work.OriginalHost.UsesPresenterFillMirror || _guestImageExtents.ContainsKey(work.Operation.Address)))
+            throw new NotSupportedException("Original Fill has an existing or changed native snapshot mirror destination.");
         foreach (var segment in mapping.Segments)
             if ((segment.GuestAccess & GuestPageProtection.Write) == 0)
                 throw new NotSupportedException("Command memory operation lacks its ORIGINAL full write entitlement.");
@@ -234,12 +257,12 @@ internal static partial class MetalVideoPresenter
         foreach (var pending in inventory.Pending)
         {
             var work = (OrderedCommandMemoryOperation)pending.Work;
-            if (work.Operation.Kind == CommandMemoryOperation.OperationKind.Write && work.Operation.ByteCount != 0)
+            if (work.Operation.HasOriginalWritePayload)
                 RequireCommandMemoryOriginal(work, work.Mapping ??
                     throw new NotSupportedException("Native color command memory writer lacks its ORIGINAL complete mapping."));
         }
         if (inventory.Taken is OrderedCommandMemoryOperation taken &&
-            taken.Operation.Kind == CommandMemoryOperation.OperationKind.Write && taken.Operation.ByteCount != 0)
+            taken.Operation.HasOriginalWritePayload)
             RequireCommandMemoryOriginal(taken, taken.Mapping ??
                 throw new NotSupportedException("Native color taken command memory writer lacks its ORIGINAL complete mapping."));
         if (inventory.Pending.Length != 0 || inventory.Taken is OrderedCommandMemoryOperation)
@@ -271,7 +294,7 @@ internal static partial class MetalVideoPresenter
         OrderedCommandMemoryOperation work, NativeColorProducer producer, PendingGuestWork? pending,
         NativeColorCommandMemoryInventory? inventory)
     {
-        if (work.Operation.Kind != CommandMemoryOperation.OperationKind.Write ||
+        if (!(work.Operation.HasOriginalWritePayload || work.Operation.Kind == CommandMemoryOperation.OperationKind.Write && work.Operation.ByteCount == 0) ||
             !work.Operation.TryGetGuestWriteRange(out var address, out var bytes))
             throw new NotSupportedException("Native color command memory operation has unknown/unbounded effects.");
         var queue = pending?.Queue;

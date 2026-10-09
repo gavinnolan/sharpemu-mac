@@ -97,9 +97,15 @@ public sealed partial class MetalStorageCpuSyncTests
     {
         internal readonly CpuMappedPublication Actual = actual;
         internal int Commits, Cancellations, AccessorQueries;
-        internal override CpuMappedPublicationResult TryCommit() { Commits++; return Actual.TryCommit(); }
+        internal override CpuMappedPublicationResult TryCommit()
+        {
+            Commits++;
+            var result = Actual.TryCommit();
+            if (fault == "commit-throw" && result == CpuMappedPublicationResult.Applied) throw failure;
+            return result;
+        }
         internal override CpuMappedCopyObservation? SuccessfulObservation
-        { get { AccessorQueries++; if (fault == "throwing") throw failure; return null; } }
+        { get { AccessorQueries++; if (fault == "throwing") throw failure; return fault == "success" ? Actual.SuccessfulObservation : null; } }
         internal override void Cancel() { Cancellations++; Actual.Dispose(); }
     }
 }

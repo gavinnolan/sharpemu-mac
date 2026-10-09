@@ -81,4 +81,17 @@ public sealed class CommandMemoryOperationTests
         // Effect inspection never executes a packet or changes immediate host memory.
         var runner = new StreamRunner(); Assert.Equal(0UL, runner.Host.ReadQword(StreamRunner.DataAddress));
     }
+    [Theory]
+    [InlineData("gds")] [InlineData("unaligned-address")] [InlineData("unaligned-size")]
+    [InlineData("zero")] [InlineData("overflow")] [InlineData("larger-than-one-chunk")]
+    public void UnsupportedFillCannotMintAnOriginalOwnedPayload(string reason)
+    {
+        var address = reason == "unaligned-address" ? StreamRunner.DataAddress + 1 :
+            reason == "overflow" ? ulong.MaxValue - 3 : StreamRunner.DataAddress;
+        var bytes = reason == "zero" ? 0ul : reason == "unaligned-size" ? 7ul :
+            reason == "larger-than-one-chunk" ? (ulong)CommandMemoryOperation.MaximumOriginalFillBytes + 4 : 8ul;
+        var fill = CommandMemoryOperation.Fill(address, bytes, 0x12345678, reason == "gds");
+        Assert.False(fill.HasOriginalWritePayload); Assert.Equal(0ul, fill.OwnedByteCount);
+    }
+
 }

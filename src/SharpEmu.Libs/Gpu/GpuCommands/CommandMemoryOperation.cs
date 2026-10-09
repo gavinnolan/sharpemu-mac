@@ -18,6 +18,9 @@ public sealed class CommandMemoryOperation
     private int execution;
     private CpuMappedPublication? retainedUnknownWrite;
     public const int MaximumOriginalWriteBytes = 4 * 1024 * 1024;
+    // One existing ordinary FillBuffer chunk; larger/GDS/unaligned fills keep
+    // their legacy transfer path and cannot claim this original transaction.
+    public const int MaximumOriginalFillBytes = 64 * 1024;
     private CommandMemoryOperation(OperationKind kind, ulong address, ulong bytes, ulong value,
         ulong source = 0, bool destinationIsGds = false, bool sourceIsGds = false,
         byte[]? payload = null, AtomicMemoryPacket atomic = default, MemorySemaphorePacket semaphore = default,
@@ -37,18 +40,24 @@ public sealed class CommandMemoryOperation
     public bool SourceIsGds { get; }
     public string DebugName { get; }
     public ulong OwnedByteCount => (ulong)(payload?.LongLength ?? 0);
+    public bool HasOriginalWritePayload => payload is { Length: > 0 } &&
+        (Kind == OperationKind.Write && payload.Length <= MaximumOriginalWriteBytes ||
+         Kind == OperationKind.Fill && !DestinationIsGds && !SourceIsGds &&
+         (Address & 3) == 0 && (ByteCount & 3) == 0 && payload.Length <= MaximumOriginalFillBytes) &&
+        OwnedByteCount == ByteCount && Address != 0 && Address <= ulong.MaxValue - ByteCount;
     public bool RetainsUncertainOriginalWrite => retainedUnknownWrite is not null;
     public ulong PriorValue { get; private set; }
     public bool ComparePassed { get; private set; }
 
-    // Only the closed byte write has an original-execution scope so far. The
+    // Closed byte writes and bounded constant non-GDS fills own their complete
+    // little-endian bytes before admission. The
     // caller cannot inspect or replace the owned bytes, or substitute a younger
     // mapping after provider preparation refuses the first original.
     public void ExecuteOriginalWrite(ICpuMappedPublicationSource source, CpuMappedCopyObservation original, Action requireOriginalOwner,
         bool originalHasWriteWatch = false)
     {
         ArgumentNullException.ThrowIfNull(requireOriginalOwner);
-        if (Kind != OperationKind.Write || payload is null || payload.Length == 0 || payload.Length > MaximumOriginalWriteBytes)
+        if (!HasOriginalWritePayload)
             throw new NotSupportedException("This command memory operation has no exact original write transaction.");
         BeginExecution();
         CpuMappedPublication? ticket = null;
@@ -69,7 +78,7 @@ public sealed class CommandMemoryOperation
             {
                 var segment = original.Segments[index];
                 runs[index] = new(segment.CoveredAddress,
-                    payload.AsMemory(checked((int)(segment.CoveredAddress - Address)), checked((int)segment.CoveredByteCount)));
+                    payload!.AsMemory(checked((int)(segment.CoveredAddress - Address)), checked((int)segment.CoveredByteCount)));
             }
             if (source.TryPrepareMappedPublication(original, runs, out ticket) != CpuMappedPublicationPreparationResult.Prepared || ticket is null)
                 throw new NotSupportedException("Command memory write could not reserve its ORIGINAL mapping and lifetime.");
@@ -94,13 +103,13 @@ public sealed class CommandMemoryOperation
                     "Command memory watched write lost its SAME Applied successor observation.");
             requireOriginalOwner(); // Applied is not an acknowledgement across session/owner replacement.
             GuestImageWriteTracker.TraceManagedDirtyCompletion(Address, ByteCount);
-            if (GuestWriteWatch.Armed) GuestWriteWatch.Check(Address, payload);
+            if (GuestWriteWatch.Armed) GuestWriteWatch.Check(Address, payload!);
         }
         catch (Exception error) { if (commitInProgress || applied && originalHasWriteWatch && appliedSuccessor is null) retainedUnknownWrite = ticket; primary = error; }
         finally
         {
             var ownedSuccessor = appliedSuccessor; appliedSuccessor = null;
-            // Closed Write needs no continuing read entitlement. The provider
+            // Closed Write/Fill needs no continuing read entitlement. The provider
             // consumed its original watch and minted this exact own-write
             // successor; release that bookkeeping once after notifications.
             try
@@ -132,8 +141,18 @@ public sealed class CommandMemoryOperation
         return new(OperationKind.Write, address, (ulong)owned.Length, BinaryPrimitives.ReadUInt64LittleEndian(scalar),
             payload: owned, debugName: debugName);
     }
-    public static CommandMemoryOperation Fill(ulong address, ulong bytes, uint value, bool isGds) =>
-        new(OperationKind.Fill, address, bytes, value, destinationIsGds: isGds, debugName: "FILL");
+    public static CommandMemoryOperation Fill(ulong address, ulong bytes, uint value, bool isGds)
+    {
+        byte[]? owned = null;
+        if (!isGds && address != 0 && address <= ulong.MaxValue - bytes &&
+            (address & 3) == 0 && (bytes & 3) == 0 && bytes is > 0 and <= MaximumOriginalFillBytes)
+        {
+            owned = new byte[checked((int)bytes)];
+            for (var offset = 0; offset < owned.Length; offset += sizeof(uint))
+                BinaryPrimitives.WriteUInt32LittleEndian(owned.AsSpan(offset, sizeof(uint)), value);
+        }
+        return new(OperationKind.Fill, address, bytes, value, destinationIsGds: isGds, payload: owned, debugName: "FILL");
+    }
     public static CommandMemoryOperation Copy(ulong destination, ulong source, ulong bytes, bool destinationIsGds, bool sourceIsGds) =>
         new(OperationKind.Copy, destination, bytes, source, source, destinationIsGds, sourceIsGds, debugName: "COPY");
     public static CommandMemoryOperation Atomic(AtomicMemoryPacket packet) =>
