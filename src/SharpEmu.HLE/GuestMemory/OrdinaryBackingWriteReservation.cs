@@ -6,6 +6,8 @@ using SharpEmu.HLE.Host;
 namespace SharpEmu.HLE.GuestMemory;
 
 public enum OrdinaryBackingWriteAdmission { Admitted, OriginalChanged, TimedOut, Refused }
+public readonly record struct OrdinaryBackingWriteCurrentnessFailure(string? Reason,
+    OrdinaryWriteIdentityFailure Provider);
 
 // Busy-only ordinary coordination. Not a signal, permission or content receipt.
 // Keeps the ORIGINAL backing pin/snapshot; never resolves a replacement mapping.
@@ -24,6 +26,19 @@ public sealed class OrdinaryBackingWriteReservation : IDisposable
     { this.owner = owner; this.backing = backing; this.originalSnapshot = originalSnapshot; this.originalMapping = originalMapping; RejectedAdmission = rejectedAdmission; }
     public long RejectedAdmission { get; }
     public bool IsOriginalCurrent => owner.IsAvailable && ReferenceEquals(owner.AliasSnapshot, originalSnapshot) && originalMapping.IsCurrent;
+
+    // Same ordered check used ONLY instead of the ordinary property when
+    // optional attribution is enabled. No late sample repairs the decision.
+    public bool TryIsOriginalCurrent(out OrdinaryBackingWriteCurrentnessFailure failure)
+    {
+        failure = default;
+        if (!owner.IsAvailable) { failure = new("original-shared-views-unavailable", default); return false; }
+        if (!ReferenceEquals(owner.AliasSnapshot, originalSnapshot))
+        { failure = new("original-shared-snapshot-replaced", default); return false; }
+        if (originalMapping.TryIsCurrent(out var provider)) return true;
+        failure = new("original-provider-identity-changed", provider);
+        return false;
+    }
 
     // Caller MUST drop all outer mapping/stripe/provider gates first. No native
     // pointers are read while waiting; the backing pin owns lifetime only.
