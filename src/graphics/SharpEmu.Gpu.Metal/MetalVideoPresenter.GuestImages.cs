@@ -717,6 +717,7 @@ internal static partial class MetalVideoPresenter
 
     internal static ulong GetGuestWorkPayloadBytes(object work)
     {
+        if (work is OrderedCommandMemoryOperation operation) return operation.Operation.OwnedByteCount;
         if (work is GuestImageWrite writePayload)
             return (ulong)(writePayload.Pixels?.LongLength ?? 0);
         if (work is GlobalDataShareCopyFromGuest gdsPayload)
@@ -1010,6 +1011,10 @@ internal static partial class MetalVideoPresenter
                         case OrderedGuestAction action:
                             FlushBatchedGuestCommands();
                             ExecuteOrderedGuestAction(action);
+                            break;
+                        case OrderedCommandMemoryOperation operation:
+                            FlushBatchedGuestCommands();
+                            operation.Action();
                             break;
                         case OrderedGuestFlip flip:
                             FlushBatchedGuestCommands();

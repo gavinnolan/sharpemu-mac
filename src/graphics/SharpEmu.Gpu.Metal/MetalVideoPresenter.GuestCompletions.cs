@@ -25,6 +25,9 @@ internal static partial class MetalVideoPresenter
     // Returns the accepted queue sequence, or zero only after the exact initial
     // callback finishes. Refusal always throws, never publishes a label/event.
     public static long SubmitOrderedGuestCompletion(Action action, string debugName)
+        => SubmitOrderedGuestCompletionCore(action, debugName, null);
+
+    private static long SubmitOrderedGuestCompletionCore(Action action, string debugName, OrderedCommandMemoryOperation? memoryOperation)
     {
         ArgumentNullException.ThrowIfNull(action);
         InitialGuestCompletionReceipt? initial = null;
@@ -39,13 +42,22 @@ internal static partial class MetalVideoPresenter
                     _initialGuestCompletion = initial = new InitialGuestCompletionReceipt();
                 else if (!_closed && _guestWorkFailure is null && _thread is not null)
                 {
-                    var sequence = EnqueueGuestWorkLocked(new OrderedGuestAction(() =>
+                    if (memoryOperation is { } owned)
+                    {
+                        if (owned.Queue != (_submittingGuestQueue ?? GuestQueueIdentity.Default))
+                            throw new NotSupportedException("Command memory operation changed its ORIGINAL admission queue.");
+                        if (owned.Mapping is { } mapping) RequireCommandMemoryOriginalLocked(owned, mapping);
+                    }
+                    Action completedAction = () =>
                     {
                         RequireGuestCompletionHealthy();
                         WaitForFlushedGuestCommands();
                         RequireGuestCompletionHealthy();
                         action();
-                    }, debugName));
+                    };
+                    var sequence = EnqueueGuestWorkLocked(memoryOperation is null
+                        ? (object)new OrderedGuestAction(completedAction, debugName)
+                        : memoryOperation with { Action = completedAction });
                     if (sequence != 0) return sequence;
                 }
             }

@@ -599,6 +599,12 @@ internal static partial class MetalVideoPresenter
             }
             else if (work is ComputeGuestDispatch dispatch)
             { foreach (var texture in dispatch.Textures) Texture(texture); Buffers(dispatch.GlobalMemoryBuffers); }
+            else if (work is OrderedCommandMemoryOperation operation)
+            {
+                if (operation.Operation.Kind != SharpEmu.Libs.Gpu.GpuCommands.CommandMemoryOperation.OperationKind.Write)
+                    throw NativeColorUnknownWorkFailure(work, future, producer, _nativeColorDiagnostics);
+                RequireNativeColorCommandMemoryLocked(operation, producer, future);
+            }
             else
                 throw NativeColorUnknownWorkFailure(work, future, producer, _nativeColorDiagnostics);
         }

@@ -72,7 +72,7 @@ internal sealed partial class MetalCommandStreamHost : AgcExports.TranslatingCom
     public override void FillBuffer(ulong address, ulong size, uint value, bool isGds)
     {
         if (isGds) FillBufferAtQueuePosition(address, size, value, true);
-        else ExecuteGuestMemoryOperation(() => FillBufferAtQueuePosition(address, size, value, false), "FILL", address, size, value);
+        else ExecuteCommandMemoryOperation(CommandMemoryOperation.Fill(address, size, value, false));
     }
 
     private void FillBufferAtQueuePosition(ulong address, ulong size, uint value, bool isGds)
@@ -114,7 +114,7 @@ internal sealed partial class MetalCommandStreamHost : AgcExports.TranslatingCom
 
     public override void CopyBuffer(ulong destination, ulong source, ulong size, bool destinationIsGds, bool sourceIsGds)
     {
-        ExecuteGuestMemoryOperation(() => CopyBufferAtQueuePosition(destination, source, size, destinationIsGds, sourceIsGds), "COPY", destination, size, source);
+        ExecuteCommandMemoryOperation(CommandMemoryOperation.Copy(destination, source, size, destinationIsGds, sourceIsGds));
     }
 
     private void CopyBufferAtQueuePosition(ulong destination, ulong source, ulong size, bool destinationIsGds, bool sourceIsGds)

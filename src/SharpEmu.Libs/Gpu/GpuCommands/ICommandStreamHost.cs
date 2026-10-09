@@ -88,6 +88,9 @@ public interface ICommandStreamHost
     // must finish this owned operation before interpreter results are consumed.
     bool TryWriteGuest(ulong address, ReadOnlySpan<byte> source, string kind = "WRITE_BYTES") => Memory.TryWrite(address, source);
     void ExecuteGuestMemoryOperation(Action operation, string kind = "MEMORY_OPERATION", ulong address = 0, ulong bytes = 0, ulong value = 0) => operation();
+    void ExecuteCommandMemoryOperation(CommandMemoryOperation operation) =>
+        ExecuteGuestMemoryOperation(() => operation.Execute(this), operation.DebugName,
+            operation.Address, operation.ByteCount, operation.Value);
 
     // Runs commands other threads posted to this worker. Called before every packet.
     void RunPendingCommands();

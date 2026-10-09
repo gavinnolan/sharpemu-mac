@@ -26,15 +26,10 @@ public sealed partial class GpuCommandInterpreter
         }
 
         // A compare-swap loop applies once per try and suspends while the compare fails.
-        var applied = false;
-        ulong priorValue = 0;
-        var comparePassed = false;
-        _host.ExecuteGuestMemoryOperation(() =>
-        {
-            applied = atomic.TryApply(_host.TryReadGuest, _host.Memory, out priorValue, out _, out comparePassed);
-            if (!applied)
-                throw _host.Fatal($"The atomic address cannot be accessed: address=0x{atomic.Address:X16} size={atomic.ByteCount}.");
-        }, "ATOMIC", atomic.Address, (ulong)atomic.ByteCount, atomic.SourceData);
+        var operation = CommandMemoryOperation.Atomic(atomic);
+        _host.ExecuteCommandMemoryOperation(operation);
+        var priorValue = operation.PriorValue;
+        var comparePassed = operation.ComparePassed;
 
         if (atomic.ReturnsData)
         {
@@ -73,26 +68,15 @@ public sealed partial class GpuCommandInterpreter
 
         if (semaphore.IsSignal)
         {
-            var signaled = false;
-            _host.ExecuteGuestMemoryOperation(() =>
-            {
-                signaled = Packets.MemorySemaphorePacket.TrySignal(
-                    _host.TryReadGuest, _host.Memory, semaphore.Address, semaphore.WriteSignal, out _);
-                if (!signaled) throw _host.Fatal($"The semaphore cannot be signaled: address=0x{semaphore.Address:X16}.");
-            }, "SEMAPHORE_SIGNAL", semaphore.Address, 8, semaphore.WriteSignal ? 1UL : 0UL);
+            _host.ExecuteCommandMemoryOperation(CommandMemoryOperation.Semaphore(semaphore));
 
             return 3;
         }
 
         // A wait takes one token, or suspends until a signal adds one.
-        var consumed = false;
-        ulong priorValue = 0;
-        _host.ExecuteGuestMemoryOperation(() =>
-        {
-            consumed = Packets.MemorySemaphorePacket.TryConsume(
-                _host.TryReadGuest, _host.Memory, semaphore.Address, out priorValue);
-            if (!consumed) throw _host.Fatal($"The semaphore cannot be read: address=0x{semaphore.Address:X16}.");
-        }, "SEMAPHORE_CONSUME", semaphore.Address, 8);
+        var consume = CommandMemoryOperation.Semaphore(semaphore);
+        _host.ExecuteCommandMemoryOperation(consume);
+        var priorValue = consume.PriorValue;
 
         if (priorValue == 0)
         {

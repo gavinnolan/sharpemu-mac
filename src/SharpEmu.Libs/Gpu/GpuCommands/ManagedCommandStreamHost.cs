@@ -45,6 +45,9 @@ public class ManagedCommandStreamHost : ICommandStreamHost
 
     public virtual bool TryWriteGuest(ulong address, ReadOnlySpan<byte> source, string kind = "WRITE_BYTES") => Memory.TryWrite(address, source);
     public virtual void ExecuteGuestMemoryOperation(Action operation, string kind = "MEMORY_OPERATION", ulong address = 0, ulong bytes = 0, ulong value = 0) => operation();
+    public virtual void ExecuteCommandMemoryOperation(CommandMemoryOperation operation) =>
+        ExecuteGuestMemoryOperation(() => operation.Execute(this), operation.DebugName,
+            operation.Address, operation.ByteCount, operation.Value);
 
     public virtual void RunPendingCommands()
     {
