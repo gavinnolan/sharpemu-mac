@@ -43,7 +43,31 @@ closure; manifest SHA-256
 GPU ARM64, all x64, all separate workers, publication and games remain unrun.
 Successor `62de4f79` changes only those scalar controls to save/set/restore
 `GpuWritten`, retaining all eight case identities and every refusal assertion.
-It changes no production code or authority. Fresh qualification is pending.
+It changes no production code or authority. Its fresh three builds and all
+1,136 ordinary cases per actual ARM64/x64 CLR pass with zero skips; ROOT verifies
+46 managed artifacts, exact case identities and unchanged source/compiled files.
+Managed manifest SHA-256:
+`52b931d50559d27532339e491ba15107981ecea89051a678ea8cf847ea3a1bd3`.
+
+The separate phase passes all 26 synthetic cold frontend controls and the
+first two real ARM64 cold Metal/provider cases, including the complete byte,
+status-4 and EOP oracles. The third ordinary-writer control fails because its
+fixture hook remains installed and intercepts the later real EOP Write32.
+The remaining 209 workers, publication and games remain unrun. ROOT verifies
+all 216 failure artifacts, 29 exact attempted cases, both native positive
+oracles and exact closure of 30 roots. Failed manifest SHA-256:
+`149b5b993a69b2430e1ab6dc1682789db0e723d9b5ca7e3fef9b6671994a3007`.
+Only its verified dead owned lease is removed after closure.
+
+Peer-reviewed successor `1893dc25` owns the writer hook before its first
+mutation and restores it once when the controlled cold copy ends, before
+later native publication/EOP writes. Partial installation, primary errors and
+unknown ownership retain the existing conservative cleanup behavior. Only
+the native test partial changes; production and all case identities remain
+unchanged. ROOT verifies 16 preparation artifacts and 2,016 source hashes;
+manifest SHA-256:
+`9d6176cd23fb23bf0f5aa5b0d25b9826a490fae6d69176671798a821558306a6`.
+Fresh build qualification is granted; passing results are pending.
 Local main remains the previously qualified `5016bc82` source. The historical
 checkpoints below retain their original source and lane state.
 
