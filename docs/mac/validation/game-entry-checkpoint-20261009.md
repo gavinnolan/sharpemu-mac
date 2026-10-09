@@ -4,6 +4,15 @@ Priority: make all nine games reach a menu or controllable scene first; performa
 
 Local main integrates qualified source `1893dc25`; its `src`, `tests` and `scripts` trees match that tested source. This adds bounded native watched Fill, pending-only canonical continuation, cold first-capture enrollment and first-installation diagnostics to the prior qualified source. It adds the GPU-produced private R32 original path, physical-placement ownership checks and bounded rejected-draw input capture for DS/Void diagnosis. It retains `8c4b352f` first watched command writes and exact Applied successors, first-status constructor Busy, first pre-encode owner diagnostics, buffer-publication continuation and gate-order correction. The longer Void replay reproduces a readable New Game menu, then goes black after confirm; it adds no gameplay acceptance. No remote push or upstream merge was performed. The six historical game replays below retain their exact executable source `188b9c2843289cdd4da5b709f49973eef3084f52`; later fixes do not relabel their evidence.
 
+Latest state: candidate `e2535177` passes all three builds and 1,246 ordinary
+cases on each actual CLR. All 246 separate workers pass, including the six
+formerly failing Busy-family workers. Signed publication is running; game replays
+are still pending. Local main remains on the qualified `1893dc25` implementation.
+Accepted gameplay remains 1/9 (Dreaming Sarah); no new gameplay or performance
+acceptance follows from these fixtures. Kairo stays source/light while SharpEmu
+owns the runtime lane. Separate Poppy foundation `d69faf76` and Void effect
+models `456d2e18` remain source-only and unqualified.
+
 ## Next source candidates and current runtime coordination
 
 Current lane: Kairo's one bounded v556 window is terminal. ROOT independently
@@ -177,16 +186,62 @@ with zero failures or skips. ROOT independently verifies forty-eight managed
 artifacts, all six exact case inventories, unchanged source/compiled hashes and
 fresh closure of fourteen owned roots. Managed manifest:
 `72cde28def460c16f6456bc32d312a9451a9cf3acaae2e3c73c4b59ad2546a28`.
-Separate native qualification is underway; publication and games remain unrun.
+Separate native qualification stops at the first Busy-retry fixture assertion;
+publication and games remain unrun.
 Both actual CLR workers now pass the formerly failing mixed buffer/image case
 with its full original status-4, writer, once-only publication and completion
-oracle unchanged. This resolves that fixture failure point; the remaining
-native workers still require completion before packaging or game replays.
+oracle unchanged. This resolves that earlier fixture failure point, but does
+not qualify the later failed Busy-retry case or remaining workers.
 Source manifest:
 `fa6f9ebd2311d8675815fac2065394341ce02502ff0398b13f6bf7189ff10c63`;
 prepared manifest:
 `1f4c89ca658c419c68940fe631caec35178b4f1088de080fce87a65f53dccf82`.
 No successor qualification, publication or game result is inherited.
+
+The 3bd separate phase retains 176 passing workers (eight activation metadata,
+twenty-six cold metadata and 142 native/provider), one failure and 69 unrun.
+`ActualNativeBusyPostReleaseRestoresDirtyAndBlocksFrameAndFutureEopUntilOriginalRetry`
+fails `Assert.Same` in `CheckOriginalVolumes`: expected `TrackedCpuMemory`, actual
+`PhysicalVirtualMemory`, the correctly selected GPU reader. Earlier status-4 and
+canonical completion rows do not make this failed case pass. ROOT verifies all
+1,256 artifacts, 2,041 source/104 compiled hashes, 177 exact outcomes and all
+176 passing full oracles, then confirms all 179 owned roots absent and the
+shared lease closed. Failed manifest:
+`ac081f4e4261ff8b81d0529aa8d0265bef03206523e97d5399f03b067c8a4567`.
+The failed source remains frozen. A complete remaining fixture identity audit
+precedes its successor; production guards and native byte checks remain intact.
+
+That audit covers all 119 listed case identities across seventeen fixture
+partials. It identifies exactly two contradictory reader checks: the failed
+Busy assertion and a failure-path cleanup comparison against the CPU tracker.
+Fixture-only source `e2535177` freezes the host-selected reader and each exact
+original volume before scenario effects; later checks use those saved identities.
+Cleanup matches the retained original Memory and Source alongside the existing
+Layout/Session checks. Faithful tracker metadata delegates and opaque wrappers
+remain unchanged. ROOT verifies all 2,042 worktree/tar hashes, eleven linked
+source artifacts, inverse full 3bd tree and unchanged production/scripts.
+All 1,246 ordinary and 246 separate identities are preserved; the six Busy
+workers run immediately after activation metadata. ROOT verifies all
+twenty-three preparation artifacts, seven inherited inventories, six minimal
+driver retargets and the approved exact worker reorder. All three builds pass,
+with seventeen retained artifacts, 2,042 unchanged source hashes and 104 compiled
+hashes independently verified. Build manifest:
+`c7d7088d181cc555066571fdd5ef1530d2c01a211bf4449b31b370f5c03ce675`.
+All 1,246 ordinary cases pass on each actual ARM64/x64 .NET 10.0.3 CLR with
+zero failures/skips. ROOT verifies forty-eight managed artifacts, all six exact
+inventories, stable compiled/source hashes and closure of fourteen owned roots.
+Managed manifest:
+`4f2d1041e922db7486d4183a291555951be0a15646fb2249733b942752be9f69`.
+All 246 fresh separate workers pass: eight activation metadata, twenty-six cold
+metadata and 212 native/provider workers. ROOT independently verifies all 1,740
+artifact hashes, 2,042 source hashes, 104 stable compiled hashes, exact case order,
+actual CLR/framework, complete per-worker oracles and fresh absence of all 248
+owned process roots. No actual heavy worker or shared lease remains. Native
+manifest: `0d46f5db5b7336cf5201e1005e98669d70de0cf02cdc604af1ddab88bdd427f2`.
+Publication is separately granted; no game replay is yet granted. Source manifest:
+`29fa86bbeb5b25d0fba1523e380fec478b820d37d2aa8ef566898c48da2cafff`.
+Preparation manifest:
+`3cee5a42d7e117cd67df372027dbff333815007d6a0e7713e45465c8369fadfe`.
 
 The external Quake one-action helper passes ten isolated Python controls,
 including actual atomic key writes and a pending stop signal during neutral
@@ -211,6 +266,21 @@ test, native module-install, signal recovery or game execution is qualified.
 Source archive manifest:
 `ff9686229827a145e5d4ebe8f2cbaf5739e9025f26f2cc3a35c773a5e3b7649f`.
 
+Frozen Poppy foundation union `d69faf76` combines that allocation/transport
+source with the exact `e2535177` boot parent. ROOT verifies all 2,051 worktree/tar
+hashes, fifteen unchanged donor blobs, both PhysicalVirtualMemory hunk inverses,
+unchanged boot paths and the inverse full parent tree. Its source manifest is
+`f6daf4c2b6daaf4bc6e1bbf275842db3f04fa9d3d93a721f28fe98ea5e08f212`.
+Phase-one drivers are prepared only: three builds, 53 focused controls per CLR
+(52 new plus an inherited actual architecture/framework proof in that same
+testhost), then all 1,298 ordinary cases per CLR. ROOT verifies fifteen linked
+preparation hashes, exact reused helper ASTs and preservation of the old ordinary
+inventories. Preparation manifest:
+`6e2595ef8b87d8d4e8eec55b1f15833c65e23bc678497295938f20474799c85f`.
+No foundation driver is executed, no native/provider/publication/game driver is
+added, and the separate eight actual-provider scenarios remain design-only.
+This source does not activate Poppy fault/store/trace recovery.
+
 The separate offline NGG scalar source `53eaad89` adds strict mathematical
 effects for five captured scalar opcodes, with forty-eight source controls.
 ROOT verifies all 1,809 worktree/tar hashes, original primary references and the
@@ -226,6 +296,14 @@ retained primary references and inverse parent tree. Combined static coverage
 is 104 of 707 captured sites, with 603 outside these models; no runtime shader
 acceptance changes. Source archive manifest:
 `ee1c3f61d4c1ef4da24863c8f55866fd801b61906cf49594a8cdbdef8fe88fa1`.
+Source-only child `456d2e18` models nine captured unsigned VCMPX sites with
+explicit supplied 32-lane inputs and old-EXEC intersection. ROOT reads the
+generation-specific primary definitions, reviews fifty-nine unrun controls,
+and verifies 1,815 source/tar hashes, fifteen retained primary-reference files
+and the inverse parent tree. Static model coverage is 113/707; the other 590
+sites and actual guest lane inputs remain unproved. No runtime route or MSL
+acceptance is changed. Source manifest:
+`dc26dc59f91262966175ff6b4cc3163c6743b4285b8415c0f00acbe94837f054`.
 
 
 The following predecessor history preserves failures and their original lane
