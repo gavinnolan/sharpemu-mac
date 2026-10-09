@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Images;
 using static SharpEmu.Libs.Agc.AgcBackendServices;
 using Binding = SharpEmu.Libs.Agc.AgcExports.TranslatedImageBinding;
@@ -618,7 +619,7 @@ internal static partial class MetalVideoPresenter
             request.HasMetadata || request.HasStencil || request.IsVolume || request.IsBlock)
             throw new NotSupportedException("Native selected color standalone request differs from its original normalized selected span.");
         RequireNativeColorOriginal(producer.Original);
-        texture = new GuestDrawTexture(d.Address, 512, 512, d.Format, d.NumberType, [], IsFallback: false,
+        texture = new GuestDrawTexture(d.Address, 512, 512, d.Format, d.NumberType, [], IsStorage: false, IsFallback: false,
             Pitch: 512, TileMode: 27, Sampler: ToGuestSampler(binding.SamplerDescriptor), DstSelect: d.DstSelect,
             Type: d.Type, SourceByteCount: 0x200000, Descriptor: raw.ToArray(), Shape: binding.Shape, Access: binding.Access, ResourceMipLevels: 1);
         lock (_gate)
