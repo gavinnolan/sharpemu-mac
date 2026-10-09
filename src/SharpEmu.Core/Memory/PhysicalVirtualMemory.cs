@@ -2414,8 +2414,12 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 return false;
             }
             originalSpace.RequireOrdinaryWriteWaitOutsideGates();
-            var outcome = reservation.TryAcquire(TimeSpan.FromMilliseconds(500));
-            if (OrdinaryWriteFailureDiagnostics.Enabled) failure = failure with { WaitOutcome = outcome };
+            OrdinaryBackingWriteCurrentnessFailure acquisitionCurrentness = default;
+            var outcome = OrdinaryWriteFailureDiagnostics.Enabled
+                ? reservation.TryAcquire(TimeSpan.FromMilliseconds(500), out acquisitionCurrentness)
+                : reservation.TryAcquire(TimeSpan.FromMilliseconds(500));
+            if (OrdinaryWriteFailureDiagnostics.Enabled)
+                failure = failure with { WaitOutcome = outcome, Currentness = acquisitionCurrentness };
             if (outcome != OrdinaryBackingWriteAdmission.Admitted)
             {
                 if (OrdinaryWriteFailureDiagnostics.Enabled) failure = failure with { Reason = "original-write-wait-declined" };
