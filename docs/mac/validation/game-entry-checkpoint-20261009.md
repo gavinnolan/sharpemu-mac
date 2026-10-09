@@ -2,16 +2,34 @@
 
 Priority: make all nine games reach a menu or controllable scene first; performance and visual polish follow entry.
 
-Local main integrates qualified source `1893dc25`; its `src`, `tests` and `scripts` trees match that tested source. This adds bounded native watched Fill, pending-only canonical continuation, cold first-capture enrollment and first-installation diagnostics to the prior qualified source. It adds the GPU-produced private R32 original path, physical-placement ownership checks and bounded rejected-draw input capture for DS/Void diagnosis. It retains `8c4b352f` first watched command writes and exact Applied successors, first-status constructor Busy, first pre-encode owner diagnostics, buffer-publication continuation and gate-order correction. Actual DS/Void replays below do not add a verified menu or gameplay title. No remote push or upstream merge was performed. The six historical game replays below retain their exact executable source `188b9c2843289cdd4da5b709f49973eef3084f52`; later fixes do not relabel their evidence.
+Local main integrates qualified source `1893dc25`; its `src`, `tests` and `scripts` trees match that tested source. This adds bounded native watched Fill, pending-only canonical continuation, cold first-capture enrollment and first-installation diagnostics to the prior qualified source. It adds the GPU-produced private R32 original path, physical-placement ownership checks and bounded rejected-draw input capture for DS/Void diagnosis. It retains `8c4b352f` first watched command writes and exact Applied successors, first-status constructor Busy, first pre-encode owner diagnostics, buffer-publication continuation and gate-order correction. The longer Void replay reproduces a readable New Game menu, then goes black after confirm; it adds no gameplay acceptance. No remote push or upstream merge was performed. The six historical game replays below retain their exact executable source `188b9c2843289cdd4da5b709f49973eef3084f52`; later fixes do not relabel their evidence.
 
 ## Next source candidates and current runtime coordination
 
-Current lane: Kairo's one bounded v555 batch is terminal and the lane is back
-with SharpEmu. ROOT retains a fresh independent process/lock check at
-`artifacts/validation/all-games-20261009/kairo-v555-terminal-runtime-handoff`.
-Kairo remains source/light only. Its brightness setup and delivered movie
-frames establish neither a menu nor gameplay; the later black capture and
-`ds_write_b128` shader blocker remain Kairo observations.
+Current lane: Kairo owns one bounded v556 build/test and 360-second Silent Hill
+replay window. Reported owned runner/game roots are `11260`/`11264`, lease owner
+`11260`. SharpEmu remains source/light until its fresh terminal handoff. Kairo's
+prior v555 terminal evidence and movie delivery do not establish menu/gameplay.
+
+The next isolated source union is `f76fa0d6fe4f91cf9df49db668d66b92a36e4cfa`.
+It combines the reviewed first admission-owner/local validation diagnostics,
+Superliminal failed-command metadata, Silent Hill first ordinary acquisition
+currentness diagnostics, and an explicit stable GPU memory view. The GPU view
+lets per-thread `TrackedCpuMemory` objects refer to the same underlying memory
+for GPU binding; distinct roots, opaque decorators and malformed views still
+refuse. It preserves the presenter identity guards. This targets the observed
+DS `guest-memory-replaced` failure; a new game result is pending.
+
+This union is **source-only and unqualified**. No build/test/game result is
+inherited from `1893dc25`. ROOT verifies all 2,030 worktree and source archive
+hashes; the expected ordinary inventory is 1,203 cases per actual CLR: 279 Host,
+819 Libs and 105 GPU. The 238 separate workers remain a separate inventory.
+Source manifest SHA-256:
+`3fc63f6696106229afa5603a7d64a570cc6b51ddbf0a901b8a4eb6497ca697fd`.
+Local main retains the qualified `1893dc25` implementation.
+
+The following predecessor history preserves failures and their original lane
+state; it is not the current execution queue.
 
 Combined source `bf7b3516` includes the reviewed Fill, pending-only canonical,
 first-installation diagnostic and cold first-capture enrollment candidates.
@@ -92,21 +110,39 @@ Inactive Poppy prototype `d632c098` adds a deterministic atomic per-thread claim
 Each attempt uses the exact signed publication and actual four-manifest pins,
 with fresh foreign-process, memory and shared-lease preflight. ROOT independently
 verifies each retained archive and exact driver/harness/game closure. Earlier
-failed attempts are unchanged. None of these four adds a menu or gameplay claim.
+failed attempts are unchanged. Void reproduces a menu; none adds gameplay acceptance.
 
 | Title | Observed result | First blocker / reached stage |
 | --- | --- | --- |
 | Oregon / `20261009-220911` | Exit 134 after 36 seconds, peak 2,057 MiB; one observed guest frame, black capture. | Cold enrollment is passed in this attempt, then the existing singleton cohort watch at `0x80115F0000` refuses `original-read-watch`, Stale, first admission `4294967296`. The local validation ticket is false; its lower predicate and actual slot owner remain unknown. |
 | Superliminal / `20261009-221110` | Exit 134 after 33 seconds, peak 3,195 MiB; black captures. | Command operation 375, submission 18 cannot prepare its ORIGINAL write. Exact first writer-reservation CAS rejects admission 2, before original-watch/history validation. Its operation kind/extent are not captured after the trace budget expires. This does not establish the old Fill blocker as fixed or unchanged. |
 | Silent Hill / `20261009-221248` | Exit 139 after 36 seconds, peak 1,822 MiB; black capture. | Several ordinary-write wait receipts return `OriginalChanged`, followed by guest memory-fault returns and SIGSEGV at `0x8049A8381`, writing through `0x28`. The failed acquisition does not yet save its exact currentness predicate. Canonical acknowledgments occur; no canonical post-release or GPU fatal is recorded. Crash causality remains unproved. |
-| Demon’s Souls / `20261009-221448` | Exit 134 after 58 seconds, peak 2,858 MiB; static launch artwork. | Compute `3E9247D2A2F42DBB` first installation rejects `guest-memory-replaced`, registry count 0, address `0x70FFF00000`. The later command-stream shutdown error is consequential. Per-thread tracking wrappers and first-worker memory binding are now under source review; no identity guard is bypassed. |
+| Demon’s Souls / `20261009-221448` | Exit 134 after 58 seconds, peak 2,858 MiB; static launch artwork. | Compute `3E9247D2A2F42DBB` first installation rejects `guest-memory-replaced`, registry count 0, address `0x70FFF00000`. The later command-stream shutdown error is consequential. Source inspection finds per-thread tracking wrappers compared against the first worker’s wrapper. The explicit stable GPU-view candidate awaits qualification and replay. |
+| Void Terrarium / `20261009-221717` | Alive at the 600-second cap, graceful stop in three seconds, peak 2,251 MiB. Readable publisher/title/menu captures. | New Game selected at 255–295 seconds. Recorded exact-owned-window Enter press/release spans 11.763 seconds; menu fades, then captures through the final frame are black. Guest consumption is not independently certified. No fatal appears in the 3,037-line log; no gameplay or FPS acceptance. |
 
 Individual manifests in `boot-cold-hook-successor-1893dc25-game-entry-prepared`:
 Oregon `c1a10d6ed094b1ddc4295c70dffa631e773ce3ad1c18a3d9f3e50c21b48ce250`,
 Superliminal `d512791bdbfe55d90aaba34acd6773e6718c3dc164dddcc7a5f93076604586ab`,
 Silent Hill `621e7f103881252a6da32f7f1618a941eb0d4fafe2ba3048ed8ed35a01131d08`,
 DS `ab0c2a6d00380cc67fe3a69531825c7b04fbb8afcfbea8ee754351250571d5c0`.
-The longer interactive Void attempt is running separately; its outcome is pending.
+Void `049500bd08838883e6ff221f45e65c1f9595ac30e531bc47e15fddf87521d193`.
+
+Void's rejected-input archive contains 20 files for two merged-stage exports:
+code sizes 4,352 and 4,864 bytes, stages `0x00402020`, eight draw records and
+raw one-point indexed payloads. The first rejection precedes host confirm; the
+second appears afterward. Neither the CPU register/index facts nor this order
+prove packed geometry inputs, LDS semantics, output correctness, or the sole
+cause of the black transition. The current vertex MSL path does not implement
+this merged geometry execution; merely accepting the stage mask is insufficient.
+
+ROOT verifies all 686 artifacts in the frozen five-title final manifest,
+SHA-256 `4fe65931e88de5bfb6d5de22935fbfc2b08341520f8b48ffd049cd5cf567c5d7`,
+and its root closure supplement,
+`cdd6749c9c61d5207c3f043128899a63d74460afffefc464894f100e401b8c07`.
+All 20 owned driver/harness/game/input-helper roots are terminal at the recorded
+handoff, no shared lease remains then, and source/binaries/signed payload are
+unchanged. This historical closure does not describe Kairo's later active lane.
+Accepted directional gameplay remains **1/9**, on the historical Sarah payload.
 
 ## Actual DS/Void replays on `5016bc82`
 
