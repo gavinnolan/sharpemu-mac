@@ -76,7 +76,7 @@ public sealed partial class MetalImmutableGpuVersionTests
 
     private void RunActualRuntimeTwoTypedPublications(bool overlappingCpuWrite, bool rgba = false, bool mixedBuffer = false, string? lateFailure = null, bool originalVolumes = false, string? busyOriginalRetry = null, string? constructionBusyWindow = null, string? queueRetentionWindow = null, string? bodyBusyWindow = null, string? precommitBusyWindow = null, string? phaseBusyWindow = null)
     {
-        Assert.True(DeviceRequested());
+        Assert.True(DeviceRequested(), "finite setup: actual native device request");
         var imageBytes = rgba ? 4194304 : 65536;
         var allocationBytes = imageBytes + (originalVolumes ? 3 : 1) * 65536;
         var storeOffset = rgba ? Bgra1024Oracle.Offset(257, 511) : 0;
@@ -112,22 +112,22 @@ public sealed partial class MetalImmutableGpuVersionTests
             physical = new PhysicalVirtualMemory(HostMemoryAuthority.Current, viewHost,
                 backingBytes: checked((ulong)allocationBytes * 2), preReserveGuestAddressSpace: false);
             owners.Physical = physical;
-            Assert.True(physical.TryHoldRangeAtOrAbove(0x71F6_0000_00, (ulong)allocationBytes, 65536, out address));
-            Assert.True(address != 0 && (address & 65535) == 0 && address >> 48 == 0);
-            Assert.True(physical.TryHoldRange(address, (ulong)allocationBytes));
+            Assert.True(physical.TryHoldRangeAtOrAbove(0x71F6_0000_00, (ulong)allocationBytes, 65536, out address), "finite setup: image placeholder hold-at-or-above");
+            Assert.True(address != 0 && (address & 65535) == 0 && address >> 48 == 0, "finite setup: image placeholder nonzero/alignment/address bounds");
+            Assert.True(physical.TryHoldRange(address, (ulong)allocationBytes), "finite setup: image placeholder exact hold");
             Assert.True(physical.TryMapBacked(address, (ulong)allocationBytes, 65536,
                 GuestPageProtection.Read | GuestPageProtection.Write, out var mapFailure), $"map failure={mapFailure}");
             ICpuMemory cpuSource = physical;
             if (bodyBusyWindow is not null || precommitBusyWindow is not null || phaseBusyWindow is not null)
             {
-                Assert.True(rgba && originalVolumes);
+                Assert.True(rgba && originalVolumes, "finite setup: independent volume route requires RGBA plus original volumes");
                 var volumePhysical = new PhysicalVirtualMemory(HostMemoryAuthority.Current, HostViewMemory.Create(),
                     backingBytes: 6 * 65536UL, preReserveGuestAddressSpace: false);
                 owners.BodyVolumePhysical = volumePhysical;
-                Assert.True(volumePhysical.TryHoldRangeAtOrAbove(0x71F7_0000_00, 3 * 65536, 65536, out var volumeBase));
+                Assert.True(volumePhysical.TryHoldRangeAtOrAbove(0x71F7_0000_00, 3 * 65536, 65536, out var volumeBase), "finite setup: independent volume placeholder hold-at-or-above");
                 owners.BodyVolumeAddress = volumeBase;
-                Assert.True(volumeBase > address + (ulong)allocationBytes || volumeBase + 3 * 65536 < address);
-                Assert.True(volumePhysical.TryHoldRange(volumeBase, 3 * 65536));
+                Assert.True(volumeBase > address + (ulong)allocationBytes || volumeBase + 3 * 65536 < address, "finite setup: separate image and volume virtual extents");
+                Assert.True(volumePhysical.TryHoldRange(volumeBase, 3 * 65536), "finite setup: independent volume placeholder exact hold");
                 Assert.True(volumePhysical.TryMapBacked(volumeBase, 3 * 65536, 65536,
                     GuestPageProtection.Read | GuestPageProtection.Write, out var volumeFailure), $"volume map failure={volumeFailure}");
                 cpuSource = new BodyBusyRoutedMemory(physical, volumePhysical, volumeBase, 3 * 65536,
@@ -142,13 +142,13 @@ public sealed partial class MetalImmutableGpuVersionTests
             var expected = Enumerable.Range(0, allocationBytes).Select(i => (byte)(i * 19 + 7)).ToArray();
             if (rgba) Bgra1024Oracle.PhysicalSeed().CopyTo(expected, 0);
             else BinaryPrimitives.WriteUInt32LittleEndian(expected, 0x87654321);
-            Assert.True(physical.TryWriteBacking(address, expected));
+            Assert.True(physical.TryWriteBacking(address, expected), "finite setup: full original image backing seed write");
             if (owners.BodyVolumePhysical is { } bodyPhysical)
-                Assert.True(bodyPhysical.TryWriteBacking(owners.BodyVolumeAddress, expected.AsSpan(imageBytes, 3 * 65536)));
+                Assert.True(bodyPhysical.TryWriteBacking(owners.BodyVolumeAddress, expected.AsSpan(imageBytes, 3 * 65536)), "finite setup: full independent volume backing seed write");
             uint[] raw = rgba
                 ? [(uint)(address >> 8), (uint)(address >> 40) | 0xC3800000u, 0x00FFC0FF, 0xD1B00F2E, 0, 0x00700000, 0, 0]
                 : [(uint)(address >> 8), 0x01400000, 0, 0xD1B00204, 0, 0x00700000, 0, 0];
-            Assert.True(AgcBackendServices.TryDecodeTextureDescriptor(raw, out var descriptor));
+            Assert.True(AgcBackendServices.TryDecodeTextureDescriptor(raw, out var descriptor), "finite setup: original image descriptor decode");
             // No fixture pre-arm or injected receipt: the production cold copy
             // itself establishes its actual protection before its original
             // epoch/token and mapped bytes are captured.
@@ -156,7 +156,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             var binding = new AgcExports.TranslatedImageBinding(descriptor, true, 0, [], IsArrayed: true,
                 ResourceDescriptor: raw, Shape: new ShaderImageShape(false, true, true, false, rgba ? TextureNumericClass.Float : TextureNumericClass.Uint),
                 Access: GuestImageAccess.Write);
-            Assert.True(ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_KERNEL_PAGE"), out var kernelPage));
+            Assert.True(ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_KERNEL_PAGE"), out var kernelPage), "finite setup: expected measured kernel-page environment parse");
             var host = new MetalCommandStreamHost(memory, backend, backend);
             var reports = new List<string>(); GpuFatal.OnFatal = reports.Add;
             if (originalVolumes && !MaterializeOriginalVolumes()) return;
@@ -326,7 +326,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                     uint[] volumeRaw = kind == 0
                         ? [(uint)(volumeAddress >> 8), (uint)(volumeAddress >> 40) | 0x03C00000, 0, 0xA1B00FAC, 0, 0x00700000, 0, 0]
                         : [(uint)(volumeAddress >> 8), (uint)(volumeAddress >> 40) | 0xC3C00000, 0x0003C003, 0xA0000FAC, 15, 0x00700000, 0, 0];
-                    Assert.True(AgcBackendServices.TryDecodeTextureDescriptor(volumeRaw, out var volumeDescriptor));
+                    Assert.True(AgcBackendServices.TryDecodeTextureDescriptor(volumeRaw, out var volumeDescriptor), "finite setup: original volume descriptor decode");
                     var volumeBinding = new AgcExports.TranslatedImageBinding(volumeDescriptor, true, 0, [], IsArrayed: false,
                         ResourceDescriptor: volumeRaw, Shape: new ShaderImageShape(true, false, true, false, TextureNumericClass.Uint), Access: GuestImageAccess.Write);
                     var seed = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [volumeBinding], out _));
@@ -356,7 +356,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                             Assert.False(watchedSource.IsMappedCopyWriteWatchCurrent(mapping));
                             Assert.True(held!.IsOriginalCurrent(mapping));
                             sequence = state.AdmitFiniteStorage(seed, shader);
-                            Assert.True(sequence > 0);
+                            Assert.True(sequence > 0, "finite setup: original volume public admission sequence");
                         }
                         catch (Exception failure) { reservationFailure = failure; throw; }
                         finally
@@ -377,11 +377,11 @@ public sealed partial class MetalImmutableGpuVersionTests
                         Assert.True(watchedSource.IsMappedCopyWriteWatchCurrent(mapping));
                     }
                     else sequence = state.AdmitFiniteStorage(seed, shader);
-                    Assert.True(sequence > 0);
+                    Assert.True(sequence > 0, "finite setup: original volume public admission sequence");
                     // Actual frontend disposal after public Submit, BEFORE the
                     // real Drain transfers ownership to the native image.
                     MetalVideoPresenter.ReleasePreparedTextureSources([seed]);
-                    Assert.True(((ICpuMappedReadWatchSource)memory).IsMappedCopyWriteWatchCurrent(mapping));
+                    Assert.True(((ICpuMappedReadWatchSource)memory).IsMappedCopyWriteWatchCurrent(mapping), "finite setup: original volume watch after frontend release");
                     if (queueRetentionWindow == "overlap" && kind == 1)
                     {
                         var completedBefore = (long)Field("_completedGuestWorkSequence").GetValue(null)!;
@@ -452,7 +452,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                 {
                     var original = StorageMember(nativeImage,"StorageCpuOrigin")!;
                     var mapping = (CpuMappedCopyObservation)StorageMember(original,"Mapping")!;
-                    Assert.True(((ICpuMappedReadWatchSource)memory).IsMappedCopyWriteWatchCurrent(mapping));
+                    Assert.True(((ICpuMappedReadWatchSource)memory).IsMappedCopyWriteWatchCurrent(mapping), "finite original-cohort check: retained volume watch after canonical publication");
                     lock(Field("_gate").GetValue(null)!) Assert.True((bool)Call("IsSingletonVolumeNativeOwnerCurrentLocked",nativeImage,original)!);
                 }
                 output.WriteLine("original-volume-native disjoint canonical Applied/publication/EOP retained BOTH exact native watch owners");
