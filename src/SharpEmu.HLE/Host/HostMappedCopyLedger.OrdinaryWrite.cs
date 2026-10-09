@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 namespace SharpEmu.HLE.Host;
 
+// Detached values from the failing ORIGINAL identity predicate, not a lease.
+public readonly record struct OrdinaryWriteIdentityFailure(string? Reason, int ViewIndex,
+    ulong ViewAddress, long OriginalIncarnation, long? ComparedIncarnation);
+
 public sealed unsafe partial class HostMappedCopyLedger
 {
     // ORIGINAL provider records only, captured before the first ordinary write
@@ -46,6 +50,46 @@ public sealed unsafe partial class HostMappedCopyLedger
             Volatile.Read(ref view.Revoked) == 0 && Volatile.Read(ref view.CopyAvailable) != 0 &&
             Volatile.Read(ref view.GuestAccessKnown) && (view.Access & GuestPageProtection.Write) != 0 &&
             Volatile.Read(ref view.Incarnation) == incarnation;
+
+        // Diagnostic alternative to IsCurrent: identical ordered predicates,
+        // sampled ONCE at the failing call. Do not query again after refusal.
+        public bool TryIsCurrent(out OrdinaryWriteIdentityFailure failure)
+        {
+            failure = default;
+            var reason = owner is null ? "original-provider-missing"
+                : backing is null ? "original-backing-missing"
+                : Volatile.Read(ref owner.unknownAlias) ? "provider-unknown-alias"
+                : backing.IsClosing ? "original-backing-closing"
+                : backing.IsDisposed ? "original-backing-disposed" : null;
+            if (reason is not null) { failure = new(reason, -1, 0, 0, null); return false; }
+            if (single is not null) return InspectOriginalView(single, singleIncarnation, 0, out failure);
+            if (states is null || incarnations is null || states.Length == 0)
+            { failure = new("original-views-missing", -1, 0, 0, null); return false; }
+            for (var index = 0; index < states.Length; index++)
+                if (!InspectOriginalView(states[index], incarnations[index], index, out failure)) return false;
+            return true;
+        }
+
+        private bool InspectOriginalView(View view, long incarnation, int index,
+            out OrdinaryWriteIdentityFailure failure)
+        {
+            failure = default;
+            var reason = !ReferenceEquals(view.Owner, owner) ? "original-view-foreign-provider"
+                : !ReferenceEquals(view.Backing, backing) ? "original-view-foreign-backing"
+                : Volatile.Read(ref view.Revoked) != 0 ? "original-view-revoked"
+                : Volatile.Read(ref view.CopyAvailable) == 0 ? "original-view-copy-unavailable"
+                : !Volatile.Read(ref view.GuestAccessKnown) ? "original-guest-access-unknown"
+                : (view.Access & GuestPageProtection.Write) == 0 ? "original-guest-write-denied" : null;
+            long? compared = null;
+            if (reason is null)
+            {
+                compared = Volatile.Read(ref view.Incarnation);
+                if (compared != incarnation) reason = "original-view-incarnation-changed";
+            }
+            if (reason is null) return true;
+            failure = new(reason, index, view.Address, incarnation, compared);
+            return false;
+        }
     }
 
     public OrdinaryWriteIdentity? CaptureOrdinaryWriteIdentity(HostBackingObject backing, ulong address, ulong size)

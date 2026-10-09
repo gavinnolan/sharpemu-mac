@@ -2358,14 +2358,17 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             try
             {
                 var region = FindRegion(address, (ulong)source.Length);
+                OrdinaryBackingWriteCurrentnessFailure currentness = default;
                 var refusal = _disposed ? "pvm-disposed-after-admission"
                     : !ReferenceEquals(_backedSpace, originalSpace) ? "backed-owner-replaced-after-admission"
                     : !originalRegion.Matches(region) ? "original-region-changed-after-admission"
-                    : !reservation.IsOriginalCurrent ? "original-mapping-changed-after-admission"
+                    : !(OrdinaryWriteFailureDiagnostics.Enabled
+                        ? reservation.TryIsOriginalCurrent(out currentness)
+                        : reservation.IsOriginalCurrent) ? "original-mapping-changed-after-admission"
                     : !IsBackedSpan(region, address, (ulong)source.Length) ? "original-no-longer-backed-after-admission" : null;
                 if (refusal is not null)
                 {
-                    if (OrdinaryWriteFailureDiagnostics.Enabled) failure = failure with { Reason = refusal };
+                    if (OrdinaryWriteFailureDiagnostics.Enabled) failure = failure with { Reason = refusal, Currentness = currentness };
                     return false;
                 }
                 reservation.BeginWriteAttempt();

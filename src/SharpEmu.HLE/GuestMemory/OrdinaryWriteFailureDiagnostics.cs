@@ -8,7 +8,10 @@ public readonly record struct SharedWriteFailure(string? Reason, long RejectedAd
 public readonly record struct OrdinaryWriteFailure(string? Reason, ulong Address, ulong Bytes,
     bool RegionFound, ulong RegionAddress, ulong RegionBytes, uint RegionProtection,
     bool RegionBacked, bool RegionReserved, SharedWriteFailure Shared,
-    OrdinaryBackingWriteAdmission? WaitOutcome);
+    OrdinaryBackingWriteAdmission? WaitOutcome)
+{
+    public OrdinaryBackingWriteCurrentnessFailure Currentness { get; init; }
+}
 
 public static class OrdinaryWriteFailureDiagnostics
 {
@@ -29,7 +32,12 @@ public static class OrdinaryWriteFailureDiagnostics
                 $"original_region_protection=0x{failure.RegionProtection:X} original_region_backed={failure.RegionBacked} original_region_reserved={failure.RegionReserved} " +
                 $"shared_reason={failure.Shared.Reason ?? "not-classified"} rejected_admission={failure.Shared.RejectedAdmission} " +
                 $"original_capture_reason={failure.Shared.OriginalCaptureReason ?? "not-classified"} original_captured={failure.Shared.OriginalCaptured} alias_pin_acquired={failure.Shared.AliasPinAcquired} snapshot_matched={failure.Shared.SnapshotMatched} " +
-                $"wait_outcome={failure.WaitOutcome?.ToString() ?? "not-attempted"}");
+                $"wait_outcome={failure.WaitOutcome?.ToString() ?? "not-attempted"} " +
+                $"original_currentness_reason={failure.Currentness.Reason ?? "not-classified"} " +
+                $"provider_currentness_reason={failure.Currentness.Provider.Reason ?? "not-classified"} " +
+                $"original_view_index={failure.Currentness.Provider.ViewIndex} original_view_addr=0x{failure.Currentness.Provider.ViewAddress:X} " +
+                $"original_incarnation={failure.Currentness.Provider.OriginalIncarnation} " +
+                $"compared_incarnation={failure.Currentness.Provider.ComparedIncarnation?.ToString() ?? "not-classified"}");
         }
         catch { } // Optional output cannot replace a failed write or cleanup cause.
     }
