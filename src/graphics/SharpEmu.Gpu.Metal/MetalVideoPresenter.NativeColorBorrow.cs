@@ -600,7 +600,7 @@ internal static partial class MetalVideoPresenter
             else if (work is ComputeGuestDispatch dispatch)
             { foreach (var texture in dispatch.Textures) Texture(texture); Buffers(dispatch.GlobalMemoryBuffers); }
             else
-                throw new NotSupportedException("Native color has an unknown accepted sibling writer.");
+                throw NativeColorUnknownWorkFailure(work, future, producer, _nativeColorDiagnostics);
         }
         void Target(GuestRenderTarget target, PendingGuestWork? future = null)
         {
@@ -886,10 +886,17 @@ internal static partial class MetalVideoPresenter
         _nativeColorDiagnostics ? new NativeColorSiblingException(reason, address, image) : new NotSupportedException("Native selected color sibling has no original physical provenance.");
     private static void TraceNativeColorRefusal(Exception failure)
     {
-        if (!_nativeColorDiagnostics || Monitor.IsEntered(_gate) || failure is not NativeColorSiblingException sibling) return;
+        if (!_nativeColorDiagnostics || Monitor.IsEntered(_gate) ||
+            failure is not NativeColorSiblingException && failure is not NativeColorUnknownWorkException) return;
         if (Interlocked.Increment(ref _nativeColorRefusalRows) > 64) return;
         try
         {
+            if (failure is NativeColorUnknownWorkException unknown)
+            {
+                Console.Error.WriteLine(FormatNativeColorUnknownWork(unknown));
+                return;
+            }
+            var sibling = (NativeColorSiblingException)failure;
             Console.Error.WriteLine($"[MetalNativeColorRefusal] reason={sibling.Reason} addr=0x{sibling.Address:X} shape={sibling.Width}x{sibling.Height}x{sibling.Depth} layers={sibling.Layers} native_type={sibling.Type} format={sibling.Format} version={sibling.Version} gpu_written={sibling.GpuWritten} initialized={sibling.Initialized}");
         }
         catch { } // optional logging cannot replace the original guard

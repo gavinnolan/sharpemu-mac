@@ -602,6 +602,7 @@ internal static partial class MetalVideoPresenter
         }
         catch (Exception failure)
         {
+            TraceNativeColorRefusal(failure);
             // ResolveDrawTextures transferred per-call retains. This validation
             // precedes EncodeDrawBindings' normal ownership release loop.
             ReleaseComputeTemporaryTextures(textureHandles, textureOwned, failure);
