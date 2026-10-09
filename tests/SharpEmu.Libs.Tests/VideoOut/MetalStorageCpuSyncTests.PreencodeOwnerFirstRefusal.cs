@@ -24,13 +24,11 @@ public sealed partial class MetalStorageCpuSyncTests
         var fields = new[] { "StorageCpuOrigin", "StorageCpuLayout", "Texture", "ContentVersion", "Width", "Height", "Depth",
             "ArrayLength", "TextureType", "Format", "Initialized", "GpuWritten" };
         var values = fields.Select(name => PrecommitGet(image, name)).ToArray();
-        var flag = Field("_volumeOwnerDeclineDiagnostics"); var oldFlag = flag.GetValue(null);
         var watch = VolumeWatch(fixture.Origin); var oldState = PrecommitGet(watch, "State"); var oldUnknown = PrecommitGet(watch, "UnknownProducer");
         var mappings = fixture.Memory.MappingQueries; var watches = fixture.Memory.WatchQueries;
         fixture.Memory.ReadStatus = () => throw new IOException("metadata attribution must never classify a provider status");
         try
         {
-            flag.SetValue(null, true);
             switch (change)
             {
                 case "image-original": Set(image, "StorageCpuOrigin", null); break;
@@ -53,7 +51,7 @@ public sealed partial class MetalStorageCpuSyncTests
             }
             Exception failure;
             lock (Field("_gate").GetValue(null)!)
-                failure = Assert.Throws<TargetInvocationException>(() => InvokeVolume("ValidateFiniteStoragePreencodeSavedImageLocked", original)).InnerException!;
+                failure = Assert.Throws<TargetInvocationException>(() => InvokeVolume("ValidateFiniteStoragePreencodeSavedImageWithDiagnosticsLocked", original, true)).InnerException!;
             Assert.Equal("Finite storage pre-encode ORIGINAL native owner/version changed.", failure.Message);
             var first = failure.GetType().GetField("First", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(failure)!;
             Assert.Equal(Address, PreencodeDiagnosticValue(first, "Address"));
@@ -70,7 +68,7 @@ public sealed partial class MetalStorageCpuSyncTests
         {
             Images[Address] = image;
             for (var index = 0; index < fields.Length; index++) Set(image, fields[index], values[index]);
-            PrecommitSet(watch, "State", oldState); PrecommitSet(watch, "UnknownProducer", oldUnknown); flag.SetValue(null, oldFlag);
+            PrecommitSet(watch, "State", oldState); PrecommitSet(watch, "UnknownProducer", oldUnknown);
         }
     }
 
@@ -109,17 +107,16 @@ public sealed partial class MetalStorageCpuSyncTests
     {
         ActualArchitecture(); using var fixture = new PrecommitScalarFixture();
         var saved = InvokeVolume("CaptureFiniteStoragePrecommitImage", Address, fixture.Image)!;
-        var flag = Field("_volumeOwnerDeclineDiagnostics"); var previous = flag.GetValue(null);
         try
         {
-            flag.SetValue(null, false); Images.Remove(Address);
+            Images.Remove(Address);
             lock (Field("_gate").GetValue(null)!)
             {
-                var failure = Assert.Throws<TargetInvocationException>(() => InvokeVolume("ValidateFiniteStoragePreencodeSavedImageLocked", saved)).InnerException!;
+                var failure = Assert.Throws<TargetInvocationException>(() => InvokeVolume("ValidateFiniteStoragePreencodeSavedImageWithDiagnosticsLocked", saved, false)).InnerException!;
                 Assert.IsType<InvalidOperationException>(failure); Assert.Null(failure.GetType().GetField("First"));
                 Assert.Equal("Finite storage pre-encode ORIGINAL native owner/version changed.", failure.Message);
             }
         }
-        finally { Images[Address] = fixture.Image; flag.SetValue(null, previous); }
+        finally { Images[Address] = fixture.Image; }
     }
 }

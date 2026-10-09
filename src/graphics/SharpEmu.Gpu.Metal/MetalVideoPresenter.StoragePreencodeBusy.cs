@@ -126,9 +126,12 @@ internal static partial class MetalVideoPresenter
         internal readonly FiniteStoragePreencodeOwnerDiagnostic First = first;
     }
 
-    private static void ValidateFiniteStoragePreencodeSavedImageLocked(FiniteStoragePrecommitImage saved)
+    private static void ValidateFiniteStoragePreencodeSavedImageLocked(FiniteStoragePrecommitImage saved) =>
+        ValidateFiniteStoragePreencodeSavedImageWithDiagnosticsLocked(saved, _volumeOwnerDeclineDiagnostics);
+
+    private static void ValidateFiniteStoragePreencodeSavedImageWithDiagnosticsLocked(FiniteStoragePrecommitImage saved, bool captureFirstRefusal)
     {
-        if (!_volumeOwnerDeclineDiagnostics)
+        if (!captureFirstRefusal)
         {
             // Cached-off retains the original predicate, reads and exception.
             if (!_guestImages.TryGetValue(saved.Address, out var image) || !ReferenceEquals(image, saved.Image) ||
