@@ -174,7 +174,7 @@ public sealed partial class MetalTextureMaterializationTests
         { GuestImageWriteTracker.NotifyManagedWrite(destination, (ulong)bytes.Length); return views.TryWriteBacking(destination, bytes); }
     }
 
-    private sealed class SelectedNativeExecutionState : IDisposable
+    private sealed partial class SelectedNativeExecutionState : IDisposable
     {
         private readonly List<(FieldInfo Field, object? Value)> saved = [];
         private readonly List<object> shaders = [];
