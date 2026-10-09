@@ -110,7 +110,8 @@ public sealed partial class MetalImmutableGpuVersionTests
         Assert.NotEqual(ownMapping.Segments[0].BackingIdentity, volumeMapping.Segments[0].BackingIdentity);
         var volumeOriginals = owners.VolumeImages.Select(owner => StorageMember(owner, "StorageCpuOrigin")!).ToArray();
         var nativeOriginals = owners.VolumeImages.Select(owner => ReadNativeVolume(owner)).ToArray();
-        var extraExpected = expected.AsSpan(imageBytes, 3 * 65536).ToArray();
+        // The independent volume backing retained the INITIAL seed; the image-only EOP never writes it.
+        var extraExpected = Enumerable.Range(imageBytes, 3 * 65536).Select(i => (byte)(i * 19 + 7)).ToArray();
         var extraBefore = ReadExtra(); Assert.Equal(extraExpected, extraBefore);
         var writeAddress = scenario == "overlap" ? volumeMapping.SourceAddress : owners.BodyVolumeAddress + 32768;
         Assert.True(volumeViews.TryResolveAlias(writeAddress, 1, out var alias));
