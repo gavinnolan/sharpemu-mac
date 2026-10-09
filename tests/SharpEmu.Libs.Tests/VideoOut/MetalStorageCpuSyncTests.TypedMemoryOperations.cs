@@ -16,6 +16,59 @@ public sealed partial class MetalStorageCpuSyncTests
 {
     private static object?[]? typedMemoryResetQuarantine;
 
+    // Real admission/Take/Complete, metadata only: this callback validates the
+    // exact original receipt without preparing a transaction or writing bytes.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void TypedOriginalReceiptRequiresActualRenderDrainScope(bool productionWrapper)
+    {
+        ActualArchitecture(); using var state = new BorrowColorState();
+        GpuFatal.OnFatal = _ => { };
+        var memory = new TypedColorMemory("disjoint"); MetalVideoPresenter.AttachGuestMemory(memory);
+        using var queue = MetalVideoPresenter.EnterGuestQueue("typed.color", 7);
+        var backend = new MetalGuestGpuBackend(); var host = new MetalCommandStreamHost(memory, backend, backend);
+        var operation = SharpEmu.Libs.Gpu.GpuCommands.CommandMemoryOperation.Write(TypedColorMemory.Destination, new byte[8]);
+        object? original = null; var validated = false;
+        Action inspect = () =>
+        {
+            try
+            {
+                lock (Field("_gate").GetValue(null)!) InvokeVolume("RequireCommandMemoryExecutionLocked", original);
+                var mapping = original!.GetType().GetProperty("Mapping")!.GetValue(original)!;
+                InvokeVolume("RequireCommandMemoryOriginal", original, mapping, true);
+                validated = true;
+            }
+            catch (TargetInvocationException failure) when (failure.InnerException is not null)
+            { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure.InnerException).Throw(); throw; }
+        };
+        original = InvokeVolume("PrepareCommandMemoryOperation", host, operation, inspect)!;
+        Assert.NotNull(original.GetType().GetProperty("Mapping")!.GetValue(original));
+        Assert.Equal(0, Field("_guestWorkDrainDepth").GetValue(null));
+        try
+        {
+            lock (Field("_gate").GetValue(null)!) Assert.Equal(1L, InvokeVolume("EnqueueGuestWorkLocked", original));
+            if (productionWrapper)
+            {
+                Assert.Equal(true, InvokeVolume("TryDrainGuestWork", (nint)0, (nint)0));
+                Assert.True(validated); Assert.Equal(1L, Field("_completedGuestWorkSequence").GetValue(null));
+            }
+            else
+            {
+                var failure = Assert.Throws<TargetInvocationException>(() => InvokeVolume("DrainGuestWorkCore",
+                    (nint)0, (nint)0, 5L * System.Diagnostics.Stopwatch.Frequency));
+                var fatal = Assert.IsType<GpuFatalException>(failure.InnerException);
+                Assert.Contains("exact taken/executing original receipt", fatal.InnerException!.Message);
+                Assert.False(validated); Assert.Equal(0L, Field("_completedGuestWorkSequence").GetValue(null));
+            }
+            Assert.Equal(0, Field("_guestWorkDrainDepth").GetValue(null));
+            Assert.Equal(0L, Field("_executingGuestWorkSequence").GetValue(null));
+            Assert.Equal(0L, Field("_takenGuestWorkSequence").GetValue(null));
+            Assert.Equal(1, memory.CommandCopies); Assert.Equal(0, memory.Writes);
+        }
+        finally { InvokeVolume("CompletePresenterShutdown"); }
+    }
+
     [Fact]
     public void RetainedUncertainOriginalWriteRefusesPublicReadmissionAfterPresenterReset()
     {

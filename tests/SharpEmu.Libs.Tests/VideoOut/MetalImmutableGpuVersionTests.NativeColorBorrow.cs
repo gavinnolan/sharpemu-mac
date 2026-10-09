@@ -57,6 +57,22 @@ public sealed partial class MetalImmutableGpuVersionTests
     public void ActualClosedMemoryWriteCancelsOriginalTicketOnChangedSessionWithoutBytesOrAck() =>
         RunNativeColorBorrow(true, typedMemory: "session-before-prepare");
 
+    // The typed receipt requires the production wrapper's exact execution
+    // scope. Keep its per-pass budget and bound all fixture passes to the same
+    // aggregate five seconds as the original direct-core fixture helper.
+    private static void DrainTypedWithActualRenderScope(NativeState state)
+    {
+        var deadline = Environment.TickCount64 + 5000;
+        while (true)
+        {
+            Call("TryDrainGuestWork", state.NativeFaceDevice, state.NativeFaceQueue);
+            lock (Field("_gate").GetValue(null)!)
+                if ((int)Field("_pendingGuestWorkCount").GetValue(null)! == 0) return;
+            Assert.True(Environment.TickCount64 < deadline,
+                "Typed native fixture did not finish its actual bounded render passes within five seconds.");
+        }
+    }
+
     private void RunNativeColorBorrow(bool completedFirst, bool failPredecessorCleanup = false, string? typedMemory = null)
     {
         NativeDepthAssert(DeviceRequested());
@@ -266,7 +282,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                 var completedBefore = Field("_completedGuestWorkSequence").GetValue(null);
                 if (typedMemory == "physical-alias")
                 {
-                    var rejected = Assert.Throws<TargetInvocationException>(() => state.DrainWithControlledBudget());
+                    var rejected = Assert.Throws<TargetInvocationException>(() => DrainTypedWithActualRenderScope(state));
                     var fatal = Assert.IsType<GpuFatalException>(rejected.InnerException);
                     Assert.Contains("ORIGINAL physical image", fatal.InnerException!.Message);
                     Assert.Equal(completedBefore, Field("_completedGuestWorkSequence").GetValue(null));
@@ -292,7 +308,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                         else Field("_selectedStorageMipSession").SetValue(null, (long)oldSession! + 1);
                         replacements++;
                     }));
-                    var rejected = Assert.Throws<TargetInvocationException>(() => state.DrainWithControlledBudget());
+                    var rejected = Assert.Throws<TargetInvocationException>(() => DrainTypedWithActualRenderScope(state));
                     var fatal = Assert.IsType<GpuFatalException>(rejected.InnerException);
                     Assert.Contains(typedMemory == "session-before-prepare" ? "ORIGINAL complete writable mapping/session" : "reserve its ORIGINAL", fatal.InnerException!.Message);
                     Assert.ThrowsAny<Exception>(() => typedCaller.GetAwaiter().GetResult());
@@ -311,7 +327,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                     output.WriteLine($"native-color-typed-memory scenario={typedMemory} original_prepare_veto=1 no_writer_bytes_or_ack=1 completed_consumer_status=4 full_native_bytes=2097152 unchanged_original_chain=1");
                     goto FixtureFinished;
                 }
-                state.DrainWithControlledBudget();
+                DrainTypedWithActualRenderScope(state);
                 Assert.True(typedCaller.GetAwaiter().GetResult()); Call("WaitForFlushedGuestCommands");
                 var consumerOutput = Assert.Single(((IDictionary)Field("_transientTargets").GetValue(null)!).Values.Cast<nint>());
                 var consumerBytes = ReadNativeColorThroughBlit(state, consumerOutput, readback, contents);
@@ -336,7 +352,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                 // EOP remains an opaque callback; it is deliberately admitted
                 // only AFTER the real sampled consumer and typed write finish.
                 host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write64, 1, typedAddress + 8, 0x1020304050607080));
-                state.DrainWithControlledBudget();
+                DrainTypedWithActualRenderScope(state);
                 BitConverter.GetBytes(0x1020304050607080UL).CopyTo(typedBaseline, 8);
                 NativeDepthAssert(memory.TryRead(typedAddress, actualWrite)); Assert.Equal(typedBaseline, actualWrite);
                 output.WriteLine("native-color-typed-memory status=4 sampled_native_bytes=2097152 original_chain_unchanged=1 disjoint_full_guest_bytes=65536 owned_write_once=1 EOP_after_consumer=1");
