@@ -126,7 +126,8 @@ public sealed partial class MetalImmutableGpuVersionTests
                 owners.BodyVolumePhysical = volumePhysical;
                 Assert.True(volumePhysical.TryHoldRangeAtOrAbove(0x71F7_0000_00, 3 * 65536, 65536, out var volumeBase), "finite setup: independent volume placeholder hold-at-or-above");
                 owners.BodyVolumeAddress = volumeBase;
-                Assert.True(volumeBase > address + (ulong)allocationBytes || volumeBase + 3 * 65536 < address, $"finite setup: separate image and volume virtual extents image=[0x{address:X},0x{address + (ulong)allocationBytes:X}) volume=[0x{volumeBase:X},0x{volumeBase + 3 * 65536:X})");
+                output.WriteLine($"finite setup extents image_address=0x{address:X}; image_bytes={allocationBytes}; volume_address=0x{volumeBase:X}; volume_bytes={3 * 65536}");
+                Assert.True(volumeBase >= address + (ulong)allocationBytes || volumeBase + 3 * 65536 <= address, $"finite setup: separate image and volume virtual extents image=[0x{address:X},0x{address + (ulong)allocationBytes:X}) volume=[0x{volumeBase:X},0x{volumeBase + 3 * 65536:X})");
                 Assert.True(volumePhysical.TryHoldRange(volumeBase, 3 * 65536), "finite setup: independent volume placeholder exact hold");
                 Assert.True(volumePhysical.TryMapBacked(volumeBase, 3 * 65536, 65536,
                     GuestPageProtection.Read | GuestPageProtection.Write, out var volumeFailure), $"volume map failure={volumeFailure}");
