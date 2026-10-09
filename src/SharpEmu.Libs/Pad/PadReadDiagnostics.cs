@@ -11,7 +11,6 @@ internal static class PadReadDiagnostics
     internal static readonly bool Enabled = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_LOG_PAD_READS"), "1", StringComparison.Ordinal);
 
-    private static int _initialRows;
     private static int _activeRows;
     private static int _periodicRows;
     private static long _nextPeriodicTimestamp;
@@ -27,10 +26,10 @@ internal static class PadReadDiagnostics
         var now = Stopwatch.GetTimestamp();
         var active = buttons != 0 || leftX != 128 || leftY != 128 ||
             rightX != 128 || rightY != 128 || l2 != 0 || r2 != 0;
-        var emit = read <= 16 && Interlocked.Increment(ref _initialRows) <= 16;
+        var emit = read <= 16;
         if (active)
         {
-            emit |= Interlocked.Increment(ref _activeRows) <= 64;
+            emit |= TryTakeRow(ref _activeRows);
         }
         else
         {
@@ -40,7 +39,7 @@ internal static class PadReadDiagnostics
             if (now >= next && Interlocked.CompareExchange(
                     ref _nextPeriodicTimestamp, now + 5 * Stopwatch.Frequency, next) == next)
             {
-                emit |= Interlocked.Increment(ref _periodicRows) <= 64;
+                emit |= TryTakeRow(ref _periodicRows);
             }
         }
 
@@ -53,6 +52,16 @@ internal static class PadReadDiagnostics
         catch
         {
             // Diagnostics cannot change the already-completed guest write result.
+        }
+    }
+
+    private static bool TryTakeRow(ref int rows)
+    {
+        while (true)
+        {
+            var current = Volatile.Read(ref rows);
+            if (current >= 64) return false;
+            if (Interlocked.CompareExchange(ref rows, current + 1, current) == current) return true;
         }
     }
 }
