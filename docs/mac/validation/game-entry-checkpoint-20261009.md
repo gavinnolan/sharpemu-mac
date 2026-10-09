@@ -78,7 +78,88 @@ unchanged 212 native/provider cases and 26 cold metadata cases, plus eight new
 fresh activation metadata workers. No qualification is inherited. Source
 manifest SHA-256:
 `906565e717ea83c7604e0e2817dbe9431d4d6a24d4abb203f0db3b51564d880f`.
-Execution, publication and games are pending. Poppy's source audit still finds
+Review then identifies an integer-boundary defect in the new diagnostic ring:
+the inclusive sequence increment can wrap after `long.MaxValue` and fail the
+bounded snapshot traversal. No game occurrence or infinite hang is established.
+Qualification is halted after the already launched workers: Host has an actual
+rc0 receipt; Libs output has zero errors but its return code is unrecorded after
+the authorized driver stop; GPU and all later phases are unrun. This partial
+archive is not a test failure and supplies no successor qualification. ROOT
+verifies all eighteen artifacts, 2,037 source hashes, 101 partial binary hashes
+and exact seven-root closure; manifest SHA-256:
+`932f84ff72166b59e514aefaff31df489f7c476499f27131ac08060003cbd26e`.
+
+Corrected source `b5fe2c0b5b6db3d8795277fe35b82e366403f28d` changes only the
+ring traversal and adds two metadata controls. It bounds iteration by retained
+count, preserving the last valid sequence and history when the next Begin
+overflows. ROOT verifies all 2,037 source/archive hashes and exact inverse
+parent tree. Its fresh three builds and all 1,244 ordinary cases per actual
+ARM64/x64 .NET 10.0.3 CLR pass, with zero failures or skips. ROOT independently
+verifies all seventeen build and forty-eight managed artifacts, all six exact
+TRX inventories and unchanged source/104 compiled hashes. Build manifest:
+`8204faa9b8079d3cabb052748d24d9789e910029e5261d331da3af8e4d89d046`;
+managed manifest:
+`896679cd74f92de80dc9ab6d1cbe2cd0b362afafd21b6fb337d8f4068553196a`.
+Its separate phase passes all eight new activation metadata and twenty-six cold
+metadata workers, then the first ARM64 native cold case fails before any positive
+native byte/status-4/EOP result. It refuses `mapped-copy-refused-or-missing-original`
+while materializing a volume original. The other 211 workers, Fill, publication
+and games remain unrun. ROOT independently verifies all 258 artifacts, unchanged
+source/binaries, all 35 exact single-case outcomes and fresh closure of 37 owned
+roots. Failed manifest SHA-256:
+`a1c5204f55757e3b7a4ef469a144b51d810c10339399f4ffd24345fe64874263`.
+The absent-versus-zero R32 flag is equivalent under its exact `== "1"` initializer;
+the flag difference does not establish causality.
+
+Source inspection finds the common native fixture directly installs tracked
+memory into the presenter's private field, bypassing production attachment. The
+new factory selects its underlying GPU reader; the unchanged enrollment identity
+guard therefore refuses. A separate fixture correction will use the production
+attachment API and retain all native oracles and cleanup. No guard is relaxed,
+failed source retried, or game result claimed. Local main still retains qualified
+`1893dc25` production bytes.
+
+Fixture-only successor `d85fbaa639a581284485f882ad5b990e81278d03` uses
+production attachment and adds one ordinary identity control, retaining all
+native case identities, byte/status-4/once/EOP oracles and cleanup. ROOT verifies
+all 2,039 worktree/tar source hashes, exact inverse parent tree, unchanged
+production/scripts and all twenty-three prepared artifacts. Expected inventory
+is 1,245 ordinary cases per actual CLR (279 Host / 861 Libs / 105 GPU), with the
+same 246 separate workers. All three fresh builds and all 1,245 ordinary cases per actual ARM64/x64
+.NET 10.0.3 CLR pass, with zero failures or skips. ROOT independently verifies
+all seventeen build and forty-eight managed artifacts, the six exact TRX
+inventories, unchanged 2,039 source/104 compiled hashes and fresh owned closure.
+Build manifest `e49e71e295e5d2e7fc7a17bcf777b4527ef50e0f7f07bb2cc8be58d09d579fa6`;
+managed manifest `d6b6ee5606e82c5e3157bb4e39e7c15b1485bc4366b43ddd7bad47b1eb1063fc`.
+Separate qualification is underway; no native/publication/game result is yet
+qualified or inherited. Source archive manifest:
+`480b1186d75cdf7c835840474772107223c493edafea06fe1c780e009c568b7f`;
+prepared manifest:
+`6faf49d9813e9d72b152180f148f9d0c68a0080e622bc77509e5f03a835bb14c`.
+
+The d85 separate phase stops at the mixed buffer/image prebuffer case after
+131 passes: eight activation metadata, twenty-six cold metadata and ninety-seven
+actual native/provider cases. The first failed case is
+`ActualStatus4PrebufferWaitCommitsMixedBufferAndImageOnceAfterOriginalWriter`;
+its buffer at `0x71F6000000` has no unchanged original complete
+mapping/session/input proof. Two volume subobjects already emit status-4 and
+full-byte results, but the mixed case fails; no mixed publication/EOP success is
+claimed. The other 114 workers, publication and games remain unrun. ROOT
+independently checks all 937 artifact hashes, 2,039 source/104 compiled hashes,
+132 exact single-case outcomes and all 131 passing full oracles, plus fresh
+closure of 134 owned roots. Failed manifest:
+`dc722c5dd01f7bbe1658584cce899dd2af2ad8edf2442286811331974f983aa9`.
+
+The common fixture's manual `CaptureBuffer` still supplies the raw CPU tracker
+for both the initial mapped copy and original registration. Actual host
+preparation supplies its already selected GPU reader. The saved buffer origin
+therefore differs from the attached presenter identity. A fixture-only successor
+will use the host's selected memory for both initial operations and assert the
+saved identity before queueing; CPU writers remain tracked. No saved receipt is
+normalized, original recaptured, production guard changed or failed source
+retried. The remaining manual capture paths are being audited.
+
+Poppy's source audit still finds
 uncovered executable-allocation ownership, protection changes and late code
 writes; no safe boot behavior change or native fault authority is established.
 
