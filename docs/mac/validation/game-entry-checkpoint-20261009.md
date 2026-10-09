@@ -2,16 +2,30 @@
 
 Priority: make all nine games reach a menu or controllable scene first; performance and visual polish follow entry.
 
-Local main integrates qualified source `1893dc25`; its `src`, `tests` and `scripts` trees match that tested source. This adds bounded native watched Fill, pending-only canonical continuation, cold first-capture enrollment and first-installation diagnostics to the prior qualified source. It adds the GPU-produced private R32 original path, physical-placement ownership checks and bounded rejected-draw input capture for DS/Void diagnosis. It retains `8c4b352f` first watched command writes and exact Applied successors, first-status constructor Busy, first pre-encode owner diagnostics, buffer-publication continuation and gate-order correction. The longer Void replay reproduces a readable New Game menu, then goes black after confirm; it adds no gameplay acceptance. No remote push or upstream merge was performed. The six historical game replays below retain their exact executable source `188b9c2843289cdd4da5b709f49973eef3084f52`; later fixes do not relabel their evidence.
+Local main integrates qualified source `e2535177` at local merge `02e7dbcf`;
+its `src`, `tests` and `scripts` trees match the tested source exactly. This adds
+a stable GPU view of underlying memory across per-thread CPU trackers and resolves
+that view before original capture/check. It also adds bounded first-refusal,
+publication-admission and Silent Hill fault-thread import diagnostics, while
+preserving ownership and original validation guards. The prior native Fill,
+pending-only continuation, cold enrollment, GPU-produced R32, physical-placement
+and rejected-draw capture changes remain integrated. No remote push or upstream
+merge was performed. Historical replays keep their original executable source
+and cannot be relabelled as results of this implementation.
 
 Latest state: candidate `e2535177` passes all three builds and 1,246 ordinary
 cases on each actual CLR. All 246 separate workers pass, including the six
-formerly failing Busy-family workers. Signed publication is running; game replays
-are still pending. Local main remains on the qualified `1893dc25` implementation.
+formerly failing Busy-family workers. Signed publication passes. The first
+Demon's Souls replay stops before emulator launch because the external game disk
+is disconnected: `/Volumes/Untitled/games` is absent and macOS lists no external
+physical disk. Local main matches the qualified implementation.
 Accepted gameplay remains 1/9 (Dreaming Sarah); no new gameplay or performance
-acceptance follows from these fixtures. Kairo stays source/light while SharpEmu
-owns the runtime lane. Separate Poppy foundation `d69faf76` and Void effect
-models `456d2e18` remain source-only and unqualified.
+acceptance follows from these fixtures. The runtime lane returns to Kairo for one
+bounded build/test batch; SharpEmu stays source/light while the corpus is missing.
+Separate Poppy foundation `d69faf76` passes three builds, 53 focused controls and
+all 1,298 ordinary cases per actual CLR; it remains unqualified for native/provider
+or game execution and is not integrated. Void's `6f5d16d3` effect fixture remains
+source-only and unqualified.
 
 ## Next source candidates and current runtime coordination
 
@@ -238,10 +252,28 @@ artifact hashes, 2,042 source hashes, 104 stable compiled hashes, exact case ord
 actual CLR/framework, complete per-worker oracles and fresh absence of all 248
 owned process roots. No actual heavy worker or shared lease remains. Native
 manifest: `0d46f5db5b7336cf5201e1005e98669d70de0cf02cdc604af1ddab88bdd427f2`.
-Publication is separately granted; no game replay is yet granted. Source manifest:
+The signed publication passes: ROOT verifies thirteen artifacts, all 239 native-only
+payload files, exact clean-source build metadata, strict signing, x86_64 executable,
+104 stable compiled files and fresh closure of all three owned roots. Publication
+manifest: `9ed2e5b9120b59b22c65fbdc9bc055a614b17f1de6c28cb10882586b8f551c95`.
+The first DS replay is granted with root pins to all four actual completed
+qualification/publication manifests; other title grants await its closure.
+Source manifest:
 `29fa86bbeb5b25d0fba1523e380fec478b820d37d2aa8ef566898c48da2cafff`.
 Preparation manifest:
 `3cee5a42d7e117cd67df372027dbff333815007d6a0e7713e45465c8369fadfe`.
+
+The DS harness returns exit 2 after 3.138 seconds: the expected `eboot.bin` is
+missing. No emulator process, game capture, input or run directory is created.
+This is a pre-launch environment failure, not a boot/render regression. All nine
+title mappings share the absent game root, so no other title is attempted. The
+user is asked to reconnect the disk or supply its new path. ROOT independently
+verifies the 279-artifact pre-launch failure archive, unchanged qualified app,
+source, binaries and four completed manifests, and closure of all three owned
+roots. Failed manifest:
+`c25ec36fcbe8e11c0587d2007ec6addd598e8d8ed1fc94f451e2d65e93fbf680`.
+Failed receipts stay
+immutable; any future launch needs restored game files and a fresh evidence target.
 
 The external Quake one-action helper passes ten isolated Python controls,
 including actual atomic key writes and a pending stop signal during neutral
@@ -277,9 +309,26 @@ testhost), then all 1,298 ordinary cases per CLR. ROOT verifies fifteen linked
 preparation hashes, exact reused helper ASTs and preservation of the old ordinary
 inventories. Preparation manifest:
 `6e2595ef8b87d8d4e8eec55b1f15833c65e23bc678497295938f20474799c85f`.
-No foundation driver is executed, no native/provider/publication/game driver is
-added, and the separate eight actual-provider scenarios remain design-only.
-This source does not activate Poppy fault/store/trace recovery.
+All three foundation builds now pass. ROOT independently verifies seventeen
+actual build artifacts, 2,051 clean source hashes, 104 compiled hashes and fresh
+closure of six owned process roots. Build manifest:
+`f4549ebbaca48f1f09887d1a3c8384aef0bb585e33e882278ba2e57ee9d556fb`.
+All 53 focused controls pass on each actual ARM64/x64 .NET 10.0.3 CLR, including
+the architecture/framework fact in the same testhost. ROOT verifies twenty-three
+focused artifacts, both exact inventories, all counters, unchanged compiled/source
+hashes and fresh closure of six owned roots. Focused manifest:
+`3bd7ae119b850c9df7c8a22e161f9a8f8d4d10f90d85a82a72550b0af13d393a`.
+All 1,298 ordinary cases pass on each actual CLR (279 Host, 914 Libs, 105 GPU),
+2,596 passed with zero failures/skips or other outcomes. ROOT independently
+verifies forty-eight actual artifacts, all six exact inventories/counters/runtime
+markers, 2,051 clean source hashes, 104 stable compiled hashes and fresh closure
+of fourteen owned roots. Managed manifest:
+`0640b76ad88e6e1edd1acb137e53d45679d2162383a1a01e3975179a0b254dde`.
+Phase-one validation is complete. At 22:41:57 UTC the lane returns to Kairo for
+one bounded build/test batch; SharpEmu remains source/light pending corpus return.
+No native/provider/publication/game driver is added, and the
+separate eight actual-provider scenarios remain design-only. This source does
+not activate Poppy fault/store/trace recovery.
 
 The separate offline NGG scalar source `53eaad89` adds strict mathematical
 effects for five captured scalar opcodes, with forty-eight source controls.
@@ -304,6 +353,15 @@ and the inverse parent tree. Static model coverage is 113/707; the other 590
 sites and actual guest lane inputs remain unproved. No runtime route or MSL
 acceptance is changed. Source manifest:
 `dc26dc59f91262966175ff6b4cc3163c6743b4285b8415c0f00acbe94837f054`.
+Frozen child `6f5d16d3` adds reusable bounded owned-instruction effect plans and
+MSL fragments, plus a strict supplied-wave SIMD32 fixture source. ROOT verifies
+all 1,821 worktree/tar hashes, unchanged 1,815 parent files, twenty-one primary
+references, full inverse parent tree and the six reviewed new paths. Its 26
+ordinary and eight native rows are unexecuted. Full per-lane/per-step bank/cohort
+oracles, one native attempt and unknown-owner quarantine are source requirements,
+not execution results; an external worker cap remains mandatory. Runtime shader
+gates stay unchanged, all eight obligations remain missing and `CanExecute=false`.
+Source manifest: `4264f0eaf7d2b0249a738669ec28a32f9426faf35abdc166d178db06eebe6feb`.
 
 
 The following predecessor history preserves failures and their original lane
