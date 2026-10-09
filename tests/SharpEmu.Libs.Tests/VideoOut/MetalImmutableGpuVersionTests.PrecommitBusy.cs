@@ -9,7 +9,9 @@ using SharpEmu.Core.Memory;
 using SharpEmu.Gpu.Metal;
 using SharpEmu.HLE;
 using SharpEmu.HLE.GuestMemory;
+using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.ShaderCompiler.Metal;
+using SharpEmu.Tests.Fixtures;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.VideoOut;
