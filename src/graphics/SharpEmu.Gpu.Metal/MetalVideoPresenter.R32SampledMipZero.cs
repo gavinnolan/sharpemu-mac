@@ -113,10 +113,15 @@ internal static partial class MetalVideoPresenter
             _selectedStorageMipPending.Keys.Any(key => !_selectedStorageMipOwners.ContainsKey(key)) ||
             _selectedStorageMipNativeQueues.Keys.Any(key => !_selectedStorageMipOwners.ContainsKey(key)))
             throw R32MipZeroRefused("orphaned original proof, pending writer or native queue");
-        // A taken ordinary producer is not in the pending list. The exact
-        // executing selected-seed scope is the only supported taken writer.
-        if (_takenGuestWorkSequence != 0 && _selectedStorageMipSeedExecutingWork is null)
-            throw R32MipZeroRefused("taken native work lacks an exact original selected-seed scope");
+        // A taken producer is no longer in the pending list. This existing
+        // retained DTO is set for EVERY taken work kind before leaving _gate;
+        // inspect its original associations, never an address advertisement.
+        if (_takenGuestWorkSequence != 0)
+        {
+            if (_takenDepthCubeProducerWork is not { } taken)
+                throw R32MipZeroRefused("taken native work lacks its exact accepted DTO");
+            RequireR32KnownWriterWork(taken);
+        }
     }
 
     private static void RequireR32KnownWriterWork(object work)
