@@ -20,8 +20,9 @@ Demon's Souls replay stops before emulator launch because the external game disk
 is disconnected: `/Volumes/Untitled/games` is absent and macOS lists no external
 physical disk. Local main matches the qualified implementation.
 Accepted gameplay remains 1/9 (Dreaming Sarah); no new gameplay or performance
-acceptance follows from these fixtures. The runtime lane returns to Kairo for one
-bounded build/test batch; SharpEmu stays source/light while the corpus is missing.
+acceptance follows from these fixtures. Kairo's one v557 offline window is
+terminal; SharpEmu takes the next lane and is preparing provider/Metal fixtures
+in source only while the corpus is missing.
 Separate Poppy foundation `d69faf76` passes three builds, 53 focused controls and
 all 1,298 ordinary cases per actual CLR; it remains unqualified for native/provider
 or game execution and is not integrated. Void's `6f5d16d3` effect fixture remains
@@ -29,7 +30,35 @@ source-only and unqualified.
 
 ## Next source candidates and current runtime coordination
 
-Current lane: Kairo's one bounded v556 window is terminal. ROOT independently
+Kairo's one offline v557 build/test window is terminal. Two helper pins pass,
+with one ignored capture diagnostic in that filter. Four separately activated
+63-index diagnostics fail on incomplete retained CPU pages: prefixes 0/1 and 3
+stop at buffer-load pc `0xd0`; prefix 2 requests an uncaptured index page. These
+are fixture-resource limits, not new live-game bugs or LDS/gameplay qualification.
+ROOT independently verifies all 62 observed identities and groups absent in a
+fresh wide process scan, no actual heavy worker and no shared lease. Evidence
+pins: `kairo-v557-terminal-runtime-handoff/root-preflight.json`.
+SharpEmu takes the next lane for source preparation of real Darwin-provider
+fixtures and capped supplied-wave Metal checks; neither new driver is yet granted.
+The game corpus remains absent. Kairo stays source/light pending explicit return.
+
+The eight real Darwin-provider fixtures are frozen separately at `81e10d48`,
+off the qualified ordinary foundation `d69faf76`. ROOT reviews all eight
+scenarios and independently verifies 2,053 worktree/archive source files,
+all 2,051 parent files unchanged and the exact inverse parent tree. Only a
+test file and qualification note are added; production and scripts are unchanged.
+These fixtures require separate fresh workers, actual runtime identity, real
+owned bytes/backings and explicit known cleanup. Their execution is still unrun;
+the proposed 16 provider workers supply no fault-recovery or game-entry claim.
+
+The first complete external `6f5d16d3` Metal driver preparation is held before
+execution. Independent source review identifies a PID-reuse cleanup defect and
+an ownership-uncertainty reset; a corrected preparation must preserve exact
+original worker identities and keep ownership loss sticky. No driver from that
+preparation ran or acquired the shared lease. The shader fixture itself remains
+unchanged and unqualified.
+
+Earlier handoff: Kairo's one bounded v556 window is terminal. ROOT independently
 verifies at 20:38:53 UTC that runner/game `11260`/`11264` and their process groups
 are absent, no actual game/compiler/test worker remains, and the shared lease is
 absent. Evidence: `kairo-v556-terminal-runtime-handoff/root-preflight.json`.
