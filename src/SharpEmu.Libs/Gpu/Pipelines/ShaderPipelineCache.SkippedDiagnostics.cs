@@ -12,6 +12,7 @@ namespace SharpEmu.Libs.Gpu.Pipelines;
 internal sealed partial class ShaderPipelineCache
 {
     private readonly HashSet<ulong> _diagnosedSkippedExports = [];
+    private RejectedDrawInputCapture? _rejectedDrawInputs;
 
     public void RecordUnsupportedGraphics(VertexStageRegisters vertex, ContextRegisters context)
         => RecordUnsupportedGraphicsCore(vertex, context, null, null);
@@ -25,11 +26,13 @@ internal sealed partial class ShaderPipelineCache
         UserConfigRegisters? userConfig, TargetlessDrawArguments? draw,
         DrawIndexedArguments? originalIndirectIndexedDraw = null)
     {
+        string? captureDirectory = null;
         try
         {
             if (Environment.GetEnvironmentVariable("SHARPEMU_DUMP_SKIPPED_GRAPHICS") != "1") return;
             var directory = Environment.GetEnvironmentVariable("SHARPEMU_SHADER_SPIRV_DUMP_DIR");
             if (string.IsNullOrWhiteSpace(directory)) return;
+            captureDirectory = directory;
             lock (_gate)
             {
                 if (_diagnosedSkippedExports.Count >= 8 || !_diagnosedSkippedExports.Add(vertex.ExportAddress)) return;
@@ -101,6 +104,20 @@ internal sealed partial class ShaderPipelineCache
             // A diagnostic failure cannot change the rejected draw's execution outcome.
             try { Console.Error.WriteLine($"[SHADER][WARN] Cannot capture rejected graphics: {exception.Message}"); }
             catch (Exception) { }
+        }
+        finally
+        {
+            // No helper allocation, formatter or additional guest read when
+            // off. Reads/file IO are outside the pipeline-cache gate.
+            if (captureDirectory is not null && userConfig is not null && draw is { } capturedDraw)
+                try
+                {
+                    RejectedDrawInputCapture inputs;
+                    lock (_gate) inputs = _rejectedDrawInputs ??= new();
+                    inputs.TryCapture(_context.Memory, vertex, context, userConfig, in capturedDraw,
+                        originalIndirectIndexedDraw, captureDirectory);
+                }
+                catch (Exception) { } // Optional capture must preserve the original rejection/primary.
         }
     }
 }
