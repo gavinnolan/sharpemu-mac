@@ -26,7 +26,7 @@ No CPU observation is promoted to GPU-current data, pipeline admission or native
 ABI authority. Output/read/format failures cannot replace the original rejected
 draw. There is no NGG activation, semantic lowering or draw-policy change.
 
-Source attributes add **19 ordinary Libs rows** and no native workers: eleven
+Source attributes add **19 ordinary Libs rows** and no native workers: nine
 Facts, plus two three/five-row input theories and the two-row actual rejected
 pipeline on/off theory (the archive lists the exact method inventory). Combined
 source expectation is **1064 ordinary managed rows per CLR**
