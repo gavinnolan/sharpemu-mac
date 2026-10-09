@@ -149,9 +149,9 @@ internal static partial class MetalVideoPresenter
     {
         if (Monitor.IsEntered(_gate)) throw new InvalidOperationException("Applied original checks require a released presenter gate.");
         lock (_gate) ValidateFiniteStorageAppliedOwnersLocked(saved);
-        var buffers = ValidateFiniteStorageBufferOriginalsAgainstImage([saved.Receipt], saved.Phase.Dispatch.GlobalMemoryBuffers);
-        if (buffers.Length != saved.Phase.Buffers.Length || buffers.Where((item, index) => !ReferenceEquals(item, saved.Phase.Buffers[index])).Any())
-            throw new InvalidOperationException("Finite Applied validation cannot adopt a younger original buffer.");
+        // Buffers were already Applied before this image. Their input registry
+        // entries are consumed; validate the SAME known completed continuations.
+        ValidateFiniteStorageCompletedBuffers(saved.Phase);
         // Validate every original even if a healthy watch is Busy. Such Busy
         // does NOT authorize callback/publication; acquired validation below
         // retains all existing strict original-content/currentness predicates.

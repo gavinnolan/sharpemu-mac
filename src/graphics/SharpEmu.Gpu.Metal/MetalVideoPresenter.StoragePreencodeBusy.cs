@@ -39,6 +39,8 @@ internal static partial class MetalVideoPresenter
         internal readonly (SelectedNativeOriginalProof Proof, int Version, long Producer)[] SelectedNativeVersions = selectedProofs
             .Select(pair => (pair.Value, pair.Value.Version, pair.Value.ProducerSequence)).ToArray();
         internal readonly FiniteStorageBufferOrigin[] Buffers = buffers;
+        internal readonly FiniteStorageBufferPublication[] BufferPublications =
+            CaptureFiniteStorageBufferPublications(dispatch.GlobalMemoryBuffers, buffers);
         internal readonly int RetiredOrigins = retiredOrigins, RetiredDisplays = retiredDisplays;
         internal OriginalCanonicalDirtyBusy? FirstBusy;
         internal long BusyStarted;
