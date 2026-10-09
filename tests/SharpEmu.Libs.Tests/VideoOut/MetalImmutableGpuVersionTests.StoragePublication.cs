@@ -136,6 +136,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                 Access: GuestImageAccess.Write);
             Assert.True(ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_KERNEL_PAGE"), out var kernelPage));
             var host = new MetalCommandStreamHost(memory, backend, backend);
+            var reports = new List<string>(); GpuFatal.OnFatal = reports.Add;
             if (originalVolumes && !MaterializeOriginalVolumes()) return;
             var first = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [binding], out _));
             Assert.Equal(rgba ? Bgra1024Oracle.LinearSeed() : expected.AsSpan(0, 4).ToArray(), first.RgbaPixels);
@@ -153,7 +154,6 @@ public sealed partial class MetalImmutableGpuVersionTests
             var observation = StorageMember(originalOrigin, "Observation")!;
             Assert.True((bool)StorageMember(observation, "Observed")!); // actual production arm/copy observation, never injected
             Assert.Equal(HostMemory.MappingGeneration, (long)StorageMember(observation, "MappingEpoch")!);
-            var reports = new List<string>(); GpuFatal.OnFatal = reports.Add;
             using var queueScope = MetalVideoPresenter.EnterGuestQueue("finite.storage.native", 1);
             var firstShader = state.FiniteStorageShader(0x11223344, rgba, mixedBuffer);
             var firstBuffer = mixedBuffer ? CaptureBuffer() : null;
