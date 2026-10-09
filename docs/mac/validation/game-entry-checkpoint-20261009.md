@@ -87,6 +87,27 @@ Superliminal's bounded non-GDS Fill successor `aadd7248` and Silent Hill's pendi
 
 Inactive Poppy prototype `d632c098` adds a deterministic atomic per-thread claim before same-receipt native ticket publication. ROOT verifies all ten source hashes and reviews that specific nested-admission fix. The prototype remains uncompiled, uninstalled and source-only; native tracker authority stays zero. Actual private ELF allocation ownership, code sealing after patching, raw protection exclusion, cross-receipt ingress and the CoreCLR signal chain remain unresolved. No game recovery or safety closure follows from this source review.
 
+## Actual boot replays on `1893dc25`
+
+Each attempt uses the exact signed publication and actual four-manifest pins,
+with fresh foreign-process, memory and shared-lease preflight. ROOT independently
+verifies each retained archive and exact driver/harness/game closure. Earlier
+failed attempts are unchanged. None of these four adds a menu or gameplay claim.
+
+| Title | Observed result | First blocker / reached stage |
+| --- | --- | --- |
+| Oregon / `20261009-220911` | Exit 134 after 36 seconds, peak 2,057 MiB; one observed guest frame, black capture. | Cold enrollment is passed in this attempt, then the existing singleton cohort watch at `0x80115F0000` refuses `original-read-watch`, Stale, first admission `4294967296`. The local validation ticket is false; its lower predicate and actual slot owner remain unknown. |
+| Superliminal / `20261009-221110` | Exit 134 after 33 seconds, peak 3,195 MiB; black captures. | Command operation 375, submission 18 cannot prepare its ORIGINAL write. Exact first writer-reservation CAS rejects admission 2, before original-watch/history validation. Its operation kind/extent are not captured after the trace budget expires. This does not establish the old Fill blocker as fixed or unchanged. |
+| Silent Hill / `20261009-221248` | Exit 139 after 36 seconds, peak 1,822 MiB; black capture. | Several ordinary-write wait receipts return `OriginalChanged`, followed by guest memory-fault returns and SIGSEGV at `0x8049A8381`, writing through `0x28`. The failed acquisition does not yet save its exact currentness predicate. Canonical acknowledgments occur; no canonical post-release or GPU fatal is recorded. Crash causality remains unproved. |
+| Demon’s Souls / `20261009-221448` | Exit 134 after 58 seconds, peak 2,858 MiB; static launch artwork. | Compute `3E9247D2A2F42DBB` first installation rejects `guest-memory-replaced`, registry count 0, address `0x70FFF00000`. The later command-stream shutdown error is consequential. Per-thread tracking wrappers and first-worker memory binding are now under source review; no identity guard is bypassed. |
+
+Individual manifests in `boot-cold-hook-successor-1893dc25-game-entry-prepared`:
+Oregon `c1a10d6ed094b1ddc4295c70dffa631e773ce3ad1c18a3d9f3e50c21b48ce250`,
+Superliminal `d512791bdbfe55d90aaba34acd6773e6718c3dc164dddcc7a5f93076604586ab`,
+Silent Hill `621e7f103881252a6da32f7f1618a941eb0d4fafe2ba3048ed8ed35a01131d08`,
+DS `ab0c2a6d00380cc67fe3a69531825c7b04fbb8afcfbea8ee754351250571d5c0`.
+The longer interactive Void attempt is running separately; its outcome is pending.
+
 ## Actual DS/Void replays on `5016bc82`
 
 The source-exact replay companion links 560 read-only actual qualification and
