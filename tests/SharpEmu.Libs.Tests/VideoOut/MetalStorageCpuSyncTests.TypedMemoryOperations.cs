@@ -4,6 +4,7 @@ using System.Collections;
 using System.Reflection;
 using SharpEmu.Gpu.Metal;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
