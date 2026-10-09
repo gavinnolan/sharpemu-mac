@@ -6,12 +6,85 @@ using SharpEmu.Gpu.Metal;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Scheduling;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.VideoOut;
 
 public sealed partial class MetalStorageCpuSyncTests
 {
+    [Fact]
+    public void RetainedUncertainOriginalWriteRefusesPublicReadmissionAfterPresenterReset()
+    {
+        ActualArchitecture();
+        var root = Field("_uncertainCommandMemoryWrite"); var previous = root.GetValue(null);
+        var previousFatal = GpuFatal.OnFatal;
+        Assert.Null(previous);
+        GpuFatal.OnFatal = _ => { }; // preserve real exception; no process FailFast in refusing controls
+        object? retained = null;
+        // Bookkeeping only: retain a real publicly admitted closed DTO as a
+        // fake uncertain scope. No publication or native effect is performed.
+        // Production has no API that clears this process-lifetime root.
+        try
+        {
+            using (var first = new BorrowColorState())
+            {
+                var memory = new TypedColorMemory("disjoint"); MetalVideoPresenter.AttachGuestMemory(memory);
+                using var queue = MetalVideoPresenter.EnterGuestQueue("typed.color", 7);
+                var backend = new MetalGuestGpuBackend(); var host = new MetalCommandStreamHost(memory, backend, backend);
+                var caller = Task.Run(() =>
+                {
+                    using var submitting = MetalVideoPresenter.EnterGuestQueue("typed.color", 7);
+                    return Record.Exception(() => host.TryWriteGuest(TypedColorMemory.Destination, new byte[8]));
+                });
+                try
+                {
+                    var deadline = Environment.TickCount64 + 5000;
+                    while (retained is null)
+                    {
+                        lock (Field("_gate").GetValue(null)!)
+                        {
+                            var queues = (IDictionary)Field("_pendingGuestWorkByQueue").GetValue(null)!;
+                            retained = queues.Values.Cast<IEnumerable>().SelectMany(items => items.Cast<object>())
+                                .Select(item => item.GetType().GetProperty("Work")!.GetValue(item)!)
+                                .SingleOrDefault(item => item.GetType().Name == "OrderedCommandMemoryOperation");
+                            if (retained is not null) root.SetValue(null, retained);
+                        }
+                        Assert.False(caller.IsCompleted); Assert.True(Environment.TickCount64 < deadline); Thread.Yield();
+                    }
+                    Assert.Equal(1, memory.CommandCopies); Assert.Equal(0, memory.Writes);
+                }
+                finally
+                {
+                    MetalVideoPresenter.LatchGuestCompletionFailure("fake uncertain scope reset control");
+                    Assert.True(caller.Wait(2000), "Do not reset an unjoined original caller.");
+                    InvokeVolume("CompletePresenterShutdown");
+                }
+                Assert.Same(retained, root.GetValue(null)); Assert.Equal(0L, Field("_completedGuestWorkSequence").GetValue(null));
+            }
+            using (var reopened = new BorrowColorState())
+            {
+                var memory = new TypedColorMemory("disjoint"); MetalVideoPresenter.AttachGuestMemory(memory);
+                Field("_selectedStorageMipSession").SetValue(null, (long)Field("_selectedStorageMipSession").GetValue(null)! + 1);
+                using var queue = MetalVideoPresenter.EnterGuestQueue("typed.color", 8);
+                var backend = new MetalGuestGpuBackend(); var host = new MetalCommandStreamHost(memory, backend, backend);
+                try
+                {
+                    var failure = Assert.IsType<SharpEmu.Libs.Gpu.Scheduling.GpuFatalException>(Record.Exception(
+                        () => host.TryWriteGuest(TypedColorMemory.Destination, new byte[8])));
+                    Assert.Contains("remains process-owned", failure.InnerException!.Message);
+                    Assert.Same(retained, root.GetValue(null)); Assert.Equal(1, memory.CommandCopies); Assert.Equal(0, memory.Writes);
+                    Assert.Equal(0, Field("_pendingGuestWorkCount").GetValue(null));
+                    Assert.Equal(0L, Field("_enqueuedGuestWorkSequence").GetValue(null));
+                    Assert.Equal(0L, Field("_completedGuestWorkSequence").GetValue(null));
+                }
+                finally { InvokeVolume("CompletePresenterShutdown"); }
+                Assert.Same(retained, root.GetValue(null));
+            }
+        }
+        finally { root.SetValue(null, previous); GpuFatal.OnFatal = previousFatal; } // restore only the fake fixture scope
+    }
+
     [Fact]
     public void ArbitraryCallbackCannotClaimClosedMemoryEffectsFromItsDebugName()
     {
@@ -49,6 +122,7 @@ public sealed partial class MetalStorageCpuSyncTests
     public void NativeColorTypedMemoryInventoryUsesOnlyItsFirstCompleteOriginal(string variant)
     {
         ActualArchitecture(); using var state = new BorrowColorState();
+        GpuFatal.OnFatal = _ => { }; // State restores the original fatal observer after the caller joins
         var memory = new TypedColorMemory(variant);
         MetalVideoPresenter.AttachGuestMemory(memory);
         using var queue = MetalVideoPresenter.EnterGuestQueue("typed.color", 7);

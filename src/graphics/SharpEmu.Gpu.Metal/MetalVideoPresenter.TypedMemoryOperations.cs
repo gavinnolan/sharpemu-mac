@@ -109,6 +109,8 @@ internal static partial class MetalVideoPresenter
 
     private static void RequireCommandMemoryOriginalLocked(OrderedCommandMemoryOperation work, CpuMappedCopyObservation mapping)
     {
+        if (_uncertainCommandMemoryWrite is not null)
+            throw new NotSupportedException("An uncertain ORIGINAL command memory write remains process-owned; further certified writes refuse across presenter reset.");
         if (_closed || _guestWorkFailure is not null || !ReferenceEquals(_guestMemory, work.Memory) ||
             work.Session != CurrentNativeDepthFaceSession || work.Queue != (_submittingGuestQueue ?? GuestQueueIdentity.Default) || work.Source is null ||
             !work.Source.IsMappedCopyObservationCurrent(mapping) ||

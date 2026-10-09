@@ -32,6 +32,11 @@ participating-writer exclusion through its one commit. Replacement, revoked
 rights, unavailable capabilities, intervening overlapping writer history and
 unknown effects refuse. No ordinary `TryWrite` fallback follows an attached
 original refusal, and no successful continuation observation is adopted.
+The first uncertain commit/cancellation retains its complete original scope for
+the process lifetime. Further certified original writes refuse even after a
+presenter/session reset; shutdown never clears or replaces that owner. Recovery
+requires a fresh process. This is conservative retained-ownership bookkeeping,
+not proof that an uncertain operation completed.
 
 Pre-write `NotifyManagedWrite` and `GuestGpuMemoryHook.MarkCpuWrite` calls remain
 before bytes. Actual publication commit rechecks the original provider records;
@@ -48,7 +53,7 @@ EOP callbacks, arbitrary actions and unbounded/missing mappings stay strict.
 
 ## Prepared controls
 
-22 new managed rows:
+23 new managed rows:
 
 - `CommandMemoryOperationTests`: 11 rows covering owned bytes, one execution
   through success/failure, atomic/semaphore results and bounded selectors.
@@ -60,6 +65,10 @@ EOP callbacks, arbitrary actions and unbounded/missing mappings stay strict.
   They never encode GPU work or execute a scalar writer.
 - `ArbitraryCallbackCannotClaimClosedMemoryEffectsFromItsDebugName`: same-name
   callback remains unknown and uninvoked.
+- `RetainedUncertainOriginalWriteRefusesPublicReadmissionAfterPresenterReset`:
+  a real public queued DTO supplies only a fake retained bookkeeping scope;
+  shutdown/reset and a new session retain it, and new public admission refuses
+  before a transaction, bytes or receipt. No unknown native outcome is fabricated.
 
 Six new fresh-device Facts in the existing native-color fixture:
 
