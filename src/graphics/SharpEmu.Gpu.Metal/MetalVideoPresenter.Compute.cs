@@ -180,6 +180,7 @@ internal static partial class MetalVideoPresenter
         List<FiniteStorageWriteback>? storageWritebacks = publishFiniteStorage
             ? new(dispatch.Textures.Length) : null;
         Exception? dispatchFailure = null;
+        FiniteStoragePreencode? originalStoragePhase = null;
         try
         {
             TraceGuestWorkStage("compute.textures.begin");
@@ -221,7 +222,7 @@ internal static partial class MetalVideoPresenter
             }
 
             if (publishFiniteStorage)
-                ValidateFiniteStorageBeforeEncoding(dispatch, commandBuffer, queue, storageWritebacks);
+                originalStoragePhase = ValidateFiniteStorageBeforeEncoding(dispatch, commandBuffer, queue, storageWritebacks);
 
             TraceGuestWorkStage("compute.textures.end");
             TraceGuestWorkStage("compute.encoder.begin");
@@ -263,10 +264,12 @@ internal static partial class MetalVideoPresenter
                     Depth = Math.Max(shader.ThreadgroupSizeZ, 1),
                 });
             MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
+            if (originalStoragePhase is not null)
+                SealFiniteStorageComputeEncoding(originalStoragePhase, dispatch, commandBuffer, queue);
             TraceGuestWorkStage("compute.dispatch_encoding.end");
             if (storageWritebacks is not null)
                 foreach (var receipt in storageWritebacks)
-                    EncodeFiniteStorageReadback(device, commandBuffer, receipt);
+                    EncodeFiniteStorageReadbackWithOriginalPhase(device, commandBuffer, receipt, originalStoragePhase);
 
             // CPU-visible writes are ordering points (see the draw path): flush
             // the batch and wait so the write-back lands before this work item

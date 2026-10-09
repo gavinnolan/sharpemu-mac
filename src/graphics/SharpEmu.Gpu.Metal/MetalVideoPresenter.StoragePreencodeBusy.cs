@@ -42,6 +42,9 @@ internal static partial class MetalVideoPresenter
         internal readonly int RetiredOrigins = retiredOrigins, RetiredDisplays = retiredDisplays;
         internal OriginalCanonicalDirtyBusy? FirstBusy;
         internal long BusyStarted;
+        internal bool ComputeEncodingEnded, ReadbackAllocationStarted;
+        internal OriginalCanonicalDirtyBusy? FirstReadbackBusy;
+        internal long ReadbackBusyStarted;
     }
 
     private sealed class FiniteStoragePreencodeCohortBusy(FiniteStoragePreencode original) : OriginalCanonicalDirtyBusy(
@@ -71,11 +74,17 @@ internal static partial class MetalVideoPresenter
         }
     }
 
-    private static void ValidateFiniteStoragePreencodeOwnersLocked(FiniteStoragePreencode original)
+    private static void ValidateFiniteStoragePreencodeOwnersLocked(FiniteStoragePreencode original) =>
+        ValidateFiniteStoragePhaseOwnersLocked(original, afterCompute: false);
+
+    private static void ValidateFiniteStoragePhaseOwnersLocked(FiniteStoragePreencode original, bool afterCompute, nint allocatedStaging = 0)
     {
         var receipt = original.Receipt;
         ValidateFiniteStorageReceiptOwnerLocked(receipt);
-        if (receipt.Encoded || receipt.SuccessfullyCompleted || receipt.CommandBuffer != 0 || receipt.Staging != 0 ||
+        if (original.ComputeEncodingEnded != afterCompute || original.ReadbackAllocationStarted != (allocatedStaging != 0) ||
+            receipt.Encoded || receipt.SuccessfullyCompleted ||
+            (allocatedStaging == 0 ? receipt.CommandBuffer != 0 || receipt.Staging != 0 :
+                !afterCompute || receipt.CommandBuffer != original.CommandBuffer || receipt.Staging != allocatedStaging) ||
             !_batchOpen || _batchCommandBuffer != original.CommandBuffer || _batchQueue != original.Queue ||
             _executingGuestWorkSequence != original.Sequence || _takenGuestWorkSequence != original.Sequence ||
             receipt.Work != original.Sequence ||
@@ -106,10 +115,13 @@ internal static partial class MetalVideoPresenter
                 throw new InvalidOperationException("Finite storage pre-encode ORIGINAL selected producer changed.");
     }
 
-    private static void ValidateFiniteStoragePreencode(FiniteStoragePreencode original)
+    private static void ValidateFiniteStoragePreencode(FiniteStoragePreencode original) =>
+        ValidateFiniteStoragePhaseOriginal(original, afterCompute: false);
+
+    private static void ValidateFiniteStoragePhaseOriginal(FiniteStoragePreencode original, bool afterCompute, nint allocatedStaging = 0)
     {
         if (Monitor.IsEntered(_gate)) throw new InvalidOperationException("Finite storage pre-encode content checks require a released presenter gate.");
-        lock (_gate) ValidateFiniteStoragePreencodeOwnersLocked(original);
+        lock (_gate) ValidateFiniteStoragePhaseOwnersLocked(original, afterCompute, allocatedStaging);
         var buffers = ValidateFiniteStorageBufferOriginalsAgainstImage([original.Receipt], original.Dispatch.GlobalMemoryBuffers);
         if (buffers.Length != original.Buffers.Length || buffers.Where((buffer, index) => !ReferenceEquals(buffer, original.Buffers[index])).Any())
             throw new InvalidOperationException("Finite storage pre-encode cannot adopt a younger writable buffer original.");
@@ -126,7 +138,7 @@ internal static partial class MetalVideoPresenter
         FiniteStorageCohortOffender? offender;
         lock (_gate)
         {
-            ValidateFiniteStoragePreencodeOwnersLocked(original);
+            ValidateFiniteStoragePhaseOwnersLocked(original, afterCompute, allocatedStaging);
             status = InspectFiniteStorageNativeCohortStatusLocked(original.Receipt.Image, original.Receipt.Origin,
                 out reason, out offender, captureOffender: _rgbaStorageRuntimePublicationRequested, classifyBusy: true);
         }
@@ -136,11 +148,19 @@ internal static partial class MetalVideoPresenter
             if (offender is { } captured) throw new FiniteStorageCohortRefusal(message, captured);
             throw new NotSupportedException(message);
         }
-        if (busy is not null) throw busy;
-        if (status == CpuMappedReadWatchStatus.Busy) throw new FiniteStoragePreencodeCohortBusy(original);
+        // Once allocation has begun, an independently classified healthy Busy
+        // cannot replay allocation or dispatch. All original mapping/read/token,
+        // native identity and physical-inventory checks above remain mandatory.
+        // Real completion/prebuffer/precommit checks still precede publication.
+        if (busy is not null && allocatedStaging == 0) throw busy;
+        if (status == CpuMappedReadWatchStatus.Busy && allocatedStaging == 0)
+        {
+            if (afterCompute) throw new FiniteStorageReadbackCohortBusy(original);
+            throw new FiniteStoragePreencodeCohortBusy(original);
+        }
     }
 
-    private static void ValidateFiniteStorageBeforeEncoding(ComputeGuestDispatch dispatch, nint commandBuffer,
+    private static FiniteStoragePreencode ValidateFiniteStorageBeforeEncoding(ComputeGuestDispatch dispatch, nint commandBuffer,
         nint queue, List<FiniteStorageWriteback>? receipts)
     {
         var original = CaptureFiniteStoragePreencode(dispatch, commandBuffer, queue, receipts);
@@ -150,7 +170,7 @@ internal static partial class MetalVideoPresenter
             {
                 _finiteStorageBeforePreencodeValidationForControl?.Invoke(original.Receipt);
                 ValidateFiniteStoragePreencode(original);
-                return;
+                return original;
             }
             catch (OriginalCanonicalDirtyBusy busy)
             {

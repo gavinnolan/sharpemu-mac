@@ -241,12 +241,18 @@ internal static partial class MetalVideoPresenter
             throw new InvalidOperationException("Metal finite storage publication exact owner/version receipt changed.");
     }
 
-    private static void EncodeFiniteStorageReadback(nint device, nint commandBuffer, FiniteStorageWriteback receipt)
+    private static void EncodeFiniteStorageReadback(nint device, nint commandBuffer, FiniteStorageWriteback receipt) =>
+        EncodeFiniteStorageReadbackWithOriginalPhase(device, commandBuffer, receipt, null);
+
+    private static void EncodeFiniteStorageReadbackWithOriginalPhase(nint device, nint commandBuffer,
+        FiniteStorageWriteback receipt, FiniteStoragePreencode? original)
     {
         if (receipt.Encoded || receipt.Consumed || commandBuffer == 0 || device == 0)
             throw new InvalidOperationException("Metal finite storage readback requires one real producer command buffer.");
         if (MetalNative.Send(commandBuffer, MetalNative.Selector("retainedReferences")) == 0)
             throw new NotSupportedException("Metal finite storage readback requires command-buffer resource retention.");
+        if (original is not null)
+            ValidateFiniteStorageBeforeReadbackAllocation(original, receipt, commandBuffer);
         // Every owned handle is installed before subsequent allocation/encoding
         // can throw, so receipt disposal always sees the exact retain.
         receipt.CommandBuffer = MetalNative.Send(commandBuffer, MetalNative.Selector("retain"));
@@ -254,7 +260,18 @@ internal static partial class MetalVideoPresenter
             (nuint)receipt.StagingBytes, 0);
         if (receipt.Texture == 0 || receipt.CommandBuffer == 0 || receipt.Staging == 0)
             throw new InvalidOperationException("Metal finite storage readback cannot allocate/retain its exact resources.");
-        ValidateFiniteStorageReceipt(receipt);
+        if (original is null) ValidateFiniteStorageReceipt(receipt);
+        else
+        {
+            // Keep the SAME frozen full inventory and every independent original
+            // mapping/read/token/session check after exactly-once allocation.
+            // Healthy original Busy alone does not replay allocation/dispatch;
+            // stale/unknown/overlap still veto before the first blit. Actual
+            // completion and later cohort validation precede any publication.
+            var allocatedStaging = receipt.Staging; // SAME actual allocation, never a later replacement
+            _finiteStorageAfterReadbackAllocationForControl?.Invoke(receipt);
+            ValidateFiniteStoragePhaseOriginal(original, afterCompute: true, allocatedStaging: allocatedStaging);
+        }
         var blit = MetalNative.Send(commandBuffer, MetalNative.Selector("blitCommandEncoder"));
         if (blit == 0) throw new InvalidOperationException("Metal finite storage readback cannot create a blit encoder.");
         Exception? failure = null;

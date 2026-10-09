@@ -40,12 +40,32 @@ public sealed partial class MetalImmutableGpuVersionTests
     public void ActualEmptyBufferPhaseNewBusyReachesCompletedImagePrecommitWithoutStrictDuplicate() =>
         RunActualRuntimeTwoTypedPublications(false, rgba: true, originalVolumes: true, phaseBusyWindow: "post-empty-buffer:disjoint");
 
+    [FiniteStoragePublicationNativeFact]
+    public void ActualComputeEndedReadbackWaitKeepsOneDispatchAndOneFullPublication() =>
+        RunActualRuntimeTwoTypedPublications(false, rgba: true, originalVolumes: true, phaseBusyWindow: "readback:disjoint");
+    [FiniteStoragePublicationNativeFact]
+    public void ActualComputeEndedReadbackOverlappingWriterNeverEncodesBlitOrAcknowledges() =>
+        RunActualRuntimeTwoTypedPublications(false, rgba: true, originalVolumes: true, phaseBusyWindow: "readback:overlap");
+    [FiniteStoragePublicationNativeFact]
+    public void ActualComputeEndedReadbackChangedTokenCannotBorrowBusy() =>
+        RunActualRuntimeTwoTypedPublications(false, rgba: true, originalVolumes: true, phaseBusyWindow: "readback:token");
+    [FiniteStoragePublicationNativeFact]
+    public void ActualAllocatedReadbackHealthyBusyReachesStatus4PrebufferWithoutReencoding() =>
+        RunActualRuntimeTwoTypedPublications(false, rgba: true, originalVolumes: true, phaseBusyWindow: "readback-allocated:disjoint");
+    [FiniteStoragePublicationNativeFact]
+    public void ActualAllocatedReadbackOverlappingWriterStillVetoesBeforeBlit() =>
+        RunActualRuntimeTwoTypedPublications(false, rgba: true, originalVolumes: true, phaseBusyWindow: "readback-allocated:overlap");
+    [FiniteStoragePublicationNativeFact]
+    public void ActualAllocatedReadbackChangedOriginalTokenStillVetoesBeforeBlit() =>
+        RunActualRuntimeTwoTypedPublications(false, rgba: true, originalVolumes: true, phaseBusyWindow: "readback-allocated:token");
+
     private void RunActualStoragePhaseOriginalBusy(NativeState state, PhysicalVirtualMemory physical, TrackedCpuMemory memory,
         FiniteStorageFixtureOwners owners, ulong address, int imageBytes, int storeOffset, byte[] expected,
         long sequence, long eop, MetalCompiledGuestShader shader, Func<byte[]> canonical, string scenario, bool mixedBuffer)
     {
         var parts = scenario.Split(':'); var phase = parts[0]; scenario = parts[1];
-        Assert.True(phase is "preencode" or "prebuffer" or "post-empty-buffer");
+        Assert.True(phase is "preencode" or "prebuffer" or "post-empty-buffer" or "readback" or "readback-allocated");
+        var readback = phase is "readback" or "readback-allocated";
         const BindingFlags instance = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
         var volumePhysical = Assert.IsType<PhysicalVirtualMemory>(owners.BodyVolumePhysical);
         SharedBackingViews Views(PhysicalVirtualMemory pvm) => Assert.IsType<SharedBackingViews>(StorageMember(StorageMember(pvm, "_backedSpace")!, "_views"));
@@ -64,18 +84,30 @@ public sealed partial class MetalImmutableGpuVersionTests
         var extraBefore = ReadExtra(); var extraExpected = extraBefore.ToArray();
         var fields = phase == "post-empty-buffer"
             ? new[] { "_finiteStorageAfterEmptyBufferValidationForControl", "_finiteStoragePrecommitBusyForControl" }
+            : phase == "readback"
+            ? new[] { "_finiteStorageBeforeReadbackValidationForControl", "_finiteStorageReadbackBusyForControl" }
+            : phase == "readback-allocated"
+            ? new[] { "_finiteStorageAfterReadbackAllocationForControl", "_finiteStoragePrebufferBusyForControl" }
             : phase == "preencode"
             ? new[] { "_finiteStorageBeforePreencodeValidationForControl", "_finiteStoragePreencodeBusyForControl" }
             : new[] { "_finiteStorageBeforePrebufferValidationForControl", "_finiteStoragePrebufferBusyForControl" };
         var saved = fields.Select(name => Field(name).GetValue(null)).ToArray();
         var writeHook = typeof(SharedBackingViews).GetField("_beforeCanonicalAliasCopyForControl", instance)!;
         var oldWrite = writeHook.GetValue(volumeViews);
+        var encoderHook = Field("_computeEncoderCreationOverride"); var oldEncoder = encoderHook.GetValue(null);
+        var encoders = 0;
         var pause = new BusyOrdinaryWriter(); owners.OrdinaryWriterOwner = pause;
         object? completedReceipt = null; var completions = 0; var started = false; var waited = 0;
         var completedBefore = Field("_completedGuestWorkSequence").GetValue(null);
         Exception? primary = null;
         try
         {
+            if (readback) encoderHook.SetValue(null, (Func<nint, nint>)(command =>
+            {
+                Interlocked.Increment(ref encoders);
+                return oldEncoder is Func<nint, nint> prior ? prior(command) :
+                    MetalNative.Send(command, MetalNative.Selector("computeCommandEncoder"));
+            }));
             writeHook.SetValue(volumeViews, (Action<ulong, int>)((target, count) =>
             {
                 Assert.Equal(alias, target); Assert.Equal(1, count);
@@ -93,12 +125,15 @@ public sealed partial class MetalImmutableGpuVersionTests
                 if (started) { Assert.Same(completedReceipt, receipt); return; }
                 completedReceipt = receipt; completions++; started = true;
                 Assert.False((bool)StorageMember(receipt, "SuccessfullyCompleted")!);
-                Assert.Equal(phase != "preencode", (bool)StorageMember(receipt, "Encoded")!);
+                Assert.Equal(phase is "prebuffer" or "post-empty-buffer", (bool)StorageMember(receipt, "Encoded")!);
+                if (readback) Assert.Equal(1, Volatile.Read(ref encoders)); // actual compute selector called ONCE before this phase
                 var commandBuffer = (nint)StorageMember(receipt, "CommandBuffer")!;
-                if (phase != "preencode")
+                if (phase is "prebuffer" or "post-empty-buffer" or "readback-allocated")
                 {
                     Assert.NotEqual((nint)0, commandBuffer);
-                    Assert.Equal((nint)4, MetalNative.Send(commandBuffer, MetalNative.Selector("status")));
+                    if (phase != "readback-allocated")
+                        Assert.Equal((nint)4, MetalNative.Send(commandBuffer, MetalNative.Selector("status")));
+                    else Assert.Equal(Field("_batchCommandBuffer").GetValue(null), commandBuffer); // same still-unsubmitted batch
                     Assert.NotEqual((nint)0, (nint)StorageMember(receipt, "Staging")!);
                 }
                 else { Assert.Equal((nint)0, commandBuffer); Assert.Equal((nint)0, StorageMember(receipt, "Staging")); }
@@ -125,6 +160,11 @@ public sealed partial class MetalImmutableGpuVersionTests
                 Assert.False(MetalVideoPresenter.WaitForGuestWork(sequence, 0)); Assert.False(MetalVideoPresenter.WaitForGuestWork(eop, 0));
                 Assert.Equal(completedBefore, Field("_completedGuestWorkSequence").GetValue(null));
                 Assert.False((bool)StorageMember(completedReceipt!, "Published")!);
+                if (phase == "readback-allocated")
+                {
+                    Assert.True((bool)StorageMember(completedReceipt!, "Encoded")!);
+                    Assert.Equal((nint)4, MetalNative.Send((nint)StorageMember(completedReceipt!, "CommandBuffer")!, MetalNative.Selector("status")));
+                }
                 var receiptImage = StorageMember(completedReceipt!, "Image")!;
                 Assert.Same(owners.OriginalOrigin, StorageMember(receiptImage, "StorageCpuOrigin"));
                 Assert.Equal(StorageMember(completedReceipt!, "Version"), StorageMember(receiptImage, "ContentVersion"));
@@ -138,6 +178,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                 var fatal = Assert.IsType<GpuFatalException>(failed.InnerException);
                 Assert.Contains("ORIGINAL", fatal.InnerException!.Message);
                 Assert.Equal(0, waited); Assert.Equal(expected, canonical());
+                if (readback) Assert.False((bool)StorageMember(completedReceipt!, "Encoded")!);
                 Assert.False(MetalVideoPresenter.WaitForGuestWork(sequence, 0)); Assert.False(MetalVideoPresenter.WaitForGuestWork(eop, 0));
                 Assert.Equal(completedBefore, Field("_completedGuestWorkSequence").GetValue(null));
                 Assert.False((bool)StorageMember(completedReceipt!, "Published")!);
@@ -158,6 +199,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                 Assert.Equal(2, StorageMember(image, "ContentVersion"));
             }
             Assert.True(started); Assert.Equal(1, completions); Assert.Equal(extraExpected, ReadExtra());
+            if (readback) Assert.Equal(1, Volatile.Read(ref encoders));
             for (var i = 0; i < owners.VolumeImages.Count; i++)
             {
                 Assert.Same(volumeOriginals[i], StorageMember(owners.VolumeImages[i], "StorageCpuOrigin"));
@@ -165,7 +207,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                 Assert.Equal(volumeVersions[i], StorageMember(owners.VolumeImages[i], "ContentVersion"));
                 Assert.Equal(volumeNative[i], ReadNativeVolume(owners.VolumeImages[i]));
             }
-            output.WriteLine($"finite-storage-phase-native phase={phase}; scenario={scenario}; actual_status4_positive_only=true; distinct_backings=true; real_admission=2; encoded_readback={(bool)StorageMember(completedReceipt!, "Encoded")!}; full_guest_and_native_bytes_positive_only=true; original_native_owners_unchanged=true; publication={(scenario != "disjoint" ? "none" : "one-canonical-version")}; EOP={(scenario != "disjoint" ? "unacknowledged" : "after-publication")}");
+            output.WriteLine($"finite-storage-phase-native phase={phase}; scenario={scenario}; actual_compute_encoders={(readback ? Volatile.Read(ref encoders) : -1)}; actual_status4_positive_only=true; distinct_backings=true; real_admission=2; encoded_readback={(bool)StorageMember(completedReceipt!, "Encoded")!}; full_guest_and_native_bytes_positive_only=true; original_native_owners_unchanged=true; publication={(scenario != "disjoint" ? "none" : "one-canonical-version")}; EOP={(scenario != "disjoint" ? "unacknowledged" : "after-publication")}");
         }
         catch (Exception failure) { primary = failure; throw; }
         finally
@@ -179,6 +221,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             catch (Exception failure) { owners.OrdinaryWriterUnconfirmed = true; cleanup = failure; }
             for (var i = 0; i < fields.Length; i++) { var index = i; Attempt(() => Field(fields[index]).SetValue(null, saved[index])); }
             Attempt(() => writeHook.SetValue(volumeViews, oldWrite));
+            if (readback) Attempt(() => encoderHook.SetValue(null, oldEncoder));
             if (!owners.OrdinaryWriterUnconfirmed) Attempt(pause.Dispose);
             if (cleanup is not null)
             {
