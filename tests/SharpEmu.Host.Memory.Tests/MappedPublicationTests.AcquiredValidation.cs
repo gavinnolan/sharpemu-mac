@@ -27,7 +27,7 @@ public sealed partial class MappedPublicationTests
                 own.Views.TryPrepareMappedPublicationValidation(applied, out var validation));
             var exact = Assert.IsType<CpuMappedPublicationValidation>(validation);
             Assert.True(exact.IsCurrent);
-            var operation = other.Backing.BeginManagedWriteOperation(); Assert.True(operation.Identity > 0);
+            var operation = BeginValidationWriterOperation(other.Backing); Assert.True(ValidationWriterIdentity(operation) > 0);
             try
             {
                 Assert.Equal(CpuMappedReadWatchStatus.Busy, other.Host.Ledger.GetMappedCopyWriteWatchStatus(other.Backing, watched));
@@ -37,7 +37,7 @@ public sealed partial class MappedPublicationTests
                 Assert.Equal(CpuMappedReadWatchStatus.Busy, other.Host.Ledger.GetMappedCopyWriteWatchStatus(other.Backing, watched));
                 Assert.True(other.Views.TryWriteBacking(State.Address + (overlap ? 0ul : 32ul), new byte[] { 93 }));
             }
-            finally { HostBackingObject.EndManagedWrite(operation, !unknown); }
+            finally { EndValidationWriter(operation, !unknown); }
             Assert.Equal(overlap || unknown ? CpuMappedReadWatchStatus.Stale : CpuMappedReadWatchStatus.Current,
                 other.Host.Ledger.GetMappedCopyWriteWatchStatus(other.Backing, watched));
             // SAME Applied observation can reprepare its own exclusion, but

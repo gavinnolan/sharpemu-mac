@@ -9,6 +9,17 @@ namespace SharpEmu.Host.Memory.Tests;
 
 public sealed partial class MappedPublicationTests
 {
+    // Same real-ledger reflection seam as MappedCopyReadWatchTests.State.
+    // Host.Memory.Tests intentionally has no friend access to writer tokens.
+    private static object BeginValidationWriterOperation(HostBackingObject backing) => typeof(HostBackingObject)
+        .GetMethod("BeginManagedWriteOperation", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(backing, null)!;
+    private static object BeginValidationWriter(HostBackingObject backing, ulong offset, ulong count) => typeof(HostBackingObject)
+        .GetMethod("BeginManagedWrite", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(backing, [offset, count])!;
+    private static long ValidationWriterIdentity(object exact) => (long)exact.GetType()
+        .GetProperty("Identity", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.GetValue(exact)!;
+    private static void EndValidationWriter(object exact, bool succeeded) => typeof(HostBackingObject)
+        .GetMethod("EndManagedWrite", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, [exact, succeeded]);
+
     private sealed class UnknownValidationProvider : ICpuMappedPublicationSource
     {
         public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(CpuMappedCopyObservation original,
@@ -42,8 +53,8 @@ public sealed partial class MappedPublicationTests
         using var publication = state.Prepare(original, State.Address, [13]);
         Assert.Equal(CpuMappedPublicationResult.Applied, publication.TryCommit());
         var successor = Assert.IsType<CpuMappedCopyObservation>(publication.SuccessfulObservation);
-        var operation = state.Backing.BeginManagedWriteOperation();
-        Assert.True(operation.Identity > 0);
+        var operation = BeginValidationWriterOperation(state.Backing);
+        Assert.True(ValidationWriterIdentity(operation) > 0);
         try
         {
             Assert.True(state.Views.TryWriteBacking(State.Address + (overlap ? 0ul : 32ul), new byte[] { 91 }));
@@ -54,7 +65,7 @@ public sealed partial class MappedPublicationTests
             Assert.Equal(1, refusal.RejectedAdmission); // exact outer operation still admitted
             Assert.True(state.Views.IsMappedCopyObservationCurrent(successor));
         }
-        finally { HostBackingObject.EndManagedWrite(operation, true); }
+        finally { EndValidationWriter(operation, true); }
         Assert.Equal(overlap ? CpuMappedPublicationPreparationResult.Rejected : CpuMappedPublicationPreparationResult.Prepared,
             state.Views.TryPrepareMappedPublicationValidation(successor, out var next, out var finalRefusal));
         using (next) { if (!overlap) Assert.True(next!.IsCurrent); }
@@ -70,18 +81,18 @@ public sealed partial class MappedPublicationTests
         using var state = new State(); var original = state.Capture();
         if (unknown)
         {
-            var failed = state.Backing.BeginManagedWrite(State.Page, 1);
-            HostBackingObject.EndManagedWrite(failed, false); // real participating unknown completion
+            var failed = BeginValidationWriter(state.Backing, State.Page, 1);
+            EndValidationWriter(failed, false); // real participating unknown completion
         }
         else for (var i = 0; i < 520; i++) Assert.True(state.Views.TryWriteBacking(State.Address + State.Page, new byte[] { 5 }));
-        var operation = state.Backing.BeginManagedWriteOperation(); Assert.True(operation.Identity > 0);
+        var operation = BeginValidationWriterOperation(state.Backing); Assert.True(ValidationWriterIdentity(operation) > 0);
         try
         {
             Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
                 state.Views.TryPrepareMappedPublicationValidation(original, out var validation, out var refusal));
             Assert.Null(validation); Assert.Equal(CpuMappedPublicationValidationRefusalKind.AdmissionBusy, refusal.Kind);
         }
-        finally { HostBackingObject.EndManagedWrite(operation, true); }
+        finally { EndValidationWriter(operation, true); }
         Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
             state.Views.TryPrepareMappedPublicationValidation(original, out var rejected, out var finalRefusal));
         Assert.Null(rejected); Assert.Equal(CpuMappedPublicationValidationRefusalKind.UnknownRejected, finalRefusal.Kind);
@@ -95,7 +106,7 @@ public sealed partial class MappedPublicationTests
         using var other = new State(); var original = failure == "foreign" ? other.Capture() : state.Capture();
         if (failure == "revoked") Assert.True(state.Host.Effect(State.Address, State.Page));
         if (failure == "unknown") state.Host.Unknown();
-        var operation = state.Backing.BeginManagedWriteOperation(); Assert.True(operation.Identity > 0);
+        var operation = BeginValidationWriterOperation(state.Backing); Assert.True(ValidationWriterIdentity(operation) > 0);
         try
         {
             Assert.Equal(CpuMappedPublicationPreparationResult.Rejected,
@@ -103,6 +114,6 @@ public sealed partial class MappedPublicationTests
             Assert.Null(ticket); Assert.Equal(CpuMappedPublicationValidationRefusalKind.UnknownRejected, refusal.Kind);
             Assert.Equal(0, refusal.RejectedAdmission);
         }
-        finally { HostBackingObject.EndManagedWrite(operation, true); }
+        finally { EndValidationWriter(operation, true); }
     }
 }
