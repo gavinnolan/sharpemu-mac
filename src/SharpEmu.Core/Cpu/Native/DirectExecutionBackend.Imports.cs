@@ -158,7 +158,7 @@ public sealed partial class DirectExecutionBackend
 		return true;
 	}
 
-	private unsafe ulong DispatchImport(int importIndex, nint argPackPtr)
+	private unsafe ulong DispatchImportCore(int importIndex, nint argPackPtr)
 	{
 		long num = NextImportDispatchIndex();
 		if ((num & 0x3F) == 0)

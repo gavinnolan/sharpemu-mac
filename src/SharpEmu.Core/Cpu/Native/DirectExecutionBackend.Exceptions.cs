@@ -181,7 +181,7 @@ public sealed partial class DirectExecutionBackend
 					$"[LOADER][INFO]   Guest thread: handle=0x{activeGuestThread.ThreadHandle:X16} " +
 					$"name='{activeGuestThread.Name}' state={activeGuestThread.State} " +
 					$"last_import={activeGuestThread.LastImportNid ?? "<none>"} " +
-					$"last_ret=0x{activeGuestThread.LastReturnRip:X16}");
+					$"last_ret=0x{activeGuestThread.LastReturnRip:X16} last_import_scope=recorded-general-dispatch-fast-paths-excluded");
 				Console.Error.WriteLine(
 					$"[LOADER][INFO]   Last import registers: " +
 					$"rax=0x{Volatile.Read(ref activeGuestThread.LastImportRax):X16} " +
