@@ -5,7 +5,7 @@ using SharpEmu.HLE;
 
 namespace SharpEmu.Core.Cpu;
 
-public sealed class TrackedCpuMemory : ICpuMemory, ITrackedCpuMemory, IGuestMemoryAllocator, ICpuMemoryWrapper, ICpuMappedCopySource, ICpuMappedReadWatchSource, ICpuMappedPublicationSource
+public sealed class TrackedCpuMemory : ICpuMemory, ITrackedCpuMemory, IGuestMemoryAllocator, ICpuMemoryWrapper, ICpuGpuMemoryView, ICpuMappedCopySource, ICpuMappedReadWatchSource, ICpuMappedPublicationSource
 {
     private readonly ICpuMemory _inner;
 
@@ -17,6 +17,10 @@ public sealed class TrackedCpuMemory : ICpuMemory, ITrackedCpuMemory, IGuestMemo
     public CpuMemoryAccessFailure? LastFailure { get; private set; }
 
     public ICpuMemory Inner => _inner;
+
+    // GPU work must not capture a guest thread's LastFailure tracker. Every
+    // GPU-visible operation/capability already forwards to this readonly view.
+    public ICpuMemory GpuMemoryView => _inner;
 
     public string DescribeReadRange(ulong address, ulong size) => _inner.DescribeReadRange(address, size);
 

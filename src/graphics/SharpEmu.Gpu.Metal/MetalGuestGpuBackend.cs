@@ -89,19 +89,34 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend, IGuestImageSnapsh
 
     // The worker runs the interpreter and retries blocked submissions.
     private readonly object _commandStreamGate = new();
+    private ICpuMemory? _commandStreamMemory;
     private CommandStreamQueue? _commandStream;
     private CommandStreamWorker? _commandStreamWorker;
+
+    // The same exact resolved reader/provider supplies interpreter and presenter
+    // originals. A live stream never changes roots or substitutes a later view.
+    internal ICpuMemory BindCommandStreamMemory(ICpuMemory memory)
+    {
+        lock (_commandStreamGate)
+        {
+            var resolved = CpuGpuMemoryView.Resolve(memory);
+            if (_commandStreamMemory is { } original && !ReferenceEquals(original, resolved))
+                throw new InvalidOperationException("Metal command stream cannot replace its original GPU memory view.");
+            return _commandStreamMemory ??= resolved;
+        }
+    }
 
     private CommandStreamQueue EnsureCommandStream(ICpuMemory memory)
     {
         lock (_commandStreamGate)
         {
+            var resolved = BindCommandStreamMemory(memory);
             if (_commandStream is { } existing)
             {
                 return existing;
             }
 
-            var host = new MetalCommandStreamHost(memory, this, this);
+            var host = new MetalCommandStreamHost(resolved, this, this);
             var queue = new CommandStreamQueue(host);
             host.AttachQueue(queue);
             _commandStreamWorker = new CommandStreamWorker(queue, host, static () => false, cancelBlockedAtStop: true, "SharpEmu Metal command stream",
