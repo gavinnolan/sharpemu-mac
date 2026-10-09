@@ -446,3 +446,18 @@ this observation does not authorize treating a cube as an ordinary 2D image.
 The wrapper returned zero despite the game's exit 134. The owned game exited
 without KILL and no owned process group or shared lock remained. No new title
 is accepted by this replay.
+
+## Native body/precommit fixes qualified; later entry boundaries remain
+
+Local candidate `63222d4a17392694350af97b42abdfd5232b33a9` passed three bounded builds, all 779 managed rows on each actual ARM64 and x64 CLR, and 27 fresh native workers per CLR with zero skips: 22 real Metal cases and five ordinary Mac provider cases. The five body-race and three completed-staging precommit cases pass on both architectures. Three known failing color cases were explicitly excluded, so this is not full color qualification. All 1,924 tracked source hashes, the 104-file compiled closure and the signed 239-file app remained stable. The closed evidence manifest is `artifacts/validation/all-games-20261009/entry-body-precommit-63222d4a-prepared/manifest.json`, SHA-256 `df9ac116089be689e607308f2c2c716e29e1f3f7cf0fdd142083aa93db70ce94`.
+
+Fresh sequential, nonoverlapping game runs under `.claude/worktrees/root-entry-body-precommit-integration/artifacts/runs/` found distinct remaining boundaries:
+
+- `20261009-035511-octo-entry-body-precommit-63222d4a-nonoverlap`: exit 134 after 30 seconds, peak 3,028 MiB. The first fatal is compute sequence 54/submission 3, after GPU completion in buffer publication receipt validation. The original volume at `0x8030FF0000` has ordinary admission 1, healthy coverage and unchanged native/volume version 2. Producer/applied/canonical counts are 1/0/0. No gameplay.
+- `20261009-035607-sh-entry-body-precommit-63222d4a-nonoverlap`: exit 134 after 25 seconds, peak 1,619 MiB. Two canonical publications and dirty acknowledgments complete. The first fatal is generic original-volume content validation during dirty acknowledgment; immediately preceding original `0x8010BC0000` records ordinary admission 1, with no release, revocation or coverage loss. The generic exception alone does not prove the later classification's exact reason. No gameplay.
+- `20261009-035657-oregon-entry-body-precommit-63222d4a-nonoverlap`: exit 134 after 32 seconds, peak 2,046 MiB. The first fatal is compute sequence 54/submission 3, original-volume validation during receipt capture before any producer-retained count or encoding. Original `0x8011630000` records ordinary admission 2 with healthy ownership/coverage. No gameplay.
+- `20261009-035749-sarah-entry-body-precommit-63222d4a-nonoverlap`: alive for 120 seconds, graceful exit 0, peak 858 MiB. Screenshots at 65, 85 and 105 seconds again show rightward movement/camera motion and leftward return/facing. This preserves the one accepted directional-gameplay baseline, not sustained 60 FPS.
+
+The earlier Octopath run is retained as foreign-overlapped/censored. Separate Kairo workloads were left untouched; their natural exits preceded the accepted replay starts. All owned PID/PPID/process-group receipts and the shared lock are closed.
+
+Source-only follow-ups address pre-encode receipt admission, validation before the first buffer commit, and preserving the actual first Busy status instead of requiring a later query to remain Busy. The root first-status correction is frozen at `31f265e1`, reviewed by the CPU and package agents, with two scalar classification controls; it has not been executed. Combined ordered-color candidate `aa361535` is undergoing separate full qualification including all three color cases. Neither follow-up establishes another title's entry or production promotion yet.
