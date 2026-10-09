@@ -557,7 +557,8 @@ public sealed partial class MetalImmutableGpuVersionTests
                         // memory/session/layout owner, never an address alone.
                         if (candidate is not null && owners.OriginalOrigin is { } original &&
                             StorageMember(candidate, "StorageCpuOrigin") is { } origin &&
-                            ReferenceEquals(StorageMember(origin, "Memory"), owners.Memory) &&
+                            ReferenceEquals(StorageMember(origin, "Memory"), StorageMember(original, "Memory")) &&
+                            ReferenceEquals(StorageMember(origin, "Source"), StorageMember(original, "Source")) &&
                             ReferenceEquals(StorageMember(origin, "Layout"), StorageMember(original, "Layout")) &&
                             Equals(StorageMember(origin, "Session"), StorageMember(original, "Session")))
                             owners.Image ??= candidate;
