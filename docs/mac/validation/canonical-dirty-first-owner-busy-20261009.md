@@ -1,0 +1,9 @@
+# Preserve the original canonical-dirty owner refusal
+
+Source work follows the diagnostic `a3cada8b` replays. Silent Hill and Octopath stop in a retained canonical-dirty retry with `other-image-original-volume-watch-or-version`. Their adjacent provider logs show participating ordinary admissions, but do not identify the entire winning metadata predicate; the change below is not yet a proven explanation of those particular failures.
+
+The initial owner check currently converts the complete original cohort result to a Boolean. The separate deferral check can observe Current after an ordinary writer finishes, then reject deferral because no original typed Busy was retained. A retained retry subsequently calls that healthy interval stale. This is an independently established source race.
+
+The initial check now retains the complete original Current/Busy/Stale result under the existing presenter gate. Only an actual first Busy constructs the existing exact owner receipt. The existing deferrer revalidates the same image, debt, origin, version, texture, physical cohort, original mapping and tokens. It may retain one whole-drain refusal if the original is subsequently Current; it consumes no dirty state, publishes no bytes and acknowledges no work. A first Stale cannot borrow a younger Busy. The next drain still requires full Current validation and ordinary provider exclusion before acknowledgment.
+
+A default-null, gate-free control boundary permits a real different-backing writer to finish between those two checks. The new native regression must verify the first refusal, unchanged complete native volume/canonical bytes and original owners, then the exact subsequent drain and ordered label. Qualification and game replay remain outstanding. No GPU fallback or original-watch refresh is introduced.
