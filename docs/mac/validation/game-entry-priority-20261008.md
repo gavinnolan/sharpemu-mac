@@ -8,6 +8,43 @@ survival do not satisfy this milestone.
 
 ## Latest signed game replays
 
+Queue successor `b3340b0f` passed 732 managed cases per actual CLR and all
+28 fresh native workers, with three builds, stable 104-file compiled closure,
+1910 source hashes and the signed 239-file native-only payload. The new queue
+controls preserve original lifetime through a real held read reservation and
+still reject a later overlapping write. Actual entry remains unqualified:
+
+- Octopath's former queue-retention fatal cleared. It exited 134 after 33
+  seconds, peak 2481 MiB, during canonical dirty acknowledgment: the original
+  volume at `8030BF0000`/65536 has ordinary writer admission 1, with coverage,
+  released and revoked flags zero.
+- Silent Hill first exited 134 after 23 seconds at the original-copy factory;
+  no observation was returned and the inner cause is unknown. A separate
+  traced replay passed that copy and reached two canonical publications, then
+  exited 134 after 30 seconds during dirty-body cohort validation, with ordinary
+  writer admission 2 at the original `80107D0000`/65536. Its capture is black.
+- Oregon passed its former copy blocker and reached a second GPU producer. It
+  exited 134 after 35 seconds, peak 2072 MiB, validating the completed readback
+  before publication. The original `8011600000`/65536 watch has ordinary writer
+  admission 2; the earlier publication count remains one. Intro artwork is not
+  gameplay.
+- Demon's Souls still stops before the sampled-mip CPU copy. The new provenance
+  shows that **the requested mip0 itself is already GPU-written**: R32Float,
+  512-by-256, version 2, from storage producer sequence 175/submission 4 at
+  `7092C80000`. All six ordinary images lack original physical-owner receipts.
+  The qualified detached CPU-copy transport below does not model this native
+  producer and cannot authorize recopying its stale guest bytes. The next path
+  must retain original physical ownership and copy/sample native GPU content.
+  This replay ended 134 after 74 seconds, peak 2219 MiB; its capture is black.
+
+All 49 recorded owned process IDs, their group memberships and the shared lock
+were absent at closure. The
+archive is `artifacts/validation/all-games-20261009/entry-queue-ds-inventory-b3340b0f-prepared`,
+manifest `d221ef9553459d0eebe713424f5815559edaf47ebb99d51f1ff7271759a3258d`.
+These production changes remain isolated from main. Source successors address
+precise dirty-body Busy deferral, bounded pre-publication waits and native color
+borrowing; runtime qualification and actual gameplay are still required.
+
 R32 successor `08ebe4cc` passed 722 managed cases on each actual CLR, all
 24 fresh native workers, three builds, the 104-file compiled closure and the
 signed 239-file native-only payload. The new native case sampled the complete
