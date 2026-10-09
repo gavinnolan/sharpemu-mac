@@ -10,6 +10,21 @@ Source `09bc1fce` passes three builds, 972 managed cases per actual ARM64/x64 CL
 
 The source-exact native-only app contains 239 files and passes deep strict signature verification. ROOT independently verifies all 11 publication artifacts, all 239 payload hashes, and closure of the two publication roots. Publish manifest SHA-256: `56325aafa33b6c2994dfb057debf27fbd82509a1f3a35990fc74b6bd2ef94f38`. Superliminal, Oregon Trail, Octopath and Silent Hill replays are separate validation; subsystem tests and packaging do not establish their boot progression.
 
+## Four current boot replays
+
+The source-exact `09bc1fce` app reaches these first failures, with no foreign overlap or monitor censor:
+
+| Title / run prefix | First observed failure | Reached stage |
+| --- | --- | --- |
+| Superliminal / `20261009-111031` | Eight-byte `WRITE_DATA`, sequence 16, cannot reserve its first original. The captured writer revision advances by 2,022, exceeding the 512-entry completed-write history. No Applied event follows. This does not identify every intervening physical destination. | Exit 134 after 19 seconds; no capture. |
+| Oregon Trail / `20261009-111224` | Guest APR command-buffer reset returns `80020101` at header `0x7060F50608`, then the guest aborts. The later deferred-canonical revalidation error follows abort and is not the entry cause. APR-specific diagnostic flags were absent, so the inner predicate remains unknown. | Colorful illustrated intro artwork at 25 seconds, independently viewed by ROOT; no menu or control. Exit 134 after 33 seconds. |
+| Octopath / `20261009-111448` | Compute sequence 54, submission 3, rejects an original native owner/version in pre-encode validation. The generic guard combines registry identity, saved native fields and volume-watch metadata; adjacent admission samples do not identify its winner. | Black capture; exit 134 after 36 seconds. |
+| Silent Hill / `20261009-111922` | First command-stream slice error includes three watched-copy refusals at `0x80107F0000`: publication admission, then ordinary admission. Later constructor sequence 36 rejects the strict original-read-watch Boolean at `0x80107D0000`, with same-query `admission-nonzero` / primary 1 and classification disabled. This is not proof of a healthy Busy source. | No capture; exit 134 after 25 seconds. |
+
+ROOT independently verifies all 239 new game artifact hashes and absence of all eight owned driver/harness roots. Final manifest: `artifacts/validation/all-games-20261009/boot-typed-original-diagnostic-09bc1fce-game-entry-commandtrace-prepared/final-game-manifest.json`, SHA-256 `fa50de42ac949e60f1c850a2e84151a7a6418f6eb6597828890fab4b77e042ae`. Source, compiled files, signed payload, prior qualification and 413 read-only prerequisite links remain unchanged. These four attempts add no verified menu or gameplay title.
+
+After the replay batch closes and a fresh scan shows no game or heavy worker, the runtime lane is handed back to Kairo for a bounded validation/replay batch. SharpEmu continues source fixes and evidence review until the next coordinated window. Both tasks remain active.
+
 ## Latest qualification and three game replays
 
 Source `1e17bc8d` passes three builds, 912 managed cases per actual ARM64/x64 CLR and 58 native cases per CLR. Both mixed buffer/image cases pass first, followed by the remaining native inventory. ROOT independently verifies the native checkpoint's 830 artifact hashes and worker closure. The source-exact native-only signed package contains 239 files; ROOT verifies its 15 publication artifacts, all 239 payload hashes and deep strict signature. Native manifest SHA-256: `5d1798217e3c6b63f1efc3faa7febe6e4e1952e909b7ee3baceba8efd5ae7bb3`; publish manifest SHA-256: `e84d636ff0132f531a2bf9aeaead02970ba86c420bb6df93d791ade3306df7a3`.
