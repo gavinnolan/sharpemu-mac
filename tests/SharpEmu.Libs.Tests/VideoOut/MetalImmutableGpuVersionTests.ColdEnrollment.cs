@@ -66,7 +66,7 @@ public sealed partial class MetalImmutableGpuVersionTests
         private long originalSession, originalEpoch, originalReadGeneration;
         private GuestImageWriteTracker.ContentToken originalToken;
         private object? originalBackend;
-        private bool started, releaseRequested, joined, hooksInstalled, finished;
+        private bool started, releaseRequested, joined, hooksInstalled, writerHookInstalled, finished;
         private long InitialAdmission => (long)StorageMember(backing.ManagedWrites!, "admission")!;
 
         internal ColdNativeMappedSource(PhysicalVirtualMemory physical, IHostViewMemory host,
@@ -136,6 +136,9 @@ public sealed partial class MetalImmutableGpuVersionTests
                     if (scenario == "ordinary-writer")
                     {
                         Assert.True(views.TryResolveAlias(disjoint, 1, out var alias));
+                        // Own restoration before the first reflection mutation,
+                        // including a partially failed installation.
+                        writerHookInstalled = true;
                         writerHook.SetValue(views, (Action<ulong, int>)((destination, length) =>
                         {
                             Assert.Equal(alias, destination); Assert.Equal(1, length); RequireGateFree();
@@ -292,13 +295,24 @@ public sealed partial class MetalImmutableGpuVersionTests
 
         private Exception? RestoreHooks()
         {
-            if (!hooksInstalled) return hookCleanupFailure;
+            if (!hooksInstalled && !writerHookInstalled) return hookCleanupFailure;
             Exception? cleanup = null;
-            Attempt(() => revisionHook.SetValue(ledger, oldRevisionHook));
-            Attempt(() => copyHook.SetValue(ledger, oldCopyHook));
-            Attempt(() => traceSink.SetValue(null, oldTraceSink));
-            Attempt(() => traceRows.SetValue(null, oldTraceRows));
-            Attempt(() => traceEnabled.SetValue(null, oldTraceEnabled));
+            if (writerHookInstalled)
+            {
+                // The controlled foreign writer has joined before a successful
+                // cold copy returns. Later publication/EOP writes must see the
+                // original hook; consume this restore attempt even if it fails.
+                Attempt(() => writerHook.SetValue(views, oldWriterHook));
+                writerHookInstalled = false;
+            }
+            if (hooksInstalled)
+            {
+                Attempt(() => revisionHook.SetValue(ledger, oldRevisionHook));
+                Attempt(() => copyHook.SetValue(ledger, oldCopyHook));
+                Attempt(() => traceSink.SetValue(null, oldTraceSink));
+                Attempt(() => traceRows.SetValue(null, oldTraceRows));
+                Attempt(() => traceEnabled.SetValue(null, oldTraceEnabled));
+            }
             // Every restore was attempted exactly once. Failed restoration
             // retains all fixture owners and cannot be retried by Finish.
             hooksInstalled = false;
@@ -325,8 +339,6 @@ public sealed partial class MetalImmutableGpuVersionTests
                 if (!joined) throw new TimeoutException("Cold actor outcome unknown; fixture owners retained.");
             }
             var cleanup = RestoreHooks();
-            try { writerHook.SetValue(views, oldWriterHook); }
-            catch (Exception restoreFailure) { cleanup ??= restoreFailure; }
             if (actorFailure is { } failure)
             {
                 // Release/commit may have thrown. Never retry it or retire its
