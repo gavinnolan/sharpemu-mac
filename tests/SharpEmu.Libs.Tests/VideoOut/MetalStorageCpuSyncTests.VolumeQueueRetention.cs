@@ -3,6 +3,7 @@
 using System.Collections;
 using System.Reflection;
 using SharpEmu.Gpu.Metal;
+using SharpEmu.HLE;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.VideoOut;
