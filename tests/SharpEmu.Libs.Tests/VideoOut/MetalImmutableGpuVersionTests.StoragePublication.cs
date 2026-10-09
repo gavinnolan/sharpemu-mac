@@ -218,7 +218,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             if (appliedValidationWindow is not null)
             {
                 RunActualAppliedValidationBusy(state, physical, memory, cpuSource, owners, address, imageBytes,
-                    storeOffset, expected, firstSequence, firstEop, firstShader, ReadCanonical, appliedValidationWindow);
+                    storeOffset, expected, originalMapping, firstSequence, firstEop, firstShader, ReadCanonical, appliedValidationWindow);
                 return;
             }
             if (precommitBusyWindow is not null)

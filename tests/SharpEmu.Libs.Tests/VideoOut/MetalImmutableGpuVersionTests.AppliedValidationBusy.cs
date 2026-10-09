@@ -49,7 +49,7 @@ public sealed partial class MetalImmutableGpuVersionTests
 
     private void RunActualAppliedValidationBusy(NativeState state, PhysicalVirtualMemory physical, TrackedCpuMemory memory,
         ICpuMemory cpuSource, FiniteStorageFixtureOwners owners, ulong address, int imageBytes, int storeOffset,
-        byte[] expected, long sequence, long eop, MetalCompiledGuestShader shader, Func<byte[]> canonical, string scenario)
+        byte[] expected, CpuMappedCopyObservation originalImageMapping, long sequence, long eop, MetalCompiledGuestShader shader, Func<byte[]> canonical, string scenario)
     {
         const BindingFlags instance = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
         var requestedScenario = scenario;
@@ -67,9 +67,31 @@ public sealed partial class MetalImmutableGpuVersionTests
         var volumeBytes = owners.VolumeImages.Select(ReadVolume).ToArray();
         var volumeOriginals = owners.VolumeImages.Select(image => StorageMember(image, "StorageCpuOrigin")).ToArray();
         var extraExpected = Enumerable.Range(imageBytes, 3 * 65536).Select(i => (byte)(i * 19 + 7)).ToArray();
+        Assert.Equal(2, volumeOriginals.Length);
+        var volumeMappings = volumeOriginals.Select(original =>
+            Assert.IsType<CpuMappedCopyObservation>(StorageMember(original!, "Mapping"))).ToArray();
+        var overlapAddress = volumeMappings[0].SourceAddress; // SAME first singleton original, not an assumed allocation index
         var destination = acquiredWindow
-            ? owners.BodyVolumeAddress + (scenario == "stale-first" ? 0ul : 2 * 65536ul + 32768)
+            ? scenario == "stale-first" ? overlapAddress : owners.BodyVolumeAddress + 32768
             : scenario == "overlap" ? address : address + (ulong)imageBytes + 32768;
+        var destinationMapping = CaptureFixtureByte(writerPhysical, destination);
+        for (var index = 0; index < volumeMappings.Length; index++)
+        {
+            var original = volumeMappings[index];
+            Assert.Equal(65536UL, original.FootprintByteCount); Assert.Equal(65536UL, original.SourceByteCount);
+            Assert.Equal(original.FootprintAddress, original.SourceAddress);
+            Assert.Equal(acquiredWindow && scenario == "stale-first" && index == 0,
+                FixturePhysicalOverlap(destinationMapping, original));
+        }
+        Assert.Equal(!acquiredWindow && scenario == "overlap", FixturePhysicalOverlap(destinationMapping, originalImageMapping));
+        if (acquiredWindow)
+        {
+            var exactOverlapMapping = CaptureFixtureByte(volumePhysical, overlapAddress);
+            Assert.True(FixturePhysicalOverlap(exactOverlapMapping, volumeMappings[0]));
+            Assert.False(FixturePhysicalOverlap(exactOverlapMapping, volumeMappings[1]));
+            Assert.False(FixturePhysicalOverlap(exactOverlapMapping, originalImageMapping));
+        }
+        output.WriteLine($"finite-applied-fixture geometry scenario={requestedScenario}; initial_writer=0x{destination:X}; negative_original=0x{overlapAddress:X}; original0=0x{volumeMappings[0].FootprintAddress:X}/65536; original1=0x{volumeMappings[1].FootprintAddress:X}/65536; actual_provider_physical_spans_checked=true; discarded_probe_not_content_authority=true");
         Assert.True(views.TryResolveAlias(destination, 1, out var alias));
         var writeHook = typeof(SharedBackingViews).GetField("_beforeCanonicalAliasCopyForControl", instance)!;
         var oldWrite = writeHook.GetValue(views);
@@ -151,11 +173,11 @@ public sealed partial class MetalImmutableGpuVersionTests
                     var image = StorageMember(actual, "Image")!;
                     image.GetType().GetField("ContentVersion", instance)!.SetValue(image, (int)StorageMember(image, "ContentVersion")! + 1);
                 }
-                if (scenario == "token") GuestImageWriteTracker.NotifyManagedWrite(acquiredWindow ? owners.BodyVolumeAddress : address, 1);
+                if (scenario == "token") GuestImageWriteTracker.NotifyManagedWrite(acquiredWindow ? overlapAddress : address, 1);
                 if (acquiredWindow && scenario == "overlap")
                 {
-                    Assert.True(volumeViews.TryWriteBacking(owners.BodyVolumeAddress, new byte[] { 0xA7 }));
-                    extraExpected[0] = 0xA7; // real later overlap invalidates the SAME original watch
+                    Assert.True(volumeViews.TryWriteBacking(overlapAddress, new byte[] { 0xA7 }));
+                    extraExpected[checked((int)(overlapAddress - owners.BodyVolumeAddress))] = 0xA7; // real later overlap invalidates the SAME original watch
                 }
                 FinishWriter();
             }));
@@ -242,6 +264,41 @@ public sealed partial class MetalImmutableGpuVersionTests
         {
             pause.Resume.Set(); Assert.True(pause.Thread!.Join(TimeSpan.FromSeconds(5)));
             if (pause.Failure is { } failure) ExceptionDispatchInfo.Capture(failure).Throw(); Assert.True(pause.Written);
+        }
+        CpuMappedCopyObservation CaptureFixtureByte(PhysicalVirtualMemory source, ulong at)
+        {
+            Assert.Equal(CpuMappedCopyResult.Copied, source.TryReadMappedCopy(at, 1, at, new byte[1], out var captured));
+            var original = Assert.IsType<CpuMappedCopyObservation>(captured);
+            Assert.Equal(at, original.FootprintAddress); Assert.Equal(1UL, original.FootprintByteCount);
+            Assert.Equal(at, original.SourceAddress); Assert.Equal(1UL, original.SourceByteCount);
+            Assert.True(source.IsMappedCopyObservationCurrent(original));
+            return original; // discarded byte does not certify any native/GPU content
+        }
+        bool FixturePhysicalOverlap(CpuMappedCopyObservation left, CpuMappedCopyObservation right)
+        {
+            Assert.Equal(left.FootprintByteCount, left.Segments.Aggregate(0UL, (count, part) => checked(count + part.CoveredByteCount)));
+            Assert.Equal(right.FootprintByteCount, right.Segments.Aggregate(0UL, (count, part) => checked(count + part.CoveredByteCount)));
+            var overlap = false;
+            foreach (var first in left.Segments)
+            {
+                var firstStart = FixturePhysicalStart(first);
+                foreach (var second in right.Segments)
+                {
+                    var secondStart = FixturePhysicalStart(second);
+                    if (first.BackingIdentity == second.BackingIdentity &&
+                        firstStart < secondStart + second.CoveredByteCount && secondStart < firstStart + first.CoveredByteCount)
+                        overlap = true;
+                }
+            }
+            return overlap;
+        }
+        UInt128 FixturePhysicalStart(CpuMappingFootprintSegment part)
+        {
+            Assert.True(part.BackingIdentity > 0 && part.MappingIncarnation > 0);
+            Assert.True(part.CoveredAddress >= part.MappingAddress && part.CoveredByteCount > 0);
+            var start = (UInt128)part.MappingBackingOffset + part.CoveredAddress - part.MappingAddress;
+            Assert.True(start + part.CoveredByteCount <= part.BackingLogicalByteCount);
+            return start;
         }
         byte[] ReadExtra() { var bytes = new byte[3 * 65536]; Assert.True(volumePhysical.TryRead(owners.BodyVolumeAddress, bytes)); return bytes; }
         byte[] ReadVolume(object volume) => ReadOriginalVolume((nint)StorageMember(volume, "Texture")!,
