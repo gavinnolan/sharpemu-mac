@@ -13,6 +13,8 @@ public sealed unsafe partial class HostMappedCopyLedger
 
     // This capability excludes ONLY the calling-thread provider gate. Known
     // wrappers must additionally exclude their inherited gates and closure.
+    public bool CanWaitForMappedReadWatchStatus => !Monitor.IsEntered(gate);
+
     public bool CanWaitForMappedReadWatchEnrollment => !Monitor.IsEntered(gate);
 
     public CpuMappedCopyResult TryReadMappedCopyWithWriteWatchAdmissionWait(HostBackingObject backing,

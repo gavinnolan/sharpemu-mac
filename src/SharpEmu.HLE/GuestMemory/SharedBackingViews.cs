@@ -156,6 +156,9 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
         }
         finally { ExitAliasAccess(); }
     }
+    public bool CanWaitForMappedReadWatchStatus => IsAvailable && CanEmitOrdinaryWriteDiagnostic &&
+        _host is IHostMappedReadWatchMemory provider && provider.CanWaitForMappedReadWatchStatus;
+
     public bool CanWaitForMappedReadWatchEnrollment => IsAvailable && CanEmitOrdinaryWriteDiagnostic &&
         _host is IHostMappedReadWatchMemory provider && provider.CanWaitForMappedReadWatchEnrollment;
 

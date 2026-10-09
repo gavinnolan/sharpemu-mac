@@ -1226,6 +1226,11 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             CpuMappedCopyResult.Rejected, footprintAddress, footprintByteCount, sourceAddress, destination.Length, true);
         return CpuMappedCopyResult.Rejected;
     }
+    public bool CanWaitForMappedReadWatchStatus =>
+        !Volatile.Read(ref _disposed) && !_gate.IsReadLockHeld && !_gate.IsWriteLockHeld && !_gate.IsUpgradeableReadLockHeld &&
+        !Monitor.IsEntered(_guestAllocationGate) && !Monitor.IsEntered(_allocationSearchHintGate) &&
+        _backedSpace is ICpuMappedReadWatchSource source && source.CanWaitForMappedReadWatchStatus;
+
     public bool CanWaitForMappedReadWatchEnrollment =>
         !Volatile.Read(ref _disposed) && !_gate.IsReadLockHeld && !_gate.IsWriteLockHeld && !_gate.IsUpgradeableReadLockHeld &&
         !Monitor.IsEntered(_guestAllocationGate) && !Monitor.IsEntered(_allocationSearchHintGate) &&

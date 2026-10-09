@@ -79,6 +79,9 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
             ? ledger.TryReadMappedCopyWithWriteWatch(backing, footprintAddress, footprintByteCount, sourceAddress, destination, out observation)
             : CpuMappedCopyResult.Unavailable;
     }
+    public bool CanWaitForMappedReadWatchStatus => CanWaitForOrdinaryWriteAdmission &&
+        MacMappedCopyState.Ledger is { } ledger && ledger.CanWaitForMappedReadWatchStatus;
+
     public bool CanWaitForMappedReadWatchEnrollment => CanWaitForOrdinaryWriteAdmission &&
         MacMappedCopyState.Ledger is { } ledger && ledger.CanWaitForMappedReadWatchEnrollment;
 

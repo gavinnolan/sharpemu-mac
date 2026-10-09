@@ -114,6 +114,9 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMap
         if (observation is not null) _views.ReleaseMappedCopyWriteWatch(observation);
         observation = null; return CpuMappedCopyResult.Rejected;
     }
+    public bool CanWaitForMappedReadWatchStatus =>
+        !Volatile.Read(ref _disposed) && _views.CanWaitForMappedReadWatchStatus;
+
     public bool CanWaitForMappedReadWatchEnrollment =>
         !Volatile.Read(ref _disposed) && _views.CanWaitForMappedReadWatchEnrollment;
 

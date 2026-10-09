@@ -71,6 +71,9 @@ public sealed class TrackedCpuMemory : ICpuMemory, ITrackedCpuMemory, IGuestMemo
             ? source.TryReadMappedCopyWithWriteWatch(footprintAddress, footprintByteCount, sourceAddress, destination, out observation)
             : CpuMappedCopyResult.Unavailable;
     }
+    public bool CanWaitForMappedReadWatchStatus =>
+        _inner is ICpuMappedReadWatchSource source && source.CanWaitForMappedReadWatchStatus;
+
     public bool CanWaitForMappedReadWatchEnrollment =>
         _inner is ICpuMappedReadWatchSource source && source.CanWaitForMappedReadWatchEnrollment;
 
