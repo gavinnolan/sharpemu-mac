@@ -59,7 +59,7 @@ internal static partial class MetalVideoPresenter
             lock (_gate) RequireCommandMemoryExecutionLocked(owned!);
             if (owned!.Mapping is { } mapping)
             {
-                lock (_gate) RequireCommandMemoryOriginalLocked(owned, mapping);
+                RequireCommandMemoryOriginal(owned, mapping, requireExecution: true);
             }
             TraceCommandMemory("executing", operation.DebugName, operation.Address, operation.ByteCount,
                 operation.Value, Volatile.Read(ref _executingGuestWorkSequence));
@@ -69,7 +69,7 @@ internal static partial class MetalVideoPresenter
                 try
                 {
                     operation.ExecuteOriginalWrite((ICpuMappedPublicationSource)owned.Memory, original,
-                        () => { lock (_gate) { RequireCommandMemoryExecutionLocked(owned); RequireCommandMemoryOriginalLocked(owned, original); } });
+                        () => RequireCommandMemoryOriginal(owned, original, requireExecution: true));
                 }
                 catch
                 {
@@ -113,7 +113,7 @@ internal static partial class MetalVideoPresenter
             throw new NotSupportedException("An uncertain ORIGINAL command memory write remains process-owned; further certified writes refuse across presenter reset.");
         if (_closed || _guestWorkFailure is not null || !ReferenceEquals(_guestMemory, work.Memory) ||
             work.Session != CurrentNativeDepthFaceSession || work.Queue != (_submittingGuestQueue ?? GuestQueueIdentity.Default) || work.Source is null ||
-            !work.Source.IsMappedCopyObservationCurrent(mapping) ||
+            !ReferenceEquals(work.Mapping, mapping) ||
             !work.Operation.TryGetGuestWriteRange(out var address, out var bytes) || bytes == 0 ||
             mapping.FootprintAddress != address || mapping.FootprintByteCount != bytes ||
             work.Operation.Kind != CommandMemoryOperation.OperationKind.Write || work.Memory is not ICpuMappedPublicationSource ||
@@ -124,8 +124,85 @@ internal static partial class MetalVideoPresenter
                 throw new NotSupportedException("Command memory operation lacks its ORIGINAL full write entitlement.");
     }
 
+    private static void RequireCommandMemoryOriginal(OrderedCommandMemoryOperation work,
+        CpuMappedCopyObservation mapping, bool requireExecution = false)
+    {
+        if (Monitor.IsEntered(_gate))
+            throw new InvalidOperationException("Command memory provider currentness requires a released presenter gate.");
+        lock (_gate)
+        {
+            if (requireExecution) RequireCommandMemoryExecutionLocked(work);
+            RequireCommandMemoryOriginalLocked(work, mapping);
+        }
+        if (!work.Source!.IsMappedCopyObservationCurrent(mapping))
+            throw new NotSupportedException("Command memory operation lost its ORIGINAL complete writable mapping/session.");
+        lock (_gate)
+        {
+            if (requireExecution) RequireCommandMemoryExecutionLocked(work);
+            RequireCommandMemoryOriginalLocked(work, mapping);
+        }
+        // This is admission/identity validation, not a pin. The actual closed
+        // write still prepares and commits ONLY the same original transaction.
+    }
+
+    // Detached identities, not a currentness cache. A borrower can use these
+    // reached provider checks only while the exact captured accepted/taken
+    // inventory is unchanged. Nothing is recaptured on a mismatch.
+    private sealed record NativeColorCommandMemoryInventory(long Enqueued, long TakenSequence,
+        object? Taken, int PendingCount, PendingGuestWork[] Pending);
+
+    private static NativeColorCommandMemoryInventory CaptureNativeColorCommandMemoryInventory()
+    {
+        if (Monitor.IsEntered(_gate))
+            throw new InvalidOperationException("Native color command memory provider checks require a released presenter gate.");
+        NativeColorCommandMemoryInventory inventory;
+        lock (_gate)
+        {
+            if (_pendingGuestWorkCount > 128 || _pendingGuestWorkByQueue.Count > 128)
+                throw new NotSupportedException("Native color command memory inventory exceeds its finite bound.");
+            inventory = new(_enqueuedGuestWorkSequence, _takenGuestWorkSequence, _takenDepthCubeProducerWork,
+                _pendingGuestWorkCount, _pendingGuestWorkByQueue.Values.SelectMany(items => items)
+                    .Where(item => item.Work is OrderedCommandMemoryOperation).ToArray());
+        }
+        foreach (var pending in inventory.Pending)
+        {
+            var work = (OrderedCommandMemoryOperation)pending.Work;
+            if (work.Operation.Kind == CommandMemoryOperation.OperationKind.Write && work.Operation.ByteCount != 0)
+                RequireCommandMemoryOriginal(work, work.Mapping ??
+                    throw new NotSupportedException("Native color command memory writer lacks its ORIGINAL complete mapping."));
+        }
+        if (inventory.Taken is OrderedCommandMemoryOperation taken &&
+            taken.Operation.Kind == CommandMemoryOperation.OperationKind.Write && taken.Operation.ByteCount != 0)
+            RequireCommandMemoryOriginal(taken, taken.Mapping ??
+                throw new NotSupportedException("Native color taken command memory writer lacks its ORIGINAL complete mapping."));
+        if (inventory.Pending.Length != 0 || inventory.Taken is OrderedCommandMemoryOperation)
+            lock (_gate) RequireNativeColorCommandMemoryInventoryLocked(inventory);
+        return inventory;
+    }
+
+    private static bool SameCommandMemoryPending(PendingGuestWork first, PendingGuestWork current) =>
+        first == current && ReferenceEquals(first.Work, current.Work);
+
+    private static void RequireNativeColorCommandMemoryInventoryLocked(NativeColorCommandMemoryInventory inventory)
+    {
+        if (_enqueuedGuestWorkSequence != inventory.Enqueued || _takenGuestWorkSequence != inventory.TakenSequence ||
+            !ReferenceEquals(_takenDepthCubeProducerWork, inventory.Taken) || _pendingGuestWorkCount != inventory.PendingCount)
+            throw new NotSupportedException("Native color ORIGINAL command memory inventory changed during provider validation.");
+        var index = 0;
+        foreach (var items in _pendingGuestWorkByQueue.Values)
+        foreach (var pending in items)
+        {
+            if (pending.Work is not OrderedCommandMemoryOperation) continue;
+            if (index >= inventory.Pending.Length || !SameCommandMemoryPending(pending, inventory.Pending[index++]))
+                throw new NotSupportedException("Native color ORIGINAL accepted command memory receipt changed.");
+        }
+        if (index != inventory.Pending.Length)
+            throw new NotSupportedException("Native color ORIGINAL accepted command memory inventory shrank.");
+    }
+
     private static void RequireNativeColorCommandMemoryLocked(
-        OrderedCommandMemoryOperation work, NativeColorProducer producer, PendingGuestWork? pending)
+        OrderedCommandMemoryOperation work, NativeColorProducer producer, PendingGuestWork? pending,
+        NativeColorCommandMemoryInventory? inventory)
     {
         if (work.Operation.Kind != CommandMemoryOperation.OperationKind.Write ||
             !work.Operation.TryGetGuestWriteRange(out var address, out var bytes))
@@ -137,6 +214,12 @@ internal static partial class MetalVideoPresenter
             work.Session != producer.Original.Session || work.Session != CurrentNativeDepthFaceSession)
             throw new NotSupportedException("Native color command memory operation has another original memory/session/queue.");
         if (bytes == 0) return; // closed zero-byte write only; never arbitrary callbacks
+        if (inventory is null)
+            throw new NotSupportedException("Native color command memory writer lacks its gate-free ORIGINAL inventory check.");
+        RequireNativeColorCommandMemoryInventoryLocked(inventory);
+        if (pending is not null ? !inventory.Pending.Any(item => SameCommandMemoryPending(item, pending.Value) && ReferenceEquals(item.Work, work)) :
+            !ReferenceEquals(inventory.Taken, work) || inventory.TakenSequence == 0)
+            throw new NotSupportedException("Native color command memory writer is not its checked accepted/taken original.");
         var mapping = work.Mapping ?? throw new NotSupportedException("Native color command memory writer lacks its ORIGINAL complete mapping.");
         RequireCommandMemoryOriginalLocked(work, mapping);
         if (NativeColorPhysicalOverlap(producer.Original.Mapping, producer.Original.Placement.PhysicalAddress,

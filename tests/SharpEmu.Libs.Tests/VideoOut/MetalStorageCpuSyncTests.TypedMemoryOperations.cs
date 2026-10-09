@@ -207,12 +207,26 @@ public sealed partial class MetalStorageCpuSyncTests
                     Assert.Contains("taken/executing original receipt", refusal.Message);
                     Assert.False(caller.IsCompleted); // invoking a borrowed callback did not acknowledge it
                 }
-                lock (Field("_gate").GetValue(null)!)
+                object? inventory = null;
+                var inventoryFailure = Record.Exception(() => inventory = InvokeVolume("CaptureNativeColorCommandMemoryInventory"));
+                if (inventoryFailure is not null)
                 {
-                    if (variant is "disjoint" or "saved-without-take") InvokeVolume("RequireNativeColorCohortLocked", producer);
+                    Assert.Contains(variant, new[] { "stale-original", "rights-after-admission", "changed-session", "wrong-queue", "missing-mapping" });
+                    Assert.IsType<NotSupportedException>(Assert.IsType<TargetInvocationException>(inventoryFailure).InnerException);
+                }
+                else lock (Field("_gate").GetValue(null)!)
+                {
+                    if (variant is "disjoint" or "saved-without-take")
+                    {
+                        // The old locked-only seam cannot manufacture a reached
+                        // provider check, even with the same original metadata.
+                        Assert.IsType<NotSupportedException>(Assert.Throws<TargetInvocationException>(
+                            () => InvokeVolume("RequireNativeColorCohortLocked", producer)).InnerException);
+                        InvokeVolume("RequireNativeColorCohortWithCommandMemoryLocked", producer, inventory);
+                    }
                     else
                     {
-                        var failure = Assert.Throws<TargetInvocationException>(() => InvokeVolume("RequireNativeColorCohortLocked", producer));
+                        var failure = Assert.Throws<TargetInvocationException>(() => InvokeVolume("RequireNativeColorCohortWithCommandMemoryLocked", producer, inventory));
                         Assert.IsType<NotSupportedException>(failure.InnerException);
                     }
                 }
@@ -232,11 +246,116 @@ public sealed partial class MetalStorageCpuSyncTests
         Assert.True(caller.IsCompleted); Assert.Equal(1, memory.Original.Releases);
     }
 
+    [Fact]
+    public void OriginalCommandCurrentnessCannotRunUnderPresenterGate()
+    {
+        ActualArchitecture(); using var state = new BorrowColorState();
+        var memory = new TypedColorMemory("disjoint"); MetalVideoPresenter.AttachGuestMemory(memory);
+        using var queue = MetalVideoPresenter.EnterGuestQueue("typed.color", 7);
+        var backend = new MetalGuestGpuBackend(); var host = new MetalCommandStreamHost(memory, backend, backend);
+        var operation = SharpEmu.Libs.Gpu.GpuCommands.CommandMemoryOperation.Write(TypedColorMemory.Destination, new byte[8]);
+        var original = InvokeVolume("PrepareCommandMemoryOperation", host, operation, (Action)(() => throw new Exception("not invoked")))!;
+        var mapping = original.GetType().GetProperty("Mapping")!.GetValue(original)!;
+        var before = memory.CommandQueries;
+        lock (Field("_gate").GetValue(null)!)
+        {
+            var refusal = Assert.Throws<TargetInvocationException>(() => InvokeVolume("RequireCommandMemoryOriginal", original, mapping, false));
+            Assert.IsType<InvalidOperationException>(refusal.InnerException);
+            Assert.Equal(before, memory.CommandQueries);
+            InvokeVolume("RequireCommandMemoryOriginalLocked", original, mapping); // scalars ONLY
+            Assert.Equal(before, memory.CommandQueries);
+        }
+        InvokeVolume("RequireCommandMemoryOriginal", original, mapping, false);
+        Assert.Equal(before + 1, memory.CommandQueries); Assert.Equal(0, memory.Writes);
+        Assert.Equal(0L, Field("_completedGuestWorkSequence").GetValue(null));
+    }
+
+    [Theory]
+    [InlineData("session")]
+    [InlineData("memory")]
+    [InlineData("uncertain-root")]
+    [InlineData("stale")]
+    public void OriginalCommandProviderCheckCannotAdoptChangedScalarOwner(string change)
+    {
+        ActualArchitecture(); using var state = new BorrowColorState();
+        var memory = new TypedColorMemory("disjoint"); MetalVideoPresenter.AttachGuestMemory(memory);
+        using var queue = MetalVideoPresenter.EnterGuestQueue("typed.color", 7);
+        var backend = new MetalGuestGpuBackend(); var host = new MetalCommandStreamHost(memory, backend, backend);
+        var operation = SharpEmu.Libs.Gpu.GpuCommands.CommandMemoryOperation.Write(TypedColorMemory.Destination, new byte[8]);
+        var original = InvokeVolume("PrepareCommandMemoryOperation", host, operation, (Action)(() => throw new Exception("not invoked")))!;
+        var mapping = original.GetType().GetProperty("Mapping")!.GetValue(original)!;
+        var oldRoot = Field("_uncertainCommandMemoryWrite").GetValue(null);
+        Assert.Null(oldRoot);
+        memory.BeforeCommandCurrent = () =>
+        {
+            memory.BeforeCommandCurrent = null;
+            switch (change)
+            {
+                case "session": Field("_selectedStorageMipSession").SetValue(null, (long)Field("_selectedStorageMipSession").GetValue(null)! + 1); break;
+                case "memory": Field("_guestMemory").SetValue(null, new TypedColorMemory("disjoint")); break;
+                case "uncertain-root": Field("_uncertainCommandMemoryWrite").SetValue(null, original); break; // fake bookkeeping, no effect
+                case "stale": memory.CommandCurrent = false; break;
+            }
+        };
+        try
+        {
+            var before = memory.CommandQueries;
+            var refusal = Assert.Throws<TargetInvocationException>(() => InvokeVolume("RequireCommandMemoryOriginal", original, mapping, false));
+            Assert.IsType<NotSupportedException>(refusal.InnerException);
+            Assert.Equal(before + 1, memory.CommandQueries); Assert.Equal(1, memory.CommandCopies);
+            Assert.Equal(0, memory.Writes); Assert.Equal(0, Field("_pendingGuestWorkCount").GetValue(null));
+            Assert.Equal(0L, Field("_completedGuestWorkSequence").GetValue(null));
+        }
+        finally
+        {
+            memory.BeforeCommandCurrent = null;
+            Field("_uncertainCommandMemoryWrite").SetValue(null, oldRoot); // only this known fake scope
+        }
+    }
+
+    [Theory]
+    [InlineData("admission")]
+    [InlineData("take")]
+    public void NativeColorCommandInventoryCannotPassAChangedAcceptedOrTakenReceipt(string change)
+    {
+        ActualArchitecture(); using var state = new BorrowColorState();
+        var memory = new TypedColorMemory("disjoint"); MetalVideoPresenter.AttachGuestMemory(memory);
+        using var queue = MetalVideoPresenter.EnterGuestQueue("typed.color", 7);
+        var invoked = false;
+        object inventory;
+        if (change == "admission")
+        {
+            inventory = InvokeVolume("CaptureNativeColorCommandMemoryInventory")!;
+            MetalVideoPresenter.SubmitOrderedGuestAction(() => invoked = true, "unknown controlled callback");
+        }
+        else
+        {
+            MetalVideoPresenter.SubmitOrderedGuestAction(() => invoked = true, "unknown controlled callback");
+            inventory = InvokeVolume("CaptureNativeColorCommandMemoryInventory")!;
+            object?[] args = [null];
+            Assert.True((bool)Presenter.GetMethod("TryTakeGuestWork", Private)!.Invoke(null, args)!);
+        }
+        try
+        {
+            lock (Field("_gate").GetValue(null)!)
+            {
+                var refusal = Assert.Throws<TargetInvocationException>(
+                    () => InvokeVolume("RequireNativeColorCommandMemoryInventoryLocked", inventory));
+                Assert.IsType<NotSupportedException>(refusal.InnerException);
+            }
+            Assert.False(invoked); Assert.Equal(0, memory.CommandQueries); Assert.Equal(0, memory.Writes);
+            Assert.Equal(0L, Field("_completedGuestWorkSequence").GetValue(null));
+        }
+        finally { InvokeVolume("CompletePresenterShutdown"); }
+    }
+
     private sealed class TypedColorMemory(string variant) : ICpuMemory, ICpuMappedReadWatchSource, ICpuMappedPublicationSource
     {
         internal const ulong Destination = Address + 0x500000;
         internal readonly BorrowColorMemory Original = new();
         internal int CommandCopies, Writes;
+        internal int CommandQueries;
+        internal Action? BeforeCommandCurrent;
         internal bool CommandCurrent = true;
         private CpuMappedCopyObservation? command;
         public bool TryRead(ulong address, Span<byte> bytes) => Original.TryRead(address, bytes);
@@ -258,8 +377,12 @@ public sealed partial class MetalStorageCpuSyncTests
         }
         public CpuMappedCopyResult TryReadMappedCopyWithWriteWatch(ulong address, ulong count, ulong source, Span<byte> bytes, out CpuMappedCopyObservation? mapping) =>
             Original.TryReadMappedCopyWithWriteWatch(address, count, source, bytes, out mapping);
-        public bool IsMappedCopyObservationCurrent(CpuMappedCopyObservation mapping) =>
-            ReferenceEquals(mapping, command) ? CommandCurrent : Original.IsMappedCopyObservationCurrent(mapping);
+        public bool IsMappedCopyObservationCurrent(CpuMappedCopyObservation mapping)
+        {
+            if (!ReferenceEquals(mapping, command)) return Original.IsMappedCopyObservationCurrent(mapping);
+            Assert.False(Monitor.IsEntered(Field("_gate").GetValue(null)!), "Original command provider query ran under the presenter gate.");
+            CommandQueries++; BeforeCommandCurrent?.Invoke(); return CommandCurrent;
+        }
         public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation mapping) => Original.IsMappedCopyWriteWatchCurrent(mapping);
         public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation mapping) => Original.ReleaseMappedCopyWriteWatch(mapping);
         public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(CpuMappedCopyObservation original,

@@ -32,6 +32,11 @@ internal static partial class MetalVideoPresenter
         ArgumentNullException.ThrowIfNull(action);
         InitialGuestCompletionReceipt? initial = null;
         Exception? admissionFailure = null;
+        if (memoryOperation is { Mapping: { } originalMapping } originalOperation)
+        {
+            try { RequireCommandMemoryOriginal(originalOperation, originalMapping); }
+            catch (Exception exception) { throw FailGuestCompletion($"{debugName}: completion was not admitted", exception); }
+        }
         lock (_gate)
         {
             try

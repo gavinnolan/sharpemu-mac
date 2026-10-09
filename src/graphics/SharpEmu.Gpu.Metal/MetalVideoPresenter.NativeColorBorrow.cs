@@ -332,6 +332,7 @@ internal static partial class MetalVideoPresenter
     {
         if (!_nativeColorWorks.TryGetValue(work, out var producers)) return;
         foreach (var producer in producers) RequireNativeColorOriginal(producer.Original);
+        var commandMemory = CaptureNativeColorCommandMemoryInventory();
         lock (_gate)
         {
             foreach (var producer in producers)
@@ -346,7 +347,7 @@ internal static partial class MetalVideoPresenter
                         !(prior.CommandBuffer == commandBuffer && prior.Batch is { Submitted: false } || prior.Batch is { Completed: true }))
                         throw new NotSupportedException("Native selected color load/partial mask has no exact ordered native predecessor.");
                 }
-                RequireNativeColorCohortLocked(producer);
+                RequireNativeColorCohortWithCommandMemoryLocked(producer, commandMemory);
             }
         }
     }
@@ -537,6 +538,10 @@ internal static partial class MetalVideoPresenter
         reason = "exact-ordered-pending-successor"; return true;
     }
     private static void RequireNativeColorCohortLocked(NativeColorProducer producer)
+        => RequireNativeColorCohortWithCommandMemoryLocked(producer, null);
+
+    private static void RequireNativeColorCohortWithCommandMemoryLocked(NativeColorProducer producer,
+        NativeColorCommandMemoryInventory? commandMemory)
     {
         var original = producer.Original;
         if (_nativeColorCleanupFailure is not null || _unorderedPresentationWriteSequence != 0 ||
@@ -603,7 +608,7 @@ internal static partial class MetalVideoPresenter
             {
                 if (operation.Operation.Kind != SharpEmu.Libs.Gpu.GpuCommands.CommandMemoryOperation.OperationKind.Write)
                     throw NativeColorUnknownWorkFailure(work, future, producer, _nativeColorDiagnostics);
-                RequireNativeColorCommandMemoryLocked(operation, producer, future);
+                RequireNativeColorCommandMemoryLocked(operation, producer, future, commandMemory);
             }
             else
                 throw NativeColorUnknownWorkFailure(work, future, producer, _nativeColorDiagnostics);
@@ -700,6 +705,7 @@ internal static partial class MetalVideoPresenter
             request.HasMetadata || request.HasStencil || request.IsVolume || request.IsBlock)
             throw new NotSupportedException("Native selected color standalone request differs from its original normalized selected span.");
         RequireNativeColorOriginal(producer.Original);
+        var commandMemory = CaptureNativeColorCommandMemoryInventory();
         texture = new GuestDrawTexture(d.Address, 512, 512, d.Format, d.NumberType, [], IsStorage: false, IsFallback: false,
             Pitch: 512, TileMode: 27, Sampler: ToGuestSampler(binding.SamplerDescriptor), DstSelect: d.DstSelect,
             Type: d.Type, SourceByteCount: 0x200000, Descriptor: raw.ToArray(), Shape: binding.Shape, Access: binding.Access, ResourceMipLevels: 1);
@@ -707,7 +713,7 @@ internal static partial class MetalVideoPresenter
         {
             if (!_nativeColorLatest.TryGetValue(d.Address, out var current) || !ReferenceEquals(current, producer) || producer.Retired)
                 throw new NotSupportedException("Native color producer changed during initial capture.");
-            RequireNativeColorCohortLocked(producer);
+            RequireNativeColorCohortWithCommandMemoryLocked(producer, commandMemory);
             if (_nativeColorPreparations.Count >= 128) throw new NotSupportedException("Native color sampled preparation inventory is full.");
             var lease = new NativeColorLease(producer);
             _nativeColorPreparations.EnsureCapacity(_nativeColorPreparations.Count + 1);
@@ -793,6 +799,7 @@ internal static partial class MetalVideoPresenter
             ReleaseDepthObjectsPreservingFailure(failure, wait);
         }
         RequireNativeColorOriginal(producer.Original);
+        var commandMemory = CaptureNativeColorCommandMemoryInventory();
         lock (_gate)
         {
             var image = producer.Image;
@@ -802,7 +809,7 @@ internal static partial class MetalVideoPresenter
                 producer.NativeQueue != _batchQueue || !ReferenceEquals(_guestMemory, producer.Original.Placement.Memory) ||
                 !(producer.CommandBuffer == commandBuffer && producer.Batch is { Submitted: false } || producer.Batch is { Completed: true }))
                 throw new NotSupportedException("Native color borrow lost its exact ORIGINAL image/version/session/native queue.");
-            RequireNativeColorCohortLocked(producer);
+            RequireNativeColorCohortWithCommandMemoryLocked(producer, commandMemory);
             handle = MetalNative.Send(producer.Texture, MetalNative.Selector("retain"));
             if (handle == 0) throw new InvalidOperationException("Native color source retain failed.");
         }
