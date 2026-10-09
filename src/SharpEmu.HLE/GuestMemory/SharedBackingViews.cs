@@ -85,6 +85,8 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
         finally { ExitAliasAccess(); }
     }
 
+    public bool CanWaitForMappedPublicationValidation => CanEmitOrdinaryWriteDiagnostic;
+
     public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(CpuMappedCopyObservation original,
         out CpuMappedPublicationValidation? validation)
     {
@@ -97,6 +99,24 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
             var result = provider.TryPrepareMappedPublicationValidation(_backing, original, out validation);
             if (IsAvailable) return result;
             validation?.Dispose(); validation = null;
+            return CpuMappedPublicationPreparationResult.Rejected;
+        }
+        finally { ExitAliasAccess(); }
+    }
+
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(CpuMappedCopyObservation original,
+        out CpuMappedPublicationValidation? validation,
+        out CpuMappedPublicationValidationRefusal refusal)
+    {
+        validation = null; refusal = default;
+        if (_host is not IHostMappedPublicationMemory provider || _backing is null)
+            return CpuMappedPublicationPreparationResult.Unavailable;
+        if (!TryEnterAliasAccess()) return CpuMappedPublicationPreparationResult.Rejected;
+        try
+        {
+            var result = provider.TryPrepareMappedPublicationValidation(_backing, original, out validation, out refusal);
+            if (IsAvailable) return result;
+            validation?.Dispose(); validation = null; refusal = default;
             return CpuMappedPublicationPreparationResult.Rejected;
         }
         finally { ExitAliasAccess(); }

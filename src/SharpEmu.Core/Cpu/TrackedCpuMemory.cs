@@ -29,12 +29,24 @@ public sealed class TrackedCpuMemory : ICpuMemory, ITrackedCpuMemory, IGuestMemo
             : CpuMappedPublicationPreparationResult.Unavailable;
     }
 
+    public bool CanWaitForMappedPublicationValidation => _inner is ICpuMappedPublicationSource source && source.CanWaitForMappedPublicationValidation;
+
     public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(CpuMappedCopyObservation original,
         out CpuMappedPublicationValidation? validation)
     {
         validation = null;
         return _inner is ICpuMappedPublicationSource source
             ? source.TryPrepareMappedPublicationValidation(original, out validation)
+            : CpuMappedPublicationPreparationResult.Unavailable;
+    }
+
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(CpuMappedCopyObservation original,
+        out CpuMappedPublicationValidation? validation,
+        out CpuMappedPublicationValidationRefusal refusal)
+    {
+        validation = null; refusal = default;
+        return _inner is ICpuMappedPublicationSource source
+            ? source.TryPrepareMappedPublicationValidation(original, out validation, out refusal)
             : CpuMappedPublicationPreparationResult.Unavailable;
     }
 

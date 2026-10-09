@@ -1163,6 +1163,11 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         validation?.Dispose(); validation = null; return CpuMappedPublicationPreparationResult.Rejected;
     }
 
+    public bool CanWaitForMappedPublicationValidation =>
+        !_gate.IsReadLockHeld && !_gate.IsWriteLockHeld && !_gate.IsUpgradeableReadLockHeld &&
+        !Monitor.IsEntered(_guestAllocationGate) && !Monitor.IsEntered(_allocationSearchHintGate) &&
+        _backedSpace is ICpuMappedPublicationSource source && source.CanWaitForMappedPublicationValidation;
+
     public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(CpuMappedCopyObservation original,
         out CpuMappedPublicationValidation? validation)
     {
@@ -1173,6 +1178,19 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         var result = source.TryPrepareMappedPublicationValidation(original, out validation);
         if (!Volatile.Read(ref _disposed) && ReferenceEquals(_backedSpace, space)) return result;
         validation?.Dispose(); validation = null; return CpuMappedPublicationPreparationResult.Rejected;
+    }
+
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(CpuMappedCopyObservation original,
+        out CpuMappedPublicationValidation? validation,
+        out CpuMappedPublicationValidationRefusal refusal)
+    {
+        validation = null; refusal = default;
+        var space = _backedSpace;
+        if (Volatile.Read(ref _disposed) || space is not ICpuMappedPublicationSource source)
+            return CpuMappedPublicationPreparationResult.Unavailable;
+        var result = source.TryPrepareMappedPublicationValidation(original, out validation, out refusal);
+        if (!Volatile.Read(ref _disposed) && ReferenceEquals(_backedSpace, space)) return result;
+        validation?.Dispose(); validation = null; refusal = default; return CpuMappedPublicationPreparationResult.Rejected;
     }
 
     public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(CpuMappedCopyObservation original,

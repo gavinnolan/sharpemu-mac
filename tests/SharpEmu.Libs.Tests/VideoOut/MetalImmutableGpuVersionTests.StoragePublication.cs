@@ -41,6 +41,8 @@ public sealed partial class MetalImmutableGpuVersionTests
         public readonly List<GuestDrawTexture> VolumeSeeds = [];
         public readonly List<object> VolumeImages = [];
         public bool OrdinaryWriterUnconfirmed;
+        public bool AppliedValidationQuarantined;
+        public bool AppliedValidationQuarantineVerified;
         public object? OrdinaryWriterOwner;
         public bool ConstructorReservationUnconfirmed;
         public CpuMappedReadValidation? ConstructorReservation;
@@ -74,7 +76,7 @@ public sealed partial class MetalImmutableGpuVersionTests
     public void ActualRuntimeLateDirtyGenerationAfterCanonicalVersionKeepsStickyDebtAndNoEop() =>
         RunActualRuntimeTwoTypedPublications(false, rgba: true, lateFailure: "generation");
 
-    private void RunActualRuntimeTwoTypedPublications(bool overlappingCpuWrite, bool rgba = false, bool mixedBuffer = false, string? lateFailure = null, bool originalVolumes = false, string? busyOriginalRetry = null, string? constructionBusyWindow = null, string? queueRetentionWindow = null, string? bodyBusyWindow = null, string? precommitBusyWindow = null, string? phaseBusyWindow = null)
+    private void RunActualRuntimeTwoTypedPublications(bool overlappingCpuWrite, bool rgba = false, bool mixedBuffer = false, string? lateFailure = null, bool originalVolumes = false, string? busyOriginalRetry = null, string? constructionBusyWindow = null, string? queueRetentionWindow = null, string? bodyBusyWindow = null, string? precommitBusyWindow = null, string? phaseBusyWindow = null, string? appliedValidationWindow = null)
     {
         Assert.True(DeviceRequested(), "finite setup: actual native device request");
         var imageBytes = rgba ? 4194304 : 65536;
@@ -118,7 +120,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             Assert.True(physical.TryMapBacked(address, (ulong)allocationBytes, 65536,
                 GuestPageProtection.Read | GuestPageProtection.Write, out var mapFailure), $"map failure={mapFailure}");
             ICpuMemory cpuSource = physical;
-            if (bodyBusyWindow is not null || precommitBusyWindow is not null || phaseBusyWindow is not null)
+            if (bodyBusyWindow is not null || precommitBusyWindow is not null || phaseBusyWindow is not null || appliedValidationWindow is not null)
             {
                 Assert.True(rgba && originalVolumes, "finite setup: independent volume route requires RGBA plus original volumes");
                 var volumePhysical = new PhysicalVirtualMemory(HostMemoryAuthority.Current, HostViewMemory.Create(),
@@ -132,7 +134,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                 Assert.True(volumePhysical.TryMapBacked(volumeBase, 3 * 65536, 65536,
                     GuestPageProtection.Read | GuestPageProtection.Write, out var volumeFailure), $"volume map failure={volumeFailure}");
                 cpuSource = new BodyBusyRoutedMemory(physical, volumePhysical, volumeBase, 3 * 65536,
-                    failValidationCancellation: bodyBusyWindow == "cancel-unknown");
+                    failValidationCancellation: bodyBusyWindow == "cancel-unknown" || appliedValidationWindow == "cancel-unknown");
             }
             var memory = new TrackedCpuMemory(cpuSource);
             owners.Memory = memory;
@@ -211,6 +213,12 @@ public sealed partial class MetalImmutableGpuVersionTests
                 if (lateFailure == "generation")
                     Assert.Equal(StorageMember(image, "ContentVersion"), StorageMember(failedDebt, "CanonicalVersion"));
                 output.WriteLine($"finite-storage-native status=4; Applied full-byte image; late={lateFailure}; sticky-debt=true; EOP-unacknowledged; actual-participating-effect-only");
+                return;
+            }
+            if (appliedValidationWindow is not null)
+            {
+                RunActualAppliedValidationBusy(state, physical, memory, cpuSource, owners, address, imageBytes,
+                    storeOffset, expected, firstSequence, firstEop, firstShader, ReadCanonical, appliedValidationWindow);
                 return;
             }
             if (precommitBusyWindow is not null)
@@ -483,7 +491,7 @@ public sealed partial class MetalImmutableGpuVersionTests
         finally
         {
             Exception? cleanup = null;
-            var completionConfirmed = !owners.OrdinaryWriterUnconfirmed && !owners.ConstructorReservationUnconfirmed;
+            var completionConfirmed = !owners.OrdinaryWriterUnconfirmed && !owners.ConstructorReservationUnconfirmed && !owners.AppliedValidationQuarantined;
             // This fresh fixture owns every newly opened batch. Discard only its
             // uncommitted encoding, then wait/status-check every committed buffer.
             // An unknown outcome keeps all exact owners quarantined, not freed.
@@ -494,7 +502,12 @@ public sealed partial class MetalImmutableGpuVersionTests
                     state?.AbortFiniteStorageEncoding();
                     Call("WaitForFlushedGuestCommands");
                 }
-                else cleanup = new InvalidOperationException("Fixture ordinary writer or constructor reservation outcome is unconfirmed; exact owners remain quarantined.");
+                else if (!owners.AppliedValidationQuarantineVerified || owners.OrdinaryWriterUnconfirmed || owners.ConstructorReservationUnconfirmed)
+                    cleanup = new InvalidOperationException("Fixture ordinary writer, constructor or Applied validation outcome is unconfirmed; exact owners remain quarantined.");
+                // A deliberate deadline/unknown-cancellation negative sets the
+                // verified flag only after its full-byte/no-ack/root oracle.
+                // It performs NO native/PVM retirement here; fresh worker exit
+                // owns the retained fixture. Unexpected cleanup still fails.
             }
             catch (Exception failure) { cleanup = failure; completionConfirmed = false; }
             if (completionConfirmed)

@@ -55,8 +55,15 @@ internal static partial class MetalVideoPresenter
         internal readonly int Version, Bytes, RowBytes, StagingBytes;
         internal readonly long Work;
         internal StorageCpuSeedOrigin? PublishedOrigin;
+        internal CpuMappedCopyObservation? AppliedObservation;
+        internal FiniteStoragePreencode? OriginalPhase;
         internal nint Texture, Staging, CommandBuffer;
         internal bool Encoded, SuccessfullyCompleted, Published, Consumed;
+        internal bool ValidationQuarantined;
+        internal int LifetimeSlot = -1;
+        // Saved original numeric handles on an uncertain release. These are
+        // not live-pointer authority and may never be accessed/released again.
+        internal nint UncertainCommandBuffer, UncertainStaging, UncertainTexture;
 
         internal FiniteStorageWriteback(GuestDrawTexture descriptor, GuestImage image,
             StorageCpuSeedOrigin origin, FiniteStorageDebt debt, int bytes)
@@ -71,16 +78,24 @@ internal static partial class MetalVideoPresenter
 
         public void Dispose()
         {
+            if (ValidationQuarantined) return; // exact retained handles, not a retryable cleanup
             if (Consumed) return;
             Consumed = true; // consume exact retains before a throwing release
             if (!Published) { Debt.Failed = true; Debt.Pending = true; }
             var commandBuffer = CommandBuffer; var staging = Staging; var texture = Texture;
+            UncertainCommandBuffer = commandBuffer; UncertainStaging = staging; UncertainTexture = texture;
             CommandBuffer = Staging = Texture = 0;
             Exception? first = null;
             ReleaseFiniteStorageHandle(commandBuffer, ref first);
             ReleaseFiniteStorageHandle(staging, ref first);
             ReleaseFiniteStorageHandle(texture, ref first);
-            if (first is not null) ExceptionDispatchInfo.Capture(first).Throw();
+            if (first is not null)
+            {
+                QuarantineFiniteStorageAppliedValidation(this, first);
+                ExceptionDispatchInfo.Capture(first).Throw();
+            }
+            UncertainCommandBuffer = UncertainStaging = UncertainTexture = 0;
+            ReleaseFiniteStorageWritebackRoot(this);
         }
     }
 
@@ -180,6 +195,7 @@ internal static partial class MetalVideoPresenter
                 throw new InvalidOperationException("Metal finite storage image has unresolved GPU publication debt.");
             ValidateFiniteStoragePreviousPublication(image, debt, origin);
             var receipt = new FiniteStorageWriteback(owned, image, origin, debt, bytes);
+            ReserveFiniteStorageWritebackRootLocked(receipt); // before any native retain/encoding
             debt.Pending = true; debt.Work = receipt.Work;
             try
             {
@@ -187,7 +203,7 @@ internal static partial class MetalVideoPresenter
                 if (receipt.Texture == 0) throw new InvalidOperationException("Metal finite storage cannot retain its original producer texture.");
                 return receipt;
             }
-            catch { debt.Failed = true; throw; }
+            catch (Exception failure) { QuarantineFiniteStorageAppliedValidation(receipt, failure); throw; }
         }
     }
 
@@ -331,6 +347,7 @@ internal static partial class MetalVideoPresenter
                 throw new InvalidOperationException("Metal finite storage publication applied without its exact provider continuity; GPU debt remains pending.");
             ValidateFiniteStorageMappingContinuation(receipt.Origin.Mapping, mapping);
             var nextOrigin = receipt.Origin with { Mapping = mapping };
+            receipt.AppliedObservation = mapping; // THIS Applied commit only; never recaptured
             TraceFiniteStorageRuntime("provider-applied", receipt.Descriptor.Address, "exact-own-mapping-continuity", receipt.Origin);
             _finiteStorageAfterAppliedForControl?.Invoke();
             WithFiniteStorageValidation(receipt, nextOrigin, reservation =>
@@ -423,7 +440,7 @@ internal static partial class MetalVideoPresenter
         Exception? primary = null;
         try
         {
-            validation = PrepareFiniteStorageValidation(next);
+            validation = PrepareFiniteStorageAppliedValidation(receipt, next);
             var reservation = new StorageWatchReservation(validation);
             ValidateFiniteStorageOrigin(next, receipt.Descriptor, reservation);
             if (!validation.IsCurrent)
@@ -455,6 +472,7 @@ internal static partial class MetalVideoPresenter
             }
             catch (Exception cleanup)
             {
+                QuarantineFiniteStorageAppliedValidation(receipt, primary ?? cleanup);
                 lock (_gate) { receipt.Debt.Failed = true; receipt.Debt.Pending = true; _textureSourceCleanupFailure ??= cleanup; }
                 if (primary is null) ExceptionDispatchInfo.Capture(cleanup).Throw();
                 try { primary.Data["FiniteStorageValidationCleanup"] = cleanup; } catch { }

@@ -100,6 +100,10 @@ public sealed partial class MappedPublicationTests
         public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(HostBackingObject backing,
             CpuMappedCopyObservation original, out CpuMappedPublicationValidation? validation) =>
             Ledger.TryPrepareMappedPublicationValidation(backing, original, out validation);
+        public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(HostBackingObject backing,
+            CpuMappedCopyObservation original, out CpuMappedPublicationValidation? validation,
+            out CpuMappedPublicationValidationRefusal refusal) =>
+            Ledger.TryPrepareMappedPublicationValidation(backing, original, out validation, out refusal);
         internal bool Effect(ulong address, ulong size) { lock (gate) return Ledger.BeforeNativeEffect(address, size); }
         internal void Unknown() { lock (gate) Ledger.QuarantineUnknownAlias(); }
         public ulong ReserveHole(ulong address, ulong size) => throw new NotSupportedException();

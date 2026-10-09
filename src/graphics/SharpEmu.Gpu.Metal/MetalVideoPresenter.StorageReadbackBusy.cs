@@ -27,6 +27,9 @@ internal static partial class MetalVideoPresenter
             ValidateFiniteStoragePreencodeOwnersLocked(original);
             if (!ReferenceEquals(original.Dispatch, dispatch) || original.CommandBuffer != commandBuffer || original.Queue != queue)
                 throw new InvalidOperationException("Finite storage compute end lost its original dispatch/batch.");
+            if (original.Receipt.OriginalPhase is not null)
+                throw new InvalidOperationException("Finite storage compute phase can only seal once.");
+            original.Receipt.OriginalPhase = original;
             original.ComputeEncodingEnded = true;
         }
     }

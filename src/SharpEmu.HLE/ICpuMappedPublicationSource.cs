@@ -7,12 +7,25 @@ namespace SharpEmu.HLE;
 /// exclusion, permission ownership, GPU completion and signal recovery.</summary>
 public interface ICpuMappedPublicationSource
 {
+    // Unknown wrappers cannot authorize waiting under hidden inherited gates.
+    bool CanWaitForMappedPublicationValidation => false;
+
     /// <summary>Cancel-only reservation from the ORIGINAL mapping and physical
     /// writer baseline. It changes no bytes or revision and certifies no native
     /// guest writer completion. Unsupported providers decline.</summary>
     CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(
         CpuMappedCopyObservation original, out CpuMappedPublicationValidation? validation)
     { validation = null; return CpuMappedPublicationPreparationResult.Unavailable; }
+
+    /// <summary>Optional exact first-return classification. Busy is a refusal,
+    /// NOT copied history/content authority. Unknown participants stay strict.</summary>
+    CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(
+        CpuMappedCopyObservation original, out CpuMappedPublicationValidation? validation,
+        out CpuMappedPublicationValidationRefusal refusal)
+    {
+        refusal = default;
+        return TryPrepareMappedPublicationValidation(original, out validation);
+    }
 
     /// <summary>Resolve the original opaque observation and detached byte runs,
     /// acquire exact mapping/backing lifetime and participating-writer exclusion,
@@ -35,6 +48,11 @@ public enum CpuMappedPublicationPreparationResult
     Rejected,
     Prepared,
 }
+
+// Detached first-refusal provenance; no constructor/fields confer authority.
+public enum CpuMappedPublicationValidationRefusalKind { UnknownRejected = 0, AdmissionBusy }
+public readonly record struct CpuMappedPublicationValidationRefusal(
+    CpuMappedPublicationValidationRefusalKind Kind, long OriginalRevision, long RejectedAdmission);
 
 public enum CpuMappedPublicationResult
 {
