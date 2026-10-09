@@ -201,6 +201,7 @@ public sealed partial class MetalStorageCpuSyncTests
     {
         ActualArchitecture(); using var state = new BorrowColorState(); var memory = new BorrowColorMemory();
         MetalVideoPresenter.AttachGuestMemory(memory);
+        using var admissionQueue = MetalVideoPresenter.EnterGuestQueue("host.default", 0);
         var first = ProjectBorrowColor(memory); SubmitBorrowColor(first);
         MetalVideoPresenter.ReleasePreparedNativeColorTarget(first);
         var prior = ((IDictionary)Field("_nativeColorLatest").GetValue(null)!)[first.Address]!;
