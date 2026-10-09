@@ -202,45 +202,78 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
     }
 
     public bool TryWriteBacking(ulong address, ReadOnlySpan<byte> data)
-        => TryWriteBackingAdmission(address, data, false, out _);
+        => TryWriteBackingAdmission(address, data, false, out _, out _);
 
     public bool TryWriteBacking(ulong address, ReadOnlySpan<byte> data, out OrdinaryBackingWriteReservation? busy)
-        => TryWriteBackingAdmission(address, data, true, out busy);
+        => TryWriteBackingAdmission(address, data, true, out busy, out _);
+
+    public bool TryWriteBacking(ulong address, ReadOnlySpan<byte> data, out OrdinaryBackingWriteReservation? busy,
+        out SharedWriteFailure failure) => TryWriteBackingAdmission(address, data, true, out busy, out failure);
 
     private bool TryWriteBackingAdmission(ulong address, ReadOnlySpan<byte> data, bool captureBusy,
-        out OrdinaryBackingWriteReservation? busy)
+        out OrdinaryBackingWriteReservation? busy, out SharedWriteFailure failure)
     {
-        busy = null;
+        busy = null; failure = default;
         if (data.IsEmpty) return TryWriteBackingCore(address, data);
         // One admission spans the complete multi-chunk operation, including
         // staged/memmove reads. Publication cannot enter between its chunks.
         var snapshot = Volatile.Read(ref _snapshot);
         // Once enrolled, retain ORIGINAL provider mapping/guest access before
         // first admission. A later lookup may never repair a busy refusal.
-        var originalMapping = captureBusy && _backing?.ManagedWrites is not null &&
-            _host is IHostMappedPublicationMemory originalProvider && originalProvider.CanWaitForOrdinaryWriteAdmission
-            ? originalProvider.CaptureOrdinaryWriteIdentity(_backing, address, (ulong)data.Length) : null;
+        string? originalCaptureReason = null;
+        HostMappedCopyLedger.OrdinaryWriteIdentity? originalMapping = null;
+        if (captureBusy && _backing?.ManagedWrites is not null &&
+            _host is IHostMappedPublicationMemory originalProvider && originalProvider.CanWaitForOrdinaryWriteAdmission)
+        {
+            originalMapping = OrdinaryWriteFailureDiagnostics.Enabled
+                ? originalProvider.CaptureOrdinaryWriteIdentity(_backing, address, (ulong)data.Length, out originalCaptureReason)
+                : originalProvider.CaptureOrdinaryWriteIdentity(_backing, address, (ulong)data.Length);
+        }
         var interval = _backing?.BeginManagedWriteOperation() ?? default;
         if (!HostManagedWriteIntervals.AllowsBytes(interval))
         {
             // Exact rejected token is the provenance, never a later admission sample.
-            if (captureBusy && originalMapping is { } originalIdentity && originalIdentity.IsCurrent && interval.IsPublicationBusy &&
-                _host is IHostMappedPublicationMemory provider && provider.CanWaitForOrdinaryWriteAdmission &&
-                TryEnterAliasAccess())
+            // Save the FIRST existing short-circuit guard; never borrow a
+            // later admission or original-currentness sample for diagnostics.
+            var originalIdentity = originalMapping.GetValueOrDefault();
+            var refusal = !captureBusy ? "busy-capture-disabled"
+                : !originalMapping.HasValue ? "original-identity-unavailable"
+                : !originalIdentity.IsCurrent ? "original-identity-changed"
+                : !interval.IsPublicationBusy ? "admission-not-publication-busy"
+                : _host is not IHostMappedPublicationMemory provider ? "provider-unavailable"
+                : !provider.CanWaitForOrdinaryWriteAdmission ? "provider-wait-gate-or-unsupported"
+                : !TryEnterAliasAccess() ? "alias-pin-refused" : null;
+            var pinAcquired = refusal is null;
+            var snapshotMatched = false;
+            if (pinAcquired)
             {
                 try
                 {
-                    if (IsAvailable && ReferenceEquals(snapshot, AliasSnapshot))
-                        busy = new(this, _backing!, snapshot, originalIdentity, interval.RejectedAdmission);
+                    if (!IsAvailable) refusal = "views-unavailable";
+                    else if (!(snapshotMatched = ReferenceEquals(snapshot, AliasSnapshot))) refusal = "original-snapshot-changed";
+                    else busy = new(this, _backing!, snapshot, originalIdentity, interval.RejectedAdmission);
                 }
                 finally { if (busy is null) ExitAliasAccess(); }
             }
+            if (OrdinaryWriteFailureDiagnostics.Enabled)
+                failure = new(refusal ?? "publication-busy-receipt-prepared", interval.RejectedAdmission,
+                    originalMapping.HasValue, pinAcquired, snapshotMatched, originalCaptureReason);
             return false; // No destination bytes, not a retryable partial operation.
         }
         var succeeded = false;
-        try { succeeded = TryWriteBackingCore(address, data); return succeeded; }
+        try
+        {
+            succeeded = TryWriteBackingCore(address, data);
+            if (!succeeded && OrdinaryWriteFailureDiagnostics.Enabled) failure = new("backing-access-failed-after-admission", 0, originalMapping.HasValue, false, false, originalCaptureReason);
+            return succeeded;
+        }
         finally { HostBackingObject.EndManagedWrite(interval, succeeded); }
     }
+
+    internal bool CanEmitOrdinaryWriteDiagnostic =>
+        !Monitor.IsEntered(_lock) && !Monitor.IsEntered(_disposeGate) &&
+        (_backing is null || !Monitor.IsEntered(_backing.Gate)) &&
+        (_host is IHostMappedPublicationMemory provider && provider.CanWaitForOrdinaryWriteAdmission);
 
     internal void RequireOrdinaryWriteWaitOutsideGates()
     {

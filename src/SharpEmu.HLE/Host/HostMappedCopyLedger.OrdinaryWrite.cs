@@ -49,16 +49,25 @@ public sealed unsafe partial class HostMappedCopyLedger
     }
 
     public OrdinaryWriteIdentity? CaptureOrdinaryWriteIdentity(HostBackingObject backing, ulong address, ulong size)
+        => CaptureOrdinaryWriteIdentity(backing, address, size, out _);
+
+    public OrdinaryWriteIdentity? CaptureOrdinaryWriteIdentity(HostBackingObject backing, ulong address, ulong size,
+        out string? firstRefusal)
     {
-        if (Monitor.IsEntered(gate)) return null; // no hidden recursive provider caller
-        if (!HostViewMemory.IsValidRange(address, size)) return null;
+        firstRefusal = null;
+        if (Monitor.IsEntered(gate)) { firstRefusal = "inherited-provider-gate"; return null; }
+        if (!HostViewMemory.IsValidRange(address, size)) { firstRefusal = "invalid-original-range"; return null; }
         lock (gate)
         {
-            if (unknownAlias || !aliases.ContainsKey(backing) || backing.IsClosing || backing.IsDisposed) return null;
+            firstRefusal = unknownAlias ? "unknown-alias"
+                : !aliases.ContainsKey(backing) ? "backing-not-enrolled"
+                : backing.IsClosing ? "backing-closing"
+                : backing.IsDisposed ? "backing-disposed" : null;
+            if (firstRefusal is not null) return null;
             var index = FindAtOrBelow(address);
-            if (index < 0) return null;
+            if (index < 0) { firstRefusal = "original-view-missing"; return null; }
             var first = views.Values[index];
-            if (!TryResolveOriginalWriteView(backing, first, address, size, out var firstCount)) return null;
+            if (!TryResolveOriginalWriteView(backing, first, address, size, out var firstCount, out firstRefusal)) return null;
             if (firstCount == size) return new(this, backing, first);
             // Allocate only after proving that the original request actually
             // crosses the first View. Never substitute a younger record later.
@@ -66,11 +75,11 @@ public sealed unsafe partial class HostMappedCopyLedger
             var cursor = address + firstCount; var end = address + size;
             while (cursor < end)
             {
-                if (selected.Count >= CpuMappedCopyObservation.MaximumSegments) return null;
+                if (selected.Count >= CpuMappedCopyObservation.MaximumSegments) { firstRefusal = "original-view-limit"; return null; }
                 index = FindAtOrBelow(cursor);
-                if (index < 0) return null;
+                if (index < 0) { firstRefusal = "original-view-missing"; return null; }
                 var view = views.Values[index];
-                if (!TryResolveOriginalWriteView(backing, view, cursor, end - cursor, out var count)) return null;
+                if (!TryResolveOriginalWriteView(backing, view, cursor, end - cursor, out var count, out firstRefusal)) return null;
                 selected.Add(view); cursor += count;
             }
             return new(this, backing, selected.ToArray());
@@ -78,14 +87,21 @@ public sealed unsafe partial class HostMappedCopyLedger
     }
 
     private static bool TryResolveOriginalWriteView(HostBackingObject backing, View view,
-        ulong cursor, ulong remaining, out ulong count)
+        ulong cursor, ulong remaining, out ulong count, out string? firstRefusal)
     {
         count = 0;
-        if (!ReferenceEquals(view.Backing, backing) || view.Revoked != 0 || view.CopyAvailable == 0 ||
-            !view.GuestAccessKnown || (view.Access & GuestPageProtection.Write) == 0 ||
-            cursor < view.Address || cursor - view.Address >= view.Size) return false;
+        firstRefusal = !ReferenceEquals(view.Backing, backing) ? "original-view-foreign-backing"
+            : view.Revoked != 0 ? "original-view-revoked"
+            : view.CopyAvailable == 0 ? "original-view-copy-unavailable"
+            : !view.GuestAccessKnown ? "original-guest-access-unknown"
+            : (view.Access & GuestPageProtection.Write) == 0 ? "original-guest-write-denied"
+            : cursor < view.Address ? "original-view-start-gap"
+            : cursor - view.Address >= view.Size ? "original-view-end-gap" : null;
+        if (firstRefusal is not null) return false;
         count = Math.Min(remaining, view.Size - (cursor - view.Address));
         var offset = view.Offset + cursor - view.Address;
-        return offset <= backing.Size && count <= backing.Size - offset;
+        firstRefusal = offset > backing.Size ? "original-backing-offset-outside"
+            : count > backing.Size - offset ? "original-backing-length-outside" : null;
+        return firstRefusal is null;
     }
 }

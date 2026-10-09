@@ -25,6 +25,15 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
         HostBackingObject backing, ulong address, ulong size) =>
         MacMappedCopyState.Ledger?.CaptureOrdinaryWriteIdentity(backing, address, size);
 
+    public HostMappedCopyLedger.OrdinaryWriteIdentity? CaptureOrdinaryWriteIdentity(
+        HostBackingObject backing, ulong address, ulong size, out string? firstRefusal)
+    {
+        if (MacMappedCopyState.Ledger is { } ledger)
+            return ledger.CaptureOrdinaryWriteIdentity(backing, address, size, out firstRefusal);
+        firstRefusal = "provider-ledger-unavailable";
+        return null;
+    }
+
     public CpuMappedPublicationPreparationResult TryPrepareMappedReadValidation(HostBackingObject backing,
         CpuMappedCopyObservation original, out CpuMappedReadValidation? validation)
     {

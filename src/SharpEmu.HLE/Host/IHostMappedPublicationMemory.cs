@@ -12,6 +12,16 @@ public interface IHostMappedPublicationMemory
     HostMappedCopyLedger.OrdinaryWriteIdentity? CaptureOrdinaryWriteIdentity(
         HostBackingObject backing, ulong address, ulong size) => null;
 
+    // Diagnostic-only overload: legacy participants call the same original
+    // capture once and explicitly leave their internal refusal unclassified.
+    HostMappedCopyLedger.OrdinaryWriteIdentity? CaptureOrdinaryWriteIdentity(
+        HostBackingObject backing, ulong address, ulong size, out string? firstRefusal)
+    {
+        var original = CaptureOrdinaryWriteIdentity(backing, address, size);
+        firstRefusal = original.HasValue ? null : "provider-capture-unclassified";
+        return original;
+    }
+
     CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(
         HostBackingObject backing, CpuMappedCopyObservation original, out CpuMappedPublicationValidation? validation)
     { validation = null; return CpuMappedPublicationPreparationResult.Unavailable; }

@@ -2196,6 +2196,30 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     public bool TryWrite(ulong virtualAddress, ReadOnlySpan<byte> source)
     {
+        OrdinaryWriteFailure failure = default;
+        GuestSpaceOwner? diagnosticSpace = null;
+        try { return TryWriteCore(virtualAddress, source, out failure, out diagnosticSpace); }
+        finally
+        {
+            // All OUR write/read lock scopes have unwound. Recursive callers
+            // with inherited gates must not format optional output here.
+            try
+            {
+                if (OrdinaryWriteFailureDiagnostics.Enabled && failure.Reason is not null &&
+                    !_gate.IsReadLockHeld && !_gate.IsWriteLockHeld && !_gate.IsUpgradeableReadLockHeld &&
+                    !Monitor.IsEntered(_guestAllocationGate) && !Monitor.IsEntered(_allocationSearchHintGate) &&
+                    !Monitor.IsEntered(HostViewRegions.Gate) &&
+                    (diagnosticSpace is null || diagnosticSpace.CanEmitOrdinaryWriteDiagnostic))
+                    OrdinaryWriteFailureDiagnostics.Emit(failure);
+            }
+            catch { } // Even an optional gate-capability getter cannot replace the write cause.
+        }
+    }
+
+    private bool TryWriteCore(ulong virtualAddress, ReadOnlySpan<byte> source,
+        out OrdinaryWriteFailure failure, out GuestSpaceOwner? diagnosticSpace)
+    {
+        failure = default; diagnosticSpace = null;
         // A managed write into a page the guest-image write tracker has
         // protected surfaces as a fatal AccessViolation — the runtime turns
         // SIGSEGV in managed code into an exception before the resumable
@@ -2214,14 +2238,20 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         try
         {
             var region = FindRegion(virtualAddress, (ulong)source.Length);
+            if (OrdinaryWriteFailureDiagnostics.Enabled)
+                failure = new(null, virtualAddress, (ulong)source.Length, region is not null,
+                    region?.VirtualAddress ?? 0, region?.Size ?? 0, region?.Protection ?? 0,
+                    region?.IsBackedView ?? false, region?.IsReservedOnly ?? false, default, null);
             if (IsBackedSpan(region, virtualAddress, (ulong)source.Length))
             {
-                originalSpace = _backedSpace!;
+                originalSpace = _backedSpace!; diagnosticSpace = originalSpace;
                 originalRegion = new(region); // BEFORE the first admission attempt.
-                var written = originalSpace.TryWriteBacking(virtualAddress, source, out publicationBusy);
+                var written = originalSpace.TryWriteBacking(virtualAddress, source, out publicationBusy, out var sharedFailure);
+                if (OrdinaryWriteFailureDiagnostics.Enabled) failure = failure with { Shared = sharedFailure };
                 if (publicationBusy is null)
                 {
                     if (written) NotifyGuestWriteWatch(virtualAddress, source);
+                    else if (OrdinaryWriteFailureDiagnostics.Enabled) failure = failure with { Reason = "backed-first-attempt-refused" };
                     return written;
                 }
                 // This receipt exists only for an exact pre-byte publication
@@ -2245,6 +2275,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 {
                     if (!EnsureRangeCommitted((ulong)destPtr, (ulong)source.Length, region))
                     {
+                        if (OrdinaryWriteFailureDiagnostics.Enabled) failure = failure with { Reason = "initial-reserved-commit-failed" };
                         return false;
                     }
                 }
@@ -2272,17 +2303,20 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
         if (publicationBusy is not null)
             return TryWriteOriginalBackedAfterPublication(virtualAddress, source,
-                originalSpace!, originalRegion, publicationBusy, notifyWriteWatch: true);
+                originalSpace!, originalRegion, publicationBusy, true, ref failure);
 
         if (!requiresExclusiveAccess)
         {
+            if (OrdinaryWriteFailureDiagnostics.Enabled) failure = failure with { Reason = "no-original-containing-region" };
             return false;
         }
 
         _gate.EnterWriteLock();
         try
         {
-            return TryWriteExclusive(virtualAddress, source);
+            var written = TryWriteExclusive(virtualAddress, source, out var exclusiveReason);
+            if (!written && OrdinaryWriteFailureDiagnostics.Enabled) failure = failure with { Reason = exclusiveReason };
+            return written;
         }
         finally
         {
@@ -2295,7 +2329,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     // snapshot before ONE write. There is no file operation or partial-copy retry.
     private bool TryWriteOriginalBackedAfterPublication(ulong address, ReadOnlySpan<byte> source,
         GuestSpaceOwner originalSpace, OriginalBackedWriteRegion originalRegion,
-        OrdinaryBackingWriteReservation reservation, bool notifyWriteWatch)
+        OrdinaryBackingWriteReservation reservation, bool notifyWriteWatch, ref OrdinaryWriteFailure failure)
     {
         Exception? primary = null;
         try
@@ -2304,20 +2338,36 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             // must decline without waiting, not drop somebody else's lock.
             if (_gate.IsReadLockHeld || _gate.IsWriteLockHeld || _gate.IsUpgradeableReadLockHeld ||
                 Monitor.IsEntered(_guestAllocationGate) || Monitor.IsEntered(_allocationSearchHintGate))
+            {
+                if (OrdinaryWriteFailureDiagnostics.Enabled) failure = failure with { Reason = "inherited-pvm-or-allocation-gate" };
                 return false;
+            }
             originalSpace.RequireOrdinaryWriteWaitOutsideGates();
-            if (reservation.TryAcquire(TimeSpan.FromMilliseconds(500)) != OrdinaryBackingWriteAdmission.Admitted)
+            var outcome = reservation.TryAcquire(TimeSpan.FromMilliseconds(500));
+            if (OrdinaryWriteFailureDiagnostics.Enabled) failure = failure with { WaitOutcome = outcome };
+            if (outcome != OrdinaryBackingWriteAdmission.Admitted)
+            {
+                if (OrdinaryWriteFailureDiagnostics.Enabled) failure = failure with { Reason = "original-write-wait-declined" };
                 return false;
+            }
             _gate.EnterReadLock();
             try
             {
                 var region = FindRegion(address, (ulong)source.Length);
-                if (_disposed || !ReferenceEquals(_backedSpace, originalSpace) ||
-                    !originalRegion.Matches(region) || !reservation.IsOriginalCurrent ||
-                    !IsBackedSpan(region, address, (ulong)source.Length)) return false;
+                var refusal = _disposed ? "pvm-disposed-after-admission"
+                    : !ReferenceEquals(_backedSpace, originalSpace) ? "backed-owner-replaced-after-admission"
+                    : !originalRegion.Matches(region) ? "original-region-changed-after-admission"
+                    : !reservation.IsOriginalCurrent ? "original-mapping-changed-after-admission"
+                    : !IsBackedSpan(region, address, (ulong)source.Length) ? "original-no-longer-backed-after-admission" : null;
+                if (refusal is not null)
+                {
+                    if (OrdinaryWriteFailureDiagnostics.Enabled) failure = failure with { Reason = refusal };
+                    return false;
+                }
                 reservation.BeginWriteAttempt();
                 var written = originalSpace.TryWriteBacking(address, source);
                 written = reservation.CompleteWriteAttempt(written);
+                if (!written && OrdinaryWriteFailureDiagnostics.Enabled) failure = failure with { Reason = "reserved-single-write-or-completion-failed" };
                 if (written && notifyWriteWatch) NotifyGuestWriteWatch(address, source);
                 return written;
             }
@@ -2487,8 +2537,9 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         return false;
     }
 
-    private bool TryWriteExclusive(ulong virtualAddress, ReadOnlySpan<byte> source)
+    private bool TryWriteExclusive(ulong virtualAddress, ReadOnlySpan<byte> source, out string? refusal)
     {
+        refusal = null;
         var region = FindRegion(virtualAddress, (ulong)source.Length);
         if (region is not null &&
             TryResolveRegionOffset(
@@ -2500,6 +2551,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             var destPtr = (void*)(region.VirtualAddress + offset);
             if (!EnsureRangeCommitted((ulong)destPtr, (ulong)source.Length, region))
             {
+                refusal = "exclusive-commit-failed";
                 return false;
             }
 
@@ -2519,6 +2571,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 : HostPageProtection.ReadWrite;
             if (!_hostMemory.Protect((ulong)destPtr, (ulong)source.Length, writeProtection, out var oldProtect))
             {
+                refusal = "exclusive-protection-change-failed";
                 return false;
             }
 
@@ -2542,6 +2595,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             return true;
         }
 
+        refusal = "exclusive-containing-region-unavailable";
         return false;
     }
 

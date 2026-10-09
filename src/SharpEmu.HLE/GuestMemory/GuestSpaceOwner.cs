@@ -129,6 +129,19 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMap
     public bool TryWriteBacking(ulong address, ReadOnlySpan<byte> data, out OrdinaryBackingWriteReservation? busy)
         => _views.TryWriteBacking(address, data, out busy);
 
+    public bool TryWriteBacking(ulong address, ReadOnlySpan<byte> data, out OrdinaryBackingWriteReservation? busy,
+        out SharedWriteFailure failure) => _views.TryWriteBacking(address, data, out busy, out failure);
+
+    public bool CanEmitOrdinaryWriteDiagnostic
+    {
+        get
+        {
+            if (Monitor.IsEntered(_mappingLock) || Monitor.IsEntered(_disposeGate)) return false;
+            foreach (var stripe in _protectionLocks) if (Monitor.IsEntered(stripe)) return false;
+            return _views.CanEmitOrdinaryWriteDiagnostic;
+        }
+    }
+
     public bool TryReadBacking(ulong address, Span<byte> data) => _views.TryReadBacking(address, data);
 
     // Reads through a view that covers the whole range without any lock; false otherwise.
