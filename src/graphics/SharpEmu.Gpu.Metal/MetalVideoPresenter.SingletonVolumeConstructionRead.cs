@@ -13,6 +13,8 @@ internal static partial class MetalVideoPresenter
     private static Action? _singletonVolumeConstructionReadReleasedForControl = null;
     private static Action? _singletonVolumeConstructionBeforeFinalContentForControl = null;
     private static Action? _singletonVolumeConstructionBeforeFinalOwnerForControl = null;
+    private static Action<CpuMappedReadValidation, CpuMappedCopyObservation>? _singletonVolumeConstructionReadPreparedForControl = null;
+    private static Action? _singletonVolumeConstructionBusyForControl = null;
 
     // Only private ORIGINAL CPU preparation can acquire this exclusion. It
     // cannot refresh a live owner or retry an already encoded dispatch.
@@ -38,6 +40,7 @@ internal static partial class MetalVideoPresenter
                     ValidateSingletonVolumeOriginalContentWithReservation(origin, scope.Reservation);
                     if (!read.IsOriginalCurrent(watch.Mapping))
                         throw new InvalidOperationException("Volume construction ORIGINAL read reservation changed during admission.");
+                    _singletonVolumeConstructionReadPreparedForControl?.Invoke(read, watch.Mapping);
                     return scope;
                 }
                 catch (Exception failure) { scope.Finish(failure); throw; }
@@ -171,6 +174,7 @@ internal static partial class MetalVideoPresenter
                 }
                 if (status != CpuMappedReadWatchStatus.Busy)
                     throw new InvalidOperationException("Volume construction ORIGINAL watch became stale before encoding.");
+                _singletonVolumeConstructionBusyForControl?.Invoke();
                 if (Stopwatch.GetTimestamp() >= deadline)
                     throw new TimeoutException("Volume construction ORIGINAL participating writer remained busy before shader encoding.");
                 Thread.Sleep(1);

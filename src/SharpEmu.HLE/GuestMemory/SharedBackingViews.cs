@@ -35,9 +35,14 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
 
     // Single-view accesses in flight; Dispose waits for them before releasing the alias.
     private int _activeAccesses;
+<<<<<<< HEAD
     // Default-null controlled ordinary-write boundary. The real operation,
     // chunk admission and alias lifetime pin are already held. Tests must use
     // the single-view path to pause without the shared-view gate held.
+=======
+    // Same default-null owned test seam as 33/2e; actual envelope/chunk/pin
+    // already held. Controlled pauses must use the gate-free single-view path.
+>>>>>>> 1c3fa39f (Prepare real native original-volume construction Busy controls)
     private Action<ulong, int>? _beforeCanonicalAliasCopyForControl = null;
 
     public SharedBackingViews(IHostViewMemory host, ulong size)
@@ -316,8 +321,12 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
         try
         {
             _beforeCanonicalAliasCopyForControl?.Invoke(destination, source.Length);
+<<<<<<< HEAD
             source.CopyTo(new Span<byte>((void*)destination, source.Length));
             succeeded = true;
+=======
+            source.CopyTo(new Span<byte>((void*)destination, source.Length)); succeeded = true;
+>>>>>>> 1c3fa39f (Prepare real native original-volume construction Busy controls)
         }
         finally { HostBackingObject.EndManagedWrite(interval, succeeded); }
     }

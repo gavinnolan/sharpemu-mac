@@ -40,6 +40,8 @@ public sealed partial class MetalImmutableGpuVersionTests
         public Action? AfterOwnedRetirement;
         public readonly List<GuestDrawTexture> VolumeSeeds = [];
         public readonly List<object> VolumeImages = [];
+        public bool OrdinaryWriterUnconfirmed;
+        public object? OrdinaryWriterOwner;
     }
 
     [FiniteStoragePublicationNativeFact]
@@ -70,7 +72,11 @@ public sealed partial class MetalImmutableGpuVersionTests
     public void ActualRuntimeLateDirtyGenerationAfterCanonicalVersionKeepsStickyDebtAndNoEop() =>
         RunActualRuntimeTwoTypedPublications(false, rgba: true, lateFailure: "generation");
 
+<<<<<<< HEAD
     private void RunActualRuntimeTwoTypedPublications(bool overlappingCpuWrite, bool rgba = false, bool mixedBuffer = false, string? lateFailure = null, bool originalVolumes = false, string? busyOriginalRetry = null)
+=======
+    private void RunActualRuntimeTwoTypedPublications(bool overlappingCpuWrite, bool rgba = false, bool mixedBuffer = false, string? lateFailure = null, bool originalVolumes = false, string? constructionBusyWindow = null)
+>>>>>>> 1c3fa39f (Prepare real native original-volume construction Busy controls)
     {
         Assert.True(DeviceRequested());
         var imageBytes = rgba ? 4194304 : 65536;
@@ -135,7 +141,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                 ResourceDescriptor: raw, Shape: new ShaderImageShape(false, true, true, false, rgba ? TextureNumericClass.Float : TextureNumericClass.Uint),
                 Access: GuestImageAccess.Write);
             Assert.True(ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_KERNEL_PAGE"), out var kernelPage));
-            if (originalVolumes) MaterializeOriginalVolumes();
+            if (originalVolumes && !MaterializeOriginalVolumes()) return;
             var first = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [binding], out _));
             Assert.Equal(rgba ? Bgra1024Oracle.LinearSeed() : expected.AsSpan(0, 4).ToArray(), first.RgbaPixels);
             var originalOrigin = Call("StorageCpuOrigin", first)!;
@@ -269,7 +275,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             }
             output.WriteLine($"Actual Mac/PVM/Tracked original-copy→SubmitCompute→Drain→typedGPU staging→status4→checked canonical scatter→EOP; two-publication overlap={overlappingCpuWrite}; exact typed array; all-owned canonical bytes compared. Ordinary participating route only; no native/JIT writer or guest ISA qualification.");
 
-            void MaterializeOriginalVolumes()
+            bool MaterializeOriginalVolumes()
             {
                 // Both source scopes remain within the continuously owned PVM
                 // mapping. Their native writes are deliberately NOT published;
@@ -300,9 +306,36 @@ public sealed partial class MetalImmutableGpuVersionTests
                     // real Drain transfers ownership to the native image.
                     MetalVideoPresenter.ReleasePreparedTextureSources([seed]);
                     Assert.True(((ICpuMappedReadWatchSource)memory).IsMappedCopyWriteWatchCurrent(mapping));
+                    var controlKind = constructionBusyWindow == "overlap" ? 1 : 0;
+                    var constructorControl = constructionBusyWindow is not null && kind == controlKind
+                        ? new NativeConstructionBusyControl(physical, memory, host, owners, address, imageBytes,
+                            expected, seed, original, sequence, constructionBusyWindow, output) : null;
+                    Exception? constructionFailure = null;
                     Field("_finiteStorageWritebackEnabled").SetValue(null, false);
-                    try { state.DrainWithControlledBudget(); }
-                    finally { Field("_finiteStorageWritebackEnabled").SetValue(null, true); }
+                    try
+                    {
+                        if (constructionBusyWindow == "overlap" && constructorControl is not null)
+                        {
+                            var failed = Assert.Throws<TargetInvocationException>(() => state.DrainWithControlledBudget());
+                            Assert.IsType<GpuFatalException>(failed.InnerException);
+                            constructorControl.AssertRefused();
+                            Assert.Equal(expected, ReadCanonical());
+                            return false; // first real volume status4 retained; refused second never encoded/acknowledged
+                        }
+                        state.DrainWithControlledBudget();
+                        constructorControl?.AssertContinued();
+                    }
+                    catch (Exception failure) { constructionFailure = failure; throw; }
+                    finally
+                    {
+                        try { Field("_finiteStorageWritebackEnabled").SetValue(null, true); }
+                        catch (Exception cleanup)
+                        {
+                            if (constructionFailure is null) { constructorControl?.Finish(cleanup); throw; }
+                            try { constructionFailure.Data["ConstructionFixtureFlagCleanup"] = cleanup; } catch { }
+                        }
+                        constructorControl?.Finish(constructionFailure);
+                    }
                     Call("WaitForFlushedGuestCommands");
                     Assert.True(MetalVideoPresenter.WaitForGuestWork(sequence, 0));
                     state.AssertFinitePipelineCompleted(shader);
@@ -320,6 +353,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                     Assert.Equal(expected,ReadCanonical()); // full backing/padding and neighboring scopes untouched
                     output.WriteLine($"original-volume-native kind={kind}; shape={seed.Width}x{seed.Height}x{seed.Depth}; pitch={seed.Pitch}; original=65536; native_status=4; all_native_bytes=true; all_canonical_neighbors=true; frontend_release_before_drain=true");
                 }
+                return true;
             }
 
             void ValidateOriginalVolumes()
@@ -435,7 +469,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             Attempt(() => Field("_finiteStorageWritebackEnabled").SetValue(null, oldFinite));
             Attempt(() => Field("_guestMemory").SetValue(null, oldMemory));
             Attempt(() => backendField.SetValue(null, oldBackend));
-            if (cleanup is not null) finiteStorageFixtureQuarantine = owners;
+            if (!completionConfirmed || cleanup is not null) finiteStorageFixtureQuarantine = owners;
             if (cleanup is not null)
             {
                 if (primary is not null) { try { primary.Data["FiniteStorageFixtureCleanupFailure"] = cleanup; } catch { } }

@@ -54,7 +54,18 @@ original independent token/mapping/session/health and complete native-owner
 identity are checked again; a changed original still fails. A secondary provider
 failure while classifying a caught content refusal preserves that first refusal.
 
-Native qualification prerequisite (separate source fixture/approval): use the
+Three fresh native Facts are now source-prepared (unbuilt/unrun):
+`ActualVolumeConstructionContinuesOriginalAfterWriterStartsBeforeFinalContent`,
+`ActualVolumeConstructionContinuesOriginalAfterWriterStartsBeforeFinalOwner`,
+`ActualVolumeConstructionRefusesOriginalOverlappingWriterBeforeSecondDispatch`.
+They extend the existing public singleton+linear-volume fixture, not a synthetic
+watch-current override. Positive rows continue to both actual native full-byte
+volume oracles plus two full RGBA canonical publications/EOP/all-owned bytes.
+The overlapping row completes the first actual singleton/status4/all-native
+bytes, then proves the second private linear-volume constructor refuses before
+its real compute encoder opens and before its queued EOP is acknowledged.
+
+Native qualification prerequisite (explicit runtime grant still required): use the
 existing public original singleton+linear-volume Submit/Drain fixture with a
 real ordinary Mac/PVM/Tracked original watched copy. Observe that a SAME read
 ticket is Current while the ordinary bool guard refuses PublicationBit; retain
@@ -67,3 +78,12 @@ ordered EOP. A paired overlapping writer must invalidate the ORIGINAL watch
 and prevent dispatch/label acknowledgement. Preserve unknown writer/native
 completion owners through quarantine; no timeout retry, prearm, recapture,
 disposed-ticket borrow or fake counter override.
+
+The native fixture's source-prepared default-null hooks return after real read
+reservation validation or execute at the two corrected final checks. The writer
+pause is inside the same already reviewed gate-free alias-copy seam as33/2e.
+The fixture counts and delegates actual encoder creation selectors; it never
+returns a fake handle/status. Writer join uncertainty retains native/backing/
+event owners via the existing fresh-worker quarantine. Constructor-control
+cleanup attempts every hook restoration, releases events only after confirmed
+join, and preserves the original body failure over secondary cleanup failures.
