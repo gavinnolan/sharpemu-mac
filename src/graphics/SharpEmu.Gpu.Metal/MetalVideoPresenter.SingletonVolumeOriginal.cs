@@ -220,7 +220,7 @@ internal static partial class MetalVideoPresenter
     {
         if (origin?.VolumeWatch is not { } watch) return;
         if (Monitor.IsEntered(_gate)) throw new InvalidOperationException("Singleton volume content validation requires a released presenter gate.");
-        var originalWatchStatus = CpuMappedReadWatchStatus.Stale;
+        CpuMappedReadWatchStatus? originalWatchStatus = null;
         // Keep the exact short-circuit order and the status of its FIRST watch
         // query. Diagnostic scalar sampling below is not a second validation.
         var originalRefusal = _closed ? "closed" : _guestWorkFailure is not null ? "guest-work-failure" :
@@ -251,15 +251,15 @@ internal static partial class MetalVideoPresenter
                 watch.Source.GetMappedCopyWriteWatchStatus(watch.Mapping) is CpuMappedReadWatchStatus.Current or CpuMappedReadWatchStatus.Busy)
                 throw new SingletonVolumeOriginalBusy(origin);
             var message = "Metal singleton volume lost its ORIGINAL full mapping/read/watch/protected token/session.";
+            var firstWatchStatus = originalWatchStatus?.ToString() ?? "not-classified";
             if (_volumeOwnerDeclineDiagnostics)
                 message += $" first_refusal={originalRefusal}; original_address=0x{origin.Layout.Address:X}; original_bytes={origin.Layout.PhysicalBytes};" +
-                    $" classified_watch={classifyOrdinaryBusy}; first_watch_status={originalWatchStatus};" +
+                    $" classify_watch_requested={classifyOrdinaryBusy}; first_watch_status={firstWatchStatus};" +
                     $" later_watch_state={Volatile.Read(ref watch.State)}; later_unknown_producer={Volatile.Read(ref watch.UnknownProducer)};" +
                     $" historical_unknown_reason={watch.DiagnosticUnknownProducerReason ?? "none"}; diagnostic_samples_not_authority=true";
             var failure = new InvalidOperationException(message);
             failure.Data["SingletonVolumeOriginalFirstRefusal"] = originalRefusal;
-            failure.Data["SingletonVolumeOriginalFirstWatchStatus"] = classifyOrdinaryBusy && originalRefusal == "original-read-watch"
-                ? originalWatchStatus.ToString() : "not-classified";
+            failure.Data["SingletonVolumeOriginalFirstWatchStatus"] = firstWatchStatus;
             throw failure;
         }
     }

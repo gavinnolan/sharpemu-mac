@@ -17,6 +17,7 @@ public sealed partial class MetalStorageCpuSyncTests
     [InlineData("unknown")] [InlineData("released")] [InlineData("stale")]
     [InlineData("provider-error")]
     [InlineData("busy-clears")] [InlineData("stale-then-busy")]
+    [InlineData("current-then-mapping-failure")]
     public void OriginalDirtyBodyBusyIsTypedOnlyForHealthySameOriginalAndOptIn(string variant)
     {
         ActualArchitecture(); using var state = new VolumeState(); using var protection = new VolumeProtectedScalar();
@@ -30,13 +31,14 @@ public sealed partial class MetalStorageCpuSyncTests
         {
             statusQueries++;
             if (variant == "provider-error") throw providerFailure;
+            if (variant == "current-then-mapping-failure") return CpuMappedReadWatchStatus.Current;
             if (variant == "busy-clears") return statusQueries == 1 ? CpuMappedReadWatchStatus.Busy : CpuMappedReadWatchStatus.Current;
             if (variant == "stale-then-busy") return statusQueries == 1 ? CpuMappedReadWatchStatus.Stale : CpuMappedReadWatchStatus.Busy;
             return variant == "stale" ? CpuMappedReadWatchStatus.Stale : CpuMappedReadWatchStatus.Busy;
         };
         switch (variant)
         {
-            case "mapping": memory.Current = false; break;
+            case "mapping": case "current-then-mapping-failure": memory.Current = false; break;
             case "token": protection.Generation(1); break;
             case "session": Field("_selectedStorageMipSession").SetValue(null, MetalVideoPresenter.CurrentStorageCpuSeedSession + 1); break;
             case "memory": Field("_guestMemory").SetValue(null, new VolumeMemory(VolumePhysical())); break;
@@ -59,17 +61,20 @@ public sealed partial class MetalStorageCpuSyncTests
                 var refusal = Assert.IsType<InvalidOperationException>(failure.InnerException);
                 Assert.Equal(variant switch
                 {
-                    "session" => "session", "memory" => "memory", _ => "original-read-watch",
+                    "session" => "session", "memory" => "memory",
+                    "current-then-mapping-failure" => "mapping", _ => "original-read-watch",
                 }, refusal.Data["SingletonVolumeOriginalFirstRefusal"]);
                 Assert.Equal(variant switch
                 {
                     "session" or "memory" or "strict-default" => "not-classified",
                     "unknown" or "released" or "stale" or "stale-then-busy" => "Stale",
+                    "current-then-mapping-failure" => "Current",
                     _ => "Busy",
                 }, refusal.Data["SingletonVolumeOriginalFirstWatchStatus"]);
             }
             if (variant == "busy-clears") Assert.Equal(2, statusQueries);
             if (variant == "stale-then-busy") Assert.Equal(1, statusQueries);
+            if (variant == "current-then-mapping-failure") Assert.Equal(1, statusQueries);
             Assert.Equal(1, memory.Copies); Assert.Equal(0, memory.Reads);
             Assert.Null(Field("_deferredCanonicalDirty").GetValue(null));
             Assert.Null(Field("_guestWorkFailure").GetValue(null));
