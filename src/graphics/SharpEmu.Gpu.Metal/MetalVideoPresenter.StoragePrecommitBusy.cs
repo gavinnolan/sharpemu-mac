@@ -28,9 +28,12 @@ internal static partial class MetalVideoPresenter
         KeyValuePair<SelectedStorageMipKey, SelectedStorageMipAssociation>[] selected,
         KeyValuePair<SelectedStorageMipKey, GuestImage>[] selectedImages,
         KeyValuePair<SelectedStorageMipKey, SelectedNativeOriginalProof>[] selectedProofs,
-        int retiredOrigins, int retiredDisplays)
+        int retiredOrigins, int retiredDisplays, bool beforeBufferPublication = false)
     {
         internal readonly FiniteStorageWriteback Receipt = receipt;
+        // Only the distinct pre-buffer factory may select this phase. It
+        // checks actual status4 but does not stamp image-publication completion.
+        internal readonly bool BeforeBufferPublication = beforeBufferPublication;
         internal readonly nint CommandBuffer = receipt.CommandBuffer, Staging = receipt.Staging;
         internal readonly FiniteStoragePrecommitImage[] SelectedNativeImages = selectedImages
             .Select(pair => CaptureFiniteStoragePrecommitImage(pair.Key.Resource.Address, pair.Value)).ToArray();
@@ -74,7 +77,8 @@ internal static partial class MetalVideoPresenter
     private static void ValidateFiniteStoragePrecommitOwnersLocked(FiniteStoragePrecommit original)
     {
         ValidateFiniteStorageReceiptOwnerLocked(original.Receipt);
-        if (!original.Receipt.SuccessfullyCompleted || !original.Receipt.Encoded || original.Receipt.CommandBuffer == 0 ||
+        if ((original.BeforeBufferPublication ? original.Receipt.SuccessfullyCompleted : !original.Receipt.SuccessfullyCompleted) ||
+            !original.Receipt.Encoded || original.Receipt.CommandBuffer == 0 ||
             original.Receipt.Staging == 0 || original.Receipt.Staging != original.Staging ||
             original.Receipt.CommandBuffer != original.CommandBuffer || _guestImages.Count != original.Images.Length ||
             _selectedStorageMipOwners.Count != original.Selected.Length || _selectedStorageMipImages.Count != original.SelectedImages.Length ||
@@ -167,13 +171,16 @@ internal static partial class MetalVideoPresenter
             try { original.FirstBusy.Data["FiniteStoragePrecommitWait"] = "500ms bound; ORIGINAL GPU debt remains pending; TryCommit not called"; } catch { }
             ExceptionDispatchInfo.Capture(original.FirstBusy).Throw();
         }
-        _finiteStoragePrecommitBusyForControl?.Invoke();
+        if (original.BeforeBufferPublication) _finiteStoragePrebufferBusyForControl?.Invoke();
+        else _finiteStoragePrecommitBusyForControl?.Invoke();
         Thread.Sleep(1); // all original objects retained, no presenter/provider/PVM gate held
     }
 
     private static CpuMappedPublication PrepareFiniteStoragePrecommit(FiniteStoragePrecommit original,
         ICpuMappedPublicationSource publisher, CpuMappedWriteRun[] runs)
     {
+        if (original.BeforeBufferPublication)
+            throw new InvalidOperationException("A pre-buffer validation cannot authorize an image publication transaction.");
         while (true)
         {
             try

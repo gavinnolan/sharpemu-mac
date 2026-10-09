@@ -84,6 +84,13 @@ internal static partial class MetalVideoPresenter
     private static void ValidateFiniteStorageBuffersAgainstImage(List<FiniteStorageWriteback>? receipts,
         GuestMemoryBuffer[] buffers)
     {
+        _ = ValidateFiniteStorageBufferOriginalsAgainstImage(receipts, buffers);
+        ValidateFiniteStorageReceipt(receipts![0]);
+    }
+
+    private static FiniteStorageBufferOrigin[] ValidateFiniteStorageBufferOriginalsAgainstImage(List<FiniteStorageWriteback>? receipts,
+        GuestMemoryBuffer[] buffers)
+    {
         if (receipts is null || receipts.Count != 1) throw new InvalidOperationException("Finite mixed work lost its exact image receipt.");
         var image = receipts[0];
         var originals = new List<FiniteStorageBufferOrigin>();
@@ -99,15 +106,22 @@ internal static partial class MetalVideoPresenter
                 throw new NotSupportedException("Finite image/buffer physical publication footprints overlap.");
             originals.Add(origin); bytes += buffer.Length;
         }
-        ValidateFiniteStorageReceipt(image);
+        return originals.ToArray();
     }
 
-    private static unsafe void PublishFiniteStorageBuffers(List<(nint Pointer, GuestMemoryBuffer Guest)> uploads,
+    private static unsafe void PublishFiniteStorageBuffers(nint committed, List<(nint Pointer, GuestMemoryBuffer Guest)> uploads,
         List<FiniteStorageWriteback>? receipts, GuestMemoryBuffer[] buffers)
     {
         // The caller has waited for the SAME successfully committed command
         // buffer. Revalidate every input and disjoint footprint before any bytes.
-        ValidateFiniteStorageBuffersAgainstImage(receipts, buffers);
+        ValidateFiniteStorageBeforeBufferPublication(committed, receipts, buffers);
+        if (!uploads.Any(upload => upload.Guest.Length != 0))
+        {
+            _finiteStorageAfterEmptyBufferValidationForControl?.Invoke(receipts![0]);
+            // No buffer effect exists. The exact completed image proceeds to
+            // its independent full original precommit validation/continuation.
+            return;
+        }
         foreach (var (pointer, buffer) in uploads)
         {
             if (buffer.Length == 0) continue;

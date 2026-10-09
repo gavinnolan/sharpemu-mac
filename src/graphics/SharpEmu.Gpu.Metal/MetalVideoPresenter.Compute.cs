@@ -221,7 +221,7 @@ internal static partial class MetalVideoPresenter
             }
 
             if (publishFiniteStorage)
-                ValidateFiniteStorageBuffersAgainstImage(storageWritebacks, dispatch.GlobalMemoryBuffers);
+                ValidateFiniteStorageBeforeEncoding(dispatch, commandBuffer, queue, storageWritebacks);
 
             TraceGuestWorkStage("compute.textures.end");
             TraceGuestWorkStage("compute.encoder.begin");
@@ -281,7 +281,7 @@ internal static partial class MetalVideoPresenter
                 TraceGuestWorkStage("compute.writeback_wait.end");
                 TraceGuestWorkStage("compute.writeback_copy.begin");
                 if (publishFiniteStorage)
-                    PublishFiniteStorageBuffers(writeBackBuffers, storageWritebacks, dispatch.GlobalMemoryBuffers);
+                    PublishFiniteStorageBuffers(committed, writeBackBuffers, storageWritebacks, dispatch.GlobalMemoryBuffers);
                 else
                     WriteBuffersBackToGuest(writeBackBuffers);
                 if (storageWritebacks is not null)

@@ -160,7 +160,10 @@ internal static partial class MetalVideoPresenter
         if (!ReferenceEquals(image.StorageCpuLayout, origin.Layout) || !origin.Layout.Matches(descriptor) ||
             origin.Layout.LinearBytes != bytes)
             throw new InvalidOperationException("Metal finite storage publication does not match its immutable original layout.");
-        ValidateFiniteStorageOrigin(origin, descriptor);
+        // Retention is lifetime bookkeeping, not permission to encode. Check
+        // this exact input now; the full original sibling content/physical
+        // cohort is validated by the immutable pre-encode continuation.
+        ValidateFiniteStorageOwnOrigin(origin, descriptor);
         // Metadata is private/owned. Preserve raw descriptor identity against a
         // later caller mutation; payload is unnecessary once native input exists.
         var owned = descriptor with { Descriptor = descriptor.Descriptor!.ToArray(), RgbaPixels = [] };
@@ -168,7 +171,6 @@ internal static partial class MetalVideoPresenter
         {
             if (_closed || _guestWorkFailure is not null)
                 throw new InvalidOperationException("Metal finite storage publication cannot acquire a closed or failed presenter owner.");
-            RequireFiniteStorageNativeCohortLocked(image, origin); // before retain/encoder acquisition
             ValidateStorageImageView(image, descriptor, StorageTextureFormat(descriptor));
             if (image.TextureType != MtlTextureType2DArray || image.ArrayLength != 1 || image.Depth != 1 || image.Texture == 0 ||
                 !_guestImages.TryGetValue(descriptor.Address, out var current) || !ReferenceEquals(current, image))
