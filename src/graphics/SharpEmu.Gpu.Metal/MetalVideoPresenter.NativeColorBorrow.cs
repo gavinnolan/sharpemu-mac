@@ -462,6 +462,43 @@ internal static partial class MetalVideoPresenter
         }
         return false;
     }
+    // This is queue ordering, not a second native texture or new content
+    // authority. The consumer already owns the prior receipt; the exact later
+    // producer has not encoded and retains that prior as its predecessor.
+    // All native handle/version/completion checks in the borrow remain strict.
+    private static bool IsOrderedNativeColorSuccessorLocked(NativeColorProducer prior,
+        PendingGuestWork pending, NativeColorOriginal next)
+    {
+        if (_takenGuestWorkSequence == 0 || _takenGuestWorkSequence != _executingGuestWorkSequence ||
+            _takenGuestWorkSequence <= prior.Sequence || pending.Sequence <= _takenGuestWorkSequence ||
+            _submittingGuestQueue is not { } queue || queue.Name != prior.Queue.Name || pending.Queue.Name != queue.Name ||
+            _takenDepthCubeProducerWork is not { } consumer || ReferenceEquals(consumer, pending.Work) ||
+            !_nativeColorQueued.TryGetValue(consumer, out var consuming) || !consuming.Dependencies.Contains(prior) ||
+            prior.Retired || prior.CleanupUnknown || prior.DependentReferences <= 0 || !prior.OriginalReferenceOwned ||
+            !prior.Original.ScalarCurrent || !_nativeColorProducers.Contains(prior)) return false;
+        IEnumerable<GuestDrawTexture> reads = consumer switch
+        { OffscreenGuestDraw draw => draw.Draw.Textures, ComputeGuestDispatch dispatch => dispatch.Textures, _ => [] };
+        if (!reads.Any(texture => texture.Access == GuestImageAccess.Read && !texture.IsStorage &&
+            _nativeColorLeases.TryGetValue(texture, out var lease) && ReferenceEquals(lease.Producer, prior))) return false;
+        if (!_nativeColorWorks.TryGetValue(pending.Work, out var accepted) ||
+            !_nativeColorQueued.TryGetValue(pending.Work, out var queued) || !queued.Dependencies.Contains(prior) ||
+            !queued.Originals.Contains(next)) return false;
+        var future = accepted.SingleOrDefault(candidate => ReferenceEquals(candidate.Original, next));
+        if (future is null || !ReferenceEquals(future.Work, pending.Work) || future.Sequence != pending.Sequence ||
+            future.Queue != pending.Queue || !ReferenceEquals(future.Predecessor, prior) ||
+            future.Encoded || future.Retired || future.CleanupUnknown || future.Texture != 0 || future.CommandBuffer != 0 ||
+            future.Image is not null || future.Batch is not null || !future.OriginalReferenceOwned ||
+            !_nativeColorProducers.Contains(future) || !next.ScalarCurrent) return false;
+        var original = prior.Original;
+        return ReferenceEquals(next.Placement.Memory, original.Placement.Memory) && ReferenceEquals(next.Source, original.Source) &&
+            next.Session == original.Session && next.Placement.Registers == original.Placement.Registers &&
+            next.Placement.PhysicalAddress == original.Placement.PhysicalAddress && next.Placement.ByteCount == original.Placement.ByteCount &&
+            next.Placement.BackingByteCount == original.Placement.BackingByteCount && next.Content.Observed && original.Content.Observed &&
+            next.Content.Token == original.Content.Token && next.Content.ByteCount == original.Content.ByteCount &&
+            next.Mapping.FootprintAddress == original.Mapping.FootprintAddress && next.Mapping.FootprintByteCount == original.Mapping.FootprintByteCount &&
+            next.Mapping.SourceAddress == original.Mapping.SourceAddress && next.Mapping.SourceByteCount == original.Mapping.SourceByteCount &&
+            next.Mapping.Segments.SequenceEqual(original.Mapping.Segments);
+    }
     private static void RequireNativeColorCohortLocked(NativeColorProducer producer)
     {
         var original = producer.Original;
@@ -500,7 +537,7 @@ internal static partial class MetalVideoPresenter
                 Mapping(origin.Memory, origin.Session, origin.Source, origin.Mapping, origin.Mapping.FootprintAddress, origin.Mapping.FootprintByteCount);
             }
         }
-        void Work(object work)
+        void Work(object work, PendingGuestWork? future = null)
         {
             if (work is OffscreenGuestDraw boundedDraw && (boundedDraw.Targets.Length > 8 || boundedDraw.Draw.Textures.Length > 128 || boundedDraw.Draw.GlobalMemoryBuffers.Length > 64) ||
                 work is ComputeGuestDispatch boundedDispatch && (boundedDispatch.Textures.Length > 128 || boundedDispatch.GlobalMemoryBuffers.Length > 64))
@@ -518,7 +555,7 @@ internal static partial class MetalVideoPresenter
             }
             if (work is OffscreenGuestDraw draw)
             {
-                foreach (var target in draw.Targets) Target(target);
+                foreach (var target in draw.Targets) Target(target, future);
                 foreach (var texture in draw.Draw.Textures) Texture(texture);
                 Buffers(draw.Draw.GlobalMemoryBuffers);
                 if (draw.DepthTarget is not null) throw new NotSupportedException("Native color pending depth writer is unqualified.");
@@ -528,14 +565,15 @@ internal static partial class MetalVideoPresenter
             else
                 throw new NotSupportedException("Native color has an unknown accepted sibling writer.");
         }
-        void Target(GuestRenderTarget target)
+        void Target(GuestRenderTarget target, PendingGuestWork? future = null)
         {
             if (target.Address == 0) return; // actual transient native target has no guest/canonical range
             if (!MetalColorMipPlacement.TryGet(target, out var placement) || !_nativeColorOriginalByPlacement.TryGetValue(placement, out var sibling))
                 throw new NotSupportedException("Native color sibling attachment lacks its ORIGINAL mapping.");
+            if (future is { } acceptedFuture && IsOrderedNativeColorSuccessorLocked(producer, acceptedFuture, sibling)) return;
             Mapping(placement.Memory, sibling.Session, sibling.Source, sibling.Mapping, placement.PhysicalAddress, placement.ByteCount);
         }
-        foreach (var queues in _pendingGuestWorkByQueue.Values) foreach (var pending in queues) Work(pending.Work);
+        foreach (var queues in _pendingGuestWorkByQueue.Values) foreach (var pending in queues) Work(pending.Work, pending);
         if (_takenGuestWorkSequence != 0)
         {
             if (_takenDepthCubeProducerWork is null) throw new NotSupportedException("Native color taken writer is unknown.");

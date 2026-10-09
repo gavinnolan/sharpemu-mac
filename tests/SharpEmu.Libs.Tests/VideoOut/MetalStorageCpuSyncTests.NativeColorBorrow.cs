@@ -187,6 +187,90 @@ public sealed partial class MetalStorageCpuSyncTests
     }
 
     [Theory]
+    [InlineData("ordered")]
+    [InlineData("no-execution")]
+    [InlineData("wrong-queue")]
+    [InlineData("earlier-sequence")]
+    [InlineData("taken-successor")]
+    [InlineData("encoded-successor")]
+    [InlineData("missing-predecessor")]
+    [InlineData("stale-mapping")]
+    [InlineData("different-physical-projection")]
+    [InlineData("different-original-token")]
+    public void NativeColorPendingSuccessorExceptionRequiresExactRetainedConsumerOrdering(string variant)
+    {
+        ActualArchitecture(); using var state = new BorrowColorState(); var memory = new BorrowColorMemory();
+        MetalVideoPresenter.AttachGuestMemory(memory);
+        var first = ProjectBorrowColor(memory); SubmitBorrowColor(first);
+        MetalVideoPresenter.ReleasePreparedNativeColorTarget(first);
+        var prior = ((IDictionary)Field("_nativeColorLatest").GetValue(null)!)[first.Address]!;
+        var sampled = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [BorrowColorBinding()], out _));
+        var shader = new MetalCompiledGuestShader(new Gen5MslShader("", "managed_ordered_color_consumer", Gen5MslStage.Pixel, 0));
+        MetalVideoPresenter.SubmitOffscreenTranslatedDraw(shader, [sampled], [], 0,
+            [first with { Address = 0, Registers = null }], null, 3, 1, 4, null, [], null, null, 0);
+        MetalVideoPresenter.ReleasePreparedTextureSources([sampled]);
+        var second = ProjectBorrowColor(memory); SubmitBorrowColor(second);
+        MetalVideoPresenter.ReleasePreparedNativeColorTarget(second);
+        var successor = ((IDictionary)Field("_nativeColorLatest").GetValue(null)!)[second.Address]!;
+        var restore = new List<Action>();
+        const BindingFlags fields = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+        object Member(object owner, string name) => owner.GetType().GetField(name, fields)!.GetValue(owner)!;
+        void Change(object owner, string name, object? value)
+        {
+            var field = owner.GetType().GetField(name, fields)!; var old = field.GetValue(owner);
+            restore.Add(() => field.SetValue(owner, old)); field.SetValue(owner, value);
+        }
+        try
+        {
+            // Actual public queue receipts, but no execution/completion seal is
+            // fabricated: this exercises ONLY sibling queue-order metadata.
+            // The real native fixture proves actual status4 and version seals.
+            _ = TakeVolumeWork(); // prior producer; never encoded or acknowledged here
+            var consuming = TakeVolumeWork();
+            var sequence = (long)consuming.GetType().GetProperty("Sequence")!.GetValue(consuming)!;
+            Field("_executingGuestWorkSequence").SetValue(null, variant == "no-execution" ? 0L : sequence);
+            if (variant == "taken-successor") _ = TakeVolumeWork();
+            if (variant == "earlier-sequence") Change(successor, "Sequence", sequence - 1);
+            if (variant == "encoded-successor") Change(successor, "Encoded", true); // negative only, never a native seal
+            if (variant == "missing-predecessor") Change(successor, "Predecessor", null);
+            if (variant == "stale-mapping") memory.Current = false;
+            var original = Member(successor, "Original");
+            if (variant == "different-physical-projection")
+            {
+                var old = (CpuMappedCopyObservation)Member(original, "Mapping");
+                Change(original, "Mapping", new CpuMappedCopyObservation(new object(), old.FootprintAddress, old.FootprintByteCount,
+                    old.SourceAddress, old.SourceByteCount, old.Segments.Select(segment => segment with { MappingBackingOffset = 1 }).ToArray()));
+            }
+            if (variant == "different-original-token")
+            {
+                GuestImageWriteTracker.NotifyManagedWrite(first.Address, 1);
+                Change(original, "Content", MetalVideoPresenter.ObserveCpuTextureSnapshot(first.Address, 0x200000, HostMemory.MappingGeneration));
+            }
+            using var queue = MetalVideoPresenter.EnterGuestQueue(variant == "wrong-queue" ? "foreign.color.queue" : "host.default", 0);
+            lock (Field("_gate").GetValue(null)!)
+            {
+                if (variant == "ordered") InvokeVolume("RequireNativeColorCohortLocked", prior);
+                else
+                {
+                    var refused = Assert.Throws<TargetInvocationException>(() => InvokeVolume("RequireNativeColorCohortLocked", prior));
+                    Assert.IsType<NotSupportedException>(refused.InnerException);
+                }
+            }
+            Assert.False((bool)Member(prior, "Encoded")); Assert.Equal((nint)0, Member(prior, "Texture"));
+            Assert.Equal(0L, Field("_completedGuestWorkSequence").GetValue(null));
+            Assert.Equal(0, memory.PlainReads); Assert.Equal(0, memory.Releases);
+        }
+        finally
+        {
+            foreach (var action in restore.AsEnumerable().Reverse()) action();
+            memory.Current = true;
+            InvokeVolume("CompletePresenterShutdown");
+        }
+        Assert.Equal(2, memory.Releases);
+        Assert.Empty((IDictionary)Field("_nativeColorQueued").GetValue(null)!);
+    }
+
+    [Theory]
     [InlineData(2)] [InlineData(3)]
     public void NativeColorPublicAdmissionRevocationCannotInstallPartialQueueOrProducerOwnership(int rejectedQuery)
     {

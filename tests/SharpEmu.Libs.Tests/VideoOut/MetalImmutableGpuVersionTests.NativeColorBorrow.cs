@@ -15,6 +15,7 @@ using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.ShaderCompiler.Metal;
+using SharpEmu.ShaderCompiler.Resources;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.VideoOut;
@@ -46,6 +47,8 @@ public sealed partial class MetalImmutableGpuVersionTests
         var oldPredecessorControl = Field("_nativeColorPredecessorValidationForControl").GetValue(null);
         var oldTemporaryRelease = Field("_computeTextureReleaseOverride").GetValue(null);
         var oldTemporaryFailure = Field("_textureSourceCleanupFailure").GetValue(null);
+        var oldFatal = GpuFatal.OnFatal;
+        var reports = new List<string>();
         NativeState? state = null; PhysicalVirtualMemory? physical = null;
         IDisposable? queueScope = null;
         TrackedCpuMemory? memory = null;
@@ -57,6 +60,7 @@ public sealed partial class MetalImmutableGpuVersionTests
         var phase = "native-state";
         try
         {
+            GpuFatal.OnFatal = reports.Add;
             state = new NativeState();
             Field("_textureSourceGraphEnabled").SetValue(null, false);
             Field("_renderOwner").SetValue(null, Thread.CurrentThread);
@@ -65,6 +69,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             Assert.Empty((IDictionary)Field("_guestImages").GetValue(null)!);
             Assert.Empty((IDictionary)Field("_guestDepthImages").GetValue(null)!);
             Assert.Empty((IDictionary)Field("_nativeColorBatches").GetValue(null)!);
+            Assert.Empty((IDictionary)Field("_transientTargets").GetValue(null)!);
             phase = "physical-provider";
             physical = new PhysicalVirtualMemory(HostMemoryAuthority.Current, HostViewMemory.Create(),
                 backingBytes: 8 * 1024 * 1024UL, preReserveGuestAddressSpace: false);
@@ -150,7 +155,12 @@ public sealed partial class MetalImmutableGpuVersionTests
                 var next = MetalColorMipPlacement.Project(memory, normalized, words,
                     new GuestRenderTarget(address, 512, 512, (uint)words.Layout, (uint)words.NumberType, Registers: words, TileMode: 27));
                 target = next;
-                MetalVideoPresenter.SubmitOffscreenTranslatedDraw(shaders.Pixel, [snapshot, snapshot], [], 0, [next], shaders.Vertex,
+                // Independent CPU-seeded temporary textures reach the failing
+                // predecessor boundary without a simultaneous read/write alias
+                // of the original color attachment in this taken draw.
+                var temporaryOne = new GuestDrawTexture(0, 1, 1, 10, 0, [11, 22, 33, 255], false, false);
+                var temporaryTwo = new GuestDrawTexture(0, 1, 1, 10, 0, [44, 55, 66, 255], false, false);
+                MetalVideoPresenter.SubmitOffscreenTranslatedDraw(shaders.Pixel, [temporaryOne, temporaryTwo], [], 0, [next], shaders.Vertex,
                     3, 1, 4, null, [], GuestRenderState.Default, null, 0);
                 MetalVideoPresenter.ReleasePreparedNativeColorTarget(next);
                 var completedSequence = Field("_completedGuestWorkSequence").GetValue(null);
@@ -163,7 +173,9 @@ public sealed partial class MetalImmutableGpuVersionTests
                 var rejected = Assert.Throws<TargetInvocationException>(() => state.DrainWithControlledBudget());
                 var fatal = Assert.IsType<GpuFatalException>(rejected.InnerException);
                 Assert.Same(originalFailure, fatal.InnerException);
-                Assert.Equal(2, released.Count); Assert.Equal(released[0], released[1]);
+                Assert.Single(reports);
+                Assert.Equal(2, released.Count); Assert.All(released, handle => Assert.NotEqual((nint)0, handle));
+                Assert.NotEqual(released[0], released[1]);
                 Assert.Same(cleanupFailure, Field("_textureSourceCleanupFailure").GetValue(null));
                 Assert.Equal(completedSequence, Field("_completedGuestWorkSequence").GetValue(null));
                 Field("_nativeColorPredecessorValidationForControl").SetValue(null, oldPredecessorControl);
@@ -176,9 +188,11 @@ public sealed partial class MetalImmutableGpuVersionTests
                 // An already admitted readonly consumer must keep the prior
                 // status4 texture after a later writer is admitted. The later
                 // partial-mask encoder then loads that exact predecessor.
-                MetalVideoPresenter.SubmitOffscreenTranslatedDraw(shaders.Pixel, [snapshot], [], 0,
+                var consumer = state.CreateNativeColorReadShader();
+                var consumerBindings = new GuestStageBindings(GuestStageKind.Pixel, [], [0], [], [], null, [], [], false, false, 0);
+                MetalVideoPresenter.SubmitOffscreenTranslatedDraw(consumer, [snapshot], [], 0,
                     [target with { Address = 0, Registers = null }], shaders.Vertex,
-                    3, 1, 4, null, [], GuestRenderState.Default, null, 0);
+                    3, 1, 4, null, [], GuestRenderState.Default, null, 0, stageBindings: [consumerBindings]);
                 MetalVideoPresenter.ReleasePreparedTextureSources([snapshot]);
                 var next = MetalColorMipPlacement.Project(memory, normalized, words,
                     new GuestRenderTarget(address, 512, 512, (uint)words.Layout, (uint)words.NumberType, Registers: words, TileMode: 27));
@@ -188,6 +202,15 @@ public sealed partial class MetalImmutableGpuVersionTests
                     3, 1, 4, null, [], GuestRenderState.Default with { Blends = [GuestBlendState.Default with { WriteMask = 1 }] }, null, 0);
                 MetalVideoPresenter.ReleasePreparedNativeColorTarget(next);
                 state.DrainWithControlledBudget(); Call("WaitForFlushedGuestCommands");
+                // The queued fragment shader actually read every prior pixel;
+                // its distinct transient output must contain the original .25
+                // red, while the later partial writer produces .875 below.
+                var consumerOutput = Assert.Single(((IDictionary)Field("_transientTargets").GetValue(null)!).Values.Cast<nint>());
+                Assert.Equal((nint)MtlPixelFormat.Rgba16Float, MetalNative.Send(consumerOutput, MetalNative.Selector("pixelFormat")));
+                var consumerBytes = ReadNativeColorThroughBlit(state, consumerOutput, readback, contents);
+                for (var pixel = 0; pixel < 512 * 512; pixel++) for (var component = 0; component < 4; component++)
+                    Assert.Equal(expected[component], BitConverter.ToUInt16(consumerBytes, pixel * 8 + component * 2));
+                output.WriteLine("native-color-borrow queued_gpu_consumer_full_native_bytes=2097152 prior_red=.25 successor_red=.875 original_argument_buffer_shader_read=1 status=4");
                 snapshot = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [binding], out _));
                 command = (nint)Call("BeginBatchedGuestCommands", state.NativeFaceQueue)!;
                 create = [state.NativeFaceDevice, command, snapshot, false]; borrowed = (nint)Call("CreateDrawTexture", create)!;
@@ -218,6 +241,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             var rejection = Assert.Throws<TargetInvocationException>(() => Call("CreateDrawTexture", state.NativeFaceDevice, state.Buffer(), snapshot, false));
             Assert.IsType<NotSupportedException>(rejection.InnerException);
             output.WriteLine($"native-color-borrow status=4 full_half_components=1048576 full_native_bytes=2097152 unchanged_original_chain_bytes={chainBytes} same_CB={!completedFirst} frontend_release_before_consume=1 wrong_queue_veto=1 overlapping_ordinary_writer_veto=1");
+            Assert.Empty(reports);
             FixtureFinished: ;
         }
         catch (Exception error)
@@ -267,6 +291,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             Attempt(() => Field("_batchQueue").SetValue(null, oldQueue));
             Attempt(() => Field("_textureSourceCleanupFailure").SetValue(null, oldTemporaryFailure));
             MetalColorMipPlacement.Enabled = oldPlacement; MetalVideoPresenter.NativeColorBorrowEnabled = oldBorrow;
+            Attempt(() => GpuFatal.OnFatal = oldFatal);
             if (cleanup is not null) NativeDepthPreserve(ref primary, cleanup);
         }
         if (primary is not null) ExceptionDispatchInfo.Capture(primary).Throw();
@@ -276,8 +301,44 @@ public sealed partial class MetalImmutableGpuVersionTests
         public NativeColorBorrowFact()
         { if (Environment.GetEnvironmentVariable("SHARPEMU_METAL_NATIVE_COLOR_BORROW_TESTS") != "1") Skip = "Fresh required-device native color worker not requested."; }
     }
+    private static byte[] ReadNativeColorThroughBlit(NativeState state, nint texture, nint buffer, nint contents)
+    {
+        var command = (nint)Call("BeginBatchedGuestCommands", state.NativeFaceQueue)!;
+        var blit = MetalNative.Send(command, MetalNative.Selector("blitCommandEncoder")); Assert.NotEqual((nint)0, blit);
+        Exception? primary = null;
+        try
+        {
+            MetalNative.SendCopyTextureToBuffer(blit, MetalNative.Selector("copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toBuffer:destinationOffset:destinationBytesPerRow:destinationBytesPerImage:"),
+                texture, 0, 0, default, new MtlSize { Width = 512, Height = 512, Depth = 1 }, buffer, 0, 4096, 0x200000);
+        }
+        catch (Exception error) { primary = error; }
+        try { MetalNative.SendVoid(blit, MetalNative.Selector("endEncoding")); } catch (Exception cleanup) { NativeDepthPreserve(ref primary, cleanup); }
+        if (primary is not null) ExceptionDispatchInfo.Capture(primary).Throw();
+        Call("WaitForFlushedGuestCommands"); Assert.Equal((nint)4, MetalNative.Send(command, MetalNative.Selector("status")));
+        var bytes = new byte[0x200000]; Marshal.Copy(contents, bytes, 0, bytes.Length); return bytes;
+    }
     private sealed partial class NativeState
     {
+        public MetalCompiledGuestShader CreateNativeColorReadShader()
+        {
+            var kind = ImageDescriptorBinding.ForImage(new ImageResource { ResourceClass = ImageResourceClass.Sampled,
+                NumericClass = ImageNumericClass.Float, Dimension = ImageDimension.Dim2D, Read = true })!.Value;
+            var layout = Gen5MslArgumentLayout.Build(new BindingLayout { Descriptors = [new(kind, [0])] });
+            var texture = Assert.Single(layout.Fields.Where(field => field.FieldKind == MslArgumentFieldKind.Textures));
+            var source = $$"""
+                #include <metal_stdlib>
+                using namespace metal;
+                struct ColorVertex { float4 position [[position]]; };
+                struct Gen5StageResources {
+                    array<texture2d<float>,1> {{texture.Name}} [[id({{texture.FirstId}})]];
+                };
+                fragment float4 native_color_consume(ColorVertex input [[stage_in]], constant Gen5StageResources& resources [[buffer(0)]]) {
+                    return resources.{{texture.Name}}[0].read(uint2(input.position.xy));
+                }
+                """;
+            var shader = new MetalCompiledGuestShader(new Gen5MslShader(source, "native_color_consume", Gen5MslStage.Pixel, 0, ArgumentLayout: layout));
+            colorShaders.Add(shader); return shader;
+        }
         public (MetalCompiledGuestShader Vertex, MetalCompiledGuestShader Pixel) CreateNativeColorBorrowShaders(bool redOnlySuccessor = false)
         {
             var vertex = new MetalCompiledGuestShader(new Gen5MslShader("""
