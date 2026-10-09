@@ -712,7 +712,12 @@ public static class PadExports
             timestampMicroseconds);
         data[0x68] = 1;
 
-        return ctx.Memory.TryWrite(dataAddress, data);
+        var written = ctx.Memory.TryWrite(dataAddress, data);
+        if (PadReadDiagnostics.Enabled)
+        {
+            PadReadDiagnostics.Record(dataAddress, written, buttons, leftX, leftY, rightX, rightY, l2, r2);
+        }
+        return written;
     }
 
     private static PadState ReadHostInputState()
