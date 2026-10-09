@@ -2,7 +2,7 @@
 
 Priority: make all nine games reach a menu or controllable scene first; performance and visual polish follow entry.
 
-Local main integrates qualified source `5016bc82`; its `src`, `tests` and `scripts` trees match that tested source. It adds the GPU-produced private R32 original path, physical-placement ownership checks and bounded rejected-draw input capture for DS/Void diagnosis. It retains `8c4b352f` first watched command writes and exact Applied successors, first-status constructor Busy, first pre-encode owner diagnostics, buffer-publication continuation and gate-order correction. Game entry on the new source still requires the separate replays below. No remote push or upstream merge was performed. The six historical game replays below retain their exact executable source `188b9c2843289cdd4da5b709f49973eef3084f52`; later fixes do not relabel their evidence.
+Local main integrates qualified source `5016bc82`; its `src`, `tests` and `scripts` trees match that tested source. It adds the GPU-produced private R32 original path, physical-placement ownership checks and bounded rejected-draw input capture for DS/Void diagnosis. It retains `8c4b352f` first watched command writes and exact Applied successors, first-status constructor Busy, first pre-encode owner diagnostics, buffer-publication continuation and gate-order correction. Actual DS/Void replays below do not add a verified menu or gameplay title. No remote push or upstream merge was performed. The six historical game replays below retain their exact executable source `188b9c2843289cdd4da5b709f49973eef3084f52`; later fixes do not relabel their evidence.
 
 ## Next source candidates and current runtime coordination
 
@@ -14,13 +14,48 @@ The first BFC build then passes Host but fails Libs with `CS0246` because `Metal
 
 New source `5016bc82` adds only the exact reviewed `6c33e428` helper and a truthful dependency note. ROOT verifies the donor bytes, all 2,003 source hashes, clean exact HEAD and unchanged inheritance of every BFC blob. Source manifest SHA-256: `a6fa41b3d6031a31b5db0c4a451d58dc3045f4cbd6089037aff1bb697b4d3edf`. Its ordinary and native inventories remain unchanged. ROOT reviews the new source/WT/tag-only driver changes and verifies all 12 prepared hashes and byte-identical inventories before granting its first fresh three-build phase. No BFC failure is overwritten or rerun on the same source.
 
-The corrected `5016bc82` source passes all three builds and all six managed suites on actual ARM64/x64 .NET 10.0.3: 208 Host, 751 Libs and 105 GPU cases per CLR, with no skips or failures. ROOT independently verifies all 46 managed artifacts, 2,003 source hashes, 104 compiled hashes, exact TRX counters and absence of twelve owned process roots. Managed manifest SHA-256: `1fb9b2d30a84c5565dbab926615cbf2846e1e889041213d63ae62584ee015c37`. All 178 separate native/provider workers also pass: 89 exact single-case workers per actual CLR. ROOT independently verifies all 1,257 native artifacts, source/compiled stability, every actual full-byte/status-4/once/EOP oracle and absence of all 179 owned roots. Native manifest SHA-256: `d2340fc3f68ee03429098a593a68a5f3859646214c4c4b6b09177394cd785af1`. Publication is granted; actual DS/Void replay remains unrun at this checkpoint.
+The corrected `5016bc82` source passes all three builds and all six managed suites on actual ARM64/x64 .NET 10.0.3: 208 Host, 751 Libs and 105 GPU cases per CLR, with no skips or failures. ROOT independently verifies all 46 managed artifacts, 2,003 source hashes, 104 compiled hashes, exact TRX counters and absence of twelve owned process roots. Managed manifest SHA-256: `1fb9b2d30a84c5565dbab926615cbf2846e1e889041213d63ae62584ee015c37`. All 178 separate native/provider workers also pass: 89 exact single-case workers per actual CLR. ROOT independently verifies all 1,257 native artifacts, source/compiled stability, every actual full-byte/status-4/once/EOP oracle and absence of all 179 owned roots. Native manifest SHA-256: `d2340fc3f68ee03429098a593a68a5f3859646214c4c4b6b09177394cd785af1`. Publication passes with a source-exact, deeply verified signed native-only 239-file osx-x64 app; ROOT verifies all ten publication artifacts, payload hashes, source/compiled stability and owned process closure. Published manifest SHA-256: `eb043f93d4e234ca44c515049ba21c4dc7f0e544b4f1dff4ec84c63958cdef06`. Actual replays are recorded separately below.
 
 The publication-admission audit identifies four actual slot owner families: watch enrollment, cancel-only original-read validation, cancel-only publication validation and real publication. The slot has no owner identity or completion promise. Lost cancellation bookkeeping can retain it without setting coverage-incomplete, so its presence cannot be labelled temporary or treated as Current. ROOT verifies the audit's source and artifact hashes; manifest SHA-256 `48c97f39ca1d64cd2994bbe631715ba05e8b3c20828bc298cf1edc681e8246e4`. A separate opt-in cold-copy design must keep the first provider mapping and backing pin before any byte is copied, wait at most 500 ms outside inherited gates, then obtain strict currentness and perform one copy. Retained unknown ownership must refuse or time out without bytes, forced release or a new observation. Existing-watch handling is separate; the first Octopath Stale result remains unchanged by this design.
 
 Superliminal's bounded non-GDS Fill successor `aadd7248` and Silent Hill's pending-only post-release continuation `a1db7b57` have passed source review; compilation and execution remain pending. Fill must retain the real mirror/cache route and refuse an existing or newly installed native mirror destination; its payload is limited to one aligned 64 KiB transfer chunk. Silent Hill must preserve the first Pending/Batch/Taken/Executing predicate, permit only pending bookkeeping to retain the same already-Applied dirty owner after all lower proofs are Current, and retry before future queued work. No actual winning Silent Hill subpredicate or new entry success is inferred from these proposals.
 
 Inactive Poppy prototype `d632c098` adds a deterministic atomic per-thread claim before same-receipt native ticket publication. ROOT verifies all ten source hashes and reviews that specific nested-admission fix. The prototype remains uncompiled, uninstalled and source-only; native tracker authority stays zero. Actual private ELF allocation ownership, code sealing after patching, raw protection exclusion, cross-receipt ingress and the CoreCLR signal chain remain unresolved. No game recovery or safety closure follows from this source review.
+
+## Actual DS/Void replays on `5016bc82`
+
+The source-exact replay companion links 560 read-only actual qualification and
+publication records. ROOT verifies those targets and all four prerequisite
+manifest hashes before launching each title. Neither replay overlaps a foreign
+game or is censored by the monitor.
+
+| Title | Observed result | Reached stage |
+| --- | --- | --- |
+| Demon’s Souls / `20261009-211122` | Exit 134 after 51 seconds, peak RSS 2,905 MiB. First command-stream error at lines 633–634 is Compute `3E9247D2A2F42DBB`, ordinary storage original installation at `0x715FF00000`; both read/storage-write bindings describe a 64×64 float 2D image. The combined guard does not establish capacity, replacement or another winning predicate. | Static launch artwork, zero observed guest frames; no menu or gameplay. ROOT views `shot-0045.png`. |
+| Void Terrarium / `20261009-211336` | Alive for the 150-second cap, graceful stop in two seconds, peak RSS 1,545 MiB. No fatal or rejected draw appears; the enabled isolated rejected-input capture directory remains empty because the diagnostic path is not reached. | Publisher logo at 115–145 seconds, then black transition; no title/menu/control. ROOT views `shot-0145.png` and `shot-final.png`. |
+
+ROOT verifies the DS 37-artifact manifest, SHA-256
+`9eaa583f46f2145688abbe43a4cd9a19ed497e635dde0ed75f5bbe36c83586ba`,
+and Void 81-artifact manifest, SHA-256
+`9411c1e416f7e105bdc66c99f83e30a502f29fa576f3919fa65bc676f4bad7ae`.
+Both retain all 2,003 source, 104 compiled and 239 signed-payload hashes and
+unchanged prerequisites. DS driver/harness/game roots `13692`/`13699`/`13716`
+and Void driver/harness roots `16751`/`16758` are absent by PID, PPID and process
+group. The existing monitor did not retain Void’s individual game PID; closure
+is recorded using its owned harness group and fresh absence of actual SharpEmu
+workers. All actual emulator/compiler/test workers and the shared lock are
+absent before the lane returns to Kairo for one bounded v555 batch. SharpEmu
+continues source/light work until the coordinated terminal handoff.
+
+The next unqualified source union `a13a75e7` combines the exact reviewed Fill
+and pending-only canonical donors over `5016bc82`, with 1,092 ordinary cases and
+103 separate workers expected per CLR. ROOT verifies all 2,009 source hashes,
+16 exact donor paths, unchanged base inheritance and full inverse tree. Child
+`d792cdf4` preserves the DS installation guard order and records its first
+winning predicate under the same lock; it changes no bound, authority or retry.
+The separate cold first-capture enrollment path remains default off and
+uncompiled; its provider, frontend and actual native controls are source work.
+Accepted directional gameplay remains 1/9, on the historical Sarah payload.
 
 ## Prior qualified boot candidate: 09bc1fce
 
