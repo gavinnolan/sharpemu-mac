@@ -19,6 +19,7 @@ internal static class MetalStoragePhysicalPlacement
 
     internal static Observation Capture(ICpuMemory memory, GuestDrawTexture texture, long session)
     {
+        memory = CpuGpuMemoryView.Resolve(memory);
         if (memory is not ICpuMappedCopySource source)
             throw new NotSupportedException("Native storage placement requires the original mapped-copy provider.");
         var (allocation, allocationBytes, address, bytes) = Describe(texture);

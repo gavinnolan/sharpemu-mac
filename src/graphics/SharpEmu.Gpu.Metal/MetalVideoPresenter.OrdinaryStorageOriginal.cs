@@ -49,6 +49,7 @@ internal static partial class MetalVideoPresenter
     {
         if (!_r32NativeOriginalRequested || TextureSourceGraphEnabled || !binding.IsStorage ||
             (binding.Access & GuestImageAccess.Write) == 0 || binding.MipLevel != 0 || binding.Descriptor.BaseLevel != 0) return null;
+        memory = CpuGpuMemoryView.Resolve(memory);
         var d = binding.Descriptor;
         var prototype = new GuestDrawTexture(d.Address, d.Width, d.Height, d.Format, d.NumberType, [], IsFallback: false, IsStorage: true,
             MipLevel: binding.MipLevel, ResourceMipLevels: d.ResourceMipLevels, Pitch: d.Pitch, Depth: d.Depth,
