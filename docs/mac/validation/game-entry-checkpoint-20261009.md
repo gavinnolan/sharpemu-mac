@@ -29,10 +29,23 @@ substitutions. Preparation manifest SHA-256:
 `3b6eaaac59a69ba44467f70af5bd8e09ad209d837a6a35841203f24d69cd7fa4`.
 Expected ordinary cases per actual CLR are 238 Host, 793 Libs and 105 GPU;
 106 native/provider cases and 13 explicitly synthetic cold frontend cases
-run separately per CLR. Its first three-build phase is granted; no passing
-build or runtime result is claimed at this checkpoint. Local main remains
-the previously qualified `5016bc82` source. The historical checkpoints below
-retain their original source and lane state.
+run separately per CLR. All three fresh builds then pass. ROOT verifies 15
+build artifacts, 2,016 source hashes and 104 compiled hashes; manifest SHA-256
+`384f868b314ad64b4b8f66d8f8547b483e6e4ef59023256981ec9df13734c07c`.
+
+The ARM64 ordinary phase passes all 238 Host cases, then Libs passes 786 of 793
+with seven failures and no skips. All seven new canonical work-refusal controls
+begin with a CPU-seeded fixture lacking `GpuWritten`; the correct production
+owner guard therefore refuses before the injected work guard. ROOT verifies
+21 immutable failure artifacts, unchanged source/binaries and exact owned-root
+closure; manifest SHA-256
+`584ab7cdcf19e4cf066dbada2659d1a0797ffba72e9f47746789751a6c800850`.
+GPU ARM64, all x64, all separate workers, publication and games remain unrun.
+Successor `62de4f79` changes only those scalar controls to save/set/restore
+`GpuWritten`, retaining all eight case identities and every refusal assertion.
+It changes no production code or authority. Fresh qualification is pending.
+Local main remains the previously qualified `5016bc82` source. The historical
+checkpoints below retain their original source and lane state.
 
 After the four `8c4b352f` SharpEmu attempts closed, Kairo owned one bounded v4.554 validation and wall-clock Silent Hill replay batch. SharpEmu's heavy work was held while source implementation and review continued. The then-prepared SharpEmu candidate was DS+Void `bfc988ed`: ROOT verifies its clean exact HEAD, all 2,001 source hashes and all 12 prepared driver artifacts. Its 1,064 ordinary cases per CLR comprise 208 Host, 751 Libs and 105 GPU cases. Its 178 separate workers comprise 73 Metal/GPU and 16 ordinary Mac-provider cases per CLR. All original `8c4b352f` case identities remain present. Preparation manifest: `artifacts/validation/all-games-20261009/void-input-on-watched-ds-boot-bfc988ed-prepared/prepared-manifest.json`, SHA-256 `67950a64f5d2abcd1d97cebf615f4185fbd7b072608cfb91d092763c7d9ba2af`. At that preparation checkpoint, no build, test, publication or game result existed for BFC. Its first build failure is retained below.
 
