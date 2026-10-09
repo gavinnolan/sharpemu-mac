@@ -68,12 +68,28 @@ public sealed partial class MetalImmutableGpuVersionTests
         public bool IsMappedCopyObservationCurrent(CpuMappedCopyObservation original) => Route(original).IsMappedCopyObservationCurrent(original);
         public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation original) => Route(original).IsMappedCopyWriteWatchCurrent(original);
         public CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(CpuMappedCopyObservation original) => Route(original).GetMappedCopyWriteWatchStatus(original);
+        public CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(CpuMappedCopyObservation original,
+            out CpuMappedReadWatchDiagnostic diagnostic) => Route(original).GetMappedCopyWriteWatchStatus(original, out diagnostic);
         public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation original) => Route(original).ReleaseMappedCopyWriteWatch(original);
         public CpuMappedPublicationPreparationResult TryPrepareMappedReadValidation(CpuMappedCopyObservation original, out CpuMappedReadValidation? ticket) =>
             Route(original).TryPrepareMappedReadValidation(original, out ticket);
+        public bool CanWaitForMappedPublicationValidation =>
+            image.CanWaitForMappedPublicationValidation && volumes.CanWaitForMappedPublicationValidation;
+        public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(CpuMappedCopyObservation original,
+            out CpuMappedPublicationValidation? ticket, out CpuMappedPublicationValidationRefusal refusal)
+        {
+            var result = Route(original).TryPrepareMappedPublicationValidation(original, out ticket, out refusal);
+            WrapCancellation(ref ticket);
+            return result;
+        }
         public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(CpuMappedCopyObservation original, out CpuMappedPublicationValidation? ticket)
         {
             var result = Route(original).TryPrepareMappedPublicationValidation(original, out ticket);
+            WrapCancellation(ref ticket);
+            return result;
+        }
+        private void WrapCancellation(ref CpuMappedPublicationValidation? ticket)
+        {
             if (validationCancellationArmed && ticket is not null)
             {
                 // Failure injection AFTER a real provider cancellation. The
@@ -82,7 +98,6 @@ public sealed partial class MetalImmutableGpuVersionTests
                 retainedUnknownValidation = ticket;
                 ticket = new CpuMappedPublicationValidation(new UncertainBodyCancellation(ticket));
             }
-            return result;
         }
         public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(CpuMappedCopyObservation original, IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? ticket) =>
             Route(original).TryPrepareMappedPublication(original, runs, out ticket);

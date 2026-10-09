@@ -1163,6 +1163,11 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         validation?.Dispose(); validation = null; return CpuMappedPublicationPreparationResult.Rejected;
     }
 
+    public bool CanWaitForMappedPublicationValidation =>
+        !_gate.IsReadLockHeld && !_gate.IsWriteLockHeld && !_gate.IsUpgradeableReadLockHeld &&
+        !Monitor.IsEntered(_guestAllocationGate) && !Monitor.IsEntered(_allocationSearchHintGate) &&
+        _backedSpace is ICpuMappedPublicationSource source && source.CanWaitForMappedPublicationValidation;
+
     public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(CpuMappedCopyObservation original,
         out CpuMappedPublicationValidation? validation)
     {
@@ -1173,6 +1178,19 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         var result = source.TryPrepareMappedPublicationValidation(original, out validation);
         if (!Volatile.Read(ref _disposed) && ReferenceEquals(_backedSpace, space)) return result;
         validation?.Dispose(); validation = null; return CpuMappedPublicationPreparationResult.Rejected;
+    }
+
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(CpuMappedCopyObservation original,
+        out CpuMappedPublicationValidation? validation,
+        out CpuMappedPublicationValidationRefusal refusal)
+    {
+        validation = null; refusal = default;
+        var space = _backedSpace;
+        if (Volatile.Read(ref _disposed) || space is not ICpuMappedPublicationSource source)
+            return CpuMappedPublicationPreparationResult.Unavailable;
+        var result = source.TryPrepareMappedPublicationValidation(original, out validation, out refusal);
+        if (!Volatile.Read(ref _disposed) && ReferenceEquals(_backedSpace, space)) return result;
+        validation?.Dispose(); validation = null; refusal = default; return CpuMappedPublicationPreparationResult.Rejected;
     }
 
     public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(CpuMappedCopyObservation original,
@@ -1219,6 +1237,22 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     }
     public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation observation)
     { if (_backedSpace is ICpuMappedReadWatchSource source) source.ReleaseMappedCopyWriteWatch(observation); }
+
+    public CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(CpuMappedCopyObservation observation,
+        out CpuMappedReadWatchDiagnostic diagnostic)
+    {
+        var space = _backedSpace;
+        if (Volatile.Read(ref _disposed))
+        { diagnostic = new() { VirtualClosure = "pvm-pre-disposed" }; return CpuMappedReadWatchStatus.Stale; }
+        if (space is not ICpuMappedReadWatchSource source)
+        { diagnostic = new() { VirtualClosure = "pvm-pre-capability-unavailable" }; return CpuMappedReadWatchStatus.Stale; }
+        var status = source.GetMappedCopyWriteWatchStatus(observation, out diagnostic);
+        if (Volatile.Read(ref _disposed))
+        { diagnostic = diagnostic with { VirtualClosure = "pvm-post-disposed" }; return CpuMappedReadWatchStatus.Stale; }
+        if (!ReferenceEquals(_backedSpace, space))
+        { diagnostic = diagnostic with { VirtualClosure = "pvm-post-space-replaced" }; return CpuMappedReadWatchStatus.Stale; }
+        return status;
+    }
 
     public CpuMappedCopyResult TryReadMappedCopy(ulong footprintAddress, ulong footprintByteCount,
         ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)

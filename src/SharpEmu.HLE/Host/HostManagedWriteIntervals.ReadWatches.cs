@@ -56,6 +56,23 @@ internal sealed partial class HostManagedWriteIntervals
             reason = "released-final"; if (Volatile.Read(ref Released) != 0) return false;
             reason = "current"; return true;
         }
+        internal CpuMappedReadWatchStatus GetStatusWithDiagnostic(out CpuMappedReadWatchDiagnostic diagnostic)
+        {
+            var current = TryIsCurrent(out var reason, out var primaryAdmission);
+            diagnostic = new() { WatchGuard = reason, PrimaryAdmission = primaryAdmission >= 0 ? primaryAdmission : null };
+            if (current) { diagnostic = diagnostic with { WatchStatus = CpuMappedReadWatchStatus.Current, ProviderStatus = CpuMappedReadWatchStatus.Current }; return CpuMappedReadWatchStatus.Current; }
+            // Same checks/order as Status. The label refers to the actual
+            // reached classification guard, never a later diagnostic sample.
+            var classification = reason != "admission-nonzero" ? "initial-watch-refusal" :
+                primaryAdmission <= 0 ? "nonpositive-admission" :
+                primaryAdmission >= PublicationBit ? "publication-admission" :
+                Volatile.Read(ref Released) != 0 ? "released-classification" :
+                Volatile.Read(ref Revoked) != 0 ? "revoked-classification" :
+                Volatile.Read(ref owner.coverageIncomplete) != 0 ? "coverage-classification" : null;
+            var status = classification is null ? CpuMappedReadWatchStatus.Busy : CpuMappedReadWatchStatus.Stale;
+            diagnostic = diagnostic with { ClassificationGuard = classification, WatchStatus = status, ProviderStatus = status };
+            return status;
+        }
         // Only the exact prepared provider ticket may use this scalar predicate.
         // Ordinary reads and new-watch admission still require admission == 0.
         internal bool IsUnrevokedDuringPublication(HostManagedWriteIntervals expected) =>

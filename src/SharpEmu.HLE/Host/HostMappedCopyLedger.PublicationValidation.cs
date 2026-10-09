@@ -9,8 +9,13 @@ public sealed unsafe partial class HostMappedCopyLedger
 
     public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(HostBackingObject backing,
         CpuMappedCopyObservation original, out CpuMappedPublicationValidation? validation)
+        => TryPrepareMappedPublicationValidation(backing, original, out validation, out _);
+
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(HostBackingObject backing,
+        CpuMappedCopyObservation original, out CpuMappedPublicationValidation? validation,
+        out CpuMappedPublicationValidationRefusal refusal)
     {
-        validation = null;
+        validation = null; refusal = default;
         if (Monitor.IsEntered(gate)) throw new InvalidOperationException("Validation cannot prepare under the provider gate.");
         if (original is null || original.OwnerIdentity is not Capture capture || !ReferenceEquals(capture.Owner, this) ||
             !HostViewMemory.IsValidRange(original.SourceAddress, original.SourceByteCount) ||
@@ -55,8 +60,18 @@ public sealed unsafe partial class HostMappedCopyLedger
                     if (cursor == end) break;
                 }
                 if (cursor != end || count == 0) return CpuMappedPublicationPreparationResult.Rejected;
-                reserved = writers.TryReservePublication(Volatile.Read(ref capture.WriterRevision), physical.AsSpan(0, count), capture.ReadWatch);
-                if (!reserved || !IsCurrent(backing, original)) return CpuMappedPublicationPreparationResult.Rejected;
+                var originalRevision = Volatile.Read(ref capture.WriterRevision);
+                reserved = writers.TryReservePublication(originalRevision, physical.AsSpan(0, count), capture.ReadWatch,
+                    out var rejectedAdmission);
+                if (!reserved)
+                {
+                    if (rejectedAdmission > 0)
+                        refusal = new(CpuMappedPublicationValidationRefusalKind.AdmissionBusy, originalRevision, rejectedAdmission);
+                    // Busy precedes the history/watch exclusion check. No such
+                    // completion/content authority is certified by this result.
+                    return CpuMappedPublicationPreparationResult.Rejected;
+                }
+                if (!IsCurrent(backing, original)) return CpuMappedPublicationPreparationResult.Rejected;
                 transaction.PhysicalCount = count; // exact resolved original prefix, never trailing entries
                 transaction.Next = validations; validations = transaction; validationCount++;
                 installed = true; validation = wrapper;

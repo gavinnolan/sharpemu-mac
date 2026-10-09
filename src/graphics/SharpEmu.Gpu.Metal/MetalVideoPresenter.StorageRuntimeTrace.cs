@@ -41,6 +41,7 @@ internal static partial class MetalVideoPresenter
 
     private static int _finiteStorageRuntimeTraceRows;
     private static int _finiteStoragePostReleaseRefusalTraceRows;
+    private static int _finiteStorageRetainedOwnerRefusalTraceRows;
     private static long _finiteStorageRuntimeProducers, _finiteStorageRuntimeApplied, _finiteStorageRuntimeCanonical;
 
     private static void TraceFiniteStorageDispatchRefusal(ComputeGuestDispatch dispatch, Exception failure)
@@ -70,6 +71,7 @@ internal static partial class MetalVideoPresenter
             else if (stage == "canonical-completed") Interlocked.Increment(ref _finiteStorageRuntimeCanonical);
             ref var budget = ref _finiteStorageRuntimeTraceRows;
             if (stage == "dirty-post-release-refused") budget = ref _finiteStoragePostReleaseRefusalTraceRows;
+            else if (stage == "dirty-retained-owner-refused") budget = ref _finiteStorageRetainedOwnerRefusalTraceRows;
             var rows = Volatile.Read(ref budget);
             if (rows >= 64 || Interlocked.CompareExchange(ref budget, rows + 1, rows) != rows) return;
             var original = origin?.Observation.Token;

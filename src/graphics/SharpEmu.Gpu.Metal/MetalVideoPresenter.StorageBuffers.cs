@@ -115,6 +115,22 @@ internal static partial class MetalVideoPresenter
         // The caller has waited for the SAME successfully committed command
         // buffer. Revalidate every input and disjoint footprint before any bytes.
         ValidateFiniteStorageBeforeBufferPublication(committed, receipts, buffers);
+        var receipt = receipts![0];
+        var phase = receipt.OriginalPhase ?? throw new InvalidOperationException("Finite buffer publication lost its original pre-encoder phase.");
+        var uploadIndex = 0;
+        foreach (var upload in uploads)
+        {
+            if (upload.Guest.Length == 0) continue;
+            if (uploadIndex >= phase.BufferPublications.Length ||
+                !ReferenceEquals(upload.Guest, phase.BufferPublications[uploadIndex].Buffer) ||
+                phase.BufferPublications[uploadIndex].Started || phase.BufferPublications[uploadIndex].Transaction is not null ||
+                phase.BufferPublications[uploadIndex].DisposalAttempted || phase.BufferPublications[uploadIndex].AppliedRecorded ||
+                phase.BufferPublications[uploadIndex].Unknown || phase.BufferPublications[uploadIndex].Complete)
+                throw new InvalidOperationException("Finite buffer staging inventory is not its original unconsumed phase.");
+            uploadIndex++;
+        }
+        if (uploadIndex != phase.BufferPublications.Length)
+            throw new InvalidOperationException("Finite buffer staging inventory is incomplete before effects.");
         if (!uploads.Any(upload => upload.Guest.Length != 0))
         {
             _finiteStorageAfterEmptyBufferValidationForControl?.Invoke(receipts![0]);
@@ -122,11 +138,14 @@ internal static partial class MetalVideoPresenter
             // its independent full original precommit validation/continuation.
             return;
         }
+        uploadIndex = 0;
         foreach (var (pointer, buffer) in uploads)
         {
             if (buffer.Length == 0) continue;
             if (pointer == 0) throw new InvalidOperationException("Completed finite buffer has no retained staging pointer.");
             var origin = RequireFiniteStorageBufferOrigin(buffer);
+            var slot = phase.BufferPublications[uploadIndex++];
+            if (!ReferenceEquals(slot.Origin, origin)) throw new InvalidOperationException("Finite buffer cannot adopt another input origin.");
             var publisher = origin.Memory as ICpuMappedPublicationSource ??
                 throw new NotSupportedException("Finite writable buffer has no canonical provider.");
             var bytes = new ReadOnlySpan<byte>((void*)pointer, buffer.Length).ToArray();
@@ -138,20 +157,52 @@ internal static partial class MetalVideoPresenter
                     PrepareFiniteStorageMappingRuns(origin.Mapping, buffer.BaseAddress, bytes), out transaction);
                 if (result != CpuMappedPublicationPreparationResult.Prepared || transaction is null)
                     throw new InvalidOperationException($"Finite buffer canonical preparation was refused: result={result}.");
+                slot.Transaction = transaction; // strong root BEFORE subsequent checks or TryCommit
                 _ = RequireFiniteStorageBufferOrigin(buffer);
                 foreach (var image in receipts!) ValidateFiniteStorageReceipt(image);
-                if (transaction.TryCommit() != CpuMappedPublicationResult.Applied || transaction.SuccessfulObservation is not { } successor)
+                BeginFiniteStorageBufferPublication(slot, transaction);
+                var outcome = transaction.TryCommit(); // NEVER repeated, including throw/PartialUnknown
+                if (outcome != CpuMappedPublicationResult.Applied)
                     throw new InvalidOperationException("Finite buffer publication has no exact Applied receipt.");
-                ValidateFiniteStorageMappingContinuation(origin.Mapping, successor);
+                slot.Applied = transaction.SuccessfulObservation; // THIS own effect, before ANY throwing checks
+                RecordFiniteStorageBufferApplied(slot, transaction, slot.Applied);
                 // Participating provider history records the actual disjoint
                 // write. Legacy virtual observers still receive precise completed
                 // notification; this does not repair/rearm host permissions.
                 GuestImageWriteTracker.NotifyCompletedMappedGpuWrite(buffer.BaseAddress, (ulong)buffer.Length);
-                _finiteStorageBufferOrigins.Remove(buffer); // consumed; never replay old payload
+                CompleteFiniteStorageBufferPublication(slot);
             }
-            catch (Exception failure) { primary = failure; throw; }
-            finally { CancelFiniteStoragePublication(transaction, primary); }
+            catch (Exception failure)
+            {
+                primary = failure;
+                if (slot.Started)
+                {
+                    slot.Unknown = true;
+                    QuarantineFiniteStorageAppliedValidation(receipt, failure);
+                }
+                throw;
+            }
+            finally
+            {
+                if (transaction is not null && !slot.DisposalAttempted)
+                {
+                    slot.DisposalAttempted = true;
+                    try
+                    {
+                        transaction.Dispose();
+                        if (!slot.Started) slot.Transaction = null; // known pre-effect cancellation only
+                    }
+                    catch (Exception cleanup)
+                    {
+                        slot.Transaction = transaction; slot.Unknown = true;
+                        QuarantineFiniteStorageAppliedValidation(receipt, cleanup);
+                        if (primary is null) throw;
+                        try { primary.Data["FiniteStorageBufferPublicationCleanup"] = cleanup; } catch { }
+                    }
+                }
+            }
         }
+        ValidateFiniteStorageCompletedBuffers(phase);
         foreach (var image in receipts!) ValidateFiniteStorageReceipt(image);
     }
 }

@@ -26,6 +26,14 @@ public interface IHostMappedPublicationMemory
         HostBackingObject backing, CpuMappedCopyObservation original, out CpuMappedPublicationValidation? validation)
     { validation = null; return CpuMappedPublicationPreparationResult.Unavailable; }
 
+    CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(
+        HostBackingObject backing, CpuMappedCopyObservation original, out CpuMappedPublicationValidation? validation,
+        out CpuMappedPublicationValidationRefusal refusal)
+    {
+        refusal = default;
+        return TryPrepareMappedPublicationValidation(backing, original, out validation);
+    }
+
     CpuMappedPublicationPreparationResult TryPrepareMappedPublication(
         HostBackingObject backing, CpuMappedCopyObservation original,
         IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication);

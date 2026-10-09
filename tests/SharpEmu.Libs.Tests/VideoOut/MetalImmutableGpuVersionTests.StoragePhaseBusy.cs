@@ -194,6 +194,23 @@ public sealed partial class MetalImmutableGpuVersionTests
                 if (mixedBuffer) BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(imageBytes + 16384), 0xCAFEBABE);
                 BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(imageBytes), 0x13579BDF);
                 Assert.Equal(expected, canonical());
+                if (mixedBuffer)
+                {
+                    var originalPhase = StorageMember(completedReceipt!, "OriginalPhase")!;
+                    var publications = Assert.IsAssignableFrom<Array>(StorageMember(originalPhase, "BufferPublications"));
+                    var publication = Assert.Single(publications.Cast<object>());
+                    Assert.True((bool)StorageMember(publication, "Started")!);
+                    Assert.True((bool)StorageMember(publication, "Complete")!);
+                    Assert.True((bool)StorageMember(publication, "DisposalAttempted")!);
+                    Assert.False((bool)StorageMember(publication, "Unknown")!);
+                    Assert.Null(StorageMember(publication, "Transaction"));
+                    var original = StorageMember(publication, "Origin")!;
+                    var continuation = Assert.IsType<CpuMappedCopyObservation>(StorageMember(publication, "Applied"));
+                    var input = Assert.IsType<CpuMappedCopyObservation>(StorageMember(original, "Mapping"));
+                    Assert.NotSame(input, continuation); Assert.Equal(input.Segments, continuation.Segments);
+                    Call("ValidateFiniteStorageCompletedBuffer", publication);
+                    Assert.Throws<TargetInvocationException>(() => Call("RequireFiniteStorageBufferOrigin", StorageMember(publication, "Buffer")));
+                }
                 var image = ((IDictionary)Field("_guestImages").GetValue(null)!)[address]!;
                 AssertFiniteDebtSettled(image); state.AssertFinitePipelineCompleted(shader);
                 Assert.Equal(2, StorageMember(image, "ContentVersion"));

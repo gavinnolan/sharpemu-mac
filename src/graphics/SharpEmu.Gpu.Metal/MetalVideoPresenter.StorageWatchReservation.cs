@@ -6,6 +6,19 @@ namespace SharpEmu.Gpu.Metal;
 
 internal static partial class MetalVideoPresenter
 {
+    private static int _originalReadWatchDiagnosticRows;
+    private readonly record struct OriginalReadWatchDiagnostic(CpuMappedReadWatchDiagnostic Provider,
+        string? LocalGuard, bool? OriginalRead, bool? Publication, bool? Validation);
+    private static bool TryReserveOriginalReadWatchDiagnostic(ICpuMemory memory)
+    {
+        if (!_volumeOwnerDeclineDiagnostics || Monitor.IsEntered(_gate)) return false;
+        // Formatting-only capability; not a status/currentness query. Unknown
+        // inherited provider gates suppress output instead of being guessed.
+        try { if (memory is not ICpuMappedPublicationSource source || !source.CanWaitForMappedPublicationValidation) return false; }
+        catch { return false; }
+        var rows = Volatile.Read(ref _originalReadWatchDiagnosticRows);
+        return rows < 64 && Interlocked.CompareExchange(ref _originalReadWatchDiagnosticRows, rows + 1, rows) == rows;
+    }
     // Stack-only context threaded from the exact local provider ticket. It
     // never replaces ordinary admission/currentness or acquires a provider gate.
     private readonly struct StorageWatchReservation
@@ -31,6 +44,39 @@ internal static partial class MetalVideoPresenter
                 publication?.IsOriginalDisjointReadWatchCurrent(watch.Mapping) == true ||
                 validation?.IsOriginalDisjointReadWatchCurrent(watch.Mapping) == true)
                 return CpuMappedReadWatchStatus.Current;
+            return status;
+        }
+        // SAME predicates/calls/short-circuit order as GetStatus. Nullable
+        // outcomes mean that ticket was not queried, not that it was current.
+        internal CpuMappedReadWatchStatus GetStatusWithDiagnostic(SingletonVolumeOriginalWatch watch,
+            out OriginalReadWatchDiagnostic diagnostic)
+        {
+            diagnostic = default;
+            if (Volatile.Read(ref watch.State) == 2)
+            { diagnostic = diagnostic with { LocalGuard = "watch-consumed" }; return CpuMappedReadWatchStatus.Stale; }
+            if (Volatile.Read(ref watch.UnknownProducer))
+            { diagnostic = diagnostic with { LocalGuard = "watch-unknown-producer" }; return CpuMappedReadWatchStatus.Stale; }
+            if (originalRead is not null)
+            {
+                var current = originalRead.IsOriginalCurrent(watch.Mapping);
+                diagnostic = diagnostic with { OriginalRead = current };
+                return current ? CpuMappedReadWatchStatus.Current : CpuMappedReadWatchStatus.Stale;
+            }
+            var status = watch.Source.GetMappedCopyWriteWatchStatus(watch.Mapping, out var provider);
+            diagnostic = diagnostic with { Provider = provider };
+            if (status == CpuMappedReadWatchStatus.Current) return status;
+            if (publication is not null)
+            {
+                var current = publication.IsOriginalDisjointReadWatchCurrent(watch.Mapping);
+                diagnostic = diagnostic with { Publication = current };
+                if (current) return CpuMappedReadWatchStatus.Current;
+            }
+            if (validation is not null)
+            {
+                var current = validation.IsOriginalDisjointReadWatchCurrent(watch.Mapping);
+                diagnostic = diagnostic with { Validation = current };
+                if (current) return CpuMappedReadWatchStatus.Current;
+            }
             return status;
         }
         internal bool IsCurrent(SingletonVolumeOriginalWatch watch) =>

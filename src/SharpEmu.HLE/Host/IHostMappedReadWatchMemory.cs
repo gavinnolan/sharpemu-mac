@@ -13,5 +13,12 @@ public interface IHostMappedReadWatchMemory : IHostMappedCopyMemory
     bool IsMappedCopyWriteWatchCurrent(HostBackingObject backing, CpuMappedCopyObservation observation);
     CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(HostBackingObject backing,
         CpuMappedCopyObservation observation) => CpuMappedReadWatchStatus.Stale;
+    CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(HostBackingObject backing,
+        CpuMappedCopyObservation observation, out CpuMappedReadWatchDiagnostic diagnostic)
+    {
+        var status = GetMappedCopyWriteWatchStatus(backing, observation);
+        diagnostic = new() { WatchGuard = "host-status-unattributed", ProviderStatus = status };
+        return status;
+    }
     void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation observation);
 }

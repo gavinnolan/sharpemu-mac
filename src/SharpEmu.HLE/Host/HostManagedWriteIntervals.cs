@@ -116,7 +116,12 @@ internal sealed partial class HostManagedWriteIntervals
         revision = found; return true;
     }
     internal bool TryReservePublication(long originalRevision, ReadOnlySpan<PhysicalRun> runs, ReadWatch? originalWatch = null)
+        => TryReservePublication(originalRevision, runs, originalWatch, out _);
+
+    internal bool TryReservePublication(long originalRevision, ReadOnlySpan<PhysicalRun> runs,
+        ReadWatch? originalWatch, out long rejectedAdmission)
     {
+        rejectedAdmission = 0;
         if (originalRevision < 0 || originalRevision == long.MaxValue || Volatile.Read(ref coverageIncomplete) != 0)
         {
             TracePublicationDecline("invalid-original-revision-or-incomplete", originalRevision);
@@ -125,6 +130,7 @@ internal sealed partial class HostManagedWriteIntervals
         var previousAdmission = Interlocked.CompareExchange(ref admission, PublicationBit, 0);
         if (previousAdmission != 0)
         {
+            rejectedAdmission = previousAdmission; // exact failed CAS, no later sample
             if (HostPublicationDiagnostics.Enabled)
                 HostPublicationDiagnostics.Declined("writer-reservation", "admission-busy", originalRevision,
                     Volatile.Read(ref nextIdentity), previousAdmission, Volatile.Read(ref coverageIncomplete));

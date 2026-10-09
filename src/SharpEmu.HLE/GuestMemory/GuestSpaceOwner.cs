@@ -71,6 +71,8 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMap
         validation?.Dispose(); validation = null; return CpuMappedPublicationPreparationResult.Rejected;
     }
 
+    public bool CanWaitForMappedPublicationValidation => _views.CanWaitForMappedPublicationValidation;
+
     public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(CpuMappedCopyObservation original,
         out CpuMappedPublicationValidation? validation)
     {
@@ -79,6 +81,17 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMap
         var result = _views.TryPrepareMappedPublicationValidation(original, out validation);
         if (!Volatile.Read(ref _disposed)) return result;
         validation?.Dispose(); validation = null; return CpuMappedPublicationPreparationResult.Rejected;
+    }
+
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(CpuMappedCopyObservation original,
+        out CpuMappedPublicationValidation? validation,
+        out CpuMappedPublicationValidationRefusal refusal)
+    {
+        validation = null; refusal = default;
+        if (Volatile.Read(ref _disposed)) return CpuMappedPublicationPreparationResult.Rejected;
+        var result = _views.TryPrepareMappedPublicationValidation(original, out validation, out refusal);
+        if (!Volatile.Read(ref _disposed)) return result;
+        validation?.Dispose(); validation = null; refusal = default; return CpuMappedPublicationPreparationResult.Rejected;
     }
 
     public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(CpuMappedCopyObservation original,
@@ -110,6 +123,16 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMap
         return Volatile.Read(ref _disposed) ? CpuMappedReadWatchStatus.Stale : status;
     }
     public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation observation) => _views.ReleaseMappedCopyWriteWatch(observation);
+
+    public CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(CpuMappedCopyObservation observation,
+        out CpuMappedReadWatchDiagnostic diagnostic)
+    {
+        if (Volatile.Read(ref _disposed))
+        { diagnostic = new() { OwnerClosure = "owner-pre-disposed" }; return CpuMappedReadWatchStatus.Stale; }
+        var status = _views.GetMappedCopyWriteWatchStatus(observation, out diagnostic);
+        if (!Volatile.Read(ref _disposed)) return status;
+        diagnostic = diagnostic with { OwnerClosure = "owner-post-disposed" }; return CpuMappedReadWatchStatus.Stale;
+    }
 
     public CpuMappedCopyResult TryReadMappedCopy(ulong footprintAddress, ulong footprintByteCount,
         ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)

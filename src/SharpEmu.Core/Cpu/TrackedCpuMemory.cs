@@ -29,12 +29,24 @@ public sealed class TrackedCpuMemory : ICpuMemory, ITrackedCpuMemory, IGuestMemo
             : CpuMappedPublicationPreparationResult.Unavailable;
     }
 
+    public bool CanWaitForMappedPublicationValidation => _inner is ICpuMappedPublicationSource source && source.CanWaitForMappedPublicationValidation;
+
     public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(CpuMappedCopyObservation original,
         out CpuMappedPublicationValidation? validation)
     {
         validation = null;
         return _inner is ICpuMappedPublicationSource source
             ? source.TryPrepareMappedPublicationValidation(original, out validation)
+            : CpuMappedPublicationPreparationResult.Unavailable;
+    }
+
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(CpuMappedCopyObservation original,
+        out CpuMappedPublicationValidation? validation,
+        out CpuMappedPublicationValidationRefusal refusal)
+    {
+        validation = null; refusal = default;
+        return _inner is ICpuMappedPublicationSource source
+            ? source.TryPrepareMappedPublicationValidation(original, out validation, out refusal)
             : CpuMappedPublicationPreparationResult.Unavailable;
     }
 
@@ -59,6 +71,12 @@ public sealed class TrackedCpuMemory : ICpuMemory, ITrackedCpuMemory, IGuestMemo
         _inner is ICpuMappedReadWatchSource source && source.IsMappedCopyWriteWatchCurrent(observation);
     public CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(CpuMappedCopyObservation observation) =>
         _inner is ICpuMappedReadWatchSource source ? source.GetMappedCopyWriteWatchStatus(observation) : CpuMappedReadWatchStatus.Stale;
+    public CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(CpuMappedCopyObservation observation,
+        out CpuMappedReadWatchDiagnostic diagnostic)
+    {
+        if (_inner is ICpuMappedReadWatchSource source) return source.GetMappedCopyWriteWatchStatus(observation, out diagnostic);
+        diagnostic = new() { VirtualClosure = "tracked-inner-capability-unavailable" }; return CpuMappedReadWatchStatus.Stale;
+    }
     public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation observation)
     { if (_inner is ICpuMappedReadWatchSource source) source.ReleaseMappedCopyWriteWatch(observation); }
 

@@ -115,9 +115,16 @@ internal static partial class MetalVideoPresenter
             if (firstBusy is not null &&
                 TryDeferCanonicalDirtyBusy(address, image, debt, origin, version, texture, firstBusy))
                 return CanonicalDirtyResult.Deferred;
-            lock (_gate)
-                if (_deferredCanonicalDirty is not null)
-                    throw new InvalidOperationException("Deferred canonical dirty ORIGINAL owner became stale: " + reason);
+            bool retained;
+            lock (_gate) retained = _deferredCanonicalDirty is not null;
+            if (retained)
+            {
+                // The first owner check already detached this offender. Keep
+                // the original refusal and format only after releasing _gate;
+                // a later provider/watch query cannot explain that first check.
+                TraceFiniteStorageRuntime("dirty-retained-owner-refused", address, reason, origin, offender);
+                throw new InvalidOperationException("Deferred canonical dirty ORIGINAL owner became stale: " + reason);
+            }
             TraceFiniteStorageRuntime("dirty-refused", address, reason, origin, offender);
             return CanonicalDirtyResult.NotApplicable;
         }
