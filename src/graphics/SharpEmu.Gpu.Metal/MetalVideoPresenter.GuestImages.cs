@@ -624,7 +624,11 @@ internal static partial class MetalVideoPresenter
         var nativeDepthFaceAdmission = PrepareNativeDepthFaceLocked(work, checked(_enqueuedGuestWorkSequence + 1), queue);
         var selectedMipAdmission = PrepareSelectedStorageMipAdmissionLocked(work, queue);
         var colorPhysicalAdmission = PrepareColorPhysicalAdmissionLocked(work);
-        var retainedVolume = RetainQueuedSingletonVolumeOriginalsLocked(work);
+        var nativeColorAdmission = PrepareNativeColorAdmissionLocked(work, checked(_enqueuedGuestWorkSequence + 1), queue);
+        var retainedColor = RetainQueuedNativeColorLocked(work, nativeColorAdmission);
+        bool retainedVolume;
+        try { retainedVolume = RetainQueuedSingletonVolumeOriginalsLocked(work); }
+        catch (Exception primary) { if (retainedColor) ReleaseQueuedNativeColorLocked(work, primary); throw; }
         var oldSequence = _enqueuedGuestWorkSequence;
         var oldCount = _pendingGuestWorkCount;
         var oldBytes = _pendingGuestWorkBytes;
@@ -670,6 +674,7 @@ internal static partial class MetalVideoPresenter
             PublishSelectedStorageMipAdmissionLocked(selectedMipAdmission);
             PublishColorPhysicalAdmissionLocked(colorPhysicalAdmission);
             PublishNativeDepthFaceLocked(nativeDepthFaceAdmission);
+            PublishNativeColorAdmissionLocked(work, nativeColorAdmission);
             _pendingGuestWorkCount++;
             var total = _pendingGuestWorkBytes + payloadBytes;
             _pendingGuestWorkBytes = total < _pendingGuestWorkBytes ? ulong.MaxValue : total;
@@ -686,7 +691,7 @@ internal static partial class MetalVideoPresenter
             RecordGuestSubmissionPrefixAdmission(sequence, queue);
             return sequence;
         }
-        catch (Exception failure) when (retainedVolume || nativeDepthFaceAdmission is not null)
+        catch (Exception failure) when (retainedColor || retainedVolume || nativeDepthFaceAdmission is not null)
         {
             if (node?.List is { } admittedQueue) admittedQueue.Remove(node);
             if (newQueue)
@@ -704,6 +709,7 @@ internal static partial class MetalVideoPresenter
             // forbids its execution rather than publishing a partial success.
             _guestWorkFailure ??= failure;
             CancelQueuedSingletonVolumeOriginalsLocked(failure);
+            CancelQueuedNativeColorLocked(failure);
             Monitor.PulseAll(_gate);
             throw;
         }
@@ -875,12 +881,16 @@ internal static partial class MetalVideoPresenter
                 {
                     if (_singletonVolumeOriginalCleanupFailure is { } priorCleanup)
                         System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(priorCleanup).Throw();
+                    if (_nativeColorCleanupFailure is { } colorCleanup) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(colorCleanup).Throw();
+                    RequireNativeColorCompletedWorkLocked(pending.Work);
                     ReleaseQueuedSingletonVolumeOriginalsLocked(pending.Work);
+                    ReleaseQueuedNativeColorLocked(pending.Work);
                 }
                 catch (Exception failure)
                 {
                     _guestWorkFailure ??= failure;
                     CancelQueuedSingletonVolumeOriginalsLocked(failure);
+                    CancelQueuedNativeColorLocked(failure);
                     Monitor.PulseAll(_gate);
                     throw; // no completed-sequence acknowledgement
                 }
@@ -1038,6 +1048,7 @@ internal static partial class MetalVideoPresenter
                         {
                             _guestWorkFailure = exception;
                             CancelQueuedSingletonVolumeOriginalsLocked(exception);
+                            CancelQueuedNativeColorLocked(exception);
                             Monitor.PulseAll(_gate);
                         }
                     }

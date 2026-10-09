@@ -50,6 +50,7 @@ internal static partial class MetalVideoPresenter
         if (_textureSourceGraphEnabled) CommitTextureSourceNativeCommands(commandBuffer);
         else MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
         MarkNativeDepthFaceBatchCommitted(commandBuffer);
+        MarkNativeColorBatchCommitted(commandBuffer);
         TagUploadPages(commandBuffer);
         TagSnapshotResources(commandBuffer);
         TagFaultScan(commandBuffer);

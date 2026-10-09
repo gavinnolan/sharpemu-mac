@@ -455,6 +455,7 @@ internal static partial class MetalVideoPresenter
     private static void ExecuteOffscreenDrawCore(nint device, nint queue, OffscreenGuestDraw work)
     {
         TraceGuestWorkStage("draw.core.entry");
+        ValidateNativeColorOriginalsBeforeExecution(work);
         var draw = work.Draw;
         if (_textureSourceGraphEnabled) RequireQualifiedColorTextureSourceWork(work);
         var targetFormats = new MetalRenderTargetFormat[work.Targets.Length];
@@ -468,6 +469,7 @@ internal static partial class MetalVideoPresenter
                     out targetFormats[index]))
             {
                 RequireNativeDepthFaceExecution(work, false, "unsupported color target format");
+                RequireNativeColorExecution(work, false, "unsupported color target format");
                 RequireGuestPrefixExecution(false, "unsupported color target format");
                 if (_textureSourceGraphEnabled)
                     throw new NotSupportedException("Metal ordered color producer has an unsupported render-target format.");
@@ -482,6 +484,7 @@ internal static partial class MetalVideoPresenter
         if (draw.RenderState.Blends.Count != targetFormats.Length)
         {
             RequireNativeDepthFaceExecution(work, false, "blend/target count mismatch");
+            RequireNativeColorExecution(work, false, "blend/target count mismatch");
             RequireGuestPrefixExecution(false, "blend/target count mismatch");
             if (_textureSourceGraphEnabled) throw new NotSupportedException("Metal ordered color producer blend/target count mismatch.");
             ReturnPooledGuestData(draw);
@@ -526,6 +529,7 @@ internal static partial class MetalVideoPresenter
             if (image is null)
             {
                 RequireNativeDepthFaceExecution(work, false, "missing color attachment");
+                RequireNativeColorExecution(work, false, "missing color attachment");
                 RequireGuestPrefixExecution(false, "missing color attachment");
                 if (_textureSourceGraphEnabled) throw new InvalidOperationException("Metal ordered color producer has no actual attachment.");
                 ReturnPooledGuestData(draw);
@@ -541,6 +545,7 @@ internal static partial class MetalVideoPresenter
         if (targetTextures[0] == 0)
         {
             RequireNativeDepthFaceExecution(work, false, "empty color attachment");
+            RequireNativeColorExecution(work, false, "empty color attachment");
             RequireGuestPrefixExecution(false, "empty color attachment");
             if (_textureSourceGraphEnabled) throw new InvalidOperationException("Metal ordered color producer has an empty actual attachment.");
             ReturnPooledGuestData(draw);
@@ -573,6 +578,7 @@ internal static partial class MetalVideoPresenter
         if (!_textureSourceGraphEnabled && !TryGetDrawPipeline(device, draw, targetFormats, depth is not null, out pipeline))
         {
             RequireNativeDepthFaceExecution(work, false, "draw pipeline creation failed");
+            RequireNativeColorExecution(work, false, "draw pipeline creation failed");
             RequireGuestPrefixExecution(false, "draw pipeline creation failed");
             ReturnPooledGuestData(draw);
             return;
@@ -582,12 +588,14 @@ internal static partial class MetalVideoPresenter
         TraceGuestWorkStage("draw.textures.begin");
         if (!_textureSourceGraphEnabled) commandBuffer = BeginBatchedGuestCommands(queue);
         RequireNativeDepthFaceExecution(work, commandBuffer != 0, "missing draw command buffer");
+        RequireNativeColorExecution(work, commandBuffer != 0, "missing draw command buffer");
         RequireGuestPrefixExecution(commandBuffer != 0, "missing draw command buffer");
         Span<nint> textureHandles = stackalloc nint[draw.Textures.Length];
         Span<bool> textureOwned = stackalloc bool[draw.Textures.Length];
         ResolveDrawTextures(device, commandBuffer, draw.Textures, textureHandles, textureOwned);
 
         TraceGuestWorkStage("draw.textures.end");
+        ValidateNativeColorEncoderPredecessors(work, publishedTargets, commandBuffer, queue);
         TraceGuestWorkStage("draw.encoder.begin");
         var pass = MetalNative.Send(
             MetalNative.Class("MTLRenderPassDescriptor"),
@@ -629,7 +637,7 @@ internal static partial class MetalVideoPresenter
 
         var encoder = MetalNative.Send(
             commandBuffer, MetalNative.Selector("renderCommandEncoderWithDescriptor:"), pass);
-        if ((_guestPrefixExecution || MetalDepthFacePlacement.Enabled && _nativeDepthFaceWorks.TryGetValue(work, out _)) && encoder == 0)
+        if ((_guestPrefixExecution || HasNativeColorProducer(work) || MetalDepthFacePlacement.Enabled && _nativeDepthFaceWorks.TryGetValue(work, out _)) && encoder == 0)
         {
             var failure = new InvalidOperationException("Metal completed submission prefix has no draw encoder.");
             // These per-call retains have not reached EncodeDrawBindings' normal
@@ -654,6 +662,15 @@ internal static partial class MetalVideoPresenter
         {
             depth.MarkContentChanged();
             SealNativeDepthFace(work, depth, commandBuffer, queue);
+        }
+        if (HasNativeColorProducer(work))
+        {
+            foreach (var image in publishedTargets)
+            {
+                if (image?.ColorPhysicalView is null) continue;
+                image.MarkContentChangedWithDiagnostic("color-draw");
+                SealNativeColorProducer(work, image, commandBuffer, queue);
+            }
         }
         TraceGuestWorkStage("draw.raster_encoding.end");
         if (_textureSourceGraphEnabled)
@@ -683,7 +700,8 @@ internal static partial class MetalVideoPresenter
 
         for (var index = 0; index < publishedTargets.Length; index++)
         {
-            if (!_textureSourceGraphEnabled && publishedTargets[index] is { } published)
+            if (!_textureSourceGraphEnabled && publishedTargets[index] is { } published &&
+                !(HasNativeColorProducer(work) && published.ColorPhysicalView is not null))
             {
                 published.MarkContentChangedWithDiagnostic("color-draw");
             }
@@ -1418,8 +1436,10 @@ internal static partial class MetalVideoPresenter
         RejectAddressOnlySelectedStorageAlias(target.Address, checked((ulong)target.Width * target.Height * 16));
         if (MetalColorMipPlacement.TryGet(target, out _) && format != MtlPixelFormat.Rgba16Float)
             throw new NotSupportedException("Metal selected color physical target requires the original RGBA16Float native format.");
+        ValidateNativeColorTargetBeforeNative(target);
         lock (_gate)
         {
+            RequireNativeColorTargetScalarLocked(target);
             if (_guestImages.TryGetValue(target.Address, out var existing))
             {
                 Require2DGuestImage(existing, "render target");
@@ -1449,8 +1469,11 @@ internal static partial class MetalVideoPresenter
         }
 
         byte[]? initialData;
+        try
+        {
         lock (_gate)
         {
+            RequireNativeColorTargetScalarLocked(target);
             _pendingGuestImageInitialData.Remove(target.Address, out initialData);
             if (_guestImages.TryGetValue(target.Address, out var replaced))
             {
@@ -1460,6 +1483,13 @@ internal static partial class MetalVideoPresenter
             _guestImages[target.Address] = image;
             _guestImageExtents[target.Address] = (target.Width, target.Height, MetalColorMipPlacement.TryGet(target, out var extentView)
                 ? extentView.ByteCount : (ulong)target.Width * target.Height * 4);
+        }
+
+        }
+        catch (Exception primary) when (NativeColorBorrowEnabled && image.ColorPhysicalView is not null)
+        {
+            ReleaseUnpublishedNativeColorImage(image, primary);
+            throw;
         }
 
         // Pending initial data is RGBA8; only 4-byte-texel targets take it verbatim.
@@ -2491,6 +2521,7 @@ internal static partial class MetalVideoPresenter
         if (status == 4)
         {
             ObserveNativeDepthBatchCompleted(commandBuffer);
+            ObserveNativeColorBatchCompleted(commandBuffer);
             MetalGpuCompletionProfile.RecordSuccessfulWait(commandBuffer, profileStart);
             return;
         }
@@ -2502,6 +2533,7 @@ internal static partial class MetalVideoPresenter
             if (status == 4)
             {
                 ObserveNativeDepthBatchCompleted(commandBuffer);
+                ObserveNativeColorBatchCompleted(commandBuffer);
                 MetalGpuCompletionProfile.RecordSuccessfulWait(commandBuffer, profileStart);
                 return;
             }

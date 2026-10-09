@@ -173,6 +173,8 @@ internal static partial class MetalVideoPresenter
 
     internal static void ReleasePreparedTextureSource(GuestDrawTexture texture)
     {
+        var colorCleanup = ReleasePreparedNativeColorTextures([texture], null);
+        if (colorCleanup is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(colorCleanup).Throw();
         lock (_gate)
         {
             if (!_textureSourceLeases.TryGetValue(texture, out var lease) || lease.PreparationReleased) return;
@@ -184,6 +186,7 @@ internal static partial class MetalVideoPresenter
     internal static void ReleasePreparedTextureSources(IReadOnlyList<GuestDrawTexture> textures)
     {
         var volumeCleanup = ReleasePreparedSingletonVolumeOriginals(textures, null);
+        volumeCleanup = ReleasePreparedNativeColorTextures(textures, volumeCleanup);
         lock (_gate)
         {
             foreach (var texture in textures)
@@ -269,6 +272,7 @@ internal static partial class MetalVideoPresenter
                 CopyOwnedR32SampledMipZero(source, copy);
                 CopyStorageCpuSeedOrigin(source, copy);
                 CopyNativeDepthCubeCapture(source, copy);
+                CopyNativeColorLease(source, copy);
             }
             catch
             {

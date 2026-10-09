@@ -15,6 +15,7 @@ internal static partial class MetalVideoPresenter
     // Missing/overflow debt is process-sticky: session reset is not teardown.
     private static void NoteFiniteStorageOwnerRetirementLocked(GuestImage retired)
     {
+        RetireNativeColorImageLocked(retired);
         if (_rgbaStorageRuntimePublicationRequested) RecordFiniteStorageOwnerRetirementLocked(retired);
         retired.StorageCpuOrigin?.VolumeWatch?.Release(preparationOnly: false, primary: _guestWorkFailure);
     }

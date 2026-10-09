@@ -259,6 +259,12 @@ internal static partial class MetalVideoPresenter
                     Exception? volumeCleanup = null;
                     try { RetireNativeDepthCubeFromRenderOwner(); }
                     catch (Exception failure) { volumeCleanup = failure; }
+                    try { RetireNativeColorFromRenderOwner(); }
+                    catch (Exception failure)
+                    {
+                        if (volumeCleanup is null) volumeCleanup = failure;
+                        else try { volumeCleanup.Data["MetalNativeColorSecondaryCleanup"] = failure; } catch { }
+                    }
                     try { ReleaseSingletonVolumeNativeOriginals(); }
                     catch (Exception failure)
                     {

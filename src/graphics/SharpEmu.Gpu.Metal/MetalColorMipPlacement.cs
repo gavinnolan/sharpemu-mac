@@ -51,7 +51,14 @@ internal static class MetalColorMipPlacement
         if (words.BaseAddress > ulong.MaxValue - resolution.BackingSize)
             throw new NotSupportedException("Metal color mip physical range wraps its guest allocation.");
         var projected = target with { Address = words.BaseAddress + mip.Offset };
-        Targets.Add(projected, new(memory, words, projected.Address, mip.Size, resolution.BackingSize));
+        var observation = new Observation(memory, words, projected.Address, mip.Size, resolution.BackingSize);
+        MetalVideoPresenter.CaptureNativeColorOriginal(observation);
+        try { Targets.Add(projected, observation); }
+        catch (Exception primary)
+        {
+            MetalVideoPresenter.ReleasePreparedNativeColorTarget(projected, observation, primary);
+            throw;
+        }
         return projected;
     }
 }

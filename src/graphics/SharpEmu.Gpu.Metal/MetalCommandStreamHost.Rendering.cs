@@ -80,6 +80,12 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
     private sealed class Preparation(MetalCommandStreamHost owner) : IResourcePreparation
     {
         private readonly List<GuestDrawTexture[]> textureSources = [];
+        private readonly List<GuestRenderTarget> colorTargets = [];
+        public void OwnColorTarget(GuestRenderTarget target)
+        {
+            try { ObjectDisposedException.ThrowIf(Disposed, this); colorTargets.Add(target); }
+            catch (Exception primary) { MetalVideoPresenter.ReleasePreparedNativeColorTarget(target, primary: primary); throw; }
+        }
         public bool Disposed { get; private set; }
         public bool DeviceAddressesPrepared { get; set; }
 
@@ -107,9 +113,16 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
             {
                 owner._preparation = null;
             }
+            Exception? failure = null;
+            foreach (var target in colorTargets)
+                try { MetalVideoPresenter.ReleasePreparedNativeColorTarget(target); }
+                catch (Exception cleanup) { failure ??= cleanup; }
+            colorTargets.Clear();
             foreach (var textures in textureSources)
-                MetalVideoPresenter.ReleasePreparedTextureSources(textures);
+                try { MetalVideoPresenter.ReleasePreparedTextureSources(textures); }
+                catch (Exception cleanup) { failure ??= cleanup; }
             textureSources.Clear();
+            if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
         }
     }
 
@@ -1006,8 +1019,14 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
             TileMode: (uint)words.TileMode,
             Registers: words,
             WriteMask: writeMask);
-        return MetalDepthFacePlacement.RecordColorSpan(Memory, target.Resolution,
-            MetalColorMipPlacement.Project(Memory, target.Resolution, words, guest));
+        var projected = MetalColorMipPlacement.Project(Memory, target.Resolution, words, guest);
+        try
+        {
+            var recorded = MetalDepthFacePlacement.RecordColorSpan(Memory, target.Resolution, projected);
+            _preparation?.OwnColorTarget(recorded);
+            return recorded;
+        }
+        catch (Exception primary) { MetalVideoPresenter.ReleasePreparedNativeColorTarget(projected, primary: primary); throw; }
     }
 
     private GuestDepthTarget? GuestDepthOf(ContextRegisters context)
@@ -1272,6 +1291,9 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         var context = RequireContext();
         var guestTargets = new GuestRenderTarget[targets.Length];
         var blends = new GuestBlendState[targets.Length];
+        Exception? primary = null;
+        try
+        {
         for (var index = 0; index < targets.Length; index++)
         {
             guestTargets[index] = GuestTargetOf(in targets[index], context.ColorTargets[targets[index].Slot], 0xF);
@@ -1290,6 +1312,19 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
             GuestRasterState.Default,
             GuestDepthState.Default);
         _snapshots.SubmitOffscreenTranslatedDraw(pixel, [], [], 0, guestTargets, vertex, 3, 1, 4, null, null, renderState);
+        }
+        catch (Exception failure) { primary = failure; throw; }
+        finally
+        {
+            Exception? cleanup = null;
+            foreach (var target in guestTargets)
+            {
+                if (target is null) continue;
+                try { MetalVideoPresenter.ReleasePreparedNativeColorTarget(target, primary: primary ?? cleanup); }
+                catch (Exception failure) { cleanup ??= failure; }
+            }
+            if (primary is null && cleanup is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(cleanup).Throw();
+        }
     }
 
     bool IRenderHost.TryRetainTargetlessDraw(RegisterBanks banks, GraphicsPrograms programs, in TargetlessDrawArguments arguments)

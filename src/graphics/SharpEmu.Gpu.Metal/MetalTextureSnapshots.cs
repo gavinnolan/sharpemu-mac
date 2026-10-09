@@ -119,7 +119,8 @@ internal static partial class MetalTextureSnapshots
                 var r32SampledMipZero = IsR32SampledMipZeroCandidate(binding);
                 if (r32SampledMipZero) RequireR32SampledMipZero(binding);
                 else MetalVideoPresenter.RejectSelectedStorageAlias(context.Memory, binding.Descriptor, binding.IsStorage, binding.MipLevel);
-                MetalVideoPresenter.ValidateColorPhysicalSnapshotBinding(context.Memory, binding);
+                var nativeColor = MetalVideoPresenter.TryCaptureNativeColorBorrow(context.Memory, binding, out var nativeColorTexture);
+                if (!nativeColor) MetalVideoPresenter.ValidateColorPhysicalSnapshotBinding(context.Memory, binding);
                 var depthCubeFaces = RequireDepthCubeSnapshot(binding);
                 var profileStart = TexturePreparationProfile.Begin();
                 var reuseKey = new GuestTextureSnapshotReuseKey(
@@ -128,7 +129,13 @@ internal static partial class MetalTextureSnapshots
                     binding.MipLevel,
                     binding.IsArrayed, binding.Shape, binding.Access);
                 GuestDrawTexture texture;
-                if (snapshots?.TryGetValue(reuseKey, out var snapshot) == true)
+                if (nativeColor)
+                {
+                    texture = nativeColorTexture;
+                    unreturnedTexture = texture;
+                    TexturePreparationProfile.RecordBinding(TexturePreparationProfile.BindingOutcome.Empty, profileStart);
+                }
+                else if (snapshots?.TryGetValue(reuseKey, out var snapshot) == true)
                 {
                     // Keep each binding's sampling state separate; share unchanged pixel data within this draw.
                     texture = snapshot with
@@ -237,6 +244,7 @@ internal static partial class MetalTextureSnapshots
         }
         catch (Exception failure)
         {
+            MetalVideoPresenter.ReleaseFailedPreparedNativeColorTextures(textures, unreturnedTexture, failure);
             MetalVideoPresenter.ReleaseFailedPreparedSingletonVolumeOriginals(textures, unreturnedTexture, failure);
             MetalVideoPresenter.ReleasePreparedTextureSources(textures);
             if (unreturnedTexture is not null)

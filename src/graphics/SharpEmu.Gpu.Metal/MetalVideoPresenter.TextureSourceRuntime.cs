@@ -83,7 +83,12 @@ internal static partial class MetalVideoPresenter
             _thread = null;
             Monitor.PulseAll(_gate);
             if (!_textureSourceGraphEnabled)
-                CancelQueuedSingletonVolumeOriginalsLocked();
+            {
+                Exception? cleanup = null;
+                try { CancelQueuedSingletonVolumeOriginalsLocked(); } catch (Exception failure) { cleanup = failure; }
+                try { CancelQueuedNativeColorLocked(cleanup); } catch (Exception failure) { cleanup ??= failure; }
+                if (cleanup is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(cleanup).Throw();
+            }
             if (_textureSourceGraphEnabled)
             {
                 if (_guestPresentationShutdownAttempt is { Finished: false } running)

@@ -43,6 +43,11 @@ internal static partial class MetalVideoPresenter
     internal static nint CreateDrawTexture(nint device, nint blitCommandBuffer,
         GuestDrawTexture texture, out bool ownedByCaller)
     {
+        if (TryResolveNativeColorBorrow(blitCommandBuffer, texture, out var nativeColor))
+        {
+            ownedByCaller = true;
+            return nativeColor;
+        }
         if (!texture.Shape.DepthCompare)
             return CreateDrawColorTexture(device, blitCommandBuffer, texture, out ownedByCaller);
 
