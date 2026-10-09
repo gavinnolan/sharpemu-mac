@@ -28,17 +28,26 @@ internal static partial class MetalVideoPresenter
     // All successful content/native/publication routes remain Current-only.
     // This helper can install ONLY a whole-drain refusal, never an ack.
     private static bool TryDeferCanonicalDirtyBusy(ulong address, GuestImage image,
-        FiniteStorageDebt debt, StorageCpuSeedOrigin origin, int version, nint texture)
+        FiniteStorageDebt debt, StorageCpuSeedOrigin origin, int version, nint texture,
+        OriginalCanonicalDirtyBusy? originalBodyBusy = null)
     {
         StorageCpuSeedOrigin[] volumes;
         lock (_gate)
         {
             if (_deferredCanonicalDirty is not null &&
                 !IsExactDeferredCanonicalDirtyLocked(address, image, debt, origin, version, texture)) return false;
-            if (GetExactCanonicalDirtyOwnerStatusLocked(address, image, debt, origin, version, texture,
-                out _, out _, classifyBusy: true) != CpuMappedReadWatchStatus.Busy) return false;
+            var status = GetExactCanonicalDirtyOwnerStatusLocked(address, image, debt, origin, version, texture,
+                out _, out _, classifyBusy: true);
+            if (status != CpuMappedReadWatchStatus.Busy &&
+                !(originalBodyBusy is not null && status == CpuMappedReadWatchStatus.Current)) return false;
             volumes = _guestImages.Values.Select(other => other.StorageCpuOrigin)
                 .Where(other => other?.VolumeWatch is not null).Cast<StorageCpuSeedOrigin>().ToArray();
+            if (originalBodyBusy is SingletonVolumeOriginalBusy volumeBusy &&
+                !volumes.Any(volume => ReferenceEquals(volume, volumeBusy.Original))) return false;
+            if (originalBodyBusy is CanonicalDirtyOwnerBusy ownerBusy &&
+                (ownerBusy.Owner.Address != address || !ReferenceEquals(ownerBusy.Owner.Image, image) ||
+                 !ReferenceEquals(ownerBusy.Owner.Debt, debt) || !ReferenceEquals(ownerBusy.Owner.Origin, origin) ||
+                 ownerBusy.Owner.Version != version || ownerBusy.Owner.Texture != texture)) return false;
         }
         if (!origin.Observation.Observed || origin.Observation.ByteCount != origin.Layout.PhysicalBytes ||
             !origin.Source.IsMappedCopyObservationCurrent(origin.Mapping) ||

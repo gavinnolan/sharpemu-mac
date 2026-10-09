@@ -198,9 +198,9 @@ internal static partial class MetalVideoPresenter
     }
 
     private static void ValidateFiniteStorageOrigin(StorageCpuSeedOrigin origin, GuestDrawTexture descriptor,
-        StorageWatchReservation reservation = default)
+        StorageWatchReservation reservation = default, bool classifyOrdinaryBusy = false)
     {
-        ValidateSingletonVolumeOriginalCohortContent(reservation); // original content sampling outside all presenter gates
+        ValidateSingletonVolumeOriginalCohortContent(reservation, classifyOrdinaryBusy); // original content sampling outside all presenter gates
         if (_closed || _guestWorkFailure is not null || !ReferenceEquals(_guestMemory, origin.Memory) ||
             origin.Session != Volatile.Read(ref _selectedStorageMipSession) ||
             origin.Mapping.FootprintAddress != descriptor.Address || origin.Mapping.FootprintByteCount != origin.Layout.PhysicalBytes ||

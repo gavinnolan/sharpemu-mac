@@ -209,8 +209,14 @@ internal static partial class MetalVideoPresenter
     private static void ValidateSingletonVolumeOriginalContent(StorageCpuSeedOrigin? origin) =>
         ValidateSingletonVolumeOriginalContentWithReservation(origin, default);
 
+    private sealed class SingletonVolumeOriginalBusy(StorageCpuSeedOrigin original) : OriginalCanonicalDirtyBusy(
+        "Metal singleton volume ORIGINAL healthy watch is busy with a participating ordinary writer.")
+    {
+        internal readonly StorageCpuSeedOrigin Original = original;
+    }
+
     private static void ValidateSingletonVolumeOriginalContentWithReservation(StorageCpuSeedOrigin? origin,
-        StorageWatchReservation reservation)
+        StorageWatchReservation reservation, bool classifyOrdinaryBusy = false)
     {
         if (origin?.VolumeWatch is not { } watch) return;
         if (Monitor.IsEntered(_gate)) throw new InvalidOperationException("Singleton volume content validation requires a released presenter gate.");
@@ -220,7 +226,22 @@ internal static partial class MetalVideoPresenter
             !GuestImageWriteTracker.IsReadSnapshotStable(watch.Read) || !origin.Observation.Observed ||
             !GuestImageWriteTracker.TryGetProtectedObservedContentToken(origin.Layout.Address, origin.Layout.PhysicalBytes, out var token) ||
             token != origin.Observation.Token)
+        {
+            // Refusal only: the actual provider status must identify a pristine
+            // ORIGINAL watch blocked by ordinary admission, not PublicationBit,
+            // revocation or incomplete coverage. Every other original veto is
+            // checked independently before issuing this private typed reason.
+            if (classifyOrdinaryBusy && Volatile.Read(ref watch.State) != 2 && !Volatile.Read(ref watch.UnknownProducer) &&
+                !_closed && _guestWorkFailure is null && _singletonVolumeOriginalCleanupFailure is null &&
+                ReferenceEquals(_guestMemory, origin.Memory) && origin.Session == CurrentStorageCpuSeedSession &&
+                origin.Source.IsMappedCopyObservationCurrent(origin.Mapping) &&
+                GuestImageWriteTracker.IsReadSnapshotStable(watch.Read) && origin.Observation.Observed &&
+                GuestImageWriteTracker.TryGetProtectedObservedContentToken(origin.Layout.Address, origin.Layout.PhysicalBytes, out var originalToken) &&
+                originalToken == origin.Observation.Token &&
+                watch.Source.GetMappedCopyWriteWatchStatus(watch.Mapping) == CpuMappedReadWatchStatus.Busy)
+                throw new SingletonVolumeOriginalBusy(origin);
             throw new InvalidOperationException("Metal singleton volume lost its ORIGINAL full mapping/read/watch/protected token/session.");
+        }
     }
 
     private static void ValidateSingletonVolumeForMaterialization(GuestDrawTexture descriptor, StorageCpuSeedOrigin? incoming,
@@ -299,7 +320,8 @@ internal static partial class MetalVideoPresenter
         watch.Version = image.ContentVersion; // exact known queued producer, never new CPU provenance
     }
 
-    private static void ValidateSingletonVolumeOriginalCohortContent(StorageWatchReservation reservation = default)
+    private static void ValidateSingletonVolumeOriginalCohortContent(StorageWatchReservation reservation = default,
+        bool classifyOrdinaryBusy = false)
     {
         StorageCpuSeedOrigin[] originals;
         lock (_gate)
@@ -308,7 +330,7 @@ internal static partial class MetalVideoPresenter
             originals = _guestImages.Values.Select(image => image.StorageCpuOrigin)
                 .Where(origin => origin?.VolumeWatch is not null).Cast<StorageCpuSeedOrigin>().ToArray();
         }
-        foreach (var original in originals) ValidateSingletonVolumeOriginalContentWithReservation(original, reservation);
+        foreach (var original in originals) ValidateSingletonVolumeOriginalContentWithReservation(original, reservation, classifyOrdinaryBusy);
     }
 
     internal static void ReleaseFailedPreparedSingletonVolumeOriginals(IReadOnlyList<GuestDrawTexture> textures,

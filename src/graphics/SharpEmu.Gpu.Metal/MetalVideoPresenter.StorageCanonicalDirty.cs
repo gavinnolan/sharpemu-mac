@@ -15,6 +15,27 @@ internal static partial class MetalVideoPresenter
     // Default-null controlled race boundary. Runs only after the actual
     // cancel-only reservation has released; cannot supply content or status.
     private static Action? _canonicalDirtyAfterValidationReleasedForControl = null;
+    // Ordinary race boundaries only; neither can supply a provider receipt,
+    // replacement observation or native completion.
+    private static Action<bool>? _canonicalDirtyBeforeBodyValidationForControl = null;
+    private abstract class OriginalCanonicalDirtyBusy(string message) : InvalidOperationException(message) { }
+    private sealed class CanonicalDirtyOwnerBusy(ulong address, GuestImage image, FiniteStorageDebt debt,
+        StorageCpuSeedOrigin origin, int version, nint texture) : OriginalCanonicalDirtyBusy(
+            "Canonical dirty ORIGINAL exact native cohort is busy with a participating ordinary writer.")
+    {
+        internal readonly DeferredCanonicalDirty Owner = new(address, image, debt, origin, version, texture);
+    }
+
+    private static bool InspectCanonicalDirtyOwnerForAcknowledgmentLocked(ulong address, GuestImage image,
+        FiniteStorageDebt debt, StorageCpuSeedOrigin origin, int version, nint texture, out string reason,
+        out FiniteStorageCohortOffender? offender, StorageWatchReservation reservation = default)
+    {
+        var status = GetExactCanonicalDirtyOwnerStatusLocked(address, image, debt, origin, version, texture,
+            out reason, out offender, reservation, classifyBusy: true);
+        if (status == CpuMappedReadWatchStatus.Busy)
+            throw new CanonicalDirtyOwnerBusy(address, image, debt, origin, version, texture);
+        return status == CpuMappedReadWatchStatus.Current;
+    }
 
     private static bool IsExactCanonicalDirtyOwnerLocked(ulong address, GuestImage image,
         FiniteStorageDebt debt, StorageCpuSeedOrigin origin, int version, nint texture, out string reason,
@@ -88,6 +109,7 @@ internal static partial class MetalVideoPresenter
         }
         CpuMappedPublicationValidation? validation = null;
         Exception? primary = null;
+        OriginalCanonicalDirtyBusy? bodyBusy = null;
         var consumed = false;
         var validationReleased = false;
         var outcome = CanonicalDirtyResult.NotApplicable;
@@ -102,21 +124,33 @@ internal static partial class MetalVideoPresenter
                 return CanonicalDirtyResult.NotApplicable;
             }
             var reservation = new StorageWatchReservation(validation);
-            ValidateFiniteStorageOrigin(origin, debt.CanonicalDescriptor!, reservation);
+            _canonicalDirtyBeforeBodyValidationForControl?.Invoke(false);
+            ValidateFiniteStorageOrigin(origin, debt.CanonicalDescriptor!, reservation, classifyOrdinaryBusy: true);
             if (!validation.IsCurrent)
             { TraceFiniteStorageRuntime("dirty-refused", address, "validation-revoked", origin); return CanonicalDirtyResult.NotApplicable; }
             lock (_gate)
-                ownerCurrent = IsExactCanonicalDirtyOwnerLocked(address, image, debt, origin, version, texture, out reason, out offender, reservation);
+                ownerCurrent = InspectCanonicalDirtyOwnerForAcknowledgmentLocked(address, image, debt, origin, version, texture, out reason, out offender, reservation);
             if (!ownerCurrent) { TraceFiniteStorageRuntime("dirty-refused", address, reason, origin, offender); return CanonicalDirtyResult.NotApplicable; }
             consumed = GuestImageWriteTracker.TryConsumeDirtyAtProtectedToken(address, origin.Layout.PhysicalBytes, origin.Observation.Token);
             if (!consumed)
             { TraceFiniteStorageRuntime("dirty-refused", address, "original-protected-token-or-armed-owner", origin); return CanonicalDirtyResult.NotApplicable; }
-            ValidateFiniteStorageOrigin(origin, debt.CanonicalDescriptor!, reservation);
+            _canonicalDirtyBeforeBodyValidationForControl?.Invoke(true);
+            ValidateFiniteStorageOrigin(origin, debt.CanonicalDescriptor!, reservation, classifyOrdinaryBusy: true);
             if (!validation.IsCurrent) throw new InvalidOperationException("Canonical dirty acknowledgment mapping was revoked.");
             lock (_gate)
-                ownerCurrent = IsExactCanonicalDirtyOwnerLocked(address, image, debt, origin, version, texture, out reason, out offender, reservation);
+                ownerCurrent = InspectCanonicalDirtyOwnerForAcknowledgmentLocked(address, image, debt, origin, version, texture, out reason, out offender, reservation);
             if (!ownerCurrent) throw new InvalidOperationException("Canonical dirty acknowledgment exact native owner changed: " + reason);
             outcome = CanonicalDirtyResult.Acknowledged;
+        }
+        catch (OriginalCanonicalDirtyBusy busy)
+        {
+            // Hold the precise failed ORIGINAL, but earn no success. Disposal
+            // must complete before installing the whole-drain retry receipt.
+            bodyBusy = busy;
+            primary = busy;
+            // Preserve the consumed scalar dirty bit even if subsequent
+            // cancellation is unknown. This is no authority or retry receipt.
+            if (consumed) GuestImageWriteTracker.RestoreDirtyAtProtectedOwner(address, origin.Observation.Token);
         }
         catch (Exception failure)
         {
@@ -134,9 +168,9 @@ internal static partial class MetalVideoPresenter
                 if (primary is null && consumed)
                 {
                     _canonicalDirtyAfterValidationReleasedForControl?.Invoke();
-                    ValidateFiniteStorageOrigin(origin, debt.CanonicalDescriptor!);
+                    ValidateFiniteStorageOrigin(origin, debt.CanonicalDescriptor!, classifyOrdinaryBusy: true);
                     lock (_gate)
-                        ownerCurrent = IsExactCanonicalDirtyOwnerLocked(address, image, debt, origin, version, texture, out reason, out offender);
+                        ownerCurrent = InspectCanonicalDirtyOwnerForAcknowledgmentLocked(address, image, debt, origin, version, texture, out reason, out offender);
                     if (!ownerCurrent)
                     {
                         TraceFiniteStorageRuntime("dirty-post-release-refused", address, reason, origin, offender);
@@ -147,8 +181,8 @@ internal static partial class MetalVideoPresenter
             catch (Exception cleanup)
             {
                 var defer = false;
-                if (validationReleased && primary is null && consumed)
-                    try { defer = TryDeferCanonicalDirtyBusy(address, image, debt, origin, version, texture); }
+                if (validationReleased && primary is null && consumed && cleanup is OriginalCanonicalDirtyBusy exactBusy)
+                    try { defer = TryDeferCanonicalDirtyBusy(address, image, debt, origin, version, texture, exactBusy); }
                     catch (Exception later) { try { cleanup.Data["CanonicalDirtyRetryClassification"] = later; } catch { } }
                 if (defer)
                 {
@@ -157,12 +191,18 @@ internal static partial class MetalVideoPresenter
                 }
                 else
                 {
-                    if (consumed) GuestImageWriteTracker.RestoreDirtyAtProtectedOwner(address, origin.Observation.Token);
+                    if (consumed && bodyBusy is null) GuestImageWriteTracker.RestoreDirtyAtProtectedOwner(address, origin.Observation.Token);
                     lock (_gate) { debt.Failed = true; debt.Pending = true; _textureSourceCleanupFailure ??= cleanup; }
                     if (primary is null) ExceptionDispatchInfo.Capture(cleanup).Throw();
                     try { primary.Data["CanonicalDirtyValidationCleanup"] = cleanup; } catch { }
                 }
             }
+        }
+        if (bodyBusy is not null)
+        {
+            if (validationReleased && TryDeferCanonicalDirtyBusy(address, image, debt, origin, version, texture, bodyBusy))
+                outcome = CanonicalDirtyResult.Deferred;
+            else ExceptionDispatchInfo.Capture(bodyBusy).Throw();
         }
         if (outcome == CanonicalDirtyResult.Acknowledged)
         {

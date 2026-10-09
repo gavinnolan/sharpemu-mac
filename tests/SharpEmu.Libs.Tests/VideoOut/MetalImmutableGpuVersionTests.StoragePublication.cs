@@ -32,6 +32,8 @@ public sealed partial class MetalImmutableGpuVersionTests
     {
         public NativeState? State;
         public PhysicalVirtualMemory? Physical;
+        public PhysicalVirtualMemory? BodyVolumePhysical;
+        public ulong BodyVolumeAddress;
         public TrackedCpuMemory? Memory;
         public object? OriginalOrigin;
         public object? Image;
@@ -72,7 +74,7 @@ public sealed partial class MetalImmutableGpuVersionTests
     public void ActualRuntimeLateDirtyGenerationAfterCanonicalVersionKeepsStickyDebtAndNoEop() =>
         RunActualRuntimeTwoTypedPublications(false, rgba: true, lateFailure: "generation");
 
-    private void RunActualRuntimeTwoTypedPublications(bool overlappingCpuWrite, bool rgba = false, bool mixedBuffer = false, string? lateFailure = null, bool originalVolumes = false, string? busyOriginalRetry = null, string? constructionBusyWindow = null, string? queueRetentionWindow = null)
+    private void RunActualRuntimeTwoTypedPublications(bool overlappingCpuWrite, bool rgba = false, bool mixedBuffer = false, string? lateFailure = null, bool originalVolumes = false, string? busyOriginalRetry = null, string? constructionBusyWindow = null, string? queueRetentionWindow = null, string? bodyBusyWindow = null)
     {
         Assert.True(DeviceRequested());
         var imageBytes = rgba ? 4194304 : 65536;
@@ -115,7 +117,23 @@ public sealed partial class MetalImmutableGpuVersionTests
             Assert.True(physical.TryHoldRange(address, (ulong)allocationBytes));
             Assert.True(physical.TryMapBacked(address, (ulong)allocationBytes, 65536,
                 GuestPageProtection.Read | GuestPageProtection.Write, out var mapFailure), $"map failure={mapFailure}");
-            var memory = new TrackedCpuMemory(physical);
+            ICpuMemory cpuSource = physical;
+            if (bodyBusyWindow is not null)
+            {
+                Assert.True(rgba && originalVolumes);
+                var volumePhysical = new PhysicalVirtualMemory(HostMemoryAuthority.Current, HostViewMemory.Create(),
+                    backingBytes: 6 * 65536UL, preReserveGuestAddressSpace: false);
+                owners.BodyVolumePhysical = volumePhysical;
+                Assert.True(volumePhysical.TryHoldRangeAtOrAbove(0x71F7_0000_00, 3 * 65536, 65536, out var volumeBase));
+                owners.BodyVolumeAddress = volumeBase;
+                Assert.True(volumeBase > address + (ulong)allocationBytes || volumeBase + 3 * 65536 < address);
+                Assert.True(volumePhysical.TryHoldRange(volumeBase, 3 * 65536));
+                Assert.True(volumePhysical.TryMapBacked(volumeBase, 3 * 65536, 65536,
+                    GuestPageProtection.Read | GuestPageProtection.Write, out var volumeFailure), $"volume map failure={volumeFailure}");
+                cpuSource = new BodyBusyRoutedMemory(physical, volumePhysical, volumeBase, 3 * 65536,
+                    failValidationCancellation: bodyBusyWindow == "cancel-unknown");
+            }
+            var memory = new TrackedCpuMemory(cpuSource);
             owners.Memory = memory;
             Assert.IsAssignableFrom<ICpuMappedCopySource>(memory);
             Assert.IsAssignableFrom<ICpuMappedPublicationSource>(memory);
@@ -125,6 +143,8 @@ public sealed partial class MetalImmutableGpuVersionTests
             if (rgba) Bgra1024Oracle.PhysicalSeed().CopyTo(expected, 0);
             else BinaryPrimitives.WriteUInt32LittleEndian(expected, 0x87654321);
             Assert.True(physical.TryWriteBacking(address, expected));
+            if (owners.BodyVolumePhysical is { } bodyPhysical)
+                Assert.True(bodyPhysical.TryWriteBacking(owners.BodyVolumeAddress, expected.AsSpan(imageBytes, 3 * 65536)));
             uint[] raw = rgba
                 ? [(uint)(address >> 8), (uint)(address >> 40) | 0xC3800000u, 0x00FFC0FF, 0xD1B00F2E, 0, 0x00700000, 0, 0]
                 : [(uint)(address >> 8), 0x01400000, 0, 0xD1B00204, 0, 0x00700000, 0, 0];
@@ -213,6 +233,12 @@ public sealed partial class MetalImmutableGpuVersionTests
             Assert.Equal(rgba ? 70u : 53u, (uint)(MtlPixelFormat)StorageMember(image, "Format")!);
             Assert.Equal(3u, (uint)StorageMember(image, "TextureType")!);
 
+            if (bodyBusyWindow is not null)
+            {
+                RunBodyBusyOriginalRetry(state, physical, memory, owners, address, imageBytes, expected, image,
+                    ownOrigin, ReadCanonical, bodyBusyWindow);
+                return;
+            }
             if (busyOriginalRetry is not null)
             {
                 Assert.True(rgba && originalVolumes && !overlappingCpuWrite && !mixedBuffer && lateFailure is null);
@@ -279,7 +305,9 @@ public sealed partial class MetalImmutableGpuVersionTests
                 using var volumeQueue = MetalVideoPresenter.EnterGuestQueue("finite.volume.native", 1);
                 for (var kind = 0; kind < 2; kind++)
                 {
-                    var volumeAddress = address + (ulong)imageBytes + (ulong)(kind + 1) * 65536;
+                    var volumeAddress = owners.BodyVolumePhysical is not null
+                        ? owners.BodyVolumeAddress + (ulong)(kind + 1) * 65536
+                        : address + (ulong)imageBytes + (ulong)(kind + 1) * 65536;
                     uint[] volumeRaw = kind == 0
                         ? [(uint)(volumeAddress >> 8), (uint)(volumeAddress >> 40) | 0x03C00000, 0, 0xA1B00FAC, 0, 0x00700000, 0, 0]
                         : [(uint)(volumeAddress >> 8), (uint)(volumeAddress >> 40) | 0xC3C00000, 0x0003C003, 0xA0000FAC, 15, 0x00700000, 0, 0];
@@ -506,6 +534,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                 if (address != 0) Attempt(() => GuestImageWriteTracker.Untrack(address));
                 if (state is not null) Attempt(state.Dispose);
                 // Do not free its mappings after uncertain native teardown.
+                if (cleanup is null && owners.BodyVolumePhysical is { } bodyPhysical) Attempt(bodyPhysical.Dispose);
                 if (cleanup is null && physical is not null) Attempt(physical.Dispose);
                 // Negative Busy rows keep their original receipt/session until
                 // every real owned native resource and mapping has retired.
