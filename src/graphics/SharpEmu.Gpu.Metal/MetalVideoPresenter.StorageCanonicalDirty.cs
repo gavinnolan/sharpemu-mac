@@ -18,6 +18,9 @@ internal static partial class MetalVideoPresenter
     // Ordinary race boundaries only; neither can supply a provider receipt,
     // replacement observation or native completion.
     private static Action<bool>? _canonicalDirtyBeforeBodyValidationForControl = null;
+    // Ordinary refusal race boundary only. It cannot supply a status, mapping,
+    // receipt or completion; runs after the first original check, gate-free.
+    private static Action? _canonicalDirtyAfterInitialOwnerCheckForControl = null;
     private abstract class OriginalCanonicalDirtyBusy(string message) : InvalidOperationException(message) { }
     private sealed class CanonicalDirtyOwnerBusy(ulong address, GuestImage image, FiniteStorageDebt debt,
         StorageCpuSeedOrigin origin, int version, nint texture) : OriginalCanonicalDirtyBusy(
@@ -83,6 +86,7 @@ internal static partial class MetalVideoPresenter
         int version; nint texture;
         string reason;
         bool ownerCurrent;
+        CpuMappedReadWatchStatus firstOwnerStatus;
         FiniteStorageCohortOffender? offender;
         lock (_gate)
         {
@@ -96,11 +100,21 @@ internal static partial class MetalVideoPresenter
             if (!_guestImages.TryGetValue(address, out image!) || !_finiteStorageDebts.TryGetValue(image, out debt!) ||
                 image.StorageCpuOrigin is not { } found) return CanonicalDirtyResult.NotApplicable;
             origin = found; version = image.ContentVersion; texture = image.Texture;
-            ownerCurrent = IsExactCanonicalDirtyOwnerLocked(address, image, debt, origin, version, texture, out reason, out offender);
+            // Preserve the first complete ORIGINAL classification. An ordinary
+            // writer can finish before deferral rechecks this same owner. A
+            // younger Current does not turn that healthy Busy into Stale.
+            firstOwnerStatus = GetExactCanonicalDirtyOwnerStatusLocked(address, image, debt, origin,
+                version, texture, out reason, out offender, classifyBusy: true);
+            ownerCurrent = firstOwnerStatus == CpuMappedReadWatchStatus.Current;
         }
         if (!ownerCurrent)
         {
-            if (TryDeferCanonicalDirtyBusy(address, image, debt, origin, version, texture)) return CanonicalDirtyResult.Deferred;
+            _canonicalDirtyAfterInitialOwnerCheckForControl?.Invoke();
+            var firstBusy = firstOwnerStatus == CpuMappedReadWatchStatus.Busy
+                ? new CanonicalDirtyOwnerBusy(address, image, debt, origin, version, texture) : null;
+            if (firstBusy is not null &&
+                TryDeferCanonicalDirtyBusy(address, image, debt, origin, version, texture, firstBusy))
+                return CanonicalDirtyResult.Deferred;
             lock (_gate)
                 if (_deferredCanonicalDirty is not null)
                     throw new InvalidOperationException("Deferred canonical dirty ORIGINAL owner became stale: " + reason);
