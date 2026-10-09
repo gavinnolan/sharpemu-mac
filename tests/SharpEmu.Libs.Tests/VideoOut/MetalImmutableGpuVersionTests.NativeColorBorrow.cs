@@ -109,7 +109,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             {
                 object?[] take = [null]; NativeDepthAssert((bool)Call("TryTakeGuestWork", take)!);
                 var pending = take[0]!;
-                Call("ExecuteOffscreenGuestDraw", state.NativeFaceDevice, state.NativeFaceQueue, pending.GetType().GetProperty("Work")!.GetValue(pending)!);
+                Call("ExecuteOffscreenDraw", state.NativeFaceDevice, state.NativeFaceQueue, pending.GetType().GetProperty("Work")!.GetValue(pending)!);
                 Call("CompleteGuestWork", pending);
             }
             phase = "native-borrow";
