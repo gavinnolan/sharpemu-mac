@@ -2,7 +2,13 @@
 
 Priority: make all nine games reach a menu or controllable scene first; performance and visual polish follow entry.
 
-Local main integrates qualified source `1e17bc8d` at `a74d2778`; its `src`, `tests` and `scripts` trees match that tested source. This includes the completed buffer-publication continuation and gate-order correction. No remote push or upstream merge was performed. The six historical game replays below retain their exact executable source `188b9c2843289cdd4da5b709f49973eef3084f52`; later fixes do not relabel their evidence.
+Local main integrates qualified source `09bc1fce` at `ba6cd1cb`; its `src`, `tests` and `scripts` trees match that tested source. This adds typed command-write ownership and same-query original-watch diagnostics to the completed buffer-publication continuation and gate-order correction. No remote push or upstream merge was performed. The six historical game replays below retain their exact executable source `188b9c2843289cdd4da5b709f49973eef3084f52`; later fixes do not relabel their evidence.
+
+## Current qualified boot candidate
+
+Source `09bc1fce` passes three builds, 972 managed cases per actual ARM64/x64 CLR (199 Host, 693 Libs, 80 GPU), and 64 native cases per CLR. Its twelve typed native cases and both mixed buffer/image regressions pass first. ROOT independently verifies 1,981 source hashes, 104 compiled hashes, 979 native qualification artifacts, and absence of all 129 native process roots. Native manifest SHA-256: `3121b1510c26ac9dbf23e995e3d02bd1a20c821d1086e28e3a17435728646ad4`.
+
+The source-exact native-only app contains 239 files and passes deep strict signature verification. ROOT independently verifies all 11 publication artifacts, all 239 payload hashes, and closure of the two publication roots. Publish manifest SHA-256: `56325aafa33b6c2994dfb057debf27fbd82509a1f3a35990fc74b6bd2ef94f38`. Superliminal, Oregon Trail, Octopath and Silent Hill replays are separate validation; subsystem tests and packaging do not establish their boot progression.
 
 ## Latest qualification and three game replays
 
