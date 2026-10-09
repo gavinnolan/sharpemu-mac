@@ -240,7 +240,8 @@ public sealed partial class MetalStorageCpuSyncTests
                 var old = (CpuMappedCopyObservation)Member(original, "Mapping");
                 Change(original, "Mapping", new CpuMappedCopyObservation(new object(), old.FootprintAddress, old.FootprintByteCount,
                     old.SourceAddress, old.SourceByteCount, old.Segments.Select(segment => segment with {
-                        MappingBackingOffset = 1, BackingLogicalByteCount = checked(segment.BackingLogicalByteCount + 1) }).ToArray()));
+                        MappingBackingOffset = checked(segment.MappingBackingOffset + segment.ProviderPageSize),
+                        BackingLogicalByteCount = checked(segment.BackingLogicalByteCount + segment.ProviderPageSize) }).ToArray()));
             }
             if (variant == "different-original-token")
             {
