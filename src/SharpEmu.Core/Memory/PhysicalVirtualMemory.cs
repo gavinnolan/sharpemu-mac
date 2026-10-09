@@ -1226,6 +1226,30 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             CpuMappedCopyResult.Rejected, footprintAddress, footprintByteCount, sourceAddress, destination.Length, true);
         return CpuMappedCopyResult.Rejected;
     }
+    public bool CanWaitForMappedReadWatchEnrollment =>
+        !Volatile.Read(ref _disposed) && !_gate.IsReadLockHeld && !_gate.IsWriteLockHeld && !_gate.IsUpgradeableReadLockHeld &&
+        !Monitor.IsEntered(_guestAllocationGate) && !Monitor.IsEntered(_allocationSearchHintGate) &&
+        _backedSpace is ICpuMappedReadWatchSource source && source.CanWaitForMappedReadWatchEnrollment;
+
+    public CpuMappedCopyResult TryReadMappedCopyWithWriteWatchAdmissionWait(ulong footprintAddress,
+        ulong footprintByteCount, ulong sourceAddress, Span<byte> destination,
+        Func<bool> originalStillCurrent, out CpuMappedCopyObservation? observation)
+    {
+        ArgumentNullException.ThrowIfNull(originalStillCurrent);
+        observation = null;
+        var space = _backedSpace;
+        if (space is not ICpuMappedReadWatchSource source) return CpuMappedCopyResult.Unavailable;
+        bool WrapperCurrent() => !Volatile.Read(ref _disposed) && ReferenceEquals(_backedSpace, space) &&
+            CanWaitForMappedReadWatchEnrollment;
+        bool OriginalWrapper() => WrapperCurrent() && originalStillCurrent() && WrapperCurrent();
+        if (!OriginalWrapper()) return CpuMappedCopyResult.Rejected;
+        var result = source.TryReadMappedCopyWithWriteWatchAdmissionWait(footprintAddress, footprintByteCount,
+            sourceAddress, destination, OriginalWrapper, out observation);
+        if (!Volatile.Read(ref _disposed) && ReferenceEquals(_backedSpace, space)) return result;
+        if (observation is not null) source.ReleaseMappedCopyWriteWatch(observation);
+        observation = null; return CpuMappedCopyResult.Rejected;
+    }
+
     public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation observation) =>
         !Volatile.Read(ref _disposed) && _backedSpace is ICpuMappedReadWatchSource source && source.IsMappedCopyWriteWatchCurrent(observation);
     public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation observation,

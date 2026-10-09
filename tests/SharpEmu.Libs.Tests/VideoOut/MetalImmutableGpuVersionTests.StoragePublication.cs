@@ -46,6 +46,7 @@ public sealed partial class MetalImmutableGpuVersionTests
         public object? OrdinaryWriterOwner;
         public bool ConstructorReservationUnconfirmed;
         public CpuMappedReadValidation? ConstructorReservation;
+        public object? ColdEnrollmentOwner;
     }
 
     [FiniteStoragePublicationNativeFact]
@@ -76,7 +77,7 @@ public sealed partial class MetalImmutableGpuVersionTests
     public void ActualRuntimeLateDirtyGenerationAfterCanonicalVersionKeepsStickyDebtAndNoEop() =>
         RunActualRuntimeTwoTypedPublications(false, rgba: true, lateFailure: "generation");
 
-    private void RunActualRuntimeTwoTypedPublications(bool overlappingCpuWrite, bool rgba = false, bool mixedBuffer = false, string? lateFailure = null, bool originalVolumes = false, string? busyOriginalRetry = null, string? constructionBusyWindow = null, string? queueRetentionWindow = null, string? bodyBusyWindow = null, string? precommitBusyWindow = null, string? phaseBusyWindow = null, string? appliedValidationWindow = null, string? pendingCanonicalWindow = null)
+    private void RunActualRuntimeTwoTypedPublications(bool overlappingCpuWrite, bool rgba = false, bool mixedBuffer = false, string? lateFailure = null, bool originalVolumes = false, string? busyOriginalRetry = null, string? constructionBusyWindow = null, string? queueRetentionWindow = null, string? bodyBusyWindow = null, string? precommitBusyWindow = null, string? phaseBusyWindow = null, string? appliedValidationWindow = null, string? pendingCanonicalWindow = null, string? coldEnrollmentWindow = null)
     {
         Assert.True(DeviceRequested(), "finite setup: actual native device request");
         var imageBytes = rgba ? 4194304 : 65536;
@@ -99,6 +100,7 @@ public sealed partial class MetalImmutableGpuVersionTests
         object? image = null;
         ulong address = 0;
         Exception? primary = null;
+        ColdNativeMappedSource? coldSource = null;
         try
         {
             state = new NativeState();
@@ -120,6 +122,15 @@ public sealed partial class MetalImmutableGpuVersionTests
             Assert.True(physical.TryMapBacked(address, (ulong)allocationBytes, 65536,
                 GuestPageProtection.Read | GuestPageProtection.Write, out var mapFailure), $"map failure={mapFailure}");
             ICpuMemory cpuSource = physical;
+            if (coldEnrollmentWindow is not null)
+            {
+                Assert.True(rgba && originalVolumes && !overlappingCpuWrite && !mixedBuffer && lateFailure is null);
+                Assert.True(MetalVideoPresenter.StorageOriginalEnrollmentWaitRequested);
+                Assert.True(MetalVideoPresenter.RgbaStorageRuntimePublicationRequested);
+                coldSource = new ColdNativeMappedSource(physical, viewHost, owners, address, imageBytes, coldEnrollmentWindow, output);
+                owners.ColdEnrollmentOwner = coldSource;
+                cpuSource = coldSource;
+            }
             if (bodyBusyWindow is not null || precommitBusyWindow is not null || phaseBusyWindow is not null || appliedValidationWindow is not null)
             {
                 Assert.True(rgba && originalVolumes, "finite setup: independent volume route requires RGBA plus original volumes");
@@ -164,6 +175,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             var reports = new List<string>(); GpuFatal.OnFatal = reports.Add;
             if (originalVolumes && !MaterializeOriginalVolumes()) return;
             var first = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [binding], out _));
+            coldSource?.AssertFirstOriginalCopied(first);
             Assert.Equal(rgba ? Bgra1024Oracle.LinearSeed() : expected.AsSpan(0, 4).ToArray(), first.RgbaPixels);
             var originalOrigin = Call("StorageCpuOrigin", first)!;
             owners.OriginalOrigin = originalOrigin;
@@ -499,6 +511,8 @@ public sealed partial class MetalImmutableGpuVersionTests
         finally
         {
             Exception? cleanup = null;
+            try { coldSource?.Finish(); }
+            catch (Exception failure) { cleanup = failure; }
             var completionConfirmed = !owners.OrdinaryWriterUnconfirmed && !owners.ConstructorReservationUnconfirmed && !owners.AppliedValidationQuarantined;
             // This fresh fixture owns every newly opened batch. Discard only its
             // uncommitted encoding, then wait/status-check every committed buffer.

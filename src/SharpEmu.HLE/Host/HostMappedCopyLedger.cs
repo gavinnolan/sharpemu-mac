@@ -185,20 +185,27 @@ public sealed unsafe partial class HostMappedCopyLedger
 
     private CpuMappedCopyResult TryReadMappedCopyCore(HostBackingObject backing, ulong footprintAddress,
         ulong footprintByteCount, ulong sourceAddress, Span<byte> destination, bool withWriteWatch,
-        out CpuMappedCopyObservation? observation)
+        out CpuMappedCopyObservation? observation, ReadWatchAdmissionWait? admissionWait = null)
     {
         CpuMappedCopyDiagnostics.Failure diagnostic = default;
         try
         {
             return TryReadMappedCopyImplementation(backing, footprintAddress, footprintByteCount,
-                sourceAddress, destination, withWriteWatch, out observation, ref diagnostic);
+                sourceAddress, destination, withWriteWatch, out observation, ref diagnostic, admissionWait);
         }
-        finally { CpuMappedCopyDiagnostics.Emit(diagnostic); } // all implementation gates and pins are already unwound
+        finally
+        {
+            // Both rows describe actual refusals, not a later Current sample.
+            // Formatting happens after every implementation gate/pin unwinds.
+            if (admissionWait is not null) CpuMappedCopyDiagnostics.Emit(admissionWait.FirstRefusal);
+            CpuMappedCopyDiagnostics.Emit(diagnostic);
+        }
     }
 
     private CpuMappedCopyResult TryReadMappedCopyImplementation(HostBackingObject backing, ulong footprintAddress,
         ulong footprintByteCount, ulong sourceAddress, Span<byte> destination, bool withWriteWatch,
-        out CpuMappedCopyObservation? observation, ref CpuMappedCopyDiagnostics.Failure diagnostic)
+        out CpuMappedCopyObservation? observation, ref CpuMappedCopyDiagnostics.Failure diagnostic,
+        ReadWatchAdmissionWait? admissionWait)
     {
         var copyBytes = destination.Length;
         Capture? ownedCapture = null;
@@ -267,13 +274,56 @@ public sealed unsafe partial class HostMappedCopyLedger
                     var last = Math.Min(lastSource, view.Address + view.Size);
                     if (first < last) physical.Add(new(view.Offset + first - view.Address, last - first));
                 }
-                watchOwnership.Watch = writers.TryCreateReadWatch(physical.ToArray(), out var enrollmentReason, out var enrollmentAdmission);
+                var originalPhysical = physical.ToArray(); // FIRST runs; never rebuilt during waiting
+                watchOwnership.Watch = writers.TryCreateReadWatch(originalPhysical, out var enrollmentReason, out var enrollmentAdmission);
+                if (ownedCapture.ReadWatch is null && admissionWait is not null &&
+                    enrollmentReason == "watch-enrollment-admission-busy" && enrollmentAdmission > 0)
+                {
+                    var firstAdmission = enrollmentAdmission;
+                    if (CpuMappedCopyDiagnostics.Enabled)
+                        admissionWait.FirstRefusal = new("ledger-prebyte-enrollment-first", enrollmentReason,
+                            CpuMappedCopyResult.Rejected, footprintAddress, footprintByteCount, sourceAddress,
+                            copyBytes, true, backing.Identity, EnrollmentAdmission: firstAdmission);
+                    while (ownedCapture.ReadWatch is null)
+                    {
+                        // Admission is a refusal, NEVER a read entitlement or
+                        // proof that a foreign/lost reservation will complete.
+                        if (!CanWaitForMappedReadWatchEnrollment || !IsCurrent(backing, captured) ||
+                            !admissionWait.OriginalStillCurrent() || !CanWaitForMappedReadWatchEnrollment ||
+                            !IsCurrent(backing, captured))
+                            return Refuse(ref diagnostic, "prebyte-original-veto", CpuMappedCopyResult.Rejected,
+                                enrollmentAdmission: firstAdmission);
+                        if (Environment.TickCount64 >= admissionWait.Deadline)
+                            return Refuse(ref diagnostic, "prebyte-admission-timeout", CpuMappedCopyResult.Rejected,
+                                enrollmentAdmission: firstAdmission);
+                        Thread.Sleep(1); // no presenter/provider/backing/wrapper gates
+                        if (!CanWaitForMappedReadWatchEnrollment || !IsCurrent(backing, captured) ||
+                            !admissionWait.OriginalStillCurrent() || !CanWaitForMappedReadWatchEnrollment ||
+                            !IsCurrent(backing, captured))
+                            return Refuse(ref diagnostic, "prebyte-original-veto", CpuMappedCopyResult.Rejected,
+                                enrollmentAdmission: firstAdmission);
+                        if (Environment.TickCount64 >= admissionWait.Deadline)
+                            return Refuse(ref diagnostic, "prebyte-admission-timeout", CpuMappedCopyResult.Rejected,
+                                enrollmentAdmission: firstAdmission);
+                        watchOwnership.Watch = writers.TryCreateReadWatch(originalPhysical, out enrollmentReason, out enrollmentAdmission);
+                        if (ownedCapture.ReadWatch is null &&
+                            (enrollmentReason != "watch-enrollment-admission-busy" || enrollmentAdmission <= 0))
+                            return Refuse(ref diagnostic, enrollmentReason!, CpuMappedCopyResult.Rejected,
+                                enrollmentAdmission: firstAdmission);
+                    }
+                }
                 if (ownedCapture.ReadWatch is null) return Refuse(ref diagnostic, enrollmentReason!, CpuMappedCopyResult.Rejected,
                     enrollmentAdmission: enrollmentAdmission);
             }
             // No virtual pointer, permission repair, provider query, callback or
             // mapping gate is used here. The exact backing pin owns the alias.
             afterCaptureForControl?.Invoke();
+            if (admissionWait is not null && (!CanWaitForMappedReadWatchEnrollment ||
+                !IsCurrent(backing, captured) || ownedCapture.ReadWatch?.IsCurrent != true ||
+                !admissionWait.OriginalStillCurrent() || !CanWaitForMappedReadWatchEnrollment ||
+                !IsCurrent(backing, captured) ||
+                ownedCapture.ReadWatch?.IsCurrent != true))
+                return Refuse(ref diagnostic, "prebyte-original-veto", CpuMappedCopyResult.Rejected);
             var sourceEnd = sourceAddress + (ulong)destination.Length;
             foreach (var view in selected)
             {
@@ -285,6 +335,9 @@ public sealed unsafe partial class HostMappedCopyLedger
                     .CopyTo(destination.Slice(checked((int)(first - sourceAddress))));
             }
             if (!IsCurrent(backing, captured)) return Refuse(ref diagnostic, "post-copy-original-mapping", CpuMappedCopyResult.Rejected);
+            if (admissionWait is not null && (!CanWaitForMappedReadWatchEnrollment ||
+                !admissionWait.OriginalStillCurrent() || !CanWaitForMappedReadWatchEnrollment || !IsCurrent(backing, captured)))
+                return Refuse(ref diagnostic, "post-copy-original-veto", CpuMappedCopyResult.Rejected);
             if (withWriteWatch)
             {
                 var originalWatch = ownedCapture.ReadWatch!;

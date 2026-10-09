@@ -29,7 +29,8 @@ internal static partial class MetalTextureSnapshots
             (!volume || source is not ICpuMappedReadWatchSource)) return false; // legacy bytes; no positive cohort proof
         // Preserve native-owner/queued upload selection. Do not capture stale
         // guest bytes over a previously admitted storage producer.
-        if (GuestGpu.Current is IGuestImageSnapshotBackend snapshots &&
+        var originalBackend = GuestGpu.Current;
+        if (originalBackend is IGuestImageSnapshotBackend snapshots &&
             snapshots.IsGuestImageUploadKnown(d.Address, d.Format, d.NumberType)) return false;
         var physical = d.Width == 3840 && d.Height == 2160 ? 8847360UL :
             d.Width == 1024 && d.Height == 1024 ? 4194304UL : 65536UL;
@@ -51,13 +52,18 @@ internal static partial class MetalTextureSnapshots
         if (layout is null) return false;
         var withWriteWatch = volume || MetalVideoPresenter.RgbaStorageRuntimePublicationRequested &&
             MetalBgra1024ArrayStorageAdmission.IsQualified(template) && source is ICpuMappedReadWatchSource;
+        var waitForOriginalEnrollment = withWriteWatch && MetalVideoPresenter.StorageOriginalEnrollmentWaitRequested;
+        if (waitForOriginalEnrollment && (source is not ICpuMappedReadWatchSource capable ||
+            !capable.CanWaitForMappedReadWatchEnrollment || originalBackend is not MetalGuestGpuBackend))
+            throw new NotSupportedException("Cold original storage enrollment requires an explicit gate-free provider and the actual Metal backend.");
         // The original copy belongs to this session even if a reset races a
         // later capture attempt. Never stamp old bytes with a newer session.
         var originalSession = MetalVideoPresenter.CurrentStorageCpuSeedSession;
         var lastResult = CpuMappedCopyResult.Unavailable;
         var firstRejectedPredicate = "copy-not-attempted";
         ulong lastFootprintAddress = 0, lastFootprintBytes = 0, lastSourceAddress = 0, lastSourceBytes = 0;
-        for (var attempt = 0; attempt < 3; attempt++)
+        var attemptLimit = waitForOriginalEnrollment ? 1 : 3;
+        for (var attempt = 0; attempt < attemptLimit; attempt++)
         {
             if (originalSession != MetalVideoPresenter.CurrentStorageCpuSeedSession)
                 throw new InvalidOperationException("Metal typed storage session changed before the original copy.");
@@ -74,7 +80,19 @@ internal static partial class MetalTextureSnapshots
             Exception? primary = null;
             try
             {
-                var result = withWriteWatch
+                // Veto only. Retain the FIRST read/token/epoch/session/backend
+                // through provider-private admission waiting; no recapture on
+                // a refusal before or after bytes. Same existing admission
+                // stability semantics retain the original epoch metadata while
+                // exact provider mapping checks reject relevant map changes.
+                bool OriginalStillCurrent() =>
+                    MetalVideoPresenter.IsStorageOriginalEnrollmentOwnerCurrent(context.Memory, originalBackend!, d.Address, originalSession) &&
+                    GuestImageWriteTracker.IsReadSnapshotStable(read) &&
+                    MetalVideoPresenter.IsCpuTextureSnapshotAdmissionStable(d.Address, observation);
+                var result = waitForOriginalEnrollment
+                    ? ((ICpuMappedReadWatchSource)source).TryReadMappedCopyWithWriteWatchAdmissionWait(d.Address,
+                        physical, d.Address, bytes, OriginalStillCurrent, out mapping)
+                    : withWriteWatch
                     ? ((ICpuMappedReadWatchSource)source).TryReadMappedCopyWithWriteWatch(d.Address, physical, d.Address, bytes, out mapping)
                     : source.TryReadMappedCopy(d.Address, physical, d.Address, bytes, out mapping);
                 lastResult = result;
@@ -84,7 +102,7 @@ internal static partial class MetalTextureSnapshots
                 lastSourceBytes = mapping?.SourceByteCount ?? 0;
                 if (originalSession != MetalVideoPresenter.CurrentStorageCpuSeedSession)
                     throw new InvalidOperationException("Metal typed storage session changed during the original copy.");
-                if (result == CpuMappedCopyResult.Unavailable) return false; // unchanged legacy owned-copy path; no dirty authority
+                if (result == CpuMappedCopyResult.Unavailable && !waitForOriginalEnrollment) return false; // unchanged legacy owned-copy path; no dirty authority
                 if (result != CpuMappedCopyResult.Copied || mapping is null)
                 { firstRejectedPredicate = "mapped-copy-refused-or-missing-original"; continue; }
                 if (withWriteWatch && (mapping.FootprintAddress != d.Address || mapping.FootprintByteCount != physical ||
@@ -123,7 +141,8 @@ internal static partial class MetalTextureSnapshots
                 if (withWriteWatch && !registered) MetalVideoPresenter.ReleaseUnregisteredSingletonVolumeWatch(source, mapping, primary);
             }
         }
-        throw new InvalidOperationException($"Metal typed storage mapping/content changed across three original-copy attempts at 0x{d.Address:X}. " +
+        var attemptsDescription = waitForOriginalEnrollment ? "one retained original-copy attempt" : "three original-copy attempts";
+        throw new InvalidOperationException($"Metal typed storage mapping/content changed across {attemptsDescription} at 0x{d.Address:X}. " +
             $"last_result={lastResult} last_attempt_first_rejected_predicate={firstRejectedPredicate} requested_bytes={physical} original_session={originalSession} " +
             $"write_watch_requested={withWriteWatch} last_original_footprint=0x{lastFootprintAddress:X}/{lastFootprintBytes} " +
             $"last_original_source=0x{lastSourceAddress:X}/{lastSourceBytes}.");
