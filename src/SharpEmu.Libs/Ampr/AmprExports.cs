@@ -154,6 +154,8 @@ public static class AmprExports
         header.Clear();
         if (!ctx.Memory.TryWrite(commandBuffer, header))
         {
+            AprFailureDiagnostics.Failed("constructor-header-write", commandBuffer, commandBuffer,
+                CommandBufferHeaderSize, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
@@ -1026,8 +1028,8 @@ public static class AmprExports
     {
         if (size > uint.MaxValue || writeOffset > uint.MaxValue ||
             !WriteVisibleCommandBufferPointers(ctx, commandBuffer, buffer, size) ||
-            !ctx.TryWriteUInt32(commandBuffer + CommandBufferOffsetOffset, (uint)writeOffset) ||
-            !ctx.TryWriteUInt32(commandBuffer + CommandBufferNumOffset, 0))
+            !WriteCommandBufferHeaderUInt32(ctx, commandBuffer, CommandBufferOffsetOffset, (uint)writeOffset, "header-offset-write") ||
+            !WriteCommandBufferHeaderUInt32(ctx, commandBuffer, CommandBufferNumOffset, 0, "header-count-write"))
         {
             return false;
         }
@@ -1044,8 +1046,28 @@ public static class AmprExports
             return false;
         }
 
-        return ctx.TryWriteUInt32(commandBuffer + CommandBufferSizeOffset, (uint)size) &&
-               ctx.TryWriteUInt64(commandBuffer + CommandBufferDataOffset, buffer);
+        return WriteCommandBufferHeaderUInt32(ctx, commandBuffer, CommandBufferSizeOffset, (uint)size, "header-size-write") &&
+               WriteCommandBufferHeaderUInt64(ctx, commandBuffer, CommandBufferDataOffset, buffer, "header-data-write");
+    }
+
+    private static bool WriteCommandBufferHeaderUInt32(CpuContext ctx, ulong commandBuffer,
+        ulong offset, uint value, string stage)
+    {
+        var address = commandBuffer + offset;
+        if (ctx.TryWriteUInt32(address, value)) return true;
+        AprFailureDiagnostics.Failed(stage, commandBuffer, address, sizeof(uint),
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        return false;
+    }
+
+    private static bool WriteCommandBufferHeaderUInt64(CpuContext ctx, ulong commandBuffer,
+        ulong offset, ulong value, string stage)
+    {
+        var address = commandBuffer + offset;
+        if (ctx.TryWriteUInt64(address, value)) return true;
+        AprFailureDiagnostics.Failed(stage, commandBuffer, address, sizeof(ulong),
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        return false;
     }
 
     private static void UpdateCommandBufferState(
