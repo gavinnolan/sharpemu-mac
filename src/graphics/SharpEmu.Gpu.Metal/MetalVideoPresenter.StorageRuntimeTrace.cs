@@ -48,6 +48,7 @@ internal static partial class MetalVideoPresenter
     private static int _finiteStoragePostReleaseRefusalTraceRows;
     private static int _finiteStorageRetainedOwnerRefusalTraceRows;
     private static int _finiteStorageBodyOwnerRefusalTraceRows;
+    private static int _finiteStoragePreencodeOwnerRefusalTraceRows;
     private static long _finiteStorageRuntimeProducers, _finiteStorageRuntimeApplied, _finiteStorageRuntimeCanonical;
 
     private static void TraceFiniteStorageDispatchRefusal(ComputeGuestDispatch dispatch, Exception failure)
@@ -83,6 +84,7 @@ internal static partial class MetalVideoPresenter
             if (stage == "dirty-post-release-refused") budget = ref _finiteStoragePostReleaseRefusalTraceRows;
             else if (stage == "dirty-retained-owner-refused") budget = ref _finiteStorageRetainedOwnerRefusalTraceRows;
             else if (stage == "dirty-body-owner-refused") budget = ref _finiteStorageBodyOwnerRefusalTraceRows;
+            if (preencodeOwner.HasValue) budget = ref _finiteStoragePreencodeOwnerRefusalTraceRows;
             var rows = Volatile.Read(ref budget);
             if (rows >= 64 || Interlocked.CompareExchange(ref budget, rows + 1, rows) != rows) return;
             var original = origin?.Observation.Token;
