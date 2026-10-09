@@ -8,6 +8,34 @@ survival do not satisfy this milestone.
 
 ## Latest signed game replays
 
+Combined constructor/writer successor `3b6206c4` passed 709 managed cases on
+each actual CLR, all 22 fresh native workers, three builds, the 104-file
+compiled closure and the signed 239-file native-only payload. Its actual
+replays still do not qualify entry:
+
+- Octopath exited 134 after 33 seconds, peak RSS 2974 MiB. The first failure
+  is queue retention of the original volume watch at `8030BF0000`/65536
+  while another constructor holds `PublicationBit` (4294967296). Coverage,
+  released and revoked flags are zero. The later submission fatal is secondary.
+- Silent Hill exited 134 after 27 seconds, peak RSS 1496 MiB. It reproduces
+  the same queue-retention collision at `80107D0000`/65536; the original and
+  sampled revision both remain 152386. The inspected 25-second capture is black.
+- Oregon exited 134 after 32 seconds, peak RSS 1925 MiB. Its first failure is
+  three typed-storage original-copy refusals at `8011600000`, a write-only
+  1-by-1 Uint volume. The adjacent admission-1 diagnostic refers to a different
+  original source, `80115F0000`; it does not establish the failing copy's cause.
+  The intro artwork is not gameplay.
+
+All 41 owned process groups and the shared lock were absent at archive closure.
+Source and payload hashes remained unchanged. Evidence is
+`artifacts/validation/all-games-20261009/entry-busy-integration-3b6206c4-prepared`,
+manifest `58321f8ed919124ed02fc0fce6f8bb8c40f8c9fd7635f1edc4e47f8df326dc21`.
+The constructor successor remains isolated from main while the demonstrated
+queue collision is repaired. Passing these subsystem controls is not gameplay
+acceptance. Separate source candidates prepare exact physical R32 mip0 owned
+sampling beside mip1 writes, and original ordered native color borrowing for
+Superliminal; neither has runtime qualification yet.
+
 Candidate `8aca3731` passed 643 managed cases on each actual CLR, five fresh
 native cases per CLR, three builds and the signed 239-file native-only bundle.
 Its 120-second Dreaming Sarah run reached the starting scene. Independent
