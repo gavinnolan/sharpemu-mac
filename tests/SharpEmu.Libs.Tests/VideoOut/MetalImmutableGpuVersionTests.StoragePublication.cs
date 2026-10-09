@@ -76,7 +76,7 @@ public sealed partial class MetalImmutableGpuVersionTests
     public void ActualRuntimeLateDirtyGenerationAfterCanonicalVersionKeepsStickyDebtAndNoEop() =>
         RunActualRuntimeTwoTypedPublications(false, rgba: true, lateFailure: "generation");
 
-    private void RunActualRuntimeTwoTypedPublications(bool overlappingCpuWrite, bool rgba = false, bool mixedBuffer = false, string? lateFailure = null, bool originalVolumes = false, string? busyOriginalRetry = null, string? constructionBusyWindow = null, string? queueRetentionWindow = null, string? bodyBusyWindow = null, string? precommitBusyWindow = null, string? phaseBusyWindow = null, string? appliedValidationWindow = null)
+    private void RunActualRuntimeTwoTypedPublications(bool overlappingCpuWrite, bool rgba = false, bool mixedBuffer = false, string? lateFailure = null, bool originalVolumes = false, string? busyOriginalRetry = null, string? constructionBusyWindow = null, string? queueRetentionWindow = null, string? bodyBusyWindow = null, string? precommitBusyWindow = null, string? phaseBusyWindow = null, string? appliedValidationWindow = null, string? pendingCanonicalWindow = null)
     {
         Assert.True(DeviceRequested(), "finite setup: actual native device request");
         var imageBytes = rgba ? 4194304 : 65536;
@@ -253,6 +253,14 @@ public sealed partial class MetalImmutableGpuVersionTests
             Assert.Equal(observation, StorageMember(ownOrigin, "Observation"));
             Assert.Equal(rgba ? 70u : 53u, (uint)(MtlPixelFormat)StorageMember(image, "Format")!);
             Assert.Equal(3u, (uint)StorageMember(image, "TextureType")!);
+
+            if (pendingCanonicalWindow is not null)
+            {
+                Assert.True(rgba && originalVolumes && !mixedBuffer && !overlappingCpuWrite);
+                RunCanonicalPendingWork(state, physical, memory, host, owners, address, imageBytes,
+                    expected, image, ownOrigin, ReadCanonical, pendingCanonicalWindow);
+                return;
+            }
 
             if (bodyBusyWindow is not null)
             {

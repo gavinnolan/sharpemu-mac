@@ -29,16 +29,31 @@ internal static partial class MetalVideoPresenter
     // This helper can install ONLY a whole-drain refusal, never an ack.
     private static bool TryDeferCanonicalDirtyBusy(ulong address, GuestImage image,
         FiniteStorageDebt debt, StorageCpuSeedOrigin origin, int version, nint texture,
-        OriginalCanonicalDirtyBusy? originalBodyBusy = null)
+        OriginalCanonicalDirtyBusy? originalBodyBusy = null) =>
+        TryRetainCanonicalDirtyRetry(address, image, debt, origin, version, texture, originalBodyBusy, null);
+
+    private static bool TryDeferCanonicalDirtyPendingWork(ulong address, GuestImage image,
+        FiniteStorageDebt debt, StorageCpuSeedOrigin origin, int version, nint texture,
+        CanonicalDirtyPendingWork originalPending) =>
+        TryRetainCanonicalDirtyRetry(address, image, debt, origin, version, texture, null, originalPending);
+
+    private static bool TryRetainCanonicalDirtyRetry(ulong address, GuestImage image,
+        FiniteStorageDebt debt, StorageCpuSeedOrigin origin, int version, nint texture,
+        OriginalCanonicalDirtyBusy? originalBodyBusy, CanonicalDirtyPendingWork? originalPending)
     {
+        var pending = originalPending is not null;
+        if (pending && (originalPending!.Owner.Address != address || !ReferenceEquals(originalPending.Owner.Image, image) ||
+            !ReferenceEquals(originalPending.Owner.Debt, debt) || !ReferenceEquals(originalPending.Owner.Origin, origin) ||
+            originalPending.Owner.Version != version || originalPending.Owner.Texture != texture)) return false;
         StorageCpuSeedOrigin[] volumes;
         lock (_gate)
         {
             if (_deferredCanonicalDirty is not null &&
                 !IsExactDeferredCanonicalDirtyLocked(address, image, debt, origin, version, texture)) return false;
             var status = GetExactCanonicalDirtyOwnerStatusLocked(address, image, debt, origin, version, texture,
-                out _, out _, classifyBusy: true);
-            if (status != CpuMappedReadWatchStatus.Busy &&
+                out _, out _, classifyBusy: true, allowPendingWork: pending);
+            if (pending ? status != CpuMappedReadWatchStatus.Current :
+                status != CpuMappedReadWatchStatus.Busy &&
                 !(originalBodyBusy is not null && status == CpuMappedReadWatchStatus.Current)) return false;
             volumes = _guestImages.Values.Select(other => other.StorageCpuOrigin)
                 .Where(other => other?.VolumeWatch is not null).Cast<StorageCpuSeedOrigin>().ToArray();
@@ -62,7 +77,8 @@ internal static partial class MetalVideoPresenter
                 !GuestImageWriteTracker.TryGetProtectedObservedContentToken(volume.Layout.Address,
                     volume.Layout.PhysicalBytes, out var current) || current != volume.Observation.Token) return false;
             var status = watch.Source.GetMappedCopyWriteWatchStatus(watch.Mapping);
-            if (status is not CpuMappedReadWatchStatus.Current and not CpuMappedReadWatchStatus.Busy) return false;
+            if (pending ? status != CpuMappedReadWatchStatus.Current :
+                status is not CpuMappedReadWatchStatus.Current and not CpuMappedReadWatchStatus.Busy) return false;
         }
         lock (_gate)
         {
@@ -74,9 +90,11 @@ internal static partial class MetalVideoPresenter
                     currentVolumes++;
                     if (!volumes.Any(prior => ReferenceEquals(prior, original))) return false;
                 }
-            if (currentVolumes != volumes.Length ||
-                GetExactCanonicalDirtyOwnerStatusLocked(address, image, debt, origin, version, texture,
-                    out _, out _, classifyBusy: true) == CpuMappedReadWatchStatus.Stale) return false;
+            if (currentVolumes != volumes.Length) return false;
+            var finalStatus = GetExactCanonicalDirtyOwnerStatusLocked(address, image, debt, origin, version, texture,
+                out _, out _, classifyBusy: true, allowPendingWork: pending);
+            if (pending ? finalStatus != CpuMappedReadWatchStatus.Current :
+                finalStatus == CpuMappedReadWatchStatus.Stale) return false;
             _deferredCanonicalDirty ??= new(address, image, debt, origin, version, texture);
             Volatile.Write(ref _cpuWrittenGuestImageSyncRequested, 1);
             return true;
