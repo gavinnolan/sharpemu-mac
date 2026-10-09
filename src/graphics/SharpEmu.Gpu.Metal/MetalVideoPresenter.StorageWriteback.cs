@@ -201,6 +201,11 @@ internal static partial class MetalVideoPresenter
         StorageWatchReservation reservation = default, bool classifyOrdinaryBusy = false)
     {
         ValidateSingletonVolumeOriginalCohortContent(reservation, classifyOrdinaryBusy); // original content sampling outside all presenter gates
+        ValidateFiniteStorageOwnOrigin(origin, descriptor);
+    }
+
+    private static void ValidateFiniteStorageOwnOrigin(StorageCpuSeedOrigin origin, GuestDrawTexture descriptor)
+    {
         if (_closed || _guestWorkFailure is not null || !ReferenceEquals(_guestMemory, origin.Memory) ||
             origin.Session != Volatile.Read(ref _selectedStorageMipSession) ||
             origin.Mapping.FootprintAddress != descriptor.Address || origin.Mapping.FootprintByteCount != origin.Layout.PhysicalBytes ||
@@ -218,14 +223,20 @@ internal static partial class MetalVideoPresenter
         lock (_gate)
         {
             RequireFiniteStorageNativeCohortLocked(receipt.Image, receipt.Origin, reservation);
-            if (_closed || _guestWorkFailure is not null || receipt.Consumed || receipt.Published || receipt.Image.Texture == 0 ||
-                receipt.Image.Texture != receipt.Texture || receipt.Image.ContentVersion != receipt.Version ||
-                !ReferenceEquals(receipt.Image.StorageCpuOrigin, receipt.Origin) ||
-                !_guestImages.TryGetValue(receipt.Descriptor.Address, out var current) || !ReferenceEquals(current, receipt.Image) ||
-                !receipt.Debt.Pending || receipt.Debt.Failed || receipt.Debt.Work != receipt.Work)
-                throw new InvalidOperationException("Metal finite storage publication exact owner/version receipt changed.");
+            ValidateFiniteStorageReceiptOwnerLocked(receipt);
         }
         ValidateFiniteStorageOrigin(receipt.Origin, receipt.Descriptor, reservation);
+    }
+
+    private static void ValidateFiniteStorageReceiptOwnerLocked(FiniteStorageWriteback receipt)
+    {
+        if (_closed || _guestWorkFailure is not null || !ReferenceEquals(_guestMemory, receipt.Origin.Memory) ||
+            receipt.Origin.Session != CurrentStorageCpuSeedSession || receipt.Consumed || receipt.Published || receipt.Image.Texture == 0 ||
+            receipt.Image.Texture != receipt.Texture || receipt.Image.ContentVersion != receipt.Version ||
+            !ReferenceEquals(receipt.Image.StorageCpuOrigin, receipt.Origin) ||
+            !_guestImages.TryGetValue(receipt.Descriptor.Address, out var current) || !ReferenceEquals(current, receipt.Image) ||
+            !receipt.Debt.Pending || receipt.Debt.Failed || receipt.Debt.Work != receipt.Work)
+            throw new InvalidOperationException("Metal finite storage publication exact owner/version receipt changed.");
     }
 
     private static void EncodeFiniteStorageReadback(nint device, nint commandBuffer, FiniteStorageWriteback receipt)
@@ -268,40 +279,27 @@ internal static partial class MetalVideoPresenter
             throw new InvalidOperationException("Metal finite storage publication has no exact committed producer receipt.");
         WaitForCommittedGuestBufferWriteback(committed); // actual status4; Error is never a receipt
         receipt.SuccessfullyCompleted = true;
-        ValidateFiniteStorageReceipt(receipt);
+        // Completed staging is independent of canonical guest content. Extract
+        // it exactly once under the SAME retained producer/resource receipt;
+        // no native command or guest copy is repeated by the continuation.
+        var continuation = CaptureFiniteStoragePrecommit(receipt);
         var pointer = MetalNative.Send(receipt.Staging, MetalNative.Selector("contents"));
         if (pointer == 0) throw new InvalidOperationException("Metal finite storage readback has no completed staging bytes.");
         var nativeLinear = ReadFiniteStorageLinearBytes(receipt, pointer);
         var run = MetalBgra1024ArrayStorageAdmission.IsQualified(receipt.Descriptor)
             ? receipt.Origin.Layout.Encode(nativeLinear)
             : PrepareFiniteStorageOriginRun(receipt.Descriptor, nativeLinear);
-        ValidateFiniteStorageReceipt(receipt);
-        // Outside _gate. Provider exclusion comes BEFORE the final scalar veto
-        // and write, not a post-copy check which cannot undo stale bytes.
         var publisher = receipt.Origin.Memory as ICpuMappedPublicationSource ??
             throw new NotSupportedException("Metal finite storage canonical provider transaction is not connected.");
-        CpuMappedPublication? transaction = null;
-        CpuMappedPublicationPreparationResult prepared;
-        try
-        {
-            prepared = publisher.TryPrepareMappedPublication(receipt.Origin.Mapping,
-                PrepareFiniteStorageMappingRuns(receipt.Origin.Mapping, receipt.Descriptor.Address, run), out transaction);
-        }
-        catch (Exception failure)
-        {
-            CancelFiniteStoragePublication(transaction, failure);
-            throw;
-        }
-        if (prepared != CpuMappedPublicationPreparationResult.Prepared || transaction is null)
-        {
-            var refusal = new InvalidOperationException($"Metal finite storage canonical publication preparation was refused: result={prepared}; GPU debt remains pending.");
-            CancelFiniteStoragePublication(transaction, refusal);
-            throw refusal;
-        }
+        var runs = PrepareFiniteStorageMappingRuns(receipt.Origin.Mapping, receipt.Descriptor.Address, run);
+        _finiteStorageCompletedPrecommitForControl?.Invoke(receipt);
+        // This helper may wait/cancel an UNSTARTED exact provider transaction.
+        // It returns only after strict Current validation. TryCommit and every
+        // post-effect path below remain single-shot, outside all retry catches.
+        var transaction = PrepareFiniteStoragePrecommit(continuation, publisher, runs);
         Exception? primary = null;
         try
         {
-            ValidateFiniteStorageReceipt(receipt, new StorageWatchReservation(transaction));
             var result = transaction.TryCommit();
             if (result != CpuMappedPublicationResult.Applied)
                 throw new InvalidOperationException($"Metal finite storage canonical publication was not fully applied: result={result}; GPU debt remains pending.");

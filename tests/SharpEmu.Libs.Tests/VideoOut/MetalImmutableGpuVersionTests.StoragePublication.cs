@@ -74,7 +74,7 @@ public sealed partial class MetalImmutableGpuVersionTests
     public void ActualRuntimeLateDirtyGenerationAfterCanonicalVersionKeepsStickyDebtAndNoEop() =>
         RunActualRuntimeTwoTypedPublications(false, rgba: true, lateFailure: "generation");
 
-    private void RunActualRuntimeTwoTypedPublications(bool overlappingCpuWrite, bool rgba = false, bool mixedBuffer = false, string? lateFailure = null, bool originalVolumes = false, string? busyOriginalRetry = null, string? constructionBusyWindow = null, string? queueRetentionWindow = null, string? bodyBusyWindow = null)
+    private void RunActualRuntimeTwoTypedPublications(bool overlappingCpuWrite, bool rgba = false, bool mixedBuffer = false, string? lateFailure = null, bool originalVolumes = false, string? busyOriginalRetry = null, string? constructionBusyWindow = null, string? queueRetentionWindow = null, string? bodyBusyWindow = null, string? precommitBusyWindow = null)
     {
         Assert.True(DeviceRequested());
         var imageBytes = rgba ? 4194304 : 65536;
@@ -118,7 +118,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             Assert.True(physical.TryMapBacked(address, (ulong)allocationBytes, 65536,
                 GuestPageProtection.Read | GuestPageProtection.Write, out var mapFailure), $"map failure={mapFailure}");
             ICpuMemory cpuSource = physical;
-            if (bodyBusyWindow is not null)
+            if (bodyBusyWindow is not null || precommitBusyWindow is not null)
             {
                 Assert.True(rgba && originalVolumes);
                 var volumePhysical = new PhysicalVirtualMemory(HostMemoryAuthority.Current, HostViewMemory.Create(),
@@ -210,6 +210,12 @@ public sealed partial class MetalImmutableGpuVersionTests
                 if (lateFailure == "generation")
                     Assert.Equal(StorageMember(image, "ContentVersion"), StorageMember(failedDebt, "CanonicalVersion"));
                 output.WriteLine($"finite-storage-native status=4; Applied full-byte image; late={lateFailure}; sticky-debt=true; EOP-unacknowledged; actual-participating-effect-only");
+                return;
+            }
+            if (precommitBusyWindow is not null)
+            {
+                RunActualPrecommitOriginalBusy(state, physical, memory, owners, address, imageBytes,
+                    storeOffset, expected, firstSequence, firstEop, firstShader, ReadCanonical, precommitBusyWindow);
                 return;
             }
             state.DrainWithControlledBudget();
