@@ -57,6 +57,28 @@ public sealed partial class MetalImmutableGpuVersionTests
     public void ActualClosedMemoryWriteCancelsOriginalTicketOnChangedSessionWithoutBytesOrAck() =>
         RunNativeColorBorrow(true, typedMemory: "session-before-prepare");
 
+    [NativeColorBorrowFact]
+    public void ActualNativeColorConsumerAllowsOriginalFourByteZeroFillAfterGpuCompletion() =>
+        RunNativeColorBorrow(true, typedMemory: "fill-disjoint4");
+    [NativeColorBorrowFact]
+    public void ActualNativeColorConsumerAllowsOriginalPatternedFillWithFullGuestOracle() =>
+        RunNativeColorBorrow(true, typedMemory: "fill-pattern");
+    [NativeColorBorrowFact]
+    public void ActualNativeColorConsumerRejectsOriginalFillPhysicalAliasWithoutConsumerOrAck() =>
+        RunNativeColorBorrow(true, typedMemory: "fill-physical-alias");
+    [NativeColorBorrowFact]
+    public void ActualOriginalFillCannotAdoptReplacementAfterCohortValidation() =>
+        RunNativeColorBorrow(true, typedMemory: "fill-replacement-before-prepare");
+    [NativeColorBorrowFact]
+    public void ActualOriginalFillRefusesRightsRevokedAfterCohortValidation() =>
+        RunNativeColorBorrow(true, typedMemory: "fill-rights-before-prepare");
+    [NativeColorBorrowFact]
+    public void ActualOriginalFillRefusesChangedSessionWithoutBytesOrAck() =>
+        RunNativeColorBorrow(true, typedMemory: "fill-session-before-prepare");
+    [NativeColorBorrowFact]
+    public void ActualOriginalFillPreservesTrackedDestinationDirtyNotification() =>
+        RunNativeColorBorrow(true, typedMemory: "fill-tracked-destination");
+
     // The typed receipt requires the production wrapper's exact execution
     // scope. Keep its per-pass budget and bound all fixture passes to the same
     // aggregate five seconds as the original direct-core fixture helper.
@@ -75,6 +97,11 @@ public sealed partial class MetalImmutableGpuVersionTests
 
     private void RunNativeColorBorrow(bool completedFirst, bool failPredecessorCleanup = false, string? typedMemory = null)
     {
+        var originalFill = typedMemory?.StartsWith("fill-", StringComparison.Ordinal) == true;
+        if (originalFill) typedMemory = typedMemory![5..];
+        if (typedMemory == "disjoint4") typedMemory = "disjoint";
+        var fillBytes = typedMemory == "pattern" ? 4096ul : 4ul;
+        var fillValue = typedMemory == "pattern" ? 0x12345678u : 0u;
         NativeDepthAssert(DeviceRequested());
         Assert.Equal(Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_ARCH"), RuntimeInformation.ProcessArchitecture.ToString());
         Assert.Equal(Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_FRAMEWORK"), RuntimeInformation.FrameworkDescription);
@@ -262,11 +289,16 @@ public sealed partial class MetalImmutableGpuVersionTests
                 MetalVideoPresenter.ReleasePreparedTextureSources([snapshot]);
                 var backend = new MetalGuestGpuBackend(); var host = new MetalCommandStreamHost(memory, backend, backend);
                 byte[] ownedWrite = [11, 22, 33, 44, 55, 66, 77, 88];
-                var expectedWrite = ownedWrite.ToArray();
+                var expectedWrite = originalFill ? new byte[checked((int)fillBytes)] : ownedWrite.ToArray();
+                if (originalFill)
+                    for (var byteIndex = 0; byteIndex < expectedWrite.Length; byteIndex++)
+                        expectedWrite[byteIndex] = (byte)(fillValue >> ((byteIndex & 3) * 8));
                 typedCaller = Task.Run(() =>
                 {
                     using var submitting = MetalVideoPresenter.EnterGuestQueue("native.selected.color", 1);
-                    return host.TryWriteGuest(typedAddress, ownedWrite);
+                    if (!originalFill) return host.TryWriteGuest(typedAddress, ownedWrite);
+                    host.FillBuffer(typedAddress, fillBytes, fillValue, isGds: false);
+                    return true;
                 });
                 var deadline = Environment.TickCount64 + 5000;
                 while (true)
@@ -337,8 +369,8 @@ public sealed partial class MetalImmutableGpuVersionTests
                             .Single(item => item.GetType().Name == "OrderedCommandMemoryOperation");
                         Assert.NotNull(admitted.GetType().GetProperty("OriginalWatch")!.GetValue(admitted));
                         var firstMapping = Assert.IsType<CpuMappedCopyObservation>(admitted.GetType().GetProperty("Mapping")!.GetValue(admitted));
-                        Assert.Equal(typedAddress, firstMapping.SourceAddress); Assert.Equal(8ul, firstMapping.SourceByteCount);
-                        Assert.Equal(typedAddress, firstMapping.FootprintAddress); Assert.Equal(8ul, firstMapping.FootprintByteCount);
+                        Assert.Equal(typedAddress, firstMapping.SourceAddress); Assert.Equal(originalFill ? fillBytes : 8ul, firstMapping.SourceByteCount);
+                        Assert.Equal(typedAddress, firstMapping.FootprintAddress); Assert.Equal(originalFill ? fillBytes : 8ul, firstMapping.FootprintByteCount);
                     }
                     // Advance the real same-backing completed-write history
                     // AFTER the exact closed-write capture, without touching
@@ -381,7 +413,7 @@ public sealed partial class MetalImmutableGpuVersionTests
                 DrainTypedWithActualRenderScope(state);
                 BitConverter.GetBytes(0x1020304050607080UL).CopyTo(typedBaseline, 8);
                 NativeDepthAssert(memory.TryRead(typedAddress, actualWrite)); Assert.Equal(typedBaseline, actualWrite);
-                output.WriteLine("native-color-typed-memory status=4 sampled_native_bytes=2097152 original_chain_unchanged=1 disjoint_full_guest_bytes=65536 owned_write_once=1 EOP_after_consumer=1");
+                output.WriteLine($"native-color-typed-memory operation={(originalFill ? "Fill" : "Write")} effect_bytes={expectedWrite.Length} value={(originalFill ? fillValue : 0):X8} no_native_mirror_destination=1 status=4 sampled_native_bytes=2097152 original_chain_unchanged=1 disjoint_full_guest_bytes=65536 owned_write_once=1 EOP_after_consumer=1");
             }
             else if (completedFirst)
             {

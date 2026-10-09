@@ -114,6 +114,25 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMap
         if (observation is not null) _views.ReleaseMappedCopyWriteWatch(observation);
         observation = null; return CpuMappedCopyResult.Rejected;
     }
+    public bool CanWaitForMappedReadWatchEnrollment =>
+        !Volatile.Read(ref _disposed) && _views.CanWaitForMappedReadWatchEnrollment;
+
+    public CpuMappedCopyResult TryReadMappedCopyWithWriteWatchAdmissionWait(ulong footprintAddress,
+        ulong footprintByteCount, ulong sourceAddress, Span<byte> destination,
+        Func<bool> originalStillCurrent, out CpuMappedCopyObservation? observation)
+    {
+        ArgumentNullException.ThrowIfNull(originalStillCurrent);
+        observation = null;
+        bool WrapperCurrent() => !Volatile.Read(ref _disposed) && CanWaitForMappedReadWatchEnrollment;
+        bool OriginalWrapper() => WrapperCurrent() && originalStillCurrent() && WrapperCurrent();
+        if (!OriginalWrapper()) return CpuMappedCopyResult.Rejected;
+        var result = _views.TryReadMappedCopyWithWriteWatchAdmissionWait(footprintAddress, footprintByteCount,
+            sourceAddress, destination, OriginalWrapper, out observation);
+        if (!Volatile.Read(ref _disposed)) return result;
+        if (observation is not null) _views.ReleaseMappedCopyWriteWatch(observation);
+        observation = null; return CpuMappedCopyResult.Rejected;
+    }
+
     public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation observation) =>
         !Volatile.Read(ref _disposed) && _views.IsMappedCopyWriteWatchCurrent(observation);
     public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation observation,

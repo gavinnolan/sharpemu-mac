@@ -15,6 +15,9 @@ internal static partial class MetalVideoPresenter
     // Default-null controlled race boundary. Runs only after the actual
     // cancel-only reservation has released; cannot supply content or status.
     private static Action? _canonicalDirtyAfterValidationReleasedForControl = null;
+    // Observes only the saved first pending refusal after known cancellation;
+    // cannot supply a status, receipt or completion.
+    private static Action? _canonicalDirtyAfterPendingWorkRefusalForControl = null;
     // Ordinary race boundaries only; neither can supply a provider receipt,
     // replacement observation or native completion.
     private static Action<bool>? _canonicalDirtyBeforeBodyValidationForControl = null;
@@ -28,13 +31,29 @@ internal static partial class MetalVideoPresenter
     {
         internal readonly DeferredCanonicalDirty Owner = new(address, image, debt, origin, version, texture);
     }
+    private enum CanonicalDirtyWorkGuard { None, Pending, Batch, Taken, Executing }
+    private sealed class CanonicalDirtyPendingWork(ulong address, GuestImage image, FiniteStorageDebt debt,
+        StorageCpuSeedOrigin origin, int version, nint texture) : InvalidOperationException(
+            "Canonical dirty ordinary post-release owner changed: pending-work-or-batch")
+    {
+        internal readonly DeferredCanonicalDirty Owner = new(address, image, debt, origin, version, texture);
+    }
 
     private static bool InspectCanonicalDirtyOwnerForAcknowledgmentLocked(ulong address, GuestImage image,
         FiniteStorageDebt debt, StorageCpuSeedOrigin origin, int version, nint texture, out string reason,
-        out FiniteStorageCohortOffender? offender, StorageWatchReservation reservation = default)
+        out FiniteStorageCohortOffender? offender, StorageWatchReservation reservation = default,
+        bool classifyPendingWork = false)
     {
-        var status = GetExactCanonicalDirtyOwnerStatusLocked(address, image, debt, origin, version, texture,
-            out reason, out offender, reservation, classifyBusy: true);
+        var status = GetExactCanonicalDirtyOwnerStatusCoreLocked(address, image, debt, origin, version, texture,
+            out reason, out offender, out var workGuard, reservation, classifyBusy: true);
+        if (classifyPendingWork && workGuard != CanonicalDirtyWorkGuard.None)
+        {
+            InvalidOperationException failure = workGuard == CanonicalDirtyWorkGuard.Pending
+                ? new CanonicalDirtyPendingWork(address, image, debt, origin, version, texture)
+                : new InvalidOperationException("Canonical dirty ordinary post-release owner changed: pending-work-or-batch");
+            failure.Data["CanonicalDirtyFirstWorkGuard"] = workGuard.ToString();
+            throw failure;
+        }
         if (status == CpuMappedReadWatchStatus.Busy)
             throw new CanonicalDirtyOwnerBusy(address, image, debt, origin, version, texture);
         return status == CpuMappedReadWatchStatus.Current;
@@ -48,9 +67,18 @@ internal static partial class MetalVideoPresenter
 
     private static CpuMappedReadWatchStatus GetExactCanonicalDirtyOwnerStatusLocked(ulong address, GuestImage image,
         FiniteStorageDebt debt, StorageCpuSeedOrigin origin, int version, nint texture, out string reason,
-        out FiniteStorageCohortOffender? offender, StorageWatchReservation reservation = default, bool classifyBusy = false)
+        out FiniteStorageCohortOffender? offender, StorageWatchReservation reservation = default, bool classifyBusy = false,
+        bool allowPendingWork = false) =>
+        GetExactCanonicalDirtyOwnerStatusCoreLocked(address, image, debt, origin, version, texture,
+            out reason, out offender, out _, reservation, classifyBusy, allowPendingWork);
+
+    private static CpuMappedReadWatchStatus GetExactCanonicalDirtyOwnerStatusCoreLocked(ulong address, GuestImage image,
+        FiniteStorageDebt debt, StorageCpuSeedOrigin origin, int version, nint texture, out string reason,
+        out FiniteStorageCohortOffender? offender, out CanonicalDirtyWorkGuard workGuard,
+        StorageWatchReservation reservation = default, bool classifyBusy = false, bool allowPendingWork = false)
     {
         offender = null;
+        workGuard = CanonicalDirtyWorkGuard.None;
         reason = "presenter-owner-session-or-version";
         if (_closed || _guestWorkFailure is not null || _typedCpuSyncCleanupFailure is not null ||
             _textureSourceCleanupFailure is not null || !ReferenceEquals(_guestMemory, origin.Memory) ||
@@ -61,8 +89,15 @@ internal static partial class MetalVideoPresenter
             !image.GpuWritten || image.TextureType != MtlTextureType2DArray || image.Depth != 1 || image.ArrayLength != 1 ||
             image.Format != origin.Layout.NativeFormat.Format) return CpuMappedReadWatchStatus.Stale;
         reason = "pending-work-or-batch";
-        if ((_pendingGuestWorkCount != 0 && !IsExactDeferredCanonicalDirtyLocked(address, image, debt, origin, version, texture)) ||
-            _batchOpen || _takenGuestWorkSequence != 0 || _executingGuestWorkSequence != 0) return CpuMappedReadWatchStatus.Stale;
+        // Preserve the first reached scalar guard, including its original
+        // order. Pending is bookkeeping, never native/content authority.
+        if (!allowPendingWork && _pendingGuestWorkCount != 0 &&
+            !IsExactDeferredCanonicalDirtyLocked(address, image, debt, origin, version, texture))
+            workGuard = CanonicalDirtyWorkGuard.Pending;
+        else if (_batchOpen) workGuard = CanonicalDirtyWorkGuard.Batch;
+        else if (_takenGuestWorkSequence != 0) workGuard = CanonicalDirtyWorkGuard.Taken;
+        else if (_executingGuestWorkSequence != 0) workGuard = CanonicalDirtyWorkGuard.Executing;
+        if (workGuard != CanonicalDirtyWorkGuard.None) return CpuMappedReadWatchStatus.Stale;
         reason = "canonical-debt-or-version";
         if (debt.Failed || debt.Pending || debt.CanonicalVersion != version || !ReferenceEquals(debt.CanonicalOrigin, origin) ||
             debt.CanonicalDescriptor is not { } descriptor || !MetalBgra1024ArrayStorageAdmission.IsQualified(descriptor) ||
@@ -198,7 +233,8 @@ internal static partial class MetalVideoPresenter
                     _canonicalDirtyAfterValidationReleasedForControl?.Invoke();
                     ValidateFiniteStorageOrigin(origin, debt.CanonicalDescriptor!, classifyOrdinaryBusy: true);
                     lock (_gate)
-                        ownerCurrent = InspectCanonicalDirtyOwnerForAcknowledgmentLocked(address, image, debt, origin, version, texture, out reason, out offender);
+                        ownerCurrent = InspectCanonicalDirtyOwnerForAcknowledgmentLocked(address, image, debt, origin, version, texture,
+                            out reason, out offender, classifyPendingWork: true);
                     if (!ownerCurrent)
                     {
                         TraceFiniteStorageRuntime("dirty-post-release-refused", address, reason, origin, offender);
@@ -208,9 +244,24 @@ internal static partial class MetalVideoPresenter
             }
             catch (Exception cleanup)
             {
+                if (_volumeOwnerDeclineDiagnostics)
+                    try
+                    {
+                        if (cleanup.Data["CanonicalDirtyFirstWorkGuard"] is string firstGuard)
+                            TraceFiniteStorageRuntime("dirty-post-release-refused", address,
+                                "pending-work-or-batch; first_work_guard=" + firstGuard, origin);
+                    }
+                    catch { /* Optional first-scalar output preserves the original cleanup refusal. */ }
                 var defer = false;
                 if (validationReleased && primary is null && consumed && cleanup is OriginalCanonicalDirtyBusy exactBusy)
                     try { defer = TryDeferCanonicalDirtyBusy(address, image, debt, origin, version, texture, exactBusy); }
+                    catch (Exception later) { try { cleanup.Data["CanonicalDirtyRetryClassification"] = later; } catch { } }
+                if (validationReleased && primary is null && consumed && cleanup is CanonicalDirtyPendingWork exactPending)
+                    try
+                    {
+                        _canonicalDirtyAfterPendingWorkRefusalForControl?.Invoke();
+                        defer = TryDeferCanonicalDirtyPendingWork(address, image, debt, origin, version, texture, exactPending);
+                    }
                     catch (Exception later) { try { cleanup.Data["CanonicalDirtyRetryClassification"] = later; } catch { } }
                 if (defer)
                 {

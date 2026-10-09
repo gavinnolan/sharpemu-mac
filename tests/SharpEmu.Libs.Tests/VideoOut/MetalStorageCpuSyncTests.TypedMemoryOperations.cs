@@ -509,7 +509,7 @@ public sealed partial class MetalStorageCpuSyncTests
         public bool TryWrite(ulong address, ReadOnlySpan<byte> bytes) { Writes++; throw new InvalidOperationException("No scalar test may execute its writer."); }
         public CpuMappedCopyResult TryReadMappedCopy(ulong address, ulong count, ulong source, Span<byte> bytes, out CpuMappedCopyObservation? mapping)
         {
-            Assert.Equal(Destination, address); Assert.Equal(variant == "tail-physical-alias" ? 32768UL : 8UL, count);
+            Assert.Equal(Destination, address); Assert.Equal(variant == "tail-physical-alias" ? 32768UL : variant == "fill" ? 4UL : 8UL, count);
             Assert.Equal(address, source); Assert.Equal(count, (ulong)bytes.Length);
             CommandCopies++; mapping = null;
             if (variant == "missing-mapping") return CpuMappedCopyResult.Unavailable;

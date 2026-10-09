@@ -4,6 +4,11 @@ namespace SharpEmu.HLE.Host;
 
 public interface IHostMappedReadWatchMemory : IHostMappedCopyMemory
 {
+    bool CanWaitForMappedReadWatchEnrollment => false;
+    CpuMappedCopyResult TryReadMappedCopyWithWriteWatchAdmissionWait(HostBackingObject backing,
+        ulong footprintAddress, ulong footprintByteCount, ulong sourceAddress, Span<byte> destination,
+        Func<bool> originalStillCurrent, out CpuMappedCopyObservation? observation)
+    { observation = null; return CpuMappedCopyResult.Unavailable; }
     CpuMappedPublicationPreparationResult TryPrepareMappedReadValidation(HostBackingObject backing,
         CpuMappedCopyObservation original, out CpuMappedReadValidation? validation)
     { validation = null; return CpuMappedPublicationPreparationResult.Unavailable; }

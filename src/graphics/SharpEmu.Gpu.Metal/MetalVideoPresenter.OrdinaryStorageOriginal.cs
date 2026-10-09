@@ -101,12 +101,22 @@ internal static partial class MetalVideoPresenter
             RequireOrdinaryStorageOriginalContent(original);
             lock (_gate)
             {
-                if (_closed || _guestWorkFailure is not null || _ordinaryStorageOriginalCleanupFailure is not null ||
-                    !ReferenceEquals(_guestMemory, memory) || session != CurrentSelectedStorageMipSeedSession ||
-                    _ordinaryStorageOriginalByAddress.Count >= MaximumOrdinaryStorageOriginals ||
-                    _ordinaryStorageOriginalByAddress.ContainsKey(d.Address) || _guestImages.ContainsKey(d.Address) ||
-                    _availableGuestImages.ContainsKey(d.Address))
-                    throw new NotSupportedException("Ordinary storage original installation changed or exceeded its bound.");
+                // Save the winning guard under the SAME installation lock.
+                // Later registry samples cannot identify why this first
+                // original was refused, and must not rescue that refusal.
+                var installationRefusal = _closed ? "presenter-closed" :
+                    _guestWorkFailure is not null ? "guest-work-failure" :
+                    _ordinaryStorageOriginalCleanupFailure is not null ? "original-cleanup-failure" :
+                    !ReferenceEquals(_guestMemory, memory) ? "guest-memory-replaced" :
+                    session != CurrentSelectedStorageMipSeedSession ? "storage-session-changed" :
+                    _ordinaryStorageOriginalByAddress.Count >= MaximumOrdinaryStorageOriginals ? "original-registry-capacity" :
+                    _ordinaryStorageOriginalByAddress.ContainsKey(d.Address) ? "original-address-already-installed" :
+                    _guestImages.ContainsKey(d.Address) ? "native-image-already-installed" :
+                    _availableGuestImages.ContainsKey(d.Address) ? "available-image-already-installed" : null;
+                if (installationRefusal is not null)
+                    throw new NotSupportedException("Ordinary storage original installation changed or exceeded its bound. " +
+                        $"first_rejected_predicate={installationRefusal} address=0x{d.Address:X} " +
+                        $"original_count={_ordinaryStorageOriginalByAddress.Count} maximum={MaximumOrdinaryStorageOriginals}.");
                 _ordinaryStorageOriginalByAddress.Add(d.Address, original);
                 mapping = null; // bounded original registry owns the exact watch until retirement
             }
