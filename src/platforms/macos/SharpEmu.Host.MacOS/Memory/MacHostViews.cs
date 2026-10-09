@@ -79,6 +79,25 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
             ? ledger.TryReadMappedCopyWithWriteWatch(backing, footprintAddress, footprintByteCount, sourceAddress, destination, out observation)
             : CpuMappedCopyResult.Unavailable;
     }
+    public bool CanWaitForMappedReadWatchEnrollment => CanWaitForOrdinaryWriteAdmission &&
+        MacMappedCopyState.Ledger is { } ledger && ledger.CanWaitForMappedReadWatchEnrollment;
+
+    public CpuMappedCopyResult TryReadMappedCopyWithWriteWatchAdmissionWait(HostBackingObject backing,
+        ulong footprintAddress, ulong footprintByteCount, ulong sourceAddress, Span<byte> destination,
+        Func<bool> originalStillCurrent, out CpuMappedCopyObservation? observation)
+    {
+        ArgumentNullException.ThrowIfNull(originalStillCurrent);
+        observation = null;
+        var ledger = MacMappedCopyState.Ledger;
+        if (ledger is null) return CpuMappedCopyResult.Unavailable;
+        bool WrapperCurrent() => ReferenceEquals(MacMappedCopyState.Ledger, ledger) &&
+            CanWaitForMappedReadWatchEnrollment;
+        bool OriginalWrapper() => WrapperCurrent() && originalStillCurrent() && WrapperCurrent();
+        if (!OriginalWrapper()) return CpuMappedCopyResult.Rejected;
+        return ledger.TryReadMappedCopyWithWriteWatchAdmissionWait(backing, footprintAddress,
+            footprintByteCount, sourceAddress, destination, OriginalWrapper, out observation);
+    }
+
     public bool IsMappedCopyWriteWatchCurrent(HostBackingObject backing, CpuMappedCopyObservation observation) =>
         MacMappedCopyState.Ledger?.IsMappedCopyWriteWatchCurrent(backing, observation) == true;
     public bool IsMappedCopyWriteWatchCurrent(HostBackingObject backing, CpuMappedCopyObservation observation,

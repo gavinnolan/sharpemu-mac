@@ -4,6 +4,28 @@ namespace SharpEmu.HLE.Host;
 
 public sealed unsafe partial class HostMappedCopyLedger
 {
+    private sealed class ReadWatchAdmissionWait(Func<bool> originalStillCurrent)
+    {
+        internal readonly Func<bool> OriginalStillCurrent = originalStillCurrent;
+        internal readonly long Deadline = Environment.TickCount64 + 500;
+        internal CpuMappedCopyDiagnostics.Failure FirstRefusal;
+    }
+
+    // This capability excludes ONLY the calling-thread provider gate. Known
+    // wrappers must additionally exclude their inherited gates and closure.
+    public bool CanWaitForMappedReadWatchEnrollment => !Monitor.IsEntered(gate);
+
+    public CpuMappedCopyResult TryReadMappedCopyWithWriteWatchAdmissionWait(HostBackingObject backing,
+        ulong footprintAddress, ulong footprintByteCount, ulong sourceAddress, Span<byte> destination,
+        Func<bool> originalStillCurrent, out CpuMappedCopyObservation? observation)
+    {
+        ArgumentNullException.ThrowIfNull(originalStillCurrent);
+        observation = null;
+        if (!CanWaitForMappedReadWatchEnrollment || !originalStillCurrent() ||
+            !CanWaitForMappedReadWatchEnrollment) return CpuMappedCopyResult.Rejected;
+        return TryReadMappedCopyCore(backing, footprintAddress, footprintByteCount, sourceAddress,
+            destination, true, out observation, new ReadWatchAdmissionWait(originalStillCurrent));
+    }
     private sealed class ReadWatchOwnership(HostMappedCopyLedger owner)
     {
         internal HostManagedWriteIntervals.ReadWatch? Watch;

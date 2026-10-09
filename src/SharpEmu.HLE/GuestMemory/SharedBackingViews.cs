@@ -156,6 +156,32 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
         }
         finally { ExitAliasAccess(); }
     }
+    public bool CanWaitForMappedReadWatchEnrollment => IsAvailable && CanEmitOrdinaryWriteDiagnostic &&
+        _host is IHostMappedReadWatchMemory provider && provider.CanWaitForMappedReadWatchEnrollment;
+
+    public CpuMappedCopyResult TryReadMappedCopyWithWriteWatchAdmissionWait(ulong footprintAddress,
+        ulong footprintByteCount, ulong sourceAddress, Span<byte> destination,
+        Func<bool> originalStillCurrent, out CpuMappedCopyObservation? observation)
+    {
+        ArgumentNullException.ThrowIfNull(originalStillCurrent);
+        observation = null;
+        var backing = _backing;
+        if (_host is not IHostMappedReadWatchMemory provider || backing is null) return CpuMappedCopyResult.Unavailable;
+        bool WrapperCurrent() => IsAvailable && ReferenceEquals(_backing, backing) &&
+            CanWaitForMappedReadWatchEnrollment;
+        bool OriginalWrapper() => WrapperCurrent() && originalStillCurrent() && WrapperCurrent();
+        if (!OriginalWrapper() || !TryEnterAliasAccess()) return CpuMappedCopyResult.Rejected;
+        try
+        {
+            var result = provider.TryReadMappedCopyWithWriteWatchAdmissionWait(backing, footprintAddress,
+                footprintByteCount, sourceAddress, destination, OriginalWrapper, out observation);
+            if (IsAvailable && ReferenceEquals(_backing, backing)) return result;
+            if (observation is not null) provider.ReleaseMappedCopyWriteWatch(observation);
+            observation = null; return CpuMappedCopyResult.Rejected;
+        }
+        finally { ExitAliasAccess(); }
+    }
+
     public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation observation) =>
         IsAvailable && _backing is not null && _host is IHostMappedReadWatchMemory provider &&
         provider.IsMappedCopyWriteWatchCurrent(_backing, observation);

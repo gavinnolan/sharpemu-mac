@@ -27,6 +27,13 @@ public readonly record struct CpuMappedReadWatchDiagnostic
 /// No fresh observation may be substituted for an invalidated original watch.</summary>
 public interface ICpuMappedReadWatchSource : ICpuMappedCopySource
 {
+    // Optional cold PRE-BYTE admission wait. Unknown wrappers decline: no
+    // observation or bytes may be obtained by retrying a fresh generic copy.
+    bool CanWaitForMappedReadWatchEnrollment => false;
+    CpuMappedCopyResult TryReadMappedCopyWithWriteWatchAdmissionWait(ulong footprintAddress,
+        ulong footprintByteCount, ulong sourceAddress, Span<byte> destination,
+        Func<bool> originalStillCurrent, out CpuMappedCopyObservation? observation)
+    { observation = null; return CpuMappedCopyResult.Unavailable; }
     // Cancel-only exclusion for the SAME original watched source. It is not a
     // publication/disjoint-watch reservation and has no bytes or continuity.
     CpuMappedPublicationPreparationResult TryPrepareMappedReadValidation(
