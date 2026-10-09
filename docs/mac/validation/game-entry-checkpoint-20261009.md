@@ -4,13 +4,23 @@ Priority: make all nine games reach a menu or controllable scene first; performa
 
 Local main integrates qualified source `8c4b352f`; its `src`, `tests` and `scripts` trees match that tested source. The successor retains the first watched command write and its exact Applied successor, preserves first-status constructor Busy and records the first pre-encode owner predicate. This adds typed command-write ownership and same-query original-watch diagnostics to the completed buffer-publication continuation and gate-order correction. No remote push or upstream merge was performed. The six historical game replays below retain their exact executable source `188b9c2843289cdd4da5b709f49973eef3084f52`; later fixes do not relabel their evidence.
 
+## Next source candidates and current runtime coordination
+
+Kairo owns one bounded v4.554 validation and wall-clock Silent Hill replay batch after the four `8c4b352f` SharpEmu attempts close. SharpEmu's heavy work remains held; source implementation and review continue. The next prepared SharpEmu candidate is DS+Void `bfc988ed`: ROOT verifies its clean exact HEAD, all 2,001 source hashes and all 12 prepared driver artifacts. Its 1,064 ordinary cases per CLR comprise 208 Host, 751 Libs and 105 GPU cases. Its 178 separate workers comprise 73 Metal/GPU and 16 ordinary Mac-provider cases per CLR. All original `8c4b352f` case identities remain present. Preparation manifest: `artifacts/validation/all-games-20261009/void-input-on-watched-ds-boot-bfc988ed-prepared/prepared-manifest.json`, SHA-256 `67950a64f5d2abcd1d97cebf615f4185fbd7b072608cfb91d092763c7d9ba2af`. No build, test, publication or game result is attributed to this candidate yet.
+
+The publication-admission audit identifies four actual slot owner families: watch enrollment, cancel-only original-read validation, cancel-only publication validation and real publication. The slot has no owner identity or completion promise. Lost cancellation bookkeeping can retain it without setting coverage-incomplete, so its presence cannot be labelled temporary or treated as Current. ROOT verifies the audit's source and artifact hashes; manifest SHA-256 `48c97f39ca1d64cd2994bbe631715ba05e8b3c20828bc298cf1edc681e8246e4`. A separate opt-in cold-copy design must keep the first provider mapping and backing pin before any byte is copied, wait at most 500 ms outside inherited gates, then obtain strict currentness and perform one copy. Retained unknown ownership must refuse or time out without bytes, forced release or a new observation. Existing-watch handling is separate; the first Octopath Stale result remains unchanged by this design.
+
+Superliminal's bounded non-GDS Fill successor and Silent Hill's pending-only post-release continuation are source work awaiting final review. Fill must retain the real mirror/cache route and refuse an existing or newly installed native mirror destination; its payload is limited to one aligned 64 KiB transfer chunk. Silent Hill must preserve the first Pending/Batch/Taken/Executing predicate, permit only pending bookkeeping to retain the same already-Applied dirty owner after all lower proofs are Current, and retry before future queued work. No actual winning Silent Hill subpredicate or new entry success is inferred from these proposals.
+
+Inactive Poppy prototype `d632c098` adds a deterministic atomic per-thread claim before same-receipt native ticket publication. ROOT verifies all ten source hashes and reviews that specific nested-admission fix. The prototype remains uncompiled, uninstalled and source-only; native tracker authority stays zero. Actual private ELF allocation ownership, code sealing after patching, raw protection exclusion, cross-receipt ingress and the CoreCLR signal chain remain unresolved. No game recovery or safety closure follows from this source review.
+
 ## Prior qualified boot candidate: 09bc1fce
 
 Source `09bc1fce` passes three builds, 972 managed cases per actual ARM64/x64 CLR (199 Host, 693 Libs, 80 GPU), and 64 native cases per CLR. Its twelve typed native cases and both mixed buffer/image regressions pass first. ROOT independently verifies 1,981 source hashes, 104 compiled hashes, 979 native qualification artifacts, and absence of all 129 native process roots. Native manifest SHA-256: `3121b1510c26ac9dbf23e995e3d02bd1a20c821d1086e28e3a17435728646ad4`.
 
 The source-exact native-only app contains 239 files and passes deep strict signature verification. ROOT independently verifies all 11 publication artifacts, all 239 payload hashes, and closure of the two publication roots. Publish manifest SHA-256: `56325aafa33b6c2994dfb057debf27fbd82509a1f3a35990fc74b6bd2ef94f38`. Superliminal, Oregon Trail, Octopath and Silent Hill replays are separate validation; subsystem tests and packaging do not establish their boot progression.
 
-## Four current boot replays
+## Four prior boot replays on 09bc1fce
 
 The source-exact `09bc1fce` app reaches these first failures, with no foreign overlap or monitor censor:
 
@@ -48,7 +58,7 @@ ROOT independently verifies all 272 new game artifact hashes and absence of all 
 
 The runtime lane returns to Kairo for one bounded validation/replay batch. SharpEmu stays active for Fill ownership, pending-only canonical continuation and publication-admission source work. Separately reviewed DS source `aca828f2` and DS+Void source `bfc988ed` preserve all boot-base changes but remain unbuilt/unrun; their inventories are 1,045/1,064 ordinary cases and 89 native cases per CLR. No new Poppy recovery handler is activated.
 
-## Latest qualification and three game replays
+## Earlier qualification and three game replays on 1e17bc8d
 
 Source `1e17bc8d` passes three builds, 912 managed cases per actual ARM64/x64 CLR and 58 native cases per CLR. Both mixed buffer/image cases pass first, followed by the remaining native inventory. ROOT independently verifies the native checkpoint's 830 artifact hashes and worker closure. The source-exact native-only signed package contains 239 files; ROOT verifies its 15 publication artifacts, all 239 payload hashes and deep strict signature. Native manifest SHA-256: `5d1798217e3c6b63f1efc3faa7febe6e4e1952e909b7ee3baceba8efd5ae7bb3`; publish manifest SHA-256: `e84d636ff0132f531a2bf9aeaead02970ba86c420bb6df93d791ade3306df7a3`.
 
