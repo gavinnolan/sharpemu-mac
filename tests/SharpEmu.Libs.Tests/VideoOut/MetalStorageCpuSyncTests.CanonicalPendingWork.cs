@@ -21,13 +21,17 @@ public sealed partial class MetalStorageCpuSyncTests
         ActualArchitecture(); using var fixture = new PrecommitScalarFixture();
         var names = new[] { "_pendingGuestWorkCount", "_batchOpen", "_takenGuestWorkSequence", "_executingGuestWorkSequence" };
         var saved = names.Select(name => Field(name).GetValue(null)).ToArray();
-        var fields = new[] { "TextureType", "Depth", "ArrayLength", "ContentVersion" };
+        var fields = new[] { "TextureType", "Depth", "ArrayLength", "ContentVersion", "GpuWritten" };
         var imageSaved = fields.Select(name => PrecommitGet(fixture.Image, name)).ToArray();
         var reads = fixture.Memory.MappingQueries; var statuses = fixture.Memory.WatchQueries;
         var actionCalls = 0;
         try
         {
             Set(fixture.Image, "TextureType", 3u); Set(fixture.Image, "Depth", 1u); Set(fixture.Image, "ArrayLength", 1u);
+            // The shared fixture begins with a CPU seed. This refusal-only
+            // control must reach the work guards behind the GPU-debt predicate;
+            // the scalar sentinel confers no native/content authority.
+            Set(fixture.Image, "GpuWritten", true);
             Field("_pendingGuestWorkCount").SetValue(null, 0); Field("_batchOpen").SetValue(null, false);
             Field("_takenGuestWorkSequence").SetValue(null, 0L); Field("_executingGuestWorkSequence").SetValue(null, 0L);
             if (variant.Contains("pending")) MetalVideoPresenter.SubmitOrderedGuestAction(() => actionCalls++, "pending guard control");
