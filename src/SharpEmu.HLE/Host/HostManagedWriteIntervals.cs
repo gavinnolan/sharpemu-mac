@@ -37,7 +37,7 @@ internal sealed partial class HostManagedWriteIntervals
     {
         internal long RejectedAdmission { get; init; }
         internal bool IsPublicationBusy => Owner is not null && Slot == -1 && Identity == 0 &&
-            (RejectedAdmission & PublicationBit) != 0;
+            RejectedAdmission >= 0 && (RejectedAdmission & PublicationBit) != 0;
     }
 
     internal Token Begin(ulong offset, ulong count) => BeginCore(offset, count, false);
@@ -45,9 +45,20 @@ internal sealed partial class HostManagedWriteIntervals
     private Token BeginCore(ulong offset, ulong count, bool operation)
     {
         if (count == 0) return default;
-        var admitted = Interlocked.Increment(ref admission);
-        if ((admitted & PublicationBit) != 0 || admitted >= PublicationBit)
-        { Interlocked.Decrement(ref admission); return new(this, -1, 0) { RejectedAdmission = admitted }; }
+        var observed = Volatile.Read(ref admission);
+        var acquired = false;
+        for (var attempt = 0; attempt < Capacity; attempt++)
+        {
+            // A losing no-byte writer must never perturb an exclusive owner:
+            // exact original watch validation requires admission == PublicationBit.
+            if (observed < 0 || observed >= PublicationBit - 1) break;
+            var previous = Interlocked.CompareExchange(ref admission, observed + 1, observed);
+            if (previous == observed) { acquired = true; break; }
+            observed = previous; // exact failed CAS, never a later diagnostic sample
+        }
+        // Bounded ordinary contention can refuse without publication ownership.
+        // Never return default here: that token preserves legacy byte permission.
+        if (!acquired) return new(this, -1, 0) { RejectedAdmission = observed };
         if (offset > backing.Size || count > backing.Size - offset)
         { LoseCoverage(CoverageLoss.InvalidPhysicalBounds); Interlocked.Decrement(ref admission); return default; }
         if (Volatile.Read(ref coverageIncomplete) != 0) { Interlocked.Decrement(ref admission); return default; }
@@ -105,8 +116,8 @@ internal sealed partial class HostManagedWriteIntervals
     internal static bool AllowsBytes(Token token) => token.Owner is null || token.Slot >= 0;
 
     // Participating writers only, never a certificate for native/JIT/raw stores.
-    // The count is acquired before allocating an interval identity; late losing
-    // writers may transiently increment under PublicationBit but cannot use bytes.
+    // The count is acquired before allocating an interval identity; losing
+    // writers leave PublicationBit unchanged and never receive byte permission.
     internal bool TryCaptureRevision(out long revision)
     {
         revision = -1;
