@@ -32,11 +32,7 @@ public sealed partial class MetalTextureMaterializationTests
         Assert.Null(r32DisjointFixtureQuarantine);
         var pending = new SelectedMipQueueScope();
         var host = SharpEmu.Host.MacOS.MacOSHost.CreateViewMemory();
-        var geometry = typeof(SharpEmu.Host.MacOS.MacOSHost).Assembly.GetType("SharpEmu.Host.MacOS.MacMappedCopyState")!;
-        var measuredLedger = Assert.IsType<HostMappedCopyLedger>(geometry.GetProperty("Ledger", Methods)!.GetValue(null));
-        var measuredKernelPage = measuredLedger.NativePageSize;
-        Assert.True(ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_KERNEL_PAGE"), out var expectedKernelPage));
-        Assert.Equal(expectedKernelPage, measuredKernelPage);
+        ulong measuredKernelPage = 0;
         var views = new SharedBackingViews(host, 0xC0000);
         SelectedMappedSeedHole? hole = null; SelectedNativeExecutionState? native = null;
         R32DisjointMemory? memory = null;
@@ -45,6 +41,11 @@ public sealed partial class MetalTextureMaterializationTests
         Exception? primary = null; ulong address = 0;
         try
         {
+            var geometry = typeof(SharpEmu.Host.MacOS.MacOSHost).Assembly.GetType("SharpEmu.Host.MacOS.MacMappedCopyState")!;
+            var measuredLedger = Assert.IsType<HostMappedCopyLedger>(geometry.GetProperty("Ledger", Methods)!.GetValue(null));
+            measuredKernelPage = measuredLedger.NativePageSize;
+            Assert.True(ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_KERNEL_PAGE"), out var expectedKernelPage));
+            Assert.Equal(expectedKernelPage, measuredKernelPage);
             Assert.True(views.IsAvailable); hole = new(host); address = hole.Address;
             Assert.True(address < 1UL << 40 && (address & 65535) == 0);
             Assert.True(views.TryMapReservedRange(address, 0xC0000, 0, HostPageProtection.ReadWrite, out _));
