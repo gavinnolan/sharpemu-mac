@@ -32,6 +32,11 @@ public sealed partial class MetalTextureMaterializationTests
         Assert.Null(r32DisjointFixtureQuarantine);
         var pending = new SelectedMipQueueScope();
         var host = SharpEmu.Host.MacOS.MacOSHost.CreateViewMemory();
+        var geometry = typeof(SharpEmu.Host.MacOS.MacOSHost).Assembly.GetType("SharpEmu.Host.MacOS.MacMappedCopyState")!;
+        var measuredLedger = Assert.IsType<HostMappedCopyLedger>(geometry.GetProperty("Ledger", Methods)!.GetValue(null));
+        var measuredKernelPage = measuredLedger.NativePageSize;
+        Assert.True(ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_KERNEL_PAGE"), out var expectedKernelPage));
+        Assert.Equal(expectedKernelPage, measuredKernelPage);
         var views = new SharedBackingViews(host, 0xC0000);
         SelectedMappedSeedHole? hole = null; SelectedNativeExecutionState? native = null;
         R32DisjointMemory? memory = null;
@@ -73,8 +78,7 @@ public sealed partial class MetalTextureMaterializationTests
             Assert.All(memory.Copies, copy => Assert.All(copy.Segments, segment =>
             {
                 Assert.True(segment.BackingIdentity > 0 && segment.MappingIncarnation > 0);
-                Assert.True(ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_KERNEL_PAGE"), out var expectedPage));
-                Assert.Equal(expectedPage, segment.ProviderPageSize);
+                Assert.Equal(measuredKernelPage, segment.ProviderPageSize);
             }));
             // Actual final with-copy association is already exercised above.
             // A second DTO cannot adopt it with substituted detached pixels.
@@ -106,7 +110,7 @@ public sealed partial class MetalTextureMaterializationTests
             Assert.Equal(guestBeforeGpu, actualGuest); // complete post-poison baseline unchanged through GPU work
             Assert.Equal(0, memory.OrdinaryReads);
             output.WriteLine($"r32-disjoint-native actualCLR={RuntimeInformation.ProcessArchitecture}; framework={RuntimeInformation.FrameworkDescription}; " +
-                $"provider_page={host.PageSize}; sampled_raw=90900924/RRRR; mip0=+40000/80000; mip1=+20000/20000; " +
+                $"kernel_ledger_page={measuredKernelPage}; provider_page={host.PageSize}; sampled_raw=90900924/RRRR; mip0=+40000/80000; mip1=+20000/20000; " +
                 "publicSubmit/Drain; CBstatus=4; all32768-native-R32-values; all786432-post-poison-guest-bytes; detached-M0-after-full-CPU-poison; independent-mode9-equation; noCPUfallback");
         }
         catch (Exception failure) { primary = failure; throw; }
