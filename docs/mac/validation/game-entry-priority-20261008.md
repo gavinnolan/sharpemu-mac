@@ -8,6 +8,26 @@ survival do not satisfy this milestone.
 
 ## Latest signed game replays
 
+R32 successor `08ebe4cc` passed 722 managed cases on each actual CLR, all
+24 fresh native workers, three builds, the 104-file compiled closure and the
+signed 239-file native-only payload. The new native case sampled the complete
+original mip0 into mip1 after deliberate CPU-source poisoning, verified every
+output float and preserved all 786432 post-poison guest bytes on both ARM64
+and x64 CLRs. This qualifies the bounded native transport, not game entry.
+
+Its actual Demon's Souls replay stopped before the mip0 CPU copy: six ordinary
+native images and six extents trigger the strict writer-inventory refusal.
+The first failure is compute `8A02D692EE458D12` at `7092C80000`, with sampled
+mip0 and storage mip1 sharing the resource base. The inspected 125-second
+capture is black. Exit 134 after 130 seconds and peak RSS 3347 MiB do not
+establish progression. All 42 owned process groups and the shared lock were
+absent at archive closure; source and payload hashes stayed unchanged.
+Evidence is `artifacts/validation/all-games-20261009/ds-r32-disjoint-08ebe4cc-prepared`,
+manifest `7e45857fce1f70be94efef0964424496110c4341835c790c46e84f76c06fd489`.
+This candidate remains isolated. The next replay adds failure-only cached
+image provenance to establish the six images' creation routes and original
+ownership before any inventory-policy change.
+
 Combined constructor/writer successor `3b6206c4` passed 709 managed cases on
 each actual CLR, all 22 fresh native workers, three builds, the 104-file
 compiled closure and the signed 239-file native-only payload. Its actual
@@ -32,9 +52,8 @@ Source and payload hashes remained unchanged. Evidence is
 manifest `58321f8ed919124ed02fc0fce6f8bb8c40f8c9fd7635f1edc4e47f8df326dc21`.
 The constructor successor remains isolated from main while the demonstrated
 queue collision is repaired. Passing these subsystem controls is not gameplay
-acceptance. Separate source candidates prepare exact physical R32 mip0 owned
-sampling beside mip1 writes, and original ordered native color borrowing for
-Superliminal; neither has runtime qualification yet.
+acceptance. Original ordered native color borrowing for Superliminal remains
+a separate source candidate without runtime qualification.
 
 Candidate `8aca3731` passed 643 managed cases on each actual CLR, five fresh
 native cases per CLR, three builds and the signed 239-file native-only bundle.
