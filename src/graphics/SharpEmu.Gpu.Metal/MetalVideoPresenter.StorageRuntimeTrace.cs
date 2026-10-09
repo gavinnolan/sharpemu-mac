@@ -57,7 +57,8 @@ internal static partial class MetalVideoPresenter
         {
             var texture = dispatch.Textures.FirstOrDefault(MetalBgra1024ArrayStorageAdmission.IsQualified);
             if (texture is not null) TraceFiniteStorageRuntime("dispatch-refused", texture.Address, failure.Message,
-                StorageCpuOrigin(texture), failure is FiniteStorageCohortRefusal cohort ? cohort.Offender : null);
+                StorageCpuOrigin(texture), failure is FiniteStorageCohortRefusal cohort ? cohort.Offender : null,
+                failure is FiniteStoragePreencodeOwnerRefusal owner ? owner.First : null);
         }
         catch { /* Even producer lookup must preserve the original exception. */ }
     }
@@ -67,7 +68,8 @@ internal static partial class MetalVideoPresenter
     // All owner snapshots are already captured. Tracker sampling/formatting is
     // outside the presenter/provider gates and cannot replace a primary error.
     private static void TraceFiniteStorageRuntime(string stage, ulong address, string reason,
-        StorageCpuSeedOrigin? origin = null, FiniteStorageCohortOffender? offender = null)
+        StorageCpuSeedOrigin? origin = null, FiniteStorageCohortOffender? offender = null,
+        FiniteStoragePreencodeOwnerDiagnostic? preencodeOwner = null)
     {
         if (!_rgbaStorageRuntimePublicationRequested || Monitor.IsEntered(_gate)) return;
         try
@@ -115,12 +117,15 @@ internal static partial class MetalVideoPresenter
                 $"; offender_first_provider_status={other.FirstWatch?.Provider.ProviderStatus?.ToString() ?? "not-reached"}; offender_first_local_guard={other.FirstWatch?.LocalGuard ?? "not-reached"}" +
                 $"; offender_first_original_read_ticket={other.FirstWatch?.OriginalRead?.ToString() ?? "not-reached"}; offender_first_publication_ticket={other.FirstWatch?.Publication?.ToString() ?? "not-reached"}; offender_first_validation_ticket={other.FirstWatch?.Validation?.ToString() ?? "not-reached"}" +
                 $"; offender_first_shared_closure={other.FirstWatch?.Provider.SharedClosure ?? "not-reached"}; offender_first_owner_closure={other.FirstWatch?.Provider.OwnerClosure ?? "not-reached"}; offender_first_virtual_closure={other.FirstWatch?.Provider.VirtualClosure ?? "not-reached"}" : "";
+            var preencodeFields = preencodeOwner is { } first ?
+                $"; preencode_first_address=0x{first.Address:X}; preencode_first_branch={first.Branch}; preencode_first_guard={first.Guard}" +
+                $"; preencode_first_saved_scalar={first.SavedScalar?.ToString() ?? "not-numeric"}; preencode_first_actual_scalar={first.ActualScalar?.ToString() ?? "not-numeric"}" : "";
             Console.Error.WriteLine($"finite-storage-runtime stage={stage}; address=0x{address:X}; reason={reason[..Math.Min(reason.Length, 192)]}; " +
                 $"producer_count={Volatile.Read(ref _finiteStorageRuntimeProducers)}; applied_count={Volatile.Read(ref _finiteStorageRuntimeApplied)}; canonical_count={Volatile.Read(ref _finiteStorageRuntimeCanonical)}; " +
                 $"original_session={origin?.Session}; original_protected_id={original?.ProtectedIdentity}; original_protected_generation={original?.ProtectedGeneration}; " +
                 $"original_watch_id={original?.WatchIdentity}; original_watch_generation={original?.WatchGeneration}; current_observed={observed}; " +
                 $"current_protected_id={current.ProtectedIdentity}; current_protected_generation={current.ProtectedGeneration}; current_watch_id={current.WatchIdentity}; current_watch_generation={current.WatchGeneration}; " +
-                $"original_token_equal={observed && original == current}; ordinary_observations_not_writer_authority=true{offenderFields}");
+                $"original_token_equal={observed && original == current}; ordinary_observations_not_writer_authority=true{offenderFields}{preencodeFields}");
         }
         catch { /* A diagnostic cannot change ordering, refusal or the primary. */ }
     }

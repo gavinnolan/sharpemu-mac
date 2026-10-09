@@ -1,0 +1,11 @@
+# Pre-encode original owner attribution
+
+Source-only candidate over exact `09bc1fce0145d9ec56a5610e3a598fdc5683664c`; no build/test/native/game execution.
+
+The actual Octopath failure at Compute sequence 54/submission 3 reports `Finite storage pre-encode ORIGINAL native owner/version changed.` This existing branch combines registry identity, the complete saved native image tuple, and original volume metadata. Nearby ordinary read-watch admission is not proof of this branch's cause: the metadata check does not query a provider watch or classify Busy.
+
+With the existing cached `SHARPEMU_CANONICAL_PUBLICATION_DIAGNOSTICS=1` flag, an alternative to that **same first check** records its first refusing registry, tuple or volume-metadata field. Numeric tuple values are captured from the exact comparison (unsigned scalar bit patterns); reference predicates record identity failure without retaining objects or inventing numeric identities. The original short-circuit order remains registry lookup → registry image identity → original/layout/texture/version/shape/initialization/GPU-written tuple → existing pure volume metadata guard. No provider query, status classifier, callback, wait, authority or retry is introduced. The cached-off route keeps the original Boolean check and exception type/message.
+
+On an opt-in refusal, a private InvalidOperationException subtype preserves the original exception message and carries detached address/branch/guard/scalar fields. The existing outside-gate dispatch catch passes them to the existing caught, finite 64-row runtime formatter. Formatting never rereads the refusing image or watch. The preexisting tracker observation in that formatter remains separately labeled ordinary observation, not first-predicate authority. Successful and cached-off paths allocate no new diagnostic object.
+
+Nineteen prepared scalar metadata rows cover all twelve original tuple fields, registry absence/replacement, original watch state/unknown, simultaneous failures proving the original guard order, metadata success despite a refusing provider read watch, and the cached-off original exception. They exercise the actual extracted owner helper with an existing synthetic native sentinel fixture; no native selector, completion, content authority, acknowledgment or runtime cause is claimed.
