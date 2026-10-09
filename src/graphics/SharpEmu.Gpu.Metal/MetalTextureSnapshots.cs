@@ -116,7 +116,9 @@ internal static partial class MetalTextureSnapshots
                         $"Metal array storage snapshots require a matching complete qualified mode24 R8Uint X001 or mode27 RGBA8Unorm/Float, R32 Uint/Float X001, RGBA8Uint/RGBA16Float identity PERF_MOD7 single-mip 1x1 layer-zero descriptor or exact1024x1024 RGBA8Unorm BGRA or3840x2160 R8Uint X001 PERF_MOD7 write-only descriptor and compiled 2D-array shape: " +
                         $"descriptor={binding.Descriptor} shape={binding.Shape} access={binding.Access} selected_mip={binding.MipLevel} " +
                         $"raw=[{string.Join(",", binding.ResourceDescriptor?.Select(static word => $"{word:X8}") ?? [])}].");
-                MetalVideoPresenter.RejectSelectedStorageAlias(context.Memory, binding.Descriptor, binding.IsStorage, binding.MipLevel);
+                var r32SampledMipZero = IsR32SampledMipZeroCandidate(binding);
+                if (r32SampledMipZero) RequireR32SampledMipZero(binding);
+                else MetalVideoPresenter.RejectSelectedStorageAlias(context.Memory, binding.Descriptor, binding.IsStorage, binding.MipLevel);
                 MetalVideoPresenter.ValidateColorPhysicalSnapshotBinding(context.Memory, binding);
                 var depthCubeFaces = RequireDepthCubeSnapshot(binding);
                 var profileStart = TexturePreparationProfile.Begin();
@@ -138,6 +140,12 @@ internal static partial class MetalTextureSnapshots
                     TexturePreparationProfile.RecordBinding(
                         TexturePreparationProfile.BindingOutcome.Reused,
                         profileStart);
+                }
+                else if (r32SampledMipZero)
+                {
+                    texture = CreateR32SampledMipZero(context, binding);
+                    unreturnedTexture = texture;
+                    TexturePreparationProfile.RecordBinding(TexturePreparationProfile.BindingOutcome.Linear, profileStart, texture.RgbaPixels.LongLength);
                 }
                 else if (depthCubeFaces && MetalVideoPresenter.TryCaptureNativeDepthCube(context.Memory, binding, out texture))
                 {

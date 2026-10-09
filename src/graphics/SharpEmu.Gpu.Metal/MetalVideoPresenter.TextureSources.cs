@@ -266,6 +266,7 @@ internal static partial class MetalVideoPresenter
             {
                 if (provenance is not null) _cpuTextureSnapshotProvenance.Add(copy, provenance);
                 CopySelectedStorageMip(source, copy);
+                CopyOwnedR32SampledMipZero(source, copy);
                 CopyStorageCpuSeedOrigin(source, copy);
                 CopyNativeDepthCubeCapture(source, copy);
             }
@@ -274,6 +275,7 @@ internal static partial class MetalVideoPresenter
                 if (lease is not null) _textureSourceLeases.Remove(copy);
                 _cpuTextureSnapshotProvenance.Remove(copy);
                 _selectedStorageMipAssociations.Remove(copy);
+                _ownedR32MipZeros.Remove(copy);
                 _storageCpuSeedOrigins.Remove(copy);
                 throw;
             }

@@ -1667,7 +1667,7 @@ internal static partial class MetalVideoPresenter
 
         // This bounded owned-origin path does not authorize address/cache reuse
         // across unobserved writer or tracker lifetimes.
-        var cacheable = !sampledSingletonVolume && IsCacheableDrawTexture(texture);
+        var cacheable = !sampledSingletonVolume && !IsOwnedR32SampledMipZero(texture) && IsCacheableDrawTexture(texture);
 
         // Feedback reads of a live guest render target sample an ordered
         // snapshot, resolved like the Vulkan presenter: a guest depth image

@@ -110,6 +110,7 @@ internal static partial class MetalVideoPresenter
 
     private static SelectedStorageMipAdmission[] PrepareSelectedStorageMipAdmissionLocked(object work, GuestQueueIdentity queue)
     {
+        ValidateOwnedR32MipZeroAdmissionLocked(work);
         if (work is not ComputeGuestDispatch dispatch ||
             !dispatch.Textures.Any(texture => _selectedStorageMipAssociations.TryGetValue(texture, out _))) return [];
         if (_enqueueAsImmediateQueueFollowup && dispatch.Textures.Any(texture => _selectedStorageMipAssociations.TryGetValue(texture, out _)))
@@ -318,6 +319,11 @@ internal static partial class MetalVideoPresenter
     // No provider/content/native query, replacement owner lookup or admission.
     private static void RejectSelectedStorageMaterializerAlias(GuestDrawTexture texture)
     {
+        if (_ownedR32MipZeros.TryGetValue(texture, out var copied))
+        {
+            lock (_gate) RequireOwnedR32MipZeroCurrentLocked(texture, copied);
+            return;
+        }
         var bytes = Math.Max(texture.SourceByteCount,
             checked((ulong)texture.Width * texture.Height * Math.Max(texture.Depth, 1u) * 16));
         lock (_gate)
