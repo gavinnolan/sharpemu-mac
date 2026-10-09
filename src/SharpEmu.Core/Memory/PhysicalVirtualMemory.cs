@@ -202,6 +202,9 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     {
         public static readonly CrossPlatformHostMemory Instance = new();
 
+        public bool CanEmitOrdinaryWriteDiagnostic =>
+            HostMemoryAuthority.IsInitialized && HostMemoryAuthority.Current.CanEmitOrdinaryWriteDiagnostic;
+
         public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection) =>
             unchecked((ulong)HostMemory.Alloc(
                 (void*)desiredAddress,
@@ -2209,6 +2212,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                     !_gate.IsReadLockHeld && !_gate.IsWriteLockHeld && !_gate.IsUpgradeableReadLockHeld &&
                     !Monitor.IsEntered(_guestAllocationGate) && !Monitor.IsEntered(_allocationSearchHintGate) &&
                     !Monitor.IsEntered(HostViewRegions.Gate) &&
+                    _hostMemory.CanEmitOrdinaryWriteDiagnostic &&
                     (diagnosticSpace is null || diagnosticSpace.CanEmitOrdinaryWriteDiagnostic))
                     OrdinaryWriteFailureDiagnostics.Emit(failure);
             }

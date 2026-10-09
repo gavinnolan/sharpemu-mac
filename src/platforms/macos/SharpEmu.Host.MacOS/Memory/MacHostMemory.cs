@@ -21,6 +21,9 @@ internal sealed unsafe partial class MacHostMemory : IHostMemoryRaw
 
     internal static bool IsNativeMappingGateHeld => Darwin.IsMappingGateHeld;
 
+    public bool CanEmitOrdinaryWriteDiagnostic =>
+        !Monitor.IsEntered(HostViewRegions.Gate) && !IsNativeMappingGateHeld;
+
     private const uint MEM_COMMIT = 0x1000;
     private const uint MEM_RESERVE = 0x2000;
     private const uint MEM_RELEASE = 0x8000;
