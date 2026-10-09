@@ -159,6 +159,17 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
     public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation observation) =>
         IsAvailable && _backing is not null && _host is IHostMappedReadWatchMemory provider &&
         provider.IsMappedCopyWriteWatchCurrent(_backing, observation);
+    public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation observation,
+        out CpuMappedReadWatchDiagnostic diagnostic)
+    {
+        if (!IsAvailableForReadWatchDiagnostic(true, out var reason))
+        { diagnostic = new() { SharedClosure = reason, BooleanCurrent = false }; return false; }
+        if (_backing is not { } backing)
+        { diagnostic = new() { SharedClosure = "shared-backing-missing", BooleanCurrent = false }; return false; }
+        if (_host is not IHostMappedReadWatchMemory provider)
+        { diagnostic = new() { SharedClosure = "shared-pre-capability-unavailable", BooleanCurrent = false }; return false; }
+        return provider.IsMappedCopyWriteWatchCurrent(backing, observation, out diagnostic);
+    }
     public CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(CpuMappedCopyObservation observation)
     {
         if (!IsAvailable || _backing is not { } backing || _host is not IHostMappedReadWatchMemory provider)

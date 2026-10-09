@@ -14,7 +14,12 @@ internal static partial class MetalVideoPresenter
         long? OriginalSession, ulong? LayoutAddress, ulong? LayoutBytes,
         ulong? SourceAddress, ulong? SourceBytes, ulong? FootprintAddress, ulong? FootprintBytes,
         ImageDiagnosticOrigin Creation, ImageDiagnosticWork Mutation,
-        int? VolumeState, bool? VolumeUnknownProducer, string? VolumeUnknownReason, int? VolumeVersion);
+        int? VolumeState, bool? VolumeUnknownProducer, string? VolumeUnknownReason, int? VolumeVersion)
+    {
+        internal string? NativeGuard { get; init; }
+        internal CpuMappedReadWatchStatus? FirstNativeStatus { get; init; }
+        internal OriginalReadWatchDiagnostic? FirstWatch { get; init; }
+    }
 
     private sealed class FiniteStorageCohortRefusal(string message, FiniteStorageCohortOffender offender)
         : NotSupportedException(message)
@@ -42,6 +47,7 @@ internal static partial class MetalVideoPresenter
     private static int _finiteStorageRuntimeTraceRows;
     private static int _finiteStoragePostReleaseRefusalTraceRows;
     private static int _finiteStorageRetainedOwnerRefusalTraceRows;
+    private static int _finiteStorageBodyOwnerRefusalTraceRows;
     private static long _finiteStorageRuntimeProducers, _finiteStorageRuntimeApplied, _finiteStorageRuntimeCanonical;
 
     private static void TraceFiniteStorageDispatchRefusal(ComputeGuestDispatch dispatch, Exception failure)
@@ -66,12 +72,15 @@ internal static partial class MetalVideoPresenter
         if (!_rgbaStorageRuntimePublicationRequested || Monitor.IsEntered(_gate)) return;
         try
         {
+            if (stage == "dirty-body-owner-refused" && _volumeOwnerDeclineDiagnostics &&
+                (origin?.Memory is not ICpuMappedPublicationSource outputSource || !outputSource.CanWaitForMappedPublicationValidation)) return;
             if (stage == "producer-retained") Interlocked.Increment(ref _finiteStorageRuntimeProducers);
             else if (stage == "provider-applied") Interlocked.Increment(ref _finiteStorageRuntimeApplied);
             else if (stage == "canonical-completed") Interlocked.Increment(ref _finiteStorageRuntimeCanonical);
             ref var budget = ref _finiteStorageRuntimeTraceRows;
             if (stage == "dirty-post-release-refused") budget = ref _finiteStoragePostReleaseRefusalTraceRows;
             else if (stage == "dirty-retained-owner-refused") budget = ref _finiteStorageRetainedOwnerRefusalTraceRows;
+            else if (stage == "dirty-body-owner-refused") budget = ref _finiteStorageBodyOwnerRefusalTraceRows;
             var rows = Volatile.Read(ref budget);
             if (rows >= 64 || Interlocked.CompareExchange(ref budget, rows + 1, rows) != rows) return;
             var original = origin?.Observation.Token;
@@ -97,7 +106,15 @@ internal static partial class MetalVideoPresenter
                 $"; offender_creation_color=[{other.Creation.Color?.ToString() ?? "unavailable"}]" +
                 $"; offender_mutation_kind={other.Mutation.Kind ?? "unrecorded"}; offender_mutation_sequence={other.Mutation.Sequence}" +
                 $"; offender_volume_state={other.VolumeState}; offender_volume_unknown={other.VolumeUnknownProducer}" +
-                $"; offender_volume_unknown_reason={other.VolumeUnknownReason}; offender_volume_version={other.VolumeVersion}" : "";
+                $"; offender_volume_unknown_reason={other.VolumeUnknownReason}; offender_volume_version={other.VolumeVersion}" +
+                $"; offender_first_native_guard={other.NativeGuard ?? "none-or-not-reached"}; offender_first_native_status={other.FirstNativeStatus?.ToString() ?? "not-reached"}" +
+                $"; offender_first_boolean_current={other.FirstWatch?.BooleanCurrent?.ToString() ?? "not-reached"}" +
+                $"; offender_first_mapping_guard={other.FirstWatch?.Provider.MappingGuard ?? "not-reached"}; offender_first_mapping_check={other.FirstWatch?.Provider.MappingCheck ?? "not-reached"}" +
+                $"; offender_first_watch_guard={other.FirstWatch?.Provider.WatchGuard ?? "not-reached"}; offender_first_primary_admission={other.FirstWatch?.Provider.PrimaryAdmission?.ToString() ?? "not-reached"}" +
+                $"; offender_first_classification_guard={other.FirstWatch?.Provider.ClassificationGuard ?? "not-reached"}" +
+                $"; offender_first_provider_status={other.FirstWatch?.Provider.ProviderStatus?.ToString() ?? "not-reached"}; offender_first_local_guard={other.FirstWatch?.LocalGuard ?? "not-reached"}" +
+                $"; offender_first_original_read_ticket={other.FirstWatch?.OriginalRead?.ToString() ?? "not-reached"}; offender_first_publication_ticket={other.FirstWatch?.Publication?.ToString() ?? "not-reached"}; offender_first_validation_ticket={other.FirstWatch?.Validation?.ToString() ?? "not-reached"}" +
+                $"; offender_first_shared_closure={other.FirstWatch?.Provider.SharedClosure ?? "not-reached"}; offender_first_owner_closure={other.FirstWatch?.Provider.OwnerClosure ?? "not-reached"}; offender_first_virtual_closure={other.FirstWatch?.Provider.VirtualClosure ?? "not-reached"}" : "";
             Console.Error.WriteLine($"finite-storage-runtime stage={stage}; address=0x{address:X}; reason={reason[..Math.Min(reason.Length, 192)]}; " +
                 $"producer_count={Volatile.Read(ref _finiteStorageRuntimeProducers)}; applied_count={Volatile.Read(ref _finiteStorageRuntimeApplied)}; canonical_count={Volatile.Read(ref _finiteStorageRuntimeCanonical)}; " +
                 $"original_session={origin?.Session}; original_protected_id={original?.ProtectedIdentity}; original_protected_generation={original?.ProtectedGeneration}; " +

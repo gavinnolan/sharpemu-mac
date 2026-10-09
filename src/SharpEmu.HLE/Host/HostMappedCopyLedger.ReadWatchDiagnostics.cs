@@ -4,6 +4,26 @@ namespace SharpEmu.HLE.Host;
 
 public sealed unsafe partial class HostMappedCopyLedger
 {
+    // Same original Boolean mapping/watch guard order. In particular this
+    // does NOT invoke Status or perform its later admission classification.
+    public bool IsMappedCopyWriteWatchCurrent(HostBackingObject backing,
+        CpuMappedCopyObservation observation, out CpuMappedReadWatchDiagnostic diagnostic)
+    {
+        diagnostic = default;
+        if (!IsCurrentForReadWatchDiagnostic(backing, observation, out var mappingReason))
+        {
+            diagnostic = new() { MappingGuard = mappingReason, MappingCheck = "before-watch", BooleanCurrent = false };
+            return ReadWatchDeclined("mapping-not-current", observation);
+        }
+        if (observation.OwnerIdentity is not Capture capture)
+        { diagnostic = new() { MappingGuard = "capture-missing", BooleanCurrent = false }; return ReadWatchDeclined("capture-missing", observation); }
+        if (capture.ReadWatch is not { } watch)
+        { diagnostic = new() { WatchGuard = "watch-missing", BooleanCurrent = false }; return ReadWatchDeclined("watch-missing", observation); }
+        var current = watch.TryIsCurrent(out var reason, out var primaryAdmission);
+        diagnostic = new() { WatchGuard = reason, PrimaryAdmission = primaryAdmission >= 0 ? primaryAdmission : null, BooleanCurrent = current };
+        return current || ReadWatchDeclined(reason, observation, primaryAdmission);
+    }
+
     // Selected ONLY by the optional diagnostic overload. Same short-circuit
     // reads as IsCurrent, without a second mapping query or late re-resolution.
     private bool IsCurrentForReadWatchDiagnostic(HostBackingObject backing, CpuMappedCopyObservation observation,

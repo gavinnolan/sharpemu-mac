@@ -160,7 +160,14 @@ internal static partial class MetalVideoPresenter
             if (!validation.IsCurrent) throw new InvalidOperationException("Canonical dirty acknowledgment mapping was revoked.");
             lock (_gate)
                 ownerCurrent = InspectCanonicalDirtyOwnerForAcknowledgmentLocked(address, image, debt, origin, version, texture, out reason, out offender, reservation);
-            if (!ownerCurrent) throw new InvalidOperationException("Canonical dirty acknowledgment exact native owner changed: " + reason);
+            if (!ownerCurrent)
+            {
+                // The first failed query and detached offender are saved under
+                // the gate. Failure-only output uses its own bounded budget.
+                if (_volumeOwnerDeclineDiagnostics)
+                    TraceFiniteStorageRuntime("dirty-body-owner-refused", address, reason, origin, offender);
+                throw new InvalidOperationException("Canonical dirty acknowledgment exact native owner changed: " + reason);
+            }
             outcome = CanonicalDirtyResult.Acknowledged;
         }
         catch (OriginalCanonicalDirtyBusy busy)

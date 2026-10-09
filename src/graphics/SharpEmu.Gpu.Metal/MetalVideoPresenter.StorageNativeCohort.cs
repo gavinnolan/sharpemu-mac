@@ -144,23 +144,31 @@ internal static partial class MetalVideoPresenter
                 return CpuMappedReadWatchStatus.Stale;
             }
             reason = "other-image-original-volume-watch-or-version";
+            string? nativeGuard = null;
+            OriginalReadWatchDiagnostic? firstWatch = null;
+            CpuMappedReadWatchStatus? firstNativeStatus = null;
             if (other.TextureType == MtlTextureType3D)
             {
                 // Keep the actual first refusing status. A participating writer
                 // can finish between a Boolean check and a later status query;
                 // that must not turn a healthy Busy into Stale. Busy is still
                 // refusal only, and every remaining physical owner is checked.
-                var status = classifyBusy
+                var status = _volumeOwnerDeclineDiagnostics
+                    ? InspectSingletonVolumeCohortWithDiagnosticLocked(other, otherOrigin!, reservation,
+                        classifyBusy, out nativeGuard, out firstWatch)
+                    : classifyBusy
                     ? IsSingletonVolumeNativeOwnerMetadataCurrentLocked(other, otherOrigin!)
                         ? reservation.GetStatus(otherOrigin!.VolumeWatch!) : CpuMappedReadWatchStatus.Stale
                     : otherOrigin!.VolumeWatch is not null &&
                         IsSingletonVolumeNativeOwnerCurrentWithReservationLocked(other, otherOrigin, reservation)
                         ? CpuMappedReadWatchStatus.Current : CpuMappedReadWatchStatus.Stale;
+                if (_volumeOwnerDeclineDiagnostics) firstNativeStatus = status;
                 if (status == CpuMappedReadWatchStatus.Busy) busy = true;
                 else if (status != CpuMappedReadWatchStatus.Current)
                 {
                     if (captureOffender && _rgbaStorageRuntimePublicationRequested)
-                        offender = CaptureFiniteStorageCohortOffender(pair.Key, other, "original-volume-watch-or-version");
+                        offender = CaptureFiniteStorageCohortOffender(pair.Key, other, "original-volume-watch-or-version") with
+                        { NativeGuard = nativeGuard, FirstNativeStatus = status, FirstWatch = firstWatch };
                     return CpuMappedReadWatchStatus.Stale;
                 }
             }
@@ -168,12 +176,34 @@ internal static partial class MetalVideoPresenter
             if (PhysicalMappingOverlaps(origin.Mapping, otherOrigin!.Mapping))
             {
                 if (captureOffender && _rgbaStorageRuntimePublicationRequested)
-                    offender = CaptureFiniteStorageCohortOffender(pair.Key, other, "physical-overlap");
+                    offender = CaptureFiniteStorageCohortOffender(pair.Key, other, "physical-overlap") with
+                    { NativeGuard = nativeGuard, FirstNativeStatus = firstNativeStatus, FirstWatch = firstWatch };
                 return CpuMappedReadWatchStatus.Stale;
             }
         }
         reason = busy ? "original-volume-watch-busy" : "qualified";
         return busy ? CpuMappedReadWatchStatus.Busy : CpuMappedReadWatchStatus.Current;
+    }
+
+    private static CpuMappedReadWatchStatus InspectSingletonVolumeCohortWithDiagnosticLocked(GuestImage image,
+        StorageCpuSeedOrigin origin, StorageWatchReservation reservation, bool classifyBusy,
+        out string? guard, out OriginalReadWatchDiagnostic? diagnostic)
+    {
+        diagnostic = null;
+        if (classifyBusy)
+        {
+            if (!InspectSingletonVolumeNativeOwnerLocked(image, origin, reservation, true, out guard, out diagnostic))
+                return CpuMappedReadWatchStatus.Stale;
+            var status = reservation.GetStatusWithDiagnostic(origin.VolumeWatch!, out var captured);
+            diagnostic = captured;
+            guard = status == CpuMappedReadWatchStatus.Current ? null : "original-read-watch";
+            return status;
+        }
+        // Preserve the outer null check before the original strict predicate.
+        guard = "watch-missing";
+        if (origin.VolumeWatch is null) return CpuMappedReadWatchStatus.Stale;
+        return InspectSingletonVolumeNativeOwnerLocked(image, origin, reservation, false, out guard, out diagnostic)
+            ? CpuMappedReadWatchStatus.Current : CpuMappedReadWatchStatus.Stale;
     }
 
     private static void RequireFiniteStorageNativeCohortLocked(GuestImage image, StorageCpuSeedOrigin origin,
