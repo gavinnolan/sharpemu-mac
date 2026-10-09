@@ -15,6 +15,7 @@ internal static partial class MetalVideoPresenter
     private static Action? _singletonVolumeConstructionBeforeFinalOwnerForControl = null;
     private static Action<CpuMappedReadValidation, CpuMappedCopyObservation>? _singletonVolumeConstructionReadPreparedForControl = null;
     private static Action? _singletonVolumeConstructionBusyForControl = null;
+    private static Action? _singletonVolumeConstructionFirstBusyForControl = null;
 
     // Only private ORIGINAL CPU preparation can acquire this exclusion. It
     // cannot refresh a live owner or retry an already encoded dispatch.
@@ -136,40 +137,17 @@ internal static partial class MetalVideoPresenter
                 if (status == CpuMappedReadWatchStatus.Current)
                 {
                     _singletonVolumeConstructionBeforeFinalContentForControl?.Invoke();
-                    try { ValidateSingletonVolumeOriginalContent(origin); }
-                    catch (InvalidOperationException failure)
-                    {
-                        // The writer may begin AFTER the status read. It may
-                        // delay only this retained constructor, never hide any
-                        // changed original token/mapping/session/health.
-                        var originalBusy = false;
-                        try
-                        {
-                            originalBusy = OriginalTransferredObservationCurrent() &&
-                                watch.Source.GetMappedCopyWriteWatchStatus(watch.Mapping) == CpuMappedReadWatchStatus.Busy;
-                        }
-                        catch { ExceptionDispatchInfo.Capture(failure).Throw(); }
-                        if (!originalBusy) throw;
-                        status = CpuMappedReadWatchStatus.Busy;
-                    }
+                    status = ValidateTransferredOriginalContent();
                     if (status == CpuMappedReadWatchStatus.Current)
                     {
                         _singletonVolumeConstructionBeforeFinalOwnerForControl?.Invoke();
-                        var accepted = false;
-                        lock (_gate)
-                        {
-                            if (OriginalTransferredOwnerIdentityLocked() && IsSingletonVolumeNativeOwnerCurrentLocked(native!, origin))
-                                accepted = true;
-                            else if (!OriginalTransferredOwnerIdentityLocked() ||
-                                watch.Source.GetMappedCopyWriteWatchStatus(watch.Mapping) != CpuMappedReadWatchStatus.Busy)
-                                throw new InvalidOperationException("Volume construction ORIGINAL owner changed at its final encoding boundary.");
-                        }
-                        if (accepted) return; // ordinary guard succeeds; no disposed-ticket borrowing
-                        // Token/mapping checks remain outside the gate. Busy
-                        // never turns a failed strict owner check into success.
-                        if (!OriginalTransferredObservationCurrent())
-                            throw new InvalidOperationException("Volume construction ORIGINAL observation changed at its final encoding boundary.");
-                        status = CpuMappedReadWatchStatus.Busy;
+                        // The native identity is metadata only. Query the SAME
+                        // original status outside the presenter gate, then
+                        // bracket it with unchanged owner checks before return.
+                        RequireTransferredOwnerMetadata();
+                        status = ValidateTransferredOriginalContent();
+                        RequireTransferredOwnerMetadata();
+                        if (status == CpuMappedReadWatchStatus.Current) return;
                     }
                 }
                 if (status != CpuMappedReadWatchStatus.Busy)
@@ -179,6 +157,33 @@ internal static partial class MetalVideoPresenter
                     throw new TimeoutException("Volume construction ORIGINAL participating writer remained busy before shader encoding.");
                 Thread.Sleep(1);
             }
+        }
+
+        private CpuMappedReadWatchStatus ValidateTransferredOriginalContent()
+        {
+            try
+            {
+                ValidateSingletonVolumeOriginalContentWithReservation(origin, default, classifyOrdinaryBusy: true);
+                return CpuMappedReadWatchStatus.Current;
+            }
+            catch (SingletonVolumeOriginalBusy busy) when (ReferenceEquals(busy.Original, origin))
+            {
+                // Preserve the FIRST healthy Busy refusal even if the writer
+                // finishes before this catch. A later status cannot rescue Stale.
+                _singletonVolumeConstructionFirstBusyForControl?.Invoke();
+                if (!OriginalTransferredObservationCurrent())
+                    throw new InvalidOperationException("Volume construction ORIGINAL observation changed at its final encoding boundary.");
+                RequireTransferredOwnerMetadata();
+                return CpuMappedReadWatchStatus.Busy;
+            }
+        }
+
+        private void RequireTransferredOwnerMetadata()
+        {
+            lock (_gate)
+                if (!OriginalTransferredOwnerIdentityLocked() ||
+                    !IsSingletonVolumeNativeOwnerMetadataCurrentLocked(native!, origin))
+                    throw new InvalidOperationException("Volume construction ORIGINAL owner changed at its final encoding boundary.");
         }
 
         private bool OriginalTransferredObservationCurrent()

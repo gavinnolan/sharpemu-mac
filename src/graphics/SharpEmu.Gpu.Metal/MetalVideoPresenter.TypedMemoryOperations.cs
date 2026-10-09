@@ -1,5 +1,6 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
+using System.Runtime.ExceptionServices;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu.GpuCommands;
 
@@ -15,7 +16,16 @@ internal static partial class MetalVideoPresenter
     // the closed packet payload. Public arbitrary Action admission stays unknown.
     private sealed record OrderedCommandMemoryOperation(
         CommandMemoryOperation Operation, ICpuMemory Memory, long Session, GuestQueueIdentity Queue,
-        ICpuMappedCopySource? Source, CpuMappedCopyObservation? Mapping, Action Action);
+        ICpuMappedCopySource? Source, CpuMappedCopyObservation? Mapping, Action Action, CommandMemoryReadWatch? OriginalWatch = null);
+
+    private sealed class CommandMemoryReadWatch(ICpuMappedReadWatchSource source, CpuMappedCopyObservation original)
+    {
+        private int releaseAttempted;
+        internal void Release()
+        {
+            if (Interlocked.Exchange(ref releaseAttempted, 1) == 0) source.ReleaseMappedCopyWriteWatch(original);
+        }
+    }
 
     private static OrderedCommandMemoryOperation PrepareCommandMemoryOperation(
         MetalCommandStreamHost host, CommandMemoryOperation operation, Action execute)
@@ -24,6 +34,7 @@ internal static partial class MetalVideoPresenter
         var session = CurrentNativeDepthFaceSession; // first session, never refreshed after a probe
         var queue = _submittingGuestQueue ?? GuestQueueIdentity.Default;
         ICpuMappedCopySource? source = null; CpuMappedCopyObservation? mapping = null;
+        CommandMemoryReadWatch? watch = null;
         if (NativeColorBorrowEnabled && operation.Kind == CommandMemoryOperation.OperationKind.Write &&
             operation.TryGetGuestWriteRange(out var address, out var bytes) && bytes is > 0 and <= CommandMemoryOperation.MaximumOriginalWriteBytes &&
             memory is ICpuMappedCopySource mapped && memory is ICpuMappedPublicationSource)
@@ -34,15 +45,32 @@ internal static partial class MetalVideoPresenter
                 // Discard ALL copied destination bytes; they are mapping setup,
                 // never native/CPU pixel authority or command payload storage.
                 var probe = new byte[(int)bytes];
-                if (mapped.TryReadMappedCopy(address, bytes, address, probe, out var original) == CpuMappedCopyResult.Copied &&
-                    original is not null && original.FootprintAddress == address && original.FootprintByteCount == bytes &&
+                CpuMappedCopyObservation? original = null;
+                var watched = mapped as ICpuMappedReadWatchSource;
+                var result = watched is null
+                    ? mapped.TryReadMappedCopy(address, bytes, address, probe, out original)
+                    : watched.TryReadMappedCopyWithWriteWatch(address, bytes, address, probe, out original);
+                // The physical veto belongs to THIS first full copy. Never
+                // enroll after an ordinary copy or retry with a fresh mapping.
+                if (watched is not null && original is not null) watch = new(watched, original);
+                if (result == CpuMappedCopyResult.Copied && original is not null &&
+                    original.FootprintAddress == address && original.FootprintByteCount == bytes &&
                     original.SourceAddress == address && original.SourceByteCount == bytes &&
                     mapped.IsMappedCopyObservationCurrent(original) && session == CurrentNativeDepthFaceSession)
                 { source = mapped; mapping = original; }
             }
             catch { } // optional attribution failure leaves the writer UNKNOWN, never rebased
         }
-        return new(operation, memory, session, queue, source, mapping, execute);
+        var prepared = new OrderedCommandMemoryOperation(operation, memory, session, queue, source, mapping, execute, watch);
+        if (mapping is null && watch is not null)
+        {
+            // A rejected copy still returns its original bookkeeping owner on
+            // some providers. Consume it once; unknown cleanup stays rooted.
+            try { watch.Release(); }
+            catch { lock (_gate) _uncertainCommandMemoryWrite ??= prepared; throw; }
+            prepared = prepared with { OriginalWatch = null };
+        }
+        return prepared;
     }
 
     internal static void ExecuteTypedGuestMemoryOperation(MetalCommandStreamHost host, CommandMemoryOperation operation)
@@ -69,7 +97,8 @@ internal static partial class MetalVideoPresenter
                 try
                 {
                     operation.ExecuteOriginalWrite((ICpuMappedPublicationSource)owned.Memory, original,
-                        () => RequireCommandMemoryOriginal(owned, original, requireExecution: true));
+                        () => RequireCommandMemoryOriginal(owned, original, requireExecution: true),
+                        originalHasWriteWatch: owned.OriginalWatch is not null);
                 }
                 catch
                 {
@@ -83,11 +112,48 @@ internal static partial class MetalVideoPresenter
                 operation.Value, Volatile.Read(ref _executingGuestWorkSequence));
         };
         owned = PrepareCommandMemoryOperation(host, operation, execute);
-        var sequence = SubmitOrderedGuestCompletionCore(execute, "command_stream memory operation", owned);
-        TraceCommandMemory("admitted", operation.DebugName, operation.Address, operation.ByteCount, operation.Value, sequence);
-        if (sequence != 0 && !WaitForGuestWork(sequence, Timeout.Infinite))
-            throw FailGuestCompletion("command-stream memory operation did not complete");
-        RequireGuestCompletionHealthy();
+        long sequence = 0; Exception? primary = null;
+        try
+        {
+            sequence = SubmitOrderedGuestCompletionCore(execute, "command_stream memory operation", owned);
+            TraceCommandMemory("admitted", operation.DebugName, operation.Address, operation.ByteCount, operation.Value, sequence);
+            if (sequence != 0 && !WaitForGuestWork(sequence, Timeout.Infinite))
+                throw FailGuestCompletion("command-stream memory operation did not complete");
+            RequireGuestCompletionHealthy();
+        }
+        catch (Exception failure) { primary = failure; }
+        finally { primary = ReleaseOriginalCommandMemoryWatch(owned, sequence, primary); }
+        if (primary is not null) ExceptionDispatchInfo.Capture(primary).Throw();
+    }
+
+    private static Exception? ReleaseOriginalCommandMemoryWatch(OrderedCommandMemoryOperation owned,
+        long sequence, Exception? primary)
+    {
+        if (owned.OriginalWatch is not { } watch) return primary;
+        lock (_gate)
+        {
+            // A global failure can wake the submitting caller before its exact
+            // taken callback exits. Preserve that original rather than releasing
+            // its physical veto beneath an in-flight/uncertain transaction.
+            if (owned.Operation.RetainsUncertainOriginalWrite ||
+                _takenDepthCubeProducerWork is OrderedCommandMemoryOperation taken &&
+                ReferenceEquals(taken.Operation, owned.Operation) ||
+                _guestWorkFailure is null && (sequence == 0 || !IsGuestWorkCompletedLocked(sequence)) &&
+                _pendingGuestWorkByQueue.Values.Any(items => items.Any(item =>
+                    item.Work is OrderedCommandMemoryOperation pending &&
+                    ReferenceEquals(pending.Operation, owned.Operation) &&
+                    ReferenceEquals(pending.OriginalWatch, watch))) ||
+                sequence != 0 && !IsGuestWorkCompletedLocked(sequence) && _guestWorkFailure is null)
+            { _uncertainCommandMemoryWrite ??= owned; return primary; }
+        }
+        try { watch.Release(); }
+        catch (Exception cleanup)
+        {
+            lock (_gate) _uncertainCommandMemoryWrite ??= owned;
+            if (primary is null) return cleanup;
+            try { primary.Data["CommandMemoryOriginalWatchCleanup"] = cleanup; } catch { }
+        }
+        return primary;
     }
 
     private static void RequireCommandMemoryExecutionLocked(OrderedCommandMemoryOperation original)
@@ -103,6 +169,7 @@ internal static partial class MetalVideoPresenter
             _takenDepthCubeProducerWork is not OrderedCommandMemoryOperation taken ||
             !ReferenceEquals(taken.Operation, original.Operation) || !ReferenceEquals(taken.Memory, original.Memory) ||
             !ReferenceEquals(taken.Source, original.Source) || !ReferenceEquals(taken.Mapping, original.Mapping) ||
+            !ReferenceEquals(taken.OriginalWatch, original.OriginalWatch) ||
             taken.Session != original.Session || taken.Queue != original.Queue || _submittingGuestQueue != original.Queue)
             throw new NotSupportedException("Command memory operation lacks its exact taken/executing original receipt.");
     }

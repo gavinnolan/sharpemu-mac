@@ -27,6 +27,14 @@ public sealed partial class MetalImmutableGpuVersionTests
         RunActualRuntimeTwoTypedPublications(false, rgba: true, originalVolumes: true, constructionBusyWindow: "owner");
 
     [FiniteStoragePublicationNativeFact]
+    public void ActualVolumeConstructionRetainsFirstBusyAfterDisjointWriterCompletesBeforeContentCatchContinues() =>
+        RunActualRuntimeTwoTypedPublications(false, rgba: true, originalVolumes: true, constructionBusyWindow: "content-completed");
+
+    [FiniteStoragePublicationNativeFact]
+    public void ActualVolumeConstructionRetainsFirstBusyAfterDisjointWriterCompletesBeforeOwnerCatchContinues() =>
+        RunActualRuntimeTwoTypedPublications(false, rgba: true, originalVolumes: true, constructionBusyWindow: "owner-completed");
+
+    [FiniteStoragePublicationNativeFact]
     public void ActualVolumeConstructionRefusesOriginalOverlappingWriterBeforeSecondDispatch() =>
         RunActualRuntimeTwoTypedPublications(false, rgba: true, originalVolumes: true, constructionBusyWindow: "overlap");
 
@@ -45,13 +53,13 @@ public sealed partial class MetalImmutableGpuVersionTests
         private readonly ulong baseAddress, writeAddress, labelAddress;
         private readonly long sequence, eop;
         private readonly ITestOutputHelper output;
-        private readonly FieldInfo writeHook, entryHook, busyHook, preparedHook, encoderHook;
-        private readonly object? oldWrite, oldEntry, oldBusy, oldPrepared, oldEncoder;
+        private readonly FieldInfo writeHook, entryHook, busyHook, preparedHook, encoderHook, firstBusyHook;
+        private readonly object? oldWrite, oldEntry, oldBusy, oldPrepared, oldEncoder, oldFirstBusy;
         private readonly ManualResetEventSlim admitted = new(), resume = new();
         private Thread? writer;
         private Exception? writerFailure;
         private bool written, entered;
-        private int busy, prepared, encoders;
+        private int busy, prepared, encoders, caughtFirstBusy;
 
         internal NativeConstructionBusyControl(PhysicalVirtualMemory physical,
             TrackedCpuMemory memory, MetalCommandStreamHost host, FiniteStorageFixtureOwners owners,
@@ -67,13 +75,14 @@ public sealed partial class MetalImmutableGpuVersionTests
             views = Assert.IsType<SharedBackingViews>(StorageMember(space, "_views"));
             const BindingFlags fields = BindingFlags.Instance | BindingFlags.NonPublic;
             writeHook = typeof(SharedBackingViews).GetField("_beforeCanonicalAliasCopyForControl", fields)!;
-            entryHook = Field(window == "owner" ? "_singletonVolumeConstructionBeforeFinalOwnerForControl" :
+            entryHook = Field(window.StartsWith("owner") ? "_singletonVolumeConstructionBeforeFinalOwnerForControl" :
                 "_singletonVolumeConstructionBeforeFinalContentForControl");
             busyHook = Field("_singletonVolumeConstructionBusyForControl");
+            firstBusyHook = Field("_singletonVolumeConstructionFirstBusyForControl");
             preparedHook = Field("_singletonVolumeConstructionReadPreparedForControl");
             encoderHook = Field("_computeEncoderCreationOverride");
             oldWrite = writeHook.GetValue(views); oldEntry = entryHook.GetValue(null);
-            oldBusy = busyHook.GetValue(null); oldPrepared = preparedHook.GetValue(null); oldEncoder = encoderHook.GetValue(null);
+            oldBusy = busyHook.GetValue(null); oldFirstBusy = firstBusyHook.GetValue(null); oldPrepared = preparedHook.GetValue(null); oldEncoder = encoderHook.GetValue(null);
             owners.OrdinaryWriterOwner = this;
             writeAddress = window == "overlap" ? seed.Address : checked(baseAddress + (ulong)imageBytes + 32768);
             labelAddress = checked(baseAddress + (ulong)imageBytes + 8);
@@ -100,13 +109,25 @@ public sealed partial class MetalImmutableGpuVersionTests
                     CheckOriginalToken();
                 }));
                 entryHook.SetValue(null, (Action)StartWriter);
+                if (window.EndsWith("completed"))
+                    firstBusyHook.SetValue(null, (Action)(() =>
+                    {
+                        RequireReleasedGates(); Assert.True(entered); Assert.Equal(0, encoders);
+                        Assert.Equal(0, caughtFirstBusy++);
+                        Assert.Equal(CpuMappedReadWatchStatus.Busy, ((ICpuMappedReadWatchSource)memory).GetMappedCopyWriteWatchStatus(mapping));
+                        firstBusyHook.SetValue(null, oldFirstBusy);
+                        resume.Set(); Join(); // real writer completes before the catch continues
+                        Assert.Equal(CpuMappedReadWatchStatus.Current, ((ICpuMappedReadWatchSource)memory).GetMappedCopyWriteWatchStatus(mapping));
+                        CheckOriginalToken(); CheckExactNativeOwner();
+                    }));
                 busyHook.SetValue(null, (Action)(() =>
                 {
                     RequireReleasedGates(); Assert.True(entered); Assert.True(window != "overlap");
-                    Assert.True(writer!.IsAlive); Assert.Equal(0, encoders);
+                    Assert.Equal(!window.EndsWith("completed"), writer!.IsAlive); Assert.Equal(0, encoders);
                     Assert.False(MetalVideoPresenter.WaitForGuestWork(sequence, 0));
                     Assert.False(MetalVideoPresenter.WaitForGuestWork(eop, 0));
-                    Assert.Equal(CpuMappedReadWatchStatus.Busy, ((ICpuMappedReadWatchSource)memory).GetMappedCopyWriteWatchStatus(mapping));
+                    Assert.Equal(window.EndsWith("completed") ? CpuMappedReadWatchStatus.Current : CpuMappedReadWatchStatus.Busy,
+                        ((ICpuMappedReadWatchSource)memory).GetMappedCopyWriteWatchStatus(mapping));
                     CheckOriginalToken(); CheckExactNativeOwner(); busy++;
                     busyHook.SetValue(null, oldBusy); resume.Set();
                 }));
@@ -150,6 +171,7 @@ public sealed partial class MetalImmutableGpuVersionTests
         internal void AssertContinued()
         {
             Join(); Assert.True(entered); Assert.Equal(1, prepared); Assert.Equal(1, busy); Assert.Equal(1, encoders);
+            Assert.Equal(window.EndsWith("completed") ? 1 : 0, caughtFirstBusy);
             Assert.True(MetalVideoPresenter.WaitForGuestWork(sequence, 0)); Assert.True(MetalVideoPresenter.WaitForGuestWork(eop, 0));
             Assert.Equal(CpuMappedReadWatchStatus.Current, ((ICpuMappedReadWatchSource)memory).GetMappedCopyWriteWatchStatus(mapping));
             CheckOriginalToken();
@@ -221,7 +243,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             resume.Set();
             try { if (writer is not null) Join(); } catch (Exception failure) { cleanup = failure; }
             Attempt(() => writeHook.SetValue(views, oldWrite)); Attempt(() => entryHook.SetValue(null, oldEntry));
-            Attempt(() => busyHook.SetValue(null, oldBusy)); Attempt(() => preparedHook.SetValue(null, oldPrepared));
+            Attempt(() => busyHook.SetValue(null, oldBusy)); Attempt(() => firstBusyHook.SetValue(null, oldFirstBusy)); Attempt(() => preparedHook.SetValue(null, oldPrepared));
             Attempt(() => encoderHook.SetValue(null, oldEncoder));
             if (!owners.OrdinaryWriterUnconfirmed) { Attempt(admitted.Dispose); Attempt(resume.Dispose); }
             if (cleanup is not null) ExceptionDispatchInfo.Capture(cleanup).Throw();

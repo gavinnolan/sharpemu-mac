@@ -99,10 +99,7 @@ internal static partial class MetalVideoPresenter
             _finiteStorageRetiredOriginCount != original.RetiredOrigins || _finiteRetiredDisplayOriginCount != original.RetiredDisplays)
             throw new InvalidOperationException("Finite storage pre-encode ORIGINAL receipt/cohort/queue changed.");
         foreach (var saved in original.Images)
-            if (!_guestImages.TryGetValue(saved.Address, out var image) || !ReferenceEquals(image, saved.Image) ||
-                !FiniteStoragePrecommitImageMatches(saved, image) || saved.Origin?.VolumeWatch is not null &&
-                !IsSingletonVolumeNativeOwnerMetadataCurrentLocked(image, saved.Origin))
-                throw new InvalidOperationException("Finite storage pre-encode ORIGINAL native owner/version changed.");
+            ValidateFiniteStoragePreencodeSavedImageLocked(saved);
         foreach (var pair in original.Selected)
             if (!_selectedStorageMipOwners.TryGetValue(pair.Key, out var value) || !ReferenceEquals(value, pair.Value))
                 throw new InvalidOperationException("Finite storage pre-encode ORIGINAL selected owner changed.");
@@ -118,6 +115,66 @@ internal static partial class MetalVideoPresenter
         foreach (var saved in original.SelectedNativeVersions)
             if (saved.Proof.Version != saved.Version || saved.Proof.ProducerSequence != saved.Producer)
                 throw new InvalidOperationException("Finite storage pre-encode ORIGINAL selected producer changed.");
+    }
+
+    private readonly record struct FiniteStoragePreencodeOwnerDiagnostic(ulong Address, string Branch, string Guard,
+        ulong? SavedScalar = null, ulong? ActualScalar = null);
+
+    private sealed class FiniteStoragePreencodeOwnerRefusal(FiniteStoragePreencodeOwnerDiagnostic first)
+        : InvalidOperationException("Finite storage pre-encode ORIGINAL native owner/version changed.")
+    {
+        internal readonly FiniteStoragePreencodeOwnerDiagnostic First = first;
+    }
+
+    private static void ValidateFiniteStoragePreencodeSavedImageLocked(FiniteStoragePrecommitImage saved) =>
+        ValidateFiniteStoragePreencodeSavedImageWithDiagnosticsLocked(saved, _volumeOwnerDeclineDiagnostics);
+
+    private static void ValidateFiniteStoragePreencodeSavedImageWithDiagnosticsLocked(FiniteStoragePrecommitImage saved, bool captureFirstRefusal)
+    {
+        if (!captureFirstRefusal)
+        {
+            // Cached-off retains the original predicate, reads and exception.
+            if (!_guestImages.TryGetValue(saved.Address, out var image) || !ReferenceEquals(image, saved.Image) ||
+                !FiniteStoragePrecommitImageMatches(saved, image) || saved.Origin?.VolumeWatch is not null &&
+                !IsSingletonVolumeNativeOwnerMetadataCurrentLocked(image, saved.Origin))
+                throw new InvalidOperationException("Finite storage pre-encode ORIGINAL native owner/version changed.");
+            return;
+        }
+        if (InspectFiniteStoragePreencodeSavedImageLocked(saved) is { } first)
+            throw new FiniteStoragePreencodeOwnerRefusal(first);
+    }
+
+    private static FiniteStoragePreencodeOwnerDiagnostic? InspectFiniteStoragePreencodeSavedImageLocked(FiniteStoragePrecommitImage saved)
+    {
+        // Alternative to ONE original check. Each reached field is sampled
+        // once in the old AND/OR order; no later tuple/watch/status resampling.
+        if (!_guestImages.TryGetValue(saved.Address, out var image)) return new(saved.Address, "registry", "missing");
+        if (!ReferenceEquals(image, saved.Image)) return new(saved.Address, "registry", "image-identity");
+        if (!ReferenceEquals(image.StorageCpuOrigin, saved.Origin)) return new(saved.Address, "tuple", "image-original");
+        if (!ReferenceEquals(image.StorageCpuLayout, saved.Layout)) return new(saved.Address, "tuple", "layout");
+        var texture = image.Texture;
+        if (texture != saved.Texture) return new(saved.Address, "tuple", "texture", (ulong)(nuint)saved.Texture, (ulong)(nuint)texture);
+        var version = image.ContentVersion;
+        if (version != saved.Version) return new(saved.Address, "tuple", "version", unchecked((ulong)saved.Version), unchecked((ulong)version));
+        var width = image.Width;
+        if (width != saved.Width) return new(saved.Address, "tuple", "width", saved.Width, width);
+        var height = image.Height;
+        if (height != saved.Height) return new(saved.Address, "tuple", "height", saved.Height, height);
+        var depth = image.Depth;
+        if (depth != saved.Depth) return new(saved.Address, "tuple", "depth", saved.Depth, depth);
+        var layers = image.ArrayLength;
+        if (layers != saved.ArrayLength) return new(saved.Address, "tuple", "layers", saved.ArrayLength, layers);
+        var type = image.TextureType;
+        if (type != saved.TextureType) return new(saved.Address, "tuple", "type", saved.TextureType, type);
+        var format = image.Format;
+        if (format != saved.Format) return new(saved.Address, "tuple", "format", (ulong)saved.Format, (ulong)format);
+        var initialized = image.Initialized;
+        if (initialized != saved.Initialized) return new(saved.Address, "tuple", "initialized", saved.Initialized ? 1ul : 0ul, initialized ? 1ul : 0ul);
+        var written = image.GpuWritten;
+        if (written != saved.GpuWritten) return new(saved.Address, "tuple", "gpu-written", saved.GpuWritten ? 1ul : 0ul, written ? 1ul : 0ul);
+        if (saved.Origin?.VolumeWatch is not null && SingletonVolumeNativeMetadataGuard(image, saved.Origin) is { } guard)
+            return new(saved.Address, "volume-metadata", guard);
+        return null;
     }
 
     private static void ValidateFiniteStoragePreencode(FiniteStoragePreencode original) =>

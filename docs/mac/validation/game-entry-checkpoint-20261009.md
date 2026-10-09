@@ -2,9 +2,9 @@
 
 Priority: make all nine games reach a menu or controllable scene first; performance and visual polish follow entry.
 
-Local main integrates qualified source `09bc1fce` at `ba6cd1cb`; its `src`, `tests` and `scripts` trees match that tested source. This adds typed command-write ownership and same-query original-watch diagnostics to the completed buffer-publication continuation and gate-order correction. No remote push or upstream merge was performed. The six historical game replays below retain their exact executable source `188b9c2843289cdd4da5b709f49973eef3084f52`; later fixes do not relabel their evidence.
+Local main integrates qualified source `8c4b352f`; its `src`, `tests` and `scripts` trees match that tested source. The successor retains the first watched command write and its exact Applied successor, preserves first-status constructor Busy and records the first pre-encode owner predicate. This adds typed command-write ownership and same-query original-watch diagnostics to the completed buffer-publication continuation and gate-order correction. No remote push or upstream merge was performed. The six historical game replays below retain their exact executable source `188b9c2843289cdd4da5b709f49973eef3084f52`; later fixes do not relabel their evidence.
 
-## Current qualified boot candidate
+## Prior qualified boot candidate: 09bc1fce
 
 Source `09bc1fce` passes three builds, 972 managed cases per actual ARM64/x64 CLR (199 Host, 693 Libs, 80 GPU), and 64 native cases per CLR. Its twelve typed native cases and both mixed buffer/image regressions pass first. ROOT independently verifies 1,981 source hashes, 104 compiled hashes, 979 native qualification artifacts, and absence of all 129 native process roots. Native manifest SHA-256: `3121b1510c26ac9dbf23e995e3d02bd1a20c821d1086e28e3a17435728646ad4`.
 
@@ -24,6 +24,14 @@ The source-exact `09bc1fce` app reaches these first failures, with no foreign ov
 ROOT independently verifies all 239 new game artifact hashes and absence of all eight owned driver/harness roots. Final manifest: `artifacts/validation/all-games-20261009/boot-typed-original-diagnostic-09bc1fce-game-entry-commandtrace-prepared/final-game-manifest.json`, SHA-256 `fa50de42ac949e60f1c850a2e84151a7a6418f6eb6597828890fab4b77e042ae`. Source, compiled files, signed payload, prior qualification and 413 read-only prerequisite links remain unchanged. These four attempts add no verified menu or gameplay title.
 
 After the replay batch closes and a fresh scan shows no game or heavy worker, the runtime lane is handed back to Kairo for a bounded validation/replay batch. SharpEmu continues source fixes and evidence review until the next coordinated window. Both tasks remain active.
+
+## Qualified watched-write and constructor successor
+
+Frozen source `8c4b352f` combines first watched command-write capture/lifetime (`6438de00`) and exact first-status constructor continuation (`66e63834`). ROOT independently verifies all 1,990 source hashes, all four exact donor blobs and unchanged inheritance outside the five integration paths. Source manifest SHA-256: `e01e0628a7613940a310f9ec8f104d4261c486a0fee2adc9ef43bfab2631666a`. Root, CPU, Metal and Package complete source review. Three builds and all 1,020 ordinary cases on each actual ARM64/x64 CLR pass, with no skipped cases. All 132 fresh native workers pass (66 per CLR). ROOT independently verifies the 12 build artifacts, 44 managed artifacts, 1,004 native artifacts, all 132 exact TRX identities, 1,990 source hashes, 104 compiled hashes and absence of all 133 native roots. Native manifest SHA-256: `0f39630cda6d0d0bc185bd3fdc58864c7e522829ebb7b3227daeb069708595cf`. Local main code matches this tested source; publication and game replays are separate checks.
+
+The ordinary inventory is 1,020 cases per CLR (208 Host, 732 Libs, 80 GPU); the separate native inventory is 66 per CLR. The new native constructor controls complete an actual disjoint admitted writer after its first Busy refusal and before continuation. The existing typed-write positive now verifies the exact queued original watch before 2,022 actual disjoint physical writes exceed the 512-entry history. Full native, canonical byte, once-only write and EOP oracles remain required. These controlled sources do not establish a new game result. Silent Hill's separate refusal before an original watch is enrolled at `0x80107F0000` remains unresolved.
+
+Kairo returns the runtime/build/test lane after its bounded v4.553 replay closes. ROOT independently confirms owned PIDs `28310` and `28307` absent, no game/compiler/test worker present and the shared lock absent. SharpEmu now owns the next qualification/replay batch; Kairo stays active for source and light analysis until coordinated return. Kairo's one-frame stalled replay and default step-clock limitation remain separate evidence.
 
 ## Latest qualification and three game replays
 

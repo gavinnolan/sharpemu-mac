@@ -44,7 +44,8 @@ public sealed class CommandMemoryOperation
     // Only the closed byte write has an original-execution scope so far. The
     // caller cannot inspect or replace the owned bytes, or substitute a younger
     // mapping after provider preparation refuses the first original.
-    public void ExecuteOriginalWrite(ICpuMappedPublicationSource source, CpuMappedCopyObservation original, Action requireOriginalOwner)
+    public void ExecuteOriginalWrite(ICpuMappedPublicationSource source, CpuMappedCopyObservation original, Action requireOriginalOwner,
+        bool originalHasWriteWatch = false)
     {
         ArgumentNullException.ThrowIfNull(requireOriginalOwner);
         if (Kind != OperationKind.Write || payload is null || payload.Length == 0 || payload.Length > MaximumOriginalWriteBytes)
@@ -53,8 +54,13 @@ public sealed class CommandMemoryOperation
         CpuMappedPublication? ticket = null;
         Exception? primary = null;
         var commitInProgress = false;
+        CpuMappedCopyObservation? appliedSuccessor = null;
+        var applied = false;
+        var watchedSource = originalHasWriteWatch ? source as ICpuMappedReadWatchSource : null;
         try
         {
+            if (originalHasWriteWatch && watchedSource is null)
+                throw new NotSupportedException("Command memory original watch has no exact release provider.");
             if (original.SourceAddress != Address || original.SourceByteCount != ByteCount ||
                 original.FootprintAddress != Address || original.FootprintByteCount != ByteCount)
                 throw new NotSupportedException("Command memory original write does not cover its entire owned payload.");
@@ -82,13 +88,31 @@ public sealed class CommandMemoryOperation
                 if (result == CpuMappedPublicationResult.PartialUnknown) retainedUnknownWrite = ticket;
                 throw new NotSupportedException($"Command memory ORIGINAL write did not complete: {result}.");
             }
+            applied = true;
+            if (originalHasWriteWatch)
+                appliedSuccessor = ticket.SuccessfulObservation ?? throw new NotSupportedException(
+                    "Command memory watched write lost its SAME Applied successor observation.");
             requireOriginalOwner(); // Applied is not an acknowledgement across session/owner replacement.
             GuestImageWriteTracker.TraceManagedDirtyCompletion(Address, ByteCount);
             if (GuestWriteWatch.Armed) GuestWriteWatch.Check(Address, payload);
         }
-        catch (Exception error) { if (commitInProgress) retainedUnknownWrite = ticket; primary = error; }
+        catch (Exception error) { if (commitInProgress || applied && originalHasWriteWatch && appliedSuccessor is null) retainedUnknownWrite = ticket; primary = error; }
         finally
         {
+            var ownedSuccessor = appliedSuccessor; appliedSuccessor = null;
+            // Closed Write needs no continuing read entitlement. The provider
+            // consumed its original watch and minted this exact own-write
+            // successor; release that bookkeeping once after notifications.
+            try
+            {
+                if (ownedSuccessor is not null) watchedSource!.ReleaseMappedCopyWriteWatch(ownedSuccessor);
+            }
+            catch (Exception cleanup)
+            {
+                retainedUnknownWrite = ticket;
+                if (primary is null) primary = cleanup;
+                else try { primary.Data["CommandMemorySuccessorWatchCleanup"] = cleanup; } catch { }
+            }
             var owned = ticket; ticket = null;
             try { owned?.Dispose(); }
             catch (Exception cleanup)

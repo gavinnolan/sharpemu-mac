@@ -16,6 +16,98 @@ public sealed partial class MetalStorageCpuSyncTests
 {
     private static object?[]? typedMemoryResetQuarantine;
 
+    [Fact]
+    public void FailedFirstCommandWatchCannotFallbackToPlainMappingCapture()
+    {
+        ActualArchitecture(); using var state = new BorrowColorState();
+        var memory = new TypedColorMemory("watch-unavailable"); MetalVideoPresenter.AttachGuestMemory(memory);
+        using var queue = MetalVideoPresenter.EnterGuestQueue("typed.color", 7);
+        var backend = new MetalGuestGpuBackend(); var host = new MetalCommandStreamHost(memory, backend, backend);
+        var operation = SharpEmu.Libs.Gpu.GpuCommands.CommandMemoryOperation.Write(TypedColorMemory.Destination, new byte[8]);
+        var original = InvokeVolume("PrepareCommandMemoryOperation", host, operation, (Action)(() => throw new Exception("not invoked")))!;
+        Assert.Null(original.GetType().GetProperty("Mapping")!.GetValue(original));
+        Assert.Null(original.GetType().GetProperty("OriginalWatch")!.GetValue(original));
+        Assert.Equal(1, memory.WatchedCommandCopies); Assert.Equal(0, memory.CommandCopies);
+        Assert.Equal(0, memory.ReleasedCommandWatches); Assert.Equal(0, memory.Writes);
+    }
+
+    // Metadata lifetime only. Active uses actual Take, but never invokes the
+    // saved callback; cleanup-unknown uses a synthetic release exception.
+    [Theory]
+    [InlineData("known")]
+    [InlineData("out-of-order-known")]
+    [InlineData("active")]
+    [InlineData("pending-sequence-unknown")]
+    [InlineData("failed-pending")]
+    [InlineData("cleanup-unknown")]
+    public void OriginalCommandWatchCleanupCannotReleaseActiveOrUncertainOwner(string variant)
+    {
+        ActualArchitecture(); using var state = new BorrowColorState();
+        var memory = new TypedColorMemory("disjoint"); MetalVideoPresenter.AttachGuestMemory(memory);
+        using var queue = MetalVideoPresenter.EnterGuestQueue("typed.color", 7);
+        var backend = new MetalGuestGpuBackend(); var host = new MetalCommandStreamHost(memory, backend, backend);
+        var operation = SharpEmu.Libs.Gpu.GpuCommands.CommandMemoryOperation.Write(TypedColorMemory.Destination, new byte[8]);
+        var original = InvokeVolume("PrepareCommandMemoryOperation", host, operation, (Action)(() => throw new Exception("not invoked")))!;
+        var root = Field("_uncertainCommandMemoryWrite"); var previousRoot = root.GetValue(null); Assert.Null(previousRoot);
+        var primary = new IOException("original caller failure"); var cleanup = new IOException("synthetic unknown watch release");
+        long sequence = 0;
+        try
+        {
+            if (variant is "active" or "out-of-order-known" or "pending-sequence-unknown" or "failed-pending")
+            {
+                if (variant == "out-of-order-known")
+                {
+                    using var foreign = MetalVideoPresenter.EnterGuestQueue("unrun.foreign", 1);
+                    MetalVideoPresenter.SubmitOrderedGuestAction(() => throw new Exception("not invoked"), "unrun prior queue");
+                }
+                lock (Field("_gate").GetValue(null)!)
+                {
+                    sequence = (long)InvokeVolume("EnqueueGuestWorkLocked", original)!;
+                    if (variant == "out-of-order-known") Field("_pendingGuestQueueCursor").SetValue(null, 1);
+                }
+                if (variant == "pending-sequence-unknown") sequence = 0; // submitting caller never received the accepted sequence
+                else if (variant == "failed-pending")
+                {
+                    MetalVideoPresenter.LatchGuestCompletionFailure("known untaken fixture cancellation");
+                    object?[] refused = [null]; Assert.Equal(false, InvokeVolume("TryTakeGuestWork", refused));
+                    Assert.Equal(0L, Field("_takenGuestWorkSequence").GetValue(null));
+                }
+                else
+                {
+                    object?[] taken = [null]; Assert.Equal(true, InvokeVolume("TryTakeGuestWork", taken));
+                    if (variant == "out-of-order-known")
+                    {
+                        Assert.Equal(2L, sequence); InvokeVolume("CompleteGuestWork", taken[0]);
+                        Assert.Equal(0L, Field("_completedGuestWorkSequence").GetValue(null));
+                        Assert.Contains(sequence, (HashSet<long>)Field("_completedGuestWorkOutOfOrder").GetValue(null)!);
+                    }
+                }
+            }
+            if (variant == "cleanup-unknown") memory.BeforeCommandRelease = () => throw cleanup;
+            Assert.Same(primary, InvokeVolume("ReleaseOriginalCommandMemoryWatch", original, sequence, primary));
+            if (variant is "active" or "pending-sequence-unknown") { Assert.Equal(0, memory.ReleasedCommandWatches); Assert.Same(original, root.GetValue(null)); }
+            else
+            {
+                Assert.Equal(1, memory.ReleasedCommandWatches);
+                Assert.Same(primary, InvokeVolume("ReleaseOriginalCommandMemoryWatch", original, sequence, primary));
+                Assert.Equal(1, memory.ReleasedCommandWatches); // consumed-before-release, no retry
+                if (variant == "cleanup-unknown")
+                { Assert.Same(original, root.GetValue(null)); Assert.Same(cleanup, primary.Data["CommandMemoryOriginalWatchCleanup"]); }
+                else Assert.Null(root.GetValue(null));
+            }
+            Assert.Equal(1, memory.WatchedCommandCopies); Assert.Equal(1, memory.CommandCopies);
+            Assert.Equal(0, memory.Writes); Assert.Equal(0L, Field("_completedGuestWorkSequence").GetValue(null));
+        }
+        finally
+        {
+            // No callback, thread or native effect exists in these metadata
+            // rows. Clear the actual taken record before disposing fake roots.
+            InvokeVolume("CompletePresenterShutdown"); memory.BeforeCommandRelease = null;
+            InvokeVolume("ReleaseOriginalCommandMemoryWatch", original, 0L, primary);
+            root.SetValue(null, previousRoot);
+        }
+    }
+
     // Real admission/Take/Complete, metadata only: this callback validates the
     // exact original receipt without preparing a transaction or writing bytes.
     [Theory]
@@ -407,7 +499,8 @@ public sealed partial class MetalStorageCpuSyncTests
     {
         internal const ulong Destination = Address + 0x500000;
         internal readonly BorrowColorMemory Original = new();
-        internal int CommandCopies, Writes;
+        internal int CommandCopies, Writes, WatchedCommandCopies, ReleasedCommandWatches;
+        internal Action? BeforeCommandRelease;
         internal int CommandQueries;
         internal Action? BeforeCommandCurrent;
         internal bool CommandCurrent = true;
@@ -429,8 +522,13 @@ public sealed partial class MetalStorageCpuSyncTests
             mapping = command = new(new object(), address, count, source, count, segments);
             bytes[0] = 0xAE; return CpuMappedCopyResult.Copied;
         }
-        public CpuMappedCopyResult TryReadMappedCopyWithWriteWatch(ulong address, ulong count, ulong source, Span<byte> bytes, out CpuMappedCopyObservation? mapping) =>
-            Original.TryReadMappedCopyWithWriteWatch(address, count, source, bytes, out mapping);
+        public CpuMappedCopyResult TryReadMappedCopyWithWriteWatch(ulong address, ulong count, ulong source, Span<byte> bytes, out CpuMappedCopyObservation? mapping)
+        {
+            if (address != Destination) return Original.TryReadMappedCopyWithWriteWatch(address, count, source, bytes, out mapping);
+            WatchedCommandCopies++;
+            if (variant == "watch-unavailable") { mapping = null; return CpuMappedCopyResult.Unavailable; }
+            return TryReadMappedCopy(address, count, source, bytes, out mapping);
+        }
         public bool IsMappedCopyObservationCurrent(CpuMappedCopyObservation mapping)
         {
             if (!ReferenceEquals(mapping, command)) return Original.IsMappedCopyObservationCurrent(mapping);
@@ -438,7 +536,11 @@ public sealed partial class MetalStorageCpuSyncTests
             CommandQueries++; BeforeCommandCurrent?.Invoke(); return CommandCurrent;
         }
         public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation mapping) => Original.IsMappedCopyWriteWatchCurrent(mapping);
-        public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation mapping) => Original.ReleaseMappedCopyWriteWatch(mapping);
+        public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation mapping)
+        {
+            if (!ReferenceEquals(mapping, command)) Original.ReleaseMappedCopyWriteWatch(mapping);
+            else { ReleasedCommandWatches++; BeforeCommandRelease?.Invoke(); }
+        }
         public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(CpuMappedCopyObservation original,
             IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication) =>
             throw new InvalidOperationException("Metadata inventory controls must not prepare or execute bytes.");
