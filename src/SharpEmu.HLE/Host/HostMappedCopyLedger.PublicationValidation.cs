@@ -107,6 +107,28 @@ public sealed unsafe partial class HostMappedCopyLedger
             Volatile.Read(ref consumed) == 0 && PhysicalCount > 0 &&
             owner.IsOriginalDisjointReadWatchCurrent(backing, Original, writers,
                 physical.AsSpan(0, PhysicalCount), watchedOriginal) && Volatile.Read(ref consumed) == 0;
+        internal override bool IsOriginalDisjointReadWatchCurrent(CpuMappedCopyObservation watchedOriginal,
+            out CpuMappedDisjointReadWatchDiagnostic diagnostic)
+        {
+            if (!writers.AdmissionDiagnosticsEnabled)
+            {
+                var unchanged = IsOriginalDisjointReadWatchCurrent(watchedOriginal); // ONE original call
+                diagnostic = new() { Guard = "diagnostics-disabled", BooleanCurrent = unchanged };
+                return unchanged;
+            }
+            diagnostic = new() { Guard = "validation-consumed", ReservedBackingIdentity = backing.Identity,
+                LocalAdmissionOwnerIdentity = Admission is { Identity: > 0 } local ? local.Identity : null,
+                BooleanCurrent = false };
+            if (Volatile.Read(ref consumed) != 0) return false;
+            diagnostic = diagnostic with { Guard = "validation-physical-count" };
+            if (PhysicalCount <= 0) return false;
+            if (!owner.IsOriginalDisjointReadWatchCurrentWithDiagnostic(backing, Original, writers,
+                physical.AsSpan(0, PhysicalCount), watchedOriginal, ref diagnostic)) return false;
+            diagnostic = diagnostic with { Guard = "validation-consumed-final" };
+            if (Volatile.Read(ref consumed) != 0) return false;
+            diagnostic = diagnostic with { Guard = "current", BooleanCurrent = true };
+            return true;
+        }
         internal override bool IsCurrent
         {
             get

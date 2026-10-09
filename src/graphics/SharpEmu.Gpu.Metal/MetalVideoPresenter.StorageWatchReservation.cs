@@ -8,7 +8,7 @@ internal static partial class MetalVideoPresenter
 {
     private static int _originalReadWatchDiagnosticRows;
     private readonly record struct OriginalReadWatchDiagnostic(CpuMappedReadWatchDiagnostic Provider,
-        string? LocalGuard, bool? OriginalRead, bool? Publication, bool? Validation, bool? BooleanCurrent = null, string? LocalTicket = null);
+        string? LocalGuard, bool? OriginalRead, bool? Publication, bool? Validation, bool? BooleanCurrent = null, string? LocalTicket = null, CpuMappedDisjointReadWatchDiagnostic? LocalValidation = null);
     // A reporting label only. Never consumed by admission, retry or waiting.
     private static string DescribeDiagnosticLocalTicket(bool publication, bool validation, bool originalRead) =>
         originalRead ? "original-read-local-ticket-no-wait-authority" :
@@ -78,8 +78,8 @@ internal static partial class MetalVideoPresenter
             }
             if (validation is not null)
             {
-                var current = validation.IsOriginalDisjointReadWatchCurrent(watch.Mapping);
-                diagnostic = diagnostic with { Validation = current };
+                var current = validation.IsOriginalDisjointReadWatchCurrent(watch.Mapping, out var localValidation);
+                diagnostic = diagnostic with { Validation = current, LocalValidation = localValidation };
                 if (current) return CpuMappedReadWatchStatus.Current;
             }
             return status;
@@ -115,8 +115,8 @@ internal static partial class MetalVideoPresenter
             }
             if (validation is not null)
             {
-                var current = validation.IsOriginalDisjointReadWatchCurrent(watch.Mapping);
-                diagnostic = diagnostic with { Validation = current };
+                var current = validation.IsOriginalDisjointReadWatchCurrent(watch.Mapping, out var localValidation);
+                diagnostic = diagnostic with { Validation = current, LocalValidation = localValidation };
                 if (current) { diagnostic = diagnostic with { BooleanCurrent = true }; return true; }
             }
             diagnostic = diagnostic with { BooleanCurrent = false }; return false;

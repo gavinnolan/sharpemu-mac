@@ -35,12 +35,16 @@ internal sealed partial class HostManagedWriteIntervals
     // Mutable per-ledger CONTROL seam only. Production never assigns it.
     // It cannot supply an owner, identity, status, receipt or authority.
     private int admissionDiagnosticsForControl = -1;
-    internal AdmissionOwner? CreateAdmissionOwner(CpuMappedAdmissionOwnerKind kind)
+    internal bool AdmissionDiagnosticsEnabled
     {
-        var control = Volatile.Read(ref admissionDiagnosticsForControl);
-        var enabled = control < 0 ? HostPublicationDiagnostics.Enabled : control == 1;
-        return enabled ? new(kind) : null;
+        get
+        {
+            var control = Volatile.Read(ref admissionDiagnosticsForControl);
+            return control < 0 ? HostPublicationDiagnostics.Enabled : control == 1;
+        }
     }
+    internal AdmissionOwner? CreateAdmissionOwner(CpuMappedAdmissionOwnerKind kind) =>
+        AdmissionDiagnosticsEnabled ? new(kind) : null;
     private AdmissionOwner? admissionOwner;
     private void PublishAdmissionOwner(AdmissionOwner? owner, CpuMappedAdmissionOwnerPhase phase)
     {

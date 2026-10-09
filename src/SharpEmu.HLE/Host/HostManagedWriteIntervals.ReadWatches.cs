@@ -91,6 +91,22 @@ internal sealed partial class HostManagedWriteIntervals
             ReferenceEquals(owner, expected) && Volatile.Read(ref Released) == 0 && Volatile.Read(ref Revoked) == 0 &&
             Volatile.Read(ref owner.coverageIncomplete) == 0 && Volatile.Read(ref owner.admission) == PublicationBit &&
             Volatile.Read(ref Revoked) == 0 && Volatile.Read(ref Released) == 0;
+        // Immutable diagnostic metadata only. Never a backing/currentness query.
+        internal long DiagnosticBackingIdentity => owner.backing.Identity;
+        internal bool TryIsUnrevokedDuringPublication(HostManagedWriteIntervals expected,
+            out string guard, out long primaryAdmission)
+        {
+            primaryAdmission = -1;
+            guard = "writer-ledger"; if (!ReferenceEquals(owner, expected)) return false;
+            guard = "released"; if (Volatile.Read(ref Released) != 0) return false;
+            guard = "revoked"; if (Volatile.Read(ref Revoked) != 0) return false;
+            guard = "coverage-incomplete"; if (Volatile.Read(ref owner.coverageIncomplete) != 0) return false;
+            primaryAdmission = Volatile.Read(ref owner.admission); // SAME original guard
+            guard = "admission-not-exclusive"; if (primaryAdmission != PublicationBit) return false;
+            guard = "revoked-final"; if (Volatile.Read(ref Revoked) != 0) return false;
+            guard = "released-final"; if (Volatile.Read(ref Released) != 0) return false;
+            guard = "current"; return true;
+        }
         internal bool CoversDuringPublication(HostManagedWriteIntervals expected, ReadOnlySpan<PhysicalRun> requested)
         {
             if (!IsUnrevokedDuringPublication(expected) || requested.IsEmpty) return false;
