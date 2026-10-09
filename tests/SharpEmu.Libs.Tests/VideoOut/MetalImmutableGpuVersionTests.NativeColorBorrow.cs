@@ -13,6 +13,7 @@ using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.ShaderCompiler.Metal;
 using Xunit;
 
@@ -26,7 +27,11 @@ public sealed partial class MetalImmutableGpuVersionTests
     [NativeColorBorrowFact]
     public void ActualSelectedColorOriginalBorrowUsesOriginalSuccessfulStatus4Batch() => RunNativeColorBorrow(true);
 
-    private void RunNativeColorBorrow(bool completedFirst)
+    [NativeColorBorrowFact]
+    public void ActualNativeColorPredecessorFailureConsumesEveryTemporaryRetainAndPreservesCause() =>
+        RunNativeColorBorrow(true, failPredecessorCleanup: true);
+
+    private void RunNativeColorBorrow(bool completedFirst, bool failPredecessorCleanup = false)
     {
         NativeDepthAssert(DeviceRequested());
         Assert.Equal(Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_ARCH"), RuntimeInformation.ProcessArchitecture.ToString());
@@ -38,6 +43,9 @@ public sealed partial class MetalImmutableGpuVersionTests
         var oldMemory = Field("_guestMemory").GetValue(null);
         var oldOwner = Field("_renderOwner").GetValue(null);
         var oldQueue = Field("_batchQueue").GetValue(null);
+        var oldPredecessorControl = Field("_nativeColorPredecessorValidationForControl").GetValue(null);
+        var oldTemporaryRelease = Field("_computeTextureReleaseOverride").GetValue(null);
+        var oldTemporaryFailure = Field("_textureSourceCleanupFailure").GetValue(null);
         NativeState? state = null; PhysicalVirtualMemory? physical = null;
         IDisposable? queueScope = null;
         TrackedCpuMemory? memory = null;
@@ -126,6 +134,35 @@ public sealed partial class MetalImmutableGpuVersionTests
             for (var pixel = 0; pixel < 512 * 512; pixel++) for (var component = 0; component < 4; component++)
                 Assert.Equal(expected[component], BitConverter.ToUInt16(actual, pixel * 8 + component * 2));
             var unchanged = new byte[(int)chainBytes]; NativeDepthAssert(memory.TryRead(address, unchanged)); Assert.Equal(originalBytes, unchanged);
+            if (failPredecessorCleanup)
+            {
+                var originalFailure = new NotSupportedException("controlled predecessor boundary failure");
+                var cleanupFailure = new InvalidOperationException("controlled release failure after exact native release");
+                var released = new List<nint>();
+                var next = MetalColorMipPlacement.Project(memory, normalized, words,
+                    new GuestRenderTarget(address, 512, 512, (uint)words.Layout, (uint)words.NumberType, Registers: words, TileMode: 27));
+                target = next;
+                MetalVideoPresenter.SubmitOffscreenTranslatedDraw(shaders.Pixel, [snapshot, snapshot], [], 0, [next], shaders.Vertex,
+                    3, 1, 4, null, [], GuestRenderState.Default, null, 0);
+                MetalVideoPresenter.ReleasePreparedNativeColorTarget(next);
+                var completedSequence = Field("_completedGuestWorkSequence").GetValue(null);
+                Field("_nativeColorPredecessorValidationForControl").SetValue(null, (Action)(() => throw originalFailure));
+                Field("_computeTextureReleaseOverride").SetValue(null, (Action<nint>)(handle =>
+                {
+                    released.Add(handle); MetalNative.SendVoid(handle, MetalNative.Selector("release"));
+                    if (released.Count == 1) throw cleanupFailure;
+                }));
+                var rejected = Assert.Throws<TargetInvocationException>(() => state.DrainWithControlledBudget());
+                var fatal = Assert.IsType<GpuFatalException>(rejected.InnerException);
+                Assert.Same(originalFailure, fatal.InnerException);
+                Assert.Equal(2, released.Count); Assert.Equal(released[0], released[1]);
+                Assert.Same(cleanupFailure, Field("_textureSourceCleanupFailure").GetValue(null));
+                Assert.Equal(completedSequence, Field("_completedGuestWorkSequence").GetValue(null));
+                Field("_nativeColorPredecessorValidationForControl").SetValue(null, oldPredecessorControl);
+                Field("_computeTextureReleaseOverride").SetValue(null, oldTemporaryRelease);
+                output.WriteLine("native-color-borrow predecessor_failure_primary_preserved=1 temporary_owned_retains=2 each_release_attempted=1 no_ack=1 status=4 initial_full_native_bytes=2097152");
+                goto FixtureFinished;
+            }
             if (completedFirst)
             {
                 // An already admitted readonly consumer must keep the prior
@@ -173,12 +210,15 @@ public sealed partial class MetalImmutableGpuVersionTests
             var rejection = Assert.Throws<TargetInvocationException>(() => Call("CreateDrawTexture", state.NativeFaceDevice, state.Buffer(), snapshot, false));
             Assert.IsType<NotSupportedException>(rejection.InnerException);
             output.WriteLine($"native-color-borrow status=4 full_half_components=1048576 full_native_bytes=2097152 unchanged_original_chain_bytes={chainBytes} same_CB={!completedFirst} frontend_release_before_consume=1 wrong_queue_veto=1 overlapping_ordinary_writer_veto=1");
+            FixtureFinished: ;
         }
         catch (Exception error) { primary = error; }
         finally
         {
             Exception? cleanup = null;
             void Attempt(Action action) { try { action(); } catch (Exception error) { NativeDepthPreserve(ref cleanup, error); } }
+            Attempt(() => Field("_nativeColorPredecessorValidationForControl").SetValue(null, oldPredecessorControl));
+            Attempt(() => Field("_computeTextureReleaseOverride").SetValue(null, oldTemporaryRelease));
             if (state is not null)
                 try { Call("WaitForFlushedGuestCommands"); safe = true; }
                 catch (Exception error) { NativeDepthPreserve(ref cleanup, error); safe = false; }
@@ -212,6 +252,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             Attempt(() => Field("_guestMemory").SetValue(null, oldMemory));
             Attempt(() => Field("_renderOwner").SetValue(null, oldOwner));
             Attempt(() => Field("_batchQueue").SetValue(null, oldQueue));
+            Attempt(() => Field("_textureSourceCleanupFailure").SetValue(null, oldTemporaryFailure));
             MetalColorMipPlacement.Enabled = oldPlacement; MetalVideoPresenter.NativeColorBorrowEnabled = oldBorrow;
             if (cleanup is not null) NativeDepthPreserve(ref primary, cleanup);
         }

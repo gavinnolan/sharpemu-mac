@@ -595,7 +595,18 @@ internal static partial class MetalVideoPresenter
         ResolveDrawTextures(device, commandBuffer, draw.Textures, textureHandles, textureOwned);
 
         TraceGuestWorkStage("draw.textures.end");
-        ValidateNativeColorEncoderPredecessors(work, publishedTargets, commandBuffer, queue);
+        try
+        {
+            _nativeColorPredecessorValidationForControl?.Invoke();
+            ValidateNativeColorEncoderPredecessors(work, publishedTargets, commandBuffer, queue);
+        }
+        catch (Exception failure)
+        {
+            // ResolveDrawTextures transferred per-call retains. This validation
+            // precedes EncodeDrawBindings' normal ownership release loop.
+            ReleaseComputeTemporaryTextures(textureHandles, textureOwned, failure);
+            throw;
+        }
         TraceGuestWorkStage("draw.encoder.begin");
         var pass = MetalNative.Send(
             MetalNative.Class("MTLRenderPassDescriptor"),

@@ -186,11 +186,32 @@ public sealed partial class MetalStorageCpuSyncTests
         Assert.Empty((IEnumerable)Field("_nativeColorProducers").GetValue(null)!);
     }
 
+    [Theory]
+    [InlineData(2)] [InlineData(3)]
+    public void NativeColorPublicAdmissionRevocationCannotInstallPartialQueueOrProducerOwnership(int rejectedQuery)
+    {
+        ActualArchitecture(); using var state = new BorrowColorState(); var memory = new BorrowColorMemory();
+        MetalVideoPresenter.AttachGuestMemory(memory); var target = ProjectBorrowColor(memory);
+        var original = ((IEnumerable)Field("_nativeColorOriginals").GetValue(null)!).Cast<object>().Single();
+        memory.MappingQueries = 0; memory.RejectAtMappingQuery = rejectedQuery;
+        Assert.Throws<NotSupportedException>(() => SubmitBorrowColor(target));
+        Assert.Equal(rejectedQuery, memory.MappingQueries);
+        Assert.Equal(1, original.GetType().GetField("References", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(original));
+        Assert.Empty((IDictionary)Field("_nativeColorQueued").GetValue(null)!);
+        Assert.Empty((IEnumerable)Field("_nativeColorProducers").GetValue(null)!);
+        Assert.Empty((IDictionary)Field("_nativeColorLatest").GetValue(null)!);
+        Assert.Equal(0L, Field("_enqueuedGuestWorkSequence").GetValue(null));
+        Assert.Equal(0L, Field("_completedGuestWorkSequence").GetValue(null));
+        MetalVideoPresenter.ReleasePreparedNativeColorTarget(target);
+        Assert.Equal(1, memory.Releases);
+    }
+
     // Explicitly synthetic provider/mapping outcomes exercise production capture
     // and ordinary queue lifetimes only. No native content or ABI proof is claimed.
     private sealed class BorrowColorMemory : ICpuMemory, ICpuMappedReadWatchSource
     {
-        internal int Copies, Releases, PlainReads;
+        internal int Copies, Releases, PlainReads, MappingQueries;
+        internal int RejectAtMappingQuery;
         internal bool Current = true, WatchCurrent = true;
         internal string? Variant;
         internal (ulong Footprint, ulong Bytes, ulong Source, int CopyBytes) Copy;
@@ -214,7 +235,8 @@ public sealed partial class MetalStorageCpuSyncTests
             if (Variant == "content") GuestImageWriteTracker.NotifyManagedWrite(source, 1);
             return CpuMappedCopyResult.Copied;
         }
-        public bool IsMappedCopyObservationCurrent(CpuMappedCopyObservation mapping) => Current;
+        public bool IsMappedCopyObservationCurrent(CpuMappedCopyObservation mapping) =>
+            Current && ++MappingQueries != RejectAtMappingQuery;
         public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation mapping) => WatchCurrent;
         public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation mapping) => Releases++;
     }

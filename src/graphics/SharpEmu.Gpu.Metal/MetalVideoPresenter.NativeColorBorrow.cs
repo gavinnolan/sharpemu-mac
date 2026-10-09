@@ -215,25 +215,32 @@ internal static partial class MetalVideoPresenter
         if (originals.Length == 0) return false;
         if (originals.Length > 128 || _nativeColorQueued.Count >= MaxPendingGuestWork + 1 || _nativeColorQueued.ContainsKey(work))
             throw new NotSupportedException("Native color queued watch retention is full/duplicated.");
-        if (originals.Any(o => !o.ScalarCurrent || o.References <= 0 || o.References == int.MaxValue))
+        if (_nativeColorCleanupFailure is not null || originals.Any(o => !o.ScalarCurrent || o.References <= 0 || o.References == int.MaxValue))
             throw new NotSupportedException("Native color queued original changed.");
         if (dependencies.Any(p => p.Retired || p.DependentReferences == int.MaxValue))
             throw new NotSupportedException("Native color queued dependency changed.");
         _nativeColorQueued.Add(work, new(originals, dependencies)); // allocate BEFORE counters
-        foreach (var original in originals) RetainNativeColorOriginalLocked(original);
+        foreach (var original in originals) original.References++; // prevalidated under SAME gate; ownership only
         foreach (var dependency in dependencies) dependency.DependentReferences++;
         return true;
     }
     private static void PublishNativeColorAdmissionLocked(object work, NativeColorProducer[] producers)
     {
         if (producers.Length == 0) return;
+        if (_nativeColorCleanupFailure is not null || producers.Any(p => p.OriginalReferenceOwned || p.Original.Consumed ||
+            !p.Original.ScalarCurrent || p.Original.References <= 0 || p.Original.References == int.MaxValue))
+            throw new NotSupportedException("Native color producer original changed before publication.");
+        if (_nativeColorWorks.TryGetValue(work, out _) || producers.Any(p =>
+            _nativeColorLatest.TryGetValue(p.Original.Placement.PhysicalAddress, out var prior) &&
+            (!ReferenceEquals(prior, p.Predecessor) || prior.DependentReferences <= 0)))
+            throw new InvalidOperationException("Native color admission lost its pre-acquired predecessor dependency.");
         _nativeColorProducers.EnsureCapacity(_nativeColorProducers.Count + producers.Length);
         _nativeColorLatest.EnsureCapacity(_nativeColorLatest.Count + producers.Length);
         _nativeColorWorks.Add(work, producers);
         foreach (var producer in producers)
         {
             _nativeColorProducers.Add(producer);
-            RetainNativeColorOriginalLocked(producer.Original); // latest accepted owner, separate from queued reference
+            producer.Original.References++; // all throwing validation/allocation precedes ownership commit
             producer.OriginalReferenceOwned = true;
             producer.IsLatest = true;
             if (_nativeColorLatest.TryGetValue(producer.Original.Placement.PhysicalAddress, out var prior))
@@ -242,7 +249,8 @@ internal static partial class MetalVideoPresenter
                 // Admission does not mutate native pixels/version. Already
                 // accepted consumers and this new producer's predecessor retain
                 // the exact older receipt through their ordered execution.
-                RetireNativeColorProducerLocked(prior);
+                // The exact predecessor dependency was checked BEFORE commit;
+                // admission cannot release an older native texture or callback.
             }
             _nativeColorLatest[producer.Original.Placement.PhysicalAddress] = producer;
         }
@@ -316,6 +324,8 @@ internal static partial class MetalVideoPresenter
             try { primary.Data["NativeColorTextureCleanup"] = cleanup; } catch { }
         }
     }
+
+    private static Action? _nativeColorPredecessorValidationForControl; // default-null ordinary failure seam
 
     private static void ValidateNativeColorEncoderPredecessors(OffscreenGuestDraw work, GuestImage?[] images, nint commandBuffer, nint queue)
     {
