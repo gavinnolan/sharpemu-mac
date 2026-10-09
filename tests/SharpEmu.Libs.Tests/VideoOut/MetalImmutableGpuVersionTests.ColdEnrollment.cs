@@ -326,7 +326,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             }
             var cleanup = RestoreHooks();
             try { writerHook.SetValue(views, oldWriterHook); }
-            catch (Exception failure) { cleanup ??= failure; }
+            catch (Exception restoreFailure) { cleanup ??= restoreFailure; }
             if (actorFailure is { } failure)
             {
                 // Release/commit may have thrown. Never retry it or retire its
