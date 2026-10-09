@@ -475,42 +475,66 @@ internal static partial class MetalVideoPresenter
     private static bool InspectOrderedNativeColorSuccessorLocked(NativeColorProducer prior,
         PendingGuestWork pending, NativeColorOriginal next, out string reason)
     {
-        reason = "taken-execution-sequence-queue-or-retained-prior";
-        if (_takenGuestWorkSequence == 0 || _takenGuestWorkSequence != _executingGuestWorkSequence ||
-            _takenGuestWorkSequence <= prior.Sequence || pending.Sequence <= _takenGuestWorkSequence ||
-            _submittingGuestQueue is not { } queue || queue.Name != prior.Queue.Name || pending.Queue.Name != queue.Name ||
-            _takenDepthCubeProducerWork is not { } consumer || ReferenceEquals(consumer, pending.Work) ||
-            !_nativeColorQueued.TryGetValue(consumer, out var consuming) || !consuming.Dependencies.Contains(prior) ||
-            prior.Retired || prior.CleanupUnknown || prior.DependentReferences <= 0 || !prior.OriginalReferenceOwned ||
-            !prior.Original.ScalarCurrent || !_nativeColorProducers.Contains(prior)) return false;
+        if (_takenGuestWorkSequence == 0) { reason = "no-taken-consumer"; return false; }
+        if (_takenGuestWorkSequence != _executingGuestWorkSequence) { reason = "taken-is-not-executing"; return false; }
+        if (_takenGuestWorkSequence <= prior.Sequence) { reason = "consumer-not-after-prior"; return false; }
+        if (pending.Sequence <= _takenGuestWorkSequence) { reason = "successor-not-after-consumer"; return false; }
+        if (_submittingGuestQueue is not { } queue) { reason = "no-executing-queue"; return false; }
+        if (queue.Name != prior.Queue.Name) { reason = "prior-queue-mismatch"; return false; }
+        if (pending.Queue.Name != queue.Name) { reason = "successor-queue-mismatch"; return false; }
+        if (_takenDepthCubeProducerWork is not { } consumer) { reason = "no-taken-work"; return false; }
+        if (ReferenceEquals(consumer, pending.Work)) { reason = "successor-is-taken-consumer"; return false; }
+        if (!_nativeColorQueued.TryGetValue(consumer, out var consuming)) { reason = "consumer-has-no-queued-owner"; return false; }
+        if (!consuming.Dependencies.Contains(prior)) { reason = "consumer-does-not-retain-prior"; return false; }
+        if (prior.Retired) { reason = "prior-retired"; return false; }
+        if (prior.CleanupUnknown) { reason = "prior-cleanup-unknown"; return false; }
+        if (prior.DependentReferences <= 0) { reason = "prior-has-no-dependency-charge"; return false; }
+        if (!prior.OriginalReferenceOwned) { reason = "prior-lost-original-charge"; return false; }
+        if (!prior.Original.ScalarCurrent) { reason = "prior-original-not-current"; return false; }
+        if (!_nativeColorProducers.Contains(prior)) { reason = "prior-not-in-producer-inventory"; return false; }
         IEnumerable<GuestDrawTexture> reads = consumer switch
         { OffscreenGuestDraw draw => draw.Draw.Textures, ComputeGuestDispatch dispatch => dispatch.Textures, _ => [] };
-        reason = "taken-readonly-lease-is-not-exact-prior";
         if (!reads.Any(texture => texture.Access == GuestImageAccess.Read && !texture.IsStorage &&
-            _nativeColorLeases.TryGetValue(texture, out var lease) && ReferenceEquals(lease.Producer, prior))) return false;
-        reason = "pending-work-owner-dependency-or-original";
-        if (!_nativeColorWorks.TryGetValue(pending.Work, out var accepted) ||
-            !_nativeColorQueued.TryGetValue(pending.Work, out var queued) || !queued.Dependencies.Contains(prior) ||
-            !queued.Originals.Contains(next)) return false;
+            _nativeColorLeases.TryGetValue(texture, out var lease) && ReferenceEquals(lease.Producer, prior)))
+        { reason = "taken-readonly-lease-is-not-exact-prior"; return false; }
+        if (!_nativeColorWorks.TryGetValue(pending.Work, out var accepted)) { reason = "pending-work-not-accepted"; return false; }
+        if (!_nativeColorQueued.TryGetValue(pending.Work, out var queued)) { reason = "pending-work-has-no-queued-owner"; return false; }
+        if (!queued.Dependencies.Contains(prior)) { reason = "pending-work-does-not-retain-prior"; return false; }
+        if (!queued.Originals.Contains(next)) { reason = "pending-work-does-not-retain-target-original"; return false; }
         var future = accepted.SingleOrDefault(candidate => ReferenceEquals(candidate.Original, next));
-        reason = "pending-accepted-sequence-predecessor-or-unencoded-owner";
-        if (future is null || !ReferenceEquals(future.Work, pending.Work) || future.Sequence != pending.Sequence ||
-            future.Queue != pending.Queue || !ReferenceEquals(future.Predecessor, prior) ||
-            future.Encoded || future.Retired || future.CleanupUnknown || future.Texture != 0 || future.CommandBuffer != 0 ||
-            future.Image is not null || future.Batch is not null || !future.OriginalReferenceOwned ||
-            !_nativeColorProducers.Contains(future) || !next.ScalarCurrent) return false;
+        if (future is null) { reason = "accepted-producer-does-not-own-target-original"; return false; }
+        if (!ReferenceEquals(future.Work, pending.Work)) { reason = "accepted-work-mismatch"; return false; }
+        if (future.Sequence != pending.Sequence) { reason = "accepted-sequence-mismatch"; return false; }
+        if (future.Queue != pending.Queue) { reason = "accepted-queue-mismatch"; return false; }
+        if (!ReferenceEquals(future.Predecessor, prior)) { reason = "accepted-predecessor-mismatch"; return false; }
+        if (future.Encoded) { reason = "successor-already-encoded"; return false; }
+        if (future.Retired) { reason = "successor-retired"; return false; }
+        if (future.CleanupUnknown) { reason = "successor-cleanup-unknown"; return false; }
+        if (future.Texture != 0) { reason = "successor-has-native-texture"; return false; }
+        if (future.CommandBuffer != 0) { reason = "successor-has-command-buffer"; return false; }
+        if (future.Image is not null) { reason = "successor-has-native-image"; return false; }
+        if (future.Batch is not null) { reason = "successor-has-native-batch"; return false; }
+        if (!future.OriginalReferenceOwned) { reason = "successor-lost-original-charge"; return false; }
+        if (!_nativeColorProducers.Contains(future)) { reason = "successor-not-in-inventory"; return false; }
+        if (!next.ScalarCurrent) { reason = "successor-original-not-current"; return false; }
         var original = prior.Original;
-        reason = "complete-original-source-session-placement-token-or-mapping";
-        var matches = ReferenceEquals(next.Placement.Memory, original.Placement.Memory) && ReferenceEquals(next.Source, original.Source) &&
-            next.Session == original.Session && next.Placement.Registers == original.Placement.Registers &&
-            next.Placement.PhysicalAddress == original.Placement.PhysicalAddress && next.Placement.ByteCount == original.Placement.ByteCount &&
-            next.Placement.BackingByteCount == original.Placement.BackingByteCount && next.Content.Observed && original.Content.Observed &&
-            next.Content.Token == original.Content.Token && next.Content.ByteCount == original.Content.ByteCount &&
-            next.Mapping.FootprintAddress == original.Mapping.FootprintAddress && next.Mapping.FootprintByteCount == original.Mapping.FootprintByteCount &&
-            next.Mapping.SourceAddress == original.Mapping.SourceAddress && next.Mapping.SourceByteCount == original.Mapping.SourceByteCount &&
-            next.Mapping.Segments.SequenceEqual(original.Mapping.Segments);
-        if (matches) reason = "exact-ordered-pending-successor";
-        return matches;
+        if (!ReferenceEquals(next.Placement.Memory, original.Placement.Memory)) { reason = "original-memory-mismatch"; return false; }
+        if (!ReferenceEquals(next.Source, original.Source)) { reason = "original-source-mismatch"; return false; }
+        if (next.Session != original.Session) { reason = "original-session-mismatch"; return false; }
+        if (next.Placement.Registers != original.Placement.Registers) { reason = "original-registers-mismatch"; return false; }
+        if (next.Placement.PhysicalAddress != original.Placement.PhysicalAddress) { reason = "original-selected-address-mismatch"; return false; }
+        if (next.Placement.ByteCount != original.Placement.ByteCount) { reason = "original-selected-size-mismatch"; return false; }
+        if (next.Placement.BackingByteCount != original.Placement.BackingByteCount) { reason = "original-backing-size-mismatch"; return false; }
+        if (!next.Content.Observed) { reason = "successor-content-unobserved"; return false; }
+        if (!original.Content.Observed) { reason = "prior-content-unobserved"; return false; }
+        if (next.Content.Token != original.Content.Token) { reason = "original-content-token-mismatch"; return false; }
+        if (next.Content.ByteCount != original.Content.ByteCount) { reason = "original-content-size-mismatch"; return false; }
+        if (next.Mapping.FootprintAddress != original.Mapping.FootprintAddress) { reason = "original-footprint-address-mismatch"; return false; }
+        if (next.Mapping.FootprintByteCount != original.Mapping.FootprintByteCount) { reason = "original-footprint-size-mismatch"; return false; }
+        if (next.Mapping.SourceAddress != original.Mapping.SourceAddress) { reason = "original-source-address-mismatch"; return false; }
+        if (next.Mapping.SourceByteCount != original.Mapping.SourceByteCount) { reason = "original-source-size-mismatch"; return false; }
+        if (!next.Mapping.Segments.SequenceEqual(original.Mapping.Segments)) { reason = "original-segments-mismatch"; return false; }
+        reason = "exact-ordered-pending-successor"; return true;
     }
     private static void RequireNativeColorCohortLocked(NativeColorProducer producer)
     {
