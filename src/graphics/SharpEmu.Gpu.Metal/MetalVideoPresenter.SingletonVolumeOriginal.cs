@@ -220,9 +220,11 @@ internal static partial class MetalVideoPresenter
     {
         if (origin?.VolumeWatch is not { } watch) return;
         if (Monitor.IsEntered(_gate)) throw new InvalidOperationException("Singleton volume content validation requires a released presenter gate.");
+        var originalWatchStatus = CpuMappedReadWatchStatus.Stale;
         if (_closed || _guestWorkFailure is not null || !ReferenceEquals(_guestMemory, origin.Memory) ||
             _singletonVolumeOriginalCleanupFailure is not null || origin.Session != CurrentStorageCpuSeedSession ||
-            !reservation.IsCurrent(watch) || !origin.Source.IsMappedCopyObservationCurrent(origin.Mapping) ||
+            (classifyOrdinaryBusy ? (originalWatchStatus = reservation.GetStatus(watch)) != CpuMappedReadWatchStatus.Current :
+                !reservation.IsCurrent(watch)) || !origin.Source.IsMappedCopyObservationCurrent(origin.Mapping) ||
             !GuestImageWriteTracker.IsReadSnapshotStable(watch.Read) || !origin.Observation.Observed ||
             !GuestImageWriteTracker.TryGetProtectedObservedContentToken(origin.Layout.Address, origin.Layout.PhysicalBytes, out var token) ||
             token != origin.Observation.Token)
@@ -231,14 +233,15 @@ internal static partial class MetalVideoPresenter
             // ORIGINAL watch blocked by ordinary admission, not PublicationBit,
             // revocation or incomplete coverage. Every other original veto is
             // checked independently before issuing this private typed reason.
-            if (classifyOrdinaryBusy && Volatile.Read(ref watch.State) != 2 && !Volatile.Read(ref watch.UnknownProducer) &&
+            if (classifyOrdinaryBusy && originalWatchStatus == CpuMappedReadWatchStatus.Busy &&
+                Volatile.Read(ref watch.State) != 2 && !Volatile.Read(ref watch.UnknownProducer) &&
                 !_closed && _guestWorkFailure is null && _singletonVolumeOriginalCleanupFailure is null &&
                 ReferenceEquals(_guestMemory, origin.Memory) && origin.Session == CurrentStorageCpuSeedSession &&
                 origin.Source.IsMappedCopyObservationCurrent(origin.Mapping) &&
                 GuestImageWriteTracker.IsReadSnapshotStable(watch.Read) && origin.Observation.Observed &&
                 GuestImageWriteTracker.TryGetProtectedObservedContentToken(origin.Layout.Address, origin.Layout.PhysicalBytes, out var originalToken) &&
                 originalToken == origin.Observation.Token &&
-                watch.Source.GetMappedCopyWriteWatchStatus(watch.Mapping) == CpuMappedReadWatchStatus.Busy)
+                watch.Source.GetMappedCopyWriteWatchStatus(watch.Mapping) is CpuMappedReadWatchStatus.Current or CpuMappedReadWatchStatus.Busy)
                 throw new SingletonVolumeOriginalBusy(origin);
             throw new InvalidOperationException("Metal singleton volume lost its ORIGINAL full mapping/read/watch/protected token/session.");
         }

@@ -16,6 +16,7 @@ public sealed partial class MetalStorageCpuSyncTests
     [InlineData("token")] [InlineData("session")] [InlineData("memory")]
     [InlineData("unknown")] [InlineData("released")] [InlineData("stale")]
     [InlineData("provider-error")]
+    [InlineData("busy-clears")] [InlineData("stale-then-busy")]
     public void OriginalDirtyBodyBusyIsTypedOnlyForHealthySameOriginalAndOptIn(string variant)
     {
         ActualArchitecture(); using var state = new VolumeState(); using var protection = new VolumeProtectedScalar();
@@ -24,8 +25,15 @@ public sealed partial class MetalStorageCpuSyncTests
         var watch = VolumeWatch(origin);
         memory.WatchCurrent = false;
         var providerFailure = new IOException("exact actual status failure");
-        memory.ReadStatus = () => variant == "provider-error" ? throw providerFailure :
-            variant == "stale" ? CpuMappedReadWatchStatus.Stale : CpuMappedReadWatchStatus.Busy;
+        var statusQueries = 0;
+        memory.ReadStatus = () =>
+        {
+            statusQueries++;
+            if (variant == "provider-error") throw providerFailure;
+            if (variant == "busy-clears") return statusQueries == 1 ? CpuMappedReadWatchStatus.Busy : CpuMappedReadWatchStatus.Current;
+            if (variant == "stale-then-busy") return statusQueries == 1 ? CpuMappedReadWatchStatus.Stale : CpuMappedReadWatchStatus.Busy;
+            return variant == "stale" ? CpuMappedReadWatchStatus.Stale : CpuMappedReadWatchStatus.Busy;
+        };
         switch (variant)
         {
             case "mapping": memory.Current = false; break;
@@ -40,13 +48,15 @@ public sealed partial class MetalStorageCpuSyncTests
             var reservation = Activator.CreateInstance(Presenter.GetNestedType("StorageWatchReservation", BindingFlags.NonPublic)!)!;
             var failure = Assert.Throws<TargetInvocationException>(() =>
                 InvokeVolume("ValidateSingletonVolumeOriginalContentWithReservation", origin, reservation, variant != "strict-default"));
-            if (variant == "busy")
+            if (variant is "busy" or "busy-clears")
             {
                 Assert.Equal("SingletonVolumeOriginalBusy", failure.InnerException!.GetType().Name);
                 Assert.Same(origin, failure.InnerException.GetType().GetField("Original", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(failure.InnerException));
             }
             else if (variant == "provider-error") Assert.Same(providerFailure, failure.InnerException);
             else Assert.IsType<InvalidOperationException>(failure.InnerException);
+            if (variant == "busy-clears") Assert.Equal(2, statusQueries);
+            if (variant == "stale-then-busy") Assert.Equal(1, statusQueries);
             Assert.Equal(1, memory.Copies); Assert.Equal(0, memory.Reads);
             Assert.Null(Field("_deferredCanonicalDirty").GetValue(null));
             Assert.Null(Field("_guestWorkFailure").GetValue(null));
