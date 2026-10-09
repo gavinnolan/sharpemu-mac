@@ -56,6 +56,34 @@ public sealed class FaultThreadImportTraceTests
         Assert.Equal(FaultThreadImportStatus.Returned, entry.Status); Assert.Equal(ulong.MaxValue, entry.Result);
     }
 
+    [Theory]
+    [InlineData(1)] [InlineData(64)]
+    public void MaximumSequenceSnapshotAndRejectedNextBeginKeepExactRetainedHistory(int retainedCount)
+    {
+        var trace = new FaultThreadImportTrace();
+        var sequence = typeof(FaultThreadImportTrace).GetField("sequence", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var count = typeof(FaultThreadImportTrace).GetField("count", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        // Mutable diagnostic-only metadata seam; no native/fault/frame access.
+        sequence.SetValue(trace, long.MaxValue - retainedCount);
+        for (var index = 0; index < retainedCount; index++)
+        {
+            var original = Begin(trace, nid: $"boundary-{index}"); trace.Complete(original, (ulong)index);
+        }
+        var entries = trace.Snapshot(trace, Environment.CurrentManagedThreadId, 7);
+        Assert.Equal(retainedCount, entries.Length); Assert.Equal(long.MaxValue, entries[^1].Sequence);
+        for (var index = 0; index < retainedCount; index++)
+        {
+            var entry = entries[index];
+            Assert.Equal(long.MaxValue - (retainedCount - 1L) + index, entry.Sequence);
+            Assert.Equal($"boundary-{index}", entry.Nid); Assert.Equal((ulong)index, entry.Result);
+            Assert.Equal(FaultThreadImportStatus.Returned, entry.Status); Assert.Same(trace, entry.BackendOwner);
+            Assert.Equal(Environment.CurrentManagedThreadId, entry.ManagedThreadId); Assert.Equal(7UL, entry.GuestThreadHandle);
+        }
+        Assert.Throws<OverflowException>(() => Begin(trace, nid: "must-not-replace-original"));
+        Assert.Equal(long.MaxValue, (long)sequence.GetValue(trace)!); Assert.Equal(retainedCount, (int)count.GetValue(trace)!);
+        Assert.Equal(entries, trace.Snapshot(trace, Environment.CurrentManagedThreadId, 7));
+    }
+
     [Fact]
     public void SnapshotFiltersBothOriginalManagedAndGuestThreadIdentity()
     {

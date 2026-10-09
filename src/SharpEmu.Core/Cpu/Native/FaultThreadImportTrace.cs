@@ -46,10 +46,14 @@ internal sealed class FaultThreadImportTrace
     internal FaultThreadImportEntry[] Snapshot(object backendOwner, int managedThreadId, ulong guestThreadHandle)
     {
         RequireOwner();
-        if (managedThreadId != ownerThread) return [];
+        if (managedThreadId != ownerThread || count == 0) return [];
         var result = new List<FaultThreadImportEntry>(count);
-        for (var current = sequence - count + 1; current <= sequence; current++)
+        var first = sequence - (count - 1L);
+        // A valid final sequence may be long.MaxValue. Bound by retained count,
+        // never increment a sequence beyond that last value into negative slots.
+        for (var offset = 0; offset < count; offset++)
         {
+            var current = first + (long)offset;
             var entry = entries[(int)((current - 1) % Capacity)];
             if (entry.Sequence == current && ReferenceEquals(entry.BackendOwner, backendOwner) && entry.ManagedThreadId == managedThreadId &&
                 entry.GuestThreadHandle == guestThreadHandle) result.Add(entry);
