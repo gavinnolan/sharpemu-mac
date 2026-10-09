@@ -35,8 +35,6 @@ public sealed partial class MetalImmutableGpuVersionTests
         public TrackedCpuMemory? Memory;
         public object? OriginalOrigin;
         public object? Image;
-        public bool OrdinaryWriterUnconfirmed;
-        public object? OrdinaryWriterOwner;
         public Action? AfterOwnedRetirement;
         public readonly List<GuestDrawTexture> VolumeSeeds = [];
         public readonly List<object> VolumeImages = [];
@@ -72,11 +70,7 @@ public sealed partial class MetalImmutableGpuVersionTests
     public void ActualRuntimeLateDirtyGenerationAfterCanonicalVersionKeepsStickyDebtAndNoEop() =>
         RunActualRuntimeTwoTypedPublications(false, rgba: true, lateFailure: "generation");
 
-<<<<<<< HEAD
-    private void RunActualRuntimeTwoTypedPublications(bool overlappingCpuWrite, bool rgba = false, bool mixedBuffer = false, string? lateFailure = null, bool originalVolumes = false, string? busyOriginalRetry = null)
-=======
-    private void RunActualRuntimeTwoTypedPublications(bool overlappingCpuWrite, bool rgba = false, bool mixedBuffer = false, string? lateFailure = null, bool originalVolumes = false, string? constructionBusyWindow = null)
->>>>>>> 1c3fa39f (Prepare real native original-volume construction Busy controls)
+    private void RunActualRuntimeTwoTypedPublications(bool overlappingCpuWrite, bool rgba = false, bool mixedBuffer = false, string? lateFailure = null, bool originalVolumes = false, string? busyOriginalRetry = null, string? constructionBusyWindow = null)
     {
         Assert.True(DeviceRequested());
         var imageBytes = rgba ? 4194304 : 65536;
