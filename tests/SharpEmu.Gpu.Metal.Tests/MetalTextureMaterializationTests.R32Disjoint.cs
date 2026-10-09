@@ -10,6 +10,7 @@ using SharpEmu.HLE.GuestMemory;
 using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.ShaderCompiler.Metal;
 using SharpEmu.ShaderCompiler.Resources;
 using Xunit;
@@ -66,14 +67,32 @@ public sealed partial class MetalTextureMaterializationTests
             Assert.Equal(0, memory.OrdinaryReads); Assert.Equal(2, memory.Copies.Count);
             Assert.Contains(memory.Copies, copy => copy.SourceAddress == address + 0x40000 && copy.SourceByteCount == 0x80000);
             Assert.Contains(memory.Copies, copy => copy.SourceAddress == address + 0x20000 && copy.SourceByteCount == 0x20000);
+            // Do not refresh M0 after M1's cold prefix protection setup.
+            // The real provider must still recognize BOTH original mappings.
+            Assert.All(memory.Copies, copy => Assert.True(memory.IsMappedCopyObservationCurrent(copy)));
             Assert.All(memory.Copies, copy => Assert.All(copy.Segments, segment =>
             {
                 Assert.True(segment.BackingIdentity > 0 && segment.MappingIncarnation > 0);
                 Assert.True(ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_KERNEL_PAGE"), out var expectedPage));
                 Assert.Equal(expectedPage, segment.ProviderPageSize);
             }));
+            // Actual final with-copy association is already exercised above.
+            // A second DTO cannot adopt it with substituted detached pixels.
+            var substituted = textures[0] with { RgbaPixels = textures[0].RgbaPixels.ToArray() };
+            var substitution = Assert.Throws<TargetInvocationException>(() =>
+                Presenter.GetMethod("CopyCapturedTextureSource", Methods)!.Invoke(null, [textures[0], substituted]));
+            Assert.IsType<InvalidOperationException>(substitution.InnerException);
+            // An immutable completed copy survives a later participating CPU
+            // write. Poison the ENTIRE original physical M0, disjoint from M1;
+            // the shader must still use the detached original M0 version.
+            var poison = new byte[0x80000]; poison.AsSpan().Fill(0xA7);
+            Assert.True(views.TryWriteBacking(address + 0x40000, poison));
+            poison.CopyTo(guest, 0x40000);
+            Assert.Equal(mip0, textures[0].RgbaPixels);
+            Assert.All(memory.Copies, copy => Assert.True(memory.IsMappedCopyObservationCurrent(copy)));
+            var guestBeforeGpu = guest.ToArray(); // distinct full baseline AFTER the intentional CPU mutation
             logical = (IDisposable)Presenter.GetMethod("EnterGuestQueue", Methods)!.Invoke(null, ["dcb.graphics", 3UL])!;
-            native.DispatchR32Disjoint(textures);
+            native.DispatchR32Disjoint(textures, memory);
             var image = Assert.Single(((IDictionary)Presenter.GetField("_selectedStorageMipImages", Methods)!.GetValue(null)!).Values.Cast<object>());
             var texture = (nint)image.GetType().GetField("Texture")!.GetValue(image)!;
             Assert.NotEqual((nint)0, texture);
@@ -84,11 +103,11 @@ public sealed partial class MetalTextureMaterializationTests
                 mip0.AsSpan(((2 * y) * 512 + 2 * x) * 4, 4).CopyTo(expected.AsSpan((y * 256 + x) * 4, 4));
             Assert.Equal(expected, ReadNativeRows(texture, 256, 128, 4));
             var actualGuest = new byte[guest.Length]; Assert.True(views.TryReadBacking(address, actualGuest));
-            Assert.Equal(guest, actualGuest); // complete original mip0/mip1/mip2/tail/padding, no publication claim
+            Assert.Equal(guestBeforeGpu, actualGuest); // complete post-poison baseline unchanged through GPU work
             Assert.Equal(0, memory.OrdinaryReads);
             output.WriteLine($"r32-disjoint-native actualCLR={RuntimeInformation.ProcessArchitecture}; framework={RuntimeInformation.FrameworkDescription}; " +
                 $"provider_page={host.PageSize}; sampled_raw=90900924/RRRR; mip0=+40000/80000; mip1=+20000/20000; " +
-                "publicSubmit/Drain; CBstatus=4; all32768-native-R32-values; all786432-original-guest-bytes; independent-mode9-equation; noCPUfallback");
+                "publicSubmit/Drain; CBstatus=4; all32768-native-R32-values; all786432-post-poison-guest-bytes; detached-M0-after-full-CPU-poison; independent-mode9-equation; noCPUfallback");
         }
         catch (Exception failure) { primary = failure; throw; }
         finally
@@ -164,7 +183,8 @@ public sealed partial class MetalTextureMaterializationTests
 
     private sealed partial class SelectedNativeExecutionState
     {
-        internal void DispatchR32Disjoint(IReadOnlyList<GuestDrawTexture> textures)
+        private Task? r32PreflightTask; // retain a timed-out provider caller with this quarantined native owner
+        internal void DispatchR32Disjoint(IReadOnlyList<GuestDrawTexture> textures, ICpuMemory memory)
         {
             var sampled = ImageDescriptorBinding.ForImage(new ImageResource { ResourceClass = ImageResourceClass.Sampled,
                 NumericClass = ImageNumericClass.Float, Dimension = ImageDimension.Dim2D })!.Value;
@@ -200,6 +220,37 @@ public sealed partial class MetalTextureMaterializationTests
                 [0UL, compiled, textures.ToArray(), Array.Empty<GuestMemoryBuffer>(), 16u, 8u, 1u, 0u, 0u, 0u, false, bindings])!;
             Assert.True(sequence > 0);
             Presenter.GetMethod("ReleasePreparedTextureSources", Methods)!.Invoke(null, [textures]);
+            var creationField = Presenter.GetField("_computeTextureCreationOverride", Methods)!;
+            var oldCreation = creationField.GetValue(null);
+            var preflightCalls = 0;
+            Exception? primary = null;
+            creationField.SetValue(null, (Func<nint, nint, GuestDrawTexture, (nint Handle, bool Owned)>)
+                ((device, command, texture) =>
+                {
+                    Assert.False(Monitor.IsEntered(Presenter.GetField("_gate", Methods)!.GetValue(null)!));
+                    Assert.True((long)Presenter.GetField("_takenGuestWorkSequence", Methods)!.GetValue(null)! > 0);
+                    Assert.True(AgcBackendServices.TryDecodeTextureDescriptor(texture.Descriptor!, out var resource));
+                    var session = (long)Presenter.GetProperty("CurrentSelectedStorageMipSeedSession", Methods)!.GetValue(null)!;
+                    r32PreflightTask = Task.Run(() =>
+                    {
+                        Assert.Null(Presenter.GetField("_selectedStorageMipSeedExecutingWork", Methods)!.GetValue(null));
+                        Presenter.GetMethod("RequireR32SampledMipZeroCopyPreflight", Methods)!.Invoke(null, [memory, resource, session]);
+                    });
+                    if (!ReferenceEquals(Task.WhenAny(r32PreflightTask, Task.Delay(TimeSpan.FromSeconds(5)))
+                        .GetAwaiter().GetResult(), r32PreflightTask))
+                    {
+                        unknown = true;
+                        throw new TimeoutException("Exact taken selected-writer preflight did not terminate; retain all original/native owners.");
+                    }
+                    r32PreflightTask.GetAwaiter().GetResult();
+                    preflightCalls++;
+                    // Restore the original hook before calling the ACTUAL
+                    // production materializer; no fake native handle/result.
+                    creationField.SetValue(null, oldCreation);
+                    object?[] arguments = [device, command, texture, false];
+                    var handle = (nint)Presenter.GetMethod("CreateDrawTexture", Methods)!.Invoke(null, arguments)!;
+                    return (handle, (bool)arguments[3]!);
+                }));
             try
             {
                 Presenter.GetMethod("DrainGuestWorkCore", Methods)!.Invoke(null, [Device.Value, queue, 5L * System.Diagnostics.Stopwatch.Frequency]);
@@ -207,8 +258,19 @@ public sealed partial class MetalTextureMaterializationTests
                 Assert.NotEqual((nint)0, command); SendVoid(command, Selector("waitUntilCompleted"));
                 Assert.Equal(4UL, ReadInteger(command, Selector("status")));
                 Assert.True((bool)Presenter.GetMethod("IsGuestWorkCompletedLocked", Methods)!.Invoke(null, [sequence])!);
+                Assert.Equal(1, preflightCalls);
             }
-            catch { unknown = true; throw; }
+            catch (Exception failure) { primary = failure; unknown = true; throw; }
+            finally
+            {
+                try { creationField.SetValue(null, oldCreation); }
+                catch (Exception cleanup)
+                {
+                    unknown = true;
+                    if (primary is null) throw;
+                    try { primary.Data["R32CreationHookCleanup"] = cleanup; } catch { }
+                }
+            }
         }
     }
 }

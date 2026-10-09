@@ -1,8 +1,9 @@
 # DS R32 mip0 sampled input and mip1 writer — native fixture preparation
 
-Source-only test preparation. No build/test/native/game worker has run for this
-fixture. Root's faithful sampled-mip snapshot/disjoint admission source is a
-required dependency before execution; this fixture does not activate it.
+Source-only preparation. No build/test/native/game worker has run for this
+fixture. The combined source imports root's faithful sampled-mip snapshot and
+disjoint admission6bf, sampler importffb, and exact taken-work inspection629,
+with inherited8bc diagnostic and corrected3b fatal interception retained.
 
 Actual Compute179 has sampled raw
 `[7092C800,C1600000,003FC07F,90900924,0,00700080,0,0]` and a same-resource
@@ -35,7 +36,25 @@ DrainGuestWorkCore; frontend preparation cleanup runs after Submit and before
 Drain. This is transport/admission/numerical proof, not guest-ISA shader codegen.
 The expected32768 R32 output floats are selected directly from the independent
 linear mip0 payload. After real status4, all native output bytes and all786432
-original guest bytes must match; no GPU→guest publication is claimed here.
+original guest bytes must match the deliberate full-M0 CPU poison plus untouched
+M1/tail/padding; no GPU→guest publication is claimed here. Native sampling must
+still return the ORIGINAL detached M0 after that real participating CPU write.
+Substituting a different pixel array into a copied DTO refuses. Both original
+provider mappings must remain current after M1 cold protection setup and after
+poison; neither original is recaptured or refreshed.
+
+The actual sampled texture creation hook delegates to production CreateDrawTexture.
+Before materialization it runs original same-chain preflight on a separate managed
+thread while the actual selected dispatch is taken, asserting no renderer seed TLS
+on that thread. The wait is bounded5s with no presenter gate held; an unknown caller
+retains its Task with quarantined native/mapping owners.
+
+Thirteen genuine managed rows stop before source/provider/native operations:
+ten complete-raw/shape/access refusal cases, one missing-provider/no-fallback case,
+and public SubmitComputeDispatch pending/taken writable-buffer cases. These use
+a throwing provider only to assert it is NEVER called; they do not fabricate a
+positive mapping. The positive row uses real Mac SharedBackingViews forwarding,
+not PhysicalVirtualMemory forwarding, and is counted separately as actual native.
 
 Original mapped copies must show the exact two selected physical source ranges,
 real backing IDs/incarnations/kernel page metadata, and zero ordinary reads.
