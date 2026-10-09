@@ -1,8 +1,24 @@
 # Current native Mac game-entry checkpoint
 
-Priority: responsive, controllable gameplay; performance and visual polish follow entry.
+Priority: make all nine games reach a menu or controllable scene first; performance and visual polish follow entry.
 
-The six recorded game replays below use exact executable source `188b9c2843289cdd4da5b709f49973eef3084f52`: storage phase/readback original continuations, first-status preservation, ordered native color borrowing, and bounded log-anchored input. Local main now also includes qualified first-refusal, APR provider and pad diagnostics plus the first dirty-owner Busy fix, integrated at `778a3b9b`. Its `src`, `tests` and `scripts` trees are byte-identical to tested source `6cb2135a`. No remote push or upstream merge was performed.
+Local main integrates qualified source `1e17bc8d` at `a74d2778`; its `src`, `tests` and `scripts` trees match that tested source. This includes the completed buffer-publication continuation and gate-order correction. No remote push or upstream merge was performed. The six historical game replays below retain their exact executable source `188b9c2843289cdd4da5b709f49973eef3084f52`; later fixes do not relabel their evidence.
+
+## Latest qualification and three game replays
+
+Source `1e17bc8d` passes three builds, 912 managed cases per actual ARM64/x64 CLR and 58 native cases per CLR. Both mixed buffer/image cases pass first, followed by the remaining native inventory. ROOT independently verifies the native checkpoint's 830 artifact hashes and worker closure. The source-exact native-only signed package contains 239 files; ROOT verifies its 15 publication artifacts, all 239 payload hashes and deep strict signature. Native manifest SHA-256: `5d1798217e3c6b63f1efc3faa7febe6e4e1952e909b7ee3baceba8efd5ae7bb3`; publish manifest SHA-256: `e84d636ff0132f531a2bf9aeaead02970ba86c420bb6df93d791ade3306df7a3`.
+
+Three fresh attempts on that package fail before menu/gameplay:
+
+| Title / run prefix | Observed first failure | Result |
+| --- | --- | --- |
+| Oregon / `20261009-095207` | Canonical dirty acknowledgment refuses another image's original-volume watch or version. The exact winning subtype is not captured. | Exit 134 after 31 seconds; black client capture. |
+| Octopath / `20261009-095323` | Compute sequence 54, graphics submission 3; strict original-read-watch refusal at `0x8030BA0000` during post-Applied completion. Its same-query fields were not captured. | Exit 134 after 38 seconds; black client capture. |
+| Silent Hill / `20261009-095420` | Same canonical dirty-owner refusal class as Oregon. Earlier ordinary-write failures are separate observations, not proof of this winning guard. | Exit 134 after 28 seconds; black client capture. |
+
+ROOT independently verifies all 208 new game artifacts and absence of all six owned driver/harness process roots; the shared lock is absent. No monitor censor or retry occurred. Archive: `artifacts/validation/all-games-20261009/finite-buffer-continuation-1e17bc8d-game-entry-41f54-prepared/final-game-manifest.json`, SHA-256 `5f2385a5e3bef9cafd647eea725391d8ee89379fc47463ef5ec8a3b4f8872919`. These attempts do not establish additional accepted titles, FPS or loading speed.
+
+On the user's request, the separate Kairo session now holds new game launches and heavy checks until coordinated handoff from this thread. Both tasks stay active: Kairo continues source edits and lightweight evidence analysis, while SharpEmu owns the runtime replay window. Kairo acknowledges the hold and verifies no game or heavy worker remains. Earlier overlapping archives retain their original provenance and limitations.
 
 Exact qualification passed three builds, all 838 managed cases on each actual ARM64 and x64 CLR, and 43 fresh native workers per CLR with no skipped cases. The native inventory contains 38 Metal and five ordinary Mac-provider workers. The 104 compiled files remained stable; the signed native-only macOS payload contains 239 unchanged files and passes deep strict signature verification. ROOT independently verified all 506 qualification artifacts against the immutable manifest.
 
