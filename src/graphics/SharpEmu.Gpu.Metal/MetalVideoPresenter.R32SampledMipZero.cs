@@ -101,7 +101,7 @@ internal static partial class MetalVideoPresenter
             _guestDepthImages.Count != 0 || _guestDepthReadAliases.Count != 0 ||
             _unorderedPresentationWriteSequence != 0 ||
             _selectedStorageMipOwners.Count > 128 || _selectedStorageMipImages.Count > 128)
-            throw R32MipZeroRefused($"session, cleanup or unqualified native/pending writer inventory images={_guestImages.Count} extents={_guestImageExtents.Count} depth={_guestDepthImages.Count}/{_guestDepthReadAliases.Count} sources={_latestTextureSources.Count} retired={_finiteStorageRetiredOriginCount}/{_finiteRetiredDisplayOriginCount}");
+            throw R32MipZeroInventoryRefusedLocked(session);
         foreach (var pending in _pendingGuestWorkByQueue.Values.SelectMany(static queue => queue))
             RequireR32KnownWriterWork(pending.Work);
         foreach (var pair in _selectedStorageMipImages)
