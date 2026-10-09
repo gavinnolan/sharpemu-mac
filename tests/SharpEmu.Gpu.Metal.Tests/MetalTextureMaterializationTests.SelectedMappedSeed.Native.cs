@@ -202,17 +202,50 @@ public sealed partial class MetalTextureMaterializationTests
         private const ulong Size = 1048576;
         private bool quarantined, consumed;
         internal ulong Address { get; }
-        internal SelectedMappedSeedHole(IHostViewMemory host)
+        internal SelectedMappedSeedHole(IHostViewMemory host, Action<string>? trace = null)
         {
             this.host = host;
+            // Use the existing measured Mach-ledger geometry, not the CLR
+            // provider page size. Without it the fixture cannot establish that
+            // outward ledger rounding stays within its exact owned extent.
+            var geometry = typeof(SharpEmu.Host.MacOS.MacOSHost).Assembly
+                .GetType("SharpEmu.Host.MacOS.MacMappedCopyState")!;
+            var ledger = geometry.GetProperty("Ledger", Methods)!.GetValue(null) as HostMappedCopyLedger;
+            var kernel = ledger?.NativePageSize ?? throw new IOException("Measured kernel-ledger page size unavailable before owned allocation.");
+            Assert.True(kernel > 0 && (kernel & (kernel - 1)) == 0 && Size % kernel == 0);
             ulong owned = 0;
-            Assert.Equal(0, seed_mach_vm_allocate(seed_mach_task_self(), ref owned, Size, 1));
+            // ANYWHERE, anonymous object, no fixed/overwrite flags. XNU's
+            // address mask requires every set mask bit to be clear in result.
+            // RW/default, ALL maximum and COPY inheritance match allocation.
+            Assert.Equal(0, seed_mach_vm_map(seed_mach_task_self(), ref owned, Size, kernel - 1,
+                1, 0, 0, 0, 3, 7, 1));
             allocation = owned;
             try
             {
+                Assert.True(owned % kernel == 0);
+                _ = checked(owned + Size);
                 Address = checked((owned + 65535) & ~65535ul);
                 Assert.True(Address >= owned && Address - owned <= Size - 786432);
-                if (!host.UnmapView(owned, Size)) throw new IOException("Whole owned Mach extent placeholder conversion declined.");
+                // Diagnostic only: the ledger page is the already measured
+                // Mach kernel geometry, distinct from CLR/provider PageSize.
+                // No new syscall, effect retry or inferred errno is introduced.
+                if (trace is not null)
+                {
+                    try
+                    {
+                        trace($"owned-hole before-conversion raw=0x{owned:X} size=0x{Size:X} selected=0x{Address:X} " +
+                            $"selected_size=0x{786432:X} contained={Address >= owned && Address - owned <= Size - 786432} " +
+                            $"host_page={host.PageSize} raw_host_remainder={owned % host.PageSize} " +
+                            $"measured_kernel_ledger_page={kernel} allocation_mask=0x{kernel - 1:X} " +
+                            $"raw_kernel_remainder={owned % kernel} " +
+                            $"size_kernel_remainder={Size % kernel}");
+                    }
+                    catch { } // Optional evidence cannot change owned setup/cleanup.
+                }
+                var converted = host.UnmapView(owned, Size);
+                try { trace?.Invoke($"owned-hole after-conversion raw=0x{owned:X} size=0x{Size:X} returned={converted}; errno=unclassified"); }
+                catch { }
+                if (!converted) throw new IOException("Whole owned Mach extent placeholder conversion declined.");
             }
             catch { quarantined = true; throw; } // unknown conversion never releases/reclaims an assumed vacancy
         }
@@ -229,7 +262,9 @@ public sealed partial class MetalTextureMaterializationTests
         }
     }
     [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "mach_task_self")] private static extern uint seed_mach_task_self();
-    [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "mach_vm_allocate")] private static extern int seed_mach_vm_allocate(uint task, ref ulong address, ulong size, int flags);
+    [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "mach_vm_map")]
+    private static extern int seed_mach_vm_map(uint task, ref ulong address, ulong size, ulong mask,
+        int flags, uint memoryObject, ulong offset, int copy, int currentProtection, int maximumProtection, int inheritance);
 }
 
 internal sealed class SelectedMappedSeedNativeTheoryAttribute : TheoryAttribute

@@ -72,6 +72,7 @@ internal static partial class MetalTextureSnapshots
         }
         fallbackTextureCount = 0;
         GuestDrawTexture? unreturnedTexture = null;
+        List<object> ordinaryOriginals = [];
         try
         {
             foreach (var binding in bindings)
@@ -119,9 +120,13 @@ internal static partial class MetalTextureSnapshots
                 var r32SampledMipZero = IsR32SampledMipZeroCandidate(binding);
                 if (r32SampledMipZero) RequireR32SampledMipZero(binding);
                 else MetalVideoPresenter.RejectSelectedStorageAlias(context.Memory, binding.Descriptor, binding.IsStorage, binding.MipLevel);
+                GuestDrawTexture nativeR32Texture = null!;
+                var nativeR32 = r32SampledMipZero && MetalVideoPresenter.TryPrepareNativeR32Sample(context.Memory, binding, out nativeR32Texture);
                 var nativeColor = MetalVideoPresenter.TryCaptureNativeColorBorrow(context.Memory, binding, out var nativeColorTexture);
                 if (!nativeColor) MetalVideoPresenter.ValidateColorPhysicalSnapshotBinding(context.Memory, binding);
                 var depthCubeFaces = RequireDepthCubeSnapshot(binding);
+                var ordinaryStorageOriginal = MetalVideoPresenter.PrepareOrdinaryStorageOriginal(context.Memory, binding);
+                if (ordinaryStorageOriginal is not null) ordinaryOriginals.Add(ordinaryStorageOriginal);
                 var profileStart = TexturePreparationProfile.Begin();
                 var reuseKey = new GuestTextureSnapshotReuseKey(
                     binding.Descriptor,
@@ -129,7 +134,13 @@ internal static partial class MetalTextureSnapshots
                     binding.MipLevel,
                     binding.IsArrayed, binding.Shape, binding.Access);
                 GuestDrawTexture texture;
-                if (nativeColor)
+                if (nativeR32)
+                {
+                    texture = nativeR32Texture;
+                    unreturnedTexture = texture;
+                    TexturePreparationProfile.RecordBinding(TexturePreparationProfile.BindingOutcome.Empty, profileStart);
+                }
+                else if (nativeColor)
                 {
                     texture = nativeColorTexture;
                     unreturnedTexture = texture;
@@ -232,6 +243,7 @@ internal static partial class MetalTextureSnapshots
                     Access = binding.Access,
                 };
                 MetalVideoPresenter.CopyCapturedTextureSource(originalTexture, texture);
+                MetalVideoPresenter.AttachOrdinaryStorageOriginal(ordinaryStorageOriginal, texture);
                 textures.Add(texture);
                 unreturnedTexture = null;
                 if (texture.IsFallback)
@@ -244,6 +256,8 @@ internal static partial class MetalTextureSnapshots
         }
         catch (Exception failure)
         {
+            foreach (var original in ordinaryOriginals) MetalVideoPresenter.AbandonPreparedOrdinaryStorageOriginal(original);
+            _ = MetalVideoPresenter.ReleaseFailedPreparedNativeR32Textures(textures, unreturnedTexture, failure);
             MetalVideoPresenter.ReleaseFailedPreparedNativeColorTextures(textures, unreturnedTexture, failure);
             MetalVideoPresenter.ReleaseFailedPreparedSingletonVolumeOriginals(textures, unreturnedTexture, failure);
             MetalVideoPresenter.ReleasePreparedTextureSources(textures);

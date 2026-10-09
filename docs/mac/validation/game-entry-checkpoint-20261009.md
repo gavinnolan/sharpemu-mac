@@ -2,7 +2,7 @@
 
 Priority: make all nine games reach a menu or controllable scene first; performance and visual polish follow entry.
 
-Local main integrates qualified source `8c4b352f`; its `src`, `tests` and `scripts` trees match that tested source. The successor retains the first watched command write and its exact Applied successor, preserves first-status constructor Busy and records the first pre-encode owner predicate. This adds typed command-write ownership and same-query original-watch diagnostics to the completed buffer-publication continuation and gate-order correction. No remote push or upstream merge was performed. The six historical game replays below retain their exact executable source `188b9c2843289cdd4da5b709f49973eef3084f52`; later fixes do not relabel their evidence.
+Local main integrates qualified source `5016bc82`; its `src`, `tests` and `scripts` trees match that tested source. It adds the GPU-produced private R32 original path, physical-placement ownership checks and bounded rejected-draw input capture for DS/Void diagnosis. It retains `8c4b352f` first watched command writes and exact Applied successors, first-status constructor Busy, first pre-encode owner diagnostics, buffer-publication continuation and gate-order correction. Game entry on the new source still requires the separate replays below. No remote push or upstream merge was performed. The six historical game replays below retain their exact executable source `188b9c2843289cdd4da5b709f49973eef3084f52`; later fixes do not relabel their evidence.
 
 ## Next source candidates and current runtime coordination
 

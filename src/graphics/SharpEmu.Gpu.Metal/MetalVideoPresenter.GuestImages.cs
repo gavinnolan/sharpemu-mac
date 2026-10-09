@@ -86,6 +86,7 @@ internal static partial class MetalVideoPresenter
         public MetalStorageCpuLayout? StorageCpuLayout;
         // Optional ORIGINAL mapping copy and observation, never synthesized at drain.
         public StorageCpuSeedOrigin? StorageCpuOrigin;
+        public OrdinaryStorageOriginal? OrdinaryStorageOriginal;
 
         /// <summary>Cached feedback-read snapshot (one retain held here) and
         /// the content version it captured. Command buffers that sampled it
@@ -625,10 +626,11 @@ internal static partial class MetalVideoPresenter
         var selectedMipAdmission = PrepareSelectedStorageMipAdmissionLocked(work, queue);
         var colorPhysicalAdmission = PrepareColorPhysicalAdmissionLocked(work);
         var nativeColorAdmission = PrepareNativeColorAdmissionLocked(work, checked(_enqueuedGuestWorkSequence + 1), queue);
-        var retainedColor = RetainQueuedNativeColorLocked(work, nativeColorAdmission);
-        bool retainedVolume;
-        try { retainedVolume = RetainQueuedSingletonVolumeOriginalsLocked(work); }
-        catch (Exception primary) { if (retainedColor) ReleaseQueuedNativeColorLocked(work, primary); throw; }
+        OrdinaryStorageProducer[] ordinaryStorageAdmission = [];
+        var ordinaryPrepared = false;
+        var retainedColor = false;
+        var retainedR32 = false;
+        var retainedVolume = false;
         var oldSequence = _enqueuedGuestWorkSequence;
         var oldCount = _pendingGuestWorkCount;
         var oldBytes = _pendingGuestWorkBytes;
@@ -638,6 +640,11 @@ internal static partial class MetalVideoPresenter
         LinkedListNode<PendingGuestWork>? node = null;
         try
         {
+            retainedColor = RetainQueuedNativeColorLocked(work, nativeColorAdmission);
+            retainedR32 = RetainQueuedNativeR32SnapshotsLocked(work);
+            retainedVolume = RetainQueuedSingletonVolumeOriginalsLocked(work);
+            ordinaryStorageAdmission = PrepareOrdinaryStorageProducersLocked(work, checked(_enqueuedGuestWorkSequence + 1), queue);
+            ordinaryPrepared = _r32NativeOriginalRequested && work is ComputeGuestDispatch;
             var sequence = ++_enqueuedGuestWorkSequence;
             _lastEnqueuedGuestWorkByQueue[queue.Name] = sequence;
             if (newQueue)
@@ -675,6 +682,7 @@ internal static partial class MetalVideoPresenter
             PublishColorPhysicalAdmissionLocked(colorPhysicalAdmission);
             PublishNativeDepthFaceLocked(nativeDepthFaceAdmission);
             PublishNativeColorAdmissionLocked(work, nativeColorAdmission);
+            PublishOrdinaryStorageProducersLocked(work, ordinaryStorageAdmission);
             _pendingGuestWorkCount++;
             var total = _pendingGuestWorkBytes + payloadBytes;
             _pendingGuestWorkBytes = total < _pendingGuestWorkBytes ? ulong.MaxValue : total;
@@ -691,7 +699,7 @@ internal static partial class MetalVideoPresenter
             RecordGuestSubmissionPrefixAdmission(sequence, queue);
             return sequence;
         }
-        catch (Exception failure) when (retainedColor || retainedVolume || nativeDepthFaceAdmission is not null)
+        catch (Exception failure) when (retainedColor || retainedVolume || retainedR32 || nativeDepthFaceAdmission is not null || ordinaryPrepared)
         {
             if (node?.List is { } admittedQueue) admittedQueue.Remove(node);
             if (newQueue)
@@ -708,8 +716,10 @@ internal static partial class MetalVideoPresenter
             // Selected metadata may already be installed. Fatal admission
             // forbids its execution rather than publishing a partial success.
             _guestWorkFailure ??= failure;
+            RollbackOrdinaryStorageProducersLocked(work, ordinaryStorageAdmission);
             CancelQueuedSingletonVolumeOriginalsLocked(failure);
             CancelQueuedNativeColorLocked(failure);
+            CancelQueuedNativeR32SnapshotsLocked(failure);
             Monitor.PulseAll(_gate);
             throw;
         }
@@ -883,15 +893,18 @@ internal static partial class MetalVideoPresenter
                     if (_singletonVolumeOriginalCleanupFailure is { } priorCleanup)
                         System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(priorCleanup).Throw();
                     if (_nativeColorCleanupFailure is { } colorCleanup) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(colorCleanup).Throw();
+                    if (_ordinaryStorageOriginalCleanupFailure is { } ordinaryCleanup) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ordinaryCleanup).Throw();
                     RequireNativeColorCompletedWorkLocked(pending.Work);
                     ReleaseQueuedSingletonVolumeOriginalsLocked(pending.Work);
                     ReleaseQueuedNativeColorLocked(pending.Work);
+                    ReleaseQueuedNativeR32SnapshotsLocked(pending.Work);
                 }
                 catch (Exception failure)
                 {
                     _guestWorkFailure ??= failure;
                     CancelQueuedSingletonVolumeOriginalsLocked(failure);
                     CancelQueuedNativeColorLocked(failure);
+                    CancelQueuedNativeR32SnapshotsLocked(failure);
                     Monitor.PulseAll(_gate);
                     throw; // no completed-sequence acknowledgement
                 }
@@ -1054,6 +1067,7 @@ internal static partial class MetalVideoPresenter
                             _guestWorkFailure = exception;
                             CancelQueuedSingletonVolumeOriginalsLocked(exception);
                             CancelQueuedNativeColorLocked(exception);
+                            CancelQueuedNativeR32SnapshotsLocked(exception);
                             Monitor.PulseAll(_gate);
                         }
                     }

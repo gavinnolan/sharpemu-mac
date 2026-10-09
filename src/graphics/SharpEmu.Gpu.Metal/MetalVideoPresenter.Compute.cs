@@ -314,6 +314,7 @@ internal static partial class MetalVideoPresenter
         }
 
         if (storageWritebacks is null) RecordStorageImageWrites(dispatch.Textures);
+        RecordOrdinaryStorageEncodedProducers(dispatch, commandBuffer, queue);
 
         ReturnPooledComputeData(dispatch);
     }
@@ -365,6 +366,7 @@ internal static partial class MetalVideoPresenter
         try
         {
             var image = EnsureStorageImageCore(device, descriptor, construction?.Reservation ?? default);
+            BindOrdinaryStorageNativeOriginal(descriptor, image);
             construction?.SetNativeOwner(image);
             return image;
         }

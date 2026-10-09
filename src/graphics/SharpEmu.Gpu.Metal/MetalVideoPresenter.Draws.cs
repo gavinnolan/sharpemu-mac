@@ -1677,6 +1677,9 @@ internal static partial class MetalVideoPresenter
         out bool ownedByCaller)
     {
         ownedByCaller = true;
+        if (TryResolveNativeR32Snapshot(blitCommandBuffer, texture, out var nativeR32))
+        { ownedByCaller = true; return nativeR32; }
+
         var sampledSingletonVolume = !texture.IsStorage && texture.Type == 10 && texture.TileMode != 0;
         if (sampledSingletonVolume)
             MetalTextureSnapshots.ValidateSampledSingletonVolumeUpload(texture);
