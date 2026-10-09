@@ -6,12 +6,15 @@ Local main integrates qualified source `1893dc25`; its `src`, `tests` and `scrip
 
 ## Next source candidates and current runtime coordination
 
-Current lane: Kairo owns one bounded v556 build/test and 360-second Silent Hill
-replay window. Reported owned runner/game roots are `11260`/`11264`, lease owner
-`11260`. SharpEmu remains source/light until its fresh terminal handoff. Kairo's
-prior v555 terminal evidence and movie delivery do not establish menu/gameplay.
+Current lane: Kairo's one bounded v556 window is terminal. ROOT independently
+verifies at 20:38:53 UTC that runner/game `11260`/`11264` and their process groups
+are absent, no actual game/compiler/test worker remains, and the shared lease is
+absent. Evidence: `kairo-v556-terminal-runtime-handoff/root-preflight.json`.
+SharpEmu now owns the qualification window; the first f76 build failure and
+the successor's first native failure are retained. Kairo stays source/light until coordinated return. Its movie delivery
+and bounded captures do not establish menu/gameplay.
 
-The next isolated source union is `f76fa0d6fe4f91cf9df49db668d66b92a36e4cfa`.
+The first isolated source union is `f76fa0d6fe4f91cf9df49db668d66b92a36e4cfa`.
 It combines the reviewed first admission-owner/local validation diagnostics,
 Superliminal failed-command metadata, Silent Hill first ordinary acquisition
 currentness diagnostics, and an explicit stable GPU memory view. The GPU view
@@ -20,13 +23,65 @@ for GPU binding; distinct roots, opaque decorators and malformed views still
 refuse. It preserves the presenter identity guards. This targets the observed
 DS `guest-memory-replaced` failure; a new game result is pending.
 
-This union is **source-only and unqualified**. No build/test/game result is
+This union is **not qualified**. No build/test/game result is
 inherited from `1893dc25`. ROOT verifies all 2,030 worktree and source archive
 hashes; the expected ordinary inventory is 1,203 cases per actual CLR: 279 Host,
 819 Libs and 105 GPU. The 238 separate workers remain a separate inventory.
 Source manifest SHA-256:
 `3fc63f6696106229afa5603a7d64a570cc6b51ddbf0a901b8a4eb6497ca697fd`.
 Local main retains the qualified `1893dc25` implementation.
+
+The first f76 build passes Host, then Libs fails `CS0103`: the new GPU-view test
+partial omitted `using SharpEmu.Libs.Gpu` for `GuestGpu`. GPU build and every
+test/native/publication/game phase remain unrun. ROOT verifies all 13 retained
+failure artifacts, 2,030 unchanged source hashes, 60 partial binary hashes, and
+fresh closure of all four owned roots. Failure manifest SHA-256:
+`28dfa37146657f2da344b1a721d5082ee36e6fad3ce23e05aa3471a4de8e6b5b`.
+Peer-reviewed successor `537e9fff4ac84b02ed3fa5814ab6f8c4c919e7c7` adds only the
+missing namespace import in that test partial. Production and all case identities
+are unchanged. The corrected source passes all three builds and all 1,203 ordinary cases on each
+actual ARM64/x64 .NET 10.0.3 CLR, with zero failures or skips. ROOT verifies all
+15 build and 46 managed artifacts, exact TRX identities and unchanged source/
+compiled hashes. Build manifest `94f675219b8422ce77de0fe16d130d46ee8373fdf43255fb3f3b643d775d4c0a`;
+managed manifest `506b83895defd89dc24944fa4f61b7ed2000fb5730a39e68c5d90ab6dbcd599c`.
+The separate phase passes 26 synthetic cold metadata workers and six actual
+native/provider workers, then the first ARM64 color-consumer Fill worker fails
+at producer submission: `Native color producer lost its ORIGINAL preparation`.
+The other 205 workers, publication and games remain unrun. ROOT independently
+verifies all 244 failed-phase artifact hashes, unchanged source/binaries and
+all 33 single-case TRX outcomes. All owned roots are closed; only the exact dead
+owned lease is removed after closure. Failed manifest SHA-256:
+`9b4028d24cf511d4642c0765be1ac9dd18fe52014587cc948ead04a8a85399ed`.
+Neither failed source is retried or relabelled.
+
+Source review establishes a direct factory mismatch: presenter attachment
+resolves a tracked wrapper to its underlying GPU reader, but color projection
+retains that wrapper in its original placement. The unchanged identity guard
+therefore cannot admit that placement. This does not establish the sole winning
+runtime predicate or a broader raw production bypass. A reviewed source
+successor resolves explicit GPU views before acquisition at six factory/host
+boundaries, preserving opaque decorators, different-root refusal and captured
+receipt identity. It adds 24 ordinary controls and four separately attributed
+fresh activation metadata rows per CLR; existing native fixtures/oracles remain
+unchanged. Factory donor `88d1b27bbc1ed8c93618bd41da1ce03759685485` is frozen;
+ROOT verifies its 2,033 source/archive hashes and exact inverse parent tree.
+
+Reviewed source `9985abae01bbfc141d7593c93789c58ee3effe42` adds default-off,
+bounded fault-thread import history including fast paths. It records no raw
+argument-pack reads and preserves the original dispatch body and result. Its
+15 ordinary controls are unrun. Frozen qualification union
+`07698f965631dcee4772c8aa3ea3bd378725b952` includes these exact disjoint donors.
+ROOT verifies all 2,037 worktree/archive source hashes, all sixteen donor paths,
+and three inverse parent tree proofs. Expected ordinary inventory is 1,242 per
+actual CLR (279 Host, 858 Libs, 105 GPU). Its 246 separate workers comprise the
+unchanged 212 native/provider cases and 26 cold metadata cases, plus eight new
+fresh activation metadata workers. No qualification is inherited. Source
+manifest SHA-256:
+`906565e717ea83c7604e0e2817dbe9431d4d6a24d4abb203f0db3b51564d880f`.
+Execution, publication and games are pending. Poppy's source audit still finds
+uncovered executable-allocation ownership, protection changes and late code
+writes; no safe boot behavior change or native fault authority is established.
+
 
 The following predecessor history preserves failures and their original lane
 state; it is not the current execution queue.
