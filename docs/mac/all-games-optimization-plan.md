@@ -3,7 +3,12 @@
 
 # All-games compatibility and Mac performance plan
 
-Updated 2026-10-08. Target: every installed title renders correctly, reaches
+Current entry work is recorded in the [game-entry checkpoint](validation/game-entry-checkpoint-20261009.md).
+The table below retains the October 8 baseline; use that checkpoint for newer
+blockers and qualification. The current priority is controllable gameplay for
+all nine titles, followed by rendering and performance.
+
+Target: every installed title renders correctly, reaches
 controllable gameplay, loads quickly and meets its intended frame cadence.
 The requested 60+ FPS target is not achieved across the collection. A title's
 own frame cap must be distinguished from host performance; changing guest time

@@ -159,9 +159,73 @@ saved identity before queueing; CPU writers remain tracked. No saved receipt is
 normalized, original recaptured, production guard changed or failed source
 retried. The remaining manual capture paths are being audited.
 
+Frozen fixture successor `3bd17de5e3acf1de6112a0d64b34c29056c1e0d5`
+changes that first buffer capture and registration to the host-selected reader
+and adds one managed ledger identity regression. ROOT verifies all 2,041
+worktree/tar source hashes, four archive artifacts, inverse full d85 tree,
+unchanged production/scripts, twenty-three prepared artifacts, seven inherited
+inventories and all six minimal driver retargets. All 1,245 old ordinary rows
+remain; expected ordinary inventory is 1,246 per CLR (279 / 862 / 105), with the
+same 246 separate workers. All three fresh builds pass with actual exit code 0.
+ROOT independently verifies seventeen build artifacts, 2,041 unchanged source
+hashes, 104 compiled hashes and fresh closure of all six owned roots. The Libs
+build's residual helper is closed after its successful return; no timeout or
+remaining worker is observed. Build manifest:
+`1b0bbab73bcd1c9758a7574ce36ad6db666ab2d13517c52b0c0d03a6c9b45ab2`.
+All 1,246 ordinary cases pass on each actual ARM64/x64 .NET 10.0.3 runtime,
+with zero failures or skips. ROOT independently verifies forty-eight managed
+artifacts, all six exact case inventories, unchanged source/compiled hashes and
+fresh closure of fourteen owned roots. Managed manifest:
+`72cde28def460c16f6456bc32d312a9451a9cf3acaae2e3c73c4b59ad2546a28`.
+Separate native qualification is underway; publication and games remain unrun.
+Both actual CLR workers now pass the formerly failing mixed buffer/image case
+with its full original status-4, writer, once-only publication and completion
+oracle unchanged. This resolves that fixture failure point; the remaining
+native workers still require completion before packaging or game replays.
+Source manifest:
+`fa6f9ebd2311d8675815fac2065394341ce02502ff0398b13f6bf7189ff10c63`;
+prepared manifest:
+`1f4c89ca658c419c68940fe631caec35178b4f1088de080fce87a65f53dccf82`.
+No successor qualification, publication or game result is inherited.
+
+The external Quake one-action helper passes ten isolated Python controls,
+including actual atomic key writes and a pending stop signal during neutral
+release. Ownership/lease/time samples in those controls are explicitly synthetic;
+no game, CLR or native worker is created. ROOT verifies all 110 evidence hashes
+and fresh closure of twelve owned roots. Regression manifest:
+`5dd09cc4db37ea27779c8b7159cbd28dd2902655987b13b90296b56f615e8e5e`.
+Actual use requires a separate current owned-capture action grant and qualified
+payload. No actual game input has yet used this helper; guest pad writes still
+cannot establish game logic consumption or gameplay.
+
 Poppy's source audit still finds
 uncovered executable-allocation ownership, protection changes and late code
 writes; no safe boot behavior change or native fault authority is established.
+Separate source `8d7ceaa5`, off the unqualified Host/PVM foundation `b75d45d0`,
+retains exact original allocation metadata once at image load and copies bounded
+historical image metadata into local options at each dispatch boundary. It does
+not refresh old cookies or claim current permission/lifetime ownership. ROOT
+reviews all six Core paths and twenty-four added ordinary source rows, then
+verifies 2,025 worktree/tar hashes and the exact inverse parent tree. No compile,
+test, native module-install, signal recovery or game execution is qualified.
+Source archive manifest:
+`ff9686229827a145e5d4ebe8f2cbaf5739e9025f26f2cc3a35c773a5e3b7649f`.
+
+The separate offline NGG scalar source `53eaad89` adds strict mathematical
+effects for five captured scalar opcodes, with forty-eight source controls.
+ROOT verifies all 1,809 worktree/tar hashes, original primary references and the
+exact inverse parent tree. Its static comparison covers seventy of the 707
+captured instruction sites; it does not execute the C# binder, compile MSL or
+qualify a native shader. All eight launch obligations remain missing and
+`CanExecute` stays false. Source archive manifest:
+`3d8ac731c959aa4ab34f19872495db6ea7f9c5c77f56239d55c1432f7dc06507`.
+Its separate child `2a8810b5` adds comparison and conditional-select scalar
+effects plus fifty-two unrun ordinary rows. ROOT reviews the complete source,
+checks the original AMD definitions and verifies all 1,812 worktree/tar hashes,
+retained primary references and inverse parent tree. Combined static coverage
+is 104 of 707 captured sites, with 603 outside these models; no runtime shader
+acceptance changes. Source archive manifest:
+`ee1c3f61d4c1ef4da24863c8f55866fd801b61906cf49594a8cdbdef8fe88fa1`.
 
 
 The following predecessor history preserves failures and their original lane
