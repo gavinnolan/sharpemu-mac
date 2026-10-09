@@ -43,6 +43,12 @@ public sealed partial class MetalImmutableGpuVersionTests
         ulong volumeAddress, ulong volumeBytes, bool failValidationCancellation) : ICpuMemory, ICpuMappedReadWatchSource, ICpuMappedPublicationSource
     {
         private CpuMappedPublicationValidation? retainedUnknownValidation;
+        private bool validationCancellationArmed;
+        internal void ArmValidationCancellation()
+        {
+            Assert.True(failValidationCancellation); Assert.False(validationCancellationArmed);
+            Assert.Null(retainedUnknownValidation); validationCancellationArmed = true;
+        }
         private PhysicalVirtualMemory Route(ulong address, ulong count) =>
             address >= volumeAddress && address - volumeAddress <= volumeBytes && count <= volumeBytes - (address - volumeAddress)
                 ? volumes : image;
@@ -64,10 +70,11 @@ public sealed partial class MetalImmutableGpuVersionTests
         public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(CpuMappedCopyObservation original, out CpuMappedPublicationValidation? ticket)
         {
             var result = Route(original).TryPrepareMappedPublicationValidation(original, out ticket);
-            if (failValidationCancellation && ticket is not null)
+            if (validationCancellationArmed && ticket is not null)
             {
                 // Failure injection AFTER a real provider cancellation. The
                 // consumer cannot certify its return; no fake positive receipt.
+                validationCancellationArmed = false;
                 retainedUnknownValidation = ticket;
                 ticket = new CpuMappedPublicationValidation(new UncertainBodyCancellation(ticket));
             }

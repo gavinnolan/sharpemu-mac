@@ -241,6 +241,9 @@ public sealed partial class MetalImmutableGpuVersionTests
 
             if (bodyBusyWindow is not null)
             {
+                // Arm only after the initial actual status4/canonical publication proof.
+                if (bodyBusyWindow == "cancel-unknown")
+                    Assert.IsType<BodyBusyRoutedMemory>(cpuSource).ArmValidationCancellation();
                 RunBodyBusyOriginalRetry(state, physical, memory, owners, address, imageBytes, expected, image,
                     ownOrigin, ReadCanonical, bodyBusyWindow);
                 return;
