@@ -83,6 +83,12 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
         MacMappedCopyState.Ledger?.IsMappedCopyWriteWatchCurrent(backing, observation) == true;
     public CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(HostBackingObject backing, CpuMappedCopyObservation observation) =>
         MacMappedCopyState.Ledger?.GetMappedCopyWriteWatchStatus(backing, observation) ?? CpuMappedReadWatchStatus.Stale;
+    public CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(HostBackingObject backing, CpuMappedCopyObservation observation,
+        out CpuMappedReadWatchDiagnostic diagnostic)
+    {
+        if (MacMappedCopyState.Ledger is { } ledger) return ledger.GetMappedCopyWriteWatchStatus(backing, observation, out diagnostic);
+        diagnostic = new() { MappingGuard = "mac-ledger-unavailable" }; return CpuMappedReadWatchStatus.Stale;
+    }
     public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation observation) =>
         MacMappedCopyState.Ledger?.ReleaseMappedCopyWriteWatch(observation);
 

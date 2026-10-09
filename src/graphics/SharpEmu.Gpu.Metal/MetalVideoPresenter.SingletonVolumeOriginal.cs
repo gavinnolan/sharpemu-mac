@@ -221,13 +221,15 @@ internal static partial class MetalVideoPresenter
         if (origin?.VolumeWatch is not { } watch) return;
         if (Monitor.IsEntered(_gate)) throw new InvalidOperationException("Singleton volume content validation requires a released presenter gate.");
         CpuMappedReadWatchStatus? originalWatchStatus = null;
+        OriginalReadWatchDiagnostic firstWatchDiagnostic = default;
         // Keep the exact short-circuit order and the status of its FIRST watch
         // query. Diagnostic scalar sampling below is not a second validation.
         var originalRefusal = _closed ? "closed" : _guestWorkFailure is not null ? "guest-work-failure" :
             !ReferenceEquals(_guestMemory, origin.Memory) ? "memory" :
             _singletonVolumeOriginalCleanupFailure is not null ? "original-cleanup-failure" :
             origin.Session != CurrentStorageCpuSeedSession ? "session" :
-            (classifyOrdinaryBusy ? (originalWatchStatus = reservation.GetStatus(watch)) != CpuMappedReadWatchStatus.Current :
+            (classifyOrdinaryBusy ? (originalWatchStatus = _volumeOwnerDeclineDiagnostics
+                ? reservation.GetStatusWithDiagnostic(watch, out firstWatchDiagnostic) : reservation.GetStatus(watch)) != CpuMappedReadWatchStatus.Current :
                 !reservation.IsCurrent(watch)) ? "original-read-watch" :
             !origin.Source.IsMappedCopyObservationCurrent(origin.Mapping) ? "mapping" :
             !GuestImageWriteTracker.IsReadSnapshotStable(watch.Read) ? "read-snapshot" :
@@ -257,6 +259,23 @@ internal static partial class MetalVideoPresenter
                     $" classify_watch_requested={classifyOrdinaryBusy}; first_watch_status={firstWatchStatus};" +
                     $" later_watch_state={Volatile.Read(ref watch.State)}; later_unknown_producer={Volatile.Read(ref watch.UnknownProducer)};" +
                     $" historical_unknown_reason={watch.DiagnosticUnknownProducerReason ?? "none"}; diagnostic_samples_not_authority=true";
+            try
+            {
+                if (TryReserveOriginalReadWatchDiagnostic(origin.Memory))
+                {
+                    var first = firstWatchDiagnostic.Provider;
+                    message += $" same_query_mapping_guard={first.MappingGuard ?? "not-reached"}; same_query_mapping_check={first.MappingCheck ?? "not-reached"};" +
+                        $" same_query_watch_guard={first.WatchGuard ?? "not-reached"}; same_query_primary_admission={first.PrimaryAdmission?.ToString() ?? "not-reached"};" +
+                        $" same_query_classification_guard={first.ClassificationGuard ?? "none-or-not-reached"}; same_query_watch_status={first.WatchStatus?.ToString() ?? "not-reached"};" +
+                        $" same_query_provider_status={first.ProviderStatus?.ToString() ?? "not-reached"};" +
+                        $" same_query_shared_closure={first.SharedClosure ?? "none-or-not-reached"}; same_query_owner_closure={first.OwnerClosure ?? "none-or-not-reached"};" +
+                        $" same_query_virtual_closure={first.VirtualClosure ?? "none-or-not-reached"}; same_query_local_guard={firstWatchDiagnostic.LocalGuard ?? "none"};" +
+                        $" same_query_read_ticket={firstWatchDiagnostic.OriginalRead?.ToString() ?? "not-queried"};" +
+                        $" same_query_publication_ticket={firstWatchDiagnostic.Publication?.ToString() ?? "not-queried"};" +
+                        $" same_query_validation_ticket={firstWatchDiagnostic.Validation?.ToString() ?? "not-queried"}; attribution_not_authority=true";
+                }
+            }
+            catch { } // Optional attribution must preserve the original refusal.
             var failure = new InvalidOperationException(message);
             failure.Data["SingletonVolumeOriginalFirstRefusal"] = originalRefusal;
             failure.Data["SingletonVolumeOriginalFirstWatchStatus"] = firstWatchStatus;

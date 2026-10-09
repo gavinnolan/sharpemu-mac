@@ -71,6 +71,12 @@ public sealed class TrackedCpuMemory : ICpuMemory, ITrackedCpuMemory, IGuestMemo
         _inner is ICpuMappedReadWatchSource source && source.IsMappedCopyWriteWatchCurrent(observation);
     public CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(CpuMappedCopyObservation observation) =>
         _inner is ICpuMappedReadWatchSource source ? source.GetMappedCopyWriteWatchStatus(observation) : CpuMappedReadWatchStatus.Stale;
+    public CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(CpuMappedCopyObservation observation,
+        out CpuMappedReadWatchDiagnostic diagnostic)
+    {
+        if (_inner is ICpuMappedReadWatchSource source) return source.GetMappedCopyWriteWatchStatus(observation, out diagnostic);
+        diagnostic = new() { VirtualClosure = "tracked-inner-capability-unavailable" }; return CpuMappedReadWatchStatus.Stale;
+    }
     public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation observation)
     { if (_inner is ICpuMappedReadWatchSource source) source.ReleaseMappedCopyWriteWatch(observation); }
 

@@ -68,6 +68,8 @@ public sealed partial class MetalImmutableGpuVersionTests
         public bool IsMappedCopyObservationCurrent(CpuMappedCopyObservation original) => Route(original).IsMappedCopyObservationCurrent(original);
         public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation original) => Route(original).IsMappedCopyWriteWatchCurrent(original);
         public CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(CpuMappedCopyObservation original) => Route(original).GetMappedCopyWriteWatchStatus(original);
+        public CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(CpuMappedCopyObservation original,
+            out CpuMappedReadWatchDiagnostic diagnostic) => Route(original).GetMappedCopyWriteWatchStatus(original, out diagnostic);
         public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation original) => Route(original).ReleaseMappedCopyWriteWatch(original);
         public CpuMappedPublicationPreparationResult TryPrepareMappedReadValidation(CpuMappedCopyObservation original, out CpuMappedReadValidation? ticket) =>
             Route(original).TryPrepareMappedReadValidation(original, out ticket);

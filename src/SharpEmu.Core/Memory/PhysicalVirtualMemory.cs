@@ -1238,6 +1238,22 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation observation)
     { if (_backedSpace is ICpuMappedReadWatchSource source) source.ReleaseMappedCopyWriteWatch(observation); }
 
+    public CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(CpuMappedCopyObservation observation,
+        out CpuMappedReadWatchDiagnostic diagnostic)
+    {
+        var space = _backedSpace;
+        if (Volatile.Read(ref _disposed))
+        { diagnostic = new() { VirtualClosure = "pvm-pre-disposed" }; return CpuMappedReadWatchStatus.Stale; }
+        if (space is not ICpuMappedReadWatchSource source)
+        { diagnostic = new() { VirtualClosure = "pvm-pre-capability-unavailable" }; return CpuMappedReadWatchStatus.Stale; }
+        var status = source.GetMappedCopyWriteWatchStatus(observation, out diagnostic);
+        if (Volatile.Read(ref _disposed))
+        { diagnostic = diagnostic with { VirtualClosure = "pvm-post-disposed" }; return CpuMappedReadWatchStatus.Stale; }
+        if (!ReferenceEquals(_backedSpace, space))
+        { diagnostic = diagnostic with { VirtualClosure = "pvm-post-space-replaced" }; return CpuMappedReadWatchStatus.Stale; }
+        return status;
+    }
+
     public CpuMappedCopyResult TryReadMappedCopy(ulong footprintAddress, ulong footprintByteCount,
         ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)
     {

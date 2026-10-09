@@ -124,6 +124,16 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMap
     }
     public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation observation) => _views.ReleaseMappedCopyWriteWatch(observation);
 
+    public CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(CpuMappedCopyObservation observation,
+        out CpuMappedReadWatchDiagnostic diagnostic)
+    {
+        if (Volatile.Read(ref _disposed))
+        { diagnostic = new() { OwnerClosure = "owner-pre-disposed" }; return CpuMappedReadWatchStatus.Stale; }
+        var status = _views.GetMappedCopyWriteWatchStatus(observation, out diagnostic);
+        if (!Volatile.Read(ref _disposed)) return status;
+        diagnostic = diagnostic with { OwnerClosure = "owner-post-disposed" }; return CpuMappedReadWatchStatus.Stale;
+    }
+
     public CpuMappedCopyResult TryReadMappedCopy(ulong footprintAddress, ulong footprintByteCount,
         ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)
     {

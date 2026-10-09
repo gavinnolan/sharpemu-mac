@@ -169,6 +169,32 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
     public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation observation)
     { if (_host is IHostMappedReadWatchMemory provider) provider.ReleaseMappedCopyWriteWatch(observation); }
 
+    private bool IsAvailableForReadWatchDiagnostic(bool before, out string? reason)
+    {
+        reason = _backing is null ? "shared-backing-missing" :
+            Volatile.Read(ref _disposeRequested) ? before ? "shared-pre-dispose-requested" : "shared-post-dispose-requested" :
+            Volatile.Read(ref _disposed) ? before ? "shared-pre-disposed" : "shared-post-disposed" :
+            _backing.IsClosing ? before ? "shared-pre-backing-closing" : "shared-post-backing-closing" :
+            _backing.IsDisposed ? before ? "shared-pre-backing-disposed" : "shared-post-backing-disposed" : null;
+        return reason is null;
+    }
+    public CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(CpuMappedCopyObservation observation,
+        out CpuMappedReadWatchDiagnostic diagnostic)
+    {
+        if (!IsAvailableForReadWatchDiagnostic(true, out var reason))
+        { diagnostic = new() { SharedClosure = reason }; return CpuMappedReadWatchStatus.Stale; }
+        if (_backing is not { } backing)
+        { diagnostic = new() { SharedClosure = "shared-backing-missing" }; return CpuMappedReadWatchStatus.Stale; }
+        if (_host is not IHostMappedReadWatchMemory provider)
+        { diagnostic = new() { SharedClosure = "shared-pre-capability-unavailable" }; return CpuMappedReadWatchStatus.Stale; }
+        var status = provider.GetMappedCopyWriteWatchStatus(backing, observation, out diagnostic);
+        if (!IsAvailableForReadWatchDiagnostic(false, out reason))
+        { diagnostic = diagnostic with { SharedClosure = reason }; return CpuMappedReadWatchStatus.Stale; }
+        if (!ReferenceEquals(_backing, backing))
+        { diagnostic = diagnostic with { SharedClosure = "shared-post-backing-replaced" }; return CpuMappedReadWatchStatus.Stale; }
+        return status;
+    }
+
     public CpuMappedCopyResult TryReadMappedCopy(ulong footprintAddress, ulong footprintByteCount,
         ulong sourceAddress, Span<byte> destination, out CpuMappedCopyObservation? observation)
     {
