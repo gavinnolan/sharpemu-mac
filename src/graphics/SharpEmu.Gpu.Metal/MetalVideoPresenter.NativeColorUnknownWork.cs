@@ -37,6 +37,10 @@ internal static partial class MetalVideoPresenter
             {
                 case OrderedGuestAction action:
                     kind = "ordered-action"; debugName = action.DebugName; break; // never invoke Action
+                case OrderedCommandMemoryOperation operation:
+                    kind = "command-memory-" + operation.Operation.Kind; debugName = operation.Operation.DebugName;
+                    address = operation.Operation.Address; secondary = operation.Operation.SourceAddress;
+                    bytes = operation.Operation.ByteCount; value = operation.Operation.Value; break; // never execute payload
                 case GuestImageWrite write:
                     kind = "image-write"; address = write.Address;
                     bytes = (ulong)(write.Pixels?.LongLength ?? 0); value = write.FillValue; break;
@@ -69,6 +73,7 @@ internal static partial class MetalVideoPresenter
     {
         null => "none", OffscreenGuestDraw => "offscreen-draw", ComputeGuestDispatch => "compute-dispatch",
         OrderedGuestAction => "ordered-action", GuestImageWrite => "image-write", GuestImageBlit => "image-blit",
+        OrderedCommandMemoryOperation => "command-memory",
         OrderedGuestFlip => "ordered-flip", GlobalDataShareFill => "gds-fill",
         GlobalDataShareCopyFromGuest => "gds-copy-from-guest", GlobalDataShareCopyToGuest => "gds-copy-to-guest",
         _ => "unclassified"

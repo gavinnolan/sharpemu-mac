@@ -8,15 +8,22 @@ internal sealed partial class MetalCommandStreamHost
     {
         // The queue owns these bytes; no packet scratch/stack span survives
         // admission, failure, or the interpreter's subsequent packet.
-        var payload = source.ToArray();
-        ExecuteGuestMemoryOperation(() =>
-        {
-            if (!Memory.TryWrite(address, payload))
-                throw new InvalidOperationException($"Metal command-stream memory write failed: address=0x{address:X16} bytes={payload.Length}.");
-        }, kind, address, (ulong)payload.Length, MetalVideoPresenter.CommandMemoryTraceScalar(payload));
+        ExecuteCommandMemoryOperation(SharpEmu.Libs.Gpu.GpuCommands.CommandMemoryOperation.Write(address, source, kind));
         return true;
     }
 
     public override void ExecuteGuestMemoryOperation(Action operation, string kind = "MEMORY_OPERATION", ulong address = 0, ulong bytes = 0, ulong value = 0) =>
         MetalVideoPresenter.ExecuteOrderedGuestMemoryOperation(operation, kind, address, bytes, value);
+
+    public override void ExecuteCommandMemoryOperation(SharpEmu.Libs.Gpu.GpuCommands.CommandMemoryOperation operation) =>
+        MetalVideoPresenter.ExecuteTypedGuestMemoryOperation(this, operation);
+
+    internal void ExecuteCommandMemoryOperationAtQueuePosition(SharpEmu.Libs.Gpu.GpuCommands.CommandMemoryOperation operation) =>
+        operation.Execute(this, transfer =>
+        {
+            if (transfer.Kind == SharpEmu.Libs.Gpu.GpuCommands.CommandMemoryOperation.OperationKind.Fill)
+                FillBufferAtQueuePosition(transfer.Address, transfer.ByteCount, (uint)transfer.Value, transfer.DestinationIsGds);
+            else CopyBufferAtQueuePosition(transfer.Address, transfer.SourceAddress, transfer.ByteCount,
+                transfer.DestinationIsGds, transfer.SourceIsGds);
+        });
 }

@@ -16,6 +16,7 @@ public readonly record struct CpuMappedReadWatchDiagnostic
     public string? ClassificationGuard { get; init; }
     public CpuMappedReadWatchStatus? WatchStatus { get; init; }
     public CpuMappedReadWatchStatus? ProviderStatus { get; init; }
+    public bool? BooleanCurrent { get; init; }
     public string? SharedClosure { get; init; }
     public string? OwnerClosure { get; init; }
     public string? VirtualClosure { get; init; }
@@ -36,6 +37,13 @@ public interface ICpuMappedReadWatchSource : ICpuMappedCopySource
         out CpuMappedCopyObservation? observation);
     // Bounded scalar check; no gate, allocation, query, callback or wait.
     bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation observation);
+    bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation observation,
+        out CpuMappedReadWatchDiagnostic diagnostic)
+    {
+        var current = IsMappedCopyWriteWatchCurrent(observation); // ONE original Boolean call, no status reclassification
+        diagnostic = new() { WatchGuard = "source-boolean-unattributed", BooleanCurrent = current };
+        return current;
+    }
     CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(CpuMappedCopyObservation observation) => CpuMappedReadWatchStatus.Stale;
     CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(CpuMappedCopyObservation observation,
         out CpuMappedReadWatchDiagnostic diagnostic)

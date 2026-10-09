@@ -8,7 +8,7 @@ internal static partial class MetalVideoPresenter
 {
     private static int _originalReadWatchDiagnosticRows;
     private readonly record struct OriginalReadWatchDiagnostic(CpuMappedReadWatchDiagnostic Provider,
-        string? LocalGuard, bool? OriginalRead, bool? Publication, bool? Validation);
+        string? LocalGuard, bool? OriginalRead, bool? Publication, bool? Validation, bool? BooleanCurrent = null);
     private static bool TryReserveOriginalReadWatchDiagnostic(ICpuMemory memory)
     {
         if (!_volumeOwnerDeclineDiagnostics || Monitor.IsEntered(_gate)) return false;
@@ -85,5 +85,36 @@ internal static partial class MetalVideoPresenter
                 watch.Source.IsMappedCopyWriteWatchCurrent(watch.Mapping) ||
                 publication?.IsOriginalDisjointReadWatchCurrent(watch.Mapping) == true ||
                 validation?.IsOriginalDisjointReadWatchCurrent(watch.Mapping) == true);
+        // Exact Boolean order, with no Status query or Busy classification.
+        internal bool IsCurrentWithDiagnostic(SingletonVolumeOriginalWatch watch,
+            out OriginalReadWatchDiagnostic diagnostic)
+        {
+            diagnostic = default;
+            if (Volatile.Read(ref watch.State) == 2)
+            { diagnostic = diagnostic with { LocalGuard = "watch-consumed", BooleanCurrent = false }; return false; }
+            if (Volatile.Read(ref watch.UnknownProducer))
+            { diagnostic = diagnostic with { LocalGuard = "watch-unknown-producer", BooleanCurrent = false }; return false; }
+            if (originalRead is not null)
+            {
+                var current = originalRead.IsOriginalCurrent(watch.Mapping);
+                diagnostic = diagnostic with { OriginalRead = current, BooleanCurrent = current }; return current;
+            }
+            var ordinary = watch.Source.IsMappedCopyWriteWatchCurrent(watch.Mapping, out var provider);
+            diagnostic = diagnostic with { Provider = provider };
+            if (ordinary) { diagnostic = diagnostic with { BooleanCurrent = true }; return true; }
+            if (publication is not null)
+            {
+                var current = publication.IsOriginalDisjointReadWatchCurrent(watch.Mapping);
+                diagnostic = diagnostic with { Publication = current };
+                if (current) { diagnostic = diagnostic with { BooleanCurrent = true }; return true; }
+            }
+            if (validation is not null)
+            {
+                var current = validation.IsOriginalDisjointReadWatchCurrent(watch.Mapping);
+                diagnostic = diagnostic with { Validation = current };
+                if (current) { diagnostic = diagnostic with { BooleanCurrent = true }; return true; }
+            }
+            diagnostic = diagnostic with { BooleanCurrent = false }; return false;
+        }
     }
 }

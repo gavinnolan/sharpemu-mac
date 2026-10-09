@@ -11,6 +11,13 @@ public interface IHostMappedReadWatchMemory : IHostMappedCopyMemory
         ulong footprintAddress, ulong footprintByteCount, ulong sourceAddress,
         Span<byte> destination, out CpuMappedCopyObservation? observation);
     bool IsMappedCopyWriteWatchCurrent(HostBackingObject backing, CpuMappedCopyObservation observation);
+    bool IsMappedCopyWriteWatchCurrent(HostBackingObject backing, CpuMappedCopyObservation observation,
+        out CpuMappedReadWatchDiagnostic diagnostic)
+    {
+        var current = IsMappedCopyWriteWatchCurrent(backing, observation);
+        diagnostic = new() { WatchGuard = "host-boolean-unattributed", BooleanCurrent = current };
+        return current;
+    }
     CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(HostBackingObject backing,
         CpuMappedCopyObservation observation) => CpuMappedReadWatchStatus.Stale;
     CpuMappedReadWatchStatus GetMappedCopyWriteWatchStatus(HostBackingObject backing,

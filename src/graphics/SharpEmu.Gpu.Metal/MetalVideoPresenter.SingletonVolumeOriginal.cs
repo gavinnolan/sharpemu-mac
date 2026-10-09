@@ -230,7 +230,7 @@ internal static partial class MetalVideoPresenter
             origin.Session != CurrentStorageCpuSeedSession ? "session" :
             (classifyOrdinaryBusy ? (originalWatchStatus = _volumeOwnerDeclineDiagnostics
                 ? reservation.GetStatusWithDiagnostic(watch, out firstWatchDiagnostic) : reservation.GetStatus(watch)) != CpuMappedReadWatchStatus.Current :
-                !reservation.IsCurrent(watch)) ? "original-read-watch" :
+                !(_volumeOwnerDeclineDiagnostics ? reservation.IsCurrentWithDiagnostic(watch, out firstWatchDiagnostic) : reservation.IsCurrent(watch))) ? "original-read-watch" :
             !origin.Source.IsMappedCopyObservationCurrent(origin.Mapping) ? "mapping" :
             !GuestImageWriteTracker.IsReadSnapshotStable(watch.Read) ? "read-snapshot" :
             !origin.Observation.Observed ? "unobserved-token" :
@@ -273,6 +273,8 @@ internal static partial class MetalVideoPresenter
                         $" same_query_read_ticket={firstWatchDiagnostic.OriginalRead?.ToString() ?? "not-queried"};" +
                         $" same_query_publication_ticket={firstWatchDiagnostic.Publication?.ToString() ?? "not-queried"};" +
                         $" same_query_validation_ticket={firstWatchDiagnostic.Validation?.ToString() ?? "not-queried"}; attribution_not_authority=true";
+                    message += $" same_query_boolean_current={firstWatchDiagnostic.BooleanCurrent?.ToString() ?? "not-queried"};" +
+                        $" same_query_provider_boolean_current={first.BooleanCurrent?.ToString() ?? "not-queried"}";
                 }
             }
             catch { } // Optional attribution must preserve the original refusal.
@@ -320,6 +322,57 @@ internal static partial class MetalVideoPresenter
         image.Texture != 0 && image.Texture == watch.Texture && image.ContentVersion == watch.Version &&
         image.TextureType == MtlTextureType3D && image.Depth == origin.Layout.Depth && image.ArrayLength == 1 &&
         image.Width == origin.Layout.Width && image.Height == origin.Layout.Height && image.Format == origin.Layout.NativeFormat.Format;
+
+    // Diagnostic alternatives to the two predicates above. Each ternary keeps
+    // the original reached reads in their original order; no later query can
+    // explain or replace the first refusing watch result.
+    private static bool InspectSingletonVolumeNativeOwnerLocked(GuestImage image, StorageCpuSeedOrigin origin,
+        StorageWatchReservation reservation, bool metadataOnly, out string? guard,
+        out OriginalReadWatchDiagnostic? diagnostic)
+    {
+        diagnostic = null;
+        guard = metadataOnly
+            ? SingletonVolumeNativeMetadataGuard(image, origin)
+            : SingletonVolumeNativeCurrentGuard(image, origin, reservation, out diagnostic);
+        return guard is null;
+    }
+
+    private static string? SingletonVolumeNativeMetadataGuard(GuestImage image, StorageCpuSeedOrigin origin) =>
+        _closed ? "presenter-closed" : _guestWorkFailure is not null ? "guest-work-failed" :
+        _singletonVolumeOriginalCleanupFailure is not null ? "original-cleanup-failed" :
+        !ReferenceEquals(_guestMemory, origin.Memory) ? "memory" : origin.Session != CurrentStorageCpuSeedSession ? "session" :
+        origin.VolumeWatch is not { } watch ? "watch-missing" : Volatile.Read(ref watch.State) != 1 ? "watch-state" :
+        Volatile.Read(ref watch.UnknownProducer) ? "watch-unknown-producer" :
+        !ReferenceEquals(watch.Image, image) ? "watch-image" : !ReferenceEquals(image.StorageCpuOrigin, origin) ? "image-original" :
+        !image.Initialized ? "image-uninitialized" : !ReferenceEquals(image.StorageCpuLayout, origin.Layout) ? "layout" :
+        image.Texture == 0 ? "texture-missing" : image.Texture != watch.Texture ? "texture" : image.ContentVersion != watch.Version ? "version" :
+        image.TextureType != MtlTextureType3D ? "type" : image.Depth != origin.Layout.Depth ? "depth" : image.ArrayLength != 1 ? "layers" :
+        image.Width != origin.Layout.Width ? "width" : image.Height != origin.Layout.Height ? "height" :
+        image.Format != origin.Layout.NativeFormat.Format ? "format" : null;
+
+    private static string? SingletonVolumeNativeCurrentGuard(GuestImage image, StorageCpuSeedOrigin origin,
+        StorageWatchReservation reservation, out OriginalReadWatchDiagnostic? diagnostic)
+    {
+        diagnostic = null;
+        return _closed ? "presenter-closed" : _guestWorkFailure is not null ? "guest-work-failed" :
+            _singletonVolumeOriginalCleanupFailure is not null ? "original-cleanup-failed" :
+            !ReferenceEquals(_guestMemory, origin.Memory) ? "memory" :
+            origin.VolumeWatch is not { } watch ? "watch-missing" : Volatile.Read(ref watch.State) != 1 ? "watch-state" :
+            !InspectOriginalBoolean(watch, reservation, out diagnostic) ? "original-read-watch" :
+            !ReferenceEquals(watch.Image, image) ? "watch-image" : !ReferenceEquals(image.StorageCpuOrigin, origin) ? "image-original" :
+            !image.Initialized ? "image-uninitialized" : !ReferenceEquals(image.StorageCpuLayout, origin.Layout) ? "layout" :
+            image.Texture == 0 ? "texture-missing" : image.Texture != watch.Texture ? "texture" : image.ContentVersion != watch.Version ? "version" :
+            image.TextureType != MtlTextureType3D ? "type" : image.Depth != origin.Layout.Depth ? "depth" : image.ArrayLength != 1 ? "layers" :
+            image.Width != origin.Layout.Width ? "width" : image.Height != origin.Layout.Height ? "height" :
+            image.Format != origin.Layout.NativeFormat.Format ? "format" : origin.Session != CurrentStorageCpuSeedSession ? "session" : null;
+    }
+
+    private static bool InspectOriginalBoolean(SingletonVolumeOriginalWatch watch, StorageWatchReservation reservation,
+        out OriginalReadWatchDiagnostic? diagnostic)
+    {
+        var current = reservation.IsCurrentWithDiagnostic(watch, out var captured);
+        diagnostic = captured; return current;
+    }
 
     private static void TransferSingletonVolumeOriginalWatchLocked(GuestImage image, StorageCpuSeedOrigin origin,
         StorageWatchReservation reservation = default)

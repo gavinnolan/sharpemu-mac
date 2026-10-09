@@ -12,6 +12,7 @@ using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.Abstractions;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.ShaderCompiler.Metal;
@@ -32,7 +33,47 @@ public sealed partial class MetalImmutableGpuVersionTests
     public void ActualNativeColorPredecessorFailureConsumesEveryTemporaryRetainAndPreservesCause() =>
         RunNativeColorBorrow(true, failPredecessorCleanup: true);
 
-    private void RunNativeColorBorrow(bool completedFirst, bool failPredecessorCleanup = false)
+    [NativeColorBorrowFact]
+    public void ActualNativeColorConsumerAllowsDisjointClosedMemoryWriteOnlyAfterRealGpuCompletion() =>
+        RunNativeColorBorrow(true, typedMemory: "disjoint");
+
+    [NativeColorBorrowFact]
+    public void ActualNativeColorConsumerRejectsClosedMemoryWriteThroughAnotherVirtualPhysicalAlias() =>
+        RunNativeColorBorrow(true, typedMemory: "physical-alias");
+
+    [NativeColorBorrowFact]
+    public void ActualClosedMemoryWriteCannotAdoptReplacementMappingAfterItsCohortCheck() =>
+        RunNativeColorBorrow(true, typedMemory: "replacement-before-prepare");
+
+    [NativeColorBorrowFact]
+    public void ActualOriginalClosedMemoryWritePreservesTrackedDestinationNotification() =>
+        RunNativeColorBorrow(true, typedMemory: "tracked-destination");
+
+    [NativeColorBorrowFact]
+    public void ActualClosedMemoryWriteRefusesOriginalRightsChangedAfterItsCohortCheck() =>
+        RunNativeColorBorrow(true, typedMemory: "rights-before-prepare");
+
+    [NativeColorBorrowFact]
+    public void ActualClosedMemoryWriteCancelsOriginalTicketOnChangedSessionWithoutBytesOrAck() =>
+        RunNativeColorBorrow(true, typedMemory: "session-before-prepare");
+
+    // The typed receipt requires the production wrapper's exact execution
+    // scope. Keep its per-pass budget and bound all fixture passes to the same
+    // aggregate five seconds as the original direct-core fixture helper.
+    private static void DrainTypedWithActualRenderScope(NativeState state)
+    {
+        var deadline = Environment.TickCount64 + 5000;
+        while (true)
+        {
+            Call("TryDrainGuestWork", state.NativeFaceDevice, state.NativeFaceQueue);
+            lock (Field("_gate").GetValue(null)!)
+                if ((int)Field("_pendingGuestWorkCount").GetValue(null)! == 0) return;
+            Assert.True(Environment.TickCount64 < deadline,
+                "Typed native fixture did not finish its actual bounded render passes within five seconds.");
+        }
+    }
+
+    private void RunNativeColorBorrow(bool completedFirst, bool failPredecessorCleanup = false, string? typedMemory = null)
     {
         NativeDepthAssert(DeviceRequested());
         Assert.Equal(Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXPECT_ARCH"), RuntimeInformation.ProcessArchitecture.ToString());
@@ -47,6 +88,8 @@ public sealed partial class MetalImmutableGpuVersionTests
         var oldPredecessorControl = Field("_nativeColorPredecessorValidationForControl").GetValue(null);
         var oldTemporaryRelease = Field("_computeTextureReleaseOverride").GetValue(null);
         var oldTemporaryFailure = Field("_textureSourceCleanupFailure").GetValue(null);
+        var oldBeforeWrite = Field("_commandMemoryBeforeOriginalWriteForControl").GetValue(null);
+        var oldSession = Field("_selectedStorageMipSession").GetValue(null);
         var oldFatal = GpuFatal.OnFatal;
         var reports = new List<string>();
         NativeState? state = null; PhysicalVirtualMemory? physical = null;
@@ -54,6 +97,9 @@ public sealed partial class MetalImmutableGpuVersionTests
         TrackedCpuMemory? memory = null;
         GuestRenderTarget? target = null; GuestDrawTexture? snapshot = null;
         ulong address = 0;
+        ulong typedAddress = 0;
+        Task<bool>? typedCaller = null;
+        GuestImageWriteTracker.ContentToken trackedDestinationBefore = default;
         nint borrowed = 0, readback = 0;
         var safe = false;
         Exception? primary = null;
@@ -80,6 +126,28 @@ public sealed partial class MetalImmutableGpuVersionTests
             NativeDepthAssert(physical.TryMapBacked(address, chainBytes, 0, GuestPageProtection.Read | GuestPageProtection.Write, out var mapFailure), $"map_failure={mapFailure}");
             var originalBytes = Enumerable.Range(0, (int)chainBytes).Select(i => (byte)(i * 37 + i / 251)).ToArray();
             NativeDepthAssert(physical.TryWriteBacking(address, originalBytes));
+            byte[]? typedBaseline = null;
+            if (typedMemory is not null)
+            {
+                // All mappings exist before either immutable original capture.
+                // The alias variant has another VA but the same selected backing
+                // offset; virtual separation is never a disjointness oracle.
+                typedAddress = address + chainBytes + 0x10000;
+                NativeDepthAssert(physical.TryHoldRange(typedAddress, 65536));
+                var backingOffset = typedMemory == "physical-alias" ? 0xB0000UL : chainBytes + 0x10000;
+                NativeDepthAssert(physical.TryMapBacked(typedAddress, 65536, backingOffset,
+                    GuestPageProtection.Read | GuestPageProtection.Write, out var typedMapFailure), $"typed_map_failure={typedMapFailure}");
+                if (typedMemory != "physical-alias")
+                {
+                    typedBaseline = Enumerable.Range(0, 65536).Select(i => (byte)(i * 13 + 29)).ToArray();
+                    NativeDepthAssert(physical.TryWriteBacking(typedAddress, typedBaseline));
+                    if (typedMemory == "tracked-destination")
+                    {
+                        GuestImageWriteTracker.Track(typedAddress, 65536, source: "native typed command destination", protect: true);
+                        NativeDepthAssert(GuestImageWriteTracker.TryGetProtectedObservedContentToken(typedAddress, 65536, out trackedDestinationBefore));
+                    }
+                }
+            }
             memory = new TrackedCpuMemory(physical);
             MetalVideoPresenter.AttachGuestMemory(memory);
             MetalColorMipPlacement.Enabled = true; MetalVideoPresenter.NativeColorBorrowEnabled = true;
@@ -183,7 +251,113 @@ public sealed partial class MetalImmutableGpuVersionTests
                 output.WriteLine("native-color-borrow predecessor_failure_primary_preserved=1 temporary_owned_retains=2 each_release_attempted=1 no_ack=1 status=4 initial_full_native_bytes=2097152");
                 goto FixtureFinished;
             }
-            if (completedFirst)
+            if (typedMemory is not null)
+            {
+                phase = "typed-memory-consumer";
+                var consumer = state.CreateNativeColorReadShader();
+                var consumerBindings = new GuestStageBindings(GuestStageKind.Pixel, [], [0], [], [], null, [], [], false, false, 0);
+                MetalVideoPresenter.SubmitOffscreenTranslatedDraw(consumer, [snapshot], [], 0,
+                    [target with { Address = 0, Registers = null }], shaders.Vertex,
+                    3, 1, 4, null, [], GuestRenderState.Default, null, 0, stageBindings: [consumerBindings]);
+                MetalVideoPresenter.ReleasePreparedTextureSources([snapshot]);
+                var backend = new MetalGuestGpuBackend(); var host = new MetalCommandStreamHost(memory, backend, backend);
+                byte[] ownedWrite = [11, 22, 33, 44, 55, 66, 77, 88];
+                var expectedWrite = ownedWrite.ToArray();
+                typedCaller = Task.Run(() =>
+                {
+                    using var submitting = MetalVideoPresenter.EnterGuestQueue("native.selected.color", 1);
+                    return host.TryWriteGuest(typedAddress, ownedWrite);
+                });
+                var deadline = Environment.TickCount64 + 5000;
+                while (true)
+                {
+                    int pending;
+                    lock (Field("_gate").GetValue(null)!) pending = (int)Field("_pendingGuestWorkCount").GetValue(null)!;
+                    if (pending == 2) break;
+                    Assert.False(typedCaller.IsCompleted, "The writer must remain at its accepted queue position.");
+                    Assert.True(Environment.TickCount64 < deadline, "Typed command write was not admitted.");
+                    Thread.Yield();
+                }
+                Array.Fill(ownedWrite, (byte)0xEE);
+                var completedBefore = Field("_completedGuestWorkSequence").GetValue(null);
+                if (typedMemory == "physical-alias")
+                {
+                    var rejected = Assert.Throws<TargetInvocationException>(() => DrainTypedWithActualRenderScope(state));
+                    var fatal = Assert.IsType<GpuFatalException>(rejected.InnerException);
+                    Assert.Contains("ORIGINAL physical image", fatal.InnerException!.Message);
+                    Assert.Equal(completedBefore, Field("_completedGuestWorkSequence").GetValue(null));
+                    Assert.ThrowsAny<Exception>(() => typedCaller.GetAwaiter().GetResult());
+                    NativeDepthAssert(memory.TryRead(address, unchanged)); Assert.Equal(originalBytes, unchanged);
+                    output.WriteLine("native-color-typed-memory physical_alias_veto=1 no_writer=1 no_consumer_encode=1 no_ack=1 initial_CBstatus=4 initial_full_native_bytes=2097152");
+                    goto FixtureFinished;
+                }
+                if (typedMemory is "replacement-before-prepare" or "rights-before-prepare" or "session-before-prepare")
+                {
+                    var replacements = 0;
+                    Field("_commandMemoryBeforeOriginalWriteForControl").SetValue(null, (Action)(() =>
+                    {
+                        Field("_commandMemoryBeforeOriginalWriteForControl").SetValue(null, oldBeforeWrite);
+                        Assert.False(Monitor.IsEntered(Field("_gate").GetValue(null)!));
+                        if (typedMemory == "replacement-before-prepare")
+                        {
+                            NativeDepthAssert(physical.TryUnmapBacked(typedAddress, 65536));
+                            NativeDepthAssert(physical.TryMapBacked(typedAddress, 65536, 0xB0000,
+                                GuestPageProtection.Read | GuestPageProtection.Write, out _));
+                        }
+                        else if (typedMemory == "rights-before-prepare") NativeDepthAssert(physical.TryProtect(typedAddress, 65536, GuestPageProtection.Read));
+                        else Field("_selectedStorageMipSession").SetValue(null, (long)oldSession! + 1);
+                        replacements++;
+                    }));
+                    var rejected = Assert.Throws<TargetInvocationException>(() => DrainTypedWithActualRenderScope(state));
+                    var fatal = Assert.IsType<GpuFatalException>(rejected.InnerException);
+                    Assert.Contains(typedMemory == "session-before-prepare" ? "ORIGINAL complete writable mapping/session" : "reserve its ORIGINAL", fatal.InnerException!.Message);
+                    Assert.ThrowsAny<Exception>(() => typedCaller.GetAwaiter().GetResult());
+                    Assert.Equal(1, replacements);
+                    Assert.Equal((long)completedBefore! + 1, Field("_completedGuestWorkSequence").GetValue(null));
+                    NativeDepthAssert(memory.TryRead(address, unchanged)); Assert.Equal(originalBytes, unchanged);
+                    if (typedMemory != "replacement-before-prepare")
+                    {
+                        var unchangedDestination = new byte[65536]; NativeDepthAssert(memory.TryRead(typedAddress, unchangedDestination));
+                        Assert.Equal(typedBaseline, unchangedDestination);
+                    }
+                    var completedConsumer = Assert.Single(((IDictionary)Field("_transientTargets").GetValue(null)!).Values.Cast<nint>());
+                    var completedPixels = ReadNativeColorThroughBlit(state, completedConsumer, readback, contents);
+                    for (var pixel = 0; pixel < 512 * 512; pixel++) for (var component = 0; component < 4; component++)
+                        Assert.Equal(expected[component], BitConverter.ToUInt16(completedPixels, pixel * 8 + component * 2));
+                    output.WriteLine($"native-color-typed-memory scenario={typedMemory} original_prepare_veto=1 no_writer_bytes_or_ack=1 completed_consumer_status=4 full_native_bytes=2097152 unchanged_original_chain=1");
+                    goto FixtureFinished;
+                }
+                DrainTypedWithActualRenderScope(state);
+                Assert.True(typedCaller.GetAwaiter().GetResult()); Call("WaitForFlushedGuestCommands");
+                var consumerOutput = Assert.Single(((IDictionary)Field("_transientTargets").GetValue(null)!).Values.Cast<nint>());
+                var consumerBytes = ReadNativeColorThroughBlit(state, consumerOutput, readback, contents);
+                for (var pixel = 0; pixel < 512 * 512; pixel++) for (var component = 0; component < 4; component++)
+                    Assert.Equal(expected[component], BitConverter.ToUInt16(consumerBytes, pixel * 8 + component * 2));
+                expectedWrite.CopyTo(typedBaseline!, 0);
+                var actualWrite = new byte[65536]; NativeDepthAssert(memory.TryRead(typedAddress, actualWrite));
+                Assert.Equal(typedBaseline, actualWrite);
+                if (typedMemory == "tracked-destination")
+                {
+                    NativeDepthAssert(GuestImageWriteTracker.PeekDirty(typedAddress));
+                    NativeDepthAssert(GuestImageWriteTracker.TryGetContentToken(typedAddress, out var afterWrite));
+                    Assert.NotEqual(trackedDestinationBefore, afterWrite);
+                    output.WriteLine("native-color-typed-memory tracked_destination_actual_protection_before_capture=1 original_transaction_Applied=1 dirty_notification_before_bytes=1 content_token_changed=1 no_recapture=1");
+                }
+                NativeDepthAssert(memory.TryRead(address, unchanged)); Assert.Equal(originalBytes, unchanged);
+                const BindingFlags originalFields = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                var actualProducer = ((IDictionary)Field("_nativeColorLatest").GetValue(null)!)[target.Address]!;
+                var nativeOriginal = actualProducer.GetType().GetField("Original", originalFields)!.GetValue(actualProducer)!;
+                Assert.True(((ICpuMappedCopySource)nativeOriginal.GetType().GetField("Source", originalFields)!.GetValue(nativeOriginal)!).IsMappedCopyObservationCurrent(
+                    (CpuMappedCopyObservation)nativeOriginal.GetType().GetField("Mapping", originalFields)!.GetValue(nativeOriginal)!));
+                // EOP remains an opaque callback; it is deliberately admitted
+                // only AFTER the real sampled consumer and typed write finish.
+                host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write64, 1, typedAddress + 8, 0x1020304050607080));
+                DrainTypedWithActualRenderScope(state);
+                BitConverter.GetBytes(0x1020304050607080UL).CopyTo(typedBaseline, 8);
+                NativeDepthAssert(memory.TryRead(typedAddress, actualWrite)); Assert.Equal(typedBaseline, actualWrite);
+                output.WriteLine("native-color-typed-memory status=4 sampled_native_bytes=2097152 original_chain_unchanged=1 disjoint_full_guest_bytes=65536 owned_write_once=1 EOP_after_consumer=1");
+            }
+            else if (completedFirst)
             {
                 // An already admitted readonly consumer must keep the prior
                 // status4 texture after a later writer is admitted. The later
@@ -254,12 +428,23 @@ public sealed partial class MetalImmutableGpuVersionTests
         {
             Exception? cleanup = null;
             void Attempt(Action action) { try { action(); } catch (Exception error) { NativeDepthPreserve(ref cleanup, error); } }
-            Attempt(() => Field("_nativeColorPredecessorValidationForControl").SetValue(null, oldPredecessorControl));
-            Attempt(() => Field("_computeTextureReleaseOverride").SetValue(null, oldTemporaryRelease));
+            var callerJoined = true;
+            if (typedCaller is { IsCompleted: false })
+            {
+                Attempt(() => MetalVideoPresenter.LatchGuestCompletionFailure("native typed memory fixture unwound", primary));
+                try { callerJoined = typedCaller.Wait(2000); } catch { callerJoined = typedCaller.IsCompleted; }
+                if (!callerJoined) NativeDepthPreserve(ref cleanup, new InvalidOperationException("Native typed memory caller ownership is unknown."));
+            }
+            if (callerJoined)
+            {
+                Attempt(() => Field("_commandMemoryBeforeOriginalWriteForControl").SetValue(null, oldBeforeWrite));
+                Attempt(() => Field("_nativeColorPredecessorValidationForControl").SetValue(null, oldPredecessorControl));
+                Attempt(() => Field("_computeTextureReleaseOverride").SetValue(null, oldTemporaryRelease));
+            }
             if (state is not null)
                 try { Call("WaitForFlushedGuestCommands"); safe = true; }
                 catch (Exception error) { NativeDepthPreserve(ref cleanup, error); safe = false; }
-            if (safe)
+            if (safe && callerJoined)
             {
                 if (snapshot is not null) Attempt(() => MetalVideoPresenter.ReleasePreparedTextureSources([snapshot]));
                 if (target is not null) Attempt(() => MetalVideoPresenter.ReleasePreparedNativeColorTarget(target));
@@ -282,16 +467,21 @@ public sealed partial class MetalImmutableGpuVersionTests
                 borrowed = 0; readback = 0;
                 if (state is not null) Attempt(state.DisposeNativeDepthFixture);
                 if (address != 0) Attempt(() => GuestImageWriteTracker.Untrack(address + 0xB0000));
+                if (typedMemory == "tracked-destination" && typedAddress != 0) Attempt(() => GuestImageWriteTracker.Untrack(typedAddress));
                 if (cleanup is null && physical is not null) Attempt(physical.Dispose);
             }
-            if (!safe || cleanup is not null) nativeColorFixtureQuarantine = new object?[] { state, physical, memory, target, snapshot, borrowed, readback };
-            Attempt(() => queueScope?.Dispose());
-            Attempt(() => Field("_guestMemory").SetValue(null, oldMemory));
-            Attempt(() => Field("_renderOwner").SetValue(null, oldOwner));
-            Attempt(() => Field("_batchQueue").SetValue(null, oldQueue));
-            Attempt(() => Field("_textureSourceCleanupFailure").SetValue(null, oldTemporaryFailure));
-            MetalColorMipPlacement.Enabled = oldPlacement; MetalVideoPresenter.NativeColorBorrowEnabled = oldBorrow;
-            Attempt(() => GpuFatal.OnFatal = oldFatal);
+            if (!safe || !callerJoined || cleanup is not null) nativeColorFixtureQuarantine = new object?[] { state, physical, memory, target, snapshot, borrowed, readback, typedCaller };
+            if (callerJoined)
+            {
+                Attempt(() => queueScope?.Dispose());
+                Attempt(() => Field("_guestMemory").SetValue(null, oldMemory));
+                Attempt(() => Field("_renderOwner").SetValue(null, oldOwner));
+                Attempt(() => Field("_batchQueue").SetValue(null, oldQueue));
+                Attempt(() => Field("_textureSourceCleanupFailure").SetValue(null, oldTemporaryFailure));
+                Attempt(() => Field("_selectedStorageMipSession").SetValue(null, oldSession));
+                MetalColorMipPlacement.Enabled = oldPlacement; MetalVideoPresenter.NativeColorBorrowEnabled = oldBorrow;
+                Attempt(() => GpuFatal.OnFatal = oldFatal);
+            }
             if (cleanup is not null) NativeDepthPreserve(ref primary, cleanup);
         }
         if (primary is not null) ExceptionDispatchInfo.Capture(primary).Throw();
