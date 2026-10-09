@@ -54,6 +54,7 @@ public sealed partial class MetalImmutableGpuVersionTests
         nint borrowed = 0, readback = 0;
         var safe = false;
         Exception? primary = null;
+        var phase = "native-state";
         try
         {
             state = new NativeState();
@@ -64,6 +65,7 @@ public sealed partial class MetalImmutableGpuVersionTests
             Assert.Empty((IDictionary)Field("_guestImages").GetValue(null)!);
             Assert.Empty((IDictionary)Field("_guestDepthImages").GetValue(null)!);
             Assert.Empty((IDictionary)Field("_nativeColorBatches").GetValue(null)!);
+            phase = "physical-provider";
             physical = new PhysicalVirtualMemory(HostMemoryAuthority.Current, HostViewMemory.Create(),
                 backingBytes: 8 * 1024 * 1024UL, preReserveGuestAddressSpace: false);
             const ulong chainBytes = 0x2B0000;
@@ -78,11 +80,13 @@ public sealed partial class MetalImmutableGpuVersionTests
             MetalColorMipPlacement.Enabled = true; MetalVideoPresenter.NativeColorBorrowEnabled = true;
             queueScope = MetalVideoPresenter.EnterGuestQueue("native.selected.color", 1);
             var words = new ColorTargetWords(address, 0, 0x40730, 0, 0x907FC1FF, 0x4DC6C000, 72, 0, 0, 0, 0);
+            phase = "original-color-projection";
             var normalized = ImageRequestBuilders.ColorTarget(words, 0xF, 0, false)!.Value;
             target = MetalColorMipPlacement.Project(memory, normalized, words,
                 new GuestRenderTarget(address, 512, 512, (uint)words.Layout, (uint)words.NumberType, Registers: words, TileMode: 27));
             NativeDepthAssert(MetalColorMipPlacement.TryGet(target, out var original));
             Assert.Equal(address + 0xB0000, target.Address); Assert.Equal(chainBytes, original.BackingByteCount);
+            phase = "producer-submit";
             var shaders = state.CreateNativeColorBorrowShaders();
             MetalVideoPresenter.SubmitOffscreenTranslatedDraw(shaders.Pixel, [], [], 0, [target], shaders.Vertex,
                 3, 1, 4, null, [], GuestRenderState.Default, null, 0);
@@ -92,8 +96,10 @@ public sealed partial class MetalImmutableGpuVersionTests
             NativeDepthAssert(AgcBackendServices.TryDecodeTextureDescriptor(raw, out var descriptor));
             var binding = new AgcExports.TranslatedImageBinding(descriptor, false, 0, [], ResourceDescriptor: raw,
                 Shape: new ShaderImageShape(false, false, false, false, TextureNumericClass.Float), Access: GuestImageAccess.Read);
+            phase = "sampled-original-snapshot";
             snapshot = Assert.Single(MetalTextureSnapshots.CreateTextureSnapshots(new CpuContext(memory, Generation.Gen5), [binding], out var fallbacks));
             Assert.Equal(0, fallbacks); Assert.Empty(snapshot.RgbaPixels); Assert.Null(snapshot.TiledSource);
+            phase = "producer-execution";
             if (completedFirst)
             {
                 state.DrainWithControlledBudget();
@@ -106,12 +112,14 @@ public sealed partial class MetalImmutableGpuVersionTests
                 Call("ExecuteOffscreenGuestDraw", state.NativeFaceDevice, state.NativeFaceQueue, pending.GetType().GetProperty("Work")!.GetValue(pending)!);
                 Call("CompleteGuestWork", pending);
             }
+            phase = "native-borrow";
             var command = (nint)Call("BeginBatchedGuestCommands", state.NativeFaceQueue)!;
             object?[] create = [state.NativeFaceDevice, command, snapshot, false];
             borrowed = (nint)Call("CreateDrawTexture", create)!;
             Assert.True((bool)create[3]!); Assert.NotEqual((nint)0, borrowed);
             Assert.Equal((nint)MtlPixelFormat.Rgba16Float, MetalNative.Send(borrowed, MetalNative.Selector("pixelFormat")));
             Assert.Equal((nint)2, MetalNative.Send(borrowed, MetalNative.Selector("textureType")));
+            phase = "native-readback";
             readback = MetalNative.SendNewBuffer(state.NativeFaceDevice, MetalNative.Selector("newBufferWithLength:options:"), 0x200000, 0);
             Assert.NotEqual((nint)0, readback);
             var blit = MetalNative.Send(command, MetalNative.Selector("blitCommandEncoder")); Assert.NotEqual((nint)0, blit);
@@ -212,7 +220,12 @@ public sealed partial class MetalImmutableGpuVersionTests
             output.WriteLine($"native-color-borrow status=4 full_half_components=1048576 full_native_bytes=2097152 unchanged_original_chain_bytes={chainBytes} same_CB={!completedFirst} frontend_release_before_consume=1 wrong_queue_veto=1 overlapping_ordinary_writer_veto=1");
             FixtureFinished: ;
         }
-        catch (Exception error) { primary = error; }
+        catch (Exception error)
+        {
+            primary = error;
+            try { output.WriteLine($"native-color-borrow failed_phase={phase}; error={error.GetType().Name}"); }
+            catch { }
+        }
         finally
         {
             Exception? cleanup = null;
