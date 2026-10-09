@@ -1,0 +1,11 @@
+# Boot watched Write and first-status constructor integration
+
+SOURCE ONLY. This isolated worktree starts at frozen `6438de00fc75c41148b0622e08abba891303d6ab` and imports exactly the four reviewed paths of `66e63834d81bfc1e6f8a9523918d0622f28c5bd4` over its `09bc1fce` base. The import has no conflicts. The four resulting files match that donor byte for byte; all other inherited files remain exact `6438`, apart from this integration note. Reversing the exact four-path donor patch and removing this note reconstructs the entire `6438` tree.
+
+The inherited first watched closed Write captures one immutable mapping and physical veto before its first bytes, never late-enrolls or recaptures. Original and SAME Applied successor cleanup remains consume-once; active/taken/unknown ownership stays rooted, while known failed untaken work releases. Its existing native positive retains the prepared 2,022 real disjoint-history write strengthening and all independent full native/guest/EOP oracles.
+
+The constructor addition preserves only the actual first healthy Busy refusal of the SAME original at its two final boundaries. Mapping/read/protected token/session and complete transferred native identity remain strict, with provider status sampling outside presenter gates and metadata brackets inside. First Stale, unknown, changed owner and token failures cannot borrow later Busy. Current remains mandatory before the first encoder; native allocation/upload/transfer and dispatch are never replayed. The earlier pre-original `80107F` enrollment refusal is untouched.
+
+Inventory is **1,020 ordinary managed rows per CLR (208 Host / 732 Libs / 80 GPU)** and **66 fresh native workers per CLR**. Relative to `6438`, the donor adds ten scalar rows and two separately guarded native Facts. Those native Facts are excluded from the ordinary managed count. No case expectation or full-byte oracle changes in this mechanical integration.
+
+All underlying donor freezes and failed/runtime archives remain immutable. This source freeze claims no build, test, native completion, signed payload or game-entry result. Package exclusively owns later qualification preparation and execution; no driver is created or changed here.
