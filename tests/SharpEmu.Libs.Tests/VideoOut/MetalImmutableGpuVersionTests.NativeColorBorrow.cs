@@ -327,6 +327,32 @@ public sealed partial class MetalImmutableGpuVersionTests
                     output.WriteLine($"native-color-typed-memory scenario={typedMemory} original_prepare_veto=1 no_writer_bytes_or_ack=1 completed_consumer_status=4 full_native_bytes=2097152 unchanged_original_chain=1");
                     goto FixtureFinished;
                 }
+                if (typedMemory == "disjoint")
+                {
+                    lock (Field("_gate").GetValue(null)!)
+                    {
+                        var queues = (IDictionary)Field("_pendingGuestWorkByQueue").GetValue(null)!;
+                        var admitted = queues.Values.Cast<IEnumerable>().SelectMany(items => items.Cast<object>())
+                            .Select(item => item.GetType().GetProperty("Work")!.GetValue(item)!)
+                            .Single(item => item.GetType().Name == "OrderedCommandMemoryOperation");
+                        Assert.NotNull(admitted.GetType().GetProperty("OriginalWatch")!.GetValue(admitted));
+                        var firstMapping = Assert.IsType<CpuMappedCopyObservation>(admitted.GetType().GetProperty("Mapping")!.GetValue(admitted));
+                        Assert.Equal(typedAddress, firstMapping.SourceAddress); Assert.Equal(8ul, firstMapping.SourceByteCount);
+                        Assert.Equal(typedAddress, firstMapping.FootprintAddress); Assert.Equal(8ul, firstMapping.FootprintByteCount);
+                    }
+                    // Advance the real same-backing completed-write history
+                    // AFTER the exact closed-write capture, without touching
+                    // its eight bytes or the original native color footprint.
+                    // Expected guest bytes include these intentional writes;
+                    // the sampled native oracle remains wholly unchanged.
+                    for (var churn = 0; churn < 2022; churn++)
+                    {
+                        var disjointBytes = BitConverter.GetBytes((ulong)churn + 0xABC0_0000UL);
+                        NativeDepthAssert(physical.TryWriteBacking(typedAddress + 32, disjointBytes));
+                        disjointBytes.CopyTo(typedBaseline!, 32);
+                    }
+                    output.WriteLine("native-color-typed-memory original_watched_capture=1 completed_disjoint_writes_after_admission=2022 history_capacity=512 refreshed_original=0 intentional_guest_churn_bytes=8");
+                }
                 DrainTypedWithActualRenderScope(state);
                 Assert.True(typedCaller.GetAwaiter().GetResult()); Call("WaitForFlushedGuestCommands");
                 var consumerOutput = Assert.Single(((IDictionary)Field("_transientTargets").GetValue(null)!).Values.Cast<nint>());
