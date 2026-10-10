@@ -993,6 +993,7 @@ public static class AmprExports
                         $"[LOADER][WARN] ampr.read_unknown_file_id id=0x{fileId:X8} size=0x{size:X} offset=0x{fileOffset:X}");
                 }
 
+                SharpEmu.HLE.GuestLoadProgress.NoteAmprRead(0, unknownId: true);
                 TraceAmprRead(ctx, commandBuffer, fileId, destination, size, fileOffset, bytesRead: 0, hostPath, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
             }
@@ -1009,6 +1010,7 @@ public static class AmprExports
         }
 
         var result = TryReadFileToGuestMemory(ctx, hostPath, fileOffset, destination, size, out var bytesRead);
+        SharpEmu.HLE.GuestLoadProgress.NoteAmprRead((long)bytesRead);
         TraceAmprRead(ctx, commandBuffer, fileId, destination, size, fileOffset, bytesRead, hostPath, result);
         if (result != (int)OrbisGen2Result.ORBIS_GEN2_OK)
         {

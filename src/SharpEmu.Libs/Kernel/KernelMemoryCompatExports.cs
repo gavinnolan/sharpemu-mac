@@ -2415,6 +2415,7 @@ public static partial class KernelMemoryCompatExports
                 HostMovieBridge.WaitForHostPlaybackToFinish(stream.Name);
             }
         }
+        SharpEmu.HLE.GuestLoadProgress.NoteFileRead(read);
         if (read > 0 && !ctx.Memory.TryWrite(bufferAddress, buffer.AsSpan(0, read)))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
