@@ -1065,26 +1065,30 @@ public static partial class Gen5MslTranslator
         private void StoreGlobalDataShareWord(string index, string value) =>
             Line($"if (exec && {index} < {GlobalDataShareWordsName}) {{ {GlobalDataShareName}[{index}] = {value}; }}");
 
+        // The atomic suffix TryGetAtomicExpression knows for one DS opcode, shared
+        // by the LDS and GDS paths because both encodings name the same operation.
+        private static string DataShareAtomicName(string opcode) => opcode switch
+        {
+            "DsAddU32" or "DsAddRtnU32" => "Add",
+            "DsSubU32" or "DsSubRtnU32" => "Sub",
+            "DsIncU32" or "DsIncRtnU32" => "Inc",
+            "DsDecU32" or "DsDecRtnU32" => "Dec",
+            "DsMinI32" or "DsMinRtnI32" => "Smin",
+            "DsMaxI32" or "DsMaxRtnI32" => "Smax",
+            "DsMinU32" or "DsMinRtnU32" => "Umin",
+            "DsMaxU32" or "DsMaxRtnU32" => "Umax",
+            "DsAndB32" or "DsAndRtnB32" => "And",
+            "DsOrB32" or "DsOrRtnB32" => "Or",
+            "DsXorB32" or "DsXorRtnB32" => "Xor",
+            "DsWrxchgRtnB32" => "Swap",
+            "DsCmpstB32" or "DsCmpstRtnB32" => "Cmpswap",
+            _ => string.Empty,
+        };
+
         private bool TryEmitGlobalDataShareAtomic(Gen5ShaderInstruction instruction, Gen5DataShareControl control, out string error)
         {
             error = string.Empty;
-            var name = instruction.Opcode switch
-            {
-                "DsAddU32" or "DsAddRtnU32" => "Add",
-                "DsSubU32" or "DsSubRtnU32" => "Sub",
-                "DsIncU32" or "DsIncRtnU32" => "Inc",
-                "DsDecU32" or "DsDecRtnU32" => "Dec",
-                "DsMinI32" or "DsMinRtnI32" => "Smin",
-                "DsMaxI32" or "DsMaxRtnI32" => "Smax",
-                "DsMinU32" or "DsMinRtnU32" => "Umin",
-                "DsMaxU32" or "DsMaxRtnU32" => "Umax",
-                "DsAndB32" or "DsAndRtnB32" => "And",
-                "DsOrB32" or "DsOrRtnB32" => "Or",
-                "DsXorB32" or "DsXorRtnB32" => "Xor",
-                "DsWrxchgRtnB32" => "Swap",
-                "DsCmpstB32" or "DsCmpstRtnB32" => "Cmpswap",
-                _ => string.Empty,
-            };
+            var name = DataShareAtomicName(instruction.Opcode);
             var isCompare = name == "Cmpswap";
             var value = instruction.Sources.Count > (isCompare ? 2 : 1) ? RawSource(instruction, isCompare ? 2 : 1) : "0u";
             var comparator = instruction.Sources.Count > 1 ? RawSource(instruction, 1) : "0u";
