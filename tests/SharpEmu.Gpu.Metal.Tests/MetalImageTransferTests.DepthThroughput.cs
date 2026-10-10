@@ -214,6 +214,54 @@ public sealed partial class MetalImageTransferTests
         MetalTiler.EndEncoding(encoder);
     }
 
+    // The surface Demon's Souls' worst profiler sample names: a 48x24 R16Unorm whose
+    // guest footprint is one 64 KiB tile. The sample reads 328 ms, which would be five
+    // orders of magnitude off the rate everything else moves at; this says what the
+    // transfer itself costs, so the sample can be read for what it is.
+    [Fact]
+    public void ASmallTiledSurfaceTransfersInMicroseconds()
+    {
+        if (!RequireDevice()) return;
+        using var harness = new MetalTransferHarness(Device.Value);
+        var description = Color2D(
+            GuestPixelFormat.Bits16UNorm, GpuFormat.R16Unorm, 48, 24, 1, 1, GuestTileMode.Standard64KB);
+        var size = description.Data.Size;
+        output.WriteLine($"48x24 R16Unorm 64KB-tiled: 0x{size:x} bytes pitch={description.Pitch}");
+        var guest = harness.Buffer(size);
+        var texture = harness.Texture(harness.Transfer.ShapeFor(description));
+        var range = new SubresourceRange(0, 1, 0, 1);
+        var guestRange = new MetalGuestRange(guest, 0, size, 0);
+        Measure(harness, "upload (guest->texture)", size,
+            () => harness.Transfer.EncodeGuestToTexture(
+                harness, description, range, guestRange, default, texture, 0, size));
+        var best = MeasureBest(harness, () => harness.Transfer.EncodeTextureToGuest(
+            harness, description, range, texture, guestRange, default, 0, size));
+        output.WriteLine($"  writeback (texture->guest)   {best * 1000,8:F2} ms");
+
+        // Generous by three orders of magnitude against the 328 ms sample: the point is
+        // that the transfer is not what that sample measured.
+        Assert.True(best < 0.010, $"a 64 KiB writeback took {best * 1000:F2} ms");
+    }
+
+    private static double MeasureBest(MetalTransferHarness harness, Action encode)
+    {
+        var best = double.MaxValue;
+        for (var round = 0; round <= ThroughputRounds; round++)
+        {
+            harness.Begin();
+            encode();
+            var started = Stopwatch.GetTimestamp();
+            harness.Submit();
+            var elapsed = Stopwatch.GetElapsedTime(started).TotalSeconds;
+            if (round != 0)
+            {
+                best = Math.Min(best, elapsed);
+            }
+        }
+
+        return best;
+    }
+
     // The 4K colour writeback for comparison: the same extent through the render-target
     // tiling the game's colour buffers use.
     [Fact]
