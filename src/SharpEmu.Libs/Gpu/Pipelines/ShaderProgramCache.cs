@@ -350,7 +350,8 @@ internal sealed class ShaderProgramCache
         if (dumpPlanning) ShaderPlanningDump.WriteInput(source, program);
         EmbeddedVertexFetchPlan? fetch = null;
         ShaderVertexInput[] vertexInputs = [];
-        if (source.Stage == ShaderStage.Vertex && options.VertexInfo is { FetchEmbedded: true } vertexInfo)
+        if (source.Stage == ShaderStage.Vertex && options.VertexInfo is { FetchEmbedded: true } vertexInfo &&
+            ShaderCompileRequest.AllowsEmbeddedVertexFetch(program, options.PrimitiveShader))
         {
             fetch = EmbeddedVertexFetchDetector.Detect(
                 program,

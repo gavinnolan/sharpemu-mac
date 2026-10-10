@@ -50,7 +50,7 @@ internal static class Gen5NggFixtures
     /// <summary>A culling primitive shader: LDS round trip across both waves, a barrier, the
     /// allocation request, a position export built from the exchanged value and the packed
     /// primitive export. Rasterizes one screen-space triangle through the center.</summary>
-    public static Gen5ShaderProgram CullingTriangle(bool nullPrimitive = false)
+    public static Gen5ShaderProgram CullingTriangle(bool nullPrimitive = false, bool bufferFetchPosition = false)
     {
         var instructions = new List<Gen5ShaderInstruction>();
         uint pc = 0;
@@ -80,8 +80,26 @@ internal static class Gen5NggFixtures
         Add("DsReadB32", Gen5ShaderEncoding.Ds,
             [Vector(13)], [Vector(14)], new Gen5DataShareControl(0, 0, false));
 
-        // x = 0.8 * value - 0.8 over values 0/1/2.
         Add("VCvtF32U32", Gen5ShaderEncoding.Vop1, [Vector(14)], [Vector(15)]);
+        if (bufferFetchPosition)
+        {
+            // buffer_load_format_xyzw v[24:27], v14, s[8:11], 0 idxen - the ES vertex fetch.
+            Add("BufferLoadFormatXyzw", Gen5ShaderEncoding.Mubuf,
+                [Vector(14), Scalar(8), Inline(0)],
+                [Vector(24), Vector(25), Vector(26), Vector(27)],
+                new Gen5BufferMemoryControl(
+                    DwordCount: 4,
+                    VectorAddress: 14,
+                    VectorData: 24,
+                    ScalarResource: 8,
+                    OffsetBytes: 0,
+                    IndexEnabled: true,
+                    OffsetEnabled: false,
+                    Glc: false,
+                    Slc: false));
+        }
+
+        // x = 0.8 * value - 0.8 over values 0/1/2.
         Add("VMulF32", Gen5ShaderEncoding.Vop2, [Literal(Bits(0.8f)), Vector(15)], [Vector(16)]);
         Add("VAddF32", Gen5ShaderEncoding.Vop2, [Literal(Bits(-0.8f)), Vector(16)], [Vector(16)]);
 
@@ -97,7 +115,10 @@ internal static class Gen5NggFixtures
         Add("SMovB32", Gen5ShaderEncoding.Sop1, [Literal(AllocationRequest)], [Scalar(124)]);
         Add("SSendmsg", Gen5ShaderEncoding.Sopp, [], [], word: SendMessageWord);
         Add("Exp", Gen5ShaderEncoding.Exp,
-            [Vector(16), Vector(19), Vector(20), Vector(21)], [],
+            bufferFetchPosition
+                ? [Vector(24), Vector(25), Vector(26), Vector(27)]
+                : [Vector(16), Vector(19), Vector(20), Vector(21)],
+            [],
             new Gen5ExportControl(Gen5NggExports.FirstPositionTarget, 0xF, false, false, false));
 
         // One parameter export so the mesh vertex payload carries a user location the
@@ -134,23 +155,53 @@ internal static class Gen5NggFixtures
         return new Gen5ShaderProgram(0, instructions);
     }
 
+    /// <summary>The same program with its vertex positions fetched the way the ES part of a
+    /// real primitive shader does: <c>buffer_load_format_xyzw</c> indexed by the vertex
+    /// index, over a V# the geometry stage's user data carries. That fetch is exactly what
+    /// the fixed-function vertex-fetch substitution used to swallow, leaving the mesh stage
+    /// with no buffer binding at all.</summary>
+    public static Gen5ShaderProgram BufferFetchTriangle() => CullingTriangle(bufferFetchPosition: true);
+
+    // Vertex positions live at the start of the fetched buffer, one float4 per vertex.
+    public const uint PositionStrideBytes = 16;
+    public const uint PositionRecordCount = 4;
+    private const uint PositionBaseAddress = 0x20_0000;
+
+    // 32_32_32_32_FLOAT with the identity destination select, as a V# carries it.
+    private const uint PositionDescriptorFormat = 77;
+
+    /// <summary>The geometry stage's user data for <see cref="BufferFetchTriangle"/>: the V#
+    /// at s[8:11], which is user-data words 0..3 when the stage's user data starts at s8.</summary>
+    public static uint[] PositionUserData()
+    {
+        var userData = new uint[16];
+        userData[0] = PositionBaseAddress;
+        userData[1] = PositionStrideBytes << 16;
+        userData[2] = PositionRecordCount;
+        userData[3] = (PositionDescriptorFormat << 12) | DescriptorConstants.IdentityDestinationSelect;
+        return userData;
+    }
+
     public static ShaderCompileRequest Request(
         Gen5ShaderProgram program,
         Gen5NggStageInfo? stageInfo = null,
-        int requiredVertexOutputCount = 1) =>
+        int requiredVertexOutputCount = 1,
+        ResourceRuntimeInputs? runtimeInputs = null) =>
         Gen5ComputeFixtures.RequestOrThrow(
             program,
             ShaderStage.Vertex,
             requiredVertexOutputCount: requiredVertexOutputCount,
+            runtimeInputs: runtimeInputs,
             primitiveShader: stageInfo ?? StageInfo,
             userDataBase: VertexUserDataBase);
 
     public static Gen5MslShader CompileOrThrow(
         Gen5ShaderProgram program,
         Gen5NggStageInfo? stageInfo = null,
-        int requiredVertexOutputCount = 1)
+        int requiredVertexOutputCount = 1,
+        ResourceRuntimeInputs? runtimeInputs = null)
     {
-        var request = Request(program, stageInfo, requiredVertexOutputCount);
+        var request = Request(program, stageInfo, requiredVertexOutputCount, runtimeInputs);
         if (!Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error))
         {
             throw new InvalidOperationException($"NGG mesh emit failed: {error}");
