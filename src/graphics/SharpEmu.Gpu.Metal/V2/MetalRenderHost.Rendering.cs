@@ -330,6 +330,7 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
+        var ending = _renderingState;
         _renderingActive = false;
         _renderingState = default;
         if (_renderEncoder != 0)
@@ -339,6 +340,21 @@ internal sealed partial class MetalRenderHost
         }
 
         _boundGraphicsPipeline = null;
+        DumpPassTargets(in ending);
+    }
+
+    // Under SHARPEMU_METAL_V2_DUMP_TARGETS, what the pass just finished writing.
+    private void DumpPassTargets(in RenderingState ending)
+    {
+        if (!DumpTargetsEnabled)
+        {
+            return;
+        }
+
+        for (var index = 0; index < ending.ColorAttachmentCount; index++)
+        {
+            DumpTexture((nint)ending.ColorAttachments[index].View.Handle, $"pass{index}");
+        }
     }
 
     private void EndComputeEncoder()

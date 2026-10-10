@@ -336,6 +336,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         }
 
         Interlocked.Increment(ref _flipsPublished);
+        ReportFlipSurface(in displayBuffer, in request, imageIdentifier, image, texture);
         _flipTarget.PublishGuestFrame(
             texture,
             Math.Max(displayBuffer.Width, 1),
@@ -346,6 +347,29 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         VideoOutBackendServices.TraceGpuFlip(
             _memory, handle, index, flipMode, flipArg, displayBuffer.Address,
             VideoOutBackendServices.GetFlipEventCount(requestId));
+    }
+
+    // What the flip actually resolved to. A title whose frames come out black has either
+    // drawn nothing or had its flip resolve to a different cached image from the one the
+    // render passes wrote, and the flip counters alone cannot tell those apart: this says
+    // which image, which view, and whether the GPU ever wrote it.
+    private void ReportFlipSurface(
+        in VideoOutExports.DisplayBufferInfo displayBuffer,
+        in ImageRequest request,
+        SharpEmu.Libs.Gpu.Buffers.ResourceSlotIdentifier identifier,
+        MetalCachedImage image,
+        nint texture)
+    {
+        MetalV2Diagnostics.InfoOnce(
+            "flip-surface",
+            $"The first published flip resolved to image={identifier} texture=0x{texture:X} " +
+            $"address=0x{displayBuffer.Address:X16} {displayBuffer.Width}x{displayBuffer.Height} " +
+            $"guestFormat={displayBuffer.PixelFormat} tiling={displayBuffer.TilingMode} " +
+            $"hdr={VideoOutBackendServices.IsHdrPixelFormat(displayBuffer.PixelFormat)} " +
+            $"description={image.Description.PixelFormat} tile={image.Description.TileMode} " +
+            $"extent={image.Description.Extent.Width}x{image.Description.Extent.Height} " +
+            $"view={request.View.Format} gpuWritten={image.IsGpuModified} renderTarget={image.Uses.RenderTarget}.");
+        DumpTexture(texture, "flip");
     }
 
     // The presenter samples the flip texture and writes the result into a plain
