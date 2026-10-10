@@ -903,6 +903,15 @@ internal sealed partial class MetalRenderHost :
         // may still be writing these bytes: an image that owns them, or a recorded
         // store into them. Without that test every command-memory read would stall.
         var size = (ulong)destination.Length;
+        // The command stream reads a packet out of guest memory for every packet it
+        // runs, and almost none of them land anywhere the GPU has written. Two
+        // comparisons answer that, and skipping the full test keeps a message send
+        // and two range scans off the per-packet path.
+        if (!_gpuWrites.MayCover(address, size) && !_imageCache.MayOwn(address, size))
+        {
+            return _memory.TryRead(address, destination);
+        }
+
         _lastReadAddress = address;
         _lastReadSize = size;
         if (_imageCache.HasGpuModifiedImageBytes(address, size))
