@@ -110,13 +110,19 @@ internal static partial class MetalVideoPresenter
     // Before the ordinary dirty consumer. Historical GpuWritten is never cleared;
     // only dirty already represented by the ORIGINAL accepted seed token may be
     // acknowledged after exact completed canonical publication. New gens refuse.
-    private static CanonicalDirtyResult TryAcknowledgeFiniteCanonicalDirty(ulong address, DeferredCanonicalDirty? expectedRetry = null)
+    private static CanonicalDirtyResult TryAcknowledgeFiniteCanonicalDirty(ulong address, DeferredCanonicalDirty? expectedRetry = null) =>
+        TryAcknowledgeFiniteCanonicalDirtyCore(address, expectedRetry, out _);
+
+    private static CanonicalDirtyResult TryAcknowledgeFiniteCanonicalDirtyCore(ulong address, DeferredCanonicalDirty? expectedRetry,
+        out CanonicalDirtyRefusalDiagnostic refusal)
     {
+        refusal = default;
         // A retry is the original receipt, not a new lookup at the old address.
         // Validate before flags, provider reservation or dirty-token consumption.
         if (expectedRetry is not null)
             lock (_gate) RequireExactDeferredCanonicalDirtyOwnerLocked(expectedRetry);
-        if (!_rgbaStorageRuntimePublicationRequested && !_finiteStorageWritebackEnabled) return CanonicalDirtyResult.NotApplicable;
+        if (!_rgbaStorageRuntimePublicationRequested && !_finiteStorageWritebackEnabled)
+        { refusal = new("entry", "publication-disabled"); return CanonicalDirtyResult.NotApplicable; }
         GuestImage image; FiniteStorageDebt debt; StorageCpuSeedOrigin origin;
         int version; nint texture;
         string reason;
@@ -133,7 +139,8 @@ internal static partial class MetalVideoPresenter
             }
             if (expectedRetry is not null) RequireExactDeferredCanonicalDirtyOwnerLocked(expectedRetry);
             if (!_guestImages.TryGetValue(address, out image!) || !_finiteStorageDebts.TryGetValue(image, out debt!) ||
-                image.StorageCpuOrigin is not { } found) return CanonicalDirtyResult.NotApplicable;
+                image.StorageCpuOrigin is not { } found)
+            { refusal = new("entry", "canonical-original-unavailable"); return CanonicalDirtyResult.NotApplicable; }
             origin = found; version = image.ContentVersion; texture = image.Texture;
             // Preserve the first complete ORIGINAL classification. An ordinary
             // writer can finish before deferral rechecks this same owner. A
@@ -160,6 +167,7 @@ internal static partial class MetalVideoPresenter
                 TraceFiniteStorageRuntime("dirty-retained-owner-refused", address, reason, origin, offender);
                 throw new InvalidOperationException("Deferred canonical dirty ORIGINAL owner became stale: " + reason);
             }
+            refusal = new("initial-owner", reason, firstOwnerStatus);
             TraceFiniteStorageRuntime("dirty-refused", address, reason, origin, offender);
             return CanonicalDirtyResult.NotApplicable;
         }
@@ -171,11 +179,15 @@ internal static partial class MetalVideoPresenter
         var outcome = CanonicalDirtyResult.NotApplicable;
         try
         {
-            var result = ((ICpuMappedPublicationSource)origin.Memory).TryPrepareMappedPublicationValidation(origin.Mapping, out validation);
+            var result = PrepareCanonicalDirtyValidation(address, image, debt, origin, version, texture,
+                out validation, out var prepareBusy, out var firstPrepareRefusal);
             if (result != CpuMappedPublicationPreparationResult.Prepared || validation is null)
             {
-                if (validation is null && TryDeferCanonicalDirtyBusy(address, image, debt, origin, version, texture))
-                    return CanonicalDirtyResult.Deferred;
+                CanonicalDirtyRefusalDiagnostic retainedRefusal = new("prepare", "not-ordinary-first-busy");
+                if (prepareBusy is not null && validation is null && TryRetainCanonicalDirtyRetryCore(address, image, debt, origin, version, texture,
+                    prepareBusy, null, out retainedRefusal)) return CanonicalDirtyResult.Deferred;
+                refusal = retainedRefusal with { PrepareResult = result, PrepareRefusal = firstPrepareRefusal };
+                if (refusal.Boundary is null) refusal = refusal with { Boundary = "prepare", Reason = "unexpected-ticket-or-result" };
                 TraceFiniteStorageRuntime("dirty-refused", address, "original-physical-history-reservation", origin);
                 return CanonicalDirtyResult.NotApplicable;
             }
@@ -183,13 +195,13 @@ internal static partial class MetalVideoPresenter
             _canonicalDirtyBeforeBodyValidationForControl?.Invoke(false);
             ValidateFiniteStorageOrigin(origin, debt.CanonicalDescriptor!, reservation, classifyOrdinaryBusy: true);
             if (!validation.IsCurrent)
-            { TraceFiniteStorageRuntime("dirty-refused", address, "validation-revoked", origin); return CanonicalDirtyResult.NotApplicable; }
+            { refusal = new("body", "validation-revoked"); TraceFiniteStorageRuntime("dirty-refused", address, "validation-revoked", origin); return CanonicalDirtyResult.NotApplicable; }
             lock (_gate)
                 ownerCurrent = InspectCanonicalDirtyOwnerForAcknowledgmentLocked(address, image, debt, origin, version, texture, out reason, out offender, reservation);
-            if (!ownerCurrent) { TraceFiniteStorageRuntime("dirty-refused", address, reason, origin, offender); return CanonicalDirtyResult.NotApplicable; }
+            if (!ownerCurrent) { refusal = new("body-owner", reason, CpuMappedReadWatchStatus.Stale); TraceFiniteStorageRuntime("dirty-refused", address, reason, origin, offender); return CanonicalDirtyResult.NotApplicable; }
             consumed = GuestImageWriteTracker.TryConsumeDirtyAtProtectedToken(address, origin.Layout.PhysicalBytes, origin.Observation.Token);
             if (!consumed)
-            { TraceFiniteStorageRuntime("dirty-refused", address, "original-protected-token-or-armed-owner", origin); return CanonicalDirtyResult.NotApplicable; }
+            { refusal = new("body", "original-protected-token-or-armed-owner"); TraceFiniteStorageRuntime("dirty-refused", address, "original-protected-token-or-armed-owner", origin); return CanonicalDirtyResult.NotApplicable; }
             _canonicalDirtyBeforeBodyValidationForControl?.Invoke(true);
             ValidateFiniteStorageOrigin(origin, debt.CanonicalDescriptor!, reservation, classifyOrdinaryBusy: true);
             if (!validation.IsCurrent) throw new InvalidOperationException("Canonical dirty acknowledgment mapping was revoked.");
