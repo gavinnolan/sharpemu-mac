@@ -13,9 +13,22 @@ recorded roots, heavy workers and the shared lease. Managed checkpoint:
 `426c0c3b2edb7c4cda6b9762bd0d7e38d485017a64b89f7371f5dad22de14a19`.
 Build checkpoint:
 `6ce830ea9829f3810698fec2558879de3bde9e3aa5c73144365bc6b6cbc983bd`.
-Four selected positive X64 native workers are now granted in order 17/35/44/37,
-60 seconds each; the other 242 historical native rows remain unrun. Publication
-and games have not yet run on this successor. Production code is unchanged
+Four selected positive X64 native workers pass in order 17/35/44/37. Each joins
+actual zero return code, normal completion, one exact Passed TRX and the native
+oracle before cleanup is considered known. ROOT verifies all 38 retained
+artifacts, unchanged source/binaries, 45 native preparation pins and fresh
+absence of all 12 recorded roots, heavy workers and the shared lease. Native
+checkpoint: `fc1cdb0356b204be327688b5f8da56f20330215694e6fb888b1a659cb1c6c187`.
+The other 242 historical native rows remain unrun. Fresh local ad-hoc app
+publication passes: ROOT verifies all 13 publication artifacts, unchanged
+source/binaries, 50 publisher preparation pins, 239 actual app files and all
+recorded file modes/symlinks, plus fresh absence of both publication roots,
+heavy workers and the shared lease. Build information identifies clean
+`351c3c1c`, osx-x64, SDK 10.0.103, Metal, AppKit, GameController and CoreAudio.
+Publication checkpoint:
+`031c18c1da79c1d6f3b9867c504305e337333b427709a1abbfacb70e37dd5d39`.
+The app is local/ad-hoc, with no notarization or remote action. Games have not
+yet run on this successor. Production code is unchanged
 from the four-fix `638c3bdf` candidate; local main still uses `e2535177`.
 
 Previous qualification (R10): test-only successor `18d90e23` passes all three
