@@ -38,6 +38,84 @@ public sealed partial class GpuCommandInterpreter
     private int _lastWriteLength;
     private ulong _lastWritePacket;
 
+    // The last packets this interpreter walked, so a stream that leaves its
+    // packet boundaries says how it got there instead of only where it stopped.
+    private readonly PacketTraceEntry[] _packetTrace = new PacketTraceEntry[32];
+    private int _packetTraceCount;
+
+    private struct PacketTraceEntry
+    {
+        public ulong Serial;
+        public ulong Address;
+        public uint Offset;
+        public uint Header;
+        public uint Length;
+        public uint Consumed;
+        public int Depth;
+        public PacketTraceOutcome Outcome;
+    }
+
+    private enum PacketTraceOutcome : byte
+    {
+        Advanced,
+        Filler,
+        Predicated,
+        DeferredAdvance,
+        Suspended,
+        Chained,
+        Popped,
+    }
+
+    private void Trace(PacketTraceOutcome outcome, in PacketCursor cursor, uint offset,
+        uint header, uint length, uint consumed, int depth)
+    {
+        _packetTrace[_packetTraceCount++ % _packetTrace.Length] = new PacketTraceEntry
+        {
+            Serial = _packetSerial,
+            Address = cursor.Address,
+            Offset = offset,
+            Header = header,
+            Length = length,
+            Consumed = consumed,
+            Depth = depth,
+            Outcome = outcome,
+        };
+    }
+
+    // An unknown opcode means either this interpreter walked off the packet grid
+    // or the words under the cursor are not the ones it was handed. Reading the
+    // header again separates the two: a guest that rebuilds a command buffer it
+    // has already submitted changes it between two reads microseconds apart, and
+    // the trace above then describes a stream that no longer exists.
+    private string DescribeConcurrentRewrite(ulong packetAddress, uint header)
+    {
+        Span<byte> word = stackalloc byte[sizeof(uint)];
+        if (!_host.TryReadGuest(packetAddress, word))
+        {
+            return string.Empty;
+        }
+
+        var reread = BinaryPrimitives.ReadUInt32LittleEndian(word);
+        return reread == header
+            ? string.Empty
+            : $" The guest rewrote this packet while it was being read: header=0x{header:X8} is now 0x{reread:X8}.";
+    }
+
+    private void DumpPacketTrace()
+    {
+        var count = Math.Min(_packetTraceCount, _packetTrace.Length);
+        Console.Error.WriteLine($"[GPU][FATAL] The last {count} packets this queue walked, oldest first:");
+        var first = _packetTraceCount - count;
+        for (var index = first; index < _packetTraceCount; index++)
+        {
+            ref var entry = ref _packetTrace[index % _packetTrace.Length];
+            Console.Error.WriteLine(
+                $"\tserial={entry.Serial} depth={entry.Depth} buffer=0x{entry.Address:X16} " +
+                $"offset=0x{entry.Offset:X5} header=0x{entry.Header:X8} length={entry.Length} " +
+                $"consumed={entry.Consumed} {entry.Outcome}");
+        }
+    }
+
     public GpuCommandInterpreter(ICommandStreamHost host, int queueId, int interruptEventId)
     {
         _host = host;
@@ -240,6 +318,7 @@ public sealed partial class GpuCommandInterpreter
             ref var cursor = ref execution.At(cursorIndex);
             if (cursor.Offset > cursor.DwordCount)
             {
+                DumpPacketTrace();
                 throw _host.Fatal($"The packet cursor is past its buffer: offset={cursor.Offset} dwords={cursor.DwordCount} address=0x{cursor.Address:X16}.");
             }
 
@@ -247,9 +326,12 @@ public sealed partial class GpuCommandInterpreter
             {
                 if (cursor.DeferredAdvance > cursor.Remaining)
                 {
+                    DumpPacketTrace();
                     throw _host.Fatal($"The deferred advance is past the buffer: advance={cursor.DeferredAdvance} remaining={cursor.Remaining} address=0x{cursor.Address:X16}.");
                 }
 
+                Trace(PacketTraceOutcome.DeferredAdvance, in cursor, cursor.Offset, 0, 0,
+                    cursor.DeferredAdvance, cursorIndex);
                 cursor.Offset += cursor.DeferredAdvance;
                 cursor.DeferredAdvance = 0;
                 execution.MadeProgress = true;
@@ -258,6 +340,7 @@ public sealed partial class GpuCommandInterpreter
 
             if (cursor.Offset == cursor.DwordCount)
             {
+                Trace(PacketTraceOutcome.Popped, in cursor, cursor.Offset, 0, 0, 0, cursorIndex);
                 execution.Pop();
                 continue;
             }
@@ -271,6 +354,7 @@ public sealed partial class GpuCommandInterpreter
 
             if (header == PacketHeader.FillerHeader)
             {
+                Trace(PacketTraceOutcome.Filler, in cursor, offset, header, 1, 1, cursorIndex);
                 cursor.Offset++;
                 execution.MadeProgress = true;
                 continue;
@@ -285,17 +369,20 @@ public sealed partial class GpuCommandInterpreter
 
             if (remaining < 2)
             {
+                DumpPacketTrace();
                 throw _host.Fatal($"The packet is shorter than two dwords: offset=0x{offset:X5} header=0x{header:X8} address=0x{packetAddress:X16}.");
             }
 
             var length = PacketHeader.Length(header);
             if (length > remaining)
             {
+                DumpPacketTrace();
                 throw _host.Fatal($"The packet is longer than the buffer: offset=0x{offset:X5} header=0x{header:X8} length={length} remaining={remaining} address=0x{packetAddress:X16}.");
             }
 
             if (PacketHeader.IsPredicated(header) && PredicateSkip)
             {
+                Trace(PacketTraceOutcome.Predicated, in cursor, offset, header, length, length, cursorIndex);
                 cursor.Offset += length;
                 execution.MadeProgress = true;
                 continue;
@@ -315,19 +402,40 @@ public sealed partial class GpuCommandInterpreter
             if (handler is null)
             {
                 DumpUnknownPacket(cursor, offset);
-                throw _host.Fatal($"The packet opcode is unknown: offset=0x{offset:X5} header=0x{header:X8} opcode=0x{opcode:X2} address=0x{packetAddress:X16}.");
+                DumpPacketTrace();
+                throw _host.Fatal(
+                    $"The packet opcode is unknown: offset=0x{offset:X5} header=0x{header:X8} " +
+                    $"opcode=0x{opcode:X2} address=0x{packetAddress:X16}.{DescribeConcurrentRewrite(packetAddress, header)}");
             }
 
             var payload = ReadPayload(cursorIndex, packetAddress, length - 1);
             var packet = new PacketContext(header & ~1u, packetAddress, offset, remaining, total);
             var consumed = handler(this, in packet, payload) + 1;
+
+            // The header's count is the size of the packet, so a handler that
+            // reports fewer dwords than its own header declares has not consumed
+            // the whole packet: advancing by its count would resume inside the
+            // body and read an operand as the next header. Several handlers
+            // return a fixed size for the variant they know (the register NOP
+            // offsets, the semaphore, the atomic), and a longer encoding of the
+            // same packet would walk the stream off its boundaries from there on.
+            // COND_EXEC is the one packet that reports more on purpose, because
+            // it skips the packets it covers.
+            if (consumed < length)
+            {
+                consumed = length;
+            }
+
             if (consumed > remaining)
             {
+                DumpPacketTrace();
                 throw _host.Fatal($"The handler consumed more than the buffer holds: consumed={consumed} remaining={remaining} header=0x{header:X8} address=0x{packetAddress:X16}.");
             }
 
             if (execution.Suspended)
             {
+                Trace(PacketTraceOutcome.Suspended, in execution.At(cursorIndex), offset, header,
+                    length, consumed, cursorIndex);
                 if (execution.Depth > cursorIndex + 1 && !_chainRequested)
                 {
                     execution.At(cursorIndex).DeferredAdvance = consumed;
@@ -339,6 +447,8 @@ public sealed partial class GpuCommandInterpreter
 
             if (_chainRequested)
             {
+                Trace(PacketTraceOutcome.Chained, in execution.At(cursorIndex), offset, header,
+                    length, consumed, cursorIndex);
                 _chainRequested = false;
                 execution.MadeProgress = true;
                 continue;
@@ -349,6 +459,8 @@ public sealed partial class GpuCommandInterpreter
                 throw _host.Fatal($"The cursor stack changed under a packet: depth={execution.Depth} expected={cursorIndex + 1} header=0x{header:X8}.");
             }
 
+            Trace(PacketTraceOutcome.Advanced, in execution.At(cursorIndex), offset, header,
+                length, consumed, cursorIndex);
             execution.At(cursorIndex).Offset += consumed;
             execution.MadeProgress = true;
         }
