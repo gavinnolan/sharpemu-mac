@@ -317,6 +317,22 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.Empty(_pipelines.UnsupportedGraphics);
     }
 
+    [Fact]
+    public void MeshPipelines_DoNotAdmitAPlainVertexDraw()
+    {
+        // A zero stage mask is the plain vertex/pixel path. Rescuing it as a mesh draw
+        // would compile an ordinary vertex program as the merged ES/GS stage and size its
+        // workgroup from geometry-engine registers this draw never programmed.
+        var banks = Banks();
+        ApplyCullingPrimitiveShaderDraw(banks);
+        banks.Context.ShaderStages = 0;
+        _pipelines.SupportsPrimitiveShaderMeshPipelines = true;
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        Assert.Empty(_pipelines.Calls);
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_", StringComparison.Ordinal));
+    }
+
     [Theory]
     [InlineData(0x1u)] // a legacy vertex/LS stage mask stays unsupported
     [InlineData(0x41u)] // VS_EN selected beside GS_EN
