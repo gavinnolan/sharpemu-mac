@@ -438,10 +438,20 @@ internal sealed partial class MetalRenderHost :
     private const ulong MaxHostFillBytes = 64 * 1024;
     private const ulong MaxRecordingHostFillBytes = 4096;
 
+    private static readonly bool HostFillsDisabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_HOST_FILLS") == "0";
+
+    private static readonly bool ClearFillsDisabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_CLEAR_FILLS") == "0";
+
     private bool CanWriteGuestOnHost(ulong address, ulong size)
     {
         var limit = _recordedCommands == 0 ? MaxHostFillBytes : MaxRecordingHostFillBytes;
-        return size <= limit &&
+        return !HostFillsDisabled && size <= limit &&
+            // The GPU path writes through the window, which is mapped whatever the
+            // guest's own protections say; the host path goes through guest memory and
+            // would quietly write only the mapped prefix.
+            _memory.CanRead(address, size) &&
             !_imageCache.HasGpuModifiedImageBytes(address, size) &&
             _gpuWrites.PendingSerial(address, size, CompletedSerial) == 0;
     }
@@ -481,7 +491,7 @@ internal sealed partial class MetalRenderHost :
         // Writing its guest bytes instead costs the writeback of whatever the GPU had
         // put there, a retile of the fill and then a detile back into the texture on
         // the next bind — measured on Quake's menu as two of each per frame.
-        if (_imageCache.TryClearImageFromBuffer(address, size, value))
+        if (!ClearFillsDisabled && _imageCache.TryClearImageFromBuffer(address, size, value))
         {
             Interlocked.Increment(ref _absorbedFills);
             return;
