@@ -24,7 +24,38 @@ internal sealed partial class MetalRenderHost
             : null;
 
     // Enough to see a title screen appear and settle without filling a disk.
-    private const int MaxTargetDumps = 240;
+    // SHARPEMU_METAL_V2_DUMP_MAX raises it for a title whose interesting frames
+    // come minutes in, where the default budget is spent before the menu ends.
+    private static readonly int _maxTargetDumps =
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DUMP_MAX"), out var max) && max > 0
+            ? max
+            : 240;
+
+    // SHARPEMU_METAL_V2_DUMP_AFTER_SECONDS=<n> holds every dump back until the
+    // title has been running that long, so the budget lands on the level rather
+    // than on the loading screen in front of it.
+    private static readonly double _dumpAfterSeconds =
+        double.TryParse(
+            Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DUMP_AFTER_SECONDS"),
+            System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out var after) && after > 0
+            ? after
+            : 0;
+
+    private static readonly long _dumpStartTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+
+    // SHARPEMU_METAL_V2_DUMP_AFTER_FLIPS=<n> does the same by flip count, for a
+    // title whose phases are easier to count than to time.
+    private static readonly long _dumpAfterFlips =
+        long.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DUMP_AFTER_FLIPS"), out var afterFlips) && afterFlips > 0
+            ? afterFlips
+            : 0;
+
+    private static bool DumpWindowOpen =>
+        (_dumpAfterSeconds <= 0 ||
+            (System.Diagnostics.Stopwatch.GetTimestamp() - _dumpStartTimestamp) /
+            (double)System.Diagnostics.Stopwatch.Frequency >= _dumpAfterSeconds);
 
     // One frame's worth of targets every so many flips. Dumping the first N occurrences
     // of each texture instead spends the whole budget on the first seconds, which for a
@@ -113,7 +144,9 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        _dumpThisFlip = _dumpFlipIndex++ % _dumpEveryFlips == 0;
+        var flip = _dumpFlipIndex++;
+        _dumpThisFlip = flip >= _dumpAfterFlips && DumpWindowOpen &&
+            (flip - _dumpAfterFlips) % _dumpEveryFlips == 0;
         if (_pendingDumps.Count == 0)
         {
             return;
@@ -158,7 +191,7 @@ internal sealed partial class MetalRenderHost
     /// </summary>
     private void DumpTexture(nint texture, uint width, uint height, ulong pixelFormat, string label)
     {
-        if (!DumpTargetsEnabled || texture == 0 || width == 0 || height == 0 || _targetDumps >= MaxTargetDumps)
+        if (!DumpTargetsEnabled || texture == 0 || width == 0 || height == 0 || _targetDumps >= _maxTargetDumps)
         {
             return;
         }
