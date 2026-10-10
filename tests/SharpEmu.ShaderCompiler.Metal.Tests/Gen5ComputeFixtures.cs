@@ -199,9 +199,10 @@ internal static class Gen5ComputeFixtures
     private const uint UserDataCount = 16;
 
     public static ShaderCompileRequest RequestOrThrow(Gen5ShaderProgram program, ShaderStage stage, uint waveLaneCount = 32, uint localSizeX = 32, int requiredVertexOutputCount = 0,
-        IReadOnlyList<Gen5PixelOutputBinding>? pixelOutputs = null, ResourceRuntimeInputs? runtimeInputs = null)
+        IReadOnlyList<Gen5PixelOutputBinding>? pixelOutputs = null, ResourceRuntimeInputs? runtimeInputs = null,
+        Gen5NggStageInfo? primitiveShader = null, uint userDataBase = 0)
     {
-        var plan = ShaderResourcePlan.Extract(program, stage, RequestHash, 0, UserDataCount);
+        var plan = ShaderResourcePlan.Extract(program, stage, RequestHash, userDataBase, UserDataCount);
         var specialization = ResourceSpecialization.Default(plan.Info);
         if (runtimeInputs is not null)
         {
@@ -212,7 +213,7 @@ internal static class Gen5ComputeFixtures
         var resources = ResourceMaterializer.ApplyTo(plan, specialization);
         var layout = BindingLayout.Allocate(
             resources.Info,
-            BindingLayout.CollectUserDataRegisters(program, 0, UserDataCount),
+            BindingLayout.CollectUserDataRegisters(program, userDataBase, UserDataCount),
             BindingLayout.UsesGlobalDataShare(program),
             ShaderCompileRequest.RequiresFlattenedTable(plan, resources),
             BindingLayout.ReadsShaderBase(program));
@@ -222,6 +223,7 @@ internal static class Gen5ComputeFixtures
             LocalSizeX = stage == ShaderStage.Compute ? localSizeX : 1,
             PixelOutputs = pixelOutputs ?? (stage == ShaderStage.Pixel ? [new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float)] : []),
             RequiredVertexOutputCount = requiredVertexOutputCount,
+            PrimitiveShader = primitiveShader,
         };
     }
 
