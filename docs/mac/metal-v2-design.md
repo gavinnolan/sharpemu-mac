@@ -144,6 +144,24 @@ A flip is presented by sampling the display surface into a plain BGRA8 drawable,
 an sRGB surface is read through a linear view; sampling it as sRGB converts to
 linear and shows the frame far too dark.
 
+## Measuring one draw or dispatch
+
+The periodic `[METAL-V2][PERF]` line reports `gpu_busy_ms` per command buffer, which is
+where the GPU time is but not *whose* it is. `SHARPEMU_METAL_V2_PROFILE_SHADERS=1` adds
+the attribution: every draw and dispatch gets its own command buffer, which is committed
+and waited on, and `GPUEndTime - GPUStartTime` is charged to the bound pipeline's shader
+hashes. Totals per `(kind, shaders)` key print every two seconds and once at exit as
+`[METAL-V2][SHADER-PROF]`, worst first; `SHARPEMU_METAL_V2_PROFILE_TOP` sets how many.
+
+Per-draw timestamps are not an option on this hardware: Apple silicon reports
+`supportsCounterSampling:` only for `MTLCounterSamplingPointAtStageBoundary`, which times
+a whole encoder, not a draw inside it. The command-buffer split is therefore the measurement,
+and it is the reason the mode is opt-in: it serializes the GPU with the host and splits
+render passes, so its absolute frame rate means nothing. Only the per-key ratios do.
+
+A hash from such a line is read back with `SHARPEMU_SHADER_MSL_DUMP_DIR` (see
+`Gen5MslDump`), which also annotates the emitted dispatcher with guest PCs.
+
 ## Process-level macOS tuning (separate workstream)
 
 - `Info.plist`: `LSSupportsGameMode`, `GCSupportsGameMode`, and

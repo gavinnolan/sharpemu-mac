@@ -179,6 +179,7 @@ internal sealed partial class MetalRenderHost :
     {
         _ = EnsureCommandBuffer();
         EndEncoders();
+        NoteProfileTransfer();
         return this;
     }
 
