@@ -298,7 +298,7 @@ internal sealed unsafe class MetalTiler : IDisposable
         }
     }
 
-    private nint CreatePipeline(nint library, string functionName, uint elementBytes, bool vectorCopy, string owner)
+    private nint CreatePipeline(nint library, string functionName, uint elementBytes, bool fastCopy, string owner)
     {
         var pool = MetalNative.objc_autoreleasePoolPush();
         try
@@ -313,9 +313,9 @@ internal sealed unsafe class MetalTiler : IDisposable
             {
                 var values = MetalNative.Send(MetalNative.Send(MetalNative.Class("MTLFunctionConstantValues"), SelAlloc), SelInit);
                 var bytes = elementBytes;
-                var vector = vectorCopy ? (byte)1 : (byte)0;
+                var fast = fastCopy ? (byte)1 : (byte)0;
                 MetalNative.SendSetConstantValue(values, SelSetConstantValue, (nint)(&bytes), DataTypeUInt, MetalTilerShaders.ElementBytesConstant);
-                MetalNative.SendSetConstantValue(values, SelSetConstantValue, (nint)(&vector), DataTypeBool, MetalTilerShaders.VectorCopyConstant);
+                MetalNative.SendSetConstantValue(values, SelSetConstantValue, (nint)(&fast), DataTypeBool, MetalTilerShaders.FastCopyConstant);
                 function = MetalNative.Send(library, SelNewSpecialized, MetalNative.NsString(functionName), values, ref error);
                 Release(values);
             }
@@ -341,7 +341,7 @@ internal sealed unsafe class MetalTiler : IDisposable
         }
     }
 
-    private nint BlockPipeline(TileBlockKind kind, MetalTileDirection direction, uint elementBytes, bool vectorCopy)
+    private nint BlockPipeline(TileBlockKind kind, MetalTileDirection direction, uint elementBytes, bool fastCopy)
     {
         var elementIndex = (uint)BitOperations.TrailingZeroCount(elementBytes);
         if ((uint)kind >= KindCount || elementIndex >= ElementSizeCount || !BitOperations.IsPow2(elementBytes))
@@ -350,14 +350,14 @@ internal sealed unsafe class MetalTiler : IDisposable
         }
 
         var slot = (((uint)kind * VariantCount + (direction == MetalTileDirection.Tile ? 1u : 0u)) * ElementSizeCount + elementIndex)
-                   * VariantCount + (vectorCopy ? 1u : 0u);
+                   * VariantCount + (fastCopy ? 1u : 0u);
         if (_blockPipelines[slot] != 0)
         {
             return _blockPipelines[slot];
         }
 
         _blockPipelines[slot] = CreatePipeline(Library(kind, direction), MetalTilerShaders.KernelName(kind, direction),
-            elementBytes, vectorCopy, $"tiler kind={kind} direction={direction} bytes={elementBytes} vector={vectorCopy}");
+            elementBytes, fastCopy, $"tiler kind={kind} direction={direction} bytes={elementBytes} fast={fastCopy}");
         return _blockPipelines[slot];
     }
 
@@ -527,22 +527,53 @@ internal sealed unsafe class MetalTiler : IDisposable
         };
     }
 
-    // Whole-element vector loads need the element's own alignment on both sides; the
-    // block offsets and block sizes are always element-aligned, so only the folded
-    // bases and the linear strides can break it.
-    private static bool AllowsVectorCopy(in MetalTileArguments arguments, uint elementBytes) =>
-        elementBytes <= 4 ||
-        ((arguments.SourceBase | arguments.DestinationBase | arguments.PitchBytes | arguments.SliceBytes) & (elementBytes - 1)) == 0;
-
-    private static void Dispatch(nint encoder, MetalTileArguments arguments, (uint X, uint Y, uint Z) group)
+    // The fast variant of a block copy. Four bytes and wider means whole-element vector
+    // loads, which need the element's own alignment on both sides; the block offsets and
+    // block sizes are always element-aligned, so only the folded bases and the linear
+    // strides can break it. Sub-dword means one dword per element group, which needs the
+    // destination side dword-aligned: the tiled side inherits that from the block size,
+    // the linear side from its base and its strides. A tail transfer starts at an
+    // arbitrary element inside its block, so no group of it is dword-aligned.
+    private static bool AllowsFastCopy(in MetalTileTransfer transfer, in MetalTileArguments arguments, bool tile)
     {
+        var bytes = transfer.BytesPerElement;
+        if (bytes >= 4)
+        {
+            return bytes == 4 ||
+                   ((arguments.SourceBase | arguments.DestinationBase | arguments.PitchBytes | arguments.SliceBytes) & (bytes - 1)) == 0;
+        }
+
+        if (transfer.Tail || WideGroupOf(transfer, tile).Width == 0)
+        {
+            return false;
+        }
+
+        return tile
+            ? arguments.DestinationBase % 4 == 0
+            : ((arguments.DestinationBase | arguments.PitchBytes | arguments.SliceBytes) & 3u) == 0;
+    }
+
+    private static (uint Width, uint Height) WideGroupOf(in MetalTileTransfer transfer, bool tile) =>
+        MetalTilerShaders.WideGroup(transfer.Kind, transfer.BytesPerElement,
+            tile ? MetalTileDirection.Tile : MetalTileDirection.Detile);
+
+    private static void Dispatch(nint encoder, MetalTileArguments arguments, (uint X, uint Y, uint Z) group) =>
+        Dispatch(encoder, arguments, group, (1, 1));
+
+    // One thread per element, or per element group when the fast sub-dword variant is
+    // bound: the grid shrinks by the group's extent and the kernel scales the index back.
+    private static void Dispatch(
+        nint encoder, MetalTileArguments arguments, (uint X, uint Y, uint Z) group, (uint Width, uint Height) wide)
+    {
+        var threadsX = (arguments.Width + wide.Width - 1) / wide.Width;
+        var threadsY = (arguments.Height + wide.Height - 1) / wide.Height;
         MetalNative.SendSetBytes(encoder, SelSetBytes, (nint)(&arguments),
             (nuint)MetalTilerShaders.ArgumentBytes, MetalTilerShaders.ArgumentIndex);
         MetalNative.SendDispatch(encoder, SelDispatch,
             new MtlSize
             {
-                Width = (nuint)((arguments.Width + group.X - 1) / group.X),
-                Height = (nuint)((arguments.Height + group.Y - 1) / group.Y),
+                Width = (nuint)((threadsX + group.X - 1) / group.X),
+                Height = (nuint)((threadsY + group.Y - 1) / group.Y),
                 Depth = (nuint)((arguments.Depth + group.Z - 1) / group.Z),
             },
             new MtlSize { Width = group.X, Height = group.Y, Depth = group.Z });
@@ -579,24 +610,25 @@ internal sealed unsafe class MetalTiler : IDisposable
 
         var pipelineKind = (TileBlockKind)uint.MaxValue;
         uint pipelineBytes = 0;
-        var pipelineVector = false;
+        var pipelineFast = false;
         var bound = false;
         var direction = tile ? MetalTileDirection.Tile : MetalTileDirection.Detile;
         foreach (ref readonly var transfer in System.Runtime.InteropServices.CollectionsMarshal.AsSpan(transfers))
         {
             var arguments = Prepare(transfer, tile, tile ? linearBase : tiledBase, tile ? tiledBase : linearBase,
                 tiled.Size, linear.Size, out _);
-            var vector = AllowsVectorCopy(arguments, transfer.BytesPerElement);
-            if (!bound || pipelineKind != transfer.Kind || pipelineBytes != transfer.BytesPerElement || pipelineVector != vector)
+            var fast = AllowsFastCopy(transfer, arguments, tile);
+            if (!bound || pipelineKind != transfer.Kind || pipelineBytes != transfer.BytesPerElement || pipelineFast != fast)
             {
-                MetalNative.SendVoid(encoder, SelSetPipeline, BlockPipeline(transfer.Kind, direction, transfer.BytesPerElement, vector));
+                MetalNative.SendVoid(encoder, SelSetPipeline, BlockPipeline(transfer.Kind, direction, transfer.BytesPerElement, fast));
                 pipelineKind = transfer.Kind;
                 pipelineBytes = transfer.BytesPerElement;
-                pipelineVector = vector;
+                pipelineFast = fast;
                 bound = true;
             }
 
-            Dispatch(encoder, arguments, MetalTilerShaders.Threadgroup(transfer.Kind));
+            var wide = fast && transfer.BytesPerElement < 4 ? WideGroupOf(transfer, tile) : (1u, 1u);
+            Dispatch(encoder, arguments, MetalTilerShaders.Threadgroup(transfer.Kind), wide);
         }
     }
 

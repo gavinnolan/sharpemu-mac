@@ -40,9 +40,11 @@ internal static class MetalTilerShaders
     public const uint TargetAtomicIndex = 2;
     public const uint ArgumentIndex = 3;
 
-    // Function constant indices.
+    // Function constant indices. The fast-copy variant means whole-element vector loads
+    // for the four-byte-and-wider elements and one dword per element group for the
+    // sub-dword ones; the two are mutually exclusive, so they share one constant.
     public const uint ElementBytesConstant = 0;
-    public const uint VectorCopyConstant = 1;
+    public const uint FastCopyConstant = 1;
 
     public const string DepthWidenFixed24 = "depth_widen_d24";
     public const string DepthWidenFloat32 = "depth_widen_d32";
@@ -251,6 +253,109 @@ internal static class MetalTilerShaders
     public static bool Supports(TileBlockKind kind, uint elementBytes) =>
         TileGeometry.TryGetBlockLayout(kind, elementBytes, out _);
 
+    // The element group one thread of a sub-dword copy handles, so the whole dword is
+    // written at once and the masked atomics disappear. A detile writes the linear side,
+    // where a run of 4/bytes elements along x is always one aligned dword. A retile
+    // writes the tiled side, where the group shape follows the kind's own addressing:
+    // the 1-byte depth kind puts a 2x2 quad in one dword, every other kind a run of
+    // four along x. Both shapes are derived from the shared block tables rather than
+    // asserted, so a kind whose addressing fits no group simply keeps the atomic path.
+    private static readonly Dictionary<(TileBlockKind Kind, uint Bytes), (uint Width, uint Height)> _tileGroups = [];
+
+    public static (uint Width, uint Height) WideGroup(TileBlockKind kind, uint bytes, MetalTileDirection direction)
+    {
+        if (bytes >= 4 || !TileGeometry.TryGetBlockLayout(kind, bytes, out var block))
+        {
+            return default;
+        }
+
+        var elements = 4 / bytes;
+        if (direction == MetalTileDirection.Detile)
+        {
+            return block.BlockWidth % elements == 0 ? (elements, 1u) : default;
+        }
+
+        lock (_tileGroups)
+        {
+            if (_tileGroups.TryGetValue((kind, bytes), out var cached))
+            {
+                return cached;
+            }
+
+            var found = default((uint Width, uint Height));
+            (uint Width, uint Height)[] candidates = elements == 4
+                ? [(4, 1), (2, 2), (1, 4)]
+                : [(2, 1), (1, 2)];
+            foreach (var candidate in candidates)
+            {
+                if (GroupFillsOneDword(block, candidate.Width, candidate.Height))
+                {
+                    found = candidate;
+                    break;
+                }
+            }
+
+            _tileGroups[(kind, bytes)] = found;
+            return found;
+        }
+    }
+
+    // True when every aligned gw x gh group of elements inside the block occupies the
+    // four bytes of one aligned dword, which is what lets a retile store it whole.
+    private static bool GroupFillsOneDword(in TileBlockLayout block, uint gw, uint gh)
+    {
+        var bytes = block.BytesPerElement;
+        if (block.BlockWidth % gw != 0 || block.BlockHeight % gh != 0 || gw * gh * bytes != 4)
+        {
+            return false;
+        }
+
+        var full = (1u << (int)(gw * gh)) - 1u;
+        for (uint z = 0; z < block.BlockDepth; z++)
+        {
+            for (uint y = 0; y < block.BlockHeight; y += gh)
+            {
+                for (uint x = 0; x < block.BlockWidth; x += gw)
+                {
+                    var first = uint.MaxValue;
+                    for (uint element = 0; element < gw * gh; element++)
+                    {
+                        if (!TileGeometry.TryGetBlockOffset(block, x + element % gw, y + element / gw, z, out var offset))
+                        {
+                            return false;
+                        }
+
+                        first = Math.Min(first, offset);
+                    }
+
+                    if (first % 4 != 0)
+                    {
+                        return false;
+                    }
+
+                    uint seen = 0;
+                    for (uint element = 0; element < gw * gh; element++)
+                    {
+                        TileGeometry.TryGetBlockOffset(block, x + element % gw, y + element / gw, z, out var offset);
+                        if (offset < first || offset >= first + 4 || (offset - first) % bytes != 0)
+                        {
+                            return false;
+                        }
+
+                        seen |= 1u << (int)((offset - first) / bytes);
+                    }
+
+                    if (seen != full)
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        return true;
+    }
+
     private const string Preamble = """
         #include <metal_stdlib>
         using namespace metal;
@@ -275,6 +380,19 @@ internal static class MetalTilerShaders
 
         """;
 
+    // The element's byte offset inside its block, as a function so the one-element and
+    // the dword-wide bodies share a single copy of the addressing expression.
+    private static void AppendOffsetFunction(StringBuilder source, TileBlockKind kind, uint bytes)
+    {
+        if (!TileGeometry.TryGetBlockLayout(kind, bytes, out _))
+        {
+            return;
+        }
+
+        source.Append($"static inline uint tiled_offset_{bytes}(uint sx, uint sy, uint sz)\n{{\n");
+        source.Append($"    return {BlockOffset(kind, bytes)};\n}}\n\n");
+    }
+
     // The element-size body of a block copy: block index, both addresses and the copy itself.
     private static void AppendBody(StringBuilder source, TileBlockKind kind, MetalTileDirection direction, uint bytes)
     {
@@ -288,12 +406,18 @@ internal static class MetalTilerShaders
         var depthShift = Log2(block.BlockDepth);
         var detile = direction == MetalTileDirection.Detile;
         source.Append($"    if (kElementBytes == {bytes}u)\n    {{\n");
+        if (bytes < 4)
+        {
+            AppendWideBody(source, kind, direction, bytes, block);
+        }
+
+        source.Append("        if (gid.x >= args.width || gid.y >= args.height)\n        {\n            return;\n        }\n\n");
         source.Append("        uint sx = tail ? gid.x + args.tailX : gid.x;\n");
         source.Append("        uint sy = tail ? gid.y + args.tailY : gid.y;\n");
         source.Append("        uint sz = gid.z + args.surfaceZ;\n");
         source.Append($"        uint block = tail ? 0u : ((gid.z >> {depthShift}u) * args.blocksPerSlice + " +
                       $"(gid.y >> {heightShift}u) * args.blocksPerRow + (gid.x >> {widthShift}u));\n");
-        source.Append($"        uint tiled = block * {block.BlockSize}u + {BlockOffset(kind, bytes)};\n");
+        source.Append($"        uint tiled = block * {block.BlockSize}u + tiled_offset_{bytes}(sx, sy, sz);\n");
         source.Append($"        uint linear = gid.z * args.sliceBytes + gid.y * args.pitchBytes + gid.x * {bytes}u;\n");
         source.Append($"        uint from = args.sourceBase + {(detile ? "tiled" : "linear")};\n");
         source.Append($"        uint to = args.destinationBase + {(detile ? "linear" : "tiled")};\n");
@@ -306,7 +430,7 @@ internal static class MetalTilerShaders
             else
             {
                 var vector = bytes == 8 ? "uint2" : "uint4";
-                source.Append("        if (kVectorCopy)\n        {\n");
+                source.Append("        if (kFastCopy)\n        {\n");
                 source.Append($"            *reinterpret_cast<device {vector}*>(target + (to >> 2)) = " +
                               $"*reinterpret_cast<device const {vector}*>(source + (from >> 2));\n");
                 source.Append("        }\n        else\n        {\n");
@@ -331,6 +455,63 @@ internal static class MetalTilerShaders
         source.Append("        return;\n    }\n");
     }
 
+    // The dword-wide body for a sub-dword element size: one thread covers the group whose
+    // destination bytes are one aligned dword, assembles it and stores it whole. A group
+    // the surface's width or height cuts short falls back to the masked atomics for the
+    // bytes it does cover, so the row padding is still never written.
+    private static void AppendWideBody(
+        StringBuilder source, TileBlockKind kind, MetalTileDirection direction, uint bytes, in TileBlockLayout block)
+    {
+        var group = WideGroup(kind, bytes, direction);
+        if (group.Width == 0)
+        {
+            return;
+        }
+
+        var mask = bytes == 1 ? "0xffu" : "0xffffu";
+        var detile = direction == MetalTileDirection.Detile;
+        source.Append("        if (kFastCopy)\n        {\n");
+        source.Append($"            uint x0 = gid.x * {group.Width}u;\n");
+        source.Append($"            uint y0 = gid.y * {group.Height}u;\n");
+        source.Append("            if (x0 >= args.width || y0 >= args.height)\n            {\n                return;\n            }\n\n");
+        source.Append("            uint sz = gid.z + args.surfaceZ;\n");
+        source.Append($"            uint block = (gid.z >> {Log2(block.BlockDepth)}u) * args.blocksPerSlice + " +
+                      $"(y0 >> {Log2(block.BlockHeight)}u) * args.blocksPerRow + (x0 >> {Log2(block.BlockWidth)}u);\n");
+        source.Append($"            uint blockBase = block * {block.BlockSize}u;\n");
+        source.Append("            uint value = 0u;\n            uint mask = 0u;\n");
+        source.Append(detile
+            ? "            uint to = args.destinationBase + gid.z * args.sliceBytes + y0 * args.pitchBytes + " +
+              $"x0 * {bytes}u;\n"
+            : "            uint to = 0u;\n");
+        source.Append($"            for (uint j = 0u; j < {group.Height}u; ++j)\n            {{\n");
+        source.Append("                uint sy = y0 + j;\n");
+        source.Append("                if (sy >= args.height)\n                {\n                    break;\n                }\n\n");
+        source.Append($"                for (uint i = 0u; i < {group.Width}u; ++i)\n                {{\n");
+        source.Append("                    uint sx = x0 + i;\n");
+        source.Append("                    if (sx >= args.width)\n                    {\n                        break;\n                    }\n\n");
+        source.Append($"                    uint tiled = args.{(detile ? "sourceBase" : "destinationBase")} + blockBase + " +
+                      $"tiled_offset_{bytes}(sx, sy, sz);\n");
+        source.Append($"                    uint linear = args.{(detile ? "destinationBase" : "sourceBase")} + " +
+                      $"gid.z * args.sliceBytes + sy * args.pitchBytes + sx * {bytes}u;\n");
+        source.Append($"                    uint from = {(detile ? "tiled" : "linear")};\n");
+        source.Append($"                    uint shift = ({(detile ? "linear" : "tiled")} & 3u) * 8u;\n");
+        if (!detile)
+        {
+            source.Append("                    to = tiled & ~3u;\n");
+        }
+
+        source.Append($"                    value |= ((source[from >> 2] >> ((from & 3u) * 8u)) & {mask}) << shift;\n");
+        source.Append($"                    mask |= {mask} << shift;\n");
+        source.Append("                }\n            }\n\n");
+        source.Append("            if (mask == 0u)\n            {\n                return;\n            }\n\n");
+        source.Append("            if (mask == 0xffffffffu)\n            {\n");
+        source.Append("                target[to >> 2] = value;\n                return;\n            }\n\n");
+        source.Append("            device atomic_uint* cell = targetAtomic + (to >> 2);\n");
+        source.Append("            atomic_fetch_and_explicit(cell, ~mask, memory_order_relaxed);\n");
+        source.Append("            atomic_fetch_or_explicit(cell, value, memory_order_relaxed);\n");
+        source.Append("            return;\n        }\n\n");
+    }
+
     // The library for one block kind and direction; the element size is a function constant.
     public static string CreateBlockCopyLibrary(TileBlockKind kind, MetalTileDirection direction)
     {
@@ -347,14 +528,21 @@ internal static class MetalTilerShaders
 
         var source = new StringBuilder(Preamble);
         source.Append("constant uint kElementBytes [[function_constant(0)]];\n");
-        source.Append("constant bool kVectorCopy [[function_constant(1)]];\n\n");
+        source.Append("constant bool kFastCopy [[function_constant(1)]];\n\n");
+        foreach (var bytes in ElementSizes)
+        {
+            AppendOffsetFunction(source, kind, bytes);
+        }
+
         source.Append($"kernel void {KernelName(kind, direction)}(\n");
         source.Append($"    device const uint* source [[buffer({SourceIndex})]],\n");
         source.Append($"    device uint* target [[buffer({TargetIndex})]],\n");
         source.Append($"    device atomic_uint* targetAtomic [[buffer({TargetAtomicIndex})]],\n");
         source.Append($"    constant TileArgs& args [[buffer({ArgumentIndex})]],\n");
         source.Append("    uint3 gid [[thread_position_in_grid]])\n{\n");
-        source.Append("    if (gid.x >= args.width || gid.y >= args.height || gid.z >= args.depth)\n    {\n        return;\n    }\n\n");
+        // The x and y bounds live in the element-size bodies: a dword-wide body indexes
+        // groups of elements, so its own bound is the group's first element.
+        source.Append("    if (gid.z >= args.depth)\n    {\n        return;\n    }\n\n");
         source.Append("    bool tail = args.tail != 0u;\n");
         foreach (var bytes in ElementSizes)
         {
