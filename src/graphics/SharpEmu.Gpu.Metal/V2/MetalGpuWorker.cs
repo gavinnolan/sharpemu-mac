@@ -292,9 +292,25 @@ internal sealed class MetalCompletionQueue : IDisposable
         // WaitForSignal returns as soon as the queue is stopping, so without the
         // same test here the wait becomes a hot spin that never ends: the worker
         // then misses its five-second shutdown deadline.
+        var complainAfter = started + (System.Diagnostics.Stopwatch.Frequency * StallSeconds);
         while (SignaledValue < serial && !_stopping)
         {
             WaitForSignal(serial);
+            if (System.Diagnostics.Stopwatch.GetTimestamp() < complainAfter)
+            {
+                continue;
+            }
+
+            // A serial nothing will ever signal stops this thread for good, and
+            // the guest then waits on a submitDone that never returns. From
+            // outside that is indistinguishable from a slow GPU, so say which
+            // serial is missing and how far the event actually got.
+            complainAfter = long.MaxValue;
+            MetalV2Diagnostics.WarnOnce(
+                "completion-stall",
+                $"A completion has not arrived in {StallSeconds}s and the wait is still running: " +
+                $"serial={serial} signalled={SignaledValue} published={Volatile.Read(ref _publishedSerial)} " +
+                $"pending={PendingCount()}.");
         }
 
         var signalled = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -308,6 +324,17 @@ internal sealed class MetalCompletionQueue : IDisposable
 
         return new MetalCompletionWait(
             signalled - started, System.Diagnostics.Stopwatch.GetTimestamp() - signalled);
+    }
+
+    // How long a completion may be outstanding before the wait says so once.
+    private const int StallSeconds = 5;
+
+    private int PendingCount()
+    {
+        lock (_gate)
+        {
+            return _pending.Count;
+        }
     }
 
     private bool HasWorkAtOrBefore(ulong serial)
