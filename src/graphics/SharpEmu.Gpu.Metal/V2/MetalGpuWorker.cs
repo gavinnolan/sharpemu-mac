@@ -205,7 +205,7 @@ internal sealed class MetalCompletionQueue : IDisposable
     private long _gpuReadySamples;
     private long _wakeWaitTicks;
     private long _handlerWakeups;
-    private bool _stopping;
+    private volatile bool _stopping;
 
     public MetalCompletionQueue(nint sharedEvent)
     {
@@ -289,7 +289,10 @@ internal sealed class MetalCompletionQueue : IDisposable
         }
 
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
-        while (SignaledValue < serial)
+        // WaitForSignal returns as soon as the queue is stopping, so without the
+        // same test here the wait becomes a hot spin that never ends: the worker
+        // then misses its five-second shutdown deadline.
+        while (SignaledValue < serial && !_stopping)
         {
             WaitForSignal(serial);
         }
