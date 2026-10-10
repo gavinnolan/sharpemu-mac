@@ -163,7 +163,30 @@ internal static partial class MetalNative
         nint texture = 0,
         nint sampler = 0)
     {
+        return TryExecuteWithArgumentBuffer(
+            library, entryPoint, bufferContents, pushData, layout, threadsPerThreadgroup,
+            out result, out _, out error, texture, sampler);
+    }
+
+    /// <summary>
+    /// As above, and also reports the step-report word the dispatcher increments when it
+    /// runs out of steps — the same word the v2 host binds and reads back per shader hash.
+    /// </summary>
+    public static bool TryExecuteWithArgumentBuffer(
+        nint library,
+        string entryPoint,
+        byte[] bufferContents,
+        byte[] pushData,
+        Gen5MslArgumentLayout layout,
+        uint threadsPerThreadgroup,
+        out byte[] result,
+        out uint stepCapHits,
+        out string error,
+        nint texture = 0,
+        nint sampler = 0)
+    {
         result = [];
+        stepCapHits = 0;
         var buffer = SharedBuffer(bufferContents);
         if (buffer == 0)
         {
@@ -172,6 +195,14 @@ internal static partial class MetalNative
         }
 
         var address = SendULong(buffer, Selector("gpuAddress"));
+        var stepReport = SharedBuffer(new byte[sizeof(uint)]);
+        if (stepReport == 0)
+        {
+            error = "failed to create the step-report buffer";
+            return false;
+        }
+
+        var stepReportAddress = SendULong(stepReport, Selector("gpuAddress"));
         var arguments = new byte[Math.Max(layout.ByteSize, 8)];
         foreach (var field in layout.Fields)
         {
@@ -193,6 +224,9 @@ internal static partial class MetalNative
                     case MslArgumentFieldKind.BufferByteCounts:
                         BitConverter.TryWriteBytes(arguments.AsSpan((int)field.ByteOffset + (element * 4)), (uint)bufferContents.Length);
                         break;
+                    case MslArgumentFieldKind.StepReport:
+                        BitConverter.TryWriteBytes(arguments.AsSpan((int)field.ByteOffset), stepReportAddress);
+                        break;
                 }
             }
         }
@@ -205,16 +239,29 @@ internal static partial class MetalNative
             return false;
         }
 
-        return RunKernel(
-            library,
-            entryPoint,
-            [(argumentBuffer, (nuint)Gen5MslArgumentLayout.ResourcesBufferIndex), (pushBuffer, (nuint)Gen5MslArgumentLayout.PushDataBufferIndex)],
-            texture == 0 ? [buffer] : [buffer, texture],
-            threadsPerThreadgroup,
-            buffer,
-            bufferContents.Length,
-            out result,
-            out error);
+        if (!RunKernel(
+                library,
+                entryPoint,
+                [(argumentBuffer, (nuint)Gen5MslArgumentLayout.ResourcesBufferIndex), (pushBuffer, (nuint)Gen5MslArgumentLayout.PushDataBufferIndex)],
+                texture == 0 ? [buffer, stepReport] : [buffer, stepReport, texture],
+                threadsPerThreadgroup,
+                buffer,
+                bufferContents.Length,
+                out result,
+                out error))
+        {
+            return false;
+        }
+
+        var stepContents = Send(stepReport, Selector("contents"));
+        if (stepContents == 0)
+        {
+            error = "step-report contents unavailable after execution";
+            return false;
+        }
+
+        stepCapHits = unchecked((uint)Marshal.ReadInt32(stepContents));
+        return true;
     }
 
     /// <summary>Float RGBA fixture with one distinct value per texel/mip/layer.
