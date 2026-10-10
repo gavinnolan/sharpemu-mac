@@ -96,12 +96,17 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMap
 
     public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(CpuMappedCopyObservation original,
         IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication)
+        => TryPrepareMappedPublication(original, runs, out publication, out _);
+
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(CpuMappedCopyObservation original,
+        IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication,
+        out CpuMappedPublicationPreparationRefusal refusal)
     {
-        publication = null;
+        publication = null; refusal = default;
         if (Volatile.Read(ref _disposed)) return CpuMappedPublicationPreparationResult.Rejected;
-        var result = _views.TryPrepareMappedPublication(original, runs, out publication);
+        var result = _views.TryPrepareMappedPublication(original, runs, out publication, out refusal);
         if (!Volatile.Read(ref _disposed)) return result;
-        publication?.Dispose(); publication = null; return CpuMappedPublicationPreparationResult.Rejected;
+        publication?.Dispose(); publication = null; refusal = default; return CpuMappedPublicationPreparationResult.Rejected;
     }
 
     public CpuMappedCopyResult TryReadMappedCopyWithWriteWatch(ulong footprintAddress, ulong footprintByteCount,
@@ -114,6 +119,9 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMap
         if (observation is not null) _views.ReleaseMappedCopyWriteWatch(observation);
         observation = null; return CpuMappedCopyResult.Rejected;
     }
+    public bool CanWaitForMappedReadWatchStatus =>
+        !Volatile.Read(ref _disposed) && _views.CanWaitForMappedReadWatchStatus;
+
     public bool CanWaitForMappedReadWatchEnrollment =>
         !Volatile.Read(ref _disposed) && _views.CanWaitForMappedReadWatchEnrollment;
 

@@ -50,7 +50,23 @@ internal static partial class MetalVideoPresenter
                 !ReferenceEquals(original.Physical.Memory, memory))
                 throw new NotSupportedException("Native R32 sampled view differs from its exact original producer descriptor/queue/domain.");
         }
-        RequireOrdinaryStorageOriginalContent(producer.Original);
+        void PreparationStillCurrent(long? waitDeadline)
+        {
+            EnterOriginalWatchMetadataGate(waitDeadline);
+            try
+            {
+                if (!_ordinaryStorageOriginalByAddress.TryGetValue(binding.Descriptor.Address, out var current) ||
+                    !ReferenceEquals(current, producer.Original) || !ReferenceEquals(current.LatestAccepted, producer) ||
+                    producer.Queue.Name != queue.Name || (_submittingGuestQueue ?? GuestQueueIdentity.Default).Name != queue.Name ||
+                    current.Physical.Original.Descriptor is not { Length: 8 } raw ||
+                    binding.ResourceDescriptor is not { Count: 8 } sampled || !raw.AsSpan().SequenceEqual(sampled.ToArray()) ||
+                    !ReferenceEquals(current.Physical.Memory, memory))
+                    throw new NotSupportedException("Native R32 Busy preparation lost its exact original producer/descriptor/queue/domain.");
+                RequireOrdinaryStoragePhysicalCurrentLocked(current, memory, current.Physical.Original, current.Physical.Session);
+            }
+            finally { Monitor.Exit(_gate); }
+        }
+        RequireOrdinaryStorageOriginalContent(producer.Original, PreparationStillCurrent);
         var descriptor = new GuestDrawTexture(binding.Descriptor.Address, 512, 256, 4, 7, [], false, false,
             ResourceMipLevels: 9, Pitch: 512, Type: 9, TileMode: 9, DstSelect: 0x924, SourceByteCount: 0xC0000,
             Sampler: ToGuestSampler(binding.SamplerDescriptor), Descriptor: binding.ResourceDescriptor!.ToArray(), Shape: binding.Shape, Access: binding.Access);
@@ -164,7 +180,7 @@ internal static partial class MetalVideoPresenter
         if (!_r32NativeOriginalRequested || _takenDepthCubeProducerWork is not ComputeGuestDispatch consumer ||
             !_nativeR32Queued.TryGetValue(consumer, out var leases)) return false;
         if (_closed || _guestWorkFailure is not null || _ordinaryStorageOriginalCleanupFailure is not null ||
-            _selectedNativeOriginalCleanupFailure is not null ||
+            Volatile.Read(ref _selectedNativeOriginalCleanupFailure) is not null ||
             _takenGuestWorkSequence != _executingGuestWorkSequence || _executingGuestWorkSequence <= 0 ||
             !_batchOpen || _batchCommandBuffer == 0 ||
             !_selectedStorageMipOwners.TryGetValue(selected.Key, out var accepted) || !ReferenceEquals(accepted, selected) ||
@@ -204,21 +220,24 @@ internal static partial class MetalVideoPresenter
     private static void ExecuteNativeR32Snapshot(NativeR32Snapshot lease)
     {
         if (Monitor.IsEntered(_gate)) throw new InvalidOperationException("Native R32 GPU snapshot requires a released presenter gate.");
-        lock (_gate)
+        void CopyStillCurrent(long? waitDeadline)
         {
-            if (lease.Consumed || lease.References <= 0 || lease.CopySequence != _executingGuestWorkSequence ||
-                _submittingGuestQueue != lease.Queue || _takenDepthCubeProducerWork is not OrderedGuestAction executing ||
-                !_nativeR32CopyActions.TryGetValue(executing.Action, out var exact) || !ReferenceEquals(exact, lease) ||
-                !_nativeR32Queued.TryGetValue(executing, out var owners) || !owners.Contains(lease))
-                throw new NotSupportedException("Native R32 copy lost its exact accepted/taken queued lifetime.");
+            EnterOriginalWatchMetadataGate(waitDeadline);
+            try
+            {
+                RequireNativeR32CopyExecutionCurrentLocked(lease);
+                RequireNativeR32PhysicalCohortLocked(lease, copying: true);
+            }
+            finally { Monitor.Exit(_gate); }
         }
-        RequireOrdinaryStorageOriginalContent(lease.Producer.Original);
+        lock (_gate) RequireNativeR32CopyExecutionCurrentLocked(lease);
+        RequireOrdinaryStorageOriginalContent(lease.Producer.Original, CopyStillCurrent);
         lock (_gate) RequireNativeR32PhysicalCohortLocked(lease, copying: true);
         var committed = FlushBatchedGuestCommands();
         if (committed != 0 && committed != lease.Producer.CommandBuffer)
             throw new NotSupportedException("Native R32 flush does not name its exact last encoded producer.");
         WaitForCommittedGuestBufferWriteback(lease.Producer.CommandBuffer); // real producer status4
-        RequireOrdinaryStorageOriginalContent(lease.Producer.Original);
+        RequireOrdinaryStorageOriginalContent(lease.Producer.Original, CopyStillCurrent);
         lock (_gate) RequireNativeR32PhysicalCohortLocked(lease, copying: true);
         Exception? primary = null;
         nint descriptor = 0;
@@ -247,14 +266,14 @@ internal static partial class MetalVideoPresenter
             try { MetalNative.SendVoid(blit, MetalNative.Selector("endEncoding")); }
             catch (Exception cleanup) when (encoding is not null) { try { encoding.Data["NativeR32CopyEncoderCleanup"] = cleanup; } catch { } }
             if (encoding is not null) ExceptionDispatchInfo.Capture(encoding).Throw();
-            RequireOrdinaryStorageOriginalContent(lease.Producer.Original);
+            RequireOrdinaryStorageOriginalContent(lease.Producer.Original, CopyStillCurrent);
             lock (_gate) RequireNativeR32PhysicalCohortLocked(lease, copying: true);
             lease.CompletionUnknown = true; // never free exact native/backing owners after an uncertain commit/wait
             MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
             _nativeR32AfterCopyCommit?.Invoke(commandBuffer);
             WaitForCommittedGuestBufferWriteback(commandBuffer); // real immutable copy status4, not just producer completion
             lease.CompletionUnknown = false;
-            RequireOrdinaryStorageOriginalContent(lease.Producer.Original);
+            RequireOrdinaryStorageOriginalContent(lease.Producer.Original, CopyStillCurrent);
             lock (_gate)
             {
                 RequireNativeR32PhysicalCohortLocked(lease, copying: true);
@@ -268,6 +287,15 @@ internal static partial class MetalVideoPresenter
                 try { MetalNative.SendVoid(descriptor, MetalNative.Selector("release")); }
                 catch (Exception cleanup) when (primary is not null) { try { primary.Data["NativeR32DescriptorCleanup"] = cleanup; } catch { } }
         }
+    }
+
+    private static void RequireNativeR32CopyExecutionCurrentLocked(NativeR32Snapshot lease)
+    {
+        if (lease.Consumed || lease.References <= 0 || lease.CopySequence != _executingGuestWorkSequence ||
+            _submittingGuestQueue != lease.Queue || _takenDepthCubeProducerWork is not OrderedGuestAction executing ||
+            !_nativeR32CopyActions.TryGetValue(executing.Action, out var exact) || !ReferenceEquals(exact, lease) ||
+            !_nativeR32Queued.TryGetValue(executing, out var owners) || !owners.Contains(lease))
+            throw new NotSupportedException("Native R32 copy lost its exact accepted/taken queued lifetime.");
     }
 
     private static bool SameNativeR32View(GuestDrawTexture texture, NativeR32Snapshot lease) =>

@@ -68,7 +68,7 @@ internal static partial class MetalVideoPresenter
         var busy = false;
         reason = "sticky-native-cleanup-failure";
         if (_singletonVolumeOriginalCleanupFailure is not null || _textureSourceCleanupFailure is not null || _typedCpuSyncCleanupFailure is not null ||
-            _r16SelectedRetainCleanupFailure is not null || _selectedNativeOriginalCleanupFailure is not null) return CpuMappedReadWatchStatus.Stale;
+            _r16SelectedRetainCleanupFailure is not null || Volatile.Read(ref _selectedNativeOriginalCleanupFailure) is not null) return CpuMappedReadWatchStatus.Stale;
         reason = "unordered-presentation-write-debt";
         if (_unorderedPresentationWriteSequence != 0 ||
             _latestPresentation is { } presentation && PresentationHasUnorderedGuestWrites(presentation)) return CpuMappedReadWatchStatus.Stale;
@@ -97,7 +97,7 @@ internal static partial class MetalVideoPresenter
         reason = "image-inventory-bound";
         if (_guestImages.Count > 128 || _selectedStorageMipOwners.Count > 128 || _selectedStorageMipImages.Count > 128) return CpuMappedReadWatchStatus.Stale;
         reason = "selected-owner-pending-or-unknown";
-        if (_selectedNativeOriginalCleanupFailure is not null || _selectedStorageMipPending.Count != 0 ||
+        if (Volatile.Read(ref _selectedNativeOriginalCleanupFailure) is not null || _selectedStorageMipPending.Count != 0 ||
             _selectedStorageMipOwners.Count != _selectedStorageMipImages.Count) return CpuMappedReadWatchStatus.Stale;
         foreach (var pair in _selectedStorageMipOwners)
         {

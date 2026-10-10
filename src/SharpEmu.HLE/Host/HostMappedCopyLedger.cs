@@ -341,7 +341,24 @@ public sealed unsafe partial class HostMappedCopyLedger
             if (withWriteWatch)
             {
                 var originalWatch = ownedCapture.ReadWatch!;
-                if (!originalWatch.IsCurrent) return Refuse(ref diagnostic, "post-copy-original-watch", CpuMappedCopyResult.Rejected);
+                string? firstWatchGuard = null;
+                long firstAdmission = -1;
+                CpuMappedAdmissionOwnerDiagnostic? firstOwner = null;
+                bool current;
+                if (CpuMappedCopyDiagnostics.Enabled)
+                    current = originalWatch.TryIsCurrent(out firstWatchGuard, out firstAdmission, out firstOwner);
+                else current = originalWatch.IsCurrent; // exact legacy query when diagnostics are off
+                if (!current)
+                {
+                    var result = Refuse(ref diagnostic, "post-copy-original-watch", CpuMappedCopyResult.Rejected);
+                    // Detached values from that ONE Boolean query, retained
+                    // before finally releases this private original watch.
+                    // No Status/classification, late query or wait authority.
+                    diagnostic = diagnostic with { PostCopyWatchGuard = firstWatchGuard,
+                        PostCopyPrimaryAdmission = firstAdmission >= 0 ? firstAdmission : null,
+                        PostCopyAdmissionOwner = firstOwner };
+                    return result;
+                }
                 // This value was fixed under exclusive watch enrollment BEFORE
                 // bytes, including when the earlier ordinary sample was busy.
                 Volatile.Write(ref ownedCapture.WriterRevision, originalWatch.EnrollmentRevision);

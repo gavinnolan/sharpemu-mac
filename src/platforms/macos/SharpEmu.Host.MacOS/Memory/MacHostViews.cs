@@ -64,10 +64,15 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
 
     public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(HostBackingObject backing,
         CpuMappedCopyObservation original, IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication)
+        => TryPrepareMappedPublication(backing, original, runs, out publication, out _);
+
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(HostBackingObject backing,
+        CpuMappedCopyObservation original, IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication,
+        out CpuMappedPublicationPreparationRefusal refusal)
     {
-        publication = null;
+        publication = null; refusal = default;
         return MacMappedCopyState.Ledger is { } ledger
-            ? ledger.TryPrepareMappedPublication(backing, original, runs, out publication)
+            ? ledger.TryPrepareMappedPublication(backing, original, runs, out publication, out refusal)
             : CpuMappedPublicationPreparationResult.Unavailable;
     }
 
@@ -79,6 +84,9 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
             ? ledger.TryReadMappedCopyWithWriteWatch(backing, footprintAddress, footprintByteCount, sourceAddress, destination, out observation)
             : CpuMappedCopyResult.Unavailable;
     }
+    public bool CanWaitForMappedReadWatchStatus => CanWaitForOrdinaryWriteAdmission &&
+        MacMappedCopyState.Ledger is { } ledger && ledger.CanWaitForMappedReadWatchStatus;
+
     public bool CanWaitForMappedReadWatchEnrollment => CanWaitForOrdinaryWriteAdmission &&
         MacMappedCopyState.Ledger is { } ledger && ledger.CanWaitForMappedReadWatchEnrollment;
 

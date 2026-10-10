@@ -37,6 +37,10 @@ public readonly record struct CpuMappedReadWatchDiagnostic
 /// No fresh observation may be substituted for an invalidated original watch.</summary>
 public interface ICpuMappedReadWatchSource : ICpuMappedCopySource
 {
+    // Optional same-ORIGINAL scalar status waiting. Grants no enrollment, byte
+    // copy, publication, retry or authority; unknown decorators refuse.
+    bool CanWaitForMappedReadWatchStatus => false;
+
     // Optional cold PRE-BYTE admission wait. Unknown wrappers decline: no
     // observation or bytes may be obtained by retrying a fresh generic copy.
     bool CanWaitForMappedReadWatchEnrollment => false;

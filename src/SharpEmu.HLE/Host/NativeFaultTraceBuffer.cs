@@ -23,7 +23,7 @@ internal struct NativeFaultTraceRecord
     public ulong Size;
     public long OwnerIdentity;
     public long ArmEpoch;
-    public long Operation;
+    public long Operation; // Schema4 Kind1: raw trap bits; otherwise native protection operation identity.
     public int Kind;
     public int Signal;
     public int SignalCode;
@@ -33,7 +33,7 @@ internal struct NativeFaultTraceRecord
     public int Result;
     public int Errno;
     public int OwnerObservation;
-    public int Reserved;
+    public int Reserved; // Schema4 Kind1: trap availability0/1; Kind8: exact CAS prior state.
     public int Route;
     public int Reason;
 }
@@ -41,7 +41,7 @@ internal struct NativeFaultTraceRecord
 internal sealed unsafe class NativeFaultTraceBuffer : IDisposable
 {
     internal const ulong Magic = 0x53454D554641554CUL;
-    internal const int Version = 3;
+    internal const int Version = 4;
     internal const int HeaderBytes = 128;
     internal const int DefaultCapacity = 4096;
     private readonly MemoryMappedFile? _file;

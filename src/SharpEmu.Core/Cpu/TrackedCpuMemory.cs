@@ -56,10 +56,15 @@ public sealed class TrackedCpuMemory : ICpuMemory, ITrackedCpuMemory, IGuestMemo
 
     public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(CpuMappedCopyObservation original,
         IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication)
+        => TryPrepareMappedPublication(original, runs, out publication, out _);
+
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(CpuMappedCopyObservation original,
+        IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication,
+        out CpuMappedPublicationPreparationRefusal refusal)
     {
-        publication = null;
+        publication = null; refusal = default;
         return _inner is ICpuMappedPublicationSource source
-            ? source.TryPrepareMappedPublication(original, runs, out publication)
+            ? source.TryPrepareMappedPublication(original, runs, out publication, out refusal)
             : CpuMappedPublicationPreparationResult.Unavailable;
     }
 
@@ -71,6 +76,9 @@ public sealed class TrackedCpuMemory : ICpuMemory, ITrackedCpuMemory, IGuestMemo
             ? source.TryReadMappedCopyWithWriteWatch(footprintAddress, footprintByteCount, sourceAddress, destination, out observation)
             : CpuMappedCopyResult.Unavailable;
     }
+    public bool CanWaitForMappedReadWatchStatus =>
+        _inner is ICpuMappedReadWatchSource source && source.CanWaitForMappedReadWatchStatus;
+
     public bool CanWaitForMappedReadWatchEnrollment =>
         _inner is ICpuMappedReadWatchSource source && source.CanWaitForMappedReadWatchEnrollment;
 

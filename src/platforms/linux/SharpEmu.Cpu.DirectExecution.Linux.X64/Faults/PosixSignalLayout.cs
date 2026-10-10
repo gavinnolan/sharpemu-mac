@@ -36,6 +36,7 @@ internal static unsafe class PosixSignalLayout
     // registers in gregs[23].
     private const int UcontextGregsOffset = 40;
     private const int GregsErrOffset = 19 * 8;
+    private const int GregsTrapNumberOffset = 20 * 8;
 
     // The kernel's x86-64 sigcontext places the FXSAVE-image pointer right
     // after the general registers it hands to the handler: err(152)
@@ -76,6 +77,11 @@ internal static unsafe class PosixSignalLayout
 
     internal static ulong GetPageFaultErrorCode(byte* registers) =>
         *(ulong*)(registers + GregsErrOffset);
+
+    // Linux sigcontext_64 and glibc REG_TRAPNO agree on this uint64 slot.
+    // Optional first-entry telemetry only; never a recovery classifier.
+    internal static ulong GetTrapNumber(byte* registers) =>
+        *(ulong*)(registers + GregsTrapNumberOffset);
 
     /// <summary>
     /// Nothing to fabricate: the Linux machine context is embedded in the

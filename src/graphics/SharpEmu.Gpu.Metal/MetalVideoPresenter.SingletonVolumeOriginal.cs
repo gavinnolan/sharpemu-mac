@@ -13,6 +13,7 @@ internal static partial class MetalVideoPresenter
     private static Exception? _singletonVolumeOriginalCleanupFailure;
     private static readonly bool _volumeOwnerDeclineDiagnostics =
         Environment.GetEnvironmentVariable("SHARPEMU_CANONICAL_PUBLICATION_DIAGNOSTICS") == "1";
+    internal static bool CanonicalPublicationDiagnosticsEnabled => _volumeOwnerDeclineDiagnostics;
     private static Action? _singletonVolumeAfterOrdinaryQueueInsert; // optional ordinary-path fixture seam
     private static readonly HashSet<SingletonVolumeOriginalWatch> _singletonVolumeOriginalWatches = new(ReferenceEqualityComparer.Instance);
 

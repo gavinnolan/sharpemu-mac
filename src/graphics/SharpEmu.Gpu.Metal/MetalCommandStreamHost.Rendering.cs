@@ -1019,9 +1019,14 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
             TileMode: (uint)words.TileMode,
             Registers: words,
             WriteMask: writeMask);
-        var projected = MetalColorMipPlacement.Project(Memory, target.Resolution, words, guest);
+        // A known regular first allocation cannot hide a classification change
+        // behind a later selected-mip address/probe. Regular MaxMip0 projection
+        // is a no-op; selected-only targets retain their existing projection.
+        var captured = MetalVideoPresenter.CaptureRegularColorTarget(Memory, target.Resolution, words, guest);
+        var projected = captured;
         try
         {
+            projected = MetalColorMipPlacement.Project(Memory, target.Resolution, words, captured);
             var recorded = MetalDepthFacePlacement.RecordColorSpan(Memory, target.Resolution, projected);
             _preparation?.OwnColorTarget(recorded);
             return recorded;

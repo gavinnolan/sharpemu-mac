@@ -626,11 +626,13 @@ internal static partial class MetalVideoPresenter
         var selectedMipAdmission = PrepareSelectedStorageMipAdmissionLocked(work, queue);
         var colorPhysicalAdmission = PrepareColorPhysicalAdmissionLocked(work);
         var nativeColorAdmission = PrepareNativeColorAdmissionLocked(work, checked(_enqueuedGuestWorkSequence + 1), queue);
+        var regularColorAdmission = PrepareRegularColorAdmissionLocked(work);
         OrdinaryStorageProducer[] ordinaryStorageAdmission = [];
         var ordinaryPrepared = false;
         var retainedColor = false;
         var retainedR32 = false;
         var retainedVolume = false;
+        var retainedRegularColor = false;
         var oldSequence = _enqueuedGuestWorkSequence;
         var oldCount = _pendingGuestWorkCount;
         var oldBytes = _pendingGuestWorkBytes;
@@ -641,6 +643,7 @@ internal static partial class MetalVideoPresenter
         try
         {
             retainedColor = RetainQueuedNativeColorLocked(work, nativeColorAdmission);
+            retainedRegularColor = RetainQueuedRegularColorLocked(work, regularColorAdmission);
             retainedR32 = RetainQueuedNativeR32SnapshotsLocked(work);
             retainedVolume = RetainQueuedSingletonVolumeOriginalsLocked(work);
             ordinaryStorageAdmission = PrepareOrdinaryStorageProducersLocked(work, checked(_enqueuedGuestWorkSequence + 1), queue);
@@ -682,6 +685,7 @@ internal static partial class MetalVideoPresenter
             PublishColorPhysicalAdmissionLocked(colorPhysicalAdmission);
             PublishNativeDepthFaceLocked(nativeDepthFaceAdmission);
             PublishNativeColorAdmissionLocked(work, nativeColorAdmission);
+            PublishRegularColorAdmissionLocked(regularColorAdmission);
             PublishOrdinaryStorageProducersLocked(work, ordinaryStorageAdmission);
             _pendingGuestWorkCount++;
             var total = _pendingGuestWorkBytes + payloadBytes;
@@ -699,7 +703,7 @@ internal static partial class MetalVideoPresenter
             RecordGuestSubmissionPrefixAdmission(sequence, queue);
             return sequence;
         }
-        catch (Exception failure) when (retainedColor || retainedVolume || retainedR32 || nativeDepthFaceAdmission is not null || ordinaryPrepared)
+        catch (Exception failure) when (retainedColor || retainedRegularColor || retainedVolume || retainedR32 || nativeDepthFaceAdmission is not null || ordinaryPrepared)
         {
             if (node?.List is { } admittedQueue) admittedQueue.Remove(node);
             if (newQueue)
@@ -1151,6 +1155,8 @@ internal static partial class MetalVideoPresenter
         lock (_gate)
         {
             _guestImages.TryGetValue(write.Address, out image);
+            if (image is not null)
+                RequireRegularColorCpuImageEffectLocked(image, replace: write.Pixels is not null);
         }
 
         if (image is null)

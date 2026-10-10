@@ -108,8 +108,18 @@ internal static partial class MetalVideoPresenter
         reason = "original-mapping-currentness-veto";
         if (!source.IsMappedCopyObservationCurrent(mapping)) return false;
         reason = "original-physical-read-watch-veto";
-        if (_selectedNativeOriginalReuseEnabled && source is ICpuMappedReadWatchSource watched &&
-            !watched.IsMappedCopyWriteWatchCurrent(mapping)) return false;
+        if (_selectedNativeOriginalReuseEnabled && source is ICpuMappedReadWatchSource watched)
+        {
+            var first = default(CpuMappedReadWatchDiagnostic);
+            var current = _selectedCopyDiagnostics
+                ? watched.IsMappedCopyWriteWatchCurrent(mapping, out first)
+                : watched.IsMappedCopyWriteWatchCurrent(mapping);
+            if (!current)
+            {
+                if (_selectedCopyDiagnostics) reason += $" first_boolean={first.BooleanCurrent} first_watch={first.WatchGuard} first_admission={first.PrimaryAdmission} first_classification={first.ClassificationGuard}";
+                return false;
+            }
+        }
         reason = "original-observed-content-or-graph-epoch-veto";
         if (observation.MappingEpoch != HostMemory.MappingGeneration)
             return !TextureSourceGraphEnabled && observation.Observed &&
@@ -132,12 +142,25 @@ internal static partial class MetalVideoPresenter
     }
 
     private static bool IsSelectedStorageMipSeedCurrent(SelectedStorageMipAssociation owner, SelectedStorageMipSeed seed)
+        => IsSelectedStorageMipSeedCurrentWithReason(owner, seed, out _);
+
+    private static bool IsSelectedStorageMipSeedCurrentWithReason(SelectedStorageMipAssociation owner,
+        SelectedStorageMipSeed seed, out string reason)
     {
-        if (!GuestImageWriteTracker.IsReadSnapshotStable(seed.Read) ||
-            !IsInitialSelectedStorageMipSeedStable(owner.Key.Resource.Address, owner.Observation, seed.Source, seed.Mapping)) return false;
+        reason = "original-read-generation";
+        if (!GuestImageWriteTracker.IsReadSnapshotStable(seed.Read)) return false;
+        if (!IsInitialSelectedStorageMipSeedStableWithReason(owner.Key.Resource.Address, owner.Observation,
+            seed.Source, seed.Mapping, out reason)) return false;
+        return IsSelectedStorageMipSeedContentCurrent(owner, out reason);
+    }
+
+    private static bool IsSelectedStorageMipSeedContentCurrent(SelectedStorageMipAssociation owner, out string reason)
+    {
         // The full original observed token is mandatory for any epoch override;
         // the weaker raw identity token is an additional veto, never authority.
+        reason = "original-epoch-without-complete-token";
         if (owner.MappingEpoch != HostMemory.MappingGeneration && (!owner.HasToken || !owner.Observation.Observed)) return false;
+        reason = "original-raw-content-token";
         return !owner.HasToken || GuestImageWriteTracker.TryGetContentToken(owner.Key.Resource.Address, out var token) && token == owner.Token;
     }
 
@@ -159,8 +182,13 @@ internal static partial class MetalVideoPresenter
         // Every initial admission/materialization check therefore validates the
         // original mapping, not only the branch overriding an epoch mismatch.
         if (stage == "admission" && seed.Phase != 0) return; // strict legacy policy for a second admission
-        if (!CanUseOriginalSelectedStorageMipSeed(owner, stage))
-            throw new InvalidOperationException("Metal original selected seed requires its exact current first-use receipt.");
+        var phaseAllowed = stage == "admission" ? seed.Phase == 0 :
+            seed.Phase == 2 && ReferenceEquals(seed.Thread, System.Threading.Thread.CurrentThread) &&
+            ReferenceEquals(seed.Work, _selectedStorageMipSeedExecutingWork) &&
+            seed.Sequence > 0 && seed.Sequence == Volatile.Read(ref _executingGuestWorkSequence);
+        var reason = "original-phase-thread-work-or-sequence";
+        if (!phaseAllowed || !IsSelectedStorageMipSeedCurrentWithReason(owner, seed, out reason))
+            throw new InvalidOperationException($"Metal original selected seed requires its exact current first-use receipt. stage={stage} reason={reason}; no_later_query=true.");
     }
 
     private static SelectedStorageMipSeedAdmission? PrepareInitialSelectedStorageMipSeedAdmission(
@@ -234,7 +262,7 @@ internal static partial class MetalVideoPresenter
         }
     }
 
-    private static SelectedStorageMipSeedExecutionScope BeginSelectedStorageMipSeedExecution(ComputeGuestDispatch dispatch)
+    private static SelectedStorageMipSeedExecutionScope BeginSelectedStorageMipSeedExecutionLegacy(ComputeGuestDispatch dispatch)
     {
         var possible = false;
         foreach (var texture in dispatch.Textures)
@@ -264,9 +292,10 @@ internal static partial class MetalVideoPresenter
                         !selected.Contains(seed))
                     {
                         selected.Add(seed);
+                        var reason = "original-execution-sequence-or-session";
                         if (seed.Sequence <= 0 || seed.Sequence != Volatile.Read(ref _executingGuestWorkSequence) ||
-                            owner.Session != Volatile.Read(ref _selectedStorageMipSession) || !IsSelectedStorageMipSeedCurrent(owner, seed))
-                            throw new InvalidOperationException("Metal original selected seed lost its exact first execution receipt.");
+                            owner.Session != Volatile.Read(ref _selectedStorageMipSession) || !IsSelectedStorageMipSeedCurrentWithReason(owner, seed, out reason))
+                            throw new InvalidOperationException($"Metal original selected seed lost its exact first execution receipt. reason={reason}; no_later_query=true.");
                     }
                 var seeds = selected.ToArray();
                 foreach (var seed in seeds) { seed.Thread = System.Threading.Thread.CurrentThread; seed.Phase = 2; }

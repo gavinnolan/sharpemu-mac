@@ -47,6 +47,7 @@ public sealed partial class MetalStorageCpuSyncTests
             var error = Assert.Throws<NotSupportedException>(() => operation.ExecuteOriginalWrite(source, original!,
                 () => Assert.Fail("Refused preparation cannot reach owner callback."), watched));
             Assert.Contains("preparation=Rejected; ticket_present=False", error.Message);
+            Assert.Contains("first_preparation_refusal=UnknownRejected; first_original_revision=0; first_rejected_admission=0", error.Message);
             Assert.Contains($"kind={operation.Kind}; debug_name='{operation.DebugName}'", error.Message);
             Assert.Contains($"address=0x{Address:X16}; bytes=4096; original_has_write_watch={watched}.", error.Message);
             Assert.Same(original, source.PreparedOriginal); Assert.Equal(1, source.Preparations);

@@ -37,4 +37,14 @@ public interface IHostMappedPublicationMemory
     CpuMappedPublicationPreparationResult TryPrepareMappedPublication(
         HostBackingObject backing, CpuMappedCopyObservation original,
         IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication);
+
+    // Diagnostic only: legacy providers remain Unknown and execute once.
+    CpuMappedPublicationPreparationResult TryPrepareMappedPublication(
+        HostBackingObject backing, CpuMappedCopyObservation original,
+        IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication,
+        out CpuMappedPublicationPreparationRefusal refusal)
+    {
+        refusal = default;
+        return TryPrepareMappedPublication(backing, original, runs, out publication);
+    }
 }

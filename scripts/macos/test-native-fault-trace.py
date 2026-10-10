@@ -117,6 +117,55 @@ class NativeTraceReaderTests(unittest.TestCase):
             with self.subTest(fields=fields), self.assertRaisesRegex(ValueError, 'unknown tracker range decision'):
                 self.read(3, [{'kind': 8, **fields}])
 
+    def test_schema4_retains_observed_zero_and_full_width_raw_trap_bits(self):
+        for trap in (0, 6, 13, 14, 65535, 0x8000000000000000, 0xFFFFFFFFFFFFFFFF):
+            signed = trap if trap < (1 << 63) else trap - (1 << 64)
+            with self.subTest(trap=trap):
+                parsed = self.read(4, [{'kind': 1, 'operation': signed, 'reserved': 1, 'errorCode': 6}])
+                entry = parsed['records'][0]
+                self.assertEqual(160, parsed['recordBytes'])
+                self.assertEqual('observed-context-field', entry['trapNumberStatus'])
+                self.assertEqual(trap, entry['trapNumber'])
+                self.assertEqual(6, entry['errorCode'])
+
+    def test_schema4_missing_context_is_unobserved_not_zero(self):
+        entry = self.read(4, [{'kind': 1}])['records'][0]
+        self.assertEqual('unobserved', entry['trapNumberStatus'])
+        self.assertIsNone(entry['trapNumber'])
+
+    def test_old_schemas_never_infer_trap_from_reused_zero_or_scalars(self):
+        for version in (1, 2, 3):
+            for fields in ({}, {'operation': 14, 'reserved': 1}):
+                with self.subTest(version=version, fields=fields):
+                    entry = self.read(version, [{'kind': 1, **fields}])['records'][0]
+                    self.assertEqual('not-collected-before-schema4', entry['trapNumberStatus'])
+                    self.assertIsNone(entry['trapNumber'])
+
+    def test_schema4_rejects_invalid_or_contradictory_trap_availability(self):
+        for fields in ({'reserved': -1}, {'reserved': 2}, {'reserved': 0, 'operation': 14}):
+            with self.subTest(fields=fields), self.assertRaisesRegex(ValueError, 'invalid trap-number availability'):
+                self.read(4, [{'kind': 1, **fields}])
+
+    def test_schema4_keeps_range_cas_and_protection_operation_separate_from_trap(self):
+        parsed = self.read(4, [{'kind': 1, 'operation': 13, 'reserved': 1},
+                              {'kind': 8, 'route': 1, 'reason': 3, 'reserved': 2, 'operation': 14},
+                              {'kind': 3, 'operation': 14}, {'kind': 4, 'operation': 14},
+                              {'kind': 7, 'route': 4, 'reason': 1}])
+        self.assertEqual(13, parsed['records'][0]['trapNumber'])
+        self.assertEqual(2, parsed['records'][1]['casPreviousState'])
+        self.assertEqual(14, parsed['records'][2]['operation'])
+        self.assertEqual(14, parsed['records'][3]['operation'])
+        for record in parsed['records'][1:]:
+            self.assertNotIn('trapNumber', record)
+        self.assertEqual('recorded', parsed['invocations'][0]['bridgeFinalStatus'])
+
+    def test_schema4_unpublished_entry_does_not_supply_a_trap_to_later_records(self):
+        parsed = self.read(4, [{'published': 0, 'kind': 1, 'operation': 14, 'reserved': 1},
+                              {'kind': 2, 'result': 0}, {'kind': 7, 'route': 4, 'reason': 1}])
+        self.assertEqual([], parsed['invocations'][0]['entrySequences'])
+        for record in parsed['records']:
+            self.assertNotIn('trapNumber', record)
+
 
 if __name__ == '__main__':
     unittest.main()

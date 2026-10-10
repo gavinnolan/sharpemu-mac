@@ -33,8 +33,14 @@ public sealed unsafe partial class HostMappedCopyLedger
     public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(HostBackingObject backing,
         CpuMappedCopyObservation original, IReadOnlyList<CpuMappedWriteRun> runs,
         out CpuMappedPublication? publication)
+        => TryPrepareMappedPublication(backing, original, runs, out publication, out _);
+
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(HostBackingObject backing,
+        CpuMappedCopyObservation original, IReadOnlyList<CpuMappedWriteRun> runs,
+        out CpuMappedPublication? publication,
+        out CpuMappedPublicationPreparationRefusal refusal)
     {
-        publication = null;
+        publication = null; refusal = default;
         if (Monitor.IsEntered(gate)) throw new InvalidOperationException("Publication cannot prepare under the provider gate.");
         if (original is null || runs is null || original.OwnerIdentity is not Capture capture ||
             !ReferenceEquals(capture.Owner, this) || runs.Count is < 1 or > MaximumPublicationRuns)
@@ -100,7 +106,11 @@ public sealed unsafe partial class HostMappedCopyLedger
                     aliasesToWrite[index] = new(offset, run.Bytes);
                     physicalRuns[index] = new(offset, (ulong)run.Bytes.Length);
                 }
-                reserved = writers.TryReservePublication(Volatile.Read(ref capture.WriterRevision), physicalRuns, capture.ReadWatch, transaction.Admission);
+                var originalRevision = Volatile.Read(ref capture.WriterRevision);
+                reserved = writers.TryReservePublication(originalRevision, physicalRuns, capture.ReadWatch, transaction.Admission, out var rejectedAdmission);
+                if (!reserved && rejectedAdmission > 0)
+                    refusal = new(CpuMappedPublicationPreparationRefusalKind.AdmissionNonzero,
+                        originalRevision, rejectedAdmission);
                 if (!reserved || !IsCurrent(backing, original))
                     return PublicationDeclined(reserved ? "mapping-changed-after-own-reservation" : "writer-reservation-declined", capture.WriterRevision);
                 if (capture.ReadWatch is { } originalWatch)

@@ -167,18 +167,96 @@ internal static partial class MetalVideoPresenter
             !original.Physical.Source.IsMappedCopyObservationCurrent(original.Physical.Mapping))
             throw new NotSupportedException("Ordinary storage lost its ORIGINAL physical mapping/view/session.");
     }
-    private static void RequireOrdinaryStorageOriginalContent(OrdinaryStorageOriginal original)
+    private static void RequireOrdinaryStorageOriginalContent(OrdinaryStorageOriginal original, Action<long?>? ownerStillCurrent = null)
     {
         if (Monitor.IsEntered(_gate)) throw new InvalidOperationException("Ordinary R32 ORIGINAL content checks require a released presenter gate.");
         if (original.Watched is not { } source) return; // mapping-only other images confer no content authority
+        var deadline = Environment.TickCount64 + 500;
+        // Unknown/legacy providers retain the original strict Boolean route.
+        // Capability opt-in changes only ordinary-Busy waiting, never authority.
+        var canWait = source.CanWaitForMappedReadWatchStatus;
+        void NonWatchCurrent()
+        {
+            RequireOrdinaryStorageOriginalNonWatchContent(original);
+            EnterOriginalWatchMetadataGate(deadline);
+            try { RequireOrdinaryStoragePhysicalCurrentLocked(original, original.Physical.Memory, original.Physical.Original, original.Physical.Session); }
+            finally { Monitor.Exit(_gate); }
+            ownerStillCurrent?.Invoke(deadline);
+        }
         if (original.WatchConsumed || original.Physical.Session != CurrentSelectedStorageMipSeedSession ||
             !original.Content.Observed || original.Content.ByteCount != original.Physical.WriteBytes || !original.Read.Active ||
             !GuestImageWriteTracker.IsReadSnapshotStable(original.Read) ||
-            !source.IsMappedCopyObservationCurrent(original.Physical.Mapping) || !source.IsMappedCopyWriteWatchCurrent(original.Physical.Mapping) ||
+            !source.IsMappedCopyObservationCurrent(original.Physical.Mapping))
+            throw new NotSupportedException("Native R32 producer lost its ORIGINAL mapping/read/protected token/watch.");
+        var waited = WaitForOrdinaryStorageOriginalWatch(source, original.Physical.Mapping, canWait, deadline, NonWatchCurrent);
+        if (!GuestImageWriteTracker.TryGetProtectedObservedContentToken(original.Physical.WriteAddress, original.Physical.WriteBytes, out var token) ||
+            token != original.Content.Token || !GuestImageWriteTracker.IsReadSnapshotStable(original.Read) ||
+            !source.IsMappedCopyObservationCurrent(original.Physical.Mapping))
+            throw new NotSupportedException("Native R32 producer lost its ORIGINAL mapping/read/protected token/watch.");
+        waited |= WaitForOrdinaryStorageOriginalWatch(source, original.Physical.Mapping, canWait, deadline, NonWatchCurrent);
+        if (waited)
+        {
+            ownerStillCurrent?.Invoke(deadline);
+            if (Environment.TickCount64 >= deadline) throw new NotSupportedException("Native R32 original Busy validation exceeded its same deadline.");
+        }
+    }
+
+    // Current fast paths retain the existing brief lock behaviour. Deferred
+    // Busy paths may wait for benign metadata contention only within the SAME
+    // content deadline, with no provider/wrapper gate held and no effect retry.
+    private static void EnterOriginalWatchMetadataGate(long? deadline)
+    {
+        if (deadline is null) { Monitor.Enter(_gate); return; }
+        var remaining = deadline.Value - Environment.TickCount64;
+        if (remaining <= 0 || !Monitor.TryEnter(_gate, checked((int)Math.Min(remaining, 500))))
+            throw new NotSupportedException("Native R32 ordinary-Busy metadata wait expired; no changed-owner inference.");
+    }
+
+    private static void RequireOrdinaryStorageOriginalNonWatchContent(OrdinaryStorageOriginal original)
+    {
+        if (Monitor.IsEntered(_gate)) throw new InvalidOperationException("Original watch waiting requires a released presenter gate.");
+        if (original.Watched is not { } source || original.WatchConsumed ||
+            original.Physical.Session != CurrentSelectedStorageMipSeedSession ||
+            !original.Content.Observed || original.Content.ByteCount != original.Physical.WriteBytes || !original.Read.Active ||
+            !GuestImageWriteTracker.IsReadSnapshotStable(original.Read) ||
+            !source.IsMappedCopyObservationCurrent(original.Physical.Mapping) ||
             !GuestImageWriteTracker.TryGetProtectedObservedContentToken(original.Physical.WriteAddress, original.Physical.WriteBytes, out var token) ||
             token != original.Content.Token || !GuestImageWriteTracker.IsReadSnapshotStable(original.Read) ||
-            !source.IsMappedCopyObservationCurrent(original.Physical.Mapping) || !source.IsMappedCopyWriteWatchCurrent(original.Physical.Mapping))
-            throw new NotSupportedException("Native R32 producer lost its ORIGINAL mapping/read/protected token/watch.");
+            !source.IsMappedCopyObservationCurrent(original.Physical.Mapping))
+            throw new NotSupportedException("Native R32 producer lost its ORIGINAL mapping/read/protected token/watch while Busy.");
+    }
+
+    private static bool WaitForOrdinaryStorageOriginalWatch(ICpuMappedReadWatchSource source,
+        CpuMappedCopyObservation mapping, bool canWait, long deadline, Action nonWatchStillCurrent)
+    {
+        if (Monitor.IsEntered(_gate)) throw new InvalidOperationException("Original watch waiting requires a released presenter gate.");
+        if (!canWait)
+        {
+            if (!source.IsMappedCopyWriteWatchCurrent(mapping))
+                throw new NotSupportedException("Native R32 producer lost its ORIGINAL mapping/read/protected token/watch.");
+            return false;
+        }
+        var waited = false;
+        for (var tick = 0; tick <= 500; tick++)
+        {
+            if (tick != 0 && Environment.TickCount64 >= deadline)
+                throw new NotSupportedException("Native R32 original ordinary-writer Busy wait expired.");
+            if (Monitor.IsEntered(_gate) || !source.CanWaitForMappedReadWatchStatus)
+                throw new NotSupportedException("Native R32 original watch cannot wait under a gate or lost provider closure.");
+            // ONE actual provider query. Its first ordinary Busy classification
+            // is never borrowed from a later sample of a failed Boolean check.
+            var status = source.GetMappedCopyWriteWatchStatus(mapping);
+            if (status == CpuMappedReadWatchStatus.Current) return waited;
+            if (status != CpuMappedReadWatchStatus.Busy)
+                throw new NotSupportedException("Native R32 original watch is Stale/unknown; no Busy wait or recapture.");
+            waited = true;
+            nonWatchStillCurrent(); // same original read/token/mapping/session and native owner each tick
+            if (!source.CanWaitForMappedReadWatchStatus || Environment.TickCount64 >= deadline || tick == 500)
+                throw new NotSupportedException("Native R32 original ordinary-writer Busy wait expired or lost provider closure.");
+            Thread.Sleep(1); // no presenter/provider/wrapper gate held, no native action repeated
+            nonWatchStillCurrent();
+        }
+        throw new NotSupportedException("Native R32 original watch wait exhausted its bound.");
     }
 
     private static OrdinaryStorageProducer[] PrepareOrdinaryStorageProducersLocked(object work, long sequence, GuestQueueIdentity queue)
