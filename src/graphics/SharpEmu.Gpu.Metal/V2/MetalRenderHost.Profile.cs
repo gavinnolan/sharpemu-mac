@@ -47,7 +47,18 @@ internal sealed partial class MetalRenderHost
     /// and charges its GPU execution time to the bound pipeline's shaders. Called at the
     /// end of every encode path; a no-op unless the profiling switch is set.
     /// </summary>
-    private void ProfileWork(MetalPipelineEntry entry, string kind, string shape)
+    private void ProfileWork(MetalPipelineEntry entry, string kind, string shape) =>
+        ProfileCommandBuffer(kind, entry.Profile ?? "stage=?", shape);
+
+    /// <summary>
+    /// What an image upload or writeback cost on the GPU. The cache calls this once a
+    /// transfer is encoded and its encoders are closed, so the draw that follows is not
+    /// charged for the tiler run that preceded it.
+    /// </summary>
+    void IMetalSubmissionContext.ProfileEncoded(string label) =>
+        ProfileCommandBuffer("transfer", label, string.Empty);
+
+    private void ProfileCommandBuffer(string kind, string label, string shape)
     {
         if (!MetalShaderProfile.Enabled)
         {
@@ -73,7 +84,7 @@ internal sealed partial class MetalRenderHost
         // GPU timestamps are not readable yet. The profiler wants the real status, and
         // this buffer holds one draw, so waiting on the buffer itself costs nothing.
         MetalNative.SendVoid(buffer, SelWaitUntilCompleted);
-        var key = $"{kind} {entry.Profile ?? "stage=?"}";
+        var key = $"{kind} {label}";
         var detail = transfers == 0 ? shape : $"{shape} transfers={transfers}";
         var status = MetalV2Native.SendValue(buffer, SelCommandBufferStatus);
         if (status != CommandBufferStatusCompleted)
