@@ -226,6 +226,22 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     public bool HasFlipSlot() => _flipTarget?.HasFlipSlot() ?? true;
 
+    // Where each flip this interval ended up. Every flip that reaches CaptureFlip counts
+    // as an attempt and then lands in exactly one of the three outcomes, so attempts
+    // staying at zero means the guest never asked for a flip at all.
+    private long _flipAttempts;
+    private long _flipsWithoutBuffer;
+    private long _flipsDiscarded;
+    private long _flipsPublished;
+
+    internal readonly record struct FlipCounters(long Attempts, long WithoutBuffer, long Discarded, long Published);
+
+    internal FlipCounters TakeFlipCounters() => new(
+        Interlocked.Exchange(ref _flipAttempts, 0),
+        Interlocked.Exchange(ref _flipsWithoutBuffer, 0),
+        Interlocked.Exchange(ref _flipsDiscarded, 0),
+        Interlocked.Exchange(ref _flipsPublished, 0));
+
     public ulong PrepareFlip(int handle, int index, int flipMode, long flipArgument)
     {
         var result = VideoOutBackendServices.TryReserveFlipRequest(
@@ -263,8 +279,17 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     // MTLTexture to the presenter, so no pixel ever travels through the CPU.
     private void CaptureFlip(int handle, int index, ulong requestId, int flipMode, long flipArg)
     {
+        Interlocked.Increment(ref _flipAttempts);
         if (VideoOutBackendServices.ReleaseNoBufferFlip(index, requestId))
         {
+            // The guest flipped without naming a new buffer. Legitimate on its own, but a
+            // title whose every flip goes this way never publishes a frame, and that used
+            // to look exactly like no flip arriving at all.
+            Interlocked.Increment(ref _flipsWithoutBuffer);
+            MetalV2Diagnostics.InfoOnce(
+                "flip-no-buffer",
+                $"A flip named no display buffer and was released without a frame: " +
+                $"handle={handle} index={index} request={requestId}.");
             return;
         }
 
@@ -295,10 +320,22 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         FlushCommandBuffer();
         if (_flipTarget is null || texture == 0)
         {
+            // The display surface resolved to no presentable texture, so there is nothing
+            // to hand the presenter. Silent until now, which made it indistinguishable
+            // from a title that never flips at all.
+            Interlocked.Increment(ref _flipsDiscarded);
+            MetalV2Diagnostics.WarnOnce(
+                "flip-discarded",
+                $"A flip had no presentable texture and was discarded: handle={handle} index={index} " +
+                $"request={requestId} target={(_flipTarget is null ? "none" : "present")} " +
+                $"address=0x{displayBuffer.Address:X16} {displayBuffer.Width}x{displayBuffer.Height} " +
+                $"format={displayBuffer.PixelFormat} tiling={displayBuffer.TilingMode} " +
+                $"view={request.View.Format}.");
             VideoOutBackendServices.DiscardFlip(requestId);
             return;
         }
 
+        Interlocked.Increment(ref _flipsPublished);
         _flipTarget.PublishGuestFrame(
             texture,
             Math.Max(displayBuffer.Width, 1),

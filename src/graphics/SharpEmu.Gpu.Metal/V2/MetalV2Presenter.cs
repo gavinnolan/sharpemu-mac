@@ -919,9 +919,15 @@ internal static class MetalV2Presenter
         var window = seconds.ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
         var published = Interlocked.Exchange(ref _publishedGuestFrames, 0);
         var blocked = Interlocked.Exchange(ref _adoptionsBlocked, 0);
+        // Where a flip stops. published=0 on its own cannot tell a title that never flips
+        // from one whose every flip is released or discarded on the way to the presenter,
+        // and those want opposite investigations.
+        var flips = _host?.TakeFlipCounters() ?? default;
         Console.Error.WriteLine(
             $"[METAL-PRESENT] guest_frames={guestFrames} guest_fps={guestFps} host_presents={hostPresents} " +
-            $"host_hz={hostHz} seconds={window} published={published} adopt_blocked={blocked}");
+            $"host_hz={hostHz} seconds={window} published={published} adopt_blocked={blocked} " +
+            $"flip_attempts={flips.Attempts} flip_no_buffer={flips.WithoutBuffer} " +
+            $"flip_discarded={flips.Discarded} flip_published={flips.Published}");
     }
 
     // The flip seam the command stream publishes through.
