@@ -255,12 +255,62 @@ internal static partial class MetalNative
         nuint destinationLevel,
         MtlOrigin destinationOrigin);
 
+    /// <summary>
+    /// copyFromBuffer:...:toTexture:...:options: — the depth/stencil-aware upload. A
+    /// combined depth-stencil texture has one plane per aspect, so the plane is chosen
+    /// by MTLBlitOption rather than by the pixel format.
+    /// </summary>
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendCopyBufferToTextureOptions(
+        nint receiver,
+        nint selector,
+        nint sourceBuffer,
+        nuint sourceOffset,
+        nuint sourceBytesPerRow,
+        nuint sourceBytesPerImage,
+        MtlSize sourceSize,
+        nint destinationTexture,
+        nuint destinationSlice,
+        nuint destinationLevel,
+        MtlOrigin destinationOrigin,
+        nuint options);
+
+    /// <summary>copyFromTexture:...:toBuffer:...:options: — the readback twin of
+    /// <see cref="SendCopyBufferToTextureOptions"/>.</summary>
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendCopyTextureToBufferOptions(
+        nint receiver,
+        nint selector,
+        nint sourceTexture,
+        nuint sourceSlice,
+        nuint sourceLevel,
+        MtlOrigin sourceOrigin,
+        MtlSize sourceSize,
+        nint destinationBuffer,
+        nuint destinationOffset,
+        nuint destinationBytesPerRow,
+        nuint destinationBytesPerImage,
+        nuint options);
+
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendDispatch(
         nint receiver,
         nint selector,
         MtlSize threadgroups,
         MtlSize threadsPerThreadgroup);
+
+    /// <summary>setBytes:length:atIndex: — per-dispatch constants without a ring
+    /// buffer; Metal copies them into the encoder's own argument storage.</summary>
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendSetBytes(nint receiver, nint selector, nint bytes, nuint length, nuint index);
+
+    /// <summary>setConstantValue:type:atIndex: on MTLFunctionConstantValues.</summary>
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendSetConstantValue(nint receiver, nint selector, nint value, nuint type, nuint index);
+
+    /// <summary>objc_msgSend for the NSUInteger-returning property getters.</summary>
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial nuint SendUInteger(nint receiver, nint selector);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendSetBuffer(nint receiver, nint selector, nint buffer, nuint offset, nuint index);
