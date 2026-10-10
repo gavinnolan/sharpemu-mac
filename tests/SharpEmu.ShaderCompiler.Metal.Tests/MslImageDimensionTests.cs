@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.ShaderCompiler.Resources;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -322,15 +323,87 @@ public sealed class MslImageDimensionTests(ITestOutputHelper output)
         Assert.Equal(compare, shader.Source.Contains("<= (float)", StringComparison.Ordinal));
     }
 
+    // A 32-bit single-channel uint image: the only class BindingLayout gives an
+    // atomic binding, and the only one Metal's texture atomics accept.
+    private const uint AtomicUintFormat = 20u;
+
     [Theory]
-    [InlineData("ImageAtomicAdd")]
-    [InlineData("ImageAtomicCmpswap")]
-    [InlineData("ImageAtomicFmax")]
-    public void StorageImageAtomicsAreRefusedBecauseMetalHasNone(string opcode)
+    // The ops with a Metal texture atomic of their own.
+    [InlineData("ImageAtomicSwap", "atomic_exchange(")]
+    [InlineData("ImageAtomicAdd", "atomic_fetch_add(")]
+    [InlineData("ImageAtomicSub", "atomic_fetch_sub(")]
+    [InlineData("ImageAtomicUmin", "atomic_fetch_min(")]
+    [InlineData("ImageAtomicUmax", "atomic_fetch_max(")]
+    [InlineData("ImageAtomicAnd", "atomic_fetch_and(")]
+    [InlineData("ImageAtomicOr", "atomic_fetch_or(")]
+    [InlineData("ImageAtomicXor", "atomic_fetch_xor(")]
+    // The ops Metal has no member for take a compare-exchange loop.
+    [InlineData("ImageAtomicSmin", "atomic_compare_exchange_weak(")]
+    [InlineData("ImageAtomicSmax", "atomic_compare_exchange_weak(")]
+    [InlineData("ImageAtomicInc", "atomic_compare_exchange_weak(")]
+    [InlineData("ImageAtomicDec", "atomic_compare_exchange_weak(")]
+    [InlineData("ImageAtomicCmpswap", "atomic_compare_exchange_weak(")]
+    [InlineData("ImageAtomicFmin", "atomic_compare_exchange_weak(")]
+    [InlineData("ImageAtomicFmax", "atomic_compare_exchange_weak(")]
+    [InlineData("ImageAtomicFcmpswap", "atomic_compare_exchange_weak(")]
+    public void StorageImageAtomicsUseTheMetalTextureAtomic(string opcode, string expected)
     {
-        Assert.False(Gen5ImageFixtures.TryCompile(opcode, Gen5ImageFixtures.ImageType2D, out _, out var error));
-        Assert.Contains("Metal has no storage-image atomic", error);
-        Assert.Contains(opcode, error);
+        var shader = Gen5ImageFixtures.CompileOrThrow(
+            opcode, Gen5ImageFixtures.ImageType2D, dmask: 1, unifiedFormat: AtomicUintFormat);
+        // An atomic binding is read_write, which is what the members need.
+        Assert.Contains("texture2d<uint, access::read_write>", shader.Source, StringComparison.Ordinal);
+        Assert.Contains(expected, shader.Source, StringComparison.Ordinal);
+        if (!MetalNative.IsAvailable)
+        {
+            Assert.False(
+                OperatingSystem.IsMacOS() && Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") == "1",
+                "The required gate cannot compile a texture atomic without a Metal device.");
+            output.WriteLine("No Metal device on this host; compile validation skipped.");
+            return;
+        }
+
+        // The OS compiler is the authority on whether the member exists at the
+        // language version the backend pins.
+        Assert.True(
+            MetalNative.TryCompileLibrary(shader.Source, out _, out var compileError),
+            $"[{opcode}] Metal rejected the emitted texture atomic: {compileError}\n{shader.Source}");
+    }
+
+    [Theory]
+    // Every dimension an atomic storage binding exists for.
+    [InlineData(Gen5ImageFixtures.ImageType1D)]
+    [InlineData(Gen5ImageFixtures.ImageType1DArray)]
+    [InlineData(Gen5ImageFixtures.ImageType2D)]
+    [InlineData(Gen5ImageFixtures.ImageType2DArray)]
+    [InlineData(Gen5ImageFixtures.ImageTypeCube)]
+    [InlineData(Gen5ImageFixtures.ImageType3D)]
+    public void StorageImageAtomicsCompileForEveryAtomicCapableDimension(uint descriptorType)
+    {
+        var shader = Gen5ImageFixtures.CompileOrThrow(
+            "ImageAtomicAdd", descriptorType, dmask: 1, unifiedFormat: AtomicUintFormat);
+        if (!MetalNative.IsAvailable)
+        {
+            Assert.False(
+                OperatingSystem.IsMacOS() && Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") == "1",
+                "The required gate cannot compile a texture atomic without a Metal device.");
+            return;
+        }
+
+        Assert.True(
+            MetalNative.TryCompileLibrary(shader.Source, out _, out var error),
+            $"[{Gen5ImageFixtures.TypeName(descriptorType)}] {error}\n{shader.Source}");
+    }
+
+    [Fact]
+    public void StorageImageAtomicsNeedASingleSampledUintBinding()
+    {
+        // A multisampled image has no storage binding class at all, so an
+        // atomic on one is refused while the layout is allocated -- before the
+        // translator could emit a texture atomic Metal would reject.
+        var failure = Assert.Throws<ResourcePlanException>(static () => Gen5ImageFixtures.TryCompile(
+            "ImageAtomicAdd", Gen5ImageFixtures.ImageType2DMsaa, out _, out _,
+            dmask: 1, unifiedFormat: AtomicUintFormat));
+        Assert.Contains("invalid binding class", failure.Message, StringComparison.Ordinal);
     }
 
     [Fact]

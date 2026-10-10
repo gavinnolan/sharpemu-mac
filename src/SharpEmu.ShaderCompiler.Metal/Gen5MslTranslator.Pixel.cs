@@ -101,13 +101,7 @@ public static partial class Gen5MslTranslator
 
             if (instruction.Opcode.StartsWith("ImageAtomic", StringComparison.Ordinal))
             {
-                // Metal has no texture atomic: the MSL texture types expose no
-                // atomic_fetch_* member and there is no image texel pointer to
-                // reinterpret, so there is nothing to lower this onto. The
-                // SPIR-V translator uses OpImageTexelPointer, which has no
-                // Metal counterpart.
-                error = $"{instruction.Opcode}: Metal has no storage-image atomic";
-                return false;
+                return TryEmitImageAtomic(instruction, image, texture, imageClass, out error);
             }
 
             if (instruction.Opcode is "ImageStore" or "ImageStoreMip")
@@ -300,6 +294,154 @@ public static partial class Gen5MslTranslator
                         : component == 3 ? levels
                         : "0u");
             }
+        }
+
+        // IMAGE_ATOMIC_* over a read_write storage texture. Metal's texture atomics
+        // (MSL 3.1) take and return the whole texel as a 4-vector, and the guest
+        // binding for an atomic image is always single-channel uint, so only x
+        // carries data. The ops Metal has no member for -- the signed minimum and
+        // maximum over a uint texture, the wrap-clamping increment and decrement,
+        // compare-swap and the float forms -- read the texel, derive the
+        // replacement and compare-exchange until the texel they computed from is
+        // still the one in memory.
+        private bool TryEmitImageAtomic(
+            Gen5ShaderInstruction instruction,
+            Gen5ImageControl image,
+            string texture,
+            MslImageClass imageClass,
+            out string error)
+        {
+            error = string.Empty;
+            var opcode = instruction.Opcode;
+            if (!imageClass.IsStorage || imageClass.Multisampled)
+            {
+                error = $"{opcode} needs a single-sampled storage image binding";
+                return false;
+            }
+
+            // BindingLayout only gives an atomic binding to a uint image, so this
+            // is the one component kind the texel vector can have.
+            if (imageClass.ComponentKind != "uint")
+            {
+                error = $"{opcode} on a {imageClass.ComponentKind} image has no Metal texture atomic";
+                return false;
+            }
+
+            // The address is bounds-checked like a store: Metal leaves an atomic on
+            // an out-of-range texel undefined, so an invalid guest address drops.
+            var spatial = new string[imageClass.SpatialComponents];
+            var guards = new List<string>(4);
+            for (var component = 0; component < spatial.Length; component++)
+            {
+                spatial[component] = Temp("int", $"as_type<int>({ImageIntegerAddress(image, component)})");
+                guards.Add($"{spatial[component]} >= 0");
+                guards.Add($"{spatial[component]} < (int){ImageExtentQuery(texture, imageClass, component, null)}");
+            }
+
+            var layerArgument = string.Empty;
+            if (imageClass.Arrayed)
+            {
+                var layer = Temp("int", $"as_type<int>({ImageIntegerAddress(image, imageClass.SpatialComponents)})");
+                guards.Add($"{layer} >= 0");
+                guards.Add($"{layer} < (int){texture}.get_array_size()");
+                layerArgument = $", (uint){layer}";
+            }
+
+            var coordinate = spatial.Length == 1
+                ? $"uint2((uint){spatial[0]}, 0u)"
+                : $"{imageClass.IntegerCoordinateType}({string.Join(", ", spatial.Select(part => $"(uint){part}"))})";
+            var data = Temp("uint", $"v[{image.VectorData}]");
+            // IMAGE_ATOMIC_CMPSWAP and FCMPSWAP read the new value from VDATA and
+            // the comparator from the register after it. VDATA is an 8-bit field,
+            // so the pair can name one register past the file.
+            var comparator = Temp(
+                "uint",
+                image.VectorData + 1 < VectorRegisterFileCount ? $"v[{image.VectorData + 1}]" : "0u");
+            var access = $"{coordinate}{layerArgument}";
+
+            Line($"if (exec && {string.Join(" && ", guards)})");
+            Line("{");
+            _indent++;
+            var suffix = opcode["ImageAtomic".Length..];
+            var direct = suffix switch
+            {
+                "Swap" => $"{texture}.atomic_exchange({access}, uint4({data}))",
+                "Add" => $"{texture}.atomic_fetch_add({access}, uint4({data}))",
+                "Sub" => $"{texture}.atomic_fetch_sub({access}, uint4({data}))",
+                "Umin" => $"{texture}.atomic_fetch_min({access}, uint4({data}))",
+                "Umax" => $"{texture}.atomic_fetch_max({access}, uint4({data}))",
+                "And" => $"{texture}.atomic_fetch_and({access}, uint4({data}))",
+                "Or" => $"{texture}.atomic_fetch_or({access}, uint4({data}))",
+                "Xor" => $"{texture}.atomic_fetch_xor({access}, uint4({data}))",
+                _ => string.Empty,
+            };
+
+            string original;
+            if (direct.Length > 0)
+            {
+                original = Temp("uint", $"{direct}.x");
+            }
+            else
+            {
+                var replacement = suffix switch
+                {
+                    "Smin" => (Func<string, string>)(value => $"(uint)min(as_type<int>({value}), as_type<int>({data}))"),
+                    "Smax" => value => $"(uint)max(as_type<int>({value}), as_type<int>({data}))",
+                    // IMAGE_ATOMIC_INC/DEC wrap against DATA rather than counting
+                    // freely: INC resets at the limit, DEC reloads it.
+                    "Inc" => value => $"{value} >= {data} ? 0u : {value} + 1u",
+                    "Dec" => value => $"({value} == 0u || {value} > {data}) ? {data} : {value} - 1u",
+                    "Cmpswap" => value => $"{value} == {comparator} ? {data} : {value}",
+                    "Fcmpswap" => value =>
+                        $"as_type<float>({value}) == as_type<float>({comparator}) ? {data} : {value}",
+                    "Fmin" => value =>
+                        $"as_type<float>({data}) < as_type<float>({value}) ? {data} : {value}",
+                    "Fmax" => value =>
+                        $"as_type<float>({data}) > as_type<float>({value}) ? {data} : {value}",
+                    _ => null!,
+                };
+                if (replacement is null)
+                {
+                    _indent--;
+                    Line("}");
+                    error = $"unsupported image atomic {opcode}";
+                    return false;
+                }
+
+                original = EmitImageAtomicExchangeLoop(texture, access, replacement);
+            }
+
+            if (image.Glc)
+            {
+                Line($"v[{image.VectorData}] = {original};");
+            }
+
+            _indent--;
+            Line("}");
+            return true;
+        }
+
+        // Reads the texel, derives the replacement from what it observed and swaps
+        // it in, retrying until the texel it computed from is still in memory. A
+        // failed exchange refreshes the observed value, so the replacement is
+        // always derived from the texel the swap is compared against.
+        private string EmitImageAtomicExchangeLoop(
+            string texture,
+            string access,
+            Func<string, string> replacement)
+        {
+            var observed = Temp("uint4", $"{texture}.atomic_load({access})");
+            var original = Temp("uint", $"{observed}.x");
+            var exchanged = Temp("bool", "false");
+            Line($"while (!{exchanged})");
+            Line("{");
+            _indent++;
+            Line($"{original} = {observed}.x;");
+            var next = Temp("uint", replacement(original));
+            Line($"{exchanged} = {texture}.atomic_compare_exchange_weak({access}, &{observed}, uint4({next}));");
+            _indent--;
+            Line("}");
+            return original;
         }
 
         // IMAGE_GET_LOD reports the level the sampler would pick for the address:

@@ -292,7 +292,7 @@ internal static partial class MetalVideoPresenter
             {
                 options = MetalNative.Send(MetalNative.Send(MetalNative.Class("MTLCompileOptions"), MetalNative.Selector("alloc")), MetalNative.Selector("init"));
                 if (options == 0) throw new InvalidOperationException("Metal depth conversion compile options creation failed.");
-                MetalNative.SendVoidBool(options, MetalNative.Selector("setFastMathEnabled:"), false);
+                MetalNative.ApplyMslCompileOptions(options);
                 nint error = 0;
                 library = MetalNative.Send(device, MetalNative.Selector("newLibraryWithSource:options:error:"),
                     MetalNative.NsString(DepthComparisonConversionSource), options, ref error);

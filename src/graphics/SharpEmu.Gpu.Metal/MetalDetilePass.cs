@@ -219,7 +219,7 @@ internal sealed unsafe class MetalDetilePass : IDisposable
         var options = MetalNative.Send(
             MetalNative.Send(MetalNative.Class("MTLCompileOptions"), MetalNative.Selector("alloc")),
             MetalNative.Selector("init"));
-        MetalNative.SendVoidBool(options, MetalNative.Selector("setFastMathEnabled:"), false);
+        MetalNative.ApplyMslCompileOptions(options);
 
         nint libraryError = 0;
         var library = MetalNative.Send(

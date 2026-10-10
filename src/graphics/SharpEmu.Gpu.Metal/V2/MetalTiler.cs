@@ -281,7 +281,7 @@ internal sealed unsafe class MetalTiler : IDisposable
         try
         {
             var options = MetalNative.Send(MetalNative.Send(MetalNative.Class("MTLCompileOptions"), SelAlloc), SelInit);
-            MetalNative.SendVoidBool(options, MetalNative.Selector("setFastMathEnabled:"), false);
+            MetalNative.ApplyMslCompileOptions(options);
             nint error = 0;
             var library = MetalNative.Send(_device, SelNewLibrary, MetalNative.NsString(source), options, ref error);
             Release(options);

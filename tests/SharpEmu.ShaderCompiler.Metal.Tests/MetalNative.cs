@@ -16,6 +16,11 @@ internal static partial class MetalNative
     private const string ObjCLibrary = "/usr/lib/libobjc.A.dylib";
     private const string MetalFramework = "/System/Library/Frameworks/Metal.framework/Metal";
 
+    // MTLLanguageVersion3_2: (major << 16) | minor. Texture atomics arrived in
+    // MSL 3.1 and the default version is older, so the backend asks for this one
+    // explicitly and the harness has to match it.
+    private const nuint MslLanguageVersion = (3 << 16) | 2;
+
     [StructLayout(LayoutKind.Sequential)]
     private struct MtlSize
     {
@@ -75,6 +80,9 @@ internal static partial class MetalNative
     private static partial void SendVoidBool(nint receiver, nint selector, [MarshalAs(UnmanagedType.I1)] bool argument);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    private static partial void SendVoidUInt(nint receiver, nint selector, nuint argument);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     private static partial void SendSetBuffer(nint receiver, nint selector, nint buffer, nuint offset, nuint index);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
@@ -128,9 +136,12 @@ internal static partial class MetalNative
         error = string.Empty;
 
         // Metal defaults to fast-math; GCN float semantics do not survive it, so the
-        // harness compiles the way a real Metal backend must: fast-math off.
+        // harness compiles the way a real Metal backend must: fast-math off, and
+        // the same language version the backend asks for so a feature that needs
+        // MSL 3.1 or later (texture atomics) compiles here too.
         var options = Send(Send(objc_getClass("MTLCompileOptions"), Selector("alloc")), Selector("init"));
         SendVoidBool(options, Selector("setFastMathEnabled:"), false);
+        SendVoidUInt(options, Selector("setLanguageVersion:"), MslLanguageVersion);
 
         nint nsError = 0;
         library = Send(
@@ -254,6 +265,73 @@ internal static partial class MetalNative
             }
         }
         return texture;
+    }
+
+    /// <summary>
+    /// A single-level R32Uint 2D texture a shader may run atomics on. Metal
+    /// allows a texture atomic only on an R32Uint/R32Sint (or R64Uint) texture
+    /// created with MTLTextureUsageShaderAtomic, which is usage bit 5.
+    /// </summary>
+    public static nint CreateAtomicUintTexture(
+        uint width, uint height, IReadOnlyList<uint> texels, nuint usage = 1 | 2 | 32)
+    {
+        const nuint R32Uint = 53;
+        var descriptor = Send(Send(objc_getClass("MTLTextureDescriptor"), Selector("alloc")), Selector("init"));
+        SendInteger(descriptor, Selector("setPixelFormat:"), R32Uint);
+        SendInteger(descriptor, Selector("setTextureType:"), 2); // MTLTextureType2D
+        SendInteger(descriptor, Selector("setWidth:"), width);
+        SendInteger(descriptor, Selector("setHeight:"), height);
+        SendInteger(descriptor, Selector("setDepth:"), 1);
+        SendInteger(descriptor, Selector("setArrayLength:"), 1);
+        SendInteger(descriptor, Selector("setMipmapLevelCount:"), 1);
+        SendInteger(descriptor, Selector("setStorageMode:"), 0);
+        SendInteger(descriptor, Selector("setUsage:"), usage);
+        var texture = Send(Device.Value, Selector("newTextureWithDescriptor:"), descriptor);
+        if (texture == 0)
+        {
+            throw new InvalidOperationException(
+                "Failed to create an atomic R32Uint fixture texture; MTLTextureUsageShaderAtomic needs macOS 14 or later.");
+        }
+
+        var bytes = new byte[width * height * sizeof(uint)];
+        for (var index = 0; index < texels.Count; index++)
+        {
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(index * sizeof(uint)), texels[index]);
+        }
+
+        unsafe
+        {
+            fixed (byte* raw = bytes)
+            {
+                SendReplace(texture, Selector("replaceRegion:mipmapLevel:slice:withBytes:bytesPerRow:bytesPerImage:"),
+                    new MtlRegion { Width = width, Height = height, Depth = 1 }, 0, 0,
+                    (nint)raw, width * sizeof(uint), 0);
+            }
+        }
+
+        return texture;
+    }
+
+    public static uint[] ReadAtomicUintTexture(nint texture, uint width, uint height)
+    {
+        var bytes = new byte[width * height * sizeof(uint)];
+        unsafe
+        {
+            fixed (byte* raw = bytes)
+            {
+                SendReadTexture(texture, Selector("getBytes:bytesPerRow:bytesPerImage:fromRegion:mipmapLevel:slice:"),
+                    (nint)raw, width * sizeof(uint), 0,
+                    new MtlRegion { Width = width, Height = height, Depth = 1 }, 0, 0);
+            }
+        }
+
+        var texels = new uint[width * height];
+        for (var index = 0; index < texels.Length; index++)
+        {
+            texels[index] = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(index * sizeof(uint)));
+        }
+
+        return texels;
     }
 
     public static byte[] ReadFloatTexture(nint texture, uint width, uint height, uint layers, uint depth)
