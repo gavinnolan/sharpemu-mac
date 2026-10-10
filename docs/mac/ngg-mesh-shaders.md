@@ -39,9 +39,11 @@ subgroup.
 
 `Gen5MslTranslator.RequiresMeshEmission(request)` is true when **both** hold:
 
-1. The request carries `ShaderCompileRequest.PrimitiveShader` — i.e. the draw's
-   `VGT_SHADER_STAGES_EN` selected the NGG stage and the backend reports
-   `SupportsPrimitiveShaderMeshPipelines`.
+1. The request carries `ShaderCompileRequest.PrimitiveShader`. `ShaderPipelineCache` fills
+   it only when the backend reports `SupportsPrimitiveShaderMeshPipelines`, the draw has no
+   separate geometry program, and `VgtShaderStages.SelectsPrimitiveShaderOnly` accepts
+   `VGT_SHADER_STAGES_EN` — the same reading `RenderExecutor` uses to admit the draw, so the
+   two cannot disagree. A zero mask is the plain vertex/pixel path and is excluded.
 2. `ShaderCompileRequest.RequiresPrimitiveShaderWorkgroup(program)` — the program uses
    LDS (any non-GDS `DS_*` other than the swizzle/bpermute pair) or `S_BARRIER`.
 
@@ -269,6 +271,9 @@ These are the parts the synthetic fixtures pin but the guest has not confirmed:
   `SharpEmu.Libs.Tests`) — the pipeline must not substitute the ES fetch for a workgroup
   primitive shader, and must still substitute it for the same program without the draw's
   primitive-shader state.
+- `VgtShaderStagesTests` and the `MeshPipelines_*` rows of `RenderExecutorDrawTests` — which
+  stage masks are primitive-shader draws, including that a plain vertex draw and a mask that
+  selects tessellation or the legacy vertex stage are not.
 - `NggMeshRuntimeTests` — needs a Metal device
   (`SHARPEMU_TEST_REQUIRE_DEVICE=1 arch -x86_64 ~/.dotnet-x64/dotnet test …`). The emitted
   MSL must compile with the OS Metal compiler, and a synthetic primitive shader must
