@@ -386,6 +386,57 @@ internal sealed class MetalGuestMemory : IDisposable
     public MetalGuestRange ResolveWritable(ulong gpuVa, ulong size) =>
         TryResolveWindow(gpuVa, size, out var resolved) ? resolved : default;
 
+    /// <summary>
+    /// Why a range has no window, for diagnostics. A caller that has to fall back wants to
+    /// say whether the guest bytes are not one backed span at all or merely straddle the
+    /// boundary between two windows, because the two have different answers.
+    /// </summary>
+    public string DescribeResolve(ulong gpuVa, ulong size)
+    {
+        if (size == 0 || gpuVa == 0 || size > ulong.MaxValue - gpuVa)
+        {
+            return "degenerate range";
+        }
+
+        if (!_backing.TryResolveBackingAlias(gpuVa, size, out var alias))
+        {
+            // Narrow down to the largest prefix that is one backed span, which says
+            // whether the range is unbacked outright or merely not contiguous.
+            var contiguous = 0UL;
+            for (var probe = size / 2; probe >= 4096; probe /= 2)
+            {
+                if (_backing.TryResolveBackingAlias(gpuVa, contiguous + probe, out _))
+                {
+                    contiguous += probe;
+                }
+            }
+
+            return $"not one backed span (contiguous prefix about 0x{contiguous:X} of 0x{size:X})";
+        }
+
+        if (alias < _aliasBase || alias - _aliasBase >= _aliasSize)
+        {
+            return $"backed at alias 0x{alias:X16}, outside the mapped windows " +
+                $"0x{_aliasBase:X16}+0x{_aliasSize:X}";
+        }
+
+        var index = (int)Math.Min((alias - _aliasBase) / _windowStride, (ulong)(_windowCount - 1));
+        ref readonly var window = ref _windows[index];
+        var offset = alias - window.AliasBase;
+        if (alias < window.AliasBase || offset >= window.Size)
+        {
+            return $"alias 0x{alias:X16} is outside window {index} (0x{window.AliasBase:X16}+0x{window.Size:X})";
+        }
+
+        if (size > window.Size - offset)
+        {
+            return $"straddles the end of window {index}: offset 0x{offset:X} + size 0x{size:X} " +
+                $"exceeds 0x{window.Size:X} by 0x{size - (window.Size - offset):X}";
+        }
+
+        return "resolvable";
+    }
+
     private bool TryResolveWindow(ulong gpuVa, ulong size, out MetalGuestRange resolved)
     {
         resolved = default;
