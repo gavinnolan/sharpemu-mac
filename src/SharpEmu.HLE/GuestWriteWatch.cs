@@ -31,13 +31,26 @@ public static class GuestWriteWatch
 
     private static readonly bool WatchBulkTorn = IsEnabled("SHARPEMU_WATCH_BULK_TORN");
 
+    // SHARPEMU_WATCH_QWORD=<hex>: report any guest write that lands this exact eight-byte
+    // value, wherever it goes. The address a corrupted structure lives at moves with the
+    // title's allocation order, so a watch keyed on the address cannot be armed ahead of
+    // a run; the value usually can. SHARPEMU_WATCH_QWORD_HI limits it to one address band
+    // (the top 32 bits of the guest address), so direct memory can be watched alone.
+    private static readonly ulong WatchQword = Parse(
+        Environment.GetEnvironmentVariable("SHARPEMU_WATCH_QWORD"));
+
+    private static readonly ulong WatchQwordHigh = Parse(
+        Environment.GetEnvironmentVariable("SHARPEMU_WATCH_QWORD_HI"));
+    private static int _qwordReports;
+
     private static readonly ulong BulkDestHigh = Parse(
         Environment.GetEnvironmentVariable("SHARPEMU_WATCH_BULK_DEST_HI"));
     private static int _bulkTornReports;
     private static int _bulkShiftReports;
 
     public static bool Armed =>
-        WatchBase != 0 || WatchPoolHeaders || WatchValuePattern || WatchValue1 || WatchBulkTorn;
+        WatchBase != 0 || WatchPoolHeaders || WatchValuePattern || WatchValue1 || WatchBulkTorn ||
+        WatchQword != 0;
 
     public static void OnDirectMapping(ulong mappedAddress, ulong length, int protection)
     {
@@ -57,6 +70,15 @@ public static class GuestWriteWatch
 
     public static void Check(ulong address, ReadOnlySpan<byte> data)
     {
+        if (WatchQword != 0 && TryFindQword(address, data, out var hit))
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] watch_qword HIT value=0x{WatchQword:X16} dest=0x{hit:X16} " +
+                $"(base=0x{address:X16} len={data.Length}){Environment.NewLine}{Environment.StackTrace}");
+            Console.Error.Flush();
+            return;
+        }
+
         if (WatchBulkTorn &&
             data.Length >= 8 &&
             (BulkDestHigh != 0
@@ -115,6 +137,41 @@ public static class GuestWriteWatch
                 return;
             }
         }
+    }
+
+    // The guest address this write puts <see cref="WatchQword"/> at, scanning the eight-byte
+    // slots the write actually lands on. Reports are capped so a value that turns out to be
+    // ordinary data cannot drown the log.
+    internal static bool TryFindQword(ulong address, ReadOnlySpan<byte> data, out ulong destination) =>
+        TryFindValue(address, data, WatchQword, WatchQwordHigh, out destination) &&
+        Interlocked.Increment(ref _qwordReports) <= MaxBulkReports;
+
+    /// <summary>
+    /// The guest address at which this write lands <paramref name="value"/> in one aligned
+    /// eight-byte slot, or false when it does not. <paramref name="bandHigh"/>, when
+    /// nonzero, restricts the search to addresses whose top 32 bits match it.
+    /// </summary>
+    internal static bool TryFindValue(
+        ulong address, ReadOnlySpan<byte> data, ulong value, ulong bandHigh, out ulong destination)
+    {
+        destination = 0;
+        if (bandHigh != 0 && (address >> 32) != bandHigh)
+        {
+            return false;
+        }
+
+        for (var offset = FirstAlignedOffset(address); offset + 8 <= data.Length; offset += 8)
+        {
+            if (BinaryPrimitives.ReadUInt64LittleEndian(data.Slice(offset, 8)) != value)
+            {
+                continue;
+            }
+
+            destination = address + (ulong)offset;
+            return true;
+        }
+
+        return false;
     }
 
     internal static string? ClassifyBulkValue(ulong qword)

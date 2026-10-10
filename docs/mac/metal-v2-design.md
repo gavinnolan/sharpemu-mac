@@ -379,6 +379,42 @@ runaway compute shaders (below).
   targets every `SHARPEMU_METAL_V2_DUMP_EVERY` flips (30 by default), so the next run
   dumps the frames that have something in them.
 
+- **Demon's Souls' corruption is not a DCC fast clear.** The frames it draws are a
+  blue-grey field with saturated speckles, which reads as a compressed surface shown
+  without its metadata, so the DCC path was the first suspect. It is not the cause.
+
+  Metal v2 already carries the Vulkan metadata machinery nearly line for line —
+  `RegisterDccMetadata`, `TryAbsorbDccFill`, `MaterializeDccClear` with its real-pixel
+  `ClearImageRange`, `TryConsumeDccAttachmentClear`. One gap was real and is now closed:
+  Vulkan has a second pass, `RecordSampledColorMetadataClears`, for a surface that was
+  fast-cleared and is *sampled* before it binds as a colour target again, which
+  `MaterializeDccClear` cannot serve because a texture request carries no metadata range
+  and the register clear colour is known only to a target. v2 had no equivalent.
+  `AcquireTextureView` now materializes it, reported as `sampled_dcc_clears`.
+
+  It fires zero times in Demon's Souls, and the frame is unchanged: `mean_rgb` 135.06
+  before, 134.32 after, pixel for pixel the same corruption. The fix closes a parity hole
+  that will matter to some other title; it is not this one, and it is unverified by any
+  title that exercises it.
+
+  What the pixels actually say, from a dumped 4K flip: the dominant colour is a *cluster*
+  around (130,136,152) rather than one flat value — a smooth low-contrast field, not a
+  fill — and the speckles saturate (75,255,25). Horizontal runs of both are dominated by
+  **two pixels**, and the frame has a sharp discontinuity across its **vertical
+  midpoint**. Two-pixel granularity and a half-height seam are a tiling or element-stride
+  mismatch, not a block-compression one: DCC keys cover 8x8 texels at 32 bpp and would
+  not alternate every two. That is where to look next, with
+  `SHARPEMU_METAL_V2_DUMP_TARGETS` and the 1920x540 target the frame also carries.
+
+- **Demon's Souls' long boot is host-side command-stream work, not the GPU.** Over one
+  454-second run the GPU worker spent 14.3 s executing GPU work (3%), 49.8 s waiting on
+  the GPU (11%), 21.9 s idle (5%) and **368 s — 81% — in its own CPU work**: interpreting
+  packets, resolving descriptors, keeping the image cache. The guest sent 371,022
+  submissions for 93,632 draws, four submissions per draw, and the queue ran 952,889
+  slices against them: **2.57 slices per submission**, because a submission that suspends
+  is re-queued and re-run from its suspend point. Better than half a million slice runs in
+  that one run were retries. Neither GPU throughput nor GPU stalls are the boot's cost.
+
 - **Where a flip stops is reported.** `published=0` alone cannot tell a title that never
   flips from one whose flips are released or discarded on the way to the presenter, and
   all three printed nothing. Every flip reaching `CaptureFlip` now counts as an attempt
@@ -396,6 +432,66 @@ runaway compute shaders (below).
 
   which is the hash to pass to `SHARPEMU_SHADER_MSL_DUMP_HASH`. A missing line is now
   evidence: a slow shader with no `STEP-CAP` is loop-bound, not capped.
+
+### The guest write guard
+
+Guest memory being the GPU's memory has one failure mode the snapshot backend did not
+have: a write that overruns its range does not fault and does not land in a staging
+buffer. It rewrites whatever the guest's own allocator put next door, and the title dies
+much later inside its own code on a clobbered pointer — in Poppy Playtime, a `mov
+rax,[rcx]` with `rcx = 0x4000000040000000`, two floats where a free-list pointer belongs.
+
+`SHARPEMU_METAL_V2_GUARD_WRITES=1` arms `MetalGuestWriteGuard`. For every write to guest
+memory the host declares — a storage-buffer or written binding, a fill, a copy, an image
+writeback, and the fills and copies the host performs itself — it snapshots the 4 KiB
+either side of the range and compares them again once the GPU has signalled that
+submission. A byte that changed, and that no other declared range covers, is reported with
+the producer that ran off its end:
+
+    [METAL-V2][GUARD] A GPU-side write changed guest bytes outside the range it declared:
+      producer=writeback [writeback format=... extent=1x1 ...] declared=0x...+0x10000
+      serial=812 side=after violation=0x... distance=0x20 was=0x... now=0x4000000040000000.
+
+The same switch arms `GuestWriteJournal` (in `SharpEmu.HLE`, because the native fault
+dumper in `SharpEmu.Core` is what asks it), a ring of the declared ranges. On a fault the
+dumper prints, for every faulting register that is a guest address, which producer had
+declared those bytes:
+
+    [LOADER][INFO]   gpu-write-journal rdx=0x... producer=storage [...] range=0x...+0x...
+
+An address no record covers was not written by a declared host-side GPU write, which
+points at a shader store through a descriptor, or away from the GPU altogether. A clean
+guard with a reproducible fault is therefore evidence too, not an absence of it.
+
+#### What it found in Poppy Playtime, and what it ruled out
+
+The title dies after about a minute, always the same way: a free-list pop in the guest's
+own binned allocator follows `0x4000000040000000` out of bin 14 of a 64 KiB-aligned
+direct-memory table, at offset `+0x720`. Four runs, two different guest threads, three
+different table addresses, the same offset and the same value.
+
+- The guard's journal covered every declared GPU-side write of the run (3013 records,
+  below the ring's 8192, so nothing was lost to wrapping) and **none of them covered the
+  faulting address** — not an image writeback, a fill, a copy, a storage binding or a host
+  fill. The margin check found no producer writing past its range either; its handful of
+  reports are the guest's own CPU writing structures next to a declared range while the
+  submission is in flight.
+- `device_address_writes=0`: this title never stores through the device-address page
+  table, so the hole closed above was not the cause here either.
+- The fault dump of the table (`fault-register-rax`) shows it otherwise pristine — valid
+  `(pointer, count)` pairs throughout, zeros where unused — and bin 14's **count is still
+  zero** while its head holds the poison. Exactly eight bytes are wrong, in a slot the
+  allocator had never used, so this is a stray eight-byte store and not stale memory, a
+  lost write or an overrun.
+- `SHARPEMU_WATCH_QWORD=0x4000000040000000 SHARPEMU_WATCH_QWORD_HI=0x90` shows the value
+  itself is ordinary guest float data: every hit is `PhysicalVirtualMemory.TryCopy` under
+  `DispatchImportCore`, a guest-to-guest `memcpy` import moving kilobyte blocks of
+  `2.0f` pairs through direct memory. None of the 54 distinct destinations seen before the
+  report cap was the faulting slot.
+
+So the GPU writes nothing that lands there, and the payload is bulk-copied float data.
+The next step is a bulk-copy destination watch (`SHARPEMU_WATCH_BULK_TORN` and friends
+already exist for this), not more GPU instrumentation.
 
 ## Process-level macOS tuning (separate workstream)
 
