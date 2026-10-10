@@ -233,14 +233,17 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     private long _flipsWithoutBuffer;
     private long _flipsDiscarded;
     private long _flipsPublished;
+    private long _flipsRefreshed;
 
-    internal readonly record struct FlipCounters(long Attempts, long WithoutBuffer, long Discarded, long Published);
+    internal readonly record struct FlipCounters(
+        long Attempts, long WithoutBuffer, long Discarded, long Published, long Refreshed);
 
     internal FlipCounters TakeFlipCounters() => new(
         Interlocked.Exchange(ref _flipAttempts, 0),
         Interlocked.Exchange(ref _flipsWithoutBuffer, 0),
         Interlocked.Exchange(ref _flipsDiscarded, 0),
-        Interlocked.Exchange(ref _flipsPublished, 0));
+        Interlocked.Exchange(ref _flipsPublished, 0),
+        Interlocked.Exchange(ref _flipsRefreshed, 0));
 
     public ulong PrepareFlip(int handle, int index, int flipMode, long flipArgument)
     {
@@ -289,6 +292,9 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     {
         Interlocked.Increment(ref _flipAttempts);
         Interlocked.Increment(ref FlipsCaptured);
+        // The one point in the frame that is outside a flush, so the safe place to read
+        // back everything the passes since the last flip wrote.
+        DrainPendingDumps();
         if (VideoOutBackendServices.ReleaseNoBufferFlip(index, requestId))
         {
             // The guest flipped without naming a new buffer. Legitimate on its own, but a
@@ -324,7 +330,25 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         var imageIdentifier = _imageCache.FindImage(ref request);
         var image = _imageCache.GetImage(imageIdentifier);
         image.Uses.VideoOut = true;
+        // A display surface the GPU just composited into must not be refilled from guest
+        // memory on the way to the screen: those bytes are whatever was there before the
+        // composite, and uploading them replaces the frame with the old one. Report it
+        // when it happens rather than presenting the result silently.
+        if (image.IsCpuDirty)
+        {
+            Interlocked.Increment(ref _flipsRefreshed);
+            MetalV2Diagnostics.WarnOnce(
+                "flip-refresh",
+                $"A flip's display surface was CPU-dirty, so it is uploaded from guest memory before " +
+                $"presenting: cause={image.DirtyCause} address=0x{displayBuffer.Address:X16} " +
+                $"{displayBuffer.Width}x{displayBuffer.Height} gpuWritten={image.IsGpuModified}.");
+        }
+
+        // Before and after, so an upload that replaces a composited frame with the bytes
+        // that were in guest memory before it shows up as the two differing.
+        if (_dumpThisFlip) { DumpTexture(image.Texture, "flip-before-refresh"); }
         _imageCache.RefreshImage(imageIdentifier);
+        if (_dumpThisFlip) { DumpTexture(image.Texture, "flip-after-refresh"); }
         var texture = PresentationViewOf(image, in request);
         var serial = SubmissionSerial;
         FlushCommandBuffer();
@@ -348,6 +372,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
         Interlocked.Increment(ref _flipsPublished);
         Interlocked.Increment(ref FlipsPublished);
+        ReportFlipSurface(in displayBuffer, in request, imageIdentifier, image, texture);
         _flipTarget.PublishGuestFrame(
             texture,
             Math.Max(displayBuffer.Width, 1),
@@ -363,6 +388,29 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         // flip is this host's frame boundary, so SHARPEMU_PROFILE_RENDER=1 reports the
         // same breakdown here without any Metal-specific instrumentation.
         SharpEmu.Libs.VideoOut.RenderPhaseProfile.RecordFrame();
+    }
+
+    // What the flip actually resolved to. A title whose frames come out black has either
+    // drawn nothing or had its flip resolve to a different cached image from the one the
+    // render passes wrote, and the flip counters alone cannot tell those apart: this says
+    // which image, which view, and whether the GPU ever wrote it.
+    private void ReportFlipSurface(
+        in VideoOutExports.DisplayBufferInfo displayBuffer,
+        in ImageRequest request,
+        SharpEmu.Libs.Gpu.Buffers.ResourceSlotIdentifier identifier,
+        MetalCachedImage image,
+        nint texture)
+    {
+        MetalV2Diagnostics.InfoOnce(
+            "flip-surface",
+            $"The first published flip resolved to image={identifier} texture=0x{texture:X} " +
+            $"address=0x{displayBuffer.Address:X16} {displayBuffer.Width}x{displayBuffer.Height} " +
+            $"guestFormat={displayBuffer.PixelFormat} tiling={displayBuffer.TilingMode} " +
+            $"hdr={VideoOutBackendServices.IsHdrPixelFormat(displayBuffer.PixelFormat)} " +
+            $"description={image.Description.PixelFormat} tile={image.Description.TileMode} " +
+            $"extent={image.Description.Extent.Width}x{image.Description.Extent.Height} " +
+            $"view={request.View.Format} gpuWritten={image.IsGpuModified} renderTarget={image.Uses.RenderTarget}.");
+        if (_dumpThisFlip) { DumpTexture(texture, "flip"); }
     }
 
     // The presenter samples the flip texture and writes the result into a plain

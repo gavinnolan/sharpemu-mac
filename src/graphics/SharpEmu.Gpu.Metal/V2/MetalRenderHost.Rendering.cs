@@ -364,6 +364,7 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
+        var ending = _renderingState;
         _renderingActive = false;
         _renderingState = default;
         if (_renderEncoder != 0)
@@ -373,6 +374,26 @@ internal sealed partial class MetalRenderHost
         }
 
         ForgetEncoderState();
+        DumpPassTargets(in ending);
+        _passDrawCount = 0;
+        _passLastProfile = null;
+    }
+
+    // Under SHARPEMU_METAL_V2_DUMP_TARGETS, remember what the pass just finished writing.
+    // Only remember: a dump reads back through its own command buffer and waits, and
+    // EndRendering runs inside EndEncoders, which runs inside the flush. Dumping here
+    // would nest a flush inside a flush. They are drained at the next flip instead.
+    private void DumpPassTargets(in RenderingState ending)
+    {
+        if (!DumpTargetsEnabled)
+        {
+            return;
+        }
+
+        for (var index = 0; index < ending.ColorAttachmentCount; index++)
+        {
+            NotePendingDump((nint)ending.ColorAttachments[index].View.Handle, $"pass{index}");
+        }
     }
 
     private void EndComputeEncoder()
@@ -803,6 +824,7 @@ internal sealed partial class MetalRenderHost
     private void CountDraw(long startedTicks)
     {
         Interlocked.Increment(ref _drawCount);
+        NotePassDraw(_boundGraphicsPipeline?.Profile);
         Interlocked.Add(ref _drawTicks, System.Diagnostics.Stopwatch.GetTimestamp() - startedTicks);
         _recordedCommands++;
     }

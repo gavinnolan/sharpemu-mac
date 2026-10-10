@@ -928,7 +928,8 @@ internal static class MetalV2Presenter
             $"[METAL-PRESENT] guest_frames={guestFrames} guest_fps={guestFps} host_presents={hostPresents} " +
             $"host_hz={hostHz} seconds={window} published={published} adopt_blocked={blocked} " +
             $"flip_attempts={flips.Attempts} flip_no_buffer={flips.WithoutBuffer} " +
-            $"flip_discarded={flips.Discarded} flip_published={flips.Published}");
+            $"flip_discarded={flips.Discarded} flip_published={flips.Published} " +
+            $"flip_refreshed={flips.Refreshed}");
     }
 
     // The flip seam the command stream publishes through.

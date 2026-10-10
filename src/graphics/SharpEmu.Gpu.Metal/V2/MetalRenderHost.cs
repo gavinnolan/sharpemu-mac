@@ -905,6 +905,10 @@ internal sealed partial class MetalRenderHost :
         var frequency = System.Diagnostics.Stopwatch.Frequency;
         Console.Error.WriteLine(
             $"[METAL-V2][PERF] seconds={seconds.ToString("F2", culture)} submissions={_submissionsStarted} " +
+            // Slices are what the queue actually ran: a submission that suspends is
+            // re-queued and re-run, so slices far above guest submissions is retry churn,
+            // not the guest sending more work.
+            $"guest_submissions={CommandStream.SubmissionsStarted} slices={CommandStream.SlicesRun} " +
             $"draws={draws} passes={passes} flushes={flushes} " +
             $"draw_ms={(drawTicks * 1000.0 / frequency).ToString("F1", culture)} " +
             $"gpu_busy_ms={gpuBusyMs.ToString("F1", culture)} " +
