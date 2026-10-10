@@ -295,6 +295,11 @@ public sealed partial class DirectExecutionBackend
 					("r12", r12), ("r13", r13), ("r14", r14), ("r15", r15),
 				]);
 
+			// rax and rdx are where a faulting load's base and the structure it walked
+			// usually live, so their neighbourhoods say whether one field was clobbered
+			// or the whole block holds something else entirely.
+			DumpPointerWindow("fault-register-rax", rax, 0x80);
+			DumpPointerWindow("fault-register-rdx", rdx, 0x80);
 			DumpPointerWindow("fault-register-rbx", rbx, 0x60);
 			DumpPointerWindow("fault-register-rsi", rsi, 0x60);
 			DumpPointerWindow("fault-register-rcx", rcx, 0x80);
