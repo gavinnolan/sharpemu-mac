@@ -14,6 +14,12 @@ internal static class MetalV2Diagnostics
     public static readonly bool Verbose =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_TRACE"), "1", StringComparison.Ordinal);
 
+    // Naming a range that has to be staged costs two extra backing lookups, so it is
+    // on only while someone is hunting ring fallbacks. Defaults on under the trace
+    // switch; SHARPEMU_METAL_V2_REPORT_UNBACKED=1 turns it on by itself.
+    public static readonly bool ReportUnbackedRanges = Verbose ||
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_REPORT_UNBACKED"), "1", StringComparison.Ordinal);
+
     public static void WarnOnce(string key, string message)
     {
         if (_reported.TryAdd(key, 0))

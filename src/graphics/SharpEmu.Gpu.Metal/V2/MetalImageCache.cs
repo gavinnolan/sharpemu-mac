@@ -202,11 +202,15 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         if (result.IsValid)
         {
             var resolved = _slots[result];
-            if ((exactFormat && resolved.Description.PixelFormat != request.Description.PixelFormat) ||
-                resolved.Description.Resources < request.Description.Resources ||
-                !resolved.SupportsViewType(request.View))
+            var formatMismatch = exactFormat && resolved.Description.PixelFormat != request.Description.PixelFormat;
+            var fewerResources = resolved.Description.Resources < request.Description.Resources;
+            if (formatMismatch || fewerResources || !resolved.SupportsViewType(request.View))
             {
-                ReleaseImage(result);
+                var cause = formatMismatch
+                    ? MetalImageReleaseCause.FormatMismatch
+                    : fewerResources ? MetalImageReleaseCause.FewerResources : MetalImageReleaseCause.ViewType;
+                ReportRelease(cause, resolved.Description, request.Description, request.View);
+                ReleaseImage(result, cause);
                 result = ResourceSlotIdentifier.Invalid;
                 viewMip = -1;
                 viewLayer = -1;
@@ -243,6 +247,56 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         return found is not null;
     }
 
+    private long _aliasesKept;
+    private long _aliasPublishes;
+
+    /// <summary>How often an alias was kept instead of dropped, and resynchronized.</summary>
+    public (long Kept, long Published) AliasCounters =>
+        (Interlocked.Exchange(ref _aliasesKept, 0), Interlocked.Exchange(ref _aliasPublishes, 0));
+
+    /// <summary>
+    /// Makes this image the one that agrees with guest memory, against every other
+    /// cached image over the same bytes. Two images can describe one surface — a depth
+    /// buffer that is also sampled as a colour format needs a texture of each — and
+    /// then the one the GPU last wrote owns the contents. Publishing it and marking
+    /// this one stale is what the old drop-and-recreate did implicitly.
+    ///
+    /// Caller holds the lock.
+    /// </summary>
+    private void SynchronizeAliases(ResourceSlotIdentifier imageIdentifier, bool takesGpuOwnership)
+    {
+        var image = _slots[imageIdentifier];
+        var address = image.Description.Data.Address;
+        var size = image.Description.Data.Size;
+        if (ImageDescription.IsEmptyRange(image.Description.Data) || !_pageOwners.MayHaveOwners(address, size))
+        {
+            return;
+        }
+
+        foreach (var otherIdentifier in FindImagesInRange(address, size, pageOverlap: false))
+        {
+            if (otherIdentifier == imageIdentifier ||
+                _slots.TryGet(otherIdentifier) is not { } other || !other.Overlaps(address, size))
+            {
+                continue;
+            }
+
+            if (other.IsGpuModified)
+            {
+                WriteBackToGuest(other, MetalWritebackCause.ImageOverlap);
+                image.MarkCpuDirty(MetalImageDirtyCause.AliasWrite);
+                _aliasPublishes++;
+            }
+
+            if (takesGpuOwnership)
+            {
+                // Whatever this image is about to write leaves the others stale.
+                other.ClearGpuModified();
+                other.MarkCpuDirty(MetalImageDirtyCause.AliasWrite);
+            }
+        }
+    }
+
     /// <summary>The texture a shader binds for one image request.</summary>
     public nint AcquireTextureView(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
     {
@@ -252,6 +306,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         if (request.Role == ImageRole.StorageImage)
         {
             WatchImage(imageIdentifier);
+            SynchronizeAliases(imageIdentifier, takesGpuOwnership: true);
             RefreshFromGuest(image);
             image.Uses.Storage = true;
             image.MarkGpuModified();
@@ -259,6 +314,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
         else
         {
+            SynchronizeAliases(imageIdentifier, takesGpuOwnership: false);
             RefreshFromGuest(image);
             image.Uses.Texture = true;
         }
@@ -272,6 +328,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var image = _slots[imageIdentifier];
         image.LastAccessTick = _collectionTick;
         WatchImage(imageIdentifier);
+        SynchronizeAliases(imageIdentifier, takesGpuOwnership: true);
         RefreshFromGuest(image);
         image.Uses.RenderTarget = true;
         if (request.Description.Metadata.Kind == MetadataKind.Dcc && request.Description.Metadata.Range.Size == 0)
@@ -291,6 +348,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var image = _slots[imageIdentifier];
         image.LastAccessTick = _collectionTick;
         WatchImage(imageIdentifier);
+        SynchronizeAliases(imageIdentifier, takesGpuOwnership: true);
         RefreshFromGuest(image);
         image.Uses.DepthTarget = true;
         if (request.Description.HasMetadata)
@@ -327,6 +385,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         using var held = _lock.Hold();
         if (_slots.TryGet(imageIdentifier) is { } image)
         {
+            SynchronizeAliases(imageIdentifier, takesGpuOwnership: false);
             RefreshFromGuest(image);
         }
     }
@@ -460,8 +519,20 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 return new OverlapResolution(mergedImageIdentifier.IsValid ? mergedImageIdentifier : cachedImageIdentifier);
             }
 
-            // Anything else at the same address replaces the cached image.
-            ReleaseImage(cachedImageIdentifier);
+            // Anything else at the same address needs its own texture. A surface the
+            // title is still using both ways keeps both, because dropping one of a
+            // pair it alternates between every frame recreates a texture and uploads
+            // it again each time: Silent Hill's 3840x2160 depth buffer, written as
+            // D32S8 and then sampled as R32F, paid three transfers of it per frame.
+            // Aliases stay coherent through SynchronizeAliases on acquisition.
+            if (!safeToDelete)
+            {
+                _aliasesKept++;
+                return new OverlapResolution(mergedImageIdentifier);
+            }
+
+            ReportRelease(MetalImageReleaseCause.SameAddressReplaced, cachedInfo, requested, default);
+            ReleaseImage(cachedImageIdentifier, MetalImageReleaseCause.SameAddressReplaced);
             return new OverlapResolution(mergedImageIdentifier);
         }
 
@@ -479,14 +550,16 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         // guest memory, from where the new, larger image uploads them.
         if (cachedInfo.FindMatchingMipLevel(requested) >= 0)
         {
-            ReleaseImage(cachedImageIdentifier);
+            ReportRelease(MetalImageReleaseCause.SubsetOfLarger, cachedInfo, requested, default);
+            ReleaseImage(cachedImageIdentifier, MetalImageReleaseCause.SubsetOfLarger);
             return new OverlapResolution(mergedImageIdentifier);
         }
 
         _ = role;
         if (requested.Data.Address >= cachedInfo.Data.Address && safeToDelete)
         {
-            ReleaseImage(cachedImageIdentifier);
+            ReportRelease(MetalImageReleaseCause.OverlapEvicted, cachedInfo, requested, default);
+            ReleaseImage(cachedImageIdentifier, MetalImageReleaseCause.OverlapEvicted);
         }
 
         return new OverlapResolution(mergedImageIdentifier);
@@ -867,15 +940,55 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
     }
 
-    private readonly long[] _uploadCauses = new long[4];
+    private readonly long[] _uploadCauses = new long[5];
     private readonly long[] _writebackCauses = new long[7];
+    private readonly long[] _releaseCauses = new long[8];
+
+    private static readonly string[] _releaseCauseNames =
+        ["format", "resources", "viewtype", "same_address", "subset", "overlap", "budget", "unmapped"];
+
+    /// <summary>The release reasons since the last read, as "name=count" pairs.</summary>
+    public void AppendReleaseCauses(System.Text.StringBuilder target)
+    {
+        for (var index = 0; index < _releaseCauses.Length; index++)
+        {
+            var count = Interlocked.Exchange(ref _releaseCauses[index], 0);
+            if (count != 0)
+            {
+                target.Append(" drop_").Append(_releaseCauseNames[index]).Append('=').Append(count);
+            }
+        }
+    }
+
+    // Names the two descriptions behind a release, once per shape pair. A cache that
+    // recreates a surface every frame does it for one reason with one pair of shapes.
+    private void ReportRelease(
+        MetalImageReleaseCause cause,
+        in ImageDescription cached,
+        in ImageDescription requested,
+        in ImageViewDescription view)
+    {
+        MetalV2Diagnostics.WarnOnce(
+            $"image-drop:{cause}:{cached.PixelFormat}:{requested.PixelFormat}:{cached.Extent.Width}x{cached.Extent.Height}" +
+            $":{requested.Extent.Width}x{requested.Extent.Height}:{cached.Resources.Levels}:{requested.Resources.Levels}",
+            $"A cached image is dropped and recreated: cause={cause} " +
+            $"cached=0x{cached.Data.Address:X16}+0x{cached.Data.Size:X} {cached.Extent.Width}x{cached.Extent.Height}x{cached.Extent.Depth} " +
+            $"{cached.PixelFormat} type={cached.Type} tile={cached.TileMode} " +
+            $"levels={cached.Resources.Levels} layers={cached.Resources.Layers} samples={cached.Samples} " +
+            $"requested=0x{requested.Data.Address:X16}+0x{requested.Data.Size:X} " +
+            $"{requested.Extent.Width}x{requested.Extent.Height}x{requested.Extent.Depth} " +
+            $"{requested.PixelFormat} type={requested.Type} tile={requested.TileMode} " +
+            $"levels={requested.Resources.Levels} layers={requested.Resources.Layers} samples={requested.Samples} " +
+            $"view_type={view.Type} view_format={view.Format} view_levels={view.BaseLevel}+{view.LevelCount} " +
+            $"view_layers={view.BaseLayer}+{view.LayerCount}.");
+    }
 
     /// <summary>
     /// Where the uploads and the writebacks since the last read came from. A static
     /// menu that uploads and writes back every frame is churning, and only the cause
     /// says which side of the host is asking for it.
     /// </summary>
-    public (long Created, long CpuWrite, long GpuWrite, long Invalidated,
+    public (long Created, long CpuWrite, long GpuWrite, long Invalidated, long Alias,
         long Binding, long Storage, long HostRead, long GuestCopy, long Overlap, long Release, long Drain)
         TakeTransferCauses()
     {
@@ -883,8 +996,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             Interlocked.Exchange(ref _uploadCauses[0], 0),
             Interlocked.Exchange(ref _uploadCauses[1], 0),
             Interlocked.Exchange(ref _uploadCauses[2], 0),
-            Interlocked.Exchange(ref _uploadCauses[3], 0));
-        return (uploads.Item1, uploads.Item2, uploads.Item3, uploads.Item4,
+            Interlocked.Exchange(ref _uploadCauses[3], 0),
+            Interlocked.Exchange(ref _uploadCauses[4], 0));
+        return (uploads.Item1, uploads.Item2, uploads.Item3, uploads.Item4, uploads.Item5,
             Interlocked.Exchange(ref _writebackCauses[0], 0),
             Interlocked.Exchange(ref _writebackCauses[1], 0),
             Interlocked.Exchange(ref _writebackCauses[2], 0),

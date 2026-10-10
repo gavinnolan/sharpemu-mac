@@ -94,6 +94,40 @@ internal sealed partial class MetalRenderHost
     private RenderingState _renderingState;
     private nint _boundComputePipeline;
     private MetalPipelineEntry? _boundGraphicsPipeline;
+
+    // What the open encoder already has. Metal keeps encoder state between draws, so
+    // these let a draw send only what changed; every one of them is reset when an
+    // encoder is created, because a new encoder starts with none of it.
+    private nint _boundDepthStencilState;
+    private float _boundBlendRed = float.NaN;
+    private float _boundBlendGreen = float.NaN;
+    private float _boundBlendBlue = float.NaN;
+    private float _boundBlendAlpha = float.NaN;
+    private float _boundBiasConstant = float.NaN;
+    private float _boundBiasSlope = float.NaN;
+    private float _boundBiasClamp = float.NaN;
+    private uint _boundStencilFront = uint.MaxValue;
+    private uint _boundStencilBack = uint.MaxValue;
+    private readonly nint[] _boundVertexBuffers = new nint[MaxVertexBufferSlots];
+    private readonly ulong[] _boundVertexOffsets = new ulong[MaxVertexBufferSlots];
+
+    private void ForgetEncoderState()
+    {
+        _boundGraphicsPipeline = null;
+        _boundDepthStencilState = 0;
+        _boundBlendRed = float.NaN;
+        _boundBlendGreen = float.NaN;
+        _boundBlendBlue = float.NaN;
+        _boundBlendAlpha = float.NaN;
+        _boundBiasConstant = float.NaN;
+        _boundBiasSlope = float.NaN;
+        _boundBiasClamp = float.NaN;
+        _boundStencilFront = uint.MaxValue;
+        _boundStencilBack = uint.MaxValue;
+        Array.Clear(_boundVertexBuffers);
+        Array.Clear(_boundVertexOffsets);
+        ForgetResidentResources();
+    }
     private MetalPipelineEntry? _pendingGraphicsPipeline;
 
     private readonly nint[] _vertexBuffers = new nint[MaxVertexBufferSlots];
@@ -294,7 +328,7 @@ internal sealed partial class MetalRenderHost
 
         _renderingActive = true;
         _renderingState = state;
-        _boundGraphicsPipeline = null;
+        ForgetEncoderState();
         _renderPasses++;
         if (MetalV2Diagnostics.Verbose || _renderPasses < 4096)
         {
@@ -338,7 +372,7 @@ internal sealed partial class MetalRenderHost
             _renderEncoder = 0;
         }
 
-        _boundGraphicsPipeline = null;
+        ForgetEncoderState();
     }
 
     private void EndComputeEncoder()
@@ -446,39 +480,73 @@ internal sealed partial class MetalRenderHost
             _boundGraphicsPipeline = entry;
         }
 
+        // Encoder state survives between draws, so only what changed is sent. A draw
+        // costs twenty-odd message sends otherwise, and consecutive draws in one pass
+        // share almost all of their state.
         var depthStencilState = GetDepthStencilState(entry, in _dynamicState);
-        MetalNative.SendVoid(_renderEncoder, SelSetDepthStencilState, depthStencilState);
+        if (_boundDepthStencilState != depthStencilState)
+        {
+            MetalNative.SendVoid(_renderEncoder, SelSetDepthStencilState, depthStencilState);
+            _boundDepthStencilState = depthStencilState;
+        }
+
         ApplyViewportAndScissor();
-        MetalNative.SendVoidBlendColor(
-            _renderEncoder,
-            SelSetBlendColor,
-            _dynamicState.BlendRed,
-            _dynamicState.BlendGreen,
-            _dynamicState.BlendBlue,
-            _dynamicState.BlendAlpha);
-        MetalV2Native.SendDepthBias(
-            _renderEncoder,
-            SelSetDepthBias,
-            _dynamicState.DepthBiasEnabled ? _dynamicState.DepthBiasConstantFactor : 0f,
-            _dynamicState.DepthBiasEnabled ? _dynamicState.DepthBiasSlopeFactor : 0f,
-            _dynamicState.DepthBiasEnabled ? _dynamicState.DepthBiasClamp : 0f);
-        if (_dynamicState.StencilTestEnabled)
+        if (_boundBlendRed != _dynamicState.BlendRed || _boundBlendGreen != _dynamicState.BlendGreen ||
+            _boundBlendBlue != _dynamicState.BlendBlue || _boundBlendAlpha != _dynamicState.BlendAlpha)
+        {
+            MetalNative.SendVoidBlendColor(
+                _renderEncoder,
+                SelSetBlendColor,
+                _dynamicState.BlendRed,
+                _dynamicState.BlendGreen,
+                _dynamicState.BlendBlue,
+                _dynamicState.BlendAlpha);
+            _boundBlendRed = _dynamicState.BlendRed;
+            _boundBlendGreen = _dynamicState.BlendGreen;
+            _boundBlendBlue = _dynamicState.BlendBlue;
+            _boundBlendAlpha = _dynamicState.BlendAlpha;
+        }
+
+        var biasConstant = _dynamicState.DepthBiasEnabled ? _dynamicState.DepthBiasConstantFactor : 0f;
+        var biasSlope = _dynamicState.DepthBiasEnabled ? _dynamicState.DepthBiasSlopeFactor : 0f;
+        var biasClamp = _dynamicState.DepthBiasEnabled ? _dynamicState.DepthBiasClamp : 0f;
+        if (_boundBiasConstant != biasConstant || _boundBiasSlope != biasSlope || _boundBiasClamp != biasClamp)
+        {
+            MetalV2Native.SendDepthBias(_renderEncoder, SelSetDepthBias, biasConstant, biasSlope, biasClamp);
+            _boundBiasConstant = biasConstant;
+            _boundBiasSlope = biasSlope;
+            _boundBiasClamp = biasClamp;
+        }
+
+        if (_dynamicState.StencilTestEnabled &&
+            (_boundStencilFront != _dynamicState.FrontStencil.Reference ||
+                _boundStencilBack != _dynamicState.BackStencil.Reference))
         {
             MetalV2Native.SendStencilReferences(
                 _renderEncoder,
                 SelSetStencilReferences,
                 _dynamicState.FrontStencil.Reference,
                 _dynamicState.BackStencil.Reference);
+            _boundStencilFront = _dynamicState.FrontStencil.Reference;
+            _boundStencilBack = _dynamicState.BackStencil.Reference;
         }
 
         for (var index = 0; index < _vertexBufferCount; index++)
         {
+            if (_boundVertexBuffers[index] == _vertexBuffers[index] &&
+                _boundVertexOffsets[index] == _vertexOffsets[index])
+            {
+                continue;
+            }
+
             MetalNative.SendSetBuffer(
                 _renderEncoder,
                 SelSetVertexBuffer,
                 _vertexBuffers[index],
                 (nuint)_vertexOffsets[index],
                 (nuint)(VertexBufferSlotBase + index));
+            _boundVertexBuffers[index] = _vertexBuffers[index];
+            _boundVertexOffsets[index] = _vertexOffsets[index];
         }
 
         ApplyStageBindings(graphics: true);

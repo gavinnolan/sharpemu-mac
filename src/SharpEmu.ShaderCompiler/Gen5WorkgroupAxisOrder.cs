@@ -24,21 +24,50 @@ public static class Gen5WorkgroupAxisOrder
     // physical axis (0=X/1=Y/2=Z) that logical axis is remapped onto.
     public static int[] Compute(uint sizeX, uint sizeY, uint sizeZ)
     {
-        if (sizeZ <= 64)
+        var physicalAxisOfLogical = new int[3];
+        ComputeInto(sizeX, sizeY, sizeZ, physicalAxisOfLogical);
+        return physicalAxisOfLogical;
+    }
+
+    /// <summary>
+    /// The same mapping written into a caller-owned span of three. The host dispatch
+    /// path runs this per dispatch, so it must not allocate.
+    /// </summary>
+    public static void ComputeInto(uint sizeX, uint sizeY, uint sizeZ, Span<int> physicalAxisOfLogical)
+    {
+        if (physicalAxisOfLogical.Length < 3)
         {
-            return [0, 1, 2];
+            throw new ArgumentException("The axis order needs three entries.", nameof(physicalAxisOfLogical));
         }
 
-        var sizes = new[] { sizeX, sizeY, sizeZ };
-        var byDescendingSize = new[] { 0, 1, 2 };
-        Array.Sort(byDescendingSize, (a, b) => sizes[b].CompareTo(sizes[a]));
+        if (sizeZ <= 64)
+        {
+            physicalAxisOfLogical[0] = 0;
+            physicalAxisOfLogical[1] = 1;
+            physicalAxisOfLogical[2] = 2;
+            return;
+        }
 
-        var physicalAxisOfLogical = new int[3];
+        Span<uint> sizes = [sizeX, sizeY, sizeZ];
+        Span<int> byDescendingSize = [0, 1, 2];
+        // Three entries: an insertion sort is shorter than a comparison delegate and
+        // keeps the original order between equal sizes, as the sorted version did.
+        for (var index = 1; index < 3; index++)
+        {
+            var candidate = byDescendingSize[index];
+            var position = index;
+            while (position > 0 && sizes[byDescendingSize[position - 1]] < sizes[candidate])
+            {
+                byDescendingSize[position] = byDescendingSize[position - 1];
+                position--;
+            }
+
+            byDescendingSize[position] = candidate;
+        }
+
         for (var physical = 0; physical < 3; physical++)
         {
             physicalAxisOfLogical[byDescendingSize[physical]] = physical;
         }
-
-        return physicalAxisOfLogical;
     }
 }

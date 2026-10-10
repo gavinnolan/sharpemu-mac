@@ -1132,6 +1132,96 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
         return size != 0 && ulong.MaxValue - address >= size && TryFindAlias(Volatile.Read(ref _snapshot), address, size, out target);
     }
 
+    /// <summary>
+    /// The alias of a range that may span several views, as long as those views are
+    /// adjacent in guest space and in the backing. A guest allocation mapped in
+    /// several calls is one contiguous run of backing bytes, so a buffer that crosses
+    /// a view edge still has one host address — the single-record test cannot see
+    /// that, and a caller that maps the backing no-copy would otherwise have to copy.
+    /// </summary>
+    public bool TryResolveAliasSpan(ulong address, ulong size, out ulong target)
+    {
+        target = 0;
+        if (size == 0 || ulong.MaxValue - address < size)
+        {
+            return false;
+        }
+
+        var snapshot = Volatile.Read(ref _snapshot);
+        if (TryFindAlias(snapshot, address, size, out target))
+        {
+            return true;
+        }
+
+        var index = FindRecordIndex(snapshot, address);
+        if (index < 0 || Volatile.Read(ref _disposed) || _backing is null)
+        {
+            target = 0;
+            return false;
+        }
+
+        var record = snapshot[index];
+        if (address >= record.Address + record.Size)
+        {
+            target = 0;
+            return false;
+        }
+
+        var offset = record.Offset + address - record.Address;
+        var covered = record.Address + record.Size - address;
+        while (covered < size)
+        {
+            if (++index >= snapshot.Length)
+            {
+                target = 0;
+                return false;
+            }
+
+            var next = snapshot[index];
+            // Adjacent in guest space and continuing at the next backing byte.
+            if (next.Address != record.Address + record.Size || next.Offset != record.Offset + record.Size)
+            {
+                target = 0;
+                return false;
+            }
+
+            record = next;
+            covered += record.Size;
+        }
+
+        if (!IsWithinBacking(offset, size))
+        {
+            target = 0;
+            return false;
+        }
+
+        target = AliasBase + offset;
+        return true;
+    }
+
+    // The last record whose address is at or below this one, or -1.
+    private static int FindRecordIndex(ViewRecord[] snapshot, ulong address)
+    {
+        var low = 0;
+        var high = snapshot.Length - 1;
+        var found = -1;
+        while (low <= high)
+        {
+            var middle = low + ((high - low) >> 1);
+            if (snapshot[middle].Address <= address)
+            {
+                found = middle;
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        return found;
+    }
+
     private bool TryFindAlias(ViewRecord[] snapshot, ulong address, ulong size, out ulong target)
     {
         target = 0;

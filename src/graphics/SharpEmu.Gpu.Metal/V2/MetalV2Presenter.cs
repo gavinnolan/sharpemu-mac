@@ -329,6 +329,7 @@ internal static class MetalV2Presenter
                 host.ReportCounters();
                 if (!host.CommandStream.HasUnblockedPending && !_relay.HasPendingCommands)
                 {
+                    host.KeepQueueWarmIfIdle();
                     var idleStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                     _ = host.CommandStream.WaitForWork(CommandStreamQueue.AllBlockedRetryMilliseconds);
                     host.NoteIdle(System.Diagnostics.Stopwatch.GetTimestamp() - idleStarted);

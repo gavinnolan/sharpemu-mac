@@ -17,6 +17,22 @@ internal enum MetalImageDirtyCause : byte
     CpuWrite,
     GpuWrite,
     Invalidated,
+    AliasWrite,
+}
+
+// Why a cached image was dropped and a new one created in its place. A title that
+// recreates the same surface every frame pays an upload and a writeback for each
+// cycle, and the reason is the only thing that says which rule to relax.
+internal enum MetalImageReleaseCause : byte
+{
+    FormatMismatch,
+    FewerResources,
+    ViewType,
+    SameAddressReplaced,
+    SubsetOfLarger,
+    OverlapEvicted,
+    Budget,
+    Unmapped,
 }
 
 // Why a GPU-written image had to be published into guest memory.

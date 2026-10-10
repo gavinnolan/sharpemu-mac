@@ -234,6 +234,7 @@ internal sealed partial class MetalRenderHost :
 
         MetalNative.SendVoid(_commandBuffer, SelCommit);
         _previousCommitTime = CACurrentMediaTime();
+        _lastCommitTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
         // A command buffer that fails never signals its serial, and the completion
         // queue would then wait out its timeout on every submission behind it. The
         // previous buffer is far enough ahead to have a status by now, so checking
@@ -399,6 +400,56 @@ internal sealed partial class MetalRenderHost :
 
     /// <summary>Counts the time the worker spent with nothing runnable.</summary>
     public void NoteIdle(long ticks) => Interlocked.Add(ref _idleTicks, ticks);
+
+    // A queue that has been idle schedules its next submission late. Measured on this
+    // host: titles that commit two thousand buffers per two seconds see their
+    // submissions start within a millisecond of the commit, while titles that commit
+    // a hundred wait three hundred milliseconds and more for the driver to pick one
+    // up (commit_to_kernel_ms), with the GPU running them in microseconds and only
+    // one guest window resident. The presenter's own queue is busy throughout, so it
+    // is the guest queue that goes cold, not the device.
+    //
+    // The worker commits an empty command buffer while it has nothing else to do, so
+    // the queue it will submit the next frame on is never cold. The buffer carries no
+    // work, no event signal and no completion handler.
+    //
+    // Off by default: measured on Octopath it fired only thirteen times per two
+    // seconds, because the worker reaches its idle path at the blocked-retry interval
+    // rather than every two milliseconds, and the completion latency did not move.
+    // The switch keeps the experiment runnable without carrying it on every title.
+    private static readonly bool KeepQueueWarm =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_KEEP_QUEUE_WARM") == "1";
+
+    private const long KeepWarmIntervalMicroseconds = 2000;
+
+    private long _lastCommitTimestamp;
+    private long _keepWarmSubmissions;
+
+    /// <summary>Commits an empty command buffer when the queue has gone quiet.</summary>
+    public void KeepQueueWarmIfIdle()
+    {
+        if (!KeepQueueWarm || _commandBuffer != 0)
+        {
+            return;
+        }
+
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        var interval = KeepWarmIntervalMicroseconds * System.Diagnostics.Stopwatch.Frequency / 1_000_000;
+        if (_lastCommitTimestamp != 0 && now - _lastCommitTimestamp < interval)
+        {
+            return;
+        }
+
+        _lastCommitTimestamp = now;
+        var buffer = MetalNative.Send(_queue, SelCommandBuffer);
+        if (buffer == 0)
+        {
+            return;
+        }
+
+        MetalNative.SendVoid(buffer, SelCommit);
+        _keepWarmSubmissions++;
+    }
 
     /// <summary>Recorded work stores into this guest range.</summary>
     public void NoteGuestMemoryWrite(ulong address, ulong size, MetalGpuWriteOrigin origin)
@@ -893,15 +944,20 @@ internal sealed partial class MetalRenderHost :
             .Append(" gpu_fills=").Append(Interlocked.Exchange(ref _gpuFills, 0))
             .Append(" cleared_fills=").Append(Interlocked.Exchange(ref _absorbedFills, 0))
             .Append(" host_copies=").Append(Interlocked.Exchange(ref _hostCopies, 0))
+            .Append(" keep_warm=").Append(Interlocked.Exchange(ref _keepWarmSubmissions, 0))
+            .Append(" residency_skipped=").Append(TakeSkippedResidencyCalls())
             .Append(" resident=").Append(_guestMemory.ResidentBuffers.Length)
             .Append(" windows_touched=").Append(System.Numerics.BitOperations.PopCount(_guestMemory.TouchedWindows));
         Console.Error.WriteLine($"[METAL-V2][WAITS]{reasons}");
         var causes = _imageCache.TakeTransferCauses();
+        var aliases = _imageCache.AliasCounters;
         Console.Error.WriteLine(
             $"[METAL-V2][CHURN] up_new={causes.Created} up_cpu={causes.CpuWrite} up_gpu={causes.GpuWrite} " +
-            $"up_other={causes.Invalidated} wb_bind={causes.Binding} wb_store={causes.Storage} " +
+            $"up_other={causes.Invalidated} up_alias={causes.Alias} " +
+            $"wb_bind={causes.Binding} wb_store={causes.Storage} " +
             $"wb_read={causes.HostRead} wb_copy={causes.GuestCopy} wb_overlap={causes.Overlap} " +
-            $"wb_release={causes.Release} wb_drain={causes.Drain} " +
+            $"wb_release={causes.Release} wb_drain={causes.Drain}{ReleaseCauses()} " +
+            $"alias_kept={aliases.Kept} alias_published={aliases.Published} " +
             $"write_ranges={_gpuWrites.Count} write_records={_gpuWrites.Recorded} " +
             $"write_folds={_gpuWrites.Folds} handler_wakeups={_completions.HandlerWakeups} " +
             $"rings={_guestMemory.RingCount} rings_freed={_guestMemory.RingsReleased} " +
@@ -923,6 +979,13 @@ internal sealed partial class MetalRenderHost :
             $"slices={CommandStream.SlicesRun} blocked={blocked.Outstanding} " +
             $"blocked_wait=0x{blocked.SampleWaitAddress:X16} " +
             $"ring_fallbacks={_guestMemory.RingFallbacks} ring_mb={_guestMemory.RingFallbackBytes / (1024 * 1024)}");
+    }
+
+    private string ReleaseCauses()
+    {
+        var builder = new System.Text.StringBuilder();
+        _imageCache.AppendReleaseCauses(builder);
+        return builder.ToString();
     }
 
     public Exception Fatal(string message) => GpuFatal.Fatal(message);

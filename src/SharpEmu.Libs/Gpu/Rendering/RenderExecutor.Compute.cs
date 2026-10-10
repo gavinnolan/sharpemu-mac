@@ -184,12 +184,10 @@ public sealed partial class RenderExecutor
             // axis lands on a physical axis Vulkan actually allows it on. The dispatch group
             // counts must be permuted the same way, or vkCmdDispatch would hand group counts
             // for the wrong physical axis to the pipeline it built with the remapped sizes.
-            var axisOrder = Gen5WorkgroupAxisOrder.Compute(
-                input.ThreadsX,
-                input.ThreadsY,
-                input.ThreadsZ);
-            var logicalGroups = new[] { groupsX, groupsY, groupsZ };
-            var physicalGroups = new uint[3];
+            Span<int> axisOrder = stackalloc int[3];
+            Gen5WorkgroupAxisOrder.ComputeInto(input.ThreadsX, input.ThreadsY, input.ThreadsZ, axisOrder);
+            Span<uint> logicalGroups = [groupsX, groupsY, groupsZ];
+            Span<uint> physicalGroups = stackalloc uint[3];
             for (var logical = 0; logical < 3; logical++)
             {
                 physicalGroups[axisOrder[logical]] = logicalGroups[logical];

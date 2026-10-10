@@ -221,6 +221,9 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMap
 
     public bool TryResolveAlias(ulong address, ulong size, out ulong alias) => _views.TryResolveAlias(address, size, out alias);
 
+    public bool TryResolveAliasSpan(ulong address, ulong size, out ulong alias) =>
+        _views.TryResolveAliasSpan(address, size, out alias);
+
     public bool TryCopyBacking(ulong destination, ulong source, ulong size) => _views.TryCopyBacking(destination, source, size);
 
     public bool IsBacked(ulong address, ulong size) => _views.Contains(address, size);
