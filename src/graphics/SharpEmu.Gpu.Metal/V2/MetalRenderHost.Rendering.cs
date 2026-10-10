@@ -7,6 +7,7 @@ using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.ShaderCompiler.Metal;
 
 namespace SharpEmu.Gpu.Metal.V2;
 
@@ -61,6 +62,8 @@ internal sealed partial class MetalRenderHost
         "drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:instanceCount:baseVertex:baseInstance:");
     private static readonly nint SelDrawIndexedIndirect = MetalNative.Selector(
         "drawIndexedPrimitives:indexType:indexBuffer:indexBufferOffset:indirectBuffer:indirectBufferOffset:");
+    private static readonly nint SelDrawMeshThreadgroups = MetalNative.Selector(
+        "drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:");
     private static readonly nint SelDispatchThreadgroups =
         MetalNative.Selector("dispatchThreadgroups:threadsPerThreadgroup:");
     private static readonly nint SelDispatchIndirect =
@@ -538,6 +541,14 @@ internal sealed partial class MetalRenderHost
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         ApplyGraphicsState();
         var entry = _boundGraphicsPipeline!;
+        if (entry.Mesh is { } mesh)
+        {
+            DrawMesh(mesh, vertexCount, instanceCount, indexed: false, firstIndexOrVertex: firstVertex,
+                baseVertex: 0, firstInstance: firstInstance);
+            CountDraw(started);
+            return;
+        }
+
         MetalV2Native.SendDrawPrimitivesBaseInstance(
             _renderEncoder,
             SelDrawPrimitives,
@@ -559,6 +570,14 @@ internal sealed partial class MetalRenderHost
 
         ApplyGraphicsState();
         var entry = _boundGraphicsPipeline!;
+        if (entry.Mesh is { } mesh)
+        {
+            DrawMesh(mesh, indexCount, instanceCount, indexed: true, firstIndexOrVertex: firstIndex,
+                baseVertex: vertexOffset, firstInstance: firstInstance);
+            CountDraw(started);
+            return;
+        }
+
         var indexBytes = _indexType == Mtl.IndexTypeUInt32 ? 4UL : 2UL;
         MetalV2Native.SendDrawIndexedBaseVertex(
             _renderEncoder,
@@ -586,6 +605,17 @@ internal sealed partial class MetalRenderHost
         // vertexOffset, firstInstance), which is exactly MTLDrawIndexedPrimitivesIndirectArguments.
         ApplyGraphicsState();
         var entry = _boundGraphicsPipeline!;
+        if (entry.Mesh is not null)
+        {
+            // A mesh grid is sized from the counts, and Metal has no indirect mesh
+            // draw that reads them; the executor resolves such a draw on the CPU when
+            // the host says it cannot take one (ResolvesIndirectDrawOnGpu).
+            MetalV2Diagnostics.WarnOnce(
+                "mesh-indirect",
+                "An indexed indirect draw reached a mesh pipeline and was skipped; its counts are not on the host.");
+            return;
+        }
+
         MetalV2Native.SendDrawIndexedIndirect(
             _renderEncoder,
             SelDrawIndexedIndirect,
@@ -633,6 +663,57 @@ internal sealed partial class MetalRenderHost
             entry.ThreadsPerThreadgroup);
         CountDraw(started);
         return true;
+    }
+
+    // One NGG subgroup per threadgroup, one instance per grid row. The counts the
+    // geometry engine would have put in registers travel in the draw-info block the
+    // mesh prologue reads (docs/mac/ngg-mesh-shaders.md).
+    private void DrawMesh(
+        Gen5MslMeshInfo mesh,
+        uint count,
+        uint instanceCount,
+        bool indexed,
+        uint firstIndexOrVertex,
+        int baseVertex,
+        uint firstInstance)
+    {
+        var verticesPerPrimitive = Math.Max(mesh.VerticesPerPrimitive, 1);
+        var primitives = count / verticesPerPrimitive;
+        var maxPrimitives = Math.Max(mesh.MaxPrimitives, 1);
+        var maxVertices = Math.Max(mesh.MaxVertices, 1);
+        var subgroups = Math.Max(
+            (primitives + maxPrimitives - 1) / maxPrimitives,
+            (count + maxVertices - 1) / maxVertices);
+        if (subgroups == 0 || instanceCount == 0)
+        {
+            return;
+        }
+
+        var drawInfo = _guestMemory.Allocate(Gen5MslMeshInfo.DrawInfoByteSize, 256, out var span);
+        span.Clear();
+        var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(span);
+        words[0] = maxVertices;
+        words[1] = maxPrimitives;
+        words[2] = indexed ? count : 0;
+        words[3] = indexed ? (_indexType == Mtl.IndexTypeUInt32 ? 2u : 1u) : 0u;
+        words[4] = indexed ? firstIndexOrVertex : 0;
+        words[5] = unchecked((uint)baseVertex);
+        words[6] = instanceCount;
+        words[7] = firstInstance;
+        MetalNative.SendSetBuffer(
+            _renderEncoder, SelSetMeshBuffer, drawInfo.Buffer, (nuint)drawInfo.Offset, (nuint)mesh.DrawInfoBufferIndex);
+        // The index slot is read as a dword stream and must be bound even for an
+        // automatic draw; the null buffer serves when the draw has no index buffer.
+        var indexBuffer = indexed && _indexBuffer != 0 ? _indexBuffer : _guestMemory.NullBuffer;
+        var indexOffset = indexed && _indexBuffer != 0 ? _indexOffset : 0;
+        MetalNative.SendSetBuffer(
+            _renderEncoder, SelSetMeshBuffer, indexBuffer, (nuint)indexOffset, (nuint)mesh.IndexBufferIndex);
+        MetalNative.SendDrawMesh(
+            _renderEncoder,
+            SelDrawMeshThreadgroups,
+            new MtlSize { Width = subgroups, Height = instanceCount, Depth = 1 },
+            new MtlSize { Width = 1, Height = 1, Depth = 1 },
+            new MtlSize { Width = Math.Max(mesh.ThreadsPerThreadgroup, 1), Height = 1, Depth = 1 });
     }
 
     private void CountDraw(long startedTicks)

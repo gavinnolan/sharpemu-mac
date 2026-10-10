@@ -85,6 +85,9 @@ internal static class Mtl
     public const nuint BarrierScopeRenderTargets = 4;
     public const nuint RenderStageVertex = 1;
     public const nuint RenderStageFragment = 2;
+    public const nuint RenderStageTile = 4;
+    public const nuint RenderStageObject = 8;
+    public const nuint RenderStageMesh = 16;
 
     // MTLResourceUsage.
     public const nuint ResourceUsageRead = 1;

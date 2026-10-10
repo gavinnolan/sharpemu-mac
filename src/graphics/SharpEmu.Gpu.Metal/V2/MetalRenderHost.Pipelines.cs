@@ -32,6 +32,10 @@ internal sealed partial class MetalRenderHost
         public PipelineStaticParameters? StaticParameters;
         public bool HasDepth;
         public bool HasStencil;
+
+        // Set when the vertex program is an NGG primitive shader compiled as a Metal
+        // mesh function; the draw then launches threadgroups instead of vertices.
+        public Gen5MslMeshInfo? Mesh;
     }
 
     // One compiled MSL module: its library, its function, and the shader it came from.
@@ -162,25 +166,42 @@ internal sealed partial class MetalRenderHost
         var pixelModule = description.PixelStage is not null && description.PixelProgram.IsValid
             ? RequireModule(description.PixelProgram)
             : null;
+        var mesh = vertexModule.Shader.Stage == Gen5MslStage.Mesh ? vertexModule.Shader.MeshInfo : null;
+        var descriptorClass = mesh is null ? "MTLRenderPipelineDescriptor" : "MTLMeshRenderPipelineDescriptor";
         var descriptor = MetalNative.Send(
-            MetalNative.Send(MetalNative.Class("MTLRenderPipelineDescriptor"), MetalNative.Selector("alloc")),
+            MetalNative.Send(MetalNative.Class(descriptorClass), MetalNative.Selector("alloc")),
             MetalNative.Selector("init"));
         if (descriptor == 0)
         {
-            throw Fatal("A Metal render pipeline descriptor could not be created.");
+            throw Fatal($"A Metal render pipeline descriptor could not be created: class={descriptorClass}.");
         }
 
         nint state;
         try
         {
-            MetalNative.SendVoid(descriptor, MetalNative.Selector("setVertexFunction:"), vertexModule.Function);
+            if (mesh is null)
+            {
+                MetalNative.SendVoid(descriptor, MetalNative.Selector("setVertexFunction:"), vertexModule.Function);
+                MetalV2Native.SendVoidValue(
+                    descriptor, MetalNative.Selector("setRasterSampleCount:"), Math.Max(parameters.Samples, 1));
+            }
+            else
+            {
+                // A mesh function has no stage_in and no vertex descriptor: the
+                // primitive shader fetches its own attributes through the resource path.
+                MetalNative.SendVoid(descriptor, MetalNative.Selector("setMeshFunction:"), vertexModule.Function);
+                MetalV2Native.SendVoidValue(
+                    descriptor,
+                    MetalNative.Selector("setMaxTotalThreadsPerMeshThreadgroup:"),
+                    Math.Max(mesh.ThreadsPerThreadgroup, 1));
+                MetalV2Native.SendVoidValue(
+                    descriptor, MetalNative.Selector("setRasterSampleCount:"), Math.Max(parameters.Samples, 1));
+            }
+
             if (pixelModule is not null)
             {
                 MetalNative.SendVoid(descriptor, MetalNative.Selector("setFragmentFunction:"), pixelModule.Function);
             }
-
-            MetalV2Native.SendVoidValue(
-                descriptor, MetalNative.Selector("setRasterSampleCount:"), Math.Max(parameters.Samples, 1));
             var colorAttachments = MetalNative.Send(descriptor, SelColorAttachments);
             for (var index = 0; index < description.Rendering.ColorCount; index++)
             {
@@ -245,7 +266,7 @@ internal sealed partial class MetalRenderHost
                     descriptor, MetalNative.Selector("setStencilAttachmentPixelFormat:"), (nuint)stencilFormat);
             }
 
-            if (description.VertexInput.AttributeCount != 0)
+            if (mesh is null && description.VertexInput.AttributeCount != 0)
             {
                 var vertexDescriptor = CreateVertexDescriptor(description);
                 MetalNative.SendVoid(descriptor, MetalNative.Selector("setVertexDescriptor:"), vertexDescriptor);
@@ -253,8 +274,16 @@ internal sealed partial class MetalRenderHost
             }
 
             nint error = 0;
-            state = MetalNative.Send(
-                _device, MetalNative.Selector("newRenderPipelineStateWithDescriptor:error:"), descriptor, ref error);
+            state = mesh is null
+                ? MetalNative.Send(
+                    _device, MetalNative.Selector("newRenderPipelineStateWithDescriptor:error:"), descriptor, ref error)
+                : MetalNative.SendNewMeshPipeline(
+                    _device,
+                    MetalNative.Selector("newRenderPipelineStateWithMeshDescriptor:options:reflection:error:"),
+                    descriptor,
+                    0,
+                    0,
+                    ref error);
             if (state == 0)
             {
                 throw Fatal(
@@ -285,6 +314,7 @@ internal sealed partial class MetalRenderHost
             StaticParameters = parameters,
             HasDepth = depthFormatOf(description) != MtlFormat.Invalid,
             HasStencil = description.Rendering.StencilFormat != GpuFormat.Undefined,
+            Mesh = mesh,
         };
         _pipelineEntries[entry.Id] = entry;
         return new PipelineHandle(entry.Id, 0, false);

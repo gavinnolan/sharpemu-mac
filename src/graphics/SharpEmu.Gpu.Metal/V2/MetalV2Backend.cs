@@ -29,6 +29,16 @@ internal sealed class MetalV2Backend : IGuestGpuBackend
 
     public string BackendName => "Metal v2";
 
+    /// <summary>
+    /// v2 builds MTLMeshRenderPipelineDescriptor pipelines and launches
+    /// drawMeshThreadgroups, so the merged ES/GS stage runs as what it is
+    /// (docs/mac/ngg-mesh-shaders.md). It needs a Metal 3 device;
+    /// SHARPEMU_METAL_MESH_SHADERS=0 keeps the per-vertex path for comparison.
+    /// </summary>
+    public bool SupportsPrimitiveShaderMeshPipelines { get; } =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_MESH_SHADERS"), "0", StringComparison.Ordinal) &&
+        MetalV2Presenter.SupportsMeshPipelines();
+
     public bool TryCompileProgram(ShaderCompileRequest request, out IGuestCompiledShader? shader, out string error)
     {
         shader = null;

@@ -88,6 +88,37 @@ internal static class MetalV2Presenter
 
     public static bool IsStarted => Volatile.Read(ref _host) is not null;
 
+    // MTLGPUFamily.Metal3, the family that has the mesh stage.
+    private const nint GpuFamilyMetal3 = 5001;
+
+    /// <summary>Whether this device can build mesh render pipelines.</summary>
+    public static bool SupportsMeshPipelines()
+    {
+        lock (_gate)
+        {
+            try
+            {
+                EnsureDeviceLocked();
+            }
+            catch (Exception exception)
+            {
+                Console.Error.WriteLine($"[METAL-V2][WARN] The Metal device is unavailable: {exception.Message}");
+                return false;
+            }
+
+            var supportsFamily = MetalNative.Selector("supportsFamily:");
+            if (MetalNative.Class("MTLMeshRenderPipelineDescriptor") == 0 ||
+                !MetalNative.SendBool(_device, MetalNative.Selector("respondsToSelector:"), supportsFamily) ||
+                !MetalNative.SendBool(_device, supportsFamily, GpuFamilyMetal3))
+            {
+                Console.Error.WriteLine("[METAL-V2][INFO] Mesh render pipelines are unavailable on this device.");
+                return false;
+            }
+
+            return true;
+        }
+    }
+
     /// <summary>Creates the device, the render host and the GPU worker, once.</summary>
     public static MetalRenderHost EnsureHost()
     {

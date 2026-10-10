@@ -28,6 +28,7 @@ internal sealed partial class MetalRenderHost
     private static readonly nint SelGpuResourceId = MetalNative.Selector("gpuResourceID");
     private static readonly nint SelGpuAddress = MetalNative.Selector("gpuAddress");
     private static readonly nint SelNewSamplerState = MetalNative.Selector("newSamplerStateWithDescriptor:");
+    private static readonly nint SelSetMeshBuffer = MetalNative.Selector("setMeshBuffer:offset:atIndex:");
 
     // The host descriptors of one stage, reused across draws so a draw allocates nothing.
     private sealed class MetalStageBindings : IPreparedBindings
@@ -690,26 +691,26 @@ internal sealed partial class MetalRenderHost
     {
         if (graphics)
         {
-            BindStageBuffers(_renderEncoder, StageVertex, SelSetVertexBuffer);
+            // A mesh pipeline has no vertex stage: the primitive shader's resources
+            // bind to the mesh stage, and so does the residency of the windows it
+            // fetches its own attributes through.
+            var meshStage = _pendingGraphicsPipeline?.Mesh is not null;
+            var stages = meshStage
+                ? Mtl.RenderStageMesh | Mtl.RenderStageFragment
+                : Mtl.RenderStageVertex | Mtl.RenderStageFragment;
+            BindStageBuffers(_renderEncoder, StageVertex, meshStage ? SelSetMeshBuffer : SelSetVertexBuffer);
             BindStageBuffers(_renderEncoder, StageFragment, SelSetFragmentBuffer);
             foreach (var window in _guestMemory.ResidentBuffers)
             {
                 MetalNative.SendUseResource(
-                    _renderEncoder,
-                    SelUseResourceStages,
-                    window,
-                    Mtl.ResourceUsageRead | Mtl.ResourceUsageWrite,
-                    Mtl.RenderStageVertex | Mtl.RenderStageFragment);
+                    _renderEncoder, SelUseResourceStages, window,
+                    Mtl.ResourceUsageRead | Mtl.ResourceUsageWrite, stages);
             }
 
             for (var index = 0; index < _usedResourceCount; index++)
             {
                 MetalNative.SendUseResource(
-                    _renderEncoder,
-                    SelUseResourceStages,
-                    _usedResources[index],
-                    _usedResourceUsage[index],
-                    Mtl.RenderStageVertex | Mtl.RenderStageFragment);
+                    _renderEncoder, SelUseResourceStages, _usedResources[index], _usedResourceUsage[index], stages);
             }
 
             return;
