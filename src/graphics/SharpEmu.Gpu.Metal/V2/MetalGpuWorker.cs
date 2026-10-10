@@ -327,7 +327,7 @@ internal sealed class MetalCompletionQueue : IDisposable
                 "completion-stall",
                 $"A completion has not arrived in {StallSeconds}s and the wait is still running: " +
                 $"serial={serial} signalled={SignaledValue} published={Volatile.Read(ref _publishedSerial)} " +
-                $"pending={PendingCount()}.");
+                $"pending={PendingCount}.");
         }
 
         var signalled = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -345,14 +345,6 @@ internal sealed class MetalCompletionQueue : IDisposable
 
     // How long a completion may be outstanding before the wait says so once.
     private const int StallSeconds = 5;
-
-    private int PendingCount()
-    {
-        lock (_gate)
-        {
-            return _pending.Count;
-        }
-    }
 
     private bool HasWorkAtOrBefore(ulong serial)
     {

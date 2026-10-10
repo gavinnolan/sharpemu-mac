@@ -300,6 +300,7 @@ internal sealed partial class MetalRenderHost :
     private int _inFlightHead;
     private int _inFlightCount;
     private long _unsampledSubmissions;
+    private ulong _notifiedCompletedSerial;
 
     private void RetainInFlight(nint buffer, ulong serial)
     {
@@ -323,12 +324,18 @@ internal sealed partial class MetalRenderHost :
     /// <summary>Reads and releases every submission the GPU has finished.</summary>
     private void DrainFinishedSubmissions()
     {
-        if (_inFlightCount == 0)
+        if (_inFlightCount == 0 && _notifiedCompletedSerial >= _nextSerial)
         {
             return;
         }
 
         var completed = CompletedSerial;
+        if (completed > _notifiedCompletedSerial)
+        {
+            _notifiedCompletedSerial = completed;
+            NotifyGpuCompleted(completed);
+        }
+
         while (_inFlightCount > 0 && _inFlightSerials[_inFlightHead] <= completed)
         {
             var buffer = _inFlightBuffers[_inFlightHead];
@@ -523,6 +530,13 @@ internal sealed partial class MetalRenderHost :
 
     private long _lastCommitTimestamp;
     private long _keepWarmSubmissions;
+
+    /// <summary>
+    /// Reads whatever the GPU has finished and tells the command stream, so a wait on
+    /// bytes the GPU wrote is retried as soon as the write lands rather than at the
+    /// blocked-retry interval. The worker calls it before it parks.
+    /// </summary>
+    public void PollGpuCompletions() => DrainFinishedSubmissions();
 
     /// <summary>Commits an empty command buffer when the queue has gone quiet.</summary>
     public void KeepQueueWarmIfIdle()

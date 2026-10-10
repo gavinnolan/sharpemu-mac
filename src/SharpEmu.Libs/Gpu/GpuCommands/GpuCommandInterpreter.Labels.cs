@@ -472,7 +472,7 @@ public sealed partial class GpuCommandInterpreter
             return true;
         }
 
-        Suspend();
+        SuspendOn(new CommandWaitCondition(CommandWaitKind.FlipSlot));
         return false;
     }
 
@@ -532,7 +532,7 @@ public sealed partial class GpuCommandInterpreter
         _host.Flush();
         if (!_host.IsFlipDone((int)videoOutHandle, (int)displayBufferIndex))
         {
-            Suspend();
+            SuspendOn(CommandWaitCondition.Flip((int)videoOutHandle, (int)displayBufferIndex));
         }
     }
 }
