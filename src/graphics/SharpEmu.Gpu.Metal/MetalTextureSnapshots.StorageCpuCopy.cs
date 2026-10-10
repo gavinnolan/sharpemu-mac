@@ -62,9 +62,11 @@ internal static partial class MetalTextureSnapshots
         var lastResult = CpuMappedCopyResult.Unavailable;
         var firstRejectedPredicate = "copy-not-attempted";
         ulong lastFootprintAddress = 0, lastFootprintBytes = 0, lastSourceAddress = 0, lastSourceBytes = 0;
+        CpuMappedReadWatchDiagnostic? lastFirstWatchRefusal = null;
         var attemptLimit = waitForOriginalEnrollment ? 1 : 3;
         for (var attempt = 0; attempt < attemptLimit; attempt++)
         {
+            lastFirstWatchRefusal = null; // The final attempt reports only its own first reached watch guard.
             if (originalSession != MetalVideoPresenter.CurrentStorageCpuSeedSession)
                 throw new InvalidOperationException("Metal typed storage session changed before the original copy.");
             var read = GuestImageWriteTracker.BeginReadSnapshot(d.Address, physical, source: "agc.typed-storage-mapped-copy");
@@ -114,7 +116,8 @@ internal static partial class MetalTextureSnapshots
                 // token, watch or mapping to replace the original admission.
                 if (!source.IsMappedCopyObservationCurrent(mapping))
                 { firstRejectedPredicate = "original-mapping-currentness"; continue; }
-                if (withWriteWatch && !((ICpuMappedReadWatchSource)source).IsMappedCopyWriteWatchCurrent(mapping))
+                if (withWriteWatch && !InspectTypedCopyOriginalWriteWatch((ICpuMappedReadWatchSource)source,
+                    mapping, MetalVideoPresenter.CanonicalPublicationDiagnosticsEnabled, out lastFirstWatchRefusal))
                 { firstRejectedPredicate = "original-physical-write-watch"; continue; }
                 if (!GuestImageWriteTracker.IsReadSnapshotStable(read))
                 { firstRejectedPredicate = "original-read-generation"; continue; }
@@ -145,6 +148,37 @@ internal static partial class MetalTextureSnapshots
         throw new InvalidOperationException($"Metal typed storage mapping/content changed across {attemptsDescription} at 0x{d.Address:X}. " +
             $"last_result={lastResult} last_attempt_first_rejected_predicate={firstRejectedPredicate} requested_bytes={physical} original_session={originalSession} " +
             $"write_watch_requested={withWriteWatch} last_original_footprint=0x{lastFootprintAddress:X}/{lastFootprintBytes} " +
-            $"last_original_source=0x{lastSourceAddress:X}/{lastSourceBytes}.");
+            $"last_original_source=0x{lastSourceAddress:X}/{lastSourceBytes}." +
+            FormatTypedCopyOriginalWatchRefusal(lastFirstWatchRefusal));
     }
+    // Diagnostics only: one unchanged Boolean provider guard, never Status,
+    // waiting, enrollment, a replacement copy or admission/content authority.
+    private static bool InspectTypedCopyOriginalWriteWatch(ICpuMappedReadWatchSource source,
+        CpuMappedCopyObservation mapping, bool diagnose, out CpuMappedReadWatchDiagnostic? first)
+    {
+        first = null;
+        if (!diagnose) return source.IsMappedCopyWriteWatchCurrent(mapping);
+        var current = source.IsMappedCopyWriteWatchCurrent(mapping, out var diagnostic);
+        if (!current) first = diagnostic; // Own the detached FIRST refusal, not a later sample.
+        return current;
+    }
+
+    private static string FormatTypedCopyOriginalWatchRefusal(CpuMappedReadWatchDiagnostic? first) =>
+        first is not { } d ? string.Empty :
+        $" same_query_mapping_guard={d.MappingGuard ?? "not-reached"};" +
+        $" same_query_mapping_check={d.MappingCheck ?? "not-reached"};" +
+        $" same_query_watch_guard={d.WatchGuard ?? "not-reached"};" +
+        $" same_query_primary_admission={d.PrimaryAdmission?.ToString() ?? "not-reached"};" +
+        $" same_query_boolean_current={d.BooleanCurrent?.ToString() ?? "not-queried"};" +
+        $" same_query_admission_owner_id={d.AdmissionOwner?.Identity?.ToString() ?? "unknown-or-not-reached"};" +
+        $" same_query_admission_owner_kind={d.AdmissionOwner?.Kind.ToString() ?? "not-reached"};" +
+        $" same_query_admission_owner_thread={d.AdmissionOwner?.AcquiringThread?.ToString() ?? "unknown-or-not-reached"};" +
+        $" same_query_admission_owner_phase={d.AdmissionOwner?.Phase.ToString() ?? "not-reached"};" +
+        $" same_query_admission_owner_outcome={d.AdmissionOwner?.Outcome.ToString() ?? "not-reached"};" +
+        $" same_query_admission_owner_refusal={d.AdmissionOwner?.Refusal ?? "not-reached"};" +
+        $" same_query_shared_closure={d.SharedClosure ?? "none-or-not-reached"};" +
+        $" same_query_owner_closure={d.OwnerClosure ?? "none-or-not-reached"};" +
+        $" same_query_virtual_closure={d.VirtualClosure ?? "none-or-not-reached"};" +
+        " attribution_not_authority=true; caller_local_ticket_context=not-queried-no-wait-authority";
+
 }
