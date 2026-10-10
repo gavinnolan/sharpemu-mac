@@ -28,6 +28,7 @@ public static class GuestLoadProgress
     private static long _amprUnknownIds;
     private static long _totalFileReadBytes;
     private static long _totalAmprReadBytes;
+    private static int _quietIntervals;
 
     private static Func<string>? _threadSummary;
     private static Timer? _timer;
@@ -107,6 +108,9 @@ public static class GuestLoadProgress
         var unknown = Interlocked.Exchange(ref _amprUnknownIds, 0);
         _totalFileReadBytes += fileBytes;
         _totalAmprReadBytes += amprBytes;
+        // Consecutive intervals in which nothing arrived. One is noise; a run of them
+        // with threads parked is the difference between slow and stuck.
+        _quietIntervals = fileBytes + amprBytes == 0 ? _quietIntervals + 1 : 0;
         string threads;
         try
         {
@@ -120,13 +124,14 @@ public static class GuestLoadProgress
         Console.Error.WriteLine(string.Format(
             CultureInfo.InvariantCulture,
             "[LOADER][LOAD] read_kb={0} reads={1} ampr_kb={2} ampr_reads={3} ampr_unknown={4} " +
-            "total_mb={5:F1} {6}",
+            "total_mb={5:F1} quiet={7} {6}",
             fileBytes / 1024,
             files,
             amprBytes / 1024,
             ampr,
             unknown,
             (_totalFileReadBytes + _totalAmprReadBytes) / (1024.0 * 1024.0),
-            threads));
+            threads,
+            _quietIntervals));
     }
 }
