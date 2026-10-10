@@ -2,7 +2,23 @@
 
 Priority: make all nine games reach a menu or controllable scene first; performance and visual polish follow entry.
 
-Current qualification (R10): test-only successor `18d90e23` passes all three
+Current qualification (R11): fixture-isolation successor `351c3c1c` passes all
+three fresh builds, all 109 focused cases and all 1,355 ordinary cases per
+actual ARM64 and X64 .NET 10.0.3 runtime. This includes the former R10 failure;
+the precise R10 residue remains unobserved. ROOT independently verifies all 96
+managed checkpoint artifacts, 2,054 unchanged source files, 245 compiled files,
+47 preparation pins, all ten exact passed TRX inventories (218 focused and
+2,710 ordinary executions, zero skips/failures), and fresh absence of all 36
+recorded roots, heavy workers and the shared lease. Managed checkpoint:
+`426c0c3b2edb7c4cda6b9762bd0d7e38d485017a64b89f7371f5dad22de14a19`.
+Build checkpoint:
+`6ce830ea9829f3810698fec2558879de3bde9e3aa5c73144365bc6b6cbc983bd`.
+Four selected positive X64 native workers are now granted in order 17/35/44/37,
+60 seconds each; the other 242 historical native rows remain unrun. Publication
+and games have not yet run on this successor. Production code is unchanged
+from the four-fix `638c3bdf` candidate; local main still uses `e2535177`.
+
+Previous qualification (R10): test-only successor `18d90e23` passes all three
 builds and all 108 focused cases on each actual CLR. ARM64 ordinary Host passes
 293/293; ordinary Libs passes 955/956 and stops on
 `ActualCanonicalDirtyCoreAndDeferredRetryCarryFirstPrepareBusyWithoutEffects`
