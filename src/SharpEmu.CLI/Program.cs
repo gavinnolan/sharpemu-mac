@@ -128,6 +128,15 @@ internal static partial class Program
             HostMainThread.Enable();
             var emulation = new Thread(() =>
             {
+                // This thread runs the guest's main thread: it drives the ELF
+                // entry point and everything the title does before it spawns a
+                // pthread of its own. Frame deadlines live here, so it asks for
+                // the same QoS class as the presenter. Guest pthreads inherit
+                // their class from whoever creates them and are deliberately
+                // left alone — a title with thirty worker threads must not have
+                // all of them outranking the presenter.
+                SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(
+                    SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
                 try
                 {
                     exitCode = RunEmulator(args, isMitigatedChild);
@@ -214,6 +223,10 @@ internal static partial class Program
 
         Log.Info(BuildInfo.Banner);
         Log.Info(HostSystemInfo.Summary);
+        // Once per process, next to the hardware banner: every later performance
+        // comparison needs the ISA surface and the core/page shape it was measured
+        // on, and on a translated host that is not what the hardware would say.
+        Log.Info(HostSystemInfo.RuntimeIsaSummary);
 
         ebootPath = Path.GetFullPath(ebootPath);
         Console.Error.WriteLine($"[DEBUG] Full path: {ebootPath}");

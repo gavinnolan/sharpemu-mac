@@ -148,8 +148,61 @@ SPDX-License-Identifier: GPL-2.0-or-later
          that collision and keeps the emulator's required mappings available. -->
     <ServerGarbageCollection>false</ServerGarbageCollection>
     <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <!-- Tiered PGO stays on: guest dispatch, the command-stream loop and the HLE
+         import thunks are all megamorphic call sites that only get devirtualised
+         once tier-1 has the profile. It costs a little extra tier-0 bookkeeping
+         at startup, which ReadyToRun (see build-app.sh) more than pays back. -->
     <TieredPGO>true</TieredPGO>
+    <!-- Already the default since .NET 7; pinned because it is the opposite of
+         what a reader would assume for an emulator. Leaving loop-containing
+         methods out of quick JIT means every one of them is fully optimised on
+         first call, and the emulator's startup path is full of enormous
+         loop-bearing methods (ELF relocation, the shader translators) that are
+         called once. Quick-jitting them and letting the ones that stay hot be
+         re-jitted at tier 1 is the cheaper trade for time-to-first-frame. -->
+    <TieredCompilationQuickJitForLoops>true</TieredCompilationQuickJitForLoops>
   </PropertyGroup>
+
+  <!-- ===================================================================== -->
+  <!-- macOS runtime configuration.                                          -->
+  <!-- ===================================================================== -->
+
+  <PropertyGroup Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('osx'))">
+    <!-- Nothing in the emulator reads culture data: every ToString/TryParse in
+         src passes CultureInfo.InvariantCulture explicitly, there is no
+         `new CultureInfo(...)` anywhere, the UI strings come from the project's
+         own JSON rather than resource satellites, and the macOS bundle carries
+         none of the NuGet natives that want ICU (no Avalonia, no Skia). Invariant
+         mode therefore drops the libicucore load from process startup at no
+         behavioural cost. The one observable change is that culture-sensitive
+         string ordering becomes ordinal, which affects list ordering only.
+         Scoped to osx-* so the Windows/Linux GUI builds keep full ICU. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('osx'))">
+    <!-- W^X double-maps every JIT code page: the runtime writes through an RW
+         alias and executes through a separate RX one. Under Rosetta 2 that extra
+         mapping is pure overhead on a path the emulator hammers — guest code is
+         translated continuously, not just at startup — and it buys nothing here,
+         because the process already holds
+         com.apple.security.cs.allow-unsigned-executable-memory and maps
+         guest-supplied pages executable by design. Turning it off is measurable:
+         about 0.6 s off Dreaming Sarah's time to guest boot complete.
+
+         Set as a host config property rather than DOTNET_EnableWriteXorExecute
+         because that is the form that survives every launch path. CoreCLR reads
+         it with Configuration::GetKnobBooleanValue("System.Runtime.
+         EnableWriteXorExecute", EXTERNAL_EnableWriteXorExecute), so the
+         environment variable still wins when set, and the property applies when
+         it is not — including when the bundle's Mach-O is exec'd directly, where
+         Info.plist LSEnvironment would not be read at all.
+
+         osx-x64 only. On Apple-silicon arm64 hosts IsWXORXEnabled() returns true
+         unconditionally and neither form has any effect, so this would be a lie
+         on an osx-arm64 artifact if one ever existed. -->
+    <RuntimeHostConfigurationOption Include="System.Runtime.EnableWriteXorExecute" Value="false" />
+  </ItemGroup>
 
   <!-- Background GC's write-watch revisit calls FlushProcessWriteBuffers,
        which on macOS uses thread_get_register_pointer_values; under Rosetta 2

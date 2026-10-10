@@ -1,0 +1,520 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+using System.Numerics;
+using System.Text;
+using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Scheduling;
+
+namespace SharpEmu.Gpu.Metal.V2;
+
+// Which way a block-copy kernel moves bytes between the guest surface and a linear buffer.
+internal enum MetalTileDirection
+{
+    Detile,
+    Tile,
+}
+
+// Assembles the MSL tiler kernels: block copies per tile block kind, the 16-bit depth
+// conversions, the BGRA16 channel swap and the unaligned row repack. The MSL twin of
+// SharpEmu.ShaderCompiler.Vulkan.TilerShaders; both are driven by the same tile tables,
+// and TileGeometry owns the block dimensions so the three stay in lockstep.
+//
+// One source per (kind, direction) carries all five element sizes behind the
+// kElementBytes function constant, so a kind costs one newLibraryWithSource and the
+// element sizes cost one newFunctionWithName:constantValues: each. Emitting every kind
+// into a single library would compile ~1200 lines of MSL before the first transfer; a
+// library per element size would be a hundred compiles instead.
+internal static class MetalTilerShaders
+{
+    // The 13 dwords every block-copy kernel reads, and the subset the conversions use.
+    public const int ArgumentCount = 13;
+
+    public const int ArgumentBytes = ArgumentCount * sizeof(uint);
+
+    // Buffer indices shared by every kernel in both libraries. The target buffer is bound
+    // twice: 1 for whole-dword stores, 2 for the masked atomics that sub-dword elements and
+    // unaligned row edges need. MSL cannot reinterpret a device pointer as atomic.
+    public const uint SourceIndex = 0;
+    public const uint TargetIndex = 1;
+    public const uint TargetAtomicIndex = 2;
+    public const uint ArgumentIndex = 3;
+
+    // Function constant indices.
+    public const uint ElementBytesConstant = 0;
+    public const uint VectorCopyConstant = 1;
+
+    public const string DepthWidenFixed24 = "depth_widen_d24";
+    public const string DepthWidenFloat32 = "depth_widen_d32";
+    public const string DepthNarrowFixed24 = "depth_narrow_d24";
+    public const string DepthNarrowFloat32 = "depth_narrow_d32";
+    public const string SwapBgra16 = "swap_bgra16";
+    public const string RepackRows = "repack_rows";
+
+    private enum Axis
+    {
+        X,
+        Y,
+        Z,
+    }
+
+    private readonly record struct Term(Axis Source, int Shift, uint Mask);
+
+    private static Term X(int shift, uint mask) => new(Axis.X, shift, mask);
+
+    private static Term Y(int shift, uint mask) => new(Axis.Y, shift, mask);
+
+    private static Term Z(int shift, uint mask) => new(Axis.Z, shift, mask);
+
+    private readonly record struct AddressBit(Axis Source, byte Bit);
+
+    private static AddressBit BX(byte bit) => new(Axis.X, bit);
+
+    private static AddressBit BY(byte bit) => new(Axis.Y, bit);
+
+    private static AddressBit[] BXY(byte x, byte y) => [BX(x), BY(y)];
+
+    private static uint Log2(uint value) => (uint)BitOperations.TrailingZeroCount(value);
+
+    private static readonly uint[] ElementSizes = [1, 2, 4, 8, 16];
+
+    private static Term[] StandardTerms(uint bytes) => bytes switch
+    {
+        1 => [Y(4, 0x1f0), Y(5, 0x400), X(0, 0x00f), X(5, 0x200), X(6, 0x800)],
+        2 => [Y(4, 0x070), Y(5, 0x100), Y(6, 0x400), X(1, 0x00e), X(4, 0x080), X(5, 0x200), X(6, 0x800)],
+        4 => [Y(4, 0x070), Y(5, 0x100), Y(6, 0x400), X(2, 0x00c), X(5, 0x080), X(6, 0x200), X(7, 0x800)],
+        8 => [Y(4, 0x030), Y(6, 0x100), Y(7, 0x400), X(3, 0x008), X(5, 0x0c0), X(6, 0x200), X(7, 0x800)],
+        _ => [Y(4, 0x030), Y(6, 0x100), Y(7, 0x400), X(6, 0x0c0), X(7, 0x200), X(8, 0x800)],
+    };
+
+    private static Term[] Standard3DTerms(uint bytes) => bytes switch
+    {
+        1 => [X(0, 3), X(4, 0x40), X(6, 0x200), Y(3, 8), Y(4, 0x20), Y(6, 0x100), Y(8, 0x800), Z(2, 4), Z(3, 0x10), Z(5, 0x80), Z(7, 0x400)],
+        2 => [X(1, 2), X(5, 0x40), X(7, 0x200), Y(3, 8), Y(4, 0x20), Y(6, 0x100), Y(8, 0x800), Z(2, 4), Z(3, 0x10), Z(5, 0x80), Z(7, 0x400)],
+        4 => [X(2, 4), X(5, 0x40), X(7, 0x200), Y(3, 8), Y(4, 0x20), Y(6, 0x100), Y(8, 0x800), Z(4, 0x10), Z(6, 0x80), Z(8, 0x400)],
+        8 => [X(3, 8), X(5, 0x40), X(7, 0x200), Y(5, 0x20), Y(7, 0x100), Y(9, 0x800), Z(4, 0x10), Z(6, 0x80), Z(8, 0x400)],
+        _ => [X(6, 0x40), X(8, 0x200), Y(5, 0x20), Y(7, 0x100), Y(9, 0x800), Z(4, 0x10), Z(6, 0x80), Z(8, 0x400)],
+    };
+
+    private static Term[] Standard64KBTerms(uint bytes) => bytes switch
+    {
+        1 => [X(0, 0x0f), X(5, 0x200), X(6, 0x800), X(7, 0x2000), X(8, 0x8000), Y(4, 0x1f0), Y(5, 0x400), Y(6, 0x1000), Y(7, 0x4000)],
+        2 => [X(1, 0x00e), X(4, 0x080), X(5, 0x200), X(6, 0x800), X(7, 0x2000), X(8, 0x8000), Y(4, 0x070), Y(5, 0x100), Y(6, 0x400), Y(7, 0x1000), Y(8, 0x4000)],
+        4 => [X(2, 0x00c), X(5, 0x080), X(6, 0x200), X(7, 0x800), X(8, 0x2000), X(9, 0x8000), Y(4, 0x070), Y(5, 0x100), Y(6, 0x400), Y(7, 0x1000), Y(8, 0x4000)],
+        8 => [X(3, 0x008), X(5, 0x0c0), X(6, 0x200), X(7, 0x800), X(8, 0x2000), X(9, 0x8000), Y(4, 0x030), Y(6, 0x100), Y(7, 0x400), Y(8, 0x1000), Y(9, 0x4000)],
+        _ => [X(6, 0x0c0), X(7, 0x200), X(8, 0x800), X(9, 0x2000), X(10, 0x8000), Y(4, 0x030), Y(6, 0x100), Y(7, 0x400), Y(8, 0x1000), Y(9, 0x4000)],
+    };
+
+    private static Term[] Gen5RenderTargetTerms(uint bytes) => bytes switch
+    {
+        1 => [Y(2, 0x008), Y(4, 0x010), Y(3, 0x0a0), Y(5, 0xf00), Y(6, 0x1000), Y(7, 0x4000), X(0, 0x007), X(3, 0x040), X(5, 0x300), X(4, 0x400), X(6, 0x800), X(7, 0x2000), X(8, 0x8000)],
+        2 => [Y(4, 0x070), Y(5, 0xf00), Y(8, 0x5000), X(1, 0x00e), X(4, 0x480), X(5, 0x300), X(6, 0x800), X(7, 0x2000), X(8, 0x8000)],
+        4 => [Y(4, 0x070), Y(5, 0xf00), Y(9, 0x1000), Y(8, 0x4000), X(2, 0x00c), X(5, 0x380), X(4, 0x400), X(6, 0x800), X(9, 0xa000)],
+        8 => [Y(4, 0x010), Y(6, 0x080), Y(5, 0xf00), Y(10, 0x5000), X(3, 0x008), X(4, 0x460), X(5, 0x300), X(6, 0x800), X(10, 0x2000), X(9, 0x8000)],
+        _ => [X(4, 0x410), X(5, 0x340), X(6, 0x800), X(11, 0xa000), Y(5, 0xf20), Y(6, 0x080), Y(10, 0x1000), Y(11, 0x4000)],
+    };
+
+    private static Term[] DepthTerms(uint bytes) => bytes switch
+    {
+        1 => [X(0, 1), X(1, 0x004), X(2, 0x010), X(3, 0x040), X(5, 0x300), X(4, 0x400), X(6, 0x800), X(7, 0x2000), X(8, 0x8000), Y(1, 0x002), Y(2, 0x008), Y(3, 0x0a0), Y(5, 0xf00), Y(6, 0x1000), Y(7, 0x4000)],
+        2 => [X(1, 0x002), X(2, 0x008), X(3, 0x020), X(4, 0x480), X(5, 0x300), X(6, 0x800), X(7, 0x2000), X(8, 0x8000), Y(2, 0x004), Y(3, 0x010), Y(4, 0x040), Y(5, 0xf00), Y(8, 0x5000)],
+        4 => [X(2, 0x004), X(3, 0x010), X(4, 0x440), X(5, 0x300), X(6, 0x800), X(9, 0xa000), Y(3, 0x008), Y(4, 0x020), Y(5, 0xf80), Y(9, 0x1000), Y(8, 0x4000)],
+        _ => [X(3, 0x008), X(4, 0x420), X(5, 0x380), X(6, 0x800), X(10, 0x2000), X(9, 0x8000), Y(4, 0x010), Y(5, 0xf40), Y(10, 0x5000)],
+    };
+
+    // PS5 Oberon RB+ R_X addressing. The destination bit index is the array index. Keep
+    // this in lockstep with GnmTiling.RbPlus64KRenderX and TileGeometry.RenderTargetOffset.
+    private static readonly AddressBit[][][] RenderTargetAddressBits =
+    [
+        [
+            [BX(0)], [BX(1)], [BX(2)], [BX(3)], [BY(0)], [BY(1)], [BY(2)], [BY(3)],
+            BXY(7, 4).Concat([BY(7)]).ToArray(), BXY(4, 4), BXY(6, 5), BXY(5, 6), [BX(6)], [BY(6)], BXY(7, 8), BXY(8, 7),
+        ],
+        [
+            [], [BX(0)], [BX(1)], [BX(2)], [BY(0)], [BY(1)], [BY(2)], [BX(3)],
+            BXY(7, 4).Concat([BY(7)]).ToArray(), BXY(4, 4), BXY(6, 5), BXY(5, 6), [BY(3)], [BX(6)], BXY(7, 7), BXY(8, 6),
+        ],
+        [
+            [], [], [BX(0)], [BX(1)], [BY(0)], [BY(1)], [BX(2)], [BY(2)],
+            BXY(7, 4).Concat([BY(7)]).ToArray(), BXY(4, 4), BXY(6, 5), BXY(5, 6), [BX(3)], [BY(3)], BXY(6, 7), BXY(7, 6),
+        ],
+        [
+            [], [], [], [BX(0)], [BY(0)], [BX(1)], [BX(2)], [BY(1)],
+            BXY(7, 4).Concat([BY(7)]).ToArray(), BXY(4, 4), BXY(6, 5), BXY(5, 6), [BY(2)], [BX(3)], BXY(7, 3), BXY(6, 6),
+        ],
+        [
+            [], [], [], [], [BX(0)], [BY(0)], [BX(1)], [BY(1)],
+            BXY(7, 4).Concat([BY(7)]).ToArray(), BXY(4, 4), BXY(6, 5), BXY(5, 6), [BX(2)], [BY(2)], BXY(6, 3), BXY(3, 6),
+        ],
+    ];
+
+    private static readonly byte[][] Standard64KBVolumeSources = [[4, 4, 4, 5], [3, 4, 4, 4], [3, 3, 4, 4], [3, 3, 3, 4], [2, 3, 3, 3]];
+    private static readonly byte[][] Prt64KBVolumeSources = [[4, 5, 4, 4], [4, 4, 3, 4], [4, 4, 3, 3], [3, 4, 3, 3], [3, 3, 2, 3]];
+    private static readonly byte[][] Prt64KBSources = [[7, 7, 6, 6], [7, 6, 6, 5], [6, 6, 5, 5], [6, 5, 5, 4], [5, 5, 4, 4]];
+
+    private static string AxisName(Axis axis) => axis switch
+    {
+        Axis.X => "sx",
+        Axis.Y => "sy",
+        _ => "sz",
+    };
+
+    private static string TermExpression(Term term)
+    {
+        var source = AxisName(term.Source);
+        return term.Shift == 0
+            ? $"({source} & 0x{term.Mask:x}u)"
+            : $"(({source} << {term.Shift}) & 0x{term.Mask:x}u)";
+    }
+
+    private static string XorTerms(Term[] terms) => $"({string.Join(" ^ ", terms.Select(TermExpression))})";
+
+    private static string Bit(Axis axis, uint sourceBit, uint destinationBit) =>
+        $"((({AxisName(axis)} >> {sourceBit}u) & 1u) << {destinationBit}u)";
+
+    // The surface layer bits the 64 KiB render-target and depth kinds fold into every element.
+    private const string ZSpread = "(((sz & 8u) << 5) ^ ((sz & 4u) << 7) ^ ((sz & 2u) << 9) ^ ((sz & 1u) << 11))";
+
+    private static string Standard64KBVolumeOffset(uint bytes)
+    {
+        var bits = Standard64KBVolumeSources[Log2(bytes)];
+        return $"({XorTerms(Standard3DTerms(bytes))} ^ {Bit(Axis.X, bits[0], 12)} ^ {Bit(Axis.Z, bits[1], 13)} ^ " +
+               $"{Bit(Axis.Y, bits[2], 14)} ^ {Bit(Axis.X, bits[3], 15)})";
+    }
+
+    private static string RenderTargetOffset(uint bytes)
+    {
+        var table = RenderTargetAddressBits[Log2(bytes)];
+        var parts = new List<string>();
+        for (uint destination = 0; destination < table.Length; destination++)
+        {
+            foreach (var bit in table[destination])
+            {
+                parts.Add(Bit(bit.Source, bit.Bit, destination));
+            }
+        }
+
+        return $"({string.Join(" ^ ", parts)})";
+    }
+
+    // The byte offset of one element inside its block, as an MSL expression over sx, sy and sz.
+    private static string BlockOffset(TileBlockKind kind, uint bytes)
+    {
+        switch (kind)
+        {
+            case TileBlockKind.Standard256B:
+                return $"({XorTerms(StandardTerms(bytes))} & 0xffu)";
+            case TileBlockKind.Standard4KB:
+                return XorTerms(StandardTerms(bytes));
+            case TileBlockKind.Standard4KB3D:
+                return XorTerms(Standard3DTerms(bytes));
+            case TileBlockKind.Standard64KB:
+                return XorTerms(Standard64KBTerms(bytes));
+            case TileBlockKind.Standard64KB3D:
+                return Standard64KBVolumeOffset(bytes);
+            case TileBlockKind.Prt64KB:
+            {
+                var bits = Prt64KBSources[Log2(bytes)];
+                return $"({XorTerms(Standard64KBTerms(bytes))} ^ {Bit(Axis.X, bits[0], 8)} ^ {Bit(Axis.Y, bits[1], 9)} ^ " +
+                       $"{Bit(Axis.X, bits[2], 10)} ^ {Bit(Axis.Y, bits[3], 11)})";
+            }
+
+            case TileBlockKind.Prt64KB3D:
+            {
+                var bits = Prt64KBVolumeSources[Log2(bytes)];
+                return $"({Standard64KBVolumeOffset(bytes)} ^ {Bit(Axis.Y, bits[0], 10)} ^ {Bit(Axis.X, bits[1], 10)} ^ " +
+                       $"{Bit(Axis.X, bits[2], 11)} ^ {Bit(Axis.Z, bits[3], 11)})";
+            }
+
+            case TileBlockKind.RenderTarget64KB:
+                return $"({RenderTargetOffset(bytes)} ^ {ZSpread})";
+            case TileBlockKind.RenderTarget64KBGen5:
+                return $"({XorTerms(Gen5RenderTargetTerms(bytes))} ^ {ZSpread})";
+            case TileBlockKind.Depth64KB:
+                return $"({ZSpread} ^ {XorTerms(DepthTerms(bytes))})";
+            default:
+                throw GpuFatal.Fatal($"The tiler has no block offset for this kind: kind={(uint)kind}.");
+        }
+    }
+
+    public static string KernelName(TileBlockKind kind, MetalTileDirection direction) =>
+        $"{(direction == MetalTileDirection.Detile ? "detile" : "tile")}_{kind.ToString().ToLowerInvariant()}";
+
+    // One thread per element. Thin kinds take a 16x16 tile, which covers a contiguous run
+    // of tiled bytes for every element size; thick kinds take 8x8x4 for the same reason.
+    public static (uint X, uint Y, uint Z) Threadgroup(TileBlockKind kind) => kind switch
+    {
+        TileBlockKind.Standard4KB3D or TileBlockKind.Standard64KB3D or TileBlockKind.Prt64KB3D => (8, 8, 4),
+        _ => (16, 16, 1),
+    };
+
+    public static bool Supports(TileBlockKind kind, uint elementBytes) =>
+        TileGeometry.TryGetBlockLayout(kind, elementBytes, out _);
+
+    private const string Preamble = """
+        #include <metal_stdlib>
+        using namespace metal;
+
+        // The 13 dwords GpuTiler's TileTransferArguments carries, in the same order.
+        struct TileArgs
+        {
+            uint sourceBase;
+            uint destinationBase;
+            uint width;
+            uint height;
+            uint depth;
+            uint surfaceZ;
+            uint pitchBytes;
+            uint sliceBytes;
+            uint blocksPerRow;
+            uint blocksPerSlice;
+            uint tailX;
+            uint tailY;
+            uint tail;
+        };
+
+        """;
+
+    // The element-size body of a block copy: block index, both addresses and the copy itself.
+    private static void AppendBody(StringBuilder source, TileBlockKind kind, MetalTileDirection direction, uint bytes)
+    {
+        if (!TileGeometry.TryGetBlockLayout(kind, bytes, out var block))
+        {
+            return;
+        }
+
+        var widthShift = Log2(block.BlockWidth);
+        var heightShift = Log2(block.BlockHeight);
+        var depthShift = Log2(block.BlockDepth);
+        var detile = direction == MetalTileDirection.Detile;
+        source.Append($"    if (kElementBytes == {bytes}u)\n    {{\n");
+        source.Append("        uint sx = tail ? gid.x + args.tailX : gid.x;\n");
+        source.Append("        uint sy = tail ? gid.y + args.tailY : gid.y;\n");
+        source.Append("        uint sz = gid.z + args.surfaceZ;\n");
+        source.Append($"        uint block = tail ? 0u : ((gid.z >> {depthShift}u) * args.blocksPerSlice + " +
+                      $"(gid.y >> {heightShift}u) * args.blocksPerRow + (gid.x >> {widthShift}u));\n");
+        source.Append($"        uint tiled = block * {block.BlockSize}u + {BlockOffset(kind, bytes)};\n");
+        source.Append($"        uint linear = gid.z * args.sliceBytes + gid.y * args.pitchBytes + gid.x * {bytes}u;\n");
+        source.Append($"        uint from = args.sourceBase + {(detile ? "tiled" : "linear")};\n");
+        source.Append($"        uint to = args.destinationBase + {(detile ? "linear" : "tiled")};\n");
+        if (bytes >= 4)
+        {
+            if (bytes == 4)
+            {
+                source.Append("        target[to >> 2] = source[from >> 2];\n");
+            }
+            else
+            {
+                var vector = bytes == 8 ? "uint2" : "uint4";
+                source.Append("        if (kVectorCopy)\n        {\n");
+                source.Append($"            *reinterpret_cast<device {vector}*>(target + (to >> 2)) = " +
+                              $"*reinterpret_cast<device const {vector}*>(source + (from >> 2));\n");
+                source.Append("        }\n        else\n        {\n");
+                for (uint word = 0; word < bytes; word += 4)
+                {
+                    source.Append($"            target[(to + {word}u) >> 2] = source[(from + {word}u) >> 2];\n");
+                }
+
+                source.Append("        }\n");
+            }
+        }
+        else
+        {
+            var mask = bytes == 1 ? "0xffu" : "0xffffu";
+            source.Append($"        uint value = (source[from >> 2] >> ((from & 3u) * 8u)) & {mask};\n");
+            source.Append("        uint shift = (to & 3u) * 8u;\n");
+            source.Append("        device atomic_uint* cell = targetAtomic + (to >> 2);\n");
+            source.Append($"        atomic_fetch_and_explicit(cell, ~({mask} << shift), memory_order_relaxed);\n");
+            source.Append("        atomic_fetch_or_explicit(cell, value << shift, memory_order_relaxed);\n");
+        }
+
+        source.Append("        return;\n    }\n");
+    }
+
+    // The library for one block kind and direction; the element size is a function constant.
+    public static string CreateBlockCopyLibrary(TileBlockKind kind, MetalTileDirection direction)
+    {
+        var any = false;
+        foreach (var bytes in ElementSizes)
+        {
+            any |= TileGeometry.TryGetBlockLayout(kind, bytes, out _);
+        }
+
+        if (!any)
+        {
+            throw GpuFatal.Fatal($"The tiler has no block layout for this kind: kind={(uint)kind}.");
+        }
+
+        var source = new StringBuilder(Preamble);
+        source.Append("constant uint kElementBytes [[function_constant(0)]];\n");
+        source.Append("constant bool kVectorCopy [[function_constant(1)]];\n\n");
+        source.Append($"kernel void {KernelName(kind, direction)}(\n");
+        source.Append($"    device const uint* source [[buffer({SourceIndex})]],\n");
+        source.Append($"    device uint* target [[buffer({TargetIndex})]],\n");
+        source.Append($"    device atomic_uint* targetAtomic [[buffer({TargetAtomicIndex})]],\n");
+        source.Append($"    constant TileArgs& args [[buffer({ArgumentIndex})]],\n");
+        source.Append("    uint3 gid [[thread_position_in_grid]])\n{\n");
+        source.Append("    if (gid.x >= args.width || gid.y >= args.height || gid.z >= args.depth)\n    {\n        return;\n    }\n\n");
+        source.Append("    bool tail = args.tail != 0u;\n");
+        foreach (var bytes in ElementSizes)
+        {
+            AppendBody(source, kind, direction, bytes);
+        }
+
+        source.Append("}\n");
+        return source.ToString();
+    }
+
+    // The library every transfer needs besides the block copies: the 16-bit depth
+    // conversions, the BGRA16 channel swap and the row repack that covers linear
+    // surfaces whose guest offset or pitch a blit cannot address directly.
+    public static string CreateConversionLibrary()
+    {
+        var source = new StringBuilder(Preamble);
+        source.Append("""
+            // Widens 16-bit depth to 24-bit fixed point or 32-bit float, one dword per element.
+            // pitchBytes is the source row stride, sliceBytes the target row stride.
+            static inline void widen(device const uint* source, device uint* target,
+                constant TileArgs& args, uint2 gid, bool float32)
+            {
+                uint from = args.sourceBase + gid.y * args.pitchBytes + gid.x * 2u;
+                uint value = (source[from >> 2] >> ((from & 2u) * 8u)) & 0xffffu;
+                uint encoded = float32
+                    ? as_type<uint>(float(value) * (1.0f / 65535.0f))
+                    : value * 256u + (value + 128u) / 257u;
+                uint to = args.destinationBase + gid.y * args.sliceBytes + gid.x * 4u;
+                target[to >> 2] = encoded;
+            }
+
+            // Narrows 24-bit fixed point or 32-bit float depth to 16 bits with a masked write.
+            static inline void narrow(device const uint* source, device atomic_uint* target,
+                constant TileArgs& args, uint2 gid, bool float32)
+            {
+                uint from = args.sourceBase + gid.y * args.pitchBytes + gid.x * 4u;
+                uint to = args.destinationBase + gid.y * args.sliceBytes + gid.x * 2u;
+                uint raw = source[from >> 2];
+                float normalized = float32
+                    ? clamp(as_type<float>(raw), 0.0f, 1.0f)
+                    : float(raw & 0x00ffffffu) * (1.0f / 16777215.0f);
+                uint decoded = uint(round(normalized * 65535.0f));
+                uint shift = (to & 2u) * 8u;
+                device atomic_uint* cell = target + (to >> 2);
+                atomic_fetch_and_explicit(cell, ~(0xffffu << shift), memory_order_relaxed);
+                atomic_fetch_or_explicit(cell, decoded << shift, memory_order_relaxed);
+            }
+
+            """);
+        foreach (var (name, float32, widening) in new[]
+                 {
+                     (DepthWidenFixed24, false, true),
+                     (DepthWidenFloat32, true, true),
+                     (DepthNarrowFixed24, false, false),
+                     (DepthNarrowFloat32, true, false),
+                 })
+        {
+            source.Append($"kernel void {name}(\n");
+            source.Append($"    device const uint* source [[buffer({SourceIndex})]],\n");
+            source.Append($"    device uint* target [[buffer({TargetIndex})]],\n");
+            source.Append($"    device atomic_uint* targetAtomic [[buffer({TargetAtomicIndex})]],\n");
+            source.Append($"    constant TileArgs& args [[buffer({ArgumentIndex})]],\n");
+            source.Append("    uint2 gid [[thread_position_in_grid]])\n{\n");
+            source.Append("    if (gid.x >= args.width || gid.y >= args.height)\n    {\n        return;\n    }\n\n");
+            source.Append(widening
+                ? $"    widen(source, target, args, gid, {(float32 ? "true" : "false")});\n"
+                : $"    narrow(source, targetAtomic, args, gid, {(float32 ? "true" : "false")});\n");
+            source.Append("}\n\n");
+        }
+
+        source.Append($$"""
+            // Swaps the 16-bit blue and red channels of BGRA16 pixels; width counts pixels.
+            kernel void {{SwapBgra16}}(
+                device const uint* source [[buffer({{SourceIndex}})]],
+                device uint* target [[buffer({{TargetIndex}})]],
+                device atomic_uint* targetAtomic [[buffer({{TargetAtomicIndex}})]],
+                constant TileArgs& args [[buffer({{ArgumentIndex}})]],
+                uint gid [[thread_position_in_grid]])
+            {
+                if (gid >= args.width)
+                {
+                    return;
+                }
+
+                uint from = (args.sourceBase >> 2) + gid * 2u;
+                uint to = (args.destinationBase >> 2) + gid * 2u;
+                uint bg = source[from];
+                uint ra = source[from + 1u];
+                target[to] = (ra & 0x0000ffffu) | (bg & 0xffff0000u);
+                target[to + 1u] = (bg & 0x0000ffffu) | (ra & 0xffff0000u);
+            }
+
+            // Copies rowBytes bytes per row between two row-strided ranges at any byte
+            // offset. One thread per destination dword; the row's edge dwords land through
+            // masked atomics, so a partially covered dword keeps its other bytes.
+            struct RepackArgs
+            {
+                uint sourceBase;
+                uint destinationBase;
+                uint rowWords;
+                uint rows;
+                uint slices;
+                uint rowBytes;
+                uint sourceRowBytes;
+                uint targetRowBytes;
+                uint sourceSliceBytes;
+                uint targetSliceBytes;
+                // A row's last destination dword may reach past the copied source bytes.
+                uint sourceWords;
+            };
+
+            kernel void {{RepackRows}}(
+                device const uint* source [[buffer({{SourceIndex}})]],
+                device uint* target [[buffer({{TargetIndex}})]],
+                device atomic_uint* targetAtomic [[buffer({{TargetAtomicIndex}})]],
+                constant RepackArgs& args [[buffer({{ArgumentIndex}})]],
+                uint3 gid [[thread_position_in_grid]])
+            {
+                if (gid.x >= args.rowWords || gid.y >= args.rows || gid.z >= args.slices)
+                {
+                    return;
+                }
+
+                uint sourceRow = args.sourceBase + gid.z * args.sourceSliceBytes + gid.y * args.sourceRowBytes;
+                uint targetRow = args.destinationBase + gid.z * args.targetSliceBytes + gid.y * args.targetRowBytes;
+                uint word = (targetRow >> 2) + gid.x;
+                uint value = 0u;
+                uint mask = 0u;
+                for (uint byteIndex = 0u; byteIndex < 4u; ++byteIndex)
+                {
+                    uint targetByte = word * 4u + byteIndex;
+                    if (targetByte < targetRow || targetByte >= targetRow + args.rowBytes)
+                    {
+                        continue;
+                    }
+
+                    uint sourceByte = sourceRow + (targetByte - targetRow);
+                    uint index = sourceByte >> 2;
+                    uint loaded = index < args.sourceWords ? source[index] : 0u;
+                    value |= ((loaded >> ((sourceByte & 3u) * 8u)) & 0xffu) << (byteIndex * 8u);
+                    mask |= 0xffu << (byteIndex * 8u);
+                }
+
+                if (mask == 0xffffffffu)
+                {
+                    target[word] = value;
+                    return;
+                }
+
+                if (mask == 0u)
+                {
+                    return;
+                }
+
+                device atomic_uint* cell = targetAtomic + word;
+                atomic_fetch_and_explicit(cell, ~mask, memory_order_relaxed);
+                atomic_fetch_or_explicit(cell, value, memory_order_relaxed);
+            }
+
+            """);
+        return source.ToString();
+    }
+}

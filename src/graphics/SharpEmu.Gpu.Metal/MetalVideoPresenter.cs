@@ -220,6 +220,11 @@ internal static partial class MetalVideoPresenter
 
     private static void Run()
     {
+        // Set here rather than beside the Thread construction above, because this
+        // body also runs on the process main thread when HostMainThread owns the
+        // AppKit loop, and a QoS class can only be applied to the calling thread.
+        SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(
+            SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
         var owner = Thread.CurrentThread;
         lock (_gate) _renderOwner = owner;
         try { RunWithRenderOwner(); }
@@ -813,7 +818,27 @@ internal static partial class MetalVideoPresenter
         MetalNative.SendVoid(layer, MetalNative.Selector("setDevice:"), device);
         MetalNative.Send(layer, MetalNative.Selector("setPixelFormat:"), (nint)PixelFormatBgra8Unorm);
         MetalNative.SendVoidBool(layer, MetalNative.Selector("setOpaque:"), true);
+
+        // The layer is only ever a present target: RenderFrame draws the guest
+        // image into the drawable and nothing samples, copies out of or blits from
+        // it afterwards. framebufferOnly lets Metal pick the most efficient
+        // (possibly compressed) layout for exactly that.
         MetalNative.SendVoidBool(layer, MetalNative.Selector("setFramebufferOnly:"), true);
+
+        // Three drawables is the deepest CAMetalLayer allows (2 and 3 are the only
+        // legal values; anything else raises an Objective-C exception) and lets the
+        // GPU work on one frame while another is queued for display, instead of the
+        // render loop stalling in nextDrawable. It is also the documented default,
+        // so this is a pin rather than a change: present depth is load-bearing for
+        // pacing and should not be left to inherit.
+        MetalNative.Send(layer, MetalNative.Selector("setMaximumDrawableCount:"), (nint)3);
+
+        // With the timeout allowed, nextDrawable gives up after a second and
+        // returns nil, which RenderFrame already treats as "skip this frame".
+        // Without it, a window server hiccup parks the render thread forever and
+        // takes the whole emulator down with it. Also the documented default, and
+        // pinned for the same reason.
+        MetalNative.SendVoidBool(layer, MetalNative.Selector("setAllowsNextDrawableTimeout:"), true);
 
         var setDisplaySync = MetalNative.Selector("setDisplaySyncEnabled:");
         if (MetalNative.SendBool(layer, MetalNative.Selector("respondsToSelector:"), setDisplaySync))
