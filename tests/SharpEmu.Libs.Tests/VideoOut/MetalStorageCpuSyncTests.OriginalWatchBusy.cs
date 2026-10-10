@@ -1,5 +1,6 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
+using System.Collections;
 using System.Reflection;
 using System.Runtime.ExceptionServices;
 using SharpEmu.HLE;
@@ -57,6 +58,69 @@ public sealed partial class MetalStorageCpuSyncTests
         }
         catch (TargetInvocationException failure) when (failure.InnerException is not null)
         { ExceptionDispatchInfo.Capture(failure.InnerException).Throw(); }
+    }
+
+    // Exact-key metadata only. Armed scalar fields are controls, not native
+    // protection authority; no Track/Untrack, permission call or byte access.
+    private sealed class OriginalWatchBusyContentMetadata : IDisposable
+    {
+        private readonly IDictionary ranges = (IDictionary)typeof(GuestImageWriteTracker).GetField("_rangesByAddress", Private)!.GetValue(null)!;
+        private readonly IDictionary watches = (IDictionary)typeof(GuestImageWriteTracker).GetField("_watchRangesByAddress", Private)!.GetValue(null)!;
+        private readonly object gate = typeof(GuestImageWriteTracker).GetField("_gate", Private)!.GetValue(null)!;
+        private readonly FieldInfo snapshot = typeof(GuestImageWriteTracker).GetField("_watchRangeSnapshot", Private)!;
+        private readonly MethodInfo rebuild = typeof(GuestImageWriteTracker).GetMethod("RebuildWatchSnapshotLocked", Private)!;
+        private readonly ulong address;
+        private readonly object owner, watch;
+        private object? previousOwner, previousWatch, previousSnapshot, installedSnapshot;
+        private bool installed, disposed;
+        internal OriginalWatchBusyContentMetadata(ulong address, ulong byteCount)
+        {
+            this.address = address; owner = Range(true, false); watch = Range(false, true);
+            try
+            {
+                lock (gate)
+                {
+                    previousOwner = ranges[address]; previousWatch = watches[address]; previousSnapshot = snapshot.GetValue(null);
+                    installed = true; // own possible partial insertion before either mutation
+                    try { ranges[address] = owner; watches[address] = watch; rebuild.Invoke(null, null); }
+                    finally { installedSnapshot = snapshot.GetValue(null); }
+                }
+            }
+            catch (Exception primary)
+            {
+                try { Dispose(); } catch (Exception cleanup) { primary.Data["OriginalWatchBusyMetadataCleanup"] = cleanup; }
+                ExceptionDispatchInfo.Capture(primary).Throw(); throw;
+            }
+            object Range(bool protect, bool managed)
+            {
+                var value = Activator.CreateInstance(typeof(GuestImageWriteTracker).GetNestedType("TrackedRange", BindingFlags.NonPublic)!, true)!;
+                foreach (var (name, scalar) in new (string, object)[] { ("Address", address), ("ByteCount", byteCount),
+                    ("Start", address), ("End", checked(address + byteCount)), ("Protect", protect), ("Armed", protect ? 1 : 0),
+                    ("ManagedWriter", managed), ("WriteGeneration", 0L) }) value.GetType().GetField(name)!.SetValue(value, scalar);
+                return value;
+            }
+        }
+        internal void Generation(long value) => owner.GetType().GetField("WriteGeneration")!.SetValue(owner, value);
+        public void Dispose()
+        {
+            if (disposed) return; disposed = true; if (!installed) return;
+            Exception? first = null;
+            void Attempt(Action action) { try { action(); } catch (Exception failure) { first ??= failure; } }
+            lock (gate)
+            {
+                Attempt(() => Restore(ranges, owner, previousOwner));
+                Attempt(() => Restore(watches, watch, previousWatch));
+                Attempt(() => { Assert.Same(installedSnapshot, snapshot.GetValue(null)); snapshot.SetValue(null, previousSnapshot); });
+            }
+            if (first is not null) ExceptionDispatchInfo.Capture(first).Throw();
+            void Restore(IDictionary table, object owned, object? previous)
+            {
+                // A setup failure before insertion leaves the exact prior row.
+                if (ReferenceEquals(table[address], previous)) return;
+                Assert.Same(owned, table[address]);
+                if (previous is null) table.Remove(address); else table[address] = previous;
+            }
+        }
     }
 
     [Theory]
@@ -157,10 +221,10 @@ public sealed partial class MetalStorageCpuSyncTests
     [InlineData("owner-change")] [InlineData("session-change")] [InlineData("token-change")]
     public void CompleteOriginalContentGuardUsesActualWatchAndPreservesOriginalMetadataDuringBusy(string variant)
     {
-        ActualArchitecture(); using var state = new State(); using var protection = new VolumeProtectedScalar();
+        ActualArchitecture(); var address = Address + 32;
+        using var state = new State(); using var protection = new OriginalWatchBusyContentMetadata(address, 16);
         using var source = new OriginalWatchBusySource(); var mapping = source.Capture();
         MetalVideoPresenter.AttachGuestMemory(source);
-        var address = Address + 32;
         var read = GuestImageWriteTracker.BeginReadSnapshot(address, 16, source: "original-watch-busy-control");
         Assert.True(read.Active); Assert.True(GuestImageWriteTracker.IsReadSnapshotStable(read));
         var content = MetalVideoPresenter.ObserveCpuTextureSnapshot(address, 16, HostMemory.MappingGeneration);
