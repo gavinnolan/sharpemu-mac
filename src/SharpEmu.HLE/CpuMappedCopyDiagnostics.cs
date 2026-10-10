@@ -14,7 +14,9 @@ internal static class CpuMappedCopyDiagnostics
         ulong Footprint, ulong FootprintBytes, ulong Source, int CopyBytes, bool Watched,
         long BackingIdentity = 0, ulong Cursor = 0, int Segments = 0,
         ulong ViewAddress = 0, ulong ViewBytes = 0, long ViewBacking = 0, long EnrollmentAdmission = -1,
-        int WriterCoverageLoss = 0, long WriterHistoryLosses = 0);
+        int WriterCoverageLoss = 0, long WriterHistoryLosses = 0,
+        string? PostCopyWatchGuard = null, long? PostCopyPrimaryAdmission = null,
+        CpuMappedAdmissionOwnerDiagnostic? PostCopyAdmissionOwner = null);
 
     internal static void Emit(in Failure failure)
     {
@@ -35,6 +37,17 @@ internal static class CpuMappedCopyDiagnostics
                 $"view_addr=0x{failure.ViewAddress:X} view_bytes={failure.ViewBytes} view_backing={failure.ViewBacking} " +
                 $"enrollment_admission={failure.EnrollmentAdmission} writer_coverage_loss={failure.WriterCoverageLoss} " +
                 $"writer_history_losses={failure.WriterHistoryLosses}";
+            if (failure.PostCopyWatchGuard is { } firstGuard)
+            {
+                var owner = failure.PostCopyAdmissionOwner;
+                line += $" first_post_copy_watch_guard={firstGuard} first_post_copy_admission={failure.PostCopyPrimaryAdmission?.ToString() ?? "unobserved"}" +
+                    $" first_post_copy_owner_identity={owner?.Identity?.ToString() ?? "unobserved"}" +
+                    $" first_post_copy_owner_kind={owner?.Kind.ToString() ?? "unobserved"}" +
+                    $" first_post_copy_owner_thread={owner?.AcquiringThread?.ToString() ?? "unobserved"}" +
+                    $" first_post_copy_owner_phase={owner?.Phase.ToString() ?? "unobserved"}" +
+                    $" first_post_copy_owner_outcome={owner?.Outcome.ToString() ?? "unobserved"}" +
+                    $" first_post_copy_owner_refusal={owner?.Refusal ?? "unobserved"} first_post_copy_attribution_is_authority=False";
+            }
             if (sinkForControl is { } sink) sink(line);
             else Console.Error.WriteLine(line);
         }
