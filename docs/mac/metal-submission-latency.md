@@ -50,7 +50,39 @@ hazard mode or lazy backing of the guest windows, not the page guard's `mprotect
 traffic, and not the presenter reading a guest texture from a second queue while it
 hands drawables to the compositor.
 
-## What does cause it
+## What it actually was
+
+`gpu_busy_ms` was wrong. It sampled a single command buffer — the one committed
+before the current flush — and only when that buffer had already reached `Completed`
+by then. While anything was in flight almost every submission went unread, so a
+title whose GPU was saturated reported `gpu_busy_ms=0.0` and looked as though it
+were waiting on nothing at all.
+
+With every submission read once the shared event passes its serial, Octopath's
+numbers invert:
+
+```
+[METAL-V2][PERF] gpu_busy_ms=2005.3 gpu_n=66 kernel_ms=1833.5 schedule_ms=944.0
+                 completions=20 completion_ms=6582.7 host_waits=0 idle_ms=1829
+```
+
+Two seconds of GPU time in a two-second window over sixty-six submissions: thirty
+milliseconds of real GPU work each, and `[METAL-V2][CHURN]` shows no uploads and no
+writebacks, so it is the title's own draws. The worker is idle because the guest is
+waiting for a GPU that is busy. The end-of-pipe completions the guest waits on take
+235 to 660 ms because they queue behind that work, and `[METAL-V2][SLOW-EOP]` shows
+`noticed_ms` of 0 to 1 ms throughout: the host notices immediately.
+
+There is no submission-scheduling pathology on this host. The lever for a title in
+this state is per-shader GPU time (`SHARPEMU_METAL_V2_PROFILE_SHADERS=1`), not
+anything in the submission path.
+
+One earlier case was real and is fixed: before the guest windows were made resident
+per submission, Void Terrarium measured `commit_to_kernel_ms` of 160 to 250 ms on the
+buffer it was waiting for with `gpu_exec_ms=0.01` — a genuine scheduling gap, caused
+by naming the whole 16 GiB backing on every encoder.
+
+## What else can look like it
 
 **Another process using the GPU.** The same probe, run while a game was playing in
 another window, produces exactly the reported symptom: one submission in eight stalls
@@ -68,10 +100,11 @@ That is worth stating plainly, because it is easy to measure the wrong thing her
 
 ## What the host does about the latency it can control
 
-Independently of contention, an end-of-pipe write the guest waits on costs a full
-submission round trip even when there is nothing for the GPU to do. The host tracks
-the newest submission that carries GPU work, and when the GPU has already finished
-it — and no earlier completion is outstanding, so ordering is kept — the end-of-pipe
-work runs on the worker instead of being queued behind a commit.
+An end-of-pipe write the guest waits on costs a full submission round trip even when
+there is nothing for the GPU to do. The host tracks the newest submission that
+carries GPU work, and when the GPU has already finished it — and no earlier
+completion is outstanding, so ordering is kept — the end-of-pipe work runs on the
+worker instead of being queued behind a commit.
 `SHARPEMU_METAL_V2_INLINE_EOP=0` turns that off, and `[METAL-V2][WAITS]` counts it as
-`inline_eop`.
+`inline_eop`. It does nothing for a title whose GPU is saturated, because there is
+always outstanding work: Octopath reports `inline_eop=0` throughout.
