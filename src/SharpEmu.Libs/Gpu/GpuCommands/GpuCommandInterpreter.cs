@@ -82,6 +82,25 @@ public sealed partial class GpuCommandInterpreter
         };
     }
 
+    // An unknown opcode means either this interpreter walked off the packet grid
+    // or the words under the cursor are not the ones it was handed. Reading the
+    // header again separates the two: a guest that rebuilds a command buffer it
+    // has already submitted changes it between two reads microseconds apart, and
+    // the trace above then describes a stream that no longer exists.
+    private string DescribeConcurrentRewrite(ulong packetAddress, uint header)
+    {
+        Span<byte> word = stackalloc byte[sizeof(uint)];
+        if (!_host.TryReadGuest(packetAddress, word))
+        {
+            return string.Empty;
+        }
+
+        var reread = BinaryPrimitives.ReadUInt32LittleEndian(word);
+        return reread == header
+            ? string.Empty
+            : $" The guest rewrote this packet while it was being read: header=0x{header:X8} is now 0x{reread:X8}.";
+    }
+
     private void DumpPacketTrace()
     {
         var count = Math.Min(_packetTraceCount, _packetTrace.Length);
@@ -384,7 +403,9 @@ public sealed partial class GpuCommandInterpreter
             {
                 DumpUnknownPacket(cursor, offset);
                 DumpPacketTrace();
-                throw _host.Fatal($"The packet opcode is unknown: offset=0x{offset:X5} header=0x{header:X8} opcode=0x{opcode:X2} address=0x{packetAddress:X16}.");
+                throw _host.Fatal(
+                    $"The packet opcode is unknown: offset=0x{offset:X5} header=0x{header:X8} " +
+                    $"opcode=0x{opcode:X2} address=0x{packetAddress:X16}.{DescribeConcurrentRewrite(packetAddress, header)}");
             }
 
             var payload = ReadPayload(cursorIndex, packetAddress, length - 1);
