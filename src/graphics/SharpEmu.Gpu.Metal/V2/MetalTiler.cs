@@ -103,6 +103,7 @@ internal sealed unsafe class MetalTiler : IDisposable
     private static readonly nint SelSetBytes = MetalNative.Selector("setBytes:length:atIndex:");
     private static readonly nint SelDispatch = MetalNative.Selector("dispatchThreadgroups:threadsPerThreadgroup:");
     private static readonly nint SelNewBuffer = MetalNative.Selector("newBufferWithLength:options:");
+    private static readonly nint SelSetTexture = MetalNative.Selector("setTexture:atIndex:");
 
     private const uint DataTypeUInt = 33;
     private const uint DataTypeBool = 53;
@@ -120,6 +121,7 @@ internal sealed unsafe class MetalTiler : IDisposable
     private readonly Dictionary<string, nint> _conversionPipelines = new(StringComparer.Ordinal);
     private readonly Dictionary<int, List<StagingSlab>> _staging = new();
     private nint _conversionLibrary;
+    private nint _depthWritebackLibrary;
     private bool _disposed;
 
     public MetalTiler(nint device)
@@ -162,6 +164,8 @@ internal sealed unsafe class MetalTiler : IDisposable
 
         Release(_conversionLibrary);
         _conversionLibrary = 0;
+        Release(_depthWritebackLibrary);
+        _depthWritebackLibrary = 0;
         foreach (var slabs in _staging.Values)
         {
             foreach (var slab in slabs)
@@ -298,7 +302,7 @@ internal sealed unsafe class MetalTiler : IDisposable
         }
     }
 
-    private nint CreatePipeline(nint library, string functionName, uint elementBytes, bool fastCopy, string owner)
+    private nint CreatePipeline(nint library, string functionName, uint elementBytes, bool? fastCopy, string owner)
     {
         var pool = MetalNative.objc_autoreleasePoolPush();
         try
@@ -313,9 +317,13 @@ internal sealed unsafe class MetalTiler : IDisposable
             {
                 var values = MetalNative.Send(MetalNative.Send(MetalNative.Class("MTLFunctionConstantValues"), SelAlloc), SelInit);
                 var bytes = elementBytes;
-                var fast = fastCopy ? (byte)1 : (byte)0;
                 MetalNative.SendSetConstantValue(values, SelSetConstantValue, (nint)(&bytes), DataTypeUInt, MetalTilerShaders.ElementBytesConstant);
-                MetalNative.SendSetConstantValue(values, SelSetConstantValue, (nint)(&fast), DataTypeBool, MetalTilerShaders.FastCopyConstant);
+                if (fastCopy is { } wanted)
+                {
+                    var fast = wanted ? (byte)1 : (byte)0;
+                    MetalNative.SendSetConstantValue(values, SelSetConstantValue, (nint)(&fast), DataTypeBool, MetalTilerShaders.FastCopyConstant);
+                }
+
                 function = MetalNative.Send(library, SelNewSpecialized, MetalNative.NsString(functionName), values, ref error);
                 Release(values);
             }
@@ -370,6 +378,30 @@ internal sealed unsafe class MetalTiler : IDisposable
 
         pipeline = CreatePipeline(ConversionLibrary(), functionName, 0, false, $"tiler {functionName}");
         _conversionPipelines[functionName] = pipeline;
+        return pipeline;
+    }
+
+    private nint DepthWritebackLibrary()
+    {
+        if (_depthWritebackLibrary == 0)
+        {
+            _depthWritebackLibrary = CompileLibrary(MetalTilerShaders.CreateDepthWritebackLibrary(), "tiler depth writeback");
+        }
+
+        return _depthWritebackLibrary;
+    }
+
+    private nint DepthWritebackPipeline(bool arrayed, uint elementBytes)
+    {
+        var name = arrayed ? MetalTilerShaders.DepthWritebackArray : MetalTilerShaders.DepthWriteback;
+        var key = $"{name}/{elementBytes}";
+        if (_conversionPipelines.TryGetValue(key, out var pipeline))
+        {
+            return pipeline;
+        }
+
+        pipeline = CreatePipeline(DepthWritebackLibrary(), name, elementBytes, null, $"tiler {key}");
+        _conversionPipelines[key] = pipeline;
         return pipeline;
     }
 
@@ -629,6 +661,46 @@ internal sealed unsafe class MetalTiler : IDisposable
 
             var wide = fast && transfer.BytesPerElement < 4 ? WideGroupOf(transfer, tile) : (1u, 1u);
             Dispatch(encoder, arguments, MetalTilerShaders.Threadgroup(transfer.Kind), wide);
+        }
+    }
+
+    // Tiles the guest depth plane out of the Metal depth texture in one pass: the kernel
+    // reads the texel and writes it where the guest surface's own 64 KiB addressing puts
+    // it, so neither a blit into a staging buffer nor a separate retile is needed. One
+    // dispatch per transfer, which for a depth surface is one per array layer; the layer
+    // rides in surfaceZ, as both the texture slice and the folded address bits.
+    public void EncodeDepthTextureWriteback(
+        nint encoder, nint texture, MetalBufferSpan guest, uint elementBytes, bool arrayed, List<MetalTileTransfer> transfers)
+    {
+        if (texture == 0 || transfers.Count == 0 || !guest.IsValid || elementBytes is not (2 or 4))
+        {
+            throw GpuFatal.Fatal(
+                $"The depth texture writeback is not encodable: texture=0x{texture:x} transfers={transfers.Count} " +
+                $"guest=0x{guest.Size:x} bytes={elementBytes}.");
+        }
+
+        var tiledBase = FoldBase(guest.Offset, guest.Size, out var tiledBind, "depth writeback");
+        if (tiledBase % 4 != 0)
+        {
+            throw GpuFatal.Fatal($"The depth writeback target is not dword aligned: offset=0x{guest.Offset:x}.");
+        }
+
+        MetalV2Native.SendSetResourceAtIndex(encoder, SelSetTexture, texture, MetalTilerShaders.TextureIndex);
+        BindTarget(encoder, guest.Buffer, tiledBind);
+        MetalNative.SendVoid(encoder, SelSetPipeline, DepthWritebackPipeline(arrayed, elementBytes));
+        foreach (ref readonly var transfer in CollectionsMarshal.AsSpan(transfers))
+        {
+            if (transfer.BytesPerElement != elementBytes || transfer.Kind != TileBlockKind.Depth64KB || transfer.Tail)
+            {
+                throw GpuFatal.Fatal(
+                    $"The depth writeback transfer does not match its plane: kind={(uint)transfer.Kind} " +
+                    $"bytes={transfer.BytesPerElement} tail={transfer.Tail} planeBytes={elementBytes}.");
+            }
+
+            var arguments = Prepare(transfer, tile: true, 0, tiledBase, guest.Size,
+                transfer.LinearOffset + transfer.LinearSize, out _);
+            Dispatch(encoder, arguments, MetalTilerShaders.Threadgroup(TileBlockKind.Depth64KB),
+                elementBytes == 2 ? (2u, 1u) : (1u, 1u));
         }
     }
 

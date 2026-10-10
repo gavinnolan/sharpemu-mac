@@ -46,6 +46,12 @@ internal static class MetalTilerShaders
     public const uint ElementBytesConstant = 0;
     public const uint FastCopyConstant = 1;
 
+    // The depth texture a writeback reads, at [[texture(0)]] of the writeback kernels.
+    public const uint TextureIndex = 0;
+
+    public const string DepthWriteback = "writeback_depth";
+    public const string DepthWritebackArray = "writeback_depth_array";
+
     public const string DepthWidenFixed24 = "depth_widen_d24";
     public const string DepthWidenFloat32 = "depth_widen_d32";
     public const string DepthNarrowFixed24 = "depth_narrow_d24";
@@ -550,6 +556,74 @@ internal static class MetalTilerShaders
         }
 
         source.Append("}\n");
+        return source.ToString();
+    }
+
+    // The depth writeback: one pass that reads the Metal depth texture and tiles the
+    // guest plane straight out of it, instead of blitting the plane into a staging buffer
+    // and retiling that. Compute cannot write a depth texture, so there is no upload twin
+    // of this; the way in stays a detile followed by a buffer-to-texture blit.
+    //
+    // A four-byte guest element is the texture's own float, stored bit for bit, and one
+    // thread writes one dword. A two-byte element is the 16-bit normalised depth the
+    // widening upload came from, so the narrowing lives here too, and one thread writes
+    // the pair of elements that share a destination dword.
+    public static string CreateDepthWritebackLibrary()
+    {
+        if (!TileGeometry.TryGetBlockLayout(TileBlockKind.Depth64KB, 4, out var wide) ||
+            !TileGeometry.TryGetBlockLayout(TileBlockKind.Depth64KB, 2, out var narrow))
+        {
+            throw GpuFatal.Fatal("The depth tile layout is missing the two- and four-byte element sizes.");
+        }
+
+        var source = new StringBuilder(Preamble);
+        source.Append("constant uint kElementBytes [[function_constant(0)]];\n\n");
+        AppendOffsetFunction(source, TileBlockKind.Depth64KB, 2);
+        AppendOffsetFunction(source, TileBlockKind.Depth64KB, 4);
+        foreach (var (name, type, read) in new[]
+                 {
+                     (DepthWriteback, "depth2d<float, access::read>", "plane.read(uint2(sx, sy))"),
+                     (DepthWritebackArray, "depth2d_array<float, access::read>", "plane.read(uint2(sx, sy), args.surfaceZ)"),
+                 })
+        {
+            source.Append($"kernel void {name}(\n");
+            source.Append($"    {type} plane [[texture({TextureIndex})]],\n");
+            source.Append($"    device uint* target [[buffer({TargetIndex})]],\n");
+            source.Append($"    device atomic_uint* targetAtomic [[buffer({TargetAtomicIndex})]],\n");
+            source.Append($"    constant TileArgs& args [[buffer({ArgumentIndex})]],\n");
+            source.Append("    uint3 gid [[thread_position_in_grid]])\n{\n");
+            source.Append("    if (kElementBytes == 4u)\n    {\n");
+            source.Append("        uint sx = gid.x;\n        uint sy = gid.y;\n");
+            source.Append("        if (sx >= args.width || sy >= args.height)\n        {\n            return;\n        }\n\n");
+            source.Append($"        uint block = (sy >> {Log2(wide.BlockHeight)}u) * args.blocksPerRow + " +
+                          $"(sx >> {Log2(wide.BlockWidth)}u);\n");
+            source.Append($"        uint to = args.destinationBase + block * {wide.BlockSize}u + " +
+                          "tiled_offset_4(sx, sy, args.surfaceZ);\n");
+            source.Append($"        target[to >> 2] = as_type<uint>({read});\n        return;\n    }}\n\n");
+            source.Append("    uint x0 = gid.x * 2u;\n    uint sy = gid.y;\n");
+            source.Append("    if (x0 >= args.width || sy >= args.height)\n    {\n        return;\n    }\n\n");
+            source.Append("    uint value = 0u;\n    uint mask = 0u;\n    uint to = 0u;\n");
+            source.Append("    for (uint i = 0u; i < 2u; ++i)\n    {\n");
+            source.Append("        uint sx = x0 + i;\n");
+            source.Append("        if (sx >= args.width)\n        {\n            break;\n        }\n\n");
+            source.Append($"        uint block = (sy >> {Log2(narrow.BlockHeight)}u) * args.blocksPerRow + " +
+                          $"(sx >> {Log2(narrow.BlockWidth)}u);\n");
+            source.Append($"        uint tiled = args.destinationBase + block * {narrow.BlockSize}u + " +
+                          "tiled_offset_2(sx, sy, args.surfaceZ);\n");
+            source.Append($"        uint encoded = uint(round(clamp({read}, 0.0f, 1.0f) * 65535.0f));\n");
+            source.Append("        uint shift = (tiled & 3u) * 8u;\n");
+            source.Append("        to = tiled & ~3u;\n");
+            source.Append("        value |= (encoded & 0xffffu) << shift;\n");
+            source.Append("        mask |= 0xffffu << shift;\n");
+            source.Append("    }\n\n");
+            source.Append("    if (mask == 0u)\n    {\n        return;\n    }\n\n");
+            source.Append("    if (mask == 0xffffffffu)\n    {\n        target[to >> 2] = value;\n        return;\n    }\n\n");
+            source.Append("    device atomic_uint* cell = targetAtomic + (to >> 2);\n");
+            source.Append("    atomic_fetch_and_explicit(cell, ~mask, memory_order_relaxed);\n");
+            source.Append("    atomic_fetch_or_explicit(cell, value, memory_order_relaxed);\n");
+            source.Append("}\n\n");
+        }
+
         return source.ToString();
     }
 

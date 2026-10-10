@@ -13,6 +13,26 @@ namespace SharpEmu.Gpu.Metal.Tests;
 // falls back to the masked atomics, and both have to agree with the CPU twin.
 public sealed partial class MetalImageTransferTests
 {
+    // The tiled depth writeback reads the depth texture in a compute kernel instead of
+    // blitting its plane into a staging buffer, so every shape that kernel has a variant
+    // for has to come back byte for byte: both element sizes, the layered texture its
+    // array variant binds, and a width whose last element pair the row cuts in half.
+    [Fact]
+    public void TiledDepthPlanesWriteBackStraightOutOfTheirTexture()
+    {
+        if (!RequireDevice()) return;
+        using var harness = new MetalTransferHarness(Device.Value);
+        RoundTrip(harness, Depth(GuestDepthFormat.Z32Float, stencil: false, 97, 33, 1), 61, "z32/odd width");
+        RoundTrip(harness, Depth(GuestDepthFormat.Z32Float, stencil: false, 96, 48, 3), 62, "z32/3 layers");
+        RoundTrip(harness, Depth(GuestDepthFormat.Z32Float, stencil: true, 96, 48, 2), 63, "z32+s8/2 layers");
+        // A 16-bit depth surface with no stencil keeps Metal's own Depth16Unorm texture,
+        // so the writeback kernel narrows what the texture normalised.
+        RoundTrip(harness, Depth(GuestDepthFormat.Z16, stencil: false, 97, 33, 2), 64, "z16/odd width/2 layers");
+        // With stencil there is no 16-bit combined format, so the plane was widened on
+        // the way in and the same kernel narrows it on the way out.
+        RoundTrip(harness, Depth(GuestDepthFormat.Z16, stencil: true, 96, 48, 2), 65, "z16+s8/2 layers widened");
+    }
+
     [Fact]
     public void WideGroupsFollowEachKindsOwnAddressing()
     {

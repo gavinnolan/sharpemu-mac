@@ -782,22 +782,66 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         MetalTiler.EndEncoding(blit);
     }
 
+    // The way out of a tiled depth surface: one compute pass reads the depth texture and
+    // tiles the guest plane straight out of it, so the plane never lands in a staging
+    // buffer and the widening the upload did is undone inside the same kernel. The
+    // stencil plane still takes a blit, because its only route out of a combined
+    // depth-stencil texture is MTLBlitOptionStencilFromDepthStencil: reading it in a
+    // shader would need an X32_Stencil8 view, and the PixelFormatView usage that view
+    // asks for is what turns off the attachment's lossless compression while it renders.
+    private void EncodeTiledDepthDownload(IMetalSubmissionContext context, in ImageDescription description,
+        TransferPlan plan, nint texture, MetalGuestRange destination, MetalGuestRange stencilDestination)
+    {
+        var stencilWanted = plan.StencilPlane && stencilDestination.IsValid;
+        var stencilPlane = stencilWanted ? _tiler.Acquire(context, description.Stencil.Size) : default;
+        if (stencilWanted)
+        {
+            var blit = _tiler.BeginBlit(context);
+            for (uint layer = 0; layer < plan.Layers; layer++)
+            {
+                MetalNative.SendCopyTextureToBufferOptions(blit, SelCopyTextureToBuffer,
+                    texture, layer, 0, default,
+                    new MtlSize { Width = description.Extent.Width, Height = description.Extent.Height, Depth = 1 },
+                    stencilPlane.Buffer, (nuint)(stencilPlane.Offset + plan.StencilSliceSize * layer),
+                    plan.StencilPitch, (nuint)plan.StencilSliceSize, (nuint)MtlBlitOption.StencilFromDepthStencil);
+            }
+
+            MetalTiler.EndEncoding(blit);
+        }
+
+        var compute = _tiler.BeginCompute(context);
+        _tiler.EncodeDepthTextureWriteback(compute, texture,
+            new MetalBufferSpan(destination.Buffer, destination.Offset, description.Data.Size),
+            description.BytesPerBlock, plan.Layers > 1, plan.Tiles);
+        if (stencilWanted)
+        {
+            _tiler.EncodeTile(compute, stencilPlane,
+                new MetalBufferSpan(stencilDestination.Buffer, stencilDestination.Offset, description.Stencil.Size),
+                plan.StencilTiles);
+        }
+
+        MetalTiler.EndEncoding(compute);
+    }
+
     private void EncodeDepthDownload(IMetalSubmissionContext context, in ImageDescription description, TransferPlan plan,
         nint texture, MetalGuestRange destination, MetalGuestRange stencilDestination)
     {
+        if (plan.Tiled)
+        {
+            EncodeTiledDepthDownload(context, description, plan, texture, destination, stencilDestination);
+            return;
+        }
+
         var widening = plan.TransferBytes != description.BytesPerBlock;
         var depthRowBytes = (ulong)description.Pitch * plan.TransferBytes;
         var depthSliceBytes = widening ? depthRowBytes * description.Extent.Height : plan.SliceSize;
-        var direct = !plan.Tiled && !widening && destination.Offset % plan.TransferBytes == 0;
+        var direct = !widening && destination.Offset % plan.TransferBytes == 0;
         var depthPlane = direct
             ? new MetalBufferSpan(destination.Buffer, destination.Offset, description.Data.Size)
             : _tiler.Acquire(context, depthSliceBytes * plan.Layers);
         var stencilWanted = plan.StencilPlane && stencilDestination.IsValid;
-        var stencilDirect = stencilWanted && !plan.Tiled;
         var stencilPlane = stencilWanted
-            ? stencilDirect
-                ? new MetalBufferSpan(stencilDestination.Buffer, stencilDestination.Offset, description.Stencil.Size)
-                : _tiler.Acquire(context, description.Stencil.Size)
+            ? new MetalBufferSpan(stencilDestination.Buffer, stencilDestination.Offset, description.Stencil.Size)
             : default;
 
         var blit = _tiler.BeginBlit(context);
@@ -826,7 +870,7 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         }
 
         MetalTiler.EndEncoding(blit);
-        if (direct && !stencilWanted)
+        if (direct)
         {
             return;
         }
@@ -849,27 +893,12 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
             depthPlane = narrowed;
         }
 
-        if (plan.Tiled)
-        {
-            _tiler.EncodeTile(compute, depthPlane,
-                new MetalBufferSpan(destination.Buffer, destination.Offset, description.Data.Size), plan.Tiles);
-            if (stencilPlane.IsValid)
-            {
-                _tiler.EncodeTile(compute, stencilPlane,
-                    new MetalBufferSpan(stencilDestination.Buffer, stencilDestination.Offset, description.Stencil.Size),
-                    plan.StencilTiles);
-            }
-        }
-        else if (!direct)
-        {
-            _tiler.EncodeRepackRows(compute, depthPlane,
-                new MetalBufferSpan(destination.Buffer, destination.Offset, description.Data.Size),
-                (uint)((ulong)description.Pitch * description.BytesPerBlock), description.Extent.Height, plan.Layers,
-                (ulong)description.Pitch * description.BytesPerBlock,
-                (ulong)description.Pitch * description.BytesPerBlock,
-                plan.SliceSize, plan.SliceSize);
-        }
-
+        _tiler.EncodeRepackRows(compute, depthPlane,
+            new MetalBufferSpan(destination.Buffer, destination.Offset, description.Data.Size),
+            (uint)((ulong)description.Pitch * description.BytesPerBlock), description.Extent.Height, plan.Layers,
+            (ulong)description.Pitch * description.BytesPerBlock,
+            (ulong)description.Pitch * description.BytesPerBlock,
+            plan.SliceSize, plan.SliceSize);
         MetalTiler.EndEncoding(compute);
     }
 }
