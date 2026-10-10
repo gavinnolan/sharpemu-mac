@@ -195,18 +195,67 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     // The completion runs once the GPU finishes everything recorded so far, so the
     // command buffer is committed right away instead of waiting for the next flush.
+    // An end-of-pipe write the guest waits on only has to wait for the GPU work
+    // recorded before it. When every submission that carries work has already
+    // finished, "after the GPU drains" is true now, and running the completion here
+    // saves the guest a whole submission round trip: on this host that is tens of
+    // milliseconds even when nothing is wrong, and far more when something is.
+    // Ordering is kept by only doing it while no earlier completion is outstanding.
+    private static readonly bool InlineCompletions =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_INLINE_EOP") != "0";
+
+    private long _inlineCompletionCount;
+
+    /// <summary>End-of-pipe completions that ran without a GPU round trip.</summary>
+    public long TakeInlineCompletions() => Interlocked.Exchange(ref _inlineCompletionCount, 0);
+
     private void QueueCompletion(Action work)
     {
+        if (InlineCompletions && LastWorkSerial <= CompletedSerial && _completions.PendingCount == 0)
+        {
+            Interlocked.Increment(ref _inlineCompletionCount);
+            work();
+            return;
+        }
+
         var serial = SubmissionSerial;
         var queued = System.Diagnostics.Stopwatch.GetTimestamp();
         _completions.Enqueue(serial, () =>
         {
-            Interlocked.Add(ref _completionLatencyTicks, System.Diagnostics.Stopwatch.GetTimestamp() - queued);
+            var ran = System.Diagnostics.Stopwatch.GetTimestamp();
+            Interlocked.Add(ref _completionLatencyTicks, ran - queued);
             Interlocked.Increment(ref _completionCount);
+            ReportSlowCompletion(serial, queued, ran);
             work();
         });
         FlushCommandBuffer();
     }
+
+    // An end-of-pipe completion the guest is waiting on that took long enough to cost
+    // frames. The two halves are what separate the causes: the GPU not having
+    // finished the submission, and the host not having noticed that it had.
+    private void ReportSlowCompletion(ulong serial, long queued, long ran)
+    {
+        var frequency = System.Diagnostics.Stopwatch.Frequency;
+        if (ran - queued <= frequency / 20 || _slowCompletionReports >= 4)
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref _slowCompletionReports);
+        var observed = _completions.LastSignalObservedTimestamp;
+        var noticedMs = observed == 0 ? -1.0 : (ran - observed) * 1000.0 / frequency;
+        Console.Error.WriteLine(
+            $"[METAL-V2][SLOW-EOP] serial={serial} latency_ms={(ran - queued) * 1000.0 / frequency:F1} " +
+            $"gpu_ms={(observed == 0 ? -1.0 : (observed - queued) * 1000.0 / frequency):F1} " +
+            $"noticed_ms={noticedMs:F1} signalled={_completions.SignaledValue} " +
+            $"pending={_completions.PendingCount}");
+    }
+
+    private int _slowCompletionReports;
+
+    /// <summary>Resets the per-window budget for slow end-of-pipe reports.</summary>
+    public void ResetSlowCompletionReports() => Interlocked.Exchange(ref _slowCompletionReports, 0);
 
     private long _completionLatencyTicks;
     private long _completionCount;

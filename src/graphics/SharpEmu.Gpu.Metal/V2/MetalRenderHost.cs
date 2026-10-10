@@ -192,10 +192,21 @@ internal sealed partial class MetalRenderHost :
     IMetalSubmissionContext IMetalImageCacheOwner.BeginTransfer()
     {
         _ = EnsureCommandBuffer();
+        NoteRecordedWork();
         EndEncoders();
         NoteProfileTransfer();
         return this;
     }
+
+    // The newest submission that has GPU work in it. An end-of-pipe completion only
+    // has to wait for the GPU while this is ahead of what the GPU has finished.
+    private ulong _lastWorkSerial;
+
+    /// <summary>Marks the submission being recorded as carrying GPU work.</summary>
+    public void NoteRecordedWork() => _lastWorkSerial = _submissionSerial;
+
+    /// <summary>The newest submission that carries GPU work.</summary>
+    public ulong LastWorkSerial => _lastWorkSerial;
 
     /// <summary>Ends whatever encoder is open; the next record opens the one it needs.</summary>
     private void EndEncoders()
@@ -915,6 +926,7 @@ internal sealed partial class MetalRenderHost :
             $"images={_imageCache.ImageCount} image_mb={_imageCache.TotalUsedMemory / (1024 * 1024)} " +
             $"uploads={uploads} writebacks={writebacks} evictions={evictions} failed={failed}");
         _slowWaitReports = 0;
+        ResetSlowCompletionReports();
         var reasons = new System.Text.StringBuilder();
         for (var index = 0; index < MetalWaitReasons.Count; index++)
         {
@@ -944,6 +956,7 @@ internal sealed partial class MetalRenderHost :
             .Append(" gpu_fills=").Append(Interlocked.Exchange(ref _gpuFills, 0))
             .Append(" cleared_fills=").Append(Interlocked.Exchange(ref _absorbedFills, 0))
             .Append(" host_copies=").Append(Interlocked.Exchange(ref _hostCopies, 0))
+            .Append(" inline_eop=").Append(TakeInlineCompletions())
             .Append(" keep_warm=").Append(Interlocked.Exchange(ref _keepWarmSubmissions, 0))
             .Append(" residency_skipped=").Append(TakeSkippedResidencyCalls())
             .Append(" resident=").Append(_guestMemory.ResidentBuffers.Length)

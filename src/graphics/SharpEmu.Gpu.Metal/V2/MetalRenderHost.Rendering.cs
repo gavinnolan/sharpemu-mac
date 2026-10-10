@@ -326,6 +326,7 @@ internal sealed partial class MetalRenderHost
             MetalNative.SendVoid(descriptor, SelRelease);
         }
 
+        NoteRecordedWork();
         _renderingActive = true;
         _renderingState = state;
         ForgetEncoderState();
@@ -389,6 +390,7 @@ internal sealed partial class MetalRenderHost
 
     private nint EnsureComputeEncoder()
     {
+        NoteRecordedWork();
         if (_computeEncoder != 0)
         {
             return _computeEncoder;
@@ -802,6 +804,7 @@ internal sealed partial class MetalRenderHost
 
     private void CountDraw(long startedTicks)
     {
+        NoteRecordedWork();
         Interlocked.Increment(ref _drawCount);
         Interlocked.Add(ref _drawTicks, System.Diagnostics.Stopwatch.GetTimestamp() - startedTicks);
         _recordedCommands++;
