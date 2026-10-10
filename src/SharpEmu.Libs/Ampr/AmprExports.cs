@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
+using SharpEmu.Libs.Diagnostics;
 using SharpEmu.Libs.Kernel;
 using System.Buffers;
 using System.Buffers.Binary;
@@ -1247,6 +1248,25 @@ public static class AmprExports
         ulong size,
         out ulong bytesRead)
     {
+        var profile = FileIoProfile.Begin();
+        var outcome = TryReadFileToGuestMemoryCore(ctx, hostPath, fileOffset, destination, size, out bytesRead);
+        FileIoProfile.End(
+            FileIoProfile.Op.AmprHostRead,
+            profile,
+            bytes: unchecked((long)bytesRead),
+            path: hostPath,
+            failed: outcome != (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        return outcome;
+    }
+
+    private static int TryReadFileToGuestMemoryCore(
+        CpuContext ctx,
+        string hostPath,
+        ulong fileOffset,
+        ulong destination,
+        ulong size,
+        out ulong bytesRead)
+    {
         bytesRead = 0;
         if (size == 0)
         {
@@ -1324,6 +1344,14 @@ public static class AmprExports
     }
 
     private static bool TryGetCachedHostFile(string hostPath, out CachedHostFile file, out int result)
+    {
+        var profile = FileIoProfile.Begin();
+        var opened = TryGetCachedHostFileCore(hostPath, out file, out result);
+        FileIoProfile.End(FileIoProfile.Op.AmprHostOpen, profile, failed: !opened);
+        return opened;
+    }
+
+    private static bool TryGetCachedHostFileCore(string hostPath, out CachedHostFile file, out int result)
     {
         file = null!;
         result = (int)OrbisGen2Result.ORBIS_GEN2_OK;

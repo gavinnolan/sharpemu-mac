@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.Libs.Diagnostics;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Threading;
@@ -54,6 +55,20 @@ public static partial class KernelMemoryCompatExports
 
     private static int KernelPreadCore(CpuContext ctx)
     {
+        var profile = FileIoProfile.Begin();
+        var outcome = KernelPreadCoreInner(ctx);
+        FileIoProfile.EndNoted(
+            FileIoProfile.Op.Pread,
+            profile,
+            bytes: outcome == (int)OrbisGen2Result.ORBIS_GEN2_OK
+                ? unchecked((long)ctx[CpuRegister.Rax])
+                : 0,
+            failed: outcome != (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        return outcome;
+    }
+
+    private static int KernelPreadCoreInner(CpuContext ctx)
+    {
         var fd = unchecked((int)ctx[CpuRegister.Rdi]);
         var bufferAddress = ctx[CpuRegister.Rsi];
         var requested = (int)Math.Min(ctx[CpuRegister.Rdx], int.MaxValue);
@@ -68,6 +83,8 @@ public static partial class KernelMemoryCompatExports
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
+
+        FileIoProfile.NotePath(stream.Name);
 
         if (requested == 0)
         {
@@ -104,6 +121,20 @@ public static partial class KernelMemoryCompatExports
     public static int KernelPwrite(CpuContext ctx) => KernelPwriteCore(ctx);
 
     private static int KernelPwriteCore(CpuContext ctx)
+    {
+        var profile = FileIoProfile.Begin();
+        var outcome = KernelPwriteCoreInner(ctx);
+        FileIoProfile.End(
+            FileIoProfile.Op.Pwrite,
+            profile,
+            bytes: outcome == (int)OrbisGen2Result.ORBIS_GEN2_OK
+                ? unchecked((long)ctx[CpuRegister.Rax])
+                : 0,
+            failed: outcome != (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        return outcome;
+    }
+
+    private static int KernelPwriteCoreInner(CpuContext ctx)
     {
         var fd = unchecked((int)ctx[CpuRegister.Rdi]);
         var bufferAddress = ctx[CpuRegister.Rsi];

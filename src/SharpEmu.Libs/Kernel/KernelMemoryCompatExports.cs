@@ -5,6 +5,7 @@ using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Ampr;
+using SharpEmu.Libs.Diagnostics;
 using SharpEmu.Libs.Media;
 using SharpEmu.Logging;
 using System.Buffers;
@@ -1447,6 +1448,17 @@ public static partial class KernelMemoryCompatExports
 
     internal static int KernelOpenCore(CpuContext ctx)
     {
+        var profile = FileIoProfile.Begin();
+        var result = KernelOpenCoreInner(ctx);
+        FileIoProfile.EndNoted(
+            FileIoProfile.Op.Open,
+            profile,
+            failed: result != (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        return result;
+    }
+
+    private static int KernelOpenCoreInner(CpuContext ctx)
+    {
         var pathAddress = ctx[CpuRegister.Rdi];
         var flags = unchecked((int)ctx[CpuRegister.Rsi]);
         // Not migratable to [GuestCString]: the local reader's TryReadCompat host-memory
@@ -1455,6 +1467,8 @@ public static partial class KernelMemoryCompatExports
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
+
+        FileIoProfile.NotePath(guestPath);
 
         if (IsRandomDevicePath(guestPath) && (flags & O_DIRECTORY) == 0)
         {
@@ -1618,6 +1632,17 @@ public static partial class KernelMemoryCompatExports
         LibraryName = "libKernel")]
     public static int KernelStat(CpuContext ctx)
     {
+        var profile = FileIoProfile.Begin();
+        var result = KernelStatInner(ctx);
+        FileIoProfile.EndNoted(
+            FileIoProfile.Op.Stat,
+            profile,
+            failed: result != (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        return result;
+    }
+
+    private static int KernelStatInner(CpuContext ctx)
+    {
         var pathAddress = ctx[CpuRegister.Rdi];
         var statAddress = ctx[CpuRegister.Rsi];
         if (pathAddress == 0 || statAddress == 0)
@@ -1629,6 +1654,8 @@ public static partial class KernelMemoryCompatExports
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
+
+        FileIoProfile.NotePath(guestPath);
 
         var hostPath = ResolveGuestPath(guestPath);
         var statCacheKey = GetNegativeStatCacheKey(guestPath);
@@ -1722,6 +1749,18 @@ public static partial class KernelMemoryCompatExports
         LibraryName = "libKernel")]
     public static int KernelAprResolveFilepathsToIdsAndFileSizes(CpuContext ctx)
     {
+        var profile = FileIoProfile.Begin();
+        var outcome = KernelAprResolveFilepathsToIdsAndFileSizesInner(ctx);
+        FileIoProfile.End(
+            FileIoProfile.Op.AprResolveIds,
+            profile,
+            bytes: unchecked((long)ctx[CpuRegister.Rsi]),
+            failed: outcome != (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        return outcome;
+    }
+
+    private static int KernelAprResolveFilepathsToIdsAndFileSizesInner(CpuContext ctx)
+    {
         var pathListAddress = ctx[CpuRegister.Rdi];
         var count = ctx[CpuRegister.Rsi];
         var idsAddress = ctx[CpuRegister.Rdx];
@@ -1812,6 +1851,18 @@ public static partial class KernelMemoryCompatExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int KernelAprResolveFilepathsWithPrefixToIdsAndFileSizes(CpuContext ctx)
+    {
+        var profile = FileIoProfile.Begin();
+        var outcome = KernelAprResolveFilepathsWithPrefixToIdsAndFileSizesInner(ctx);
+        FileIoProfile.End(
+            FileIoProfile.Op.AprResolveIds,
+            profile,
+            bytes: unchecked((long)ctx[CpuRegister.Rdx]),
+            failed: outcome != (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        return outcome;
+    }
+
+    private static int KernelAprResolveFilepathsWithPrefixToIdsAndFileSizesInner(CpuContext ctx)
     {
         var prefixAddress = ctx[CpuRegister.Rdi];
         var pathListAddress = ctx[CpuRegister.Rsi];
@@ -1920,6 +1971,18 @@ public static partial class KernelMemoryCompatExports
         LibraryName = "libKernel")]
     public static int KernelAprResolveFilepathsToIds(CpuContext ctx)
     {
+        var profile = FileIoProfile.Begin();
+        var outcome = KernelAprResolveFilepathsToIdsInner(ctx);
+        FileIoProfile.End(
+            FileIoProfile.Op.AprResolveIds,
+            profile,
+            bytes: unchecked((long)ctx[CpuRegister.Rsi]),
+            failed: outcome != (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        return outcome;
+    }
+
+    private static int KernelAprResolveFilepathsToIdsInner(CpuContext ctx)
+    {
         var pathListAddress = ctx[CpuRegister.Rdi];
         var count = ctx[CpuRegister.Rsi];
         var idsAddress = ctx[CpuRegister.Rdx];
@@ -2022,6 +2085,17 @@ public static partial class KernelMemoryCompatExports
         LibraryName = "libKernel")]
     public static int KernelAprGetFileSize(CpuContext ctx)
     {
+        var profile = FileIoProfile.Begin();
+        var outcome = KernelAprGetFileSizeInner(ctx);
+        FileIoProfile.End(
+            FileIoProfile.Op.AprFileStat,
+            profile,
+            failed: outcome != (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        return outcome;
+    }
+
+    private static int KernelAprGetFileSizeInner(CpuContext ctx)
+    {
         var fileId = unchecked((uint)ctx[CpuRegister.Rdi]);
         var sizeAddress = ctx[CpuRegister.Rsi];
         if (sizeAddress == 0)
@@ -2061,6 +2135,17 @@ public static partial class KernelMemoryCompatExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int KernelFstat(CpuContext ctx)
+    {
+        var profile = FileIoProfile.Begin();
+        var outcome = KernelFstatInner(ctx);
+        FileIoProfile.End(
+            FileIoProfile.Op.Fstat,
+            profile,
+            failed: outcome != (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        return outcome;
+    }
+
+    private static int KernelFstatInner(CpuContext ctx)
     {
         var fd = unchecked((int)ctx[CpuRegister.Rdi]);
         var statAddress = ctx[CpuRegister.Rsi];
@@ -2257,6 +2342,17 @@ public static partial class KernelMemoryCompatExports
 
     private static int KernelCloseCore(CpuContext ctx, int fd)
     {
+        var profile = FileIoProfile.Begin();
+        var outcome = KernelCloseCoreInner(ctx, fd);
+        FileIoProfile.End(
+            FileIoProfile.Op.Close,
+            profile,
+            failed: outcome != (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        return outcome;
+    }
+
+    private static int KernelCloseCoreInner(CpuContext ctx, int fd)
+    {
         if (fd is 0 or 1 or 2)
         {
             ctx[CpuRegister.Rax] = 0;
@@ -2317,6 +2413,20 @@ public static partial class KernelMemoryCompatExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int KernelReadUnderscore(CpuContext ctx)
+    {
+        var profile = FileIoProfile.Begin();
+        var result = KernelReadUnderscoreInner(ctx);
+        FileIoProfile.EndNoted(
+            FileIoProfile.Op.Read,
+            profile,
+            bytes: result == (int)OrbisGen2Result.ORBIS_GEN2_OK
+                ? unchecked((long)ctx[CpuRegister.Rax])
+                : 0,
+            failed: result != (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        return result;
+    }
+
+    private static int KernelReadUnderscoreInner(CpuContext ctx)
     {
         var fd = unchecked((int)ctx[CpuRegister.Rdi]);
         var bufferAddress = ctx[CpuRegister.Rsi];
@@ -2381,6 +2491,8 @@ public static partial class KernelMemoryCompatExports
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
+
+        FileIoProfile.NotePath(stream.Name);
 
         // A host movie watchdog may have closed the decoder while the guest
         // still owns its Bink file descriptor. Return EOF so the guest closes
@@ -2537,6 +2649,17 @@ public static partial class KernelMemoryCompatExports
     }
 
     private static OrbisGen2Result KernelLseekCore(int fd, long offset, int whence, out long position)
+    {
+        var profile = FileIoProfile.Begin();
+        var outcome = KernelLseekCoreInner(fd, offset, whence, out position);
+        FileIoProfile.End(
+            FileIoProfile.Op.Lseek,
+            profile,
+            failed: outcome != OrbisGen2Result.ORBIS_GEN2_OK);
+        return outcome;
+    }
+
+    private static OrbisGen2Result KernelLseekCoreInner(int fd, long offset, int whence, out long position)
     {
         position = -1;
 
@@ -4879,7 +5002,9 @@ public static partial class KernelMemoryCompatExports
             return memoized.Path;
         }
 
+        var profile = FileIoProfile.Begin();
         var resolved = ResolveGuestPathUncached(guestPath);
+        FileIoProfile.End(FileIoProfile.Op.ResolvePath, profile);
         // Only a successful resolution is memoized: a denial is a containment
         // decision about the host filesystem's current shape, so it stays live.
         if (!string.IsNullOrEmpty(resolved) &&
@@ -7028,6 +7153,14 @@ public static partial class KernelMemoryCompatExports
 
     private static bool TryGetAprFileSize(string hostPath, out ulong size)
     {
+        var profile = FileIoProfile.Begin();
+        var found = TryGetAprFileSizeCore(hostPath, out size);
+        FileIoProfile.End(FileIoProfile.Op.AprFileSize, profile, failed: !found);
+        return found;
+    }
+
+    private static bool TryGetAprFileSizeCore(string hostPath, out ulong size)
+    {
         size = 0;
 
         string cachePath;
@@ -7082,6 +7215,14 @@ public static partial class KernelMemoryCompatExports
     }
 
     private static bool TryWriteHostPathStat(CpuContext ctx, ulong statAddress, string hostPath, bool isDirectory)
+    {
+        var profile = FileIoProfile.Begin();
+        var ok = TryWriteHostPathStatCore(ctx, statAddress, hostPath, isDirectory);
+        FileIoProfile.End(FileIoProfile.Op.HostStat, profile, failed: !ok);
+        return ok;
+    }
+
+    private static bool TryWriteHostPathStatCore(CpuContext ctx, ulong statAddress, string hostPath, bool isDirectory)
     {
         if (isDirectory)
         {
@@ -7153,6 +7294,17 @@ public static partial class KernelMemoryCompatExports
     }
 
     private static int KernelGetdirentriesCore(CpuContext ctx, int fd, ulong bufferAddress, int requested, ulong basePointerAddress)
+    {
+        var profile = FileIoProfile.Begin();
+        var outcome = KernelGetdirentriesCoreInner(ctx, fd, bufferAddress, requested, basePointerAddress);
+        FileIoProfile.End(
+            FileIoProfile.Op.Getdents,
+            profile,
+            failed: outcome != (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        return outcome;
+    }
+
+    private static int KernelGetdirentriesCoreInner(CpuContext ctx, int fd, ulong bufferAddress, int requested, ulong basePointerAddress)
     {
         if (fd < 0 || bufferAddress == 0 || requested < 12)
         {
