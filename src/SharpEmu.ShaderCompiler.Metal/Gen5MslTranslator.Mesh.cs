@@ -364,6 +364,7 @@ public static partial class Gen5MslTranslator
                 source.AppendLine($"            if (++steps >= {_maxDispatcherSteps}u)");
                 source.AppendLine("            {");
                 source.AppendLine("                active = false;");
+                source.AppendLine($"                {StepCapReportCall}");
                 source.AppendLine("            }");
             }
 

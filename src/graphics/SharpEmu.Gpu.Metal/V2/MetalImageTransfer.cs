@@ -361,9 +361,21 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
 
         if (guest.Size < description.Data.Size)
         {
-            throw GpuFatal.Fatal(
-                $"The guest range is smaller than the image: range=0x{guest.Size:x} image=0x{description.Data.Size:x} " +
-                $"address=0x{description.Data.Address:X16}.");
+            // The range the guest-memory resolver handed back does not cover the whole
+            // image, which happens when a range no window covers falls back to the
+            // upload ring and is clamped to its maximum (see MetalGuestMemory.Upload).
+            // A copy sized from the description would then run off the end of the
+            // staged bytes, so the transfer is dropped: the texture keeps whatever it
+            // already holds. Never fatal — one oversized texture must not end the run.
+            MetalV2Diagnostics.WarnOnce(
+                "short-image-range",
+                $"A guest range is smaller than the image, so the transfer is skipped: " +
+                $"range=0x{guest.Size:x} image=0x{description.Data.Size:x} " +
+                $"address=0x{description.Data.Address:X16} format={description.PixelFormat} " +
+                $"type={description.Type} extent={description.Extent.Width}x{description.Extent.Height}x" +
+                $"{description.Extent.Depth} levels={description.Resources.Levels} " +
+                $"layers={description.TransferLayers} tile={description.TileMode}.");
+            return false;
         }
 
         return true;

@@ -209,7 +209,15 @@ render passes, so its absolute frame rate means nothing. Only the per-key ratios
 A hash from such a line is read back with `SHARPEMU_SHADER_MSL_DUMP_DIR` (see
 `Gen5MslDump`), which also annotates the emitted dispatcher with guest PCs. Outside the
 profiling mode, `[METAL-V2][SLOW-WAIT]` names the last draw or dispatch the slow command
-buffer held, which is usually enough to pick the shader to read.
+buffer held, which is usually enough to pick the shader to read — but only the *last*
+one, so outside this mode a `SLOW-WAIT` figure belongs to the whole buffer, not to the
+shader it names.
+
+Every transfer the host encodes — an image upload or writeback, a guest fill or copy, a
+texture-to-texture copy, a clear pass — closes its own command buffer in this mode and is
+charged to itself. It has to: anything that does not leaves its GPU time in the buffer
+the next draw is measured in, which is exactly how Demon's Souls came to look like it had
+runaway compute shaders (below).
 
 ### What the first measured runs found
 
@@ -226,13 +234,39 @@ buffer held, which is usually enough to pick the shader to read.
   blit should cost. The stencil plane goes in through
   `MTLBlitOptionStencilFromDepthStencil`, one texel at a time as far as the GPU is
   concerned. Everything else in that title measures in single-digit milliseconds.
-- **Demon's Souls has runaway compute shaders.** `0xFB8FF966CA63E288` ran one command
-  buffer for 2449 ms, and `0xE2609CAFCC903222` spent 619 ms on 4096 threads. Both loop on
-  a counter compared against a dword loaded from a constant buffer (`s14 = 0;
-  s15 = SBufferLoadDword; while (s14 < s15)`), which the translator emits correctly, so
-  either the loaded bound or the buffer behind it is wrong and the loop runs to the
-  100,000-step dispatcher cap. That cap is silent: nothing on the host says a shader hit
-  it, and making it observable is the next step.
+- **Demon's Souls does not have runaway compute shaders; the profiler was charging
+  dispatches for transfers.** The first reading of these runs was that
+  `0xFB8FF966CA63E288` (664 ms), `0x3E9247D2A2F42DBB` (1211 ms) and
+  `0xE2609CAFCC903222` (619 ms) spun to the 100,000-step dispatcher cap. Three
+  measurements say otherwise.
+
+  Only uploads and writebacks closed their own profiled command buffer; a guest fill, a
+  guest copy, a texture copy and a clear pass each left their work in the buffer the next
+  draw was measured in, which is what `transfers=N` on a dispatch sample counted. With
+  every transfer closing its own buffer, the same dispatches measure 8.1 ms, 18.0 ms and
+  below the top twelve, and the title's exit total falls from 2980.7 ms to 517.5 ms.
+
+  The step cap is no longer silent either (see below) and never fires in this title. And
+  `SHARPEMU_METAL_V2_DUMP_BUFFERS` shows the loop's descriptor is right: buffer 0 of
+  `0xE2609CAFCC903222` resolves to `stride=16 records=65 size=0x410 window=True` with
+  head `00000021 41000000 ...` — a trip count of 33 over 64 sixteen-byte seed points. The
+  loop is a brute-force nearest-seed pass over a 64x64 image, and a hand-written MSL
+  equivalent of it runs in 0.030 ms on an M4 even with the translator's full
+  `s[128] v[256]` register-file declaration, so neither the trip count nor the register
+  file is the cost.
+
+  What is left is the same finding as Silent Hill's: image transfers. The worst single
+  item in Demon's Souls is now a 48x24 `R16Unorm` writeback of 64 KiB at 328 ms.
+
+- **The dispatcher step cap reports itself.** The last field of every stage argument
+  buffer points at one word of a host-readable buffer, private to the program's hash,
+  which the dispatcher increments on the way out. The v2 host reads the words back after
+  each flush and on shutdown:
+
+      [METAL-V2][STEP-CAP] hash=0x109472F03FF5477A stage=fragment invocations=8294400 total=8294400
+
+  which is the hash to pass to `SHARPEMU_SHADER_MSL_DUMP_HASH`. A missing line is now
+  evidence: a slow shader with no `STEP-CAP` is loop-bound, not capped.
 
 ## Process-level macOS tuning (separate workstream)
 

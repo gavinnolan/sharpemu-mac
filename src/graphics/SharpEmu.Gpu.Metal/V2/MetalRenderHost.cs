@@ -239,6 +239,7 @@ internal sealed partial class MetalRenderHost :
         // previous buffer is far enough ahead to have a status by now, so checking
         // it here costs one message send and turns a silent stall into a message.
         ReportSubmissionFailure();
+        ReportStepCaps();
         _previousCommandBuffer = _commandBuffer;
         _previousSerial = serial;
         _commandBuffer = 0;
@@ -553,6 +554,7 @@ internal sealed partial class MetalRenderHost :
             MetalNative.SendVoid(encoder, SelEndEncoding);
         }
 
+        ((IMetalSubmissionContext)this).ProfileEncoded($"fill bytes=0x{size:X}");
         _imageCache.InvalidateMemoryFromGpu(address, size);
         NoteGuestMemoryWrite(address, size, MetalGpuWriteOrigin.Fill);
         Interlocked.Increment(ref _gpuFills);
@@ -625,6 +627,7 @@ internal sealed partial class MetalRenderHost :
             MetalNative.SendVoid(encoder, SelEndEncoding);
         }
 
+        context.ProfileEncoded($"copy bytes=0x{size:X}");
         _imageCache.InvalidateMemoryFromGpu(destination, size);
         NoteGuestMemoryWrite(destination, size, MetalGpuWriteOrigin.Copy);
     }
@@ -944,6 +947,8 @@ internal sealed partial class MetalRenderHost :
             }
 
             ReportSubmissionFailure();
+            ReportStepCaps();
+            DisposeStepReport();
         }
         catch (Exception exception)
         {

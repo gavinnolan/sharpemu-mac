@@ -276,6 +276,7 @@ public static partial class Gen5MslTranslator
                     MslArgumentFieldKind.Textures => $"array<{_imageClasses[field.Kind].TextureType}, {field.Count}> {field.Name}",
                     MslArgumentFieldKind.Samplers => $"array<sampler, {field.Count}> {field.Name}",
                     MslArgumentFieldKind.Pointer => $"{PointerType(field.Kind)} {field.Name}",
+                    MslArgumentFieldKind.StepReport => $"device atomic_uint* {field.Name}",
                     _ => $"uint {field.Name}",
                 };
                 source.AppendLine($"    {declaration} [[id({field.FirstId})]];");
@@ -455,7 +456,15 @@ public static partial class Gen5MslTranslator
         {
             error = string.Empty;
             var request = _request;
-            var dynamicOffset = control.DynamicOffsetRegister is { } register ? ScalarExpression(register) : "0u";
+            // SOFFSET is read once, before any destination is written: S_BUFFER_LOAD_DWORDX2
+            // and wider routinely name a destination that overlaps the offset register
+            // (`s[106:107] <- s[8:11], s106`), and the hardware reads every source operand
+            // before it writes the first dword. Re-reading the register file per component
+            // would compute the second dword's address from the first dword's value, which
+            // is what the SPIR-V translator avoids by holding the loaded SSA value.
+            var dynamicOffset = control.DynamicOffsetRegister is { } register
+                ? Temp("uint", ScalarExpression(register))
+                : "0u";
             string? deviceAddress = null;
             for (var component = 0; component < instruction.Destinations.Count; component++)
             {

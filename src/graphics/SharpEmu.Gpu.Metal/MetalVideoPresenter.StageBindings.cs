@@ -218,6 +218,10 @@ internal static partial class MetalVideoPresenter
                     case MslArgumentFieldKind.Pointer:
                         BinaryPrimitives.WriteUInt64LittleEndian(span, PointerFieldValue(device, field.Kind, bindings, uploads, used, selGpuAddress));
                         break;
+                    case MslArgumentFieldKind.StepReport:
+                        // The step-cap report is a v2 diagnostic; the cleared span leaves a
+                        // null pointer, which the dispatcher's report call checks for.
+                        break;
                     default:
                         BinaryPrimitives.WriteUInt32LittleEndian(span, WordFieldValue(field.Kind, bindings));
                         break;

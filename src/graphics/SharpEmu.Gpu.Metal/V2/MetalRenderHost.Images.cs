@@ -212,6 +212,10 @@ internal sealed partial class MetalRenderHost
         {
             MetalNative.SendVoid(encoder, SelEndEncoding);
         }
+
+        context.ProfileEncoded(
+            $"image-copy extent={extent.Width}x{extent.Height}x{extent.Depth} " +
+            $"layers={Math.Min(sourceRange.LayerCount, destinationRange.LayerCount)}");
     }
 
     public bool IsMetadata(ulong address) => _imageCache.IsMetadata(address);

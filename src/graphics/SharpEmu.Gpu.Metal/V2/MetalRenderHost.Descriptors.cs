@@ -395,7 +395,89 @@ internal sealed partial class MetalRenderHost
 
             stage.Buffers[index] = range;
             stage.BufferLengths[index] = (uint)Math.Min(size, uint.MaxValue);
+            ReportBufferBinding(stage, index, in descriptor, requested, size, range);
         }
+    }
+
+    // SHARPEMU_METAL_V2_DUMP_BUFFERS=<hash>[,<hash>...]: what one program's scalar and
+    // storage buffers actually resolve to. A translated loop whose trip count comes out
+    // of a constant buffer is only as right as the descriptor behind it, and the listing
+    // alone cannot say whether the dword it loads is the guest's count or a stale window.
+    private static readonly HashSet<ulong> _dumpBufferHashes = ParseDumpBufferHashes();
+    private readonly Dictionary<(ulong Hash, int Buffer), int> _dumpedBufferCounts = new();
+    private const int MaxBufferDumpsPerBinding = 4;
+
+    private static HashSet<ulong> ParseDumpBufferHashes()
+    {
+        var value = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DUMP_BUFFERS");
+        var hashes = new HashSet<ulong>();
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return hashes;
+        }
+
+        foreach (var part in value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var text = part.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? part[2..] : part;
+            if (ulong.TryParse(text, System.Globalization.NumberStyles.HexNumber,
+                    System.Globalization.CultureInfo.InvariantCulture, out var hash))
+            {
+                hashes.Add(hash);
+            }
+        }
+
+        return hashes;
+    }
+
+    private void ReportBufferBinding(
+        MetalStageBindings stage,
+        int index,
+        in BufferDescriptorWords descriptor,
+        ulong requested,
+        ulong size,
+        in MetalGuestRange range)
+    {
+        var hash = stage.Program.Hash;
+        if (_dumpBufferHashes.Count == 0 || !_dumpBufferHashes.Contains(hash))
+        {
+            return;
+        }
+
+        var key = (hash, index);
+        _dumpedBufferCounts.TryGetValue(key, out var seen);
+        if (seen >= MaxBufferDumpsPerBinding)
+        {
+            return;
+        }
+
+        _dumpedBufferCounts[key] = seen + 1;
+        Span<byte> head = stackalloc byte[32];
+        head.Clear();
+        var read = _guestMemory.TryPeek(descriptor.Address, head);
+        var windowed = _guestMemory.ResolveWritable(descriptor.Address, size).IsValid;
+        var dwords = new System.Text.StringBuilder();
+        for (var offset = 0; offset < head.Length; offset += sizeof(uint))
+        {
+            dwords.Append(System.Globalization.CultureInfo.InvariantCulture, $" {BinaryPrimitives.ReadUInt32LittleEndian(head[offset..]):X8}");
+        }
+
+        Console.Error.WriteLine(string.Format(
+            System.Globalization.CultureInfo.InvariantCulture,
+            "[METAL-V2][BUF] hash=0x{0:X16} stage={1} buf={2} addr=0x{3:X16} stride={4} records={5} " +
+            "fmt={6} req=0x{7:X} size=0x{8:X} window={9} resolved={10} read={11} head={12}",
+            hash,
+            stage.Program.Stage,
+            index,
+            descriptor.Address,
+            descriptor.Stride,
+            descriptor.RecordCount,
+            descriptor.Format,
+            requested,
+            size,
+            windowed,
+            range.IsValid,
+            read,
+            dwords));
     }
 
     public void CommitBindings(GpuBindPoint bindPoint, in PipelineHandle pipeline, ReadOnlySpan<IPreparedBindings> stages)
@@ -492,6 +574,10 @@ internal sealed partial class MetalRenderHost
                     break;
                 case MslArgumentFieldKind.Pointer:
                     BinaryPrimitives.WriteUInt64LittleEndian(span, PointerFieldValue(stage, field.Kind));
+                    break;
+                case MslArgumentFieldKind.StepReport:
+                    BinaryPrimitives.WriteUInt64LittleEndian(
+                        span, StepReportAddress(stage.Program.Hash, StepReportStageName(stageIndex)));
                     break;
                 default:
                     BinaryPrimitives.WriteUInt32LittleEndian(span, WordFieldValue(stage, field.Kind));
