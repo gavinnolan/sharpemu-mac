@@ -102,6 +102,7 @@ public static partial class Gen5MslTranslator
         private int _indent;
         private int _nextTemp;
         private bool _usesLds;
+        private uint _scratchDwordCount;
         private bool _usesFormatLoads;
         private bool _usesWaveScratch;
 
@@ -147,6 +148,11 @@ public static partial class Gen5MslTranslator
                 {
                     _usesLds |= instruction.Control is Gen5DataShareControl { Gds: false } &&
                         instruction.Opcode is not ("DsSwizzleB32" or "DsBpermuteB32");
+                    if (instruction.Opcode.StartsWith("Scratch", StringComparison.Ordinal))
+                    {
+                        _scratchDwordCount = Math.Max(_request.ScratchDwords, 1u);
+                    }
+
                     _usesFormatLoads |= IsFormatBufferLoad(instruction.Opcode) ||
                         instruction.Opcode.StartsWith("TBufferStoreFormat", StringComparison.Ordinal);
                     if (instruction.Control is Gen5InterpolationControl interpolationControl)
@@ -419,7 +425,9 @@ public static partial class Gen5MslTranslator
                     var cntl = attribute < (uint)_pixelInputCntl.Length
                         ? _pixelInputCntl[attribute]
                         : attribute;
-                    var flat = (cntl & 0x400u) != 0 ? ", flat" : string.Empty;
+                    var flat = (cntl & 0x400u) != 0 || ReadsOnlyTheProvokingVertex(attribute)
+                        ? ", flat"
+                        : string.Empty;
                     source.AppendLine(
                         $"    float4 attr{attribute} [[user(locn{locations[index]}){flat}]];");
                 }
@@ -535,6 +543,15 @@ public static partial class Gen5MslTranslator
                     // because only write-then-read correctness is needed.
                     source.AppendLine($"    thread uint sharpemu_lds[{PrivateLdsDwordCount}] = {{}};");
                 }
+            }
+
+            if (_scratchDwordCount != 0)
+            {
+                // Guest scratch is per-invocation private storage, so it is a
+                // thread-local array like the SPIR-V translator's Private one.
+                // The dword index wraps into it, so an out-of-range guest
+                // address never escapes the allocation.
+                source.AppendLine($"    thread uint sharpemu_scratch[{_scratchDwordCount}] = {{}};");
             }
 
             if (_usesWaveScratch && _usesLds && _stage == Gen5MslStage.Compute)
@@ -979,6 +996,9 @@ public static partial class Gen5MslTranslator
                 case "SNop":
                 case "SSetregB32":
                 case "SWaitcnt":
+                // A dependency-counter wait: the emitted MSL has no hardware
+                // counters to wait on, so it is a hint like S_WAITCNT.
+                case "SWaitcntDepctr":
                 case "SInstPrefetch":
                 case "STtraceData":
                 // Wave scheduling priority hint; no effect on results.

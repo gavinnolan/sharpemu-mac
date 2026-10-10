@@ -259,7 +259,7 @@ static constant float sharpemu_off_i4_table[16] =
 struct Gen5PsIn
 {
     float4 sharpemu_frag_coord [[position]];
-    float4 attr0 [[user(locn0)]];
+    float4 attr0 [[user(locn0), flat]];
 };
 
 struct Gen5PsOut

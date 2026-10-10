@@ -1042,6 +1042,38 @@ public static partial class Gen5MslTranslator
 
         // ---- interpolation / pixel inputs ----
 
+        // V_INTERP_MOV's selector picks one of the triangle's parameters: P0 is the
+        // provoking vertex's value and P10/P20 the two deltas from it. Reading P0
+        // alone is exactly what a flat input gives, so an attribute read only that
+        // way is declared flat. Reconstructing the deltas would need the three
+        // vertex values, which Metal has no barycentric input to recover, so the
+        // remaining attributes keep ordinary interpolation -- the same fallback the
+        // SPIR-V translator takes on a device without fragmentShaderBarycentric.
+        private bool ReadsOnlyTheProvokingVertex(uint attribute)
+        {
+            var read = false;
+            foreach (var instruction in _request.Program.Instructions)
+            {
+                if (instruction.Control is not Gen5InterpolationControl control ||
+                    control.Attribute != attribute)
+                {
+                    continue;
+                }
+
+                if (instruction.Opcode != "VInterpMovF32" ||
+                    (instruction.Words[0] & 0xFFu) != ProvokingVertexParameter)
+                {
+                    return false;
+                }
+
+                read = true;
+            }
+
+            return read;
+        }
+
+        private const uint ProvokingVertexParameter = 2;
+
         private bool TryEmitInterpolation(
             Gen5ShaderInstruction instruction,
             Gen5InterpolationControl interpolation,

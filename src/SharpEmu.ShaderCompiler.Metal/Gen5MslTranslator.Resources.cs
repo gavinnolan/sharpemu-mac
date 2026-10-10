@@ -542,6 +542,11 @@ public static partial class Gen5MslTranslator
         private bool TryEmitLayoutGlobalMemory(Gen5ShaderInstruction instruction, Gen5GlobalMemoryControl control, out string error)
         {
             error = string.Empty;
+            if (instruction.Opcode.StartsWith("Scratch", StringComparison.Ordinal))
+            {
+                return TryEmitScratchMemory(instruction, control, out error);
+            }
+
             var request = _request;
             if (!request.Memory.TryGetIndex(instruction.Pc, 0, out var memoryIndex))
             {
@@ -664,6 +669,112 @@ public static partial class Gen5MslTranslator
             }
 
             return true;
+        }
+
+        // ---- scratch ----
+
+        // Guest scratch is per-invocation private storage, named by its own FLAT
+        // segment rather than by a resource, so it never reaches the device
+        // address table: it lives in a thread-local array like the SPIR-V
+        // translator's Private one.
+        private bool TryEmitScratchMemory(Gen5ShaderInstruction instruction, Gen5GlobalMemoryControl control, out string error)
+        {
+            error = string.Empty;
+            if (_scratchDwordCount == 0)
+            {
+                error = "scratch storage was not declared";
+                return false;
+            }
+
+            var address = control.ScalarAddress < 125
+                ? ScalarExpression(control.ScalarAddress)
+                : $"v[{control.VectorAddress}]";
+            if (control.DynamicOffsetRegister is { } dynamicOffsetRegister)
+            {
+                address = $"{address} + {ScalarExpression(dynamicOffsetRegister)}";
+            }
+
+            if (control.OffsetBytes != 0)
+            {
+                address = $"{address} + {FormatUInt(unchecked((uint)control.OffsetBytes))}";
+            }
+
+            var byteAddress = Temp("uint", address);
+            if (instruction.Opcode.StartsWith("ScratchStore", StringComparison.Ordinal))
+            {
+                Line("if (exec)");
+                Line("{");
+                _indent++;
+                if (TryGetSubdwordStoreInfo(instruction.Opcode, out var byteCount, out var sourceShift))
+                {
+                    // A sub-dword store merges into the dword it lands in.
+                    var source = sourceShift == 0
+                        ? $"v[{control.SourceVectorRegister}]"
+                        : $"(v[{control.SourceVectorRegister}] >> {sourceShift})";
+                    var element = FormatUInt(byteCount == 1 ? 0xFFu : 0xFFFFu);
+                    var shift = Temp("uint", $"({byteAddress} & 3u) << 3u");
+                    var word = ScratchWord(byteAddress);
+                    Line($"{word} = ({word} & ~({element} << {shift})) | (((({source}) & {element})) << {shift});");
+                }
+                else
+                {
+                    for (uint index = 0; index < control.DwordCount; index++)
+                    {
+                        var value = control.SourceIsScalar
+                            ? ScalarExpression(control.SourceVectorRegister + index)
+                            : $"v[{control.SourceVectorRegister + index}]";
+                        Line($"{ScratchWord(byteAddress, index * sizeof(uint))} = {value};");
+                    }
+                }
+
+                _indent--;
+                Line("}");
+                return true;
+            }
+
+            if (!instruction.Opcode.StartsWith("ScratchLoad", StringComparison.Ordinal))
+            {
+                error = $"unsupported scratch opcode {instruction.Opcode}";
+                return false;
+            }
+
+            var destination = control.DestinationVectorRegister;
+            if (TryGetSubdwordLoadInfo(instruction.Opcode, out var loadBytes, out var signExtend, out var d16, out var d16High))
+            {
+                var shift = Temp("uint", $"({byteAddress} & 3u) << 3u");
+                var loaded = Temp(
+                    "uint",
+                    $"({ScratchWord(byteAddress)} >> {shift}) & {FormatUInt(loadBytes == 1 ? 0xFFu : 0xFFFFu)}");
+                if (signExtend)
+                {
+                    loaded = Temp("uint", $"(uint)extract_bits(as_type<int>({loaded}), 0u, {loadBytes * 8}u)");
+                }
+
+                StoreVector(
+                    destination,
+                    !d16 ? loaded
+                        : d16High
+                            ? $"(v[{destination}] & 0x0000FFFFu) | (({loaded} & 0xFFFFu) << 16)"
+                            : $"(v[{destination}] & 0xFFFF0000u) | ({loaded} & 0xFFFFu)");
+                return true;
+            }
+
+            for (uint index = 0; index < control.DwordCount; index++)
+            {
+                StoreVector(destination + index, ScratchWord(byteAddress, index * sizeof(uint)));
+            }
+
+            return true;
+        }
+
+        // The scratch array element one byte address names. The dword index wraps
+        // into the allocation, so an out-of-range guest address stays inside it.
+        private string ScratchWord(string byteAddress, uint offsetBytes = 0)
+        {
+            var address = offsetBytes == 0 ? byteAddress : $"({byteAddress} + {offsetBytes}u)";
+            return _scratchDwordCount > 1
+                ? $"sharpemu_scratch[(({address}) >> 2) % {_scratchDwordCount}u]"
+                : "sharpemu_scratch[0]";
         }
 
         // ---- buffers ----
