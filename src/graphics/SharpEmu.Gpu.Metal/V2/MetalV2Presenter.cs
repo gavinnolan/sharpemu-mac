@@ -48,11 +48,11 @@ internal static class MetalV2Presenter
     private static Exception? _startupFailure;
 
     // The frame the next present shows: a guest texture plus the serial it needs.
-    private static nint _pendingTexture;
-    private static uint _pendingWidth;
-    private static uint _pendingHeight;
-    private static ulong _pendingRequestId;
-    private static ulong _pendingSerial;
+    // Published flips waiting for their submission and their refresh, oldest first.
+    private readonly record struct PendingFrame(nint Texture, uint Width, uint Height, ulong RequestId, ulong Serial);
+
+    private const int MaxPendingFrames = 4;
+    private static readonly Queue<PendingFrame> _pendingFrames = new(MaxPendingFrames);
     private static nint _presentTexture;
     private static uint _presentWidth;
     private static uint _presentHeight;
@@ -157,6 +157,11 @@ internal static class MetalV2Presenter
                     Name = "SharpEmu Metal v2 GPU worker",
                 };
                 _worker.Start();
+                new Thread(RunFlipPacer)
+                {
+                    IsBackground = true,
+                    Name = "SharpEmu Metal v2 flip pacer",
+                }.Start();
                 Console.Error.WriteLine("[METAL-V2][INFO] GPU worker started.");
                 return host;
             }
@@ -544,38 +549,124 @@ internal static class MetalV2Presenter
         }
     }
 
-    // Caller holds the frame gate. Moves the pending frame into the presented slot
-    // when the GPU has finished the submission that drew it.
+    private static readonly AutoResetEvent _flipPacerSignal = new(false);
+
+    // Wakes the pacer: a frame was published or a flip submission completed.
+    internal static void SignalFlipPacer() => _flipPacerSignal.Set();
+
+    // Presents each queued flip at the refresh video-out allows, independent of the
+    // window's drawable cadence: the guest's flip event and buffer release follow
+    // presentation, so a frame promoted a host tick late costs the guest a refresh.
+    private static void RunFlipPacer()
+    {
+        _ = SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(
+            SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
+        while (Volatile.Read(ref _host) is { } host)
+        {
+            var wakeAt = long.MaxValue;
+            var waitingForGpu = false;
+            lock (_frameGate)
+            {
+                while (TryPromotePendingLocked())
+                {
+                }
+
+                if (_pendingFrames.TryPeek(out var frame))
+                {
+                    if (host.Completions.SignaledValue < frame.Serial)
+                    {
+                        waitingForGpu = true;
+                    }
+                    else
+                    {
+                        wakeAt = VideoOutBackendServices.NextFlipPresentTimestamp(
+                            frame.RequestId, System.Diagnostics.Stopwatch.GetTimestamp());
+                    }
+                }
+            }
+
+            if (waitingForGpu)
+            {
+                // The completion thread signals flips; the short timeout covers frames
+                // whose submission carries no flip completion.
+                _flipPacerSignal.WaitOne(1);
+            }
+            else if (wakeAt == long.MaxValue)
+            {
+                _flipPacerSignal.WaitOne(wakeAt == long.MaxValue && _pendingFrames.Count > 0 ? 1 : 100);
+            }
+            else
+            {
+                SleepUntil(wakeAt);
+            }
+        }
+    }
+
+    // Coarse sleep for the bulk (macOS overshoots by up to ~1.5 ms), then a spin.
+    private static void SleepUntil(long target)
+    {
+        var frequency = System.Diagnostics.Stopwatch.Frequency;
+        while (true)
+        {
+            var remaining = target - System.Diagnostics.Stopwatch.GetTimestamp();
+            if (remaining <= 0)
+            {
+                return;
+            }
+
+            var microseconds = remaining * 1_000_000 / frequency;
+            if (microseconds > 2000)
+            {
+                _flipPacerSignal.WaitOne((int)((microseconds - 1500) / 1000));
+                return;
+            }
+
+            Thread.SpinWait(64);
+        }
+    }
+
+    // Caller holds the frame gate. Moves the oldest pending frame into the presented
+    // slot once the GPU finished the submission that drew it and video-out lets it
+    // reach the display (vblank, flip rate and flip mode).
     private static bool TryPromotePendingLocked()
     {
-        if (_pendingTexture == 0)
+        if (!_pendingFrames.TryPeek(out var frame))
         {
             return false;
         }
 
         var host = Volatile.Read(ref _host);
-        if (host is not null && host.Completions.SignaledValue < _pendingSerial)
+        if (host is not null && host.Completions.SignaledValue < frame.Serial)
         {
             return false;
         }
 
-        var texture = _pendingTexture;
-        var requestId = _pendingRequestId;
-        _pendingTexture = 0;
-        _pendingRequestId = 0;
-        if (_presentTexture != 0 && _presentTexture != texture)
+        if (frame.RequestId != 0 &&
+            !VideoOutBackendServices.CanPresentFlip(frame.RequestId, System.Diagnostics.Stopwatch.GetTimestamp()))
+        {
+            return false;
+        }
+
+        _ = _pendingFrames.Dequeue();
+        if (_presentTexture != 0)
         {
             MetalNative.SendVoid(_presentTexture, MetalNative.Selector("release"));
         }
 
-        _presentTexture = texture;
-        _presentWidth = _pendingWidth;
-        _presentHeight = _pendingHeight;
+        _presentTexture = frame.Texture;
+        _presentWidth = frame.Width;
+        _presentHeight = frame.Height;
         Interlocked.Increment(ref _presentedGuestFrames);
         PerfOverlay.RecordGuestPresent();
-        if (requestId != 0)
+        if (frame.RequestId != 0)
         {
-            VideoOutBackendServices.MarkFlipPresented(requestId);
+            VideoOutBackendServices.MarkFlipPresented(frame.RequestId);
+            // A flip packet suspended on a full queue can run now. On the worker
+            // itself the caller is the slot check, which proceeds anyway.
+            if (_relay is { IsGpuQueueThread: false } relay)
+            {
+                relay.TryPost(static () => Volatile.Read(ref _host)?.RetryBlockedFlips());
+            }
         }
 
         return true;
@@ -832,44 +923,31 @@ internal static class MetalV2Presenter
     // The flip seam the command stream publishes through.
     private sealed class FlipTarget : IMetalFlipTarget
     {
-        // The presenter holds one frame: a newer one replaces it and the replaced
-        // frame retires at once, so a flip never has to wait for a slot. Throttling
-        // the guest to the display is video-out's job, not the renderer's.
-        public bool HasFlipSlot() => true;
+        // Flip packets suspend while the queue is full, as in the Vulkan presenter.
+        public bool HasFlipSlot()
+        {
+            lock (_frameGate)
+            {
+                return _pendingFrames.Count < MaxPendingFrames || TryPromotePendingLocked();
+            }
+        }
 
         public void PublishGuestFrame(nint texture, uint width, uint height, ulong requestId, ulong serial, bool isHdr)
         {
             _ = isHdr;
-            // The presenter owns the retain until the frame after it replaces it.
+            // The presenter owns one retain per queued or presented frame.
             MetalNative.Send(texture, MetalNative.Selector("retain"));
-            nint replaced;
-            ulong discarded;
             lock (_frameGate)
             {
-                // Show the frame already waiting before replacing it; otherwise a guest
-                // that flips faster than the display never has a completed frame to show.
+                _pendingFrames.Enqueue(new PendingFrame(texture, width, height, requestId, serial));
                 _ = TryPromotePendingLocked();
-                replaced = _pendingTexture;
-                discarded = _pendingRequestId;
-                _pendingTexture = texture;
-                _pendingWidth = width;
-                _pendingHeight = height;
-                _pendingRequestId = requestId;
-                _pendingSerial = serial;
                 _splashHidden = true;
             }
 
+            SignalFlipPacer();
+
             Interlocked.Increment(ref _guestFrameSequence);
             Interlocked.Increment(ref _publishedGuestFrames);
-            if (replaced != 0)
-            {
-                MetalNative.SendVoid(replaced, MetalNative.Selector("release"));
-                if (discarded != 0)
-                {
-                    // The queue only shows the newest frame; the skipped one still retires.
-                    VideoOutBackendServices.MarkFlipPresented(discarded);
-                }
-            }
         }
     }
 }

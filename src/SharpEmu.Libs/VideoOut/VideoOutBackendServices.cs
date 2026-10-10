@@ -15,6 +15,9 @@ public static class VideoOutBackendServices
     public static bool CanPresentFlip(ulong requestId, long timestamp) =>
         VideoOutExports.CanPresentFlip(requestId, timestamp);
 
+    public static long NextFlipPresentTimestamp(ulong requestId, long timestamp) =>
+        VideoOutExports.NextFlipPresentTimestamp(requestId, timestamp);
+
     public static void CancelFlip(ulong requestId) =>
         VideoOutExports.CancelFlip(requestId);
 

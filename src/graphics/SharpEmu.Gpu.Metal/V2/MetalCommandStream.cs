@@ -172,12 +172,17 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 break;
             case EndOfPipeWriteKind.Flip:
             case EndOfPipeWriteKind.FlipWithWrite32:
-                QueueCompletion(() => VideoOutBackendServices.CompleteFlip(requestId));
+                QueueCompletion(() =>
+                {
+                    VideoOutBackendServices.CompleteFlip(requestId);
+                    MetalV2Presenter.SignalFlipPacer();
+                });
                 break;
             case EndOfPipeWriteKind.FlipWithInterruptWriteBack32:
                 QueueCompletion(() =>
                 {
                     VideoOutBackendServices.CompleteFlip(requestId);
+                    MetalV2Presenter.SignalFlipPacer();
                     TriggerInterrupt(eventId, 0);
                 });
                 break;
@@ -372,6 +377,14 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                     break;
             }
         }
+    }
+
+    // The presenter freed the flip slot: retry suspended heads now instead of at the
+    // next blocked-retry interval. Runs on the GPU worker thread.
+    internal void RetryBlockedFlips()
+    {
+        CommandStream.RetryBlocked();
+        _lastProgressTicks = System.Diagnostics.Stopwatch.GetTimestamp();
     }
 
     private void RetryBlockedIfDue()

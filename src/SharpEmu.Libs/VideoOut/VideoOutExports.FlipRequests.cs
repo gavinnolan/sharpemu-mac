@@ -189,6 +189,30 @@ public static partial class VideoOutExports
         }
     }
 
+    // The earliest timestamp at which CanPresentFlip can become true for this request;
+    // long.MaxValue while the request still waits on its ready signal or is gone.
+    internal static long NextFlipPresentTimestamp(ulong requestId, long timestamp)
+    {
+        if (requestId == 0)
+        {
+            return timestamp;
+        }
+        lock (_stateGate)
+        {
+            if (!_flipRequests.TryGetValue(requestId, out var request) ||
+                request.Outcome != FlipOutcome.Pending || !_ports.TryGetValue(request.Handle, out var port))
+            {
+                return long.MaxValue;
+            }
+            if (_flipPacingDisabled || !request.GpuQueued) return timestamp;
+            if (request.FlipMode == VideoOutDisplayClock.FlipModeVsyncMultiple && request.ReadyTimestamp is null)
+                return long.MaxValue;
+            return VideoOutDisplayClock.NextFlipTimestamp(port.OpenTimestamp, port.LastPresentationTimestamp,
+                timestamp, port.RefreshRate, port.FlipRate, request.FlipMode, port.OutputHeight,
+                port.WindowTop, port.WindowBottom, request.ReadyTimestamp ?? timestamp);
+        }
+    }
+
     internal static bool IsRefreshAvailable(long openedAt, long lastPresentedAt, long timestamp, uint refreshRate, int flipRate)
         => VideoOutDisplayClock.NextFlipTimestamp(openedAt, lastPresentedAt, timestamp,
             refreshRate, flipRate, 1, 0, 0, 0, timestamp) <= timestamp;
