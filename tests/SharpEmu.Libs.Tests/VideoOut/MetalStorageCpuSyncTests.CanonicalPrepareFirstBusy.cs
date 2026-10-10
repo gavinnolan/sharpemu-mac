@@ -80,7 +80,10 @@ public sealed partial class MetalStorageCpuSyncTests
         var memory = fixture.Memory; var before = memory.Bytes(); var dirty = GuestImageWriteTracker.PeekDirty(Address);
         memory.BeginWriter(); memory.AfterPreparation = memory.EndWriter;
         object?[] initial = [Address, null, null];
-        Assert.Equal("Deferred", InvokeVolume("TryAcknowledgeFiniteCanonicalDirtyCore", initial)!.ToString());
+        var initialResult = InvokeVolume("TryAcknowledgeFiniteCanonicalDirtyCore", initial)!.ToString();
+        if (initialResult != "Deferred")
+            Console.WriteLine($"[canonical-prepare-fixture-first-refusal] result={initialResult} detached={initial[2]}");
+        Assert.Equal("Deferred", initialResult);
         var retained = Field("_deferredCanonicalDirty").GetValue(null)!; Assert.NotNull(retained);
         Assert.Same(fixture.Image, Property(retained, "Image")); Assert.Same(fixture.Debt, Property(retained, "Debt"));
         Assert.Same(fixture.Origin, Property(retained, "Origin")); Assert.Equal(1, Property(retained, "Version"));
@@ -96,6 +99,45 @@ public sealed partial class MetalStorageCpuSyncTests
         // Both calls stop at real Rejected/no-ticket preparation. Omitting the
         // first marker at either production call site makes this row fail;
         // the sentinel never reaches acknowledgment, bytes or a native action.
+    }
+
+    [Fact]
+    public void CanonicalPrepareFixtureIsolatesAndRestoresExactPredecessorOwnerGuardMetadata()
+    {
+        ActualArchitecture();
+        string[] guards = ["_takenGuestWorkSequence", "_typedCpuSyncCleanupFailure", "_textureSourceCleanupFailure"];
+        var previous = guards.Select(name => Field(name).GetValue(null)).ToArray();
+        object?[] predecessor = [41L, new InvalidOperationException("predecessor typed cleanup metadata"),
+            new InvalidOperationException("predecessor texture cleanup metadata")];
+        try
+        {
+            for (var index = 0; index < guards.Length; index++) Field(guards[index]).SetValue(null, predecessor[index]);
+            using (var fixture = new CanonicalPreparationMetadataFixture())
+            {
+                Assert.Equal(0L, Field(guards[0]).GetValue(null));
+                Assert.Null(Field(guards[1]).GetValue(null)); Assert.Null(Field(guards[2]).GetValue(null));
+                var before = fixture.Memory.Bytes();
+                fixture.Memory.BeginWriter(); fixture.Memory.AfterPreparation = fixture.Memory.EndWriter;
+                object?[] call = [Address, null, null];
+                var result = InvokeVolume("TryAcknowledgeFiniteCanonicalDirtyCore", call)!.ToString();
+                if (result != "Deferred")
+                    Console.WriteLine($"[canonical-prepare-fixture-first-refusal] result={result} detached={call[2]}");
+                Assert.Equal("Deferred", result);
+                Assert.Same(fixture.Origin, Property(Field("_deferredCanonicalDirty").GetValue(null)!, "Origin"));
+                Assert.Null(fixture.Memory.Writer); Assert.Equal(1, fixture.Memory.Preparations);
+                Assert.Equal(1, fixture.Memory.Copies); Assert.Equal(0, fixture.Memory.LegacyCalls);
+                Assert.Equal(before, fixture.Memory.Bytes());
+            }
+            Assert.Equal(predecessor[0], Field(guards[0]).GetValue(null));
+            Assert.Same(predecessor[1], Field(guards[1]).GetValue(null));
+            Assert.Same(predecessor[2], Field(guards[2]).GetValue(null));
+        }
+        finally
+        {
+            for (var index = 0; index < guards.Length; index++) Field(guards[index]).SetValue(null, previous[index]);
+        }
+        // Fabricated predecessor guards are test metadata, never native owner
+        // or cleanup authority. The real managed ledger alone supplies Busy.
     }
 
     [Fact]
@@ -299,7 +341,8 @@ public sealed partial class MetalStorageCpuSyncTests
         internal GuestDrawTexture Snapshot = null!;
         internal object Origin = null!, Image = null!, Debt = null!;
         private object? debts;
-        private readonly string[] names = ["_deferredCanonicalDirty", "_cpuWrittenGuestImageSyncRequested"];
+        private readonly string[] names = ["_deferredCanonicalDirty", "_cpuWrittenGuestImageSyncRequested",
+            "_takenGuestWorkSequence", "_typedCpuSyncCleanupFailure", "_textureSourceCleanupFailure"];
         private object?[]? saved;
         private bool debtInstalled, disposed;
         private IReadOnlyList<GuestDrawTexture>? ownedSnapshots;
@@ -311,6 +354,12 @@ public sealed partial class MetalStorageCpuSyncTests
                 debts = Field("_finiteStorageDebts").GetValue(null)!;
                 saved = names.Select(name => Field(name).GetValue(null)).ToArray();
                 Field(names[0]).SetValue(null, null);
+                // These mutable exact-owner guards are not scoped by the
+                // inherited PresenterState. Save all before changing any;
+                // constructor rollback and Dispose restore the exact values.
+                Field("_takenGuestWorkSequence").SetValue(null, 0L);
+                Field("_typedCpuSyncCleanupFailure").SetValue(null, null);
+                Field("_textureSourceCleanupFailure").SetValue(null, null);
                 // Extend only the existing mutable metadata control's declared
                 // range. No syscall, protection flag or native lease is supplied.
                 var range = typeof(VolumeProtectedScalar).GetField("owner", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(Protection)!;
