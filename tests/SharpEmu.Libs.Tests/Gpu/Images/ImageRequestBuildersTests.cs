@@ -102,8 +102,8 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         var description = ImageRequestBuilders.Texture(words, Sampled2D with { Volume = true }).Request.Description;
 
         Assert.Equal(GuestImageType.Color3D, description.Type);
-        Assert.Equal(new Extent3D(32, 32, 32), description.Extent);
-        Assert.Equal(Format.A2B10G10R10UnormPack32, description.PixelFormat);
+        Assert.Equal(new GpuExtent3D(32, 32, 32), description.Extent);
+        Assert.Equal(GpuFormat.A2B10G10R10UnormPack32, description.PixelFormat);
         Assert.Equal(MetadataKind.Dcc, description.Metadata.Kind);
         Assert.Equal(0x606D6E0000UL, description.Metadata.Range.Address);
         Assert.Equal(0x20000UL, description.Metadata.Range.Size);
@@ -248,7 +248,7 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
 
         Assert.NotNull(target);
         var description = target.Value.Request.Description;
-        Assert.Equal(new Extent3D(816, 604, 1), description.Extent);
+        Assert.Equal(new GpuExtent3D(816, 604, 1), description.Extent);
         Assert.Equal(832u, description.Pitch);
         Assert.Equal(832UL * 604 * 4, description.Data.Size);
         Assert.Equal(texture.Request.Description.Pitch, description.Pitch);

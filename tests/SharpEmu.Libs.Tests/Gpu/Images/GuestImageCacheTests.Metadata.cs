@@ -179,17 +179,17 @@ public sealed partial class GuestImageCacheTests
         var target = LinearRequest(
             imageAddress,
             imageSize,
-            Format.R8G8B8A8Unorm,
+            GpuFormat.R8G8B8A8Unorm,
             GuestPixelFormat.Bits8_8_8_8UNorm,
             GuestImageType.Color3D,
-            new Extent3D(width, height, depth),
+            new GpuExtent3D(width, height, depth),
             1,
             4,
             1);
         target = AsColorTarget(target);
         target.View = target.View with
         {
-            Type = ImageViewType.Type2DArray,
+            Type = GpuImageViewType.Type2DArray,
             BaseLayer = 0,
             LayerCount = depth,
         };
@@ -241,10 +241,10 @@ public sealed partial class GuestImageCacheTests
         var texture = LinearRequest(
             imageAddress,
             imageSize,
-            Format.R16G16B16A16Sfloat,
+            GpuFormat.R16G16B16A16Sfloat,
             GuestPixelFormat.Bits16_16_16_16Float,
             GuestImageType.Color3D,
-            new Extent3D(width, height, depth),
+            new GpuExtent3D(width, height, depth),
             1,
             8,
             1);
@@ -289,10 +289,10 @@ public sealed partial class GuestImageCacheTests
         var texture = LinearRequest(
             imageAddress,
             (ulong)width * height * layers * 4,
-            Format.R8G8B8A8Unorm,
+            GpuFormat.R8G8B8A8Unorm,
             GuestPixelFormat.Bits8_8_8_8UNorm,
             GuestImageType.Color2D,
-            new Extent3D(width, height, 1),
+            new GpuExtent3D(width, height, 1),
             layers,
             4,
             1);

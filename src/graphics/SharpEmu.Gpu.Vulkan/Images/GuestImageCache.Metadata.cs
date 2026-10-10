@@ -3,6 +3,9 @@
 
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Gpu.Vulkan.Scheduling;
+using SharpEmu.Libs.Gpu.Abstractions;
+using SharpEmu.Libs.Gpu.Buffers;
+using Silk.NET.Vulkan;
 
 namespace SharpEmu.Gpu.Vulkan.Images;
 
@@ -52,7 +55,7 @@ public sealed partial class GuestImageCache
         }
 
         var view = request.View;
-        var volume = description.IsVolume && view.Type == ImageViewType.Type3D;
+        var volume = description.IsVolume && view.Type == GpuImageViewType.Type3D;
         var first = volume ? 0u : metadataBaseLayer;
         var imageFirst = volume ? 0u : view.BaseLayer;
         var count = volume ? description.Extent.Depth : view.LayerCount;
@@ -157,7 +160,7 @@ public sealed partial class GuestImageCache
         ResourceSlotIdentifier imageIdentifier,
         in ImageRequest request,
         in SubresourceRange range,
-        in ClearColorValue clear)
+        in GpuClearColor clear)
     {
         var image = _slots[imageIdentifier];
         ref readonly var description = ref image.Description;
@@ -198,20 +201,20 @@ public sealed partial class GuestImageCache
 
         scheduled.EndRendering();
         var command = new CommandBuffer(scheduled.Handle);
-        var needsAttachmentClear = request.View.Format != image.Backing.Format ||
+        var needsAttachmentClear = request.View.Format.ToVk() != image.Backing.Format ||
                                    (description.IsVolume && !fullImage);
         if (needsAttachmentClear)
         {
             var viewDescription = new ImageViewDescription(
                 request.View.Format,
-                range.LayerCount == 1 ? ImageViewType.Type2D : ImageViewType.Type2DArray,
-                ImageAspectFlags.ColorBit,
+                range.LayerCount == 1 ? GpuImageViewType.Type2D : GpuImageViewType.Type2DArray,
+                GpuImageAspect.ColorBit,
                 range.BaseLevel,
                 range.LevelCount,
                 range.BaseLayer,
                 range.LayerCount,
                 default,
-                ImageUsageFlags.ColorAttachmentBit);
+                GpuImageUsage.ColorAttachmentBit);
             var view = image.GetOrCreateView(viewDescription);
             image.Transition(
                 ImageLayout.ColorAttachmentOptimal,
@@ -225,7 +228,7 @@ public sealed partial class GuestImageCache
                 ImageLayout = ImageLayout.ColorAttachmentOptimal,
                 LoadOp = AttachmentLoadOp.Clear,
                 StoreOp = AttachmentStoreOp.Store,
-                ClearValue = new ClearValue { Color = clear },
+                ClearValue = new ClearValue { Color = clear.ToVk() },
             };
             var rendering = new RenderingInfo
             {
@@ -251,7 +254,7 @@ public sealed partial class GuestImageCache
                 range.LevelCount,
                 description.IsVolume ? 0u : range.BaseLayer,
                 description.IsVolume ? 1u : range.LayerCount);
-            var nativeClear = clear;
+            var nativeClear = clear.ToVk();
             _device.Vk.CmdClearColorImage(
                 command,
                 image.Backing.Handle,
