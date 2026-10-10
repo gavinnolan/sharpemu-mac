@@ -259,16 +259,15 @@ internal static class MetalTilerShaders
     public static bool Supports(TileBlockKind kind, uint elementBytes) =>
         TileGeometry.TryGetBlockLayout(kind, elementBytes, out _);
 
-    // The element group one thread of a sub-dword copy handles, so the whole dword is
-    // written at once and the masked atomics disappear. A detile writes the linear side,
-    // where a run of 4/bytes elements along x is always one aligned dword. A retile
-    // writes the tiled side, where the group shape follows the kind's own addressing:
-    // the 1-byte depth kind puts a 2x2 quad in one dword, every other kind a run of
-    // four along x. Both shapes are derived from the shared block tables rather than
-    // asserted, so a kind whose addressing fits no group simply keeps the atomic path.
-    private static readonly Dictionary<(TileBlockKind Kind, uint Bytes), (uint Width, uint Height)> _tileGroups = [];
+    // The element group whose bytes are one aligned dword on the given side of a
+    // sub-dword copy. The linear side is always a run of 4/bytes elements along x; the
+    // tiled side follows the kind's own addressing, derived from the shared block tables
+    // rather than asserted, so a kind whose addressing fits no group keeps the atomic
+    // path. The 1-byte depth kind interleaves x and y in the two low address bits, which
+    // puts a 2x2 quad in one tiled dword; every other kind keeps x's low bits there.
+    private static readonly Dictionary<(TileBlockKind Kind, uint Bytes), (uint Width, uint Height)> _tiledGroups = [];
 
-    public static (uint Width, uint Height) WideGroup(TileBlockKind kind, uint bytes, MetalTileDirection direction)
+    public static (uint Width, uint Height) DwordGroup(TileBlockKind kind, uint bytes, bool tiledSide)
     {
         if (bytes >= 4 || !TileGeometry.TryGetBlockLayout(kind, bytes, out var block))
         {
@@ -276,14 +275,14 @@ internal static class MetalTilerShaders
         }
 
         var elements = 4 / bytes;
-        if (direction == MetalTileDirection.Detile)
+        if (!tiledSide)
         {
-            return block.BlockWidth % elements == 0 ? (elements, 1u) : default;
+            return (elements, 1);
         }
 
-        lock (_tileGroups)
+        lock (_tiledGroups)
         {
-            if (_tileGroups.TryGetValue((kind, bytes), out var cached))
+            if (_tiledGroups.TryGetValue((kind, bytes), out var cached))
             {
                 return cached;
             }
@@ -301,9 +300,34 @@ internal static class MetalTilerShaders
                 }
             }
 
-            _tileGroups[(kind, bytes)] = found;
+            _tiledGroups[(kind, bytes)] = found;
             return found;
         }
+    }
+
+    // What one thread of a sub-dword copy covers: the smallest rectangle that is a whole
+    // number of dwords on both sides, so the thread writes only full dwords and reads
+    // only dwords it consumes entirely. The two sides' groups are powers of two, so that
+    // rectangle is just the larger extent of each. Both sides matter even though only the
+    // destination has to be written whole: a 1-byte depth retile whose group were the
+    // 2x2 quad alone would read half of two linear dwords, and its detile whose group
+    // were the 4x1 run alone would read half of two tiled dwords.
+    public static (uint Width, uint Height) WideGroup(TileBlockKind kind, uint bytes)
+    {
+        if (bytes >= 4 || !TileGeometry.TryGetBlockLayout(kind, bytes, out var block))
+        {
+            return default;
+        }
+
+        var tiled = DwordGroup(kind, bytes, tiledSide: true);
+        var linear = DwordGroup(kind, bytes, tiledSide: false);
+        if (tiled.Width == 0)
+        {
+            return default;
+        }
+
+        var group = (Width: Math.Max(tiled.Width, linear.Width), Height: Math.Max(tiled.Height, linear.Height));
+        return block.BlockWidth % group.Width == 0 && block.BlockHeight % group.Height == 0 ? group : default;
     }
 
     // True when every aligned gw x gh group of elements inside the block occupies the
@@ -461,21 +485,24 @@ internal static class MetalTilerShaders
         source.Append("        return;\n    }\n");
     }
 
-    // The dword-wide body for a sub-dword element size: one thread covers the group whose
-    // destination bytes are one aligned dword, assembles it and stores it whole. A group
-    // the surface's width or height cuts short falls back to the masked atomics for the
-    // bytes it does cover, so the row padding is still never written.
+    // The dword-wide body for a sub-dword element size. One thread covers the rectangle
+    // that is a whole number of dwords on both sides and walks it one destination dword
+    // at a time, assembling that dword's elements and storing it whole; every dword it
+    // reads is consumed by the same thread, so nothing is loaded twice. A dword the
+    // surface's width or height cuts short falls back to the masked atomics for the bytes
+    // it does cover, so the row padding is still never written.
     private static void AppendWideBody(
         StringBuilder source, TileBlockKind kind, MetalTileDirection direction, uint bytes, in TileBlockLayout block)
     {
-        var group = WideGroup(kind, bytes, direction);
-        if (group.Width == 0)
+        var group = WideGroup(kind, bytes);
+        var detile = direction == MetalTileDirection.Detile;
+        var dword = DwordGroup(kind, bytes, tiledSide: !detile);
+        if (group.Width == 0 || dword.Width == 0)
         {
             return;
         }
 
         var mask = bytes == 1 ? "0xffu" : "0xffffu";
-        var detile = direction == MetalTileDirection.Detile;
         source.Append("        if (kFastCopy)\n        {\n");
         source.Append($"            uint x0 = gid.x * {group.Width}u;\n");
         source.Append($"            uint y0 = gid.y * {group.Height}u;\n");
@@ -484,37 +511,43 @@ internal static class MetalTilerShaders
         source.Append($"            uint block = (gid.z >> {Log2(block.BlockDepth)}u) * args.blocksPerSlice + " +
                       $"(y0 >> {Log2(block.BlockHeight)}u) * args.blocksPerRow + (x0 >> {Log2(block.BlockWidth)}u);\n");
         source.Append($"            uint blockBase = block * {block.BlockSize}u;\n");
-        source.Append("            uint value = 0u;\n            uint mask = 0u;\n");
+        source.Append($"            for (uint dy = 0u; dy < {group.Height / dword.Height}u; ++dy)\n            {{\n");
+        source.Append($"                for (uint dx = 0u; dx < {group.Width / dword.Width}u; ++dx)\n                {{\n");
+        source.Append($"                    uint bx = x0 + dx * {dword.Width}u;\n");
+        source.Append($"                    uint by = y0 + dy * {dword.Height}u;\n");
+        source.Append("                    uint value = 0u;\n                    uint mask = 0u;\n");
         source.Append(detile
-            ? "            uint to = args.destinationBase + gid.z * args.sliceBytes + y0 * args.pitchBytes + " +
-              $"x0 * {bytes}u;\n"
-            : "            uint to = 0u;\n");
-        source.Append($"            for (uint j = 0u; j < {group.Height}u; ++j)\n            {{\n");
-        source.Append("                uint sy = y0 + j;\n");
-        source.Append("                if (sy >= args.height)\n                {\n                    break;\n                }\n\n");
-        source.Append($"                for (uint i = 0u; i < {group.Width}u; ++i)\n                {{\n");
-        source.Append("                    uint sx = x0 + i;\n");
-        source.Append("                    if (sx >= args.width)\n                    {\n                        break;\n                    }\n\n");
-        source.Append($"                    uint tiled = args.{(detile ? "sourceBase" : "destinationBase")} + blockBase + " +
+            ? "                    uint to = args.destinationBase + gid.z * args.sliceBytes + by * args.pitchBytes + " +
+              $"bx * {bytes}u;\n"
+            : "                    uint to = 0u;\n");
+        source.Append($"                    for (uint j = 0u; j < {dword.Height}u; ++j)\n                    {{\n");
+        source.Append("                        uint sy = by + j;\n");
+        source.Append("                        if (sy >= args.height)\n                        {\n                            break;\n                        }\n\n");
+        source.Append($"                        for (uint i = 0u; i < {dword.Width}u; ++i)\n                        {{\n");
+        source.Append("                            uint sx = bx + i;\n");
+        source.Append("                            if (sx >= args.width)\n                            {\n                                break;\n                            }\n\n");
+        source.Append($"                            uint tiled = args.{(detile ? "sourceBase" : "destinationBase")} + blockBase + " +
                       $"tiled_offset_{bytes}(sx, sy, sz);\n");
-        source.Append($"                    uint linear = args.{(detile ? "destinationBase" : "sourceBase")} + " +
+        source.Append($"                            uint linear = args.{(detile ? "destinationBase" : "sourceBase")} + " +
                       $"gid.z * args.sliceBytes + sy * args.pitchBytes + sx * {bytes}u;\n");
-        source.Append($"                    uint from = {(detile ? "tiled" : "linear")};\n");
-        source.Append($"                    uint shift = ({(detile ? "linear" : "tiled")} & 3u) * 8u;\n");
+        source.Append($"                            uint from = {(detile ? "tiled" : "linear")};\n");
+        source.Append($"                            uint shift = ({(detile ? "linear" : "tiled")} & 3u) * 8u;\n");
         if (!detile)
         {
-            source.Append("                    to = tiled & ~3u;\n");
+            source.Append("                            to = tiled & ~3u;\n");
         }
 
-        source.Append($"                    value |= ((source[from >> 2] >> ((from & 3u) * 8u)) & {mask}) << shift;\n");
-        source.Append($"                    mask |= {mask} << shift;\n");
+        source.Append($"                            value |= ((source[from >> 2] >> ((from & 3u) * 8u)) & {mask}) << shift;\n");
+        source.Append($"                            mask |= {mask} << shift;\n");
+        source.Append("                        }\n                    }\n\n");
+        source.Append("                    if (mask == 0xffffffffu)\n                    {\n");
+        source.Append("                        target[to >> 2] = value;\n                    }\n");
+        source.Append("                    else if (mask != 0u)\n                    {\n");
+        source.Append("                        device atomic_uint* cell = targetAtomic + (to >> 2);\n");
+        source.Append("                        atomic_fetch_and_explicit(cell, ~mask, memory_order_relaxed);\n");
+        source.Append("                        atomic_fetch_or_explicit(cell, value, memory_order_relaxed);\n");
+        source.Append("                    }\n");
         source.Append("                }\n            }\n\n");
-        source.Append("            if (mask == 0u)\n            {\n                return;\n            }\n\n");
-        source.Append("            if (mask == 0xffffffffu)\n            {\n");
-        source.Append("                target[to >> 2] = value;\n                return;\n            }\n\n");
-        source.Append("            device atomic_uint* cell = targetAtomic + (to >> 2);\n");
-        source.Append("            atomic_fetch_and_explicit(cell, ~mask, memory_order_relaxed);\n");
-        source.Append("            atomic_fetch_or_explicit(cell, value, memory_order_relaxed);\n");
         source.Append("            return;\n        }\n\n");
     }
 

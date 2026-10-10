@@ -45,20 +45,24 @@ public sealed partial class MetalImageTransferTests
                     continue;
                 }
 
-                // A detile writes the linear side, where 4/bytes elements along x are
-                // always one aligned dword.
-                Assert.Equal((4 / bytes, 1u), MetalTilerShaders.WideGroup(kind, bytes, MetalTileDirection.Detile));
+                // The linear side's dword is always 4/bytes elements along x.
+                Assert.Equal((4 / bytes, 1u), MetalTilerShaders.DwordGroup(kind, bytes, tiledSide: false));
 
-                // A retile writes the tiled side. The one-byte depth kind interleaves x
-                // and y in the two low address bits, so its dword is a 2x2 quad; every
-                // other kind keeps x's low bits there and takes a run along x.
-                var expected = kind == TileBlockKind.Depth64KB && bytes == 1 ? (2u, 2u) : (4 / bytes, 1u);
-                Assert.Equal(expected, MetalTilerShaders.WideGroup(kind, bytes, MetalTileDirection.Tile));
+                // The tiled side's dword follows the kind's addressing. The one-byte
+                // depth kind interleaves x and y in the two low address bits, so its
+                // dword is a 2x2 quad; every other kind keeps x's low bits there and
+                // takes a run along x.
+                var quad = kind == TileBlockKind.Depth64KB && bytes == 1;
+                Assert.Equal(quad ? (2u, 2u) : (4 / bytes, 1u), MetalTilerShaders.DwordGroup(kind, bytes, tiledSide: true));
+
+                // One thread covers whole dwords on both sides, so the depth kind's
+                // one-byte copies take two of each and everything else takes one.
+                Assert.Equal(quad ? (4u, 2u) : (4 / bytes, 1u), MetalTilerShaders.WideGroup(kind, bytes));
             }
         }
 
         // Four bytes and wider copy whole elements, so they have no element group.
-        Assert.Equal((0u, 0u), MetalTilerShaders.WideGroup(TileBlockKind.Standard64KB, 4, MetalTileDirection.Tile));
+        Assert.Equal((0u, 0u), MetalTilerShaders.WideGroup(TileBlockKind.Standard64KB, 4));
     }
 
     [Fact]

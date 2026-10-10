@@ -575,7 +575,7 @@ internal sealed unsafe class MetalTiler : IDisposable
                    ((arguments.SourceBase | arguments.DestinationBase | arguments.PitchBytes | arguments.SliceBytes) & (bytes - 1)) == 0;
         }
 
-        if (transfer.Tail || WideGroupOf(transfer, tile).Width == 0)
+        if (transfer.Tail || WideGroupOf(transfer).Width == 0)
         {
             return false;
         }
@@ -585,9 +585,8 @@ internal sealed unsafe class MetalTiler : IDisposable
             : ((arguments.DestinationBase | arguments.PitchBytes | arguments.SliceBytes) & 3u) == 0;
     }
 
-    private static (uint Width, uint Height) WideGroupOf(in MetalTileTransfer transfer, bool tile) =>
-        MetalTilerShaders.WideGroup(transfer.Kind, transfer.BytesPerElement,
-            tile ? MetalTileDirection.Tile : MetalTileDirection.Detile);
+    private static (uint Width, uint Height) WideGroupOf(in MetalTileTransfer transfer) =>
+        MetalTilerShaders.WideGroup(transfer.Kind, transfer.BytesPerElement);
 
     private static void Dispatch(nint encoder, MetalTileArguments arguments, (uint X, uint Y, uint Z) group) =>
         Dispatch(encoder, arguments, group, (1, 1));
@@ -659,7 +658,7 @@ internal sealed unsafe class MetalTiler : IDisposable
                 bound = true;
             }
 
-            var wide = fast && transfer.BytesPerElement < 4 ? WideGroupOf(transfer, tile) : (1u, 1u);
+            var wide = fast && transfer.BytesPerElement < 4 ? WideGroupOf(transfer) : (1u, 1u);
             Dispatch(encoder, arguments, MetalTilerShaders.Threadgroup(transfer.Kind), wide);
         }
     }
