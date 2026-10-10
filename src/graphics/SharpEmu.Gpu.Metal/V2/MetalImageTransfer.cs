@@ -29,6 +29,9 @@ internal enum MtlTextureUsage : uint
     ShaderWrite = 2,
     RenderTarget = 4,
     PixelFormatView = 16,
+    // macOS 14 and later. Metal allows a texture atomic only on a texture
+    // created with this bit, and only on R32Uint, R32Sint or R64Uint.
+    ShaderAtomic = 32,
 }
 
 [Flags]
@@ -205,6 +208,17 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         if (description.Samples == 1 && !MetalGuestFormats.IsSrgb(format))
         {
             usage |= MtlTextureUsage.ShaderWrite;
+
+            // A shader that runs IMAGE_ATOMIC_* on this image needs the atomic
+            // usage bit, and Metal only accepts it on the single-channel 32-bit
+            // integer formats. Those are exactly the formats a guest atomic
+            // image has (BindingLayout gives an atomic binding to a uint image
+            // only), so the bit goes on by format rather than by waiting for a
+            // shader to be compiled against the texture the cache already made.
+            if (format is MtlPixelFormat.R32Uint or MtlPixelFormat.R32Sint)
+            {
+                usage |= MtlTextureUsage.ShaderAtomic;
+            }
         }
 
         return usage;

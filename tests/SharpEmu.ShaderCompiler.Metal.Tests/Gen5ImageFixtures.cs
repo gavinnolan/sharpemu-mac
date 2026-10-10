@@ -72,7 +72,8 @@ internal static class Gen5ImageFixtures
         ShaderStage stage = ShaderStage.Compute,
         uint[]? addressValues = null,
         bool storeResults = false,
-        uint[]? storeValues = null)
+        uint[]? storeValues = null,
+        bool glc = false)
     {
         var isArray = arrayed ?? descriptorType is ImageType1DArray or ImageType2DArray or ImageTypeCube or ImageType2DMsaaArray;
         var dimension = instructionDimension ?? descriptorType switch
@@ -100,7 +101,7 @@ internal static class Gen5ImageFixtures
             ScalarSampler: 16,
             Dimension: dimension,
             IsArray: isArray,
-            Glc: false,
+            Glc: glc,
             Slc: false,
             A16: a16,
             D16: d16);
