@@ -98,6 +98,7 @@ internal sealed class MetalGuestMemory : IDisposable
     private readonly IGuestBackedSpace _backing;
     private readonly ICpuMemory _memory;
     private readonly Window[] _windows;
+    private readonly ulong _windowStride;
     private readonly int _windowCount;
     private readonly ulong _aliasBase;
     private readonly ulong _aliasSize;
@@ -127,7 +128,13 @@ internal sealed class MetalGuestMemory : IDisposable
         _aliasSize = aliasSize;
         var maxBufferLength = (ulong)MetalV2Native.SendValue(device, SelMaxBufferLength);
         var windowBytes = Math.Min(PreferredWindowBytes, maxBufferLength == 0 ? PreferredWindowBytes : maxBufferLength);
-        var windowCount = (int)((aliasSize + windowBytes - 1) / windowBytes);
+        // Windows overlap by half: window k starts at k * stride, so any range of up to
+        // one stride lies wholly inside the window its first byte selects, and a range
+        // crossing a window edge never falls back to a copy.
+        var windowStride = windowBytes / 2;
+        var windowCount = aliasSize <= windowBytes
+            ? 1
+            : (int)((aliasSize - windowBytes + windowStride - 1) / windowStride) + 1;
         if (windowCount > MaxWindows)
         {
             throw GpuFatal.Fatal(
@@ -140,7 +147,7 @@ internal sealed class MetalGuestMemory : IDisposable
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         for (var index = 0; index < windowCount; index++)
         {
-            var offset = (ulong)index * windowBytes;
+            var offset = (ulong)index * windowStride;
             var size = Math.Min(windowBytes, aliasSize - offset);
             var pointer = aliasBase + offset;
             var buffer = MetalV2Native.SendNewBufferNoCopy(
@@ -162,6 +169,7 @@ internal sealed class MetalGuestMemory : IDisposable
         }
 
         _windowCount = windowCount;
+        _windowStride = windowStride;
         _gdsBuffer = CreateSharedBuffer(GdsBytes, "guest.gds", out _, out _);
         _nullBuffer = CreateSharedBuffer(256, "guest.null", out _nullContents, out _);
         unsafe
@@ -211,59 +219,38 @@ internal sealed class MetalGuestMemory : IDisposable
             return default;
         }
 
-        if (!StageEverything &&
-            _backing.TryResolveBackingAlias(gpuVa, size, out var alias) &&
-            alias >= _aliasBase && alias - _aliasBase < _aliasSize)
+        if (!StageEverything && TryResolveWindow(gpuVa, size, out var resolved))
         {
-            var aliasOffset = alias - _aliasBase;
-            for (var index = 0; index < _windowCount; index++)
-            {
-                ref readonly var window = ref _windows[index];
-                if (alias < window.AliasBase || alias - window.AliasBase >= window.Size)
-                {
-                    continue;
-                }
-
-                var offset = alias - window.AliasBase;
-                if (size <= window.Size - offset)
-                {
-                    return new MetalGuestRange(window.Buffer, offset, size, window.GpuAddress + offset);
-                }
-
-                break;
-            }
-
-            _ = aliasOffset;
+            return resolved;
         }
 
         return Upload(gpuVa, size);
     }
 
     /// <summary>The window range of an address that must be written by the GPU; zero when it is not backed.</summary>
-    public MetalGuestRange ResolveWritable(ulong gpuVa, ulong size)
+    public MetalGuestRange ResolveWritable(ulong gpuVa, ulong size) =>
+        TryResolveWindow(gpuVa, size, out var resolved) ? resolved : default;
+
+    private bool TryResolveWindow(ulong gpuVa, ulong size, out MetalGuestRange resolved)
     {
+        resolved = default;
         if (size == 0 || gpuVa == 0 || size > ulong.MaxValue - gpuVa ||
             !_backing.TryResolveBackingAlias(gpuVa, size, out var alias) ||
             alias < _aliasBase || alias - _aliasBase >= _aliasSize)
         {
-            return default;
+            return false;
         }
 
-        for (var index = 0; index < _windowCount; index++)
+        var index = (int)Math.Min((alias - _aliasBase) / _windowStride, (ulong)(_windowCount - 1));
+        ref readonly var window = ref _windows[index];
+        var offset = alias - window.AliasBase;
+        if (alias < window.AliasBase || offset >= window.Size || size > window.Size - offset)
         {
-            ref readonly var window = ref _windows[index];
-            if (alias < window.AliasBase || alias - window.AliasBase >= window.Size)
-            {
-                continue;
-            }
-
-            var offset = alias - window.AliasBase;
-            return size <= window.Size - offset
-                ? new MetalGuestRange(window.Buffer, offset, size, window.GpuAddress + offset)
-                : default;
+            return false;
         }
 
-        return default;
+        resolved = new MetalGuestRange(window.Buffer, offset, size, window.GpuAddress + offset);
+        return true;
     }
 
     /// <summary>Copies guest bytes into the ring; used for ranges no window covers.</summary>
