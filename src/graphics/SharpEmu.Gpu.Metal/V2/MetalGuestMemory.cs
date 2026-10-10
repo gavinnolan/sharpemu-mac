@@ -443,6 +443,13 @@ internal sealed class MetalGuestMemory : IDisposable
     }
 
     /// <summary>
+    /// Reads guest bytes on the host, for diagnostics that want to say what a shader is
+    /// about to read. Not a transfer path: the GPU reaches the same bytes through a
+    /// window or the upload ring.
+    /// </summary>
+    public bool TryPeek(ulong gpuVa, Span<byte> destination) => _memory.TryRead(gpuVa, destination);
+
+    /// <summary>
     /// A small shared buffer outside the per-submission ring, for words the GPU writes
     /// and the host reads back after a submission. The caller owns its lifetime and
     /// must name it with <c>useResource</c> wherever a shader reaches it.
