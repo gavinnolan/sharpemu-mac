@@ -118,6 +118,26 @@ compiler, CLR/testhost, provider, Metal worker or game is qualified by it.
 Archive manifest:
 `5c43c2ed8a5c92bbe8f1f0043a55bb8cf71f6aed4115f9ef266f768269712adc`.
 
+### First candidate build: controller refusal retained
+
+The first `d914f004` Host build is unqualified. R3 captures the direct .NET
+worker, then rejects a new descendant whose kernel executable differs from the
+selected dotnet image. The refused candidate's path was not retained, so its
+identity is unknown. The build later logs the Host DLL output, but its child
+return code and terminal receipt are unobserved. No later build or focused test
+runs, and no process is signaled. Root verifies all 32 failed archive hashes,
+then independently confirms both known PID/PPID/PG roots absent and no actual
+heavy worker. Exact dead-owner lease 21945/nonce `4d09d480...` is archived and
+administratively cleared; the old controller's unknown state and stopped ledger
+remain intact. Failed manifest:
+`e59e696a9a725c637068c5c82036ec338f26fe8843d159d3eac0ca184a38a2f4`.
+
+The SDK can launch its own native C# compiler apphost. R4 will pin that exact
+SDK path and hash as build-only authority, keep runtime workers restricted to
+the selected CLR, and record every refused candidate before policy evaluation.
+This is a justified controller revision; it does not identify the unrecorded
+child or qualify the failed build. No broad shell/tool exception is planned.
+
 ### Fresh reconnected-volume Oregon replay
 
 The source-exact `e2535177` Oregon replay `20261010-013557` exits 134 after
