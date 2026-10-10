@@ -190,6 +190,29 @@ internal static partial class MetalNative
     public static partial void SendVoidBool(nint receiver, nint selector, [MarshalAs(UnmanagedType.I1)] bool argument);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendVoidNUInt(nint receiver, nint selector, nuint argument);
+
+    // MTLLanguageVersion3_2: (major << 16) | minor. Texture atomics arrived in
+    // MSL 3.1 and MTLCompileOptions still defaults to an older version, so every
+    // site that compiles MSL asks for this one rather than taking the default.
+    public const nuint MslLanguageVersion = (3 << 16) | 2;
+
+    /// <summary>Pins the MSL version a library is compiled against.</summary>
+    public static void SetMslLanguageVersion(nint options) =>
+        SendVoidNUInt(options, Selector("setLanguageVersion:"), MslLanguageVersion);
+
+    /// <summary>
+    /// The compile options every translated-guest MSL library is built with: fast
+    /// math off, because the translated GCN float semantics do not survive it, and
+    /// an explicit language version so MSL 3.1+ features are available.
+    /// </summary>
+    public static void ApplyMslCompileOptions(nint options)
+    {
+        SendVoidBool(options, Selector("setFastMathEnabled:"), false);
+        SetMslLanguageVersion(options);
+    }
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendVoidDouble(nint receiver, nint selector, double argument);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]

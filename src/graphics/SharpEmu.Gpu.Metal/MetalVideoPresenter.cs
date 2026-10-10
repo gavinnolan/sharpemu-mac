@@ -965,7 +965,7 @@ internal static partial class MetalVideoPresenter
         try
         {
             if (options == 0) throw new InvalidOperationException("Metal native shader compile options could not be initialized.");
-            MetalNative.SendVoidBool(options, MetalNative.Selector("setFastMathEnabled:"), false);
+            MetalNative.ApplyMslCompileOptions(options);
             library = MetalNative.Send(
                 device,
                 MetalNative.Selector("newLibraryWithSource:options:error:"),

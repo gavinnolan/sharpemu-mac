@@ -793,6 +793,10 @@ internal static class MetalV2Presenter
         var options = MetalNative.Send(
             MetalNative.Send(MetalNative.Class("MTLCompileOptions"), MetalNative.Selector("alloc")),
             MetalNative.Selector("init"));
+        // The present shaders are hand-written and keep Metal's default fast math;
+        // only the language version is pinned, so every library in the backend is
+        // compiled against the same MSL version.
+        MetalNative.SetMslLanguageVersion(options);
         nint vertexLibrary = 0;
         nint fragmentLibrary = 0;
         try

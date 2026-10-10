@@ -112,8 +112,9 @@ internal sealed partial class MetalRenderHost
 
             try
             {
-                // Fast math off: the translated GCN float semantics do not survive it.
-                MetalNative.SendVoidBool(options, MetalNative.Selector("setFastMathEnabled:"), false);
+                // Fast math off (the translated GCN float semantics do not survive
+                // it) and an explicit MSL version, so texture atomics are available.
+                MetalNative.ApplyMslCompileOptions(options);
                 nint error = 0;
                 var library = MetalNative.Send(
                     _device,

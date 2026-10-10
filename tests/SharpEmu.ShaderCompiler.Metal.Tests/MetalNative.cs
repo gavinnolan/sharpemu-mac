@@ -16,6 +16,11 @@ internal static partial class MetalNative
     private const string ObjCLibrary = "/usr/lib/libobjc.A.dylib";
     private const string MetalFramework = "/System/Library/Frameworks/Metal.framework/Metal";
 
+    // MTLLanguageVersion3_2: (major << 16) | minor. Texture atomics arrived in
+    // MSL 3.1 and the default version is older, so the backend asks for this one
+    // explicitly and the harness has to match it.
+    private const nuint MslLanguageVersion = (3 << 16) | 2;
+
     [StructLayout(LayoutKind.Sequential)]
     private struct MtlSize
     {
@@ -75,6 +80,9 @@ internal static partial class MetalNative
     private static partial void SendVoidBool(nint receiver, nint selector, [MarshalAs(UnmanagedType.I1)] bool argument);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    private static partial void SendVoidUInt(nint receiver, nint selector, nuint argument);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     private static partial void SendSetBuffer(nint receiver, nint selector, nint buffer, nuint offset, nuint index);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
@@ -128,9 +136,12 @@ internal static partial class MetalNative
         error = string.Empty;
 
         // Metal defaults to fast-math; GCN float semantics do not survive it, so the
-        // harness compiles the way a real Metal backend must: fast-math off.
+        // harness compiles the way a real Metal backend must: fast-math off, and
+        // the same language version the backend asks for so a feature that needs
+        // MSL 3.1 or later (texture atomics) compiles here too.
         var options = Send(Send(objc_getClass("MTLCompileOptions"), Selector("alloc")), Selector("init"));
         SendVoidBool(options, Selector("setFastMathEnabled:"), false);
+        SendVoidUInt(options, Selector("setLanguageVersion:"), MslLanguageVersion);
 
         nint nsError = 0;
         library = Send(
