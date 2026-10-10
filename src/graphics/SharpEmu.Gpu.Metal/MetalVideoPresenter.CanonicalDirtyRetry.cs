@@ -234,7 +234,7 @@ internal static partial class MetalVideoPresenter
                 _batchOpen || _takenGuestWorkSequence != 0 || _executingGuestWorkSequence != 0 ||
                 _guestWorkFailure is not null || _textureSourceCleanupFailure is not null ||
                 _typedCpuSyncCleanupFailure is not null || _singletonVolumeOriginalCleanupFailure is not null ||
-                _selectedNativeOriginalCleanupFailure is not null || _r16SelectedRetainCleanupFailure is not null ||
+                Volatile.Read(ref _selectedNativeOriginalCleanupFailure) is not null || _r16SelectedRetainCleanupFailure is not null ||
                 _nativeDepthBatches.Count != 0 || retry.Origin.Session == CurrentStorageCpuSeedSession ||
                 retry.Debt.Failed || retry.Debt.Pending || retry.Debt.CanonicalVersion != retry.Version ||
                 !ReferenceEquals(retry.Debt.CanonicalOrigin, retry.Origin)) return false;

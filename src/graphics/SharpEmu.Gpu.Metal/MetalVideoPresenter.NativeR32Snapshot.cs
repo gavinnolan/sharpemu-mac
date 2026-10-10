@@ -180,7 +180,7 @@ internal static partial class MetalVideoPresenter
         if (!_r32NativeOriginalRequested || _takenDepthCubeProducerWork is not ComputeGuestDispatch consumer ||
             !_nativeR32Queued.TryGetValue(consumer, out var leases)) return false;
         if (_closed || _guestWorkFailure is not null || _ordinaryStorageOriginalCleanupFailure is not null ||
-            _selectedNativeOriginalCleanupFailure is not null ||
+            Volatile.Read(ref _selectedNativeOriginalCleanupFailure) is not null ||
             _takenGuestWorkSequence != _executingGuestWorkSequence || _executingGuestWorkSequence <= 0 ||
             !_batchOpen || _batchCommandBuffer == 0 ||
             !_selectedStorageMipOwners.TryGetValue(selected.Key, out var accepted) || !ReferenceEquals(accepted, selected) ||

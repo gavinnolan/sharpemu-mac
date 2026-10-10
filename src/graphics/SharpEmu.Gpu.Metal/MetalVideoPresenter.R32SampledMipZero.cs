@@ -95,7 +95,7 @@ internal static partial class MetalVideoPresenter
     private static void RequireR32MipZeroInventoryLocked(long session)
     {
         if (TextureSourceGraphEnabled || session != CurrentSelectedStorageMipSeedSession ||
-            _selectedNativeOriginalCleanupFailure is not null || _textureSourceCleanupFailure is not null ||
+            Volatile.Read(ref _selectedNativeOriginalCleanupFailure) is not null || _textureSourceCleanupFailure is not null ||
             _finiteStorageRetiredUnknown || _finiteStorageRetiredOriginCount != 0 || _finiteRetiredDisplayOriginCount != 0 ||
             _guestImages.Count != 0 || _guestImageExtents.Count != 0 || _latestTextureSources.Count != 0 ||
             _guestDepthImages.Count != 0 || _guestDepthReadAliases.Count != 0 ||
