@@ -166,13 +166,20 @@ internal sealed class MetalGuestMemory : IDisposable
 
             SetLabel(buffer, $"guest.window[{index}]");
             _windows[index] = new Window(buffer, pointer, size, MetalNative.SendGpuAddress(buffer, SelGpuAddress));
-            AddResident(buffer);
+            if (_residencySet != 0)
+            {
+                AddResident(buffer);
+            }
         }
 
         _windowCount = windowCount;
         _windowStride = windowStride;
         _gdsBuffer = CreateSharedBuffer(GdsBytes, "guest.gds", out _, out _);
         _nullBuffer = CreateSharedBuffer(256, "guest.null", out _nullContents, out _);
+        // Both are reached through an address in an argument buffer, so the encoder
+        // has to be told about them; both are small enough to always name.
+        AddResident(_gdsBuffer);
+        AddResident(_nullBuffer);
         unsafe
         {
             new Span<byte>((void*)_nullContents, 256).Clear();
@@ -204,9 +211,86 @@ internal sealed class MetalGuestMemory : IDisposable
     {
         _submissionSerial = submissionSerial;
         _completedSerial = completedSerial;
+        // Residency is per submission: naming every window on every encoder asks the
+        // kernel to make the whole 16 GiB backing writable-resident for a draw that
+        // touches one window, which measured as tens of milliseconds between -commit
+        // and the driver scheduling the submission.
+        _touchedWindows = 0;
+        _residentDirty = true;
     }
 
-    public void NoteCompleted(ulong completedSerial) => _completedSerial = Math.Max(_completedSerial, completedSerial);
+    private ulong _touchedWindows;
+    private bool _residentDirty = true;
+
+    /// <summary>The windows resolved since this submission began, one bit each.</summary>
+    public ulong TouchedWindows => _touchedWindows;
+
+    /// <summary>Notes that this submission reaches into these windows.</summary>
+    public void MarkWindowsTouched(ulong windows)
+    {
+        if ((windows & ~_touchedWindows) == 0)
+        {
+            return;
+        }
+
+        _touchedWindows |= windows;
+        _residentDirty = true;
+    }
+
+    /// <summary>Forgets which windows this submission has reached, for a re-scan.</summary>
+    public void ClearTouchedWindows()
+    {
+        _touchedWindows = 0;
+        _residentDirty = true;
+    }
+
+    /// <summary>Every window, for a submission that cannot name the ones it needs.</summary>
+    public ulong AllWindows => _windowCount >= 64 ? ulong.MaxValue : (1UL << _windowCount) - 1;
+
+    public void NoteCompleted(ulong completedSerial)
+    {
+        _completedSerial = Math.Max(_completedSerial, completedSerial);
+        TrimIdleRings();
+    }
+
+    // A ring is created when a range straddles a window or is not backed, which a
+    // title can do in bursts: a 4 GiB span of unbacked descriptors once cost tens of
+    // rings. Nothing freed them again, so the pool was the process's high-water mark
+    // for the rest of the run. Rings beyond the few that keep a steady submission fed
+    // are released once the GPU has been done with them for this many serials.
+    private const int KeptRings = 4;
+    private const ulong IdleRingSerials = 64;
+
+    private void TrimIdleRings()
+    {
+        if (_rings.Count <= KeptRings || _completedSerial < IdleRingSerials)
+        {
+            return;
+        }
+
+        var retireBefore = _completedSerial - IdleRingSerials;
+        for (var index = _rings.Count - 1; index >= KeptRings; index--)
+        {
+            var ring = _rings[index];
+            if (ring.LastUsedSerial > retireBefore)
+            {
+                continue;
+            }
+
+            RemoveResident(ring.Buffer);
+            MetalNative.SendVoid(ring.Buffer, SelRelease);
+            _rings.RemoveAt(index);
+            _ringsReleased++;
+        }
+    }
+
+    private long _ringsReleased;
+
+    /// <summary>How many idle upload rings have been handed back since startup.</summary>
+    public long RingsReleased => Volatile.Read(ref _ringsReleased);
+
+    /// <summary>The upload rings alive right now.</summary>
+    public int RingCount => _rings.Count;
 
     /// <summary>
     /// The GPU view of a guest byte range. A backed range inside one window needs no
@@ -248,6 +332,13 @@ internal sealed class MetalGuestMemory : IDisposable
         if (alias < window.AliasBase || offset >= window.Size || size > window.Size - offset)
         {
             return false;
+        }
+
+        var bit = 1UL << index;
+        if ((_touchedWindows & bit) == 0)
+        {
+            _touchedWindows |= bit;
+            _residentDirty = true;
         }
 
         resolved = new MetalGuestRange(window.Buffer, offset, size, window.GpuAddress + offset);
@@ -449,6 +540,40 @@ internal sealed class MetalGuestMemory : IDisposable
         NoteResident(allocation);
     }
 
+    /// <summary>Drops a released allocation from whatever keeps it resident.</summary>
+    public void RemoveResident(nint allocation)
+    {
+        if (allocation == 0)
+        {
+            return;
+        }
+
+        if (_residencySet != 0)
+        {
+            var selector = MetalNative.Selector("removeAllocation:");
+            if (MetalNative.SendBool(_residencySet, MetalNative.Selector("respondsToSelector:"), selector))
+            {
+                MetalNative.SendVoid(_residencySet, selector, allocation);
+                CommitResidency();
+            }
+
+            return;
+        }
+
+        for (var index = 0; index < _residentCount; index++)
+        {
+            if (_residentBuffers[index] != allocation)
+            {
+                continue;
+            }
+
+            _residentBuffers[index] = _residentBuffers[--_residentCount];
+            _residentBuffers[_residentCount] = 0;
+            _residentDirty = true;
+            return;
+        }
+    }
+
     public void CommitResidency()
     {
         if (_residencySet == 0)
@@ -483,10 +608,51 @@ internal sealed class MetalGuestMemory : IDisposable
     /// residency set: an argument buffer holds their addresses, not references, so
     /// Metal cannot see the dependency on its own.
     /// </summary>
-    public ReadOnlySpan<nint> ResidentBuffers => _residentBuffers.AsSpan(0, _residentCount);
+    public ReadOnlySpan<nint> ResidentBuffers
+    {
+        get
+        {
+            if (_residencySet != 0)
+            {
+                return default;
+            }
+
+            if (_residentDirty)
+            {
+                _residentDirty = false;
+                _submissionResidentCount = 0;
+                for (var index = 0; index < _windowCount; index++)
+                {
+                    if ((_touchedWindows & (1UL << index)) != 0)
+                    {
+                        Append(ref _submissionResidentBuffers, ref _submissionResidentCount, _windows[index].Buffer);
+                    }
+                }
+
+                for (var index = 0; index < _residentCount; index++)
+                {
+                    Append(ref _submissionResidentBuffers, ref _submissionResidentCount, _residentBuffers[index]);
+                }
+            }
+
+            return _submissionResidentBuffers.AsSpan(0, _submissionResidentCount);
+        }
+    }
+
+    private static void Append(ref nint[] buffers, ref int count, nint buffer)
+    {
+        if (count == buffers.Length)
+        {
+            Array.Resize(ref buffers, buffers.Length * 2);
+        }
+
+        buffers[count++] = buffer;
+    }
 
     private nint[] _residentBuffers = new nint[16];
     private int _residentCount;
+    private nint[] _submissionResidentBuffers = new nint[16];
+    private int _submissionResidentCount;
 
     private void NoteResident(nint buffer)
     {
@@ -509,6 +675,7 @@ internal sealed class MetalGuestMemory : IDisposable
         }
 
         _residentBuffers[_residentCount++] = buffer;
+        _residentDirty = true;
     }
 
     public void Dispose()

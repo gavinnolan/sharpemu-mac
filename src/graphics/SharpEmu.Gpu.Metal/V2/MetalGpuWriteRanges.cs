@@ -4,6 +4,58 @@
 namespace SharpEmu.Gpu.Metal.V2;
 
 /// <summary>
+/// Which packet or host path asked the worker to wait for the GPU. Every wait costs
+/// a frame's worth of latency on an idle GPU, so the counters are per reason: the
+/// only way to remove one is to know who asks for it.
+/// </summary>
+internal enum MetalWaitReason
+{
+    /// <summary>A WAIT_REG_MEM, a predication packet or another explicit CP wait.</summary>
+    CommandProcessor,
+
+    /// <summary>A full GPU synchronization: the GDS paths and the shutdown drain.</summary>
+    Synchronize,
+
+    /// <summary>A host read of bytes a GPU-written image owns.</summary>
+    ReadImage,
+
+    /// <summary>A host read of bytes a recorded shader store or writeback covers.</summary>
+    ReadRange,
+
+    /// <summary>The image cache needed the GPU to finish before touching a texture.</summary>
+    ImageCache,
+
+    Other,
+}
+
+/// <summary>Which host path recorded a GPU write range.</summary>
+internal enum MetalGpuWriteOrigin : byte
+{
+    StorageBuffer,
+    WrittenBinding,
+    Fill,
+    Copy,
+    ImageWriteback,
+    Unbounded,
+}
+
+internal static class MetalWaitReasons
+{
+    public const int Count = (int)MetalWaitReason.Other + 1;
+
+    public static readonly string[] Names =
+        ["cp", "sync", "read_image", "read_range", "image_cache", "other"];
+}
+
+internal static class MetalGpuWriteOrigins
+{
+    public const int Count = (int)MetalGpuWriteOrigin.Unbounded + 1;
+
+    public static readonly string[] Names =
+        ["storage", "binding", "fill", "copy", "writeback", "unbounded"];
+}
+
+/// <summary>
 /// The guest byte ranges recorded work may still be writing, each with the
 /// submission serial that will finish it. The twin of the Vulkan
 /// <c>GuestBufferCache._gpuModifiedRanges</c>: a CPU or command-processor read only
@@ -27,6 +79,7 @@ internal sealed class MetalGpuWriteRanges
         public ulong Start;
         public ulong End;
         public ulong Serial;
+        public MetalGpuWriteOrigin Origin;
     }
 
     private Record[] _records = new Record[64];
@@ -46,7 +99,11 @@ internal sealed class MetalGpuWriteRanges
     public bool IsEmpty => _count == 0 && _unboundedSerial == 0;
 
     /// <summary>Recorded work in <paramref name="serial"/> stores into this range.</summary>
-    public void Note(ulong address, ulong size, ulong serial)
+    public void Note(
+        ulong address,
+        ulong size,
+        ulong serial,
+        MetalGpuWriteOrigin origin = MetalGpuWriteOrigin.StorageBuffer)
     {
         if (size == 0 || serial == 0 || serial <= _retiredSerial || address > ulong.MaxValue - size)
         {
@@ -82,8 +139,17 @@ internal sealed class MetalGpuWriteRanges
             }
         }
 
-        _records[_count++] = new Record { Start = address, End = end, Serial = serial };
+        _records[_count++] = new Record { Start = address, End = end, Serial = serial, Origin = origin };
+        _recordsByOrigin[(int)origin]++;
     }
+
+    private readonly long[] _recordsByOrigin = new long[MetalGpuWriteOrigins.Count];
+
+    /// <summary>How many records each host path contributed since startup.</summary>
+    public long RecordsFrom(MetalGpuWriteOrigin origin) => _recordsByOrigin[(int)origin];
+
+    /// <summary>The record the last <see cref="PendingSerial"/> call matched.</summary>
+    public (ulong Start, ulong End, ulong Serial, MetalGpuWriteOrigin Origin) LastMatch { get; private set; }
 
     /// <summary>
     /// Recorded work in <paramref name="serial"/> may store anywhere in guest memory.
@@ -95,6 +161,7 @@ internal sealed class MetalGpuWriteRanges
         if (serial > _unboundedSerial)
         {
             _unboundedSerial = serial;
+            _recordsByOrigin[(int)MetalGpuWriteOrigin.Unbounded]++;
         }
     }
 
@@ -113,12 +180,18 @@ internal sealed class MetalGpuWriteRanges
 
         var end = address + size;
         var pending = _unboundedSerial > completed ? _unboundedSerial : 0;
+        if (pending != 0)
+        {
+            LastMatch = (0, ulong.MaxValue, pending, MetalGpuWriteOrigin.Unbounded);
+        }
+
         for (var index = 0; index < _count; index++)
         {
             ref var record = ref _records[index];
             if (record.Serial > pending && record.End > address && record.Start < end)
             {
                 pending = record.Serial;
+                LastMatch = (record.Start, record.End, record.Serial, record.Origin);
             }
         }
 
@@ -178,7 +251,13 @@ internal sealed class MetalGpuWriteRanges
             serial = Math.Max(serial, _records[index].Serial);
         }
 
-        _records[0] = new Record { Start = start, End = end, Serial = serial };
+        _records[0] = new Record
+        {
+            Start = start,
+            End = end,
+            Serial = serial,
+            Origin = _records[0].Origin,
+        };
         var kept = 1;
         for (var index = half; index < _count; index++)
         {

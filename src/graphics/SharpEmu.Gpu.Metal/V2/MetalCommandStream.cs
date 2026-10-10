@@ -63,12 +63,12 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         FlushCommandBuffer();
     }
 
-    void ICommandStreamHost.FlushAndWait() => FlushAndWaitForGpu();
+    void ICommandStreamHost.FlushAndWait() => FlushAndWaitForGpu(MetalWaitReason.CommandProcessor);
 
     public void SynchronizeGpu()
     {
         _imageCache.FlushAllGpuWrites();
-        FlushAndWaitForGpu();
+        FlushAndWaitForGpu(MetalWaitReason.Synchronize);
     }
 
     public void RunGarbageCollector() => _imageCache.Collect();
