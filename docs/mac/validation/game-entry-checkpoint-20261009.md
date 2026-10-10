@@ -2,6 +2,60 @@
 
 Priority: make all nine games reach a menu or controllable scene first; performance and visual polish follow entry.
 
+Current qualification: the fresh R9 build-only runner passes all three builds
+(`rc=0`; Host 6.005 seconds, Libs 29.844 seconds, GPU 3.336 seconds), proves each
+directly launched MSBuild root and observes terminal absence of heavy workers.
+Compiler descendants remain diagnostic only. Focused ARM64 Host passes 14/14;
+focused ARM64 Libs has 75 passes and 19 failures, so qualification stops.
+Fourteen failures are ambiguous .NET 10 `ConditionalWeakTable.Remove` reflection
+calls in test cleanup. The five original-content guard fixtures register tracker
+metadata at the base address but request an interior address; their initial
+observation assertions fail. A test-only successor is being prepared without
+relaxing production ownership/token guards. All later tests/native/game phases
+remain unrun; no failed result is adopted by the successor.
+ROOT verifies all 45 failed archive artifacts, 2,054 source files, 245 compiled
+files and 45 preparation pins, then freshly verifies absence of all 12 recorded
+roots, heavy workers and the shared lease. Failed terminal manifest:
+`18d22cb2d8b5c7bd216f22500d0be10292ec91cff8d93968261ccfeaa7de1bb7`.
+Successful build checkpoint:
+`1b2b742242440f7d87b23f1718c43a71ed6afdc6fa473f39f0c6de7347347e07`.
+Frozen preparation: `841b8ba552de78a3166489d3d0f5d32b0113e7c2868caee96e063e75f77dedfc`.
+The emulator source remains the four-fix candidate `638c3bdf`; local main is
+still qualified `e2535177`. No new game-entry acceptance yet.
+
+Native qualification will initially cover four positive X64 rows: real R32
+private-copy/consumer, disjoint canonical publication, and two applied disjoint
+continuations. The complete 246-row inventory is retained, without claiming a
+full run. Intentional unknown-retirement fixtures are held. Review caught that
+positive log markers precede fixture cleanup; the unexecuted wrapper must also
+join actual zero exit and exact passed-case TRX before calling cleanup known.
+The marker-only proposal is held and grants no native or game qualification.
+Its reviewed successor joins exact Passed TRX and normal terminal completion
+before native retirement proof; any failure retains native uncertainty. This
+wrapper is source-only because the managed prerequisite did not pass.
+
+Latest runner result: R8 passes all 21 supplied-state controls. Its Host build
+passes, and the Libs run records two verified compiler exits without granting
+those processes ownership. Libs then stops on a different compiler before image
+observation; actual build return code is unrecorded and GPU/managed/game phases
+remain unrun. ROOT verifies the 22 failed archive artifacts, 2,054 source files,
+241 partial outputs and 64 preparation pins, plus fresh absence of all 23
+recorded/declined/rejected roots and heavy workers; only the exact dead lease
+is archived/removed. Failure manifest:
+`a026e2ed11a61d8d89cde9ddcedff023c07edcfb3dd7bd9023661dee0ac78d10`.
+A separate build-only controller will prove the directly launched MSBuild job,
+its command/source/output and terminal status. Compiler descendants remain
+non-authoritative diagnostics; strict testhost and native checks are unchanged.
+No failed build result is retrospectively qualified.
+
+Poppy diagnostic offline qualification: all 18 named decoder controls pass
+once (12 inherited, six schema4), actual Python return code zero, no signals.
+ROOT verifies all nine retained artifact hashes and 2,056 source hashes.
+Archive: `d5cbf27709bd42e35b200dafa23d4a80a2dfffe8c367b4f31e66e08203b5c1c9`.
+This validates trace decoding only; C# builds, signal metadata controls, native
+recovery and a Poppy replay remain unqualified. Runner R8's compiler-exit
+handling is separately source-reviewed, with no game result yet.
+
 Runner successor R7 passes its eight supplied-state boundary/ancestry controls,
 with no failures, skips or signals; ROOT verifies all 21 retained artifact
 hashes. The unchanged eight-level ancestry limit is now separate from a
@@ -41,8 +95,9 @@ then the 108 focused and 1,354 ordinary cases per actual CLR. Host checkpoint:
 
 Separate diagnostic `2a919bd1` freezes the reviewed Poppy raw trap-number
 observation without changing recovery. ROOT verifies 2,056 live/archive source
-hashes. Its 11 new Mac metadata rows and six decoder controls are unexecuted;
-it remains separate from the current build candidate and is not integrated.
+hashes. Its 11 new Mac metadata rows remain unexecuted; the six new decoder
+controls pass in the separate 18-case Python run. It remains separate from the
+current build candidate and is not integrated.
 Source manifest: `d3e8ef16e4bec8b1141ca851a308730e35f52bf0ee4b12f58922bc82455940b8`.
 
 Local main integrates qualified source `e2535177` at local merge `02e7dbcf`;
@@ -239,8 +294,9 @@ and remains separate from main.
 
 The source-exact `e2535177` Quake replay `20261010-022046` runs to its 180-second
 cap. Captures show publisher/intro frames and a readable advisory, followed by
-gray bands and colored corruption at 135 seconds, then a black client at 175
-seconds. No usable menu, input or controllable scene is observed. Initialization,
+gray bands and colored corruption at both 135 and 175 seconds, with most of
+the later client area black. ROOT directly re-inspects the retained 175-second
+image on October 10; its corruption remains visible near the top. No usable menu, input or controllable scene is observed. Initialization,
 demo and map log messages do not establish gameplay. There are no fatal or
 unsupported exceptions before the first host shutdown request; 9,450 retained
 semaphore-timeout rows are symptoms with no established causal link.
