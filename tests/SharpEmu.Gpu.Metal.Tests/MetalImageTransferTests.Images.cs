@@ -198,10 +198,10 @@ public sealed partial class MetalImageTransferTests
         var stencilOut = stencilTarget != 0 ? new MetalGuestRange(stencilTarget, 0, description.Stencil.Size, 0) : default;
 
         harness.Begin();
-        harness.Transfer.EncodeGuestToTexture(harness, description, range, sourceRange, stencilIn, texture);
+        harness.Transfer.EncodeGuestToTexture(harness, description, range, sourceRange, stencilIn, texture, 0, description.Data.Size);
         harness.Submit();
         harness.Begin();
-        harness.Transfer.EncodeTextureToGuest(harness, description, range, texture, targetRange, stencilOut);
+        harness.Transfer.EncodeTextureToGuest(harness, description, range, texture, targetRange, stencilOut, 0, description.Data.Size);
         harness.Submit();
 
         Assert.Equal(guest, harness.Read(target, 0, description.Data.Size));
@@ -248,6 +248,94 @@ public sealed partial class MetalImageTransferTests
         RoundTrip(harness, Depth(GuestDepthFormat.Z16, stencil: true, 128, 64, 1), 33, "z16+s8 widened");
     }
 
+    // An image too large to map or stage whole is moved a run of layers at a time, each
+    // run addressed by its own guest range. The layers that come back must be identical
+    // to what a single whole-image transfer produces, and the staging each run asks for
+    // must be the run's size rather than the image's.
+    [Theory]
+    [InlineData(GuestTileMode.Standard64KB)]
+    [InlineData(GuestTileMode.Linear)]
+    public void ALayeredImageMovesPieceByPieceExactlyAsItMovesWhole(GuestTileMode tile)
+    {
+        if (!RequireDevice()) return;
+        using var harness = new MetalTransferHarness(Device.Value);
+        var description = Color2D(
+            GuestPixelFormat.Bits8_8_8_8UNorm, GpuFormat.R8G8B8A8Unorm, 64, 32, 1, 8, tile);
+        var layerBytes = description.Data.Size / description.Resources.Layers;
+        Assert.Equal(description.Data.Size, layerBytes * description.Resources.Layers);
+
+        var guest = BuildGuest(description, 71);
+        var whole = TransferWhole(harness, description, guest);
+        var pieces = TransferInLayerRuns(harness, description, guest, run: 3);
+        Assert.Equal(whole, pieces);
+        output.WriteLine($"pieces matched whole for 0x{description.Data.Size:x} bytes in runs of 3 layers");
+    }
+
+    // A depth array takes the dedicated depth path, which used to ignore the subresource
+    // range entirely and stage every layer whatever was asked for.
+    [Fact]
+    public void ADepthArrayMovesPieceByPieceExactlyAsItMovesWhole()
+    {
+        if (!RequireDevice()) return;
+        using var harness = new MetalTransferHarness(Device.Value);
+        var description = Depth(GuestDepthFormat.Z32Float, stencil: false, 64, 32, 6);
+        var guest = BuildGuest(description, 73);
+        var whole = TransferWhole(harness, description, guest);
+        var pieces = TransferInLayerRuns(harness, description, guest, run: 2);
+        Assert.Equal(whole, pieces);
+        output.WriteLine($"depth pieces matched whole for 0x{description.Data.Size:x} bytes in runs of 2 layers");
+    }
+
+    private static byte[] TransferWhole(MetalTransferHarness harness, in ImageDescription description, byte[] guest)
+    {
+        var source = harness.Buffer(guest);
+        var target = harness.Buffer(description.Data.Size);
+        var texture = harness.Texture(harness.Transfer.ShapeFor(description));
+        var range = new SubresourceRange(0, description.Resources.Levels, 0, description.Resources.Layers);
+        harness.Begin();
+        harness.Transfer.EncodeGuestToTexture(
+            harness, description, range, new MetalGuestRange(source, 0, description.Data.Size, 0), default,
+            texture, 0, description.Data.Size);
+        harness.Submit();
+        harness.Begin();
+        harness.Transfer.EncodeTextureToGuest(
+            harness, description, range, texture, new MetalGuestRange(target, 0, description.Data.Size, 0), default,
+            0, description.Data.Size);
+        harness.Submit();
+        return harness.Read(target, 0, description.Data.Size);
+    }
+
+    // Each run is handed a guest range that starts at the run's own bytes, exactly as the
+    // image cache hands one window-resolved piece at a time.
+    private static byte[] TransferInLayerRuns(
+        MetalTransferHarness harness, in ImageDescription description, byte[] guest, uint run)
+    {
+        var layers = description.Resources.Layers;
+        var layerBytes = description.Data.Size / layers;
+        var source = harness.Buffer(guest);
+        var target = harness.Buffer(description.Data.Size);
+        var texture = harness.Texture(harness.Transfer.ShapeFor(description));
+        for (uint first = 0; first < layers; first += run)
+        {
+            var count = Math.Min(run, layers - first);
+            var pieceBase = layerBytes * first;
+            var pieceSize = layerBytes * count;
+            var range = new SubresourceRange(0, description.Resources.Levels, first, count);
+            harness.Begin();
+            harness.Transfer.EncodeGuestToTexture(
+                harness, description, range, new MetalGuestRange(source, pieceBase, pieceSize, 0), default,
+                texture, pieceBase, pieceSize);
+            harness.Submit();
+            harness.Begin();
+            harness.Transfer.EncodeTextureToGuest(
+                harness, description, range, texture, new MetalGuestRange(target, pieceBase, pieceSize, 0), default,
+                pieceBase, pieceSize);
+            harness.Submit();
+        }
+
+        return harness.Read(target, 0, description.Data.Size);
+    }
+
     [Fact]
     public void LinearImagesBlitWithoutACompensatingPass()
     {
@@ -274,10 +362,10 @@ public sealed partial class MetalImageTransferTests
         var sourceRange = new MetalGuestRange(source, 0, description.Data.Size, 0);
         var targetRange = new MetalGuestRange(target, 0, description.Data.Size, 0);
         harness.Begin();
-        harness.Transfer.EncodeGuestToTexture(harness, description, range, sourceRange, default, texture);
+        harness.Transfer.EncodeGuestToTexture(harness, description, range, sourceRange, default, texture, 0, description.Data.Size);
         harness.Submit();
         harness.Begin();
-        harness.Transfer.EncodeTextureToGuest(harness, description, range, texture, targetRange, default);
+        harness.Transfer.EncodeTextureToGuest(harness, description, range, texture, targetRange, default, 0, description.Data.Size);
         harness.Submit();
 
         // Only the elements of level 1 came back; level 0 and the rest of the mip tail's

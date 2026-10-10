@@ -119,6 +119,7 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
     private readonly Dictionary<PlanKey, TransferPlan> _plans = [];
     private readonly List<MetalSubresourceCopy> _copies = [];
     private readonly List<MetalTileTransfer> _tiles = [];
+    private readonly List<MetalTileTransfer> _stencilTiles = [];
     private readonly List<ulong> _stagedOffsets = [];
     private bool _disposed;
 
@@ -225,11 +226,12 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
     }
 
     public void EncodeGuestToTexture(IMetalSubmissionContext context, in ImageDescription description,
-        SubresourceRange range, MetalGuestRange source, MetalGuestRange stencilSource, nint texture)
+        SubresourceRange range, MetalGuestRange source, MetalGuestRange stencilSource, nint texture,
+        ulong guestBase, ulong pieceSize)
     {
         // Per-sample tiled layouts are not decoded on either backend; the Vulkan cache
         // leaves a multisampled image untouched too.
-        if (!Ready(context, description, source, texture))
+        if (!Ready(context, description, source, texture, guestBase, pieceSize))
         {
             return;
         }
@@ -237,11 +239,11 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         var plan = PlanFor(description);
         if (plan.DepthStencil)
         {
-            EncodeDepthUpload(context, description, plan, source, stencilSource, texture);
+            EncodeDepthUpload(context, description, plan, range, source, stencilSource, texture, guestBase);
             return;
         }
 
-        Select(plan, description, range);
+        Select(plan, description, range, guestBase);
         if (_copies.Count == 0)
         {
             return;
@@ -280,9 +282,10 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
     }
 
     public void EncodeTextureToGuest(IMetalSubmissionContext context, in ImageDescription description,
-        SubresourceRange range, nint texture, MetalGuestRange destination, MetalGuestRange stencilDestination)
+        SubresourceRange range, nint texture, MetalGuestRange destination, MetalGuestRange stencilDestination,
+        ulong guestBase, ulong pieceSize)
     {
-        if (!Ready(context, description, destination, texture))
+        if (!Ready(context, description, destination, texture, guestBase, pieceSize))
         {
             return;
         }
@@ -290,11 +293,11 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         var plan = PlanFor(description);
         if (plan.DepthStencil)
         {
-            EncodeDepthDownload(context, description, plan, texture, destination, stencilDestination);
+            EncodeDepthDownload(context, description, plan, range, texture, destination, stencilDestination, guestBase);
             return;
         }
 
-        Select(plan, description, range);
+        Select(plan, description, range, guestBase);
         if (_copies.Count == 0)
         {
             return;
@@ -306,7 +309,7 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         var direct = !plan.Tiled && !plan.Swap && IsDirectlyBlittable(plan, destination.Offset);
         var tight = !direct && !plan.Tiled;
         var linear = direct
-            ? new MetalBufferSpan(destination.Buffer, destination.Offset, description.Data.Size)
+            ? new MetalBufferSpan(destination.Buffer, destination.Offset, pieceSize)
             : _tiler.Acquire(context, plan.Tiled ? plan.LinearSize : staged);
 
         var blit = _tiler.BeginBlit(context);
@@ -337,7 +340,7 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
             source = swapped;
         }
 
-        var guest = new MetalBufferSpan(destination.Buffer, destination.Offset, description.Data.Size);
+        var guest = new MetalBufferSpan(destination.Buffer, destination.Offset, pieceSize);
         if (plan.Tiled)
         {
             _tiler.EncodeTile(compute, new MetalBufferSpan(source.Buffer, source.Offset, plan.LinearSize), guest, _tiles);
@@ -350,7 +353,9 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         MetalTiler.EndEncoding(compute);
     }
 
-    private bool Ready(IMetalSubmissionContext context, in ImageDescription description, in MetalGuestRange guest, nint texture)
+    private bool Ready(
+        IMetalSubmissionContext context, in ImageDescription description, in MetalGuestRange guest, nint texture,
+        ulong guestBase, ulong pieceSize)
     {
         if (_disposed || context.CommandBuffer == 0 || texture == 0 || !guest.IsValid ||
             ImageDescription.IsEmptyRange(description.Data) || description.Samples != 1 ||
@@ -359,18 +364,24 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
             return false;
         }
 
-        if (guest.Size < description.Data.Size)
+        if (guestBase > description.Data.Size || pieceSize > description.Data.Size - guestBase)
         {
-            // The range the guest-memory resolver handed back does not cover the whole
-            // image, which happens when a range no window covers falls back to the
-            // upload ring and is clamped to its maximum (see MetalGuestMemory.Upload).
-            // A copy sized from the description would then run off the end of the
-            // staged bytes, so the transfer is dropped: the texture keeps whatever it
-            // already holds. Never fatal — one oversized texture must not end the run.
+            throw GpuFatal.Fatal(
+                $"An image piece falls outside its image: base=0x{guestBase:X} piece=0x{pieceSize:X} " +
+                $"image=0x{description.Data.Size:X}.");
+        }
+
+        if (guest.Size < pieceSize)
+        {
+            // The resolver could not map even this piece. A copy sized from the
+            // description would run off the end of what it did map, so this piece is
+            // dropped and the texture keeps whatever it already holds there. The caller
+            // splits a large image into pieces precisely so that one unmappable piece
+            // costs only its own subresources; never fatal, and never silent.
             MetalV2Diagnostics.WarnOnce(
                 "short-image-range",
-                $"A guest range is smaller than the image, so the transfer is skipped: " +
-                $"range=0x{guest.Size:x} image=0x{description.Data.Size:x} " +
+                $"A guest range is smaller than the image piece, so the piece is skipped: " +
+                $"range=0x{guest.Size:x} piece=0x{pieceSize:x} at 0x{guestBase:x} of 0x{description.Data.Size:x} " +
                 $"address=0x{description.Data.Address:X16} format={description.PixelFormat} " +
                 $"type={description.Type} extent={description.Extent.Width}x{description.Extent.Height}x" +
                 $"{description.Extent.Depth} levels={description.Resources.Levels} " +
@@ -399,7 +410,7 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         if (plan.Tiled)
         {
             linear = _tiler.Acquire(context, plan.LinearSize);
-            _tiler.EncodeDetile(compute, new MetalBufferSpan(guest.Buffer, guest.Offset, TiledCapacity(plan, source)), linear, _tiles);
+            _tiler.EncodeDetile(compute, new MetalBufferSpan(guest.Buffer, guest.Offset, TiledCapacity(source)), linear, _tiles);
         }
         else
         {
@@ -419,10 +430,13 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         return linear;
     }
 
-    private static ulong TiledCapacity(TransferPlan plan, in MetalGuestRange source)
+    // How much of the mapped guest piece the selected tiles actually reach. The selection
+    // is already rebased onto the piece, so this is the piece's own extent, not the
+    // image's.
+    private ulong TiledCapacity(in MetalGuestRange source)
     {
         ulong capacity = 0;
-        foreach (var transfer in plan.Tiles)
+        foreach (var transfer in _tiles)
         {
             capacity = Math.Max(capacity, transfer.TiledOffset + transfer.TiledSize);
         }
@@ -504,7 +518,14 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
 
     // Narrows the plan to the subresources the caller asked for. A volume's layers are
     // depth slices of one texture, so only its levels are selected.
-    private void Select(TransferPlan plan, in ImageDescription description, SubresourceRange range)
+    //
+    // guestBase is where the guest range the caller resolved starts inside the image, so a
+    // caller that could only map part of a very large image hands over that part and the
+    // subresources inside it. Every selected offset is rebased onto it: the guest offsets
+    // become relative to the piece that was mapped, and the linear offsets to the start of
+    // the piece's own staging, so the staging a transfer asks for is the piece's size and
+    // never the whole image's.
+    private void Select(TransferPlan plan, in ImageDescription description, SubresourceRange range, ulong guestBase)
     {
         _copies.Clear();
         _tiles.Clear();
@@ -522,7 +543,9 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
                 continue;
             }
 
-            _copies.Add(copy);
+            var rebased = copy;
+            rebased.BufferOffset = Rebase(copy.BufferOffset, guestBase, "a subresource copy");
+            _copies.Add(rebased);
         }
 
         if (!plan.Tiled)
@@ -530,25 +553,50 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
             return;
         }
 
+        var linearBase = ulong.MaxValue;
+        foreach (var transfer in plan.Tiles)
+        {
+            if (Selected(plan, transfer, range, lastLevel, lastLayer))
+            {
+                linearBase = Math.Min(linearBase, transfer.LinearOffset);
+            }
+        }
+
+        if (linearBase == ulong.MaxValue)
+        {
+            plan.LinearSize = 4;
+            return;
+        }
+
         ulong linear = 0;
         foreach (var transfer in plan.Tiles)
         {
-            if (transfer.Level < range.BaseLevel || transfer.Level > lastLevel || range.LevelCount == 0)
+            if (!Selected(plan, transfer, range, lastLevel, lastLayer))
             {
                 continue;
             }
 
-            if (!plan.Volume && (transfer.Slice < range.BaseLayer || transfer.Slice > lastLayer || range.LayerCount == 0))
-            {
-                continue;
-            }
-
-            _tiles.Add(transfer);
-            linear = Math.Max(linear, transfer.LinearOffset + transfer.LinearSize);
+            var rebased = transfer;
+            rebased.TiledOffset = Rebase(transfer.TiledOffset, guestBase, "a tile transfer");
+            rebased.LinearOffset = transfer.LinearOffset - linearBase;
+            _tiles.Add(rebased);
+            linear = Math.Max(linear, rebased.LinearOffset + rebased.LinearSize);
         }
 
         plan.LinearSize = Math.Max(linear, 4);
     }
+
+    private static bool Selected(
+        TransferPlan plan, in MetalTileTransfer transfer, SubresourceRange range, uint lastLevel, uint lastLayer) =>
+        range.LevelCount != 0 &&
+        transfer.Level >= range.BaseLevel && transfer.Level <= lastLevel &&
+        (plan.Volume || (range.LayerCount != 0 && transfer.Slice >= range.BaseLayer && transfer.Slice <= lastLayer));
+
+    private static ulong Rebase(ulong offset, ulong guestBase, string what) =>
+        offset >= guestBase
+            ? offset - guestBase
+            : throw GpuFatal.Fatal(
+                $"{what} starts before the mapped piece of its image: offset=0x{offset:X} base=0x{guestBase:X}.");
 
     private TransferPlan PlanFor(in ImageDescription description)
     {
@@ -729,24 +777,88 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         }
     }
 
-    private void EncodeDepthUpload(IMetalSubmissionContext context, in ImageDescription description, TransferPlan plan,
-        MetalGuestRange source, MetalGuestRange stencilSource, nint texture)
+    // The layers of one piece of a depth image. A depth plan is always a single level
+    // with equal-sized layers (PlanDepth enforces both), so a piece is a run of layers and
+    // guestBase has to be exactly where that run starts.
+    private static (uint Base, uint Count) DepthLayers(TransferPlan plan, SubresourceRange range, ulong guestBase)
     {
-        var depthPlane = new MetalBufferSpan(source.Buffer, source.Offset, description.Data.Size);
-        var stencilPlane = plan.StencilPlane && stencilSource.IsValid
-            ? new MetalBufferSpan(stencilSource.Buffer, stencilSource.Offset, description.Stencil.Size)
+        var first = Math.Min(range.BaseLayer, plan.Layers);
+        var count = Math.Min(range.LayerCount, plan.Layers - first);
+        if (guestBase != plan.SliceSize * first)
+        {
+            throw GpuFatal.Fatal(
+                $"A depth piece does not start on a layer boundary: base=0x{guestBase:X} " +
+                $"layer={first} sliceSize=0x{plan.SliceSize:X}.");
+        }
+
+        return (first, count);
+    }
+
+    // The stencil plane has its own tile list; rebase it onto the piece the way Select
+    // rebases the depth plane's.
+    private List<MetalTileTransfer> SelectStencilTiles(TransferPlan plan, uint firstLayer, uint layerCount)
+    {
+        _stencilTiles.Clear();
+        var guestBase = plan.StencilSliceSize * firstLayer;
+        var lastLayer = firstLayer + layerCount - 1;
+        var linearBase = ulong.MaxValue;
+        foreach (var transfer in plan.StencilTiles)
+        {
+            if (transfer.Slice >= firstLayer && transfer.Slice <= lastLayer)
+            {
+                linearBase = Math.Min(linearBase, transfer.LinearOffset);
+            }
+        }
+
+        if (linearBase == ulong.MaxValue)
+        {
+            return _stencilTiles;
+        }
+
+        foreach (var transfer in plan.StencilTiles)
+        {
+            if (transfer.Slice < firstLayer || transfer.Slice > lastLayer)
+            {
+                continue;
+            }
+
+            var rebased = transfer;
+            rebased.TiledOffset = Rebase(transfer.TiledOffset, guestBase, "a stencil tile transfer");
+            rebased.LinearOffset = transfer.LinearOffset - linearBase;
+            _stencilTiles.Add(rebased);
+        }
+
+        return _stencilTiles;
+    }
+
+    private void EncodeDepthUpload(IMetalSubmissionContext context, in ImageDescription description, TransferPlan plan,
+        SubresourceRange range, MetalGuestRange source, MetalGuestRange stencilSource, nint texture, ulong guestBase)
+    {
+        var (firstLayer, layerCount) = DepthLayers(plan, range, guestBase);
+        if (layerCount == 0)
+        {
+            return;
+        }
+
+        Select(plan, description, range, guestBase);
+        var depthPiece = plan.SliceSize * layerCount;
+        var stencilPiece = plan.StencilSliceSize * layerCount;
+        var depthPlane = new MetalBufferSpan(source.Buffer, source.Offset, depthPiece);
+        var stencilPlane = plan.StencilPlane && stencilSource.IsValid && stencilSource.Size >= stencilPiece
+            ? new MetalBufferSpan(stencilSource.Buffer, stencilSource.Offset, stencilPiece)
             : default;
         nint compute = 0;
         if (plan.Tiled)
         {
             compute = _tiler.BeginCompute(context);
-            var detiled = _tiler.Acquire(context, description.Data.Size);
-            _tiler.EncodeDetile(compute, depthPlane, detiled, plan.Tiles);
+            var detiled = _tiler.Acquire(context, depthPiece);
+            _tiler.EncodeDetile(compute, depthPlane, detiled, _tiles);
             depthPlane = detiled;
             if (stencilPlane.IsValid)
             {
-                var detiledStencil = _tiler.Acquire(context, description.Stencil.Size);
-                _tiler.EncodeDetile(compute, stencilPlane, detiledStencil, plan.StencilTiles);
+                var stencilTiles = SelectStencilTiles(plan, firstLayer, layerCount);
+                var detiledStencil = _tiler.Acquire(context, stencilPiece);
+                _tiler.EncodeDetile(compute, stencilPlane, detiledStencil, stencilTiles);
                 stencilPlane = detiledStencil;
             }
         }
@@ -756,13 +868,13 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         if (plan.TransferBytes != description.BytesPerBlock)
         {
             compute = compute != 0 ? compute : _tiler.BeginCompute(context);
-            var widened = _tiler.Acquire(context, depthSliceBytes * plan.Layers);
+            var widened = _tiler.Acquire(context, depthSliceBytes * layerCount);
             _tiler.EncodeDepthConversion(compute, depthPlane, widened, MetalDepthConversion.Widen, float32: true,
                 new MetalDepthConversionLayout
                 {
                     Width = description.Extent.Width,
                     Height = description.Extent.Height,
-                    Layers = plan.Layers,
+                    Layers = layerCount,
                     SourceRowStride = (ulong)description.Pitch * description.BytesPerBlock,
                     TargetRowStride = depthRowBytes,
                     SourceSliceStride = plan.SliceSize,
@@ -784,24 +896,24 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         var depthOption = MetalGuestFormats.HasStencilPlane(plan.Format)
             ? MtlBlitOption.DepthFromDepthStencil
             : MtlBlitOption.None;
-        for (uint layer = 0; layer < plan.Layers; layer++)
+        for (uint layer = 0; layer < layerCount; layer++)
         {
             MetalNative.SendCopyBufferToTextureOptions(blit, SelCopyBufferToTexture,
                 depthPlane.Buffer, (nuint)(depthPlane.Offset + depthSliceBytes * layer),
                 (nuint)depthRowBytes, (nuint)depthSliceBytes,
                 new MtlSize { Width = description.Extent.Width, Height = description.Extent.Height, Depth = 1 },
-                texture, layer, 0, default, (nuint)depthOption);
+                texture, firstLayer + layer, 0, default, (nuint)depthOption);
         }
 
         if (stencilPlane.IsValid)
         {
-            for (uint layer = 0; layer < plan.Layers; layer++)
+            for (uint layer = 0; layer < layerCount; layer++)
             {
                 MetalNative.SendCopyBufferToTextureOptions(blit, SelCopyBufferToTexture,
                     stencilPlane.Buffer, (nuint)(stencilPlane.Offset + plan.StencilSliceSize * layer),
                     plan.StencilPitch, (nuint)plan.StencilSliceSize,
                     new MtlSize { Width = description.Extent.Width, Height = description.Extent.Height, Depth = 1 },
-                    texture, layer, 0, default, (nuint)MtlBlitOption.StencilFromDepthStencil);
+                    texture, firstLayer + layer, 0, default, (nuint)MtlBlitOption.StencilFromDepthStencil);
             }
         }
 
@@ -816,17 +928,30 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
     // shader would need an X32_Stencil8 view, and the PixelFormatView usage that view
     // asks for is what turns off the attachment's lossless compression while it renders.
     private void EncodeTiledDepthDownload(IMetalSubmissionContext context, in ImageDescription description,
-        TransferPlan plan, nint texture, MetalGuestRange destination, MetalGuestRange stencilDestination)
+        TransferPlan plan, SubresourceRange range, nint texture, MetalGuestRange destination,
+        MetalGuestRange stencilDestination, ulong guestBase)
     {
-        var stencilWanted = plan.StencilPlane && stencilDestination.IsValid;
-        var stencilPlane = stencilWanted ? _tiler.Acquire(context, description.Stencil.Size) : default;
+        var (firstLayer, layerCount) = DepthLayers(plan, range, guestBase);
+        if (layerCount == 0)
+        {
+            return;
+        }
+
+        // The selected tiles carry the texture slice they came from and guest offsets
+        // rebased onto this piece, so the kernel reads the right array slices and writes
+        // inside the piece that was mapped.
+        Select(plan, description, range, guestBase);
+        var depthPiece = plan.SliceSize * layerCount;
+        var stencilPiece = plan.StencilSliceSize * layerCount;
+        var stencilWanted = plan.StencilPlane && stencilDestination.IsValid && stencilDestination.Size >= stencilPiece;
+        var stencilPlane = stencilWanted ? _tiler.Acquire(context, stencilPiece) : default;
         if (stencilWanted)
         {
             var blit = _tiler.BeginBlit(context);
-            for (uint layer = 0; layer < plan.Layers; layer++)
+            for (uint layer = 0; layer < layerCount; layer++)
             {
                 MetalNative.SendCopyTextureToBufferOptions(blit, SelCopyTextureToBuffer,
-                    texture, layer, 0, default,
+                    texture, firstLayer + layer, 0, default,
                     new MtlSize { Width = description.Extent.Width, Height = description.Extent.Height, Depth = 1 },
                     stencilPlane.Buffer, (nuint)(stencilPlane.Offset + plan.StencilSliceSize * layer),
                     plan.StencilPitch, (nuint)plan.StencilSliceSize, (nuint)MtlBlitOption.StencilFromDepthStencil);
@@ -837,47 +962,57 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
 
         var compute = _tiler.BeginCompute(context);
         _tiler.EncodeDepthTextureWriteback(compute, texture,
-            new MetalBufferSpan(destination.Buffer, destination.Offset, description.Data.Size),
-            description.BytesPerBlock, plan.Layers > 1, plan.Tiles);
+            new MetalBufferSpan(destination.Buffer, destination.Offset, depthPiece),
+            description.BytesPerBlock, plan.Layers > 1, _tiles);
         if (stencilWanted)
         {
             _tiler.EncodeTile(compute, stencilPlane,
-                new MetalBufferSpan(stencilDestination.Buffer, stencilDestination.Offset, description.Stencil.Size),
-                plan.StencilTiles);
+                new MetalBufferSpan(stencilDestination.Buffer, stencilDestination.Offset, stencilPiece),
+                SelectStencilTiles(plan, firstLayer, layerCount));
         }
 
         MetalTiler.EndEncoding(compute);
     }
 
     private void EncodeDepthDownload(IMetalSubmissionContext context, in ImageDescription description, TransferPlan plan,
-        nint texture, MetalGuestRange destination, MetalGuestRange stencilDestination)
+        SubresourceRange range, nint texture, MetalGuestRange destination, MetalGuestRange stencilDestination,
+        ulong guestBase)
     {
-        if (plan.Tiled)
+        var (firstLayer, layerCount) = DepthLayers(plan, range, guestBase);
+        if (layerCount == 0)
         {
-            EncodeTiledDepthDownload(context, description, plan, texture, destination, stencilDestination);
             return;
         }
 
+        if (plan.Tiled)
+        {
+            EncodeTiledDepthDownload(
+                context, description, plan, range, texture, destination, stencilDestination, guestBase);
+            return;
+        }
+
+        var depthPiece = plan.SliceSize * layerCount;
+        var stencilPiece = plan.StencilSliceSize * layerCount;
         var widening = plan.TransferBytes != description.BytesPerBlock;
         var depthRowBytes = (ulong)description.Pitch * plan.TransferBytes;
         var depthSliceBytes = widening ? depthRowBytes * description.Extent.Height : plan.SliceSize;
         var direct = !widening && destination.Offset % plan.TransferBytes == 0;
         var depthPlane = direct
-            ? new MetalBufferSpan(destination.Buffer, destination.Offset, description.Data.Size)
-            : _tiler.Acquire(context, depthSliceBytes * plan.Layers);
-        var stencilWanted = plan.StencilPlane && stencilDestination.IsValid;
+            ? new MetalBufferSpan(destination.Buffer, destination.Offset, depthPiece)
+            : _tiler.Acquire(context, depthSliceBytes * layerCount);
+        var stencilWanted = plan.StencilPlane && stencilDestination.IsValid && stencilDestination.Size >= stencilPiece;
         var stencilPlane = stencilWanted
-            ? new MetalBufferSpan(stencilDestination.Buffer, stencilDestination.Offset, description.Stencil.Size)
+            ? new MetalBufferSpan(stencilDestination.Buffer, stencilDestination.Offset, stencilPiece)
             : default;
 
         var blit = _tiler.BeginBlit(context);
         var depthOption = MetalGuestFormats.HasStencilPlane(plan.Format)
             ? MtlBlitOption.DepthFromDepthStencil
             : MtlBlitOption.None;
-        for (uint layer = 0; layer < plan.Layers; layer++)
+        for (uint layer = 0; layer < layerCount; layer++)
         {
             MetalNative.SendCopyTextureToBufferOptions(blit, SelCopyTextureToBuffer,
-                texture, layer, 0, default,
+                texture, firstLayer + layer, 0, default,
                 new MtlSize { Width = description.Extent.Width, Height = description.Extent.Height, Depth = 1 },
                 depthPlane.Buffer, (nuint)(depthPlane.Offset + depthSliceBytes * layer),
                 (nuint)depthRowBytes, (nuint)depthSliceBytes, (nuint)depthOption);
@@ -885,10 +1020,10 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
 
         if (stencilPlane.IsValid)
         {
-            for (uint layer = 0; layer < plan.Layers; layer++)
+            for (uint layer = 0; layer < layerCount; layer++)
             {
                 MetalNative.SendCopyTextureToBufferOptions(blit, SelCopyTextureToBuffer,
-                    texture, layer, 0, default,
+                    texture, firstLayer + layer, 0, default,
                     new MtlSize { Width = description.Extent.Width, Height = description.Extent.Height, Depth = 1 },
                     stencilPlane.Buffer, (nuint)(stencilPlane.Offset + plan.StencilSliceSize * layer),
                     plan.StencilPitch, (nuint)plan.StencilSliceSize, (nuint)MtlBlitOption.StencilFromDepthStencil);
@@ -904,13 +1039,13 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         var compute = _tiler.BeginCompute(context);
         if (widening)
         {
-            var narrowed = _tiler.Acquire(context, description.Data.Size);
+            var narrowed = _tiler.Acquire(context, depthPiece);
             _tiler.EncodeDepthConversion(compute, depthPlane, narrowed, MetalDepthConversion.Narrow, float32: true,
                 new MetalDepthConversionLayout
                 {
                     Width = description.Extent.Width,
                     Height = description.Extent.Height,
-                    Layers = plan.Layers,
+                    Layers = layerCount,
                     SourceRowStride = depthRowBytes,
                     TargetRowStride = (ulong)description.Pitch * description.BytesPerBlock,
                     SourceSliceStride = depthSliceBytes,
@@ -920,8 +1055,8 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         }
 
         _tiler.EncodeRepackRows(compute, depthPlane,
-            new MetalBufferSpan(destination.Buffer, destination.Offset, description.Data.Size),
-            (uint)((ulong)description.Pitch * description.BytesPerBlock), description.Extent.Height, plan.Layers,
+            new MetalBufferSpan(destination.Buffer, destination.Offset, depthPiece),
+            (uint)((ulong)description.Pitch * description.BytesPerBlock), description.Extent.Height, layerCount,
             (ulong)description.Pitch * description.BytesPerBlock,
             (ulong)description.Pitch * description.BytesPerBlock,
             plan.SliceSize, plan.SliceSize);

@@ -100,9 +100,9 @@ public sealed partial class MetalImageTransferTests
         // whenever the plane has to land in a staging buffer on the way.
         output.WriteLine("whole transfers:");
         Measure(harness, "upload (guest->texture)", depthBytes + stencilBytes,
-            () => harness.Transfer.EncodeGuestToTexture(harness, description, range, depthRange, stencilRange, texture));
+            () => harness.Transfer.EncodeGuestToTexture(harness, description, range, depthRange, stencilRange, texture, 0, description.Data.Size));
         Measure(harness, "writeback (texture->guest)", depthBytes + stencilBytes,
-            () => harness.Transfer.EncodeTextureToGuest(harness, description, range, texture, depthRange, stencilRange));
+            () => harness.Transfer.EncodeTextureToGuest(harness, description, range, texture, depthRange, stencilRange, 0, description.Data.Size));
 
         output.WriteLine("stages:");
         Measure(harness, "detile depth (4B)", depthBytes * 2, () =>
@@ -175,12 +175,12 @@ public sealed partial class MetalImageTransferTests
         Measure(harness, "upload (guest->texture)", depthBytes + stencilBytes, () =>
         {
             ClearDepthStencil(harness, texture);
-            harness.Transfer.EncodeGuestToTexture(harness, description, range, depthRange, stencilRange, texture);
+            harness.Transfer.EncodeGuestToTexture(harness, description, range, depthRange, stencilRange, texture, 0, description.Data.Size);
         });
         Measure(harness, "writeback (texture->guest)", depthBytes + stencilBytes, () =>
         {
             ClearDepthStencil(harness, texture);
-            harness.Transfer.EncodeTextureToGuest(harness, description, range, texture, depthRange, stencilRange);
+            harness.Transfer.EncodeTextureToGuest(harness, description, range, texture, depthRange, stencilRange, 0, description.Data.Size);
         });
 
         output.WriteLine($"staging buffers={harness.Tiler.StagingBufferCount} bytes={harness.Tiler.StagingBytes}");
@@ -230,8 +230,8 @@ public sealed partial class MetalImageTransferTests
         var range = new SubresourceRange(0, 1, 0, 1);
         var guestRange = new MetalGuestRange(guest, 0, size, 0);
         Measure(harness, "upload (guest->texture)", size,
-            () => harness.Transfer.EncodeGuestToTexture(harness, description, range, guestRange, default, texture));
+            () => harness.Transfer.EncodeGuestToTexture(harness, description, range, guestRange, default, texture, 0, description.Data.Size));
         Measure(harness, "writeback (texture->guest)", size,
-            () => harness.Transfer.EncodeTextureToGuest(harness, description, range, texture, guestRange, default));
+            () => harness.Transfer.EncodeTextureToGuest(harness, description, range, texture, guestRange, default, 0, description.Data.Size));
     }
 }

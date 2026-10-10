@@ -611,6 +611,30 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
     }
 
+    // How much of an image one transfer may map and stage at a time. A guest-memory
+    // window is 4 GiB, but the staging a tiled transfer asks for is as large as the piece
+    // it is given, so a very large image is moved a few layers at a time rather than
+    // asking the ring for hundreds of megabytes in one submission.
+    private const ulong MaxTransferPieceBytes = 32UL * 1024 * 1024;
+
+    // The pieces an image is transferred in: one piece for anything that maps whole, and
+    // otherwise runs of whole layers, which is the only split whose guest bytes are
+    // contiguous and whose subresources are expressible as a SubresourceRange. An image
+    // that cannot be split that way stays a single piece and reports itself if it fails.
+    private static bool TrySplitLayers(in ImageDescription description, out uint layers, out ulong layerBytes)
+    {
+        layers = description.TransferLayers;
+        layerBytes = 0;
+        if (layers <= 1 || description.Resources.Levels != 1 || description.IsVolume ||
+            description.Data.Size % layers != 0)
+        {
+            return false;
+        }
+
+        layerBytes = description.Data.Size / layers;
+        return layerBytes != 0;
+    }
+
     // Uploads the guest bytes of a CPU-dirty image through the tiler.
     private void RefreshFromGuest(MetalCachedImage image)
     {
@@ -621,25 +645,92 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         ref readonly var description = ref image.Description;
         var context = _owner.BeginTransfer();
-        var source = _guestMemory.Resolve(description.Data.Address, description.Data.Size);
-        if (!source.IsValid)
+        var whole = description.Data.Size <= MaxTransferPieceBytes
+            ? _guestMemory.Resolve(description.Data.Address, description.Data.Size)
+            : default;
+        if (whole.IsValid && whole.Size >= description.Data.Size)
         {
-            MetalV2Diagnostics.WarnOnce(
-                "upload-unresolved",
-                $"An image range could not be resolved for an upload: address=0x{description.Data.Address:X16} size=0x{description.Data.Size:X}.");
+            var stencil = description.HasStencil
+                ? _guestMemory.Resolve(description.Stencil.Address, description.Stencil.Size)
+                : default;
+            var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
+            _transfer.EncodeGuestToTexture(
+                context, in description, range, whole, stencil, image.Texture, 0, description.Data.Size);
+        }
+        else if (!UploadInPieces(context, image))
+        {
             image.RefreshComplete();
             return;
         }
 
-        var stencil = description.HasStencil
-            ? _guestMemory.Resolve(description.Stencil.Address, description.Stencil.Size)
-            : default;
-        var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
-        _transfer.EncodeGuestToTexture(context, in description, range, source, stencil, image.Texture);
         _uploadCauses[(int)image.DirtyCause]++;
         context.ProfileEncoded(ProfileLabel("upload", in description));
         image.RefreshComplete();
         Interlocked.Increment(ref _uploads);
+    }
+
+    // Moves an image that is too large to map or stage whole, a run of layers at a time.
+    // A run that cannot be mapped is reported and skipped on its own; the rest still land.
+    private bool UploadInPieces(IMetalSubmissionContext context, MetalCachedImage image)
+    {
+        ref readonly var description = ref image.Description;
+        if (!TrySplitLayers(in description, out var layers, out var layerBytes))
+        {
+            var source = _guestMemory.Resolve(description.Data.Address, description.Data.Size);
+            if (!source.IsValid)
+            {
+                MetalV2Diagnostics.WarnOnce(
+                    "upload-unresolved",
+                    $"An image range could not be resolved for an upload: " +
+                    $"address=0x{description.Data.Address:X16} size=0x{description.Data.Size:X} " +
+                    $"({_guestMemory.DescribeResolve(description.Data.Address, description.Data.Size)}).");
+                return false;
+            }
+
+            var stencil = description.HasStencil
+                ? _guestMemory.Resolve(description.Stencil.Address, description.Stencil.Size)
+                : default;
+            var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
+            _transfer.EncodeGuestToTexture(
+                context, in description, range, source, stencil, image.Texture, 0, description.Data.Size);
+            return true;
+        }
+
+        var batch = (uint)Math.Clamp(MaxTransferPieceBytes / layerBytes, 1, layers);
+        var stencilLayerBytes = description.HasStencil && layers != 0 ? description.Stencil.Size / layers : 0;
+        MetalV2Diagnostics.InfoOnce(
+            "image-pieces",
+            $"An image is transferred in pieces because it does not map or stage whole: " +
+            $"address=0x{description.Data.Address:X16} size=0x{description.Data.Size:X} layers={layers} " +
+            $"batch={batch} ({_guestMemory.DescribeResolve(description.Data.Address, description.Data.Size)}).");
+        var moved = false;
+        for (uint first = 0; first < layers; first += batch)
+        {
+            var count = Math.Min(batch, layers - first);
+            var pieceBase = layerBytes * first;
+            var pieceSize = layerBytes * count;
+            var piece = _guestMemory.Resolve(description.Data.Address + pieceBase, pieceSize);
+            if (!piece.IsValid || piece.Size < pieceSize)
+            {
+                MetalV2Diagnostics.WarnOnce(
+                    "upload-piece-unresolved",
+                    $"An image piece could not be resolved for an upload, so those layers keep what they hold: " +
+                    $"address=0x{description.Data.Address + pieceBase:X16} size=0x{pieceSize:X} layers={first}+{count} " +
+                    $"({_guestMemory.DescribeResolve(description.Data.Address + pieceBase, pieceSize)}).");
+                continue;
+            }
+
+            var stencilPiece = description.HasStencil && stencilLayerBytes != 0
+                ? _guestMemory.Resolve(
+                    description.Stencil.Address + (stencilLayerBytes * first), stencilLayerBytes * count)
+                : default;
+            var range = new SubresourceRange(0, description.Resources.Levels, first, count);
+            _transfer.EncodeGuestToTexture(
+                context, in description, range, piece, stencilPiece, image.Texture, pieceBase, pieceSize);
+            moved = true;
+        }
+
+        return moved;
     }
 
     // Retiles a GPU-written image back into guest memory; afterwards guest memory and
@@ -653,35 +744,102 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         ref readonly var description = ref image.Description;
-        var destination = _guestMemory.ResolveWritable(description.Data.Address, description.Data.Size);
-        if (!destination.IsValid)
+        var destination = description.Data.Size <= MaxTransferPieceBytes
+            ? _guestMemory.ResolveWritable(description.Data.Address, description.Data.Size)
+            : default;
+        var context = _owner.BeginTransfer();
+        if (destination.IsValid && destination.Size >= description.Data.Size)
         {
-            // Nothing in guest memory can receive the bytes; keep the texture
-            // authoritative rather than publishing a wrong result.
-            MetalV2Diagnostics.WarnOnce(
-                "writeback-unresolved",
-                $"A GPU-written image has no writable guest window: address=0x{description.Data.Address:X16} size=0x{description.Data.Size:X}.");
+            var stencil = description.HasStencil
+                ? _guestMemory.ResolveWritable(description.Stencil.Address, description.Stencil.Size)
+                : default;
+            var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
+            _transfer.EncodeTextureToGuest(
+                context, in description, range, image.Texture, destination, stencil, 0, description.Data.Size);
+        }
+        else if (!WriteBackInPieces(context, image))
+        {
             return;
         }
 
-        var stencil = description.HasStencil
-            ? _guestMemory.ResolveWritable(description.Stencil.Address, description.Stencil.Size)
-            : default;
-        var context = _owner.BeginTransfer();
-        var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
-        _transfer.EncodeTextureToGuest(context, in description, range, image.Texture, destination, stencil);
         context.ProfileEncoded(ProfileLabel("writeback", in description));
         image.ClearGpuModified();
         // The retile is a GPU store into guest memory: until it completes the bytes
         // in guest memory are the old ones, so a read of them has to wait for it.
         _owner.NoteGuestWrite(description.Data.Address, description.Data.Size);
-        if (description.HasStencil && stencil.IsValid)
+        if (description.HasStencil)
         {
+            // Noted whether or not every piece of the plane found a window: the hazard is
+            // that a read sees stale bytes, and over-noting only costs a wait.
             _owner.NoteGuestWrite(description.Stencil.Address, description.Stencil.Size);
         }
 
         _writebackCauses[(int)cause]++;
         Interlocked.Increment(ref _writebacks);
+    }
+
+    // The writeback counterpart of UploadInPieces: a run of layers at a time, writing
+    // only through windows, because a retile stores into guest memory and the upload ring
+    // is nobody's guest memory. A run with no writable window keeps the texture
+    // authoritative for those layers and says so.
+    private bool WriteBackInPieces(IMetalSubmissionContext context, MetalCachedImage image)
+    {
+        ref readonly var description = ref image.Description;
+        if (!TrySplitLayers(in description, out var layers, out var layerBytes))
+        {
+            var destination = _guestMemory.ResolveWritable(description.Data.Address, description.Data.Size);
+            if (!destination.IsValid)
+            {
+                // Nothing in guest memory can receive the bytes; keep the texture
+                // authoritative rather than publishing a wrong result.
+                MetalV2Diagnostics.WarnOnce(
+                    "writeback-unresolved",
+                    $"A GPU-written image has no writable guest window: " +
+                    $"address=0x{description.Data.Address:X16} size=0x{description.Data.Size:X} " +
+                    $"({_guestMemory.DescribeResolve(description.Data.Address, description.Data.Size)}).");
+                return false;
+            }
+
+            var stencil = description.HasStencil
+                ? _guestMemory.ResolveWritable(description.Stencil.Address, description.Stencil.Size)
+                : default;
+            var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
+            _transfer.EncodeTextureToGuest(
+                context, in description, range, image.Texture, destination, stencil, 0, description.Data.Size);
+            return true;
+        }
+
+        var batch = (uint)Math.Clamp(MaxTransferPieceBytes / layerBytes, 1, layers);
+        var stencilLayerBytes = description.HasStencil && layers != 0 ? description.Stencil.Size / layers : 0;
+        var moved = false;
+        for (uint first = 0; first < layers; first += batch)
+        {
+            var count = Math.Min(batch, layers - first);
+            var pieceBase = layerBytes * first;
+            var pieceSize = layerBytes * count;
+            var piece = _guestMemory.ResolveWritable(description.Data.Address + pieceBase, pieceSize);
+            if (!piece.IsValid || piece.Size < pieceSize)
+            {
+                MetalV2Diagnostics.WarnOnce(
+                    "writeback-piece-unresolved",
+                    $"A GPU-written image piece has no writable guest window, so those layers stay in the " +
+                    $"texture: address=0x{description.Data.Address + pieceBase:X16} size=0x{pieceSize:X} " +
+                    $"layers={first}+{count} " +
+                    $"({_guestMemory.DescribeResolve(description.Data.Address + pieceBase, pieceSize)}).");
+                continue;
+            }
+
+            var stencilPiece = description.HasStencil && stencilLayerBytes != 0
+                ? _guestMemory.ResolveWritable(
+                    description.Stencil.Address + (stencilLayerBytes * first), stencilLayerBytes * count)
+                : default;
+            var range = new SubresourceRange(0, description.Resources.Levels, first, count);
+            _transfer.EncodeTextureToGuest(
+                context, in description, range, image.Texture, piece, stencilPiece, pieceBase, pieceSize);
+            moved = true;
+        }
+
+        return moved;
     }
 
     // What a transfer is, for the GPU profiler: the shape the tiler actually walks.

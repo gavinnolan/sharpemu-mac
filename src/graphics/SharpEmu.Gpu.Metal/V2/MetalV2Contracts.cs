@@ -46,13 +46,22 @@ internal interface IMetalImageTransfer
     MetalTextureShape ShapeFor(in ImageDescription description);
 
     // Detiles/copies every subresource in range from guest memory into the texture.
-    // source covers description.Data (and Stencil when present is passed separately).
+    //
+    // source covers [guestBase, guestBase + pieceSize) of description.Data — the piece of
+    // the image the caller could map — and range names the subresources inside it.
+    // Passing (0, description.Data.Size) with the whole range is the ordinary whole-image
+    // transfer; a caller that cannot map a very large image whole splits it into pieces so
+    // that each one lands in a guest-memory window and the staging stays piece-sized.
+    // Stencil, when present, is passed separately and is cut the same way.
     void EncodeGuestToTexture(IMetalSubmissionContext context, in ImageDescription description,
-        SubresourceRange range, MetalGuestRange source, MetalGuestRange stencilSource, nint texture);
+        SubresourceRange range, MetalGuestRange source, MetalGuestRange stencilSource, nint texture,
+        ulong guestBase, ulong pieceSize);
 
-    // Retiles/copies every subresource in range from the texture back into guest memory.
+    // Retiles/copies every subresource in range from the texture back into guest memory,
+    // with the same piece contract as the upload.
     void EncodeTextureToGuest(IMetalSubmissionContext context, in ImageDescription description,
-        SubresourceRange range, nint texture, MetalGuestRange destination, MetalGuestRange stencilDestination);
+        SubresourceRange range, nint texture, MetalGuestRange destination, MetalGuestRange stencilDestination,
+        ulong guestBase, ulong pieceSize);
 }
 
 // What MTLTextureDescriptor fields an image needs.
