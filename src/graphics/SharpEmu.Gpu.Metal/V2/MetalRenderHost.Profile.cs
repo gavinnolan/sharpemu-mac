@@ -54,34 +54,39 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
+        MetalV2Diagnostics.InfoOnce(
+            "shader-profile",
+            "SHARPEMU_METAL_V2_PROFILE_SHADERS=1: one command buffer per draw and dispatch, " +
+            "committed and waited; frame rate in this mode is meaningless, per-shader GPU time is not.");
         var transfers = Interlocked.Exchange(ref _profileTransfers, 0);
         FlushAndWaitForGpu();
-        // FlushCommandBuffer parks the committed buffer in _previousCommandBuffer and
-        // the wait above has run it to completion; the next flush reports and releases it.
+        // FlushCommandBuffer parks the committed buffer in _previousCommandBuffer; the
+        // next flush is what reports and releases it, so reading it here is safe.
         var buffer = _previousCommandBuffer;
         if (buffer == 0)
         {
             return;
         }
 
+        // The shared event is signalled from inside the command buffer, so the wait
+        // above returns before the driver has moved the buffer to Completed and its
+        // GPU timestamps are not readable yet. The profiler wants the real status, and
+        // this buffer holds one draw, so waiting on the buffer itself costs nothing.
+        MetalNative.SendVoid(buffer, SelWaitUntilCompleted);
+        var key = $"{kind} {entry.Profile ?? "stage=?"}";
+        var detail = transfers == 0 ? shape : $"{shape} transfers={transfers}";
         var status = MetalV2Native.SendValue(buffer, SelCommandBufferStatus);
         if (status != CommandBufferStatusCompleted)
         {
-            MetalShaderProfile.NoteFailure(kind);
+            var error = MetalNative.Send(buffer, MetalNative.Selector("error"));
+            MetalShaderProfile.NoteFailure(
+                key, detail, status, error == 0 ? "no error object" : MetalNative.DescribeError(error));
             return;
         }
 
         var start = MetalNative.SendDouble(buffer, SelGpuStartTime);
         var end = MetalNative.SendDouble(buffer, SelGpuEndTime);
-        if (end <= start)
-        {
-            return;
-        }
-
-        MetalShaderProfile.Note(
-            $"{kind} {entry.Profile ?? "stage=?"}",
-            transfers == 0 ? shape : $"{shape} transfers={transfers}",
-            end - start);
+        MetalShaderProfile.Note(key, detail, Math.Max(end - start, 0.0));
     }
 
     private long _profileTransfers;
@@ -115,6 +120,7 @@ internal static class MetalShaderProfile
     private static readonly object _gate = new();
     private static long _reportTimestamp;
     private static bool _exitHooked;
+    private static int _failureDetails;
 
     public static readonly bool Enabled = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_PROFILE_SHADERS"), "1", StringComparison.Ordinal);
@@ -137,11 +143,7 @@ internal static class MetalShaderProfile
             {
                 bucket = new Bucket();
                 _buckets[key] = bucket;
-                if (!_exitHooked)
-                {
-                    _exitHooked = true;
-                    AppDomain.CurrentDomain.ProcessExit += (_, _) => Report("exit");
-                }
+                HookExitLocked();
             }
 
             bucket.Count++;
@@ -153,24 +155,56 @@ internal static class MetalShaderProfile
                 bucket.WorstShape = shape;
             }
 
-            var now = System.Diagnostics.Stopwatch.GetTimestamp();
-            if (_reportTimestamp == 0)
-            {
-                _reportTimestamp = now;
-            }
-            else if (now - _reportTimestamp >= 2 * System.Diagnostics.Stopwatch.Frequency)
-            {
-                _reportTimestamp = now;
-                ReportLocked("interval");
-            }
+            ReportIfDueLocked();
         }
     }
 
-    public static void NoteFailure(string kind)
+    /// <summary>
+    /// A draw whose own command buffer did not complete. The first such draws are
+    /// printed in full with the driver's error: a per-draw split turns "a submission
+    /// failed somewhere" into the exact shader and shape that failed.
+    /// </summary>
+    public static void NoteFailure(string key, string shape, nuint status, string error)
     {
         lock (_gate)
         {
-            _failures[kind] = _failures.TryGetValue(kind, out var count) ? count + 1 : 1;
+            var failureKey = $"{key} status={status}";
+            _failures[failureKey] = _failures.TryGetValue(failureKey, out var count) ? count + 1 : 1;
+            HookExitLocked();
+            if (_failureDetails < 32)
+            {
+                _failureDetails++;
+                Console.Error.WriteLine(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"[METAL-V2][SHADER-PROF] failed {key} [{shape}] status={status} {error}"));
+            }
+
+            ReportIfDueLocked();
+        }
+    }
+
+    private static void HookExitLocked()
+    {
+        if (_exitHooked)
+        {
+            return;
+        }
+
+        _exitHooked = true;
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => Report("exit");
+    }
+
+    private static void ReportIfDueLocked()
+    {
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (_reportTimestamp == 0)
+        {
+            _reportTimestamp = now;
+        }
+        else if (now - _reportTimestamp >= 2 * System.Diagnostics.Stopwatch.Frequency)
+        {
+            _reportTimestamp = now;
+            ReportLocked("interval");
         }
     }
 
@@ -184,7 +218,7 @@ internal static class MetalShaderProfile
 
     private static void ReportLocked(string reason)
     {
-        if (_buckets.Count == 0)
+        if (_buckets.Count == 0 && _failures.Count == 0)
         {
             return;
         }
@@ -215,10 +249,10 @@ internal static class MetalShaderProfile
                 $"max_ms={bucket.MaxSeconds * 1000.0:F2} worst=[{bucket.WorstShape}] last=[{bucket.Shape}]"));
         }
 
-        foreach (var (kind, count) in _failures)
+        foreach (var (failureKey, count) in _failures)
         {
             Console.Error.WriteLine(string.Create(
-                culture, $"[METAL-V2][SHADER-PROF] incomplete kind={kind} n={count}"));
+                culture, $"[METAL-V2][SHADER-PROF] incomplete {failureKey} n={count}"));
         }
     }
 }
