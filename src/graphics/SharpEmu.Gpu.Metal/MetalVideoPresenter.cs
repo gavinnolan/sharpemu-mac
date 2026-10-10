@@ -220,6 +220,11 @@ internal static partial class MetalVideoPresenter
 
     private static void Run()
     {
+        // Set here rather than beside the Thread construction above, because this
+        // body also runs on the process main thread when HostMainThread owns the
+        // AppKit loop, and a QoS class can only be applied to the calling thread.
+        SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(
+            SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
         var owner = Thread.CurrentThread;
         lock (_gate) _renderOwner = owner;
         try { RunWithRenderOwner(); }

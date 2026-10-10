@@ -128,6 +128,15 @@ internal static partial class Program
             HostMainThread.Enable();
             var emulation = new Thread(() =>
             {
+                // This thread runs the guest's main thread: it drives the ELF
+                // entry point and everything the title does before it spawns a
+                // pthread of its own. Frame deadlines live here, so it asks for
+                // the same QoS class as the presenter. Guest pthreads inherit
+                // their class from whoever creates them and are deliberately
+                // left alone — a title with thirty worker threads must not have
+                // all of them outranking the presenter.
+                SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(
+                    SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
                 try
                 {
                     exitCode = RunEmulator(args, isMitigatedChild);
