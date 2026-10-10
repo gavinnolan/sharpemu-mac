@@ -85,6 +85,11 @@ public static partial class Gen5MslTranslator
                 ? maxSteps
                 : 100_000;
 
+        // The call the dispatcher makes when it runs out of steps. The step-report word
+        // is the last field of every stage argument buffer, so it is always in scope.
+        private const string StepCapReportCall =
+            $"sharpemu_note_step_cap({ResourcesName}.{Gen5MslArgumentLayout.StepReportName});";
+
         private readonly Gen5MslStage _stage;
         private readonly uint _localSizeX;
         private readonly uint _localSizeY;
@@ -630,6 +635,7 @@ public static partial class Gen5MslTranslator
                 source.AppendLine($"        if (++steps >= {_maxDispatcherSteps}u)");
                 source.AppendLine("        {");
                 source.AppendLine("            active = false;");
+                source.AppendLine($"            {StepCapReportCall}");
                 source.AppendLine("        }");
             }
 

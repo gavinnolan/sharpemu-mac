@@ -15,6 +15,11 @@ public enum MslArgumentFieldKind
     Samplers,
     Pointer,
     Word,
+    // The per-pipeline dispatcher step-cap counter. Metal-only and not a guest
+    // descriptor: the host binds one word per shader hash and reads it back when the
+    // submission completes, so a shader that hits the cap says so instead of only
+    // looking slow.
+    StepReport,
 }
 
 // One field of the stage argument buffer: its binding kind, id range and byte range.
@@ -34,6 +39,7 @@ public sealed class Gen5MslArgumentLayout
     public const int ResourcesBufferIndex = 0;
     public const int PushDataBufferIndex = 1;
     public const string StructName = "Gen5StageResources";
+    public const string StepReportName = "step_report";
     private const uint ResourceBytes = 8;
     private const uint WordBytes = 4;
 
@@ -92,6 +98,9 @@ public sealed class Gen5MslArgumentLayout
                     break;
             }
         }
+
+        // Always last, so adding it never moves a descriptor field.
+        Add(DescriptorBindingKind.Buffers, MslArgumentFieldKind.StepReport, StepReportName, 1, ResourceBytes);
 
         return new Gen5MslArgumentLayout(fields, Align(offset, ResourceBytes));
 

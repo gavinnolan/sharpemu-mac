@@ -217,6 +217,7 @@ internal sealed partial class MetalRenderHost :
         // previous buffer is far enough ahead to have a status by now, so checking
         // it here costs one message send and turns a silent stall into a message.
         ReportSubmissionFailure();
+        ReportStepCaps();
         _previousCommandBuffer = _commandBuffer;
         _previousSerial = serial;
         _commandBuffer = 0;
@@ -696,6 +697,8 @@ internal sealed partial class MetalRenderHost :
             }
 
             ReportSubmissionFailure();
+            ReportStepCaps();
+            DisposeStepReport();
         }
         catch (Exception exception)
         {

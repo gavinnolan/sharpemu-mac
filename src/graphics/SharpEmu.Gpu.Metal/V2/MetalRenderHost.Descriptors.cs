@@ -493,6 +493,10 @@ internal sealed partial class MetalRenderHost
                 case MslArgumentFieldKind.Pointer:
                     BinaryPrimitives.WriteUInt64LittleEndian(span, PointerFieldValue(stage, field.Kind));
                     break;
+                case MslArgumentFieldKind.StepReport:
+                    BinaryPrimitives.WriteUInt64LittleEndian(
+                        span, StepReportAddress(stage.Program.Hash, StepReportStageName(stageIndex)));
+                    break;
                 default:
                     BinaryPrimitives.WriteUInt32LittleEndian(span, WordFieldValue(stage, field.Kind));
                     break;

@@ -442,6 +442,14 @@ internal sealed class MetalGuestMemory : IDisposable
         return new Span<byte>((void*)contents, (int)GdsBytes);
     }
 
+    /// <summary>
+    /// A small shared buffer outside the per-submission ring, for words the GPU writes
+    /// and the host reads back after a submission. The caller owns its lifetime and
+    /// must name it with <c>useResource</c> wherever a shader reaches it.
+    /// </summary>
+    public nint CreateReportBuffer(ulong size, string label, out nint contents, out ulong gpuAddress) =>
+        CreateSharedBuffer(size, label, out contents, out gpuAddress);
+
     private nint CreateSharedBuffer(ulong size, string label, out nint contents, out ulong gpuAddress)
     {
         var buffer = MetalNative.SendNewBuffer(

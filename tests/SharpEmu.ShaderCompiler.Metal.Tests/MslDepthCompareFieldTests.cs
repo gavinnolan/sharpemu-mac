@@ -17,8 +17,16 @@ public sealed class MslDepthCompareFieldTests(ITestOutputHelper output)
         {
             Descriptors = kinds.Select(static kind => new DescriptorBinding(kind, [0])).ToArray(),
         });
-        Assert.Equal(kinds.Length, layout.Fields.Select(static field => field.Name).Distinct().Count());
-        Assert.Equal((uint)kinds.Length * 8, layout.ByteSize);
+        // Every layout also carries the trailing step-report pointer, which is not a
+        // guest descriptor and must never move an image field's id or byte offset.
+        Assert.Equal(kinds.Length + 1, layout.Fields.Count);
+        Assert.Equal(kinds.Length + 1, layout.Fields.Select(static field => field.Name).Distinct().Count());
+        Assert.Equal((uint)(kinds.Length + 1) * 8, layout.ByteSize);
+        var report = layout.Fields[^1];
+        Assert.Equal(MslArgumentFieldKind.StepReport, report.FieldKind);
+        Assert.Equal(Gen5MslArgumentLayout.StepReportName, report.Name);
+        Assert.Equal((uint)kinds.Length, report.FirstId);
+        Assert.Equal((uint)kinds.Length * 8, report.ByteOffset);
         for (var index = 0; index < kinds.Length; index++)
         {
             var field = layout.Fields[index];
