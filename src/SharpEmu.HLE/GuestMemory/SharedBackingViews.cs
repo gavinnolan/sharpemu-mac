@@ -596,6 +596,49 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
     public bool TryMapReservedRange(ulong address, ulong size, ulong offset, HostPageProtection protection, out HostViewFailure failure)
         => TryMapReservedRange(address, size, offset, protection, false, out failure);
 
+    private int _overlapReports;
+
+    /// <summary>How many mappings were recorded over a range another one still holds.</summary>
+    public int OverlappingViewRecords => Volatile.Read(ref _overlapReports);
+
+    // Must be called holding _lock. Reports, once per distinct pair shape, a new view
+    // whose guest range intersects a record that has not been unmapped.
+    private void WarnOnOverlappingView(ulong address, ulong size, ulong offset)
+    {
+        if (size == 0)
+        {
+            return;
+        }
+
+        var end = address + size;
+        var index = RangeSearch.FindLastIndexAtOrBelow(_views, address);
+        // The record at or below can reach into this range, and every record that starts
+        // inside it overlaps by construction.
+        for (var candidate = Math.Max(index, 0); candidate < _views.Count; candidate++)
+        {
+            var record = _views.Values[candidate];
+            if (record.Address >= end)
+            {
+                break;
+            }
+
+            if (record.Address + record.Size <= address)
+            {
+                continue;
+            }
+
+            if (++_overlapReports <= 32)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] mapping overlaps a live one: new=0x{address:X16}+0x{size:X}@0x{offset:X} " +
+                    $"existing=0x{record.Address:X16}+0x{record.Size:X}@0x{record.Offset:X}");
+                Console.Error.Flush();
+            }
+
+            return;
+        }
+    }
+
     private bool TryMapReservedRange(ulong address, ulong size, ulong offset, HostPageProtection protection,
         bool wasRestored, out HostViewFailure failure)
     {
@@ -607,7 +650,14 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
             if (_backing is null || _backing.IsClosing || _backing.IsDisposed || !IsWithinBacking(offset, size))
             { failure = HostViewFailure.OffsetOutOfBounds; return false; }
             lock (_lock)
+            {
                 if (_views.ContainsKey(address)) OnFatal($"A backing view record already exists at 0x{address:X16}.");
+                // An exact duplicate was already fatal; a *partial* overlap was not, and it
+                // is the worse of the two. The guest is handed two allocations that share
+                // bytes, and whichever writes second rewrites the other's data with no
+                // fault at the time and no way, later, to say who did it.
+                WarnOnOverlappingView(address, size, offset);
+            }
             bool mapped;
             try { mapped = _host.TryMapView(_backing, address, offset, size, protection, out failure); }
             catch (Exception error)

@@ -33,6 +33,34 @@ public sealed class BackingAliasSpanTests
         Assert.Equal(start + Page - 64, alias);
     }
 
+    // Two live mappings that share guest bytes hand the title two allocations over one
+    // piece of memory; whichever writes second rewrites the other's data silently.
+    [Fact]
+    public void AMappingOverALiveOneIsReported()
+    {
+        var host = new PinnedViews();
+        using var views = new SharedBackingViews(host, 4 * Page);
+        Assert.True(views.TryMapReservedRange(0x10_0000, 2 * Page, 0, HostPageProtection.ReadWrite, out _));
+        Assert.Equal(0, views.OverlappingViewRecords);
+
+        // Starts inside the first mapping's second page.
+        Assert.True(views.TryMapReservedRange(0x10_1000, Page, 2 * Page, HostPageProtection.ReadWrite, out _));
+        Assert.Equal(1, views.OverlappingViewRecords);
+    }
+
+    [Fact]
+    public void MappingsThatOnlyTouchAreNotReportedAsOverlapping()
+    {
+        var host = new PinnedViews();
+        using var views = new SharedBackingViews(host, 4 * Page);
+        Assert.True(views.TryMapReservedRange(0x10_0000, Page, 0, HostPageProtection.ReadWrite, out _));
+        Assert.True(views.TryMapReservedRange(0x10_1000, Page, Page, HostPageProtection.ReadWrite, out _));
+        Assert.True(views.TryMapReservedRange(0x10_2000, Page, 2 * Page, HostPageProtection.ReadWrite, out _));
+        // And one below the first, ending exactly where it starts.
+        Assert.True(views.TryMapReservedRange(0x0F_F000, Page, 3 * Page, HostPageProtection.ReadWrite, out _));
+        Assert.Equal(0, views.OverlappingViewRecords);
+    }
+
     [Fact]
     public void MappingsThatAreNotAdjacentInGuestSpaceDoNotResolveAsOneRange()
     {
