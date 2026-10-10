@@ -94,9 +94,11 @@ internal sealed partial class MetalRenderHost
         ref readonly var description = ref image.Description;
         var label =
             $"in{index}-{(role == ImageRole.StorageImage ? "storage" : "sampled")}-{description.PixelFormat}" +
-            $"-{description.TileMode}-{description.Extent.Width}x{description.Extent.Height}" +
+            $"-{description.Type}-{description.TileMode}" +
+            $"-{description.Extent.Width}x{description.Extent.Height}x{description.Extent.Depth}" +
             $"-L{description.Resources.Levels}A{description.Resources.Layers}" +
-            $"-bpb{description.BytesPerBlock}-pitch{description.Pitch}-bytes{description.Data.Size:X}";
+            $"-bpb{description.BytesPerBlock}-pitch{description.Pitch}-bytes{description.Data.Size:X}" +
+            $"-at{description.Data.Address:X}";
         NotePendingDump(texture, label);
     }
 
