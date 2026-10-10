@@ -156,6 +156,14 @@ internal static partial class MacObjC
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint SendIndex(nint receiver, nint selector, nuint index);
 
+    /// <summary>
+    /// -beginActivityWithOptions:reason:. NSActivityOptions is a uint64_t, which is
+    /// a distinct native signature from the nint overload above even where the two
+    /// widths coincide.
+    /// </summary>
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial nint SendActivity(nint receiver, nint selector, ulong options, nint reason);
+
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint SendObjectError(nint receiver, nint selector, nint argument, ref nint error);
 

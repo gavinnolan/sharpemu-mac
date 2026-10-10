@@ -25,6 +25,11 @@ public static class MacPlatform
                 "SharpEmu.Platform.MacOS was composed into a process that is not running on macOS.");
         }
 
+        // Before anything else: tell macOS this process is latency-critical work on
+        // the user's behalf, so App Nap and timer coalescing stay out of the way for
+        // the whole run. Best-effort — see MacProcessActivity.
+        MacProcessActivity.Begin();
+
         HostDisplayCatalog.RegisterProvider("CoreGraphics", MacDisplayCatalog.TryQuery);
         LauncherGamepad.RegisterProvider(MacLauncherGamepadProvider.Instance);
     }
