@@ -352,8 +352,11 @@ public static partial class Gen5MslTranslator
                 : $"{imageClass.IntegerCoordinateType}({string.Join(", ", spatial.Select(part => $"(uint){part}"))})";
             var data = Temp("uint", $"v[{image.VectorData}]");
             // IMAGE_ATOMIC_CMPSWAP and FCMPSWAP read the new value from VDATA and
-            // the comparator from the register after it.
-            var comparator = Temp("uint", $"v[{image.VectorData + 1}]");
+            // the comparator from the register after it. VDATA is an 8-bit field,
+            // so the pair can name one register past the file.
+            var comparator = Temp(
+                "uint",
+                image.VectorData + 1 < VectorRegisterFileCount ? $"v[{image.VectorData + 1}]" : "0u");
             var access = $"{coordinate}{layerArgument}";
 
             Line($"if (exec && {string.Join(" && ", guards)})");
