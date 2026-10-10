@@ -75,6 +75,10 @@ internal sealed partial class MetalRenderHost :
     // SHARPEMU_METAL_V2_GUARD_WRITES=1 only: checks that every declared GPU-side write
     // leaves the bytes either side of its range alone.
     private readonly MetalGuestWriteGuard? _guard;
+
+    // SHARPEMU_TRAP_SLOT only: watches the trapped blocks across each submission, for a
+    // GPU store that lands where no declared range said it would.
+    private readonly MetalSlotTrap? _slotTrap;
     // Without ranges every write is "somewhere in guest memory", which is what the
     // first version of this host did; kept for A/B measurement.
     private static readonly bool ConservativeReads =
@@ -118,6 +122,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         _guard = MetalGuestWriteGuard.Enabled ? new MetalGuestWriteGuard(memory) : null;
+        _slotTrap = MetalSlotTrap.Enabled ? new MetalSlotTrap(memory) : null;
         _guestMemory = new MetalGuestMemory(device, backing, memory);
         _guestMemory.AttachToQueue(queue);
         _transfer = new MetalImageTransfer(device);
@@ -194,6 +199,10 @@ internal sealed partial class MetalRenderHost :
         // Every watch whose submission the GPU has finished is checked here, on the one
         // thread that records them, rather than from the completion handler.
         _guard?.Verify(completed);
+        _slotTrap?.Verify(completed);
+        // The CPU trap releases a page to let a faulting store land; this is the steady
+        // point at which it is taken back.
+        SharpEmu.HLE.GpuMemory.GuestSlotTrap.Rearm();
         return _commandBuffer;
     }
 
@@ -252,6 +261,7 @@ internal sealed partial class MetalRenderHost :
             MetalNative.SendVoid(_commandBuffer, SelAddCompletedHandler, MetalCompletionSignal.Block);
         }
 
+        _slotTrap?.OnCommit(serial);
         MetalNative.SendVoid(_commandBuffer, SelCommit);
         _previousCommitTime = CACurrentMediaTime();
         _lastCommitTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -961,6 +971,9 @@ internal sealed partial class MetalRenderHost :
             return NullBuffer;
         }
 
+        _slotTrap?.NoteBinding(
+            isWritten ? "binding(write)" : "binding(read)",
+            address, size, (ulong)range.Buffer, range.Offset, range.GpuAddress);
         if (isWritten)
         {
             _imageCache.InvalidateMemoryFromGpu(address, size);

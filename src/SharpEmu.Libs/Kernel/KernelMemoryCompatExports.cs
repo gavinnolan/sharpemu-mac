@@ -3535,6 +3535,7 @@ public static partial class KernelMemoryCompatExports
             if (!ctx.TryWriteUInt64(inOutAddressPointer, address))
                 return MemoryFault;
             GuestWriteWatch.OnDirectMapping(address, length, protection);
+            SharpEmu.HLE.GpuMemory.GuestSlotTrap.OnDirectMapping(address, length, protection);
             if (ShouldTraceDirectMemory())
                 Console.Error.WriteLine($"[LOADER][TRACE] map_direct applied address=0x{address:X} requested=0x{requested:X} size=0x{length:X} offset=0x{directMemoryStart:X} flags=0x{flags:X}");
             return 0;
