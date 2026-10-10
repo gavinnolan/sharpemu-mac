@@ -526,12 +526,17 @@ internal sealed partial class MetalRenderHost
     public void ShaderWriteBarrier(GpuPipelineStage sourceStages)
     {
         _ = sourceStages;
+        NoteGuestMemoryWrite();
         RecordMemoryBarrier();
     }
 
     public void ShaderWriteHazardBarrier() => RecordMemoryBarrier();
 
-    public void ShaderAccessBarrier() => RecordMemoryBarrier();
+    public void ShaderAccessBarrier()
+    {
+        NoteGuestMemoryWrite();
+        RecordMemoryBarrier();
+    }
 
     private void RecordMemoryBarrier()
     {

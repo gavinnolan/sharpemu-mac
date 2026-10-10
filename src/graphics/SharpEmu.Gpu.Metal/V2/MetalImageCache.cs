@@ -90,6 +90,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     private long _uploads;
     private long _writebacks;
     private long _evictions;
+    private bool _watchingStopped;
     private bool _disposed;
 
     public MetalImageCache(

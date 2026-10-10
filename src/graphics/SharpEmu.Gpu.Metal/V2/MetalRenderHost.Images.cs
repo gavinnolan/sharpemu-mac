@@ -252,6 +252,8 @@ internal sealed partial class MetalRenderHost
     public void PrepareMemoryWritingDraw()
     {
         // A store-only draw needs no special setup on Metal: the open render pass
-        // already has the window buffers resident and hazard-tracked.
+        // already has the window buffers resident and hazard-tracked. It does mean a
+        // later CPU read must wait for this submission.
+        NoteGuestMemoryWrite();
     }
 }

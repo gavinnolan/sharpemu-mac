@@ -389,6 +389,7 @@ internal sealed partial class MetalRenderHost
             if (written)
             {
                 _imageCache.InvalidateMemoryFromGpu(descriptor.Address, size);
+                NoteGuestMemoryWrite();
             }
 
             stage.Buffers[index] = range;

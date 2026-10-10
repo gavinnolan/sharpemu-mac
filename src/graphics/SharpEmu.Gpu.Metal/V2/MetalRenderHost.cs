@@ -61,10 +61,17 @@ internal sealed partial class MetalRenderHost :
     private ulong _submissionSerial;
     private ulong _nextSerial;
     private long _recordedCommands;
+    // Set when recorded work may store into guest memory. A CPU read only has to
+    // wait for the GPU while it is set; without it every packet read would stall.
+    private bool _gpuWroteGuestMemory;
     private long _drawCount;
     private long _drawTicks;
     private long _pipelineCreations;
     private long _shaderCompilations;
+    private long _flushes;
+    private long _gpuWaits;
+    private long _gpuWaitTicks;
+    private long _statsTimestamp;
     private bool _disposed;
 
     public MetalRenderHost(
@@ -198,6 +205,7 @@ internal sealed partial class MetalRenderHost :
         MetalNative.SendVoid(_commandBuffer, SelRelease);
         _commandBuffer = 0;
         _recordedCommands = 0;
+        Interlocked.Increment(ref _flushes);
         _completions.Publish(serial);
         return serial;
     }
@@ -205,10 +213,17 @@ internal sealed partial class MetalRenderHost :
     /// <summary>Commits the current command buffer and waits for the GPU to finish it.</summary>
     public void FlushAndWaitForGpu()
     {
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var serial = FlushCommandBuffer();
         _completions.WaitFor(serial);
+        Interlocked.Increment(ref _gpuWaits);
+        Interlocked.Add(ref _gpuWaitTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
         _guestMemory.NoteCompleted(serial);
+        _gpuWroteGuestMemory = false;
     }
+
+    /// <summary>Recorded work may now store into guest memory.</summary>
+    public void NoteGuestMemoryWrite() => _gpuWroteGuestMemory = true;
 
     void IMetalImageCacheOwner.WaitForGpu() => FlushAndWaitForGpu();
 
@@ -279,6 +294,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         _imageCache.InvalidateMemoryFromGpu(address, size);
+        NoteGuestMemoryWrite();
     }
 
     private void WriteGuestPattern(ulong address, ulong size, uint value)
@@ -339,6 +355,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         _imageCache.InvalidateMemoryFromGpu(destination, size);
+        NoteGuestMemoryWrite();
     }
 
     private void CopyGuestBytesOnHost(ulong destination, ulong source, ulong size)
@@ -394,14 +411,20 @@ internal sealed partial class MetalRenderHost :
             return true;
         }
 
-        // The CPU reads guest memory directly, so everything the GPU still owns has
-        // to be published first and the recorded work has to finish.
-        if (_imageCache.HasGpuModifiedImageBytes(address, (ulong)destination.Length))
+        // Guest memory is the GPU's memory, so a read only has to wait for work that
+        // may still be writing it: an image that owns these bytes, or any recorded
+        // shader store. Without that test every command-memory read would stall.
+        var size = (ulong)destination.Length;
+        if (_imageCache.HasGpuModifiedImageBytes(address, size))
         {
-            FlushGpuWrites(address, (ulong)destination.Length);
+            FlushGpuWrites(address, size);
+            FlushAndWaitForGpu();
+        }
+        else if (_gpuWroteGuestMemory)
+        {
+            FlushAndWaitForGpu();
         }
 
-        FlushAndWaitForGpu();
         return _memory.TryRead(address, destination);
     }
 
@@ -453,6 +476,7 @@ internal sealed partial class MetalRenderHost :
         if (isWritten)
         {
             _imageCache.InvalidateMemoryFromGpu(address, size);
+            NoteGuestMemoryWrite();
         }
 
         return new BufferBinding((ulong)range.Buffer, range.Offset);
@@ -499,6 +523,41 @@ internal sealed partial class MetalRenderHost :
     }
 
     public void CountShaderCompilation() => Interlocked.Increment(ref _shaderCompilations);
+
+    /// <summary>One periodic line with everything the v2 host counts; cheap to read.</summary>
+    public void ReportCounters()
+    {
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (_statsTimestamp == 0)
+        {
+            _statsTimestamp = now;
+            return;
+        }
+
+        if (now - _statsTimestamp < 2 * System.Diagnostics.Stopwatch.Frequency)
+        {
+            return;
+        }
+
+        var seconds = (now - _statsTimestamp) / (double)System.Diagnostics.Stopwatch.Frequency;
+        _statsTimestamp = now;
+        var draws = Interlocked.Exchange(ref _drawCount, 0);
+        var drawTicks = Interlocked.Exchange(ref _drawTicks, 0);
+        var flushes = Interlocked.Exchange(ref _flushes, 0);
+        var waits = Interlocked.Exchange(ref _gpuWaits, 0);
+        var waitTicks = Interlocked.Exchange(ref _gpuWaitTicks, 0);
+        var pipelines = Interlocked.Exchange(ref _pipelineCreations, 0);
+        var (created, uploads, writebacks, evictions) = _imageCache.Counters;
+        var culture = System.Globalization.CultureInfo.InvariantCulture;
+        var drawMs = (drawTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency).ToString("F1", culture);
+        var waitMs = (waitTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency).ToString("F1", culture);
+        Console.Error.WriteLine(
+            $"[METAL-V2][PERF] seconds={seconds.ToString("F2", culture)} submissions={_submissionsStarted} " +
+            $"draws={draws} draw_ms={drawMs} flushes={flushes} gpu_waits={waits} gpu_wait_ms={waitMs} " +
+            $"pipelines={pipelines} images={_imageCache.ImageCount} created={created} uploads={uploads} " +
+            $"writebacks={writebacks} evictions={evictions} image_mb={_imageCache.TotalUsedMemory / (1024 * 1024)} " +
+            $"ring_fallbacks={_guestMemory.RingFallbacks}");
+    }
 
     public Exception Fatal(string message) => GpuFatal.Fatal(message);
 

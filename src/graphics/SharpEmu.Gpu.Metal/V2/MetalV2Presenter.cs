@@ -232,8 +232,47 @@ internal static class MetalV2Presenter
     public static void RequestClose()
     {
         Volatile.Write(ref _closeRequested, true);
-        Volatile.Read(ref _hostWindow)?.Close();
+        // The guest leaves right after this, and the runtime then frees the page
+        // guard, which refuses to go while an image watch is outstanding. Dropping
+        // the watches here does not depend on the worker reaching its own teardown.
+        Volatile.Read(ref _host)?.ImageCache.StopWatching();
+        try
+        {
+            Volatile.Read(ref _hostWindow)?.Close();
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"[METAL-V2][WARN] The window could not be closed: {exception.Message}");
+        }
+
+        StopWorker();
+    }
+
+    /// <summary>
+    /// Stops the GPU worker and waits for its teardown. The page watches the image
+    /// cache holds have to come off before the runtime releases the page guard, and
+    /// only the worker may touch the cache, so the caller waits for it here.
+    /// </summary>
+    public static void StopWorker()
+    {
+        Thread? worker;
+        lock (_gate)
+        {
+            worker = _worker;
+            _worker = null;
+        }
+
+        Volatile.Write(ref _closeRequested, true);
         _host?.CommandStream.Wake();
+        if (worker is null || worker == Thread.CurrentThread)
+        {
+            return;
+        }
+
+        if (!worker.Join(TimeSpan.FromSeconds(2)))
+        {
+            Console.Error.WriteLine("[METAL-V2][WARN] The GPU worker did not stop within five seconds.");
+        }
     }
 
     private static void Wake() => _host?.CommandStream.Wake();
@@ -250,6 +289,7 @@ internal static class MetalV2Presenter
             {
                 host.RunPendingCommands();
                 host.RunCommandStreamSlices(64);
+                host.ReportCounters();
                 if (!host.CommandStream.HasUnblockedPending && !_relay.HasPendingCommands)
                 {
                     _ = host.CommandStream.WaitForWork(CommandStreamQueue.AllBlockedRetryMilliseconds);
@@ -263,15 +303,43 @@ internal static class MetalV2Presenter
         }
         finally
         {
-            try
-            {
-                host.FlushCommandBuffer();
-            }
-            catch
-            {
-                // Shutdown already failed; nothing further to publish.
-            }
+            Shutdown(host);
         }
+    }
+
+    // The worker owns the teardown: the page watches have to come off before the
+    // page guard is released, and only this thread may touch the image cache.
+    private static void Shutdown(MetalRenderHost host)
+    {
+        try
+        {
+            host.CommandStream.StopAccepting();
+            host.CommandStream.DiscardAll();
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"[METAL-V2][WARN] The command stream could not stop: {exception.Message}");
+        }
+
+        try
+        {
+            _relay?.StopAcceptingWork();
+            host.ImageCache.StopWatching();
+            host.FlushAndWaitForGpu();
+            host.ImageCache.Shutdown();
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"[METAL-V2][WARN] The image cache could not drain: {exception.Message}");
+        }
+        finally
+        {
+            GuestGpuMemoryHook.Current?.AttachStores(null, null);
+            GuestGpuMemoryHook.Current?.AttachGpuQueue(null, null);
+            VideoOutBackendServices.CancelOutstandingFlips();
+        }
+
+        Console.Error.WriteLine("[METAL-V2][INFO] GPU worker stopped.");
     }
 
     // ---- the window and presentation ----

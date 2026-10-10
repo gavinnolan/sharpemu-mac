@@ -115,6 +115,9 @@ internal sealed class MetalV2Backend : IGuestGpuBackend
         _ = memory;
         if (HostSessionControl.IsShutdownRequested)
         {
+            // The last frame boundary of a session is where the worker's teardown is
+            // ordered before the runtime releases the guest page guard.
+            MetalV2Presenter.StopWorker();
             return IdleOutcome.Cancelled;
         }
 

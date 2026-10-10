@@ -132,6 +132,17 @@ internal static class MetalV2Formats
     public static bool HasStencil(ulong format) =>
         format is MtlFormat.Depth32FloatStencil8 or MtlFormat.Stencil8 or MtlFormat.X32Stencil8;
 
+    // The non-sRGB format with the same bits, for a view that must not convert.
+    public static GpuFormat LinearCounterpart(GpuFormat format) => format switch
+    {
+        GpuFormat.R8Srgb => GpuFormat.R8Unorm,
+        GpuFormat.R8G8Srgb => GpuFormat.R8G8Unorm,
+        GpuFormat.R8G8B8A8Srgb => GpuFormat.R8G8B8A8Unorm,
+        GpuFormat.B8G8R8A8Srgb => GpuFormat.B8G8R8A8Unorm,
+        GpuFormat.A8B8G8R8SrgbPack32 => GpuFormat.A8B8G8R8UnormPack32,
+        _ => format,
+    };
+
     public static ulong TextureType(GpuImageType type, uint layers, uint samples) => (type, layers, samples) switch
     {
         (GpuImageType.Type3D, _, _) => Mtl.TextureType3D,

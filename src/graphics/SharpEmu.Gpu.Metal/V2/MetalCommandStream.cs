@@ -261,7 +261,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         var image = _imageCache.GetImage(imageIdentifier);
         image.Uses.VideoOut = true;
         _imageCache.RefreshImage(imageIdentifier);
-        var texture = image.GetOrCreateView(request.View);
+        var texture = PresentationViewOf(image, in request);
         var serial = SubmissionSerial;
         FlushCommandBuffer();
         if (_flipTarget is null || texture == 0)
@@ -280,6 +280,21 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         VideoOutBackendServices.TraceGpuFlip(
             _memory, handle, index, flipMode, flipArg, displayBuffer.Address,
             VideoOutBackendServices.GetFlipEventCount(requestId));
+    }
+
+    // The presenter samples the flip texture and writes the result into a plain
+    // BGRA8 drawable, so an sRGB surface has to be read through a linear view:
+    // sampling it as sRGB would convert to linear and show the frame far too dark.
+    private nint PresentationViewOf(MetalCachedImage image, in ImageRequest request)
+    {
+        var view = request.View;
+        var linear = MetalV2Formats.LinearCounterpart(view.Format);
+        if (linear != view.Format)
+        {
+            view = view with { Format = linear };
+        }
+
+        return image.GetOrCreateView(view);
     }
 
     public void DrawIndexed(ulong submitId, in DrawIndexedArguments arguments) =>

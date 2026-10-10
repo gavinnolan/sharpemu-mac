@@ -88,7 +88,7 @@ internal sealed partial class MetalImageCache
     private void WatchImage(ResourceSlotIdentifier imageIdentifier)
     {
         var image = _slots[imageIdentifier];
-        if (!image.Registered || ImageDescription.IsEmptyRange(image.Description.Data))
+        if (_watchingStopped || !image.Registered || ImageDescription.IsEmptyRange(image.Description.Data))
         {
             return;
         }
@@ -248,6 +248,30 @@ internal sealed partial class MetalImageCache
             // The pages are gone; there is nowhere to write the contents back to.
             image.ClearGpuModified();
             ReleaseImage(imageIdentifier);
+        }
+    }
+
+    /// <summary>
+    /// Releases every page watch and takes no new ones. The runtime frees the page
+    /// guard as soon as the guest has left, and it refuses to be freed while a watch
+    /// is outstanding, so this runs from the shutting-down thread rather than waiting
+    /// for the GPU worker to notice.
+    /// </summary>
+    public void StopWatching()
+    {
+        using var held = _lock.Hold();
+        _watchingStopped = true;
+        var watched = new List<ResourceSlotIdentifier>();
+        _slots.ForEach((imageIdentifier, image) =>
+        {
+            if (image.IsWatched)
+            {
+                watched.Add(imageIdentifier);
+            }
+        });
+        foreach (var imageIdentifier in watched)
+        {
+            UnwatchImage(imageIdentifier);
         }
     }
 
