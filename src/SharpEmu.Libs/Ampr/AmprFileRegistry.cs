@@ -5,6 +5,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text;
+using SharpEmu.Libs.Diagnostics;
 using SharpEmu.Logging;
 
 namespace SharpEmu.Libs.Ampr;
@@ -71,6 +72,14 @@ internal static class AmprFileRegistry
 
     public static uint RegisterAprResolvedPath(string guestPath, string hostPath)
     {
+        var profile = FileIoProfile.Begin();
+        var id = RegisterAprResolvedPathCore(guestPath, hostPath);
+        FileIoProfile.End(FileIoProfile.Op.AprRegister, profile);
+        return id;
+    }
+
+    private static uint RegisterAprResolvedPathCore(string guestPath, string hostPath)
+    {
         // APR file ids are part of the guest ABI: ResolveFilepathsToIds returns
         // the 31-bit FNV-1a hash of the guest path. Keep the collision-safe
         // process-local handles used by Register() separate from this path so a
@@ -108,7 +117,11 @@ internal static class AmprFileRegistry
         return handle;
     }
 
+    // Both sides normally come straight out of ResolveGuestPath, which already
+    // returns Path.GetFullPath output, so the equal case needs no normalization
+    // at all - and it runs under _resolvedFileGate once per resolved asset.
     private static bool IsSameHostFile(string left, string right) =>
+        HostFsPath.Comparer.Equals(left, right) ||
         HostFsPath.Comparer.Equals(Path.GetFullPath(left), Path.GetFullPath(right));
 
     public static bool TryGetHostPath(uint id, out string hostPath)

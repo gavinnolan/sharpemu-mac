@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
+using SharpEmu.Libs.Diagnostics;
 using SharpEmu.Libs.Kernel;
 using System.Buffers;
 using System.Buffers.Binary;
@@ -102,6 +103,8 @@ public static class AmprExports
 
     private sealed class CachedHostFile : IDisposable
     {
+        private long _nextSequentialOffset = -1;
+
         public CachedHostFile(string path)
         {
             Handle = File.OpenHandle(
@@ -115,6 +118,43 @@ public static class AmprExports
 
         public SafeFileHandle Handle { get; }
         public long Length { get; }
+
+        /// <summary>
+        /// Asks the kernel to start pulling in the bytes after a read that
+        /// continues where the previous one stopped.
+        /// </summary>
+        /// <remarks>
+        /// Unreal titles drain a .pak in 64 KiB positional reads - Octopath
+        /// Traveler II issues 12,236 of them for 784 MiB - and each one is a
+        /// separate syscall that waits for the device. That reaches ~21 MB/s on
+        /// the external game volume against ~41 MB/s of raw sequential
+        /// throughput, because nothing tells the kernel the next 64 KiB is
+        /// wanted until the guest asks for it. F_RDADVISE queues that read
+        /// asynchronously with no copy to userspace, so the following call can
+        /// be served from the buffer cache.
+        ///
+        /// Only a continuing offset is advised: hinting ahead of a genuinely
+        /// random read would evict pages a different stream still wants, and
+        /// the handle cache is shared by all of a title's AMPR reads.
+        /// </remarks>
+        public void AdviseSequentialReadAhead(long offset, int length)
+        {
+            if (!HostReadAhead.Enabled || length <= 0)
+            {
+                return;
+            }
+
+            var completed = offset + length;
+            var continuesPreviousRead = offset == Volatile.Read(ref _nextSequentialOffset);
+            Volatile.Write(ref _nextSequentialOffset, completed);
+            if (!continuesPreviousRead || completed >= Length)
+            {
+                return;
+            }
+
+            var window = (int)Math.Min(HostReadAhead.WindowBytes, Length - completed);
+            HostReadAhead.Advise(Handle, completed, window);
+        }
 
         public void Dispose() => Handle.Dispose();
     }
@@ -1247,6 +1287,25 @@ public static class AmprExports
         ulong size,
         out ulong bytesRead)
     {
+        var profile = FileIoProfile.Begin();
+        var outcome = TryReadFileToGuestMemoryCore(ctx, hostPath, fileOffset, destination, size, out bytesRead);
+        FileIoProfile.End(
+            FileIoProfile.Op.AmprHostRead,
+            profile,
+            bytes: unchecked((long)bytesRead),
+            path: hostPath,
+            failed: outcome != (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        return outcome;
+    }
+
+    private static int TryReadFileToGuestMemoryCore(
+        CpuContext ctx,
+        string hostPath,
+        ulong fileOffset,
+        ulong destination,
+        ulong size,
+        out ulong bytesRead)
+    {
         bytesRead = 0;
         if (size == 0)
         {
@@ -1299,6 +1358,8 @@ public static class AmprExports
                     break;
                 }
 
+                cachedFile.AdviseSequentialReadAhead(unchecked((long)absoluteOffset), read);
+
                 if (!ctx.Memory.TryWrite(destination + bytesRead, buffer.AsSpan(0, read)))
                 {
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
@@ -1324,6 +1385,14 @@ public static class AmprExports
     }
 
     private static bool TryGetCachedHostFile(string hostPath, out CachedHostFile file, out int result)
+    {
+        var profile = FileIoProfile.Begin();
+        var opened = TryGetCachedHostFileCore(hostPath, out file, out result);
+        FileIoProfile.End(FileIoProfile.Op.AmprHostOpen, profile, failed: !opened);
+        return opened;
+    }
+
+    private static bool TryGetCachedHostFileCore(string hostPath, out CachedHostFile file, out int result)
     {
         file = null!;
         result = (int)OrbisGen2Result.ORBIS_GEN2_OK;

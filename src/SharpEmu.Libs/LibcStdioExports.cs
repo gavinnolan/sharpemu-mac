@@ -6,6 +6,7 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Diagnostics;
 using SharpEmu.Libs.Kernel;
 
 namespace SharpEmu.Libs.LibcStdio;
@@ -89,6 +90,17 @@ public static class LibcStdioExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libc")]
     public static int Fopen(CpuContext ctx)
+    {
+        var profile = FileIoProfile.Begin();
+        var outcome = FopenInner(ctx);
+        FileIoProfile.End(
+            FileIoProfile.Op.Fopen,
+            profile,
+            failed: outcome != (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        return outcome;
+    }
+
+    private static int FopenInner(CpuContext ctx)
     {
         var pathAddress = ctx[CpuRegister.Rdi];
         var modeAddress = ctx[CpuRegister.Rsi];
@@ -201,6 +213,17 @@ public static class LibcStdioExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libc")]
     public static int Fseek(CpuContext ctx)
+    {
+        var profile = FileIoProfile.Begin();
+        var outcome = FseekInner(ctx);
+        FileIoProfile.End(
+            FileIoProfile.Op.Fseek,
+            profile,
+            failed: outcome != (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        return outcome;
+    }
+
+    private static int FseekInner(CpuContext ctx)
     {
         var handle = ctx[CpuRegister.Rdi];
         var offset = unchecked((long)ctx[CpuRegister.Rsi]);
@@ -476,6 +499,17 @@ public static class LibcStdioExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libc")]
     public static int Fread(CpuContext ctx)
+    {
+        var profile = FileIoProfile.Begin();
+        var outcome = FreadInner(ctx);
+        FileIoProfile.End(
+            FileIoProfile.Op.Fread,
+            profile,
+            failed: outcome != (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        return outcome;
+    }
+
+    private static int FreadInner(CpuContext ctx)
     {
         var destination = ctx[CpuRegister.Rdi];
         var elementSize = ctx[CpuRegister.Rsi];
