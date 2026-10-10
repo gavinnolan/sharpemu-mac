@@ -33,6 +33,9 @@ internal enum MetalGpuWriteOrigin : byte
 {
     StorageBuffer,
     WrittenBinding,
+
+    /// <summary>A store through the device-address page table, at an evaluated range.</summary>
+    DeviceAddress,
     Fill,
     Copy,
     ImageWriteback,
@@ -52,7 +55,7 @@ internal static class MetalGpuWriteOrigins
     public const int Count = (int)MetalGpuWriteOrigin.Unbounded + 1;
 
     public static readonly string[] Names =
-        ["storage", "binding", "fill", "copy", "writeback", "unbounded"];
+        ["storage", "binding", "device_address", "fill", "copy", "writeback", "unbounded"];
 }
 
 /// <summary>

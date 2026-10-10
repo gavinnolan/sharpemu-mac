@@ -433,6 +433,66 @@ runaway compute shaders (below).
   which is the hash to pass to `SHARPEMU_SHADER_MSL_DUMP_HASH`. A missing line is now
   evidence: a slow shader with no `STEP-CAP` is loop-bound, not capped.
 
+### The guest write guard
+
+Guest memory being the GPU's memory has one failure mode the snapshot backend did not
+have: a write that overruns its range does not fault and does not land in a staging
+buffer. It rewrites whatever the guest's own allocator put next door, and the title dies
+much later inside its own code on a clobbered pointer — in Poppy Playtime, a `mov
+rax,[rcx]` with `rcx = 0x4000000040000000`, two floats where a free-list pointer belongs.
+
+`SHARPEMU_METAL_V2_GUARD_WRITES=1` arms `MetalGuestWriteGuard`. For every write to guest
+memory the host declares — a storage-buffer or written binding, a fill, a copy, an image
+writeback, and the fills and copies the host performs itself — it snapshots the 4 KiB
+either side of the range and compares them again once the GPU has signalled that
+submission. A byte that changed, and that no other declared range covers, is reported with
+the producer that ran off its end:
+
+    [METAL-V2][GUARD] A GPU-side write changed guest bytes outside the range it declared:
+      producer=writeback [writeback format=... extent=1x1 ...] declared=0x...+0x10000
+      serial=812 side=after violation=0x... distance=0x20 was=0x... now=0x4000000040000000.
+
+The same switch arms `GuestWriteJournal` (in `SharpEmu.HLE`, because the native fault
+dumper in `SharpEmu.Core` is what asks it), a ring of the declared ranges. On a fault the
+dumper prints, for every faulting register that is a guest address, which producer had
+declared those bytes:
+
+    [LOADER][INFO]   gpu-write-journal rdx=0x... producer=storage [...] range=0x...+0x...
+
+An address no record covers was not written by a declared host-side GPU write, which
+points at a shader store through a descriptor, or away from the GPU altogether. A clean
+guard with a reproducible fault is therefore evidence too, not an absence of it.
+
+#### What it found in Poppy Playtime, and what it ruled out
+
+The title dies after about a minute, always the same way: a free-list pop in the guest's
+own binned allocator follows `0x4000000040000000` out of bin 14 of a 64 KiB-aligned
+direct-memory table, at offset `+0x720`. Four runs, two different guest threads, three
+different table addresses, the same offset and the same value.
+
+- The guard's journal covered every declared GPU-side write of the run (3013 records,
+  below the ring's 8192, so nothing was lost to wrapping) and **none of them covered the
+  faulting address** — not an image writeback, a fill, a copy, a storage binding or a host
+  fill. The margin check found no producer writing past its range either; its handful of
+  reports are the guest's own CPU writing structures next to a declared range while the
+  submission is in flight.
+- `device_address_writes=0`: this title never stores through the device-address page
+  table, so the hole closed above was not the cause here either.
+- The fault dump of the table (`fault-register-rax`) shows it otherwise pristine — valid
+  `(pointer, count)` pairs throughout, zeros where unused — and bin 14's **count is still
+  zero** while its head holds the poison. Exactly eight bytes are wrong, in a slot the
+  allocator had never used, so this is a stray eight-byte store and not stale memory, a
+  lost write or an overrun.
+- `SHARPEMU_WATCH_QWORD=0x4000000040000000 SHARPEMU_WATCH_QWORD_HI=0x90` shows the value
+  itself is ordinary guest float data: every hit is `PhysicalVirtualMemory.TryCopy` under
+  `DispatchImportCore`, a guest-to-guest `memcpy` import moving kilobyte blocks of
+  `2.0f` pairs through direct memory. None of the 54 distinct destinations seen before the
+  report cap was the faulting slot.
+
+So the GPU writes nothing that lands there, and the payload is bulk-copied float data.
+The next step is a bulk-copy destination watch (`SHARPEMU_WATCH_BULK_TORN` and friends
+already exist for this), not more GPU instrumentation.
+
 ## Process-level macOS tuning (separate workstream)
 
 - `Info.plist`: `LSSupportsGameMode`, `GCSupportsGameMode`, and

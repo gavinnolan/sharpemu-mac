@@ -175,6 +175,14 @@ public sealed class ShaderResourceInfo
     public bool HasBitwiseExclusiveOr { get; set; }
     public bool UsesDeviceAddresses { get; set; }
 
+    /// <summary>
+    /// The program stores through the device-address page table, so it can write any
+    /// mapped guest page and no host-side range describes where. A backend that keeps
+    /// guest memory as the GPU's memory has to treat the submission as writing
+    /// everywhere; one that copies into staging resources does not.
+    /// </summary>
+    public bool WritesDeviceAddresses { get; set; }
+
     public ShaderResourceInfo Clone() => new()
     {
         Buffers = Buffers.Select(buffer => buffer.Clone()).ToList(),
@@ -189,6 +197,7 @@ public sealed class ShaderResourceInfo
         InstanceOffsetScalarRegister = InstanceOffsetScalarRegister,
         HasBitwiseExclusiveOr = HasBitwiseExclusiveOr,
         UsesDeviceAddresses = UsesDeviceAddresses,
+        WritesDeviceAddresses = WritesDeviceAddresses,
     };
 }
 
