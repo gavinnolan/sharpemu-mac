@@ -41,7 +41,28 @@ public static class GuestWriteWatch
 
     private static readonly ulong WatchQwordHigh = Parse(
         Environment.GetEnvironmentVariable("SHARPEMU_WATCH_QWORD_HI"));
+
+    // SHARPEMU_WATCH_QWORD_LOW=<hex>: only the destinations whose low address bits match.
+    // A corrupted structure sits at a fixed offset inside an aligned allocation whose base
+    // moves between runs, so "the slot at +0x720 of any 64 KiB block" is a filter that can
+    // be armed in advance while the address itself cannot. The mask defaults to the 64 KiB
+    // block (0xFFFF) and SHARPEMU_WATCH_QWORD_LOW_MASK sets another.
+    private static readonly bool WatchQwordLowSet =
+        !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("SHARPEMU_WATCH_QWORD_LOW"));
+
+    private static readonly ulong WatchQwordLow = Parse(
+        Environment.GetEnvironmentVariable("SHARPEMU_WATCH_QWORD_LOW"));
+
+    private static readonly ulong WatchQwordLowMask = ParseOrDefault("SHARPEMU_WATCH_QWORD_LOW_MASK", 0xFFFF);
+
+    // How many hits are reported before the watch goes quiet. A value that turns out to be
+    // ordinary data fills the log in seconds, so the default is small; a filtered watch
+    // wants more. SHARPEMU_WATCH_QWORD_REPORTS sets it.
+    private static readonly int WatchQwordReportLimit =
+        (int)Math.Min(ParseOrDefault("SHARPEMU_WATCH_QWORD_REPORTS", MaxBulkReports), int.MaxValue);
+
     private static int _qwordReports;
+    private static long _qwordSuppressed;
 
     private static readonly ulong BulkDestHigh = Parse(
         Environment.GetEnvironmentVariable("SHARPEMU_WATCH_BULK_DEST_HI"));
@@ -74,7 +95,9 @@ public static class GuestWriteWatch
         {
             Console.Error.WriteLine(
                 $"[LOADER][WARN] watch_qword HIT value=0x{WatchQword:X16} dest=0x{hit:X16} " +
-                $"(base=0x{address:X16} len={data.Length}){Environment.NewLine}{Environment.StackTrace}");
+                $"(base=0x{address:X16} len={data.Length}" +
+                (WatchQwordLowSet ? $" slot=0x{WatchQwordLow:X}/0x{WatchQwordLowMask:X}" : string.Empty) +
+                $"){Environment.NewLine}{Environment.StackTrace}");
             Console.Error.Flush();
             return;
         }
@@ -142,17 +165,43 @@ public static class GuestWriteWatch
     // The guest address this write puts <see cref="WatchQword"/> at, scanning the eight-byte
     // slots the write actually lands on. Reports are capped so a value that turns out to be
     // ordinary data cannot drown the log.
-    internal static bool TryFindQword(ulong address, ReadOnlySpan<byte> data, out ulong destination) =>
-        TryFindValue(address, data, WatchQword, WatchQwordHigh, out destination) &&
-        Interlocked.Increment(ref _qwordReports) <= MaxBulkReports;
+    internal static bool TryFindQword(ulong address, ReadOnlySpan<byte> data, out ulong destination)
+    {
+        var slot = WatchQwordLowSet ? WatchQwordLow : 0;
+        var mask = WatchQwordLowSet ? WatchQwordLowMask : 0;
+        if (!TryFindValue(address, data, WatchQword, WatchQwordHigh, slot, mask, out destination))
+        {
+            return false;
+        }
+
+        if (Interlocked.Increment(ref _qwordReports) <= WatchQwordReportLimit)
+        {
+            return true;
+        }
+
+        Interlocked.Increment(ref _qwordSuppressed);
+        destination = 0;
+        return false;
+    }
+
+    /// <summary>How many hits the report limit has swallowed.</summary>
+    public static long SuppressedQwordHits => Interlocked.Read(ref _qwordSuppressed);
 
     /// <summary>
     /// The guest address at which this write lands <paramref name="value"/> in one aligned
     /// eight-byte slot, or false when it does not. <paramref name="bandHigh"/>, when
-    /// nonzero, restricts the search to addresses whose top 32 bits match it.
+    /// nonzero, restricts the search to addresses whose top 32 bits match it;
+    /// <paramref name="slotMask"/>, when nonzero, to destinations whose masked low bits
+    /// equal <paramref name="slot"/>. Both filters are applied inside the scan, so a write
+    /// that lands the value in several slots still reports the one that was asked for.
     /// </summary>
     internal static bool TryFindValue(
-        ulong address, ReadOnlySpan<byte> data, ulong value, ulong bandHigh, out ulong destination)
+        ulong address, ReadOnlySpan<byte> data, ulong value, ulong bandHigh, out ulong destination) =>
+        TryFindValue(address, data, value, bandHigh, slot: 0, slotMask: 0, out destination);
+
+    internal static bool TryFindValue(
+        ulong address, ReadOnlySpan<byte> data, ulong value, ulong bandHigh, ulong slot, ulong slotMask,
+        out ulong destination)
     {
         destination = 0;
         if (bandHigh != 0 && (address >> 32) != bandHigh)
@@ -162,12 +211,14 @@ public static class GuestWriteWatch
 
         for (var offset = FirstAlignedOffset(address); offset + 8 <= data.Length; offset += 8)
         {
-            if (BinaryPrimitives.ReadUInt64LittleEndian(data.Slice(offset, 8)) != value)
+            var candidate = address + (ulong)offset;
+            if (BinaryPrimitives.ReadUInt64LittleEndian(data.Slice(offset, 8)) != value ||
+                (slotMask != 0 && (candidate & slotMask) != (slot & slotMask)))
             {
                 continue;
             }
 
-            destination = address + (ulong)offset;
+            destination = candidate;
             return true;
         }
 
@@ -230,6 +281,13 @@ public static class GuestWriteWatch
             $"[LOADER][WARN] watch_write HIT addr=0x{address:X16} len={data.Length} " +
             $"first_qword=0x{LittleEndianValue(data):X16}{Environment.NewLine}{Environment.StackTrace}");
         Console.Error.Flush();
+    }
+
+    // A hexadecimal environment setting, or the fallback when it is absent or unreadable.
+    private static ulong ParseOrDefault(string name, ulong fallback)
+    {
+        var value = Parse(Environment.GetEnvironmentVariable(name));
+        return value != 0 ? value : fallback;
     }
 
     private static bool IsEnabled(string name) =>

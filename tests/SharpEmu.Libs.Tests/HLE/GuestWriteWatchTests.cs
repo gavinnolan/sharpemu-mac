@@ -56,6 +56,37 @@ public sealed class GuestWriteWatchTests
         Assert.False(GuestWriteWatch.TryFindValue(0x9003260000, data, 0x4000000040000000UL, 0, out _));
     }
 
+    // The corrupted slot sits at a fixed offset inside a 64 KiB block whose base the run
+    // chooses, so the filter names the offset and lets the base be anything.
+    [Fact]
+    public void TryFindValue_HonoursTheSlotFilterInsideTheScan()
+    {
+        var data = new byte[0x1000];
+        // The value appears twice: once in an uninteresting slot, once in the watched one.
+        BitConverter.TryWriteBytes(data.AsSpan(0x100), 0x4000000040000000UL);
+        BitConverter.TryWriteBytes(data.AsSpan(0x720), 0x4000000040000000UL);
+
+        Assert.True(GuestWriteWatch.TryFindValue(
+            0x9003260000, data, 0x4000000040000000UL, 0, 0x720, 0xFFFF, out var hit));
+        Assert.Equal(0x9003260720UL, hit);
+
+        // A different 64 KiB block, same offset: still the slot that was asked for.
+        Assert.True(GuestWriteWatch.TryFindValue(
+            0x9003330000, data, 0x4000000040000000UL, 0, 0x720, 0xFFFF, out hit));
+        Assert.Equal(0x9003330720UL, hit);
+    }
+
+    [Fact]
+    public void TryFindValue_WithASlotFilterIgnoresEveryOtherSlot()
+    {
+        var data = new byte[0x1000];
+        BitConverter.TryWriteBytes(data.AsSpan(0x100), 0x4000000040000000UL);
+        Assert.False(GuestWriteWatch.TryFindValue(
+            0x9003260000, data, 0x4000000040000000UL, 0, 0x720, 0xFFFF, out _));
+        // Without the filter the same write is a hit.
+        Assert.True(GuestWriteWatch.TryFindValue(0x9003260000, data, 0x4000000040000000UL, 0, out _));
+    }
+
     [Fact]
     public void TryFindValue_HonoursTheAddressBand()
     {
