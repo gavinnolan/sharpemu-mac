@@ -303,6 +303,12 @@ public sealed class MslImageDimensionTests(ITestOutputHelper output)
     // SAMPLE_C_CD is a compare that also reads gradients.
     [InlineData("ImageSampleCCd", true, true)]
     [InlineData("ImageSampleCCdCl", true, true)]
+    // SAMPLE_CL is a LOD clamp, so it reads neither.
+    [InlineData("ImageSampleCl", false, false)]
+    [InlineData("ImageSampleClO", false, false)]
+    // SAMPLE_C_L, named with a capital L, really is a compare.
+    [InlineData("ImageSampleCL", false, true)]
+    [InlineData("ImageSampleCLz", false, true)]
     // SAMPLE_C without a derivative family reads only the reference.
     [InlineData("ImageSampleC", false, true)]
     [InlineData("ImageSampleD", true, false)]

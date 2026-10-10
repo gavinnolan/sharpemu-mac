@@ -421,11 +421,14 @@ public static partial class Gen5MslTranslator
             var kind = imageClass.ComponentKind;
             var opcode = instruction.Opcode;
             var hasOffset = opcode.EndsWith("O", StringComparison.Ordinal);
-            // SAMPLE_CD is coarse derivatives, not a comparison: its "Cd" is one
-            // token, so the C in it must not read as the z-compare marker the way
-            // the C in SAMPLE_C_CD does.
+            // SAMPLE_CD is coarse derivatives and SAMPLE_CL is a LOD clamp, not
+            // comparisons: their "Cd" and "Cl" are single tokens, so the C in them
+            // must not read as the z-compare marker the way the C in SAMPLE_C_CD
+            // and SAMPLE_C_L (named CL, with a capital L) does. A false compare
+            // also consumes an address slot, which shifts every coordinate.
             var hasCompare = opcode.Contains("SampleC", StringComparison.Ordinal) &&
-                !opcode.StartsWith("ImageSampleCd", StringComparison.Ordinal);
+                !opcode.StartsWith("ImageSampleCd", StringComparison.Ordinal) &&
+                !opcode.StartsWith("ImageSampleCl", StringComparison.Ordinal);
             // The C comparison marker precedes D/L/B. Decode the remaining
             // family so CL reads its trailing LOD and CD consumes derivatives.
             var sampleFamily = hasCompare ? opcode.Replace("SampleC", "Sample", StringComparison.Ordinal) : opcode;
