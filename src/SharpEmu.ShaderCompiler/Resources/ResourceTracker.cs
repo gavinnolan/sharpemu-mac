@@ -837,6 +837,19 @@ public sealed partial class ResourceTracker
 
     // ---- collection ----
 
+    // This access goes through the device-address page table. A store or an atomic
+    // through it can land on any mapped guest page and no host-side range says where,
+    // which a backend whose guest memory *is* the GPU's memory has to know: a later
+    // read of any address has to wait for the submission.
+    private void NoteDeviceAddresses(MemoryAccessInfo memory)
+    {
+        _info.UsesDeviceAddresses = true;
+        if (memory.Access is MemoryAccess.Write or MemoryAccess.Atomic)
+        {
+            _info.WritesDeviceAddresses = true;
+        }
+    }
+
     private void Collect(int index)
     {
         var memory = _plan.Memory[index];
@@ -907,7 +920,7 @@ public sealed partial class ResourceTracker
                     {
                         Provenance = BufferDescriptorProvenance.Runtime,
                     };
-                    _info.UsesDeviceAddresses = true;
+                    NoteDeviceAddresses(memory);
                     return;
                 }
             }
@@ -942,7 +955,7 @@ public sealed partial class ResourceTracker
                 if (memory.Kind == MemoryResourceKind.Buffer && IsDeviceLoadedBufferHandle(access.Handle))
                 {
                     memory.DeviceDescriptor = true;
-                    _info.UsesDeviceAddresses = true;
+                    NoteDeviceAddresses(memory);
                     return;
                 }
 
@@ -950,7 +963,7 @@ public sealed partial class ResourceTracker
                 {
                     Provenance = BufferDescriptorProvenance.Runtime,
                 };
-                _info.UsesDeviceAddresses = true;
+                NoteDeviceAddresses(memory);
                 return;
             }
 
@@ -960,7 +973,7 @@ public sealed partial class ResourceTracker
                 (memory.Kind == MemoryResourceKind.Buffer && IsDeviceLoadedBufferHandle(access.Handle)))
             {
                 memory.DeviceDescriptor = true;
-                _info.UsesDeviceAddresses = true;
+                NoteDeviceAddresses(memory);
                 return;
             }
 
@@ -984,7 +997,7 @@ public sealed partial class ResourceTracker
                 }
 
                 memory.DeviceDescriptor = true;
-                _info.UsesDeviceAddresses = true;
+                NoteDeviceAddresses(memory);
                 return;
             }
 
@@ -1016,7 +1029,7 @@ public sealed partial class ResourceTracker
                 throw Failure(memory.Pc, "an address handle must have two address dwords");
             }
 
-            _info.UsesDeviceAddresses = true;
+            NoteDeviceAddresses(memory);
             return;
         }
 

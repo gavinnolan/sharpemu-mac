@@ -397,6 +397,73 @@ internal sealed partial class MetalRenderHost
             stage.BufferLengths[index] = (uint)Math.Min(size, uint.MaxValue);
             ReportBufferBinding(stage, index, in descriptor, requested, size, range);
         }
+
+        BindDeviceAddressRanges(stage, info, snapshot);
+    }
+
+    /// <summary>
+    /// The guest ranges a device-address program reaches without a descriptor binding:
+    /// a flat or global access, or a V# the shader loads out of guest memory when it
+    /// runs. The resource planner evaluates each handle's base and extent for the draw,
+    /// which is what lets these be named at all.
+    ///
+    /// They are not bindings here — guest memory is the GPU's memory, so the pointer in
+    /// the page table already addresses the window — but they carry the same obligations
+    /// a storage binding does, and without them the backend has a hole its own rules
+    /// forbid: an image that owns the bytes never publishes them before the shader reads
+    /// them, a shader store never invalidates the image or records its range, and a
+    /// later command-processor poll or host read of those bytes does not wait for the
+    /// submission still writing them. The twin of the Vulkan presenter's
+    /// <c>BindDeviceAddressRanges</c>.
+    /// </summary>
+    private void BindDeviceAddressRanges(
+        MetalStageBindings stage, ShaderResourceInfo info, ResourceSnapshot snapshot)
+    {
+        var unplanned = false;
+        var declaredWrite = false;
+        foreach (var range in snapshot.DeviceAddressRanges)
+        {
+            if (!range.Planned)
+            {
+                // Nothing evaluated this handle, so the store's destination is unknown.
+                unplanned |= range.Written;
+                continue;
+            }
+
+            // A pointer to an unmapped page resolves to null in the shader, which drops
+            // the access; there is nothing to publish, invalidate or wait for.
+            if (range.Size == 0 || range.Base == 0 || !_memory.CanRead(range.Base, 1))
+            {
+                continue;
+            }
+
+            var size = ClampMappedSize(range.Base, range.Size);
+            FlushGpuWrites(range.Base, size, MetalWritebackCause.StorageDescriptor);
+            if (!range.Written)
+            {
+                continue;
+            }
+
+            _imageCache.InvalidateMemoryFromGpu(range.Base, size);
+            NoteGuestMemoryWrite(range.Base, size, MetalGpuWriteOrigin.DeviceAddress);
+            declaredWrite = true;
+        }
+
+        if (!unplanned && (!info.WritesDeviceAddresses || declaredWrite))
+        {
+            return;
+        }
+
+        // The program stores through the page table and no evaluated range says where.
+        // Conservative is the only correct answer: every later read of any guest address
+        // waits for this submission.
+        NoteUnboundedGuestMemoryWrite();
+        _deviceAddressWrites++;
+        MetalV2Diagnostics.WarnOnce(
+            "device-address-unbounded",
+            $"A shader stores through the device-address page table with no evaluated range, so every " +
+            $"later guest read waits for its submission: hash=0x{stage.Program.Hash:X16} " +
+            $"unplanned={unplanned} ranges={snapshot.DeviceAddressRanges.Length}.");
     }
 
     // SHARPEMU_METAL_V2_DUMP_BUFFERS=<hash>[,<hash>...]: what one program's scalar and
@@ -673,6 +740,11 @@ internal sealed partial class MetalRenderHost
     private const int AddressRangeEntryBytes = 24;
     private const int MaxAddressRanges = 4096;
     private long _deviceAddressSpanVersion = long.MinValue;
+
+    private long _deviceAddressWrites;
+
+    /// <summary>How many bound stages could store through the device-address page table.</summary>
+    internal long DeviceAddressWrites => _deviceAddressWrites;
 
     private ulong _deviceAddressTable;
     private uint _deviceAddressEntryCount;

@@ -87,6 +87,28 @@ public sealed class MetalGpuWriteRangesTests
     }
 
     [Fact]
+    public void EveryWriteOriginHasAReportName()
+    {
+        Assert.Equal(MetalGpuWriteOrigins.Count, MetalGpuWriteOrigins.Names.Length);
+        Assert.Equal("device_address", MetalGpuWriteOrigins.Names[(int)MetalGpuWriteOrigin.DeviceAddress]);
+        Assert.Equal("unbounded", MetalGpuWriteOrigins.Names[(int)MetalGpuWriteOrigin.Unbounded]);
+    }
+
+    [Fact]
+    public void AStoreThroughThePageTableAtAnEvaluatedRangeIsWaitedForLikeAnyOther()
+    {
+        var ranges = new MetalGpuWriteRanges();
+        ranges.Note(0x1_0000, 0x1000, serial: 5, MetalGpuWriteOrigin.DeviceAddress);
+        Assert.Equal(5UL, ranges.PendingSerial(0x1_0800, 8, completed: 0));
+        Assert.Equal(MetalGpuWriteOrigin.DeviceAddress, ranges.LastMatch.Origin);
+        Assert.Equal(1, ranges.RecordsFrom(MetalGpuWriteOrigin.DeviceAddress));
+        // A store the planner could not evaluate has no range, so every read waits.
+        ranges.NoteUnbounded(serial: 9);
+        Assert.Equal(9UL, ranges.PendingSerial(0xDEAD_0000, 8, completed: 0));
+        Assert.Equal(MetalGpuWriteOrigin.Unbounded, ranges.LastMatch.Origin);
+    }
+
+    [Fact]
     public void ClearingAfterAFullWaitDropsEverything()
     {
         var ranges = new MetalGpuWriteRanges();
