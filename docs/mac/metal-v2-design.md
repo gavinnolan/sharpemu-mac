@@ -379,6 +379,42 @@ runaway compute shaders (below).
   targets every `SHARPEMU_METAL_V2_DUMP_EVERY` flips (30 by default), so the next run
   dumps the frames that have something in them.
 
+- **Demon's Souls' corruption is not a DCC fast clear.** The frames it draws are a
+  blue-grey field with saturated speckles, which reads as a compressed surface shown
+  without its metadata, so the DCC path was the first suspect. It is not the cause.
+
+  Metal v2 already carries the Vulkan metadata machinery nearly line for line —
+  `RegisterDccMetadata`, `TryAbsorbDccFill`, `MaterializeDccClear` with its real-pixel
+  `ClearImageRange`, `TryConsumeDccAttachmentClear`. One gap was real and is now closed:
+  Vulkan has a second pass, `RecordSampledColorMetadataClears`, for a surface that was
+  fast-cleared and is *sampled* before it binds as a colour target again, which
+  `MaterializeDccClear` cannot serve because a texture request carries no metadata range
+  and the register clear colour is known only to a target. v2 had no equivalent.
+  `AcquireTextureView` now materializes it, reported as `sampled_dcc_clears`.
+
+  It fires zero times in Demon's Souls, and the frame is unchanged: `mean_rgb` 135.06
+  before, 134.32 after, pixel for pixel the same corruption. The fix closes a parity hole
+  that will matter to some other title; it is not this one, and it is unverified by any
+  title that exercises it.
+
+  What the pixels actually say, from a dumped 4K flip: the dominant colour is a *cluster*
+  around (130,136,152) rather than one flat value — a smooth low-contrast field, not a
+  fill — and the speckles saturate (75,255,25). Horizontal runs of both are dominated by
+  **two pixels**, and the frame has a sharp discontinuity across its **vertical
+  midpoint**. Two-pixel granularity and a half-height seam are a tiling or element-stride
+  mismatch, not a block-compression one: DCC keys cover 8x8 texels at 32 bpp and would
+  not alternate every two. That is where to look next, with
+  `SHARPEMU_METAL_V2_DUMP_TARGETS` and the 1920x540 target the frame also carries.
+
+- **Demon's Souls' long boot is host-side command-stream work, not the GPU.** Over one
+  454-second run the GPU worker spent 14.3 s executing GPU work (3%), 49.8 s waiting on
+  the GPU (11%), 21.9 s idle (5%) and **368 s — 81% — in its own CPU work**: interpreting
+  packets, resolving descriptors, keeping the image cache. The guest sent 371,022
+  submissions for 93,632 draws, four submissions per draw, and the queue ran 952,889
+  slices against them: **2.57 slices per submission**, because a submission that suspends
+  is re-queued and re-run from its suspend point. Better than half a million slice runs in
+  that one run were retries. Neither GPU throughput nor GPU stalls are the boot's cost.
+
 - **Where a flip stops is reported.** `published=0` alone cannot tell a title that never
   flips from one whose flips are released or discarded on the way to the presenter, and
   all three printed nothing. Every flip reaching `CaptureFlip` now counts as an attempt
