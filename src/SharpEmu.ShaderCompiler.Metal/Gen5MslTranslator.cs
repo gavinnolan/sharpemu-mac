@@ -1088,6 +1088,13 @@ public static partial class Gen5MslTranslator
             out string error)
         {
             error = string.Empty;
+            if (instruction.Opcode is "BufferWbinvl1" or "BufferWbinvl1Vol")
+            {
+                // The host storage path is already coherent; the guest instruction
+                // invalidates a cache level and does not access the buffer itself.
+                return true;
+            }
+
             if (control.Typed && instruction.Opcode.Contains("D16", StringComparison.Ordinal))
             {
                 error = $"unsupported buffer opcode {instruction.Opcode}";
@@ -1824,37 +1831,64 @@ public static partial class Gen5MslTranslator
             out string error)
         {
             error = string.Empty;
-            if (opcode is "BufferAtomicSwap" or "GlobalAtomicAdd" or "BufferAtomicAdd" or
-                "GlobalAtomicUMax" or "BufferAtomicUMax" or "BufferAtomicUmax")
+            if (opcode.StartsWith("BufferAtomic", StringComparison.Ordinal) ||
+                opcode.StartsWith("GlobalAtomic", StringComparison.Ordinal))
             {
                 var atomic = opcode.StartsWith("BufferAtomic", StringComparison.Ordinal)
                     ? opcode["BufferAtomic".Length..] : opcode["GlobalAtomic".Length..];
-                // MUBUF SWAP reads VDATA and, with GLC, replaces that same
-                // register with the pre-operation word (RDNA2 sections 8.1/12.14).
-                if (!TryGetAtomicExpression(atomic, $"v[{sourceVectorRegister}]", "0u", out var build))
+                // The X2 forms run the operation over a dword pair. SWAP and OR
+                // are the only ones the guest shaders use and the only ones that
+                // survive the split: each dword is independent of the other.
+                var words = atomic.EndsWith("X2", StringComparison.Ordinal) ? 2u : 1u;
+                if (words == 2)
+                {
+                    atomic = atomic[..^2];
+                }
+
+                // MUBUF CMPSWAP reads the new value from VDATA and the comparator
+                // from the register after it; SWAP reads VDATA and, with GLC,
+                // replaces that same register with the pre-operation word
+                // (RDNA2 sections 8.1/12.14).
+                if (!TryGetAtomicExpression(atomic, $"v[{sourceVectorRegister}]", $"v[{sourceVectorRegister + 1}]", out _))
                 {
                     error = $"unsupported memory opcode {opcode}";
                     return false;
                 }
+
                 Line("if (exec)");
                 Line("{");
                 _indent++;
                 var bytes = BufferBytes(bindingIndex);
-                Line($"if (4u <= {bytes} && {byteAddress} <= {bytes} - 4u && ({byteAddress} & 3u) == 0u)");
+                var width = words * sizeof(uint);
+                Line($"if ({width}u <= {bytes} && {byteAddress} <= {bytes} - {width}u && ({byteAddress} & 3u) == 0u)");
                 Line("{");
                 _indent++;
-                var original = Temp(
-                    "uint",
-                    build($"b{bindingIndex} + ({byteAddress} >> 2)"));
-                if (glc)
+                for (uint word = 0; word < words; word++)
                 {
-                    Line($"v[{destinationVectorRegister}] = {original};");
+                    TryGetAtomicExpression(
+                        atomic,
+                        $"v[{sourceVectorRegister + word}]",
+                        $"v[{sourceVectorRegister + 1}]",
+                        out var build);
+                    var original = Temp(
+                        "uint",
+                        build($"b{bindingIndex} + ({byteAddress} >> 2) + {word}u"));
+                    if (glc)
+                    {
+                        Line($"v[{destinationVectorRegister + word}] = {original};");
+                    }
                 }
 
                 _indent--;
                 Line("}");
                 if (glc)
-                    Line($"else {{ v[{destinationVectorRegister}] = 0u; }}");
+                {
+                    var cleared = string.Concat(
+                        Enumerable.Range(0, (int)words)
+                            .Select(word => $" v[{destinationVectorRegister + word}] = 0u;"));
+                    Line($"else {{{cleared} }}");
+                }
+
                 _indent--;
                 Line("}");
                 return true;

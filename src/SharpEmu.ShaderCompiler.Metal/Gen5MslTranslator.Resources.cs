@@ -433,6 +433,10 @@ public static partial class Gen5MslTranslator
                 "Cmpswap" => pointer => $"sharpemu_atomic_compare_swap((device atomic_uint*)({pointer}), {comparator}, {value})",
                 "Inc" => pointer => $"sharpemu_atomic_step((device atomic_uint*)({pointer}), true)",
                 "Dec" => pointer => $"sharpemu_atomic_step((device atomic_uint*)({pointer}), false)",
+                "Fmin" => pointer => $"sharpemu_atomic_float_minmax((device atomic_uint*)({pointer}), {value}, false)",
+                "Fmax" => pointer => $"sharpemu_atomic_float_minmax((device atomic_uint*)({pointer}), {value}, true)",
+                // DS_MIN/MAX_F32 replace with DATA0 while DATA1 ranks below memory.
+                "Freplace" => pointer => $"sharpemu_atomic_float_replace((device atomic_uint*)({pointer}), {value}, {comparator})",
                 _ => null,
             };
             build = candidate!;
@@ -964,6 +968,21 @@ public static partial class Gen5MslTranslator
                     return true;
                 }
 
+                case "DsReadI8":
+                {
+                    // The byte the low two bits of the offset address select,
+                    // sign-extended out of the word that holds it.
+                    var address = Temp("uint", RawSource(instruction, 0));
+                    var byteAddress = Temp("uint", $"{address} + {control.SingleOffsetBytes}u");
+                    var word = Temp("uint", LoadGlobalDataShareWord(
+                        Temp("uint", GlobalDataShareIndex(address, control.SingleOffsetBytes))));
+                    var shift = Temp("uint", $"({byteAddress} & 3u) << 3u");
+                    StoreVector(
+                        instruction.Destinations[0].Value,
+                        $"(uint)(((int)(({word} >> {shift}) << 24u)) >> 24)");
+                    return true;
+                }
+
                 case "DsReadB64":
                 {
                     var index = Temp("uint", GlobalDataShareIndex(RawSource(instruction, 0), control.SingleOffsetBytes));
@@ -1088,10 +1107,18 @@ public static partial class Gen5MslTranslator
         private bool TryEmitGlobalDataShareAtomic(Gen5ShaderInstruction instruction, Gen5DataShareControl control, out string error)
         {
             error = string.Empty;
-            var name = DataShareAtomicName(instruction.Opcode);
-            var isCompare = name == "Cmpswap";
-            var value = instruction.Sources.Count > (isCompare ? 2 : 1) ? RawSource(instruction, isCompare ? 2 : 1) : "0u";
-            var comparator = instruction.Sources.Count > 1 ? RawSource(instruction, 1) : "0u";
+            var name = instruction.Opcode switch
+            {
+                "DsMinF32" or "DsMaxF32" => "Freplace",
+                _ => DataShareAtomicName(instruction.Opcode),
+            };
+            // DS_CMPST reads DATA0 as the comparator and DATA1 as the new value;
+            // the conditional float replaces read DATA0 as the replacement value
+            // and DATA1 as the operand compared against memory.
+            var valueIndex = name == "Cmpswap" ? 2 : 1;
+            var comparatorIndex = name == "Freplace" ? 2 : 1;
+            var value = instruction.Sources.Count > valueIndex ? RawSource(instruction, valueIndex) : "0u";
+            var comparator = instruction.Sources.Count > comparatorIndex ? RawSource(instruction, comparatorIndex) : "0u";
             if (name.Length == 0 || !TryGetAtomicExpression(name, value, comparator, out var build))
             {
                 error = $"unsupported GDS opcode {instruction.Opcode}";

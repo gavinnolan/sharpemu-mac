@@ -41,16 +41,94 @@ public sealed class Gen5MslBufferAtomicTests(ITestOutputHelper output)
     }
 
     [Theory]
-    [InlineData(0x3Cu, "BufferAtomicInc")]
-    [InlineData(0x3Du, "BufferAtomicDec")]
-    [InlineData(0x50u, "BufferAtomicSwapX2")]
-    public void UnqualifiedAtomicVariantsRemainExplicitlyUnsupported(uint opcode, string name)
+    // An unnamed MUBUF opcode still fails loudly rather than emitting nothing.
+    [InlineData(0x34u, "MubufRaw34")]
+    [InlineData(0x5Bu, "MubufRaw5B")]
+    public void UndecodedBufferOpcodesRemainExplicitlyUnsupported(uint opcode, string name)
     {
         var fixture = Fixture(true, 0, 0, 0, indexed: false, opcode);
         var request = Request(fixture, 0);
         Assert.False(Gen5MslTranslator.TryCompileProgram(request, out _, out var error));
         Assert.Contains(name, error);
         Assert.Contains("unsupported memory opcode", error);
+    }
+
+    [Theory]
+    [InlineData(0x30u, Replacement, Before)]            // swap
+    [InlineData(0x32u, 0x0FFEEDDCu, Before)]            // add
+    [InlineData(0x33u, 0xEDBA8754u, Before)]            // sub
+    [InlineData(0x35u, Before, Before)]                 // signed min keeps the negative word
+    [InlineData(0x36u, Replacement, Before)]            // unsigned min takes the operand
+    [InlineData(0x37u, Replacement, Before)]            // signed max takes the operand
+    [InlineData(0x38u, Before, Before)]                 // unsigned max keeps the larger word
+    [InlineData(0x39u, 0x10003200u, Before)]            // and
+    [InlineData(0x3Au, 0xFFFEBBDCu, Before)]            // or
+    [InlineData(0x3Bu, 0xEFFE89DCu, Before)]            // xor
+    [InlineData(0x3Cu, 0xFEDCBA99u, Before)]            // inc
+    [InlineData(0x3Du, 0xFEDCBA97u, Before)]            // dec
+    // As floats Before is -1.47e38 and Replacement 1.28e-28.
+    [InlineData(0x3Fu, Before, Before)]                 // fmin keeps the negative word
+    [InlineData(0x40u, Replacement, Before)]            // fmax takes the operand
+    public void EveryBufferAtomicAppliesItsOperationAndReturnsThePreOperationWord(
+        uint opcode, uint expectedMemory, uint expectedReturn)
+    {
+        var fixture = Fixture(true, 0, 32, 0, indexed: false, opcode);
+        var shader = Compile(fixture, 0);
+        if (!RequireDevice()) return;
+
+        var expected = SentinelBuffer(32);
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(32), expectedMemory);
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(48), expectedReturn);
+        Assert.Equal(expected, Execute(shader, SentinelBuffer(32)));
+    }
+
+    [Theory]
+    // CMPSWAP reads the new value from VDATA and the comparator from the next
+    // register, so the swap lands only when the comparator matches memory.
+    [InlineData(Before, Replacement)]
+    [InlineData(0u, Before)]
+    public void CompareSwapOnlyReplacesTheWordItsComparatorMatches(uint comparator, uint expectedMemory)
+    {
+        var fixture = CompareSwapFixture(comparator);
+        var shader = Compile(fixture, 0);
+        if (!RequireDevice()) return;
+
+        var expected = SentinelBuffer(32);
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(32), expectedMemory);
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(48), Before);
+        Assert.Equal(expected, Execute(shader, SentinelBuffer(32)));
+    }
+
+    [Theory]
+    // The X2 forms run over a dword pair and return both halves into VDATA.
+    [InlineData(0x50u, Replacement, 0u)]
+    [InlineData(0x5Au, 0xFFFEBBDCu, Sentinel)]
+    public void PairWideAtomicsCoverBothDwordsOfTheAccess(uint opcode, uint expectedLow, uint expectedHigh)
+    {
+        var fixture = PairFixture(opcode);
+        var shader = Compile(fixture, 0);
+        if (!RequireDevice()) return;
+
+        var expected = SentinelBuffer(32);
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(32), expectedLow);
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(36), expectedHigh);
+        // The returned pair replaces v[4:5], which the fixture stores at 48/52.
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(48), Before);
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(52), Sentinel);
+        Assert.Equal(expected, Execute(shader, SentinelBuffer(32)));
+    }
+
+    [Fact]
+    public void CacheWritebackInvalidateIsANoOpWithoutABufferBinding()
+    {
+        // buffer_wbinvl1 names no resource: it invalidates a cache level, which
+        // the host storage path never needs.
+        var fixture = new Gen5ComputeFixture("buffer-wbinvl1",
+            [0xE0F80000, 0x00000000, 0xBF810000], 8, 0);
+        var instruction = Assert.Single(Gen5ComputeFixtures.DecodeOrThrow(fixture).Instructions,
+            static candidate => candidate.Opcode == "BufferWbinvl1");
+        Assert.IsType<Gen5BufferMemoryControl>(instruction.Control);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(Request(fixture, 0), out _, out var error), error);
     }
 
     [Fact]
@@ -159,6 +237,33 @@ public sealed class Gen5MslBufferAtomicTests(ITestOutputHelper output)
         return Gen5ComputeFixtures.RequestOrThrow(Gen5ComputeFixtures.DecodeOrThrow(fixture), ShaderStage.Compute,
             runtimeInputs: new ResourceRuntimeInputs { UserData = userData });
     }
+
+    // One MUBUF atomic at byte 32 of the dense buffer with GLC set, so VDATA
+    // comes back holding the pre-operation word, stored at byte 48.
+    private static Gen5ComputeFixture CompareSwapFixture(uint comparator) =>
+        new("buffer-atomic-cmpswap",
+        [
+            0x7E0202FF, 32,                                  // v_mov_b32 v1, 32
+            0x7E0802FF, Replacement,                         // v_mov_b32 v4, replacement
+            0x7E0A02FF, comparator,                          // v_mov_b32 v5, comparator
+            0xE0000000u | 0x31u << 18 | 1u << 14 | 1u << 12, // buffer_atomic_cmpswap v[4:5], v1, s[8:11] offen glc
+            0x80020401,
+            0xE0700030, 0x80020400,                          // buffer_store_dword v4, off, s[8:11], 0 offset:48
+            0xBF810000,                                      // s_endpgm
+        ], 8, 64);
+
+    private static Gen5ComputeFixture PairFixture(uint opcode) =>
+        new("buffer-atomic-x2",
+        [
+            0x7E0202FF, 32,                                   // v_mov_b32 v1, 32
+            0x7E0802FF, Replacement,                          // v_mov_b32 v4, replacement
+            0x7E0A0280,                                       // v_mov_b32 v5, 0
+            0xE0000000u | opcode << 18 | 1u << 14 | 1u << 12, // the X2 atomic under test
+            0x80020401,
+            0xE0700030, 0x80020400,                           // buffer_store_dword v4 offset:48
+            0xE0700034, 0x80020500,                           // buffer_store_dword v5 offset:52
+            0xBF810000,                                       // s_endpgm
+        ], 8, 64);
 
     private static Gen5ComputeFixture Fixture(bool glc, uint index, uint offset,
         uint immediate, bool indexed, uint opcode = 0x30, bool active = true)
