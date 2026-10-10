@@ -21,6 +21,7 @@ public static partial class Gen5MslTranslator
     private const uint PrivateLdsDwordCount = 2048;
     private const uint VccLoRegister = 106;
     private const uint VccHiRegister = 107;
+    private const uint M0Register = 124;
     private const uint ExecLoRegister = 126;
     private const uint ExecHiRegister = 127;
 
@@ -109,6 +110,12 @@ public static partial class Gen5MslTranslator
         /// single-lane model regardless of guest wave size).</summary>
         private bool IsWave64 => _waveLaneCount == 64 && _stage == Gen5MslStage.Compute;
 
+        /// <summary>True for the stages whose Metal threads map one-to-one onto guest wave
+        /// lanes — compute dispatches and NGG primitive shaders emitted as mesh functions.
+        /// Those stages back LDS with threadgroup memory and ballot for real; the other
+        /// graphics stages model a single logical lane.</summary>
+        private bool HasRealWaveLanes => _stage is Gen5MslStage.Compute or Gen5MslStage.Mesh;
+
         public bool TryCompile(out Gen5MslShader shader, out string error)
         {
             shader = default!;
@@ -121,7 +128,11 @@ public static partial class Gen5MslTranslator
                 // ops are wave-size-agnostic and need no scratch.
                 _usesWaveScratch = IsWave64 && UsesWaveSensitiveOperations();
 
-                var blocks = BuildBasicBlocks(_request.Program.Instructions);
+                // The mesh stage parks a wave at S_BARRIER and resumes it from the next
+                // block, so a barrier has to end its block (see Gen5MslTranslator.Mesh.cs).
+                var blocks = BuildBasicBlocks(
+                    _request.Program.Instructions,
+                    splitAfterBarrier: _stage == Gen5MslStage.Mesh);
                 if (blocks.Count == 0)
                 {
                     error = "shader contains no executable blocks";
@@ -143,11 +154,25 @@ public static partial class Gen5MslTranslator
                         _pixelAttributes.Add(interpolationControl.Attribute);
                     }
 
-                    if (_stage == Gen5MslStage.Vertex &&
+                    if (_stage is Gen5MslStage.Vertex or Gen5MslStage.Mesh &&
                         instruction.Control is Gen5ExportControl { Target: >= 32 and < 64 } vertexExport)
                     {
                         _vertexOutputs.Add(vertexExport.Target - 32);
                     }
+                }
+
+                if (_stage == Gen5MslStage.Mesh)
+                {
+                    // The paired pixel program is translated against the same param
+                    // interface as the vertex path, so cover every location it reads.
+                    for (uint location = 0; location < _requiredVertexOutputCount; location++)
+                    {
+                        _vertexOutputs.Add(location);
+                    }
+
+                    // The mesh entry has no [[stage_in]]: a primitive shader fetches its
+                    // own attributes through buffer loads, which the resource path
+                    // translates unchanged.
                 }
 
                 if (_stage == Gen5MslStage.Vertex)
@@ -179,7 +204,9 @@ public static partial class Gen5MslTranslator
                 // keeping the order body-then-wrap matches how the pixel/vertex
                 // stages will need it (their IO discovery happens during block
                 // translation).
-                _indent = 2;
+                // The mesh dispatcher nests its switch inside the loop's park guard, so its
+                // cases sit one level deeper.
+                _indent = _stage == Gen5MslStage.Mesh ? 3 : 2;
                 for (var index = 0; index < blocks.Count; index++)
                 {
                     Line($"case {index}u:");
@@ -205,13 +232,14 @@ public static partial class Gen5MslTranslator
                     AttributeCount: _stage switch
                     {
                         Gen5MslStage.Pixel => (uint)_pixelAttributes.Count,
-                        Gen5MslStage.Vertex => (uint)_vertexOutputs.Count,
+                        Gen5MslStage.Vertex or Gen5MslStage.Mesh => (uint)_vertexOutputs.Count,
                         _ => 0,
                     },
-                    _localSizeX,
+                    _stage == Gen5MslStage.Mesh ? Mesh.ThreadsPerThreadgroup : _localSizeX,
                     _localSizeY,
                     _localSizeZ,
-                    ArgumentLayout: _argumentLayout);
+                    ArgumentLayout: _argumentLayout,
+                    MeshInfo: _meshInfo);
                 return true;
             }
             catch (Exception exception)
@@ -288,6 +316,7 @@ public static partial class Gen5MslTranslator
         {
             Gen5MslStage.Vertex => "gen5_vs",
             Gen5MslStage.Pixel => "gen5_ps",
+            Gen5MslStage.Mesh => "gen5_ms",
             _ => "gen5_cs",
         };
 
@@ -316,7 +345,14 @@ public static partial class Gen5MslTranslator
             EmitPrelude(source);
             source.AppendLine();
 
-            if (_stage == Gen5MslStage.Vertex)
+            if (_stage == Gen5MslStage.Mesh)
+            {
+                // The mesh vertex payload, the merged ES/GS launch block and the mesh
+                // output type.
+                EmitMeshTypes(source);
+                EmitMeshSignature(source);
+            }
+            else if (_stage == Gen5MslStage.Vertex)
             {
                 // Stage IO structs: fetched attributes from the evaluated vertex
                 // inputs (bound via MTLVertexDescriptor), position plus the
@@ -409,13 +445,18 @@ public static partial class Gen5MslTranslator
                 source.AppendLine($"fragment Gen5PsOut {EntryPointName}(");
                 source.AppendLine("    Gen5PsIn sharpemu_in [[stage_in]],");
             }
-            else
+            else if (_stage != Gen5MslStage.Mesh)
             {
                 source.AppendLine($"kernel void {EntryPointName}(");
             }
 
             {
                 EmitResourceParameters(source);
+            }
+
+            if (_stage == Gen5MslStage.Mesh)
+            {
+                EmitMeshSystemParameters(source);
             }
 
             if (_stage == Gen5MslStage.Compute)
@@ -463,7 +504,7 @@ public static partial class Gen5MslTranslator
                     source.AppendLine("    threadgroup uint sharpemu_wave_scratch[3];");
                 }
             }
-            if (_stage != Gen5MslStage.Compute)
+            if (!HasRealWaveLanes)
             {
                 // Graphics stages model a single logical wave lane — the SPIR-V
                 // translator's no-subgroup fallback — because Metal leaves
@@ -474,7 +515,14 @@ public static partial class Gen5MslTranslator
             }
             if (_usesLds)
             {
-                if (_stage == Gen5MslStage.Compute)
+                if (_stage == Gen5MslStage.Mesh)
+                {
+                    // A primitive shader's LDS is the real thing: its waves exchange
+                    // vertex data through it. Sized from the stage's own allocation
+                    // because the mesh output payload shares the threadgroup budget.
+                    source.AppendLine($"    threadgroup uint sharpemu_lds[{_meshLdsDwords}];");
+                }
+                else if (_stage == Gen5MslStage.Compute)
                 {
                     // 32 KB of guest LDS as workgroup-shared memory; the address
                     // is masked into bounds like the SPIR-V translator.
@@ -501,6 +549,13 @@ public static partial class Gen5MslTranslator
                     $"    threadgroup uint* sharpemu_wave_scratch = &sharpemu_lds[{LdsDwordCount - 3}u];");
             }
 
+            if (_stage == Gen5MslStage.Mesh)
+            {
+                // The rendezvous counters and the export allocation have to exist before
+                // the register file so the launch state can read the allocation.
+                EmitMeshDeclarations(source);
+            }
+
             EmitRegisterFile(source);
             if (_stage == Gen5MslStage.Pixel)
             {
@@ -514,6 +569,16 @@ public static partial class Gen5MslTranslator
             }
 
             EmitInitialState(source);
+            if (_stage == Gen5MslStage.Mesh)
+            {
+                source.AppendLine();
+                EmitMeshDispatcher(source, _body.ToString());
+                source.AppendLine();
+                EmitMeshEpilogue(source);
+                source.AppendLine("}");
+                return;
+            }
+
             source.AppendLine();
             source.AppendLine("    while (active)");
             source.AppendLine("    {");
@@ -576,7 +641,7 @@ public static partial class Gen5MslTranslator
         private void EmitPrelude(StringBuilder source) =>
             source.Append(MslTemplates.Render(
                 "prelude",
-                ("ballot_return", _stage == Gen5MslStage.Compute
+                ("ballot_return", HasRealWaveLanes
                     ? "(uint)(uint64_t)simd_ballot(value)"
                     : "value ? 1u : 0u")));
 
@@ -684,6 +749,10 @@ public static partial class Gen5MslTranslator
                 // Hardware-selected VGPRs for the vertex and instance indices.
                 source.AppendLine("    v[5] = sharpemu_vertex_id;");
                 source.AppendLine("    v[8] = sharpemu_instance_id;");
+            }
+            else if (_stage == Gen5MslStage.Mesh)
+            {
+                EmitMeshInitialState(source);
             }
 
             // VCC/EXEC live in their architectural SGPRs (see StoreScalar);
@@ -917,11 +986,25 @@ public static partial class Gen5MslTranslator
                 case "SClause":
                 case "VNop":
                 // NGG shaders bracket their exports with s_sendmsg
-                // (GS_ALLOC_REQ/DEALLOC) to reserve hardware export space;
-                // exports are translated directly, so the message is moot.
+                // (GS_ALLOC_REQ/DEALLOC) to reserve hardware export space. The mesh
+                // stage turns the allocation request into the output's primitive count;
+                // the per-vertex path translates exports directly, so it is moot there.
                 case "SSendmsg":
+                    if (_stage == Gen5MslStage.Mesh && Gen5NggExports.IsAllocationRequest(instruction))
+                    {
+                        EmitMeshAllocationRequest();
+                    }
+
                     return true;
                 case "SBarrier":
+                    if (_stage == Gen5MslStage.Mesh)
+                    {
+                        // Park the wave; the dispatcher's loop body is the only
+                        // convergent barrier point (see Gen5MslTranslator.Mesh.cs).
+                        Line("sharpemu_mesh_wait = true;");
+                        return true;
+                    }
+
                     Line("threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);");
                     return true;
             }
@@ -1307,7 +1390,12 @@ public static partial class Gen5MslTranslator
 
         private string LdsIndex(string address, uint offsetBytes)
         {
-            var wordMask = _stage == Gen5MslStage.Compute ? LdsDwordMask : PrivateLdsDwordCount - 1;
+            var wordMask = _stage switch
+            {
+                Gen5MslStage.Compute => LdsDwordMask,
+                Gen5MslStage.Mesh => _meshLdsDwords - 1,
+                _ => PrivateLdsDwordCount - 1,
+            };
             return offsetBytes == 0
                 ? $"((({address}) >> 2) & {wordMask}u)"
                 : $"(((({address}) + {offsetBytes}u) >> 2) & {wordMask}u)";
@@ -1357,7 +1445,7 @@ public static partial class Gen5MslTranslator
                     var operation = instruction.Opcode == "DsAppend" ? "add" : "sub";
 
                     // Graphics stages use the existing one-lane LDS model.
-                    if (_stage != Gen5MslStage.Compute)
+                    if (!HasRealWaveLanes)
                     {
                         var original = Temp("uint", $"sharpemu_lds[{index}]");
                         var assignment = operation == "add" ? "+=" : "-=";
@@ -1816,7 +1904,8 @@ public static partial class Gen5MslTranslator
             int EndIndex);
 
         private static IReadOnlyList<ShaderBlock> BuildBasicBlocks(
-            IReadOnlyList<Gen5ShaderInstruction> instructions)
+            IReadOnlyList<Gen5ShaderInstruction> instructions,
+            bool splitAfterBarrier = false)
         {
             if (instructions.Count == 0)
             {
@@ -1833,7 +1922,8 @@ public static partial class Gen5MslTranslator
                     leaders.Add(targetPc);
                 }
 
-                if ((IsBranch(instruction.Opcode) || instruction.Opcode == "SEndpgm") &&
+                if ((IsBranch(instruction.Opcode) || instruction.Opcode == "SEndpgm" ||
+                        (splitAfterBarrier && instruction.Opcode == "SBarrier")) &&
                     index + 1 < instructions.Count)
                 {
                     leaders.Add(instructions[index + 1].Pc);

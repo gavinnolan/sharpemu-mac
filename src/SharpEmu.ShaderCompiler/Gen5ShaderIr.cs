@@ -151,6 +151,27 @@ public readonly record struct Gen5ComputeSystemRegisters(
     uint? WorkGroupZRegister,
     uint? ThreadGroupSizeRegister);
 
+// The geometry-engine state one NGG primitive-shader (merged ES/GS) subgroup runs under.
+// A primitive shader is one workgroup of waves that share LDS, so the emitter needs the
+// subgroup's vertex/primitive budget to size its output and its workgroup.
+//
+// VerticesPerSubgroup/PrimitivesPerSubgroup come from VGT_GS_ONCHIP_CNTL
+// (ES_VERTS_PER_SUBGRP / GS_PRIMS_PER_SUBGRP); when the title leaves them zero the
+// emitter falls back to MaxOutputPerSubgroup (GE_MAX_OUTPUT_PER_SUBGROUP). The group
+// sizes are GE_CNTL.VERT_GRP_SIZE / PRIM_GRP_SIZE, which bound what the geometry engine
+// packs into one subgroup. OutputPrimitiveType is VGT_GS_OUT_PRIM_TYPE
+// (0 point, 1 line strip, 2 triangle strip). LocalDataShareBytes is the LDS the stage
+// allocates, decoded from the geometry stage's resource register.
+public readonly record struct Gen5NggStageInfo(
+    uint VerticesPerSubgroup,
+    uint PrimitivesPerSubgroup,
+    uint MaxOutputPerSubgroup,
+    uint OutputPrimitiveType,
+    uint PrimitiveAmplificationFactor,
+    uint LocalDataShareBytes,
+    uint VertexGroupSize,
+    uint PrimitiveGroupSize);
+
 public readonly record struct Gen5Operand(Gen5OperandKind Kind, uint Value)
 {
     public static Gen5Operand Scalar(uint index) =>

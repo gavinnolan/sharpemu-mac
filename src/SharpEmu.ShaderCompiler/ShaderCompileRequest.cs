@@ -184,6 +184,35 @@ public sealed class ShaderCompileRequest
     public uint PixelInputAddress { get; init; }
     public IReadOnlyList<uint>? PixelInputCntl { get; init; }
 
+    // Set when the draw's VGT_SHADER_STAGES_EN selects the NGG primitive-shader path, so the
+    // program is the merged ES/GS stage rather than a plain vertex shader. A backend that can
+    // run the merged stage as a workgroup (the Metal mesh path) uses it; the ones that cannot
+    // keep translating the program as a per-vertex shader, which only works for passthrough
+    // NGG programs.
+    public Gen5NggStageInfo? PrimitiveShader { get; init; }
+
+    /// <summary>True when the program cannot be expressed per-vertex: its lanes exchange
+    /// data through LDS or synchronize the workgroup, so it needs a real workgroup stage.
+    ///
+    /// GS_ALLOC_REQ and the primitive export are deliberately not part of the test. Every
+    /// NGG program issues them, passthrough ones included, and those already run on the
+    /// per-vertex path; cross-lane LDS and S_BARRIER are what that path provably cannot
+    /// express, because it gives each invocation private LDS and one logical lane.</summary>
+    public static bool RequiresPrimitiveShaderWorkgroup(Gen5ShaderProgram program)
+    {
+        foreach (var instruction in program.Instructions)
+        {
+            if (instruction.Opcode is "SBarrier" ||
+                (instruction.Control is Gen5DataShareControl { Gds: false } &&
+                    instruction.Opcode is not ("DsSwizzleB32" or "DsBpermuteB32")))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public int RequiredVertexOutputCount { get; init; }
     public IReadOnlyList<ShaderVertexInput> VertexInputs { get; init; } = [];
     public uint PositionExportControl { get; init; }
