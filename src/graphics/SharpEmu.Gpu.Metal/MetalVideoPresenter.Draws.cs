@@ -1449,17 +1449,26 @@ internal static partial class MetalVideoPresenter
         if (MetalColorMipPlacement.TryGet(target, out _) && format != MtlPixelFormat.Rgba16Float)
             throw new NotSupportedException("Metal selected color physical target requires the original RGBA16Float native format.");
         ValidateNativeColorTargetBeforeNative(target);
+        RegularColorOriginal? regular;
         lock (_gate)
         {
             RequireNativeColorTargetScalarLocked(target);
+            regular = RequireRegularColorTargetLocked(target);
             if (_guestImages.TryGetValue(target.Address, out var existing))
             {
                 Require2DGuestImage(existing, "render target");
                 ValidateColorPhysicalNativeTarget(target, existing, format);
+                if (regular is not null)
+                {
+                    RequireRegularColorNativeImageLocked(regular, existing, format);
+                    return existing;
+                }
                 if (existing.Width == target.Width && existing.Height == target.Height)
                     return existing;
             }
         }
+
+        if (regular is not null) return CreateAndInstallRegularColorImage(device, target, format, regular);
 
         if (target.Width == 0 || target.Height == 0 || target.Width > 16384 || target.Height > 16384)
         {
@@ -1522,6 +1531,7 @@ internal static partial class MetalVideoPresenter
 
     private static void RetireGuestImageVariantLocked(ulong address, GuestImage retired)
     {
+        RetireRegularColorImageLocked(retired);
         NoteFiniteStorageOwnerRetirementLocked(retired);
         var key = (address, retired.Width, retired.Height, retired.Format);
         if (_guestImageVariants.Remove(key, out var previous))

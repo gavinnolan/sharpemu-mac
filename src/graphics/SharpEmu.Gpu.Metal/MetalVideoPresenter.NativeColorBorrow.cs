@@ -127,13 +127,22 @@ internal static partial class MetalVideoPresenter
     internal static void ReleasePreparedNativeColorTarget(GuestRenderTarget target,
         MetalColorMipPlacement.Observation? placement = null, Exception? primary = null)
     {
-        if (placement is null && !MetalColorMipPlacement.TryGet(target, out placement!)) return;
-        lock (_gate)
+        Exception? first = primary;
+        try { ReleasePreparedRegularColorTarget(target, first); }
+        catch (Exception cleanup) { first ??= cleanup; }
+        if (placement is not null || MetalColorMipPlacement.TryGet(target, out placement!))
         {
-            if (!_nativeColorOriginalByPlacement.TryGetValue(placement, out var original) || original.PreparationReleased) return;
-            original.PreparationReleased = true;
-            ReleaseNativeColorOriginalLocked(original, primary);
+            lock (_gate)
+            {
+                if (_nativeColorOriginalByPlacement.TryGetValue(placement, out var original) && !original.PreparationReleased)
+                {
+                    original.PreparationReleased = true;
+                    try { ReleaseNativeColorOriginalLocked(original, first); }
+                    catch (Exception cleanup) { first ??= cleanup; }
+                }
+            }
         }
+        if (primary is null && first is not null) ExceptionDispatchInfo.Capture(first).Throw();
     }
 
     private sealed class NativeColorProducer(OffscreenGuestDraw work, NativeColorOriginal original,
@@ -258,8 +267,14 @@ internal static partial class MetalVideoPresenter
     }
     private static void ReleaseQueuedNativeColorLocked(object work, Exception? primary = null)
     {
-        if (!_nativeColorQueued.Remove(work, out var owner)) return;
         Exception? first = primary;
+        try { ReleaseQueuedRegularColorLocked(work, first); }
+        catch (Exception cleanup) { first ??= cleanup; }
+        if (!_nativeColorQueued.Remove(work, out var owner))
+        {
+            if (primary is null && first is not null) ExceptionDispatchInfo.Capture(first).Throw();
+            return;
+        }
         foreach (var original in owner.Originals)
             try { ReleaseNativeColorOriginalLocked(original, first); }
             catch (Exception cleanup) { first ??= cleanup; }
@@ -278,6 +293,8 @@ internal static partial class MetalVideoPresenter
     private static void CancelQueuedNativeColorLocked(Exception? primary = null)
     {
         Exception? first = primary;
+        try { CancelQueuedRegularColorLocked(first); }
+        catch (Exception cleanup) { first ??= cleanup; }
         // Removal consumes exact independent authority before optional callbacks.
         while (_nativeColorQueued.Count != 0)
         {
@@ -544,7 +561,7 @@ internal static partial class MetalVideoPresenter
         NativeColorCommandMemoryInventory? commandMemory)
     {
         var original = producer.Original;
-        if (_nativeColorCleanupFailure is not null || _unorderedPresentationWriteSequence != 0 ||
+        if (_nativeColorCleanupFailure is not null || Volatile.Read(ref _regularColorOriginalFailure) is not null || _unorderedPresentationWriteSequence != 0 ||
             _latestPresentation is { } presentation && PresentationHasUnorderedGuestWrites(presentation) ||
             _finiteStorageRetiredUnknown || _latestTextureSources.Count != 0 || _guestDepthReadAliases.Count != 0 ||
             _guestImages.Count > 128 || _guestDepthImages.Count > 128 || _selectedStorageMipOwners.Count > 128 ||
@@ -617,7 +634,16 @@ internal static partial class MetalVideoPresenter
         void Target(GuestRenderTarget target, PendingGuestWork? future = null)
         {
             if (target.Address == 0) return; // actual transient native target has no guest/canonical range
-            if (!MetalColorMipPlacement.TryGet(target, out var placement) || !_nativeColorOriginalByPlacement.TryGetValue(placement, out var sibling))
+            if (!MetalColorMipPlacement.TryGet(target, out var placement))
+            {
+                var regular = RequireRegularColorTargetLocked(target)
+                    ?? throw new NotSupportedException("Native color sibling attachment lacks its ORIGINAL mapping.");
+                var observation = regular.Observation;
+                Mapping(observation.Memory, observation.Session, observation.Source, observation.Mapping,
+                    observation.Placement.Address, observation.Placement.ByteCount);
+                return;
+            }
+            if (!_nativeColorOriginalByPlacement.TryGetValue(placement, out var sibling))
                 throw new NotSupportedException("Native color sibling attachment lacks its ORIGINAL mapping.");
             if (future is { } acceptedFuture && IsOrderedNativeColorSuccessorLocked(producer, acceptedFuture, sibling)) return;
             Mapping(placement.Memory, sibling.Session, sibling.Source, sibling.Mapping, placement.PhysicalAddress, placement.ByteCount);
@@ -641,6 +667,13 @@ internal static partial class MetalVideoPresenter
             }
             else if (pair.Value.StorageCpuOrigin is { } storage)
                 Mapping(storage.Memory, storage.Session, storage.Source, storage.Mapping, storage.Layout.Address, storage.Layout.PhysicalBytes);
+            else if (_regularColorImages.TryGetValue(pair.Value, out var regular))
+            {
+                RequireRegularColorNativeImageLocked(regular.Original, pair.Value, regular.Original.Observation.Placement.NativeFormat);
+                var observation = regular.Original.Observation;
+                Mapping(observation.Memory, observation.Session, observation.Source, observation.Mapping,
+                    observation.Placement.Address, observation.Placement.ByteCount);
+            }
             else throw NativeColorSiblingFailure("other-native-image-original-missing", pair.Key, pair.Value);
         }
         foreach (var pair in _guestDepthImages)
