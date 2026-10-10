@@ -448,7 +448,8 @@ internal sealed partial class MetalRenderHost
     private nint GetDepthStencilState(MetalPipelineEntry entry, in DynamicDrawState state)
     {
         var parameters = entry.StaticParameters;
-        var stencilEnabled = state.StencilTestEnabled && entry.HasStencil && parameters is not null;
+        var stencilEnabled = state.StencilTestEnabled && entry.HasStencil && parameters is not null &&
+            !MetalV2Diagnostics.IgnoreFragmentTests;
         var key = MixDepthStencilKey(entry, in state, stencilEnabled);
         if (_depthStencilStates.TryGetValue(key, out var found))
         {
@@ -465,7 +466,7 @@ internal sealed partial class MetalRenderHost
 
         try
         {
-            var depthCompare = entry.HasDepth && state.DepthTestEnabled
+            var depthCompare = entry.HasDepth && state.DepthTestEnabled && !MetalV2Diagnostics.IgnoreFragmentTests
                 ? MetalV2Formats.CompareFunction(state.DepthCompare)
                 : MetalV2Formats.CompareFunction(GpuCompareOp.Always);
             MetalV2Native.SendVoidValue(descriptor, MetalNative.Selector("setDepthCompareFunction:"), depthCompare);
