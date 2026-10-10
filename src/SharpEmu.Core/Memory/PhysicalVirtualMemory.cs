@@ -1372,6 +1372,12 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         return !_disposed && _backedSpace is { } backed && backed.TryResolveAlias(address, size, out alias);
     }
 
+    public bool TryResolveBackingAliasSpan(ulong address, ulong size, out ulong alias)
+    {
+        alias = 0;
+        return !_disposed && _backedSpace is { } backed && backed.TryResolveAliasSpan(address, size, out alias);
+    }
+
     public (ulong Base, ulong Size) BackingAliasRange =>
         !_disposed && _backedSpace is { } backed ? (backed.AliasBase, backed.BackingSize) : (0, 0);
 

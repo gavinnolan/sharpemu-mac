@@ -309,6 +309,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         VideoOutBackendServices.TraceGpuFlip(
             _memory, handle, index, flipMode, flipArg, displayBuffer.Address,
             VideoOutBackendServices.GetFlipEventCount(requestId));
+        // The shared phase profile measures the whole draw translation path, which v2
+        // runs on this thread exactly as the Vulkan render loop does on its own. A
+        // flip is this host's frame boundary, so SHARPEMU_PROFILE_RENDER=1 reports the
+        // same breakdown here without any Metal-specific instrumentation.
+        SharpEmu.Libs.VideoOut.RenderPhaseProfile.RecordFrame();
     }
 
     // The presenter samples the flip texture and writes the result into a plain

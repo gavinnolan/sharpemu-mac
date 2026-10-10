@@ -39,6 +39,13 @@ public interface IGuestBackedSpace
         return false;
     }
 
+    // The same, for a range that may cross the edge between two mappings. A guest
+    // allocation mapped in several calls is still one contiguous run of backing
+    // bytes, so a buffer that straddles a mapping edge has one host address;
+    // without this a caller that maps the backing no-copy has to stage a copy.
+    bool TryResolveBackingAliasSpan(ulong address, ulong size, out ulong alias) =>
+        TryResolveBackingAlias(address, size, out alias);
+
     // The whole backing seen as one contiguous host range: its base pointer and byte
     // size, or zero when the space has no alias. The Metal backend maps this range as
     // no-copy MTLBuffer windows, so every address TryResolveBackingAlias returns falls

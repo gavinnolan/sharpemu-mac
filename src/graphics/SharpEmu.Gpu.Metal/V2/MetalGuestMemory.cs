@@ -386,13 +386,41 @@ internal sealed class MetalGuestMemory : IDisposable
     public MetalGuestRange ResolveWritable(ulong gpuVa, ulong size) =>
         TryResolveWindow(gpuVa, size, out var resolved) ? resolved : default;
 
+    // Why a range had to be staged into the ring instead of binding its window: the
+    // start, the end, or the span between them. A sample per size class is enough to
+    // name the allocation, and the ring bytes in the counters say how much it costs.
+    private void ReportUnresolved(ulong gpuVa, ulong size)
+    {
+        if (!MetalV2Diagnostics.ReportUnbackedRanges)
+        {
+            return;
+        }
+
+        var startBacked = _backing.TryResolveBackingAlias(gpuVa, 1, out var startAlias);
+        var endBacked = _backing.TryResolveBackingAlias(gpuVa + size - 1, 1, out var endAlias);
+        var contiguous = startBacked && endBacked && endAlias - startAlias == size - 1;
+        MetalV2Diagnostics.WarnOnce(
+            $"unbacked-range:{size:X}:{(startBacked ? 1 : 0)}{(endBacked ? 1 : 0)}{(contiguous ? 1 : 0)}",
+            $"A guest range does not resolve to a window and is staged into the ring: " +
+            $"address=0x{gpuVa:X16} size=0x{size:X} start_backed={startBacked} end_backed={endBacked} " +
+            $"alias_contiguous={contiguous} start_alias=0x{startAlias:X16} end_alias=0x{endAlias:X16}.");
+    }
+
     private bool TryResolveWindow(ulong gpuVa, ulong size, out MetalGuestRange resolved)
     {
         resolved = default;
-        if (size == 0 || gpuVa == 0 || size > ulong.MaxValue - gpuVa ||
-            !_backing.TryResolveBackingAlias(gpuVa, size, out var alias) ||
+        if (size == 0 || gpuVa == 0 || size > ulong.MaxValue - gpuVa)
+        {
+            return false;
+        }
+
+        // A range that crosses the edge between two mappings of one allocation is
+        // still contiguous in the backing, so it still has one window address; the
+        // single-mapping test alone sent those to the staging ring.
+        if (!_backing.TryResolveBackingAliasSpan(gpuVa, size, out var alias) ||
             alias < _aliasBase || alias - _aliasBase >= _aliasSize)
         {
+            ReportUnresolved(gpuVa, size);
             return false;
         }
 
@@ -401,6 +429,11 @@ internal sealed class MetalGuestMemory : IDisposable
         var offset = alias - window.AliasBase;
         if (alias < window.AliasBase || offset >= window.Size || size > window.Size - offset)
         {
+            MetalV2Diagnostics.WarnOnce(
+                $"window-straddle:{size:X}",
+                $"A backed guest range straddles the window edge and has to be staged: " +
+                $"address=0x{gpuVa:X16} size=0x{size:X} alias=0x{alias:X16} window={index} " +
+                $"window_offset=0x{offset:X} window_size=0x{window.Size:X}.");
             return false;
         }
 
