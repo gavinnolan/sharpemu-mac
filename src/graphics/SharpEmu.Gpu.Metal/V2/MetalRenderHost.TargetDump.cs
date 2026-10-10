@@ -24,11 +24,47 @@ internal sealed partial class MetalRenderHost
 
     // Enough to see a title screen appear and settle without filling a disk.
     private const int MaxTargetDumps = 240;
-    private const int MaxDumpsPerTexture = 3;
+    private const int MaxDumpsPerTexture = 8;
 
     private int _targetDumps;
     private readonly Dictionary<nint, int> _dumpsByTexture = new();
     private bool _dumpDirectoryReady;
+    private readonly List<(nint Texture, string Label)> _pendingDumps = new();
+    private long _passDrawCount;
+
+    /// <summary>Draws recorded into the pass now open, so a dump can say whether the
+    /// target it shows was drawn into or only cleared.</summary>
+    private void NotePassDraw() => _passDrawCount++;
+
+    /// <summary>
+    /// Remembers a texture to dump at the next safe point. EndRendering runs inside the
+    /// flush, and a dump has to flush, so nothing may be read back from there.
+    /// </summary>
+    private void NotePendingDump(nint texture, string label)
+    {
+        if (texture == 0 || _pendingDumps.Count >= 64)
+        {
+            return;
+        }
+
+        _pendingDumps.Add((texture, $"{label}-draws{_passDrawCount}"));
+    }
+
+    /// <summary>Reads back everything remembered since the last drain.</summary>
+    private void DrainPendingDumps()
+    {
+        if (!DumpTargetsEnabled || _pendingDumps.Count == 0)
+        {
+            return;
+        }
+
+        var pending = _pendingDumps.ToArray();
+        _pendingDumps.Clear();
+        foreach (var (texture, label) in pending)
+        {
+            DumpTexture(texture, label);
+        }
+    }
 
     private static bool DumpTargetsEnabled => _dumpTargetsDirectory is not null;
 
@@ -107,7 +143,7 @@ internal sealed partial class MetalRenderHost
                 convert(source, rgba);
                 _dumpsByTexture[texture] = seen + 1;
                 _targetDumps++;
-                WriteDumpPng(rgba, width, height, label, seen);
+                WriteDumpPng(rgba, width, height, label, seen, texture);
             }
             finally
             {
@@ -125,7 +161,7 @@ internal sealed partial class MetalRenderHost
     private static unsafe ReadOnlySpan<byte> DumpSpan(nint contents, int length) =>
         new((void*)contents, length);
 
-    private void WriteDumpPng(byte[] rgba, uint width, uint height, string label, int index)
+    private void WriteDumpPng(byte[] rgba, uint width, uint height, string label, int index, nint texture)
     {
         if (!_dumpDirectoryReady)
         {
@@ -139,22 +175,43 @@ internal sealed partial class MetalRenderHost
         var path = Path.Combine(_dumpTargetsDirectory!, name);
         File.WriteAllBytes(path, EncodePng(rgba, width, height));
 
-        // Says whether the pixels are actually black, which is the whole question.
+        // A target that was only cleared and a target that was drawn into with zeros look
+        // the same in a mean, so report the extremes and the first pixel that is not
+        // black as well: "everything is exactly zero" and "everything is very dark" are
+        // different bugs.
         ulong sum = 0;
         var opaque = 0;
+        byte max = 0;
+        var nonBlack = -1;
         for (var i = 0; i < rgba.Length; i += 4)
         {
-            sum += (ulong)(rgba[i] + rgba[i + 1] + rgba[i + 2]);
+            var r = rgba[i];
+            var g = rgba[i + 1];
+            var b = rgba[i + 2];
+            sum += (ulong)(r + g + b);
+            max = Math.Max(max, Math.Max(r, Math.Max(g, b)));
             if (rgba[i + 3] != 0)
             {
                 opaque++;
             }
+
+            if (nonBlack < 0 && (r | g | b) != 0)
+            {
+                nonBlack = i;
+            }
         }
 
+        var pixels = rgba.Length / 4;
+        var sample = nonBlack < 0
+            ? "none"
+            : string.Format(
+                CultureInfo.InvariantCulture, "#{0}=({1},{2},{3},{4})", nonBlack / 4,
+                rgba[nonBlack], rgba[nonBlack + 1], rgba[nonBlack + 2], rgba[nonBlack + 3]);
         Console.Error.WriteLine(string.Format(
             CultureInfo.InvariantCulture,
-            "[METAL-V2][DUMP] {0} {1}x{2} mean_rgb={3:F2} opaque={4}/{5} -> {6}",
-            label, width, height, sum / (double)(rgba.Length / 4 * 3), opaque, rgba.Length / 4, name));
+            "[METAL-V2][DUMP] {0} tex=0x{1:X} {2}x{3} mean_rgb={4:F4} max_rgb={5} opaque={6}/{7} " +
+            "first_lit={8} -> {9}",
+            label, texture, width, height, sum / (double)(pixels * 3), max, opaque, pixels, sample, name));
     }
 
     private static bool TryDescribeDumpFormat(

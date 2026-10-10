@@ -233,14 +233,17 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     private long _flipsWithoutBuffer;
     private long _flipsDiscarded;
     private long _flipsPublished;
+    private long _flipsRefreshed;
 
-    internal readonly record struct FlipCounters(long Attempts, long WithoutBuffer, long Discarded, long Published);
+    internal readonly record struct FlipCounters(
+        long Attempts, long WithoutBuffer, long Discarded, long Published, long Refreshed);
 
     internal FlipCounters TakeFlipCounters() => new(
         Interlocked.Exchange(ref _flipAttempts, 0),
         Interlocked.Exchange(ref _flipsWithoutBuffer, 0),
         Interlocked.Exchange(ref _flipsDiscarded, 0),
-        Interlocked.Exchange(ref _flipsPublished, 0));
+        Interlocked.Exchange(ref _flipsPublished, 0),
+        Interlocked.Exchange(ref _flipsRefreshed, 0));
 
     public ulong PrepareFlip(int handle, int index, int flipMode, long flipArgument)
     {
@@ -280,6 +283,9 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     private void CaptureFlip(int handle, int index, ulong requestId, int flipMode, long flipArg)
     {
         Interlocked.Increment(ref _flipAttempts);
+        // The one point in the frame that is outside a flush, so the safe place to read
+        // back everything the passes since the last flip wrote.
+        DrainPendingDumps();
         if (VideoOutBackendServices.ReleaseNoBufferFlip(index, requestId))
         {
             // The guest flipped without naming a new buffer. Legitimate on its own, but a
@@ -314,7 +320,25 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         var imageIdentifier = _imageCache.FindImage(ref request);
         var image = _imageCache.GetImage(imageIdentifier);
         image.Uses.VideoOut = true;
+        // A display surface the GPU just composited into must not be refilled from guest
+        // memory on the way to the screen: those bytes are whatever was there before the
+        // composite, and uploading them replaces the frame with the old one. Report it
+        // when it happens rather than presenting the result silently.
+        if (image.IsCpuDirty)
+        {
+            Interlocked.Increment(ref _flipsRefreshed);
+            MetalV2Diagnostics.WarnOnce(
+                "flip-refresh",
+                $"A flip's display surface was CPU-dirty, so it is uploaded from guest memory before " +
+                $"presenting: cause={image.DirtyCause} address=0x{displayBuffer.Address:X16} " +
+                $"{displayBuffer.Width}x{displayBuffer.Height} gpuWritten={image.IsGpuModified}.");
+        }
+
+        // Before and after, so an upload that replaces a composited frame with the bytes
+        // that were in guest memory before it shows up as the two differing.
+        DumpTexture(image.Texture, "flip-before-refresh");
         _imageCache.RefreshImage(imageIdentifier);
+        DumpTexture(image.Texture, "flip-after-refresh");
         var texture = PresentationViewOf(image, in request);
         var serial = SubmissionSerial;
         FlushCommandBuffer();
