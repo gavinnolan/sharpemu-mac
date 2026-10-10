@@ -377,6 +377,7 @@ internal sealed partial class MetalRenderHost :
             MetalNative.SendVoid(encoder, SelEndEncoding);
         }
 
+        ((IMetalSubmissionContext)this).ProfileEncoded($"fill bytes=0x{size:X}");
         _imageCache.InvalidateMemoryFromGpu(address, size);
         NoteGuestMemoryWrite();
     }
@@ -438,6 +439,7 @@ internal sealed partial class MetalRenderHost :
             MetalNative.SendVoid(encoder, SelEndEncoding);
         }
 
+        context.ProfileEncoded($"copy bytes=0x{size:X}");
         _imageCache.InvalidateMemoryFromGpu(destination, size);
         NoteGuestMemoryWrite();
     }

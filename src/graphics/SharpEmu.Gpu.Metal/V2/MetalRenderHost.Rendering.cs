@@ -849,7 +849,8 @@ internal sealed partial class MetalRenderHost
         bool clearDepth,
         bool clearStencil)
     {
-        var commandBuffer = ((IMetalImageCacheOwner)this).BeginTransfer().CommandBuffer;
+        var context = ((IMetalImageCacheOwner)this).BeginTransfer();
+        var commandBuffer = context.CommandBuffer;
         var descriptor = MetalNative.Send(
             MetalNative.Send(MetalNative.Class("MTLRenderPassDescriptor"), MetalNative.Selector("alloc")),
             MetalNative.Selector("init"));
@@ -886,6 +887,8 @@ internal sealed partial class MetalRenderHost
         {
             MetalNative.SendVoid(descriptor, SelRelease);
         }
+
+        context.ProfileEncoded($"clear {width}x{height} layers={range.LayerCount}");
     }
 
     // One load-clear render pass with no draws: the cheapest full clear in Metal.
@@ -901,7 +904,8 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        var commandBuffer = ((IMetalImageCacheOwner)this).BeginTransfer().CommandBuffer;
+        var context = ((IMetalImageCacheOwner)this).BeginTransfer();
+        var commandBuffer = context.CommandBuffer;
         var descriptor = MetalNative.Send(
             MetalNative.Send(MetalNative.Class("MTLRenderPassDescriptor"), MetalNative.Selector("alloc")),
             MetalNative.Selector("init"));
@@ -937,6 +941,8 @@ internal sealed partial class MetalRenderHost
         {
             MetalNative.SendVoid(descriptor, SelRelease);
         }
+
+        context.ProfileEncoded($"clear {width}x{height} layers={range.LayerCount}");
     }
 
     private static void ConfigureClearAttachment(nint attachment, nint texture, in SubresourceRange range)
