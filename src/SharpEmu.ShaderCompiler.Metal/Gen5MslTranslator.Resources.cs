@@ -566,6 +566,12 @@ public static partial class Gen5MslTranslator
                 : $"{Scalar64Expression(control.ScalarAddress)} + (ulong)v[{control.VectorAddress}]";
             address = Temp("ulong", $"({address}) + {SignedOffset64(control.OffsetBytes)}");
             var entry = request.Memory[memoryIndex];
+            if (control.UsesFlatAddress && entry.AddressSpace != FlatAddressSpace.Global)
+            {
+                return TryEmitFlatLocalMemory(
+                    instruction, control, memoryOpcode, entry.AddressSpace, address, out error);
+            }
+
             var writes = entry.Access is MemoryAccess.Write or MemoryAccess.Atomic;
             var accessBytes = Math.Max((entry.DataBits + 7) / 8, 1u) * Math.Max(entry.DataDwords, 1u);
             var allowed = writes ? IsWrittenAccessAllowed(memoryIndex, address, accessBytes) : "true";
@@ -668,6 +674,127 @@ public static partial class Gen5MslTranslator
                     $"sharpemu_load_device_dword({DeviceArguments}, {componentAddress})");
             }
 
+            return true;
+        }
+
+        // Routes each lane of an aperture-derived FLAT access like the hardware: LDS
+        // or scratch at the low dword when the high dword is in an aperture,
+        // otherwise a global access through the page table.
+        private bool TryEmitFlatLocalMemory(
+            Gen5ShaderInstruction instruction,
+            Gen5GlobalMemoryControl control,
+            string memoryOpcode,
+            FlatAddressSpace addressSpace,
+            string address,
+            out string error)
+        {
+            error = string.Empty;
+            var store = memoryOpcode.StartsWith("GlobalStoreDword", StringComparison.Ordinal);
+            var load = memoryOpcode.StartsWith("GlobalLoadDword", StringComparison.Ordinal);
+            if (!store && !load)
+            {
+                error = $"{instruction.Opcode} through the {addressSpace} flat aperture is not implemented";
+                return false;
+            }
+
+            var canShare = addressSpace is FlatAddressSpace.Shared or FlatAddressSpace.SharedOrPrivate;
+            var canPrivate = addressSpace is FlatAddressSpace.Private or FlatAddressSpace.SharedOrPrivate;
+            if (canShare && !_usesLds)
+            {
+                error = "a shared flat aperture access has no LDS storage";
+                return false;
+            }
+
+            if (canPrivate && _scratchDwordCount == 0)
+            {
+                error = "a private flat aperture access has no scratch storage";
+                return false;
+            }
+
+            Line("if (exec)");
+            Line("{");
+            _indent++;
+            var offset = Temp("uint", $"(uint){address}");
+            var aperture = Temp(
+                "uint",
+                $"(uint)({address} >> {32 + Gen5InlineConstants.ApertureShift})");
+
+            void Emit(Func<uint, string> word)
+            {
+                for (uint index = 0; index < control.DwordCount; index++)
+                {
+                    if (store)
+                    {
+                        Line($"{word(index)} = v[{control.SourceVectorRegister + index}];");
+                    }
+                    else
+                    {
+                        StoreVector(
+                            control.DestinationVectorRegister + index,
+                            word(index),
+                            guardWithExec: false);
+                    }
+                }
+            }
+
+            void Shared() => Emit(index =>
+                $"sharpemu_lds[{LdsIndex(offset, index * sizeof(uint))}]");
+
+            void Private() => Emit(index => ScratchWord(offset, index * sizeof(uint)));
+
+            void Global()
+            {
+                var aligned = Temp("ulong", $"{address} & ~3ul");
+                for (uint index = 0; index < control.DwordCount; index++)
+                {
+                    var dwordAddress = index == 0 ? aligned : $"{aligned} + {index * sizeof(uint)}ul";
+                    if (store)
+                    {
+                        Line($"sharpemu_store_device_dword({DeviceArguments}, {dwordAddress}, v[{control.SourceVectorRegister + index}]);");
+                    }
+                    else
+                    {
+                        StoreVector(
+                            control.DestinationVectorRegister + index,
+                            $"sharpemu_load_device_dword({DeviceArguments}, {dwordAddress})",
+                            guardWithExec: false);
+                    }
+                }
+            }
+
+            void Branch(string condition, Action then, Action otherwise)
+            {
+                Line($"if ({condition})");
+                Line("{");
+                _indent++;
+                then();
+                _indent--;
+                Line("}");
+                Line("else");
+                Line("{");
+                _indent++;
+                otherwise();
+                _indent--;
+                Line("}");
+            }
+
+            var isShared = $"{aperture} == {FormatUInt(Gen5InlineConstants.SharedApertureHigh >> Gen5InlineConstants.ApertureShift)}";
+            var isPrivate = $"{aperture} == {FormatUInt(Gen5InlineConstants.PrivateApertureHigh >> Gen5InlineConstants.ApertureShift)}";
+            if (canShare && canPrivate)
+            {
+                Branch(isShared, Shared, () => Branch(isPrivate, Private, Global));
+            }
+            else if (canShare)
+            {
+                Branch(isShared, Shared, Global);
+            }
+            else
+            {
+                Branch(isPrivate, Private, Global);
+            }
+
+            _indent--;
+            Line("}");
             return true;
         }
 

@@ -4,6 +4,7 @@
 using System.Globalization;
 using System.Text;
 using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Resources;
 
 namespace SharpEmu.ShaderCompiler.Metal;
 
@@ -164,6 +165,19 @@ public static partial class Gen5MslTranslator
                         instruction.Control is Gen5ExportControl { Target: >= 32 and < 64 } vertexExport)
                     {
                         _vertexOutputs.Add(vertexExport.Target - 32);
+                    }
+                }
+
+                // A FLAT access whose address can land in an aperture needs the
+                // storage that aperture names, even when no DS or SCRATCH opcode
+                // in the program asked for it.
+                foreach (var memory in _request.Memory.Entries)
+                {
+                    _usesLds |= memory.AddressSpace
+                        is FlatAddressSpace.Shared or FlatAddressSpace.SharedOrPrivate;
+                    if (memory.AddressSpace is FlatAddressSpace.Private or FlatAddressSpace.SharedOrPrivate)
+                    {
+                        _scratchDwordCount = Math.Max(_request.ScratchDwords, 1u);
                     }
                 }
 

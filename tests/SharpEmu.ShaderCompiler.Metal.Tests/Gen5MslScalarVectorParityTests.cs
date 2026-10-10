@@ -192,6 +192,36 @@ public sealed class Gen5MslScalarVectorParityTests(ITestOutputHelper output)
         Assert.Equal(expected ? 1u : 0u, BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(0)) & 1u);
     }
 
+    [Theory]
+    // A FLAT address whose high dword is an aperture constant lands in LDS or in
+    // scratch instead of going through the page table, and the translator has to
+    // route it there like the hardware does.
+    [InlineData(0x000000EBu, "sharpemu_lds[", "7u")]       // src_shared_base
+    [InlineData(0x000000EDu, "sharpemu_scratch[", "8u")]   // src_private_base
+    public void FlatAccessesThroughAnApertureReachTheStorageItNames(
+        uint apertureOperand, string storage, string apertureValue)
+    {
+        uint[] words =
+        [
+            0x7E000280,                     // v_mov_b32 v0, 0
+            0x7E020200u | apertureOperand,   // v_mov_b32 v1, src_shared/private_base
+            0x7E0402FF, 0x00C0FFEE,         // v_mov_b32 v2, 0xC0FFEE
+            0xDC700000, 0x007F0200,         // flat_store_dword v[0:1], v2
+            0xDC300000, 0x037F0000,         // flat_load_dword v3, v[0:1]
+            .. StoreDword(3, 0),
+            SEndpgm,
+        ];
+        var shader = Compile("flat-aperture", words, 16, scratchDwords: 64);
+        Assert.Contains(storage, shader.Source, StringComparison.Ordinal);
+        Assert.Contains($" == {apertureValue}", shader.Source, StringComparison.Ordinal);
+        // The global fall-through stays, for a lane whose address is not in the aperture.
+        Assert.Contains("sharpemu_load_device_dword", shader.Source, StringComparison.Ordinal);
+
+        var result = Run("flat-aperture", words, 16, scratchDwords: 64);
+        if (result is null) return;
+        Assert.Equal(0x00C0FFEEu, BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(0)));
+    }
+
     // buffer_store_dword vN, off, s[8:11], 0 offset:byteOffset
     private static uint[] StoreDword(uint register, uint byteOffset) =>
         [0xE0700000u | byteOffset, 0x80020000u | register << 8];
