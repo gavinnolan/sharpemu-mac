@@ -192,6 +192,64 @@ parent paths. Its expected ordinary inventory is 1,303 cases per actual CLR;
 246 separate worker identities remain unchanged. This successor is unqualified
 and remains separate from main.
 
+### Fresh Quake replay
+
+The source-exact `e2535177` Quake replay `20261010-022046` runs to its 180-second
+cap. Captures show publisher/intro frames and a readable advisory, followed by
+gray bands and colored corruption at 135 seconds, then a black client at 175
+seconds. No usable menu, input or controllable scene is observed. Initialization,
+demo and map log messages do not establish gameplay. There are no fatal or
+unsupported exceptions before the first host shutdown request; 9,450 retained
+semaphore-timeout rows are symptoms with no established causal link.
+
+The controller/harness returns zero after 192.58 seconds, but the game does not
+exit within ten seconds of the harness's SIGTERM and requires its existing
+SIGKILL escalation. This is not a graceful shutdown or a recorded guest exit
+code. Peak sampled RSS is 6,264 MiB. Neutral input is cleared before terminal
+cleanup; no manual input occurs. ROOT verifies all 385 archive artifacts, 2,042
+source files, 104 compiled files and 239 app files, then independently confirms
+all four roots/groups absent and no actual heavy worker/shared lease. Archive:
+`d4c9e6e7d7108c253e3610207cf3469477927d5d02b3a0d61a95591724860d0e`.
+No unchanged Quake retry is scheduled. Six titles have fresh game-entry evidence at this point; the subsequent
+Poppy check is recorded below. Void and Sarah checks remain pending.
+
+### Current Poppy diagnostic check
+
+The exact `e2535177` Poppy replay `20261010-023523` exits 138 after 19 seconds,
+with peak sampled RSS 1,811 MiB. Its sole 15-second capture is black. Actual
+SIGBUS records show the same instruction address `0x80135FB0B` with two
+separate fault addresses; neither is recovered. Earlier nonzero guest-frame
+intervals do not establish a menu or gameplay. No controller signal or host
+shutdown request is observed. The native trace file has the expected 655,488
+bytes; ROOT independently verifies all 310 archive artifacts, 2,042 source files,
+104 compiled files and 239 app files, plus fresh four-root/group absence and
+no actual heavy worker or shared lease. The pinned offline decoder returns
+zero: 80 published records, zero dropped records and 4,016 unused/unpublished
+slots. Invocation 3 recovers after an Armed owner restores RW protection with
+return zero. Invocations 4/5 observe Disarmed state and decline. A later RO
+rearm precedes their final declined dispositions. These records do not prove
+actual trap permissions or allocation lifetime. Terminal archive:
+`da4697548725f536e7a6ad807812345a1c1d1bc3bdad31e97c7cc9fd43891b16`.
+
+ROOT verified the prepared payloads, 2,042 source files, 104 compiled files,
+239 app files, 1,818 qualification links and original executable before this
+single empty-input replay. Existing fault-thread import diagnostics and the
+fresh native trace are the only added runtime diagnostics. The fault records
+are observations, not proof of unsupported ISA or a protection failure.
+
+### Combined boot-fix source candidate
+
+Local `638c3bdf` combines the DS bounded original-watch wait and admission CAS
+fixes with the reviewed Octopath dirty-retention and Superliminal regular-color
+owner changes. The Octopath/Superliminal donor paths are disjoint and preserved
+byte for byte. ROOT verifies all 2,054 live/archive source files and 13 exact
+donor paths; no new production code is added during integration. Expected
+ordinary inventory is 1,354 cases per actual CLR (293 Host, 956 Libs, 105 GPU).
+The 246 separate native workers are unchanged. This is source review only:
+no build, test, game or publish result is inherited by the candidate. It remains
+separate from main until qualification. Archive:
+`75374bcd4f8cb22009e529f042927305d5b02542bc1d6572af1d2c33f501e800`.
+
 ### Fresh reconnected-volume Oregon replay
 
 The source-exact `e2535177` Oregon replay `20261010-013557` exits 134 after
