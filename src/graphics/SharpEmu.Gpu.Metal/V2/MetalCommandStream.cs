@@ -336,9 +336,9 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
         // Before and after, so an upload that replaces a composited frame with the bytes
         // that were in guest memory before it shows up as the two differing.
-        DumpTexture(image.Texture, "flip-before-refresh");
+        if (_dumpThisFlip) { DumpTexture(image.Texture, "flip-before-refresh"); }
         _imageCache.RefreshImage(imageIdentifier);
-        DumpTexture(image.Texture, "flip-after-refresh");
+        if (_dumpThisFlip) { DumpTexture(image.Texture, "flip-after-refresh"); }
         var texture = PresentationViewOf(image, in request);
         var serial = SubmissionSerial;
         FlushCommandBuffer();
@@ -393,7 +393,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             $"description={image.Description.PixelFormat} tile={image.Description.TileMode} " +
             $"extent={image.Description.Extent.Width}x{image.Description.Extent.Height} " +
             $"view={request.View.Format} gpuWritten={image.IsGpuModified} renderTarget={image.Uses.RenderTarget}.");
-        DumpTexture(texture, "flip");
+        if (_dumpThisFlip) { DumpTexture(texture, "flip"); }
     }
 
     // The presenter samples the flip texture and writes the result into a plain

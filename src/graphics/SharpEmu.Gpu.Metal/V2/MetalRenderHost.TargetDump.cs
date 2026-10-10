@@ -24,7 +24,17 @@ internal sealed partial class MetalRenderHost
 
     // Enough to see a title screen appear and settle without filling a disk.
     private const int MaxTargetDumps = 240;
-    private const int MaxDumpsPerTexture = 8;
+
+    // One frame's worth of targets every so many flips. Dumping the first N occurrences
+    // of each texture instead spends the whole budget on the first seconds, which for a
+    // title that loads for minutes is exactly the part that has nothing in it.
+    private static readonly int _dumpEveryFlips =
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DUMP_EVERY"), out var every) && every > 0
+            ? every
+            : 30;
+
+    private long _dumpFlipIndex;
+    private bool _dumpThisFlip;
 
     private int _targetDumps;
     private readonly Dictionary<nint, int> _dumpsByTexture = new();
@@ -54,7 +64,7 @@ internal sealed partial class MetalRenderHost
     /// </summary>
     private void NotePendingDump(nint texture, string label)
     {
-        if (texture == 0 || _pendingDumps.Count >= 64)
+        if (texture == 0 || !_dumpThisFlip || _pendingDumps.Count >= 64)
         {
             return;
         }
@@ -65,10 +75,19 @@ internal sealed partial class MetalRenderHost
         _pendingDumps.Add((texture, $"{label}-draws{_passDrawCount}{shaders}"));
     }
 
-    /// <summary>Reads back everything remembered since the last drain.</summary>
+    /// <summary>
+    /// Reads back everything remembered since the last drain, and decides whether the
+    /// frame about to be recorded is one of the sampled ones.
+    /// </summary>
     private void DrainPendingDumps()
     {
-        if (!DumpTargetsEnabled || _pendingDumps.Count == 0)
+        if (!DumpTargetsEnabled)
+        {
+            return;
+        }
+
+        _dumpThisFlip = _dumpFlipIndex++ % _dumpEveryFlips == 0;
+        if (_pendingDumps.Count == 0)
         {
             return;
         }
@@ -118,11 +137,6 @@ internal sealed partial class MetalRenderHost
         }
 
         _dumpsByTexture.TryGetValue(texture, out var seen);
-        if (seen >= MaxDumpsPerTexture)
-        {
-            return;
-        }
-
         if (!TryDescribeDumpFormat(pixelFormat, out var sourceBytes, out var convert))
         {
             MetalV2Diagnostics.WarnOnce(

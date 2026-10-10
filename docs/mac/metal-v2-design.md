@@ -329,6 +329,44 @@ runaway compute shaders (below).
   2048x2048 shadow map. The frames are still black, which is now a content question and
   not a presentation one. Dreaming Sarah is unaffected and holds 60.00 fps.
 
+- **Demon's Souls' black frames are not a presentation fault.** The title presents, and
+  every frame is black. Four things were candidates: the flip resolving to a different
+  image from the one the passes wrote, an HDR or tiling mismatch, the display surface
+  being refilled from guest memory on the way to the screen, or the frame genuinely
+  being black. `SHARPEMU_METAL_V2_DUMP_TARGETS` and the flip-resolution line rule out
+  the first three.
+
+      The first published flip resolved to image={Index 77, Generation 1}
+      texture=0x7FA6D51AA0B0 address=0x0000007057F00000 3840x2160 tiling=0 hdr=False
+      description=A2B10G10R10UnormPack32 view=A2B10G10R10UnormPack32
+      gpuWritten=True renderTarget=True.
+
+  The flip lands on the image the passes wrote, through a view of its own format; the
+  surface is not HDR and not tiled; and `flip_refreshed` is zero on every interval, with
+  the surface dumped either side of its refresh reading identically. Nothing between the
+  composite and the screen touches the pixels.
+
+  What the dumps show instead is that **every colour target in the frame is exactly
+  zero** — 98 dumps across one run, all `max_rgb=0`, none with a single lit pixel, while
+  the passes that wrote them recorded 1 to 48 draws each and every colour attachment
+  loads rather than clears. The chain is self-consistently black: fullscreen post passes
+  sample inputs that are zero and write zero.
+
+  Two things narrow where to look next. Every pass dumped in the loading phase shares one
+  vertex shader, `0x29F08899182DFBF7`, which reads as an NGG primitive shader
+  (`s_sendmsg` for export space, an `EXP_PRIM` export the translator emits nothing for)
+  but is a correct procedural fullscreen quad: it exports POS0 as
+  `(2*i0-1, 1-2*i1, 1, 1)`. So the geometry of these passes is fine and they do cover
+  their targets. And no scene-geometry pass appears at all in that phase, which is what a
+  black loading screen looks like — a 330 s run did eventually dump a 4K target at
+  `mean_rgb=67` with recognisable silhouettes and a light source, so the engine does
+  start drawing content.
+
+  The next question is therefore where the first non-zero pixel is supposed to come from,
+  and the dumper now samples one frame's targets every `SHARPEMU_METAL_V2_DUMP_EVERY`
+  flips (30 by default) rather than the first few occurrences of each texture, because
+  the first occurrences are all in the part of the run that has nothing in it.
+
 - **Where a flip stops is reported.** `published=0` alone cannot tell a title that never
   flips from one whose flips are released or discarded on the way to the presenter, and
   all three printed nothing. Every flip reaching `CaptureFlip` now counts as an attempt
