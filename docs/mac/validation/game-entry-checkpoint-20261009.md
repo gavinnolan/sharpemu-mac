@@ -132,11 +132,65 @@ administratively cleared; the old controller's unknown state and stopped ledger
 remain intact. Failed manifest:
 `e59e696a9a725c637068c5c82036ec338f26fe8843d159d3eac0ca184a38a2f4`.
 
-The SDK can launch its own native C# compiler apphost. R4 will pin that exact
-SDK path and hash as build-only authority, keep runtime workers restricted to
+The SDK can launch its own native C# compiler apphost. R4 pins that exact
+SDK path and hash as build-only authority, keeps runtime workers restricted to
 the selected CLR, and record every refused candidate before policy evaluation.
 This is a justified controller revision; it does not identify the unrecorded
 child or qualify the failed build. No broad shell/tool exception is planned.
+
+R4's five isolated image-policy controls pass. Its first actual Host build then
+stops after 2.24 seconds because known compiler PID 30196 changes one of its
+recorded process identity fields. The changed row was not retained; its cause
+is unknown. All three observed workers have exact executable records. No later
+build, test, native worker or game runs, and no process is signaled. ROOT verifies
+all 48 failed artifact hashes and fresh closure, then archives and clears only
+the exact dead-owner lease. The failed manifest is
+`9ccabccc320ed725bb9e2d63771bc83c3f6a21aa6c38540606d0d6f7c6871317`.
+The stopped controller and unqualified outputs remain unchanged.
+
+R5 adds the first mismatched process row, including process state, to that same
+refusal receipt. It changes no identity or signal authority. ROOT verifies its
+31 payload hashes and the three changed helper functions; source, case lists,
+SDK pins and adapters remain unchanged. Its one pure diagnostic control passes.
+The diagnostic Host build stops after 1.48 seconds: the exact first mismatch
+changes only the compiler's displayed command from its path to `(csc)`, with
+state `R`; PID, parent, group and displayed start time remain unchanged. This
+does not prove PID reuse or a zombie. ROOT verifies all 51 failed artifact hashes,
+2,047 source hashes and 91 unqualified binaries, then confirms exact root/group
+closure and archives/removes only the exact dead-owner lease. No process is
+signaled, and all subsequent phases remain unrun. Failed manifest:
+`889abc52064e529cc5f01f088eb097b54d313cd0ae75fb47574e8f4a425c789a`.
+Prepared manifest:
+`22bda8c5007560adf4f3e8696bec927993ea186bd266a7a179ecd0aa3c07169b`.
+
+Apple's `ps/print.c` argument-retrieval error path prints the parenthesized
+kernel command name; displayed `comm` is consequently unsuitable as immutable
+process authority. R6 source preparation replaces that display check with a
+kernel process incarnation and exec-generation token, retaining command text
+as diagnostics. Exact image, original parent/group, finite caps, refusal and
+cleanup rules remain required. No R6 execution is granted by this note.
+
+### Reviewed Octopath retry successor
+
+Immediately before Octopath's terminal refusal, preparation reports ordinary
+admission 2. Its later retention predicate is unobserved because the general
+trace budget is exhausted. A separate reviewed successor records that predicate
+with an independent bounded diagnostic. It also preserves exact original
+receipt bookkeeping when the first attributed preparation refuses for ordinary
+Busy and a later status is Current. This creates no completion, publication or
+native effect; a later real preparation remains necessary. Missing attribution,
+publication, stale mappings and changed owners still refuse. All 23 new ordinary
+source rows and both production changes pass independent source review; builds
+and tests remain unrun. This possible retry window is not established as the
+terminal live-game cause. R2 source inventory:
+`90c6a4d64cc9fb2a467b4aecef44a3fa0f5bf36e9cb353981c8bdc2ede156768`.
+
+The four reviewed paths are frozen at local successor `37bb1dec`, with source
+manifest `429c07d336944b1b80dbc052ceacba9c0dc2344c1347cde0e16986029d6bd3a7`.
+ROOT verifies all seven artifacts, 2,049 live/archive files and 2,045 unchanged
+parent paths. Its expected ordinary inventory is 1,303 cases per actual CLR;
+246 separate worker identities remain unchanged. This successor is unqualified
+and remains separate from main.
 
 ### Fresh reconnected-volume Oregon replay
 
