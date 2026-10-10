@@ -247,11 +247,11 @@ internal sealed partial class MetalRenderHost :
         _previousCommitTime = CACurrentMediaTime();
         _lastCommitTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
         // A command buffer that fails never signals its serial, and the completion
-        // queue would then wait out its timeout on every submission behind it. The
-        // previous buffer is far enough ahead to have a status by now, so checking
-        // it here costs one message send and turns a silent stall into a message.
-        ReportSubmissionFailure();
+        // queue would then wait out its timeout on every submission behind it, so
+        // every submission's status is read once it has finished.
+        DrainFinishedSubmissions();
         ReportStepCaps();
+        RetainInFlight(_commandBuffer, serial);
         _previousCommandBuffer = _commandBuffer;
         _previousSerial = serial;
         _commandBuffer = 0;
@@ -279,16 +279,61 @@ internal sealed partial class MetalRenderHost :
     private readonly long[] _waitsByReason = new long[MetalWaitReasons.Count];
     private readonly long[] _waitTicksByReason = new long[MetalWaitReasons.Count];
 
-    private void ReportSubmissionFailure()
+    // Committed submissions whose GPU time has not been read yet. Sampling only the
+    // one buffer that happened to be finished at the next flush missed almost every
+    // submission while any were in flight, which is why a title whose GPU was busy
+    // for a hundred milliseconds a frame could report gpu_busy_ms=0.0 and look as
+    // though it were waiting on nothing.
+    private const int MaxInFlightSubmissions = 64;
+
+    private readonly nint[] _inFlightBuffers = new nint[MaxInFlightSubmissions];
+    private readonly ulong[] _inFlightSerials = new ulong[MaxInFlightSubmissions];
+    private int _inFlightHead;
+    private int _inFlightCount;
+    private long _unsampledSubmissions;
+
+    private void RetainInFlight(nint buffer, ulong serial)
     {
-        if (_previousCommandBuffer == 0)
+        if (_inFlightCount == MaxInFlightSubmissions)
+        {
+            // The oldest has not finished and the ring is full: let it go unsampled
+            // rather than block the worker on it.
+            var oldest = _inFlightBuffers[_inFlightHead];
+            _inFlightHead = (_inFlightHead + 1) % MaxInFlightSubmissions;
+            _inFlightCount--;
+            _unsampledSubmissions++;
+            MetalNative.SendVoid(oldest, SelRelease);
+        }
+
+        var slot = (_inFlightHead + _inFlightCount) % MaxInFlightSubmissions;
+        _inFlightBuffers[slot] = buffer;
+        _inFlightSerials[slot] = serial;
+        _inFlightCount++;
+    }
+
+    /// <summary>Reads and releases every submission the GPU has finished.</summary>
+    private void DrainFinishedSubmissions()
+    {
+        if (_inFlightCount == 0)
         {
             return;
         }
 
-        var buffer = _previousCommandBuffer;
-        var serial = _previousSerial;
-        _previousCommandBuffer = 0;
+        var completed = CompletedSerial;
+        while (_inFlightCount > 0 && _inFlightSerials[_inFlightHead] <= completed)
+        {
+            var buffer = _inFlightBuffers[_inFlightHead];
+            var serial = _inFlightSerials[_inFlightHead];
+            _inFlightBuffers[_inFlightHead] = 0;
+            _inFlightHead = (_inFlightHead + 1) % MaxInFlightSubmissions;
+            _inFlightCount--;
+            SampleSubmission(buffer, serial);
+            MetalNative.SendVoid(buffer, SelRelease);
+        }
+    }
+
+    private void SampleSubmission(nint buffer, ulong serial)
+    {
         var status = MetalV2Native.SendValue(buffer, MetalNative.Selector("status"));
         if (status == CommandBufferStatusError)
         {
@@ -298,21 +343,55 @@ internal sealed partial class MetalRenderHost :
                 "submission-failed",
                 $"A Metal submission failed and will never signal its serial: serial={serial} " +
                 $"{MetalNative.DescribeError(error)}");
-        }
-        else if (status == CommandBufferStatusCompleted)
-        {
-            // The GPU's own execution time, which separates "the GPU is saturated"
-            // from "the completion took a long time to reach this thread".
-            var start = MetalNative.SendDouble(buffer, SelGpuStartTime);
-            var end = MetalNative.SendDouble(buffer, SelGpuEndTime);
-            if (end > start)
-            {
-                _gpuBusySeconds += end - start;
-                _gpuBusySamples++;
-            }
+            return;
         }
 
-        MetalNative.SendVoid(buffer, SelRelease);
+        if (status != CommandBufferStatusCompleted)
+        {
+            _unsampledSubmissions++;
+            return;
+        }
+
+        // The GPU's own execution time, which separates "the GPU is saturated" from
+        // "the completion took a long time to reach this thread", and the driver's
+        // scheduling gap before it.
+        var gpuStart = MetalNative.SendDouble(buffer, SelGpuStartTime);
+        var gpuEnd = MetalNative.SendDouble(buffer, SelGpuEndTime);
+        if (gpuEnd > gpuStart)
+        {
+            _gpuBusySeconds += gpuEnd - gpuStart;
+            _gpuBusySamples++;
+        }
+
+        var kernelStart = MetalNative.SendDouble(buffer, SelKernelStartTime);
+        var kernelEnd = MetalNative.SendDouble(buffer, SelKernelEndTime);
+        if (kernelEnd > kernelStart)
+        {
+            _kernelSeconds += kernelEnd - kernelStart;
+        }
+
+        if (gpuStart > kernelEnd && gpuStart - kernelEnd < 10.0)
+        {
+            _scheduleGapSeconds += gpuStart - kernelEnd;
+        }
+    }
+
+    private double _kernelSeconds;
+    private double _scheduleGapSeconds;
+
+    private void ReleaseInFlightSubmissions()
+    {
+        while (_inFlightCount > 0)
+        {
+            var buffer = _inFlightBuffers[_inFlightHead];
+            _inFlightBuffers[_inFlightHead] = 0;
+            _inFlightHead = (_inFlightHead + 1) % MaxInFlightSubmissions;
+            _inFlightCount--;
+            if (buffer != 0)
+            {
+                MetalNative.SendVoid(buffer, SelRelease);
+            }
+        }
     }
 
     /// <summary>Commits the current command buffer and waits for the GPU to finish it.</summary>
@@ -896,14 +975,23 @@ internal sealed partial class MetalRenderHost :
 
         var seconds = (now - _statsTimestamp) / (double)System.Diagnostics.Stopwatch.Frequency;
         _statsTimestamp = now;
+        // Read every submission that has finished since the last report, so the GPU
+        // time below covers them all and not only the one that happened to be done.
+        DrainFinishedSubmissions();
         var draws = Interlocked.Exchange(ref _drawCount, 0);
         var drawTicks = Interlocked.Exchange(ref _drawTicks, 0);
         var flushes = Interlocked.Exchange(ref _flushes, 0);
         var passes = Interlocked.Exchange(ref _renderPasses, 0);
         var gpuBusyMs = _gpuBusySeconds * 1000.0;
         var gpuBusySamples = _gpuBusySamples;
+        var kernelMs = _kernelSeconds * 1000.0;
+        var scheduleMs = _scheduleGapSeconds * 1000.0;
+        var unsampled = _unsampledSubmissions;
         _gpuBusySeconds = 0;
         _gpuBusySamples = 0;
+        _kernelSeconds = 0;
+        _scheduleGapSeconds = 0;
+        _unsampledSubmissions = 0;
         var waits = Interlocked.Exchange(ref _gpuWaits, 0);
         var partial = Interlocked.Exchange(ref _partialWaits, 0);
         var waitTicks = Interlocked.Exchange(ref _gpuWaitTicks, 0);
@@ -919,6 +1007,9 @@ internal sealed partial class MetalRenderHost :
             $"draws={draws} passes={passes} flushes={flushes} " +
             $"draw_ms={(drawTicks * 1000.0 / frequency).ToString("F1", culture)} " +
             $"gpu_busy_ms={gpuBusyMs.ToString("F1", culture)} " +
+            $"gpu_n={gpuBusySamples} gpu_unsampled={unsampled} " +
+            $"kernel_ms={kernelMs.ToString("F1", culture)} " +
+            $"schedule_ms={scheduleMs.ToString("F1", culture)} " +
             $"completions={completions} completion_ms={completionMs.ToString("F1", culture)} " +
             $"host_waits={waits} partial_waits={partial} " +
             $"host_wait_ms={(waitTicks * 1000.0 / frequency).ToString("F1", culture)} " +
@@ -1022,7 +1113,8 @@ internal sealed partial class MetalRenderHost :
                 _commandBuffer = 0;
             }
 
-            ReportSubmissionFailure();
+            _previousCommandBuffer = 0;
+            ReleaseInFlightSubmissions();
             ReportStepCaps();
             DisposeStepReport();
         }
