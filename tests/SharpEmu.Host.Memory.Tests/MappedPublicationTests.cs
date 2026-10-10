@@ -97,6 +97,10 @@ public sealed partial class MappedPublicationTests
         public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(HostBackingObject backing,
             CpuMappedCopyObservation original, IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication) =>
             Ledger.TryPrepareMappedPublication(backing, original, runs, out publication);
+        public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(HostBackingObject backing,
+            CpuMappedCopyObservation original, IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication,
+            out CpuMappedPublicationPreparationRefusal refusal) =>
+            Ledger.TryPrepareMappedPublication(backing, original, runs, out publication, out refusal);
         public CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(HostBackingObject backing,
             CpuMappedCopyObservation original, out CpuMappedPublicationValidation? validation) =>
             Ledger.TryPrepareMappedPublicationValidation(backing, original, out validation);

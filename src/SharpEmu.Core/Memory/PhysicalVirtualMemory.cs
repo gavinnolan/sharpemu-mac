@@ -1195,14 +1195,19 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(CpuMappedCopyObservation original,
         IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication)
+        => TryPrepareMappedPublication(original, runs, out publication, out _);
+
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(CpuMappedCopyObservation original,
+        IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication,
+        out CpuMappedPublicationPreparationRefusal refusal)
     {
-        publication = null;
+        publication = null; refusal = default;
         var space = _backedSpace;
         if (Volatile.Read(ref _disposed) || space is not ICpuMappedPublicationSource source)
             return CpuMappedPublicationPreparationResult.Unavailable;
-        var result = source.TryPrepareMappedPublication(original, runs, out publication);
+        var result = source.TryPrepareMappedPublication(original, runs, out publication, out refusal);
         if (!Volatile.Read(ref _disposed) && ReferenceEquals(_backedSpace, space)) return result;
-        publication?.Dispose(); publication = null; return CpuMappedPublicationPreparationResult.Rejected;
+        publication?.Dispose(); publication = null; refusal = default; return CpuMappedPublicationPreparationResult.Rejected;
     }
 
     public CpuMappedCopyResult TryReadMappedCopyWithWriteWatch(ulong footprintAddress, ulong footprintByteCount,

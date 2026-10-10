@@ -124,16 +124,21 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
 
     public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(CpuMappedCopyObservation original,
         IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication)
+        => TryPrepareMappedPublication(original, runs, out publication, out _);
+
+    public CpuMappedPublicationPreparationResult TryPrepareMappedPublication(CpuMappedCopyObservation original,
+        IReadOnlyList<CpuMappedWriteRun> runs, out CpuMappedPublication? publication,
+        out CpuMappedPublicationPreparationRefusal refusal)
     {
-        publication = null;
+        publication = null; refusal = default;
         if (_host is not IHostMappedPublicationMemory provider || _backing is null)
             return CpuMappedPublicationPreparationResult.Unavailable;
         if (!TryEnterAliasAccess()) return CpuMappedPublicationPreparationResult.Rejected;
         try
         {
-            var result = provider.TryPrepareMappedPublication(_backing, original, runs, out publication);
+            var result = provider.TryPrepareMappedPublication(_backing, original, runs, out publication, out refusal);
             if (IsAvailable) return result;
-            publication?.Dispose(); publication = null;
+            publication?.Dispose(); publication = null; refusal = default;
             return CpuMappedPublicationPreparationResult.Rejected;
         }
         finally { ExitAliasAccess(); }

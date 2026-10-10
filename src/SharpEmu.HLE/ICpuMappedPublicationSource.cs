@@ -35,6 +35,17 @@ public interface ICpuMappedPublicationSource
     CpuMappedPublicationPreparationResult TryPrepareMappedPublication(
         CpuMappedCopyObservation original, IReadOnlyList<CpuMappedWriteRun> runs,
         out CpuMappedPublication? publication);
+
+    /// <summary>Detached classification of the SAME first returned preparation.
+    /// Unknown providers call their original method once. No value authorizes
+    /// waiting, publication, mapping replacement or content observation.</summary>
+    CpuMappedPublicationPreparationResult TryPrepareMappedPublication(
+        CpuMappedCopyObservation original, IReadOnlyList<CpuMappedWriteRun> runs,
+        out CpuMappedPublication? publication, out CpuMappedPublicationPreparationRefusal refusal)
+    {
+        refusal = default;
+        return TryPrepareMappedPublication(original, runs, out publication);
+    }
 }
 
 /// <summary>Detached source bytes for an exact original virtual subrange. The
@@ -53,6 +64,12 @@ public enum CpuMappedPublicationPreparationResult
 public enum CpuMappedPublicationValidationRefusalKind { UnknownRejected = 0, AdmissionBusy }
 public readonly record struct CpuMappedPublicationValidationRefusal(
     CpuMappedPublicationValidationRefusalKind Kind, long OriginalRevision, long RejectedAdmission);
+
+// Only an actual failed provider admission CAS supplies AdmissionNonzero.
+// PublicationBit is not classified as an ordinary writer or wait entitlement.
+public enum CpuMappedPublicationPreparationRefusalKind { UnknownRejected = 0, AdmissionNonzero }
+public readonly record struct CpuMappedPublicationPreparationRefusal(
+    CpuMappedPublicationPreparationRefusalKind Kind, long OriginalRevision, long RejectedAdmission);
 
 public enum CpuMappedPublicationResult
 {
