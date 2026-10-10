@@ -406,6 +406,48 @@ runaway compute shaders (below).
   not alternate every two. That is where to look next, with
   `SHARPEMU_METAL_V2_DUMP_TARGETS` and the 1920x540 target the frame also carries.
 
+- **What the Demon's Souls corruption is not.** The two-pixel granularity and the
+  apparent seam across the frame's middle both dissolved under measurement, and three
+  candidate mechanisms are ruled out. Recorded so nobody walks them again.
+
+  *No MSAA anywhere.* All eleven distinct render-pass shapes the title uses report
+  `samples=1`, so two horizontally interleaved samples cannot be the source of a
+  two-pixel pattern.
+
+  *No seam.* Scanning the dumped 4K flip row by row, the dominant colour's share varies
+  smoothly with image content (0.48 at the top, 0.04 around y=1140, 0.46 at the bottom).
+  The "seam" was an artefact of looking at a downscaled view.
+
+  *The two-pixel runs are an upscale, not a stride.* They appear in both the dominant
+  field and the speckles, which is what a half-resolution source point-sampled to 4K
+  looks like; a wrong element size would not alternate in both.
+
+  *The froxel volumes are not one surface described two ways.* The input dumps show
+  `R16G16B16A16Sfloat Color3D Standard64KB 214x120x72 L1A1 bytes=0x1180000` and
+  `R16G16B16A16Sfloat Color2D RenderTarget 214x120 L1A72 bytes=0x1200000`, which looked
+  like one volumetric grid seen as a 3D image by its reader and a 72-layer array by its
+  writer — a round trip through guest memory under two tile modes would corrupt it
+  exactly this way. They are at different addresses (`0x708CE80000`/`0x708E000000`
+  against `0x7066EF0000`), so they are different surfaces and no such conflict exists.
+
+- **Where the Demon's Souls frame actually comes from.** Dumping every pass of a sampled
+  frame in order, with the textures each one binds, gives a frame that is not what it
+  looked like. Every scene-sized target — 1280x720 and 2560x1440, the G-buffer and
+  lighting shapes — is `max_rgb=0`, pure black, though its passes record 1 to 48 draws.
+  All the content arrives in about twenty **single-quad draws into a 4K target**
+  (`vs=0x91C625E416E34368 ps=0x17A41E9C3C41BE38`), which is a composite of sampled
+  surfaces, not rendered geometry. The recognisable architecture is therefore the
+  loading screen's artwork, not Boletarian Palace being rendered: the title never gets
+  past loading in the time we can run it, and the first thing to fix for a correct title
+  screen is the boot, not the renderer.
+
+  The one concrete anomaly among those inputs is a **flat bright green
+  `R8G8B8A8Unorm RenderTarget 1280x720`** surface, uniform to the pixel apart from a thin
+  strip at the bottom. Green is also the dominant speckle colour in the composited frame.
+  It is not a DCC fixed clear — `TryDecodeDccColor` can only ever produce 0.0 or 1.0 per
+  channel, never the ~(0.5, 1.0, 0.5) this surface holds — so where it comes from is the
+  open question and the next thing to chase.
+
 - **Demon's Souls' long boot is host-side command-stream work, not the GPU.** Over one
   454-second run the GPU worker spent 14.3 s executing GPU work (3%), 49.8 s waiting on
   the GPU (11%), 21.9 s idle (5%) and **368 s — 81% — in its own CPU work**: interpreting
