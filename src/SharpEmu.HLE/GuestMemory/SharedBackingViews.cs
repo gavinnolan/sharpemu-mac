@@ -637,6 +637,40 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
 
             return;
         }
+
+        WarnOnAliasedBacking(address, size, offset);
+    }
+
+    private int _aliasReports;
+
+    /// <summary>How many mappings were recorded over backing bytes another one still holds.</summary>
+    public int AliasedBackingRecords => Volatile.Read(ref _aliasReports);
+
+    // Must be called holding _lock. Two mappings at different guest addresses over the
+    // same backing bytes are one piece of memory the title sees twice. That is legal — a
+    // title may map direct memory at two addresses on purpose — but it is also what an
+    // allocator handing the same physical offset out twice looks like, and then a write
+    // through one address rewrites what the other holds.
+    private void WarnOnAliasedBacking(ulong address, ulong size, ulong offset)
+    {
+        var end = offset + size;
+        foreach (var record in _views.Values)
+        {
+            if (record.Address == address || record.Offset >= end || record.Offset + record.Size <= offset)
+            {
+                continue;
+            }
+
+            if (++_aliasReports <= 32)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] mapping aliases live backing bytes: new=0x{address:X16}+0x{size:X}@0x{offset:X} " +
+                    $"existing=0x{record.Address:X16}+0x{record.Size:X}@0x{record.Offset:X}");
+                Console.Error.Flush();
+            }
+
+            return;
+        }
     }
 
     private bool TryMapReservedRange(ulong address, ulong size, ulong offset, HostPageProtection protection,
