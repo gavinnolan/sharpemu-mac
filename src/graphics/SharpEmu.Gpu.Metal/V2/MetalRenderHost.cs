@@ -71,6 +71,10 @@ internal sealed partial class MetalRenderHost :
     // serial that finishes each. A CPU read waits only when it overlaps one whose
     // serial has not completed, and then only for that serial.
     private readonly MetalGpuWriteRanges _gpuWrites = new();
+
+    // SHARPEMU_METAL_V2_GUARD_WRITES=1 only: checks that every declared GPU-side write
+    // leaves the bytes either side of its range alone.
+    private readonly MetalGuestWriteGuard? _guard;
     // Without ranges every write is "somewhere in guest memory", which is what the
     // first version of this host did; kept for A/B measurement.
     private static readonly bool ConservativeReads =
@@ -113,6 +117,7 @@ internal sealed partial class MetalRenderHost :
             throw GpuFatal.Fatal("Metal v2 needs an MTLSharedEvent for submission completion.");
         }
 
+        _guard = MetalGuestWriteGuard.Enabled ? new MetalGuestWriteGuard(memory) : null;
         _guestMemory = new MetalGuestMemory(device, backing, memory);
         _guestMemory.AttachToQueue(queue);
         _transfer = new MetalImageTransfer(device);
@@ -184,7 +189,11 @@ internal sealed partial class MetalRenderHost :
         // runs inside an autorelease pool the whole time it is being recorded.
         MetalNative.Send(_commandBuffer, MetalNative.Selector("retain"));
         _submissionSerial = ++_nextSerial;
-        _guestMemory.BeginSubmission(_submissionSerial, CompletedSerial);
+        var completed = CompletedSerial;
+        _guestMemory.BeginSubmission(_submissionSerial, completed);
+        // Every watch whose submission the GPU has finished is checked here, on the one
+        // thread that records them, rather than from the completion handler.
+        _guard?.Verify(completed);
         return _commandBuffer;
     }
 
@@ -403,6 +412,17 @@ internal sealed partial class MetalRenderHost :
     /// <summary>Recorded work stores into this guest range.</summary>
     public void NoteGuestMemoryWrite(ulong address, ulong size, MetalGpuWriteOrigin origin)
     {
+        if (_guard is not null && size != 0)
+        {
+            // A fill, copy or writeback has just been encoded, so the last transfer label
+            // is its own; a shader store names the draw or dispatch that bound it.
+            var producer = origin is MetalGpuWriteOrigin.Fill or MetalGpuWriteOrigin.Copy
+                    or MetalGpuWriteOrigin.ImageWriteback
+                ? $"{MetalGpuWriteOrigins.Names[(int)origin]} [{LastTransferDescription}]"
+                : $"{MetalGpuWriteOrigins.Names[(int)origin]} [{LastWorkDescription}]";
+            _guard.Capture(address, size, SubmissionSerial, producer);
+        }
+
         if (ConservativeReads)
         {
             _gpuWrites.NoteUnbounded(SubmissionSerial);
@@ -562,6 +582,25 @@ internal sealed partial class MetalRenderHost :
 
     private void WriteGuestPattern(ulong address, ulong size, uint value)
     {
+        if (_guard is null)
+        {
+            WriteGuestPatternCore(address, size, value);
+            return;
+        }
+
+        var watch = _guard.Begin(address, size, $"host-fill value=0x{value:X8}");
+        try
+        {
+            WriteGuestPatternCore(address, size, value);
+        }
+        finally
+        {
+            _guard.End(watch);
+        }
+    }
+
+    private void WriteGuestPatternCore(ulong address, ulong size, uint value)
+    {
         Span<byte> chunk = stackalloc byte[4096];
         var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(chunk);
         words.Fill(value);
@@ -633,6 +672,25 @@ internal sealed partial class MetalRenderHost :
     }
 
     private void CopyGuestBytesOnHost(ulong destination, ulong source, ulong size)
+    {
+        if (_guard is null)
+        {
+            CopyGuestBytesOnHostCore(destination, source, size);
+            return;
+        }
+
+        var watch = _guard.Begin(destination, size, $"host-copy from=0x{source:X16}");
+        try
+        {
+            CopyGuestBytesOnHostCore(destination, source, size);
+        }
+        finally
+        {
+            _guard.End(watch);
+        }
+    }
+
+    private void CopyGuestBytesOnHostCore(ulong destination, ulong source, ulong size)
     {
         var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent((int)Math.Min(size, 64 * 1024));
         try
@@ -906,6 +964,11 @@ internal sealed partial class MetalRenderHost :
             $"write_folds={_gpuWrites.Folds} handler_wakeups={_completions.HandlerWakeups} " +
             $"rings={_guestMemory.RingCount} rings_freed={_guestMemory.RingsReleased} " +
             $"ring_mb={_guestMemory.RingFallbackBytes / (1024 * 1024)}");
+        if (_guard is not null)
+        {
+            Console.Error.WriteLine($"[METAL-V2][GUARD] {_guard.Report()}");
+        }
+
         if (!MetalV2Diagnostics.Verbose)
         {
             return;

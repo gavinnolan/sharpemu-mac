@@ -64,8 +64,19 @@ internal sealed partial class MetalRenderHost
     /// transfer is encoded and its encoders are closed, so the draw that follows is not
     /// charged for the tiler run that preceded it.
     /// </summary>
-    void IMetalSubmissionContext.ProfileEncoded(string label) =>
+    void IMetalSubmissionContext.ProfileEncoded(string label)
+    {
+        // Remembered unconditionally, like _lastWorkLabel: it is what names the producer
+        // in a write-guard violation and in a slow command buffer's report.
+        _lastTransferLabel = label;
         ProfileCommandBuffer("transfer", label, string.Empty);
+    }
+
+    private string? _lastTransferLabel;
+
+    /// <summary>The last image transfer, fill or copy encoded, for a diagnostic that has
+    /// to name which one wrote a guest byte.</summary>
+    internal string LastTransferDescription => _lastTransferLabel ?? "none";
 
     private void ProfileCommandBuffer(string kind, string label, string shape)
     {

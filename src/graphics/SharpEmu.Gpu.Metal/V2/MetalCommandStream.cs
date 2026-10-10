@@ -126,7 +126,10 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 throw Fatal($"The GDS copy source is outside the buffer: offset=0x{source:X} size=0x{size:X}.");
             }
 
-            if (!_memory.TryWrite(destination, gds.Slice((int)source, (int)size)))
+            var watch = _guard?.Begin(destination, size, "gds-copy") ?? -1;
+            var wrote = _memory.TryWrite(destination, gds.Slice((int)source, (int)size));
+            _guard?.End(watch);
+            if (!wrote)
             {
                 throw Fatal($"The GDS copy cannot write guest memory: address=0x{destination:X16} size=0x{size:X}.");
             }
