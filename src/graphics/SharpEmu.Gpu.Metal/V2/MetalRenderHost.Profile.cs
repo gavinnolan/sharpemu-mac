@@ -20,13 +20,8 @@ internal sealed partial class MetalRenderHost
 
     // The pipeline entry's profile label, resolved once per pipeline so a draw only
     // concatenates its own shape onto it.
-    private string? ProfileLabelFor(MetalShaderModule vertex, MetalShaderModule? pixel, Gen5MslMeshInfo? mesh)
+    private static string ProfileLabelFor(MetalShaderModule vertex, MetalShaderModule? pixel, Gen5MslMeshInfo? mesh)
     {
-        if (!MetalShaderProfile.Enabled)
-        {
-            return null;
-        }
-
         var stage = mesh is not null ? "mesh" : vertex.Shader.Stage.ToString().ToLowerInvariant();
         var label = $"stage={stage} vs=0x{vertex.Hash:X16}";
         if (pixel is not null)
@@ -47,8 +42,22 @@ internal sealed partial class MetalRenderHost
     /// and charges its GPU execution time to the bound pipeline's shaders. Called at the
     /// end of every encode path; a no-op unless the profiling switch is set.
     /// </summary>
-    private void ProfileWork(MetalPipelineEntry entry, string kind, string shape) =>
+    private void ProfileWork(MetalPipelineEntry entry, string kind, string shape)
+    {
+        // Remembered even when the profiler is off: it costs two field writes and it is
+        // what names the shaders in a slow command buffer's SLOW-WAIT line.
+        _lastWorkKind = kind;
+        _lastWorkLabel = entry.Profile;
         ProfileCommandBuffer(kind, entry.Profile ?? "stage=?", shape);
+    }
+
+    private string _lastWorkKind = string.Empty;
+    private string? _lastWorkLabel;
+
+    /// <summary>The last draw or dispatch encoded, for a diagnostic that found a slow
+    /// command buffer and has to say what was in it.</summary>
+    internal string LastWorkDescription =>
+        _lastWorkLabel is null ? "none" : $"{_lastWorkKind} {_lastWorkLabel}";
 
     /// <summary>
     /// What an image upload or writeback cost on the GPU. The cache calls this once a
