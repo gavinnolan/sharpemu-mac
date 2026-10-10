@@ -25,7 +25,7 @@ internal interface IMetalImageCacheOwner
     ulong CompletedSerial { get; }
 
     // Ends any open encoder and hands over the command buffer being recorded.
-    IMetalSubmissionContext BeginTransfer();
+    IMetalSubmissionContext BeginTransfer(MetalTransferCause cause);
 
     // Fills a guest byte range with a repeating dword on the GPU.
     void FillGuestRange(ulong address, ulong size, uint value);
@@ -833,7 +833,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         ref readonly var description = ref image.Description;
-        var context = _owner.BeginTransfer();
+        var context = _owner.BeginTransfer(MetalTransferCause.Upload);
         var whole = description.Data.Size <= MaxTransferPieceBytes
             ? _guestMemory.Resolve(description.Data.Address, description.Data.Size)
             : default;
@@ -936,7 +936,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var destination = description.Data.Size <= MaxTransferPieceBytes
             ? _guestMemory.ResolveWritable(description.Data.Address, description.Data.Size)
             : default;
-        var context = _owner.BeginTransfer();
+        var context = _owner.BeginTransfer(MetalTransferCause.Writeback);
         if (destination.IsValid && destination.Size >= description.Data.Size)
         {
             var stencil = description.HasStencil

@@ -39,6 +39,20 @@ internal interface IMetalSubmissionContext
 
 // Moves image contents between guest memory and Metal textures entirely on the GPU.
 // Implemented by MetalImageTransfer (tiler workstream); used by MetalImageCache.
+// Why an encoder was torn down to record a transfer. Every one of these ends the open
+// render pass, and a pass restart costs the attachment a store and a reload, so which
+// cause dominates decides what is worth avoiding.
+internal enum MetalTransferCause
+{
+    Upload,
+    Writeback,
+    ColorClear,
+    DepthClear,
+    GuestFill,
+    GuestCopy,
+    ImageCopy,
+}
+
 internal interface IMetalImageTransfer
 {
     // The Metal texture shape the cache must allocate for a description (format,
