@@ -231,6 +231,10 @@ internal sealed partial class MetalRenderHost :
 
     private static readonly nint SelGpuStartTime = MetalNative.Selector("GPUStartTime");
     private static readonly nint SelGpuEndTime = MetalNative.Selector("GPUEndTime");
+    [System.Runtime.InteropServices.DllImport("/System/Library/Frameworks/QuartzCore.framework/QuartzCore")]
+    private static extern double CACurrentMediaTime();
+
+    private int _slowWaitReports;
 
     private void ReportSubmissionFailure()
     {
@@ -273,9 +277,26 @@ internal sealed partial class MetalRenderHost :
     {
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var serial = FlushCommandBuffer();
+        var waited = _previousCommandBuffer;
+        var committedAt = System.Diagnostics.Stopwatch.GetTimestamp();
         _completions.WaitFor(serial);
+        var finished = System.Diagnostics.Stopwatch.GetTimestamp();
         Interlocked.Increment(ref _gpuWaits);
-        Interlocked.Add(ref _gpuWaitTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
+        Interlocked.Add(ref _gpuWaitTicks, finished - started);
+        var frequency = System.Diagnostics.Stopwatch.Frequency;
+        if (finished - started > frequency / 50 && waited != 0 && _slowWaitReports < 64)
+        {
+            // A slow host wait: separate the GPU's own execution from scheduling.
+            _slowWaitReports++;
+            var now = CACurrentMediaTime();
+            var gpuStart = MetalNative.SendDouble(waited, SelGpuStartTime);
+            var gpuEnd = MetalNative.SendDouble(waited, SelGpuEndTime);
+            Console.Error.WriteLine(
+                $"[METAL-V2][SLOW-WAIT] serial={serial} total_ms={(finished - started) * 1000.0 / frequency:F1} " +
+                $"flush_ms={(committedAt - started) * 1000.0 / frequency:F1} " +
+                $"gpu_exec_ms={(gpuEnd - gpuStart) * 1000.0:F2} gpu_end_age_ms={(now - gpuEnd) * 1000.0:F1} " +
+                $"gpu_start_age_ms={(now - gpuStart) * 1000.0:F1}");
+        }
         _guestMemory.NoteCompleted(serial);
         _gpuWroteGuestMemory = false;
     }
