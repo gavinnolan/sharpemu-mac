@@ -6028,6 +6028,14 @@ public static partial class KernelMemoryCompatExports
 
     private static bool TryResolveAprFilepath(CpuContext ctx, ulong pathListAddress, ulong index, out string guestPath)
     {
+        var profile = FileIoProfile.Begin();
+        var found = TryResolveAprFilepathCore(ctx, pathListAddress, index, out guestPath);
+        FileIoProfile.End(FileIoProfile.Op.AprReadPath, profile, failed: !found);
+        return found;
+    }
+
+    private static bool TryResolveAprFilepathCore(CpuContext ctx, ulong pathListAddress, ulong index, out string guestPath)
+    {
         guestPath = string.Empty;
         if (TryReadAprPathPointer(ctx, pathListAddress + (index * sizeof(ulong)), out guestPath))
         {

@@ -39,6 +39,8 @@ internal static class FileIoProfile
         ResolvePath,
         HostStat,
         AprResolveIds,
+        AprReadPath,
+        AprRegister,
         AprFileSize,
         AprFileStat,
         AmprReadFileCmd,
