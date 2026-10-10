@@ -2,6 +2,65 @@
 
 Priority: make all nine games reach a menu or controllable scene first; performance and visual polish follow entry.
 
+Current candidate qualification (R13): test-only successor `4087f2c7` passes
+all three fresh builds, all 182 focused and 1,428 ordinary cases per actual
+ARM64/X64 CLR, and all 44 separately activated metadata cases in four fresh
+workers. The corrected added-association case passes on both runtimes and
+asserts rejection before the final Boolean watch query. ROOT verifies the
+94-artifact managed checkpoint and 126-artifact cumulative metadata checkpoint,
+2,066 unchanged source files, 245 compiled files, 59 preparation pins, exact
+TRX inventories and actual runtime architectures, plus fresh absence of all 48
+recorded roots, heavy workers and shared lease. The sticky managed cleanup case
+has no native authority. All four selected X64 Metal workers pass in global
+plan positions 17/35/44/37. ROOT verifies all 39 native artifacts and all 55
+preparation pins, the exact native plan/TRX/runtime/cleanup receipts, and fresh
+absence of all 12 recorded roots, heavy workers and shared lease. The other
+242 native rows remain unrun. Local ad-hoc publication passes: ROOT verifies
+all 13 publication artifacts, 60 preparation pins, 239 actual app files and
+their recorded modes/symlinks, clean `4087f2c7` build information, and fresh
+absence of both publication roots, heavy workers and shared lease. The app
+uses osx-x64, Metal, AppKit, GameController and CoreAudio. Games remain unrun on
+this candidate; fresh DS180 and Poppy180 companions are being finalized.
+Build checkpoint: `05866ad8c8ede4a593dac2f33add2910740c9122efa930187c12b069092e928a`.
+Managed checkpoint: `e6be381eaedaae61395c579840bcf2df2ad9c262958028bbc9e1119ca7fb2284`.
+Metadata checkpoint: `4e3da298592445ddd6b53522481d3e776c32cdbc9a1cf710d3164660f2df1e76`.
+Native checkpoint: `352695a4a6048ca188d1d3403766e08c31e6ab206bb6691cb0b79b683f4a5859`.
+Publication checkpoint: `e84d7533b1a8321bd10da896cfac9a807c358e83fa6f8e99f0e9d3a4a5832e6e`.
+
+Previous candidate qualification (R12): `77e6cbef` passes all three fresh builds,
+all 182 focused and all 1,428 ordinary cases on each actual ARM64/X64 .NET
+10.0.3 runtime. ROOT independently verifies all 94 managed checkpoint artifacts,
+2,066 source files, 245 compiled files, 55 preparation pins, the ten exact
+Passed TRX inventories (364 focused and 2,856 ordinary executions), and fresh
+absence of all 36 recorded roots. Qualification stops at the first activated
+metadata worker: 20/21 pass, while `association-added` reports expected 1,
+actual 2. The other three metadata workers and all native, publication and game
+phases remain unrun. ROOT verifies all 103 failure artifacts, unchanged source
+and binaries, exact failed TRX, and fresh absence of all 39 recorded roots,
+heavy workers and the shared lease. Failure checkpoint:
+`b347bd9654548f691a493a4f372d01722638156c5345b27862ac396b6a4122c7`.
+Independent source reviews identify an incorrect status-query expectation:
+the added alias leaves the saved original intact, the original watch changes
+from Busy to Current on query two, and the final frozen-original guard then
+rejects the added alias before any Boolean watch query or Metal effect. A
+test-only successor `4087f2c7` corrects the count and asserts the exact refusal;
+its execution is pending. ROOT verifies its 12 archive payloads and all 2,066
+live/archived source hashes, with only the reviewed test file differing from
+`77e6cbef`. Production behavior is unchanged by that correction.
+Build checkpoint: `540ae95c45f2c051a7b48c82ddc47d9196811985125d2a5191748f85441b399d`.
+Managed checkpoint: `343a255085c72971f8c6ac3dbcd65035a9db315f72c58317f2f4ed2fb05251b9`.
+ARM64 managed tests do not claim ARM64 guest CPU execution.
+
+R13 preparation for `4087f2c7` is frozen at
+`f282ea55f1e5378205172a4b8ea85d91baab0495c964869c136f634638aad622`.
+Fresh managed/metadata validation passes with the same 1,428/182/22 case inventories.
+The unused R12 native/publisher source packs retained the older `351c3c1c`
+archive-hash assertion despite their updated source paths. This source-pin
+omission was missed in ROOT's retarget review and found before any native or
+publication execution. R13 corrects that literal to its exact `4087f2c7`
+archive; cleanup and execution mechanisms stay unchanged. Frozen R12 packs
+remain retained and unexecuted.
+
 Current qualification (R11): fixture-isolation successor `351c3c1c` passes all
 three fresh builds, all 109 focused cases and all 1,355 ordinary cases per
 actual ARM64 and X64 .NET 10.0.3 runtime. This includes the former R10 failure;
@@ -93,20 +152,26 @@ The Superliminal archive also records a separate library GUI opened by ROOT's
 post-exit UI inspection; it was absent before the next run. It was not the
 game process or the source of that game's earlier failure.
 The promised DS/Void batch is now terminal. The next isolated combined SOURCE
-candidate is `7b253fd7`, in `root-game-entry-successor`: Oregon's same-query
+candidate is `77e6cbef`, in `root-game-entry-successor`: Oregon's same-query
 watch-owner donor `dd9fd890`, Poppy's raw-trap donor `2a919bd1`, Superliminal's
-same-return publication-preparation attribution `6d8f0693`, and DS's bounded
-same-original ordinary-writer continuation `fb8ed6a3`. The DS donor also names
+same-return publication-preparation attribution `6d8f0693`, DS's bounded
+same-original ordinary-writer continuation `fb8ed6a3`, and Silent Hill's
+same-query post-copy watch attribution `3011385b`. The DS donor also names
 Octopath's first admission predicate and retains strict final-gap refusal.
 All donors passed source review and are committed locally. This combined
-candidate has not been built, tested, published or replayed. Its 22 selected
+candidate passes fresh R12 build and managed qualification; separately activated
+metadata qualification stops at the failure recorded above, with no publication
+or game replay yet. The frozen preparation
+manifest is `4cdc1ab041e68ccdd452143ea83c86c0f842ccd30c6feb26c94b025934a61189`,
+covering 2,066 source files, 1,428 ordinary cases and 182 focused cases per
+actual macOS CLR. Its 22 selected
 seed metadata controls remain separately activated, with positive cases grouped
 per CLR and one sticky unknown-cleanup case isolated per CLR. Historical native
 fixtures and their 246 identities remain unchanged; actual selected-four Metal
 qualification will be repeated. Quake's fresh 600-second companion is prepared
 but unrun; Poppy waits for qualification of the raw-trap diagnostic.
-Production code is unchanged
-from the four-fix `638c3bdf` candidate; local main still uses `e2535177`.
+The currently published R11 app's production code is unchanged from the
+four-fix `638c3bdf` candidate; local main still uses `e2535177`.
 
 Previous qualification (R10): test-only successor `18d90e23` passes all three
 builds and all 108 focused cases on each actual CLR. ARM64 ordinary Host passes
