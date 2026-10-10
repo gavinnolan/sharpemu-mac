@@ -76,6 +76,7 @@ internal sealed class MetalV2Backend : IGuestGpuBackend
             return false;
         }
 
+        Interlocked.Increment(ref _flipSubmissions);
         // The flip queues behind the graphics submissions before it.
         var stream = MetalV2Presenter.Host.CommandStream;
         if (!stream.TryEnqueueFlipPreparation(videoOutHandle, displayBufferIndex, flipRequestId))
@@ -121,7 +122,50 @@ internal sealed class MetalV2Backend : IGuestGpuBackend
             return IdleOutcome.Cancelled;
         }
 
-        return MetalV2Presenter.IsStarted ? MetalV2Presenter.Host.CommandStream.Done() : IdleOutcome.Completed;
+        if (!MetalV2Presenter.IsStarted)
+        {
+            return IdleOutcome.Completed;
+        }
+
+        // The guest's own view of the backend: how long its frame boundary blocks.
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var outcome = MetalV2Presenter.Host.CommandStream.Done();
+        ReportGuestWait(System.Diagnostics.Stopwatch.GetTimestamp() - started);
+        return outcome;
+    }
+
+    private static long _flipSubmissions;
+    private static long _doneCalls;
+    private static long _doneTicks;
+    private static long _doneStatsTimestamp;
+
+    private static void ReportGuestWait(long ticks)
+    {
+        Interlocked.Increment(ref _doneCalls);
+        Interlocked.Add(ref _doneTicks, ticks);
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        var previous = Volatile.Read(ref _doneStatsTimestamp);
+        if (previous == 0)
+        {
+            Interlocked.CompareExchange(ref _doneStatsTimestamp, now, 0);
+            return;
+        }
+
+        if (now - previous < 2 * System.Diagnostics.Stopwatch.Frequency ||
+            Interlocked.CompareExchange(ref _doneStatsTimestamp, now, previous) != previous)
+        {
+            return;
+        }
+
+        var calls = Interlocked.Exchange(ref _doneCalls, 0);
+        var waited = Interlocked.Exchange(ref _doneTicks, 0);
+        var seconds = (now - previous) / (double)System.Diagnostics.Stopwatch.Frequency;
+        var culture = System.Globalization.CultureInfo.InvariantCulture;
+        var waitMs = (waited * 1000.0 / System.Diagnostics.Stopwatch.Frequency).ToString("F1", culture);
+        var flips = Interlocked.Exchange(ref _flipSubmissions, 0);
+        Console.Error.WriteLine(
+            $"[METAL-V2][GUEST] seconds={seconds.ToString("F2", culture)} submit_done={calls} " +
+            $"submit_done_wait_ms={waitMs} flip_submissions={flips}");
     }
 
     public void RunAfterPendingCommandStreams(Action work)

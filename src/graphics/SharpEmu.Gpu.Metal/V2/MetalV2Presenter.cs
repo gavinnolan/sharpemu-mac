@@ -23,7 +23,6 @@ namespace SharpEmu.Gpu.Metal.V2;
 internal static class MetalV2Presenter
 {
     private const ulong PixelFormatBgra8Unorm = 80;
-    private const int MaxPendingFlips = 3;
 
     private static readonly object _gate = new();
     private static readonly object _frameGate = new();
@@ -54,7 +53,6 @@ internal static class MetalV2Presenter
     private static uint _pendingHeight;
     private static ulong _pendingRequestId;
     private static ulong _pendingSerial;
-    private static int _pendingCount;
     private static nint _presentTexture;
     private static uint _presentWidth;
     private static uint _presentHeight;
@@ -66,6 +64,8 @@ internal static class MetalV2Presenter
     private static uint _hostFrameHeight;
     private static long _guestFrameSequence;
     private static long _presentedGuestFrames;
+    private static long _publishedGuestFrames;
+    private static long _adoptionsBlocked;
     private static long _hostPresents;
     private static long _statsTimestamp;
 
@@ -282,6 +282,7 @@ internal static class MetalV2Presenter
     private static void RunWorker()
     {
         var host = _host!;
+        _ = SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
         _relay!.BindCurrentThread();
         try
         {
@@ -292,7 +293,9 @@ internal static class MetalV2Presenter
                 host.ReportCounters();
                 if (!host.CommandStream.HasUnblockedPending && !_relay.HasPendingCommands)
                 {
+                    var idleStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                     _ = host.CommandStream.WaitForWork(CommandStreamQueue.AllBlockedRetryMilliseconds);
+                    host.NoteIdle(System.Diagnostics.Stopwatch.GetTimestamp() - idleStarted);
                 }
             }
         }
@@ -495,48 +498,56 @@ internal static class MetalV2Presenter
     }
 
     // A published flip becomes the presented frame once its submission completes.
+    // Promotion also happens on publication, so a frame that finished while the guest
+    // was already drawing the next one is still shown instead of being replaced
+    // unseen: with one slot and a completion wait, the newest frame is never ready
+    // and the display starves.
     private static void AdoptPendingFrame()
     {
-        nint texture;
-        uint width;
-        uint height;
-        ulong requestId;
         lock (_frameGate)
         {
-            if (_pendingTexture == 0)
+            if (!TryPromotePendingLocked())
             {
-                return;
+                Interlocked.Increment(ref _adoptionsBlocked);
             }
+        }
+    }
 
-            var host = Volatile.Read(ref _host);
-            if (host is not null && host.Completions.SignaledValue < _pendingSerial)
-            {
-                return;
-            }
-
-            texture = _pendingTexture;
-            width = _pendingWidth;
-            height = _pendingHeight;
-            requestId = _pendingRequestId;
-            _pendingTexture = 0;
-            _pendingRequestId = 0;
-            _pendingCount = Math.Max(_pendingCount - 1, 0);
+    // Caller holds the frame gate. Moves the pending frame into the presented slot
+    // when the GPU has finished the submission that drew it.
+    private static bool TryPromotePendingLocked()
+    {
+        if (_pendingTexture == 0)
+        {
+            return false;
         }
 
+        var host = Volatile.Read(ref _host);
+        if (host is not null && host.Completions.SignaledValue < _pendingSerial)
+        {
+            return false;
+        }
+
+        var texture = _pendingTexture;
+        var requestId = _pendingRequestId;
+        _pendingTexture = 0;
+        _pendingRequestId = 0;
         if (_presentTexture != 0 && _presentTexture != texture)
         {
             MetalNative.SendVoid(_presentTexture, MetalNative.Selector("release"));
         }
 
         _presentTexture = texture;
-        _presentWidth = width;
-        _presentHeight = height;
+        _presentWidth = _pendingWidth;
+        _presentHeight = _pendingHeight;
         Interlocked.Increment(ref _presentedGuestFrames);
         PerfOverlay.RecordGuestPresent();
         if (requestId != 0)
         {
             VideoOutBackendServices.MarkFlipPresented(requestId);
         }
+
+        return true;
     }
 
     private static unsafe void UploadPendingHostFrame()
@@ -780,21 +791,20 @@ internal static class MetalV2Presenter
         var guestFps = (guestFrames / seconds).ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
         var hostHz = (hostPresents / seconds).ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
         var window = seconds.ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
+        var published = Interlocked.Exchange(ref _publishedGuestFrames, 0);
+        var blocked = Interlocked.Exchange(ref _adoptionsBlocked, 0);
         Console.Error.WriteLine(
             $"[METAL-PRESENT] guest_frames={guestFrames} guest_fps={guestFps} host_presents={hostPresents} " +
-            $"host_hz={hostHz} seconds={window}");
+            $"host_hz={hostHz} seconds={window} published={published} adopt_blocked={blocked}");
     }
 
     // The flip seam the command stream publishes through.
     private sealed class FlipTarget : IMetalFlipTarget
     {
-        public bool HasFlipSlot()
-        {
-            lock (_frameGate)
-            {
-                return _pendingCount < MaxPendingFlips;
-            }
-        }
+        // The presenter holds one frame: a newer one replaces it and the replaced
+        // frame retires at once, so a flip never has to wait for a slot. Throttling
+        // the guest to the display is video-out's job, not the renderer's.
+        public bool HasFlipSlot() => true;
 
         public void PublishGuestFrame(nint texture, uint width, uint height, ulong requestId, ulong serial, bool isHdr)
         {
@@ -805,6 +815,9 @@ internal static class MetalV2Presenter
             ulong discarded;
             lock (_frameGate)
             {
+                // Show the frame already waiting before replacing it; otherwise a guest
+                // that flips faster than the display never has a completed frame to show.
+                _ = TryPromotePendingLocked();
                 replaced = _pendingTexture;
                 discarded = _pendingRequestId;
                 _pendingTexture = texture;
@@ -812,11 +825,11 @@ internal static class MetalV2Presenter
                 _pendingHeight = height;
                 _pendingRequestId = requestId;
                 _pendingSerial = serial;
-                _pendingCount = Math.Min(_pendingCount + 1, MaxPendingFlips);
                 _splashHidden = true;
             }
 
             Interlocked.Increment(ref _guestFrameSequence);
+            Interlocked.Increment(ref _publishedGuestFrames);
             if (replaced != 0)
             {
                 MetalNative.SendVoid(replaced, MetalNative.Selector("release"));

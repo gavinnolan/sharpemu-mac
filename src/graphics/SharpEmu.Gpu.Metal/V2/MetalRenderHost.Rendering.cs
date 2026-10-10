@@ -71,6 +71,22 @@ internal sealed partial class MetalRenderHost
 
     private nint _renderEncoder;
     private nint _computeEncoder;
+    private long _renderPasses;
+    private long _passEndClear;
+    private long _passEndTarget;
+    private long _passEndTransfer;
+    private long _passEndCompute;
+    private long _targetlessPasses;
+
+    internal (long Clear, long Target, long Transfer, long Compute, long Targetless) TakePassBreakdown()
+    {
+        var clear = Interlocked.Exchange(ref _passEndClear, 0);
+        var target = Interlocked.Exchange(ref _passEndTarget, 0);
+        var transfer = Interlocked.Exchange(ref _passEndTransfer, 0);
+        var compute = Interlocked.Exchange(ref _passEndCompute, 0);
+        var targetless = Interlocked.Exchange(ref _targetlessPasses, 0);
+        return (clear, target, transfer, compute, targetless);
+    }
     private bool _renderingActive;
     private RenderingState _renderingState;
     private nint _boundComputePipeline;
@@ -94,11 +110,88 @@ internal sealed partial class MetalRenderHost
     private uint _depthAttachmentLevel;
     private uint _depthAttachmentSlice;
 
+    // The subresources the open pass was created with, so the next draw can tell
+    // whether it renders into the very same attachments.
+    private readonly uint[] _passLevels = new uint[MaxColorAttachments];
+    private readonly uint[] _passSlices = new uint[MaxColorAttachments];
+    private readonly uint[] _passDepthPlanes = new uint[MaxColorAttachments];
+    private int _passAttachmentCount;
+    private uint _passDepthLevel;
+    private uint _passDepthSlice;
+
+    /// <summary>
+    /// Whether the next draw can keep the open render pass. Only what Metal bakes
+    /// into the pass matters: the attachments, their subresources, the render area
+    /// and whether a load clear has to happen. The shared RenderingState also
+    /// carries the clear values of attachments that are not being cleared, and
+    /// comparing those would end the pass between ordinary draws — which on a
+    /// tile-based GPU means storing and reloading the whole framebuffer each time.
+    /// </summary>
+    private bool CanContinuePass(in RenderingState state)
+    {
+        if (!_renderingActive || _renderEncoder == 0 ||
+            state.ColorAttachmentCount != _renderingState.ColorAttachmentCount ||
+            state.Width != _renderingState.Width || state.Height != _renderingState.Height ||
+            state.Layers != _renderingState.Layers || state.Samples != _renderingState.Samples ||
+            _attachmentCount != _passAttachmentCount)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < state.ColorAttachmentCount; index++)
+        {
+            ref readonly var next = ref state.ColorAttachments[index];
+            ref readonly var open = ref _renderingState.ColorAttachments[index];
+            if (next.IsClear || next.View.Handle != open.View.Handle || next.Format != open.Format)
+            {
+                return false;
+            }
+
+            if (index < _attachmentCount &&
+                (_attachmentLevels[index] != _passLevels[index] ||
+                 _attachmentSlices[index] != _passSlices[index] ||
+                 _attachmentDepthPlanes[index] != _passDepthPlanes[index]))
+            {
+                return false;
+            }
+        }
+
+        ref readonly var nextDepth = ref state.DepthStencilAttachment;
+        ref readonly var openDepth = ref _renderingState.DepthStencilAttachment;
+        if (nextDepth.DepthClear || nextDepth.StencilClear ||
+            nextDepth.View.Handle != openDepth.View.Handle ||
+            nextDepth.HasDepth != openDepth.HasDepth || nextDepth.HasStencil != openDepth.HasStencil)
+        {
+            return false;
+        }
+
+        return nextDepth.View.Handle == 0 ||
+            (_depthAttachmentLevel == _passDepthLevel && _depthAttachmentSlice == _passDepthSlice);
+    }
+
     public void BeginRendering(in RenderingState state)
     {
-        if (_renderingActive && _renderingState == state)
+        if (CanContinuePass(in state))
         {
             return;
+        }
+
+        if (_renderingActive)
+        {
+            var clears = state.DepthStencilAttachment.DepthClear || state.DepthStencilAttachment.StencilClear;
+            for (var index = 0; index < state.ColorAttachmentCount && !clears; index++)
+            {
+                clears |= state.ColorAttachments[index].IsClear;
+            }
+
+            if (clears)
+            {
+                _passEndClear++;
+            }
+            else
+            {
+                _passEndTarget++;
+            }
         }
 
         EndRendering();
@@ -165,12 +258,17 @@ internal sealed partial class MetalRenderHost
                 }
             }
 
-            // A draw without attachments still rasterizes (its stores are the output),
-            // and Metal needs the render area stated explicitly for that case.
+            // A draw without attachments reaches the executor only when it has no
+            // pixel stage: its output is what the vertex stage stores, and no
+            // fragment ever runs. The shared state still asks for the maximum
+            // framebuffer, and a tile-based GPU would walk every one of a
+            // 16384x16384 area's tiles for it, so the pass takes the smallest area
+            // Metal accepts.
             if (state.ColorAttachmentCount == 0 && !depthStencil.HasDepth && !depthStencil.HasStencil)
             {
-                MetalV2Native.SendVoidValue(descriptor, SelSetRenderTargetWidth, Math.Min(state.Width, 16384));
-                MetalV2Native.SendVoidValue(descriptor, SelSetRenderTargetHeight, Math.Min(state.Height, 16384));
+                MetalV2Native.SendVoidValue(descriptor, SelSetRenderTargetWidth, 1);
+                MetalV2Native.SendVoidValue(descriptor, SelSetRenderTargetHeight, 1);
+                _targetlessPasses++;
             }
 
             if (state.Layers > 1)
@@ -194,6 +292,24 @@ internal sealed partial class MetalRenderHost
         _renderingActive = true;
         _renderingState = state;
         _boundGraphicsPipeline = null;
+        _renderPasses++;
+        if (MetalV2Diagnostics.Verbose || _renderPasses < 4096)
+        {
+            var first = state.ColorAttachmentCount != 0 ? state.ColorAttachments[0] : default;
+            ref readonly var passDepth = ref state.DepthStencilAttachment;
+            MetalV2Diagnostics.InfoOnce(
+                $"pass:{state.Width}x{state.Height}:{state.Samples}:{state.ColorAttachmentCount}:" +
+                $"{(int)first.Format}:{first.IsClear}:{passDepth.HasDepth}:{passDepth.DepthClear}",
+                $"render pass {state.Width}x{state.Height} samples={state.Samples} layers={state.Layers} " +
+                $"colors={state.ColorAttachmentCount} format={(int)first.Format} clear={first.IsClear} " +
+                $"depth={passDepth.HasDepth} depth_clear={passDepth.DepthClear} stencil={passDepth.HasStencil}.");
+        }
+        _passAttachmentCount = _attachmentCount;
+        Array.Copy(_attachmentLevels, _passLevels, MaxColorAttachments);
+        Array.Copy(_attachmentSlices, _passSlices, MaxColorAttachments);
+        Array.Copy(_attachmentDepthPlanes, _passDepthPlanes, MaxColorAttachments);
+        _passDepthLevel = _depthAttachmentLevel;
+        _passDepthSlice = _depthAttachmentSlice;
     }
 
     private static MtlClearColor ClearColorOf(in RenderingAttachment attachment) => new()
@@ -239,6 +355,11 @@ internal sealed partial class MetalRenderHost
         if (_computeEncoder != 0)
         {
             return _computeEncoder;
+        }
+
+        if (_renderingActive)
+        {
+            _passEndCompute++;
         }
 
         EndRendering();
@@ -540,7 +661,7 @@ internal sealed partial class MetalRenderHost
 
     private void RecordMemoryBarrier()
     {
-        const nuint scope = Mtl.BarrierScopeBuffers | Mtl.BarrierScopeTextures;
+        const nuint scope = Mtl.BarrierScopeBuffers | Mtl.BarrierScopeTextures | Mtl.BarrierScopeRenderTargets;
         if (_renderEncoder != 0)
         {
             MetalV2Native.SendMemoryBarrierStages(
@@ -558,9 +679,21 @@ internal sealed partial class MetalRenderHost
         }
     }
 
-    /// <summary>A guest barrier that spans encoders: the open encoder closes.</summary>
+    /// <summary>
+    /// A guest cache flush. Ending the render pass here would store and reload the
+    /// whole attachment on a tile-based GPU, which is what the guest's per-draw
+    /// barriers would cost; a scoped memory barrier on the open encoder expresses
+    /// the same ordering without leaving the pass. Only a barrier with no encoder
+    /// open has nothing to attach to, and then there is nothing to order either.
+    /// </summary>
     public void EmitGlobalBarrier()
     {
+        if (_renderEncoder != 0 || _computeEncoder != 0)
+        {
+            RecordMemoryBarrier();
+            return;
+        }
+
         EndRendering();
         EndComputeEncoder();
     }

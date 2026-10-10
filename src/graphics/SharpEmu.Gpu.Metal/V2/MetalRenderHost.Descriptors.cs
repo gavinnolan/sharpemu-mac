@@ -692,6 +692,16 @@ internal sealed partial class MetalRenderHost
         {
             BindStageBuffers(_renderEncoder, StageVertex, SelSetVertexBuffer);
             BindStageBuffers(_renderEncoder, StageFragment, SelSetFragmentBuffer);
+            foreach (var window in _guestMemory.ResidentBuffers)
+            {
+                MetalNative.SendUseResource(
+                    _renderEncoder,
+                    SelUseResourceStages,
+                    window,
+                    Mtl.ResourceUsageRead | Mtl.ResourceUsageWrite,
+                    Mtl.RenderStageVertex | Mtl.RenderStageFragment);
+            }
+
             for (var index = 0; index < _usedResourceCount; index++)
             {
                 MetalNative.SendUseResource(
@@ -706,6 +716,12 @@ internal sealed partial class MetalRenderHost
         }
 
         BindStageBuffers(_computeEncoder, StageCompute, SelSetComputeBuffer);
+        foreach (var window in _guestMemory.ResidentBuffers)
+        {
+            MetalNative.SendUseResourceUsage(
+                _computeEncoder, SelUseResourceUsage, window, Mtl.ResourceUsageRead | Mtl.ResourceUsageWrite);
+        }
+
         for (var index = 0; index < _usedResourceCount; index++)
         {
             MetalNative.SendUseResourceUsage(

@@ -28,6 +28,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     private IMetalFlipTarget? _flipTarget;
     private long _lastProgressTicks;
     private ulong _submissionsStarted;
+    private ulong _endOfPipeRecords;
+    private ulong _frameBoundaries;
 
     private static readonly long _blockedRetryTicks =
         CommandStreamQueue.AllBlockedRetryMilliseconds * System.Diagnostics.Stopwatch.Frequency / 1000L;
@@ -55,7 +57,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         _translation!.BeginSubmission(queueId, submissionId, geometrySnapshots, CommandStream.GetInterpreter(queueId));
     }
 
-    void ICommandStreamHost.Flush() => FlushCommandBuffer();
+    void ICommandStreamHost.Flush()
+    {
+        _frameBoundaries++;
+        FlushCommandBuffer();
+    }
 
     void ICommandStreamHost.FlushAndWait() => FlushAndWaitForGpu();
 
@@ -151,6 +157,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     // orders. A completion is therefore always paired with a flush.
     public void RecordEndOfPipe(in EndOfPipeWrite write)
     {
+        _endOfPipeRecords++;
         var eventId = write.EventId;
         var contextId = write.ContextId;
         var requestId = write.FlipRequestId;
@@ -186,8 +193,25 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     private void QueueCompletion(Action work)
     {
         var serial = SubmissionSerial;
-        _completions.Enqueue(serial, work);
+        var queued = System.Diagnostics.Stopwatch.GetTimestamp();
+        _completions.Enqueue(serial, () =>
+        {
+            Interlocked.Add(ref _completionLatencyTicks, System.Diagnostics.Stopwatch.GetTimestamp() - queued);
+            Interlocked.Increment(ref _completionCount);
+            work();
+        });
         FlushCommandBuffer();
+    }
+
+    private long _completionLatencyTicks;
+    private long _completionCount;
+
+    /// <summary>How long end-of-pipe completions waited for the GPU since the last read.</summary>
+    public (long Count, double Milliseconds) TakeCompletionLatency()
+    {
+        var count = Interlocked.Exchange(ref _completionCount, 0);
+        var ticks = Interlocked.Exchange(ref _completionLatencyTicks, 0);
+        return (count, ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
     }
 
     private readonly EndOfPipeEvents _endOfPipeEvents = new();

@@ -58,6 +58,11 @@ internal sealed partial class MetalRenderHost :
     private readonly MetalCompletionQueue _completions;
 
     private nint _commandBuffer;
+    private nint _previousCommandBuffer;
+    private ulong _previousSerial;
+    private long _failedSubmissions;
+    private double _gpuBusySeconds;
+    private long _gpuBusySamples;
     private ulong _submissionSerial;
     private ulong _nextSerial;
     private long _recordedCommands;
@@ -71,6 +76,7 @@ internal sealed partial class MetalRenderHost :
     private long _flushes;
     private long _gpuWaits;
     private long _gpuWaitTicks;
+    private long _idleTicks;
     private long _statsTimestamp;
     private bool _disposed;
 
@@ -111,6 +117,8 @@ internal sealed partial class MetalRenderHost :
     nint IMetalSubmissionContext.Device => _device;
 
     nint IMetalImageCacheOwner.Device => _device;
+
+    ulong IMetalImageCacheOwner.CurrentSerial => SubmissionSerial;
 
     public nint CommandBuffer => EnsureCommandBuffer();
 
@@ -179,6 +187,7 @@ internal sealed partial class MetalRenderHost :
     {
         if (_renderEncoder != 0)
         {
+            _passEndTransfer++;
             EndRendering();
         }
 
@@ -202,12 +211,61 @@ internal sealed partial class MetalRenderHost :
         var serial = _submissionSerial;
         MetalV2Native.SendEventValue(_commandBuffer, SelEncodeSignalEvent, _sharedEvent, serial);
         MetalNative.SendVoid(_commandBuffer, SelCommit);
-        MetalNative.SendVoid(_commandBuffer, SelRelease);
+        // A command buffer that fails never signals its serial, and the completion
+        // queue would then wait out its timeout on every submission behind it. The
+        // previous buffer is far enough ahead to have a status by now, so checking
+        // it here costs one message send and turns a silent stall into a message.
+        ReportSubmissionFailure();
+        _previousCommandBuffer = _commandBuffer;
+        _previousSerial = serial;
         _commandBuffer = 0;
         _recordedCommands = 0;
         Interlocked.Increment(ref _flushes);
         _completions.Publish(serial);
         return serial;
+    }
+
+    // MTLCommandBufferStatus.
+    private const nuint CommandBufferStatusCompleted = 4;
+    private const nuint CommandBufferStatusError = 5;
+
+    private static readonly nint SelGpuStartTime = MetalNative.Selector("GPUStartTime");
+    private static readonly nint SelGpuEndTime = MetalNative.Selector("GPUEndTime");
+
+    private void ReportSubmissionFailure()
+    {
+        if (_previousCommandBuffer == 0)
+        {
+            return;
+        }
+
+        var buffer = _previousCommandBuffer;
+        var serial = _previousSerial;
+        _previousCommandBuffer = 0;
+        var status = MetalV2Native.SendValue(buffer, MetalNative.Selector("status"));
+        if (status == CommandBufferStatusError)
+        {
+            Interlocked.Increment(ref _failedSubmissions);
+            var error = MetalNative.Send(buffer, MetalNative.Selector("error"));
+            MetalV2Diagnostics.WarnOnce(
+                "submission-failed",
+                $"A Metal submission failed and will never signal its serial: serial={serial} " +
+                $"{MetalNative.DescribeError(error)}");
+        }
+        else if (status == CommandBufferStatusCompleted)
+        {
+            // The GPU's own execution time, which separates "the GPU is saturated"
+            // from "the completion took a long time to reach this thread".
+            var start = MetalNative.SendDouble(buffer, SelGpuStartTime);
+            var end = MetalNative.SendDouble(buffer, SelGpuEndTime);
+            if (end > start)
+            {
+                _gpuBusySeconds += end - start;
+                _gpuBusySamples++;
+            }
+        }
+
+        MetalNative.SendVoid(buffer, SelRelease);
     }
 
     /// <summary>Commits the current command buffer and waits for the GPU to finish it.</summary>
@@ -221,6 +279,9 @@ internal sealed partial class MetalRenderHost :
         _guestMemory.NoteCompleted(serial);
         _gpuWroteGuestMemory = false;
     }
+
+    /// <summary>Counts the time the worker spent with nothing runnable.</summary>
+    public void NoteIdle(long ticks) => Interlocked.Add(ref _idleTicks, ticks);
 
     /// <summary>Recorded work may now store into guest memory.</summary>
     public void NoteGuestMemoryWrite() => _gpuWroteGuestMemory = true;
@@ -524,7 +585,11 @@ internal sealed partial class MetalRenderHost :
 
     public void CountShaderCompilation() => Interlocked.Increment(ref _shaderCompilations);
 
-    /// <summary>One periodic line with everything the v2 host counts; cheap to read.</summary>
+    /// <summary>
+    /// One periodic line of host counters. The compact form is always printed; the
+    /// render-pass breakdown and the completion timings that found the residency-set
+    /// stall follow it under SHARPEMU_METAL_V2_TRACE=1.
+    /// </summary>
     public void ReportCounters()
     {
         var now = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -544,19 +609,47 @@ internal sealed partial class MetalRenderHost :
         var draws = Interlocked.Exchange(ref _drawCount, 0);
         var drawTicks = Interlocked.Exchange(ref _drawTicks, 0);
         var flushes = Interlocked.Exchange(ref _flushes, 0);
+        var passes = Interlocked.Exchange(ref _renderPasses, 0);
+        var gpuBusyMs = _gpuBusySeconds * 1000.0;
+        var gpuBusySamples = _gpuBusySamples;
+        _gpuBusySeconds = 0;
+        _gpuBusySamples = 0;
         var waits = Interlocked.Exchange(ref _gpuWaits, 0);
         var waitTicks = Interlocked.Exchange(ref _gpuWaitTicks, 0);
+        var idleTicks = Interlocked.Exchange(ref _idleTicks, 0);
         var pipelines = Interlocked.Exchange(ref _pipelineCreations, 0);
+        var failed = Interlocked.Exchange(ref _failedSubmissions, 0);
+        var (completions, completionMs) = TakeCompletionLatency();
         var (created, uploads, writebacks, evictions) = _imageCache.Counters;
         var culture = System.Globalization.CultureInfo.InvariantCulture;
-        var drawMs = (drawTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency).ToString("F1", culture);
-        var waitMs = (waitTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency).ToString("F1", culture);
+        var frequency = System.Diagnostics.Stopwatch.Frequency;
         Console.Error.WriteLine(
             $"[METAL-V2][PERF] seconds={seconds.ToString("F2", culture)} submissions={_submissionsStarted} " +
-            $"draws={draws} draw_ms={drawMs} flushes={flushes} gpu_waits={waits} gpu_wait_ms={waitMs} " +
-            $"pipelines={pipelines} images={_imageCache.ImageCount} created={created} uploads={uploads} " +
-            $"writebacks={writebacks} evictions={evictions} image_mb={_imageCache.TotalUsedMemory / (1024 * 1024)} " +
-            $"ring_fallbacks={_guestMemory.RingFallbacks}");
+            $"draws={draws} passes={passes} flushes={flushes} " +
+            $"draw_ms={(drawTicks * 1000.0 / frequency).ToString("F1", culture)} " +
+            $"gpu_busy_ms={gpuBusyMs.ToString("F1", culture)} " +
+            $"completions={completions} completion_ms={completionMs.ToString("F1", culture)} " +
+            $"host_waits={waits} host_wait_ms={(waitTicks * 1000.0 / frequency).ToString("F1", culture)} " +
+            $"idle_ms={(idleTicks * 1000.0 / frequency).ToString("F0", culture)} pipelines={pipelines} " +
+            $"images={_imageCache.ImageCount} image_mb={_imageCache.TotalUsedMemory / (1024 * 1024)} " +
+            $"uploads={uploads} writebacks={writebacks} evictions={evictions} failed={failed}");
+        if (!MetalV2Diagnostics.Verbose)
+        {
+            return;
+        }
+
+        var (endClear, endTarget, endTransfer, endCompute, targetless) = TakePassBreakdown();
+        var (eventReady, eventWaited, eventWaitMs, eventWakeMs) = _completions.TakeWaitProfile();
+        var blocked = CommandStream.SnapshotBlocked();
+        Console.Error.WriteLine(
+            $"[METAL-V2][TRACE] created={created} end_clear={endClear} end_target={endTarget} " +
+            $"end_transfer={endTransfer} end_compute={endCompute} targetless={targetless} " +
+            $"gpu_busy_n={gpuBusySamples} event_ready={eventReady} event_waited={eventWaited} " +
+            $"event_wait_ms={eventWaitMs.ToString("F1", culture)} " +
+            $"event_wake_ms={eventWakeMs.ToString("F1", culture)} " +
+            $"slices={CommandStream.SlicesRun} blocked={blocked.Outstanding} " +
+            $"blocked_wait=0x{blocked.SampleWaitAddress:X16} " +
+            $"ring_fallbacks={_guestMemory.RingFallbacks} ring_mb={_guestMemory.RingFallbackBytes / (1024 * 1024)}");
     }
 
     public Exception Fatal(string message) => GpuFatal.Fatal(message);
@@ -579,6 +672,8 @@ internal sealed partial class MetalRenderHost :
                 MetalNative.SendVoid(_commandBuffer, SelRelease);
                 _commandBuffer = 0;
             }
+
+            ReportSubmissionFailure();
         }
         catch (Exception exception)
         {

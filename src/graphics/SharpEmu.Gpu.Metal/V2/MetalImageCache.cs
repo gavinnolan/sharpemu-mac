@@ -17,6 +17,10 @@ internal interface IMetalImageCacheOwner
 {
     nint Device { get; }
 
+    // The serial of the command buffer being recorded, without touching its
+    // encoders: noting that an image is GPU-written must not end the render pass.
+    ulong CurrentSerial { get; }
+
     // Ends any open encoder and hands over the command buffer being recorded.
     IMetalSubmissionContext BeginTransfer();
 
@@ -247,7 +251,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             RefreshFromGuest(image);
             image.Uses.Storage = true;
             image.MarkGpuModified();
-            image.GpuWriteSerial = _owner.BeginTransfer().SubmissionSerial;
+            image.GpuWriteSerial = _owner.CurrentSerial;
         }
         else
         {
@@ -273,7 +277,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         image.MarkGpuModified();
-        image.GpuWriteSerial = _owner.BeginTransfer().SubmissionSerial;
+        image.GpuWriteSerial = _owner.CurrentSerial;
         return image.GetOrCreateView(request.View);
     }
 
@@ -297,7 +301,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         image.MarkGpuModified();
-        image.GpuWriteSerial = _owner.BeginTransfer().SubmissionSerial;
+        image.GpuWriteSerial = _owner.CurrentSerial;
         return image.GetOrCreateView(request.View);
     }
 
@@ -311,7 +315,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         WatchImage(imageIdentifier);
         image.MarkGpuModified();
-        image.GpuWriteSerial = _owner.BeginTransfer().SubmissionSerial;
+        image.GpuWriteSerial = _owner.CurrentSerial;
     }
 
     public void RefreshImage(ResourceSlotIdentifier imageIdentifier)

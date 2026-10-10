@@ -190,6 +190,10 @@ internal sealed class MetalCompletionQueue : IDisposable
     private readonly Thread _thread;
     private ulong _publishedSerial;
     private ulong _drainedSerial;
+    private long _gpuWaitTicks;
+    private long _gpuWaitSamples;
+    private long _gpuReadySamples;
+    private long _wakeWaitTicks;
     private bool _stopping;
 
     public MetalCompletionQueue(nint sharedEvent)
@@ -229,6 +233,21 @@ internal sealed class MetalCompletionQueue : IDisposable
         }
     }
 
+    /// <summary>
+    /// How this thread spent its time since the last read: how often a submission was
+    /// already signalled when it looked, how long it waited on the event otherwise,
+    /// and how long it waited to be told a submission had been committed.
+    /// </summary>
+    public (long Ready, long Waited, double WaitMilliseconds, double WakeMilliseconds) TakeWaitProfile()
+    {
+        var ready = Interlocked.Exchange(ref _gpuReadySamples, 0);
+        var waited = Interlocked.Exchange(ref _gpuWaitSamples, 0);
+        var waitTicks = Interlocked.Exchange(ref _gpuWaitTicks, 0);
+        var wakeTicks = Interlocked.Exchange(ref _wakeWaitTicks, 0);
+        var frequency = (double)System.Diagnostics.Stopwatch.Frequency;
+        return (ready, waited, waitTicks * 1000.0 / frequency, wakeTicks * 1000.0 / frequency);
+    }
+
     /// <summary>Blocks until the GPU finished the serial and its completions ran.</summary>
     public void WaitFor(ulong serial)
     {
@@ -239,14 +258,7 @@ internal sealed class MetalCompletionQueue : IDisposable
 
         while (SignaledValue < serial)
         {
-            if (!MetalV2Native.SendWaitUntilSignaledValue(
-                    _sharedEvent, SelWaitUntilSignaledValue, serial, WaitTimeoutMilliseconds) &&
-                SignaledValue < serial)
-            {
-                continue;
-            }
-
-            break;
+            WaitForSignal(serial);
         }
 
         lock (_gate)
@@ -273,9 +285,14 @@ internal sealed class MetalCompletionQueue : IDisposable
 
     private void Run()
     {
+        // A completion carries a flip and an interrupt the guest is waiting on, so
+        // the thread is a frame-deadline thread like the worker and the presenter.
+        _ = SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(
+            SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
         while (true)
         {
             ulong target;
+            var wakeStarted = System.Diagnostics.Stopwatch.GetTimestamp();
             lock (_gate)
             {
                 while (!_stopping && (_pending.Count == 0 || MinimumPendingSerial() > _publishedSerial))
@@ -295,13 +312,54 @@ internal sealed class MetalCompletionQueue : IDisposable
                 }
             }
 
+            Interlocked.Add(ref _wakeWaitTicks, System.Diagnostics.Stopwatch.GetTimestamp() - wakeStarted);
             if (SignaledValue < target)
             {
-                _ = MetalV2Native.SendWaitUntilSignaledValue(
-                    _sharedEvent, SelWaitUntilSignaledValue, target, WaitTimeoutMilliseconds);
+                var waitStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+                WaitForSignal(target);
+                Interlocked.Add(ref _gpuWaitTicks, System.Diagnostics.Stopwatch.GetTimestamp() - waitStarted);
+                Interlocked.Increment(ref _gpuWaitSamples);
+            }
+            else
+            {
+                Interlocked.Increment(ref _gpuReadySamples);
             }
 
             Drain(SignaledValue);
+        }
+    }
+
+    // The event carries a flip and the interrupts the guest is waiting on, so the
+    // wait is latency-critical. waitUntilSignaledValue:timeoutMS: measured about
+    // forty-five milliseconds per completion on this host — its full timeout — even
+    // though the value had arrived: it does not wake this process on a GPU signal.
+    // Reading signaledValue does see it, so the wait is a short spin and then a
+    // one-millisecond poll, which is two message sends per millisecond.
+    private void WaitForSignal(ulong target)
+    {
+        var frequency = System.Diagnostics.Stopwatch.Frequency;
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var spinDeadline = started + (frequency / 2000);
+        var pollDeadline = started + (frequency / 4);
+        while (SignaledValue < target)
+        {
+            var now = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (now < spinDeadline)
+            {
+                Thread.SpinWait(32);
+                continue;
+            }
+
+            if (now >= pollDeadline)
+            {
+                // The submission is far later than any frame; let the thread park so
+                // a stuck queue costs nothing, and re-check on the next round.
+                _ = MetalV2Native.SendWaitUntilSignaledValue(
+                    _sharedEvent, SelWaitUntilSignaledValue, target, WaitTimeoutMilliseconds);
+                return;
+            }
+
+            Thread.Sleep(1);
         }
     }
 

@@ -28,6 +28,29 @@ internal sealed class MetalGuestMemory : IDisposable
     private const ulong RingAlignment = 256;
     public const ulong GdsBytes = ManagedCommandStreamHost.GdsBytes;
 
+    // Hazard tracking on a 4 GiB window makes Metal order and fence every command
+    // buffer that touches it, which measured at tens of milliseconds per submission
+    // because every submission touches a window. Untracked is the design's choice:
+    // the guest's own barriers end the encoder, and encoders on one queue run in
+    // order. SHARPEMU_METAL_V2_TRACKED=1 restores automatic tracking for comparison.
+    // An MTLResidencySet would keep the windows mapped for the queue without any
+    // per-encoder call, which is what the design asked for — but a set holding the
+    // whole 16 GiB backing measured about seventy milliseconds of scheduling
+    // latency on every submission, with the GPU itself idle: Dreaming Sarah ran at
+    // five frames a second with it and at a hundred and twenty without. Naming the
+    // windows per encoder costs five useResource calls instead.
+    // SHARPEMU_METAL_V2_RESIDENCY_SET=1 restores the set for comparison.
+    private static readonly bool UseResidencySet = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_RESIDENCY_SET"), "1", StringComparison.Ordinal);
+
+    private static readonly bool StageEverything = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_STAGE_ALL"), "1", StringComparison.Ordinal);
+
+    private static readonly nuint HazardTrackingMode =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_TRACKED"), "1", StringComparison.Ordinal)
+            ? 0
+            : Mtl.ResourceHazardTrackingModeUntracked;
+
     private static readonly nint SelNewBufferNoCopy =
         MetalNative.Selector("newBufferWithBytesNoCopy:length:options:deallocator:");
     private static readonly nint SelNewBuffer = MetalNative.Selector("newBufferWithLength:options:");
@@ -38,7 +61,6 @@ internal sealed class MetalGuestMemory : IDisposable
     private static readonly nint SelRelease = MetalNative.Selector("release");
     private static readonly nint SelAddAllocation = MetalNative.Selector("addAllocation:");
     private static readonly nint SelCommit = MetalNative.Selector("commit");
-    private static readonly nint SelRequestResidency = MetalNative.Selector("requestResidency");
 
     // One no-copy MTLBuffer over a slice of the backing alias.
     private readonly struct Window
@@ -113,7 +135,7 @@ internal sealed class MetalGuestMemory : IDisposable
                 $"size=0x{aliasSize:X} windowBytes=0x{windowBytes:X}.");
         }
 
-        _residencySet = CreateResidencySet(device);
+        _residencySet = UseResidencySet ? CreateResidencySet(device) : 0;
         _windows = new Window[windowCount];
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         for (var index = 0; index < windowCount; index++)
@@ -126,11 +148,7 @@ internal sealed class MetalGuestMemory : IDisposable
                 SelNewBufferNoCopy,
                 (nint)pointer,
                 (nuint)size,
-                // Default hazard tracking: every encoder reads and writes these windows,
-                // so Metal's own cross-encoder barriers are what keeps a compute store
-                // ordered before the vertex fetch of the next pass. Untracked windows
-                // would need explicit fences at every encoder boundary.
-                Mtl.ResourceStorageModeShared,
+                Mtl.ResourceStorageModeShared | HazardTrackingMode,
                 0);
             if (buffer == 0)
             {
@@ -193,7 +211,8 @@ internal sealed class MetalGuestMemory : IDisposable
             return default;
         }
 
-        if (_backing.TryResolveBackingAlias(gpuVa, size, out var alias) &&
+        if (!StageEverything &&
+            _backing.TryResolveBackingAlias(gpuVa, size, out var alias) &&
             alias >= _aliasBase && alias - _aliasBase < _aliasSize)
         {
             var aliasOffset = alias - _aliasBase;
@@ -360,7 +379,7 @@ internal sealed class MetalGuestMemory : IDisposable
             _device,
             SelNewBuffer,
             (nuint)size,
-            Mtl.ResourceStorageModeShared);
+            Mtl.ResourceStorageModeShared | HazardTrackingMode);
         if (buffer == 0)
         {
             throw GpuFatal.Fatal($"A Metal buffer could not be created: label={label} size=0x{size:X}.");
@@ -425,7 +444,10 @@ internal sealed class MetalGuestMemory : IDisposable
         if (_residencySet != 0 && allocation != 0)
         {
             MetalNative.SendVoid(_residencySet, SelAddAllocation, allocation);
+            return;
         }
+
+        NoteResident(allocation);
     }
 
     public void CommitResidency()
@@ -435,8 +457,11 @@ internal sealed class MetalGuestMemory : IDisposable
             return;
         }
 
+        // Commit publishes the allocation list; requesting residency once keeps the
+        // windows mapped for the queue instead of letting Metal establish residency
+        // around every command buffer. The pages stay lazily backed either way.
         MetalNative.SendVoid(_residencySet, SelCommit);
-        MetalNative.SendVoid(_residencySet, SelRequestResidency);
+        MetalNative.SendVoid(_residencySet, MetalNative.Selector("requestResidency"));
     }
 
     /// <summary>Attaches the residency set to a queue, once per queue.</summary>
@@ -454,20 +479,37 @@ internal sealed class MetalGuestMemory : IDisposable
         }
     }
 
-    // Every window is resident for the queue; without a residency set each encoder
-    // needs them listed, which is what this enumeration is for.
-    public ReadOnlySpan<nint> WindowBuffers
-    {
-        get
-        {
-            var buffers = new nint[_windowCount];
-            for (var index = 0; index < _windowCount; index++)
-            {
-                buffers[index] = _windows[index].Buffer;
-            }
+    /// <summary>
+    /// The window and ring buffers an encoder has to be told about when there is no
+    /// residency set: an argument buffer holds their addresses, not references, so
+    /// Metal cannot see the dependency on its own.
+    /// </summary>
+    public ReadOnlySpan<nint> ResidentBuffers => _residentBuffers.AsSpan(0, _residentCount);
 
-            return buffers;
+    private nint[] _residentBuffers = new nint[16];
+    private int _residentCount;
+
+    private void NoteResident(nint buffer)
+    {
+        if (_residencySet != 0 || buffer == 0)
+        {
+            return;
         }
+
+        for (var index = 0; index < _residentCount; index++)
+        {
+            if (_residentBuffers[index] == buffer)
+            {
+                return;
+            }
+        }
+
+        if (_residentCount == _residentBuffers.Length)
+        {
+            Array.Resize(ref _residentBuffers, _residentBuffers.Length * 2);
+        }
+
+        _residentBuffers[_residentCount++] = buffer;
     }
 
     public void Dispose()
