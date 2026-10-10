@@ -2,6 +2,34 @@
 
 Priority: make all nine games reach a menu or controllable scene first; performance and visual polish follow entry.
 
+Runner successor R7 passes its eight supplied-state boundary/ancestry controls,
+with no failures, skips or signals; ROOT verifies all 21 retained artifact
+hashes. The unchanged eight-level ancestry limit is now separate from a
+128-process cumulative registration limit. The fresh Host build passes, but Libs stops during a compiler candidate’s
+final kernel-identity check. The final packet was not saved, so the archived
+result cannot establish absence, replacement or a cause. Its build return code
+is unrecorded; GPU and all managed/native/game phases remain unrun. ROOT verifies
+all 22 failed artifacts and fresh absence of all 22 recorded process roots and
+heavy workers, then archives/removes only the exact dead lease. Failed R7
+manifest: `d1d77dbbc0b8a3c55cf71fe073a4d397dcfb06f6720bf265e2a7d7a48135cd13`.
+A separate source proposal permits declining registration of a build-only pinned
+compiler after verified-image observation only when explicit absence is proved;
+it grants that declined process no ownership or signal authority. Failed R6/R7
+results remain unqualified.
+Pure-control archive: `6b2eab9666edaaed5d1fcb238eaef6f42bbd5a98eccfc3accd21bb1783813e04`.
+These controls do not establish game entry or native cleanup.
+
+Current runner stop: the subsequent Libs build controller stops after tracking
+eight workers, with `finite owner bound exceeded (all phases)`. Its build return
+code is unrecorded and its 241 partial outputs are unqualified; completed log
+output cannot turn this into a pass. The ninth candidate's identity was not
+recorded. ROOT verifies all 24 failed archive artifacts and fresh absence of
+all 17 retained Host/Libs roots and actual heavy workers, then archives/removes
+only the exact dead lease. The sticky failed result remains preserved:
+`7031cd00833f4e58243ba28da230486b03a75843b369df0a106b2bf1e7c5f401`.
+A narrow runner successor separates the cumulative registration limit from the
+unchanged ancestry-depth limit; no emulator change follows from this stop.
+
 Current qualification update (October 10): the four-fix source candidate
 `638c3bdf` passes its first Host build (`rc=0`, 7.835 seconds). ROOT verifies
 all 13 checkpoint artifacts, 2,054 source files, 91 compiled files and fresh
