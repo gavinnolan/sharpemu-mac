@@ -250,7 +250,7 @@ public sealed partial class MetalStorageCpuSyncTests
             Assert.Equal((nint)0, PrecommitGet(image, "Texture")); Assert.Null(PrecommitGet(original, "Native"));
             Assert.Equal(1, fixture.Memory.Copies); Assert.Equal(fixture.Before, fixture.Memory.Expected);
         }
-        finally { table.GetType().GetMethod("Remove")!.Invoke(table, [image]); }
+        finally { table.GetType().GetMethod("Remove", [image.GetType()])!.Invoke(table, [image]); }
         InvokeVolume("RequireRegularColorCpuImageEffectLocked", image, replace); // generic nonassociated metadata unchanged
     }
 

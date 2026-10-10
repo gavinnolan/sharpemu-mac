@@ -344,7 +344,7 @@ public sealed partial class MetalStorageCpuSyncTests
             void Attempt(Action cleanup) { try { cleanup(); } catch (Exception failure) { first ??= failure; } }
             // Attempt every independent metadata restoration exactly once;
             // sentinel handles have no native retains and acquire no release.
-            if (debtInstalled) Attempt(() => debts!.GetType().GetMethod("Remove")!.Invoke(debts, [Image]));
+            if (debtInstalled) Attempt(() => debts!.GetType().GetMethod("Remove", [Image.GetType()])!.Invoke(debts, [Image]));
             if (Image is not null) Attempt(() => { if (ReferenceEquals(Images[Address], Image)) Images.Remove(Address); });
             if (ownedSnapshots is not null) Attempt(() => MetalVideoPresenter.ReleasePreparedTextureSources(ownedSnapshots));
             if (saved is not null)
