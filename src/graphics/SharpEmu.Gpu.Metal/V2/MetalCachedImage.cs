@@ -233,6 +233,11 @@ internal sealed class MetalCachedImage : IDisposable
         var viewFormat = MetalV2Formats.PixelFormat(requested.Format);
         var viewType = MetalV2Formats.ViewTextureType(requested.Type, Shape.SampleCount);
         var swizzle = SwizzleOf(requested.Mapping, out var identitySwizzle);
+        // MTLTextureUsagePixelFormatView is only needed to reinterpret the pixel
+        // format or the swizzle. Narrowing a view to a level or a slice of the
+        // same format needs nothing, so a depth or compressed image -- which the
+        // cache creates without that usage -- can still have the subresource view
+        // a mipped or layered attachment binds.
         var viewable = (Shape.Usage & Mtl.TextureUsagePixelFormatView) != 0;
         if (!viewable && !identitySwizzle)
         {
@@ -257,16 +262,16 @@ internal sealed class MetalCachedImage : IDisposable
             }
         }
 
-        if (!viewable)
+        if (!viewable && viewFormat != Shape.PixelFormat)
         {
-            // Metal raises rather than returning nil for a view of a texture that
-            // was not created for one, and a raised ObjC exception on the GPU
-            // worker takes the process down. A compressed image is the usual
-            // case: it is sampled whole, in its own format, so binding it
+            // Metal raises rather than returning nil for a reinterpreting view of
+            // a texture that was not created for one, and a raised ObjC exception
+            // on the GPU worker takes the process down. A compressed image is the
+            // usual case: it is sampled whole, in its own format, so binding it
             // unviewed is what the draw wanted anyway.
             MetalV2Diagnostics.WarnOnce(
                 $"view-usage:{Shape.PixelFormat}->{viewFormat}:{Shape.TextureType}->{viewType}",
-                $"A texture without the pixel-format-view usage cannot make a view; binding the image instead: " +
+                $"A texture without the pixel-format-view usage cannot be reinterpreted; binding the image instead: " +
                 $"format={Shape.PixelFormat}->{viewFormat} type={Shape.TextureType}->{viewType} " +
                 $"usage=0x{Shape.Usage:X} levels={requested.BaseLevel}+{requested.LevelCount} " +
                 $"layers={requested.BaseLayer}+{requested.LayerCount}.");
