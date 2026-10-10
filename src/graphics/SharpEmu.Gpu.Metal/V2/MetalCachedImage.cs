@@ -204,16 +204,9 @@ internal sealed class MetalCachedImage : IDisposable
         var viewFormat = MetalV2Formats.PixelFormat(requested.Format);
         var viewType = MetalV2Formats.ViewTextureType(requested.Type, Shape.SampleCount);
         var swizzle = SwizzleOf(requested.Mapping, out var identitySwizzle);
-        if (!identitySwizzle && (Shape.Usage & Mtl.TextureUsagePixelFormatView) == 0)
+        var viewable = (Shape.Usage & Mtl.TextureUsagePixelFormatView) != 0;
+        if (!viewable && !identitySwizzle)
         {
-            // Metal raises rather than returning nil for a view of a texture that
-            // was not created for one, and a raised ObjC exception here takes the
-            // process down. A compressed or depth image is the usual case, and
-            // neither carries a guest swizzle worth honouring.
-            MetalV2Diagnostics.WarnOnce(
-                $"swizzle-usage:{Shape.PixelFormat}",
-                $"A texture without the pixel-format-view usage cannot take its guest swizzle: " +
-                $"format={Shape.PixelFormat} usage=0x{Shape.Usage:X}.");
             identitySwizzle = true;
         }
 
@@ -233,6 +226,22 @@ internal sealed class MetalCachedImage : IDisposable
                     return _views[index].Texture;
                 }
             }
+        }
+
+        if (!viewable)
+        {
+            // Metal raises rather than returning nil for a view of a texture that
+            // was not created for one, and a raised ObjC exception on the GPU
+            // worker takes the process down. A compressed image is the usual
+            // case: it is sampled whole, in its own format, so binding it
+            // unviewed is what the draw wanted anyway.
+            MetalV2Diagnostics.WarnOnce(
+                $"view-usage:{Shape.PixelFormat}->{viewFormat}:{Shape.TextureType}->{viewType}",
+                $"A texture without the pixel-format-view usage cannot make a view; binding the image instead: " +
+                $"format={Shape.PixelFormat}->{viewFormat} type={Shape.TextureType}->{viewType} " +
+                $"usage=0x{Shape.Usage:X} levels={requested.BaseLevel}+{requested.LevelCount} " +
+                $"layers={requested.BaseLayer}+{requested.LayerCount}.");
+            return Texture;
         }
 
         var levelCount = Math.Min(requested.LevelCount, Shape.MipLevels - Math.Min(requested.BaseLevel, Shape.MipLevels - 1));
