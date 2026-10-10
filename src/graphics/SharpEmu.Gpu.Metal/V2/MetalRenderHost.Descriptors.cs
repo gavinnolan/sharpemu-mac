@@ -763,15 +763,21 @@ internal sealed partial class MetalRenderHost
             BindStageBuffers(_renderEncoder, StageFragment, SelSetFragmentBuffer);
             foreach (var window in _guestMemory.ResidentBuffers)
             {
-                MetalNative.SendUseResource(
-                    _renderEncoder, SelUseResourceStages, window,
-                    Mtl.ResourceUsageRead | Mtl.ResourceUsageWrite, stages);
+                if (TryNoteResident(window, Mtl.ResourceUsageRead | Mtl.ResourceUsageWrite, stages))
+                {
+                    MetalNative.SendUseResource(
+                        _renderEncoder, SelUseResourceStages, window,
+                        Mtl.ResourceUsageRead | Mtl.ResourceUsageWrite, stages);
+                }
             }
 
             for (var index = 0; index < _usedResourceCount; index++)
             {
-                MetalNative.SendUseResource(
-                    _renderEncoder, SelUseResourceStages, _usedResources[index], _usedResourceUsage[index], stages);
+                if (TryNoteResident(_usedResources[index], _usedResourceUsage[index], stages))
+                {
+                    MetalNative.SendUseResource(
+                        _renderEncoder, SelUseResourceStages, _usedResources[index], _usedResourceUsage[index], stages);
+                }
             }
 
             return;
@@ -780,15 +786,71 @@ internal sealed partial class MetalRenderHost
         BindStageBuffers(_computeEncoder, StageCompute, SelSetComputeBuffer);
         foreach (var window in _guestMemory.ResidentBuffers)
         {
-            MetalNative.SendUseResourceUsage(
-                _computeEncoder, SelUseResourceUsage, window, Mtl.ResourceUsageRead | Mtl.ResourceUsageWrite);
+            if (TryNoteResident(window, Mtl.ResourceUsageRead | Mtl.ResourceUsageWrite, stages: 0))
+            {
+                MetalNative.SendUseResourceUsage(
+                    _computeEncoder, SelUseResourceUsage, window, Mtl.ResourceUsageRead | Mtl.ResourceUsageWrite);
+            }
         }
 
         for (var index = 0; index < _usedResourceCount; index++)
         {
-            MetalNative.SendUseResourceUsage(
-                _computeEncoder, SelUseResourceUsage, _usedResources[index], _usedResourceUsage[index]);
+            if (TryNoteResident(_usedResources[index], _usedResourceUsage[index], stages: 0))
+            {
+                MetalNative.SendUseResourceUsage(
+                    _computeEncoder, SelUseResourceUsage, _usedResources[index], _usedResourceUsage[index]);
+            }
         }
+    }
+
+    // -useResource: is encoder state, not draw state: a resource named once stays
+    // resident for the rest of the encoder. Naming every window and every texture
+    // again on every draw was four to a dozen message sends per draw for nothing.
+    private nint[] _encoderResidentResources = new nint[64];
+    private nuint[] _encoderResidentUsage = new nuint[64];
+    private nuint[] _encoderResidentStages = new nuint[64];
+    private int _encoderResidentCount;
+    private long _residencyCallsSkipped;
+
+    private void ForgetResidentResources() => _encoderResidentCount = 0;
+
+    /// <summary>How many -useResource: calls the encoder cache skipped.</summary>
+    public long TakeSkippedResidencyCalls() => Interlocked.Exchange(ref _residencyCallsSkipped, 0);
+
+    private bool TryNoteResident(nint resource, nuint usage, nuint stages)
+    {
+        for (var index = 0; index < _encoderResidentCount; index++)
+        {
+            if (_encoderResidentResources[index] != resource)
+            {
+                continue;
+            }
+
+            // A wider usage or a new stage has to be named again; the same one need not.
+            if ((_encoderResidentUsage[index] & usage) == usage &&
+                (_encoderResidentStages[index] & stages) == stages)
+            {
+                _residencyCallsSkipped++;
+                return false;
+            }
+
+            _encoderResidentUsage[index] |= usage;
+            _encoderResidentStages[index] |= stages;
+            return true;
+        }
+
+        if (_encoderResidentCount == _encoderResidentResources.Length)
+        {
+            Array.Resize(ref _encoderResidentResources, _encoderResidentCount * 2);
+            Array.Resize(ref _encoderResidentUsage, _encoderResidentCount * 2);
+            Array.Resize(ref _encoderResidentStages, _encoderResidentCount * 2);
+        }
+
+        _encoderResidentResources[_encoderResidentCount] = resource;
+        _encoderResidentUsage[_encoderResidentCount] = usage;
+        _encoderResidentStages[_encoderResidentCount] = stages;
+        _encoderResidentCount++;
+        return true;
     }
 
     private void BindStageBuffers(nint encoder, int stageIndex, nint setBufferSelector)

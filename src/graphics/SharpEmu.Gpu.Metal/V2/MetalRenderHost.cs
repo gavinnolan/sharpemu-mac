@@ -890,6 +890,7 @@ internal sealed partial class MetalRenderHost :
             .Append(" gpu_fills=").Append(Interlocked.Exchange(ref _gpuFills, 0))
             .Append(" cleared_fills=").Append(Interlocked.Exchange(ref _absorbedFills, 0))
             .Append(" host_copies=").Append(Interlocked.Exchange(ref _hostCopies, 0))
+            .Append(" residency_skipped=").Append(TakeSkippedResidencyCalls())
             .Append(" resident=").Append(_guestMemory.ResidentBuffers.Length)
             .Append(" windows_touched=").Append(System.Numerics.BitOperations.PopCount(_guestMemory.TouchedWindows));
         Console.Error.WriteLine($"[METAL-V2][WAITS]{reasons}");

@@ -361,6 +361,13 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         var stream = CommandStream;
         for (var slice = 0; slice < maxSlices; slice++)
         {
+            // The shared profile only charges its detail phases inside an enclosing
+            // scope, so that cache work on other threads stays out of the render
+            // thread's counters. This is the v2 worker's equivalent of the Vulkan
+            // render loop's outer scope, and it is what makes
+            // SHARPEMU_PROFILE_RENDER=1 attribute the draw path on this backend.
+            using var sliceScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.Measure(
+                SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandStream);
             var result = stream.ProcessOne();
             switch (result)
             {
