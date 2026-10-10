@@ -38,4 +38,10 @@ public interface IGuestBackedSpace
         alias = 0;
         return false;
     }
+
+    // The whole backing seen as one contiguous host range: its base pointer and byte
+    // size, or zero when the space has no alias. The Metal backend maps this range as
+    // no-copy MTLBuffer windows, so every address TryResolveBackingAlias returns falls
+    // inside a window at a known offset.
+    (ulong Base, ulong Size) BackingAliasRange => (0, 0);
 }

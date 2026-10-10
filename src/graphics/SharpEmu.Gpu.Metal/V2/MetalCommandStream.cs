@@ -1,0 +1,361 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+using SharpEmu.HLE;
+using SharpEmu.Libs.Agc;
+using SharpEmu.Libs.Gpu.GpuCommands;
+using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.VideoOut;
+
+namespace SharpEmu.Gpu.Metal.V2;
+
+/// <summary>
+/// The command-stream half of the render host: the packet interpreter's view of the
+/// backend. The command translation layer builds its RenderExecutor and
+/// ShaderPipelineCache only when one object implements ICommandStreamHost,
+/// IRenderHost and IShaderPipelineHost at once, which is why this is a partial of
+/// MetalRenderHost rather than a type of its own.
+///
+/// Everything here runs on the GPU worker thread. Completion is a shared event:
+/// a committed command buffer signals its serial, and the completion thread runs
+/// the interrupts and flip completions of that submission in order.
+/// </summary>
+internal sealed partial class MetalRenderHost : ICommandStreamHost
+{
+    private CommandStreamQueue? _commandStream;
+    private AgcExports.CommandStreamTranslation? _translation;
+    private IMetalFlipTarget? _flipTarget;
+    private long _lastProgressTicks;
+    private ulong _submissionsStarted;
+
+    private static readonly long _blockedRetryTicks =
+        CommandStreamQueue.AllBlockedRetryMilliseconds * System.Diagnostics.Stopwatch.Frequency / 1000L;
+
+    public CommandStreamQueue CommandStream =>
+        _commandStream ?? throw Fatal("The Metal command stream has not been created.");
+
+    /// <summary>Creates the interpreter queue and the draw translation over this host.</summary>
+    public void InitializeCommandStream(IMetalFlipTarget flipTarget)
+    {
+        _flipTarget = flipTarget;
+        _commandStream = new CommandStreamQueue(this);
+        _translation = AgcBackendServices.CreateCommandStreamTranslation(_memory, this);
+        _lastProgressTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+    }
+
+    ICpuMemory ICommandStreamHost.Memory => _memory;
+
+    public void RunPendingCommands() => _relay.RunPendingCommands();
+
+    public void BeginSubmission(int queueId, ulong submissionId, object? geometrySnapshots)
+    {
+        _submissionsStarted++;
+        _ = EnsureCommandBuffer();
+        _translation!.BeginSubmission(queueId, submissionId, geometrySnapshots, CommandStream.GetInterpreter(queueId));
+    }
+
+    void ICommandStreamHost.Flush() => FlushCommandBuffer();
+
+    void ICommandStreamHost.FlushAndWait() => FlushAndWaitForGpu();
+
+    public void SynchronizeGpu()
+    {
+        _imageCache.FlushAllGpuWrites();
+        FlushAndWaitForGpu();
+    }
+
+    public void RunGarbageCollector() => _imageCache.Collect();
+
+    public void FillBuffer(ulong address, ulong size, uint value, bool isGds)
+    {
+        if (size == 0)
+        {
+            return;
+        }
+
+        if (isGds)
+        {
+            if (address > MetalGuestMemory.GdsBytes || size > MetalGuestMemory.GdsBytes - address)
+            {
+                throw Fatal($"The GDS fill range is outside the buffer: offset=0x{address:X} size=0x{size:X}.");
+            }
+
+            // The data share is a shared-storage buffer, so the host fill is visible to
+            // the GPU without a transfer; a shader write to it is ordered by Metal.
+            SynchronizeGpu();
+            var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(
+                _guestMemory.GdsWords().Slice((int)address, (int)size));
+            words.Fill(value);
+            return;
+        }
+
+        FillGuestMemory(address, size, value);
+    }
+
+    public void CopyBuffer(ulong destination, ulong source, ulong size, bool destinationIsGds, bool sourceIsGds)
+    {
+        if (size == 0)
+        {
+            return;
+        }
+
+        if (destinationIsGds && sourceIsGds)
+        {
+            throw Fatal($"A GDS-to-GDS copy is not supported: destination=0x{destination:X} source=0x{source:X} size=0x{size:X}.");
+        }
+
+        if (!destinationIsGds && !sourceIsGds)
+        {
+            CopyGuestMemory(destination, source, size);
+            return;
+        }
+
+        SynchronizeGpu();
+        var gds = _guestMemory.GdsWords();
+        if (sourceIsGds)
+        {
+            if (source > MetalGuestMemory.GdsBytes || size > MetalGuestMemory.GdsBytes - source)
+            {
+                throw Fatal($"The GDS copy source is outside the buffer: offset=0x{source:X} size=0x{size:X}.");
+            }
+
+            if (!_memory.TryWrite(destination, gds.Slice((int)source, (int)size)))
+            {
+                throw Fatal($"The GDS copy cannot write guest memory: address=0x{destination:X16} size=0x{size:X}.");
+            }
+
+            _imageCache.InvalidateMemory(destination, size);
+            return;
+        }
+
+        if (destination > MetalGuestMemory.GdsBytes || size > MetalGuestMemory.GdsBytes - destination)
+        {
+            throw Fatal($"The GDS copy destination is outside the buffer: offset=0x{destination:X} size=0x{size:X}.");
+        }
+
+        if (!TryReadGuest(source, gds.Slice((int)destination, (int)size)))
+        {
+            throw Fatal($"The GDS copy cannot read guest memory: address=0x{source:X16} size=0x{size:X}.");
+        }
+    }
+
+    public void ReadGds(Span<uint> destination, uint wordOffset, uint wordCount)
+    {
+        SynchronizeGpu();
+        GlobalDataShare.ReadWords(_guestMemory.GdsWords(), destination, wordOffset, wordCount);
+    }
+
+    // The interpreter writes the label itself; only the interrupt and the flip
+    // completion of a submission wait for the GPU, which is what the shared event
+    // orders. A completion is therefore always paired with a flush.
+    public void RecordEndOfPipe(in EndOfPipeWrite write)
+    {
+        var eventId = write.EventId;
+        var contextId = write.ContextId;
+        var requestId = write.FlipRequestId;
+        switch (write.Kind)
+        {
+            case EndOfPipeWriteKind.InterruptOnly:
+            case EndOfPipeWriteKind.Interrupt32:
+            case EndOfPipeWriteKind.Interrupt64:
+            case EndOfPipeWriteKind.InterruptWriteBack32:
+            case EndOfPipeWriteKind.InterruptWriteBack64:
+                QueueCompletion(() => TriggerInterrupt(eventId, contextId));
+                break;
+            case EndOfPipeWriteKind.Flip:
+            case EndOfPipeWriteKind.FlipWithWrite32:
+                QueueCompletion(() => VideoOutBackendServices.CompleteFlip(requestId));
+                break;
+            case EndOfPipeWriteKind.FlipWithInterruptWriteBack32:
+                QueueCompletion(() =>
+                {
+                    VideoOutBackendServices.CompleteFlip(requestId);
+                    TriggerInterrupt(eventId, 0);
+                });
+                break;
+            default:
+                // A plain label write, a clock write or a GDS write has no GPU
+                // completion: the interpreter already published its bytes.
+                break;
+        }
+    }
+
+    // The completion runs once the GPU finishes everything recorded so far, so the
+    // command buffer is committed right away instead of waiting for the next flush.
+    private void QueueCompletion(Action work)
+    {
+        var serial = SubmissionSerial;
+        _completions.Enqueue(serial, work);
+        FlushCommandBuffer();
+    }
+
+    private readonly EndOfPipeEvents _endOfPipeEvents = new();
+
+    public void TriggerInterrupt(int eventId, uint contextId) =>
+        _endOfPipeEvents.TriggerInterrupt(eventId, contextId);
+
+    public bool HasFlipSlot() => _flipTarget?.HasFlipSlot() ?? true;
+
+    public ulong PrepareFlip(int handle, int index, int flipMode, long flipArgument)
+    {
+        var result = VideoOutBackendServices.TryReserveFlipRequest(
+            handle, index, flipMode, flipArgument, gpuQueued: true, out var requestId);
+        if (result != 0)
+        {
+            throw Fatal(
+                $"Could not submit the GPU flip: result=0x{result:X8} handle={handle} index={index} mode={flipMode} arg={flipArgument}.");
+        }
+
+        if (requestId == 0)
+        {
+            throw Fatal("The GPU flip submission returned a request id of zero.");
+        }
+
+        try
+        {
+            CaptureFlip(handle, index, requestId, flipMode, flipArgument);
+        }
+        catch
+        {
+            VideoOutBackendServices.CancelFlip(requestId);
+            throw;
+        }
+
+        return requestId;
+    }
+
+    public bool IsFlipDone(int handle, int index) => VideoOutBackendServices.IsFlipDone(handle, index);
+
+    public void PrepareCpuFlip(int handle, int index, ulong requestId) =>
+        CaptureFlip(handle, index, requestId, flipMode: 0, flipArg: 0);
+
+    // The display surface is a cached image like any other; the flip hands its
+    // MTLTexture to the presenter, so no pixel ever travels through the CPU.
+    private void CaptureFlip(int handle, int index, ulong requestId, int flipMode, long flipArg)
+    {
+        if (VideoOutBackendServices.ReleaseNoBufferFlip(index, requestId))
+        {
+            return;
+        }
+
+        if (!VideoOutBackendServices.TryGetDisplayBufferInfo(handle, index, out var displayBuffer))
+        {
+            throw Fatal(
+                $"The flip names a display buffer that is not registered: handle={handle} index={index} request={requestId}.");
+        }
+
+        var surface = new DisplaySurfaceWords(
+            displayBuffer.Address,
+            0,
+            displayBuffer.PixelFormat,
+            displayBuffer.Width,
+            displayBuffer.Height,
+            displayBuffer.TilingMode,
+            displayBuffer.Option,
+            0,
+            0,
+            false);
+        var request = ImageRequestBuilders.DisplaySurface(surface);
+        var imageIdentifier = _imageCache.FindImage(ref request);
+        var image = _imageCache.GetImage(imageIdentifier);
+        image.Uses.VideoOut = true;
+        _imageCache.RefreshImage(imageIdentifier);
+        var texture = image.GetOrCreateView(request.View);
+        var serial = SubmissionSerial;
+        FlushCommandBuffer();
+        if (_flipTarget is null || texture == 0)
+        {
+            VideoOutBackendServices.DiscardFlip(requestId);
+            return;
+        }
+
+        _flipTarget.PublishGuestFrame(
+            texture,
+            Math.Max(displayBuffer.Width, 1),
+            Math.Max(displayBuffer.Height, 1),
+            requestId,
+            serial,
+            VideoOutBackendServices.IsHdrPixelFormat(displayBuffer.PixelFormat));
+        VideoOutBackendServices.TraceGpuFlip(
+            _memory, handle, index, flipMode, flipArg, displayBuffer.Address,
+            VideoOutBackendServices.GetFlipEventCount(requestId));
+    }
+
+    public void DrawIndexed(ulong submitId, in DrawIndexedArguments arguments) =>
+        _translation!.DrawIndexed(submitId, in arguments);
+
+    public void DrawAuto(ulong submitId, in DrawAutoArguments arguments) =>
+        _translation!.DrawAuto(submitId, in arguments);
+
+    public void DispatchDirect(
+        ulong submitId,
+        uint groupsX,
+        uint groupsY,
+        uint groupsZ,
+        uint dispatchInitiator,
+        ulong indirectArgumentsAddress = 0) =>
+        _translation!.Dispatch(submitId, groupsX, groupsY, groupsZ, dispatchInitiator, indirectArgumentsAddress);
+
+    public bool ResolvesIndirectDispatchOnGpu => true;
+
+    public bool ResolvesIndirectDrawOnGpu => true;
+
+    public void OnQueueReset(int queueId) => _translation!.QueueReset(queueId);
+
+    /// <summary>
+    /// Runs interpreter slices until nothing is runnable or the budget ends; blocked
+    /// heads retry on the shared interval, exactly as the Vulkan worker does.
+    /// </summary>
+    public void RunCommandStreamSlices(int maxSlices)
+    {
+        var stream = CommandStream;
+        for (var slice = 0; slice < maxSlices; slice++)
+        {
+            var result = stream.ProcessOne();
+            switch (result)
+            {
+                case SliceResult.NoWork:
+                    return;
+                case SliceResult.AllBlocked:
+                    RetryBlockedIfDue();
+                    return;
+                case SliceResult.BlockedWithoutProgress:
+                    if (!stream.HasUnblockedPending)
+                    {
+                        RetryBlockedIfDue();
+                        return;
+                    }
+
+                    break;
+                default:
+                    _lastProgressTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+                    break;
+            }
+        }
+    }
+
+    private void RetryBlockedIfDue()
+    {
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (now - _lastProgressTicks < _blockedRetryTicks)
+        {
+            return;
+        }
+
+        CommandStream.RetryBlocked();
+        _lastProgressTicks = now;
+    }
+
+    public ulong SubmissionsStarted => _submissionsStarted;
+}
+
+// What a flip needs from the presenter: a slot check and the published frame.
+internal interface IMetalFlipTarget
+{
+    bool HasFlipSlot();
+
+    // The texture is presented once the submission serial completes; the presenter
+    // retains it until the frame it belongs to has been shown.
+    void PublishGuestFrame(nint texture, uint width, uint height, ulong requestId, ulong serial, bool isHdr);
+}

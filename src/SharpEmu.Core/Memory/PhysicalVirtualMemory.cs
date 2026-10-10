@@ -1372,6 +1372,9 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         return !_disposed && _backedSpace is { } backed && backed.TryResolveAlias(address, size, out alias);
     }
 
+    public (ulong Base, ulong Size) BackingAliasRange =>
+        !_disposed && _backedSpace is { } backed ? (backed.AliasBase, backed.BackingSize) : (0, 0);
+
     private bool HasBackingOwner() => !_disposed && _backedSpace != null;
 
     // A span may cross adjacent view records; the owner validates full coverage.
