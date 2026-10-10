@@ -52,6 +52,12 @@ internal sealed class MetalCachedImage : IDisposable
         MetalNative.Selector("newTextureViewWithPixelFormat:textureType:levels:slices:swizzle:");
     private static long _gpuWriteCounter;
 
+    // The flip path reaches GetOrCreateView from the GPU worker while the cache
+    // reaches it under its own lock, so the view list needs one of its own. It
+    // used to be reached rarely enough for the race to stay latent: before the
+    // guest swizzle was honoured, the common whole-image view returned the
+    // texture without ever touching the list.
+    private readonly object _viewGate = new();
     private readonly List<(ImageViewDescription Description, nint Texture)> _views = new();
     private bool _cpuDirty;
     private bool _gpuModified;
@@ -218,11 +224,14 @@ internal sealed class MetalCachedImage : IDisposable
             return Texture;
         }
 
-        for (var index = 0; index < _views.Count; index++)
+        lock (_viewGate)
         {
-            if (_views[index].Description.Equals(requested))
+            for (var index = 0; index < _views.Count; index++)
             {
-                return _views[index].Texture;
+                if (_views[index].Description.Equals(requested))
+                {
+                    return _views[index].Texture;
+                }
             }
         }
 
@@ -254,7 +263,22 @@ internal sealed class MetalCachedImage : IDisposable
             return Texture;
         }
 
-        _views.Add((requested, view));
+        lock (_viewGate)
+        {
+            // Another thread may have made the same view while this one was
+            // asking Metal for it; keep theirs so the list holds one of each.
+            for (var index = 0; index < _views.Count; index++)
+            {
+                if (_views[index].Description.Equals(requested))
+                {
+                    MetalNative.SendVoid(view, SelRelease);
+                    return _views[index].Texture;
+                }
+            }
+
+            _views.Add((requested, view));
+        }
+
         return view;
     }
 
@@ -273,12 +297,15 @@ internal sealed class MetalCachedImage : IDisposable
 
     private void ReleaseViews()
     {
-        foreach (var (_, view) in _views)
+        lock (_viewGate)
         {
-            MetalNative.SendVoid(view, SelRelease);
-        }
+            foreach (var (_, view) in _views)
+            {
+                MetalNative.SendVoid(view, SelRelease);
+            }
 
-        _views.Clear();
+            _views.Clear();
+        }
     }
 
     public void Dispose()
