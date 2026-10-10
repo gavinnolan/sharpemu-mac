@@ -27,8 +27,33 @@ heavy workers and the shared lease. Build information identifies clean
 `351c3c1c`, osx-x64, SDK 10.0.103, Metal, AppKit, GameController and CoreAudio.
 Publication checkpoint:
 `031c18c1da79c1d6f3b9867c504305e337333b427709a1abbfacb70e37dd5d39`.
-The app is local/ad-hoc, with no notarization or remote action. Games have not
-yet run on this successor. Production code is unchanged
+The app is local/ad-hoc, with no notarization or remote action. Two fresh games
+have now run on it, with no new menu/gameplay acceptance:
+
+- Oregon Trail exits 134 after 36 seconds, peak sampled RSS 2,221 MiB. No
+  captures or input. The winning typed-storage copy returns `Copied`, then its
+  original write-watch check refuses exact publication admission 4,294,967,296
+  for `0x8011630000 / 65536`. The earlier ordinary admission 2 row refers to a
+  different source. This does not prove the current publication's owner,
+  disjointness or terminal release. ROOT verifies all 45 archive artifacts and
+  fresh absence of the four owned roots, heavy workers and the shared lease.
+  Archive: `51911f828632dd42e0f81e27567c5b953286ddac67f27adb81facc67d7dc5113`.
+- Demon's Souls exits 134 after 54 seconds, peak sampled RSS 2,606 MiB. Four
+  captures show static launch artwork; no input or guest-frame/menu claim.
+  Its selected mip copy is admitted, then first selected-seed execution refuses
+  its exact receipt. The original watch observes ordinary admission 2 at
+  `0x7092CA0000 / 131072`, with a later diagnostic sample zero. This Boolean
+  guard occurs before the existing Busy-aware native-materialization check.
+  ROOT verifies all 53 archive artifacts and fresh absence of the four owned
+  roots, heavy workers and the shared lease. Archive:
+  `85a94c7975fb78a176abf3206f8ab5f2f74f20ac0d4417c045838431051f8121`.
+
+Both harness/driver return codes are zero while the actual game return codes
+are 134; none is a game-entry success. Neither unchanged game is retried.
+Octopath's distinct 150-second empty-input replay is granted next. Oregon's
+exact first-owner diagnostics and DS's same-original Busy continuation are
+being reviewed in separate source; neither is implemented qualification yet.
+Production code is unchanged
 from the four-fix `638c3bdf` candidate; local main still uses `e2535177`.
 
 Previous qualification (R10): test-only successor `18d90e23` passes all three
