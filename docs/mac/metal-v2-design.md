@@ -3,7 +3,8 @@
 
 # Metal v2 render host
 
-Status: accepted 2026-10-10. Replaces the snapshot/admission Metal path as the default.
+Status: accepted 2026-10-10; built and default on macOS the same day. Replaces the
+snapshot/admission Metal path, which stays behind `SHARPEMU_METAL_LEGACY=1`.
 
 ## Why
 
@@ -78,8 +79,15 @@ Everything is in `src/graphics/SharpEmu.Gpu.Metal/V2/`, namespace `SharpEmu.Gpu.
 | `MetalTextureLayout.cs` | port of Vulkan `TextureTransferLayout` (per subresource linear/tiled offsets) |
 | `MetalImageCache*.cs` | address cache, page-owner table, dirty/GPU-modified state, overlap/alias, views, eviction |
 | `MetalRenderHost*.cs` | `IRenderHost` + `IShaderPipelineHost`: render passes, pipelines, argument buffers, draws, dispatches, barriers, clears |
-| `MetalCommandStream.cs` | `ICommandStreamHost` (fills, copies, EOP, flips) + GPU worker thread + completion thread |
+| `MetalCommandStream.cs` | `ICommandStreamHost` (fills, copies, EOP, flips) + the GPU worker loop |
+| `MetalGpuWorker.cs` | the worker relay and the shared-event completion thread |
+| `MetalV2Presenter.cs` | the AppKit window, the CAMetalLayer, the GPU worker thread and the flip seam |
 | `MetalV2Backend.cs` | `IGuestGpuBackend` (minimal like `VulkanGuestGpuBackend`); selected by default |
+
+The three `IRenderHost`, `IShaderPipelineHost` and `ICommandStreamHost` contracts are
+one object (`MetalRenderHost`, spanning those files), because the shared command
+translation builds its `RenderExecutor` only when one host implements all three —
+exactly as the Vulkan `Presenter` does.
 
 Reuse:
 - From the existing Metal package: `MetalNative`, `MetalGuestFormats`, the MSL
@@ -98,7 +106,43 @@ Reuse:
   using an uncompiled pipeline wait for it; they are never silently skipped.
 - Cache selectors and `objc_msgSend` function pointers. Use `delegate* unmanaged`.
   No `Marshal` reflection per call.
-- Persistent residency sets. Argument buffers are suballocated from a ring.
+- Argument buffers are suballocated from a ring.
+
+## What the first Dreaming Sarah runs measured
+
+The host was built as described and ran the title at five frames a second with the
+GPU idle (`GPUEndTime - GPUStartTime` under a millisecond per submission). Five
+things were wrong, each found by measuring rather than by reading, and together
+they are the difference between 5 and about 108 fps — above the legacy path's 62:
+
+- **No `MTLResidencySet` over the guest windows.** A set holding the 16 GiB backing
+  added roughly seventy milliseconds of *scheduling* latency to every submission.
+  Naming the five windows with `useResource` per encoder costs five calls instead.
+  The design's "persistent residency sets" line is therefore wrong for a set this
+  large; `SHARPEMU_METAL_V2_RESIDENCY_SET=1` restores it for comparison.
+- **The windows must stay `hazardTrackingModeUntracked`.** With tracking, Metal
+  fences every submission that touches a 4 GiB window, which is every submission.
+- **Nothing that merely observes an image may end the open encoder.** Reading the
+  submission serial through the transfer scope ended the render pass once per draw,
+  which on a tile-based GPU stores and reloads the whole framebuffer.
+- **A guest cache flush records a scoped `memoryBarrierWithScope`**, not an encoder
+  end, when a pass is open.
+- **Pass continuation is decided on what Metal bakes into the pass**, not on
+  `RenderingState` equality: that struct also carries the clear values of
+  attachments which are not being cleared.
+
+Two more that are about the host, not the GPU:
+
+- `waitUntilSignaledValue:timeoutMS:` does not wake this process on a GPU signal; it
+  spent its full timeout every time while `signaledValue` already showed the value.
+  The completion thread spins briefly and then polls.
+- The presenter promotes a completed frame when the next one is published. With one
+  slot and a completion wait, a guest that flips faster than the display never has a
+  ready frame and the display starves.
+
+A flip is presented by sampling the display surface into a plain BGRA8 drawable, so
+an sRGB surface is read through a linear view; sampling it as sRGB converts to
+linear and shows the frame far too dark.
 
 ## Process-level macOS tuning (separate workstream)
 
