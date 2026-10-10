@@ -459,85 +459,73 @@ kernel void gen5_cs(
     uint3 sharpemu_group_id [[threadgroup_position_in_grid]],
     uint sharpemu_lane [[thread_index_in_simdgroup]])
 {
-    uint s[128] = {};
-    uint v[256] = {};
+    uint s8, s9, s10, s11, s106, s107, s126, s127;
+    uint v3 = 0u;
+    uint v0, v1, v2;
     bool exec = true;
     bool vcc = false;
     bool scc = false;
-    uint pc = 0u;
     bool active = true;
-    uint steps = 0u;
     device uint* b0 = sharpemu_resources.buffers[0];
     uint bias[1] = {};
-    s[8] = sharpemu_push_data[0];
-    s[9] = sharpemu_push_data[1];
-    s[10] = sharpemu_push_data[2];
+    s8 = sharpemu_push_data[0];
+    s9 = sharpemu_push_data[1];
+    s10 = sharpemu_push_data[2];
     bias[0] = (sharpemu_push_data[3] >> 0u) & 0xFFu;
-    v[0] = sharpemu_local_id.x;
-    v[1] = sharpemu_local_id.y;
-    v[2] = sharpemu_local_id.z;
+    v0 = sharpemu_local_id.x;
+    v1 = sharpemu_local_id.y;
+    v2 = sharpemu_local_id.z;
     active = (sharpemu_group_id.x * 32u + sharpemu_local_id.x) < 0xFFFFFFFFu
         && (sharpemu_group_id.y * 1u + sharpemu_local_id.y) < 0xFFFFFFFFu
         && (sharpemu_group_id.z * 1u + sharpemu_local_id.z) < 0xFFFFFFFFu;
-    s[106] = 0u;
-    s[107] = 0u;
-    s[126] = sharpemu_ballot(true);
-    s[127] = 0u;
+    s106 = 0u;
+    s107 = 0u;
+    s126 = sharpemu_ballot(true);
+    s127 = 0u;
 
-    while (active)
+    if (!active)
     {
-        switch (pc)
+        return;
+    }
+
+    {
+        uint t0 = 0x38FACu;
+        s11 = t0;
+        uint t1 = ((0x0u + 0u + 0u + (0u * 0u)) + bias[0]);
+        bool t2 = 8u <= sharpemu_resources.buffer_bytes[0] && t1 <= sharpemu_resources.buffer_bytes[0] - 8u;
+        bool t3 = ((0x38FACu >> 12) & 0x7Fu) != 0u && t2;
+        uint t4 = 0u;
+        uint t5 = 0u;
+        uint t6 = 0u;
+        sharpemu_format_layout(11u, 0u, t4, t5, t6);
+        uint t7 = (t5 + t6 + 7u) >> 3u;
+        bool t8 = t7 <= sharpemu_resources.buffer_bytes[0] && (t1 + t4) <= sharpemu_resources.buffer_bytes[0] - t7;
+        bool t9 = t6 == 0u || t8;
+        uint t10 = sharpemu_load_word(b0, sharpemu_resources.buffer_bytes[0], (t1 + t4));
+        uint t11 = t6 == 0u ? 0u : extract_bits(t10, t5, t6);
+        uint t12 = t6 == 0u ? 0u : sharpemu_format_convert(t11, t6, 7u, 11u);
+        if (exec) { v2 = t3 ? t12 : 0u; }
+        uint t13 = 0u;
+        uint t14 = 0u;
+        uint t15 = 0u;
+        sharpemu_format_layout(11u, 1u, t13, t14, t15);
+        uint t16 = (t14 + t15 + 7u) >> 3u;
+        bool t17 = t16 <= sharpemu_resources.buffer_bytes[0] && (t1 + t13) <= sharpemu_resources.buffer_bytes[0] - t16;
+        bool t18 = t15 == 0u || t17;
+        uint t19 = sharpemu_load_word(b0, sharpemu_resources.buffer_bytes[0], (t1 + t13));
+        uint t20 = t15 == 0u ? 0u : extract_bits(t19, t14, t15);
+        uint t21 = t15 == 0u ? 0u : sharpemu_format_convert(t20, t15, 7u, 11u);
+        if (exec) { v3 = t3 ? t21 : 0u; }
+        uint t22 = ((0x10u + 0u + 0u + (0u * 0u)) + bias[0]);
+        if (exec)
         {
-        case 0u:
-        {
-            uint t0 = 0x38FACu;
-            s[11] = t0;
-            uint t1 = ((0x0u + 0u + 0u + (0u * 0u)) + bias[0]);
-            bool t2 = 8u <= sharpemu_resources.buffer_bytes[0] && t1 <= sharpemu_resources.buffer_bytes[0] - 8u;
-            bool t3 = ((0x38FACu >> 12) & 0x7Fu) != 0u && t2;
-            uint t4 = 0u;
-            uint t5 = 0u;
-            uint t6 = 0u;
-            sharpemu_format_layout(11u, 0u, t4, t5, t6);
-            uint t7 = (t5 + t6 + 7u) >> 3u;
-            bool t8 = t7 <= sharpemu_resources.buffer_bytes[0] && (t1 + t4) <= sharpemu_resources.buffer_bytes[0] - t7;
-            bool t9 = t6 == 0u || t8;
-            uint t10 = sharpemu_load_word(b0, sharpemu_resources.buffer_bytes[0], (t1 + t4));
-            uint t11 = t6 == 0u ? 0u : extract_bits(t10, t5, t6);
-            uint t12 = t6 == 0u ? 0u : sharpemu_format_convert(t11, t6, 7u, 11u);
-            if (exec) { v[2] = t3 ? t12 : 0u; }
-            uint t13 = 0u;
-            uint t14 = 0u;
-            uint t15 = 0u;
-            sharpemu_format_layout(11u, 1u, t13, t14, t15);
-            uint t16 = (t14 + t15 + 7u) >> 3u;
-            bool t17 = t16 <= sharpemu_resources.buffer_bytes[0] && (t1 + t13) <= sharpemu_resources.buffer_bytes[0] - t16;
-            bool t18 = t15 == 0u || t17;
-            uint t19 = sharpemu_load_word(b0, sharpemu_resources.buffer_bytes[0], (t1 + t13));
-            uint t20 = t15 == 0u ? 0u : extract_bits(t19, t14, t15);
-            uint t21 = t15 == 0u ? 0u : sharpemu_format_convert(t20, t15, 7u, 11u);
-            if (exec) { v[3] = t3 ? t21 : 0u; }
-            uint t22 = ((0x10u + 0u + 0u + (0u * 0u)) + bias[0]);
-            if (exec)
-            {
-                sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t22 + 0u, v[2], 4u);
-            }
-            uint t23 = ((0x14u + 0u + 0u + (0u * 0u)) + bias[0]);
-            if (exec)
-            {
-                sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t23 + 0u, v[3], 4u);
-            }
-            active = false;
+            sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t22 + 0u, v2, 4u);
         }
-        break;
-        default:
-            active = false;
-            break;
-        }
-        if (++steps >= 100000u)
+        uint t23 = ((0x14u + 0u + 0u + (0u * 0u)) + bias[0]);
+        if (exec)
         {
-            active = false;
-            sharpemu_note_step_cap(sharpemu_resources.step_report);
+            sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t23 + 0u, v3, 4u);
         }
     }
+    return;
 }

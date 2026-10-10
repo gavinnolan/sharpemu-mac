@@ -283,63 +283,51 @@ kernel void gen5_cs(
     uint sharpemu_lane [[thread_index_in_simdgroup]])
 {
     threadgroup uint sharpemu_lds[8192];
-    uint s[128] = {};
-    uint v[256] = {};
+    uint s8, s9, s10, s11, s106, s107, s126, s127;
+    uint v3 = 0u;
+    uint v0, v1, v2;
     bool exec = true;
     bool vcc = false;
     bool scc = false;
-    uint pc = 0u;
     bool active = true;
-    uint steps = 0u;
     device uint* b0 = sharpemu_resources.buffers[0];
     uint bias[1] = {};
-    s[8] = sharpemu_push_data[0];
-    s[9] = sharpemu_push_data[1];
-    s[10] = sharpemu_push_data[2];
-    s[11] = sharpemu_push_data[3];
+    s8 = sharpemu_push_data[0];
+    s9 = sharpemu_push_data[1];
+    s10 = sharpemu_push_data[2];
+    s11 = sharpemu_push_data[3];
     bias[0] = (sharpemu_push_data[4] >> 0u) & 0xFFu;
-    v[0] = sharpemu_local_id.x;
-    v[1] = sharpemu_local_id.y;
-    v[2] = sharpemu_local_id.z;
+    v0 = sharpemu_local_id.x;
+    v1 = sharpemu_local_id.y;
+    v2 = sharpemu_local_id.z;
     active = (sharpemu_group_id.x * 32u + sharpemu_local_id.x) < 0xFFFFFFFFu
         && (sharpemu_group_id.y * 1u + sharpemu_local_id.y) < 0xFFFFFFFFu
         && (sharpemu_group_id.z * 1u + sharpemu_local_id.z) < 0xFFFFFFFFu;
-    s[106] = 0u;
-    s[107] = 0u;
-    s[126] = sharpemu_ballot(true);
-    s[127] = 0u;
+    s106 = 0u;
+    s107 = 0u;
+    s126 = sharpemu_ballot(true);
+    s127 = 0u;
 
-    while (active)
+    if (!active)
     {
-        switch (pc)
+        return;
+    }
+
+    {
+        uint t0 = 0u;
+        if (exec) { v0 = t0; }
+        uint t1 = 0x1234u;
+        if (exec) { v2 = t1; }
+        uint t2 = v0;
+        if (exec) { sharpemu_lds[(((t2) >> 2) & 8191u)] = v2; }
+        threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+        uint t3 = v0;
+        if (exec) { v3 = sharpemu_lds[(((t3) >> 2) & 8191u)]; }
+        uint t4 = ((0x0u + 0u + 0u + (0u * 0u)) + bias[0]);
+        if (exec)
         {
-        case 0u:
-        {
-            uint t0 = 0u;
-            if (exec) { v[0] = t0; }
-            uint t1 = 0x1234u;
-            if (exec) { v[2] = t1; }
-            uint t2 = v[0];
-            if (exec) { sharpemu_lds[(((t2) >> 2) & 8191u)] = v[2]; }
-            threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
-            uint t3 = v[0];
-            if (exec) { v[3] = sharpemu_lds[(((t3) >> 2) & 8191u)]; }
-            uint t4 = ((0x0u + 0u + 0u + (0u * 0u)) + bias[0]);
-            if (exec)
-            {
-                sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t4 + 0u, v[3], 4u);
-            }
-            active = false;
-        }
-        break;
-        default:
-            active = false;
-            break;
-        }
-        if (++steps >= 100000u)
-        {
-            active = false;
-            sharpemu_note_step_cap(sharpemu_resources.step_report);
+            sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t4 + 0u, v3, 4u);
         }
     }
+    return;
 }

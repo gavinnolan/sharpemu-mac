@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Text.RegularExpressions;
 using Xunit;
 
 namespace SharpEmu.ShaderCompiler.Metal.Tests;
@@ -16,8 +17,8 @@ public sealed class GlobalMemoryRegisterTests
     {
         var source = Compile(opcode);
         for (var component = 0; component < componentCount; component++)
-            Assert.Contains($"v[{8 + component}] = sharpemu_load_device_dword", source);
-        Assert.DoesNotContain("v[3] =", source);
+            Assert.Contains($"v{8 + component} = sharpemu_load_device_dword", source);
+        Assert.DoesNotMatch(@"(?m)^\s*(if \(exec\) \{ )?v3 = ", source);
     }
 
     [Theory]
@@ -29,8 +30,8 @@ public sealed class GlobalMemoryRegisterTests
     {
         var source = Compile(opcode);
         for (var component = 0; component < componentCount; component++)
-            Assert.Matches($@"sharpemu_store_device_dword\([^\r\n]*, v\[{3 + component}\]\);", source);
-        Assert.DoesNotContain(", v[8],", source);
+            Assert.Matches($@"sharpemu_store_device_dword\([^\r\n]*, v{3 + component}\);", source);
+        Assert.DoesNotContain(", v8,", source);
     }
 
     [Theory]
@@ -42,9 +43,9 @@ public sealed class GlobalMemoryRegisterTests
     {
         var source = Compile(opcode, returnsValue);
         Assert.Contains($"atomic_fetch_{operation}_explicit", source);
-        Assert.Contains(", v[3], memory_order_relaxed)", source);
-        Assert.Equal(returnsValue, source.Contains("v[8] =", StringComparison.Ordinal));
-        Assert.DoesNotContain("v[3] =", source);
+        Assert.Contains(", v3, memory_order_relaxed)", source);
+        Assert.Equal(returnsValue, Regex.IsMatch(source, @"(?m)^\s*(if \(exec\) \{ )?v8 = "));
+        Assert.DoesNotMatch(@"(?m)^\s*(if \(exec\) \{ )?v3 = ", source);
     }
 
     [Theory]
@@ -57,8 +58,8 @@ public sealed class GlobalMemoryRegisterTests
     public void PartialLoads_PreserveTheOtherHalfOfTheDestination(uint opcode, bool highHalf)
     {
         var source = Compile(opcode);
-        Assert.Contains(highHalf ? "v[8] & 0x0000FFFFu" : "v[8] & 0xFFFF0000u", source);
-        Assert.DoesNotContain("v[3]", source);
+        Assert.Contains(highHalf ? "v8 & 0x0000FFFFu" : "v8 & 0xFFFF0000u", source);
+        Assert.DoesNotMatch(@"\bv3\b", source);
     }
 
     private static string Compile(uint opcode, bool returnsValue = false)
