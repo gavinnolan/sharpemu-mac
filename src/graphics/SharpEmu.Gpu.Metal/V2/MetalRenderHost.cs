@@ -425,17 +425,30 @@ internal sealed partial class MetalRenderHost :
     void IMetalImageCacheOwner.NoteGuestWrite(ulong address, ulong size) =>
         NoteGuestMemoryWrite(address, size, MetalGpuWriteOrigin.ImageWriteback);
 
-    // A fill the host can do itself is one nothing recorded is reading or writing and
-    // that no GPU-owned image covers. Doing it on the GPU instead is what makes a
-    // command processor poll of the dword it just filled wait for a submission, which
-    // on this host costs far more than the fill.
+    // A fill or copy the host can do itself is one no GPU-owned image covers and no
+    // recorded store is still writing. Doing it on the GPU instead is what makes the
+    // command processor's own poll of the dword it just wrote wait for a whole
+    // submission: measured on Quake, a four-byte fill followed by a WAIT_REG_MEM on
+    // it cost 20 to 65 ms of host wait each, 150 times per two seconds.
+    //
+    // A packet-sized range stays on the host even while a command buffer is being
+    // recorded. The command processor runs ahead of the GPU by design and the
+    // interpreter already publishes its own label writes straight into guest memory,
+    // so a dword of command memory is never what a recorded shader is reading.
     private const ulong MaxHostFillBytes = 64 * 1024;
+    private const ulong MaxRecordingHostFillBytes = 4096;
+
+    private bool CanWriteGuestOnHost(ulong address, ulong size)
+    {
+        var limit = _recordedCommands == 0 ? MaxHostFillBytes : MaxRecordingHostFillBytes;
+        return size <= limit &&
+            !_imageCache.HasGpuModifiedImageBytes(address, size) &&
+            _gpuWrites.PendingSerial(address, size, CompletedSerial) == 0;
+    }
 
     private bool TryFillGuestMemoryOnHost(ulong address, ulong size, uint value)
     {
-        if (size > MaxHostFillBytes || _recordedCommands != 0 ||
-            _imageCache.HasGpuModifiedImageBytes(address, size) ||
-            _gpuWrites.PendingSerial(address, size, CompletedSerial) != 0)
+        if (!CanWriteGuestOnHost(address, size))
         {
             return false;
         }
@@ -448,6 +461,8 @@ internal sealed partial class MetalRenderHost :
 
     private long _hostFills;
     private long _gpuFills;
+    private long _absorbedFills;
+    private long _hostCopies;
 
     /// <summary>Fills a guest range with a repeating dword through its window.</summary>
     public void FillGuestMemory(ulong address, ulong size, uint value)
@@ -459,6 +474,16 @@ internal sealed partial class MetalRenderHost :
 
         if (TryFillGuestMemoryOnHost(address, size, value))
         {
+            return;
+        }
+
+        // A fill whose range is exactly one cached image is that image being cleared.
+        // Writing its guest bytes instead costs the writeback of whatever the GPU had
+        // put there, a retile of the fill and then a detile back into the texture on
+        // the next bind — measured on Quake's menu as two of each per frame.
+        if (_imageCache.TryClearImageFromBuffer(address, size, value))
+        {
+            Interlocked.Increment(ref _absorbedFills);
             return;
         }
 
@@ -552,6 +577,16 @@ internal sealed partial class MetalRenderHost :
         if (!target.IsValid || !origin.IsValid)
         {
             CopyGuestBytesOnHost(destination, source, size);
+            return;
+        }
+
+        // A packet-sized copy the host can do itself costs nothing and records no GPU
+        // write, so the poll that usually follows it does not wait for a submission.
+        if (CanWriteGuestOnHost(destination, size))
+        {
+            CopyGuestBytesOnHost(destination, source, size);
+            _imageCache.InvalidateMemory(destination, size);
+            Interlocked.Increment(ref _hostCopies);
             return;
         }
 
@@ -842,6 +877,8 @@ internal sealed partial class MetalRenderHost :
 
         reasons.Append(" host_fills=").Append(Interlocked.Exchange(ref _hostFills, 0))
             .Append(" gpu_fills=").Append(Interlocked.Exchange(ref _gpuFills, 0))
+            .Append(" cleared_fills=").Append(Interlocked.Exchange(ref _absorbedFills, 0))
+            .Append(" host_copies=").Append(Interlocked.Exchange(ref _hostCopies, 0))
             .Append(" resident=").Append(_guestMemory.ResidentBuffers.Length)
             .Append(" windows_touched=").Append(System.Numerics.BitOperations.PopCount(_guestMemory.TouchedWindows));
         Console.Error.WriteLine($"[METAL-V2][WAITS]{reasons}");

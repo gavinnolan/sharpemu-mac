@@ -369,6 +369,12 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 continue;
             }
 
+            MetalV2Diagnostics.WarnOnce(
+                $"gpu-invalidate:{size:X}:{image.Description.Data.Size:X}",
+                $"A GPU write to guest memory invalidated a cached image, so the image uploads again: " +
+                $"write=0x{address:X16}+0x{size:X} image=0x{image.Description.Data.Address:X16}+0x{image.Description.Data.Size:X} " +
+                $"extent={image.Description.Extent.Width}x{image.Description.Extent.Height} " +
+                $"format={image.Description.PixelFormat} gpu_modified={image.IsGpuModified}.");
             image.ClearGpuModified();
             image.MarkCpuDirty(MetalImageDirtyCause.GpuWrite);
             UnwatchImage(imageIdentifier);
