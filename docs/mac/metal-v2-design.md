@@ -329,8 +329,8 @@ runaway compute shaders (below).
   2048x2048 shadow map. The frames are still black, which is now a content question and
   not a presentation one. Dreaming Sarah is unaffected and holds 60.00 fps.
 
-- **Demon's Souls' black frames are not a presentation fault.** The title presents, and
-  every frame is black. Four things were candidates: the flip resolving to a different
+- **Demon's Souls' black frames are not a presentation fault, and they do not stay
+  black.** The title presents, and its first minutes of frames are black. Four things were candidates: the flip resolving to a different
   image from the one the passes wrote, an HDR or tiling mismatch, the display surface
   being refilled from guest memory on the way to the screen, or the frame genuinely
   being black. `SHARPEMU_METAL_V2_DUMP_TARGETS` and the flip-resolution line rule out
@@ -362,10 +362,22 @@ runaway compute shaders (below).
   `mean_rgb=67` with recognisable silhouettes and a light source, so the engine does
   start drawing content.
 
-  The next question is therefore where the first non-zero pixel is supposed to come from,
-  and the dumper now samples one frame's targets every `SHARPEMU_METAL_V2_DUMP_EVERY`
-  flips (30 by default) rather than the first few occurrences of each texture, because
-  the first occurrences are all in the part of the run that has nothing in it.
+  And the frames stop being black on their own. In an eight-minute run the window is
+  still black at 4:51 and by 7:46 it is drawing the scene: architecture, stairs, terrain
+  silhouettes, a light source — recognisably Boletarian Palace, at 2 fps. So the title
+  renders; what it renders is wrong.
+
+  The corruption has a shape worth naming: a flat mid-grey everywhere, overlaid with
+  saturated green, magenta and purple speckles in **square blocks** that follow the
+  geometry's edges. Uniform blocks rather than per-pixel noise is what a block-compressed
+  or metadata-compressed surface read without its metadata looks like, which makes DCC on
+  the colour targets the first thing to check — `ImageDescription.ClassifyDisplayCompression`
+  and `MetadataKind.Dcc` are where that decision is made.
+
+  The dumper missed this entirely: it spent its budget on the first few occurrences of
+  each texture, and those are all in the loading phase. It now samples one frame's
+  targets every `SHARPEMU_METAL_V2_DUMP_EVERY` flips (30 by default), so the next run
+  dumps the frames that have something in them.
 
 - **Where a flip stops is reported.** `published=0` alone cannot tell a title that never
   flips from one whose flips are released or discarded on the way to the presenter, and
