@@ -342,6 +342,7 @@ internal sealed partial class MetalRenderHost
         _boundGraphicsPipeline = null;
         DumpPassTargets(in ending);
         _passDrawCount = 0;
+        _passLastProfile = null;
     }
 
     // Under SHARPEMU_METAL_V2_DUMP_TARGETS, remember what the pass just finished writing.
@@ -755,7 +756,7 @@ internal sealed partial class MetalRenderHost
     private void CountDraw(long startedTicks)
     {
         Interlocked.Increment(ref _drawCount);
-        NotePassDraw();
+        NotePassDraw(_boundGraphicsPipeline?.Profile);
         Interlocked.Add(ref _drawTicks, System.Diagnostics.Stopwatch.GetTimestamp() - startedTicks);
         _recordedCommands++;
     }

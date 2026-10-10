@@ -32,9 +32,21 @@ internal sealed partial class MetalRenderHost
     private readonly List<(nint Texture, string Label)> _pendingDumps = new();
     private long _passDrawCount;
 
-    /// <summary>Draws recorded into the pass now open, so a dump can say whether the
-    /// target it shows was drawn into or only cleared.</summary>
-    private void NotePassDraw() => _passDrawCount++;
+    private string? _passLastProfile;
+
+    /// <summary>
+    /// Draws recorded into the pass now open, and the last pipeline to draw into it, so a
+    /// dump can say whether the target it shows was drawn into or only cleared, and name
+    /// the shader to read when it was drawn into and still came out wrong.
+    /// </summary>
+    private void NotePassDraw(string? profile)
+    {
+        _passDrawCount++;
+        if (profile is not null)
+        {
+            _passLastProfile = profile;
+        }
+    }
 
     /// <summary>
     /// Remembers a texture to dump at the next safe point. EndRendering runs inside the
@@ -47,7 +59,10 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        _pendingDumps.Add((texture, $"{label}-draws{_passDrawCount}"));
+        var shaders = _passLastProfile is null
+            ? string.Empty
+            : "-" + _passLastProfile.Replace("stage=", string.Empty).Replace(" ", "-").Replace("=0x", "");
+        _pendingDumps.Add((texture, $"{label}-draws{_passDrawCount}{shaders}"));
     }
 
     /// <summary>Reads back everything remembered since the last drain.</summary>
