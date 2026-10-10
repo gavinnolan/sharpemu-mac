@@ -103,6 +103,7 @@ internal sealed unsafe class MetalTiler : IDisposable
     private static readonly nint SelSetBytes = MetalNative.Selector("setBytes:length:atIndex:");
     private static readonly nint SelDispatch = MetalNative.Selector("dispatchThreadgroups:threadsPerThreadgroup:");
     private static readonly nint SelNewBuffer = MetalNative.Selector("newBufferWithLength:options:");
+    private static readonly nint SelSetTexture = MetalNative.Selector("setTexture:atIndex:");
 
     private const uint DataTypeUInt = 33;
     private const uint DataTypeBool = 53;
@@ -120,6 +121,7 @@ internal sealed unsafe class MetalTiler : IDisposable
     private readonly Dictionary<string, nint> _conversionPipelines = new(StringComparer.Ordinal);
     private readonly Dictionary<int, List<StagingSlab>> _staging = new();
     private nint _conversionLibrary;
+    private nint _depthWritebackLibrary;
     private bool _disposed;
 
     public MetalTiler(nint device)
@@ -162,6 +164,8 @@ internal sealed unsafe class MetalTiler : IDisposable
 
         Release(_conversionLibrary);
         _conversionLibrary = 0;
+        Release(_depthWritebackLibrary);
+        _depthWritebackLibrary = 0;
         foreach (var slabs in _staging.Values)
         {
             foreach (var slab in slabs)
@@ -298,7 +302,7 @@ internal sealed unsafe class MetalTiler : IDisposable
         }
     }
 
-    private nint CreatePipeline(nint library, string functionName, uint elementBytes, bool vectorCopy, string owner)
+    private nint CreatePipeline(nint library, string functionName, uint elementBytes, bool? fastCopy, string owner)
     {
         var pool = MetalNative.objc_autoreleasePoolPush();
         try
@@ -313,9 +317,13 @@ internal sealed unsafe class MetalTiler : IDisposable
             {
                 var values = MetalNative.Send(MetalNative.Send(MetalNative.Class("MTLFunctionConstantValues"), SelAlloc), SelInit);
                 var bytes = elementBytes;
-                var vector = vectorCopy ? (byte)1 : (byte)0;
                 MetalNative.SendSetConstantValue(values, SelSetConstantValue, (nint)(&bytes), DataTypeUInt, MetalTilerShaders.ElementBytesConstant);
-                MetalNative.SendSetConstantValue(values, SelSetConstantValue, (nint)(&vector), DataTypeBool, MetalTilerShaders.VectorCopyConstant);
+                if (fastCopy is { } wanted)
+                {
+                    var fast = wanted ? (byte)1 : (byte)0;
+                    MetalNative.SendSetConstantValue(values, SelSetConstantValue, (nint)(&fast), DataTypeBool, MetalTilerShaders.FastCopyConstant);
+                }
+
                 function = MetalNative.Send(library, SelNewSpecialized, MetalNative.NsString(functionName), values, ref error);
                 Release(values);
             }
@@ -341,7 +349,7 @@ internal sealed unsafe class MetalTiler : IDisposable
         }
     }
 
-    private nint BlockPipeline(TileBlockKind kind, MetalTileDirection direction, uint elementBytes, bool vectorCopy)
+    private nint BlockPipeline(TileBlockKind kind, MetalTileDirection direction, uint elementBytes, bool fastCopy)
     {
         var elementIndex = (uint)BitOperations.TrailingZeroCount(elementBytes);
         if ((uint)kind >= KindCount || elementIndex >= ElementSizeCount || !BitOperations.IsPow2(elementBytes))
@@ -350,14 +358,14 @@ internal sealed unsafe class MetalTiler : IDisposable
         }
 
         var slot = (((uint)kind * VariantCount + (direction == MetalTileDirection.Tile ? 1u : 0u)) * ElementSizeCount + elementIndex)
-                   * VariantCount + (vectorCopy ? 1u : 0u);
+                   * VariantCount + (fastCopy ? 1u : 0u);
         if (_blockPipelines[slot] != 0)
         {
             return _blockPipelines[slot];
         }
 
         _blockPipelines[slot] = CreatePipeline(Library(kind, direction), MetalTilerShaders.KernelName(kind, direction),
-            elementBytes, vectorCopy, $"tiler kind={kind} direction={direction} bytes={elementBytes} vector={vectorCopy}");
+            elementBytes, fastCopy, $"tiler kind={kind} direction={direction} bytes={elementBytes} fast={fastCopy}");
         return _blockPipelines[slot];
     }
 
@@ -370,6 +378,30 @@ internal sealed unsafe class MetalTiler : IDisposable
 
         pipeline = CreatePipeline(ConversionLibrary(), functionName, 0, false, $"tiler {functionName}");
         _conversionPipelines[functionName] = pipeline;
+        return pipeline;
+    }
+
+    private nint DepthWritebackLibrary()
+    {
+        if (_depthWritebackLibrary == 0)
+        {
+            _depthWritebackLibrary = CompileLibrary(MetalTilerShaders.CreateDepthWritebackLibrary(), "tiler depth writeback");
+        }
+
+        return _depthWritebackLibrary;
+    }
+
+    private nint DepthWritebackPipeline(bool arrayed, uint elementBytes)
+    {
+        var name = arrayed ? MetalTilerShaders.DepthWritebackArray : MetalTilerShaders.DepthWriteback;
+        var key = $"{name}/{elementBytes}";
+        if (_conversionPipelines.TryGetValue(key, out var pipeline))
+        {
+            return pipeline;
+        }
+
+        pipeline = CreatePipeline(DepthWritebackLibrary(), name, elementBytes, null, $"tiler {key}");
+        _conversionPipelines[key] = pipeline;
         return pipeline;
     }
 
@@ -527,22 +559,52 @@ internal sealed unsafe class MetalTiler : IDisposable
         };
     }
 
-    // Whole-element vector loads need the element's own alignment on both sides; the
-    // block offsets and block sizes are always element-aligned, so only the folded
-    // bases and the linear strides can break it.
-    private static bool AllowsVectorCopy(in MetalTileArguments arguments, uint elementBytes) =>
-        elementBytes <= 4 ||
-        ((arguments.SourceBase | arguments.DestinationBase | arguments.PitchBytes | arguments.SliceBytes) & (elementBytes - 1)) == 0;
-
-    private static void Dispatch(nint encoder, MetalTileArguments arguments, (uint X, uint Y, uint Z) group)
+    // The fast variant of a block copy. Four bytes and wider means whole-element vector
+    // loads, which need the element's own alignment on both sides; the block offsets and
+    // block sizes are always element-aligned, so only the folded bases and the linear
+    // strides can break it. Sub-dword means one dword per element group, which needs the
+    // destination side dword-aligned: the tiled side inherits that from the block size,
+    // the linear side from its base and its strides. A tail transfer starts at an
+    // arbitrary element inside its block, so no group of it is dword-aligned.
+    private static bool AllowsFastCopy(in MetalTileTransfer transfer, in MetalTileArguments arguments, bool tile)
     {
+        var bytes = transfer.BytesPerElement;
+        if (bytes >= 4)
+        {
+            return bytes == 4 ||
+                   ((arguments.SourceBase | arguments.DestinationBase | arguments.PitchBytes | arguments.SliceBytes) & (bytes - 1)) == 0;
+        }
+
+        if (transfer.Tail || WideGroupOf(transfer).Width == 0)
+        {
+            return false;
+        }
+
+        return tile
+            ? arguments.DestinationBase % 4 == 0
+            : ((arguments.DestinationBase | arguments.PitchBytes | arguments.SliceBytes) & 3u) == 0;
+    }
+
+    private static (uint Width, uint Height) WideGroupOf(in MetalTileTransfer transfer) =>
+        MetalTilerShaders.WideGroup(transfer.Kind, transfer.BytesPerElement);
+
+    private static void Dispatch(nint encoder, MetalTileArguments arguments, (uint X, uint Y, uint Z) group) =>
+        Dispatch(encoder, arguments, group, (1, 1));
+
+    // One thread per element, or per element group when the fast sub-dword variant is
+    // bound: the grid shrinks by the group's extent and the kernel scales the index back.
+    private static void Dispatch(
+        nint encoder, MetalTileArguments arguments, (uint X, uint Y, uint Z) group, (uint Width, uint Height) wide)
+    {
+        var threadsX = (arguments.Width + wide.Width - 1) / wide.Width;
+        var threadsY = (arguments.Height + wide.Height - 1) / wide.Height;
         MetalNative.SendSetBytes(encoder, SelSetBytes, (nint)(&arguments),
             (nuint)MetalTilerShaders.ArgumentBytes, MetalTilerShaders.ArgumentIndex);
         MetalNative.SendDispatch(encoder, SelDispatch,
             new MtlSize
             {
-                Width = (nuint)((arguments.Width + group.X - 1) / group.X),
-                Height = (nuint)((arguments.Height + group.Y - 1) / group.Y),
+                Width = (nuint)((threadsX + group.X - 1) / group.X),
+                Height = (nuint)((threadsY + group.Y - 1) / group.Y),
                 Depth = (nuint)((arguments.Depth + group.Z - 1) / group.Z),
             },
             new MtlSize { Width = group.X, Height = group.Y, Depth = group.Z });
@@ -579,24 +641,65 @@ internal sealed unsafe class MetalTiler : IDisposable
 
         var pipelineKind = (TileBlockKind)uint.MaxValue;
         uint pipelineBytes = 0;
-        var pipelineVector = false;
+        var pipelineFast = false;
         var bound = false;
         var direction = tile ? MetalTileDirection.Tile : MetalTileDirection.Detile;
         foreach (ref readonly var transfer in System.Runtime.InteropServices.CollectionsMarshal.AsSpan(transfers))
         {
             var arguments = Prepare(transfer, tile, tile ? linearBase : tiledBase, tile ? tiledBase : linearBase,
                 tiled.Size, linear.Size, out _);
-            var vector = AllowsVectorCopy(arguments, transfer.BytesPerElement);
-            if (!bound || pipelineKind != transfer.Kind || pipelineBytes != transfer.BytesPerElement || pipelineVector != vector)
+            var fast = AllowsFastCopy(transfer, arguments, tile);
+            if (!bound || pipelineKind != transfer.Kind || pipelineBytes != transfer.BytesPerElement || pipelineFast != fast)
             {
-                MetalNative.SendVoid(encoder, SelSetPipeline, BlockPipeline(transfer.Kind, direction, transfer.BytesPerElement, vector));
+                MetalNative.SendVoid(encoder, SelSetPipeline, BlockPipeline(transfer.Kind, direction, transfer.BytesPerElement, fast));
                 pipelineKind = transfer.Kind;
                 pipelineBytes = transfer.BytesPerElement;
-                pipelineVector = vector;
+                pipelineFast = fast;
                 bound = true;
             }
 
-            Dispatch(encoder, arguments, MetalTilerShaders.Threadgroup(transfer.Kind));
+            var wide = fast && transfer.BytesPerElement < 4 ? WideGroupOf(transfer) : (1u, 1u);
+            Dispatch(encoder, arguments, MetalTilerShaders.Threadgroup(transfer.Kind), wide);
+        }
+    }
+
+    // Tiles the guest depth plane out of the Metal depth texture in one pass: the kernel
+    // reads the texel and writes it where the guest surface's own 64 KiB addressing puts
+    // it, so neither a blit into a staging buffer nor a separate retile is needed. One
+    // dispatch per transfer, which for a depth surface is one per array layer; the layer
+    // rides in surfaceZ, as both the texture slice and the folded address bits.
+    public void EncodeDepthTextureWriteback(
+        nint encoder, nint texture, MetalBufferSpan guest, uint elementBytes, bool arrayed, List<MetalTileTransfer> transfers)
+    {
+        if (texture == 0 || transfers.Count == 0 || !guest.IsValid || elementBytes is not (2 or 4))
+        {
+            throw GpuFatal.Fatal(
+                $"The depth texture writeback is not encodable: texture=0x{texture:x} transfers={transfers.Count} " +
+                $"guest=0x{guest.Size:x} bytes={elementBytes}.");
+        }
+
+        var tiledBase = FoldBase(guest.Offset, guest.Size, out var tiledBind, "depth writeback");
+        if (tiledBase % 4 != 0)
+        {
+            throw GpuFatal.Fatal($"The depth writeback target is not dword aligned: offset=0x{guest.Offset:x}.");
+        }
+
+        MetalV2Native.SendSetResourceAtIndex(encoder, SelSetTexture, texture, MetalTilerShaders.TextureIndex);
+        BindTarget(encoder, guest.Buffer, tiledBind);
+        MetalNative.SendVoid(encoder, SelSetPipeline, DepthWritebackPipeline(arrayed, elementBytes));
+        foreach (ref readonly var transfer in CollectionsMarshal.AsSpan(transfers))
+        {
+            if (transfer.BytesPerElement != elementBytes || transfer.Kind != TileBlockKind.Depth64KB || transfer.Tail)
+            {
+                throw GpuFatal.Fatal(
+                    $"The depth writeback transfer does not match its plane: kind={(uint)transfer.Kind} " +
+                    $"bytes={transfer.BytesPerElement} tail={transfer.Tail} planeBytes={elementBytes}.");
+            }
+
+            var arguments = Prepare(transfer, tile: true, 0, tiledBase, guest.Size,
+                transfer.LinearOffset + transfer.LinearSize, out _);
+            Dispatch(encoder, arguments, MetalTilerShaders.Threadgroup(TileBlockKind.Depth64KB),
+                elementBytes == 2 ? (2u, 1u) : (1u, 1u));
         }
     }
 

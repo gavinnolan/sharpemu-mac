@@ -108,6 +108,45 @@ Reuse:
   No `Marshal` reflection per call.
 - Argument buffers are suballocated from a ring.
 
+### Image transfers
+
+Every tiled surface moves on the GPU, and the only rate worth quoting is guest bytes per
+second. `DepthStencilTransferThroughputIsBandwidthBound` and
+`ColorTransferThroughputIsBandwidthBound` print the whole transfer and every stage of it;
+on an M4, with a 4K RGBA8 render target as the control:
+
+| 4K surface, 40.3 MiB of planes | before | after |
+| --- | --- | --- |
+| D32S8 upload | 2.31 ms, 18.3 GB/s | 1.85 ms, 22.8 GB/s |
+| D32S8 writeback | 2.26 ms, 18.7 GB/s | 1.31 ms, 32.4 GB/s |
+| stencil plane detile | 1.02 ms, 17.4 GB/s | 0.49 ms, 36.1 GB/s |
+| stencil plane retile | 0.98 ms, 18.1 GB/s | 0.43 ms, 41.1 GB/s |
+| RGBA8 upload / writeback | 1.58 / 1.60 ms | 1.60 / 1.62 ms |
+
+A device another process is also using makes the old numbers much worse than the new ones
+(the atomics degrade where the dword stores do not), so compare only runs whose control
+agrees. Three things shape the rate:
+
+- **A sub-dword element is copied a dword at a time.** One thread covers the element
+  group whose destination bytes are one aligned dword, so a one- or two-byte surface no
+  longer pays two masked atomics per element. `MetalTilerShaders.WideGroup` derives the
+  group from the shared block tables; the one-byte depth kind interleaves x and y in the
+  two low address bits, so its retile dword is a 2x2 quad. The variant is bound only when
+  the destination side is dword-aligned and the transfer is not a block tail, and a group
+  the row cuts short falls back to the atomics, so row padding is never written.
+- **A tiled depth plane is written back in one pass.** The kernel binds the texture as
+  `depth2d`/`depth2d_array` and tiles the guest plane straight out of it, narrowing to 16
+  bits on the way when the guest wanted 16 bits; no staging buffer and no retile.
+- **The remaining passes are a staging round trip, and two Metal rules keep them there.**
+  Compute cannot write a depth texture, so the way in stays a detile plus a
+  buffer-to-texture blit. Stencil leaves a combined texture only through
+  `MTLBlitOptionStencilFromDepthStencil`, because reading it in a shader needs an
+  `X32_Stencil8` view and the `PixelFormatView` usage that view asks for is what turns off
+  the attachment's lossless compression while it renders. A fullscreen render pass
+  exporting `[[depth(any)]]` would fuse the upload, but fragment depth is clamped to the
+  depth range, so a guest plane holding anything outside [0, 1] would not survive the
+  round trip.
+
 ## What the first Dreaming Sarah runs measured
 
 The host was built as described and ran the title at five frames a second with the
@@ -230,10 +269,18 @@ runaway compute shaders (below).
   layout is now chosen against `recommendedMaxWorkingSetSize`.
 - **Image transfers, not shaders, dominate Silent Hill.** With the windows fixed, the
   worst single items are a 3840x2160 `D32SfloatS8Uint` upload at 156 ms and its writeback
-  at 163 ms — about 200 MB/s for a 33 MB surface, two orders of magnitude off what the
-  blit should cost. The stencil plane goes in through
-  `MTLBlitOptionStencilFromDepthStencil`, one texel at a time as far as the GPU is
-  concerned. Everything else in that title measures in single-digit milliseconds.
+  at 163 ms, with everything else in that title in single-digit milliseconds.
+
+  A transfer's sample is not a transfer, though: `ProfileEncoded` charges the label the
+  whole command buffer's `GPUEndTime - GPUStartTime`, and those two lines say
+  `transfers=4` and `transfers=5`, so each one is a first-ever command buffer holding
+  five surfaces and the first touch of every staging slab they allocated. Timed on the
+  device on their own (`DepthStencilTransferThroughputIsBandwidthBound`), the same 4K
+  D32S8 upload and writeback cost about 2 ms each, not 160, and the stage breakdown shows
+  no serialized blit: `MTLBlitOptionDepthFromDepthStencil` moves the depth plane at over
+  80 GB/s in both directions and the stencil option at 25-40 GB/s. Read a `transfer`
+  sample as an upper bound on a group of surfaces, and use the device benchmark for the
+  rate.
 - **Demon's Souls does not have runaway compute shaders; the profiler was charging
   dispatches for transfers.** The first reading of these runs was that
   `0xFB8FF966CA63E288` (664 ms), `0x3E9247D2A2F42DBB` (1211 ms) and
