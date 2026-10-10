@@ -72,7 +72,7 @@ internal sealed partial class MetalImageCache
 
         if (image.IsGpuModified)
         {
-            WriteBackToGuest(image);
+            WriteBackToGuest(image, MetalWritebackCause.Release);
         }
 
         if (image.Description.HasMetadata)

@@ -144,6 +144,53 @@ A flip is presented by sampling the display surface into a plain BGRA8 drawable,
 an sRGB surface is read through a linear view; sampling it as sRGB converts to
 linear and shows the frame far too dark.
 
+## What the host waits measured
+
+Quake's menu spent 1440 ms of every two seconds in 288 host waits while the GPU was
+busy for 670, and Void Terrarium's intro spent all of every two seconds in eight to
+twenty-four waits of 150 to 250 ms each with the GPU busy for under a millisecond.
+Three things were wrong, and none of them was the GPU.
+
+- **A host read waited on one global flag.** `TryReadGuest` waited whenever any
+  shader store had been recorded since the last wait, so every label poll, indirect
+  argument read and DMA source read serialized the command processor against the GPU,
+  and each wait also committed the open command buffer. `MetalGpuWriteRanges` records
+  the guest byte range of every recorded store with the serial that finishes it, as
+  the Vulkan `GuestBufferCache` does with `_gpuModifiedRanges`; a read waits only when
+  it overlaps a range whose serial has not completed, and an already-committed serial
+  is waited for without touching what is being recorded.
+- **Every encoder made every guest window resident.** `useResource` over the windows
+  per encoder asks the kernel to make the whole backing writable-resident for a draw
+  that touches one window. That, and not the `MTLResidencySet` as such, is what the
+  Dreaming Sarah runs above measured as scheduling latency: on Void it was sixty to
+  two hundred and fifty milliseconds between `commit` and the driver starting on the
+  submission, with the GPU then running it in ten microseconds. Only the windows a
+  submission resolved a range through are named now, plus the window set the
+  device-address table covers when a program binds it.
+- **A packet-sized fill ran on the GPU.** The command processor writes a dword with
+  DMA_DATA and polls it with WAIT_REG_MEM; filling it on the GPU made the poll wait
+  for the whole submission. A fill or copy of at most a packet's worth of fully mapped
+  bytes runs on the host, which is also where the interpreter already writes its own
+  labels. A fill whose range is exactly one cached image clears that image's texture
+  instead of writing the bytes and making the image upload again.
+
+Two measurements that did not pay off, kept behind environment variables so they can
+be re-run: `-[MTLCommandBuffer waitUntilCompleted]` instead of the shared-event wait
+(`SHARPEMU_METAL_V2_WAIT_ON_COMMAND_BUFFER=1`) halved the frame rate, because the
+driver still took a hundred milliseconds and more to schedule the submission; and the
+old global flag (`SHARPEMU_METAL_V2_CONSERVATIVE_READS=1`) for checking a correctness
+question against the range tracking.
+
+A command-buffer completion handler does pay off. It is a global Objective-C block
+literal whose `invoke` is an `[UnmanagedCallersOnly]` function, so there is no
+per-buffer callback object, and the host parks instead of polling the shared event
+every millisecond. `SHARPEMU_METAL_V2_POLL_COMPLETIONS=1` restores the poll.
+
+`[METAL-V2][WAITS]` reports host waits per reason and GPU-write records per origin,
+`[METAL-V2][CHURN]` attributes every image upload and writeback to its cause, and
+`[METAL-V2][SLOW-WAIT]` names the read, the recorded range it collided with, and the
+`commit → kernel → GPU` breakdown of where the submission's latency went.
+
 ## Measuring one draw or dispatch
 
 The periodic `[METAL-V2][PERF]` line reports `gpu_busy_ms` per command buffer, which is

@@ -181,30 +181,62 @@ internal sealed class MetalCompletionQueue : IDisposable
 {
     private const ulong WaitTimeoutMilliseconds = 50;
 
+    // The safety net behind a completion handler: a missed wakeup costs this much
+    // latency instead of hanging. With the handler bound it is never reached.
+    private const int HandlerWaitMilliseconds = 4;
+
     private static readonly nint SelSignaledValue = MetalNative.Selector("signaledValue");
     private static readonly nint SelWaitUntilSignaledValue = MetalNative.Selector("waitUntilSignaledValue:timeoutMS:");
 
+    private static readonly bool PollCompletions =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_POLL_COMPLETIONS") == "1";
+
     private readonly nint _sharedEvent;
     private readonly object _gate = new();
+    private readonly object _wakeGate = new();
     private readonly List<(ulong Serial, Action Work)> _pending = new();
     private readonly Thread _thread;
+    private readonly Action _wakeHandler;
+    private readonly bool _handlerBound;
     private ulong _publishedSerial;
     private ulong _drainedSerial;
     private long _gpuWaitTicks;
     private long _gpuWaitSamples;
     private long _gpuReadySamples;
     private long _wakeWaitTicks;
+    private long _handlerWakeups;
     private bool _stopping;
 
     public MetalCompletionQueue(nint sharedEvent)
     {
         _sharedEvent = sharedEvent;
+        _wakeHandler = OnGpuCompleted;
+        _handlerBound = !PollCompletions && MetalCompletionSignal.TryBind(_wakeHandler);
+        Console.Error.WriteLine(
+            _handlerBound
+                ? "[METAL-V2][INFO] Submission completions wake the host through a command-buffer handler."
+                : "[METAL-V2][INFO] Submission completions are polled on the shared event.");
         _thread = new Thread(Run)
         {
             IsBackground = true,
             Name = "SharpEmu Metal completion",
         };
         _thread.Start();
+    }
+
+    /// <summary>Whether a committed command buffer should carry the wakeup handler.</summary>
+    public bool WantsCompletionHandler => _handlerBound;
+
+    public long HandlerWakeups => Interlocked.Read(ref _handlerWakeups);
+
+    // Metal finished a command buffer: everyone watching the shared event looks again.
+    private void OnGpuCompleted()
+    {
+        Interlocked.Increment(ref _handlerWakeups);
+        lock (_wakeGate)
+        {
+            Monitor.PulseAll(_wakeGate);
+        }
     }
 
     public ulong SignaledValue => MetalV2Native.SendValue64(_sharedEvent, SelSignaledValue);
@@ -249,18 +281,20 @@ internal sealed class MetalCompletionQueue : IDisposable
     }
 
     /// <summary>Blocks until the GPU finished the serial and its completions ran.</summary>
-    public void WaitFor(ulong serial)
+    public MetalCompletionWait WaitFor(ulong serial)
     {
         if (serial == 0)
         {
-            return;
+            return default;
         }
 
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
         while (SignaledValue < serial)
         {
             WaitForSignal(serial);
         }
 
+        var signalled = System.Diagnostics.Stopwatch.GetTimestamp();
         lock (_gate)
         {
             while (_drainedSerial < serial && !_stopping && HasWorkAtOrBefore(serial))
@@ -268,6 +302,9 @@ internal sealed class MetalCompletionQueue : IDisposable
                 Monitor.Wait(_gate, 2);
             }
         }
+
+        return new MetalCompletionWait(
+            signalled - started, System.Diagnostics.Stopwatch.GetTimestamp() - signalled);
     }
 
     private bool HasWorkAtOrBefore(ulong serial)
@@ -333,14 +370,47 @@ internal sealed class MetalCompletionQueue : IDisposable
     // wait is latency-critical. waitUntilSignaledValue:timeoutMS: measured about
     // forty-five milliseconds per completion on this host — its full timeout — even
     // though the value had arrived: it does not wake this process on a GPU signal.
-    // Reading signaledValue does see it, so the wait is a short spin and then a
-    // one-millisecond poll, which is two message sends per millisecond.
+    // A command-buffer completion handler does wake it, so the wait is a short spin
+    // and then a park that the handler ends; the timeout is only a safety net.
     private void WaitForSignal(ulong target)
     {
         var frequency = System.Diagnostics.Stopwatch.Frequency;
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
-        var spinDeadline = started + (frequency / 2000);
-        var pollDeadline = started + (frequency / 4);
+        var spinDeadline = started + (frequency / 20000);
+        if (!_handlerBound)
+        {
+            PollForSignal(target, started, started + (frequency / 2000), started + (frequency / 4));
+            return;
+        }
+
+        while (SignaledValue < target)
+        {
+            if (System.Diagnostics.Stopwatch.GetTimestamp() < spinDeadline)
+            {
+                Thread.SpinWait(32);
+                continue;
+            }
+
+            lock (_wakeGate)
+            {
+                // Inside the lock the handler cannot pulse between the test and the
+                // wait, so a completion is never missed.
+                if (SignaledValue >= target || _stopping)
+                {
+                    return;
+                }
+
+                _ = Monitor.Wait(_wakeGate, HandlerWaitMilliseconds);
+            }
+        }
+    }
+
+    // The original path, kept for A/B measurement under
+    // SHARPEMU_METAL_V2_POLL_COMPLETIONS=1 and as the fallback when the completion
+    // block could not be built.
+    private void PollForSignal(ulong target, long started, long spinDeadline, long pollDeadline)
+    {
+        _ = started;
         while (SignaledValue < target)
         {
             var now = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -438,12 +508,21 @@ internal sealed class MetalCompletionQueue : IDisposable
 
     public void Dispose()
     {
+        MetalCompletionSignal.Unbind(_wakeHandler);
         lock (_gate)
         {
             _stopping = true;
             Monitor.PulseAll(_gate);
         }
 
+        lock (_wakeGate)
+        {
+            Monitor.PulseAll(_wakeGate);
+        }
+
         _thread.Join(TimeSpan.FromSeconds(2));
     }
 }
+
+/// <summary>How a host wait for one submission spent its time.</summary>
+internal readonly record struct MetalCompletionWait(long SignalTicks, long DrainTicks);

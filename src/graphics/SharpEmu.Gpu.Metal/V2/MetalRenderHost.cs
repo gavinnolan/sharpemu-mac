@@ -36,6 +36,7 @@ internal sealed partial class MetalRenderHost :
     private static readonly nint SelEndEncoding = MetalNative.Selector("endEncoding");
     private static readonly nint SelWaitUntilCompleted = MetalNative.Selector("waitUntilCompleted");
     private static readonly nint SelEncodeSignalEvent = MetalNative.Selector("encodeSignalEvent:value:");
+    private static readonly nint SelAddCompletedHandler = MetalNative.Selector("addCompletedHandler:");
     private static readonly nint SelSignaledValue = MetalNative.Selector("signaledValue");
     private static readonly nint SelNewSharedEvent = MetalNative.Selector("newSharedEvent");
     private static readonly nint SelBlitEncoder = MetalNative.Selector("blitCommandEncoder");
@@ -66,15 +67,28 @@ internal sealed partial class MetalRenderHost :
     private ulong _submissionSerial;
     private ulong _nextSerial;
     private long _recordedCommands;
-    // Set when recorded work may store into guest memory. A CPU read only has to
-    // wait for the GPU while it is set; without it every packet read would stall.
-    private bool _gpuWroteGuestMemory;
+    // The guest byte ranges recorded work may still be writing, with the submission
+    // serial that finishes each. A CPU read waits only when it overlaps one whose
+    // serial has not completed, and then only for that serial.
+    private readonly MetalGpuWriteRanges _gpuWrites = new();
+    // Without ranges every write is "somewhere in guest memory", which is what the
+    // first version of this host did; kept for A/B measurement.
+    private static readonly bool ConservativeReads =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_CONSERVATIVE_READS") == "1";
+
+    // Waits in -[MTLCommandBuffer waitUntilCompleted] instead of on the shared event
+    // the submission signals. Measured slower on this host: the driver still took
+    // 100 ms and more to schedule the submission, and the fps halved, so the host
+    // waits on the event and this is kept only for comparison.
+    private static readonly bool WaitOnCommandBuffer =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WAIT_ON_COMMAND_BUFFER") == "1";
     private long _drawCount;
     private long _drawTicks;
     private long _pipelineCreations;
     private long _shaderCompilations;
     private long _flushes;
     private long _gpuWaits;
+    private long _partialWaits;
     private long _gpuWaitTicks;
     private long _idleTicks;
     private long _statsTimestamp;
@@ -211,7 +225,15 @@ internal sealed partial class MetalRenderHost :
         EndEncoders();
         var serial = _submissionSerial;
         MetalV2Native.SendEventValue(_commandBuffer, SelEncodeSignalEvent, _sharedEvent, serial);
+        if (_completions.WantsCompletionHandler)
+        {
+            // The handler is a global block with no state: it only wakes whoever waits
+            // on the shared event, which the signal above has already advanced.
+            MetalNative.SendVoid(_commandBuffer, SelAddCompletedHandler, MetalCompletionSignal.Block);
+        }
+
         MetalNative.SendVoid(_commandBuffer, SelCommit);
+        _previousCommitTime = CACurrentMediaTime();
         // A command buffer that fails never signals its serial, and the completion
         // queue would then wait out its timeout on every submission behind it. The
         // previous buffer is far enough ahead to have a status by now, so checking
@@ -232,10 +254,17 @@ internal sealed partial class MetalRenderHost :
 
     private static readonly nint SelGpuStartTime = MetalNative.Selector("GPUStartTime");
     private static readonly nint SelGpuEndTime = MetalNative.Selector("GPUEndTime");
+    private static readonly nint SelKernelStartTime = MetalNative.Selector("kernelStartTime");
+    private static readonly nint SelKernelEndTime = MetalNative.Selector("kernelEndTime");
     [System.Runtime.InteropServices.DllImport("/System/Library/Frameworks/QuartzCore.framework/QuartzCore")]
     private static extern double CACurrentMediaTime();
 
     private int _slowWaitReports;
+    private double _previousCommitTime;
+    private ulong _lastReadAddress;
+    private ulong _lastReadSize;
+    private readonly long[] _waitsByReason = new long[MetalWaitReasons.Count];
+    private readonly long[] _waitTicksByReason = new long[MetalWaitReasons.Count];
 
     private void ReportSubmissionFailure()
     {
@@ -274,50 +303,198 @@ internal sealed partial class MetalRenderHost :
     }
 
     /// <summary>Commits the current command buffer and waits for the GPU to finish it.</summary>
-    public void FlushAndWaitForGpu()
+    public void FlushAndWaitForGpu() => FlushAndWaitForGpu(MetalWaitReason.Other);
+
+    /// <summary>
+    /// Commits the current command buffer and waits for the GPU to finish it. The
+    /// reason is counted, because the only way to remove a host wait is to know which
+    /// packet asked for it.
+    /// </summary>
+    public void FlushAndWaitForGpu(MetalWaitReason reason)
     {
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var serial = FlushCommandBuffer();
         var waited = _previousCommandBuffer;
         var committedAt = System.Diagnostics.Stopwatch.GetTimestamp();
-        _completions.WaitFor(serial);
+        if (waited != 0 && WaitOnCommandBuffer)
+        {
+            // Wait on the command buffer the driver knows about rather than on the
+            // shared event it signals. Measured on this host, a committed submission
+            // sat 160 to 250 ms between -commit and the driver scheduling it
+            // (`commit_to_kernel_ms`) while the GPU then ran it in ten microseconds:
+            // nothing on our queue was pushing the submission out. Asking the driver
+            // to wait for that command buffer makes it flush and schedule it now.
+            MetalNative.SendVoid(waited, SelWaitUntilCompleted);
+        }
+
+        var profile = _completions.WaitFor(serial);
+        ReportWait(serial, started, committedAt, waited, in profile, reason, partial: false);
+        _guestMemory.NoteCompleted(serial);
+        _gpuWrites.Clear(serial);
+    }
+
+    /// <summary>
+    /// Waits for one submission that is already committed, leaving what is being
+    /// recorded open. A command-processor read of bytes an earlier submission wrote
+    /// needs that submission and nothing else, and on a tile-based GPU committing the
+    /// open pass instead would store and reload the whole framebuffer.
+    /// </summary>
+    private void WaitForCommittedSerial(ulong serial, MetalWaitReason reason)
+    {
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var profile = _completions.WaitFor(serial);
+        ReportWait(serial, started, started, waited: 0, in profile, reason, partial: true);
+        _guestMemory.NoteCompleted(serial);
+        _gpuWrites.Retire(CompletedSerial);
+        Interlocked.Increment(ref _partialWaits);
+    }
+
+    private void ReportWait(
+        ulong serial,
+        long started,
+        long committedAt,
+        nint waited,
+        in MetalCompletionWait profile,
+        MetalWaitReason reason,
+        bool partial)
+    {
         var finished = System.Diagnostics.Stopwatch.GetTimestamp();
         Interlocked.Increment(ref _gpuWaits);
         Interlocked.Add(ref _gpuWaitTicks, finished - started);
+        _waitsByReason[(int)reason]++;
+        _waitTicksByReason[(int)reason] += finished - started;
         var frequency = System.Diagnostics.Stopwatch.Frequency;
-        if (finished - started > frequency / 50 && waited != 0 && _slowWaitReports < 64)
+        if (finished - started <= frequency / 50 || _slowWaitReports >= 4)
         {
-            // A slow host wait: separate the GPU's own execution from scheduling.
-            _slowWaitReports++;
-            var now = CACurrentMediaTime();
-            var gpuStart = MetalNative.SendDouble(waited, SelGpuStartTime);
-            var gpuEnd = MetalNative.SendDouble(waited, SelGpuEndTime);
-            Console.Error.WriteLine(
-                $"[METAL-V2][SLOW-WAIT] serial={serial} total_ms={(finished - started) * 1000.0 / frequency:F1} " +
-                $"flush_ms={(committedAt - started) * 1000.0 / frequency:F1} " +
-                $"gpu_exec_ms={(gpuEnd - gpuStart) * 1000.0:F2} gpu_end_age_ms={(now - gpuEnd) * 1000.0:F1} " +
-                $"gpu_start_age_ms={(now - gpuStart) * 1000.0:F1} last={LastWorkDescription}");
+            return;
         }
-        _guestMemory.NoteCompleted(serial);
-        _gpuWroteGuestMemory = false;
+
+        // A slow host wait: separate the GPU's own execution from the scheduling
+        // latency before it and from the time the completion took to reach us.
+        _slowWaitReports++;
+        var now = CACurrentMediaTime();
+        var gpuStart = waited == 0 ? 0 : MetalNative.SendDouble(waited, SelGpuStartTime);
+        var gpuEnd = waited == 0 ? 0 : MetalNative.SendDouble(waited, SelGpuEndTime);
+        var kernelStart = waited == 0 ? 0 : MetalNative.SendDouble(waited, SelKernelStartTime);
+        var kernelEnd = waited == 0 ? 0 : MetalNative.SendDouble(waited, SelKernelEndTime);
+        Console.Error.WriteLine(
+            $"[METAL-V2][SLOW-WAIT] serial={serial} reason={reason} partial={(partial ? 1 : 0)} " +
+            $"read=0x{_lastReadAddress:X16}+0x{_lastReadSize:X} " +
+            $"range=0x{_gpuWrites.LastMatch.Start:X16}..0x{_gpuWrites.LastMatch.End:X16} " +
+            $"range_from={_gpuWrites.LastMatch.Origin} range_serial={_gpuWrites.LastMatch.Serial} " +
+            $"total_ms={(finished - started) * 1000.0 / frequency:F1} " +
+            $"flush_ms={(committedAt - started) * 1000.0 / frequency:F1} " +
+            $"signal_ms={profile.SignalTicks * 1000.0 / frequency:F1} " +
+            $"drain_ms={profile.DrainTicks * 1000.0 / frequency:F1} " +
+            // commit → the driver starting on it → the GPU starting on it: a long
+            // commit-to-kernel gap is host or driver scheduling, not GPU work.
+            $"commit_to_kernel_ms={(kernelStart - _previousCommitTime) * 1000.0:F1} " +
+            $"kernel_to_gpu_ms={(gpuStart - kernelEnd) * 1000.0:F1} " +
+            $"gpu_exec_ms={(gpuEnd - gpuStart) * 1000.0:F2} gpu_end_age_ms={(now - gpuEnd) * 1000.0:F1} " +
+            $"gpu_start_age_ms={(now - gpuStart) * 1000.0:F1} " +
+            $"kernel_ms={(kernelEnd - kernelStart) * 1000.0:F2} " +
+            $"kernel_end_age_ms={(now - kernelEnd) * 1000.0:F1} last={LastWorkDescription}");
     }
 
     /// <summary>Counts the time the worker spent with nothing runnable.</summary>
     public void NoteIdle(long ticks) => Interlocked.Add(ref _idleTicks, ticks);
 
-    /// <summary>Recorded work may now store into guest memory.</summary>
-    public void NoteGuestMemoryWrite() => _gpuWroteGuestMemory = true;
+    /// <summary>Recorded work stores into this guest range.</summary>
+    public void NoteGuestMemoryWrite(ulong address, ulong size, MetalGpuWriteOrigin origin)
+    {
+        if (ConservativeReads)
+        {
+            _gpuWrites.NoteUnbounded(SubmissionSerial);
+            return;
+        }
 
-    void IMetalImageCacheOwner.WaitForGpu() => FlushAndWaitForGpu();
+        _gpuWrites.Note(address, size, SubmissionSerial, origin);
+    }
+
+    /// <summary>
+    /// Recorded work stores into guest memory without a known destination. Only the
+    /// paths that genuinely cannot name their range use this: it makes every later
+    /// read of any address wait for the submission.
+    /// </summary>
+    public void NoteUnboundedGuestMemoryWrite() => _gpuWrites.NoteUnbounded(SubmissionSerial);
+
+    void IMetalImageCacheOwner.WaitForGpu() => FlushAndWaitForGpu(MetalWaitReason.ImageCache);
 
     void IMetalImageCacheOwner.FillGuestRange(ulong address, ulong size, uint value) =>
         FillGuestMemory(address, size, value);
+
+    void IMetalImageCacheOwner.NoteGuestWrite(ulong address, ulong size) =>
+        NoteGuestMemoryWrite(address, size, MetalGpuWriteOrigin.ImageWriteback);
+
+    // A fill or copy the host can do itself is one no GPU-owned image covers and no
+    // recorded store is still writing. Doing it on the GPU instead is what makes the
+    // command processor's own poll of the dword it just wrote wait for a whole
+    // submission: measured on Quake, a four-byte fill followed by a WAIT_REG_MEM on
+    // it cost 20 to 65 ms of host wait each, 150 times per two seconds.
+    //
+    // A packet-sized range stays on the host even while a command buffer is being
+    // recorded. The command processor runs ahead of the GPU by design and the
+    // interpreter already publishes its own label writes straight into guest memory,
+    // so a dword of command memory is never what a recorded shader is reading.
+    private const ulong MaxHostFillBytes = 64 * 1024;
+    private const ulong MaxRecordingHostFillBytes = 4096;
+
+    private static readonly bool HostFillsDisabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_HOST_FILLS") == "0";
+
+    private static readonly bool ClearFillsDisabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_CLEAR_FILLS") == "0";
+
+    private bool CanWriteGuestOnHost(ulong address, ulong size)
+    {
+        var limit = _recordedCommands == 0 ? MaxHostFillBytes : MaxRecordingHostFillBytes;
+        return !HostFillsDisabled && size <= limit &&
+            // The GPU path writes through the window, which is mapped whatever the
+            // guest's own protections say; the host path goes through guest memory and
+            // would quietly write only the mapped prefix.
+            _memory.CanRead(address, size) &&
+            !_imageCache.HasGpuModifiedImageBytes(address, size) &&
+            _gpuWrites.PendingSerial(address, size, CompletedSerial) == 0;
+    }
+
+    private bool TryFillGuestMemoryOnHost(ulong address, ulong size, uint value)
+    {
+        if (!CanWriteGuestOnHost(address, size))
+        {
+            return false;
+        }
+
+        WriteGuestPattern(address, size, value);
+        _imageCache.InvalidateMemory(address, size);
+        Interlocked.Increment(ref _hostFills);
+        return true;
+    }
+
+    private long _hostFills;
+    private long _gpuFills;
+    private long _absorbedFills;
+    private long _hostCopies;
 
     /// <summary>Fills a guest range with a repeating dword through its window.</summary>
     public void FillGuestMemory(ulong address, ulong size, uint value)
     {
         if (size == 0)
         {
+            return;
+        }
+
+        if (TryFillGuestMemoryOnHost(address, size, value))
+        {
+            return;
+        }
+
+        // A fill whose range is exactly one cached image is that image being cleared.
+        // Writing its guest bytes instead costs the writeback of whatever the GPU had
+        // put there, a retile of the fill and then a detile back into the texture on
+        // the next bind — measured on Quake's menu as two of each per frame.
+        if (!ClearFillsDisabled && _imageCache.TryClearImageFromBuffer(address, size, value))
+        {
+            Interlocked.Increment(ref _absorbedFills);
             return;
         }
 
@@ -377,7 +554,8 @@ internal sealed partial class MetalRenderHost :
         }
 
         _imageCache.InvalidateMemoryFromGpu(address, size);
-        NoteGuestMemoryWrite();
+        NoteGuestMemoryWrite(address, size, MetalGpuWriteOrigin.Fill);
+        Interlocked.Increment(ref _gpuFills);
     }
 
     private void WriteGuestPattern(ulong address, ulong size, uint value)
@@ -413,7 +591,17 @@ internal sealed partial class MetalRenderHost :
             return;
         }
 
-        FlushGpuWrites(source, size);
+        // A packet-sized copy the host can do itself costs nothing and records no GPU
+        // write, so the poll that usually follows it does not wait for a submission.
+        if (CanWriteGuestOnHost(destination, size))
+        {
+            CopyGuestBytesOnHost(destination, source, size);
+            _imageCache.InvalidateMemory(destination, size);
+            Interlocked.Increment(ref _hostCopies);
+            return;
+        }
+
+        FlushGpuWrites(source, size, MetalWritebackCause.GuestCopy);
         var context = ((IMetalImageCacheOwner)this).BeginTransfer();
         var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
         if (encoder == 0)
@@ -438,7 +626,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         _imageCache.InvalidateMemoryFromGpu(destination, size);
-        NoteGuestMemoryWrite();
+        NoteGuestMemoryWrite(destination, size, MetalGpuWriteOrigin.Copy);
     }
 
     private void CopyGuestBytesOnHost(ulong destination, ulong source, ulong size)
@@ -465,7 +653,8 @@ internal sealed partial class MetalRenderHost :
     }
 
     /// <summary>Publishes every GPU-owned image byte in the range into guest memory.</summary>
-    public void FlushGpuWrites(ulong address, ulong size) => _imageCache.FlushGpuWrites(address, size);
+    public void FlushGpuWrites(ulong address, ulong size, MetalWritebackCause cause) =>
+        _imageCache.FlushGpuWrites(address, size, cause);
 
     public void RunPendingOperations() => _relay.RunPendingCommands();
 
@@ -495,17 +684,31 @@ internal sealed partial class MetalRenderHost :
         }
 
         // Guest memory is the GPU's memory, so a read only has to wait for work that
-        // may still be writing it: an image that owns these bytes, or any recorded
-        // shader store. Without that test every command-memory read would stall.
+        // may still be writing these bytes: an image that owns them, or a recorded
+        // store into them. Without that test every command-memory read would stall.
         var size = (ulong)destination.Length;
+        _lastReadAddress = address;
+        _lastReadSize = size;
         if (_imageCache.HasGpuModifiedImageBytes(address, size))
         {
-            FlushGpuWrites(address, size);
-            FlushAndWaitForGpu();
+            // The writeback is recorded into the buffer being built, so this one has
+            // to be committed before the bytes can be read.
+            FlushGpuWrites(address, size, MetalWritebackCause.HostRead);
+            FlushAndWaitForGpu(MetalWaitReason.ReadImage);
+            return _memory.TryRead(address, destination);
         }
-        else if (_gpuWroteGuestMemory)
+
+        var pending = _gpuWrites.PendingSerial(address, size, CompletedSerial);
+        if (pending != 0)
         {
-            FlushAndWaitForGpu();
+            if (_commandBuffer != 0 && pending >= _submissionSerial)
+            {
+                FlushAndWaitForGpu(MetalWaitReason.ReadRange);
+            }
+            else
+            {
+                WaitForCommittedSerial(pending, MetalWaitReason.ReadRange);
+            }
         }
 
         return _memory.TryRead(address, destination);
@@ -549,7 +752,7 @@ internal sealed partial class MetalRenderHost :
     {
         // A buffer binding sees guest memory, so any image that owns these bytes
         // publishes them first; a written binding also invalidates those images.
-        FlushGpuWrites(address, size);
+        FlushGpuWrites(address, size, MetalWritebackCause.BufferBinding);
         var range = _guestMemory.Resolve(address, size);
         if (!range.IsValid)
         {
@@ -559,7 +762,7 @@ internal sealed partial class MetalRenderHost :
         if (isWritten)
         {
             _imageCache.InvalidateMemoryFromGpu(address, size);
-            NoteGuestMemoryWrite();
+            NoteGuestMemoryWrite(address, size, MetalGpuWriteOrigin.WrittenBinding);
         }
 
         return new BufferBinding((ulong)range.Buffer, range.Offset);
@@ -637,6 +840,7 @@ internal sealed partial class MetalRenderHost :
         _gpuBusySeconds = 0;
         _gpuBusySamples = 0;
         var waits = Interlocked.Exchange(ref _gpuWaits, 0);
+        var partial = Interlocked.Exchange(ref _partialWaits, 0);
         var waitTicks = Interlocked.Exchange(ref _gpuWaitTicks, 0);
         var idleTicks = Interlocked.Exchange(ref _idleTicks, 0);
         var pipelines = Interlocked.Exchange(ref _pipelineCreations, 0);
@@ -651,10 +855,54 @@ internal sealed partial class MetalRenderHost :
             $"draw_ms={(drawTicks * 1000.0 / frequency).ToString("F1", culture)} " +
             $"gpu_busy_ms={gpuBusyMs.ToString("F1", culture)} " +
             $"completions={completions} completion_ms={completionMs.ToString("F1", culture)} " +
-            $"host_waits={waits} host_wait_ms={(waitTicks * 1000.0 / frequency).ToString("F1", culture)} " +
+            $"host_waits={waits} partial_waits={partial} " +
+            $"host_wait_ms={(waitTicks * 1000.0 / frequency).ToString("F1", culture)} " +
             $"idle_ms={(idleTicks * 1000.0 / frequency).ToString("F0", culture)} pipelines={pipelines} " +
             $"images={_imageCache.ImageCount} image_mb={_imageCache.TotalUsedMemory / (1024 * 1024)} " +
             $"uploads={uploads} writebacks={writebacks} evictions={evictions} failed={failed}");
+        _slowWaitReports = 0;
+        var reasons = new System.Text.StringBuilder();
+        for (var index = 0; index < MetalWaitReasons.Count; index++)
+        {
+            var count = _waitsByReason[index];
+            if (count == 0)
+            {
+                continue;
+            }
+
+            var ticks = _waitTicksByReason[index];
+            _waitsByReason[index] = 0;
+            _waitTicksByReason[index] = 0;
+            reasons.Append(' ').Append(MetalWaitReasons.Names[index]).Append('=').Append(count)
+                .Append('/').Append((ticks * 1000.0 / frequency).ToString("F0", culture)).Append("ms");
+        }
+
+        for (var index = 0; index < MetalGpuWriteOrigins.Count; index++)
+        {
+            var records = _gpuWrites.RecordsFrom((MetalGpuWriteOrigin)index);
+            if (records != 0)
+            {
+                reasons.Append(' ').Append(MetalGpuWriteOrigins.Names[index]).Append("_records=").Append(records);
+            }
+        }
+
+        reasons.Append(" host_fills=").Append(Interlocked.Exchange(ref _hostFills, 0))
+            .Append(" gpu_fills=").Append(Interlocked.Exchange(ref _gpuFills, 0))
+            .Append(" cleared_fills=").Append(Interlocked.Exchange(ref _absorbedFills, 0))
+            .Append(" host_copies=").Append(Interlocked.Exchange(ref _hostCopies, 0))
+            .Append(" resident=").Append(_guestMemory.ResidentBuffers.Length)
+            .Append(" windows_touched=").Append(System.Numerics.BitOperations.PopCount(_guestMemory.TouchedWindows));
+        Console.Error.WriteLine($"[METAL-V2][WAITS]{reasons}");
+        var causes = _imageCache.TakeTransferCauses();
+        Console.Error.WriteLine(
+            $"[METAL-V2][CHURN] up_new={causes.Created} up_cpu={causes.CpuWrite} up_gpu={causes.GpuWrite} " +
+            $"up_other={causes.Invalidated} wb_bind={causes.Binding} wb_store={causes.Storage} " +
+            $"wb_read={causes.HostRead} wb_copy={causes.GuestCopy} wb_overlap={causes.Overlap} " +
+            $"wb_release={causes.Release} wb_drain={causes.Drain} " +
+            $"write_ranges={_gpuWrites.Count} write_records={_gpuWrites.Recorded} " +
+            $"write_folds={_gpuWrites.Folds} handler_wakeups={_completions.HandlerWakeups} " +
+            $"rings={_guestMemory.RingCount} rings_freed={_guestMemory.RingsReleased} " +
+            $"ring_mb={_guestMemory.RingFallbackBytes / (1024 * 1024)}");
         if (!MetalV2Diagnostics.Verbose)
         {
             return;

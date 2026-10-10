@@ -385,12 +385,12 @@ internal sealed partial class MetalRenderHost
 
             var size = ClampMappedSize(descriptor.Address, requested);
             var written = info.Buffers[index].Written;
-            FlushGpuWrites(descriptor.Address, size);
+            FlushGpuWrites(descriptor.Address, size, MetalWritebackCause.StorageDescriptor);
             var range = _guestMemory.Resolve(descriptor.Address, size);
             if (written)
             {
                 _imageCache.InvalidateMemoryFromGpu(descriptor.Address, size);
-                NoteGuestMemoryWrite();
+                NoteGuestMemoryWrite(descriptor.Address, size, MetalGpuWriteOrigin.StorageBuffer);
             }
 
             stage.Buffers[index] = range;
@@ -626,11 +626,17 @@ internal sealed partial class MetalRenderHost
             BinaryPrimitives.WriteUInt64LittleEndian(entry[16..], address);
         }
 
+        // A device-address program can dereference any mapped guest page, so every
+        // window the table names has to be resident for this submission even though
+        // nothing resolved a range through it.
+        _guestMemory.MarkWindowsTouched(_deviceAddressWindows);
         _deviceAddressTable = range.GpuAddress;
         _deviceAddressEntryCount = (uint)_deviceAddressEntries.Count;
         _deviceAddressTableSerial = _submissionSerial;
         return _deviceAddressTable;
     }
+
+    private ulong _deviceAddressWindows;
 
     // Each guest span becomes the fewest window-backed runs that cover it. A span whose
     // backing is not contiguous (fragmented flexible memory) or crosses a window splits
@@ -639,6 +645,10 @@ internal sealed partial class MetalRenderHost
     private void RebuildDeviceAddressEntries(SharpEmu.HLE.GpuMemory.GuestGpuMemory? gpuMemory)
     {
         _deviceAddressEntries.Clear();
+        // The scan resolves every mapped span, which marks windows this submission may
+        // not otherwise touch; remember the set the table needs and restore the rest.
+        var touchedBefore = _guestMemory.TouchedWindows;
+        _guestMemory.ClearTouchedWindows();
         gpuMemory?.ForEachSpan((address, size) =>
         {
             var page = DeviceAddressPaging.PageSize;
@@ -687,6 +697,9 @@ internal sealed partial class MetalRenderHost
                 start += length;
             }
         });
+        _deviceAddressWindows = _guestMemory.TouchedWindows;
+        _guestMemory.ClearTouchedWindows();
+        _guestMemory.MarkWindowsTouched(touchedBefore | _deviceAddressWindows);
         _deviceAddressEntries.Sort(static (left, right) => left.FirstPage.CompareTo(right.FirstPage));
     }
 

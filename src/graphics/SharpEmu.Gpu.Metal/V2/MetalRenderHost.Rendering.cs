@@ -741,20 +741,17 @@ internal sealed partial class MetalRenderHost
 
     // Shader stores become visible to later work. Inside a render pass a scoped
     // barrier is enough; across encoders Metal's own tracking orders the windows.
+    // The barrier itself records no guest write range: what the stores reached was
+    // recorded where the storage buffers and images were bound.
     public void ShaderWriteBarrier(GpuPipelineStage sourceStages)
     {
         _ = sourceStages;
-        NoteGuestMemoryWrite();
         RecordMemoryBarrier();
     }
 
     public void ShaderWriteHazardBarrier() => RecordMemoryBarrier();
 
-    public void ShaderAccessBarrier()
-    {
-        NoteGuestMemoryWrite();
-        RecordMemoryBarrier();
-    }
+    public void ShaderAccessBarrier() => RecordMemoryBarrier();
 
     private void RecordMemoryBarrier()
     {

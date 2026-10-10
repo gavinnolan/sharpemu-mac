@@ -8,6 +8,29 @@ using SharpEmu.Libs.Gpu.Scheduling;
 
 namespace SharpEmu.Gpu.Metal.V2;
 
+// Why a cached image has to be uploaded from guest memory again. Counted per cause
+// so a run can say whether the churn comes from the guest writing the bytes or from
+// the host invalidating them itself.
+internal enum MetalImageDirtyCause : byte
+{
+    Created,
+    CpuWrite,
+    GpuWrite,
+    Invalidated,
+}
+
+// Why a GPU-written image had to be published into guest memory.
+internal enum MetalWritebackCause : byte
+{
+    BufferBinding,
+    StorageDescriptor,
+    HostRead,
+    GuestCopy,
+    ImageOverlap,
+    Release,
+    DrainAll,
+}
+
 // What a cached image has been bound as; the upload role follows from it.
 internal struct MetalImageUses
 {
@@ -75,7 +98,18 @@ internal sealed class MetalCachedImage : IDisposable
     // The byte footprint the cache accounts for; a view-only image has none.
     public ulong AccountedSize => Texture == 0 ? 0 : (Description.Data.Size + 1023) & ~1023UL;
 
-    public void MarkCpuDirty() => _cpuDirty = true;
+    // Why the next upload will happen; purely diagnostic.
+    public MetalImageDirtyCause DirtyCause { get; private set; } = MetalImageDirtyCause.Created;
+
+    public void MarkCpuDirty(MetalImageDirtyCause cause = MetalImageDirtyCause.Invalidated)
+    {
+        if (!_cpuDirty)
+        {
+            DirtyCause = cause;
+        }
+
+        _cpuDirty = true;
+    }
 
     public void RefreshComplete() => _cpuDirty = false;
 
@@ -95,7 +129,7 @@ internal sealed class MetalCachedImage : IDisposable
         if (GuestRangeOverlap.Bytes(Description.Data.Address, Description.Data.Size, address, size) ||
             GuestRangeOverlap.Pages(Description.Data.Address, Description.Data.Size, address, size))
         {
-            _cpuDirty = true;
+            MarkCpuDirty(MetalImageDirtyCause.CpuWrite);
             _gpuModified = false;
         }
     }
