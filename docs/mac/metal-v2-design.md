@@ -111,10 +111,21 @@ Reuse:
 ### Image transfers
 
 Every tiled surface moves on the GPU, and the only rate worth quoting is guest bytes per
-second. On an M4 a 4K surface runs at about 20 GB/s end to end in either direction,
-colour and depth-stencil alike; `DepthStencilTransferThroughputIsBandwidthBound` and
-`ColorTransferThroughputIsBandwidthBound` print the whole transfer and every stage of it.
-Three things shape that number:
+second. `DepthStencilTransferThroughputIsBandwidthBound` and
+`ColorTransferThroughputIsBandwidthBound` print the whole transfer and every stage of it;
+on an M4, with a 4K RGBA8 render target as the control:
+
+| 4K surface, 40.3 MiB of planes | before | after |
+| --- | --- | --- |
+| D32S8 upload | 2.31 ms, 18.3 GB/s | 1.85 ms, 22.8 GB/s |
+| D32S8 writeback | 2.26 ms, 18.7 GB/s | 1.31 ms, 32.4 GB/s |
+| stencil plane detile | 1.02 ms, 17.4 GB/s | 0.49 ms, 36.1 GB/s |
+| stencil plane retile | 0.98 ms, 18.1 GB/s | 0.43 ms, 41.1 GB/s |
+| RGBA8 upload / writeback | 1.58 / 1.60 ms | 1.60 / 1.62 ms |
+
+A device another process is also using makes the old numbers much worse than the new ones
+(the atomics degrade where the dword stores do not), so compare only runs whose control
+agrees. Three things shape the rate:
 
 - **A sub-dword element is copied a dword at a time.** One thread covers the element
   group whose destination bytes are one aligned dword, so a one- or two-byte surface no
