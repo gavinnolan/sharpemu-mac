@@ -1,0 +1,298 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+using SharpEmu.HLE;
+using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Resources;
+using Xunit;
+using Xunit.Abstractions;
+
+namespace SharpEmu.ShaderCompiler.Metal.Tests;
+
+/// <summary>
+/// Tier 2 and 3 for the NGG mesh path: the emitted MSL must compile with the OS Metal
+/// compiler, and a synthetic primitive shader must rasterize through a real mesh render
+/// pipeline. These no-op (with a note) on hosts without a Metal device, like the compute
+/// runtime tests, and the Void capture case additionally no-ops when the preserved capture
+/// is not on this machine — no guest shader bytes live in the repository.
+/// </summary>
+public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
+{
+    private const uint TargetSize = 32;
+
+    // The preserved rejected-draw capture, outside the repository source tree.
+    private const string VoidCaptureDirectory =
+        "/Users/xnetcat/Projects/sharpemu/sharpemu-mac/artifacts/validation/void-skipped-shader-400e5c64/shader-capture";
+
+    [Fact]
+    public void SyntheticPrimitiveShadersCompileWithTheRuntimeMetalCompiler()
+    {
+        if (SkipWithoutMetalDevice("mesh compile validation")) return;
+
+        foreach (var (name, shader) in SyntheticShaders())
+        {
+            Assert.True(
+                MetalNative.TryCompileLibrary(shader.Source, out _, out var error),
+                $"[{name}] Metal rejected the emitted mesh MSL: {error}\n{shader.Source}");
+        }
+    }
+
+    [Fact]
+    public void SyntheticPrimitiveShaderRasterizesThroughAMeshPipeline()
+    {
+        if (SkipWithoutMetalDevice("the mesh execution test")) return;
+
+        var pixels = RenderOrThrow(Gen5NggFixtures.CullingTriangle());
+
+        // The subgroup allocated one triangle over vertices 0/1/2, whose positions the
+        // program only has because the LDS round trip and the barrier both worked:
+        // (-0.8,-0.8), (0,0.8), (0.8,-0.8). The center is inside it.
+        Assert.Equal(1.0f, Green(pixels, TargetSize / 2, TargetSize / 2), 3);
+
+        // param0.x carries the exchanged lane value, so the center interpolates the three
+        // exported values 0/1/2 at barycentrics (0.25, 0.5, 0.25) — exactly 1.
+        Assert.Equal(1.0f, Red(pixels, TargetSize / 2, TargetSize / 2), 1);
+
+        // Outside the triangle the clear survives, so the primitive count really was one
+        // and the remaining 63 primitive slots stayed degenerate.
+        Assert.Equal(0.0f, Green(pixels, 1, 1), 3);
+        Assert.Equal(0.0f, Green(pixels, TargetSize - 2, 1), 3);
+    }
+
+    [Fact]
+    public void NullPrimitiveBitCullsTheTriangle()
+    {
+        if (SkipWithoutMetalDevice("the mesh culling test")) return;
+
+        var pixels = RenderOrThrow(Gen5NggFixtures.CullingTriangle(nullPrimitive: true));
+        for (var y = 0u; y < TargetSize; y++)
+        {
+            for (var x = 0u; x < TargetSize; x++)
+            {
+                Assert.Equal(0.0f, Green(pixels, x, y), 3);
+            }
+        }
+    }
+
+    [Fact]
+    public void PreservedVoidCaptureCompilesAsAMeshShader()
+    {
+        if (SkipWithoutMetalDevice("the captured-shader compile")) return;
+        if (!TryLoadVoidCapture(out var program, out var stageInfo, out var userDataBase, out var reason))
+        {
+            output.WriteLine($"Void capture unavailable ({reason}); the captured-shader compile is skipped.");
+            return;
+        }
+
+        Assert.True(ShaderCompileRequest.RequiresPrimitiveShaderWorkgroup(program));
+        var request = Gen5ComputeFixtures.RequestOrThrow(
+            program,
+            ShaderStage.Vertex,
+            requiredVertexOutputCount: 4,
+            primitiveShader: stageInfo,
+            userDataBase: userDataBase);
+        Assert.True(Gen5MslTranslator.RequiresMeshEmission(request));
+        Assert.True(
+            Gen5MslTranslator.TryCompileProgram(request, out var shader, out var translateError),
+            $"the captured primitive shader did not translate: {translateError}");
+        Assert.Equal(Gen5MslStage.Mesh, shader.Stage);
+        Assert.True(
+            MetalNative.TryCompileLibrary(shader.Source, out _, out var compileError),
+            $"Metal rejected the captured primitive shader's MSL: {compileError}");
+        output.WriteLine(
+            $"Captured primitive shader translated: {program.Instructions.Count} instructions, " +
+            $"{shader.MeshInfo!.ThreadsPerThreadgroup} threads/threadgroup, " +
+            $"{shader.MeshInfo.MaxVertices} vertices, {shader.MeshInfo.MaxPrimitives} primitives.");
+    }
+
+    private static IEnumerable<(string Name, Gen5MslShader Shader)> SyntheticShaders()
+    {
+        yield return ("culling triangle", Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.CullingTriangle()));
+        yield return ("null primitive", Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.CullingTriangle(nullPrimitive: true)));
+        yield return ("line output", Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.CullingTriangle(),
+            Gen5NggFixtures.StageInfo with { OutputPrimitiveType = Gen5NggExports.OutputPrimitiveLineStrip }));
+        yield return ("point output", Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.CullingTriangle(),
+            Gen5NggFixtures.StageInfo with { OutputPrimitiveType = Gen5NggExports.OutputPrimitivePointList }));
+        yield return ("clamped subgroup", Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.CullingTriangle(),
+            Gen5NggFixtures.StageInfo with { VerticesPerSubgroup = 4096, PrimitivesPerSubgroup = 4096 }));
+    }
+
+    private float[] RenderOrThrow(Gen5ShaderProgram program)
+    {
+        var shader = Gen5NggFixtures.CompileOrThrow(program);
+        var mesh = shader.MeshInfo!;
+        var source = shader.Source + FragmentSource;
+        if (!MetalNative.TryCompileLibrary(source, out var library, out var compileError))
+        {
+            throw new InvalidOperationException($"Metal rejected the mesh MSL: {compileError}\n{source}");
+        }
+
+        if (!MetalNative.TryRenderMesh(
+                library,
+                shader.EntryPoint,
+                "gen5_mesh_test_fs",
+                [
+                    (BuildArgumentBuffer(shader), 0u),
+                    (new byte[64], 1u),
+                    (BuildDrawInfo(mesh), mesh.DrawInfoBufferIndex),
+                    (new byte[16], mesh.IndexBufferIndex),
+                ],
+                threadgroups: 1,
+                mesh.ThreadsPerThreadgroup,
+                TargetSize,
+                TargetSize,
+                out var pixels,
+                out var renderError))
+        {
+            throw new InvalidOperationException($"the mesh draw failed: {renderError}");
+        }
+
+        return pixels;
+    }
+
+    // The stage argument buffer; the synthetic programs touch no resources, so zeros are
+    // enough — only its size has to match the layout.
+    private static byte[] BuildArgumentBuffer(Gen5MslShader shader) =>
+        new byte[Math.Max(shader.ArgumentLayout?.ByteSize ?? 0, 8)];
+
+    // Gen5MeshDrawInfo, in the order docs/mac/ngg-mesh-shaders.md records.
+    private static byte[] BuildDrawInfo(Gen5MslMeshInfo mesh)
+    {
+        var words = new uint[Gen5MslMeshInfo.DrawInfoDwordCount];
+        words[0] = mesh.MaxVertices;
+        words[1] = mesh.MaxPrimitives;
+        words[2] = 0; // index_count: an automatic draw, so the lane index is the vertex.
+        words[3] = 0; // index_type: none.
+        words[6] = 1; // instance_count.
+        words[8] = mesh.MaxVertices;
+        words[9] = mesh.MaxPrimitives;
+        var bytes = new byte[words.Length * sizeof(uint)];
+        Buffer.BlockCopy(words, 0, bytes, 0, bytes.Length);
+        return bytes;
+    }
+
+    // Stands in for the translated pixel program: it reads the same position/user(locn0)
+    // interface the vertex path produces, which is the point of the shared payload struct.
+    private const string FragmentSource = """
+
+        struct Gen5MeshTestIn
+        {
+            float4 position [[position]];
+            float4 param0 [[user(locn0)]];
+        };
+
+        fragment float4 gen5_mesh_test_fs(Gen5MeshTestIn in [[stage_in]])
+        {
+            return float4(in.param0.x, 1.0f, 0.0f, 1.0f);
+        }
+        """;
+
+    private static float Red(float[] pixels, uint x, uint y) => pixels[((y * TargetSize) + x) * 4];
+
+    private static float Green(float[] pixels, uint x, uint y) => pixels[(((y * TargetSize) + x) * 4) + 1];
+
+    // The capture is a decoded-program JSON plus the raw code range beside it. Only the
+    // range bytes are read, and only when the directory exists on this machine.
+    private static bool TryLoadVoidCapture(
+        out Gen5ShaderProgram program,
+        out Gen5NggStageInfo stageInfo,
+        out uint userDataBase,
+        out string reason)
+    {
+        program = null!;
+        stageInfo = default;
+        userDataBase = Gen5NggFixtures.VertexUserDataBase;
+        if (!Directory.Exists(VoidCaptureDirectory))
+        {
+            reason = "the capture directory is not present";
+            return false;
+        }
+
+        foreach (var json in Directory.GetFiles(VoidCaptureDirectory, "skipped-export-*.json"))
+        {
+            var range = Path.ChangeExtension(json, null) + ".range-0.bin";
+            if (!File.Exists(range))
+            {
+                continue;
+            }
+
+            var bytes = File.ReadAllBytes(range);
+            if (bytes.Length < sizeof(uint) || !TryReadCaptureRegisters(json, out var captured))
+            {
+                continue;
+            }
+
+            var words = new uint[bytes.Length / sizeof(uint)];
+            Buffer.BlockCopy(bytes, 0, words, 0, words.Length * sizeof(uint));
+            var memory = new FakeGuestMemory();
+            memory.AddRegion(0x1000, words);
+            var ctx = new CpuContext(memory, Generation.Gen5);
+            if (!Gen5ShaderTranslator.TryDecodeProgram(ctx, 0x1000, out var decoded, out _))
+            {
+                continue;
+            }
+
+            if (!ShaderCompileRequest.RequiresPrimitiveShaderWorkgroup(decoded))
+            {
+                continue;
+            }
+
+            program = decoded;
+            stageInfo = captured;
+            reason = string.Empty;
+            return true;
+        }
+
+        reason = "no capture in the directory decoded into a workgroup primitive shader";
+        return false;
+    }
+
+    // Only the geometry-engine scalars are taken from the capture's JSON; no draw payload,
+    // resource descriptor or user-data value is read.
+    private static bool TryReadCaptureRegisters(string path, out Gen5NggStageInfo stageInfo)
+    {
+        stageInfo = default;
+        try
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+            var root = document.RootElement;
+            var maxOutput = ReadUInt(root, "maxOutput");
+            var ldsSize = root.TryGetProperty("geometryResource2", out var resource2) &&
+                resource2.TryGetProperty("LocalDataShareSize", out var lds)
+                    ? lds.GetUInt32()
+                    : 0u;
+            stageInfo = new Gen5NggStageInfo(
+                VerticesPerSubgroup: maxOutput,
+                PrimitivesPerSubgroup: maxOutput,
+                MaxOutputPerSubgroup: maxOutput,
+                OutputPrimitiveType: ReadUInt(root, "outputPrimitive"),
+                PrimitiveAmplificationFactor: ReadUInt(root, "subgroupControl"),
+
+                // GFX10 programs LDS_SIZE in 128-dword granules.
+                LocalDataShareBytes: ldsSize * 128 * sizeof(uint),
+                VertexGroupSize: maxOutput,
+                PrimitiveGroupSize: maxOutput);
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or System.Text.Json.JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static uint ReadUInt(System.Text.Json.JsonElement root, string name) =>
+        root.TryGetProperty(name, out var value) && value.TryGetUInt32(out var parsed) ? parsed : 0u;
+
+    private bool SkipWithoutMetalDevice(string activity)
+    {
+        if (MetalNative.IsAvailable) return false;
+        Assert.False(
+            OperatingSystem.IsMacOS() && Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") == "1",
+            $"The required gate cannot run {activity} without a Metal device.");
+        output.WriteLine($"No Metal device on this host; {activity} skipped.");
+        return true;
+    }
+}

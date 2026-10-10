@@ -29,6 +29,12 @@ public interface IGuestGpuBackend
     // Compiles one permutation of a program over its resource plan and binding layout.
     bool TryCompileProgram(ShaderCompileRequest request, out IGuestCompiledShader? shader, out string error);
 
+    /// <summary>True when this backend can run an NGG primitive shader as the merged ES/GS
+    /// workgroup stage it really is - a mesh pipeline whose threadgroup is one NGG subgroup.
+    /// A backend that says no keeps getting such programs translated per-vertex, which only
+    /// works for passthrough ones, and the executor keeps skipping the rest.</summary>
+    bool SupportsPrimitiveShaderMeshPipelines => false;
+
     /// <summary>Returns the backend's no-color-output fragment shader.</summary>
     IGuestCompiledShader GetDepthOnlyFragmentShader();
 

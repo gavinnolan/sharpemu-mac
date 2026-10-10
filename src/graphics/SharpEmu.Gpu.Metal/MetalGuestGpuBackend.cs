@@ -33,6 +33,13 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend, IGuestImageSnapsh
             AttributeCount: 0));
 
 
+    // Metal 3 mesh pipelines carry the merged ES/GS stage (see docs/mac/ngg-mesh-shaders.md).
+    // The translator emits them, but admitting the draws needs the render host to build
+    // MTLMeshRenderPipelineDescriptor pipelines and call drawMeshThreadgroups, so this stays
+    // opt-in until that path lands; the host flips it to an unconditional true then.
+    public bool SupportsPrimitiveShaderMeshPipelines { get; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_MESH_SHADERS") == "1";
+
     public bool TryCompileProgram(ShaderCompileRequest request, out IGuestCompiledShader? shader, out string error)
     {
         shader = null;

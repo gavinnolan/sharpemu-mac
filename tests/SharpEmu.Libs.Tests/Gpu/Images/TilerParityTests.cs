@@ -3,6 +3,7 @@
 
 using System.Runtime.InteropServices;
 using SharpEmu.Gpu.Vulkan.Images;
+using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Vulkan;
 using SharpEmu.ShaderCompiler.Vulkan;

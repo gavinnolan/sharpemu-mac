@@ -45,6 +45,8 @@ internal sealed class HeadlessCommandStreamBackend : IGuestGpuBackend
     public bool TryCompileProgram(ShaderCompileRequest request, out IGuestCompiledShader? shader, out string error) =>
         _host.Value.TryCompileProgram(request, out shader, out error);
 
+    public bool SupportsPrimitiveShaderMeshPipelines => _host.Value.SupportsPrimitiveShaderMeshPipelines;
+
     public IGuestCompiledShader GetDepthOnlyFragmentShader() => _host.Value.GetDepthOnlyFragmentShader();
 
     public void HideSplashScreen() => _host.Value.HideSplashScreen();
