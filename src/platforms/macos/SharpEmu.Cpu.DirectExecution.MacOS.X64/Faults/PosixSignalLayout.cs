@@ -43,6 +43,7 @@ internal static unsafe class PosixSignalLayout
     // Vector registers sit at the same offset in both signal frame formats.
     // The system headers i386/_mcontext.h and mach/i386/_structs.h define it.
     private const int MachineContextVectorRegistersOffset = 352;
+    private const int McontextTrapNumberOffset = 0;
     private const int McontextErrOffset = 4;
     private const int McontextFaultAddressOffset = 8;
 
@@ -75,6 +76,11 @@ internal static unsafe class PosixSignalLayout
 
     internal static ulong GetPageFaultErrorCode(byte* registers) =>
         *(uint*)(registers + McontextErrOffset);
+
+    // Darwin's __es begins { uint16 trapno, uint16 cpu, uint32 err }.
+    // Optional first-entry telemetry only; never a recovery classifier.
+    internal static ulong GetTrapNumber(byte* registers) =>
+        *(ushort*)(registers + McontextTrapNumberOffset);
 
     /// <summary>
     /// Fabricates the minimum of a Darwin signal frame that the bridge's

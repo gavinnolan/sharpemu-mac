@@ -7,7 +7,8 @@ import struct
 import uuid
 
 MAGIC = 0x53454D554641554C
-RECORDS = {1: struct.Struct('<4q7Q3q10i'), 2: struct.Struct('<4q7Q3q12i'), 3: struct.Struct('<4q7Q3q12i')}
+RECORDS = {1: struct.Struct('<4q7Q3q10i'), 2: struct.Struct('<4q7Q3q12i'),
+           3: struct.Struct('<4q7Q3q12i'), 4: struct.Struct('<4q7Q3q12i')}
 FIELDS = ['published', 'sequence', 'nanoseconds', 'invocation', 'rawAddress',
           'address', 'errorCode', 'rip', 'ownerAddress', 'ownerEnd', 'size',
           'ownerIdentity', 'armEpoch', 'operation', 'kind', 'signal', 'signalCode', 'access',
@@ -52,6 +53,16 @@ def read_trace(path):
             raise ValueError('invalid published record')
         record = dict(zip(FIELDS, values))
         record['event'] = 'native-signal-entry' if version >= 2 and record['kind'] == 1 else KINDS[record['kind']]
+        if record['kind'] == 1:
+            if version >= 4:
+                if record['reserved'] not in (0, 1) or (record['reserved'] == 0 and record['operation'] != 0):
+                    raise ValueError('invalid trap-number availability')
+                observed = record['reserved'] == 1
+                record['trapNumberStatus'] = 'observed-context-field' if observed else 'unobserved'
+                record['trapNumber'] = (record['operation'] & 0xFFFFFFFFFFFFFFFF) if observed else None
+            else:
+                record['trapNumberStatus'] = 'not-collected-before-schema4'
+                record['trapNumber'] = None
         if record['kind'] == 7:
             if version < 2 or record['route'] not in ROUTES or record['reason'] not in REASONS:
                 raise ValueError('unknown final disposition')
@@ -96,6 +107,7 @@ def read_trace(path):
                        'timestamps precede owner-field observations; fields are not an atomic owner reservation',
                        'published MAP_SHARED slots are not a fatal-tail durability guarantee',
                        'owner observations never authorize recovery',
+                       'trapNumber is a raw supplied x86 context field, not proof of hardware cause, permissions or recovery',
                        'range CAS prior state is the branch input; owner state/epoch are later separate observations',
                        'range branchHandled is not the early or final invocation disposition or a permission receipt',
                        'watcher-removal-succeeded can have zero native operations; pair actual protection records separately',

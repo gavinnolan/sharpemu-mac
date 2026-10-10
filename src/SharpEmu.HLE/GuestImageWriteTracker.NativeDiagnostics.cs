@@ -66,7 +66,7 @@ public static unsafe partial class GuestImageWriteTracker
     /// <summary>Scalar native signal entry (memory or otherwise), never a mapping claim.</summary>
     public static long RecordNativeImageFaultEntry(
         int signal, ulong rawAddress, int signalCode, ulong address,
-        int access, ulong errorCode, ulong rip)
+        int access, ulong errorCode, ulong rip, ulong trapNumber = 0, bool trapNumberObserved = false)
     {
         var buffer = Volatile.Read(ref _nativeDiagnosticBuffer);
         if (buffer is null) return 0;
@@ -78,6 +78,12 @@ public static unsafe partial class GuestImageWriteTracker
         record.Access = access;
         record.ErrorCode = errorCode;
         record.Rip = rip;
+        // Schema4 Kind1 only: preserve every raw bit plus explicit availability.
+        // Legacy callers and explicit HLE warmup omit trap availability. POSIX
+        // warmup supplies a fabricated context: its raw zero is observed metadata,
+        // with final preflight-warmup marking it separately from a kernel signal.
+        record.Operation = trapNumberObserved ? unchecked((long)trapNumber) : 0;
+        record.Reserved = trapNumberObserved ? 1 : 0;
         _ = buffer.Write(record);
         return invocation;
     }

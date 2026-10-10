@@ -342,7 +342,8 @@ internal static unsafe class PosixFaultBridge
             ? (int)GetAccessType(registers, address, rip) : -1;
         return GuestImageWriteTracker.RecordNativeImageFaultEntry(
             signal, rawAddress, signalCode, address, access,
-            registers == null ? 0 : PosixSignalLayout.GetPageFaultErrorCode(registers), rip);
+            registers == null ? 0 : PosixSignalLayout.GetPageFaultErrorCode(registers), rip,
+            registers == null ? 0 : PosixSignalLayout.GetTrapNumber(registers), registers != null);
     }
 
     private static bool TryHandleTrackedImageWriteFaultForInvocation(
