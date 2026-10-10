@@ -2,6 +2,21 @@
 
 Priority: make all nine games reach a menu or controllable scene first; performance and visual polish follow entry.
 
+Current qualification update (October 10): the four-fix source candidate
+`638c3bdf` passes its first Host build (`rc=0`, 7.835 seconds). ROOT verifies
+all 13 checkpoint artifacts, 2,054 source files, 91 compiled files and fresh
+absence of its eight process roots, heavy workers and shared lease. The runner
+successfully observes its pinned kernel process identities during this build;
+no testhost, native fixture or game result follows. Libs/GPU builds are next,
+then the 108 focused and 1,354 ordinary cases per actual CLR. Host checkpoint:
+`ecf29b4d2f5a6387bc93f1e82ffbfb9e34c2839ae8d51f2225953230afa7738b`.
+
+Separate diagnostic `2a919bd1` freezes the reviewed Poppy raw trap-number
+observation without changing recovery. ROOT verifies 2,056 live/archive source
+hashes. Its 11 new Mac metadata rows and six decoder controls are unexecuted;
+it remains separate from the current build candidate and is not integrated.
+Source manifest: `d3e8ef16e4bec8b1141ca851a308730e35f52bf0ee4b12f58922bc82455940b8`.
+
 Local main integrates qualified source `e2535177` at local merge `02e7dbcf`;
 its `src`, `tests` and `scripts` trees match the tested source exactly. This adds
 a stable GPU view of underlying memory across per-thread CPU trackers and resolves
@@ -942,3 +957,19 @@ The separate known-Kairo `6cb2135a` Quake replay `20261009-091157-quake-canonica
 The Poppy isolation successor `ad502b58` passes three builds, all 33 focused controls per CLR, and the previously failing APR batch (402 cases per CLR). Both CLR runs pass Host/GPU and Libs batches 0–5. Execution stops at ARM64 Libs batch 6: 375/377 pass; both `TransientProtectionDoesNotAllocateAfterGuestThreadEntry` cases allocate 37,600 bytes instead of zero over 100 calls. Source audit identifies unconditional allocating raw protection preparation in `MacHostViews.ChangeAccess`; this is not attributed to the newer tracked metadata exclusion without further evidence. Remaining batches and native workers are unrun. Failed manifest SHA-256 `807f6233df8194014786e38d39361b649e1aec3e22ab52a13f2eb4d3a4af621c`; ROOT independently verifies all 147 hashes and absence of all 23 owned roots. The allocation requirement remains unchanged, and actual Poppy fault/store/trace recovery is still unimplemented.
 
 This document preserves both the six entry replays and the five later diagnostic replays. Earlier failed source, native workers and game evidence remain immutable. Accepted gameplay remains 1/9; sustained 60 FPS and fast loading are not established.
+
+### Revised runner control results
+
+The revised R6 runner passes all 60 supplied-state controls (28 kernel/censor,
+26 retained ownership, one detached-diagnostic and five image-policy controls),
+with zero failures, errors or skips. All four isolated Python children return
+zero without signals or native/controller invocations. ROOT verifies the 114
+archive artifacts, 2,047 unchanged source files and fresh five-root/group absence;
+no actual heavy worker or shared lease remains. These are runner controls, not
+boot-fix or live kernel-ABI qualification. Archive:
+`d13bd0707c32e3280b813aa7bcb6745d280c070281933c96c2f3a8575b891515`.
+
+A separate Poppy diagnostic draft retains the first supplied trap number in a
+schema4 entry while keeping recovery behavior unchanged. Its new metadata and
+decoder controls are source only, not executed or integrated. The four-fix build
+candidate remains `638c3bdf`; the diagnostic is a separate successor.
