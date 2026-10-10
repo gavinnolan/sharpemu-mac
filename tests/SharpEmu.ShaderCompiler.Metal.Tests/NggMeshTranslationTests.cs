@@ -199,6 +199,47 @@ public sealed class NggMeshTranslationTests
     }
 
     [Fact]
+    public void MeshStageKeepsItsOwnVertexFetchBinding()
+    {
+        // The ES part of a real primitive shader fetches vertices itself, through a V# its
+        // user data carries. A mesh function has no [[stage_in]] to substitute that with, so
+        // the fetch has to reach a real buffer binding.
+        var runtimeInputs = new ResourceRuntimeInputs { UserData = Gen5NggFixtures.PositionUserData() };
+        var request = Gen5NggFixtures.Request(
+            Gen5NggFixtures.BufferFetchTriangle(), runtimeInputs: runtimeInputs);
+        Assert.Empty(request.VertexInputs);
+        var buffer = Assert.Single(request.Resources.Info.Buffers);
+        Assert.Equal(77u, buffer.DescriptorFormat);
+
+        var shader = Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.BufferFetchTriangle(), runtimeInputs: runtimeInputs);
+        Assert.Equal(Gen5MslStage.Mesh, shader.Stage);
+
+        // The fetch reads the bound buffer, not a vertex attribute.
+        Assert.Contains("b0", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("[[stage_in]]", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("[[attribute(", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EmbeddedVertexFetchIsRefusedForAWorkgroupPrimitiveShader()
+    {
+        // The substitution rewrites the program's own fetch into a host vertex attribute and
+        // drops the scalar loads behind its V#. For the merged ES/GS workgroup stage that
+        // leaves the fetch with nothing to read, so it must not be applied.
+        var culling = Gen5NggFixtures.CullingTriangle();
+        Assert.False(ShaderCompileRequest.AllowsEmbeddedVertexFetch(culling, Gen5NggFixtures.StageInfo));
+
+        // Without the draw's primitive-shader state the program is an ordinary vertex
+        // shader again, and the substitution is allowed.
+        Assert.True(ShaderCompileRequest.AllowsEmbeddedVertexFetch(culling, null));
+
+        // A passthrough primitive shader stays on the per-vertex path, so it keeps it too.
+        Assert.True(ShaderCompileRequest.AllowsEmbeddedVertexFetch(
+            Gen5NggFixtures.Passthrough(), Gen5NggFixtures.StageInfo));
+    }
+
+    [Fact]
     public void LineAndPointOutputPrimitivesChangeTheTopology()
     {
         var line = Gen5NggFixtures.CompileOrThrow(

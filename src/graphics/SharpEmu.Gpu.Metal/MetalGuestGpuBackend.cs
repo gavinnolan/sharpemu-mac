@@ -33,12 +33,11 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend, IGuestImageSnapsh
             AttributeCount: 0));
 
 
-    // Metal 3 mesh pipelines carry the merged ES/GS stage (see docs/mac/ngg-mesh-shaders.md).
-    // The translator emits them, but admitting the draws needs the render host to build
-    // MTLMeshRenderPipelineDescriptor pipelines and call drawMeshThreadgroups, so this stays
-    // opt-in until that path lands; the host flips it to an unconditional true then.
-    public bool SupportsPrimitiveShaderMeshPipelines { get; } =
-        Environment.GetEnvironmentVariable("SHARPEMU_METAL_MESH_SHADERS") == "1";
+    // The legacy host records and replays per-draw snapshots and has no mesh pipeline path,
+    // so it cannot run the merged ES/GS stage however the translator emits it. v2 can, and
+    // does by default (see MetalV2Backend and docs/mac/ngg-mesh-shaders.md); claiming the
+    // capability here would only turn a skipped draw into a failed pipeline.
+    public bool SupportsPrimitiveShaderMeshPipelines => false;
 
     public bool TryCompileProgram(ShaderCompileRequest request, out IGuestCompiledShader? shader, out string error)
     {

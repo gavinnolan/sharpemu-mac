@@ -31,17 +31,14 @@ internal sealed class MetalV2Backend : IGuestGpuBackend
 
     /// <summary>
     /// v2 builds MTLMeshRenderPipelineDescriptor pipelines and launches
-    /// drawMeshThreadgroups, so the merged ES/GS stage can run as what it is
-    /// (docs/mac/ngg-mesh-shaders.md). The host side is complete, but asking for it
-    /// also changes how the translator plans resources for the ordinary vertex
-    /// stage, and Void Terrarium then stops compiling one of its vertex programs
-    /// ("BufferLoadFormatXyzw: missing buffer-memory binding") where it renders its
-    /// whole title menu without it. So it stays opt-in behind
-    /// SHARPEMU_METAL_MESH_SHADERS=1 until that compile succeeds, and it needs a
-    /// Metal 3 device either way.
+    /// drawMeshThreadgroups, so the merged ES/GS stage runs as what it is
+    /// (docs/mac/ngg-mesh-shaders.md). On by default on a Metal 3 device: without it
+    /// the executor drops every culling primitive-shader draw, which is most of what
+    /// a UE4/UE5 title renders. SHARPEMU_METAL_MESH_SHADERS=0 opts out and restores
+    /// the per-vertex path for comparison.
     /// </summary>
     public bool SupportsPrimitiveShaderMeshPipelines { get; } =
-        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_MESH_SHADERS"), "1", StringComparison.Ordinal) &&
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_MESH_SHADERS"), "0", StringComparison.Ordinal) &&
         MetalV2Presenter.SupportsMeshPipelines();
 
     public bool TryCompileProgram(ShaderCompileRequest request, out IGuestCompiledShader? shader, out string error)

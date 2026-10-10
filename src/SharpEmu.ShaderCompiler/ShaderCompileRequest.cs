@@ -213,6 +213,22 @@ public sealed class ShaderCompileRequest
         return false;
     }
 
+    /// <summary>False when the fixed-function vertex-fetch substitution must not be applied
+    /// to this program.
+    ///
+    /// The substitution rewrites the program's own <c>buffer_load_format</c> fetches into
+    /// host vertex attributes and drops the scalar loads that produced their V#, because a
+    /// vertex stage gets those attributes from a vertex descriptor instead. A primitive
+    /// shader compiled as the merged ES/GS workgroup stage has no such input: a mesh
+    /// function has no <c>[[stage_in]]</c>, and the host binds no vertex buffers for it. Its
+    /// ES part therefore has to keep fetching for itself, V# scalar loads included -
+    /// otherwise the resource plan never sees those loads, the fetch has no buffer binding,
+    /// and the program cannot be compiled.</summary>
+    public static bool AllowsEmbeddedVertexFetch(
+        Gen5ShaderProgram program,
+        Gen5NggStageInfo? primitiveShader) =>
+        primitiveShader is null || !RequiresPrimitiveShaderWorkgroup(program);
+
     public int RequiredVertexOutputCount { get; init; }
     public IReadOnlyList<ShaderVertexInput> VertexInputs { get; init; } = [];
     public uint PositionExportControl { get; init; }

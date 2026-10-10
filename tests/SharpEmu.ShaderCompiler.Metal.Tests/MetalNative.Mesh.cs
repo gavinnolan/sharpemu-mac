@@ -50,7 +50,8 @@ internal static partial class MetalNative
         uint width,
         uint height,
         out float[] pixels,
-        out string error)
+        out string error,
+        IReadOnlyList<nint>? extraResidentBuffers = null)
     {
         pixels = [];
         error = string.Empty;
@@ -131,6 +132,11 @@ internal static partial class MetalNative
             SendSetBuffer(encoder, Selector("setMeshBuffer:offset:atIndex:"), buffer, 0, index);
         }
 
+        foreach (var resident in extraResidentBuffers ?? [])
+        {
+            residents.Add(resident);
+        }
+
         foreach (var resident in residents)
         {
             SendUseResource(encoder, Selector("useResource:usage:"), resident, ReadWriteUsage);
@@ -158,6 +164,73 @@ internal static partial class MetalNative
         pixels = new float[width * height * 4];
         Buffer.BlockCopy(bytesOut, 0, pixels, 0, bytesOut.Length);
         return true;
+    }
+
+    /// <summary>Renders a mesh draw whose shader reads resources through its stage argument
+    /// buffer. The argument buffer is filled from the layout the way the compute harness does
+    /// it - every buffer field points at the one data buffer, with its byte length - so a
+    /// program that fetches vertices through a V# reads <paramref name="bufferContents"/>.</summary>
+    public static bool TryRenderMeshWithArgumentBuffer(
+        nint library,
+        string meshEntryPoint,
+        string fragmentEntryPoint,
+        byte[] bufferContents,
+        byte[] pushData,
+        byte[] drawInfo,
+        Gen5MslArgumentLayout layout,
+        uint drawInfoBufferIndex,
+        uint indexBufferIndex,
+        uint threadgroups,
+        uint threadsPerThreadgroup,
+        uint width,
+        uint height,
+        out float[] pixels,
+        out string error)
+    {
+        pixels = [];
+        var data = SharedBuffer(bufferContents.Length == 0 ? new byte[4] : bufferContents);
+        if (data == 0)
+        {
+            error = "failed to create the data buffer";
+            return false;
+        }
+
+        var address = SendULong(data, Selector("gpuAddress"));
+        var arguments = new byte[Math.Max(layout.ByteSize, 8)];
+        foreach (var field in layout.Fields)
+        {
+            for (var element = 0; element < field.Count; element++)
+            {
+                switch (field.FieldKind)
+                {
+                    case MslArgumentFieldKind.BufferPointers:
+                        BitConverter.TryWriteBytes(arguments.AsSpan((int)field.ByteOffset + (element * 8)), address);
+                        break;
+                    case MslArgumentFieldKind.BufferByteCounts:
+                        BitConverter.TryWriteBytes(
+                            arguments.AsSpan((int)field.ByteOffset + (element * 4)), (uint)bufferContents.Length);
+                        break;
+                }
+            }
+        }
+
+        return TryRenderMesh(
+            library,
+            meshEntryPoint,
+            fragmentEntryPoint,
+            [
+                (arguments, (uint)Gen5MslArgumentLayout.ResourcesBufferIndex),
+                (pushData, (uint)Gen5MslArgumentLayout.PushDataBufferIndex),
+                (drawInfo, drawInfoBufferIndex),
+                (new byte[16], indexBufferIndex),
+            ],
+            threadgroups,
+            threadsPerThreadgroup,
+            width,
+            height,
+            out pixels,
+            out error,
+            [data]);
     }
 
     private static nint CreateRenderTarget(uint width, uint height)
