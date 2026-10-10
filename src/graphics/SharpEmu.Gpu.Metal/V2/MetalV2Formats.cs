@@ -82,6 +82,7 @@ internal static class MtlFormat
     public const ulong Depth32Float = 252;
     public const ulong Stencil8 = 253;
     public const ulong Depth32FloatStencil8 = 260;
+    public const ulong X32Stencil8 = 261;
 }
 
 // Translates the shared neutral vocabulary (GpuFormat, blend and stencil codes,
@@ -91,14 +92,15 @@ internal static class MetalV2Formats
 {
     private static readonly ConcurrentDictionary<GpuFormat, byte> _reportedFormats = new();
 
-    // The pixel format a cached image is allocated with. An unmapped format falls back
-    // to a four-byte RGBA image and logs once: a texture is never a fatal error.
+    // The pixel format a view or an attachment uses. The mapping is the image
+    // transfer's (MetalGuestFormats), so a texture and the bytes staged into it never
+    // disagree; an unmapped format falls back to four-byte RGBA and logs once, because
+    // a texture is never worth a fatal error.
     public static ulong PixelFormat(GpuFormat format)
     {
-        var mapped = TryPixelFormat(format);
-        if (mapped != MtlFormat.Invalid)
+        if (MetalGuestFormats.TryDecodeHostFormat(format, out var mapped))
         {
-            return mapped;
+            return (ulong)mapped;
         }
 
         if (_reportedFormats.TryAdd(format, 0))
@@ -110,96 +112,25 @@ internal static class MetalV2Formats
         return MtlFormat.Rgba8Unorm;
     }
 
-    public static bool IsSupported(GpuFormat format) => TryPixelFormat(format) != MtlFormat.Invalid;
+    public static bool IsSupported(GpuFormat format) =>
+        MetalGuestFormats.TryDecodeHostFormat(format, out _);
+
+    // The format an unmapped image falls back to: same bytes per block, so the tiler's
+    // element size and the guest footprint still agree.
+    public static GpuFormat SubstituteFor(uint bytesPerBlock) => bytesPerBlock switch
+    {
+        1 => GpuFormat.R8Unorm,
+        2 => GpuFormat.R16Unorm,
+        8 => GpuFormat.R16G16B16A16Unorm,
+        16 => GpuFormat.R32G32B32A32Sfloat,
+        _ => GpuFormat.R8G8B8A8Unorm,
+    };
 
     public static bool IsDepthFormat(ulong format) =>
         format is MtlFormat.Depth16Unorm or MtlFormat.Depth32Float or MtlFormat.Depth32FloatStencil8;
 
     public static bool HasStencil(ulong format) =>
-        format is MtlFormat.Depth32FloatStencil8 or MtlFormat.Stencil8;
-
-    public static ulong TryPixelFormat(GpuFormat format) => format switch
-    {
-        GpuFormat.R8Unorm => MtlFormat.R8Unorm,
-        GpuFormat.R8Srgb => MtlFormat.R8UnormSrgb,
-        GpuFormat.R8SNorm => MtlFormat.R8Snorm,
-        GpuFormat.R8Uint => MtlFormat.R8Uint,
-        GpuFormat.R8Sint => MtlFormat.R8Sint,
-        GpuFormat.R8Uscaled => MtlFormat.R8Uint,
-        GpuFormat.R8Sscaled => MtlFormat.R8Sint,
-        GpuFormat.R8G8Unorm => MtlFormat.Rg8Unorm,
-        GpuFormat.R8G8Srgb => MtlFormat.Rg8UnormSrgb,
-        GpuFormat.R8G8SNorm => MtlFormat.Rg8Snorm,
-        GpuFormat.R8G8Uint or GpuFormat.R8G8Uscaled => MtlFormat.Rg8Uint,
-        GpuFormat.R8G8Sint or GpuFormat.R8G8Sscaled => MtlFormat.Rg8Sint,
-        GpuFormat.R8G8B8A8Unorm => MtlFormat.Rgba8Unorm,
-        GpuFormat.R8G8B8A8Srgb => MtlFormat.Rgba8UnormSrgb,
-        GpuFormat.R8G8B8A8SNorm => MtlFormat.Rgba8Snorm,
-        GpuFormat.R8G8B8A8Uint or GpuFormat.R8G8B8A8Uscaled => MtlFormat.Rgba8Uint,
-        GpuFormat.R8G8B8A8Sint or GpuFormat.R8G8B8A8Sscaled => MtlFormat.Rgba8Sint,
-        GpuFormat.B8G8R8A8Unorm => MtlFormat.Bgra8Unorm,
-        GpuFormat.B8G8R8A8Srgb => MtlFormat.Bgra8UnormSrgb,
-        GpuFormat.A8B8G8R8UnormPack32 => MtlFormat.Rgba8Unorm,
-        GpuFormat.A8B8G8R8SrgbPack32 => MtlFormat.Rgba8UnormSrgb,
-        GpuFormat.A8B8G8R8SNormPack32 => MtlFormat.Rgba8Snorm,
-        GpuFormat.A8B8G8R8UintPack32 => MtlFormat.Rgba8Uint,
-        GpuFormat.A8B8G8R8SintPack32 => MtlFormat.Rgba8Sint,
-        GpuFormat.R5G6B5UnormPack16 or GpuFormat.B5G6R5UnormPack16 => MtlFormat.B5G6R5Unorm,
-        GpuFormat.A1R5G5B5UnormPack16 => MtlFormat.Bgr5A1Unorm,
-        GpuFormat.R5G5B5A1UnormPack16 or GpuFormat.B5G5R5A1UnormPack16 => MtlFormat.A1Bgr5Unorm,
-        GpuFormat.R4G4B4A4UnormPack16 or GpuFormat.B4G4R4A4UnormPack16 or
-            GpuFormat.A4R4G4B4UnormPack16 or GpuFormat.A4B4G4R4UnormPack16 => MtlFormat.Abgr4Unorm,
-        GpuFormat.R16Unorm => MtlFormat.R16Unorm,
-        GpuFormat.R16SNorm => MtlFormat.R16Snorm,
-        GpuFormat.R16Uint or GpuFormat.R16Uscaled => MtlFormat.R16Uint,
-        GpuFormat.R16Sint or GpuFormat.R16Sscaled => MtlFormat.R16Sint,
-        GpuFormat.R16Sfloat => MtlFormat.R16Float,
-        GpuFormat.R16G16Unorm => MtlFormat.Rg16Unorm,
-        GpuFormat.R16G16SNorm => MtlFormat.Rg16Snorm,
-        GpuFormat.R16G16Uint or GpuFormat.R16G16Uscaled => MtlFormat.Rg16Uint,
-        GpuFormat.R16G16Sint or GpuFormat.R16G16Sscaled => MtlFormat.Rg16Sint,
-        GpuFormat.R16G16Sfloat => MtlFormat.Rg16Float,
-        GpuFormat.R16G16B16A16Unorm => MtlFormat.Rgba16Unorm,
-        GpuFormat.R16G16B16A16SNorm => MtlFormat.Rgba16Snorm,
-        GpuFormat.R16G16B16A16Uint or GpuFormat.R16G16B16A16Uscaled => MtlFormat.Rgba16Uint,
-        GpuFormat.R16G16B16A16Sint or GpuFormat.R16G16B16A16Sscaled => MtlFormat.Rgba16Sint,
-        GpuFormat.R16G16B16A16Sfloat => MtlFormat.Rgba16Float,
-        GpuFormat.R32Uint => MtlFormat.R32Uint,
-        GpuFormat.R32Sint => MtlFormat.R32Sint,
-        GpuFormat.R32Sfloat => MtlFormat.R32Float,
-        GpuFormat.R32G32Uint => MtlFormat.Rg32Uint,
-        GpuFormat.R32G32Sint => MtlFormat.Rg32Sint,
-        GpuFormat.R32G32Sfloat => MtlFormat.Rg32Float,
-        GpuFormat.R32G32B32A32Uint => MtlFormat.Rgba32Uint,
-        GpuFormat.R32G32B32A32Sint => MtlFormat.Rgba32Sint,
-        GpuFormat.R32G32B32A32Sfloat => MtlFormat.Rgba32Float,
-        GpuFormat.A2R10G10B10UnormPack32 => MtlFormat.Bgr10A2Unorm,
-        GpuFormat.A2B10G10R10UnormPack32 => MtlFormat.Rgb10A2Unorm,
-        GpuFormat.A2B10G10R10UintPack32 => MtlFormat.Rgb10A2Uint,
-        GpuFormat.B10G11R11UfloatPack32 => MtlFormat.Rg11B10Float,
-        GpuFormat.E5B9G9R9UfloatPack32 => MtlFormat.Rgb9E5Float,
-        GpuFormat.BC1RgbUnormBlock or GpuFormat.BC1RgbaUnormBlock => MtlFormat.Bc1Rgba,
-        GpuFormat.BC1RgbSrgbBlock or GpuFormat.BC1RgbaSrgbBlock => MtlFormat.Bc1RgbaSrgb,
-        GpuFormat.BC2UnormBlock => MtlFormat.Bc2Rgba,
-        GpuFormat.BC2SrgbBlock => MtlFormat.Bc2RgbaSrgb,
-        GpuFormat.BC3UnormBlock => MtlFormat.Bc3Rgba,
-        GpuFormat.BC3SrgbBlock => MtlFormat.Bc3RgbaSrgb,
-        GpuFormat.BC4UnormBlock => MtlFormat.Bc4RUnorm,
-        GpuFormat.BC4SNormBlock => MtlFormat.Bc4RSnorm,
-        GpuFormat.BC5UnormBlock => MtlFormat.Bc5RgUnorm,
-        GpuFormat.BC5SNormBlock => MtlFormat.Bc5RgSnorm,
-        GpuFormat.BC6HUfloatBlock => MtlFormat.Bc6HRgbUfloat,
-        GpuFormat.BC6HSfloatBlock => MtlFormat.Bc6HRgbFloat,
-        GpuFormat.BC7UnormBlock => MtlFormat.Bc7RgbaUnorm,
-        GpuFormat.BC7SrgbBlock => MtlFormat.Bc7RgbaUnormSrgb,
-        // Metal has no 24-bit depth and no 16-bit depth with stencil; both widen.
-        GpuFormat.D16Unorm => MtlFormat.Depth16Unorm,
-        GpuFormat.D32Sfloat or GpuFormat.X8D24UnormPack32 => MtlFormat.Depth32Float,
-        GpuFormat.D16UnormS8Uint or GpuFormat.D24UnormS8Uint or GpuFormat.D32SfloatS8Uint =>
-            MtlFormat.Depth32FloatStencil8,
-        GpuFormat.S8Uint => MtlFormat.Stencil8,
-        _ => MtlFormat.Invalid,
-    };
+        format is MtlFormat.Depth32FloatStencil8 or MtlFormat.Stencil8 or MtlFormat.X32Stencil8;
 
     public static ulong TextureType(GpuImageType type, uint layers, uint samples) => (type, layers, samples) switch
     {

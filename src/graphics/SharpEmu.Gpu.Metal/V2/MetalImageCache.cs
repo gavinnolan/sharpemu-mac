@@ -522,9 +522,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
     private ResourceSlotIdentifier InsertImage(in ImageDescription description)
     {
-        var shape = _transfer.ShapeFor(in description);
-        var texture = CreateTexture(in shape, in description);
-        var image = new MetalCachedImage(in description, in shape, texture);
+        var admitted = Admit(in description);
+        var shape = _transfer.ShapeFor(in admitted);
+        var texture = CreateTexture(in shape, in admitted);
+        var image = new MetalCachedImage(in admitted, in shape, texture);
         var imageIdentifier = _slots.Insert(image);
         if (!ImageDescription.IsEmptyRange(description.Data))
         {
@@ -534,6 +535,27 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         Interlocked.Increment(ref _createdImages);
         CollectIfOverBudget();
         return imageIdentifier;
+    }
+
+    // An image format the transfer cannot carry would be a fatal error there, and a
+    // texture is never worth stopping the title for: the description takes the
+    // size-equivalent format instead, and the substitution is logged once.
+    private static ImageDescription Admit(in ImageDescription description)
+    {
+        if (MetalV2Formats.IsSupported(description.PixelFormat))
+        {
+            return description;
+        }
+
+        var substitute = MetalV2Formats.SubstituteFor(description.BytesPerBlock);
+        MetalV2Diagnostics.WarnOnce(
+            $"admit:{(int)description.PixelFormat}",
+            $"No Metal format carries this image; using the size-equivalent one: " +
+            $"format={(int)description.PixelFormat} guestFormat={(uint)description.GuestFormat} " +
+            $"bytesPerBlock={description.BytesPerBlock} substitute={(int)substitute}.");
+        var admitted = description;
+        admitted.PixelFormat = substitute;
+        return admitted;
     }
 
     private nint CreateTexture(in MetalTextureShape shape, in ImageDescription description)

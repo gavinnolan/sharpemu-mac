@@ -88,7 +88,7 @@ internal sealed partial class MetalRenderHost :
 
         _guestMemory = new MetalGuestMemory(device, backing, memory);
         _guestMemory.AttachToQueue(queue);
-        _transfer = new MetalImageTransferStub(_guestMemory, backing, FlushAndWaitForGpu);
+        _transfer = new MetalImageTransfer(device);
         _imageCache = new MetalImageCache(this, _transfer, _guestMemory, pages, backing);
         _completions = new MetalCompletionQueue(_sharedEvent);
     }
@@ -528,6 +528,7 @@ internal sealed partial class MetalRenderHost :
 
         _completions.Dispose();
         DisposePipelines();
+        (_transfer as IDisposable)?.Dispose();
         _imageCache.Dispose();
         _guestMemory.Dispose();
         if (_sharedEvent != 0)
