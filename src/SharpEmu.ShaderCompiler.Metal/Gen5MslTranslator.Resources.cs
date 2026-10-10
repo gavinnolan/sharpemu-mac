@@ -42,7 +42,13 @@ public static partial class Gen5MslTranslator
             return false;
         }
 
-        return new CompilationContext(request).TryCompile(out shader, out error);
+        if (!new CompilationContext(request).TryCompile(out shader, out error))
+        {
+            return false;
+        }
+
+        Gen5MslDump.Write(request, shader);
+        return true;
     }
 
     private sealed partial class CompilationContext

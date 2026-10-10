@@ -626,6 +626,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             : default;
         var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
         _transfer.EncodeGuestToTexture(context, in description, range, source, stencil, image.Texture);
+        context.ProfileEncoded(ProfileLabel("upload", in description));
         image.RefreshComplete();
         Interlocked.Increment(ref _uploads);
     }
@@ -658,9 +659,17 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var context = _owner.BeginTransfer();
         var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
         _transfer.EncodeTextureToGuest(context, in description, range, image.Texture, destination, stencil);
+        context.ProfileEncoded(ProfileLabel("writeback", in description));
         image.ClearGpuModified();
         Interlocked.Increment(ref _writebacks);
     }
+
+    // What a transfer is, for the GPU profiler: the shape the tiler actually walks.
+    private static string ProfileLabel(string direction, in ImageDescription description) =>
+        $"{direction} format={description.PixelFormat} type={description.Type} " +
+        $"extent={description.Extent.Width}x{description.Extent.Height}x{description.Extent.Depth} " +
+        $"levels={description.Resources.Levels} layers={description.TransferLayers} " +
+        $"tile={description.TileMode} samples={description.Samples} bytes=0x{description.Data.Size:X}";
 
     /// <summary>Writes every GPU-modified image back, then lets the CPU read guest memory.</summary>
     public void FlushAllGpuWrites()

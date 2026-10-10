@@ -36,6 +36,10 @@ internal sealed partial class MetalRenderHost
         // Set when the vertex program is an NGG primitive shader compiled as a Metal
         // mesh function; the draw then launches threadgroups instead of vertices.
         public Gen5MslMeshInfo? Mesh;
+
+        // The shader hashes behind this pipeline, formatted once for the per-draw GPU
+        // profiler; null unless SHARPEMU_METAL_V2_PROFILE_SHADERS=1.
+        public string? Profile;
     }
 
     // One compiled MSL module: its library, its function, and the shader it came from.
@@ -315,6 +319,7 @@ internal sealed partial class MetalRenderHost
             HasDepth = depthFormatOf(description) != MtlFormat.Invalid,
             HasStencil = description.Rendering.StencilFormat != GpuFormat.Undefined,
             Mesh = mesh,
+            Profile = ProfileLabelFor(vertexModule, pixelModule, mesh),
         };
         _pipelineEntries[entry.Id] = entry;
         return new PipelineHandle(entry.Id, 0, false);
@@ -430,6 +435,7 @@ internal sealed partial class MetalRenderHost
             State = state,
             Graphics = false,
             ThreadsPerThreadgroup = threads,
+            Profile = ProfileLabelFor(module, null, null),
         };
         _pipelineEntries[entry.Id] = entry;
         return new PipelineHandle(entry.Id, 0, false);

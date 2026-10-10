@@ -26,6 +26,15 @@ internal interface IMetalSubmissionContext
 
     // The last serial the shared event has reached.
     ulong CompletedSerial { get; }
+
+    // Profiling only: everything encoded into CommandBuffer up to here belongs to this
+    // label. The host closes and times the command buffer under
+    // SHARPEMU_METAL_V2_PROFILE_SHADERS=1 and does nothing otherwise, which is why this
+    // may be called from any encode path without a cost.
+    void ProfileEncoded(string label)
+    {
+        _ = label;
+    }
 }
 
 // Moves image contents between guest memory and Metal textures entirely on the GPU.

@@ -179,6 +179,7 @@ internal sealed partial class MetalRenderHost :
     {
         _ = EnsureCommandBuffer();
         EndEncoders();
+        NoteProfileTransfer();
         return this;
     }
 
@@ -295,7 +296,7 @@ internal sealed partial class MetalRenderHost :
                 $"[METAL-V2][SLOW-WAIT] serial={serial} total_ms={(finished - started) * 1000.0 / frequency:F1} " +
                 $"flush_ms={(committedAt - started) * 1000.0 / frequency:F1} " +
                 $"gpu_exec_ms={(gpuEnd - gpuStart) * 1000.0:F2} gpu_end_age_ms={(now - gpuEnd) * 1000.0:F1} " +
-                $"gpu_start_age_ms={(now - gpuStart) * 1000.0:F1}");
+                $"gpu_start_age_ms={(now - gpuStart) * 1000.0:F1} last={LastWorkDescription}");
         }
         _guestMemory.NoteCompleted(serial);
         _gpuWroteGuestMemory = false;
