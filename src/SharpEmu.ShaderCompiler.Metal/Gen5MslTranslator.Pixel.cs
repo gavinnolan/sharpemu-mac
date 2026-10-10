@@ -14,7 +14,8 @@ public static partial class Gen5MslTranslator
 
         private static bool UsesSampler(string opcode) =>
             opcode.StartsWith("ImageSample", StringComparison.Ordinal) ||
-            opcode.StartsWith("ImageGather", StringComparison.Ordinal);
+            opcode.StartsWith("ImageGather", StringComparison.Ordinal) ||
+            opcode == "ImageGetLod";
 
         // ---- image instruction emission ----
 
@@ -90,6 +91,23 @@ public static partial class Gen5MslTranslator
             {
                 EmitImageGetResinfo(image, texture, imageClass);
                 return true;
+            }
+
+            if (instruction.Opcode == "ImageGetLod")
+            {
+                EmitImageGetLod(image, texture, samplerName, imageClass);
+                return true;
+            }
+
+            if (instruction.Opcode.StartsWith("ImageAtomic", StringComparison.Ordinal))
+            {
+                // Metal has no texture atomic: the MSL texture types expose no
+                // atomic_fetch_* member and there is no image texel pointer to
+                // reinterpret, so there is nothing to lower this onto. The
+                // SPIR-V translator uses OpImageTexelPointer, which has no
+                // Metal counterpart.
+                error = $"{instruction.Opcode}: Metal has no storage-image atomic";
+                return false;
             }
 
             if (instruction.Opcode is "ImageStore" or "ImageStoreMip")
@@ -284,6 +302,48 @@ public static partial class Gen5MslTranslator
             }
         }
 
+        // IMAGE_GET_LOD reports the level the sampler would pick for the address:
+        // the clamped level in x and the unclamped one in y, which is what the
+        // SPIR-V translator's OpImageQueryLod returns. A multisampled texture has
+        // no mip chain to pick from, so both halves read zero.
+        private void EmitImageGetLod(
+            Gen5ImageControl image,
+            string texture,
+            string samplerName,
+            MslImageClass imageClass)
+        {
+            var levels = new string[2];
+            if (imageClass.SupportsSampleLod)
+            {
+                var coordinates = BuildFloatSpatial(image, 0, imageClass);
+                if (imageClass.SpatialComponents == 1)
+                {
+                    coordinates = Temp("float2", $"float2({coordinates}, 0.5f)");
+                }
+
+                levels[0] = Temp("float", $"{texture}.calculate_clamped_lod({samplerName}, {coordinates})");
+                levels[1] = Temp("float", $"{texture}.calculate_unclamped_lod({samplerName}, {coordinates})");
+            }
+            else
+            {
+                levels[0] = "0.0f";
+                levels[1] = "0.0f";
+            }
+
+            // A zero DMASK still returns the clamped level, like the size query.
+            var mask = image.Dmask != 0 ? image.Dmask : 1u;
+            uint outputIndex = 0;
+            for (var component = 0; component < 2; component++)
+            {
+                if ((mask & (1u << component)) == 0)
+                {
+                    continue;
+                }
+
+                StoreVector(image.VectorData + outputIndex++, AsUInt(levels[component]));
+            }
+        }
+
         // The extent accessor uses the guest's logical rank. Height-one 2D
         // backing preserves 1D mip queries; multisampled textures take no LOD.
         private static string ImageExtentQuery(string texture, MslImageClass imageClass, int component, string? lod)
@@ -361,11 +421,17 @@ public static partial class Gen5MslTranslator
             var kind = imageClass.ComponentKind;
             var opcode = instruction.Opcode;
             var hasOffset = opcode.EndsWith("O", StringComparison.Ordinal);
-            var hasCompare = opcode.Contains("SampleC", StringComparison.Ordinal);
+            // SAMPLE_CD is coarse derivatives, not a comparison: its "Cd" is one
+            // token, so the C in it must not read as the z-compare marker the way
+            // the C in SAMPLE_C_CD does.
+            var hasCompare = opcode.Contains("SampleC", StringComparison.Ordinal) &&
+                !opcode.StartsWith("ImageSampleCd", StringComparison.Ordinal);
             // The C comparison marker precedes D/L/B. Decode the remaining
             // family so CL reads its trailing LOD and CD consumes derivatives.
             var sampleFamily = hasCompare ? opcode.Replace("SampleC", "Sample", StringComparison.Ordinal) : opcode;
-            var hasGradients = sampleFamily.Contains("SampleD", StringComparison.Ordinal);
+            var hasGradients = sampleFamily.Contains("SampleD", StringComparison.Ordinal) ||
+                opcode.Contains("SampleCd", StringComparison.Ordinal) ||
+                opcode.Contains("SampleCCd", StringComparison.Ordinal);
             var hasZeroLod = opcode.Contains("Lz", StringComparison.Ordinal);
             var hasLod = !hasZeroLod && sampleFamily.Contains("SampleL", StringComparison.Ordinal);
             var hasBias = sampleFamily.Contains("SampleB", StringComparison.Ordinal);
@@ -515,6 +581,17 @@ public static partial class Gen5MslTranslator
             var opcode = instruction.Opcode;
             var hasOffset = opcode.EndsWith("O", StringComparison.Ordinal);
             var hasCompare = opcode.Contains("Gather4C", StringComparison.Ordinal);
+            if (opcode == "ImageGather4H")
+            {
+                if (imageClass.Dimension is ImageDimension.Dim1D or ImageDimension.Dim1DArray)
+                {
+                    error = "unsupported 1D horizontal image gather";
+                    return false;
+                }
+
+                sampled = EmitHorizontalGather(image, texture, samplerName, imageClass);
+                return true;
+            }
 
             // Metal exposes gather on 2D and 2D-array textures only. A 1D gather is
             // emulated from two point samples, the way the SPIR-V backend does it;
@@ -600,6 +677,46 @@ public static partial class Gen5MslTranslator
             }
 
             return true;
+        }
+
+        // GATHER4_H returns four horizontally adjacent texels rather than a 2x2
+        // footprint, which the SPIR-V translator expresses as a gather with the
+        // constant offsets {-1,0}, {0,0}, {1,0} and {2,0}. Metal's gather takes a
+        // single offset, so each of the four texels is point-sampled at the
+        // footprint corner the gather would have taken it from.
+        private string EmitHorizontalGather(
+            Gen5ImageControl image,
+            string texture,
+            string samplerName,
+            MslImageClass imageClass)
+        {
+            var kind = imageClass.ComponentKind;
+            var size = Temp("float2", $"float2({texture}.get_width(0), {texture}.get_height(0))");
+            var coordinates = BuildFloatSpatial(image, 0, imageClass);
+            var layerArgument = imageClass.Arrayed
+                ? $", {BuildSampleLayer(image, imageClass.SpatialComponents, imageClass, texture)}"
+                : string.Empty;
+            // The gather's own corner texel: the lower-left of the 2x2 footprint.
+            var corner = Temp("float2", $"floor({coordinates} * {size} - 0.5f) + 0.5f");
+
+            // The gathered component is selected from the first dmask bit.
+            uint component = 0;
+            while (component < 3 && (image.Dmask & (1u << (int)component)) == 0)
+            {
+                component++;
+            }
+
+            var texels = new string[4];
+            for (var texel = 0; texel < texels.Length; texel++)
+            {
+                var sample = Temp(
+                    $"vec<{kind}, 4>",
+                    $"{texture}.sample({samplerName}, ({corner} + float2({texel - 1}.0f, 0.0f)) / {size}" +
+                    $"{layerArgument}, metal::level(0.0f))");
+                texels[texel] = $"{sample}[{component}]";
+            }
+
+            return Temp($"vec<{kind}, 4>", $"{VectorLiteral(kind)}({string.Join(", ", texels)})");
         }
 
         // A 1D gather has no Metal (or Vulkan) instruction, so the two texels the filter

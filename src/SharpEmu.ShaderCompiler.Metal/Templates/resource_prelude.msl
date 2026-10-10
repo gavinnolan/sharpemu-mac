@@ -128,7 +128,7 @@ static inline uint sharpemu_atomic_float_replace(device atomic_uint* word, uint 
     return observed;
 }
 
-// BUFFER/IMAGE_ATOMIC_FMIN/FMAX: a real float minimum or maximum of the word
+// BUFFER_ATOMIC_FMIN/FMAX: a real float minimum or maximum of the word
 // and the operand, which is not the DS conditional replace above.
 static inline uint sharpemu_atomic_float_minmax(device atomic_uint* word, uint value, bool maxValue)
 {

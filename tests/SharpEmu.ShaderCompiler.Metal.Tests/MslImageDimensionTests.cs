@@ -265,6 +265,69 @@ public sealed class MslImageDimensionTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void HorizontalGather_TakesFourHorizontallyAdjacentTexels()
+    {
+        // GATHER4_H has no Metal instruction: the four texels the SPIR-V
+        // translator reaches with constant offsets are point-sampled instead.
+        var shader = Gen5ImageFixtures.CompileOrThrow("ImageGather4H", Gen5ImageFixtures.ImageType2D);
+        Assert.DoesNotContain(".gather(", shader.Source);
+        Assert.Equal(4, Lines(shader.Source, ".sample(").Count);
+        Assert.Contains("float2(-1.0f, 0.0f)", shader.Source);
+        Assert.Contains("float2(2.0f, 0.0f)", shader.Source);
+    }
+
+    [Fact]
+    public void HorizontalGather_OnAOneDimensionalImage_IsRefused()
+    {
+        Assert.False(
+            Gen5ImageFixtures.TryCompile("ImageGather4H", Gen5ImageFixtures.ImageType1D, out _, out var error));
+        Assert.Contains("1D horizontal image gather", error);
+    }
+
+    [Theory]
+    [InlineData(Gen5ImageFixtures.ImageType2D)]
+    [InlineData(Gen5ImageFixtures.ImageType2DArray)]
+    [InlineData(Gen5ImageFixtures.ImageType3D)]
+    public void GetLod_ReportsTheClampedAndUnclampedLevels(uint descriptorType)
+    {
+        var shader = Gen5ImageFixtures.CompileOrThrow("ImageGetLod", descriptorType);
+        Assert.Contains("calculate_clamped_lod(", shader.Source);
+        Assert.Contains("calculate_unclamped_lod(", shader.Source);
+    }
+
+    [Theory]
+    // SAMPLE_CD is coarse derivatives, so it reads gradients and no reference.
+    [InlineData("ImageSampleCd", true, false)]
+    [InlineData("ImageSampleCdCl", true, false)]
+    [InlineData("ImageSampleCdO", true, false)]
+    // SAMPLE_C_CD is a compare that also reads gradients.
+    [InlineData("ImageSampleCCd", true, true)]
+    [InlineData("ImageSampleCCdCl", true, true)]
+    // SAMPLE_C without a derivative family reads only the reference.
+    [InlineData("ImageSampleC", false, true)]
+    [InlineData("ImageSampleD", true, false)]
+    public void CoarseDerivativeSamplesReadGradientsWithoutMistakingCdForACompare(
+        string opcode, bool gradients, bool compare)
+    {
+        var shader = Gen5ImageFixtures.CompileOrThrow(opcode, Gen5ImageFixtures.ImageType2D);
+        Assert.Equal(gradients, shader.Source.Contains("gradient2d(", StringComparison.Ordinal));
+        // A colour-format image compares the filtered value, so the reference
+        // shows up as the comparison rather than as a sample_compare argument.
+        Assert.Equal(compare, shader.Source.Contains("<= (float)", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("ImageAtomicAdd")]
+    [InlineData("ImageAtomicCmpswap")]
+    [InlineData("ImageAtomicFmax")]
+    public void StorageImageAtomicsAreRefusedBecauseMetalHasNone(string opcode)
+    {
+        Assert.False(Gen5ImageFixtures.TryCompile(opcode, Gen5ImageFixtures.ImageType2D, out _, out var error));
+        Assert.Contains("Metal has no storage-image atomic", error);
+        Assert.Contains(opcode, error);
+    }
+
+    [Fact]
     public void VolumeGather_IsRefusedWithTheDimensionInTheMessage()
     {
         Assert.False(
@@ -326,6 +389,9 @@ public sealed class MslImageDimensionTests(ITestOutputHelper output)
             data.Add("ImageStore", descriptorType);
             data.Add("ImageStoreMip", descriptorType);
             data.Add("ImageGetResinfo", descriptorType);
+            data.Add("ImageGetLod", descriptorType);
+            data.Add("ImageSampleCd", descriptorType);
+            data.Add("ImageSampleCCd", descriptorType);
         }
 
         // Gather exists on 2D shapes only; the 1D form is emulated.
@@ -334,6 +400,8 @@ public sealed class MslImageDimensionTests(ITestOutputHelper output)
         data.Add("ImageGather4", Gen5ImageFixtures.ImageTypeCube);
         data.Add("ImageGather4Lz", Gen5ImageFixtures.ImageType1D);
         data.Add("ImageGather4C", Gen5ImageFixtures.ImageType2DArray);
+        data.Add("ImageGather4H", Gen5ImageFixtures.ImageType2D);
+        data.Add("ImageGather4H", Gen5ImageFixtures.ImageType2DArray);
 
         // Multisampled images only ever reach the fetch paths.
         data.Add("ImageLoad", Gen5ImageFixtures.ImageType2DMsaa);
