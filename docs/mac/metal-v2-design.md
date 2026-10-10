@@ -315,6 +315,36 @@ runaway compute shaders (below).
   which is the hash to pass to `SHARPEMU_SHADER_MSL_DUMP_HASH`. A missing line is now
   evidence: a slow shader with no `STEP-CAP` is loop-bound, not capped.
 
+### The guest write guard
+
+Guest memory being the GPU's memory has one failure mode the snapshot backend did not
+have: a write that overruns its range does not fault and does not land in a staging
+buffer. It rewrites whatever the guest's own allocator put next door, and the title dies
+much later inside its own code on a clobbered pointer — in Poppy Playtime, a `mov
+rax,[rcx]` with `rcx = 0x4000000040000000`, two floats where a free-list pointer belongs.
+
+`SHARPEMU_METAL_V2_GUARD_WRITES=1` arms `MetalGuestWriteGuard`. For every write to guest
+memory the host declares — a storage-buffer or written binding, a fill, a copy, an image
+writeback, and the fills and copies the host performs itself — it snapshots the 4 KiB
+either side of the range and compares them again once the GPU has signalled that
+submission. A byte that changed, and that no other declared range covers, is reported with
+the producer that ran off its end:
+
+    [METAL-V2][GUARD] A GPU-side write changed guest bytes outside the range it declared:
+      producer=writeback [writeback format=... extent=1x1 ...] declared=0x...+0x10000
+      serial=812 side=after violation=0x... distance=0x20 was=0x... now=0x4000000040000000.
+
+The same switch arms `GuestWriteJournal` (in `SharpEmu.HLE`, because the native fault
+dumper in `SharpEmu.Core` is what asks it), a ring of the declared ranges. On a fault the
+dumper prints, for every faulting register that is a guest address, which producer had
+declared those bytes:
+
+    [LOADER][INFO]   gpu-write-journal rdx=0x... producer=storage [...] range=0x...+0x...
+
+An address no record covers was not written by a declared host-side GPU write, which
+points at a shader store through a descriptor, or away from the GPU altogether. A clean
+guard with a reproducible fault is therefore evidence too, not an absence of it.
+
 ## Process-level macOS tuning (separate workstream)
 
 - `Info.plist`: `LSSupportsGameMode`, `GCSupportsGameMode`, and
