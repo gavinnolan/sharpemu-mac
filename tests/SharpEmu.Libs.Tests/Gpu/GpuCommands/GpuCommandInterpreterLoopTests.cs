@@ -59,6 +59,67 @@ public sealed class GpuCommandInterpreterLoopTests
         Assert.Contains("offset=0x00002", fatal.Message);
     }
 
+    // A handler that reports a fixed size for the variant it knows must not be
+    // able to leave the cursor inside the packet body it did not finish. The
+    // register-NOP offsets return two dwords whatever the header declares, so a
+    // longer encoding of the same packet used to resume on an operand and read
+    // it as the next header.
+    [Theory]
+    [InlineData(PacketOpcode.SetContextRegister, RegisterBankLayout.ContextNop)]
+    [InlineData(PacketOpcode.SetShaderRegister, RegisterBankLayout.ShaderRegisterNop)]
+    public void AHandlerThatUnderReportsItsPacketStillAdvancesPastIt(uint opcode, uint nopOffset)
+    {
+        var runner = new StreamRunner();
+
+        // Five dwords: the header, the NOP register offset and three operands
+        // the handler never looks at.
+        var longNop = StreamRunner.Packet(opcode, nopOffset, 0x11111111u, 0x22222222u, 0x33333333u);
+        Assert.Equal(5u, PacketHeader.Length(longNop[0]));
+
+        var progress = runner.Run(longNop, CreateInstanceCountPacket(9));
+
+        Assert.Equal(SubmissionProgress.Complete, progress);
+        Assert.Equal(9u, runner.Interpreter.InstanceCount);
+    }
+
+    [Fact]
+    public void AnUnderReportedPacketInsideAnIndirectBufferDoesNotDeriveTheNextHeaderFromItsBody()
+    {
+        // The same misalignment one level down: the nested buffer has to end on
+        // its own boundary so the parent resumes at the packet after the call.
+        var runner = new StreamRunner();
+        runner.Load(Nested, StreamRunner.Concat(
+            StreamRunner.Packet(PacketOpcode.SetContextRegister, RegisterBankLayout.ContextNop, 0xC0031500u, 1u),
+            CreateInstanceCountPacket(4)));
+
+        var progress = runner.Run(IndirectBuffer(Nested, 6), CreateInstanceCountPacket(9));
+
+        Assert.Equal(SubmissionProgress.Complete, progress);
+        Assert.Equal(9u, runner.Interpreter.InstanceCount);
+    }
+
+    // COND_EXEC is the one packet that reports more dwords than its own header
+    // declares, because it skips the packets it covers. The clamp must leave it
+    // alone.
+    [Fact]
+    public void ConditionalExecuteStillSkipsThePacketsItCovers()
+    {
+        var runner = new StreamRunner();
+        runner.Host.WriteQword(Label, 0);
+        var condition = StreamRunner.Packet(
+            PacketOpcode.ConditionalExecute,
+            StreamRunner.Low(Label),
+            StreamRunner.High(Label),
+            0,
+            2u);
+
+        var progress = runner.Run(condition, CreateInstanceCountPacket(3), CreateInstanceCountPacket(9));
+
+        Assert.Equal(SubmissionProgress.Complete, progress);
+        // The skipped packet never set 3, so the last packet's value is what stands.
+        Assert.Equal(9u, runner.Interpreter.InstanceCount);
+    }
+
     [Fact]
     public void PacketLongerThanTheBuffer_IsFatal()
     {
