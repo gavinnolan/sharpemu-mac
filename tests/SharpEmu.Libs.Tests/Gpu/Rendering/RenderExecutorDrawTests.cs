@@ -281,6 +281,72 @@ public sealed class RenderExecutorDrawTests : IDisposable
             c.StartsWith("draw_", StringComparison.Ordinal));
     }
 
+    // The captured Void Terrarium culling draw: a stage mask the compact primitive masks do
+    // not cover, with the NGG subgroup registers the per-vertex path cannot honor.
+    private static void ApplyCullingPrimitiveShaderDraw(RegisterBanks banks)
+    {
+        banks.Context.ShaderStages = 0x00402020;
+        banks.Context.ShaderInterface.PrimitiveShaderSubgroupControl = 2;
+        banks.Context.ShaderInterface.MaxOutputPerSubgroup = 128;
+        banks.Context.ShaderInterface.GeometryOnChipControl = 0x00402040;
+        banks.Shader.Vertex.GeometryAddress = 0;
+    }
+
+    [Fact]
+    public void CullingPrimitiveShaderDraw_IsSkippedWithoutMeshPipelines()
+    {
+        // Vulkan's behavior, and Metal's until its host builds mesh pipelines.
+        var banks = Banks();
+        ApplyCullingPrimitiveShaderDraw(banks);
+        Assert.False(_pipelines.SupportsPrimitiveShaderMeshPipelines);
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        Assert.Empty(_pipelines.Calls);
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void CullingPrimitiveShaderDraw_RunsWhenTheBackendHasMeshPipelines()
+    {
+        var banks = Banks();
+        ApplyCullingPrimitiveShaderDraw(banks);
+        _pipelines.SupportsPrimitiveShaderMeshPipelines = true;
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        Assert.Contains(_host.Calls, c => c.StartsWith("draw_indexed", StringComparison.Ordinal));
+        Assert.Empty(_pipelines.UnsupportedGraphics);
+    }
+
+    [Theory]
+    [InlineData(0x1u)] // a legacy vertex/LS stage mask stays unsupported
+    [InlineData(0x41u)] // VS_EN selected beside GS_EN
+    public void MeshPipelines_DoNotAdmitForeignStageMasks(uint stageMask)
+    {
+        var banks = Banks();
+        ApplyCullingPrimitiveShaderDraw(banks);
+        banks.Context.ShaderStages = stageMask;
+        _pipelines.SupportsPrimitiveShaderMeshPipelines = true;
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        Assert.Empty(_pipelines.Calls);
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void MeshPipelines_DoNotAdmitASeparateGeometryProgram()
+    {
+        // A real geometry program is a second stage no primitive shader implements.
+        var banks = Banks();
+        ApplyCullingPrimitiveShaderDraw(banks);
+        banks.Shader.Vertex.GeometryAddress = 0x3000;
+        banks.Context.ShaderInterface.GeometryMaxVerticesOut = 4;
+        _pipelines.SupportsPrimitiveShaderMeshPipelines = true;
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        Assert.Empty(_pipelines.Calls);
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_", StringComparison.Ordinal));
+    }
+
     [Theory]
     [InlineData(0x02002000u, 0u)]
     [InlineData(0x02002000u, 1u)]

@@ -55,6 +55,10 @@ public sealed class ComputeProgram
 // The shader and pipeline caches behind the executor.
 public interface IShaderPipelineProvider
 {
+    // True when the backend can run an NGG primitive shader as a mesh pipeline. The
+    // executor then stops skipping culling primitive-shader draws; see IGuestGpuBackend.
+    bool SupportsPrimitiveShaderMeshPipelines => false;
+
     // Optional capture of rejected stage inputs; it never admits or executes the draw.
     void RecordUnsupportedGraphics(VertexStageRegisters vertex, ContextRegisters context) { }
 
