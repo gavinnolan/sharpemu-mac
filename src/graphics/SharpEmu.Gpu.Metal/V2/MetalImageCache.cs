@@ -27,6 +27,10 @@ internal interface IMetalImageCacheOwner
     // Fills a guest byte range with a repeating dword on the GPU.
     void FillGuestRange(ulong address, ulong size, uint value);
 
+    // Recorded work stores into this guest range, so a later read of these bytes
+    // waits for the submission being recorded and a read of anything else does not.
+    void NoteGuestWrite(ulong address, ulong size);
+
     // Finishes every recorded command buffer so the CPU sees the GPU's writes.
     void WaitForGpu();
 
@@ -332,7 +336,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     /// memory. Called before a buffer binding, an incompatible image request or a
     /// host read can observe the bytes.
     /// </summary>
-    public void FlushGpuWrites(ulong address, ulong size)
+    public void FlushGpuWrites(ulong address, ulong size, MetalWritebackCause cause)
     {
         if (!IsValidRange(address, size) || !_pageOwners.MayHaveOwners(address, size))
         {
@@ -344,7 +348,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         {
             if (_slots.TryGet(imageIdentifier) is { } image && image.GpuOverlaps(address, size))
             {
-                WriteBackToGuest(image);
+                WriteBackToGuest(image, cause);
             }
         }
     }
@@ -366,7 +370,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             }
 
             image.ClearGpuModified();
-            image.MarkCpuDirty();
+            image.MarkCpuDirty(MetalImageDirtyCause.GpuWrite);
             UnwatchImage(imageIdentifier);
         }
     }
@@ -626,13 +630,14 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             : default;
         var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
         _transfer.EncodeGuestToTexture(context, in description, range, source, stencil, image.Texture);
+        _uploadCauses[(int)image.DirtyCause]++;
         image.RefreshComplete();
         Interlocked.Increment(ref _uploads);
     }
 
     // Retiles a GPU-written image back into guest memory; afterwards guest memory and
     // the texture agree, so the image stays cached and clean.
-    private void WriteBackToGuest(MetalCachedImage image)
+    private void WriteBackToGuest(MetalCachedImage image, MetalWritebackCause cause)
     {
         if (!image.IsGpuModified || image.Texture == 0 || ImageDescription.IsEmptyRange(image.Description.Data))
         {
@@ -659,6 +664,15 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
         _transfer.EncodeTextureToGuest(context, in description, range, image.Texture, destination, stencil);
         image.ClearGpuModified();
+        // The retile is a GPU store into guest memory: until it completes the bytes
+        // in guest memory are the old ones, so a read of them has to wait for it.
+        _owner.NoteGuestWrite(description.Data.Address, description.Data.Size);
+        if (description.HasStencil && stencil.IsValid)
+        {
+            _owner.NoteGuestWrite(description.Stencil.Address, description.Stencil.Size);
+        }
+
+        _writebackCauses[(int)cause]++;
         Interlocked.Increment(ref _writebacks);
     }
 
@@ -676,8 +690,35 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         });
         foreach (var image in pending)
         {
-            WriteBackToGuest(image);
+            WriteBackToGuest(image, MetalWritebackCause.DrainAll);
         }
+    }
+
+    private readonly long[] _uploadCauses = new long[4];
+    private readonly long[] _writebackCauses = new long[7];
+
+    /// <summary>
+    /// Where the uploads and the writebacks since the last read came from. A static
+    /// menu that uploads and writes back every frame is churning, and only the cause
+    /// says which side of the host is asking for it.
+    /// </summary>
+    public (long Created, long CpuWrite, long GpuWrite, long Invalidated,
+        long Binding, long Storage, long HostRead, long GuestCopy, long Overlap, long Release, long Drain)
+        TakeTransferCauses()
+    {
+        var uploads = (
+            Interlocked.Exchange(ref _uploadCauses[0], 0),
+            Interlocked.Exchange(ref _uploadCauses[1], 0),
+            Interlocked.Exchange(ref _uploadCauses[2], 0),
+            Interlocked.Exchange(ref _uploadCauses[3], 0));
+        return (uploads.Item1, uploads.Item2, uploads.Item3, uploads.Item4,
+            Interlocked.Exchange(ref _writebackCauses[0], 0),
+            Interlocked.Exchange(ref _writebackCauses[1], 0),
+            Interlocked.Exchange(ref _writebackCauses[2], 0),
+            Interlocked.Exchange(ref _writebackCauses[3], 0),
+            Interlocked.Exchange(ref _writebackCauses[4], 0),
+            Interlocked.Exchange(ref _writebackCauses[5], 0),
+            Interlocked.Exchange(ref _writebackCauses[6], 0));
     }
 
     public void Dispose()

@@ -385,12 +385,12 @@ internal sealed partial class MetalRenderHost
 
             var size = ClampMappedSize(descriptor.Address, requested);
             var written = info.Buffers[index].Written;
-            FlushGpuWrites(descriptor.Address, size);
+            FlushGpuWrites(descriptor.Address, size, MetalWritebackCause.StorageDescriptor);
             var range = _guestMemory.Resolve(descriptor.Address, size);
             if (written)
             {
                 _imageCache.InvalidateMemoryFromGpu(descriptor.Address, size);
-                NoteGuestMemoryWrite();
+                NoteGuestMemoryWrite(descriptor.Address, size);
             }
 
             stage.Buffers[index] = range;
