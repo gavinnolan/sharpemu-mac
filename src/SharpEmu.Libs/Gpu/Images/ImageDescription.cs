@@ -28,8 +28,11 @@ public struct MetadataDescription
     public GuestSpan Range;
     public MetadataKind Kind;
     public uint Control;
+    public uint DccClearWord;
     public DisplayCompression Compression;
     public bool StencilCompressed;
+    public bool DccClearRegisterValid;
+    public bool DccAlphaMsb;
 }
 
 public readonly record struct SubresourceCount(uint Levels, uint Layers) : IComparable<SubresourceCount>
@@ -366,7 +369,8 @@ public struct ImageDescription
         {
             case MetadataKind.None:
                 if (!IsEmptyRange(Metadata.Range) || Metadata.Control != 0 ||
-                    Metadata.Compression != DisplayCompression.Uncompressed || Metadata.StencilCompressed)
+                    Metadata.DccClearWord != 0 || Metadata.Compression != DisplayCompression.Uncompressed || Metadata.StencilCompressed ||
+                    Metadata.DccClearRegisterValid || Metadata.DccAlphaMsb)
                 {
                     throw GpuFatal.Fatal("An image without metadata carries metadata state.");
                 }
@@ -376,6 +380,11 @@ public struct ImageDescription
                 if (!IsValidRange(Metadata.Range) || Metadata.Compression != DisplayCompression.Uncompressed)
                 {
                     throw GpuFatal.Fatal($"The HTile metadata is invalid: address=0x{Metadata.Range.Address:X16} size=0x{Metadata.Range.Size:X16}.");
+                }
+
+                if (Metadata.DccClearWord != 0 || Metadata.DccClearRegisterValid || Metadata.DccAlphaMsb)
+                {
+                    throw GpuFatal.Fatal("HTile metadata carries DCC clear state.");
                 }
 
                 break;
@@ -507,6 +516,91 @@ public static class DisplayFormatRule
 // Decoders for the packed 32-bit clear values guest compute fills carry.
 public static class PackedClearValue
 {
+    public static bool SupportsDccFixedColor(GpuFormat format) => DccComponentCount(format) != 0;
+
+    public static bool TryDecodeDccColor(
+        GpuFormat format,
+        uint metadataFill,
+        in MetadataDescription metadata,
+        bool allowClearToRegister,
+        out GpuClearColor clear)
+    {
+        clear = default;
+        var code = (byte)metadataFill;
+        if (metadataFill != code * 0x01010101u)
+        {
+            return false;
+        }
+
+        if (code == 0x20)
+        {
+            return allowClearToRegister && metadata.DccClearRegisterValid &&
+                   TryDecodeColor(format, metadata.DccClearWord, out clear);
+        }
+
+        if (code == 0x00)
+        {
+            return true;
+        }
+
+        var components = DccComponentCount(format);
+        if (components == 0 || code is not (0x40 or 0x80 or 0xc0))
+        {
+            return false;
+        }
+
+        var rgb = (code & 0x80) != 0 ? 1.0f : 0.0f;
+        var alpha = (code & 0x40) != 0 ? 1.0f : 0.0f;
+        Span<float> channels = stackalloc float[4] { rgb, rgb, rgb, alpha };
+        if (!metadata.DccAlphaMsb)
+        {
+            (channels[0], channels[3]) = (channels[3], channels[0]);
+        }
+
+        if (components == 1)
+        {
+            channels[0] = channels[3];
+        }
+        else if (components == 2)
+        {
+            channels[1] = channels[3];
+        }
+
+        switch (format)
+        {
+            case GpuFormat.B8G8R8A8Unorm:
+            case GpuFormat.B8G8R8A8Srgb:
+            case GpuFormat.A2R10G10B10UnormPack32:
+            case GpuFormat.A1R5G5B5UnormPack16:
+            case GpuFormat.R5G6B5UnormPack16:
+                (channels[0], channels[2]) = (channels[2], channels[0]);
+                break;
+            case GpuFormat.R4G4B4A4UnormPack16:
+                (channels[0], channels[3]) = (channels[3], channels[0]);
+                (channels[1], channels[2]) = (channels[2], channels[1]);
+                break;
+        }
+
+        clear = default;
+        clear.Float32_0 = channels[0];
+        clear.Float32_1 = channels[1];
+        clear.Float32_2 = channels[2];
+        clear.Float32_3 = channels[3];
+        return true;
+    }
+
+    private static uint DccComponentCount(GpuFormat format) => format switch
+    {
+        GpuFormat.R8Unorm or GpuFormat.R16Unorm or GpuFormat.R16Sfloat or GpuFormat.R32Sfloat => 1,
+        GpuFormat.R8G8Unorm or GpuFormat.R16G16Unorm or GpuFormat.R16G16Sfloat or GpuFormat.R32G32Sfloat => 2,
+        GpuFormat.R5G6B5UnormPack16 or GpuFormat.B10G11R11UfloatPack32 => 3,
+        GpuFormat.R8G8B8A8Unorm or GpuFormat.R8G8B8A8Srgb or GpuFormat.B8G8R8A8Unorm or GpuFormat.B8G8R8A8Srgb or
+        GpuFormat.A2B10G10R10UnormPack32 or GpuFormat.A2R10G10B10UnormPack32 or GpuFormat.A1R5G5B5UnormPack16 or
+        GpuFormat.R4G4B4A4UnormPack16 or GpuFormat.R16G16B16A16Unorm or GpuFormat.R16G16B16A16Sfloat or
+        GpuFormat.R32G32B32A32Sfloat => 4,
+        _ => 0,
+    };
+
     public static bool TryDecodeColor(GpuFormat format, uint packed, out GpuClearColor clear)
     {
         static float Unorm8(uint value) => (value & 0xff) / 255.0f;
