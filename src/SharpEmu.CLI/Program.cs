@@ -223,6 +223,10 @@ internal static partial class Program
 
         Log.Info(BuildInfo.Banner);
         Log.Info(HostSystemInfo.Summary);
+        // Once per process, next to the hardware banner: every later performance
+        // comparison needs the ISA surface and the core/page shape it was measured
+        // on, and on a translated host that is not what the hardware would say.
+        Log.Info(HostSystemInfo.RuntimeIsaSummary);
 
         ebootPath = Path.GetFullPath(ebootPath);
         Console.Error.WriteLine($"[DEBUG] Full path: {ebootPath}");

@@ -24,6 +24,32 @@ public static class HostSystemInfo
     public static string Summary =>
         $"Host hardware: CPU: {CpuName}; GPU: {GpuName}; RAM: {MemoryDescriptionValue.Value}.";
 
+    /// <summary>
+    /// The instruction-set surface the JIT will actually use in this process, plus
+    /// the two shape numbers (logical processors, page size) that every later
+    /// performance measurement has to be read against.
+    ///
+    /// This is not a hardware inventory: it is what the runtime reports, which is
+    /// the only thing <c>IsSupported</c>-guarded code and the vectorised helpers
+    /// react to. The distinction matters on an emulated host — SharpEmu's macOS
+    /// build is osx-x64 running under Rosetta 2 on Apple silicon, where the
+    /// translator exposes SSE4.2 but no AVX at all, so a 256-bit path that looks
+    /// available on paper is dead code there. <c>ProcessArchitecture</c> next to
+    /// <c>OSArchitecture</c> makes that translation visible in one line.
+    /// </summary>
+    public static string RuntimeIsaSummary =>
+        "Runtime ISA: " +
+        $"process={RuntimeInformation.ProcessArchitecture} os={RuntimeInformation.OSArchitecture}; " +
+        $"Sse42={System.Runtime.Intrinsics.X86.Sse42.IsSupported} " +
+        $"Avx={System.Runtime.Intrinsics.X86.Avx.IsSupported} " +
+        $"Avx2={System.Runtime.Intrinsics.X86.Avx2.IsSupported} " +
+        $"AdvSimd={System.Runtime.Intrinsics.Arm.AdvSimd.IsSupported}; " +
+        $"Vector128={System.Runtime.Intrinsics.Vector128.IsHardwareAccelerated} " +
+        $"Vector256={System.Runtime.Intrinsics.Vector256.IsHardwareAccelerated} " +
+        $"Vector512={System.Runtime.Intrinsics.Vector512.IsHardwareAccelerated}; " +
+        $"ProcessorCount={Environment.ProcessorCount} " +
+        $"PageSize={Environment.SystemPageSize}.";
+
     private static string GetCpuName()
     {
         if (!OperatingSystem.IsWindows())
