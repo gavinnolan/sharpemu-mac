@@ -113,7 +113,12 @@ public static class AmprExports
                 FileAccess.Read,
                 FileShare.ReadWrite | FileShare.Delete,
                 FileOptions.RandomAccess);
-            Length = RandomAccess.GetLength(Handle);
+            // Resolving this path already measured the file. Asking the host
+            // again is a second cold metadata read of the same inode on the
+            // external game volume, and an asset storm pays it per open.
+            Length = KernelMemoryCompatExports.TryGetReadOnlyImageLength(path, out var known)
+                ? known
+                : RandomAccess.GetLength(Handle);
         }
 
         public SafeFileHandle Handle { get; }
@@ -166,10 +171,42 @@ public static class AmprExports
     }
 
     // Keep a bounded LRU of open host files. An unbounded cache exhausts the
-    // process FD limit (~10k on macOS) during large asset storms, after
-    // which every new open throws IOException and surfaces as NOT_FOUND — the
-    // guest then reports InvalidFileFourCC on empty buffers.
-    private const int MaxCachedHostFiles = 1536;
+    // process FD limit during large asset storms, after which every new open
+    // throws IOException and surfaces as NOT_FOUND — the guest then reports
+    // InvalidFileFourCC on empty buffers.
+    //
+    // The cap is sized against the real limit rather than a guess: macOS allows
+    // 92160 descriptors per process (kern.maxfilesperproc) and this process is
+    // launched with a soft RLIMIT_NOFILE of 1048576, so 1536 was leaving most
+    // of a title's working set to be reopened. Demon's Souls touches ~10k
+    // distinct assets per boot and was reopening ~9k of them, each one a cold
+    // open on the external volume. An eighth of the soft limit keeps a wide
+    // margin for the guest's own descriptors, the GPU and the audio stack.
+    private static readonly int MaxCachedHostFiles = ResolveHostFileCacheLimit();
+
+    private const int MinimumHostFileCacheLimit = 512;
+    private const int MaximumHostFileCacheLimit = 16384;
+
+    private static int ResolveHostFileCacheLimit()
+    {
+        var configured = Environment.GetEnvironmentVariable("SHARPEMU_AMPR_FILE_CACHE");
+        if (int.TryParse(configured, out var requested) &&
+            requested is >= MinimumHostFileCacheLimit and <= MaximumHostFileCacheLimit)
+        {
+            return requested;
+        }
+
+        var descriptors = HostDescriptorLimit.SoftLimit;
+        if (descriptors <= 0)
+        {
+            return MinimumHostFileCacheLimit * 3;
+        }
+
+        return (int)Math.Clamp(
+            descriptors / 8,
+            MinimumHostFileCacheLimit,
+            MaximumHostFileCacheLimit);
+    }
     private static readonly object _hostFileCacheGate = new();
     private static readonly Dictionary<string, LinkedListNode<CachedHostFileEntry>> _hostFileByPath =
         new(HostFsPath.Comparer);
