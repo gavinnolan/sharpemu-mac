@@ -147,7 +147,9 @@ public sealed class MslTranslationTests
         Assert.Equal("gen5_ps", shader.EntryPoint);
         Assert.Equal(1u, shader.AttributeCount);
         Assert.Contains("fragment Gen5PsOut gen5_ps(", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("float4 attr0 [[user(locn0)]];", shader.Source, StringComparison.Ordinal);
+        // The fixture reads attr0 through V_INTERP_MOV's P0 selector, which is
+        // the provoking vertex's parameter -- exactly a flat input.
+        Assert.Contains("float4 attr0 [[user(locn0), flat]];", shader.Source, StringComparison.Ordinal);
         Assert.Contains("[[color(0)]]", shader.Source, StringComparison.Ordinal);
         Assert.Contains("[[position]]", shader.Source, StringComparison.Ordinal);
 
@@ -372,8 +374,40 @@ public sealed class MslTranslationTests
 
         var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture);
 
-        Assert.Contains("12u + (s[124])", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("< 256u ?", shader.Source, StringComparison.Ordinal);
+        // The register file is an array the emitted MSL indexes at run time, so
+        // the relative number is the encoded one plus M0, wrapped into the file.
+        Assert.Contains("v[(12u + ", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("s[124]", shader.Source, StringComparison.Ordinal);
+        Assert.Contains(") & 255u]", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    // V_MOVRELD writes the relative destination from an ordinary src0, V_MOVRELSD
+    // makes both ends relative, and V_MOVRELSD2 splits M0 into two offsets.
+    [InlineData(0x7E6E850Cu, "VMovreldB32")]
+    [InlineData(0x7E6E890Cu, "VMovrelsdB32")]
+    [InlineData(0x7E6E910Cu, "VMovrelsd2B32")]
+    public void RelativeMoveFormsAddressTheRegisterFileThroughM0(uint word, string opcode)
+    {
+        var fixture = new Gen5ComputeFixture(
+            $"relative-{opcode}",
+            [word, 0xBF810000],
+            StoreScalarResourceBase: 0,
+            StoreBackingBytes: 0);
+        var program = Gen5ComputeFixtures.DecodeOrThrow(fixture);
+        Assert.Equal(opcode, program.Instructions[0].Opcode);
+
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture);
+        Assert.Contains("s[124]", shader.Source, StringComparison.Ordinal);
+        // The destination is the relative one for every form but V_MOVRELS, and
+        // the relative number wraps into the register file.
+        Assert.Contains("(55u + ", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("& 255u", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("if (exec) { v[", shader.Source, StringComparison.Ordinal);
+        // V_MOVRELSD2 reads M0's two halves as independent offsets.
+        Assert.Equal(
+            opcode == "VMovrelsd2B32",
+            shader.Source.Contains(">> 16u) & 0x3FFu", StringComparison.Ordinal));
     }
 
     [Fact]
