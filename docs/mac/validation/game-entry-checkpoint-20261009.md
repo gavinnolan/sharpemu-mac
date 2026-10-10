@@ -2,7 +2,28 @@
 
 Priority: make all nine games reach a menu or controllable scene first; performance and visual polish follow entry.
 
-Current qualification: the fresh R9 build-only runner passes all three builds
+Current qualification (R10): test-only successor `18d90e23` passes all three
+builds and all 108 focused cases on each actual CLR. ARM64 ordinary Host passes
+293/293; ordinary Libs passes 955/956 and stops on
+`ActualCanonicalDirtyCoreAndDeferredRetryCarryFirstPrepareBusyWithoutEffects`
+(expected `Deferred`, actual `NotApplicable`). Its focused executions passed.
+The exact detached refusal was not printed, so the actual polluting field is
+unproved. Source review found that the fixture does not scope three mutable
+owner guards: taken-work sequence and typed/texture cleanup failures. A narrow
+test-only successor saves, clears and restores those exact values, reports the
+original same-call refusal on failure, and adds an actual-ledger isolation
+control. Production guards and native fixtures remain unchanged.
+ARM64 GPU, X64 ordinary, native fixtures, publication and games remain unrun.
+ROOT verifies all 69 failed archive artifacts, 2,054 source files, 245 compiled
+files and 46 preparation pins, plus fresh absence of all 24 retained roots,
+heavy workers and the shared lease. Failed terminal manifest:
+`374196b65746aa1aca1502e65b50def050fe5937c68f88dcbe5aa40b72eb0f77`.
+R10 build checkpoint:
+`a18acc038c24b7296d46b6388c21e11cf5317ef3e6b0a9c94a596a4f86018d70`.
+No failed or partial qualification is adopted by the fresh successor. Local
+main production remains qualified `e2535177`; accepted gameplay remains 1/9.
+
+Previous qualification (R9): the fresh build-only runner passes all three builds
 (`rc=0`; Host 6.005 seconds, Libs 29.844 seconds, GPU 3.336 seconds), proves each
 directly launched MSBuild root and observes terminal absence of heavy workers.
 Compiler descendants remain diagnostic only. Focused ARM64 Host passes 14/14;
