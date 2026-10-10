@@ -98,13 +98,24 @@ public sealed partial class MetalStorageCpuSyncTests
                 else if (variant == "persistent-busy")
                 { Assert.Contains("expired", refused.Message); Assert.InRange(source.StatusQueries, 1, 501); Assert.Equal(0, source.BooleanQueries); Assert.InRange(elapsed.ElapsedMilliseconds, 450L, 3000L); }
                 else
-                { Assert.Equal(variant == "sequence" ? 0 : 1, source.StatusQueries); Assert.Equal(0, source.BooleanQueries); }
+                {
+                    // An added alias leaves the saved original valid through
+                    // Busy -> Current; only the frozen Core rejects the new link.
+                    if (variant == "association-added") Assert.Contains("cannot adopt an added original", refused.Message);
+                    var expectedStatusQueries = variant == "sequence" ? 0 : variant == "association-added" ? 2 : 1;
+                    Assert.True(source.StatusQueries == expectedStatusQueries,
+                        $"variant={variant}; expected statusQueries={expectedStatusQueries}; actual={source.StatusQueries}; refusal={refused.Message}");
+                    Assert.True(source.BooleanQueries == 0,
+                        $"variant={variant}; expected final BooleanQueries=0; actual={source.BooleanQueries}; refusal={refused.Message}");
+                }
                 Assert.Equal(3, PrecommitGet(fixture.Seed, "Phase"));
             }
-            Assert.Equal(1, source.Copies); Assert.Equal(0, source.LegacyReads);
+            Assert.True(source.Copies == 1, $"variant={variant}; expected copies=1; actual={source.Copies}");
+            Assert.True(source.LegacyReads == 0, $"variant={variant}; expected legacyReads=0; actual={source.LegacyReads}");
             Assert.Equal(pixels, fixture.Texture.RgbaPixels); Assert.Equal(before, source.Memory.Bytes());
             Assert.Same(mapping, PrecommitGet(fixture.Seed, "Mapping")); Assert.Same(source, PrecommitGet(fixture.Seed, "Source"));
-            Assert.Equal(1, source.Releases); Assert.Equal(1, PrecommitGet(fixture.Seed, "WriteWatchConsumed"));
+            Assert.True(source.Releases == 1, $"variant={variant}; expected watchReleases=1; actual={source.Releases}");
+            Assert.Equal(1, PrecommitGet(fixture.Seed, "WriteWatchConsumed"));
         }
         catch (Exception error) { primary = error; throw; }
         finally
