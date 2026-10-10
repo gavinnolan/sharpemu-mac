@@ -299,7 +299,10 @@ public sealed partial class DirectExecutionBackend
 			// usually live, so their neighbourhoods say whether one field was clobbered
 			// or the whole block holds something else entirely.
 			DumpPointerWindow("fault-register-rax", rax, 0x80);
-			DumpPointerWindow("fault-register-rdx", rdx, 0x80);
+			// From before rdx, so the entries on both sides of the faulting one are
+			// visible: one odd entry among healthy neighbours is a clobbered field,
+			// while a run of unrelated bytes is an index that left its table.
+			DumpPointerWindow("fault-register-rdx-0x80", rdx >= 0x80 ? rdx - 0x80 : rdx, 0x100);
 			DumpPointerWindow("fault-register-rbx", rbx, 0x60);
 			DumpPointerWindow("fault-register-rsi", rsi, 0x60);
 			DumpPointerWindow("fault-register-rcx", rcx, 0x80);

@@ -560,8 +560,34 @@ different table addresses, the same offset and the same value.
   report cap was the faulting slot.
 
 So the GPU writes nothing that lands there, and the payload is bulk-copied float data.
-The next step is a bulk-copy destination watch (`SHARPEMU_WATCH_BULK_TORN` and friends
-already exist for this), not more GPU instrumentation.
+
+The HLE memory subsystem was then ruled out as well, in its own right:
+
+- A value watch filtered to the slot (`SHARPEMU_WATCH_QWORD=0x4000000040000000`,
+  `_LOW=0x720`, `_LOW_MASK=0xFFFF`) saw **no managed guest write at all** land that value
+  in a `+0x720` slot, over a whole run that ended in the usual fault. That covers every
+  HLE import, `TryCopy`, `TryWrite` and the GPU command-memory path.
+- Arming any watch disables the native `memcpy` stub, so those runs are also runs with
+  `SHARPEMU_HLE_FAST_MEMCPY=0` - and `SHARPEMU_HLE_FAST_PATH=0`, which disables all three
+  stubs, reproduces the fault identically too.
+- Guest-to-guest copies over fragmented backing are correct, including when the source's
+  pieces and the destination's split the payload at different points, for plain,
+  overlapping and edge-straddling copies alike (`BackingCopyFragmentationTests`).
+- No mapping was recorded over guest bytes, or over backing bytes, that another live
+  mapping still held: zero reports from either check across a full run.
+- The allocator's mutex really excludes: real threads through the HLE exports, counting a
+  guest counter, with no lost acquisitions (`PthreadMutexExclusionTests`).
+
+And the dump of the neighbourhood settles what the write was. The 0x100 bytes around the
+faulting entry are **entirely zero** except the eight bytes that faulted, with the count
+beside them still zero. Not an overrun, not a mispaired copy piece, not stale memory, and
+not an index that left its table: one targeted eight-byte store of `float2(2.0, 2.0)` into
+a slot the allocator had never used.
+
+What is left writes those bytes as guest code, through a pointer the guest itself holds.
+Catching it needs a write-protected page and a fault handler - the page guard the image
+cache already uses, armed on the table once it is identified - because no managed hook can
+see a native guest store.
 
 ## Process-level macOS tuning (separate workstream)
 
