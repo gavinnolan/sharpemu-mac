@@ -198,8 +198,9 @@ internal sealed partial class MetalRenderHost :
     }
 
     // Everything the cache and the transfers encode needs the encoders closed first.
-    IMetalSubmissionContext IMetalImageCacheOwner.BeginTransfer()
+    IMetalSubmissionContext IMetalImageCacheOwner.BeginTransfer(MetalTransferCause cause)
     {
+        _transferCauses[(int)cause]++;
         _ = EnsureCommandBuffer();
         NoteRecordedWork();
         EndEncoders();
@@ -669,7 +670,7 @@ internal sealed partial class MetalRenderHost :
             return;
         }
 
-        var context = ((IMetalImageCacheOwner)this).BeginTransfer();
+        var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestFill);
         var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
         if (encoder == 0)
         {
@@ -784,7 +785,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         FlushGpuWrites(source, size, MetalWritebackCause.GuestCopy);
-        var context = ((IMetalImageCacheOwner)this).BeginTransfer();
+        var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestCopy);
         var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
         if (encoder == 0)
         {
@@ -1146,6 +1147,7 @@ internal sealed partial class MetalRenderHost :
         Console.Error.WriteLine(
             $"[METAL-V2][TRACE] created={created} end_clear={endClear} end_target={endTarget} " +
             $"end_transfer={endTransfer} end_compute={endCompute} targetless={targetless} " +
+            $"transfer_causes=[{TakeTransferCauses()}] " +
             $"gpu_busy_n={gpuBusySamples} event_ready={eventReady} event_waited={eventWaited} " +
             $"event_wait_ms={eventWaitMs.ToString("F1", culture)} " +
             $"event_wake_ms={eventWakeMs.ToString("F1", culture)} " +

@@ -177,7 +177,7 @@ internal sealed partial class MetalRenderHost
         in SubresourceRange destinationRange,
         in GpuExtent3D extent)
     {
-        var context = ((IMetalImageCacheOwner)this).BeginTransfer();
+        var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.ImageCopy);
         var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
         if (encoder == 0)
         {

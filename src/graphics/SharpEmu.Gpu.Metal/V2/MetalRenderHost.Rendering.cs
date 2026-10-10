@@ -81,6 +81,26 @@ internal sealed partial class MetalRenderHost
     private long _passEndCompute;
     private long _targetlessPasses;
 
+    private readonly long[] _transferCauses = new long[7];
+
+    /// <summary>Transfers by cause since the last call; every one ended the open pass.</summary>
+    internal string TakeTransferCauses()
+    {
+        var builder = new System.Text.StringBuilder();
+        for (var cause = 0; cause < _transferCauses.Length; cause++)
+        {
+            var count = _transferCauses[cause];
+            _transferCauses[cause] = 0;
+            if (count != 0)
+            {
+                builder.Append(builder.Length == 0 ? string.Empty : " ")
+                    .Append((MetalTransferCause)cause).Append('=').Append(count);
+            }
+        }
+
+        return builder.Length == 0 ? "none" : builder.ToString();
+    }
+
     internal (long Clear, long Target, long Transfer, long Compute, long Targetless) TakePassBreakdown()
     {
         var clear = Interlocked.Exchange(ref _passEndClear, 0);
@@ -939,7 +959,7 @@ internal sealed partial class MetalRenderHost
         bool clearDepth,
         bool clearStencil)
     {
-        var context = ((IMetalImageCacheOwner)this).BeginTransfer();
+        var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.DepthClear);
         var commandBuffer = context.CommandBuffer;
         var descriptor = MetalNative.Send(
             MetalNative.Send(MetalNative.Class("MTLRenderPassDescriptor"), MetalNative.Selector("alloc")),
@@ -994,7 +1014,7 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        var context = ((IMetalImageCacheOwner)this).BeginTransfer();
+        var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.ColorClear);
         var commandBuffer = context.CommandBuffer;
         var descriptor = MetalNative.Send(
             MetalNative.Send(MetalNative.Class("MTLRenderPassDescriptor"), MetalNative.Selector("alloc")),

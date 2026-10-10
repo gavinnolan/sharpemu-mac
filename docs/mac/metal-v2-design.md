@@ -589,6 +589,46 @@ Catching it needs a write-protected page and a fault handler - the page guard th
 cache already uses, armed on the table once it is identified - because no managed hook can
 see a native guest store.
 
+### The Oregon Trail
+
+The title renders essentially correctly — pixel-art scene, starry background, card
+panels, all in the right places and colours. One thing is visibly missing: the **text**
+inside the UI panels, which come out as flat dark green with faint lighter cells where
+glyphs belong. The panel chrome and the little arrow glyph draw, so it is the text that
+is absent rather than the panel.
+
+Frame rate depends sharply on the phase. In the light phase it holds 48-58 fps; on the
+card-selection screen it drops to **31-32** against a 60 fps target. In that heavy phase
+the GPU is busy 54% of wall and the GPU worker is **idle 80%** with zero host waits, so
+the cost is GPU-side, not the worker's.
+
+What the GPU is spending it on is render-pass restarts. Per two-second interval the heavy
+phase records `passes=1325` against `draws=4800` — under four draws a pass, about twenty
+passes a frame — and the pass-end breakdown says where they come from:
+
+    end_clear=0 end_target=0 end_transfer=1205 end_compute=0
+
+Almost every pass is torn down to record a transfer, not because the guest changed render
+target. Every such teardown costs the attachment a store and a reload, and at 1920x1080
+`B10G11R11UfloatPack32` that is several megabytes each way, twenty times a frame.
+
+`transfer_causes` says which transfers, and it is not the uploads:
+
+    transfer_causes=[Upload=5 ColorClear=76 GuestFill=67]
+
+So roughly 95% of the teardowns are standalone colour clears and guest buffer fills. Both
+have a route out that uploads do not: a clear recorded as the next pass's load action
+costs nothing, since the attachment descriptor already distinguishes `IsClear`, and a
+guest fill that does not touch the open render target could be deferred to the next
+natural encoder boundary or done on the host. An upload bound mid-pass genuinely has to
+end the encoder, and there are only a handful of those.
+
+Still open from the earlier triage: `A GPU-written image has no writable guest window:
+address=0x801C6F0000 size=0x400000`, now with its reason — *not one backed span
+(contiguous prefix about 0x240000 of 0x400000)*. The piecewise writeback added for Demon's
+Souls only splits an image whose layers are separable, so a single-layer 4 MiB surface
+still falls back to the whole-range resolve and is skipped.
+
 ## Process-level macOS tuning (separate workstream)
 
 - `Info.plist`: `LSSupportsGameMode`, `GCSupportsGameMode`, and
