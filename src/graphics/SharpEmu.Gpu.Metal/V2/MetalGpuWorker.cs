@@ -251,6 +251,23 @@ internal sealed class MetalCompletionQueue : IDisposable
         }
     }
 
+    private long _lastSignalObserved;
+
+    /// <summary>When the completion thread last saw the event reach a new value.</summary>
+    public long LastSignalObservedTimestamp => Interlocked.Read(ref _lastSignalObserved);
+
+    /// <summary>How many completions are still waiting for their submission.</summary>
+    public int PendingCount
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _pending.Count;
+            }
+        }
+    }
+
     /// <summary>A command buffer was committed; its completion work may now run.</summary>
     public void Publish(ulong serial)
     {
@@ -392,6 +409,7 @@ internal sealed class MetalCompletionQueue : IDisposable
                 Interlocked.Increment(ref _gpuReadySamples);
             }
 
+            Interlocked.Exchange(ref _lastSignalObserved, System.Diagnostics.Stopwatch.GetTimestamp());
             Drain(SignaledValue);
         }
     }
