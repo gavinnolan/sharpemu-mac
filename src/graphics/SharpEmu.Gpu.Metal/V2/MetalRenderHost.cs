@@ -894,11 +894,14 @@ internal sealed partial class MetalRenderHost :
             .Append(" windows_touched=").Append(System.Numerics.BitOperations.PopCount(_guestMemory.TouchedWindows));
         Console.Error.WriteLine($"[METAL-V2][WAITS]{reasons}");
         var causes = _imageCache.TakeTransferCauses();
+        var aliases = _imageCache.AliasCounters;
         Console.Error.WriteLine(
             $"[METAL-V2][CHURN] up_new={causes.Created} up_cpu={causes.CpuWrite} up_gpu={causes.GpuWrite} " +
-            $"up_other={causes.Invalidated} wb_bind={causes.Binding} wb_store={causes.Storage} " +
+            $"up_other={causes.Invalidated} up_alias={causes.Alias} " +
+            $"wb_bind={causes.Binding} wb_store={causes.Storage} " +
             $"wb_read={causes.HostRead} wb_copy={causes.GuestCopy} wb_overlap={causes.Overlap} " +
-            $"wb_release={causes.Release} wb_drain={causes.Drain} " +
+            $"wb_release={causes.Release} wb_drain={causes.Drain}{ReleaseCauses()} " +
+            $"alias_kept={aliases.Kept} alias_published={aliases.Published} " +
             $"write_ranges={_gpuWrites.Count} write_records={_gpuWrites.Recorded} " +
             $"write_folds={_gpuWrites.Folds} handler_wakeups={_completions.HandlerWakeups} " +
             $"rings={_guestMemory.RingCount} rings_freed={_guestMemory.RingsReleased} " +
@@ -920,6 +923,13 @@ internal sealed partial class MetalRenderHost :
             $"slices={CommandStream.SlicesRun} blocked={blocked.Outstanding} " +
             $"blocked_wait=0x{blocked.SampleWaitAddress:X16} " +
             $"ring_fallbacks={_guestMemory.RingFallbacks} ring_mb={_guestMemory.RingFallbackBytes / (1024 * 1024)}");
+    }
+
+    private string ReleaseCauses()
+    {
+        var builder = new System.Text.StringBuilder();
+        _imageCache.AppendReleaseCauses(builder);
+        return builder.ToString();
     }
 
     public Exception Fatal(string message) => GpuFatal.Fatal(message);

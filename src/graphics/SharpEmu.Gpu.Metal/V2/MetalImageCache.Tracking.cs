@@ -63,8 +63,9 @@ internal sealed partial class MetalImageCache
 
     // Publishes a GPU-written image back into guest memory, then drops it. Guest
     // memory is the single source of truth, so nothing is lost by dropping a texture.
-    private void ReleaseImage(ResourceSlotIdentifier imageIdentifier)
+    private void ReleaseImage(ResourceSlotIdentifier imageIdentifier, MetalImageReleaseCause cause)
     {
+        _releaseCauses[(int)cause]++;
         if (_slots.TryGet(imageIdentifier) is not { } image)
         {
             return;
@@ -247,7 +248,7 @@ internal sealed partial class MetalImageCache
 
             // The pages are gone; there is nowhere to write the contents back to.
             image.ClearGpuModified();
-            ReleaseImage(imageIdentifier);
+            ReleaseImage(imageIdentifier, MetalImageReleaseCause.Unmapped);
         }
     }
 
@@ -309,7 +310,7 @@ internal sealed partial class MetalImageCache
                 break;
             }
 
-            ReleaseImage(imageIdentifier);
+            ReleaseImage(imageIdentifier, MetalImageReleaseCause.Budget);
             Interlocked.Increment(ref _evictions);
         }
 
