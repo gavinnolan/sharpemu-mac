@@ -60,6 +60,67 @@ public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void BufferFetchedVerticesRasterizeThroughAMeshPipeline()
+    {
+        if (SkipWithoutMetalDevice("the mesh vertex-fetch test")) return;
+
+        // The ES part fetches its position with buffer_load_format_xyzw over a V# in the
+        // geometry stage's user data - the fetch the vertex-fetch substitution used to
+        // swallow, leaving the mesh stage with no buffer binding. Positions come from the
+        // buffer, so a pixel only appears if that binding reached the GPU.
+        var runtimeInputs = new ResourceRuntimeInputs { UserData = Gen5NggFixtures.PositionUserData() };
+        var shader = Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.BufferFetchTriangle(), runtimeInputs: runtimeInputs);
+        var mesh = shader.MeshInfo!;
+        var source = shader.Source + FragmentSource;
+        if (!MetalNative.TryCompileLibrary(source, out var library, out var compileError))
+        {
+            throw new InvalidOperationException($"Metal rejected the mesh MSL: {compileError}\n{source}");
+        }
+
+        if (!MetalNative.TryRenderMeshWithArgumentBuffer(
+                library,
+                shader.EntryPoint,
+                "gen5_mesh_test_fs",
+                PositionBuffer(),
+                new byte[SharpEmu.ShaderCompiler.Resources.PushData.ByteSize],
+                BuildDrawInfo(mesh),
+                shader.ArgumentLayout!,
+                mesh.DrawInfoBufferIndex,
+                mesh.IndexBufferIndex,
+                threadgroups: 1,
+                mesh.ThreadsPerThreadgroup,
+                TargetSize,
+                TargetSize,
+                out var pixels,
+                out var renderError))
+        {
+            throw new InvalidOperationException($"the mesh draw failed: {renderError}");
+        }
+
+        // Same triangle as the arithmetic fixture, so the same pixels have to light up.
+        Assert.Equal(1.0f, Green(pixels, TargetSize / 2, TargetSize / 2), 3);
+        Assert.Equal(1.0f, Red(pixels, TargetSize / 2, TargetSize / 2), 1);
+        Assert.Equal(0.0f, Green(pixels, 1, 1), 3);
+        Assert.Equal(0.0f, Green(pixels, TargetSize - 2, 1), 3);
+    }
+
+    // Four float4 records; the primitive export references the first three.
+    private static byte[] PositionBuffer()
+    {
+        var positions = new[]
+        {
+            -0.8f, -0.8f, 0.0f, 1.0f,
+             0.0f,  0.8f, 0.0f, 1.0f,
+             0.8f, -0.8f, 0.0f, 1.0f,
+             0.0f,  0.0f, 0.0f, 1.0f,
+        };
+        var bytes = new byte[Gen5NggFixtures.PositionStrideBytes * Gen5NggFixtures.PositionRecordCount];
+        Buffer.BlockCopy(positions, 0, bytes, 0, bytes.Length);
+        return bytes;
+    }
+
+    [Fact]
     public void NullPrimitiveBitCullsTheTriangle()
     {
         if (SkipWithoutMetalDevice("the mesh culling test")) return;
@@ -85,6 +146,16 @@ public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
         }
 
         Assert.True(ShaderCompileRequest.RequiresPrimitiveShaderWorkgroup(program));
+
+        // The captured program is exactly the shape the vertex-fetch substitution must not
+        // touch: its ES part fetches vertices with buffer_load_format over a V# its user
+        // data carries, and substituting that drops the scalar loads the fetch needs, so
+        // the mesh stage is left with "missing buffer-memory binding".
+        Assert.False(ShaderCompileRequest.AllowsEmbeddedVertexFetch(program, stageInfo));
+        Assert.Contains(program.Instructions, instruction =>
+            instruction.Control is Gen5BufferMemoryControl &&
+            instruction.Opcode.StartsWith("BufferLoadFormat", StringComparison.Ordinal));
+
         var request = Gen5ComputeFixtures.RequestOrThrow(
             program,
             ShaderStage.Vertex,
@@ -92,6 +163,9 @@ public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
             primitiveShader: stageInfo,
             userDataBase: userDataBase);
         Assert.True(Gen5MslTranslator.RequiresMeshEmission(request));
+
+        // Every one of those fetches has to reach a buffer binding, or translation fails.
+        Assert.NotEmpty(request.Resources.Info.Buffers);
         Assert.True(
             Gen5MslTranslator.TryCompileProgram(request, out var shader, out var translateError),
             $"the captured primitive shader did not translate: {translateError}");

@@ -3,9 +3,11 @@
 
 # NGG primitive shaders as Metal mesh shaders
 
-Status: translator landed 2026-10-10. The render-host side described here is not built yet;
-Metal reports the capability only when `SHARPEMU_METAL_MESH_SHADERS=1`, so nothing changes
-until the host implements this contract.
+Status: accepted 2026-10-10. The translator and the Metal v2 render host both implement this
+contract, and v2 enables mesh pipelines by default on a Metal 3 device.
+`SHARPEMU_METAL_MESH_SHADERS=0` opts out and restores the per-vertex path for comparison.
+The legacy Metal host (`SHARPEMU_METAL_LEGACY=1`) has no mesh pipeline path and never
+reports the capability.
 
 ## Why
 
@@ -37,9 +39,11 @@ subgroup.
 
 `Gen5MslTranslator.RequiresMeshEmission(request)` is true when **both** hold:
 
-1. The request carries `ShaderCompileRequest.PrimitiveShader` — i.e. the draw's
-   `VGT_SHADER_STAGES_EN` selected the NGG stage and the backend reports
-   `SupportsPrimitiveShaderMeshPipelines`.
+1. The request carries `ShaderCompileRequest.PrimitiveShader`. `ShaderPipelineCache` fills
+   it only when the backend reports `SupportsPrimitiveShaderMeshPipelines`, the draw has no
+   separate geometry program, and `VgtShaderStages.SelectsPrimitiveShaderOnly` accepts
+   `VGT_SHADER_STAGES_EN` — the same reading `RenderExecutor` uses to admit the draw, so the
+   two cannot disagree. A zero mask is the plain vertex/pixel path and is excluded.
 2. `ShaderCompileRequest.RequiresPrimitiveShaderWorkgroup(program)` — the program uses
    LDS (any non-GDS `DS_*` other than the swizzle/bpermute pair) or `S_BARRIER`.
 
@@ -85,10 +89,18 @@ id<MTLRenderPipelineState> p =
     [device newRenderPipelineStateWithMeshDescriptor:d options:0 reflection:nil error:&e];
 ```
 
-**No `MTLVertexDescriptor`.** A mesh function has no `[[stage_in]]`; a primitive shader
-fetches its own attributes through buffer loads, which the resource path already
-translates. The host therefore binds no vertex buffers for a mesh draw, and
-`request.VertexInputs` is ignored on this path.
+**No `MTLVertexDescriptor`.** A mesh function has no `[[stage_in]]`, so the host binds no
+vertex buffers for a mesh draw and `request.VertexInputs` is always empty on this path.
+
+The ES part fetches its own attributes with `buffer_load_format` over a V# its user data
+carries, and the resource plan has to keep that fetch. The fixed-function vertex-fetch
+substitution would rewrite it into a host vertex attribute and drop the scalar loads behind
+its V#, leaving the fetch with no buffer binding at all — the program then fails to compile
+with "BufferLoadFormatXyzw: missing buffer-memory binding".
+`ShaderCompileRequest.AllowsEmbeddedVertexFetch` is what refuses the substitution for a
+workgroup primitive shader, and `ShaderProgramCache` consults it before detecting an
+embedded fetch. One consequence for the host: such a program *does* have ordinary buffer
+bindings in its argument buffer, where the vertex path had none.
 
 The fragment interface is unchanged. The mesh vertex payload is declared field for field
 like `Gen5VsOut`:
@@ -255,13 +267,22 @@ These are the parts the synthetic fixtures pin but the guest has not confirmed:
 - `NggMeshTranslationTests` — structure of the emitted MSL and of `Gen5MslMeshInfo`,
   including that passthrough programs and programs without the draw's primitive-shader
   state keep the per-vertex path. Runs everywhere.
+- `ShaderProgramCacheTests.PrimitiveShaderWorkgroupKeepsItsOwnVertexFetch` (in
+  `SharpEmu.Libs.Tests`) — the pipeline must not substitute the ES fetch for a workgroup
+  primitive shader, and must still substitute it for the same program without the draw's
+  primitive-shader state.
+- `VgtShaderStagesTests` and the `MeshPipelines_*` rows of `RenderExecutorDrawTests` — which
+  stage masks are primitive-shader draws, including that a plain vertex draw and a mask that
+  selects tessellation or the legacy vertex stage are not.
 - `NggMeshRuntimeTests` — needs a Metal device
   (`SHARPEMU_TEST_REQUIRE_DEVICE=1 arch -x86_64 ~/.dotnet-x64/dotnet test …`). The emitted
   MSL must compile with the OS Metal compiler, and a synthetic primitive shader must
   rasterize through a real mesh pipeline: it exchanges its vertex value across the
   subgroup's two waves through LDS, synchronizes, allocates one triangle, exports it, and
   the render target has to show that triangle with the exported parameter interpolated to
-  its exact barycentric value. The null-primitive bit must leave the target empty.
+  its exact barycentric value. The null-primitive bit must leave the target empty. A second
+  device row fetches the positions with `buffer_load_format_xyzw` over a V# in user data,
+  so the same pixels only appear if the mesh stage's buffer binding reached the GPU.
 - The preserved Void Terrarium capture (707 instructions, 19 `DS_WRITE_B128`, six
   `S_BARRIER`, `S_SENDMSG` message 9, `EXP` target 20) is translated and compiled when it
   is present on the machine, and skipped otherwise. No guest shader bytes are in the

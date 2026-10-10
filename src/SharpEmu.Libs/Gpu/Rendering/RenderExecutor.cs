@@ -37,27 +37,11 @@ public enum GuestIndexType : uint
 // Resolves draw and dispatch state from the register banks and records it through the host.
 public sealed partial class RenderExecutor
 {
-    // Prospero uses both the full NGG mask and compact primitive-shader masks
-    // when the task/mesh front end has already folded the upper enable bits
-    // away. Little Nightmares also emits 0x2030 for a primitive path with no
-    // geometry shader; the remaining bits describe the fixed NGG setup.
-    // GS_W32_EN (bit 22) and VS_W32_EN (bit 23) only select the wave size;
-    // graphics stages always compile as wave32, so they do not change the path.
-    private const uint VgtShaderStagesWaveSizeBits = (1u << 22) | (1u << 23);
-
+    // The stage-mask readings live in VgtShaderStages, so the pipeline cache compiles the
+    // vertex program the same way this decides whether the draw runs.
     private static bool IsPrimitiveShaderStageMask(uint stages) =>
-        (stages & ~VgtShaderStagesWaveSizeBits) is 0x02002000 or 0x00002000 or 0x00002030;
+        VgtShaderStages.IsPrimitiveShader(stages);
 
-    // VGT_SHADER_STAGES_EN bits 0-1 (LS_EN), 2 (HS_EN) and 6-7 (VS_EN) select stages no
-    // primitive shader implements - tessellation and the legacy vertex stage. Everything
-    // else the register can select (the ES/GS enables, the primitive group size, primitive
-    // generation and its passthrough mode) is NGG setup the primitive shader performs
-    // itself, so a mesh backend can run the draw. Void Terrarium's culling draws arrive as
-    // 0x00402020, which the compact masks above do not cover.
-    private const uint VgtShaderStagesForeignStageBits = 0x7u | (0x3u << 6);
-
-    private static bool IsPrimitiveShaderMeshStageMask(uint stages) =>
-        (stages & ~VgtShaderStagesWaveSizeBits & VgtShaderStagesForeignStageBits) == 0;
     private const uint MaxOutputPerSubgroupLimit = 0x40;
     private static int _geometryWarningShown;
 
@@ -528,7 +512,7 @@ public sealed partial class RenderExecutor
         var primitiveShaderMeshPath =
             _pipelines.SupportsPrimitiveShaderMeshPipelines &&
             vertex.ExportAddress != 0 && vertex.GeometryAddress == 0 &&
-            IsPrimitiveShaderMeshStageMask(stages);
+            VgtShaderStages.SelectsPrimitiveShaderOnly(stages);
         var unsupportedStageMask = stages != 0 && !IsPrimitiveShaderStageMask(stages) && !primitiveShaderMeshPath;
         var unsupportedGeometryStage = vertex.ExportAddress != 0 && vertex.GeometryAddress != 0 && !primitiveShaderVertexPath;
         var geometryRegisters = !primitiveShaderVertexPath && !primitiveShaderMeshPath &&

@@ -48,9 +48,17 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     // The geometry-engine state one NGG subgroup runs under, for a draw the backend will
     // compile as the merged ES/GS workgroup stage. Null keeps the per-vertex path, which is
     // what every backend without mesh pipelines gets.
-    private Gen5NggStageInfo? PrimitiveShaderStageInfo(VertexStageRegisters vertex, ShaderInterfaceRegisters shaderInterface)
+    private Gen5NggStageInfo? PrimitiveShaderStageInfo(
+        VertexStageRegisters vertex,
+        ShaderInterfaceRegisters shaderInterface,
+        uint shaderStages)
     {
-        if (!SupportsPrimitiveShaderMeshPipelines || vertex.GeometryAddress != 0)
+        // Exactly the draws the executor admits as mesh draws, or a program would be
+        // compiled as the merged ES/GS stage with no mesh pipeline to run it - and an
+        // ordinary vertex program that happens to touch LDS would have its workgroup sized
+        // from geometry-engine registers the draw never programmed.
+        if (!SupportsPrimitiveShaderMeshPipelines || vertex.GeometryAddress != 0 ||
+            !VgtShaderStages.SelectsPrimitiveShaderOnly(shaderStages))
         {
             return null;
         }
@@ -180,7 +188,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 {
                     VertexInfo = vertexInfo,
                     RequiredVertexOutputCount = (int)attributeCount,
-                    PrimitiveShader = PrimitiveShaderStageInfo(vertex, shaderInterface),
+                    PrimitiveShader = PrimitiveShaderStageInfo(vertex, shaderInterface, context.ShaderStages),
                 },
                 ref pushDataCursor,
                 out vertexProgram,
