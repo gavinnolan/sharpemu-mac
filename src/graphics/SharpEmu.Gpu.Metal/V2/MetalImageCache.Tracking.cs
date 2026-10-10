@@ -373,8 +373,14 @@ internal sealed partial class MetalImageCache
 
     public bool IsMetadataCleared(ulong address, uint slice, out uint fillValue)
     {
-        fillValue = 0;
         using var held = _lock.Hold();
+        return IsMetadataClearedLocked(address, slice, out fillValue);
+    }
+
+    /// <summary>As above, for a caller that already holds the lock.</summary>
+    private bool IsMetadataClearedLocked(ulong address, uint slice, out uint fillValue)
+    {
+        fillValue = 0;
         if (!_surfaceMetadata.TryGetValue(address, out var found) ||
             found.Kind == SurfaceMetadataKind.PendingDcc || slice >= 32)
         {
@@ -390,6 +396,12 @@ internal sealed partial class MetalImageCache
     public bool SetMetadataSlice(ulong address, uint slice, bool isClear)
     {
         using var held = _lock.Hold();
+        return SetMetadataSliceLocked(address, slice, isClear);
+    }
+
+    /// <summary>As above, for a caller that already holds the lock.</summary>
+    private bool SetMetadataSliceLocked(ulong address, uint slice, bool isClear)
+    {
         if (!_surfaceMetadata.TryGetValue(address, out var found) ||
             found.Kind == SurfaceMetadataKind.PendingDcc || slice >= 32)
         {

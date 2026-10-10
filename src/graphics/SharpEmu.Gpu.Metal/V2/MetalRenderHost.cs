@@ -917,6 +917,7 @@ internal sealed partial class MetalRenderHost :
             $"host_wait_ms={(waitTicks * 1000.0 / frequency).ToString("F1", culture)} " +
             $"idle_ms={(idleTicks * 1000.0 / frequency).ToString("F0", culture)} pipelines={pipelines} " +
             $"images={_imageCache.ImageCount} image_mb={_imageCache.TotalUsedMemory / (1024 * 1024)} " +
+            $"sampled_dcc_clears={_imageCache.TakeSampledDccClears()} " +
             $"uploads={uploads} writebacks={writebacks} evictions={evictions} failed={failed}");
         _slowWaitReports = 0;
         var reasons = new System.Text.StringBuilder();

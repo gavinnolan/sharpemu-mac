@@ -319,8 +319,114 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             image.Uses.Texture = true;
         }
 
+        MaterializeSampledDccClear(image, in request);
         return image.GetOrCreateView(request.View);
     }
+
+    /// <summary>
+    /// A DCC fast clear stays pending until the surface binds as a colour target again.
+    /// A shader that samples the surface before that must still see the cleared contents,
+    /// and MaterializeDccClear cannot do it: a texture request carries no metadata range
+    /// of its own, and the register clear colour it would need is only known while the
+    /// surface is a target. What the image remembers from when it *was* a target is
+    /// enough, so the clear is materialized here from the tracked state, or from the
+    /// guest's own DCC bytes when the fill was never seen.
+    ///
+    /// Without this a sampled surface reads as its raw DCC-coded bytes: a flat field of
+    /// the repeated key with the odd block of real payload, which is what Demon's Souls
+    /// showed instead of Boletarian Palace.
+    ///
+    /// Caller holds the lock.
+    /// </summary>
+    private void MaterializeSampledDccClear(MetalCachedImage image, in ImageRequest request)
+    {
+        const byte DccClearToZero = 0x00;
+        ref readonly var description = ref image.Description;
+        if (description.Metadata.Kind != MetadataKind.Dcc || description.Metadata.Range.Size != 0 ||
+            description.Resources.Levels != 1)
+        {
+            return;
+        }
+
+        var metadataAddress = description.Metadata.Range.Address;
+        var sliceSize = description.DccSliceSize;
+        var view = request.View;
+        var layers = description.TransferLayers;
+        for (var layer = view.BaseLayer; layer < view.BaseLayer + view.LayerCount && layer < layers; layer++)
+        {
+            // A tracked clear only counts when it was a clear to zero: every other code
+            // needs the register colour, which a sampled binding does not have.
+            var tracked = IsMetadataClearedLocked(metadataAddress, layer, out var trackedValue) &&
+                (byte)trackedValue == DccClearToZero;
+            GpuClearColor clear = default;
+            var guestSlice = 0UL;
+            if (!tracked)
+            {
+                if (sliceSize == 0 ||
+                    !TryReadGuestDccClear(metadataAddress, sliceSize, layer, out guestSlice, out var code) ||
+                    !PackedClearValue.TryDecodeDccColor(
+                        view.Format, code * 0x01010101u, description.Metadata,
+                        allowClearToRegister: false, out clear))
+                {
+                    continue;
+                }
+            }
+
+            ClearImageRange(image, new SubresourceRange(view.BaseLevel, 1, layer, 1), in clear);
+            Interlocked.Increment(ref _sampledDccClears);
+            if (tracked)
+            {
+                SetMetadataSliceLocked(metadataAddress, layer, false);
+                continue;
+            }
+
+            // The bytes become the "already materialized" sentinel, so the next sample
+            // does not clear over whatever is drawn into the surface in between.
+            _owner.FillGuestRange(guestSlice, sliceSize, uint.MaxValue);
+        }
+    }
+
+    /// <summary>
+    /// The DCC key of one layer, when every byte of that layer's metadata slice carries
+    /// it. A slice that is not uniform is not a fast clear and is left alone.
+    ///
+    /// Caller holds the lock.
+    /// </summary>
+    private bool TryReadGuestDccClear(ulong address, ulong sliceSize, uint layer, out ulong guestSlice, out byte code)
+    {
+        guestSlice = 0;
+        code = 0;
+        const ulong MetadataBlockSize = 0x1000;
+        if (sliceSize == 0 || sliceSize % MetadataBlockSize != 0 || address % MetadataBlockSize != 0 ||
+            sliceSize > ulong.MaxValue / (layer + 1UL))
+        {
+            return false;
+        }
+
+        guestSlice = address + (sliceSize * layer);
+        Span<byte> firstByte = stackalloc byte[1];
+        if (!_backing.TryReadBacking(guestSlice, firstByte))
+        {
+            return false;
+        }
+
+        code = firstByte[0];
+        var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(
+            checked((int)Math.Min(sliceSize, 64 * 1024)));
+        try
+        {
+            return IsUniformSlice(guestSlice, sliceSize, code, buffer);
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    private long _sampledDccClears;
+
+    /// <summary>How many sampled surfaces had a pending DCC clear materialized.</summary>
+    public long TakeSampledDccClears() => Interlocked.Exchange(ref _sampledDccClears, 0);
 
     public nint AcquireColorTargetView(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
     {
