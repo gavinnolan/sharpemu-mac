@@ -131,6 +131,23 @@ Menu entry and guest PAD delivery are observed; controllable gameplay and the
 cause of the dark transition remain unverified. Void checkpoint:
 `d2c7ce5f0c307bbb5bd82145e74b4a26b8725b73fae45544e66160dadb235fe6`.
 
+Quake's R13 600-second replay logs engine initialization, `demo1`, Necropolis
+and `R_NewMap`, but does not show a usable menu or controllable scene.
+Owned captures show a readable photosensitivity advisory at 65 seconds,
+corrupted bands at 145, black at 235, then corrupted bands again at 516 and
+596 seconds. No readable BACK target appears, so input remains neutral.
+The harness reports alive at its cap, peak RSS 6,235 MiB and nine-second
+graceful stop; actual game exit code is unrecorded. No GPU fatal/error appears
+before host interruption; the synchronization fatal follows interruption and
+is teardown evidence. ROOT verifies all 287 artifacts, exact source/binary/app
+and preparation maps, and fresh absence of all four owned roots, heavy workers
+and shared lease. The current source already admits qualified 256 MiB
+single-mip 2D snapshots; the earlier budget refusal is not observed here.
+Slow PAD/guest-frame progress after map initialization warrants existing
+presenter profiling, without attributing a CPU/GPU cause from sparse logs.
+Quake checkpoint:
+`9030aae3866fe72c73eba48f8776f6f8b807ea3b7685e794adaa7f38cbd5c81b`.
+
 Next candidate `26e88673` is SOURCE ONLY in the isolated
 `fix/boot-first-watch-entry` branch. Its six reviewed, disjoint donors contain
 bounded first R32/prebyte watch continuation, bounded PAD transition diagnostics,
@@ -139,8 +156,10 @@ provenance, and selected-seed epoch-refusal scalars. ROOT verifies its 16 archiv
 artifacts and all 2,073 live/TAR source hashes; 14 paths change from `4087f2c7`.
 The prepared ordinary inventory is 1,485 (362 Host / 1,018 Libs / 105 GPU), and
 the focused inventory is 239 (83 Host / 156 Libs). Native and activated-metadata
-identities remain unchanged. Builds, tests, native qualification, publication
-and changed-source games are unrun. Poppy's separate lifetime scaffold
+identities remain unchanged. Fresh R14 builds and managed qualification are
+authorized after all nine R13 replays close; no new results are accepted yet.
+Native qualification, publication and changed-source games remain unrun.
+Poppy's separate lifetime scaffold
 `3b1cede1` is not part of this candidate and grants no fault recovery.
 Source archive: `2fbf114143b1ab55814b258b2523fc736dc2542c3596204d0e44b935e4af1131`.
 Build checkpoint: `05866ad8c8ede4a593dac2f33add2910740c9122efa930187c12b069092e928a`.
