@@ -345,6 +345,36 @@ An address no record covers was not written by a declared host-side GPU write, w
 points at a shader store through a descriptor, or away from the GPU altogether. A clean
 guard with a reproducible fault is therefore evidence too, not an absence of it.
 
+#### What it found in Poppy Playtime, and what it ruled out
+
+The title dies after about a minute, always the same way: a free-list pop in the guest's
+own binned allocator follows `0x4000000040000000` out of bin 14 of a 64 KiB-aligned
+direct-memory table, at offset `+0x720`. Four runs, two different guest threads, three
+different table addresses, the same offset and the same value.
+
+- The guard's journal covered every declared GPU-side write of the run (3013 records,
+  below the ring's 8192, so nothing was lost to wrapping) and **none of them covered the
+  faulting address** — not an image writeback, a fill, a copy, a storage binding or a host
+  fill. The margin check found no producer writing past its range either; its handful of
+  reports are the guest's own CPU writing structures next to a declared range while the
+  submission is in flight.
+- `device_address_writes=0`: this title never stores through the device-address page
+  table, so the hole closed above was not the cause here either.
+- The fault dump of the table (`fault-register-rax`) shows it otherwise pristine — valid
+  `(pointer, count)` pairs throughout, zeros where unused — and bin 14's **count is still
+  zero** while its head holds the poison. Exactly eight bytes are wrong, in a slot the
+  allocator had never used, so this is a stray eight-byte store and not stale memory, a
+  lost write or an overrun.
+- `SHARPEMU_WATCH_QWORD=0x4000000040000000 SHARPEMU_WATCH_QWORD_HI=0x90` shows the value
+  itself is ordinary guest float data: every hit is `PhysicalVirtualMemory.TryCopy` under
+  `DispatchImportCore`, a guest-to-guest `memcpy` import moving kilobyte blocks of
+  `2.0f` pairs through direct memory. None of the 54 distinct destinations seen before the
+  report cap was the faulting slot.
+
+So the GPU writes nothing that lands there, and the payload is bulk-copied float data.
+The next step is a bulk-copy destination watch (`SHARPEMU_WATCH_BULK_TORN` and friends
+already exist for this), not more GPU instrumentation.
+
 ## Process-level macOS tuning (separate workstream)
 
 - `Info.plist`: `LSSupportsGameMode`, `GCSupportsGameMode`, and
