@@ -24,6 +24,7 @@ internal sealed class MetalGuestMemory : IDisposable
     // fifth. maxBufferLength caps a single window at about 13.6 GB on this hardware.
     private const ulong PreferredWindowBytes = 4UL * 1024 * 1024 * 1024;
     private const int MaxWindows = 16;
+    private const ulong MaxUploadBytes = 64UL * 1024 * 1024;
     private const ulong RingBufferBytes = 32UL * 1024 * 1024;
     private const ulong RingAlignment = 256;
     public const ulong GdsBytes = ManagedCommandStreamHost.GdsBytes;
@@ -256,6 +257,17 @@ internal sealed class MetalGuestMemory : IDisposable
     /// <summary>Copies guest bytes into the ring; used for ranges no window covers.</summary>
     private MetalGuestRange Upload(ulong gpuVa, ulong size)
     {
+        if (size > MaxUploadBytes)
+        {
+            // An unbacked range this large is not data a draw reads whole; bind its
+            // prefix rather than staging gigabytes per submission.
+            MetalV2Diagnostics.WarnOnce(
+                "oversized-upload",
+                $"An unbacked guest range is too large to stage; binding its first 0x{MaxUploadBytes:X} bytes: " +
+                $"address=0x{gpuVa:X16} size=0x{size:X}.");
+            size = MaxUploadBytes;
+        }
+
         var range = Allocate(size, RingAlignment, out var span);
         span.Clear();
         if (!_memory.TryRead(gpuVa, span))

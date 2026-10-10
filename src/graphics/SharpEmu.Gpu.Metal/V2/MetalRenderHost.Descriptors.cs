@@ -585,7 +585,8 @@ internal sealed partial class MetalRenderHost
     };
 
     private const int AddressRangeEntryBytes = 24;
-    private const int MaxAddressRanges = 64;
+    private const int MaxAddressRanges = 4096;
+    private long _deviceAddressSpanVersion = long.MinValue;
 
     private ulong _deviceAddressTable;
     private uint _deviceAddressEntryCount;
@@ -605,25 +606,14 @@ internal sealed partial class MetalRenderHost
             return _deviceAddressTable;
         }
 
-        _deviceAddressEntries.Clear();
-        SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.Current?.ForEachSpan((address, size) =>
+        var gpuMemory = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.Current;
+        var spanVersion = gpuMemory?.SpanVersion ?? -1;
+        if (spanVersion != _deviceAddressSpanVersion)
         {
-            if (_deviceAddressEntries.Count >= MaxAddressRanges || size < DeviceAddressPaging.PageSize)
-            {
-                return;
-            }
+            RebuildDeviceAddressEntries(gpuMemory);
+            _deviceAddressSpanVersion = spanVersion;
+        }
 
-            var firstPage = address >> DeviceAddressPaging.PageBits;
-            var pageCount = size >> DeviceAddressPaging.PageBits;
-            var window = _guestMemory.Resolve(firstPage << DeviceAddressPaging.PageBits, size);
-            if (!window.IsValid || pageCount == 0)
-            {
-                return;
-            }
-
-            _deviceAddressEntries.Add((firstPage, pageCount, window.GpuAddress));
-        });
-        _deviceAddressEntries.Sort(static (left, right) => left.FirstPage.CompareTo(right.FirstPage));
         var bytes = Math.Max(_deviceAddressEntries.Count * AddressRangeEntryBytes, AddressRangeEntryBytes);
         var range = _guestMemory.Allocate((ulong)bytes, 256, out var span);
         span.Clear();
@@ -640,6 +630,64 @@ internal sealed partial class MetalRenderHost
         _deviceAddressEntryCount = (uint)_deviceAddressEntries.Count;
         _deviceAddressTableSerial = _submissionSerial;
         return _deviceAddressTable;
+    }
+
+    // Each guest span becomes the fewest window-backed runs that cover it. A span whose
+    // backing is not contiguous (fragmented flexible memory) or crosses a window splits
+    // into several entries; pages with no window are left out, never copied, because a
+    // shader store through a copied page would not reach guest memory.
+    private void RebuildDeviceAddressEntries(SharpEmu.HLE.GpuMemory.GuestGpuMemory? gpuMemory)
+    {
+        _deviceAddressEntries.Clear();
+        gpuMemory?.ForEachSpan((address, size) =>
+        {
+            var page = DeviceAddressPaging.PageSize;
+            var start = (address + page - 1) & ~(page - 1);
+            var end = (address + size) & ~(page - 1);
+            while (start < end && _deviceAddressEntries.Count < MaxAddressRanges)
+            {
+                var remaining = end - start;
+                var run = _guestMemory.ResolveWritable(start, remaining);
+                var length = remaining;
+                if (!run.IsValid)
+                {
+                    // Largest resolvable prefix, in whole pages.
+                    var good = 0UL;
+                    var bad = remaining;
+                    while (bad - good > page)
+                    {
+                        var middle = ((good + bad) / 2) & ~(page - 1);
+                        if (middle == good)
+                        {
+                            break;
+                        }
+
+                        if (_guestMemory.ResolveWritable(start, middle).IsValid)
+                        {
+                            good = middle;
+                        }
+                        else
+                        {
+                            bad = middle;
+                        }
+                    }
+
+                    length = good;
+                    if (length == 0)
+                    {
+                        start += page;
+                        continue;
+                    }
+
+                    run = _guestMemory.ResolveWritable(start, length);
+                }
+
+                _deviceAddressEntries.Add((start >> DeviceAddressPaging.PageBits,
+                    length >> DeviceAddressPaging.PageBits, run.GpuAddress));
+                start += length;
+            }
+        });
+        _deviceAddressEntries.Sort(static (left, right) => left.FirstPage.CompareTo(right.FirstPage));
     }
 
     private ulong UploadDwords(ReadOnlySpan<uint> words)
