@@ -27,7 +27,7 @@ heavy workers and the shared lease. Build information identifies clean
 `351c3c1c`, osx-x64, SDK 10.0.103, Metal, AppKit, GameController and CoreAudio.
 Publication checkpoint:
 `031c18c1da79c1d6f3b9867c504305e337333b427709a1abbfacb70e37dd5d39`.
-The app is local/ad-hoc, with no notarization or remote action. Two fresh games
+The app is local/ad-hoc, with no notarization or remote action. Seven fresh games
 have now run on it, with no new menu/gameplay acceptance:
 
 - Oregon Trail exits 134 after 36 seconds, peak sampled RSS 2,221 MiB. No
@@ -47,12 +47,64 @@ have now run on it, with no new menu/gameplay acceptance:
   ROOT verifies all 53 archive artifacts and fresh absence of the four owned
   roots, heavy workers and the shared lease. Archive:
   `85a94c7975fb78a176abf3206f8ab5f2f74f20ac0d4417c045838431051f8121`.
+- Octopath remains alive at its 150-second cap, peak sampled RSS 2,817 MiB,
+  and stops through the harness. Captures remain black; a single interval
+  reports one guest frame, without menu or gameplay evidence. Its GPU command
+  slice refuses the exact current first-use selected-seed receipt. The winning
+  predicate is not yet attributed at the refusal call. Archive:
+  `8b640c98a07315b45c71be85eacfe02938f07319f398dc7c43900a40bc85d869`.
+- Superliminal exits 134 after 42 seconds, peak sampled RSS 2,943 MiB. Fill759,
+  submission34, destination `0x7018B41018 / 4` refuses original publication
+  preparation before notifications, commit or mirror writes. Adjacent ledger
+  rows show a writer-reservation CAS refusal with ordinary admission 2;
+  same-call detached attribution remains required before a continuation.
+  Archive: `0bcf2d8212998ccdcfb3728faacd8b2845bfb6ed6c2fc27df850afd268c5f6cc`.
+- Silent Hill exits 134 after 29 seconds, peak sampled RSS 1,566 MiB. Its only
+  capture is black. The first watched mapped copy refuses after copying at
+  `0x80109F0000 / 65536`, then typed storage refuses the missing original
+  receipt (`Rejected`, compute hash `80B8F1B01227D2C4`). The owner or cause of
+  the failed provider watch is not established. Archive:
+  `7c78817685b8e67fafda612367a39bfbe6f2351c14d71e945c085fcff244406a`.
+- Void Terrarium stays alive through its fixed 150-second cap, peak sampled
+  RSS 1,668 MiB, then closes gracefully after two seconds. Captures progress
+  from startup artwork through black frames to a readable NIS/Software logo;
+  no prompt, menu or gameplay is observed. No GPU fatal is observed. ROOT
+  verifies all 97 archive artifacts, unchanged source/binaries/app, and fresh
+  absence of the four owned roots, heavy workers and shared lease. Archive:
+  `5dd3f74dcae170384ff397ad78a2aaf1cf53971ce0716ecf3b3601605cdcd9a0`.
+- Dreaming Sarah reaches a readable title menu with New game selected in
+  capture0035. Later captures lose all menu text, so the conditional input
+  instruction is not executed. No key is written, complete neutral PAD reads
+  are retained, and gameplay on this candidate remains unverified. It stays
+  alive at the 150-second cap, peak sampled RSS 937 MiB, and closes gracefully.
+  ROOT verifies all 96 archive artifacts, unchanged source/binaries/app, and
+  fresh absence of the four owned roots, heavy workers and shared lease.
+  Shutdown CPU-trap messages are not labeled a boot cause. Archive:
+  `9b8d2c17ef6d7520b51f5cee7138316156e43caf9e6cd3c546b405530722db72`.
 
-Both harness/driver return codes are zero while the actual game return codes
-are 134; none is a game-entry success. Neither unchanged game is retried.
-Octopath's distinct 150-second empty-input replay is granted next. Oregon's
-exact first-owner diagnostics and DS's same-original Busy continuation are
-being reviewed in separate source; neither is implemented qualification yet.
+All seven harness/driver return codes are zero; four actual games exit 134 and
+the three capped games' actual return codes are unrecorded. None adds a new
+gameplay acceptance; Dreaming Sarah's current title menu is verified separately.
+ROOT verifies the five-title aggregate's retained archive/artifact links,
+unchanged source/binaries/app and fresh absence of all 20 owned roots, heavy
+workers and the shared lease. Aggregate:
+`1f2ec2487c078579c58c56c23e5afa7e1c3f68795107baafee381ba3f888fb4f`.
+The Superliminal archive also records a separate library GUI opened by ROOT's
+post-exit UI inspection; it was absent before the next run. It was not the
+game process or the source of that game's earlier failure.
+The promised DS/Void batch is now terminal. The next isolated combined SOURCE
+candidate is `7b253fd7`, in `root-game-entry-successor`: Oregon's same-query
+watch-owner donor `dd9fd890`, Poppy's raw-trap donor `2a919bd1`, Superliminal's
+same-return publication-preparation attribution `6d8f0693`, and DS's bounded
+same-original ordinary-writer continuation `fb8ed6a3`. The DS donor also names
+Octopath's first admission predicate and retains strict final-gap refusal.
+All donors passed source review and are committed locally. This combined
+candidate has not been built, tested, published or replayed. Its 22 selected
+seed metadata controls remain separately activated, with positive cases grouped
+per CLR and one sticky unknown-cleanup case isolated per CLR. Historical native
+fixtures and their 246 identities remain unchanged; actual selected-four Metal
+qualification will be repeated. Quake's fresh 600-second companion is prepared
+but unrun; Poppy waits for qualification of the raw-trap diagnostic.
 Production code is unchanged
 from the four-fix `638c3bdf` candidate; local main still uses `e2535177`.
 
