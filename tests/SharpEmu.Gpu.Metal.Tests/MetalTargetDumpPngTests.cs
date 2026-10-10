@@ -59,6 +59,35 @@ public sealed class MetalTargetDumpPngTests
         }
     }
 
+    // The depth attachment is what says whether a pass rasterised anything at all, so
+    // the dumper has to read the depth formats a render pass actually uses - including
+    // the combined one, whose stencil half the blit leaves behind.
+    [Theory]
+    [InlineData(252ul)]  // MTLPixelFormatDepth32Float
+    [InlineData(260ul)]  // MTLPixelFormatDepth32Float_Stencil8
+    public void ADepthTargetDumpsAsGrey(ulong pixelFormat)
+    {
+        Assert.True(MetalRenderHost.TryDescribeDumpFormat(pixelFormat, out var sourceBytes, out var convert));
+        Assert.Equal(4, sourceBytes);
+
+        var source = new byte[3 * sizeof(float)];
+        BitConverter.TryWriteBytes(source.AsSpan(0), 0f);
+        BitConverter.TryWriteBytes(source.AsSpan(4), 0.5f);
+        BitConverter.TryWriteBytes(source.AsSpan(8), 1f);
+        var rgba = new byte[3 * 4];
+        convert(source, rgba);
+
+        Assert.Equal<byte[]>([0, 0, 0, 255], rgba[..4]);
+        Assert.Equal<byte[]>([127, 127, 127, 255], rgba[4..8]);
+        Assert.Equal<byte[]>([255, 255, 255, 255], rgba[8..]);
+    }
+
+    // A colour format the dumper cannot read has to say so rather than write a PNG of
+    // reinterpreted bytes; the caller warns once and skips the target.
+    [Fact]
+    public void ACompressedTargetIsNotDumped() =>
+        Assert.False(MetalRenderHost.TryDescribeDumpFormat(131ul, out _, out _));
+
     // Every chunk's CRC has to be right, or a strict decoder rejects the whole file.
     private static List<(string Type, byte[] Data)> ReadChunks(byte[] png)
     {

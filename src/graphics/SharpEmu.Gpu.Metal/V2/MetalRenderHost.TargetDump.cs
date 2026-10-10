@@ -403,7 +403,7 @@ internal sealed partial class MetalRenderHost
             label, texture, width, height, sum / (double)(pixels * 3), max, opaque, pixels, sample, name));
     }
 
-    private static bool TryDescribeDumpFormat(
+    internal static bool TryDescribeDumpFormat(
         ulong pixelFormat, out int sourceBytes, out Action<ReadOnlySpan<byte>, byte[]> convert)
     {
         switch (pixelFormat)
