@@ -448,6 +448,34 @@ runaway compute shaders (below).
   channel, never the ~(0.5, 1.0, 0.5) this surface holds — so where it comes from is the
   open question and the next thing to chase.
 
+- **Demon's Souls is loading, not stuck.** `SHARPEMU_LOG_LOAD_PROGRESS=1` prints, every
+  two seconds, the bytes the guest's reads and AMPR command buffers delivered, the
+  running total, how many intervals in a row delivered nothing, and what every guest
+  thread is doing — naming each blocked one with the reason it blocked, the key it waits
+  on, its last HLE call and how many calls it made that interval.
+
+  Over 150 seconds the title read **1.67 GB** through AMPR, in bursts of 20-35 MB per
+  interval separated by quiet gaps of up to thirteen intervals (26 s). Through every gap
+  15 to 18 of its 26 threads kept taking HLE calls, so the guest is computing, not
+  waiting on us. `ampr_unknown` is zero throughout: every file id resolves. The threads
+  parked through the longest gap are the four Bink movie threads, `Core.Res.Decompressor`
+  and `Core.Res.FileLoader`, all on their own `pthread_cond_wait`, with
+  `Core.Res.TaskManager` still cycling — the resource pipeline is request-starved between
+  bursts, not blocked on a primitive the emulator never delivers.
+
+  AMPR cannot hang in any case: submission is synchronous
+  (`sceKernelAprSubmitCommandBufferAndGetResult` replays the queued commands on the
+  calling thread) and there is no Kraken or Oodle stage in it — a read-file record is a
+  raw host read into guest memory. So the boot is slow, and what makes it slow is guest
+  CPU work between streaming bursts, which is the same cost the worker-side accounting
+  found.
+
+  The flat bright green `R8G8B8A8Unorm` 1280x720 surface left over from the previous
+  investigation is never a render-pass target: it binds only as a storage image and a
+  sampled texture, so a compute shader writes it. A compute shader whose own inputs are
+  zero producing a constant is consistent with the rest of the frame rather than an
+  independent fault, so it is downstream of the blackness, not its source.
+
 - **Demon's Souls' long boot is host-side command-stream work, not the GPU.** Over one
   454-second run the GPU worker spent 14.3 s executing GPU work (3%), 49.8 s waiting on
   the GPU (11%), 21.9 s idle (5%) and **368 s — 81% — in its own CPU work**: interpreting

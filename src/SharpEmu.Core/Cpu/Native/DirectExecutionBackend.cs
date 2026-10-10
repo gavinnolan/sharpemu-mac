@@ -3561,6 +3561,70 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return size != 0 && address >= baseAddress && address - baseAddress < size;
 	}
 
+	// What each guest thread is doing, for the load-progress line. The import count is
+	// the progress signal: a thread whose count advances between intervals is running
+	// guest code, and one whose count is frozen while it sits in a named wait is stuck on
+	// something the emulator has not delivered. Only the threads that matter are named —
+	// every blocked one, and a count of those still running.
+	private readonly Dictionary<ulong, long> _progressImportCounts = new();
+
+	private string DescribeGuestThreadProgress()
+	{
+		var blocked = new List<string>();
+		var running = 0;
+		var advancing = 0;
+		var exited = 0;
+		using (LockGate("DescribeGuestThreadProgress"))
+		{
+			foreach (var thread in _guestThreads.Values)
+			{
+				if (thread.State == GuestThreadRunState.Exited)
+				{
+					exited++;
+					continue;
+				}
+
+				_progressImportCounts.TryGetValue(thread.ThreadHandle, out var previous);
+				var imports = Interlocked.Read(ref thread.ImportCount);
+				_progressImportCounts[thread.ThreadHandle] = imports;
+				var moved = imports != previous;
+				if (moved)
+				{
+					advancing++;
+				}
+
+				if (thread.State != GuestThreadRunState.Blocked)
+				{
+					running++;
+					continue;
+				}
+
+				blocked.Add(string.Format(
+					System.Globalization.CultureInfo.InvariantCulture,
+					"{0}[{1}{2} nid={3} +{4}]",
+					thread.Name,
+					thread.BlockReason ?? "blocked",
+					thread.BlockWakeKey is { Length: > 0 } key ? ":" + key : string.Empty,
+					thread.LastImportNid ?? "-",
+					imports - previous));
+			}
+		}
+
+		// Blocked threads that are still taking HLE calls are not the problem; the ones
+		// that have stopped are, so they come first and the list is bounded.
+		blocked.Sort(StringComparer.Ordinal);
+		var shown = blocked.Count > 12 ? blocked.GetRange(0, 12) : blocked;
+		return string.Format(
+			System.Globalization.CultureInfo.InvariantCulture,
+			"threads={0} running={1} advancing={2} exited={3} blocked={4} {5}",
+			_guestThreads.Count,
+			running,
+			advancing,
+			exited,
+			blocked.Count,
+			string.Join(" ", shown));
+	}
+
 	public bool TryStartThread(CpuContext creatorContext, GuestThreadStartRequest request, out string? error)
 	{
 		error = null;
@@ -3583,6 +3647,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			$"entry=0x{thread.EntryPoint:X16} arg=0x{thread.Argument:X16} priority={thread.Priority} " +
 			$"host_priority={MapGuestThreadPriority(thread.Priority)} affinity=0x{thread.AffinityMask:X}");
 		LoadProgressDiagnostics.ArmIfNorthAudioThread(thread.Name);
+		SharpEmu.HLE.GuestLoadProgress.Start(DescribeGuestThreadProgress);
 		Pump(creatorContext, "pthread_create");
 		// Thread creation can dispatch even when another caller owns Pump.
 		DispatchReadyGuestThreads();
