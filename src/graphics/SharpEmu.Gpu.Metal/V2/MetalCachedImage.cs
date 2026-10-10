@@ -48,8 +48,16 @@ internal sealed class MetalCachedImage : IDisposable
     private static readonly nint SelRelease = MetalNative.Selector("release");
     private static readonly nint SelNewTextureView =
         MetalNative.Selector("newTextureViewWithPixelFormat:textureType:levels:slices:");
+    private static readonly nint SelNewSwizzledTextureView =
+        MetalNative.Selector("newTextureViewWithPixelFormat:textureType:levels:slices:swizzle:");
     private static long _gpuWriteCounter;
 
+    // The flip path reaches GetOrCreateView from the GPU worker while the cache
+    // reaches it under its own lock, so the view list needs one of its own. It
+    // used to be reached rarely enough for the race to stay latent: before the
+    // guest swizzle was honoured, the common whole-image view returned the
+    // texture without ever touching the list.
+    private readonly object _viewGate = new();
     private readonly List<(ImageViewDescription Description, nint Texture)> _views = new();
     private bool _cpuDirty;
     private bool _gpuModified;
@@ -159,6 +167,32 @@ internal sealed class MetalCachedImage : IDisposable
     /// a slice range, a reinterpreted format) gets an MTLTexture view, which is a
     /// handle onto the same allocation and never copies.
     /// </summary>
+    // The guest T#'s DST_SEL, which the Vulkan backend puts on its image view's
+    // component mapping. Without it a single-channel font atlas samples as
+    // (r, 0, 0, 1), so a shader that reads the glyph coverage out of .a gets 1
+    // everywhere and every glyph quad fills in solid.
+    private static MtlTextureSwizzleChannels SwizzleOf(in GpuComponentMapping mapping, out bool identity)
+    {
+        var red = Channel(mapping.R, MtlTextureSwizzle.Red);
+        var green = Channel(mapping.G, MtlTextureSwizzle.Green);
+        var blue = Channel(mapping.B, MtlTextureSwizzle.Blue);
+        var alpha = Channel(mapping.A, MtlTextureSwizzle.Alpha);
+        identity = red == (byte)MtlTextureSwizzle.Red && green == (byte)MtlTextureSwizzle.Green &&
+            blue == (byte)MtlTextureSwizzle.Blue && alpha == (byte)MtlTextureSwizzle.Alpha;
+        return new MtlTextureSwizzleChannels { Red = red, Green = green, Blue = blue, Alpha = alpha };
+    }
+
+    private static byte Channel(GpuComponentSwizzle component, MtlTextureSwizzle identity) => (byte)(component switch
+    {
+        GpuComponentSwizzle.Zero => MtlTextureSwizzle.Zero,
+        GpuComponentSwizzle.One => MtlTextureSwizzle.One,
+        GpuComponentSwizzle.R => MtlTextureSwizzle.Red,
+        GpuComponentSwizzle.G => MtlTextureSwizzle.Green,
+        GpuComponentSwizzle.B => MtlTextureSwizzle.Blue,
+        GpuComponentSwizzle.A => MtlTextureSwizzle.Alpha,
+        _ => identity,
+    });
+
     public nint GetOrCreateView(in ImageViewDescription requested)
     {
         if (Texture == 0)
@@ -169,19 +203,45 @@ internal sealed class MetalCachedImage : IDisposable
 
         var viewFormat = MetalV2Formats.PixelFormat(requested.Format);
         var viewType = MetalV2Formats.ViewTextureType(requested.Type, Shape.SampleCount);
+        var swizzle = SwizzleOf(requested.Mapping, out var identitySwizzle);
+        var viewable = (Shape.Usage & Mtl.TextureUsagePixelFormatView) != 0;
+        if (!viewable && !identitySwizzle)
+        {
+            identitySwizzle = true;
+        }
+
         var wholeImage = requested.BaseLevel == 0 && requested.LevelCount >= Shape.MipLevels &&
             requested.BaseLayer == 0 && requested.LayerCount >= Shape.ArrayLength;
-        if (wholeImage && viewFormat == Shape.PixelFormat && viewType == Shape.TextureType)
+        if (wholeImage && identitySwizzle && viewFormat == Shape.PixelFormat && viewType == Shape.TextureType)
         {
             return Texture;
         }
 
-        for (var index = 0; index < _views.Count; index++)
+        lock (_viewGate)
         {
-            if (_views[index].Description.Equals(requested))
+            for (var index = 0; index < _views.Count; index++)
             {
-                return _views[index].Texture;
+                if (_views[index].Description.Equals(requested))
+                {
+                    return _views[index].Texture;
+                }
             }
+        }
+
+        if (!viewable)
+        {
+            // Metal raises rather than returning nil for a view of a texture that
+            // was not created for one, and a raised ObjC exception on the GPU
+            // worker takes the process down. A compressed image is the usual
+            // case: it is sampled whole, in its own format, so binding it
+            // unviewed is what the draw wanted anyway.
+            MetalV2Diagnostics.WarnOnce(
+                $"view-usage:{Shape.PixelFormat}->{viewFormat}:{Shape.TextureType}->{viewType}",
+                $"A texture without the pixel-format-view usage cannot make a view; binding the image instead: " +
+                $"format={Shape.PixelFormat}->{viewFormat} type={Shape.TextureType}->{viewType} " +
+                $"usage=0x{Shape.Usage:X} levels={requested.BaseLevel}+{requested.LevelCount} " +
+                $"layers={requested.BaseLayer}+{requested.LayerCount}.");
+            return Texture;
         }
 
         var levelCount = Math.Min(requested.LevelCount, Shape.MipLevels - Math.Min(requested.BaseLevel, Shape.MipLevels - 1));
@@ -194,13 +254,13 @@ internal sealed class MetalCachedImage : IDisposable
             layerCount = 1;
         }
 
-        var view = MetalV2Native.SendNewTextureView(
-            Texture,
-            SelNewTextureView,
-            (nuint)viewFormat,
-            (nuint)viewType,
-            new NsRange { Location = requested.BaseLevel, Length = Math.Max(levelCount, 1) },
-            new NsRange { Location = baseLayer, Length = Math.Max(layerCount, 1) });
+        var levelRange = new NsRange { Location = requested.BaseLevel, Length = Math.Max(levelCount, 1) };
+        var sliceRange = new NsRange { Location = baseLayer, Length = Math.Max(layerCount, 1) };
+        var view = identitySwizzle
+            ? MetalV2Native.SendNewTextureView(
+                Texture, SelNewTextureView, (nuint)viewFormat, (nuint)viewType, levelRange, sliceRange)
+            : MetalV2Native.SendNewSwizzledTextureView(
+                Texture, SelNewSwizzledTextureView, (nuint)viewFormat, (nuint)viewType, levelRange, sliceRange, swizzle);
         if (view == 0)
         {
             // A refused reinterpretation is not fatal for a texture: the image itself
@@ -212,7 +272,22 @@ internal sealed class MetalCachedImage : IDisposable
             return Texture;
         }
 
-        _views.Add((requested, view));
+        lock (_viewGate)
+        {
+            // Another thread may have made the same view while this one was
+            // asking Metal for it; keep theirs so the list holds one of each.
+            for (var index = 0; index < _views.Count; index++)
+            {
+                if (_views[index].Description.Equals(requested))
+                {
+                    MetalNative.SendVoid(view, SelRelease);
+                    return _views[index].Texture;
+                }
+            }
+
+            _views.Add((requested, view));
+        }
+
         return view;
     }
 
@@ -231,12 +306,15 @@ internal sealed class MetalCachedImage : IDisposable
 
     private void ReleaseViews()
     {
-        foreach (var (_, view) in _views)
+        lock (_viewGate)
         {
-            MetalNative.SendVoid(view, SelRelease);
-        }
+            foreach (var (_, view) in _views)
+            {
+                MetalNative.SendVoid(view, SelRelease);
+            }
 
-        _views.Clear();
+            _views.Clear();
+        }
     }
 
     public void Dispose()

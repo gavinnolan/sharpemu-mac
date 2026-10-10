@@ -23,6 +23,17 @@ internal struct MtlClearColor
     public double Alpha;
 }
 
+/// <summary>MTLTextureSwizzle.</summary>
+internal enum MtlTextureSwizzle : byte
+{
+    Zero = 0,
+    One = 1,
+    Red = 2,
+    Green = 3,
+    Blue = 4,
+    Alpha = 5,
+}
+
 /// <summary>MTLTextureSwizzleChannels: one MTLTextureSwizzle byte per output
 /// channel (Zero=0, One=1, Red=2, Green=3, Blue=4, Alpha=5).</summary>
 [StructLayout(LayoutKind.Sequential)]

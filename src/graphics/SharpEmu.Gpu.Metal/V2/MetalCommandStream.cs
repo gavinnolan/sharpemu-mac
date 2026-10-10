@@ -277,15 +277,25 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     // The display surface is a cached image like any other; the flip hands its
     // MTLTexture to the presenter, so no pixel ever travels through the CPU.
+    // Where a flip stops before it reaches the presenter. A title that shows a
+    // frame while guest_fps stays zero is presenting through the CPU path, and
+    // these say which step dropped the GPU one.
+    internal static long FlipsCaptured;
+    internal static long FlipsWithoutBuffer;
+    internal static long FlipsDiscarded;
+    internal static long FlipsPublished;
+
     private void CaptureFlip(int handle, int index, ulong requestId, int flipMode, long flipArg)
     {
         Interlocked.Increment(ref _flipAttempts);
+        Interlocked.Increment(ref FlipsCaptured);
         if (VideoOutBackendServices.ReleaseNoBufferFlip(index, requestId))
         {
             // The guest flipped without naming a new buffer. Legitimate on its own, but a
             // title whose every flip goes this way never publishes a frame, and that used
             // to look exactly like no flip arriving at all.
             Interlocked.Increment(ref _flipsWithoutBuffer);
+            Interlocked.Increment(ref FlipsWithoutBuffer);
             MetalV2Diagnostics.InfoOnce(
                 "flip-no-buffer",
                 $"A flip named no display buffer and was released without a frame: " +
@@ -324,6 +334,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             // to hand the presenter. Silent until now, which made it indistinguishable
             // from a title that never flips at all.
             Interlocked.Increment(ref _flipsDiscarded);
+            Interlocked.Increment(ref FlipsDiscarded);
             MetalV2Diagnostics.WarnOnce(
                 "flip-discarded",
                 $"A flip had no presentable texture and was discarded: handle={handle} index={index} " +
@@ -336,6 +347,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         }
 
         Interlocked.Increment(ref _flipsPublished);
+        Interlocked.Increment(ref FlipsPublished);
         _flipTarget.PublishGuestFrame(
             texture,
             Math.Max(displayBuffer.Width, 1),
