@@ -24,6 +24,7 @@
 #   SHARPEMU_CODESIGN_IDENTITY    signing identity; unset means ad-hoc ("-")
 #   SHARPEMU_MAC_FORBID_SDL       "1" (default) fails the build on SDL3; "0" to bisect
 #   SHARPEMU_MAC_KEEP_UNIVERSAL   pass "1" to keep arm64 slices in fat dylibs
+#   SHARPEMU_MAC_R2R              "true" (default) publishes ReadyToRun; "false" to bisect
 #   SHARPEMU_MAC_DMG              pass "1" to also produce a .dmg
 #   SHARPEMU_OUTPUT_DIR           where SharpEmu.app is written
 #                                 (default artifacts/macos)
@@ -67,12 +68,26 @@ echo "==> SharpEmu.app ${version} (${rid}, bundle id ${bundle_id}, min macOS ${m
 
 # ---------------------------------------------------------------- publish ----
 
+# PublishReadyToRun: AOT-compile the managed assemblies to osx-x64 native code
+# at publish time so the JIT does not have to produce them during startup. This
+# matters more here than for an ordinary app for two reasons: the startup path
+# is enormous (the HLE import surface, the ELF loader and both shader
+# translators are all jitted before the first guest frame), and the process runs
+# under Rosetta 2, which translates the JIT's own machine-code emission on top
+# of everything else. R2R code is a tier-0 substitute only — tiered compilation
+# and TieredPGO still re-jit whatever stays hot, so steady-state throughput is
+# unaffected.
+#
+# crossgen2 runs as a native arm64 tool and cross-compiles for osx-x64, so this
+# works on an Apple silicon build host. Set SHARPEMU_MAC_R2R=false to bisect a
+# suspected R2R codegen problem.
 publish_args=(
     publish "${repo_root}/src/SharpEmu.CLI/SharpEmu.CLI.csproj"
     -c Release
     -r "${rid}"
     --self-contained true
     -p:PublishSingleFile=false
+    -p:PublishReadyToRun="${SHARPEMU_MAC_R2R:-true}"
     -p:PublishDir="${publish_dir}/"
 )
 if [ "${SHARPEMU_MAC_FORBID_SDL:-1}" = "1" ]; then
