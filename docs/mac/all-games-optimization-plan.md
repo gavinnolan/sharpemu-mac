@@ -4,8 +4,8 @@
 # All-games compatibility and Mac performance plan
 
 Current entry work is recorded in the [game-entry checkpoint](validation/game-entry-checkpoint-20261009.md).
-The table below retains the October 8 baseline; use that checkpoint for newer
-blockers and qualification. The current priority is controllable gameplay for
+The table combines the latest verified entry observations with explicitly
+identified historical baselines; the checkpoint records qualification details. The current priority is controllable gameplay for
 all nine titles, followed by rendering and performance.
 
 Target: every installed title renders correctly, reaches
@@ -35,15 +35,15 @@ execution remains x64/Rosetta; ARM64 CLR tests qualify host code only.
 
 | Title | Current blocker / evidence | Next qualified change |
 | --- | --- | --- |
-| Dreaming Sarah | Controllable outdoor scene; same-binary876 ABBA: off63.34/65.86Hz; idle-on73.34/69.41Hz, tails remain33.8–36.2ms | Reduce unnecessary drawable acquisition; then queue-drain attribution and controlled same-build pacing comparison |
-| Demon’s Souls | DF identifies global mapping epoch change at admission; zero guest frames | Preserve content authority while replacing broad vetoes with qualified per-range lifetime/operation ownership |
-| Silent Hill: The Short Message | 2ad passes1024² BGRA; exact3840×2160 R8Uint mode24 array rejects; one early frame, then zero | 4K R8 integrated; replay advances to2048² R16Float eleven-level resource/views0–3; subresource layout/coherence next |
-| Octopath Traveler II | 2ad reaches the same4K R8Uint array rejection | Shared4K R8 now passed; qualify2048² R16Float subresources and separate title progression |
-| The Oregon Trail | 2ad passes BGRA; GPU-written1×1 RGBA8 sampled alias lacks captured provenance | Capture exact retained GPU-owner/view provenance before admitting sampled aliases |
-| Poppy Playtime Chapter 1 | Fatal write fault; later b7 record observes tracker Disarmed after a successful RW restore | Filtered schema3 retains85/0drops and three actual Disarmed CAS declines after successful RW restore; require permission/lifetime ownership, no unconditional retry |
-| Superliminal | 2ad retains the ten-mip512² color and disjoint128×64 storage collision | Preserve normalized physical selected-mip placement; actual production clear/Drain and disjoint-tail proof before integration |
+| Dreaming Sarah | R13 reaches the outdoor scene after written guest confirm; later standing character observed, horizontal control unverified. Historical876 controllability remains accepted | Qualify bounded transition diagnostics, then verify visible movement and neutral release |
+| Demon’s Souls | R13 first R32 producer snapshot rejects read-watch ordinary admission 2 before the execution-watch path; zero observed guest frames | Wait only on the first classified ordinary writer using the same original mapping/read/content and bounded deadline |
+| Silent Hill: The Short Message | R13 stays black through150s; first selected-seed admission fails content/graph-epoch veto | Identify actual original epoch/observed/graph predicate using same-query values; preserve stale-owner refusal |
+| Octopath Traveler II | R13 exits134 after43s; original-copy attempts reject enrollment and post-copy watch admission | Identify actual retained watch state and writer; qualify a bounded continuation only for a classified disjoint ordinary writer |
+| The Oregon Trail | R13 stays black through150s; prebyte-original-veto before returned copy receipt | Attribute exact first guard; wait only on classified ordinary Busy while original mapping/content and deadline remain unchanged |
+| Poppy Playtime Chapter 1 | R13 exits138 after30s. Schema4 records raw trap14 for four actual faults; one recovers, three find the same owner/epoch disarmed, one final decline and two unknown final outcomes | Qualify concurrent pending-fault handling with explicit native permission and mapping lifetime ownership; no unconditional disarmed retry |
+| Superliminal | R13 renders title/corridor loading then exits134 after73s; GPU-written8×8 RGBA32Float sibling lacks original provenance | Retain actual creation descriptor and mutation record, then qualify its physical layout and producer ownership |
 | Quake | Native movie plays; first 8192² R32 tiled depth image exceeds 128 MiB snapshot bound | Qualified physical placement and bounded upload staging; native depth comparison now qualified separately at8783b897 |
-| Void Terrarium | 2ad Move prompt visible; extra direction replay overlaps loading, progression unverified | Input/checkpoint qualification on quiet host, first visual discrepancy and scene-specific GPU/producer attribution |
+| Void Terrarium | R13 reaches New Game; actual guest confirm and neutral delivered, then dark transition through600s; no controllable scene | Retain transition evidence and identify missing draw/native pipeline or guest progression before more input |
 
 ## Ownership before speed
 

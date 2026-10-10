@@ -19,8 +19,130 @@ absence of all 12 recorded roots, heavy workers and shared lease. The other
 all 13 publication artifacts, 60 preparation pins, 239 actual app files and
 their recorded modes/symlinks, clean `4087f2c7` build information, and fresh
 absence of both publication roots, heavy workers and shared lease. The app
-uses osx-x64, Metal, AppKit, GameController and CoreAudio. Games remain unrun on
-this candidate; fresh DS180 and Poppy180 companions are being finalized.
+uses osx-x64, Metal, AppKit, GameController and CoreAudio. Local main integrates
+the qualified candidate at `08212825`; its production/test/script bytes match
+the published `4087f2c7` source, with only documentation differences.
+
+The fresh R13 Demon’s Souls 180-second replay remains blocked before game entry.
+Log 837 rejects the first R32 producer's original read-watch observation with
+ordinary admission 2, source `0x7092CC0000`, 524,288 bytes, original revision
+3,912,086 and sampled revision 3,912,088. Log 838 reports the refused first
+producer snapshot; this precedes the previously fixed execution-watch path.
+Launch artwork is visible in early captures, followed by black captures from
+55 seconds onward; there is no observed guest frame, menu or input. The harness
+reports alive at its 180-second cap, peak RSS 3,920 MiB and graceful shutdown;
+the actual game exit code is unrecorded. ROOT verifies all 108 retained artifacts,
+2,066 source files, 245 compiled files, 239 app files, 23 preparation pins and
+fresh absence of all four owned PID/PPID/process-group roots, heavy workers and
+the shared lease. No unchanged emulator retry is performed. DS checkpoint:
+`6c67649a68d5c267746d7b9b11202def4b287a8bc7a67ccb866b54d3eb1dac73`.
+Poppy's separate raw-trap replay exits with actual game code 138 after 30 seconds,
+peak RSS 1,718 MiB. Its owned 25-second capture is black, with no input or menu.
+ROOT verifies its 50 artifacts, unchanged source/binary/app maps, preparation
+pins and fresh closure of all four owned roots, heavy workers and shared lease.
+The pinned decoder reports schema 4, 75 published records and zero dropped
+records. Actual fault invocations 3–6 carry observed raw trap number 14,
+SIGBUS/code 2, error field 6 and RIP `0x80135FB0B`; preflight invocations 1/2
+and invocation 0 are excluded from the actual-fault inventory. Invocation 3
+recovers after exact watcher removal and a successful writable-protection
+operation. Invocations 4/5/6 observe the same owner 5, epoch 1, already disarmed,
+and skip it. Invocation 5 ends declined; the final outcomes for 4/6 are missing
+and remain unknown. The separate epoch-2 read-only rearm is retained as context,
+without inferring kernel fault order, current permission authority or a safe
+recovery policy. No unsupported-instruction cause or gameplay success is claimed.
+Poppy checkpoint:
+`c397137f6b86003c108b06ba817a796cf804ed45123c1a1821e94fb1d7517b9c`.
+Dreaming Sarah's fresh replay reaches the outdoor scene. ROOT inspects its
+35-second capture with New Game selected, then authorizes one two-second confirm.
+Actual guest PAD writes contain Cross `0x4000`, neutral axes/triggers and a later
+complete neutral release. The scene appears after the confirm; the final
+175-second capture shows a standing character with the opening title overlay
+gone. One later one-second right/D hold and its neutral release are retained,
+but movement and guest delivery of that second action remain unverified: the
+64 active PAD diagnostic rows were exhausted by the earlier confirm hold.
+This is an observability limit, not proof that the guest missed movement.
+The harness caps at 180 seconds, peak RSS 893 MiB, graceful shutdown; actual
+game exit code is unrecorded. ROOT verifies all 130 artifacts, unchanged
+source/binary/app maps and fresh closure of all seven recorded controller,
+harness, game and input roots, heavy workers and shared lease. `input_empty`
+is false and both manual input receipts are retained. No new controllable
+gameplay or performance acceptance is claimed. Sarah checkpoint:
+`099eb8646c2591e64ce8f3725f77ca7d62f271d1d713e59017a9d7051e7fa681`.
+A source-only successor `63aca17f` preserves a separate bounded budget for exact
+submitted PAD state changes, so one held confirm cannot hide later movement
+or release. Its four regression cases remain unrun pending qualification.
+Oregon Trail's fresh R13 replay stays alive through its 150-second cap, peak
+RSS 1,971 MiB, with black captures and no observed game entry. Its first copy
+refusal is `prebyte-original-veto` at `0x801C6F0000`, 4,194,304 bytes, before a
+returned receipt or the later post-copy Boolean diagnostic. The exact winning
+prebyte predicate remains unknown; the previous run's publication-bit refusal
+cannot establish this run's cause. ROOT verifies all 95 artifacts, exact source,
+binary, app and preparation maps, plus fresh closure of the four owned roots,
+heavy workers and shared lease. Oregon checkpoint:
+`4584f76b10d8fea69a2b8974ab8a8983a7c5af151cc29d33033ac3ee1f76`.
+Superliminal's fresh R13 replay renders its title/corridor loading scene, then
+exits with actual game code 134 after 73 seconds, peak RSS 3,531 MiB. Its first
+material refusal is `other-native-image-original-missing`, address
+`0x7015080100`, 8×8×1 `Rgba32Float`, version 8, GPU-written and initialized.
+Command sequence 2,663 / submission 90 then fails completion. This run does
+not observe the earlier first-publication-preparation refusal; a changed first
+blocker does not prove that earlier race fixed. No menu, input or gameplay is
+observed. ROOT verifies all 62 artifacts, exact source/binary/app/preparation
+maps and fresh closure of the four owned roots, heavy workers and shared lease.
+Superliminal checkpoint:
+`d481ca362f3e4b240c5f0543de8a5bbccef40029e559ca25e6b3592b43018ee0`.
+A source-only diagnostic successor `89e41976` retains the rejected image's
+cached creation descriptor and mutation record. It adds no format acceptance,
+copy fallback or new owner; qualification and a changed-source replay remain
+pending.
+Silent Hill's R13 replay remains black through its 150-second cap, peak RSS
+2,084 MiB, with no actionable prompt or input. Its first command-slice error
+is admission of an initial selected seed: `original-observed-content-or-graph-epoch-veto`,
+with no later query used to reclassify it. The first winning interior predicate
+is not identified by that aggregate label. Earlier writer and watch refusals
+are retained as context, without attributing them to this error. ROOT verifies
+all 93 artifacts and exact maps/preparation/checkpoints, plus fresh closure of
+four owned roots, heavy workers and the shared lease. SH checkpoint:
+`1251ca48d54a50f1008d69bbeb1ecdca05f973207341f199883e26a33295bd9d`.
+Octopath's R13 replay exits with actual game code 134 after 43 seconds, peak
+RSS 3,144 MiB. No capture is produced before exit, so no visual stage is inferred.
+The retained three original-copy attempts at `0x8030DD0000`, 65,536 bytes,
+reject at enrollment publication admission, then post-copy original-watch
+admission 2, then enrollment admission 2. The actual first post-copy guard
+reports `admission-nonzero`; its writer's ownership remains unobserved, and
+detached diagnostic attribution grants no authority. ROOT verifies all 46
+artifacts and exact maps/preparation/checkpoints, plus fresh closure of the
+four owned roots, heavy workers and shared lease. Octopath checkpoint:
+`78a02b11bdf054658193a1c21f8dd6645e88cd7edb11cff06a58e4028db3d90d`.
+Void Terrarium's R13 600-second replay reaches a readable New Game menu.
+ROOT inspects the owned 266-second capture and authorizes one three-second
+confirm. Actual guest PAD writes contain Cross `0x4000` from seconds
+311.400–314.124, then a complete neutral release at 314.699. The menu fades
+and later captures are dark, with no readable playable scene or next prompt.
+There is no repeated input. The unsupported graphics-stage warning predates
+the confirm, bracketed by neutral polls around 235–240 seconds; the original
+post-input wording was premature. No GPU fatal/error is observed before host
+interruption. The harness reports alive at 600 seconds, peak RSS 2,161 MiB,
+graceful shutdown after three seconds and unrecorded actual game exit code.
+ROOT verifies all 286 artifacts, exact maps/preparation/checkpoints and fresh
+closure of all six game/harness/controller/input roots, heavy workers and the
+shared lease. `input_empty` is false and the actual input receipt is retained.
+Menu entry and guest PAD delivery are observed; controllable gameplay and the
+cause of the dark transition remain unverified. Void checkpoint:
+`d2c7ce5f0c307bbb5bd82145e74b4a26b8725b73fae45544e66160dadb235fe6`.
+
+Next candidate `26e88673` is SOURCE ONLY in the isolated
+`fix/boot-first-watch-entry` branch. Its six reviewed, disjoint donors contain
+bounded first R32/prebyte watch continuation, bounded PAD transition diagnostics,
+first missing-native-sibling provenance, actual scalar allocation-return
+provenance, and selected-seed epoch-refusal scalars. ROOT verifies its 16 archive
+artifacts and all 2,073 live/TAR source hashes; 14 paths change from `4087f2c7`.
+The prepared ordinary inventory is 1,485 (362 Host / 1,018 Libs / 105 GPU), and
+the focused inventory is 239 (83 Host / 156 Libs). Native and activated-metadata
+identities remain unchanged. Builds, tests, native qualification, publication
+and changed-source games are unrun. Poppy's separate lifetime scaffold
+`3b1cede1` is not part of this candidate and grants no fault recovery.
+Source archive: `2fbf114143b1ab55814b258b2523fc736dc2542c3596204d0e44b935e4af1131`.
 Build checkpoint: `05866ad8c8ede4a593dac2f33add2910740c9122efa930187c12b069092e928a`.
 Managed checkpoint: `e6be381eaedaae61395c579840bcf2df2ad9c262958028bbc9e1119ca7fb2284`.
 Metadata checkpoint: `4e3da298592445ddd6b53522481d3e776c32cdbc9a1cf710d3164660f2df1e76`.
@@ -44,7 +166,7 @@ the added alias leaves the saved original intact, the original watch changes
 from Busy to Current on query two, and the final frozen-original guard then
 rejects the added alias before any Boolean watch query or Metal effect. A
 test-only successor `4087f2c7` corrects the count and asserts the exact refusal;
-its execution is pending. ROOT verifies its 12 archive payloads and all 2,066
+its fresh R13 execution passes as recorded above. ROOT verifies its 12 archive payloads and all 2,066
 live/archived source hashes, with only the reviewed test file differing from
 `77e6cbef`. Production behavior is unchanged by that correction.
 Build checkpoint: `540ae95c45f2c051a7b48c82ddc47d9196811985125d2a5191748f85441b399d`.
@@ -170,8 +292,9 @@ per CLR and one sticky unknown-cleanup case isolated per CLR. Historical native
 fixtures and their 246 identities remain unchanged; actual selected-four Metal
 qualification will be repeated. Quake's fresh 600-second companion is prepared
 but unrun; Poppy waits for qualification of the raw-trap diagnostic.
-The currently published R11 app's production code is unchanged from the
-four-fix `638c3bdf` candidate; local main still uses `e2535177`.
+The earlier R11 app's production code was unchanged from the four-fix
+`638c3bdf` candidate. The current published app and local integration are R13,
+as recorded above.
 
 Previous qualification (R10): test-only successor `18d90e23` passes all three
 builds and all 108 focused cases on each actual CLR. ARM64 ordinary Host passes
