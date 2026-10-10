@@ -90,6 +90,103 @@ internal sealed partial class MetalRenderHost
         }
     }
 
+    // A target that never changes although draws reached it was culled, clipped,
+    // depth-rejected, masked out or drawn somewhere else, and all five look the same in
+    // the target itself. SHARPEMU_METAL_V2_DUMP_DRAWS=<n> writes the state the first n
+    // draws of a dumped frame rasterise with, which tells the five apart.
+    private static readonly int _maxDrawStateLines =
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DUMP_DRAWS"), out var draws) && draws > 0
+            ? draws
+            : 0;
+
+    private int _drawStateLines;
+
+    // One sampled input per draw fills the budget long before the passes that matter
+    // end; SHARPEMU_METAL_V2_DUMP_INPUTS=0 spends it all on the targets instead.
+    private static readonly bool _dumpInputs =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DUMP_INPUTS"), "0", StringComparison.Ordinal);
+
+    private static readonly nint SelBufferContents = MetalNative.Selector("contents");
+
+    /// <summary>The first bytes of a Metal buffer, as hex, for a draw-state report.</summary>
+    private static unsafe string PreviewBuffer(nint buffer, ulong offset, int count)
+    {
+        if (buffer == 0)
+        {
+            return "none";
+        }
+
+        var contents = MetalNative.Send(buffer, SelBufferContents);
+        if (contents == 0)
+        {
+            return "private";
+        }
+
+        return Convert.ToHexString(new ReadOnlySpan<byte>((byte*)contents + offset, count));
+    }
+
+    /// <summary>Reports what the draw just recorded rasterises with.</summary>
+    private void NoteDrawState(string kind, string shape)
+    {
+        if (!DumpTargetsEnabled || !_dumpThisFlip || _drawStateLines >= _maxDrawStateLines)
+        {
+            return;
+        }
+
+        _drawStateLines++;
+        var entry = _boundGraphicsPipeline;
+        ref readonly var state = ref _dynamicState;
+        ref readonly var depth = ref _renderingState.DepthStencilAttachment;
+        // The write mask Metal was given, which the executor derives from the pixel
+        // program's export mask: a pixel stage whose exports went unrecognised produces a
+        // pipeline that writes no colour at all while still writing depth.
+        var masks = new System.Text.StringBuilder();
+        if (entry?.StaticParameters is { } statics)
+        {
+            for (var index = 0; index < statics.ColorCount; index++)
+            {
+                masks.Append(index == 0 ? string.Empty : ",").Append(statics.GetColorMask(index).ToString("X", CultureInfo.InvariantCulture));
+            }
+        }
+
+        // The first bytes of the streams the draw fetches from. A draw that rasterises
+        // nothing at all with every test switched off read either nothing or rubbish.
+        var streams = new System.Text.StringBuilder();
+        for (var index = 0; index < _vertexBufferCount; index++)
+        {
+            streams.Append(index == 0 ? "vb" : " vb").Append(index).Append('@')
+                .Append(_vertexOffsets[index].ToString("X", CultureInfo.InvariantCulture)).Append('=')
+                .Append(PreviewBuffer(_vertexBuffers[index], _vertexOffsets[index], 24));
+        }
+
+        streams.Append(" ib@").Append(_indexOffset.ToString("X", CultureInfo.InvariantCulture)).Append('=')
+            .Append(PreviewBuffer(_indexBuffer, _indexOffset, 12));
+
+        var cull = entry is null ? "?" :
+            entry.CullsEverything ? "both" :
+            entry.CullMode == Mtl.CullModeFront ? "front" :
+            entry.CullMode == Mtl.CullModeBack ? "back" : "none";
+        Console.Error.WriteLine(string.Format(
+            CultureInfo.InvariantCulture,
+            "[METAL-V2][DRAW] #{0} draw={1} {25} {26} prim={27} streams={28} targets={2} " +
+            "vp=({3},{4} {5}x{6} z{7}..{8}) " +
+            "scissor=({9},{10})-({11},{12}) cull={13} winding={14} clip={15} " +
+            "depth={16} test={17} write={18} cmp={19} clear={20} stencil={21} " +
+            "colormask={22:X} colorcount={23} hostmasks=[{29}] ps={24}",
+            _drawStateLines, _passDrawCount, _renderingState.ColorAttachmentCount,
+            state.ViewportX, state.ViewportY, state.ViewportWidth, state.ViewportHeight,
+            state.ViewportMinDepth, state.ViewportMaxDepth,
+            state.Scissor.Left, state.Scissor.Top, state.Scissor.Right, state.Scissor.Bottom,
+            cull, entry?.Winding == Mtl.WindingClockwise ? "cw" : "ccw", entry?.DepthClipMode,
+            depth.HasDepth ? "yes" : "no", state.DepthTestEnabled, state.DepthWriteEnabled,
+            state.DepthCompare,
+            depth.DepthClear ? BitConverter.UInt32BitsToSingle(depth.ClearWord0) : float.NaN,
+            state.StencilTestEnabled, state.ColorWriteEnableMask, state.ColorWriteCount,
+            entry?.Profile ?? "-",
+            kind, shape, entry?.PrimitiveType, _vertexBufferCount, masks));
+        Console.Error.WriteLine($"[METAL-V2][DRAW]   #{_drawStateLines} {streams}");
+    }
+
     /// <summary>
     /// Remembers a texture to dump at the next safe point. EndRendering runs inside the
     /// flush, and a dump has to flush, so nothing may be read back from there.
@@ -116,7 +213,7 @@ internal sealed partial class MetalRenderHost
     private void NotePendingInputDump(
         nint texture, SharpEmu.Libs.Gpu.Buffers.ResourceSlotIdentifier identifier, int index, ImageRole role)
     {
-        if (!DumpTargetsEnabled || !_dumpThisFlip || texture == 0 ||
+        if (!DumpTargetsEnabled || !_dumpThisFlip || !_dumpInputs || texture == 0 ||
             !_imageCache.TryGetImage(identifier, out var image))
         {
             return;
@@ -223,7 +320,10 @@ internal sealed partial class MetalRenderHost
                 MetalNative.SendCopyTextureToBufferOptions(
                     blit, SelDumpCopyTextureToBuffer, texture, 0, 0, default,
                     new MtlSize { Width = width, Height = height, Depth = 1 },
-                    readback, 0, (nuint)rowBytes, (nuint)total, (nuint)MtlBlitOption.None);
+                    readback, 0, (nuint)rowBytes, (nuint)total,
+                    (nuint)(pixelFormat == MtlFormat.Depth32FloatStencil8
+                        ? MtlBlitOption.DepthFromDepthStencil
+                        : MtlBlitOption.None));
                 MetalNative.SendVoid(blit, SelEndEncoding);
                 FlushAndWaitForGpu();
 
@@ -359,6 +459,40 @@ internal sealed partial class MetalRenderHost
                             var v = (float)half;
                             target[o + c] = (byte)Math.Clamp(v * 255f, 0f, 255f);
                         }
+                    }
+                };
+                return true;
+            // Depth, so a pass whose colour never changes can be told apart from a pass
+            // whose depth test rejected everything. The stencil half of a combined format
+            // stays behind: the blit asks for the depth plane alone.
+            case MtlFormat.Depth32Float:
+            case MtlFormat.Depth32FloatStencil8:
+                sourceBytes = 4;
+                convert = static (source, target) =>
+                {
+                    for (int i = 0, o = 0; i + 3 < source.Length; i += 4, o += 4)
+                    {
+                        var depth = BitConverter.UInt32BitsToSingle(
+                            BinaryPrimitives.ReadUInt32LittleEndian(source[i..]));
+                        var level = (byte)Math.Clamp(depth * 255f, 0f, 255f);
+                        target[o] = level;
+                        target[o + 1] = level;
+                        target[o + 2] = level;
+                        target[o + 3] = 255;
+                    }
+                };
+                return true;
+            case MtlFormat.Depth16Unorm:
+                sourceBytes = 2;
+                convert = static (source, target) =>
+                {
+                    for (int i = 0, o = 0; i + 1 < source.Length; i += 2, o += 4)
+                    {
+                        var level = (byte)(BinaryPrimitives.ReadUInt16LittleEndian(source[i..]) >> 8);
+                        target[o] = level;
+                        target[o + 1] = level;
+                        target[o + 2] = level;
+                        target[o + 3] = 255;
                     }
                 };
                 return true;

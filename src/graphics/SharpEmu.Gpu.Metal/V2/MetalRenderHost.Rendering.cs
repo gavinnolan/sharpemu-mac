@@ -395,6 +395,13 @@ internal sealed partial class MetalRenderHost
         {
             NotePendingDump((nint)ending.ColorAttachments[index].View.Handle, $"pass{index}");
         }
+
+        // The depth the pass leaves behind says whether its geometry rasterised at all,
+        // which a colour target that never changes cannot.
+        if (ending.DepthStencilAttachment.HasDepth)
+        {
+            NotePendingDump((nint)ending.DepthStencilAttachment.View.Handle, "passdepth");
+        }
     }
 
     private void EndComputeEncoder()
@@ -496,7 +503,8 @@ internal sealed partial class MetalRenderHost
         if (!ReferenceEquals(_boundGraphicsPipeline, entry))
         {
             MetalNative.SendVoid(_renderEncoder, SelSetRenderPipelineState, entry.State);
-            MetalV2Native.SendVoidValue(_renderEncoder, SelSetCullMode, (nuint)entry.CullMode);
+            MetalV2Native.SendVoidValue(
+                _renderEncoder, SelSetCullMode, (nuint)(MetalV2Diagnostics.IgnoreFragmentTests ? Mtl.CullModeNone : entry.CullMode));
             MetalV2Native.SendVoidValue(_renderEncoder, SelSetFrontFacingWinding, (nuint)entry.Winding);
             MetalV2Native.SendVoidValue(_renderEncoder, SelSetDepthClipMode, (nuint)entry.DepthClipMode);
             MetalV2Native.SendVoidValue(_renderEncoder, SelSetTriangleFillMode, (nuint)entry.FillMode);
@@ -606,7 +614,7 @@ internal sealed partial class MetalRenderHost
         var bottom = (uint)Math.Clamp(scissor.Bottom, 0, (int)height);
         var scissorWidth = right > left ? right - left : 0;
         var scissorHeight = bottom > top ? bottom - top : 0;
-        if (_boundGraphicsPipeline is { CullsEverything: true })
+        if (_boundGraphicsPipeline is { CullsEverything: true } && !MetalV2Diagnostics.IgnoreFragmentTests)
         {
             // Metal has no "cull both faces"; a one-pixel scissor is the cheapest
             // equivalent, and the draw then covers nothing it would have kept.
