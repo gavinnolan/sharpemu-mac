@@ -21,6 +21,9 @@ internal interface IMetalImageCacheOwner
     // encoders: noting that an image is GPU-written must not end the render pass.
     ulong CurrentSerial { get; }
 
+    // The newest submission the GPU has finished.
+    ulong CompletedSerial { get; }
+
     // Ends any open encoder and hands over the command buffer being recorded.
     IMetalSubmissionContext BeginTransfer();
 
@@ -90,6 +93,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     private readonly MetalImagePageOwners _pageOwners = new();
     private readonly SortedDictionary<ulong, SurfaceMetadata> _surfaceMetadata = new();
     private readonly Dictionary<GpuFormat, ResourceSlotIdentifier> _nullImages = new();
+
+    // Evicted images whose Metal objects a recorded submission still names.
+    private readonly List<(ulong Serial, MetalCachedImage Image)> _retiring = new();
     private ulong _totalUsedMemory;
     private ulong _memoryBudgetBytes;
     private ulong _collectionTick;
@@ -311,12 +317,14 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             image.Uses.Storage = true;
             image.MarkGpuModified();
             image.GpuWriteSerial = _owner.CurrentSerial;
+            image.NoteUse(image.GpuWriteSerial);
         }
         else
         {
             SynchronizeAliases(imageIdentifier, takesGpuOwnership: false);
             RefreshFromGuest(image);
             image.Uses.Texture = true;
+            image.NoteUse(_owner.CurrentSerial);
         }
 
         return image.GetOrCreateView(request.View);
@@ -339,6 +347,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         image.MarkGpuModified();
         image.GpuWriteSerial = _owner.CurrentSerial;
+        image.NoteUse(image.GpuWriteSerial);
         return image.GetOrCreateView(request.View);
     }
 
@@ -364,6 +373,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         image.MarkGpuModified();
         image.GpuWriteSerial = _owner.CurrentSerial;
+        image.NoteUse(image.GpuWriteSerial);
         return image.GetOrCreateView(request.View);
     }
 
@@ -1016,6 +1026,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         _disposed = true;
+        // Teardown follows a full GPU wait, so nothing is still naming these.
+        foreach (var (_, retiring) in _retiring)
+        {
+            retiring.Dispose();
+        }
+
+        _retiring.Clear();
         _slots.ForEach(static (_, image) => image.Dispose());
     }
 

@@ -111,6 +111,19 @@ internal sealed class MetalCachedImage : IDisposable
     // writeback knows whether the GPU work it depends on has been recorded.
     public ulong GpuWriteSerial;
 
+    // The newest submission that bound this image's texture or any of its views.
+    // An argument buffer holds a gpuResourceID, which Metal does not retain, so
+    // the Metal objects have to outlive every command buffer that named them.
+    public ulong LastUseSerial;
+
+    public void NoteUse(ulong serial)
+    {
+        if (serial > LastUseSerial)
+        {
+            LastUseSerial = serial;
+        }
+    }
+
     public long GpuWriteSequence { get; private set; }
 
     public bool IsCpuDirty => _cpuDirty;

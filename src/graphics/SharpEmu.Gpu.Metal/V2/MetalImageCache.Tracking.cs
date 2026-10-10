@@ -83,7 +83,48 @@ internal sealed partial class MetalImageCache
 
         RemoveFromIndex(imageIdentifier);
         _slots.Erase(imageIdentifier);
-        image.Dispose();
+        RetireImage(image);
+    }
+
+    // A command buffer names a texture through an argument buffer, which holds a
+    // gpuResourceID that Metal does not retain: releasing the texture while a
+    // recorded-but-unfinished submission still names it leaves the GPU driver
+    // messaging freed memory. So an evicted image's Metal objects wait for the
+    // submission that last bound them, and the slot is free either way.
+    private void RetireImage(MetalCachedImage image)
+    {
+        if (image.LastUseSerial <= _owner.CompletedSerial)
+        {
+            image.Dispose();
+            return;
+        }
+
+        _retiring.Add((image.LastUseSerial, image));
+    }
+
+    // Drops the Metal objects of every evicted image the GPU has finished with.
+    private void DrainRetiredImages()
+    {
+        if (_retiring.Count == 0)
+        {
+            return;
+        }
+
+        var completed = _owner.CompletedSerial;
+        var kept = 0;
+        for (var index = 0; index < _retiring.Count; index++)
+        {
+            var entry = _retiring[index];
+            if (entry.Serial <= completed)
+            {
+                entry.Image.Dispose();
+                continue;
+            }
+
+            _retiring[kept++] = entry;
+        }
+
+        _retiring.RemoveRange(kept, _retiring.Count - kept);
     }
 
     private void WatchImage(ResourceSlotIdentifier imageIdentifier)
@@ -281,6 +322,7 @@ internal sealed partial class MetalImageCache
     {
         using var held = _lock.Hold();
         _collectionTick++;
+        DrainRetiredImages();
         CollectIfOverBudget();
     }
 
