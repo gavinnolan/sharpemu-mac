@@ -935,7 +935,7 @@ public static partial class Gen5MslTranslator
         // thread's value in every lane); compute lanes are real simdgroup
         // threads and shuffle for real. Mirrors the SPIR-V translator's
         // no-subgroup fallback for graphics stages.
-        private bool IsSingleLaneStage => _stage != Gen5MslStage.Compute;
+        private bool IsSingleLaneStage => !HasRealWaveLanes;
 
         private string ShuffleLane(string value, string targetLane) =>
             IsSingleLaneStage ? value : $"simd_shuffle({value}, (ushort){targetLane})";

@@ -33,6 +33,11 @@ public sealed class StageCompileOptions
 {
     public VertexInputInfo? VertexInfo { get; init; }
     public int RequiredVertexOutputCount { get; init; }
+
+    // Set when the draw selected the NGG primitive-shader stage and the backend can run it
+    // as a workgroup; the emitter then compiles the merged ES/GS stage instead of a plain
+    // vertex shader.
+    public Gen5NggStageInfo? PrimitiveShader { get; init; }
     public PixelInputInfo? PixelInfo { get; init; }
     public IReadOnlyList<Gen5PixelOutputBinding> PixelOutputs { get; init; } = [];
     public uint PixelInputEnable { get; init; }
@@ -326,7 +331,8 @@ internal sealed class ShaderProgramCache
         switch (stage)
         {
             case ShaderStage.Vertex:
-                StageStaticKey.Build(options.VertexInfo ?? throw new ArgumentException("The vertex lookup has no vertex input info."), options.RequiredVertexOutputCount, _staticState);
+                StageStaticKey.Build(options.VertexInfo ?? throw new ArgumentException("The vertex lookup has no vertex input info."),
+                    options.RequiredVertexOutputCount, options.PrimitiveShader, _staticState);
                 break;
             case ShaderStage.Pixel:
                 StageStaticKey.Build(options.PixelInfo ?? throw new ArgumentException("The pixel lookup has no pixel input info."), _staticState);
@@ -609,6 +615,7 @@ internal sealed class ShaderProgramCache
                     SupportsSharedInt64Atomics = sharedInt64Atomics,
                     ShaderSignedZeroInfNanPreserveFloat32Supported = signedZeroInfNanPreserve,
                     RequiredVertexOutputCount = options.RequiredVertexOutputCount,
+                    PrimitiveShader = options.PrimitiveShader,
                     VertexInputs = entry.VertexInputs,
                     PositionExportControl = info.PositionExportControl,
                     SupportsClipDistance = _host.ClipDistanceEnabled,

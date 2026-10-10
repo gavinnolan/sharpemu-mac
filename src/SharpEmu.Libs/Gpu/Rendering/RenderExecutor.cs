@@ -47,6 +47,17 @@ public sealed partial class RenderExecutor
 
     private static bool IsPrimitiveShaderStageMask(uint stages) =>
         (stages & ~VgtShaderStagesWaveSizeBits) is 0x02002000 or 0x00002000 or 0x00002030;
+
+    // VGT_SHADER_STAGES_EN bits 0-1 (LS_EN), 2 (HS_EN) and 6-7 (VS_EN) select stages no
+    // primitive shader implements - tessellation and the legacy vertex stage. Everything
+    // else the register can select (the ES/GS enables, the primitive group size, primitive
+    // generation and its passthrough mode) is NGG setup the primitive shader performs
+    // itself, so a mesh backend can run the draw. Void Terrarium's culling draws arrive as
+    // 0x00402020, which the compact masks above do not cover.
+    private const uint VgtShaderStagesForeignStageBits = 0x7u | (0x3u << 6);
+
+    private static bool IsPrimitiveShaderMeshStageMask(uint stages) =>
+        (stages & ~VgtShaderStagesWaveSizeBits & VgtShaderStagesForeignStageBits) == 0;
     private const uint MaxOutputPerSubgroupLimit = 0x40;
     private static int _geometryWarningShown;
 
@@ -511,9 +522,16 @@ public sealed partial class RenderExecutor
             IsPrimitiveShaderStageMask(stages) && vertex.ExportAddress != 0 &&
             (vertex.GeometryAddress == 0 ||
              (shaderInterface.GeometryMaxVerticesOut == 0 && IsKnownGeometryOutputPrimitiveType(shaderInterface.GeometryOutputPrimitiveType)));
-        var unsupportedStageMask = stages != 0 && !IsPrimitiveShaderStageMask(stages);
+        // A backend with mesh pipelines runs the merged ES/GS stage as it really is, so the
+        // NGG setup registers that defeat the per-vertex path stop being rejections: the
+        // primitive shader itself consumes the subgroup control and the output budget.
+        var primitiveShaderMeshPath =
+            _pipelines.SupportsPrimitiveShaderMeshPipelines &&
+            vertex.ExportAddress != 0 && vertex.GeometryAddress == 0 &&
+            IsPrimitiveShaderMeshStageMask(stages);
+        var unsupportedStageMask = stages != 0 && !IsPrimitiveShaderStageMask(stages) && !primitiveShaderMeshPath;
         var unsupportedGeometryStage = vertex.ExportAddress != 0 && vertex.GeometryAddress != 0 && !primitiveShaderVertexPath;
-        var geometryRegisters = !primitiveShaderVertexPath &&
+        var geometryRegisters = !primitiveShaderVertexPath && !primitiveShaderMeshPath &&
             ((shaderInterface.PrimitiveShaderSubgroupControl != 0 && shaderInterface.PrimitiveShaderSubgroupControl != 1) ||
              shaderInterface.GeometryMaxVerticesOut != 0 ||
              !IsKnownGeometryOutputPrimitiveType(shaderInterface.GeometryOutputPrimitiveType) ||

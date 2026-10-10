@@ -1,0 +1,216 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Resources;
+using Xunit;
+
+namespace SharpEmu.ShaderCompiler.Metal.Tests;
+
+/// <summary>
+/// Structural checks over the mesh emission of NGG primitive shaders. Pure text generation,
+/// so these run everywhere; the Metal-compiler and device checks live in
+/// <see cref="NggMeshRuntimeTests"/>.
+/// </summary>
+public sealed class NggMeshTranslationTests
+{
+    [Fact]
+    public void PassthroughPrimitiveShaderKeepsThePerVertexPath()
+    {
+        var program = Gen5NggFixtures.Passthrough();
+        Assert.False(ShaderCompileRequest.RequiresPrimitiveShaderWorkgroup(program));
+
+        var shader = Gen5NggFixtures.CompileOrThrow(program);
+        Assert.Equal(Gen5MslStage.Vertex, shader.Stage);
+        Assert.Equal("gen5_vs", shader.EntryPoint);
+        Assert.Null(shader.MeshInfo);
+    }
+
+    [Fact]
+    public void PrimitiveShaderWithoutTheStageMaskKeepsThePerVertexPath()
+    {
+        // The same program without the draw's primitive-shader state must not change
+        // backends: only a request that says the draw selected the NGG stage may.
+        var request = Gen5ComputeFixtures.RequestOrThrow(
+            Gen5NggFixtures.CullingTriangle(),
+            ShaderStage.Vertex,
+            userDataBase: Gen5NggFixtures.VertexUserDataBase);
+        Assert.False(Gen5MslTranslator.RequiresMeshEmission(request));
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.Equal(Gen5MslStage.Vertex, shader.Stage);
+    }
+
+    [Fact]
+    public void CullingPrimitiveShaderEmitsAMeshFunction()
+    {
+        var shader = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.CullingTriangle());
+        Assert.Equal(Gen5MslStage.Mesh, shader.Stage);
+        Assert.Equal("gen5_ms", shader.EntryPoint);
+        Assert.Contains("[[mesh, max_total_threads_per_threadgroup(64)]]", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("void gen5_ms(", shader.Source, StringComparison.Ordinal);
+        Assert.Contains(
+            "using Gen5MeshOutput = mesh<Gen5MeshVertex, void, 64, 1, topology::triangle>;",
+            shader.Source,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MeshInterfaceDescribesTheSubgroupLaunch()
+    {
+        var shader = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.CullingTriangle());
+        var mesh = Assert.IsType<Gen5MslMeshInfo>(shader.MeshInfo);
+        Assert.Equal(64u, mesh.ThreadsPerThreadgroup);
+        Assert.Equal(2u, mesh.WavesPerThreadgroup);
+        Assert.Equal(Gen5NggFixtures.VertexCount, mesh.MaxVertices);
+        Assert.Equal(Gen5NggFixtures.PrimitiveCount, mesh.MaxPrimitives);
+        Assert.Equal(3u, mesh.VerticesPerPrimitive);
+        Assert.Equal(Gen5MslMeshTopology.Triangle, mesh.Topology);
+        Assert.Equal(2u, mesh.DrawInfoBufferIndex);
+        Assert.Equal(3u, mesh.IndexBufferIndex);
+
+        // The threadgroup size the host launches with has to match the interface.
+        Assert.Equal(mesh.ThreadsPerThreadgroup, shader.ThreadgroupSizeX);
+    }
+
+    [Fact]
+    public void MeshVertexPayloadMatchesTheVertexStageInterface()
+    {
+        // The pixel program is translated against user(locn*) params, so a mesh pipeline
+        // can only reuse it when the mesh vertex struct declares the same locations.
+        var mesh = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.CullingTriangle(), requiredVertexOutputCount: 3);
+        var vertex = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.Passthrough(), requiredVertexOutputCount: 3);
+        for (var location = 0; location < 3; location++)
+        {
+            var field = $"float4 param{location} [[user(locn{location})]];";
+            Assert.Contains(field, mesh.Source, StringComparison.Ordinal);
+            Assert.Contains(field, vertex.Source, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("float4 sharpemu_position [[position]];", mesh.Source, StringComparison.Ordinal);
+        Assert.Equal(3u, mesh.AttributeCount);
+    }
+
+    [Fact]
+    public void LocalDataShareBecomesThreadgroupMemory()
+    {
+        var shader = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.CullingTriangle());
+
+        // Not the per-invocation scratch array the vertex path uses.
+        Assert.Contains("threadgroup uint sharpemu_lds[", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("thread uint sharpemu_lds[", shader.Source, StringComparison.Ordinal);
+        var mesh = Assert.IsType<Gen5MslMeshInfo>(shader.MeshInfo);
+        Assert.Contains($"threadgroup uint sharpemu_lds[{mesh.ThreadgroupMemoryBytes / 4}]", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BarrierParksTheWaveInsteadOfBarrieringInPlace()
+    {
+        var shader = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.CullingTriangle());
+
+        // S_BARRIER must end its block and park the wave; the dispatcher's loop body is
+        // the only place a threadgroup_barrier may appear, because two waves of the same
+        // subgroup can sit at different pc values.
+        Assert.Contains("sharpemu_mesh_wait = true;", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("if (active && !sharpemu_mesh_wait)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("case 1u:", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("atomic_fetch_add_explicit(&sharpemu_mesh_parked", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AllocationRequestDrivesThePrimitiveCount()
+    {
+        var shader = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.CullingTriangle());
+
+        // M0[9:0] is the vertex count and M0[22:12] the primitive count.
+        Assert.Contains("sharpemu_mesh_alloc[0] = min(((s[124] >> 0u) & 0x3FFu)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_mesh_alloc[1] = min(((s[124] >> 12u) & 0x7FFu)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("set_primitive_count(min(sharpemu_mesh_alloc[1]", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PrimitiveExportDecodesTenBitSlots()
+    {
+        var shader = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.CullingTriangle());
+        Assert.Contains("sharpemu_mesh_prim[0] = (", shader.Source, StringComparison.Ordinal);
+        Assert.Contains(">> 0u) & 0x1FFu;", shader.Source, StringComparison.Ordinal);
+        Assert.Contains(">> 10u) & 0x1FFu;", shader.Source, StringComparison.Ordinal);
+        Assert.Contains(">> 20u) & 0x1FFu;", shader.Source, StringComparison.Ordinal);
+        Assert.Contains(">> 31u) & 1u) != 0u;", shader.Source, StringComparison.Ordinal);
+
+        // A culled primitive becomes degenerate; Metal cannot drop one in place.
+        Assert.Contains("sharpemu_mesh_culled ? uint3(0u) : sharpemu_mesh_prim", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MergedWaveInfoSeedsTheGuestExecRebuild()
+    {
+        var shader = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.CullingTriangle());
+        Assert.Contains("s[3] = sharpemu_mesh_wave_verts |", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("(sharpemu_mesh_wave_prims << 8u)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("(2u << 28u)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("s[2] =", shader.Source, StringComparison.Ordinal);
+
+        // The ES/VS vector inputs stay where the per-vertex path puts them.
+        Assert.Contains("v[5] = sharpemu_mesh_vertex_index;", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("v[8] = sharpemu_mesh_instance_index;", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SystemScalarsThatAreAlsoUserDataAreLeftAlone()
+    {
+        // A program whose user data starts at s0 has no system scalars to seed; writing
+        // them would clobber a resource pointer.
+        var request = Gen5ComputeFixtures.RequestOrThrow(
+            Gen5NggFixtures.CullingTriangle(),
+            ShaderStage.Vertex,
+            primitiveShader: Gen5NggFixtures.StageInfo,
+            userDataBase: 0);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.Equal(Gen5MslStage.Mesh, shader.Stage);
+        Assert.DoesNotContain("s[3] = sharpemu_mesh_wave_verts", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SubgroupBudgetIsClampedToWhatAMeshThreadgroupCanCarry()
+    {
+        // A title that programs more than the hardware's 256 output vertices, or leaves the
+        // on-chip registers at zero, still has to produce a compilable pipeline.
+        var huge = Gen5NggFixtures.StageInfo with
+        {
+            VerticesPerSubgroup = 4096,
+            PrimitivesPerSubgroup = 4096,
+        };
+        var clamped = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.CullingTriangle(), huge);
+        var mesh = Assert.IsType<Gen5MslMeshInfo>(clamped.MeshInfo);
+        Assert.Equal(256u, mesh.MaxVertices);
+        Assert.Equal(256u, mesh.MaxPrimitives);
+        Assert.Equal(256u, mesh.ThreadsPerThreadgroup);
+
+        var empty = Gen5NggFixtures.StageInfo with
+        {
+            VerticesPerSubgroup = 0,
+            PrimitivesPerSubgroup = 0,
+            MaxOutputPerSubgroup = 0,
+        };
+        var fallback = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.CullingTriangle(), empty);
+        var fallbackMesh = Assert.IsType<Gen5MslMeshInfo>(fallback.MeshInfo);
+        Assert.Equal(32u, fallbackMesh.ThreadsPerThreadgroup);
+        Assert.Equal(1u, fallbackMesh.WavesPerThreadgroup);
+    }
+
+    [Fact]
+    public void LineAndPointOutputPrimitivesChangeTheTopology()
+    {
+        var line = Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.CullingTriangle(),
+            Gen5NggFixtures.StageInfo with { OutputPrimitiveType = Gen5NggExports.OutputPrimitiveLineStrip });
+        Assert.Equal(Gen5MslMeshTopology.Line, Assert.IsType<Gen5MslMeshInfo>(line.MeshInfo).Topology);
+        Assert.Contains("topology::line", line.Source, StringComparison.Ordinal);
+
+        var point = Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.CullingTriangle(),
+            Gen5NggFixtures.StageInfo with { OutputPrimitiveType = Gen5NggExports.OutputPrimitivePointList });
+        Assert.Equal(Gen5MslMeshTopology.Point, Assert.IsType<Gen5MslMeshInfo>(point.MeshInfo).Topology);
+        Assert.Contains("topology::point", point.Source, StringComparison.Ordinal);
+    }
+}

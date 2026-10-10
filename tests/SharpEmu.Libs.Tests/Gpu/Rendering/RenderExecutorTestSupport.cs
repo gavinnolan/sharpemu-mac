@@ -411,6 +411,9 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
 {
     public GraphicsPrograms Graphics { get; set; } = RenderExecutorFixtures.Programs();
 
+    // Stands in for a backend with mesh pipelines (Metal); Vulkan leaves it false.
+    public bool SupportsPrimitiveShaderMeshPipelines { get; set; }
+
     public ComputeProgram Compute { get; set; } = RenderExecutorFixtures.ComputeProgram();
 
     public List<string> Calls { get; } = new();

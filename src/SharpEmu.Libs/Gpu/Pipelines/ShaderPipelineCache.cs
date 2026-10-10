@@ -20,7 +20,11 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private const uint MaxPixelInputs = 32;
     private const uint MaxViewportDimension = 16384;
 
+    // The geometry stage programs its LDS allocation in 128-dword granules, like compute.
+    private const uint LocalDataShareGranuleDwords = 128;
+
     private readonly CpuContext _context;
+    private readonly IGuestGpuBackend _compiler;
     private readonly IShaderPipelineHost _host;
     private readonly ShaderHeaderRegistry _registry;
     private readonly ShaderProgramCache _programs;
@@ -33,9 +37,37 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     public ShaderPipelineCache(CpuContext context, IShaderPipelineHost host, IGuestGpuBackend compiler, ShaderHeaderRegistry registry)
     {
         _context = context;
+        _compiler = compiler;
         _host = host;
         _registry = registry;
         _programs = new ShaderProgramCache(context, compiler, host);
+    }
+
+    public bool SupportsPrimitiveShaderMeshPipelines => _compiler.SupportsPrimitiveShaderMeshPipelines;
+
+    // The geometry-engine state one NGG subgroup runs under, for a draw the backend will
+    // compile as the merged ES/GS workgroup stage. Null keeps the per-vertex path, which is
+    // what every backend without mesh pipelines gets.
+    private Gen5NggStageInfo? PrimitiveShaderStageInfo(VertexStageRegisters vertex, ShaderInterfaceRegisters shaderInterface)
+    {
+        if (!SupportsPrimitiveShaderMeshPipelines || vertex.GeometryAddress != 0)
+        {
+            return null;
+        }
+
+        return new Gen5NggStageInfo(
+            VerticesPerSubgroup: shaderInterface.ExportVerticesPerSubgroup,
+            PrimitivesPerSubgroup: shaderInterface.GeometryPrimitivesPerSubgroup,
+            MaxOutputPerSubgroup: shaderInterface.MaxOutputPerSubgroup,
+            OutputPrimitiveType: shaderInterface.GeometryOutputPrimitiveType,
+            PrimitiveAmplificationFactor: shaderInterface.PrimitiveShaderSubgroupControl,
+            LocalDataShareBytes: vertex.GeometryResource2.LocalDataShareSize *
+                LocalDataShareGranuleDwords * sizeof(uint),
+
+            // GE_CNTL's group sizes live in the user-config bank, which this lookup does not
+            // see; they are per-draw launch state and travel in the mesh draw-info block.
+            VertexGroupSize: 0,
+            PrimitiveGroupSize: 0);
     }
 
     public ShaderProgramCache Programs => _programs;
@@ -144,7 +176,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
             if (!TryPrepareProgram(
                 vertexSource,
-                new StageCompileOptions { VertexInfo = vertexInfo, RequiredVertexOutputCount = (int)attributeCount },
+                new StageCompileOptions
+                {
+                    VertexInfo = vertexInfo,
+                    RequiredVertexOutputCount = (int)attributeCount,
+                    PrimitiveShader = PrimitiveShaderStageInfo(vertex, shaderInterface),
+                },
                 ref pushDataCursor,
                 out vertexProgram,
                 out vertexStage))

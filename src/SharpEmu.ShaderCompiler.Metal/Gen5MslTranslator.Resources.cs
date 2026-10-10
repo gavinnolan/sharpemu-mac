@@ -115,12 +115,23 @@ public static partial class Gen5MslTranslator
         {
             _request = request;
             _argumentLayout = Gen5MslArgumentLayout.Build(request.Bindings);
-            _stage = request.Stage switch
+            // An NGG primitive shader that exchanges data through LDS, synchronizes or asks
+            // for export space is the merged ES/GS workgroup stage, which only a mesh
+            // function can express. Passthrough primitive shaders keep the vertex path.
+            _stage = RequiresMeshEmission(request)
+                ? Gen5MslStage.Mesh
+                : request.Stage switch
+                {
+                    ShaderStage.Vertex => Gen5MslStage.Vertex,
+                    ShaderStage.Pixel => Gen5MslStage.Pixel,
+                    _ => Gen5MslStage.Compute,
+                };
+            if (_stage == Gen5MslStage.Mesh)
             {
-                ShaderStage.Vertex => Gen5MslStage.Vertex,
-                ShaderStage.Pixel => Gen5MslStage.Pixel,
-                _ => Gen5MslStage.Compute,
-            };
+                _meshLdsDwords = MeshLdsDwordCount(request);
+                _meshInfo = BuildMeshInfo(request, _meshLdsDwords);
+            }
+
             _pixelOutputBindings = request.PixelOutputs;
             _usesPixelValidMask =
                 _stage == Gen5MslStage.Pixel &&
@@ -1119,7 +1130,7 @@ public static partial class Gen5MslTranslator
             var word = $"(device atomic_uint*)({GlobalDataShareName} + {index})";
 
             // Graphics stages model one logical lane, so the counter grows by one per invocation.
-            if (_stage != Gen5MslStage.Compute)
+            if (!HasRealWaveLanes)
             {
                 var original = Temp("uint", "0u");
                 Line($"if (exec && {inBounds}) {{ {original} = atomic_fetch_{operation}_explicit({word}, 1u, memory_order_relaxed); }}");

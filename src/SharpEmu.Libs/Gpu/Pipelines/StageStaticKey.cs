@@ -2,20 +2,32 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.ShaderCompiler;
 
 namespace SharpEmu.Libs.Gpu.Pipelines;
 
 // The static state of a stage as one word list; two draws with equal lists share a program entry.
 public static class StageStaticKey
 {
-    public const int MaxWords = 14 + VertexInputInfo.MaxBuffers * 13;
+    // The nine trailing words are the NGG primitive-shader state (see the vertex key).
+    public const int MaxWords = 14 + 9 + VertexInputInfo.MaxBuffers * 13;
 
     private static uint Bits(float value) => BitConverter.SingleToUInt32Bits(value);
 
     private static uint Bit(bool value) => value ? 1u : 0u;
 
     // The vertex key adds the required output count the paired pixel program declares.
-    public static void Build(VertexInputInfo info, int requiredOutputCount, List<uint> key)
+    public static void Build(VertexInputInfo info, int requiredOutputCount, List<uint> key) =>
+        Build(info, requiredOutputCount, null, key);
+
+    // A primitive-shader draw compiles the same program differently - as the merged ES/GS
+    // workgroup stage, sized by the geometry-engine registers - so that state belongs in
+    // the key or two draws would share one permutation.
+    public static void Build(
+        VertexInputInfo info,
+        int requiredOutputCount,
+        Gen5NggStageInfo? primitiveShader,
+        List<uint> key)
     {
         key.Clear();
         key.Add(Bit(info.FetchEmbedded));
@@ -36,6 +48,19 @@ public static class StageStaticKey
         }
 
         key.Add((uint)requiredOutputCount);
+        key.Add(Bit(primitiveShader.HasValue));
+        if (primitiveShader is { } ngg)
+        {
+            key.Add(ngg.VerticesPerSubgroup);
+            key.Add(ngg.PrimitivesPerSubgroup);
+            key.Add(ngg.MaxOutputPerSubgroup);
+            key.Add(ngg.OutputPrimitiveType);
+            key.Add(ngg.PrimitiveAmplificationFactor);
+            key.Add(ngg.LocalDataShareBytes);
+            key.Add(ngg.VertexGroupSize);
+            key.Add(ngg.PrimitiveGroupSize);
+        }
+
         foreach (var attribute in info.Attributes)
         {
             var descriptor = attribute.Descriptor;

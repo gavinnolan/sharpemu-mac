@@ -715,6 +715,11 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
+            if (_stage == Gen5MslStage.Mesh)
+            {
+                return TryEmitMeshExport(instruction, export);
+            }
+
             if (_stage == Gen5MslStage.Vertex)
             {
                 return TryEmitVertexExport(instruction, export);
