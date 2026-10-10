@@ -302,8 +302,40 @@ runaway compute shaders (below).
   `s[128] v[256]` register-file declaration, so neither the trip count nor the register
   file is the cost.
 
-  What is left is the same finding as Silent Hill's: image transfers. The worst single
-  item in Demon's Souls is now a 48x24 `R16Unorm` writeback of 64 KiB at 328 ms.
+  The sample that then looked worst, a 48x24 `R16Unorm` writeback of one 64 KiB tile at
+  328 ms, is the same artifact again: on the device that transfer costs 0.20 ms and its
+  upload 0.22 ms (`ASmallTiledSurfaceTransfersInMicroseconds`).
+
+- **Demon's Souls renders once a large image is moved in pieces.** The title drew
+  nothing for its whole run — `published=0` on every `[METAL-PRESENT]` line — and the
+  only other symptom was one warning about a guest range smaller than its image. That
+  image is the shadow atlas: `D32Sfloat`, 1024x1024, 80 layers, `0x14000000` bytes.
+
+  Guest memory could not map it, and the reason matters: it is not one backed span at
+  all. `DescribeResolve` reports a contiguous prefix of about `0x3FFC00` — under a
+  single 4 MiB layer — so no window arrangement would ever have covered it whole, and
+  the ring fallback truncates at 64 MiB. The transfer was dropped, the atlas never got
+  its contents, and the title never reached a flip.
+
+  Moved in runs of eight layers, every piece resolves and the whole atlas lands:
+
+      [METAL-V2][INFO] An image is transferred in pieces because it does not map or
+      stage whole: address=0x0000007144700000 size=0x14000000 layers=80 batch=8
+      (not one backed span (contiguous prefix about 0x3FFC00 of 0x14000000)).
+
+  Demon's Souls then runs its render loop and presents: 465 frames in one six-minute
+  run at 3-5 fps, `flip_attempts` and `flip_published` equal on every interval, 1228
+  draws and 127 passes per two seconds across render targets from 1280x720 up to a
+  2048x2048 shadow map. The frames are still black, which is now a content question and
+  not a presentation one. Dreaming Sarah is unaffected and holds 60.00 fps.
+
+- **Where a flip stops is reported.** `published=0` alone cannot tell a title that never
+  flips from one whose flips are released or discarded on the way to the presenter, and
+  all three printed nothing. Every flip reaching `CaptureFlip` now counts as an attempt
+  and lands in one outcome, on the `[METAL-PRESENT]` line as `flip_attempts`,
+  `flip_no_buffer`, `flip_discarded` and `flip_published`. For Demon's Souls before the
+  fix all four were zero, which ruled out the presenter entirely and pointed at the
+  title not asking — which it was not, because it was still waiting on the atlas.
 
 - **The dispatcher step cap reports itself.** The last field of every stage argument
   buffer points at one word of a host-readable buffer, private to the program's hash,
