@@ -209,7 +209,12 @@ public static partial class Gen5MslTranslator
                 _indent = _stage == Gen5MslStage.Mesh ? 3 : 2;
                 for (var index = 0; index < blocks.Count; index++)
                 {
-                    Line($"case {index}u:");
+                    // The block's guest PC in the case label is what makes a dumped
+                    // shader readable against its .gen5 listing; only the dump mode
+                    // pays for it, so the golden MSL stays byte-for-byte the shipped form.
+                    Line(Gen5MslDump.Enabled
+                        ? $"case {index}u: // pc=0x{blocks[index].StartPc:X4}"
+                        : $"case {index}u:");
                     Line("{");
                     _indent++;
                     if (!TryEmitBlock(blocks, index, out error))
@@ -821,6 +826,13 @@ public static partial class Gen5MslTranslator
             {
                 var instruction = instructions[index];
                 var isTerminator = index == block.EndIndex - 1;
+                // Comments cost nothing in the compiled library and are the only way
+                // to read a dumped MSL body against the guest program it came from.
+                if (Gen5MslDump.Enabled)
+                {
+                    Line($"// 0x{instruction.Pc:X4} {instruction.Opcode}");
+                }
+
                 if (instruction.Opcode == "SEndpgm")
                 {
                     Line("active = false;");
