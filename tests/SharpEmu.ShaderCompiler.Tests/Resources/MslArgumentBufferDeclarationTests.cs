@@ -201,7 +201,7 @@ public sealed class MslArgumentBufferDeclarationTests
     }
 
     [Fact]
-    public void DepthCompareSample_KeepsTheManualCompare()
+    public void DepthCompareSample_UsesTheNativeDepthSampler()
     {
         var instructions = new List<Gen5ShaderInstruction>();
         uint pc = 0;
@@ -215,8 +215,12 @@ public sealed class MslArgumentBufferDeclarationTests
         var request = Request(Program([.. instructions]), ShaderStage.Pixel);
         var shader = Compile(request);
 
-        Assert.DoesNotContain("sample_compare", shader.Source);
-        Assert.Contains("<= (float)", shader.Source);
+        // A shader that samples an image with IMAGE_SAMPLE_C makes it a
+        // depth-compare binding, and Metal's depth sampler compares each
+        // contributing texel before filtering. Comparing an already filtered
+        // colour value instead would lose the PCF the guest asked for.
+        Assert.Contains("sample_compare(", shader.Source);
+        Assert.DoesNotContain("<= (float)", shader.Source);
         Assert.Contains("sampler t", shader.Source);
     }
 
