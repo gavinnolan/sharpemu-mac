@@ -1,0 +1,59 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+using SharpEmu.Libs.Gpu.Images;
+
+namespace SharpEmu.Gpu.Metal.V2;
+
+// A guest byte range as seen by the GPU: an MTLBuffer (a no-copy guest window or an
+// upload ring slice) and the byte offset of the range's first byte inside it.
+internal readonly record struct MetalGuestRange(nint Buffer, ulong Offset, ulong Size, ulong GpuAddress)
+{
+    public bool IsValid => Buffer != 0;
+}
+
+// The command buffer currently being recorded and the completion serials of the queue.
+// Resources a transfer allocates for this command buffer may be reused once
+// CompletedSerial >= SubmissionSerial. Callers end any open encoder before passing it.
+internal interface IMetalSubmissionContext
+{
+    nint Device { get; }
+
+    nint CommandBuffer { get; }
+
+    // The serial the shared event reaches when CommandBuffer completes.
+    ulong SubmissionSerial { get; }
+
+    // The last serial the shared event has reached.
+    ulong CompletedSerial { get; }
+}
+
+// Moves image contents between guest memory and Metal textures entirely on the GPU.
+// Implemented by MetalImageTransfer (tiler workstream); used by MetalImageCache.
+internal interface IMetalImageTransfer
+{
+    // The Metal texture shape the cache must allocate for a description (format,
+    // type, extent, mips, layers, usage). The transfer and the cache agree on it.
+    MetalTextureShape ShapeFor(in ImageDescription description);
+
+    // Detiles/copies every subresource in range from guest memory into the texture.
+    // source covers description.Data (and Stencil when present is passed separately).
+    void EncodeGuestToTexture(IMetalSubmissionContext context, in ImageDescription description,
+        SubresourceRange range, MetalGuestRange source, MetalGuestRange stencilSource, nint texture);
+
+    // Retiles/copies every subresource in range from the texture back into guest memory.
+    void EncodeTextureToGuest(IMetalSubmissionContext context, in ImageDescription description,
+        SubresourceRange range, nint texture, MetalGuestRange destination, MetalGuestRange stencilDestination);
+}
+
+// What MTLTextureDescriptor fields an image needs.
+internal readonly record struct MetalTextureShape(
+    ulong PixelFormat,      // MTLPixelFormat
+    ulong TextureType,      // MTLTextureType
+    uint Width,
+    uint Height,
+    uint Depth,
+    uint MipLevels,
+    uint ArrayLength,
+    uint SampleCount,
+    ulong Usage);           // MTLTextureUsage
