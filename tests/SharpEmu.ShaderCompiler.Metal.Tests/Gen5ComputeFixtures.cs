@@ -200,7 +200,7 @@ internal static class Gen5ComputeFixtures
 
     public static ShaderCompileRequest RequestOrThrow(Gen5ShaderProgram program, ShaderStage stage, uint waveLaneCount = 32, uint localSizeX = 32, int requiredVertexOutputCount = 0,
         IReadOnlyList<Gen5PixelOutputBinding>? pixelOutputs = null, ResourceRuntimeInputs? runtimeInputs = null,
-        Gen5NggStageInfo? primitiveShader = null, uint userDataBase = 0)
+        Gen5NggStageInfo? primitiveShader = null, uint userDataBase = 0, uint scratchDwords = 0)
     {
         var plan = ShaderResourcePlan.Extract(program, stage, RequestHash, userDataBase, UserDataCount);
         var specialization = ResourceSpecialization.Default(plan.Info);
@@ -224,6 +224,7 @@ internal static class Gen5ComputeFixtures
             PixelOutputs = pixelOutputs ?? (stage == ShaderStage.Pixel ? [new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float)] : []),
             RequiredVertexOutputCount = requiredVertexOutputCount,
             PrimitiveShader = primitiveShader,
+            ScratchDwords = scratchDwords,
         };
     }
 

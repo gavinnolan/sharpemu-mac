@@ -58,6 +58,8 @@ internal sealed class MetalGuestMemory : IDisposable
     private static readonly nint SelGpuAddress = MetalNative.Selector("gpuAddress");
     private static readonly nint SelContents = MetalNative.Selector("contents");
     private static readonly nint SelMaxBufferLength = MetalNative.Selector("maxBufferLength");
+    private static readonly nint SelRecommendedWorkingSet =
+        MetalNative.Selector("recommendedMaxWorkingSetSize");
     private static readonly nint SelSetLabel = MetalNative.Selector("setLabel:");
     private static readonly nint SelRelease = MetalNative.Selector("release");
     private static readonly nint SelAddAllocation = MetalNative.Selector("addAllocation:");
@@ -129,13 +131,16 @@ internal sealed class MetalGuestMemory : IDisposable
         _aliasSize = aliasSize;
         var maxBufferLength = (ulong)MetalV2Native.SendValue(device, SelMaxBufferLength);
         var windowBytes = Math.Min(PreferredWindowBytes, maxBufferLength == 0 ? PreferredWindowBytes : maxBufferLength);
-        // Windows overlap by half: window k starts at k * stride, so any range of up to
-        // one stride lies wholly inside the window its first byte selects, and a range
-        // crossing a window edge never falls back to a copy.
-        var windowStride = windowBytes / 2;
-        var windowCount = aliasSize <= windowBytes
-            ? 1
-            : (int)((aliasSize - windowBytes + windowStride - 1) / windowStride) + 1;
+        var budget = WindowBudget(device);
+        var (windowStride, windowCount, mappedBytes) = ChooseWindowLayout(aliasSize, windowBytes, budget);
+        if (mappedBytes > budget)
+        {
+            MetalV2Diagnostics.WarnOnce(
+                "window-budget",
+                "The guest backing does not fit what the device can hold resident; submissions may fail with " +
+                $"Insufficient Memory: mapped=0x{mappedBytes:X} budget=0x{budget:X}.");
+        }
+
         if (windowCount > MaxWindows)
         {
             throw GpuFatal.Fatal(
@@ -191,7 +196,72 @@ internal sealed class MetalGuestMemory : IDisposable
         var mapSeconds = seconds.ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
         Console.Error.WriteLine(
             $"[METAL-V2][INFO] guest memory mapped windows={windowCount} window_bytes=0x{windowBytes:X} " +
+            $"stride=0x{windowStride:X} mapped_mb={mappedBytes / (1024 * 1024)} " +
+            $"budget_mb={budget / (1024 * 1024)} " +
             $"alias=0x{aliasBase:X16}+0x{aliasSize:X} map_seconds={mapSeconds} residency_set={(_residencySet != 0 ? 1 : 0)}");
+    }
+
+    /// <summary>
+    /// Picks the window stride for a backing alias.
+    ///
+    /// Windows may overlap by half: window k starts at k * stride, so any range of up to
+    /// one stride lies wholly inside the window its first byte selects, and a range
+    /// crossing a window edge never falls back to a copy.
+    ///
+    /// That doubles how many window bytes every encoder names with <c>useResource</c>,
+    /// and a command buffer whose named resources exceed what the device can hold
+    /// resident fails outright — "Insufficient Memory"
+    /// (<c>kIOGPUCommandBufferCallbackErrorOutOfMemory</c>) — with no draw ever reaching
+    /// the framebuffer. On a 24 GB M4 a 16.4 GiB backing in half-overlapping 4 GiB
+    /// windows asks for 30.4 GiB and every single submission failed. The overlap is
+    /// therefore taken only while the mapped total fits the device's working set;
+    /// otherwise the windows tile the alias exactly and a straddling range takes the ring
+    /// (reads) or splits into runs (which the device-address table already does).
+    /// </summary>
+    internal static (ulong Stride, int Count, ulong MappedBytes) ChooseWindowLayout(
+        ulong aliasSize,
+        ulong windowBytes,
+        ulong budget)
+    {
+        var overlapped = windowBytes / 2;
+        if (overlapped != 0 && MappedBytes(aliasSize, windowBytes, overlapped) <= budget)
+        {
+            return (overlapped, WindowCount(aliasSize, windowBytes, overlapped),
+                MappedBytes(aliasSize, windowBytes, overlapped));
+        }
+
+        return (windowBytes, WindowCount(aliasSize, windowBytes, windowBytes),
+            MappedBytes(aliasSize, windowBytes, windowBytes));
+    }
+
+    // How many windows of windowBytes at this stride cover the alias.
+    private static int WindowCount(ulong aliasSize, ulong windowBytes, ulong windowStride) =>
+        aliasSize <= windowBytes
+            ? 1
+            : (int)((aliasSize - windowBytes + windowStride - 1) / windowStride) + 1;
+
+    // The bytes every encoder names with useResource, which is what the device has to
+    // hold resident: overlapping windows map the same guest bytes more than once.
+    private static ulong MappedBytes(ulong aliasSize, ulong windowBytes, ulong windowStride)
+    {
+        var total = 0UL;
+        var count = WindowCount(aliasSize, windowBytes, windowStride);
+        for (var index = 0; index < count; index++)
+        {
+            var offset = (ulong)index * windowStride;
+            total += Math.Min(windowBytes, aliasSize - offset);
+        }
+
+        return total;
+    }
+
+    // What the device says it can keep resident. A command buffer that names more than
+    // this is refused by the driver rather than throttled, so the window layout is
+    // chosen against it instead of against the alias size.
+    private static ulong WindowBudget(nint device)
+    {
+        var recommended = MetalV2Native.SendValue64(device, SelRecommendedWorkingSet);
+        return recommended != 0 ? recommended : 4UL * 1024 * 1024 * 1024;
     }
 
     public nint Device => _device;

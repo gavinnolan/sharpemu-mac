@@ -144,6 +144,49 @@ A flip is presented by sampling the display surface into a plain BGRA8 drawable,
 an sRGB surface is read through a linear view; sampling it as sRGB converts to
 linear and shows the frame far too dark.
 
+## Measuring one draw or dispatch
+
+The periodic `[METAL-V2][PERF]` line reports `gpu_busy_ms` per command buffer, which is
+where the GPU time is but not *whose* it is. `SHARPEMU_METAL_V2_PROFILE_SHADERS=1` adds
+the attribution: every draw and dispatch gets its own command buffer, which is committed
+and waited on, and `GPUEndTime - GPUStartTime` is charged to the bound pipeline's shader
+hashes. Totals per `(kind, shaders)` key print every two seconds and once at exit as
+`[METAL-V2][SHADER-PROF]`, worst first; `SHARPEMU_METAL_V2_PROFILE_TOP` sets how many.
+
+Per-draw timestamps are not an option on this hardware: Apple silicon reports
+`supportsCounterSampling:` only for `MTLCounterSamplingPointAtStageBoundary`, which times
+a whole encoder, not a draw inside it. The command-buffer split is therefore the measurement,
+and it is the reason the mode is opt-in: it serializes the GPU with the host and splits
+render passes, so its absolute frame rate means nothing. Only the per-key ratios do.
+
+A hash from such a line is read back with `SHARPEMU_SHADER_MSL_DUMP_DIR` (see
+`Gen5MslDump`), which also annotates the emitted dispatcher with guest PCs. Outside the
+profiling mode, `[METAL-V2][SLOW-WAIT]` names the last draw or dispatch the slow command
+buffer held, which is usually enough to pick the shader to read.
+
+### What the first measured runs found
+
+- **The guest windows must fit what the device can hold resident.** Every encoder names
+  them with `useResource`, so their mapped total is a per-command-buffer residency
+  request. Half-overlapping 4 GiB windows map a 16.4 GiB backing as 30.4 GiB; on a 24 GB
+  M4 the driver refused *every* submission with `Insufficient Memory`
+  (`kIOGPUCommandBufferCallbackErrorOutOfMemory`) — 57 of 57 per interval in Silent Hill,
+  which is why it rendered nothing at all, and the same error ended Demon's Souls. The
+  layout is now chosen against `recommendedMaxWorkingSetSize`.
+- **Image transfers, not shaders, dominate Silent Hill.** With the windows fixed, the
+  worst single items are a 3840x2160 `D32SfloatS8Uint` upload at 156 ms and its writeback
+  at 163 ms — about 200 MB/s for a 33 MB surface, two orders of magnitude off what the
+  blit should cost. The stencil plane goes in through
+  `MTLBlitOptionStencilFromDepthStencil`, one texel at a time as far as the GPU is
+  concerned. Everything else in that title measures in single-digit milliseconds.
+- **Demon's Souls has runaway compute shaders.** `0xFB8FF966CA63E288` ran one command
+  buffer for 2449 ms, and `0xE2609CAFCC903222` spent 619 ms on 4096 threads. Both loop on
+  a counter compared against a dword loaded from a constant buffer (`s14 = 0;
+  s15 = SBufferLoadDword; while (s14 < s15)`), which the translator emits correctly, so
+  either the loaded bound or the buffer behind it is wrong and the loop runs to the
+  100,000-step dispatcher cap. That cap is silent: nothing on the host says a shader hit
+  it, and making it observable is the next step.
+
 ## Process-level macOS tuning (separate workstream)
 
 - `Info.plist`: `LSSupportsGameMode`, `GCSupportsGameMode`, and

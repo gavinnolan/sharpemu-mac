@@ -546,6 +546,7 @@ internal sealed partial class MetalRenderHost
             DrawMesh(mesh, vertexCount, instanceCount, indexed: false, firstIndexOrVertex: firstVertex,
                 baseVertex: 0, firstInstance: firstInstance);
             CountDraw(started);
+            ProfileWork(entry, "draw-mesh", $"vertices={vertexCount} instances={instanceCount}");
             return;
         }
 
@@ -558,6 +559,7 @@ internal sealed partial class MetalRenderHost
             Math.Max(instanceCount, 1),
             firstInstance);
         CountDraw(started);
+        ProfileWork(entry, "draw", $"vertices={vertexCount} instances={instanceCount}");
     }
 
     void IRenderHost.DrawIndexed(uint indexCount, uint instanceCount, uint firstIndex, int vertexOffset, uint firstInstance)
@@ -575,6 +577,7 @@ internal sealed partial class MetalRenderHost
             DrawMesh(mesh, indexCount, instanceCount, indexed: true, firstIndexOrVertex: firstIndex,
                 baseVertex: vertexOffset, firstInstance: firstInstance);
             CountDraw(started);
+            ProfileWork(entry, "draw-indexed-mesh", $"indices={indexCount} instances={instanceCount}");
             return;
         }
 
@@ -591,6 +594,7 @@ internal sealed partial class MetalRenderHost
             vertexOffset,
             firstInstance);
         CountDraw(started);
+        ProfileWork(entry, "draw-indexed", $"indices={indexCount} instances={instanceCount}");
     }
 
     void IRenderHost.DrawIndexedIndirect(BufferBinding arguments)
@@ -626,6 +630,7 @@ internal sealed partial class MetalRenderHost
             (nint)arguments.Handle,
             (nuint)arguments.Offset);
         CountDraw(started);
+        ProfileWork(entry, "draw-indexed-indirect", "indirect");
     }
 
     public void Dispatch(uint groupsX, uint groupsY, uint groupsZ)
@@ -640,6 +645,12 @@ internal sealed partial class MetalRenderHost
             new MtlSize { Width = Math.Max(groupsX, 1), Height = Math.Max(groupsY, 1), Depth = Math.Max(groupsZ, 1) },
             entry.ThreadsPerThreadgroup);
         CountDraw(started);
+        ProfileWork(
+            entry,
+            "dispatch",
+            $"groups={groupsX}x{groupsY}x{groupsZ} " +
+            $"threadgroup={entry.ThreadsPerThreadgroup.Width}x{entry.ThreadsPerThreadgroup.Height}x" +
+            $"{entry.ThreadsPerThreadgroup.Depth}");
     }
 
     public bool TryDispatchIndirect(ulong argumentsAddress)
@@ -662,6 +673,11 @@ internal sealed partial class MetalRenderHost
             (nuint)range.Offset,
             entry.ThreadsPerThreadgroup);
         CountDraw(started);
+        ProfileWork(
+            entry,
+            "dispatch-indirect",
+            $"threadgroup={entry.ThreadsPerThreadgroup.Width}x{entry.ThreadsPerThreadgroup.Height}x" +
+            $"{entry.ThreadsPerThreadgroup.Depth}");
         return true;
     }
 

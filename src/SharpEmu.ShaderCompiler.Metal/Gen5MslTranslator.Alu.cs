@@ -103,31 +103,10 @@ public static partial class Gen5MslTranslator
                     return true;
                 }
                 case "VMovrelsB32":
-                {
-                    if (instruction.Control is not null ||
-                        instruction.Destinations.Count == 0 ||
-                        instruction.Destinations[0].Kind != Gen5OperandKind.VectorRegister ||
-                        instruction.Sources.Count < 2 ||
-                        instruction.Sources[0].Kind != Gen5OperandKind.VectorRegister ||
-                        instruction.Sources[1].Kind != Gen5OperandKind.ScalarRegister)
-                    {
-                        error = "VMovrelsB32 expects an unmodified VGPR source and M0";
-                        return false;
-                    }
-
-                    var baseRegister = instruction.Sources[0].Value;
-                    var relativeRegister = Temp(
-                        "uint",
-                        $"{baseRegister}u + ({RawSource(instruction, 1)})");
-                    var selectedRegister = Temp(
-                        "uint",
-                        $"{relativeRegister} < {VectorRegisterFileCount}u ? " +
-                        $"{relativeRegister} : {baseRegister}u");
-                    StoreVector(
-                        instruction.Destinations[0].Value,
-                        $"v[{selectedRegister}]");
-                    return true;
-                }
+                case "VMovreldB32":
+                case "VMovrelsdB32":
+                case "VMovrelsd2B32":
+                    return TryEmitMoveRelative(instruction, out error);
                 case "VWritelaneB32":
                 {
                     // vdst[lane(src1)] = src0; a writelane lands regardless of EXEC.
@@ -360,7 +339,8 @@ public static partial class Gen5MslTranslator
                 "VLshlrevB32" => $"(({RawSource(instruction, 1)}) << (({RawSource(instruction, 0)}) & 31u))",
                 "VLshrB32" => $"(({RawSource(instruction, 0)}) >> (({RawSource(instruction, 1)}) & 31u))",
                 "VLshrrevB32" => $"(({RawSource(instruction, 1)}) >> (({RawSource(instruction, 0)}) & 31u))",
-                "VLshrrevB64" => EmitLshrrevB64(instruction, destination),
+                "VLshrrevB64" => EmitShiftRev64(instruction, destination, left: false),
+                "VLshlrevB64" => EmitShiftRev64(instruction, destination, left: true),
                 "VAshrI32" =>
                     AsUInt($"(as_type<int>({RawSource(instruction, 0)}) >> (({RawSource(instruction, 1)}) & 31u))"),
                 "VAshrrevI32" =>
@@ -579,10 +559,76 @@ public static partial class Gen5MslTranslator
             return $"({AsUInt(signedLeft)} * {AsUInt(signedRight)})";
         }
 
-        private string EmitLshrrevB64(Gen5ShaderInstruction instruction, uint destination)
+        // The relative moves address the VGPR file relative to the wave's own
+        // allocation base, which is exactly what the private register array models,
+        // so the encoded register number and M0 simply add. V_MOVRELSD2 is the one
+        // form that takes separate source and destination offsets, out of M0's two
+        // halves. Unlike the SPIR-V translator this needs no constant-offset
+        // analysis: the MSL register file is an array it can index at run time.
+        private bool TryEmitMoveRelative(Gen5ShaderInstruction instruction, out string error)
+        {
+            error = string.Empty;
+            var opcode = instruction.Opcode;
+            if (instruction.Control is not null ||
+                instruction.Sources.Count == 0 ||
+                instruction.Destinations.Count == 0 ||
+                instruction.Destinations[0].Kind != Gen5OperandKind.VectorRegister)
+            {
+                error = $"{opcode} expects an unmodified operand and a VGPR destination";
+                return false;
+            }
+
+            var m0 = Temp("uint", ScalarExpression(M0Register));
+            var sourceOffset = m0;
+            var destinationOffset = m0;
+            if (opcode == "VMovrelsd2B32")
+            {
+                sourceOffset = Temp("uint", $"{m0} & 0x3FFu");
+                destinationOffset = Temp("uint", $"({m0} >> 16u) & 0x3FFu");
+            }
+
+            string value;
+            if (opcode == "VMovreldB32")
+            {
+                // Only the destination is relative here: src0 is an ordinary
+                // operand and may be an SGPR or an inline/literal constant.
+                value = Temp("uint", RawSource(instruction, 0));
+            }
+            else
+            {
+                var source = instruction.Sources[0];
+                if (source.Kind != Gen5OperandKind.VectorRegister)
+                {
+                    error = $"{opcode} source must be a vector register";
+                    return false;
+                }
+
+                value = Temp(
+                    "uint",
+                    $"v[({source.Value}u + {sourceOffset}) & {VectorRegisterFileCount - 1}u]");
+            }
+
+            var destination = instruction.Destinations[0].Value;
+            if (opcode == "VMovrelsB32")
+            {
+                StoreVector(destination, value);
+                return true;
+            }
+
+            var target = Temp(
+                "uint",
+                $"({destination}u + {destinationOffset}) & {VectorRegisterFileCount - 1}u");
+            Line($"if (exec) {{ v[{target}] = {value}; }}");
+            return true;
+        }
+
+        // D.u64 = S1.u64 << or >> (S0.u32 & 0x3F), landing in the register pair.
+        private string EmitShiftRev64(Gen5ShaderInstruction instruction, uint destination, bool left)
         {
             var shift = Temp("uint", $"({RawSource(instruction, 0)}) & 63u");
-            var shifted = Temp("ulong", $"({RawSource64(instruction, 1)}) >> {shift}");
+            var shifted = Temp(
+                "ulong",
+                $"({RawSource64(instruction, 1)}) {(left ? "<<" : ">>")} {shift}");
             StoreVector(destination + 1, $"(uint)({shifted} >> 32)");
             return $"(uint){shifted}";
         }
@@ -1116,6 +1162,7 @@ public static partial class Gen5MslTranslator
             else
             {
                 var signed16 = opcode.EndsWith("I16", StringComparison.Ordinal);
+                var unsigned16 = opcode.EndsWith("U16", StringComparison.Ordinal);
                 var signed = signed16 ||
                     opcode.EndsWith("I32", StringComparison.Ordinal) ||
                     opcode.EndsWith("I64", StringComparison.Ordinal);
@@ -1145,7 +1192,11 @@ public static partial class Gen5MslTranslator
                         : wide
                         ? $"(as_type<long>({left}) {op} as_type<long>({right}))"
                         : $"(as_type<int>({left}) {op} as_type<int>({right}))"
-                    : $"(({left}) {op} ({right}))";
+                    // A 16-bit compare reads only the low half; whatever the
+                    // upper half carries must not change the result.
+                    : unsigned16
+                        ? $"((({left}) & 0xFFFFu) {op} (({right}) & 0xFFFFu))"
+                        : $"(({left}) {op} ({right}))";
             }
 
             // Only EXEC-enabled lanes can pass; balloting the raw condition
@@ -1610,6 +1661,21 @@ public static partial class Gen5MslTranslator
                     StoreScalar(destination, result);
                     return true;
                 }
+                case "SFlbitI32B32":
+                {
+                    // Leading zero count, 0xFFFFFFFF when the source is zero.
+                    var result = Temp(
+                        "uint",
+                        $"{left} == 0u ? 0xFFFFFFFFu : (uint)clz({left})");
+                    StoreScalar(destination, result);
+                    return true;
+                }
+                case "SBitreplicateB64B32":
+                    // S_BITREPLICATE_B64_B32 broadcasts the source dword into both
+                    // halves of its 64-bit SGPR destination and does not write SCC.
+                    StoreScalar(destination, left);
+                    StoreScalar(destination + 1, left);
+                    return true;
                 case "SBitset0B32":
                     StoreScalar(
                         destination,
@@ -1680,6 +1746,10 @@ public static partial class Gen5MslTranslator
                     break;
                 case "SMulHiU32":
                     resultExpression = $"mulhi({left}, {right})";
+                    sccStatement = string.Empty;
+                    break;
+                case "SMulHiI32":
+                    resultExpression = $"as_type<uint>(mulhi(as_type<int>({left}), as_type<int>({right})))";
                     sccStatement = string.Empty;
                     break;
                 case "SAndB32":
@@ -1897,12 +1967,26 @@ public static partial class Gen5MslTranslator
         {
             error = string.Empty;
 
-            // S_SWAPPC_B64 is a dynamic call/return operation.  The Gen5
-            // translator has already linearized the reachable shader body,
-            // so there is no host program counter to exchange here.  Its
+            // S_SETPC_B64 and S_SWAPPC_B64 are dynamic call/return operations.
+            // The Gen5 translator has already linearized the reachable shader
+            // body, so there is no host program counter to exchange here. Their
             // single pair operand must not be treated as a binary 64-bit op.
-            if (instruction.Opcode == "SSwappcB64")
+            if (instruction.Opcode is "SSetpcB64" or "SSwappcB64")
             {
+                return true;
+            }
+
+            // S_BITSET0/1_B64 take a 32-bit bit index and update the 64-bit value
+            // already held at the destination: they have no 64-bit source operand
+            // and neither form writes SCC.
+            if (instruction.Opcode is "SBitset0B64" or "SBitset1B64")
+            {
+                var bit = Temp("ulong", $"1ul << (ulong)({RawSource(instruction, 0)} & 63u)");
+                StoreScalar64(
+                    destination,
+                    instruction.Opcode == "SBitset1B64"
+                        ? $"{Scalar64Expression(destination)} | {bit}"
+                        : $"{Scalar64Expression(destination)} & ~{bit}");
                 return true;
             }
 
@@ -2110,14 +2194,27 @@ public static partial class Gen5MslTranslator
 
                 if (applySdwaIntegerModifiers)
                 {
+                    // SDWA ABS/NEG are floating-point sign-bit modifiers even on
+                    // a bit-move opcode: ABS clears the sign bit, NEG flips it.
+                    // Two's-complement negating the raw bits instead turns 1.0
+                    // into -4.0 and -3.0 into 1.5, which silently skews every
+                    // pass that y-flips its clip position with an SDWA-negated
+                    // V_MOV_B32 - the whole of UE's DrawRectangle.
+                    var signBit = selector switch
+                    {
+                        <= 3 => 0x80u,
+                        4 or 5 => 0x8000u,
+                        _ => 0x80000000u,
+                    };
+
                     if ((sdwa.AbsoluteMask & (1u << sourceIndex)) != 0)
                     {
-                        value = $"(uint)abs(as_type<int>({value}))";
+                        value = $"(({value}) & {FormatUInt(~signBit)})";
                     }
 
                     if ((sdwa.NegateMask & (1u << sourceIndex)) != 0)
                     {
-                        value = $"(0u - ({value}))";
+                        value = $"(({value}) ^ {FormatUInt(signBit)})";
                     }
                 }
             }

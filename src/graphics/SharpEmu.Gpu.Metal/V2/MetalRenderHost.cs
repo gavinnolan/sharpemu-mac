@@ -193,6 +193,7 @@ internal sealed partial class MetalRenderHost :
     {
         _ = EnsureCommandBuffer();
         EndEncoders();
+        NoteProfileTransfer();
         return this;
     }
 
@@ -392,7 +393,7 @@ internal sealed partial class MetalRenderHost :
             $"gpu_exec_ms={(gpuEnd - gpuStart) * 1000.0:F2} gpu_end_age_ms={(now - gpuEnd) * 1000.0:F1} " +
             $"gpu_start_age_ms={(now - gpuStart) * 1000.0:F1} " +
             $"kernel_ms={(kernelEnd - kernelStart) * 1000.0:F2} " +
-            $"kernel_end_age_ms={(now - kernelEnd) * 1000.0:F1}");
+            $"kernel_end_age_ms={(now - kernelEnd) * 1000.0:F1} last={LastWorkDescription}");
     }
 
     /// <summary>Counts the time the worker spent with nothing runnable.</summary>

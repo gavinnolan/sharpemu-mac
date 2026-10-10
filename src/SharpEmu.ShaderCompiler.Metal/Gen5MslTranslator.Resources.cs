@@ -42,7 +42,13 @@ public static partial class Gen5MslTranslator
             return false;
         }
 
-        return new CompilationContext(request).TryCompile(out shader, out error);
+        if (!new CompilationContext(request).TryCompile(out shader, out error))
+        {
+            return false;
+        }
+
+        Gen5MslDump.Write(request, shader);
+        return true;
     }
 
     private sealed partial class CompilationContext
@@ -433,6 +439,10 @@ public static partial class Gen5MslTranslator
                 "Cmpswap" => pointer => $"sharpemu_atomic_compare_swap((device atomic_uint*)({pointer}), {comparator}, {value})",
                 "Inc" => pointer => $"sharpemu_atomic_step((device atomic_uint*)({pointer}), true)",
                 "Dec" => pointer => $"sharpemu_atomic_step((device atomic_uint*)({pointer}), false)",
+                "Fmin" => pointer => $"sharpemu_atomic_float_minmax((device atomic_uint*)({pointer}), {value}, false)",
+                "Fmax" => pointer => $"sharpemu_atomic_float_minmax((device atomic_uint*)({pointer}), {value}, true)",
+                // DS_MIN/MAX_F32 replace with DATA0 while DATA1 ranks below memory.
+                "Freplace" => pointer => $"sharpemu_atomic_float_replace((device atomic_uint*)({pointer}), {value}, {comparator})",
                 _ => null,
             };
             build = candidate!;
@@ -538,6 +548,11 @@ public static partial class Gen5MslTranslator
         private bool TryEmitLayoutGlobalMemory(Gen5ShaderInstruction instruction, Gen5GlobalMemoryControl control, out string error)
         {
             error = string.Empty;
+            if (instruction.Opcode.StartsWith("Scratch", StringComparison.Ordinal))
+            {
+                return TryEmitScratchMemory(instruction, control, out error);
+            }
+
             var request = _request;
             if (!request.Memory.TryGetIndex(instruction.Pc, 0, out var memoryIndex))
             {
@@ -557,6 +572,12 @@ public static partial class Gen5MslTranslator
                 : $"{Scalar64Expression(control.ScalarAddress)} + (ulong)v[{control.VectorAddress}]";
             address = Temp("ulong", $"({address}) + {SignedOffset64(control.OffsetBytes)}");
             var entry = request.Memory[memoryIndex];
+            if (control.UsesFlatAddress && entry.AddressSpace != FlatAddressSpace.Global)
+            {
+                return TryEmitFlatLocalMemory(
+                    instruction, control, memoryOpcode, entry.AddressSpace, address, out error);
+            }
+
             var writes = entry.Access is MemoryAccess.Write or MemoryAccess.Atomic;
             var accessBytes = Math.Max((entry.DataBits + 7) / 8, 1u) * Math.Max(entry.DataDwords, 1u);
             var allowed = writes ? IsWrittenAccessAllowed(memoryIndex, address, accessBytes) : "true";
@@ -660,6 +681,233 @@ public static partial class Gen5MslTranslator
             }
 
             return true;
+        }
+
+        // Routes each lane of an aperture-derived FLAT access like the hardware: LDS
+        // or scratch at the low dword when the high dword is in an aperture,
+        // otherwise a global access through the page table.
+        private bool TryEmitFlatLocalMemory(
+            Gen5ShaderInstruction instruction,
+            Gen5GlobalMemoryControl control,
+            string memoryOpcode,
+            FlatAddressSpace addressSpace,
+            string address,
+            out string error)
+        {
+            error = string.Empty;
+            var store = memoryOpcode.StartsWith("GlobalStoreDword", StringComparison.Ordinal);
+            var load = memoryOpcode.StartsWith("GlobalLoadDword", StringComparison.Ordinal);
+            if (!store && !load)
+            {
+                error = $"{instruction.Opcode} through the {addressSpace} flat aperture is not implemented";
+                return false;
+            }
+
+            var canShare = addressSpace is FlatAddressSpace.Shared or FlatAddressSpace.SharedOrPrivate;
+            var canPrivate = addressSpace is FlatAddressSpace.Private or FlatAddressSpace.SharedOrPrivate;
+            if (canShare && !_usesLds)
+            {
+                error = "a shared flat aperture access has no LDS storage";
+                return false;
+            }
+
+            if (canPrivate && _scratchDwordCount == 0)
+            {
+                error = "a private flat aperture access has no scratch storage";
+                return false;
+            }
+
+            Line("if (exec)");
+            Line("{");
+            _indent++;
+            var offset = Temp("uint", $"(uint){address}");
+            var aperture = Temp(
+                "uint",
+                $"(uint)({address} >> {32 + Gen5InlineConstants.ApertureShift})");
+
+            void Emit(Func<uint, string> word)
+            {
+                for (uint index = 0; index < control.DwordCount; index++)
+                {
+                    if (store)
+                    {
+                        Line($"{word(index)} = v[{control.SourceVectorRegister + index}];");
+                    }
+                    else
+                    {
+                        StoreVector(
+                            control.DestinationVectorRegister + index,
+                            word(index),
+                            guardWithExec: false);
+                    }
+                }
+            }
+
+            void Shared() => Emit(index =>
+                $"sharpemu_lds[{LdsIndex(offset, index * sizeof(uint))}]");
+
+            void Private() => Emit(index => ScratchWord(offset, index * sizeof(uint)));
+
+            void Global()
+            {
+                var aligned = Temp("ulong", $"{address} & ~3ul");
+                for (uint index = 0; index < control.DwordCount; index++)
+                {
+                    var dwordAddress = index == 0 ? aligned : $"{aligned} + {index * sizeof(uint)}ul";
+                    if (store)
+                    {
+                        Line($"sharpemu_store_device_dword({DeviceArguments}, {dwordAddress}, v[{control.SourceVectorRegister + index}]);");
+                    }
+                    else
+                    {
+                        StoreVector(
+                            control.DestinationVectorRegister + index,
+                            $"sharpemu_load_device_dword({DeviceArguments}, {dwordAddress})",
+                            guardWithExec: false);
+                    }
+                }
+            }
+
+            void Branch(string condition, Action then, Action otherwise)
+            {
+                Line($"if ({condition})");
+                Line("{");
+                _indent++;
+                then();
+                _indent--;
+                Line("}");
+                Line("else");
+                Line("{");
+                _indent++;
+                otherwise();
+                _indent--;
+                Line("}");
+            }
+
+            var isShared = $"{aperture} == {FormatUInt(Gen5InlineConstants.SharedApertureHigh >> Gen5InlineConstants.ApertureShift)}";
+            var isPrivate = $"{aperture} == {FormatUInt(Gen5InlineConstants.PrivateApertureHigh >> Gen5InlineConstants.ApertureShift)}";
+            if (canShare && canPrivate)
+            {
+                Branch(isShared, Shared, () => Branch(isPrivate, Private, Global));
+            }
+            else if (canShare)
+            {
+                Branch(isShared, Shared, Global);
+            }
+            else
+            {
+                Branch(isPrivate, Private, Global);
+            }
+
+            _indent--;
+            Line("}");
+            return true;
+        }
+
+        // ---- scratch ----
+
+        // Guest scratch is per-invocation private storage, named by its own FLAT
+        // segment rather than by a resource, so it never reaches the device
+        // address table: it lives in a thread-local array like the SPIR-V
+        // translator's Private one.
+        private bool TryEmitScratchMemory(Gen5ShaderInstruction instruction, Gen5GlobalMemoryControl control, out string error)
+        {
+            error = string.Empty;
+            if (_scratchDwordCount == 0)
+            {
+                error = "scratch storage was not declared";
+                return false;
+            }
+
+            var address = control.ScalarAddress < 125
+                ? ScalarExpression(control.ScalarAddress)
+                : $"v[{control.VectorAddress}]";
+            if (control.DynamicOffsetRegister is { } dynamicOffsetRegister)
+            {
+                address = $"{address} + {ScalarExpression(dynamicOffsetRegister)}";
+            }
+
+            if (control.OffsetBytes != 0)
+            {
+                address = $"{address} + {FormatUInt(unchecked((uint)control.OffsetBytes))}";
+            }
+
+            var byteAddress = Temp("uint", address);
+            if (instruction.Opcode.StartsWith("ScratchStore", StringComparison.Ordinal))
+            {
+                Line("if (exec)");
+                Line("{");
+                _indent++;
+                if (TryGetSubdwordStoreInfo(instruction.Opcode, out var byteCount, out var sourceShift))
+                {
+                    // A sub-dword store merges into the dword it lands in.
+                    var source = sourceShift == 0
+                        ? $"v[{control.SourceVectorRegister}]"
+                        : $"(v[{control.SourceVectorRegister}] >> {sourceShift})";
+                    var element = FormatUInt(byteCount == 1 ? 0xFFu : 0xFFFFu);
+                    var shift = Temp("uint", $"({byteAddress} & 3u) << 3u");
+                    var word = ScratchWord(byteAddress);
+                    Line($"{word} = ({word} & ~({element} << {shift})) | (((({source}) & {element})) << {shift});");
+                }
+                else
+                {
+                    for (uint index = 0; index < control.DwordCount; index++)
+                    {
+                        var value = control.SourceIsScalar
+                            ? ScalarExpression(control.SourceVectorRegister + index)
+                            : $"v[{control.SourceVectorRegister + index}]";
+                        Line($"{ScratchWord(byteAddress, index * sizeof(uint))} = {value};");
+                    }
+                }
+
+                _indent--;
+                Line("}");
+                return true;
+            }
+
+            if (!instruction.Opcode.StartsWith("ScratchLoad", StringComparison.Ordinal))
+            {
+                error = $"unsupported scratch opcode {instruction.Opcode}";
+                return false;
+            }
+
+            var destination = control.DestinationVectorRegister;
+            if (TryGetSubdwordLoadInfo(instruction.Opcode, out var loadBytes, out var signExtend, out var d16, out var d16High))
+            {
+                var shift = Temp("uint", $"({byteAddress} & 3u) << 3u");
+                var loaded = Temp(
+                    "uint",
+                    $"({ScratchWord(byteAddress)} >> {shift}) & {FormatUInt(loadBytes == 1 ? 0xFFu : 0xFFFFu)}");
+                if (signExtend)
+                {
+                    loaded = Temp("uint", $"(uint)extract_bits(as_type<int>({loaded}), 0u, {loadBytes * 8}u)");
+                }
+
+                StoreVector(
+                    destination,
+                    !d16 ? loaded
+                        : d16High
+                            ? $"(v[{destination}] & 0x0000FFFFu) | (({loaded} & 0xFFFFu) << 16)"
+                            : $"(v[{destination}] & 0xFFFF0000u) | ({loaded} & 0xFFFFu)");
+                return true;
+            }
+
+            for (uint index = 0; index < control.DwordCount; index++)
+            {
+                StoreVector(destination + index, ScratchWord(byteAddress, index * sizeof(uint)));
+            }
+
+            return true;
+        }
+
+        // The scratch array element one byte address names. The dword index wraps
+        // into the allocation, so an out-of-range guest address stays inside it.
+        private string ScratchWord(string byteAddress, uint offsetBytes = 0)
+        {
+            var address = offsetBytes == 0 ? byteAddress : $"({byteAddress} + {offsetBytes}u)";
+            return _scratchDwordCount > 1
+                ? $"sharpemu_scratch[(({address}) >> 2) % {_scratchDwordCount}u]"
+                : "sharpemu_scratch[0]";
         }
 
         // ---- buffers ----
@@ -964,6 +1212,21 @@ public static partial class Gen5MslTranslator
                     return true;
                 }
 
+                case "DsReadI8":
+                {
+                    // The byte the low two bits of the offset address select,
+                    // sign-extended out of the word that holds it.
+                    var address = Temp("uint", RawSource(instruction, 0));
+                    var byteAddress = Temp("uint", $"{address} + {control.SingleOffsetBytes}u");
+                    var word = Temp("uint", LoadGlobalDataShareWord(
+                        Temp("uint", GlobalDataShareIndex(address, control.SingleOffsetBytes))));
+                    var shift = Temp("uint", $"({byteAddress} & 3u) << 3u");
+                    StoreVector(
+                        instruction.Destinations[0].Value,
+                        $"(uint)(((int)(({word} >> {shift}) << 24u)) >> 24)");
+                    return true;
+                }
+
                 case "DsReadB64":
                 {
                     var index = Temp("uint", GlobalDataShareIndex(RawSource(instruction, 0), control.SingleOffsetBytes));
@@ -1065,29 +1328,41 @@ public static partial class Gen5MslTranslator
         private void StoreGlobalDataShareWord(string index, string value) =>
             Line($"if (exec && {index} < {GlobalDataShareWordsName}) {{ {GlobalDataShareName}[{index}] = {value}; }}");
 
+        // The atomic suffix TryGetAtomicExpression knows for one DS opcode, shared
+        // by the LDS and GDS paths because both encodings name the same operation.
+        private static string DataShareAtomicName(string opcode) => opcode switch
+        {
+            "DsAddU32" or "DsAddRtnU32" => "Add",
+            "DsSubU32" or "DsSubRtnU32" => "Sub",
+            "DsIncU32" or "DsIncRtnU32" => "Inc",
+            "DsDecU32" or "DsDecRtnU32" => "Dec",
+            "DsMinI32" or "DsMinRtnI32" => "Smin",
+            "DsMaxI32" or "DsMaxRtnI32" => "Smax",
+            "DsMinU32" or "DsMinRtnU32" => "Umin",
+            "DsMaxU32" or "DsMaxRtnU32" => "Umax",
+            "DsAndB32" or "DsAndRtnB32" => "And",
+            "DsOrB32" or "DsOrRtnB32" => "Or",
+            "DsXorB32" or "DsXorRtnB32" => "Xor",
+            "DsWrxchgRtnB32" => "Swap",
+            "DsCmpstB32" or "DsCmpstRtnB32" => "Cmpswap",
+            _ => string.Empty,
+        };
+
         private bool TryEmitGlobalDataShareAtomic(Gen5ShaderInstruction instruction, Gen5DataShareControl control, out string error)
         {
             error = string.Empty;
             var name = instruction.Opcode switch
             {
-                "DsAddU32" or "DsAddRtnU32" => "Add",
-                "DsSubU32" or "DsSubRtnU32" => "Sub",
-                "DsIncU32" or "DsIncRtnU32" => "Inc",
-                "DsDecU32" or "DsDecRtnU32" => "Dec",
-                "DsMinI32" or "DsMinRtnI32" => "Smin",
-                "DsMaxI32" or "DsMaxRtnI32" => "Smax",
-                "DsMinU32" or "DsMinRtnU32" => "Umin",
-                "DsMaxU32" or "DsMaxRtnU32" => "Umax",
-                "DsAndB32" or "DsAndRtnB32" => "And",
-                "DsOrB32" or "DsOrRtnB32" => "Or",
-                "DsXorB32" or "DsXorRtnB32" => "Xor",
-                "DsWrxchgRtnB32" => "Swap",
-                "DsCmpstB32" or "DsCmpstRtnB32" => "Cmpswap",
-                _ => string.Empty,
+                "DsMinF32" or "DsMaxF32" => "Freplace",
+                _ => DataShareAtomicName(instruction.Opcode),
             };
-            var isCompare = name == "Cmpswap";
-            var value = instruction.Sources.Count > (isCompare ? 2 : 1) ? RawSource(instruction, isCompare ? 2 : 1) : "0u";
-            var comparator = instruction.Sources.Count > 1 ? RawSource(instruction, 1) : "0u";
+            // DS_CMPST reads DATA0 as the comparator and DATA1 as the new value;
+            // the conditional float replaces read DATA0 as the replacement value
+            // and DATA1 as the operand compared against memory.
+            var valueIndex = name == "Cmpswap" ? 2 : 1;
+            var comparatorIndex = name == "Freplace" ? 2 : 1;
+            var value = instruction.Sources.Count > valueIndex ? RawSource(instruction, valueIndex) : "0u";
+            var comparator = instruction.Sources.Count > comparatorIndex ? RawSource(instruction, comparatorIndex) : "0u";
             if (name.Length == 0 || !TryGetAtomicExpression(name, value, comparator, out var build))
             {
                 error = $"unsupported GDS opcode {instruction.Opcode}";

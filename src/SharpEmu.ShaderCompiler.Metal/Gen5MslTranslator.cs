@@ -4,6 +4,7 @@
 using System.Globalization;
 using System.Text;
 using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Resources;
 
 namespace SharpEmu.ShaderCompiler.Metal;
 
@@ -102,6 +103,7 @@ public static partial class Gen5MslTranslator
         private int _indent;
         private int _nextTemp;
         private bool _usesLds;
+        private uint _scratchDwordCount;
         private bool _usesFormatLoads;
         private bool _usesWaveScratch;
 
@@ -147,6 +149,11 @@ public static partial class Gen5MslTranslator
                 {
                     _usesLds |= instruction.Control is Gen5DataShareControl { Gds: false } &&
                         instruction.Opcode is not ("DsSwizzleB32" or "DsBpermuteB32");
+                    if (instruction.Opcode.StartsWith("Scratch", StringComparison.Ordinal))
+                    {
+                        _scratchDwordCount = Math.Max(_request.ScratchDwords, 1u);
+                    }
+
                     _usesFormatLoads |= IsFormatBufferLoad(instruction.Opcode) ||
                         instruction.Opcode.StartsWith("TBufferStoreFormat", StringComparison.Ordinal);
                     if (instruction.Control is Gen5InterpolationControl interpolationControl)
@@ -158,6 +165,19 @@ public static partial class Gen5MslTranslator
                         instruction.Control is Gen5ExportControl { Target: >= 32 and < 64 } vertexExport)
                     {
                         _vertexOutputs.Add(vertexExport.Target - 32);
+                    }
+                }
+
+                // A FLAT access whose address can land in an aperture needs the
+                // storage that aperture names, even when no DS or SCRATCH opcode
+                // in the program asked for it.
+                foreach (var memory in _request.Memory.Entries)
+                {
+                    _usesLds |= memory.AddressSpace
+                        is FlatAddressSpace.Shared or FlatAddressSpace.SharedOrPrivate;
+                    if (memory.AddressSpace is FlatAddressSpace.Private or FlatAddressSpace.SharedOrPrivate)
+                    {
+                        _scratchDwordCount = Math.Max(_request.ScratchDwords, 1u);
                     }
                 }
 
@@ -209,7 +229,12 @@ public static partial class Gen5MslTranslator
                 _indent = _stage == Gen5MslStage.Mesh ? 3 : 2;
                 for (var index = 0; index < blocks.Count; index++)
                 {
-                    Line($"case {index}u:");
+                    // The block's guest PC in the case label is what makes a dumped
+                    // shader readable against its .gen5 listing; only the dump mode
+                    // pays for it, so the golden MSL stays byte-for-byte the shipped form.
+                    Line(Gen5MslDump.Enabled
+                        ? $"case {index}u: // pc=0x{blocks[index].StartPc:X4}"
+                        : $"case {index}u:");
                     Line("{");
                     _indent++;
                     if (!TryEmitBlock(blocks, index, out error))
@@ -419,7 +444,9 @@ public static partial class Gen5MslTranslator
                     var cntl = attribute < (uint)_pixelInputCntl.Length
                         ? _pixelInputCntl[attribute]
                         : attribute;
-                    var flat = (cntl & 0x400u) != 0 ? ", flat" : string.Empty;
+                    var flat = (cntl & 0x400u) != 0 || ReadsOnlyTheProvokingVertex(attribute)
+                        ? ", flat"
+                        : string.Empty;
                     source.AppendLine(
                         $"    float4 attr{attribute} [[user(locn{locations[index]}){flat}]];");
                 }
@@ -535,6 +562,15 @@ public static partial class Gen5MslTranslator
                     // because only write-then-read correctness is needed.
                     source.AppendLine($"    thread uint sharpemu_lds[{PrivateLdsDwordCount}] = {{}};");
                 }
+            }
+
+            if (_scratchDwordCount != 0)
+            {
+                // Guest scratch is per-invocation private storage, so it is a
+                // thread-local array like the SPIR-V translator's Private one.
+                // The dword index wraps into it, so an out-of-range guest
+                // address never escapes the allocation.
+                source.AppendLine($"    thread uint sharpemu_scratch[{_scratchDwordCount}] = {{}};");
             }
 
             if (_usesWaveScratch && _usesLds && _stage == Gen5MslStage.Compute)
@@ -821,6 +857,13 @@ public static partial class Gen5MslTranslator
             {
                 var instruction = instructions[index];
                 var isTerminator = index == block.EndIndex - 1;
+                // Comments cost nothing in the compiled library and are the only way
+                // to read a dumped MSL body against the guest program it came from.
+                if (Gen5MslDump.Enabled)
+                {
+                    Line($"// 0x{instruction.Pc:X4} {instruction.Opcode}");
+                }
+
                 if (instruction.Opcode == "SEndpgm")
                 {
                     Line("active = false;");
@@ -979,6 +1022,9 @@ public static partial class Gen5MslTranslator
                 case "SNop":
                 case "SSetregB32":
                 case "SWaitcnt":
+                // A dependency-counter wait: the emitted MSL has no hardware
+                // counters to wait on, so it is a hint like S_WAITCNT.
+                case "SWaitcntDepctr":
                 case "SInstPrefetch":
                 case "STtraceData":
                 // Wave scheduling priority hint; no effect on results.
@@ -1088,6 +1134,13 @@ public static partial class Gen5MslTranslator
             out string error)
         {
             error = string.Empty;
+            if (instruction.Opcode is "BufferWbinvl1" or "BufferWbinvl1Vol")
+            {
+                // The host storage path is already coherent; the guest instruction
+                // invalidates a cache level and does not access the buffer itself.
+                return true;
+            }
+
             if (control.Typed && instruction.Opcode.Contains("D16", StringComparison.Ordinal))
             {
                 error = $"unsupported buffer opcode {instruction.Opcode}";
@@ -1488,18 +1541,6 @@ public static partial class Gen5MslTranslator
                     StoreVector(destination, $"{inBounds} ? {result} : 0u");
                     return true;
                 }
-                case "DsAddU32":
-                {
-                    var address = Temp("uint", RawSource(instruction, 0));
-                    var value = Temp("uint", RawSource(instruction, 1));
-                    Line("if (exec)");
-                    Line("{");
-                    _indent++;
-                    Line($"atomic_fetch_add_explicit((threadgroup atomic_uint*)&sharpemu_lds[{LdsIndex(address, control.SingleOffsetBytes)}], {value}, memory_order_relaxed);");
-                    _indent--;
-                    Line("}");
-                    return true;
-                }
                 case "DsWriteB32":
                 case "DsWriteAddtidB32":
                 {
@@ -1563,6 +1604,25 @@ public static partial class Gen5MslTranslator
                         $"sharpemu_lds[{LdsIndex(address, control.SingleOffsetBytes)}]");
                     return true;
                 }
+                case "DsReadI8":
+                {
+                    if (instruction.Destinations.Count < 1 || instruction.Sources.Count < 1)
+                    {
+                        error = "missing LDS signed byte read operand";
+                        return false;
+                    }
+
+                    // The byte lives in the word the address selects; which byte
+                    // comes from the low two bits of the offset address.
+                    var address = Temp("uint", RawSource(instruction, 0));
+                    var byteAddress = Temp("uint", $"{address} + {control.SingleOffsetBytes}u");
+                    var word = Temp("uint", $"sharpemu_lds[{LdsIndex(address, control.SingleOffsetBytes)}]");
+                    var shift = Temp("uint", $"({byteAddress} & 3u) << 3u");
+                    StoreVector(
+                        instruction.Destinations[0].Value,
+                        $"(uint)(((int)(({word} >> {shift}) << 24u)) >> 24)");
+                    return true;
+                }
                 case "DsReadB64":
                 case "DsReadB96":
                 case "DsReadB128":
@@ -1606,7 +1666,14 @@ public static partial class Gen5MslTranslator
                         $"sharpemu_lds[{LdsIndex(address, EffectiveDsPairOffsetBytes(control.Offset1, st64))}]");
                     return true;
                 }
+                case "DsMskorB32":
+                    return TryEmitDataShareAtomic(instruction, control, out error);
                 default:
+                    if (Gen5ShaderTranslator.IsDataShareAtomic(instruction.Opcode))
+                    {
+                        return TryEmitDataShareAtomic(instruction, control, out error);
+                    }
+
                     error = $"unsupported LDS opcode {instruction.Opcode}";
                     return false;
             }
@@ -1614,6 +1681,190 @@ public static partial class Gen5MslTranslator
 
         private static uint EffectiveDsPairOffsetBytes(uint offset, bool st64) =>
             offset * (st64 ? 256u : sizeof(uint));
+
+        // LDS atomics. Compute and mesh stages back LDS with real threadgroup
+        // memory, so each guest atomic becomes a threadgroup atomic over the same
+        // word. Graphics stages model one logical lane over a private LDS array
+        // (the SPIR-V translator's Private-array fallback), where a plain
+        // read-modify-write already has the atomic's semantics.
+        private bool TryEmitDataShareAtomic(
+            Gen5ShaderInstruction instruction,
+            Gen5DataShareControl control,
+            out string error)
+        {
+            error = string.Empty;
+            var opcode = instruction.Opcode;
+            if (instruction.Sources.Count < 1)
+            {
+                error = $"missing LDS address operand for {opcode}";
+                return false;
+            }
+
+            if (opcode is "DsAddU64" or "DsOrB64")
+            {
+                return TryEmitDataSharePairAtomic(instruction, control, out error);
+            }
+
+            // DS_MSKOR and DS_MIN/MAX_F32 take a second data register; DS_CMPST
+            // reverses the buffer order and reads DATA0 as the comparator.
+            var takesThreeSources = opcode is "DsMskorB32" or "DsMinF32" or "DsMaxF32" or
+                "DsCmpstB32" or "DsCmpstRtnB32";
+            if (instruction.Sources.Count < (takesThreeSources ? 3 : 2))
+            {
+                error = $"missing LDS operands for {opcode}";
+                return false;
+            }
+
+            var name = opcode switch
+            {
+                "DsMskorB32" => "Mskor",
+                "DsMinF32" => "Fmin",
+                "DsMaxF32" => "Fmax",
+                _ => DataShareAtomicName(opcode),
+            };
+            if (name.Length == 0)
+            {
+                error = $"unsupported LDS opcode {opcode}";
+                return false;
+            }
+
+            var address = Temp("uint", RawSource(instruction, 0));
+            var index = Temp("uint", LdsIndex(address, control.SingleOffsetBytes));
+            var first = Temp("uint", RawSource(instruction, 1));
+            var second = takesThreeSources ? Temp("uint", RawSource(instruction, 2)) : "0u";
+            Line("if (exec)");
+            Line("{");
+            _indent++;
+            var original = EmitDataShareAtomicWord(name, index, first, second);
+            if (instruction.Destinations.Count > 0)
+            {
+                Line($"v[{instruction.Destinations[0].Value}] = {original};");
+            }
+
+            _indent--;
+            Line("}");
+            return true;
+        }
+
+        // Emits the atomic over one LDS word and names the pre-operation value.
+        // "first" is DATA0, "second" DATA1 for the three-operand forms.
+        private string EmitDataShareAtomicWord(string name, string index, string first, string second)
+        {
+            var word = $"sharpemu_lds[{index}]";
+            if (!HasRealWaveLanes)
+            {
+                // One logical lane over private scratch: read, compute, write back.
+                var observed = Temp("uint", word);
+                var replacement = name switch
+                {
+                    "Add" => $"{observed} + {first}",
+                    "Sub" => $"{observed} - {first}",
+                    "Inc" => $"{observed} + 1u",
+                    "Dec" => $"{observed} - 1u",
+                    "Smin" => $"(uint)min(as_type<int>({observed}), as_type<int>({first}))",
+                    "Smax" => $"(uint)max(as_type<int>({observed}), as_type<int>({first}))",
+                    "Umin" => $"min({observed}, {first})",
+                    "Umax" => $"max({observed}, {first})",
+                    "And" => $"{observed} & {first}",
+                    "Or" => $"{observed} | {first}",
+                    "Xor" => $"{observed} ^ {first}",
+                    "Swap" => first,
+                    "Cmpswap" => $"{observed} == {first} ? {second} : {observed}",
+                    "Mskor" => $"({observed} & ~{first}) | {second}",
+                    "Fmin" => $"as_type<float>({second}) < as_type<float>({observed}) ? {first} : {observed}",
+                    _ => $"as_type<float>({observed}) > as_type<float>({second}) ? {first} : {observed}",
+                };
+                Line($"{word} = {replacement};");
+                return observed;
+            }
+
+            var pointer = $"(threadgroup atomic_uint*)&{word}";
+            var direct = name switch
+            {
+                "Add" => $"atomic_fetch_add_explicit({pointer}, {first}, memory_order_relaxed)",
+                "Sub" => $"atomic_fetch_sub_explicit({pointer}, {first}, memory_order_relaxed)",
+                // DS_INC/DEC_U32 wrap, so they are an add and a subtract of one.
+                "Inc" => $"atomic_fetch_add_explicit({pointer}, 1u, memory_order_relaxed)",
+                "Dec" => $"atomic_fetch_sub_explicit({pointer}, 1u, memory_order_relaxed)",
+                "Umin" => $"atomic_fetch_min_explicit({pointer}, {first}, memory_order_relaxed)",
+                "Umax" => $"atomic_fetch_max_explicit({pointer}, {first}, memory_order_relaxed)",
+                "Smin" => $"(uint)atomic_fetch_min_explicit((threadgroup atomic_int*)&{word}, as_type<int>({first}), memory_order_relaxed)",
+                "Smax" => $"(uint)atomic_fetch_max_explicit((threadgroup atomic_int*)&{word}, as_type<int>({first}), memory_order_relaxed)",
+                "And" => $"atomic_fetch_and_explicit({pointer}, {first}, memory_order_relaxed)",
+                "Or" => $"atomic_fetch_or_explicit({pointer}, {first}, memory_order_relaxed)",
+                "Xor" => $"atomic_fetch_xor_explicit({pointer}, {first}, memory_order_relaxed)",
+                "Swap" => $"atomic_exchange_explicit({pointer}, {first}, memory_order_relaxed)",
+                _ => string.Empty,
+            };
+            if (direct.Length > 0)
+            {
+                return Temp("uint", direct);
+            }
+
+            // The remaining forms have no single Metal atomic: they read, derive
+            // the replacement from what they observed and swap it in, retrying
+            // until the word they computed from is still the one in memory.
+            var pointerName = Temp("threadgroup atomic_uint*", pointer);
+            var expected = Temp("uint", $"atomic_load_explicit({pointerName}, memory_order_relaxed)");
+            var next = name switch
+            {
+                "Cmpswap" => $"{expected} == {first} ? {second} : {expected}",
+                "Mskor" => $"({expected} & ~{first}) | {second}",
+                // GFX10's DS_MIN_F32 replaces memory when DATA1 < memory and
+                // DS_MAX_F32 when memory > DATA1 -- the same predicate, which is
+                // why both forms read DATA0 as the replacement and DATA1 as the
+                // compare operand instead of being symmetric.
+                "Fmin" => $"as_type<float>({second}) < as_type<float>({expected}) ? {first} : {expected}",
+                _ => $"as_type<float>({expected}) > as_type<float>({second}) ? {first} : {expected}",
+            };
+            Line($"while (!atomic_compare_exchange_weak_explicit({pointerName}, &{expected}, {next}, memory_order_relaxed, memory_order_relaxed))");
+            Line("{");
+            Line("}");
+            return expected;
+        }
+
+        // ds_add_u64 / ds_or_b64 over the uint LDS array: a dword pair, not one
+        // 64-bit atomic. OR is bitwise-independent so the halves are free of each
+        // other; ADD folds each lane's own carry out of the low dword into the
+        // high one, so the high dword still counts every wrap however the lanes
+        // interleave. The pair is not atomic against concurrent 64-bit use.
+        private bool TryEmitDataSharePairAtomic(
+            Gen5ShaderInstruction instruction,
+            Gen5DataShareControl control,
+            out string error)
+        {
+            error = string.Empty;
+            if (instruction.Sources.Count < 3)
+            {
+                error = "missing LDS 64-bit atomic source";
+                return false;
+            }
+
+            var address = Temp("uint", RawSource(instruction, 0));
+            var lowIndex = Temp("uint", LdsIndex(address, control.SingleOffsetBytes));
+            var highIndex = Temp("uint", LdsIndex(address, control.SingleOffsetBytes + sizeof(uint)));
+            var low = Temp("uint", RawSource(instruction, 1));
+            var high = Temp("uint", RawSource(instruction, 2));
+            Line("if (exec)");
+            Line("{");
+            _indent++;
+            if (instruction.Opcode == "DsOrB64")
+            {
+                EmitDataShareAtomicWord("Or", lowIndex, low, "0u");
+                EmitDataShareAtomicWord("Or", highIndex, high, "0u");
+            }
+            else
+            {
+                var originalLow = EmitDataShareAtomicWord("Add", lowIndex, low, "0u");
+                var carry = Temp("uint", $"({originalLow} + {low}) < {originalLow} ? 1u : 0u");
+                var highWithCarry = Temp("uint", $"{high} + {carry}");
+                EmitDataShareAtomicWord("Add", highIndex, highWithCarry, "0u");
+            }
+
+            _indent--;
+            Line("}");
+            return true;
+        }
 
         private bool TryEmitResolvedMemoryAccess(
             string opcode,
@@ -1626,37 +1877,64 @@ public static partial class Gen5MslTranslator
             out string error)
         {
             error = string.Empty;
-            if (opcode is "BufferAtomicSwap" or "GlobalAtomicAdd" or "BufferAtomicAdd" or
-                "GlobalAtomicUMax" or "BufferAtomicUMax" or "BufferAtomicUmax")
+            if (opcode.StartsWith("BufferAtomic", StringComparison.Ordinal) ||
+                opcode.StartsWith("GlobalAtomic", StringComparison.Ordinal))
             {
                 var atomic = opcode.StartsWith("BufferAtomic", StringComparison.Ordinal)
                     ? opcode["BufferAtomic".Length..] : opcode["GlobalAtomic".Length..];
-                // MUBUF SWAP reads VDATA and, with GLC, replaces that same
-                // register with the pre-operation word (RDNA2 sections 8.1/12.14).
-                if (!TryGetAtomicExpression(atomic, $"v[{sourceVectorRegister}]", "0u", out var build))
+                // The X2 forms run the operation over a dword pair. SWAP and OR
+                // are the only ones the guest shaders use and the only ones that
+                // survive the split: each dword is independent of the other.
+                var words = atomic.EndsWith("X2", StringComparison.Ordinal) ? 2u : 1u;
+                if (words == 2)
+                {
+                    atomic = atomic[..^2];
+                }
+
+                // MUBUF CMPSWAP reads the new value from VDATA and the comparator
+                // from the register after it; SWAP reads VDATA and, with GLC,
+                // replaces that same register with the pre-operation word
+                // (RDNA2 sections 8.1/12.14).
+                if (!TryGetAtomicExpression(atomic, $"v[{sourceVectorRegister}]", $"v[{sourceVectorRegister + 1}]", out _))
                 {
                     error = $"unsupported memory opcode {opcode}";
                     return false;
                 }
+
                 Line("if (exec)");
                 Line("{");
                 _indent++;
                 var bytes = BufferBytes(bindingIndex);
-                Line($"if (4u <= {bytes} && {byteAddress} <= {bytes} - 4u && ({byteAddress} & 3u) == 0u)");
+                var width = words * sizeof(uint);
+                Line($"if ({width}u <= {bytes} && {byteAddress} <= {bytes} - {width}u && ({byteAddress} & 3u) == 0u)");
                 Line("{");
                 _indent++;
-                var original = Temp(
-                    "uint",
-                    build($"b{bindingIndex} + ({byteAddress} >> 2)"));
-                if (glc)
+                for (uint word = 0; word < words; word++)
                 {
-                    Line($"v[{destinationVectorRegister}] = {original};");
+                    TryGetAtomicExpression(
+                        atomic,
+                        $"v[{sourceVectorRegister + word}]",
+                        $"v[{sourceVectorRegister + 1}]",
+                        out var build);
+                    var original = Temp(
+                        "uint",
+                        build($"b{bindingIndex} + ({byteAddress} >> 2) + {word}u"));
+                    if (glc)
+                    {
+                        Line($"v[{destinationVectorRegister + word}] = {original};");
+                    }
                 }
 
                 _indent--;
                 Line("}");
                 if (glc)
-                    Line($"else {{ v[{destinationVectorRegister}] = 0u; }}");
+                {
+                    var cleared = string.Concat(
+                        Enumerable.Range(0, (int)words)
+                            .Select(word => $" v[{destinationVectorRegister + word}] = 0u;"));
+                    Line($"else {{{cleared} }}");
+                }
+
                 _indent--;
                 Line("}");
                 return true;
