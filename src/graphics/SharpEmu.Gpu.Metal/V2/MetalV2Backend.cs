@@ -77,8 +77,14 @@ internal sealed class MetalV2Backend : IGuestGpuBackend
         }
 
         // The flip queues behind the graphics submissions before it.
-        return MetalV2Presenter.Host.CommandStream.TryEnqueueFlipPreparation(
-            videoOutHandle, displayBufferIndex, flipRequestId);
+        var stream = MetalV2Presenter.Host.CommandStream;
+        if (!stream.TryEnqueueFlipPreparation(videoOutHandle, displayBufferIndex, flipRequestId))
+        {
+            return false;
+        }
+
+        stream.Wake();
+        return true;
     }
 
     public void SubmitCommandStream(

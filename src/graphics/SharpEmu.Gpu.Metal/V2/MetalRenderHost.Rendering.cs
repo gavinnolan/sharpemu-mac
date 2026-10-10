@@ -364,29 +364,51 @@ internal sealed partial class MetalRenderHost
     {
         var width = Math.Max(_renderingState.Width, 1u);
         var height = Math.Max(_renderingState.Height, 1u);
-        var viewport = new MtlViewport
+        // Guests program a negative viewport height to get y-up rendering out of
+        // Vulkan's y-down NDC. Metal's NDC is already y-up and rejects a negative
+        // height, so the same on-screen mapping is the flipped positive rect.
+        var originY = (double)_dynamicState.ViewportY;
+        var viewportHeight = (double)_dynamicState.ViewportHeight;
+        if (viewportHeight < 0)
+        {
+            originY += viewportHeight;
+            viewportHeight = -viewportHeight;
+        }
+
+        MetalNative.SendVoidViewport(_renderEncoder, SelSetViewport, new MtlViewport
         {
             OriginX = _dynamicState.ViewportX,
-            OriginY = _dynamicState.ViewportY,
-            Width = _dynamicState.ViewportWidth,
-            Height = _dynamicState.ViewportHeight,
-            ZNear = _dynamicState.ViewportMinDepth,
-            ZFar = _dynamicState.ViewportMaxDepth,
-        };
-        MetalNative.SendVoidViewport(_renderEncoder, SelSetViewport, viewport);
+            OriginY = originY,
+            Width = Math.Max(_dynamicState.ViewportWidth, 0),
+            Height = viewportHeight,
+            ZNear = Math.Clamp(_dynamicState.ViewportMinDepth, 0f, 1f),
+            ZFar = Math.Clamp(_dynamicState.ViewportMaxDepth, 0f, 1f),
+        });
         var scissor = _dynamicState.Scissor;
         var left = (uint)Math.Clamp(scissor.Left, 0, (int)width);
         var top = (uint)Math.Clamp(scissor.Top, 0, (int)height);
         var right = (uint)Math.Clamp(scissor.Right, 0, (int)width);
         var bottom = (uint)Math.Clamp(scissor.Bottom, 0, (int)height);
-        // Metal refuses an empty scissor rectangle, so an empty one collapses to a
-        // single pixel the depth and color write masks then discard.
+        var scissorWidth = right > left ? right - left : 0;
+        var scissorHeight = bottom > top ? bottom - top : 0;
+        if (_boundGraphicsPipeline is { CullsEverything: true })
+        {
+            // Metal has no "cull both faces"; a one-pixel scissor is the cheapest
+            // equivalent, and the draw then covers nothing it would have kept.
+            left = 0;
+            top = 0;
+            scissorWidth = 1;
+            scissorHeight = 1;
+        }
+
+        // Metal refuses an empty scissor rectangle; an empty guest rectangle becomes
+        // one pixel at its corner, which the clamped viewport keeps out of the image.
         MetalNative.SendVoidScissor(_renderEncoder, SelSetScissorRect, new MtlScissorRect
         {
             X = left,
             Y = top,
-            Width = Math.Max(right > left ? right - left : 0, 1),
-            Height = Math.Max(bottom > top ? bottom - top : 0, 1),
+            Width = Math.Max(scissorWidth, 1),
+            Height = Math.Max(scissorHeight, 1),
         });
     }
 

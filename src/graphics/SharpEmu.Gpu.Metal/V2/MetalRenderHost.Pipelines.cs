@@ -28,6 +28,7 @@ internal sealed partial class MetalRenderHost
         public nint DepthClipMode;
         public nint FillMode;
         public MtlSize ThreadsPerThreadgroup;
+        public bool CullsEverything;
         public PipelineStaticParameters? StaticParameters;
         public bool HasDepth;
         public bool HasStencil;
@@ -69,19 +70,27 @@ internal sealed partial class MetalRenderHost
                 $"The MSL library has no entry point: entry={metal.Shader.EntryPoint} hash=0x{hash:X16}.");
         }
 
-        _modules.Add(new MetalShaderModule
+        int index;
+        // Module creation can reach the host from the shader cache's own threads,
+        // while RequireModule runs on the GPU worker; the list is shared state.
+        lock (_modules)
         {
-            Library = library,
-            Function = function,
-            Shader = metal.Shader,
-            Hash = hash,
-        });
+            _modules.Add(new MetalShaderModule
+            {
+                Library = library,
+                Function = function,
+                Shader = metal.Shader,
+                Hash = hash,
+            });
+            index = _modules.Count;
+        }
+
         Interlocked.Increment(ref _shaderCompilations);
         MetalV2Diagnostics.Trace(
             $"compiled module hash=0x{hash:X16} entry={metal.Shader.EntryPoint} " +
             $"ms={(System.Diagnostics.Stopwatch.GetTimestamp() - started) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1}");
         // Module zero never identifies a module, so the handle is the one-based index.
-        return (ulong)_modules.Count;
+        return (ulong)index;
     }
 
     private nint CompileLibrary(string source, ulong hash)
@@ -129,13 +138,16 @@ internal sealed partial class MetalRenderHost
 
     private MetalShaderModule RequireModule(in ShaderProgram program)
     {
-        var index = (int)program.Module - 1;
-        if (index < 0 || index >= _modules.Count)
+        lock (_modules)
         {
-            throw Fatal($"The shader module handle is unknown: module={program.Module} program={program.Id}.");
-        }
+            var index = (int)program.Module - 1;
+            if (index < 0 || index >= _modules.Count)
+            {
+                throw Fatal($"The shader module handle is unknown: module={program.Module} program={program.Id}.");
+            }
 
-        return _modules[index];
+            return _modules[index];
+        }
     }
 
     private MetalPipelineEntry RequirePipelineEntry(in PipelineHandle pipeline) =>
@@ -264,8 +276,9 @@ internal sealed partial class MetalRenderHost
             Graphics = true,
             PrimitiveType = MetalV2Formats.Topology(parameters.Topology),
             CullMode = parameters.CullFront && parameters.CullBack
-                ? Mtl.CullModeFront
+                ? Mtl.CullModeNone
                 : parameters.CullFront ? Mtl.CullModeFront : parameters.CullBack ? Mtl.CullModeBack : Mtl.CullModeNone,
+            CullsEverything = parameters.CullFront && parameters.CullBack,
             Winding = parameters.FrontFaceClockwise ? Mtl.WindingClockwise : Mtl.WindingCounterClockwise,
             DepthClipMode = parameters.DepthClipEnable ? Mtl.DepthClipModeClip : Mtl.DepthClipModeClamp,
             FillMode = 0,

@@ -125,6 +125,11 @@ internal sealed partial class MetalRenderHost
         _usedResourceCount = 0;
         Array.Clear(_stageArgumentValid);
         _hasPushData = false;
+        // The attachment subresources are recorded as the draw acquires them, which
+        // happens inside this preparation.
+        _attachmentCount = 0;
+        _depthAttachmentLevel = 0;
+        _depthAttachmentSlice = 0;
         return _preparation;
     }
 
