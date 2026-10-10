@@ -15,7 +15,13 @@ namespace SharpEmu.Gpu.Metal.Tests;
 // 4K colour detile reaches at around 60-90 GB/s on the same device.
 public sealed partial class MetalImageTransferTests
 {
-    private const int ThroughputRounds = 5;
+    // The best of this many submissions is the reported time. Five is enough to shake off
+    // a scheduling hiccup on an idle device; a device another process is also using needs
+    // more, which is what SHARPEMU_TEST_THROUGHPUT_ROUNDS is for.
+    private static readonly int ThroughputRounds =
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_TEST_THROUGHPUT_ROUNDS"), out var rounds) && rounds > 0
+            ? rounds
+            : 5;
 
     private static readonly nint SelCopyBufferToTexture = MetalNative.Selector(
         "copyFromBuffer:sourceOffset:sourceBytesPerRow:sourceBytesPerImage:sourceSize:" +
