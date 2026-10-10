@@ -4,6 +4,7 @@
 using System.Buffers.Binary;
 using System.Globalization;
 using System.IO.Compression;
+using SharpEmu.Libs.Gpu.Images;
 
 namespace SharpEmu.Gpu.Metal.V2;
 
@@ -64,7 +65,7 @@ internal sealed partial class MetalRenderHost
     /// </summary>
     private void NotePendingDump(nint texture, string label)
     {
-        if (texture == 0 || !_dumpThisFlip || _pendingDumps.Count >= 64)
+        if (texture == 0 || !_dumpThisFlip || _pendingDumps.Count >= 512)
         {
             return;
         }
@@ -73,6 +74,30 @@ internal sealed partial class MetalRenderHost
             ? string.Empty
             : "-" + _passLastProfile.Replace("stage=", string.Empty).Replace(" ", "-").Replace("=0x", "");
         _pendingDumps.Add((texture, $"{label}-draws{_passDrawCount}{shaders}"));
+    }
+
+    /// <summary>
+    /// A texture a stage is about to sample. The target a pass writes only says where the
+    /// wrongness ends up; the inputs say where it came from, and the label carries the
+    /// guest description — format, tile mode, extent, bytes — because a surface read with
+    /// the wrong element size or swizzle is wrong in exactly those fields.
+    /// </summary>
+    private void NotePendingInputDump(
+        nint texture, SharpEmu.Libs.Gpu.Buffers.ResourceSlotIdentifier identifier, int index, ImageRole role)
+    {
+        if (!DumpTargetsEnabled || !_dumpThisFlip || texture == 0 ||
+            !_imageCache.TryGetImage(identifier, out var image))
+        {
+            return;
+        }
+
+        ref readonly var description = ref image.Description;
+        var label =
+            $"in{index}-{(role == ImageRole.StorageImage ? "storage" : "sampled")}-{description.PixelFormat}" +
+            $"-{description.TileMode}-{description.Extent.Width}x{description.Extent.Height}" +
+            $"-L{description.Resources.Levels}A{description.Resources.Layers}" +
+            $"-bpb{description.BytesPerBlock}-pitch{description.Pitch}-bytes{description.Data.Size:X}";
+        NotePendingDump(texture, label);
     }
 
     /// <summary>

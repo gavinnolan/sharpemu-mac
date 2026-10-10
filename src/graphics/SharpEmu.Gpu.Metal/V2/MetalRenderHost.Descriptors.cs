@@ -361,6 +361,7 @@ internal sealed partial class MetalRenderHost
             }
 
             stage.Textures[index] = _imageCache.AcquireTextureView(identifier, request with { Role = role });
+            NotePendingInputDump(stage.Textures[index], identifier, index, role);
         }
 
         for (var index = 0; index < stage.BufferCount; index++)
