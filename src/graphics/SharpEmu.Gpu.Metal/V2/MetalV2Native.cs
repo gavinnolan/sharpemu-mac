@@ -230,6 +230,17 @@ internal static partial class MetalV2Native
         NsRange levels,
         NsRange slices);
 
+    // -newTextureViewWithPixelFormat:textureType:levels:slices:swizzle:
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial nint SendNewSwizzledTextureView(
+        nint receiver,
+        nint selector,
+        nuint pixelFormat,
+        nuint textureType,
+        NsRange levels,
+        NsRange slices,
+        MtlTextureSwizzleChannels swizzle);
+
     // -drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:
     //  instanceCount:baseVertex:baseInstance:
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]

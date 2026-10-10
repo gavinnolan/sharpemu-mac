@@ -93,6 +93,7 @@ internal sealed class MetalV2Backend : IGuestGpuBackend
         var stream = MetalV2Presenter.Host.CommandStream;
         if (!stream.TryEnqueueFlipPreparation(videoOutHandle, displayBufferIndex, flipRequestId))
         {
+            Interlocked.Increment(ref _flipsRefused);
             return false;
         }
 
@@ -147,6 +148,7 @@ internal sealed class MetalV2Backend : IGuestGpuBackend
     }
 
     private static long _flipSubmissions;
+    private static long _flipsRefused;
     private static long _doneCalls;
     private static long _doneTicks;
     private static long _doneStatsTimestamp;
@@ -175,9 +177,16 @@ internal sealed class MetalV2Backend : IGuestGpuBackend
         var culture = System.Globalization.CultureInfo.InvariantCulture;
         var waitMs = (waited * 1000.0 / System.Diagnostics.Stopwatch.Frequency).ToString("F1", culture);
         var flips = Interlocked.Exchange(ref _flipSubmissions, 0);
+        var refused = Interlocked.Exchange(ref _flipsRefused, 0);
+        var captured = Interlocked.Exchange(ref MetalRenderHost.FlipsCaptured, 0);
+        var noBuffer = Interlocked.Exchange(ref MetalRenderHost.FlipsWithoutBuffer, 0);
+        var discarded = Interlocked.Exchange(ref MetalRenderHost.FlipsDiscarded, 0);
+        var published = Interlocked.Exchange(ref MetalRenderHost.FlipsPublished, 0);
         Console.Error.WriteLine(
             $"[METAL-V2][GUEST] seconds={seconds.ToString("F2", culture)} submit_done={calls} " +
-            $"submit_done_wait_ms={waitMs} flip_submissions={flips}");
+            $"submit_done_wait_ms={waitMs} flip_submissions={flips} flips_refused={refused} " +
+            $"flips_captured={captured} flips_no_buffer={noBuffer} flips_discarded={discarded} " +
+            $"flips_published={published}");
     }
 
     public void RunAfterPendingCommandStreams(Action work)

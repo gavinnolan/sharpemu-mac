@@ -261,10 +261,20 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     // The display surface is a cached image like any other; the flip hands its
     // MTLTexture to the presenter, so no pixel ever travels through the CPU.
+    // Where a flip stops before it reaches the presenter. A title that shows a
+    // frame while guest_fps stays zero is presenting through the CPU path, and
+    // these say which step dropped the GPU one.
+    internal static long FlipsCaptured;
+    internal static long FlipsWithoutBuffer;
+    internal static long FlipsDiscarded;
+    internal static long FlipsPublished;
+
     private void CaptureFlip(int handle, int index, ulong requestId, int flipMode, long flipArg)
     {
+        Interlocked.Increment(ref FlipsCaptured);
         if (VideoOutBackendServices.ReleaseNoBufferFlip(index, requestId))
         {
+            Interlocked.Increment(ref FlipsWithoutBuffer);
             return;
         }
 
@@ -295,10 +305,12 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         FlushCommandBuffer();
         if (_flipTarget is null || texture == 0)
         {
+            Interlocked.Increment(ref FlipsDiscarded);
             VideoOutBackendServices.DiscardFlip(requestId);
             return;
         }
 
+        Interlocked.Increment(ref FlipsPublished);
         _flipTarget.PublishGuestFrame(
             texture,
             Math.Max(displayBuffer.Width, 1),
