@@ -732,12 +732,45 @@ median off 60 is upstream of the backend.
 
 ### Quake
 
-Menus render correctly at over 100 fps — logo, Options, Accessibility text, all of it.
-Gameplay could not be reached: a **`CONNECTION ERROR` modal for Bethesda.net** sits over
-the menu and comes back after being dismissed, so the main menu cannot be navigated to
-start a game. Two runs with different key paths (confirms, and escapes back to the root
-first) end on the same modal. That is a networking or HLE matter rather than a rendering
-one, and it is what to clear before Quake can be checked in game.
+Menus render correctly at over 100 fps — logo, Options, Accessibility text, all of it —
+and the attract-mode demo renders the Necropolis at 111 fps with no visible fault, so the
+renderer is not what is holding this title back.
+
+**The `CONNECTION ERROR` modal is not the blocker, and the earlier entry here was wrong.**
+It is what an offline console shows. The title's own log makes the chain explicit:
+`kexSocialSignInPSN::GetSignInToken` cannot get a PSN token, so it defers the Bethesda.net
+init, and at the menu `kexQuakeMenu::StartUserPlatformSignIn: Network not available` leads
+to `bnetUIHost::DoErrorDisplay: Invoked with ErrorNoInternetConnection`. `DoErrorDisplay`
+is invoked **once** per run; the modal then closes by itself. The offline answers it reads
+to decide this are the ones fpPS4 and shadPS4 give — `sceNpGetState` SIGNED_OUT (1),
+`sceNpGetNpReachabilityState` UNAVAILABLE (0), `sceNpCheckNpReachability`
+`SCE_NP_ERROR_SIGNED_OUT`, `sceNpHasSignedUp` false — and they agree with each other;
+`tests/SharpEmu.Libs.Tests/Np/NpOfflineStateTests.cs` pins them. No `sceNetCtl` and no
+`sceHttp` v1 call is made before the modal, so there is nothing there to make consistent.
+
+What actually blocks the title is **input on the first-boot Accessibility prompt**: the
+`Disable all settings` item never activates. The pad bits do reach guest memory —
+`SHARPEMU_LOG_PAD_READS=1` shows `buttons=0x00004000` (Cross) written at the moment of the
+press, inside 6.5 million reads in the first forty seconds — and the D-pad has been seen to
+move the menu cursor, but no Cross press advances the screen. Seven 0.4 s presses in one
+run and 2–3 s holds of Cross, Circle, Square, Triangle and Options in another all leave the
+prompt exactly as it was. A fifth run held D-pad Down for two seconds with pad logging on:
+`buttons=0x00000040` is written to `0x80226F400` on 64 consecutive reads across that hold,
+and the cursor still does not appear — so the bits are in guest memory at the moment the
+menu ignores them, and the menu, not the pad path, is what is deaf.
+
+The cursor appears in some runs and not others, which points at the error modal rather than
+the prompt: the likeliest reading is that the Bethesda modal keeps its input grab after it
+stops being drawn, and only a dismissal that lands at the right moment hands the menu back.
+Whoever picks this up should start there — the pad path is proven, so the question is what
+state `bnetUIHost` leaves the menu in after `DoErrorDisplay`, not whether input arrives.
+Note while reading KEX: its pad reader runs at about 200 kHz on its own thread while the
+menu runs at frame rate.
+
+A second, smaller finding from the same run: after the modal, the title retries
+`GetPublicProfile` for ever — 15069 failed transactions in 150 s, none of which reaches an
+HLE import, because its PSN web-API user context was never created. It costs CPU and is
+downstream of being offline.
 
 ## Process-level macOS tuning (separate workstream)
 

@@ -13,6 +13,20 @@ public static class NpManagerExports
     private const int NpTitleSecretSize = 128;
     private const int NpErrorInvalidArgument = unchecked((int)0x80550003);
     private const int NpErrorSignedOut = unchecked((int)0x80550006);
+
+    // SceNpState. The ordering matters and is easy to get backwards: SIGNED_OUT is 1 and
+    // SIGNED_IN is 2, so the value this emulator reports for a console with no PSN
+    // session is 1. fpPS4 and shadPS4 report the same, which is the combination titles
+    // are known to tolerate.
+    internal const uint NpStateUnknown = 0;
+    internal const uint NpStateSignedOut = 1;
+    internal const uint NpStateSignedIn = 2;
+
+    // SceNpReachabilityState: UNAVAILABLE means PSN cannot be used or cannot be
+    // confirmed, which is what an emulator with no PSN session reports.
+    internal const uint NpReachabilityUnavailable = 0;
+    internal const uint NpReachabilityAvailable = 1;
+    internal const uint NpReachabilityReachable = 2;
     private static int _nextNpRequestId;
     private static readonly ConcurrentDictionary<int, int> _requestResults = new();
 
@@ -196,8 +210,10 @@ public static class NpManagerExports
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
+        // No PSN session: signed out. Reported alongside sceNpGetNpReachabilityState
+        // UNAVAILABLE and sceNpCheckNpReachability SIGNED_OUT so the three agree.
         Span<byte> stateBytes = stackalloc byte[sizeof(uint)];
-        BinaryPrimitives.WriteUInt32LittleEndian(stateBytes, 1);
+        BinaryPrimitives.WriteUInt32LittleEndian(stateBytes, NpStateSignedOut);
         return ctx.Memory.TryWrite(stateAddress, stateBytes)
             ? ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK)
             : ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
@@ -217,11 +233,11 @@ public static class NpManagerExports
             return SetReturn(ctx, NpErrorInvalidArgument);
         }
 
-        // The offline profile exposed by sceNpGetState is signed in. Keep the
-        // account query consistent with that state: Unity's PSN integration
-        // treats SIGNED_OUT as an exceptional state and retries it every frame.
-        // A stable local-only id is sufficient for titles which only use the
-        // value as a profile key.
+        // A stable local-only id, which is what titles that use the account id purely
+        // as a save or profile key need. It is deliberately not gated on the signed-out
+        // state sceNpGetState reports: titles built on Unity's PSN integration poll the
+        // account id every frame and treat a failure as an exceptional state, so failing
+        // here costs far more than the inconsistency.
         Span<byte> accountId = stackalloc byte[sizeof(ulong)];
         BinaryPrimitives.WriteUInt64LittleEndian(accountId, 1);
         return ctx.Memory.TryWrite(accountIdAddress, accountId)
@@ -268,7 +284,7 @@ public static class NpManagerExports
         }
 
         Span<byte> state = stackalloc byte[sizeof(uint)];
-        BinaryPrimitives.WriteUInt32LittleEndian(state, 0); // Unavailable while offline.
+        BinaryPrimitives.WriteUInt32LittleEndian(state, NpReachabilityUnavailable);
         return ctx.Memory.TryWrite(stateAddress, state)
             ? SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_OK)
             : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);

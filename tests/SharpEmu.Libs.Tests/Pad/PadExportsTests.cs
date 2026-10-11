@@ -253,6 +253,39 @@ public sealed class PadExportsTests : IDisposable
         Assert.Equal(expected, PadExports.PadOpen(_ctx));
     }
 
+    // A controller reports at a fixed rate, so reads taken between two reports
+    // return the same sample and the same timestamp. Titles use that: Quake polls
+    // scePadReadState about two hundred thousand times a second and treats a
+    // changed timestamp as a new sample, so a timestamp taken from the clock on
+    // every call splits one button press across tens of thousands of "samples"
+    // and the press is gone before the frame that would act on it.
+    [NativeX64Fact]
+    public void ReadState_RepeatsOneSamplesTimestampUntilTheSampleChanges()
+    {
+        var handle = OpenPad(0x10000000, 0);
+        Assert.True(handle > 0);
+
+        var first = ReadStateTimestamp(handle);
+        var second = ReadStateTimestamp(handle);
+        Assert.Equal(first, second);
+
+        // Past the sampling interval the pad has reported again and the timestamp
+        // has to move, or no title could ever see a second press.
+        Thread.Sleep(5);
+        Assert.True(ReadStateTimestamp(handle) > first);
+    }
+
+    private ulong ReadStateTimestamp(int handle)
+    {
+        const ulong address = Base + 0x300;
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)handle);
+        _ctx[CpuRegister.Rsi] = address;
+        Assert.Equal(0, PadExports.PadReadState(_ctx));
+        var data = new byte[8];
+        Assert.True(_memory.TryRead(address + 0x50, data));
+        return BitConverter.ToUInt64(data);
+    }
+
     private int OpenPad(int userId, int type)
     {
         PadExports.PadInit(_ctx);
