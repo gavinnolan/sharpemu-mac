@@ -118,6 +118,28 @@ public static partial class Gen5MslTranslator
 
         // A translator-side probe, off unless someone is hunting a draw that covers
         // nothing; see the vertex epilogue.
+        // SHARPEMU_MSL_DEBUG_VS_WORD=<n>: publish buffer n's byte count and byte bias
+        // through the step-report word, which the host prints after every flush.
+        private static readonly int DebugVertexWord =
+            int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_MSL_DEBUG_VS_WORD"), out var watched) &&
+            watched >= 0
+                ? watched
+                : -1;
+
+        // Narrows both vertex probes to one program, so what they report is not mixed
+        // with every other vertex shader in the frame.
+        private static readonly ulong DebugVertexHash =
+            Environment.GetEnvironmentVariable("SHARPEMU_MSL_DEBUG_HASH") is { Length: > 0 } text &&
+            ulong.TryParse(
+                text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? text[2..] : text,
+                System.Globalization.NumberStyles.HexNumber,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var only)
+                ? only
+                : 0;
+
+        private bool DebugsThisProgram => DebugVertexHash == 0 || DebugVertexHash == _request.Hash;
+
         private static readonly bool DebugVertexPosition =
             Environment.GetEnvironmentVariable("SHARPEMU_MSL_DEBUG_VS_POSITION") == "1";
         private readonly uint _pixelInputEnable;
@@ -688,7 +710,7 @@ public static partial class Gen5MslTranslator
             }
             else if (_stage == Gen5MslStage.Vertex)
             {
-                if (DebugVertexPosition)
+                if (DebugVertexPosition && DebugsThisProgram)
                 {
                     // SHARPEMU_MSL_DEBUG_VS_POSITION=1 throws the program's own clip
                     // position away and puts every triple of vertices across the whole
@@ -698,6 +720,17 @@ public static partial class Gen5MslTranslator
                         "    sharpemu_out.sharpemu_position = float4(" +
                         "(float)(sharpemu_vertex_id % 3u) - 0.5f, " +
                         "(float)((sharpemu_vertex_id / 3u) % 3u) - 1.0f, 0.5f, 1.0f);");
+                }
+
+                if (DebugVertexWord >= 0 && DebugsThisProgram &&
+                    DebugVertexWord < _request.Resources.Info.Buffers.Count)
+                {
+                    source.AppendLine(
+                        $"    if ({ResourcesName}.{Gen5MslArgumentLayout.StepReportName} != nullptr) " +
+                        $"atomic_store_explicit({ResourcesName}.{Gen5MslArgumentLayout.StepReportName}, 0x40000000u | " +
+                        $"(bias[{DebugVertexWord}] << 20u) | " +
+                        $"({ResourcesName}.buffer_bytes[{DebugVertexWord}] & 0xFFFFFu) | " +
+                        $"(b{DebugVertexWord} == nullptr ? 0x80000000u : 0u), memory_order_relaxed);");
                 }
 
                 source.AppendLine("    return sharpemu_out;");
