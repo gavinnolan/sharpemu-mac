@@ -465,18 +465,19 @@ public sealed class MslTranslationTests
         Assert.DoesNotContain("== 14u ?", shader.Source, StringComparison.Ordinal);
         Assert.DoesNotContain("uint v[256]", shader.Source, StringComparison.Ordinal);
 
-        // With the analysis switched off the same program goes back to a run-time
-        // number resolved over the registers it touches.
+        // With the switch off the same program indexes the register file at run time,
+        // and the file has to stay an array for it.
         var request = Gen5ComputeFixtures.CreateComputeRequest(fixture);
         Assert.True(
             Gen5MslTranslator.TryCompileProgram(
                 request,
-                out var unbounded,
+                out var unresolved,
                 out var error,
                 new Gen5MslCodegenOptions(BoundedRelativeMoves: false)),
             error);
-        Assert.Contains("& 255u", unbounded.Source, StringComparison.Ordinal);
-        Assert.Contains("== 14u ? v14", unbounded.Source, StringComparison.Ordinal);
+        Assert.Contains("(12u + ", unresolved.Source, StringComparison.Ordinal);
+        Assert.Matches(@"v\[t\d+\]", unresolved.Source);
+        Assert.Contains("uint v[256] = {};", unresolved.Source, StringComparison.Ordinal);
     }
 
     [Theory]

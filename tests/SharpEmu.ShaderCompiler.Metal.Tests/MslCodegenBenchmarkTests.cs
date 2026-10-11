@@ -181,6 +181,67 @@ public sealed class MslCodegenBenchmarkTests(ITestOutputHelper output)
         StoreScalarResourceBase: 8,
         StoreBackingBytes: 16);
 
+    private static uint BufferLoadLow(uint byteOffset) => 0xE0300000u | byteOffset;
+
+    /// <summary>Buffer dword loads and the stores that follow them: the access shape a
+    /// game's shader spends its memory time on. Octopath's shaders make 1661 such loads,
+    /// and each one used to carry an alignment branch and a four-iteration byte loop,
+    /// while every store became four byte stores.</summary>
+    private static Gen5ComputeFixture BufferDwordChain()
+    {
+        const uint count = 24;
+        var words = new List<uint>();
+        for (var register = 1u; register <= count; register++)
+        {
+            words.Add(BufferLoadLow((register - 1) * 4));
+            words.Add(BufferStoreHigh(register));
+        }
+
+        words.Add(0xBF8C0000u); // s_waitcnt
+        for (var round = 0; round < 3; round++)
+        {
+            for (var register = 1u; register <= count; register++)
+            {
+                words.Add(VFmac(register, (register % count) + 1, ((register + 1) % count) + 1));
+            }
+        }
+
+        AppendStores(words, count);
+        return new Gen5ComputeFixture("buffer-dwords", [.. words], 8, (int)(count * 4) + 16);
+    }
+
+    /// <summary>A program that writes a run-time register number through M0. The register
+    /// file used to become an array for it, which puts every register access in
+    /// thread-private memory — the shape of Octopath's 44%-of-the-frame vertex shader.</summary>
+    private static Gen5ComputeFixture WaterfallRelativeMove()
+    {
+        const uint count = 24;
+        var words = new List<uint>();
+        for (var register = 1u; register <= count; register++)
+        {
+            words.Add(VMovLiteral(register));
+            words.Add(0x3F800000u + (register << 16));
+            words.Add(VFmac(register, 0, register));
+        }
+
+        // M0 from a lane value: nothing bounds it, so the access resolves over the
+        // registers the program touches.
+        words.Add(0x7E0E0500u);             // v_readfirstlane_b32 s7, v0
+        words.Add(0xBEFC0307u);             // s_mov_b32 m0, s7
+        for (var round = 0u; round < 4u; round++)
+        {
+            words.Add(0x7E00870Cu | ((round + 1u) << 17)); // v_movrels_b32 v(1+round), v12
+        }
+
+        for (var register = 1u; register <= count; register++)
+        {
+            words.Add(VFmac(register, (register % count) + 1, ((register + 1) % count) + 1));
+        }
+
+        AppendStores(words, count);
+        return new Gen5ComputeFixture("waterfall-movrel", [.. words], 8, (int)(count * 4) + 16);
+    }
+
     private static void AppendStores(List<uint> words, uint count)
     {
         for (var register = 1u; register <= count; register++)
@@ -194,10 +255,30 @@ public sealed class MslCodegenBenchmarkTests(ITestOutputHelper output)
 
     // ---- the measurement ----
 
+    /// <summary>Every form the translator can emit, timed against the one it emitted
+    /// before any of this work: the PC dispatcher over both register files at their
+    /// architectural size. The forms in between isolate one change each, so a column
+    /// that does not move says that change bought nothing for that shape.</summary>
     [Fact]
-    public void StructuredCodegenBeatsTheDispatcher()
+    public void EachCodegenChangeIsWorthItsKeep()
     {
-        var programs = new[] { AluChain(), LoopWithLiveState(), BranchChain() };
+        var programs = new[]
+        {
+            AluChain(), LoopWithLiveState(), BranchChain(), BufferDwordChain(), WaterfallRelativeMove(),
+        };
+        var forms = new (string Name, Gen5MslCodegenOptions Options)[]
+        {
+            ("dispatcher", new Gen5MslCodegenOptions(
+                StructuredControlFlow: false, RegisterAllocation: false,
+                ExecGuardElision: false, BoundedRelativeMoves: false, RawDwordAccess: false)),
+            ("structured", new Gen5MslCodegenOptions(
+                ExecGuardElision: false, BoundedRelativeMoves: false, RawDwordAccess: false)),
+            ("+exec", new Gen5MslCodegenOptions(
+                BoundedRelativeMoves: false, RawDwordAccess: false)),
+            ("+dwords", new Gen5MslCodegenOptions(BoundedRelativeMoves: false)),
+            ("+movrel", new Gen5MslCodegenOptions()),
+        };
+
         var device = Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") == "1";
         if (device)
         {
@@ -208,9 +289,9 @@ public sealed class MslCodegenBenchmarkTests(ITestOutputHelper output)
             output.WriteLine("No device gate: reporting codegen shape only.");
         }
 
-        // An emulator run elsewhere on the machine holds the same GPU, and the
-        // dispatcher form is the one that suffers for it, which would make the gate
-        // report a win that is really contention. Say so and measure without gating.
+        // An emulator run elsewhere on the machine holds the same GPU, and the slower
+        // forms are the ones that suffer for it, which would report a win that is really
+        // contention. Say so and measure without gating.
         var contended = System.Diagnostics.Process.GetProcessesByName("SharpEmu").Length != 0;
         if (contended)
         {
@@ -223,25 +304,43 @@ public sealed class MslCodegenBenchmarkTests(ITestOutputHelper output)
         var regressions = new List<string>();
         foreach (var program in programs)
         {
-            var dispatcher = Measure(program, structured: false, device);
-            var structured = Measure(program, structured: true, device);
-            Append(report, program.Name, "dispatcher", dispatcher, 1.0);
-            var speedup = dispatcher.GpuMilliseconds > 0 && structured.GpuMilliseconds > 0
-                ? dispatcher.GpuMilliseconds / structured.GpuMilliseconds
-                : 0.0;
-            Append(report, program.Name, "structured", structured, speedup);
+            var baseline = 0.0;
+            Measurement? first = null;
+            Measurement? last = null;
+            foreach (var (name, options) in forms)
+            {
+                var measurement = Measure(program, options, device);
+                if (first is null)
+                {
+                    first = measurement;
+                    baseline = measurement.GpuMilliseconds;
+                }
 
+                last = measurement;
+                var speedup = baseline > 0 && measurement.GpuMilliseconds > 0
+                    ? baseline / measurement.GpuMilliseconds
+                    : 0.0;
+                Append(report, program.Name, name, measurement, speedup);
+            }
+
+            report.AppendLine();
+            Assert.NotNull(first);
+            Assert.NotNull(last);
             Assert.True(
-                structured.RegisterDwords < dispatcher.RegisterDwords,
-                $"[{program.Name}] the structured form declares no fewer register dwords");
-            Assert.False(structured.UsesDispatcher, $"[{program.Name}] still emits a PC dispatcher");
+                last.Value.RegisterDwords < first.Value.RegisterDwords,
+                $"[{program.Name}] the final form declares no fewer register dwords");
+            Assert.False(last.Value.UsesDispatcher, $"[{program.Name}] still emits a PC dispatcher");
+
             // The report is the point; the gate only catches a collapse, and only when
             // this process has the GPU to itself. A program with no control flow is
             // expected to come out even anyway, because the Metal compiler already
             // promotes the register-file array when nothing indexes it dynamically.
-            if (device && !contended && speedup != 0.0 && speedup < 0.6)
+            var total = baseline > 0 && last.Value.GpuMilliseconds > 0
+                ? baseline / last.Value.GpuMilliseconds
+                : 0.0;
+            if (device && !contended && total != 0.0 && total < 0.6)
             {
-                regressions.Add($"{program.Name} {speedup:F2}x");
+                regressions.Add($"{program.Name} {total:F2}x");
             }
         }
 
@@ -302,6 +401,8 @@ public sealed class MslCodegenBenchmarkTests(ITestOutputHelper output)
             LoopWithLiveState(),
             BranchChain(),
             RelativeMove(),
+            BufferDwordChain(),
+            WaterfallRelativeMove(),
         };
 
         foreach (var program in programs)
@@ -388,13 +489,13 @@ public sealed class MslCodegenBenchmarkTests(ITestOutputHelper output)
         uint MaxThreadsPerThreadgroup,
         double GpuMilliseconds);
 
-    private static Measurement Measure(Gen5ComputeFixture program, bool structured, bool device)
+    private static Measurement Measure(
+        Gen5ComputeFixture program,
+        Gen5MslCodegenOptions options,
+        bool device)
     {
-        // Options travel with the compile, so the two forms can be built in the same
+        // Options travel with the compile, so every form can be built in the same
         // process without disturbing anything else compiling alongside.
-        var options = new Gen5MslCodegenOptions(
-            StructuredControlFlow: structured,
-            RegisterAllocation: structured);
         var request = Gen5ComputeFixtures.CreateComputeRequest(program);
         Assert.True(
             Gen5MslTranslator.TryCompileProgram(request, out var shader, out var compileError, options),

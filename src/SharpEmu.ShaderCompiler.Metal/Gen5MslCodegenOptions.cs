@@ -20,20 +20,27 @@ namespace SharpEmu.ShaderCompiler.Metal;
 /// on.</param>
 /// <param name="ExecGuardElision">Drop the per-lane EXEC guard where the program proves
 /// every lane is set. <c>SHARPEMU_MSL_EXECGUARD=0</c> keeps every guard.</param>
-/// <param name="BoundedRelativeMoves">Resolve V_MOVREL* through the registers its M0
-/// values can actually reach, so the register file needs no run-time index.
-/// <c>SHARPEMU_MSL_MOVREL=0</c> indexes the file instead.</param>
+/// <param name="BoundedRelativeMoves">Resolve V_MOVREL*'s register — from M0's known
+/// values where straight-line code produces them, and otherwise over the registers the
+/// program touches — so the register file needs no run-time index and can be scalarized.
+/// <c>SHARPEMU_MSL_MOVREL=0</c> indexes the file instead, which keeps it an array.</param>
+/// <param name="RawDwordAccess">Read and write a raw buffer dword with one indexed
+/// access, which is how the GCN ISA addresses it and what the SPIR-V backend emits,
+/// instead of assembling it from bytes. <c>SHARPEMU_MSL_DWORDACCESS=0</c> goes back to
+/// the byte path.</param>
 public sealed record Gen5MslCodegenOptions(
     bool StructuredControlFlow = true,
     bool RegisterAllocation = true,
     bool ForceRegisterInitialization = false,
     bool ExecGuardElision = true,
-    bool BoundedRelativeMoves = true)
+    bool BoundedRelativeMoves = true,
+    bool RawDwordAccess = true)
 {
     public static Gen5MslCodegenOptions FromEnvironment { get; } = new(
         StructuredControlFlow: Environment.GetEnvironmentVariable("SHARPEMU_MSL_STRUCTURED") != "0",
         RegisterAllocation: Environment.GetEnvironmentVariable("SHARPEMU_MSL_REGALLOC") != "0",
         ForceRegisterInitialization: Environment.GetEnvironmentVariable("SHARPEMU_MSL_REGINIT") == "1",
         ExecGuardElision: Environment.GetEnvironmentVariable("SHARPEMU_MSL_EXECGUARD") != "0",
-        BoundedRelativeMoves: Environment.GetEnvironmentVariable("SHARPEMU_MSL_MOVREL") != "0");
+        BoundedRelativeMoves: Environment.GetEnvironmentVariable("SHARPEMU_MSL_MOVREL") != "0",
+        RawDwordAccess: Environment.GetEnvironmentVariable("SHARPEMU_MSL_DWORDACCESS") != "0");
 }

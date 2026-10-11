@@ -630,7 +630,9 @@ public static partial class Gen5MslTranslator
                 var sourceIndex = Temp(
                     "uint",
                     $"({source.Value}u + {sourceOffset}) & {VectorRegisterFileCount - 1}u");
-                value = Temp("uint", $"{DynamicVectorRead}({sourceIndex})");
+                value = Temp("uint", _options.BoundedRelativeMoves
+                    ? $"{DynamicVectorRead}({sourceIndex})"
+                    : $"v[{sourceIndex}]");
             }
 
             var destination = instruction.Destinations[0].Value;
@@ -643,7 +645,9 @@ public static partial class Gen5MslTranslator
             var target = Temp(
                 "uint",
                 $"({destination}u + {destinationOffset}) & {VectorRegisterFileCount - 1}u");
-            Line(ExecGuarded($"{DynamicVectorWrite}({target}, {value});"));
+            Line(ExecGuarded(_options.BoundedRelativeMoves
+                ? $"{DynamicVectorWrite}({target}, {value});"
+                : $"v[{target}] = {value};"));
             return true;
         }
 

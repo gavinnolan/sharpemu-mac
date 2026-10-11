@@ -1439,7 +1439,10 @@ public static partial class Gen5MslTranslator
                 {
                     Gfx10UnifiedFormat.TryGetComponentLayout(dataFormat, component, out var byteOffset, out _, out _);
                     var address = byteOffset == 0 ? byteAddress : $"({byteAddress} + {byteOffset}u)";
-                    Line($"sharpemu_store_dword(b{bindingIndex}, {BufferBytes(bindingIndex)}, {address}, v[{control.VectorData + component}]);");
+                    Line(StoreDwordStatement(
+                        bindingIndex,
+                        address,
+                        $"v[{control.VectorData + component}]"));
                 }
             }
             else
@@ -2005,7 +2008,10 @@ public static partial class Gen5MslTranslator
                 {
                     for (uint index = 0; index < dwordCount; index++)
                     {
-                        Line($"sharpemu_store_dword(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress} + {index * 4}u, v[{sourceVectorRegister + index}]);");
+                        Line(StoreDwordStatement(
+                            bindingIndex,
+                            $"{byteAddress} + {index * 4}u",
+                            $"v[{sourceVectorRegister + index}]"));
                     }
                 }
 
@@ -2100,7 +2106,14 @@ public static partial class Gen5MslTranslator
         /// each of them, which Octopath Traveler II's shaders do 1661 times, 65 of them in
         /// the dispatch that spends 19% of the frame's GPU time.</summary>
         private string LoadDword(int bindingIndex, string byteAddress) =>
-            $"sharpemu_load_dword(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress})";
+            _options.RawDwordAccess
+                ? $"sharpemu_load_dword(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress})"
+                : LoadWord(bindingIndex, byteAddress);
+
+        private string StoreDwordStatement(int bindingIndex, string byteAddress, string value) =>
+            _options.RawDwordAccess
+                ? $"sharpemu_store_dword(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress}, {value});"
+                : $"sharpemu_store_bytes(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress}, {value}, 4u);";
 
         private string LoadWord(int bindingIndex, string byteAddress) =>
             $"sharpemu_load_word(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress})";
