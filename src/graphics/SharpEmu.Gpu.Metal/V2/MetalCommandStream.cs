@@ -155,9 +155,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         GlobalDataShare.ReadWords(_guestMemory.GdsWords(), destination, wordOffset, wordCount);
     }
 
-    // The interpreter writes the label itself; only the interrupt and the flip
-    // completion of a submission wait for the GPU, which is what the shared event
-    // orders. A completion is therefore always paired with a flush.
+    // A label is published after the work it reports, as the hardware publishes it. The
+    // GPU writes it itself where the packet sits in the stream, so no completion and no
+    // flush are needed for the bytes; only an interrupt or a flip, which the host has to
+    // deliver, still waits for the shared event — and that completion then also carries
+    // the label whenever the GPU could not write it.
     public void RecordEndOfPipe(in EndOfPipeWrite write)
     {
         _endOfPipeRecords++;
@@ -165,6 +167,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         var eventId = write.EventId;
         var contextId = write.ContextId;
         var requestId = write.FlipRequestId;
+        var encoded = TryEncodeEndOfPipeLabel(in write);
         switch (write.Kind)
         {
             case EndOfPipeWriteKind.InterruptOnly:
@@ -174,7 +177,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             case EndOfPipeWriteKind.InterruptWriteBack64:
                 QueueCompletion(() =>
                 {
-                    PublishEndOfPipeLabel(in label);
+                    if (!encoded) PublishEndOfPipeLabel(in label);
                     TriggerInterrupt(eventId, contextId);
                 });
                 break;
@@ -182,7 +185,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             case EndOfPipeWriteKind.FlipWithWrite32:
                 QueueCompletion(() =>
                 {
-                    PublishEndOfPipeLabel(in label);
+                    if (!encoded) PublishEndOfPipeLabel(in label);
                     VideoOutBackendServices.CompleteFlip(requestId);
                     MetalV2Presenter.SignalFlipPacer();
                 });
@@ -190,7 +193,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             case EndOfPipeWriteKind.FlipWithInterruptWriteBack32:
                 QueueCompletion(() =>
                 {
-                    PublishEndOfPipeLabel(in label);
+                    if (!encoded) PublishEndOfPipeLabel(in label);
                     VideoOutBackendServices.CompleteFlip(requestId);
                     MetalV2Presenter.SignalFlipPacer();
                     TriggerInterrupt(eventId, 0);
@@ -200,9 +203,9 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 // A plain label or clock write has no interrupt behind it, but it is
                 // still an end-of-pipe write: the guest polls it to learn that the work
                 // recorded before it has finished, and reuses what that work reads once
-                // it sees it. Only deferred when asked: a completion costs a flush, and
-                // a title that writes a label per pass pays one per pass.
-                if (DeferEndOfPipeLabels)
+                // it sees it. The GPU writing it needs nothing further; a label outside
+                // every window has to be published by a completion, which costs a flush.
+                if (!encoded)
                 {
                     QueueCompletion(() => PublishEndOfPipeLabel(in label));
                 }
@@ -210,6 +213,146 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 break;
         }
     }
+
+    /// <summary>
+    /// Encodes a label's bytes into the command buffer where its packet sits, so the GPU
+    /// writes the guest window itself once it reaches them.
+    /// </summary>
+    /// <remarks>
+    /// This is what the label means: the work recorded before it has finished. Handing the
+    /// bytes to a completion says the same thing but costs a command buffer flush per label
+    /// and then waits for the host to be told the submission finished, which on a title that
+    /// writes a label per render pass was measured at 24 fps down to 9.5. A copy from a
+    /// staging ring into the window has neither cost: blit encoders run in the order they
+    /// were created, after the encoders of the work the label reports, which is the same
+    /// ordering the untracked windows already rely on everywhere else on this host.
+    ///
+    /// The bytes land when the command buffer is committed, so the label is recorded as GPU
+    /// work: a command processor read of those bytes waits for the submission, and the
+    /// worker commits what it has before it parks (<see cref="FlushPendingLabelWrites"/>).
+    /// </remarks>
+    private bool TryEncodeEndOfPipeLabel(in EndOfPipeWrite write)
+    {
+        var bytes = EndOfPipeLabelBytes(write.Kind);
+        if (bytes == 0)
+        {
+            // A GDS write was copied where the data share lives, and an interrupt or a
+            // bare flip carries no payload at all.
+            return false;
+        }
+
+        if (write.Destination == 0 || (ulong)bytes > ulong.MaxValue - write.Destination)
+        {
+            throw Fatal(
+                $"An end-of-pipe label has an invalid range: address=0x{write.Destination:X16} bytes={bytes}.");
+        }
+
+        if (!GpuTimedLabels)
+        {
+            return false;
+        }
+
+        var destination = _guestMemory.ResolveWritable(write.Destination, (ulong)bytes);
+        if (!destination.IsValid)
+        {
+            Interlocked.Increment(ref _labelsWithoutWindow);
+            return false;
+        }
+
+        var staging = _guestMemory.Allocate((ulong)bytes, sizeof(ulong), out var payload);
+        if (!staging.IsValid)
+        {
+            return false;
+        }
+
+        Span<byte> value = stackalloc byte[sizeof(ulong)];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(value, write.Value);
+        value[..bytes].CopyTo(payload);
+
+        var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.EndOfPipeLabel);
+        var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
+        if (encoder == 0)
+        {
+            throw Fatal("A Metal blit encoder could not be created for an end-of-pipe label.");
+        }
+
+        try
+        {
+            MetalNative.SendCopyBuffer(
+                encoder,
+                SelCopyBuffer,
+                staging.Buffer,
+                (nuint)staging.Offset,
+                destination.Buffer,
+                (nuint)destination.Offset,
+                (nuint)bytes);
+        }
+        finally
+        {
+            MetalNative.SendVoid(encoder, SelEndEncoding);
+        }
+
+        // Beginning the transfer marked this submission as carrying GPU work, which is what
+        // keeps a completion queued behind it — the interrupt of this same packet — from
+        // running inline ahead of the bytes.
+        context.ProfileEncoded($"eop label bytes={bytes}");
+        // A command processor polling this label suspends until something says the bytes
+        // changed, and the only thing that knows is the completion of this submission. The
+        // worker reports completions when it next flushes, which is never while every head
+        // is suspended, so one wake per submission is queued here: it costs no flush, and
+        // without it a poll waits out the blocked-retry timer instead of a millisecond.
+        var serial = context.SubmissionSerial;
+        if (_labelWakeSerial != serial)
+        {
+            _labelWakeSerial = serial;
+            _completions.Enqueue(serial, () => _commandStream?.NotifyCompletedGpuTick(serial));
+        }
+
+        NoteGuestMemoryWrite(write.Destination, (ulong)bytes, MetalGpuWriteOrigin.EndOfPipeLabel);
+        _pendingLabelWrites++;
+        Interlocked.Increment(ref _gpuTimedLabels);
+        return true;
+    }
+
+    private static int EndOfPipeLabelBytes(EndOfPipeWriteKind kind) => kind switch
+    {
+        EndOfPipeWriteKind.Write32 or EndOfPipeWriteKind.WriteBack32 or
+        EndOfPipeWriteKind.Interrupt32 or EndOfPipeWriteKind.InterruptWriteBack32 or
+        EndOfPipeWriteKind.FlipWithWrite32 or EndOfPipeWriteKind.FlipWithInterruptWriteBack32 => 4,
+        EndOfPipeWriteKind.Write64 or EndOfPipeWriteKind.WriteBack64 or
+        EndOfPipeWriteKind.Interrupt64 or EndOfPipeWriteKind.InterruptWriteBack64 or
+        EndOfPipeWriteKind.ClockWrite or EndOfPipeWriteKind.ClockWriteBack => 8,
+        _ => 0,
+    };
+
+    /// <summary>
+    /// Commits a command buffer that carries label bytes nothing else will flush.
+    /// </summary>
+    /// <remarks>
+    /// A label written by the GPU lands when its command buffer is committed, and the guest
+    /// thread polling it is not something this host can see. The worker calls this when it
+    /// runs out of runnable work: a guest waiting on a label is exactly the case where the
+    /// stream stops advancing, so one commit per park publishes every label at once instead
+    /// of one commit per label.
+    /// </remarks>
+    private void FlushPendingLabelWrites()
+    {
+        if (_pendingLabelWrites == 0)
+        {
+            return;
+        }
+
+        FlushCommandBuffer();
+    }
+
+    private ulong _pendingLabelWrites;
+    private ulong _labelWakeSerial;
+    private long _gpuTimedLabels;
+    private long _labelsWithoutWindow;
+
+    /// <summary>Labels the GPU wrote itself, and labels with no window to write.</summary>
+    public (long GpuTimed, long WithoutWindow) TakeLabelCounters() =>
+        (Interlocked.Exchange(ref _gpuTimedLabels, 0), Interlocked.Exchange(ref _labelsWithoutWindow, 0));
 
     /// <summary>
     /// Writes an end-of-pipe label's bytes into guest memory. The interpreter leaves
@@ -222,24 +365,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// </summary>
     private void PublishEndOfPipeLabel(in EndOfPipeWrite write)
     {
-        if (!DeferEndOfPipeLabels)
-        {
-            // The interpreter published the bytes as it parsed the packet.
-            return;
-        }
-
-        var bytes = write.Kind switch
-        {
-            EndOfPipeWriteKind.Write32 or EndOfPipeWriteKind.WriteBack32 or
-            EndOfPipeWriteKind.Interrupt32 or EndOfPipeWriteKind.InterruptWriteBack32 or
-            EndOfPipeWriteKind.FlipWithWrite32 or EndOfPipeWriteKind.FlipWithInterruptWriteBack32 => 4,
-            EndOfPipeWriteKind.Write64 or EndOfPipeWriteKind.WriteBack64 or
-            EndOfPipeWriteKind.Interrupt64 or EndOfPipeWriteKind.InterruptWriteBack64 or
-            EndOfPipeWriteKind.ClockWrite or EndOfPipeWriteKind.ClockWriteBack => 8,
-            // A GDS write was copied where the data share lives, and an interrupt or a
-            // bare flip carries no payload at all.
-            _ => 0,
-        };
+        var bytes = EndOfPipeLabelBytes(write.Kind);
         if (bytes == 0)
         {
             return;
@@ -261,21 +387,22 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         }
     }
 
-    // SHARPEMU_METAL_V2_DEFER_EOP=1 hands every end-of-pipe label's bytes to the
-    // completion that reports its work, instead of letting the interpreter publish
-    // them as it parses the packet. That is what the hardware does and what V1 does,
-    // and it is what Superliminal's level needs - but a completion costs a command
-    // buffer flush, and a title that writes a label per render pass then pays one per
-    // pass: measured at 0.5 fps against 24. Off until the completion for a label that
-    // nothing has been recorded after can ride the previous submission instead.
-    private static readonly bool DeferEndOfPipeLabels =
-        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEFER_EOP") == "1";
+    // SHARPEMU_METAL_V2_GPU_LABELS=0 goes back to publishing every label from the
+    // completion that reports its work. That is correct and it is what V1 does, but a
+    // completion costs a command buffer flush and then waits to be told the submission
+    // finished, so a title that writes a label per render pass pays both per pass:
+    // measured at 9.5 fps against 24. The GPU writing the label where its packet sits
+    // says the same thing and costs neither, which is why it is the default.
+    private static readonly bool GpuTimedLabels =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_GPU_LABELS") != "0";
 
     /// <summary>
-    /// The interpreter must not publish label bytes itself when this host defers them;
-    /// see <see cref="PublishEndOfPipeLabel"/>.
+    /// The interpreter must never publish label bytes itself on this host: it parses a
+    /// packet long before the GPU runs the work the label reports, and a guest told that
+    /// work has finished reuses the memory it still has to read. See
+    /// <see cref="TryEncodeEndOfPipeLabel"/> and <see cref="PublishEndOfPipeLabel"/>.
     /// </summary>
-    public bool DefersEndOfPipeLabels => DeferEndOfPipeLabels;
+    public bool DefersEndOfPipeLabels => true;
 
     // The completion runs once the GPU finishes everything recorded so far, so the
     // command buffer is committed right away instead of waiting for the next flush.
@@ -617,14 +744,17 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             switch (result)
             {
                 case SliceResult.NoWork:
+                    FlushPendingLabelWrites();
                     return;
                 case SliceResult.AllBlocked:
                     RetryBlockedIfDue();
+                    FlushPendingLabelWrites();
                     return;
                 case SliceResult.BlockedWithoutProgress:
                     if (!stream.HasUnblockedPending)
                     {
                         RetryBlockedIfDue();
+                        FlushPendingLabelWrites();
                         return;
                     }
 

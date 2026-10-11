@@ -81,7 +81,10 @@ internal sealed partial class MetalRenderHost
     private long _passEndCompute;
     private long _targetlessPasses;
 
-    private readonly long[] _transferCauses = new long[7];
+    // Sized from the enum: a hard-coded length indexed by a cause is one new cause away
+    // from throwing on the first transfer of that kind.
+    private readonly long[] _transferCauses =
+        new long[Enum.GetValues<MetalTransferCause>().Length];
 
     /// <summary>Transfers by cause since the last call; every one ended the open pass.</summary>
     internal string TakeTransferCauses()

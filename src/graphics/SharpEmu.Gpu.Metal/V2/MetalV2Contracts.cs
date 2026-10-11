@@ -51,6 +51,7 @@ internal enum MetalTransferCause
     GuestFill,
     GuestCopy,
     ImageCopy,
+    EndOfPipeLabel,
 }
 
 internal interface IMetalImageTransfer
