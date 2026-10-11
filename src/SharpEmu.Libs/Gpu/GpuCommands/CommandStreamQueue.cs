@@ -578,6 +578,18 @@ public sealed class CommandStreamQueue
         }
     }
 
+    /// <summary>
+    /// A pipeline the backend was compiling is ready, so the draws and dispatches that
+    /// suspended on one can run. They re-check their own pipeline when they resume.
+    /// </summary>
+    public void NotifyPipelineReady()
+    {
+        lock (_gate)
+        {
+            WakeMatchingLocked(wait => wait.Kind is CommandWaitKind.Pipeline or CommandWaitKind.Unknown);
+        }
+    }
+
     /// <summary>The presenter freed a flip slot.</summary>
     public void NotifyFlipSlotAvailable()
     {
