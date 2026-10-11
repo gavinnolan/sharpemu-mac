@@ -69,6 +69,11 @@ public static class PadExports
     [ThreadStatic]
     private static PadState _cachedInputState;
 
+    // Microsecond timestamp of the sample held in _cachedInputState, reported to
+    // the guest unchanged for as long as that sample is the current one.
+    [ThreadStatic]
+    private static ulong _cachedSampleTimestampMicroseconds;
+
     private static bool _initialized;
     private static readonly bool LogPadState =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_PAD_STATE"), "1", StringComparison.Ordinal);
@@ -830,13 +835,17 @@ public static class PadExports
 
         WriteTouchData(data, input.Touch);
         data[0x4C] = 1;
-        var timestampTicks = Stopwatch.GetTimestamp();
-        var timestampMicroseconds =
-            ((ulong)(timestampTicks / Stopwatch.Frequency) * 1_000_000UL) +
-            ((ulong)(timestampTicks % Stopwatch.Frequency) * 1_000_000UL / (ulong)Stopwatch.Frequency);
+        // The timestamp belongs to the sample, not to the call. A controller
+        // reports at a fixed rate and every read between two reports returns the
+        // same data with the same timestamp; a title that detects a new press by
+        // comparing timestamps relies on that. Stamping each call with the clock
+        // turns one physical press into as many distinct "samples" as the title
+        // happens to read - Quake polls scePadReadState about two hundred thousand
+        // times a second - and an edge found in one of them is gone before the
+        // frame that would act on it.
         BinaryPrimitives.WriteUInt64LittleEndian(
             data[0x50..],
-            timestampMicroseconds);
+            _cachedSampleTimestampMicroseconds);
         data[0x68] = 1;
 
         var written = ctx.Memory.TryWrite(dataAddress, data);
@@ -922,6 +931,9 @@ public static class PadExports
             Motion: motion,
             Touch: touch);
         _lastInputSampleTicks = now;
+        _cachedSampleTimestampMicroseconds =
+            ((ulong)(now / Stopwatch.Frequency) * 1_000_000UL) +
+            ((ulong)(now % Stopwatch.Frequency) * 1_000_000UL / (ulong)Stopwatch.Frequency);
         return _cachedInputState;
     }
 
