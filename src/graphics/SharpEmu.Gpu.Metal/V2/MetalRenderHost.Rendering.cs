@@ -81,6 +81,26 @@ internal sealed partial class MetalRenderHost
     private long _passEndCompute;
     private long _targetlessPasses;
 
+    private readonly long[] _transferCauses = new long[7];
+
+    /// <summary>Transfers by cause since the last call; every one ended the open pass.</summary>
+    internal string TakeTransferCauses()
+    {
+        var builder = new System.Text.StringBuilder();
+        for (var cause = 0; cause < _transferCauses.Length; cause++)
+        {
+            var count = _transferCauses[cause];
+            _transferCauses[cause] = 0;
+            if (count != 0)
+            {
+                builder.Append(builder.Length == 0 ? string.Empty : " ")
+                    .Append((MetalTransferCause)cause).Append('=').Append(count);
+            }
+        }
+
+        return builder.Length == 0 ? "none" : builder.ToString();
+    }
+
     internal (long Clear, long Target, long Transfer, long Compute, long Targetless) TakePassBreakdown()
     {
         var clear = Interlocked.Exchange(ref _passEndClear, 0);
@@ -395,6 +415,13 @@ internal sealed partial class MetalRenderHost
         {
             NotePendingDump((nint)ending.ColorAttachments[index].View.Handle, $"pass{index}");
         }
+
+        // The depth the pass leaves behind says whether its geometry rasterised at all,
+        // which a colour target that never changes cannot.
+        if (ending.DepthStencilAttachment.HasDepth)
+        {
+            NotePendingDump((nint)ending.DepthStencilAttachment.View.Handle, "passdepth");
+        }
     }
 
     private void EndComputeEncoder()
@@ -496,7 +523,8 @@ internal sealed partial class MetalRenderHost
         if (!ReferenceEquals(_boundGraphicsPipeline, entry))
         {
             MetalNative.SendVoid(_renderEncoder, SelSetRenderPipelineState, entry.State);
-            MetalV2Native.SendVoidValue(_renderEncoder, SelSetCullMode, (nuint)entry.CullMode);
+            MetalV2Native.SendVoidValue(
+                _renderEncoder, SelSetCullMode, (nuint)(MetalV2Diagnostics.IgnoreFragmentTests ? Mtl.CullModeNone : entry.CullMode));
             MetalV2Native.SendVoidValue(_renderEncoder, SelSetFrontFacingWinding, (nuint)entry.Winding);
             MetalV2Native.SendVoidValue(_renderEncoder, SelSetDepthClipMode, (nuint)entry.DepthClipMode);
             MetalV2Native.SendVoidValue(_renderEncoder, SelSetTriangleFillMode, (nuint)entry.FillMode);
@@ -606,7 +634,7 @@ internal sealed partial class MetalRenderHost
         var bottom = (uint)Math.Clamp(scissor.Bottom, 0, (int)height);
         var scissorWidth = right > left ? right - left : 0;
         var scissorHeight = bottom > top ? bottom - top : 0;
-        if (_boundGraphicsPipeline is { CullsEverything: true })
+        if (_boundGraphicsPipeline is { CullsEverything: true } && !MetalV2Diagnostics.IgnoreFragmentTests)
         {
             // Metal has no "cull both faces"; a one-pixel scissor is the cheapest
             // equivalent, and the draw then covers nothing it would have kept.
@@ -885,9 +913,37 @@ internal sealed partial class MetalRenderHost
         EndComputeEncoder();
     }
 
+    // How a guest clear arrives: with no pass open, with one open that has drawn
+    // nothing yet, or with one open that has. Only the first two can become the next
+    // pass's load action; the third has to be a real clear.
+    private long _clearNoPass;
+    private long _clearEmptyPass;
+    private long _clearDrawnPass;
+
+    internal string TakeClearArrivals()
+    {
+        var none = Interlocked.Exchange(ref _clearNoPass, 0);
+        var empty = Interlocked.Exchange(ref _clearEmptyPass, 0);
+        var drawn = Interlocked.Exchange(ref _clearDrawnPass, 0);
+        return $"no_pass={none} empty_pass={empty} drawn_pass={drawn}";
+    }
+
     // Replaces a draw whose only effect is one colour over the whole target.
     public void ClearColorTargets(ReadOnlySpan<ColorTargetState> targets, SolidColorClear clear)
     {
+        if (!_renderingActive)
+        {
+            _clearNoPass++;
+        }
+        else if (_passDrawCount == 0)
+        {
+            _clearEmptyPass++;
+        }
+        else
+        {
+            _clearDrawnPass++;
+        }
+
         Span<float> logical = stackalloc float[4] { clear.Red, clear.Green, clear.Blue, clear.Alpha };
         foreach (ref readonly var target in targets)
         {
@@ -939,7 +995,7 @@ internal sealed partial class MetalRenderHost
         bool clearDepth,
         bool clearStencil)
     {
-        var context = ((IMetalImageCacheOwner)this).BeginTransfer();
+        var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.DepthClear);
         var commandBuffer = context.CommandBuffer;
         var descriptor = MetalNative.Send(
             MetalNative.Send(MetalNative.Class("MTLRenderPassDescriptor"), MetalNative.Selector("alloc")),
@@ -994,7 +1050,7 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        var context = ((IMetalImageCacheOwner)this).BeginTransfer();
+        var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.ColorClear);
         var commandBuffer = context.CommandBuffer;
         var descriptor = MetalNative.Send(
             MetalNative.Send(MetalNative.Class("MTLRenderPassDescriptor"), MetalNative.Selector("alloc")),

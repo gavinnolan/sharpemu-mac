@@ -40,6 +40,12 @@ internal sealed partial class MetalRenderHost
         // The shader hashes behind this pipeline, formatted once for the per-draw GPU
         // profiler; null unless SHARPEMU_METAL_V2_PROFILE_SHADERS=1.
         public string? Profile;
+
+        // The vertex descriptor this pipeline was built with, for the draw-state report:
+        // a stride, a step function or an attribute format that does not match what the
+        // program fetches makes every vertex the same one, and the draw then rasterises
+        // nothing at all while looking perfectly ordinary from the outside.
+        public string? VertexLayout;
     }
 
     // One compiled MSL module: its library, its function, and the shader it came from.
@@ -68,7 +74,11 @@ internal sealed partial class MetalRenderHost
         }
 
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        // The MSL front end runs here, and the driver's back end runs when a pipeline
+        // state is made from the function. They are separate costs with separate
+        // caches, so they are counted separately.
         var library = CompileLibrary(metal.Shader.Source, hash);
+        Interlocked.Add(ref _libraryTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
         var function = MetalNative.Send(
             library, MetalNative.Selector("newFunctionWithName:"), MetalNative.NsString(metal.Shader.EntryPoint));
         if (function == 0)
@@ -182,6 +192,7 @@ internal sealed partial class MetalRenderHost
         }
 
         nint state;
+        string? vertexLayout = null;
         try
         {
             if (mesh is null)
@@ -273,12 +284,13 @@ internal sealed partial class MetalRenderHost
 
             if (mesh is null && description.VertexInput.AttributeCount != 0)
             {
-                var vertexDescriptor = CreateVertexDescriptor(description);
+                var vertexDescriptor = CreateVertexDescriptor(description, out vertexLayout);
                 MetalNative.SendVoid(descriptor, MetalNative.Selector("setVertexDescriptor:"), vertexDescriptor);
                 MetalNative.SendVoid(vertexDescriptor, SelRelease);
             }
 
             nint error = 0;
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
             state = mesh is null
                 ? MetalNative.Send(
                     _device, MetalNative.Selector("newRenderPipelineStateWithDescriptor:error:"), descriptor, ref error)
@@ -289,6 +301,7 @@ internal sealed partial class MetalRenderHost
                     0,
                     0,
                     ref error);
+            Interlocked.Add(ref _pipelineTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
             if (state == 0)
             {
                 throw Fatal(
@@ -321,6 +334,7 @@ internal sealed partial class MetalRenderHost
             HasStencil = description.Rendering.StencilFormat != GpuFormat.Undefined,
             Mesh = mesh,
             Profile = ProfileLabelFor(vertexModule, pixelModule, mesh),
+            VertexLayout = vertexLayout,
         };
         _pipelineEntries[entry.Id] = entry;
         return new PipelineHandle(entry.Id, 0, false);
@@ -339,8 +353,9 @@ internal sealed partial class MetalRenderHost
         MtlFormat.Rgba32Uint or MtlFormat.Rgba32Sint or MtlFormat.Rgb10A2Uint;
 
     // The vertex descriptor: one attribute per fetch, one layout per guest buffer.
-    private nint CreateVertexDescriptor(GraphicsPipelineDescription description)
+    private nint CreateVertexDescriptor(GraphicsPipelineDescription description, out string? layoutReport)
     {
+        var report = MetalV2Diagnostics.ReportVertexLayout ? new System.Text.StringBuilder() : null;
         var descriptor = MetalNative.Send(
             MetalNative.Send(MetalNative.Class("MTLVertexDescriptor"), MetalNative.Selector("alloc")),
             MetalNative.Selector("init"));
@@ -370,6 +385,10 @@ internal sealed partial class MetalRenderHost
             {
                 MetalV2Native.SendVoidValue(layout, MetalNative.Selector("setStepRate:"), 0);
             }
+
+            report?.Append(
+                System.Globalization.CultureInfo.InvariantCulture,
+                $" buf{VertexBufferSlotBase + binding}:stride={stride}{(vertexInput.Bindings[binding].Instance ? ":instance" : string.Empty)}");
         }
 
         for (var index = 0; index < vertexInput.AttributeCount; index++)
@@ -392,20 +411,115 @@ internal sealed partial class MetalRenderHost
                 attribute, MetalNative.Selector("setOffset:"), (nuint)vertexInput.Attributes[index].Offset);
             MetalV2Native.SendVoidValue(
                 attribute, MetalNative.Selector("setBufferIndex:"), (nuint)(VertexBufferSlotBase + binding));
+            report?.Append(
+                System.Globalization.CultureInfo.InvariantCulture,
+                $" a{index}:fmt={(int)format}:off={vertexInput.Attributes[index].Offset}" +
+                $":buf={VertexBufferSlotBase + binding}:guest={resource.Descriptor.Format}:used={usedComponents}");
         }
 
+        layoutReport = report?.ToString();
         return descriptor;
+    }
+
+    // Pipeline states can be built off the command-stream thread, which stops a long
+    // compile blocking every queue. Off by default: measured on Demon's Souls it
+    // removed the compile from the worker (pipeline_ms fell to four milliseconds a
+    // window) without making the title faster, because pipeline creation was never
+    // its cost — and a dispatch that suspends re-runs the program preparation and
+    // resource materialisation in front of the pipeline request, which are. Turning
+    // this on is worth it once a retry no longer repeats that work.
+    private static readonly bool AsynchronousPipelines =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ASYNC_PIPELINES") == "1";
+
+    private static bool SynchronousPipelines => !AsynchronousPipelines;
+
+    private MetalPipelineCompiler? _compiler;
+
+    private MetalPipelineCompiler Compiler => _compiler ??= new MetalPipelineCompiler(
+        () => _commandStream?.NotifyPipelineReady(),
+        Math.Max(2, Environment.ProcessorCount / 2));
+
+    /// <summary>Compiles that have been started, finished, shared and their time.</summary>
+    public (long Started, long Finished, long Deduped, double Milliseconds) TakeCompilerCounters() =>
+        _compiler?.TakeCounters() ?? (0, 0, 0, 0);
+
+    public int PipelinesCompiling => _compiler?.InFlight ?? 0;
+
+    public bool SupportsPipelineSuspend => !SynchronousPipelines;
+
+    public void NotePipelineNotReady() => _pipelineNotReady = true;
+
+    private bool _pipelineNotReady;
+
+    bool SharpEmu.Libs.Gpu.GpuCommands.ICommandStreamHost.ConsumePipelineNotReady()
+    {
+        var pending = _pipelineNotReady;
+        _pipelineNotReady = false;
+        return pending;
+    }
+
+    /// <summary>
+    /// The pipeline state for a dispatch, or false while the driver is still building
+    /// it on the compile pool. The caller suspends the packet and runs it again when
+    /// the compile reports in.
+    /// </summary>
+    public bool TryCreateComputePipeline(ComputePipelineDescription description, out PipelineHandle handle)
+    {
+        if (SynchronousPipelines)
+        {
+            handle = CreateComputePipeline(description);
+            return true;
+        }
+
+        handle = default;
+        var module = RequireModule(description.Program);
+        var function = module.Function;
+        var hash = description.Stage.Hash;
+        if (!Compiler.TryTake(description.Program.Id, () => BuildComputePipelineState(function, hash), out var state))
+        {
+            return false;
+        }
+
+        handle = RegisterComputePipeline(description, module, state);
+        return true;
+    }
+
+    // Runs on the compile pool: MTLDevice is thread safe, and nothing here touches
+    // the host's own state.
+    private nint BuildComputePipelineState(nint function, ulong hash)
+    {
+        nint error = 0;
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var state = MetalNative.Send(
+            _device,
+            MetalNative.Selector("newComputePipelineStateWithFunction:error:"),
+            function,
+            ref error);
+        Interlocked.Add(ref _pipelineTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
+        if (state == 0)
+        {
+            throw Fatal(
+                $"A Metal compute pipeline state could not be created: hash=0x{hash:X16} " +
+                $"{MetalNative.DescribeError(error)}");
+        }
+
+        return state;
     }
 
     public PipelineHandle CreateComputePipeline(ComputePipelineDescription description)
     {
         var module = RequireModule(description.Program);
         nint error = 0;
+        // The driver turns the function into a GPU binary here, on the worker thread,
+        // and the guest's dispatch packet waits for it. Measured on Demon's Souls'
+        // load phase this is tens to hundreds of milliseconds per new shader.
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var state = MetalNative.Send(
             _device,
             MetalNative.Selector("newComputePipelineStateWithFunction:error:"),
             module.Function,
             ref error);
+        Interlocked.Add(ref _pipelineTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
         if (state == 0)
         {
             throw Fatal(
@@ -413,6 +527,16 @@ internal sealed partial class MetalRenderHost
                 $"{MetalNative.DescribeError(error)}");
         }
 
+        return RegisterComputePipeline(description, module, state);
+    }
+
+    // The pipeline entry for a finished compute state. Runs on the command stream, so
+    // the entry table and the identifier counter stay single threaded.
+    private PipelineHandle RegisterComputePipeline(
+        ComputePipelineDescription description,
+        MetalShaderModule module,
+        nint state)
+    {
         Interlocked.Increment(ref _pipelineCreations);
         var threads = new MtlSize
         {
@@ -448,7 +572,8 @@ internal sealed partial class MetalRenderHost
     private nint GetDepthStencilState(MetalPipelineEntry entry, in DynamicDrawState state)
     {
         var parameters = entry.StaticParameters;
-        var stencilEnabled = state.StencilTestEnabled && entry.HasStencil && parameters is not null;
+        var stencilEnabled = state.StencilTestEnabled && entry.HasStencil && parameters is not null &&
+            !MetalV2Diagnostics.IgnoreFragmentTests;
         var key = MixDepthStencilKey(entry, in state, stencilEnabled);
         if (_depthStencilStates.TryGetValue(key, out var found))
         {
@@ -465,7 +590,7 @@ internal sealed partial class MetalRenderHost
 
         try
         {
-            var depthCompare = entry.HasDepth && state.DepthTestEnabled
+            var depthCompare = entry.HasDepth && state.DepthTestEnabled && !MetalV2Diagnostics.IgnoreFragmentTests
                 ? MetalV2Formats.CompareFunction(state.DepthCompare)
                 : MetalV2Formats.CompareFunction(GpuCompareOp.Always);
             MetalV2Native.SendVoidValue(descriptor, MetalNative.Selector("setDepthCompareFunction:"), depthCompare);
@@ -639,6 +764,9 @@ internal sealed partial class MetalRenderHost
 
     private void DisposePipelines()
     {
+        // Let whatever is still compiling finish before the device goes away.
+        _compiler?.Dispose();
+        _compiler = null;
         foreach (var entry in _pipelineEntries.Values)
         {
             if (entry.State != 0)

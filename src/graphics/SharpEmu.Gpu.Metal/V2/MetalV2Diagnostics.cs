@@ -20,6 +20,19 @@ internal static class MetalV2Diagnostics
     public static readonly bool ReportUnbackedRanges = Verbose ||
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_REPORT_UNBACKED"), "1", StringComparison.Ordinal);
 
+    // SHARPEMU_METAL_V2_IGNORE_TESTS=1 drops face culling, the depth compare and the
+    // stencil test from every draw. A pass whose target never changes either had its
+    // fragments thrown away by one of those three or never had a fragment to throw
+    // away, and nothing in a target dump tells the two apart.
+    public static readonly bool IgnoreFragmentTests =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_IGNORE_TESTS"), "1", StringComparison.Ordinal);
+
+    // SHARPEMU_METAL_V2_REPORT_VERTEX_LAYOUT=1 keeps the vertex descriptor each
+    // pipeline was built with, for the per-draw report: a stride or an attribute format
+    // that does not match what the program fetches is invisible in everything else.
+    public static readonly bool ReportVertexLayout =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_REPORT_VERTEX_LAYOUT"), "1", StringComparison.Ordinal);
+
     public static void WarnOnce(string key, string message)
     {
         if (_reported.TryAdd(key, 0))

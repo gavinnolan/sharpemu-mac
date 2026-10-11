@@ -93,6 +93,11 @@ internal sealed partial class MetalRenderHost :
     private long _drawCount;
     private long _drawTicks;
     private long _pipelineCreations;
+    // How long the driver spent turning functions into GPU binaries, on this thread.
+    private long _pipelineTicks;
+
+    // How long the MSL front end spent turning sources into libraries.
+    private long _libraryTicks;
     private long _shaderCompilations;
     private long _flushes;
     private long _gpuWaits;
@@ -211,8 +216,9 @@ internal sealed partial class MetalRenderHost :
     }
 
     // Everything the cache and the transfers encode needs the encoders closed first.
-    IMetalSubmissionContext IMetalImageCacheOwner.BeginTransfer()
+    IMetalSubmissionContext IMetalImageCacheOwner.BeginTransfer(MetalTransferCause cause)
     {
+        _transferCauses[(int)cause]++;
         _ = EnsureCommandBuffer();
         NoteRecordedWork();
         EndEncoders();
@@ -318,6 +324,7 @@ internal sealed partial class MetalRenderHost :
     private int _inFlightHead;
     private int _inFlightCount;
     private long _unsampledSubmissions;
+    private ulong _notifiedCompletedSerial;
 
     private void RetainInFlight(nint buffer, ulong serial)
     {
@@ -341,12 +348,18 @@ internal sealed partial class MetalRenderHost :
     /// <summary>Reads and releases every submission the GPU has finished.</summary>
     private void DrainFinishedSubmissions()
     {
-        if (_inFlightCount == 0)
+        if (_inFlightCount == 0 && _notifiedCompletedSerial >= _nextSerial)
         {
             return;
         }
 
         var completed = CompletedSerial;
+        if (completed > _notifiedCompletedSerial)
+        {
+            _notifiedCompletedSerial = completed;
+            NotifyGpuCompleted(completed);
+        }
+
         while (_inFlightCount > 0 && _inFlightSerials[_inFlightHead] <= completed)
         {
             var buffer = _inFlightBuffers[_inFlightHead];
@@ -542,6 +555,13 @@ internal sealed partial class MetalRenderHost :
     private long _lastCommitTimestamp;
     private long _keepWarmSubmissions;
 
+    /// <summary>
+    /// Reads whatever the GPU has finished and tells the command stream, so a wait on
+    /// bytes the GPU wrote is retried as soon as the write lands rather than at the
+    /// blocked-retry interval. The worker calls it before it parks.
+    /// </summary>
+    public void PollGpuCompletions() => DrainFinishedSubmissions();
+
     /// <summary>Commits an empty command buffer when the queue has gone quiet.</summary>
     public void KeepQueueWarmIfIdle()
     {
@@ -687,7 +707,7 @@ internal sealed partial class MetalRenderHost :
             return;
         }
 
-        var context = ((IMetalImageCacheOwner)this).BeginTransfer();
+        var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestFill);
         var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
         if (encoder == 0)
         {
@@ -802,7 +822,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         FlushGpuWrites(source, size, MetalWritebackCause.GuestCopy);
-        var context = ((IMetalImageCacheOwner)this).BeginTransfer();
+        var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestCopy);
         var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
         if (encoder == 0)
         {
@@ -907,6 +927,15 @@ internal sealed partial class MetalRenderHost :
         // may still be writing these bytes: an image that owns them, or a recorded
         // store into them. Without that test every command-memory read would stall.
         var size = (ulong)destination.Length;
+        // The command stream reads a packet out of guest memory for every packet it
+        // runs, and almost none of them land anywhere the GPU has written. Two
+        // comparisons answer that, and skipping the full test keeps a message send
+        // and two range scans off the per-packet path.
+        if (!_gpuWrites.MayCover(address, size) && !_imageCache.MayOwn(address, size))
+        {
+            return _memory.TryRead(address, destination);
+        }
+
         _lastReadAddress = address;
         _lastReadSize = size;
         if (_imageCache.HasGpuModifiedImageBytes(address, size))
@@ -1076,6 +1105,9 @@ internal sealed partial class MetalRenderHost :
         var waitTicks = Interlocked.Exchange(ref _gpuWaitTicks, 0);
         var idleTicks = Interlocked.Exchange(ref _idleTicks, 0);
         var pipelines = Interlocked.Exchange(ref _pipelineCreations, 0);
+        var pipelineMs = Interlocked.Exchange(ref _pipelineTicks, 0) * 1000.0 /
+            System.Diagnostics.Stopwatch.Frequency;
+        var compiles = TakeCompilerCounters();
         var failed = Interlocked.Exchange(ref _failedSubmissions, 0);
         var (completions, completionMs) = TakeCompletionLatency();
         var (created, uploads, writebacks, evictions) = _imageCache.Counters;
@@ -1097,8 +1129,19 @@ internal sealed partial class MetalRenderHost :
             $"host_waits={waits} partial_waits={partial} " +
             $"host_wait_ms={(waitTicks * 1000.0 / frequency).ToString("F1", culture)} " +
             $"idle_ms={(idleTicks * 1000.0 / frequency).ToString("F0", culture)} pipelines={pipelines} " +
+            $"pipeline_ms={pipelineMs.ToString("F1", culture)} " +
+            $"library_ms={(Interlocked.Exchange(ref _libraryTicks, 0) * 1000.0 / frequency).ToString("F1", culture)} " +
+            $"compiles={compiles.Started}/{compiles.Finished} compile_waits={compiles.Deduped} " +
+            $"compile_ms={compiles.Milliseconds.ToString("F1", culture)} compiling={PipelinesCompiling} " +
             $"images={_imageCache.ImageCount} image_mb={_imageCache.TotalUsedMemory / (1024 * 1024)} " +
             $"sampled_dcc_clears={_imageCache.TakeSampledDccClears()} " +
+            $"dcc_repeats_skipped={_imageCache.TakeDccRepeatsSkipped()} " +
+            // Shaders whose control flow the structured emitter could express, against
+            // the ones that fell back to the PC dispatcher: a dispatcher shader keeps the
+            // whole guest register file live across its loop, so a rising count here is
+            // the first thing to look at when GPU time will not come down.
+            $"msl_structured={ShaderCompiler.Metal.Gen5MslTranslator.Statistics.ControlFlowForms.Structured} " +
+            $"msl_dispatcher={ShaderCompiler.Metal.Gen5MslTranslator.Statistics.ControlFlowForms.Dispatcher} " +
             $"uploads={uploads} writebacks={writebacks} evictions={evictions} failed={failed}");
         _slowWaitReports = 0;
         ResetSlowCompletionReports();
@@ -1174,6 +1217,7 @@ internal sealed partial class MetalRenderHost :
         Console.Error.WriteLine(
             $"[METAL-V2][TRACE] created={created} end_clear={endClear} end_target={endTarget} " +
             $"end_transfer={endTransfer} end_compute={endCompute} targetless={targetless} " +
+            $"transfer_causes=[{TakeTransferCauses()}] clears=[{TakeClearArrivals()}] " +
             $"gpu_busy_n={gpuBusySamples} event_ready={eventReady} event_waited={eventWaited} " +
             $"event_wait_ms={eventWaitMs.ToString("F1", culture)} " +
             $"event_wake_ms={eventWakeMs.ToString("F1", culture)} " +

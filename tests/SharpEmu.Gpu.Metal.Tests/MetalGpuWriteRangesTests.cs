@@ -117,5 +117,58 @@ public sealed class MetalGpuWriteRangesTests
         ranges.Clear(completed: 5);
         Assert.True(ranges.IsEmpty);
         Assert.Equal(0UL, ranges.PendingSerial(0x1_0000, 0x1000, completed: 5));
+        Assert.False(ranges.MayCover(0x1_0000, 0x1000));
+    }
+
+    /// <summary>
+    /// The cheap test the command stream uses for every packet it reads. It may say
+    /// yes when the full test would say no, but it must never say no when a recorded
+    /// write covers the bytes.
+    /// </summary>
+    [Fact]
+    public void TheCheapCoverTestNeverMissesARecordedWrite()
+    {
+        var ranges = new MetalGpuWriteRanges();
+        Assert.False(ranges.MayCover(0x1_0000, 0x10));
+
+        ranges.Note(0x2_0000, 0x1000, serial: 5);
+        Assert.True(ranges.MayCover(0x2_0000, 0x10));
+        Assert.True(ranges.MayCover(0x2_0FF0, 0x20));
+        Assert.False(ranges.MayCover(0x1_0000, 0x10));
+        Assert.False(ranges.MayCover(0x2_1000, 0x10));
+
+        ranges.Note(0x9_0000, 0x1000, serial: 6);
+        // The bounds span both records, so the gap between them answers yes; what
+        // matters is that neither record is ever missed.
+        Assert.True(ranges.MayCover(0x2_0000, 0x10));
+        Assert.True(ranges.MayCover(0x9_0800, 0x10));
+        Assert.False(ranges.MayCover(0x9_1000, 0x10));
+
+        ranges.Retire(completed: 5);
+        Assert.False(ranges.MayCover(0x2_0000, 0x10));
+        Assert.True(ranges.MayCover(0x9_0800, 0x10));
+
+        ranges.Retire(completed: 6);
+        Assert.False(ranges.MayCover(0x9_0800, 0x10));
+
+        // An unbounded write covers everything until it completes.
+        ranges.NoteUnbounded(serial: 9);
+        Assert.True(ranges.MayCover(0xDEAD_0000, 0x10));
+    }
+
+    [Fact]
+    public void FoldingKeepsTheCheapCoverTestHonest()
+    {
+        var ranges = new MetalGpuWriteRanges();
+        for (var index = 0UL; index < 2048; index++)
+        {
+            ranges.Note(0x10_0000 + (index * 0x2000), 0x1000, serial: index + 1);
+        }
+
+        Assert.True(ranges.Folds > 0);
+        for (var index = 0UL; index < 2048; index++)
+        {
+            Assert.True(ranges.MayCover(0x10_0000 + (index * 0x2000), 0x1000));
+        }
     }
 }

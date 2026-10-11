@@ -144,6 +144,15 @@ internal sealed class MetalGpuWriteRanges
 
         _records[_count++] = new Record { Start = address, End = end, Serial = serial, Origin = origin };
         _recordsByOrigin[(int)origin]++;
+        if (address < _boundsStart)
+        {
+            _boundsStart = address;
+        }
+
+        if (end > _boundsEnd)
+        {
+            _boundsEnd = end;
+        }
     }
 
     private readonly long[] _recordsByOrigin = new long[MetalGpuWriteOrigins.Count];
@@ -173,6 +182,21 @@ internal sealed class MetalGpuWriteRanges
     /// being written by work that has yet to complete. <paramref name="completed"/> is
     /// the serial the GPU has already signalled.
     /// </summary>
+    // The span every live record lies inside. A command-stream read is almost never
+    // anywhere near a range a shader wrote, and answering those in two comparisons
+    // keeps the GPU-dirty test off the per-packet path: the full test reads the
+    // shared event's value, which is a message send.
+    private ulong _boundsStart = ulong.MaxValue;
+    private ulong _boundsEnd;
+
+    /// <summary>
+    /// False when no recorded write can possibly cover these bytes. Cheap enough to
+    /// call for every packet the command stream reads, and it touches nothing.
+    /// </summary>
+    public bool MayCover(ulong address, ulong size) =>
+        _unboundedSerial != 0 ||
+        (_count != 0 && size != 0 && address < _boundsEnd && _boundsStart < address + size);
+
     public ulong PendingSerial(ulong address, ulong size, ulong completed)
     {
         Retire(completed);
@@ -216,15 +240,32 @@ internal sealed class MetalGpuWriteRanges
         }
 
         var kept = 0;
+        var start = ulong.MaxValue;
+        var end = 0UL;
         for (var index = 0; index < _count; index++)
         {
-            if (_records[index].Serial > completed)
+            if (_records[index].Serial <= completed)
             {
-                _records[kept++] = _records[index];
+                continue;
             }
+
+            ref var record = ref _records[index];
+            if (record.Start < start)
+            {
+                start = record.Start;
+            }
+
+            if (record.End > end)
+            {
+                end = record.End;
+            }
+
+            _records[kept++] = record;
         }
 
         _count = kept;
+        _boundsStart = start;
+        _boundsEnd = end;
     }
 
     /// <summary>Everything recorded has completed.</summary>
@@ -232,6 +273,8 @@ internal sealed class MetalGpuWriteRanges
     {
         _count = 0;
         _unboundedSerial = 0;
+        _boundsStart = ulong.MaxValue;
+        _boundsEnd = 0;
         if (completed > _retiredSerial)
         {
             _retiredSerial = completed;

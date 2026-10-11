@@ -28,6 +28,7 @@ public sealed partial class GpuCommandInterpreter
         // A compare-swap loop applies once per try and suspends while the compare fails.
         var operation = CommandMemoryOperation.Atomic(atomic);
         _host.ExecuteCommandMemoryOperation(operation);
+        GuestMemoryWritten?.Invoke(atomic.Address, sizeof(ulong));
         var priorValue = operation.PriorValue;
         var comparePassed = operation.ComparePassed;
 
@@ -47,7 +48,7 @@ public sealed partial class GpuCommandInterpreter
 
         if (atomic.Command == 1 && !comparePassed)
         {
-            Suspend();
+            SuspendOn(CommandWaitCondition.Memory(atomic.Address, sizeof(ulong)));
         }
 
         return 8;
@@ -69,6 +70,7 @@ public sealed partial class GpuCommandInterpreter
         if (semaphore.IsSignal)
         {
             _host.ExecuteCommandMemoryOperation(CommandMemoryOperation.Semaphore(semaphore));
+            GuestMemoryWritten?.Invoke(semaphore.Address, sizeof(ulong));
 
             return 3;
         }
@@ -76,11 +78,12 @@ public sealed partial class GpuCommandInterpreter
         // A wait takes one token, or suspends until a signal adds one.
         var consume = CommandMemoryOperation.Semaphore(semaphore);
         _host.ExecuteCommandMemoryOperation(consume);
+        GuestMemoryWritten?.Invoke(semaphore.Address, sizeof(ulong));
         var priorValue = consume.PriorValue;
 
         if (priorValue == 0)
         {
-            Suspend();
+            SuspendOn(CommandWaitCondition.Memory(semaphore.Address, sizeof(ulong)));
         }
 
         return 3;

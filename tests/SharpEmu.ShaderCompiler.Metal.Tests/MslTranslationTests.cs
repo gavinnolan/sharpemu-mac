@@ -51,8 +51,7 @@ public sealed class MslTranslationTests
         var request = Gen5ComputeFixtures.RequestOrThrow(
             new Gen5ShaderProgram(0, [sad, end]), ShaderStage.Compute, localSizeX: 1);
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
-        Assert.Contains("uint v[256]", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("((max(v[0], v[1]) - min(v[0], v[1])) + (v[2]))", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("((max(v0, v1) - min(v0, v1)) + (v2))", shader.Source, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -90,7 +89,9 @@ public sealed class MslTranslationTests
             Assert.Equal(Gen5MslStage.Compute, shader.Stage);
             Assert.Equal("gen5_cs", shader.EntryPoint);
             Assert.Contains("kernel void gen5_cs(", shader.Source, StringComparison.Ordinal);
-            Assert.Contains("while (active)", shader.Source, StringComparison.Ordinal);
+
+            // Structured control flow, so no PC dispatcher survives in the output.
+            Assert.DoesNotContain("switch (pc)", shader.Source, StringComparison.Ordinal);
         }
     }
 
@@ -108,23 +109,30 @@ public sealed class MslTranslationTests
     }
 
     [Fact]
-    public void LoopFixtureProducesMultipleDispatcherBlocks()
+    public void LoopFixtureBecomesARealLoop()
     {
         var shader = Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.Loop);
 
-        // The backward branch splits the program into at least three blocks and
-        // the conditional branch selects between loop head and fallthrough.
-        Assert.Contains("case 0u:", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("case 1u:", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("case 2u:", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("pc = (scc) ?", shader.Source, StringComparison.Ordinal);
+        // The backward branch is a while (true) whose back edge is a continue and
+        // whose exit is a break, with the scalar condition driving both.
+        Assert.Contains("while (true)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("if (scc)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("continue;", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("break;", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("switch (pc)", shader.Source, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void DispatcherIsBoundedByDefault()
+    public void LoopsAreBoundedByDefault()
     {
-        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.Fmac);
-        Assert.Contains("if (++steps >=", shader.Source, StringComparison.Ordinal);
+        // The step cap rides on the back edge now that there is no dispatcher to
+        // charge per block, so a loop carries it and straight-line code does not.
+        var looping = Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.Loop);
+        Assert.Contains("if (++steps >=", looping.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_note_step_cap(", looping.Source, StringComparison.Ordinal);
+
+        var straightLine = Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.Fmac);
+        Assert.DoesNotContain("++steps", straightLine.Source, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -217,8 +225,8 @@ public sealed class MslTranslationTests
         var shader = Gen5ComputeFixtures.CompilePixelOrThrow();
 
         Assert.Contains(
-            "vec<float, 4>(as_type<float>(v[0]), as_type<float>(v[1]), " +
-            "as_type<float>(v[2]), as_type<float>(v[3]))",
+            "vec<float, 4>(as_type<float>(v0), as_type<float>(v1), " +
+            "as_type<float>(v2), as_type<float>(v3))",
             shader.Source,
             StringComparison.Ordinal);
     }
@@ -230,8 +238,8 @@ public sealed class MslTranslationTests
             componentMapping: new Gen5ColorComponentMapping(0xC6));
 
         Assert.Contains(
-            "vec<float, 4>(as_type<float>(v[2]), as_type<float>(v[1]), " +
-            "as_type<float>(v[0]), as_type<float>(v[3]))",
+            "vec<float, 4>(as_type<float>(v2), as_type<float>(v1), " +
+            "as_type<float>(v0), as_type<float>(v3))",
             shader.Source,
             StringComparison.Ordinal);
     }
@@ -248,8 +256,8 @@ public sealed class MslTranslationTests
         Assert.Contains("float4 sharpemu_position [[position]];", shader.Source, StringComparison.Ordinal);
         Assert.Contains("float4 param0 [[user(locn0)]];", shader.Source, StringComparison.Ordinal);
         Assert.Contains("uint sharpemu_vertex_id [[vertex_id]],", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("v[5] = sharpemu_vertex_id;", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("v[8] = sharpemu_instance_id;", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("v5 = sharpemu_vertex_id;", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("v8 = sharpemu_instance_id;", shader.Source, StringComparison.Ordinal);
         Assert.Contains("sharpemu_out.sharpemu_position = exec ?", shader.Source, StringComparison.Ordinal);
         Assert.Contains("sharpemu_out.param0 = exec ?", shader.Source, StringComparison.Ordinal);
         Assert.Contains("return sharpemu_out;", shader.Source, StringComparison.Ordinal);
@@ -280,11 +288,11 @@ public sealed class MslTranslationTests
     }
 
     [Theory]
-    [InlineData(0xFACu, "as_type<float>(v[4]), as_type<float>(v[5]), as_type<float>(v[6]), as_type<float>(v[7])")]
-    [InlineData(0x9F5u, "as_type<float>(v[7]), as_type<float>(v[4]), as_type<float>(v[5]), as_type<float>(v[6])")]
-    [InlineData(0xF2Eu, "as_type<float>(v[6]), as_type<float>(v[5]), as_type<float>(v[4]), as_type<float>(v[7])")]
-    [InlineData(0x3ACu, "as_type<float>(v[4]), as_type<float>(v[5]), as_type<float>(v[6]), 0.0f")]
-    [InlineData(0xFA4u, "as_type<float>(v[4]), 0.0f, as_type<float>(v[6]), as_type<float>(v[7])")]
+    [InlineData(0xFACu, "as_type<float>(v4), as_type<float>(v5), as_type<float>(v6), as_type<float>(v7)")]
+    [InlineData(0x9F5u, "as_type<float>(v7), as_type<float>(v4), as_type<float>(v5), as_type<float>(v6)")]
+    [InlineData(0xF2Eu, "as_type<float>(v6), as_type<float>(v5), as_type<float>(v4), as_type<float>(v7)")]
+    [InlineData(0x3ACu, "as_type<float>(v4), as_type<float>(v5), as_type<float>(v6), 0.0f")]
+    [InlineData(0xFA4u, "as_type<float>(v4), 0.0f, as_type<float>(v6), as_type<float>(v7)")]
     public void ImageStoreAppliesInverseDescriptorSwizzle(
         uint dstSelect,
         string expectedComponents)
@@ -305,7 +313,7 @@ public sealed class MslTranslationTests
             dmask: 0);
 
         Assert.Contains(
-            ".write(vec<float, 4>(as_type<float>(v[4]), 0.0f, 0.0f, 0.0f),",
+            ".write(vec<float, 4>(as_type<float>(v4), 0.0f, 0.0f, 0.0f),",
             shader.Source,
             StringComparison.Ordinal);
     }
@@ -319,7 +327,7 @@ public sealed class MslTranslationTests
             opcode: "ImageStoreMip");
 
         Assert.Contains(
-            ".write(vec<float, 4>(as_type<float>(v[7]), as_type<float>(v[4]), as_type<float>(v[5]), as_type<float>(v[6])),",
+            ".write(vec<float, 4>(as_type<float>(v7), as_type<float>(v4), as_type<float>(v5), as_type<float>(v6)),",
             shader.Source,
             StringComparison.Ordinal);
     }
@@ -337,7 +345,7 @@ public sealed class MslTranslationTests
             shader.Source,
             StringComparison.Ordinal);
         Assert.Contains(
-            ".write(vec<uint, 4>(v[6], v[5], v[4], v[7]),",
+            ".write(vec<uint, 4>(v6, v5, v4, v7),",
             shader.Source,
             StringComparison.Ordinal);
     }
@@ -377,7 +385,7 @@ public sealed class MslTranslationTests
         // The register file is an array the emitted MSL indexes at run time, so
         // the relative number is the encoded one plus M0, wrapped into the file.
         Assert.Contains("v[(12u + ", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("s[124]", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("s124", shader.Source, StringComparison.Ordinal);
         Assert.Contains(") & 255u]", shader.Source, StringComparison.Ordinal);
     }
 
@@ -398,7 +406,7 @@ public sealed class MslTranslationTests
         Assert.Equal(opcode, program.Instructions[0].Opcode);
 
         var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture);
-        Assert.Contains("s[124]", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("s124", shader.Source, StringComparison.Ordinal);
         // The destination is the relative one for every form but V_MOVRELS, and
         // the relative number wraps into the register file.
         Assert.Contains("(55u + ", shader.Source, StringComparison.Ordinal);
@@ -476,7 +484,7 @@ public sealed class MslTranslationTests
 
         var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture);
 
-        Assert.Contains("pc = (false) ?", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("if (!(false))", shader.Source, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -532,8 +540,8 @@ public sealed class MslTranslationTests
         var shader = CompileTypedBufferAccess("TBufferStoreFormatXy", dwordCount: 2, typedFormat: 14);
 
         Assert.Contains("if (exec && ", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("sharpemu_format_encode(v[4], 8u, 0u, 3u)", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("sharpemu_format_encode(v[5], 8u, 0u, 3u)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_format_encode(v4, 8u, 0u, 3u)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_format_encode(v5, 8u, 0u, 3u)", shader.Source, StringComparison.Ordinal);
         Assert.Contains("<< 8u), 0u, 0u, 0u), uint4(0xFFFFu, 0x0u, 0x0u, 0x0u));", shader.Source, StringComparison.Ordinal);
         Assert.Contains("2u <= sharpemu_resources.buffer_bytes[0] && ", shader.Source, StringComparison.Ordinal);
         Assert.DoesNotContain("sharpemu_store_bytes(b", shader.Source, StringComparison.Ordinal);
@@ -545,8 +553,8 @@ public sealed class MslTranslationTests
         // Format 77 is 32x4 float: four aligned dword stores, no encoding, one bounds test.
         var shader = CompileTypedBufferAccess("TBufferStoreFormatXyzw", dwordCount: 4, typedFormat: 77);
 
-        Assert.Contains(", v[4], 4u);", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("+ 12u), v[7], 4u);", shader.Source, StringComparison.Ordinal);
+        Assert.Contains(", v4, 4u);", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("+ 12u), v7, 4u);", shader.Source, StringComparison.Ordinal);
         Assert.Contains("16u <= sharpemu_resources.buffer_bytes[0] && ", shader.Source, StringComparison.Ordinal);
         Assert.DoesNotContain("sharpemu_format_encode(v[", shader.Source, StringComparison.Ordinal);
         Assert.DoesNotContain("sharpemu_store_element(b", shader.Source, StringComparison.Ordinal);
@@ -570,10 +578,10 @@ public sealed class MslTranslationTests
         var shader = CompileTypedBufferAccess("BufferStoreFormatXyzw", 4, 0, typed: false, descriptorFormat: 50);
 
         // 2_10_10_10 is R10G10B10A2: ten-bit X, Y and Z, then the two-bit W.
-        Assert.Contains("sharpemu_format_encode(v[4], 10u, 0u, 9u)", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("sharpemu_format_encode(v[5], 10u, 0u, 9u)", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("sharpemu_format_encode(v[6], 10u, 0u, 9u)", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("sharpemu_format_encode(v[7], 2u, 0u, 9u)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_format_encode(v4, 10u, 0u, 9u)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_format_encode(v5, 10u, 0u, 9u)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_format_encode(v6, 10u, 0u, 9u)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_format_encode(v7, 2u, 0u, 9u)", shader.Source, StringComparison.Ordinal);
         Assert.Contains("uint4(0xFFFFFFFFu, 0x0u, 0x0u, 0x0u)", shader.Source, StringComparison.Ordinal);
         Assert.DoesNotContain("sharpemu_store_bytes(b", shader.Source, StringComparison.Ordinal);
     }
@@ -652,7 +660,7 @@ public sealed class MslTranslationTests
             VertexInputs = [new ShaderVertexInput(0, 0, 2, 7, false, [])],
         };
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
-        Assert.Contains("v[2] = 0u;", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("v2 = 0u;", shader.Source, StringComparison.Ordinal);
     }
 
     private static Gen5MslShader CompileImageStore(

@@ -33,8 +33,8 @@ public sealed class Gen5MslBufferAtomicTests(ITestOutputHelper output)
         Assert.Equal(glc, control.Glc);
         var shader = Compile(fixture, 16);
         Assert.Contains("atomic_exchange_explicit", shader.Source);
-        Assert.Contains("v[4], memory_order_relaxed", shader.Source);
-        Assert.Contains("(v[0] * 0x10u)", shader.Source);
+        Assert.Contains("v4, memory_order_relaxed", shader.Source);
+        Assert.Contains("(v0 * 0x10u)", shader.Source);
         Assert.Contains("4u <= sharpemu_resources.buffer_bytes[0]", shader.Source);
         Assert.Contains("sharpemu_resources.buffer_bytes[0] - 4u", shader.Source);
         Assert.DoesNotContain("+ 4u <= sharpemu_resources.buffer_bytes", shader.Source);

@@ -481,6 +481,14 @@ internal sealed partial class MetalRenderHost
     private readonly Dictionary<(ulong Hash, int Buffer), int> _dumpedBufferCounts = new();
     private const int MaxBufferDumpsPerBinding = 4;
 
+    // How much of each buffer to print. The head alone says nothing about the matrix a
+    // vertex program loads from the middle of a constant buffer.
+    private static readonly int _dumpBufferBytes =
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DUMP_BUFFER_BYTES"), out var bytes) &&
+        bytes is > 0 and <= 4096
+            ? (bytes + 3) & ~3
+            : 32;
+
     private static HashSet<ulong> ParseDumpBufferHashes()
     {
         var value = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DUMP_BUFFERS");
@@ -525,20 +533,22 @@ internal sealed partial class MetalRenderHost
         }
 
         _dumpedBufferCounts[key] = seen + 1;
-        Span<byte> head = stackalloc byte[32];
-        head.Clear();
-        var read = _guestMemory.TryPeek(descriptor.Address, head);
+        var count = (int)Math.Min((ulong)_dumpBufferBytes, Math.Max(size, 4));
+        var host = new byte[count];
+        var read = _guestMemory.TryPeek(descriptor.Address, host);
         var windowed = _guestMemory.ResolveWritable(descriptor.Address, size).IsValid;
-        var dwords = new System.Text.StringBuilder();
-        for (var offset = 0; offset < head.Length; offset += sizeof(uint))
-        {
-            dwords.Append(System.Globalization.CultureInfo.InvariantCulture, $" {BinaryPrimitives.ReadUInt32LittleEndian(head[offset..]):X8}");
-        }
+
+        // What the shader will actually read: the bytes behind the pointer the argument
+        // buffer carries. A window aliases guest memory, so the two agree; an upload ring
+        // holds a copy taken when the binding was prepared, and a guest write after that
+        // never reaches it. Printing both is the only way to tell those apart.
+        var device = ReadDeviceBytes(range, count);
 
         Console.Error.WriteLine(string.Format(
             System.Globalization.CultureInfo.InvariantCulture,
             "[METAL-V2][BUF] hash=0x{0:X16} stage={1} buf={2} addr=0x{3:X16} stride={4} records={5} " +
-            "fmt={6} req=0x{7:X} size=0x{8:X} window={9} resolved={10} read={11} head={12}",
+            "fmt={6} req=0x{7:X} size=0x{8:X} window={9} resolved={10} read={11} " +
+            "buffer=0x{12:X}+0x{13:X} same={14}\n  cpu={15}\n  gpu={16}",
             hash,
             stage.Program.Stage,
             index,
@@ -551,7 +561,47 @@ internal sealed partial class MetalRenderHost
             windowed,
             range.IsValid,
             read,
-            dwords));
+            range.Buffer,
+            range.Offset,
+            device is not null && host.AsSpan().SequenceEqual(device),
+            DescribeDwords(host),
+            device is null ? "private" : DescribeDwords(device)));
+    }
+
+    /// <summary>The first bytes the GPU sees behind a resolved range, or null when the
+    /// buffer has no host-visible contents.</summary>
+    private static unsafe byte[]? ReadDeviceBytes(in MetalGuestRange range, int count)
+    {
+        if (!range.IsValid)
+        {
+            return null;
+        }
+
+        var contents = MetalNative.Send(range.Buffer, MetalNative.Selector("contents"));
+        if (contents == 0)
+        {
+            return null;
+        }
+
+        return new ReadOnlySpan<byte>((byte*)contents + range.Offset, count).ToArray();
+    }
+
+    private static string DescribeDwords(ReadOnlySpan<byte> bytes)
+    {
+        var dwords = new System.Text.StringBuilder();
+        for (var offset = 0; offset + 3 < bytes.Length; offset += sizeof(uint))
+        {
+            if (offset % 64 == 0)
+            {
+                dwords.Append(System.Globalization.CultureInfo.InvariantCulture, $"\n    +{offset:X3}:");
+            }
+
+            dwords.Append(
+                System.Globalization.CultureInfo.InvariantCulture,
+                $" {BinaryPrimitives.ReadUInt32LittleEndian(bytes[offset..]):X8}");
+        }
+
+        return dwords.ToString();
     }
 
     public void CommitBindings(GpuBindPoint bindPoint, in PipelineHandle pipeline, ReadOnlySpan<IPreparedBindings> stages)

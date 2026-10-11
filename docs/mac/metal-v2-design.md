@@ -589,6 +589,92 @@ Catching it needs a write-protected page and a fault handler - the page guard th
 cache already uses, armed on the table once it is identified - because no managed hook can
 see a native guest store.
 
+### The Oregon Trail
+
+The title renders essentially correctly — pixel-art scene, starry background, card
+panels, all in the right places and colours. One thing is visibly missing: the **text**
+inside the UI panels, which come out as flat dark green with faint lighter cells where
+glyphs belong. The panel chrome and the little arrow glyph draw, so it is the text that
+is absent rather than the panel.
+
+Frame rate depends sharply on the phase. In the light phase it holds 48-58 fps; on the
+card-selection screen it drops to **31-32** against a 60 fps target. In that heavy phase
+the GPU is busy 54% of wall and the GPU worker is **idle 80%** with zero host waits, so
+the cost is GPU-side, not the worker's.
+
+What the GPU is spending it on is render-pass restarts. Per two-second interval the heavy
+phase records `passes=1325` against `draws=4800` — under four draws a pass, about twenty
+passes a frame — and the pass-end breakdown says where they come from:
+
+    end_clear=0 end_target=0 end_transfer=1205 end_compute=0
+
+Almost every pass is torn down to record a transfer, not because the guest changed render
+target. Every such teardown costs the attachment a store and a reload, and at 1920x1080
+`B10G11R11UfloatPack32` that is several megabytes each way, twenty times a frame.
+
+`transfer_causes` says which transfers, and it is not the uploads:
+
+    transfer_causes=[Upload=5 ColorClear=76 GuestFill=67]
+
+So roughly 95% of the teardowns are standalone colour clears and guest buffer fills. Both
+have a route out that uploads do not: a clear recorded as the next pass's load action
+costs nothing, since the attachment descriptor already distinguishes `IsClear`, and a
+guest fill that does not touch the open render target could be deferred to the next
+natural encoder boundary or done on the host. An upload bound mid-pass genuinely has to
+end the encoder, and there are only a handful of those.
+
+What those teardowns actually are is not what the first reading said. `end_transfer` is
+incremented inside `EndEncoders`, which `BeginTransfer` and `FlushCommandBuffer` both
+call, so it counts every pass closed on the way to a transfer *or* a flush rather than
+transfers alone. Counting the transfers by cause, and counting how a guest clear arrives,
+names the real source:
+
+    transfer_causes=[Upload=22 ColorClear=1490 GuestFill=1490]
+    clears=[no_pass=0 empty_pass=0 drawn_pass=0]
+
+`ClearColorTargets` is never called — the guest issues no clear at all. The 1490 colour
+clears and 1490 guest fills are one pair each, and that pairing is `MaterializeDccClear`:
+a real clear of the image followed by the fill that writes the already-materialized
+sentinel into the guest's DCC metadata. Twenty-four materializations a frame, two
+render-pass teardowns apiece.
+
+They repeat because the sentinel is written by the GPU while the check that reads it back
+is a host read of the same bytes. Between the fill being recorded and the GPU running it,
+every lookup of that surface sees the old uniform clear code and materializes again.
+
+The cache now remembers which metadata slice and clear code it has already applied and
+skips the repeat, keyed on the code as well as the address so a different clear colour is
+a new clear. Guest memory is written exactly when it was before. The re-arm lives in
+`TryAbsorbDccFill` and **only** there: an earlier version also re-armed from
+`InvalidateMemoryFromGpu`, which `MaterializeDccClear`'s own sentinel fill reaches, so
+every materialization immediately forgot the claim it had just made and the set
+suppressed nothing — the A/B caught it, with the skip counter at zero in both arms.
+
+Measured back to back on a quiet machine, same input plan, 150 s each, with
+`SHARPEMU_METAL_V2_DCC_MATERIALIZED_SET=0` as the control:
+
+| | on | off |
+|---|---|---|
+| colour clears | **466** | 6544 |
+| repeats skipped | **3074** | 0 |
+| pass teardowns | **2627** | 9127 |
+| peak frame rate | 58.8 | 57.3 |
+
+The card screen renders identically in both arms — panels, artwork, glyphs all present —
+so the panel loss seen while chasing an earlier variant of this was machine load, not the
+change. Frame rate is not the discriminator here: both arms reach about 58 fps once the
+machine is quiet, and it is the counters that separate them.
+
+Separately, the panel text is **not** globally broken: the same run renders a full
+sentence of crisp white text on the loading screen. Whatever is missing from the card
+panels is specific to them.
+
+Still open from the earlier triage: `A GPU-written image has no writable guest window:
+address=0x801C6F0000 size=0x400000`, now with its reason — *not one backed span
+(contiguous prefix about 0x240000 of 0x400000)*. The piecewise writeback added for Demon's
+Souls only splits an image whose layers are separable, so a single-layer 4 MiB surface
+still falls back to the whole-range resolve and is skipped.
+
 ## Process-level macOS tuning (separate workstream)
 
 - `Info.plist`: `LSSupportsGameMode`, `GCSupportsGameMode`, and

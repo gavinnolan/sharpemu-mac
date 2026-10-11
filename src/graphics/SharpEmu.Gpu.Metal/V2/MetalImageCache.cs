@@ -25,7 +25,7 @@ internal interface IMetalImageCacheOwner
     ulong CompletedSerial { get; }
 
     // Ends any open encoder and hands over the command buffer being recorded.
-    IMetalSubmissionContext BeginTransfer();
+    IMetalSubmissionContext BeginTransfer(MetalTransferCause cause);
 
     // Fills a guest byte range with a repeating dword on the GPU.
     void FillGuestRange(ulong address, ulong size, uint value);
@@ -531,7 +531,16 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     /// <summary>A GPU shader or transfer wrote these guest bytes: the images reload.</summary>
     public void InvalidateMemoryFromGpu(ulong address, ulong size)
     {
-        if (!IsValidRange(address, size) || !_pageOwners.MayHaveOwners(address, size))
+        if (!IsValidRange(address, size))
+        {
+            return;
+        }
+
+        // Deliberately no re-arm here. MaterializeDccClear's own sentinel fill reaches
+        // this path, so re-arming from it would forget the claim the materialization
+        // just made and the clear would repeat exactly as before. The guest asking for
+        // the clear again arrives as TryAbsorbDccFill, which is where the re-arm lives.
+        if (!_pageOwners.MayHaveOwners(address, size))
         {
             return;
         }
@@ -555,6 +564,14 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             UnwatchImage(imageIdentifier);
         }
     }
+
+    /// <summary>
+    /// Whether any image has ever covered these pages. Lock-free and never wrong in
+    /// the direction that matters: a false answer means no image can own the bytes,
+    /// which is what lets the command stream read a packet without the full test.
+    /// </summary>
+    public bool MayOwn(ulong address, ulong size) =>
+        IsValidRange(address, size) && _pageOwners.MayHaveOwners(address, size);
 
     /// <summary>True while a GPU-modified image owns bytes in the range.</summary>
     public bool HasGpuModifiedImageBytes(ulong address, ulong size)
@@ -833,7 +850,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         ref readonly var description = ref image.Description;
-        var context = _owner.BeginTransfer();
+        var context = _owner.BeginTransfer(MetalTransferCause.Upload);
         var whole = description.Data.Size <= MaxTransferPieceBytes
             ? _guestMemory.Resolve(description.Data.Address, description.Data.Size)
             : default;
@@ -936,7 +953,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var destination = description.Data.Size <= MaxTransferPieceBytes
             ? _guestMemory.ResolveWritable(description.Data.Address, description.Data.Size)
             : default;
-        var context = _owner.BeginTransfer();
+        var context = _owner.BeginTransfer(MetalTransferCause.Writeback);
         if (destination.IsValid && destination.Size >= description.Data.Size)
         {
             var stencil = description.HasStencil
