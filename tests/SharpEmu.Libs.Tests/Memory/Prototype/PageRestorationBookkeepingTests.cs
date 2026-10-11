@@ -138,18 +138,20 @@ public sealed class PageRestorationBookkeepingTests
         Assert.Equal(ReleaseStep.NativeRestoreRequired, page.TryBegin(member, out var old));
         using var paused = new ManualResetEventSlim();
         using var proceed = new ManualResetEventSlim();
-        var worker = Task.Run(() => page.Complete(old, true, 0, beforeMemberClaim: () =>
+        // A dedicated thread and generous bounds: a starved thread pool on a loaded host
+        // must not read as a bookkeeping failure. Every wait returns as soon as it is met.
+        var worker = Task.Factory.StartNew(() => page.Complete(old, true, 0, beforeMemberClaim: () =>
         {
             paused.Set();
-            Assert.True(proceed.Wait(TimeSpan.FromSeconds(5)));
-        }));
+            Assert.True(proceed.Wait(TimeSpan.FromSeconds(30)));
+        }), CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
         try
         {
-            Assert.True(paused.Wait(TimeSpan.FromSeconds(5)));
+            Assert.True(paused.Wait(TimeSpan.FromSeconds(30)));
             Assert.True(page.Complete(old, false, 12));
             Assert.Equal(ReleaseStep.NativeRestoreRequired, page.TryBegin(member, out var retry));
             proceed.Set();
-            Assert.False(await worker.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.False(await worker.WaitAsync(TimeSpan.FromSeconds(30)));
             Assert.Equal(1, page.Watchers);
             Assert.True(page.Pending);
             Assert.True(page.Complete(retry, false, 13));
