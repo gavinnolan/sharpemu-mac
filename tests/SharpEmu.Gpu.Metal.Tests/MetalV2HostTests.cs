@@ -118,6 +118,19 @@ public sealed class MetalV2HostTests
         Assert.Equal(Mtl.BlendOperationReverseSubtract, MetalV2Formats.BlendOperation(4));
     }
 
+    [Theory]
+    [InlineData(GpuPrimitiveTopology.PointList, 1u)]
+    [InlineData(GpuPrimitiveTopology.LineList, 2u)]
+    [InlineData(GpuPrimitiveTopology.LineStrip, 2u)]
+    [InlineData(GpuPrimitiveTopology.TriangleList, 3u)]
+    [InlineData(GpuPrimitiveTopology.TriangleStrip, 3u)]
+    [InlineData(GpuPrimitiveTopology.TriangleFan, 3u)]
+    public void LayeredPipelinesDeclareTheClassOfTheDrawnPrimitive(GpuPrimitiveTopology topology, uint expected)
+    {
+        // A layered pipeline's input topology class has to match every draw's primitive type.
+        Assert.Equal((nuint)expected, MetalV2Formats.TopologyClass(topology));
+    }
+
     [Fact]
     public void VertexFormatsNarrowToTheComponentsTheProgramFetches()
     {

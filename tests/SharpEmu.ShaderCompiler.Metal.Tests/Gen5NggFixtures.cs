@@ -186,22 +186,25 @@ internal static class Gen5NggFixtures
         Gen5ShaderProgram program,
         Gen5NggStageInfo? stageInfo = null,
         int requiredVertexOutputCount = 1,
-        ResourceRuntimeInputs? runtimeInputs = null) =>
+        ResourceRuntimeInputs? runtimeInputs = null,
+        uint positionExportControl = 0) =>
         Gen5ComputeFixtures.RequestOrThrow(
             program,
             ShaderStage.Vertex,
             requiredVertexOutputCount: requiredVertexOutputCount,
             runtimeInputs: runtimeInputs,
             primitiveShader: stageInfo ?? StageInfo,
-            userDataBase: VertexUserDataBase);
+            userDataBase: VertexUserDataBase,
+            positionExportControl: positionExportControl);
 
     public static Gen5MslShader CompileOrThrow(
         Gen5ShaderProgram program,
         Gen5NggStageInfo? stageInfo = null,
         int requiredVertexOutputCount = 1,
-        ResourceRuntimeInputs? runtimeInputs = null)
+        ResourceRuntimeInputs? runtimeInputs = null,
+        uint positionExportControl = 0)
     {
-        var request = Request(program, stageInfo, requiredVertexOutputCount, runtimeInputs);
+        var request = Request(program, stageInfo, requiredVertexOutputCount, runtimeInputs, positionExportControl);
         if (!Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error))
         {
             throw new InvalidOperationException($"NGG mesh emit failed: {error}");
