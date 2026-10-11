@@ -81,6 +81,10 @@ public sealed class ApplicationSettings
 
     public string HdrMode { get; set; } = "Auto";
 
+    // What the guest is told the display is, which is what decides how much pixel work a
+    // title does. Not the window size: see GuestDisplayResolution.
+    public string GuestDisplayResolution { get; set; } = "1080p";
+
     public bool OverlayEnabled { get; set; } = true;
     public string OverlayCorner { get; set; } = "TopRight";
     public string OverlayMode { get; set; } = "TitleBar";
@@ -189,6 +193,8 @@ public sealed class ApplicationSettings
         settings.Resolution = NormalizeResolution(settings.Resolution);
         settings.ScalingMode = NormalizeChoice(settings.ScalingMode, "Fit", "Cover", "Stretch", "Integer");
         settings.HdrMode = NormalizeChoice(settings.HdrMode, "Auto", "On", "Off");
+        settings.GuestDisplayResolution = NormalizeChoice(
+            settings.GuestDisplayResolution, "1080p", "1440p", "2160p");
         settings.BinkPlaybackMode = NormalizeChoice(settings.BinkPlaybackMode, "Guest", "Host", "Skip");
         settings.OverlayCorner = NormalizeChoice(settings.OverlayCorner, "TopRight", "TopLeft", "BottomRight", "BottomLeft");
         settings.OverlayMode = NormalizeChoice(settings.OverlayMode, "TitleBar", "Full", "Minimal");

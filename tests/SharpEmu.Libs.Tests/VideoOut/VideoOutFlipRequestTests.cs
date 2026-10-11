@@ -80,8 +80,14 @@ public sealed class VideoOutFlipRequestTests : IDisposable
         Assert.Equal(0UL, Change());
         Assert.True(VideoOutExports.TryGetDisplayBufferInfo(_handle, 0, out var info));
         Assert.Equal(new VideoOutExports.DisplayBufferInfo(MemoryBase, pqFormat, 0, 3840, 2160, 3840, 8), info);
-        Assert.Equal(3840u, port.GetType().GetProperty("OutputWidth")!.GetValue(port));
-        Assert.Equal(2160u, port.GetType().GetProperty("OutputHeight")!.GetValue(port));
+        // Registering a 4K buffer records what the title asked for; it does not redefine the
+        // display we advertise, which is the host's setting. The two were the same field, so
+        // the resolution class a title read back was always its own guess.
+        Assert.Equal(3840u, port.GetType().GetProperty("RegisteredWidth")!.GetValue(port));
+        Assert.Equal(2160u, port.GetType().GetProperty("RegisteredHeight")!.GetValue(port));
+        var advertised = SharpEmu.Libs.VideoOut.HostVideoHost.CurrentOptions.GuestDisplaySize;
+        Assert.Equal(advertised.Width, port.GetType().GetProperty("OutputWidth")!.GetValue(port));
+        Assert.Equal(advertised.Height, port.GetType().GetProperty("OutputHeight")!.GetValue(port));
         Assert.Equal(unchecked((ulong)(int)0x8029000B), Change(handle: -1));
         Assert.Equal(unchecked((ulong)(int)0x8029001A), Change(address: 0));
         Assert.Equal(unchecked((ulong)(int)0x8029001A), Change(option: 1));

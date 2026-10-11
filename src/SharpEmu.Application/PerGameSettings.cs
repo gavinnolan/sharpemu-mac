@@ -37,6 +37,8 @@ public sealed class PerGameSettings
 
     public string? HdrMode { get; set; }
 
+    public string? GuestDisplayResolution { get; set; }
+
     public bool? OverlayEnabled { get; set; }
     public string? OverlayCorner { get; set; }
     public string? OverlayMode { get; set; }
@@ -58,6 +60,7 @@ public sealed class PerGameSettings
         ScalingMode is null &&
         VSync is null &&
         HdrMode is null &&
+        GuestDisplayResolution is null &&
         OverlayEnabled is null &&
         OverlayCorner is null &&
         OverlayMode is null &&
@@ -164,6 +167,11 @@ public sealed class PerGameSettings
         if (VSync == global.VSync)
         {
             VSync = null;
+        }
+
+        if (string.Equals(GuestDisplayResolution, global.GuestDisplayResolution, StringComparison.OrdinalIgnoreCase))
+        {
+            GuestDisplayResolution = null;
         }
 
         if (string.Equals(HdrMode, global.HdrMode, StringComparison.OrdinalIgnoreCase))
@@ -279,6 +287,7 @@ public sealed record EffectiveLaunchSettings(
     string ScalingMode,
     bool VSync,
     string HdrMode,
+    string GuestDisplayResolution,
     bool OverlayEnabled,
     string OverlayCorner,
     string OverlayMode,
@@ -296,6 +305,7 @@ public sealed record EffectiveLaunchSettings(
         perGame?.ScalingMode ?? global.ScalingMode,
         perGame?.VSync ?? global.VSync,
         perGame?.HdrMode ?? global.HdrMode,
+        perGame?.GuestDisplayResolution ?? global.GuestDisplayResolution,
         perGame?.OverlayEnabled ?? global.OverlayEnabled,
         perGame?.OverlayCorner ?? global.OverlayCorner,
         perGame?.OverlayMode ?? global.OverlayMode,

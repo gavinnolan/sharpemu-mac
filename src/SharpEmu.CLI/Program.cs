@@ -1038,6 +1038,14 @@ internal static partial class Program
         int? refreshRateOverride = null;
         bool? vsyncOverride = null;
         HostHdrMode? hdrModeOverride = null;
+        // SHARPEMU_DISPLAY_RESOLUTION is read here rather than where video-out answers the
+        // guest, so one place decides and every query agrees.
+        var displayResolutionOverride =
+            TryParseDisplayResolution(
+                Environment.GetEnvironmentVariable("SHARPEMU_DISPLAY_RESOLUTION") ?? string.Empty,
+                out var environmentDisplayResolution)
+                ? environmentDisplayResolution
+                : (GuestDisplayResolution?)null;
         bool? overlayEnabledOverride = null;
         PerformanceOverlayMode? overlayModeOverride = null;
         PerformanceOverlayCorner? overlayCornerOverride = null;
@@ -1354,6 +1362,7 @@ internal static partial class Program
             RefreshRate = refreshRateOverride ?? configuredVideoOptions.RefreshRate,
             VSync = vsyncOverride ?? configuredVideoOptions.VSync,
             HdrMode = hdrModeOverride ?? configuredVideoOptions.HdrMode,
+            DisplayResolution = displayResolutionOverride ?? configuredVideoOptions.DisplayResolution,
             OverlayEnabled = overlayEnabledOverride ?? configuredVideoOptions.OverlayEnabled,
             OverlayMode = overlayModeOverride ?? configuredVideoOptions.OverlayMode,
             OverlayCorner = overlayCornerOverride ?? configuredVideoOptions.OverlayCorner,
@@ -1383,6 +1392,10 @@ internal static partial class Program
             var hdrMode = TryParseHdrMode(effective.HdrMode, out var parsedHdrMode)
                 ? parsedHdrMode
                 : defaults.HdrMode;
+            var displayResolution =
+                TryParseDisplayResolution(effective.GuestDisplayResolution, out var parsedDisplayResolution)
+                    ? parsedDisplayResolution
+                    : defaults.DisplayResolution;
 
             return new HostVideoOptions
             {
@@ -1394,6 +1407,7 @@ internal static partial class Program
                 RefreshRate = effective.RefreshRate,
                 VSync = effective.VSync,
                 HdrMode = hdrMode,
+                DisplayResolution = displayResolution,
                 OverlayEnabled = effective.OverlayEnabled,
                 OverlayCorner = Enum.TryParse<PerformanceOverlayCorner>(effective.OverlayCorner, true, out var corner)
                     ? corner : defaults.OverlayCorner,
@@ -1497,6 +1511,20 @@ internal static partial class Program
             _ => (HostHdrMode)(-1),
         };
         return Enum.IsDefined(mode);
+    }
+
+    /// <summary>The display the guest is told about: 1080p, 1440p or 2160p. Four-K is the
+    /// one a title can spend four times the pixel work on, so it is opt-in.</summary>
+    private static bool TryParseDisplayResolution(string value, out GuestDisplayResolution resolution)
+    {
+        resolution = value.Trim().ToLowerInvariant() switch
+        {
+            "1080p" or "1080" or "fhd" or "hd" or "1920x1080" => GuestDisplayResolution.Hd,
+            "1440p" or "1440" or "qhd" or "2560x1440" => GuestDisplayResolution.Qhd,
+            "2160p" or "2160" or "4k" or "uhd" or "3840x2160" => GuestDisplayResolution.Uhd,
+            _ => (GuestDisplayResolution)(-1),
+        };
+        return Enum.IsDefined(resolution);
     }
 
     private static bool TryParseResolution(string value, out int width, out int height)
