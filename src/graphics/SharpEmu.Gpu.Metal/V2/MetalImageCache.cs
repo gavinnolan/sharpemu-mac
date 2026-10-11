@@ -30,6 +30,10 @@ internal interface IMetalImageCacheOwner
     // Fills a guest byte range with a repeating dword on the GPU.
     void FillGuestRange(ulong address, ulong size, uint value);
 
+    // The same fill, written by the host so the bytes are visible to the next host read
+    // rather than when the GPU gets to it. Only for ranges the GPU never reads.
+    void FillGuestRangeOnHost(ulong address, ulong size, uint value);
+
     // Recorded work stores into this guest range, so a later read of these bytes
     // waits for the submission being recorded and a read of anything else does not.
     void NoteGuestWrite(ulong address, ulong size);
@@ -390,7 +394,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
             // The bytes become the "already materialized" sentinel, so the next sample
             // does not clear over whatever is drawn into the surface in between.
-            _owner.FillGuestRange(guestSlice, sliceSize, uint.MaxValue);
+            _owner.FillGuestRangeOnHost(guestSlice, sliceSize, uint.MaxValue);
         }
     }
 

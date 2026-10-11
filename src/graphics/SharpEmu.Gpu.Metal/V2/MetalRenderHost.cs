@@ -583,6 +583,16 @@ internal sealed partial class MetalRenderHost :
 
     void IMetalImageCacheOwner.WaitForGpu() => FlushAndWaitForGpu(MetalWaitReason.ImageCache);
 
+    void IMetalImageCacheOwner.FillGuestRangeOnHost(ulong address, ulong size, uint value)
+    {
+        if (size == 0)
+        {
+            return;
+        }
+
+        WriteGuestPattern(address, size, value);
+    }
+
     void IMetalImageCacheOwner.FillGuestRange(ulong address, ulong size, uint value) =>
         FillGuestMemory(address, size, value);
 
@@ -1147,7 +1157,7 @@ internal sealed partial class MetalRenderHost :
         Console.Error.WriteLine(
             $"[METAL-V2][TRACE] created={created} end_clear={endClear} end_target={endTarget} " +
             $"end_transfer={endTransfer} end_compute={endCompute} targetless={targetless} " +
-            $"transfer_causes=[{TakeTransferCauses()}] " +
+            $"transfer_causes=[{TakeTransferCauses()}] clears=[{TakeClearArrivals()}] " +
             $"gpu_busy_n={gpuBusySamples} event_ready={eventReady} event_waited={eventWaited} " +
             $"event_wait_ms={eventWaitMs.ToString("F1", culture)} " +
             $"event_wake_ms={eventWakeMs.ToString("F1", culture)} " +

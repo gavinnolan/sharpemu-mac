@@ -636,7 +636,14 @@ internal sealed partial class MetalImageCache
 
                 if (request.Role != ImageRole.DisplaySurface)
                 {
-                    _owner.FillGuestRange(address, sliceSize, uint.MaxValue);
+                    // Host-side on purpose. This byte pattern is what stops the next
+                    // lookup materializing the same clear again, and the next lookup is
+                    // a host read: a GPU fill would not have landed by then, so the
+                    // clear would repeat every time the surface was looked up — which
+                    // is what cost The Oregon Trail two render-pass teardowns per
+                    // materialization, around twenty-four times a frame. Nothing on the
+                    // GPU reads DCC metadata, so writing it here is safe.
+                    _owner.FillGuestRangeOnHost(address, sliceSize, uint.MaxValue);
                 }
             }
         }
