@@ -278,7 +278,8 @@ internal sealed partial class MetalRenderHost :
 
         _slotTrap?.OnCommit(serial);
         MetalNative.SendVoid(_commandBuffer, SelCommit);
-        if (_pendingLabelWrites != 0 && ScheduleLabelSubmissions && _inFlightCount == 0)
+        if (_pendingLabelWrites != 0 && ScheduleLabelSubmissions &&
+            System.Diagnostics.Stopwatch.GetTimestamp() - _lastCommitTimestamp > QuietQueueTicks)
         {
             // A queue that commits a hundred buffers in two seconds waits hundreds of
             // milliseconds for the driver to pick one up, which nothing noticed while the
@@ -288,11 +289,12 @@ internal sealed partial class MetalRenderHost :
             // it is not waiting for the GPU, which is the whole point of writing the label
             // on the GPU in the first place.
             //
-            // Only when nothing else is in flight: that is what a queue going quiet looks
-            // like, and it is the only state the driver dawdles in. Doing it on every
-            // label-carrying commit instead put Superliminal into long stalls, because a
-            // queue with work already in it needs no prompting and the wait is pure
-            // latency on the worker.
+            // Only on a queue that has gone quiet, which is the state the driver dawdles
+            // in: Quake commits one buffer every twenty milliseconds at its intro and
+            // waits, while Superliminal commits one every two or three and needs no
+            // prompting at all. Prompting on every label-carrying commit put Superliminal
+            // into long stalls instead, because the wait is then pure latency on the
+            // worker.
             MetalNative.SendVoid(_commandBuffer, SelWaitUntilScheduled);
             Interlocked.Increment(ref _scheduledLabelSubmissions);
         }
@@ -1063,6 +1065,9 @@ internal sealed partial class MetalRenderHost :
     // driver's own pace, which is what every title did before labels were honest.
     private static readonly bool ScheduleLabelSubmissions =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_SCHEDULE_LABELS") != "0";
+
+    // How long since the previous commit makes this queue a quiet one.
+    private static readonly long QuietQueueTicks = System.Diagnostics.Stopwatch.Frequency / 250;
 
     /// <summary>Label submissions the driver was asked to schedule at once.</summary>
     public long TakeScheduledLabelSubmissions() => Interlocked.Exchange(ref _scheduledLabelSubmissions, 0);
