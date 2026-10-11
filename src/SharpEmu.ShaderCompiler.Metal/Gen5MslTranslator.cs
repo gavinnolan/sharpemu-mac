@@ -2250,7 +2250,40 @@ public static partial class Gen5MslTranslator
 
         private static string AsFloat(string expression) => $"as_type<float>({expression})";
 
-        private static string AsUInt(string expression) => $"as_type<uint>({expression})";
+        /// <summary>The uint bits of an expression. A value that was just reinterpreted
+        /// as a float is handed back as it came: the register file is uint, so an
+        /// instruction that reads a float and writes uint bits would otherwise emit
+        /// as_type&lt;uint&gt;(as_type&lt;float&gt;(v0)) — a no-op the Metal compiler folds
+        /// but which 120 lines of a game's shaders carry through the compiler first.</summary>
+        private static string AsUInt(string expression)
+        {
+            const string cast = "as_type<float>(";
+            if (expression.StartsWith(cast, StringComparison.Ordinal) &&
+                expression.EndsWith(')') &&
+                MatchingParenthesis(expression, cast.Length - 1) == expression.Length - 1)
+            {
+                return expression[cast.Length..^1];
+            }
+
+            return $"as_type<uint>({expression})";
+        }
+
+        /// <summary>The index of the parenthesis closing the one at
+        /// <paramref name="open"/>, or -1.</summary>
+        private static int MatchingParenthesis(string expression, int open)
+        {
+            var depth = 0;
+            for (var index = open; index < expression.Length; index++)
+            {
+                depth += expression[index] == '(' ? 1 : expression[index] == ')' ? -1 : 0;
+                if (depth == 0)
+                {
+                    return index;
+                }
+            }
+
+            return -1;
+        }
 
         // ---- basic blocks (ports BuildBasicBlocks from the SPIR-V translator) ----
 

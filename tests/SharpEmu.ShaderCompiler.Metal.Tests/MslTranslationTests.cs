@@ -136,6 +136,55 @@ public sealed class MslTranslationTests
         return count;
     }
 
+    /// <summary>The register file is uint, so an instruction that reads a float and
+    /// writes back raw bits used to emit as_type&lt;uint&gt;(as_type&lt;float&gt;(v0)) — a
+    /// no-op, but one the Metal compiler had to be handed first. V_CVT_PKRTZ_F16_F32
+    /// truncates its operands' mantissas before converting, which is where it showed up.
+    /// The packed halves still have to come out right: 1.5 is 0x3E00 and 2.0 is 0x4000.</summary>
+    [Fact]
+    public void PackedHalfConversionDoesNotRoundTripItsBitcasts()
+    {
+        var fixture = new Gen5ComputeFixture(
+            "pkrtz",
+            [
+                0x7E0002FF, 0x3FC00000, // v_mov_b32 v0, 1.5f
+                0x7E0202FF, 0x40000000, // v_mov_b32 v1, 2.0f
+                0x5E0A0300,             // v_cvt_pkrtz_f16_f32 v5, v0, v1
+                0xE0700000, 0x80020500, // buffer_store_dword v5, off, s[8:11], 0
+                0xBF810000,             // s_endpgm
+            ],
+            StoreScalarResourceBase: 8,
+            StoreBackingBytes: 16);
+
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture);
+        Assert.Contains("& 0xFFFFE000u", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("as_type<uint>(as_type<float>(", shader.Source, StringComparison.Ordinal);
+
+        if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") != "1")
+        {
+            return;
+        }
+
+        Assert.True(MetalNative.IsAvailable, "The required execution gate needs a Metal device.");
+        Assert.True(
+            MetalNative.TryCompileLibrary(shader.Source, out var library, out var metalError),
+            metalError);
+        Assert.True(
+            MetalNative.TryExecuteWithArgumentBuffer(
+                library,
+                shader.EntryPoint,
+                new byte[fixture.StoreBackingBytes],
+                new byte[Resources.PushData.ByteSize],
+                shader.ArgumentLayout!,
+                threadsPerThreadgroup: 1,
+                out var result,
+                out var runError),
+            runError);
+        Assert.Equal(
+            0x40003E00u,
+            System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(result));
+    }
+
     [Fact]
     public void ExecMaskedStoresAreGuarded()
     {

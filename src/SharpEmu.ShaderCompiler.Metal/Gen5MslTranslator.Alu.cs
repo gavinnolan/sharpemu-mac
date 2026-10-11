@@ -758,10 +758,10 @@ public static partial class Gen5MslTranslator
             // mirroring the SPIR-V translator's TruncateFloat32ForPack.
             var first = Temp(
                 "float",
-                $"as_type<float>(as_type<uint>({F(instruction, 0)}) & 0xFFFFE000u)");
+                $"as_type<float>({AsUInt(F(instruction, 0))} & 0xFFFFE000u)");
             var second = Temp(
                 "float",
-                $"as_type<float>(as_type<uint>({F(instruction, 1)}) & 0xFFFFE000u)");
+                $"as_type<float>({AsUInt(F(instruction, 1))} & 0xFFFFE000u)");
             return $"(((uint)as_type<ushort>(half({first}))) | (((uint)as_type<ushort>(half({second}))) << 16))";
         }
 
