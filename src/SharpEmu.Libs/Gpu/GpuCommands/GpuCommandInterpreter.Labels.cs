@@ -188,7 +188,9 @@ public sealed partial class GpuCommandInterpreter
                 if (is64Bit)
                 {
                     var clock = GpuReferenceClock.Read();
-                    WriteEndOfPipeQword(destination, clock);
+                    WriteEndOfPipeQword(destination, clock, withInterrupt
+                        ? EndOfPipeWriteKind.Interrupt64
+                        : (cacheAction == 0x38 ? EndOfPipeWriteKind.ClockWriteBack : EndOfPipeWriteKind.ClockWrite));
                     switch (cacheAction)
                     {
                         case 0x00:
@@ -218,33 +220,33 @@ public sealed partial class GpuCommandInterpreter
             $"index={eventIndex} bits={(is64Bit ? 64 : 32)} interrupt={interruptSelector} destination=0x{destination:X16}.");
     }
 
-    private void WriteEndOfPipeDword(ulong destination, uint value)
+    private void WriteEndOfPipeDword(ulong destination, uint value, EndOfPipeWriteKind kind)
     {
-        if (_host.DefersEndOfPipeLabels) _lastWriteLength = 0;
+        if (_host.DefersEndOfPipeLabel(kind)) _lastWriteLength = 0;
         else WriteDword(destination, value);
     }
 
-    private void WriteEndOfPipeQword(ulong destination, ulong value)
+    private void WriteEndOfPipeQword(ulong destination, ulong value, EndOfPipeWriteKind kind)
     {
-        if (_host.DefersEndOfPipeLabels) _lastWriteLength = 0;
+        if (_host.DefersEndOfPipeLabel(kind)) _lastWriteLength = 0;
         else WriteQword(destination, value);
     }
 
     private void Write32(ulong destination, uint value, bool withWriteBack, bool withInterrupt, int eventId, uint contextId)
     {
-        WriteEndOfPipeDword(destination, value);
         var kind = withInterrupt
             ? (withWriteBack ? EndOfPipeWriteKind.InterruptWriteBack32 : EndOfPipeWriteKind.Interrupt32)
             : (withWriteBack ? EndOfPipeWriteKind.WriteBack32 : EndOfPipeWriteKind.Write32);
+        WriteEndOfPipeDword(destination, value, kind);
         _host.RecordEndOfPipe(new EndOfPipeWrite(kind, SubmitId, destination, value, eventId, contextId));
     }
 
     private void Write64(ulong destination, ulong value, bool withWriteBack, bool withInterrupt, int eventId, uint contextId)
     {
-        WriteEndOfPipeQword(destination, value);
         var kind = withInterrupt
             ? (withWriteBack ? EndOfPipeWriteKind.InterruptWriteBack64 : EndOfPipeWriteKind.Interrupt64)
             : (withWriteBack ? EndOfPipeWriteKind.WriteBack64 : EndOfPipeWriteKind.Write64);
+        WriteEndOfPipeQword(destination, value, kind);
         _host.RecordEndOfPipe(new EndOfPipeWrite(kind, SubmitId, destination, value, eventId, contextId));
     }
 
@@ -497,7 +499,7 @@ public sealed partial class GpuCommandInterpreter
             return;
         }
 
-        WriteEndOfPipeDword(destination, value);
+        WriteEndOfPipeDword(destination, value, EndOfPipeWriteKind.FlipWithWrite32);
         var flip = PendingFlip;
         var requestId = _host.PrepareFlip(flip.Handle, flip.Index, flip.FlipMode, flip.FlipArgument);
         _host.RecordEndOfPipe(new EndOfPipeWrite(
@@ -518,7 +520,7 @@ public sealed partial class GpuCommandInterpreter
             return;
         }
 
-        WriteEndOfPipeDword(destination, value);
+        WriteEndOfPipeDword(destination, value, EndOfPipeWriteKind.FlipWithInterruptWriteBack32);
         var flip = PendingFlip;
         var requestId = _host.PrepareFlip(flip.Handle, flip.Index, flip.FlipMode, flip.FlipArgument);
         _host.RecordEndOfPipe(new EndOfPipeWrite(

@@ -39,6 +39,9 @@ internal enum MetalGpuWriteOrigin : byte
     Fill,
     Copy,
     ImageWriteback,
+
+    /// <summary>An end-of-pipe label the GPU writes where its packet sits in the stream.</summary>
+    EndOfPipeLabel,
     Unbounded,
 }
 
@@ -55,7 +58,7 @@ internal static class MetalGpuWriteOrigins
     public const int Count = (int)MetalGpuWriteOrigin.Unbounded + 1;
 
     public static readonly string[] Names =
-        ["storage", "binding", "device_address", "fill", "copy", "writeback", "unbounded"];
+        ["storage", "binding", "device_address", "fill", "copy", "writeback", "eop_label", "unbounded"];
 }
 
 /// <summary>

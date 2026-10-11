@@ -84,6 +84,18 @@ public interface ICommandStreamHost
     // Reads guest memory the GPU may have written; the host synchronizes GPU-owned pages first.
     bool TryReadGuest(ulong address, Span<byte> destination);
 
+    /// <summary>
+    /// Reads bytes a wait packet is polling, as memory holds them now.
+    /// </summary>
+    /// <remarks>
+    /// The hardware's command processor reads memory and stalls on the value it finds, so a
+    /// poll must not wait for work that is about to write those bytes: an unmet compare
+    /// suspends the submission and the host wakes it when the write lands. A host that puts
+    /// the write in a command buffer has to make sure that buffer is on its way, or nothing
+    /// will ever change the bytes. Hosts whose reads do not wait need no override.
+    /// </remarks>
+    bool TryPollGuest(ulong address, Span<byte> destination) => TryReadGuest(address, destination);
+
     // Immediate hosts retain their ordinary memory effects. An ordered host
     // must finish this owned operation before interpreter results are consumed.
     bool TryWriteGuest(ulong address, ReadOnlySpan<byte> source, string kind = "WRITE_BYTES") => Memory.TryWrite(address, source);
@@ -118,6 +130,14 @@ public interface ICommandStreamHost
     // successfully after preceding GPU work, before any interrupt/flip acknowledgement.
     // Other hosts retain the existing immediate interpreter label writes.
     bool DefersEndOfPipeLabels => false;
+
+    /// <summary>Whether this host publishes one kind of label itself, after its work.</summary>
+    /// <remarks>
+    /// Kinds differ in what the guest does with them. A fence the guest polls before reusing
+    /// the memory the work reads has to be published after that work or the reuse races it;
+    /// a timestamp is read for its value and not as permission to touch anything.
+    /// </remarks>
+    bool DefersEndOfPipeLabel(EndOfPipeWriteKind kind) => DefersEndOfPipeLabels;
 
     void RecordEndOfPipe(in EndOfPipeWrite write);
 

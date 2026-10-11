@@ -289,6 +289,8 @@ internal sealed partial class MetalRenderHost :
         _previousSerial = serial;
         _commandBuffer = 0;
         _recordedCommands = 0;
+        // Every label this submission carried is now on its way to the guest window.
+        _pendingLabelWrites = 0;
         Interlocked.Increment(ref _flushes);
         _completions.Publish(serial);
         return serial;
@@ -963,6 +965,65 @@ internal sealed partial class MetalRenderHost :
         return _memory.TryRead(address, destination);
     }
 
+    /// <summary>
+    /// Reads the bytes a wait packet polls without waiting for the GPU to write them.
+    /// </summary>
+    /// <remarks>
+    /// An end-of-pipe label the GPU writes is a recorded write like any other, so an
+    /// ordinary read of it waits for the submission: on Superliminal that was eight hundred
+    /// waits and a second of worker time per two-second window, because the command
+    /// processor polls the labels it just queued. The hardware's command processor does not
+    /// wait either — it reads memory, and the value arrives when the GPU gets there. What
+    /// the host must do is commit the work that will write the bytes, so that the poll has
+    /// something to wait for; the compare then suspends the submission, and the completion
+    /// of that submission wakes it.
+    /// </remarks>
+    // SHARPEMU_METAL_V2_POLL_WITHOUT_WAIT=0 makes a poll an ordinary read again, which
+    // waits for the GPU on the worker thread. For telling the two apart when a title
+    // misbehaves.
+    private static readonly bool PollWithoutWaiting =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_POLL_WITHOUT_WAIT") != "0";
+
+    public bool TryPollGuest(ulong address, Span<byte> destination)
+    {
+        if (destination.IsEmpty)
+        {
+            return true;
+        }
+
+        if (!PollWithoutWaiting)
+        {
+            return TryReadGuest(address, destination);
+        }
+
+        var size = (ulong)destination.Length;
+        if (_imageCache.MayOwn(address, size) && _imageCache.HasGpuModifiedImageBytes(address, size))
+        {
+            // An image owns these bytes, and its writeback has to be read back through the
+            // ordinary path before anything can be said about them.
+            return TryReadGuest(address, destination);
+        }
+
+        if (_commandBuffer != 0 &&
+            _gpuWrites.MayCover(address, size) &&
+            _gpuWrites.PendingSerial(address, size, CompletedSerial) >= _submissionSerial)
+        {
+            // The write is still in the buffer being recorded: commit it, do not wait. The
+            // commit is per poll, which is the cost of this design — deferring it to the
+            // worker's next park was measured slower, because the park follows immediately
+            // anyway and the extra scheduler turn only adds latency to the wake.
+            Interlocked.Increment(ref _pollFlushes);
+            FlushCommandBuffer();
+        }
+
+        return _memory.TryRead(address, destination);
+    }
+
+    private long _pollFlushes;
+
+    /// <summary>Commits a wait packet asked for so the bytes it polls can change.</summary>
+    public long TakePollFlushes() => Interlocked.Exchange(ref _pollFlushes, 0);
+
     // The part of the range that is mapped from its start; an unmapped start is fatal
     // because the executor cannot bind it.
     public ulong ClampMappedSize(ulong address, ulong size)
@@ -1170,11 +1231,15 @@ internal sealed partial class MetalRenderHost :
             }
         }
 
+        var labels = TakeLabelCounters();
         reasons.Append(" host_fills=").Append(Interlocked.Exchange(ref _hostFills, 0))
             .Append(" gpu_fills=").Append(Interlocked.Exchange(ref _gpuFills, 0))
             .Append(" cleared_fills=").Append(Interlocked.Exchange(ref _absorbedFills, 0))
             .Append(" host_copies=").Append(Interlocked.Exchange(ref _hostCopies, 0))
             .Append(" inline_eop=").Append(TakeInlineCompletions())
+            .Append(" gpu_labels=").Append(labels.GpuTimed)
+            .Append(" host_labels=").Append(labels.WithoutWindow)
+            .Append(" poll_flushes=").Append(TakePollFlushes())
             .Append(" keep_warm=").Append(Interlocked.Exchange(ref _keepWarmSubmissions, 0))
             .Append(" residency_skipped=").Append(TakeSkippedResidencyCalls())
             .Append(" device_address_writes=").Append(DeviceAddressWrites)
