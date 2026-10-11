@@ -35,12 +35,12 @@ internal static partial class MacMappedCopyState
         }
     }
 
-    [LibraryImport("/usr/lib/libSystem.B.dylib")]
+    [LibraryImport("libSystem.B.dylib")]
     private static partial uint mach_host_self();
-    [LibraryImport("/usr/lib/libSystem.B.dylib")]
+    [LibraryImport("libSystem.B.dylib")]
     private static partial uint mach_task_self();
-    [LibraryImport("/usr/lib/libSystem.B.dylib")]
+    [LibraryImport("libSystem.B.dylib")]
     private static partial int _host_page_size(uint host, out nuint size);
-    [LibraryImport("/usr/lib/libSystem.B.dylib")]
+    [LibraryImport("libSystem.B.dylib")]
     private static partial int mach_port_deallocate(uint task, uint port);
 }
