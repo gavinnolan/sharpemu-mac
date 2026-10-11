@@ -762,10 +762,28 @@ menu ignores them, and the menu, not the pad path, is what is deaf.
 The cursor appears in some runs and not others, which points at the error modal rather than
 the prompt: the likeliest reading is that the Bethesda modal keeps its input grab after it
 stops being drawn, and only a dismissal that lands at the right moment hands the menu back.
-Whoever picks this up should start there — the pad path is proven, so the question is what
-state `bnetUIHost` leaves the menu in after `DoErrorDisplay`, not whether input arrives.
 Note while reading KEX: its pad reader runs at about 200 kHz on its own thread while the
-menu runs at frame rate.
+menu runs at frame rate, and the gateway dispatches about 95 million imports in 150 s.
+
+**It is not a system dialog left open by our HLE.** Quake imports the whole dialog surface
+— 30 NIDs across `libSceCommonDialog`, `libSceMsgDialog`, `libSceSigninDialog`,
+`libSceSaveDataDialog`, `libSceNpCommerce`, `libSceWebBrowserDialog`, `libSceImeDialog` —
+and a run filtered with `SHARPEMU_LOG_IMPORT_FILTER=Dialog` shows it calls exactly one of
+them: `sceImeDialogGetStatus`, 3208 times in 150 s, answered `SCE_IME_DIALOG_STATUS_NONE`
+every time because `sceImeDialogInit` is never called. No `Open`, no `UpdateStatus`, no
+`GetResult`, no `Terminate`, on any dialog. This is measured rather than assumed:
+`sceSaveDataDialogGetStatus` and `sceSaveDataDialogUpdateStatus` are leaf-dispatched and
+were invisible until `SHARPEMU_LOG_IMPORT_FILTER` was taught to cover the leaf paths.
+
+The other routes to "a dialog is open" are ruled out the same way.
+`sceSystemServiceGetStatus` is called **twice per run**, both during init, so neither
+`isSystemUiOverlaid` nor `isInBackgroundExecution` can gate per-frame input — and we write
+zero to both. `sceSystemServiceReceiveEvent` is never called.
+`sceSystemServiceParamGetInt` is called twice, both for the system language (id 1), never
+for `ENTER_BUTTON_ASSIGN`, so the confirm button is not being swapped either.
+
+What is left is inside KEX: the pad bits arrive, nothing in our dialog or system-service
+surface tells the title a dialog is up, and the prompt still does not act.
 
 A second, smaller finding from the same run: after the modal, the title retries
 `GetPublicProfile` for ever — 15069 failed transactions in 150 s, none of which reaches an
