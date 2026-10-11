@@ -1,0 +1,81 @@
+#include <metal_stdlib>
+
+using namespace metal;
+
+// Writes an extended linear sRGB (EDR) drawable, where 1.0 is SDR white and
+// values above it reach into the display's headroom.
+struct PresentIn
+{
+    float4 attr0 [[user(locn0)]];
+};
+
+struct PresentHdrParameters
+{
+    float sdrScale;
+    float pqScale;
+    float headroom;
+    uint pq;
+};
+
+// The sRGB EOTF an sRGB-format view applies on sampling; the flip texture is
+// always read through its linear (Unorm) view.
+static float3 srgb_to_linear(float3 encoded)
+{
+    encoded = max(encoded, 0.0f);
+    float3 low = encoded / 12.92f;
+    float3 high = powr((encoded + 0.055f) / 1.055f, 2.4f);
+    return select(high, low, encoded <= 0.04045f);
+}
+
+// SMPTE ST 2084: normalized PQ code values to absolute luminance in nits.
+static float3 pq_to_nits(float3 encoded)
+{
+    const float inverseM1 = 16384.0f / 2610.0f;
+    const float inverseM2 = 32.0f / 2523.0f;
+    const float c1 = 3424.0f / 4096.0f;
+    const float c2 = 2413.0f / 128.0f;
+    const float c3 = 2392.0f / 128.0f;
+    float3 powered = powr(max(clamp(encoded, 0.0f, 1.0f), 1e-6f), inverseM2);
+    float3 normalized = max(powered - c1, 0.0f) / (c2 - c3 * powered);
+    return powr(max(normalized, 1e-12f), inverseM1) * 10000.0f;
+}
+
+// Highlights above a knee roll off smoothly into the display's current
+// headroom instead of clipping at it; everything up to SDR white is untouched.
+static float3 fit_headroom(float3 rgb, float headroom)
+{
+    float peak = max(max(rgb.r, rgb.g), rgb.b);
+    float knee = max(1.0f, headroom * 0.75f);
+    if (peak <= knee)
+    {
+        return rgb;
+    }
+
+    float range = headroom - knee;
+    float mapped = range > 1e-4f
+        ? knee + range * (1.0f - exp(-(peak - knee) / range))
+        : knee;
+    return rgb * (mapped / peak);
+}
+
+fragment float4 present_hdr_fs(
+    PresentIn in [[stage_in]],
+    texture2d<float> tex0 [[texture(0)]],
+    sampler smp0 [[sampler(0)]],
+    constant PresentHdrParameters& parameters [[buffer(0)]])
+{
+    float4 color = tex0.sample(smp0, float2(in.attr0.x, 1.0f - in.attr0.y));
+    if (parameters.pq == 0u)
+    {
+        return float4(srgb_to_linear(color.rgb) * parameters.sdrScale, color.a);
+    }
+
+    // BT.2020 primaries to BT.709/sRGB primaries; out-of-gamut colours stay
+    // negative, which the extended colour space carries.
+    float3 bt2020 = pq_to_nits(color.rgb) * parameters.pqScale;
+    float3 rgb = float3(
+        dot(bt2020, float3(1.660491f, -0.587641f, -0.072850f)),
+        dot(bt2020, float3(-0.124550f, 1.132900f, -0.008349f)),
+        dot(bt2020, float3(-0.018151f, -0.100579f, 1.118730f)));
+    return float4(fit_headroom(rgb, parameters.headroom), color.a);
+}

@@ -31,6 +31,14 @@ public interface IMetalHostWindow : IDisposable
     nint CreateMetalLayer();
 
     /// <summary>
+    /// The extended-dynamic-range headroom of the screen the window is on, as
+    /// multiples of SDR white: <c>Current</c> is what the display can show right
+    /// now (it rises once a layer asks for EDR), <c>Potential</c> the most it can
+    /// ever reach. Both are 1.0 on a display without EDR. Main thread only.
+    /// </summary>
+    (double Current, double Potential) EdrHeadroom { get; }
+
+    /// <summary>
     /// Reads and clears the "surface geometry changed" latch — resize, display
     /// change, backing-scale change, fullscreen transition or restore. The
     /// presenter uses it to force a drawable-size resync.
