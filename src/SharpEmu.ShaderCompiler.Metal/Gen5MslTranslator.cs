@@ -73,6 +73,24 @@ public static partial class Gen5MslTranslator
         return true;
     }
 
+    /// <summary>How the translated shaders in this process came out. A shader whose
+    /// control flow no MSL construct expresses falls back to the PC dispatcher, so the
+    /// ratio is what says whether the structured emitter is covering a game's shaders;
+    /// the render host folds it into its periodic performance line.</summary>
+    public static class Statistics
+    {
+        private static long _structured;
+        private static long _dispatcher;
+
+        public static (long Structured, long Dispatcher) ControlFlowForms =>
+            (Interlocked.Read(ref _structured), Interlocked.Read(ref _dispatcher));
+
+        internal static void NoteControlFlowForm(bool structured)
+        {
+            Interlocked.Increment(ref structured ? ref _structured : ref _dispatcher);
+        }
+    }
+
     private sealed partial class CompilationContext
     {
         // Safety valve for the PC-dispatcher loop, mirroring the SPIR-V
@@ -591,7 +609,7 @@ public static partial class Gen5MslTranslator
                 // blocks, which needs a resumable pc (see Gen5MslTranslator.Mesh.cs).
                 EmitMeshDispatcher(body, BuildDispatcherSwitchBody(blocks, baseIndent: 3));
             }
-            else if (StructuredControlFlowEnabled &&
+            else if (_options.StructuredControlFlow &&
                 TryBuildStructuredBody(blocks, out var structuredBody))
             {
                 structured = true;
@@ -618,6 +636,11 @@ public static partial class Gen5MslTranslator
                 }
 
                 body.AppendLine("    }");
+            }
+
+            if (_stage != Gen5MslStage.Mesh)
+            {
+                Statistics.NoteControlFlowForm(structured);
             }
 
             var plan = BuildRegisterPlan(blocks, initialState.ToString());

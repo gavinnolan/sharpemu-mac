@@ -1079,6 +1079,12 @@ internal sealed partial class MetalRenderHost :
             $"idle_ms={(idleTicks * 1000.0 / frequency).ToString("F0", culture)} pipelines={pipelines} " +
             $"images={_imageCache.ImageCount} image_mb={_imageCache.TotalUsedMemory / (1024 * 1024)} " +
             $"sampled_dcc_clears={_imageCache.TakeSampledDccClears()} " +
+            // Shaders whose control flow the structured emitter could express, against
+            // the ones that fell back to the PC dispatcher: a dispatcher shader keeps the
+            // whole guest register file live across its loop, so a rising count here is
+            // the first thing to look at when GPU time will not come down.
+            $"msl_structured={ShaderCompiler.Metal.Gen5MslTranslator.Statistics.ControlFlowForms.Structured} " +
+            $"msl_dispatcher={ShaderCompiler.Metal.Gen5MslTranslator.Statistics.ControlFlowForms.Dispatcher} " +
             $"uploads={uploads} writebacks={writebacks} evictions={evictions} failed={failed}");
         _slowWaitReports = 0;
         ResetSlowCompletionReports();

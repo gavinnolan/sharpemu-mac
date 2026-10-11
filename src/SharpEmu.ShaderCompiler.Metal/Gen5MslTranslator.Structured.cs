@@ -33,10 +33,6 @@ public static partial class Gen5MslTranslator
 {
     private sealed partial class CompilationContext
     {
-        /// <summary>Set to 0 to force the PC dispatcher during bring-up.</summary>
-        private static readonly bool StructuredControlFlowEnabled =
-            Environment.GetEnvironmentVariable("SHARPEMU_MSL_STRUCTURED") != "0";
-
         /// <summary>A region end no block can match, for a loop with no way out but a
         /// return and for the function's own outermost region.</summary>
         private const int NoFollow = int.MinValue;

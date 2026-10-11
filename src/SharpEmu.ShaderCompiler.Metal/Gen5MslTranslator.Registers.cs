@@ -34,15 +34,6 @@ public static partial class Gen5MslTranslator
 {
     private sealed partial class CompilationContext
     {
-        /// <summary>Set to 0 to declare both register files at their architectural size,
-        /// zero-filled, as the translator did before this pass existed.</summary>
-        private static readonly bool RegisterAllocationEnabled =
-            Environment.GetEnvironmentVariable("SHARPEMU_MSL_REGALLOC") != "0";
-
-        /// <summary>Set to 1 to zero-fill every declared register regardless of liveness.</summary>
-        private static readonly bool ForceRegisterInitialization =
-            Environment.GetEnvironmentVariable("SHARPEMU_MSL_REGINIT") == "1";
-
         private const int ScalarSlotBase = 0;
         private const int VectorSlotBase = (int)ScalarRegisterFileCount;
         private const int RegisterSlotCount =
@@ -150,7 +141,7 @@ public static partial class Gen5MslTranslator
             IReadOnlyList<ShaderBlock> blocks,
             string initialState)
         {
-            if (!RegisterAllocationEnabled)
+            if (!_options.RegisterAllocation)
             {
                 return new RegisterPlan { ScalarArray = true, VectorArray = true };
             }
@@ -220,7 +211,7 @@ public static partial class Gen5MslTranslator
         private bool[] LiveAtEntry(IReadOnlyList<ShaderBlock> blocks, string initialState)
         {
             var count = blocks.Count;
-            if (ForceRegisterInitialization)
+            if (_options.ForceRegisterInitialization)
             {
                 var all = new bool[RegisterSlotCount];
                 Array.Fill(all, true);
