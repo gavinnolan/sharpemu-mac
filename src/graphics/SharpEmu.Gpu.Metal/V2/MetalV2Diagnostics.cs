@@ -52,6 +52,14 @@ internal static class MetalV2Diagnostics
     public static readonly bool DeferLabelWrites =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEFER_LABELS"), "0", StringComparison.Ordinal);
 
+    // SHARPEMU_METAL_V2_FOLD_CLEARS=0 encodes every clear as its own render pass the
+    // moment it is asked for, the way it did before a clear could become the load action
+    // of the pass that follows it. A fast-clear that is materialised and then rendered
+    // into costs a 4K store and a 4K load for a result the load action gives away, which
+    // is what the switch exists to be able to measure.
+    public static readonly bool FoldClearsIntoPasses =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_FOLD_CLEARS"), "0", StringComparison.Ordinal);
+
     public static void WarnOnce(string key, string message)
     {
         if (_reported.TryAdd(key, 0))

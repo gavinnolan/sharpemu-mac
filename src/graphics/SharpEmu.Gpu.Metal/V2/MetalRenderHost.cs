@@ -46,6 +46,7 @@ internal sealed partial class MetalRenderHost :
         MetalNative.Selector("copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:");
     private static readonly nint SelSetLabel = MetalNative.Selector("setLabel:");
     private static readonly nint SelRelease = MetalNative.Selector("release");
+    private static readonly nint SelRetain = MetalNative.Selector("retain");
 
     private readonly nint _device;
     private readonly nint _queue;
@@ -222,6 +223,16 @@ internal sealed partial class MetalRenderHost :
         _ = EnsureCommandBuffer();
         NoteRecordedWork();
         EndEncoders();
+        // A transfer that reads or writes a texture has to see the clears that were
+        // asked for before it. A fill of guest memory and a label copy touch no texture,
+        // and draining for them would encode the very clears the next pass is about to
+        // absorb — the sentinel fill that follows a materialised fast-clear is exactly
+        // that case.
+        if (cause is not (MetalTransferCause.GuestFill or MetalTransferCause.EndOfPipeLabel))
+        {
+            MaterializePendingClears();
+        }
+
         NoteProfileTransfer();
         return this;
     }
@@ -264,6 +275,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         EndEncoders();
+        MaterializePendingClears();
         // Compared here as well as when a command buffer opens: a run that ends between
         // the two sees every snapshot it took go unchecked, which is how the one report
         // this watch exists for was lost twice.
@@ -1271,6 +1283,7 @@ internal sealed partial class MetalRenderHost :
         var (endClearCount, endTargetCount, endTransferCount, endComputeCount, targetlessCount) =
             TakePassBreakdown();
         var (clearPasses, clearDepthPasses, clearPixels) = TakeClearPasses();
+        var (foldedClears, encodedClears) = TakeClearFolding();
         Console.Error.WriteLine(
             $"[METAL-V2][TBDR] passes={passes} empty={emptyPasses} returned={returnedPasses} " +
             $"load_mb={(loadBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
@@ -1281,7 +1294,8 @@ internal sealed partial class MetalRenderHost :
             $"end_compute={endComputeCount} targetless={targetlessCount} " +
             $"clears=[{TakeClearArrivals()}] clear_passes={clearPasses} " +
             $"clear_depth={clearDepthPasses} clear_mpx={(clearPixels / 1e6).ToString("F1", culture)} " +
-            $"labels_deferred={TakeDeferredLabelWrites()} transfers=[{TakeTransferCauses()}]");
+            $"labels_deferred={TakeDeferredLabelWrites()} clears_folded={foldedClears} " +
+            $"clears_encoded={encodedClears} transfers=[{TakeTransferCauses()}]");
         if (_guard is not null)
         {
             Console.Error.WriteLine($"[METAL-V2][GUARD] {_guard.Report()}");
@@ -1332,6 +1346,7 @@ internal sealed partial class MetalRenderHost :
         try
         {
             EndEncoders();
+            MaterializePendingClears();
             if (_commandBuffer != 0)
             {
                 MetalNative.SendVoid(_commandBuffer, SelCommit);
