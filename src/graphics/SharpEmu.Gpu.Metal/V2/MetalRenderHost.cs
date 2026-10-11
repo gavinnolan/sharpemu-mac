@@ -1114,6 +1114,7 @@ internal sealed partial class MetalRenderHost :
             $"compile_ms={compiles.Milliseconds.ToString("F1", culture)} compiling={PipelinesCompiling} " +
             $"images={_imageCache.ImageCount} image_mb={_imageCache.TotalUsedMemory / (1024 * 1024)} " +
             $"sampled_dcc_clears={_imageCache.TakeSampledDccClears()} " +
+            $"dcc_repeats_skipped={_imageCache.TakeDccRepeatsSkipped()} " +
             $"uploads={uploads} writebacks={writebacks} evictions={evictions} failed={failed}");
         _slowWaitReports = 0;
         ResetSlowCompletionReports();

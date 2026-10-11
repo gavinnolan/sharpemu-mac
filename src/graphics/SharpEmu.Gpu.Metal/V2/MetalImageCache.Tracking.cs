@@ -365,6 +365,22 @@ internal sealed partial class MetalImageCache
         }
     }
 
+    // SHARPEMU_METAL_V2_DCC_MATERIALIZED_SET=0 turns the memory off and takes the
+    // repeated materialization back, for comparing one against the other.
+    private static readonly bool UseMaterializedSet = !string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DCC_MATERIALIZED_SET"),
+        "0",
+        StringComparison.Ordinal);
+
+    // Metadata slices whose clear has already been materialized, by address and clear
+    // code. Keyed on the code as well as the address so a different clear colour at the
+    // same metadata is a new clear rather than a skipped one.
+    private readonly HashSet<(ulong Address, byte Code)> _materializedDccSlices = new();
+    private long _dccRepeatsSkipped;
+
+    /// <summary>Materializations skipped because the clear was already applied.</summary>
+    public long TakeDccRepeatsSkipped() => Interlocked.Exchange(ref _dccRepeatsSkipped, 0);
+
     private void RegisterDccMetadata(in ImageDescription description)
     {
         var address = description.Metadata.Range.Address;
@@ -506,6 +522,9 @@ internal sealed partial class MetalImageCache
             _ => 0u,
         };
         using var held = _lock.Hold();
+        // A guest fill of this metadata is the guest asking for the clear again.
+        _materializedDccSlices.RemoveWhere(
+            entry => entry.Address >= address && entry.Address - address < size);
         if (!_surfaceMetadata.TryGetValue(address, out var found))
         {
             // The fill may precede color-target discovery; a pending entry stays
@@ -618,6 +637,21 @@ internal sealed partial class MetalImageCache
 
                 if (!IsUniformSlice(address, sliceSize, code, buffer))
                 {
+                    continue;
+                }
+
+                // The sentinel that stops this repeating is written by the GPU, while
+                // the uniform-slice check above is a host read of those same bytes.
+                // Between the fill being recorded and the GPU running it, every lookup
+                // of this surface sees the old clear code and materializes again — in
+                // The Oregon Trail twenty-four times a frame, two render-pass teardowns
+                // apiece. Remembering what has been done closes that window without
+                // touching guest memory any earlier than before; a guest fill of the
+                // same metadata re-arms it, so a surface the game clears every frame
+                // keeps working.
+                if (UseMaterializedSet && !_materializedDccSlices.Add((address, code)))
+                {
+                    Interlocked.Increment(ref _dccRepeatsSkipped);
                     continue;
                 }
 
