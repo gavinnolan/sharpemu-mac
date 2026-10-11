@@ -122,8 +122,8 @@ public sealed class NggMeshTranslationTests
         var shader = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.CullingTriangle());
 
         // M0[9:0] is the vertex count and M0[22:12] the primitive count.
-        Assert.Contains("sharpemu_mesh_alloc[0] = min(((s[124] >> 0u) & 0x3FFu)", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("sharpemu_mesh_alloc[1] = min(((s[124] >> 12u) & 0x7FFu)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_mesh_alloc[0] = min(((s124 >> 0u) & 0x3FFu)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_mesh_alloc[1] = min(((s124 >> 12u) & 0x7FFu)", shader.Source, StringComparison.Ordinal);
         Assert.Contains("set_primitive_count(min(sharpemu_mesh_alloc[1]", shader.Source, StringComparison.Ordinal);
     }
 
@@ -145,14 +145,14 @@ public sealed class NggMeshTranslationTests
     public void MergedWaveInfoSeedsTheGuestExecRebuild()
     {
         var shader = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.CullingTriangle());
-        Assert.Contains("s[3] = sharpemu_mesh_wave_verts |", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("s3 = sharpemu_mesh_wave_verts |", shader.Source, StringComparison.Ordinal);
         Assert.Contains("(sharpemu_mesh_wave_prims << 8u)", shader.Source, StringComparison.Ordinal);
         Assert.Contains("(2u << 28u)", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("s[2] =", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("s2 =", shader.Source, StringComparison.Ordinal);
 
         // The ES/VS vector inputs stay where the per-vertex path puts them.
-        Assert.Contains("v[5] = sharpemu_mesh_vertex_index;", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("v[8] = sharpemu_mesh_instance_index;", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("v5 = sharpemu_mesh_vertex_index;", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("v8 = sharpemu_mesh_instance_index;", shader.Source, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -167,7 +167,7 @@ public sealed class NggMeshTranslationTests
             userDataBase: 0);
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
         Assert.Equal(Gen5MslStage.Mesh, shader.Stage);
-        Assert.DoesNotContain("s[3] = sharpemu_mesh_wave_verts", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("s3 = sharpemu_mesh_wave_verts", shader.Source, StringComparison.Ordinal);
     }
 
     [Fact]

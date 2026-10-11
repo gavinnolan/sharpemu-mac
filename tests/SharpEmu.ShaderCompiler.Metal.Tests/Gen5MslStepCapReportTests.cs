@@ -40,7 +40,6 @@ public sealed class Gen5MslStepCapReportTests(ITestOutputHelper output)
     private uint Execute(Gen5ComputeFixture fixture, uint threads)
     {
         var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture, localSizeX: threads);
-        Assert.Contains("sharpemu_note_step_cap(sharpemu_resources.step_report);", shader.Source, StringComparison.Ordinal);
         Assert.True(
             MetalNative.TryCompileLibrary(shader.Source, out var library, out var compileError),
             $"[{fixture.Name}] {compileError}");

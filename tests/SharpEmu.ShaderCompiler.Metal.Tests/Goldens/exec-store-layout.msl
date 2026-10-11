@@ -282,99 +282,85 @@ kernel void gen5_cs(
     uint3 sharpemu_group_id [[threadgroup_position_in_grid]],
     uint sharpemu_lane [[thread_index_in_simdgroup]])
 {
-    uint s[128] = {};
-    uint v[256] = {};
+    uint s0, s8, s9, s10, s11, s106, s107, s126, s127;
+    uint v0, v1, v2, v3 = 0u, v4 = 0u, v5 = 0u, v6 = 0u;
     bool exec = true;
     bool vcc = false;
     bool scc = false;
-    uint pc = 0u;
     bool active = true;
-    uint steps = 0u;
     device uint* b0 = sharpemu_resources.buffers[0];
     uint bias[1] = {};
-    s[0] = sharpemu_push_data[0];
-    s[8] = sharpemu_push_data[1];
-    s[9] = sharpemu_push_data[2];
-    s[10] = sharpemu_push_data[3];
-    s[11] = sharpemu_push_data[4];
+    s0 = sharpemu_push_data[0];
+    s8 = sharpemu_push_data[1];
+    s9 = sharpemu_push_data[2];
+    s10 = sharpemu_push_data[3];
+    s11 = sharpemu_push_data[4];
     bias[0] = (sharpemu_push_data[5] >> 0u) & 0xFFu;
-    v[0] = sharpemu_local_id.x;
-    v[1] = sharpemu_local_id.y;
-    v[2] = sharpemu_local_id.z;
+    v0 = sharpemu_local_id.x;
+    v1 = sharpemu_local_id.y;
+    v2 = sharpemu_local_id.z;
     active = (sharpemu_group_id.x * 32u + sharpemu_local_id.x) < 0xFFFFFFFFu
         && (sharpemu_group_id.y * 1u + sharpemu_local_id.y) < 0xFFFFFFFFu
         && (sharpemu_group_id.z * 1u + sharpemu_local_id.z) < 0xFFFFFFFFu;
-    s[106] = 0u;
-    s[107] = 0u;
-    s[126] = sharpemu_ballot(true);
-    s[127] = 0u;
+    s106 = 0u;
+    s107 = 0u;
+    s126 = sharpemu_ballot(true);
+    s127 = 0u;
 
-    while (active)
+    if (!active)
     {
-        switch (pc)
+        return;
+    }
+
+    {
+        uint t0 = 0x3FC00000u;
+        if (exec) { v0 = t0; }
+        uint t1 = 0x40100000u;
+        if (exec) { v1 = t1; }
+        uint t2 = 0x41200000u;
+        if (exec) { v2 = t2; }
+        uint t3 = as_type<uint>((fma(as_type<float>(v0), as_type<float>(v1), as_type<float>(v2))));
+        if (exec) { v2 = t3; }
+        uint t4 = 0x7FFFFFFFu;
+        if (exec) { v3 = t4; }
+        uint t5 = 0x10003u;
+        if (exec) { v4 = t5; }
+        uint t6 = as_type<uint>(mulhi(as_type<int>(v3), as_type<int>(v4)));
+        if (exec) { v5 = t6; }
+        uint t7 = ((v3) * (v4));
+        if (exec) { v6 = t7; }
+        uint t8 = ((0x0u + 0u + 0u + (0u * 0u)) + bias[0]);
+        if (exec)
         {
-        case 0u:
-        {
-            uint t0 = 0x3FC00000u;
-            if (exec) { v[0] = t0; }
-            uint t1 = 0x40100000u;
-            if (exec) { v[1] = t1; }
-            uint t2 = 0x41200000u;
-            if (exec) { v[2] = t2; }
-            uint t3 = as_type<uint>((fma(as_type<float>(v[0]), as_type<float>(v[1]), as_type<float>(v[2]))));
-            if (exec) { v[2] = t3; }
-            uint t4 = 0x7FFFFFFFu;
-            if (exec) { v[3] = t4; }
-            uint t5 = 0x10003u;
-            if (exec) { v[4] = t5; }
-            uint t6 = as_type<uint>(mulhi(as_type<int>(v[3]), as_type<int>(v[4])));
-            if (exec) { v[5] = t6; }
-            uint t7 = ((v[3]) * (v[4]));
-            if (exec) { v[6] = t7; }
-            uint t8 = ((0x0u + 0u + 0u + (0u * 0u)) + bias[0]);
-            if (exec)
-            {
-                sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t8 + 0u, v[2], 4u);
-            }
-            uint t9 = ((0x4u + 0u + 0u + (0u * 0u)) + bias[0]);
-            if (exec)
-            {
-                sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t9 + 0u, v[5], 4u);
-            }
-            uint t10 = ((0x8u + 0u + 0u + (0u * 0u)) + bias[0]);
-            if (exec)
-            {
-                sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t10 + 0u, v[6], 4u);
-            }
-            uint t11 = 0u;
-            uint t12 = t11;
-            s[126] = t12;
-            exec = ((t12) >> sharpemu_lane & 1u) != 0u;
-            uint t13 = ((0xCu + 0u + 0u + (0u * 0u)) + bias[0]);
-            if (exec)
-            {
-                sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t13 + 0u, v[2], 4u);
-            }
-            uint t14 = 0xFFFFFFFFu;
-            uint t15 = t14;
-            s[126] = t15;
-            exec = ((t15) >> sharpemu_lane & 1u) != 0u;
-            uint t16 = ((0x10u + 0u + 0u + (0u * 0u)) + bias[0]);
-            if (exec)
-            {
-                sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t16 + 0u, v[0], 4u);
-            }
-            active = false;
+            sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t8 + 0u, v2, 4u);
         }
-        break;
-        default:
-            active = false;
-            break;
-        }
-        if (++steps >= 100000u)
+        uint t9 = ((0x4u + 0u + 0u + (0u * 0u)) + bias[0]);
+        if (exec)
         {
-            active = false;
-            sharpemu_note_step_cap(sharpemu_resources.step_report);
+            sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t9 + 0u, v5, 4u);
+        }
+        uint t10 = ((0x8u + 0u + 0u + (0u * 0u)) + bias[0]);
+        if (exec)
+        {
+            sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t10 + 0u, v6, 4u);
+        }
+        uint t11 = 0u;
+        uint t12 = t11;
+        s126 = t12;
+        exec = ((t12) >> sharpemu_lane & 1u) != 0u;
+        uint t13 = ((0xCu + 0u + 0u + (0u * 0u)) + bias[0]);
+        if (exec)
+        {
+            sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t13 + 0u, v2, 4u);
+        }
+        uint t14 = 0xFFFFFFFFu;
+        uint t15 = t14;
+        s126 = t15;
+        exec = ((t15) >> sharpemu_lane & 1u) != 0u;
+        uint t16 = ((0x10u + 0u + 0u + (0u * 0u)) + bias[0]);
+        if (exec)
+        {
+            sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t16 + 0u, v0, 4u);
         }
     }
 }
