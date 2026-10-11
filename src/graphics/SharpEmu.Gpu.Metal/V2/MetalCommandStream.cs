@@ -161,6 +161,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     public void RecordEndOfPipe(in EndOfPipeWrite write)
     {
         _endOfPipeRecords++;
+        var label = write;
         var eventId = write.EventId;
         var contextId = write.ContextId;
         var requestId = write.FlipRequestId;
@@ -171,12 +172,17 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             case EndOfPipeWriteKind.Interrupt64:
             case EndOfPipeWriteKind.InterruptWriteBack32:
             case EndOfPipeWriteKind.InterruptWriteBack64:
-                QueueCompletion(() => TriggerInterrupt(eventId, contextId));
+                QueueCompletion(() =>
+                {
+                    PublishEndOfPipeLabel(in label);
+                    TriggerInterrupt(eventId, contextId);
+                });
                 break;
             case EndOfPipeWriteKind.Flip:
             case EndOfPipeWriteKind.FlipWithWrite32:
                 QueueCompletion(() =>
                 {
+                    PublishEndOfPipeLabel(in label);
                     VideoOutBackendServices.CompleteFlip(requestId);
                     MetalV2Presenter.SignalFlipPacer();
                 });
@@ -184,17 +190,71 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             case EndOfPipeWriteKind.FlipWithInterruptWriteBack32:
                 QueueCompletion(() =>
                 {
+                    PublishEndOfPipeLabel(in label);
                     VideoOutBackendServices.CompleteFlip(requestId);
                     MetalV2Presenter.SignalFlipPacer();
                     TriggerInterrupt(eventId, 0);
                 });
                 break;
             default:
-                // A plain label write, a clock write or a GDS write has no GPU
-                // completion: the interpreter already published its bytes.
+                // A plain label or clock write has no interrupt behind it, but it is
+                // still an end-of-pipe write: the guest polls it to learn that the work
+                // recorded before it has finished, and reuses what that work reads once
+                // it sees it.
+                QueueCompletion(() => PublishEndOfPipeLabel(in label));
                 break;
         }
     }
+
+    /// <summary>
+    /// Writes an end-of-pipe label's bytes into guest memory. The interpreter leaves
+    /// them to the host (<see cref="DefersEndOfPipeLabels"/>) because it runs ahead of
+    /// the GPU by design: publishing a label when its packet is parsed tells the guest
+    /// that work still queued has finished, and the guest then overwrites the constants
+    /// and vertex data that work has yet to read. Superliminal's level rendered from
+    /// whatever had replaced its view-projection matrix by the time the GPU got to it,
+    /// which came out as a degenerate clip position and an empty G-buffer.
+    /// </summary>
+    private void PublishEndOfPipeLabel(in EndOfPipeWrite write)
+    {
+        var bytes = write.Kind switch
+        {
+            EndOfPipeWriteKind.Write32 or EndOfPipeWriteKind.WriteBack32 or
+            EndOfPipeWriteKind.Interrupt32 or EndOfPipeWriteKind.InterruptWriteBack32 or
+            EndOfPipeWriteKind.FlipWithWrite32 or EndOfPipeWriteKind.FlipWithInterruptWriteBack32 => 4,
+            EndOfPipeWriteKind.Write64 or EndOfPipeWriteKind.WriteBack64 or
+            EndOfPipeWriteKind.Interrupt64 or EndOfPipeWriteKind.InterruptWriteBack64 or
+            EndOfPipeWriteKind.ClockWrite or EndOfPipeWriteKind.ClockWriteBack => 8,
+            // A GDS write was copied where the data share lives, and an interrupt or a
+            // bare flip carries no payload at all.
+            _ => 0,
+        };
+        if (bytes == 0)
+        {
+            return;
+        }
+
+        if (write.Destination == 0 || (ulong)bytes > ulong.MaxValue - write.Destination)
+        {
+            throw Fatal(
+                $"An end-of-pipe label has an invalid range: address=0x{write.Destination:X16} bytes={bytes}.");
+        }
+
+        Span<byte> payload = stackalloc byte[8];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(payload, write.Value);
+        if (!_memory.TryWrite(write.Destination, payload[..bytes]))
+        {
+            throw Fatal(
+                $"An end-of-pipe label cannot be written to guest memory: " +
+                $"address=0x{write.Destination:X16} bytes={bytes}.");
+        }
+    }
+
+    /// <summary>
+    /// The interpreter must not publish label bytes itself; see
+    /// <see cref="PublishEndOfPipeLabel"/>.
+    /// </summary>
+    public bool DefersEndOfPipeLabels => true;
 
     // The completion runs once the GPU finishes everything recorded so far, so the
     // command buffer is committed right away instead of waiting for the next flush.
