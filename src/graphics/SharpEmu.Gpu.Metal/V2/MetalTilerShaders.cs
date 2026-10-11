@@ -17,7 +17,7 @@ internal enum MetalTileDirection
 
 // Assembles the MSL tiler kernels: block copies per tile block kind, the 16-bit depth
 // conversions, the BGRA16 channel swap and the unaligned row repack. The MSL twin of
-// SharpEmu.ShaderCompiler.Vulkan.TilerShaders; both are driven by the same tile tables,
+// the Vulkan shader compiler's TilerShaders; both are driven by the same tile tables,
 // and TileGeometry owns the block dimensions so the three stay in lockstep.
 //
 // One source per (kind, direction) carries all five element sizes behind the

@@ -45,7 +45,9 @@ public sealed class KernelReadEventTests
             KernelSocketCompatExports.Connect(ctx));
         Assert.Equal(0UL, ctx[CpuRegister.Rax]);
 
-        using var server = await acceptTask.WaitAsync(TimeSpan.FromSeconds(2));
+        // Both bounds return as soon as the event happens; they only have to outlast
+        // thread-pool and read-event poll-timer delays while the full suite loads the machine.
+        using var server = await acceptTask.WaitAsync(TimeSpan.FromSeconds(10));
         var equeue = CreateEqueue(ctx, memory);
         const ulong expectedUserData = 0xCAFE_BABE_1234_5678;
 
@@ -58,7 +60,7 @@ public sealed class KernelReadEventTests
             KernelEventQueueCompatExports.KernelAddReadEvent(ctx));
 
         await server.GetStream().WriteAsync(new byte[] { 0x5A });
-        WriteUInt32(memory, TimeoutAddress, 1_000_000);
+        WriteUInt32(memory, TimeoutAddress, 10_000_000);
         ConfigureWait(ctx, equeue, TimeoutAddress);
         Assert.Equal(
             (int)OrbisGen2Result.ORBIS_GEN2_OK,

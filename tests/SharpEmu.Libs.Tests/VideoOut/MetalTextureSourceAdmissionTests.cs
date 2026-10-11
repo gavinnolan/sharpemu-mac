@@ -141,7 +141,7 @@ public sealed class MetalTextureSourceAdmissionTests
         Assert.True((bool)source.GetType().GetField("ClearsOutput")!.GetValue(source)!);
         var descriptor = (GuestDrawTexture)source.GetType().GetField("Descriptor")!.GetValue(source)!;
         Assert.Equal(4u, descriptor.Width); Assert.Equal(4u, descriptor.Height);
-        Assert.Equal(4u, descriptor.Pitch); Assert.Equal(10u, descriptor.Format);
+        Assert.Equal(MetalTextureSourceLeaseTests.LinearColorPitch, descriptor.Pitch); Assert.Equal(10u, descriptor.Format);
         Assert.Equal(9u, descriptor.Type);
         Assert.Equal(128UL, state.NativeBytes);
     }
@@ -257,8 +257,9 @@ public sealed class MetalTextureSourceAdmissionTests
 
     private static AgcExports.TranslatedImageBinding SourceBinding()
     {
-        Assert.True(AgcBackendServices.TryDecodeTextureDescriptor(MetalTextureSourceLeaseTests.ResourceWords(), out var descriptor));
-        return new(descriptor, false, 0, [], ResourceDescriptor: MetalTextureSourceLeaseTests.ResourceWords(),
+        var words = MetalTextureSourceLeaseTests.ResourceWords(pitch: MetalTextureSourceLeaseTests.LinearColorPitch);
+        Assert.True(AgcBackendServices.TryDecodeTextureDescriptor(words, out var descriptor));
+        return new(descriptor, false, 0, [], ResourceDescriptor: words,
             Shape: new ShaderImageShape(false, false, false, false, TextureNumericClass.Float), Access: GuestImageAccess.Read);
     }
     private sealed class NeverReadMemory : ICpuMemory

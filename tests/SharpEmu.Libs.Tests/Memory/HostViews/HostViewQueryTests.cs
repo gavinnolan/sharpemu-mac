@@ -33,9 +33,16 @@ public sealed unsafe class HostViewQueryTests
             Assert.True(views.ChangeAccess(address, views.PageSize, HostPageProtection.ReadWrite));
             Assert.True(views.ChangeAccess(address, views.PageSize, HostPageProtection.ReadOnly));
             // One round: a second read-write change would take the unchanged-protection path.
+            // A provider with mapped-copy bookkeeping (macOS) prepares successor intervals on
+            // ordinary protection and allocates by design; its page-watcher path, the derived
+            // protection receipt, is the one that must stay allocation-free.
             var changed = false;
             var allocatedBytes = AllocationMeasurement.SteadyState(null,
-                () => changed = views.ChangeAccess(address, views.PageSize, HostPageProtection.ReadWrite), rounds: 1);
+                () => changed = views is IHostDerivedProtectionMemory derived
+                    ? derived.ChangeDerivedAccess(address, views.PageSize,
+                        GuestPageProtection.Read | GuestPageProtection.Write, HostPageProtection.ReadWrite,
+                        ordinaryEnrollment: false)
+                    : views.ChangeAccess(address, views.PageSize, HostPageProtection.ReadWrite), rounds: 1);
             Assert.True(changed);
             Assert.Equal(0, allocatedBytes);
             Assert.True(views.ChangeAccess(address, views.PageSize, HostPageProtection.NoAccess));

@@ -306,9 +306,14 @@ public sealed class MetalTextureSourceLeaseTests
     private static GuestDrawTexture Texture(bool storage) => new(Address, 4, 4, 10, 0, [], false, storage,
         Pitch: 4, Descriptor: ResourceWords(), Shape: new ShaderImageShape(false, false, storage, false, TextureNumericClass.Float),
         Access: GuestImageAccess.Read);
-    internal static uint[] ResourceWords(ulong address = Address) =>
+    // A 4x4 RGBA8 linear color target resolves to a 256-byte-aligned row
+    // pitch (64 texels) and four padded rows, the same as a linear texture of
+    // that memory. A texture that reads such a target names that pitch.
+    internal const uint LinearColorPitch = 64;
+    internal const ulong LinearColorFootprint = 1024;
+    internal static uint[] ResourceWords(ulong address = Address, uint pitch = 4) =>
         [(uint)(address >> 8), (uint)((address >> 40) & 0xFF) | 56u << 20 | 3u << 30,
-         3u << 14, 0xFACu | 9u << 28, 3, 0, 0, 0];
+         3u << 14, 0xFACu | 9u << 28, pitch - 1, 0, 0, 0];
     private static FieldInfo Field(string name) => typeof(MetalVideoPresenter).GetField(name, BindingFlags.Static | BindingFlags.NonPublic)!;
     private static void Call(string name, params object[] arguments) => typeof(MetalVideoPresenter)
         .GetMethod(name, BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, arguments);

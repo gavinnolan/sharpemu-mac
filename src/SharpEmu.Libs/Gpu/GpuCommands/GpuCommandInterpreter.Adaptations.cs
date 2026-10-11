@@ -78,12 +78,18 @@ public sealed partial class GpuCommandInterpreter
         // A wait takes one token, or suspends until a signal adds one.
         var consume = CommandMemoryOperation.Semaphore(semaphore);
         _host.ExecuteCommandMemoryOperation(consume);
-        GuestMemoryWritten?.Invoke(semaphore.Address, sizeof(ulong));
         var priorValue = consume.PriorValue;
 
+        // Only a taken token is a write. Reporting the empty poll too woke every other
+        // head waiting on this semaphore, which polled, reported and woke this one back:
+        // two waiters on one semaphore spun against each other until a signal came.
         if (priorValue == 0)
         {
             SuspendOn(CommandWaitCondition.Memory(semaphore.Address, sizeof(ulong)));
+        }
+        else
+        {
+            GuestMemoryWritten?.Invoke(semaphore.Address, sizeof(ulong));
         }
 
         return 3;

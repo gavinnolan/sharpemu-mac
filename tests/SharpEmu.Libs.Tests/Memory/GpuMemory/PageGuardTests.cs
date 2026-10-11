@@ -168,15 +168,22 @@ public sealed class PageGuardTests : IDisposable
         guard.AddWatch(0x10000, 0x3000, blockReads: false);
         Assert.Empty(_space.Protects);
 
+        // Runs split on the guest entitlement as well as on the derived access,
+        // so the Read and Read|Execute pages are protected separately even
+        // though both derive None while read-blocked.
         guard.AddWatch(0x10000, 0x3000, blockReads: true);
-        Assert.Equal(new[] { (0x10000UL, 0x2000UL, GuestPageProtection.None) }, _space.Protects);
+        Assert.Equal(new[]
+        {
+            (0x10000UL, 0x1000UL, GuestPageProtection.None),
+            (0x11000UL, 0x1000UL, GuestPageProtection.None),
+        }, _space.Protects);
 
         guard.RemoveWatch(0x10000, 0x3000, blockReads: true);
-        Assert.Equal((0x10000UL, 0x1000UL, GuestPageProtection.Read), _space.Protects[1]);
-        Assert.Equal((0x11000UL, 0x1000UL, GuestPageProtection.Read | GuestPageProtection.Execute), _space.Protects[2]);
+        Assert.Equal((0x10000UL, 0x1000UL, GuestPageProtection.Read), _space.Protects[2]);
+        Assert.Equal((0x11000UL, 0x1000UL, GuestPageProtection.Read | GuestPageProtection.Execute), _space.Protects[3]);
 
         guard.RemoveWatch(0x10000, 0x3000, blockReads: false);
-        Assert.Equal(3, _space.Protects.Count);
+        Assert.Equal(4, _space.Protects.Count);
         Assert.Empty(_fatals);
     }
 
