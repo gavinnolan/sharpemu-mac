@@ -6,7 +6,8 @@ using Xunit;
 
 namespace SharpEmu.ShaderCompiler.Metal.Tests;
 
-// A graphics stage runs one guest lane per Metal thread, so EXEC has exactly one real
+// A single-lane stage (the vertex stage, or a pixel stage with graphics subgroups off)
+// runs one guest lane per Metal thread, so EXEC has exactly one real
 // bit. SILENT HILL's lighting pixel shader starts with s_wqm_b64 exec, exec, which turned
 // EXEC 1 into 0xF; once its own lane finished a per-light loop, bits 1..3 - lanes that do
 // not exist - stayed set, the S_CBRANCH_EXECZ exit never fired, and every pixel ran to the
@@ -47,7 +48,8 @@ public sealed class Gen5MslSingleLaneExecTests
     private static string Compile(Gen5ShaderProgram program)
     {
         var request = Gen5ComputeFixtures.RequestOrThrow(program, ShaderStage.Pixel,
-            pixelOutputs: [new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float)]);
+            pixelOutputs: [new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float)],
+            enableGraphicsSubgroupOperations: false);
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
         return shader.Source;
     }

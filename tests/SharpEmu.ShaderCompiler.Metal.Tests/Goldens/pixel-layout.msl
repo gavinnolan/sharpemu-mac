@@ -275,7 +275,7 @@ static inline void sharpemu_store_element(device uint* b, uint bytes, uint addr,
 
 static inline uint sharpemu_ballot(bool value)
 {
-    return value ? 1u : 0u;
+    return (uint)(uint64_t)simd_ballot(value);
 }
 
 // The guest reciprocal, square-root, log and exp units read an F32 denormal input
@@ -338,9 +338,9 @@ struct Gen5PsOut
 
 fragment Gen5PsOut gen5_ps(
     Gen5PsIn sharpemu_in [[stage_in]],
-    constant Gen5StageResources& sharpemu_resources [[buffer(0)]])
+    constant Gen5StageResources& sharpemu_resources [[buffer(0)]],
+    uint sharpemu_lane [[thread_index_in_simdgroup]])
 {
-    const uint sharpemu_lane = 0u;
     uint s106, s107, s126, s127;
     uint v0, v1, v2, v3;
     bool exec = true;

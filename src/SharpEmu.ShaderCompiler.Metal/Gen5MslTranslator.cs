@@ -224,15 +224,35 @@ public static partial class Gen5MslTranslator
         private bool _usesWaveScratch;
 
         /// <summary>True when this stage emulates a 64-lane guest wave across two
-        /// 32-wide Apple simdgroups (compute only; graphics stages use the
-        /// single-lane model regardless of guest wave size).</summary>
+        /// 32-wide Apple simdgroups (compute only; graphics stages run a wave as one
+        /// simdgroup or a single lane regardless of guest wave size, and the host
+        /// requests wave32 for them, as it does for the SPIR-V translator).</summary>
         private bool IsWave64 => _waveLaneCount == 64 && _stage == Gen5MslStage.Compute;
 
         /// <summary>True for the stages whose Metal threads map one-to-one onto guest wave
-        /// lanes — compute dispatches and NGG primitive shaders emitted as mesh functions.
-        /// Those stages back LDS with threadgroup memory and ballot for real; the other
-        /// graphics stages model a single logical lane.</summary>
-        private bool HasRealWaveLanes => _stage is Gen5MslStage.Compute or Gen5MslStage.Mesh;
+        /// lanes, so ballots, shuffles and lane indices are real: compute dispatches, NGG
+        /// primitive shaders emitted as mesh functions, and pixel shaders when the host
+        /// enables graphics subgroup operations.
+        ///
+        /// A pixel shader's guest wave32 is the fragment's 32-wide Apple SIMD-group, the
+        /// one-subgroup-per-wave mapping the SPIR-V translator uses for graphics stages.
+        /// Apple packs fragments into it as 2x2 quads at lanes 4n..4n+3 ordered top-left,
+        /// top-right, bottom-left, bottom-right ([[thread_index_in_quadgroup]] is
+        /// lane &amp; 3), which is the GCN pixel-quad layout that DPP quad_perm and S_WQM
+        /// assume, so guest lanes need no remapping.
+        ///
+        /// The vertex stage stays a single logical lane. MSL documents SIMD-group
+        /// functions only for kernel and fragment functions (MSL spec 6.10) and gives a
+        /// vertex function no [[thread_index_in_simdgroup]], so there is no supported
+        /// lane index to shuffle or ballot against.</summary>
+        private bool HasRealWaveLanes =>
+            _stage is Gen5MslStage.Compute or Gen5MslStage.Mesh ||
+            (_stage == Gen5MslStage.Pixel && _request.EnableGraphicsSubgroupOperations);
+
+        /// <summary>True where guest LDS is threadgroup memory the wave's lanes share.
+        /// Every other stage keeps it as per-invocation scratch, real lanes or not: a
+        /// fragment function has no threadgroup memory to put it in.</summary>
+        private bool HasSharedLds => _stage is Gen5MslStage.Compute or Gen5MslStage.Mesh;
 
         public bool TryCompile(out Gen5MslShader shader, out string error)
         {
@@ -608,10 +628,10 @@ public static partial class Gen5MslTranslator
                 // the wave for 64-wide ballots (see EmitWave64Ballot).
                 source.AppendLine("    uint sharpemu_tg_index [[thread_index_in_threadgroup]],");
             }
-            else if (_stage == Gen5MslStage.Compute)
+            else if (_stage == Gen5MslStage.Compute || (_stage == Gen5MslStage.Pixel && HasRealWaveLanes))
             {
-                // Compute threads map one-to-one onto guest lanes, so wave ops
-                // address the invocation's real simdgroup lane.
+                // Compute threads and fragments map one-to-one onto guest lanes, so
+                // wave ops address the invocation's real simdgroup lane.
                 source.AppendLine("    uint sharpemu_lane [[thread_index_in_simdgroup]],");
             }
 
@@ -632,11 +652,10 @@ public static partial class Gen5MslTranslator
             }
             if (!HasRealWaveLanes)
             {
-                // Graphics stages model a single logical wave lane — the SPIR-V
-                // translator's no-subgroup fallback — because Metal leaves
-                // simdgroup ops undefined inside the divergent dispatcher loop.
-                // Ballots degrade to bit 0 in the prelude and shuffle-family
-                // selects resolve to the lane's own value.
+                // The vertex stage, and a pixel stage whose host turned graphics
+                // subgroups off, model a single logical wave lane — the SPIR-V
+                // translator's no-subgroup fallback. Ballots degrade to bit 0 in the
+                // prelude and shuffle-family selects resolve to the lane's own value.
                 source.AppendLine("    const uint sharpemu_lane = 0u;");
             }
             if (_usesLds)
@@ -817,16 +836,26 @@ public static partial class Gen5MslTranslator
         // translator's robust-access behavior. The static text lives in
         // Templates/prelude.msl; only the wave-ballot expression varies.
         //
-        // Graphics stages model one logical wave lane (lane 0), so a ballot is
-        // just that lane's bit: "value ? 1 : 0". A real simd_ballot cannot be
-        // used there: the translated program runs inside the divergent
-        // while(active){switch(pc)} dispatcher, where Metal leaves cross-lane
-        // ops undefined, so lanes at different pc corrupt each other's EXEC/VCC
-        // reconstruction and kill whole quads (all fragments discarded). This
-        // is the SPIR-V translator's no-subgroup fallback model. Compute
-        // mirrors the SPIR-V translator's compute path instead: threads map
-        // one-to-one onto real simdgroup lanes and ballots are real, so masks
-        // parked in VCC/EXEC hold each lane's actual bit.
+        // A single-lane stage models one logical wave lane (lane 0), so a ballot
+        // is just that lane's bit: "value ? 1 : 0" — the SPIR-V translator's
+        // no-subgroup fallback. Stages with real lanes mirror its subgroup path:
+        // threads map one-to-one onto simdgroup lanes and ballots are real, so
+        // masks parked in VCC/EXEC hold each lane's actual bit. That is also what
+        // keeps cross-lane ops defined inside the translated control flow (the
+        // structured nest or the while(active){switch(pc)} dispatcher): every
+        // scalar register, and so every branch and the pc, derives from uniform
+        // inputs, ballots and lane broadcasts, so a simdgroup's lanes never take
+        // different paths — only per-lane EXEC guards differ, and cross-lane ops
+        // are emitted outside them. The two models must not be mixed: a real
+        // ballot over a per-lane EXEC bit lets lanes branch apart, and then they
+        // corrupt each other's EXEC/VCC reconstruction (whole quads discarded).
+        //
+        // In a fragment, Metal's running lanes include helper threads (they are
+        // active for SIMD-group functions, MSL spec 6.10.2), so the entry EXEC
+        // ballot holds them too — the SPIR-V translator's subgroup model, and what
+        // keeps the EXEC guard elision's "EXEC starts full" premise true. Helper
+        // threads' stores and atomics have no effect and their outputs are
+        // dropped, so only a guest ballot of the entry mask can tell.
         private void EmitPrelude(StringBuilder source) =>
             source.Append(MslTemplates.Render(
                 "prelude",
@@ -1681,8 +1710,8 @@ public static partial class Gen5MslTranslator
                     var destination = instruction.Destinations[0].Value;
                     var operation = instruction.Opcode == "DsAppend" ? "add" : "sub";
 
-                    // Graphics stages use the existing one-lane LDS model.
-                    if (!HasRealWaveLanes)
+                    // Per-invocation LDS keeps the one-lane model: the counter is this lane's own.
+                    if (!HasSharedLds)
                     {
                         var original = Temp("uint", $"sharpemu_lds[{index}]");
                         var assignment = operation == "add" ? "+=" : "-=";
@@ -1932,7 +1961,7 @@ public static partial class Gen5MslTranslator
         private string EmitDataShareAtomicWord(string name, string index, string first, string second)
         {
             var word = $"sharpemu_lds[{index}]";
-            if (!HasRealWaveLanes)
+            if (!HasSharedLds)
             {
                 // One logical lane over private scratch: read, compute, write back.
                 var observed = Temp("uint", word);
@@ -2275,6 +2304,33 @@ public static partial class Gen5MslTranslator
                 ? $"(((sharpemu_lane < 32u ? ({low}) : ({high})) >> (sharpemu_lane & 31u)) & 1u) != 0u"
                 : $"(({low}) >> sharpemu_lane & 1u) != 0u";
 
+        /// <summary>True for the graphics stages, where a guest wave's lanes are only the
+        /// host threads that are running: one lane in a single-lane stage, the fragments
+        /// (and their helpers) Metal packed into the simdgroup in a pixel stage. Any
+        /// other EXEC bit is a lane that does not exist - whole-quad mode, an all-ones
+        /// move or a wave64 high half puts them there - and since no thread can ever
+        /// clear it again, an EXECZ loop exit would wait on it for ever. Compute and
+        /// mesh keep EXEC as written, as the SPIR-V translator does.</summary>
+        private bool ClampsExecToLanes => IsSingleLaneStage || _stage == Gen5MslStage.Pixel;
+
+        /// <summary>A new EXEC low dword limited to the lanes that exist (see
+        /// <see cref="ClampsExecToLanes"/>). A pixel stage ballots the running lanes at
+        /// every EXEC write rather than once at entry: helper threads may stop once the
+        /// gradients they exist for are done (MSL spec 6.10.3), and a bit left for one
+        /// would never clear. EXEC is only written at scalar points, where the whole
+        /// simdgroup is converged.</summary>
+        private string ClampExecToLanes(string expression) =>
+            IsSingleLaneStage ? $"({expression}) & 1u"
+            : ClampsExecToLanes ? $"({expression}) & sharpemu_ballot(true)"
+            : expression;
+
+        /// <summary>The 64-bit form of <see cref="ClampExecToLanes"/>, for a whole EXEC
+        /// pair; the high half never has a lane in these stages.</summary>
+        private string ClampExecToLanes64(string expression) =>
+            IsSingleLaneStage ? $"({expression}) & 1ul"
+            : ClampsExecToLanes ? $"({expression}) & (ulong)sharpemu_ballot(true)"
+            : expression;
+
         // VCC (s106:s107) and EXEC (s126:s127) are architectural SGPRs: programs
         // freely use them as scratch data registers (s_buffer_load into s[106],
         // then v_rcp_f32 of that value is real RDNA2 code). The register file
@@ -2295,11 +2351,7 @@ public static partial class Gen5MslTranslator
 
                 case ExecLoRegister:
                 {
-                    // A single-lane stage has exactly one lane, bit 0. Any other bit is a
-                    // lane that does not exist - whole-quad mode or an all-ones move puts
-                    // them there - and it can never clear again, so an EXECZ loop exit
-                    // waits on it for ever.
-                    var value = Temp("uint", IsSingleLaneStage ? $"({expression}) & 1u" : expression);
+                    var value = Temp("uint", ClampExecToLanes(expression));
                     Line($"s[{ExecLoRegister}] = {value};");
                     Line($"exec = {LaneBit(value, ScalarExpression(ExecHiRegister))};");
                     return;
@@ -2308,7 +2360,7 @@ public static partial class Gen5MslTranslator
                 case VccHiRegister:
                 case ExecHiRegister:
                 {
-                    var value = Temp("uint", register == ExecHiRegister && IsSingleLaneStage ? "0u" : expression);
+                    var value = Temp("uint", register == ExecHiRegister && ClampsExecToLanes ? "0u" : expression);
                     Line($"s[{register}] = {value};");
                     if (IsWave64)
                     {

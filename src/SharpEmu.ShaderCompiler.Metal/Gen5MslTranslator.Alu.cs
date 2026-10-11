@@ -62,9 +62,8 @@ public static partial class Gen5MslTranslator
                         return false;
                     }
 
-                    // Under the single-lane graphics model the "first active
-                    // lane" is always this lane; a real simd_shuffle would read
-                    // another fragment's value. Compute broadcasts from the
+                    // Under the single-lane model the "first active lane" is
+                    // always this lane. Real lanes broadcast from the
                     // first guest-active lane (the ballot of EXEC), matching
                     // the SPIR-V translator — SPIR-V's own BroadcastFirst uses
                     // the first host-active invocation, which may be a lane the
@@ -1108,18 +1107,23 @@ public static partial class Gen5MslTranslator
             return (Temp("uint", target), "true");
         }
 
-        // Under the single-lane graphics model every shuffle-select resolves
-        // to the lane's own value (the register conceptually holds this
-        // thread's value in every lane); compute lanes are real simdgroup
-        // threads and shuffle for real. Mirrors the SPIR-V translator's
-        // no-subgroup fallback for graphics stages.
+        // Under the single-lane model (the vertex stage) every shuffle-select
+        // resolves to the lane's own value (the register conceptually holds this
+        // thread's value in every lane), the SPIR-V translator's no-subgroup
+        // fallback; compute, mesh and pixel lanes are real simdgroup threads and
+        // shuffle for real.
         private bool IsSingleLaneStage => !HasRealWaveLanes;
 
         private string ShuffleLane(string value, string targetLane) =>
             IsSingleLaneStage ? value : $"simd_shuffle({value}, (ushort){targetLane})";
 
+        // Whether the source lane has its EXEC bit, read from the ballot rather than by
+        // shuffling the bit over: a simdgroup is often only partly filled (a fragment
+        // simdgroup on a primitive's edge, a partial compute group), simd_shuffle from a
+        // lane that is not running is undefined, and simd_ballot reports it as 0 - the
+        // EXEC-clear lane it stands for.
         private string LaneActiveExpression(string targetLane) =>
-            IsSingleLaneStage ? "exec" : $"simd_shuffle(exec ? 1u : 0u, (ushort){targetLane}) != 0u";
+            IsSingleLaneStage ? "exec" : $"((sharpemu_ballot(exec) >> ({targetLane})) & 1u) != 0u";
 
         private string ApplyDppSource(Gen5DppControl control, string value)
         {
@@ -1742,7 +1746,7 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
-                var mask = Temp("uint", IsSingleLaneStage ? $"({combined}) & 1u" : combined);
+                var mask = Temp("uint", ClampExecToLanes(combined));
                 StoreScalar(destination, oldExec);
                 Line($"s[{ExecLoRegister}] = {mask};");
                 Line($"s[{ExecHiRegister}] = 0u;");
@@ -2168,7 +2172,7 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
-                var mask = Temp("ulong", IsSingleLaneStage ? $"({combined}) & 1ul" : combined);
+                var mask = Temp("ulong", ClampExecToLanes64(combined));
                 StoreScalar64(destination, oldExec);
                 Line($"s[{ExecLoRegister}] = (uint){mask};");
                 Line($"s[{ExecHiRegister}] = (uint)({mask} >> 32);");
