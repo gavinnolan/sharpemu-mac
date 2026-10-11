@@ -544,8 +544,21 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     // next blocked-retry interval. Runs on the GPU worker thread.
     internal void RetryBlockedFlips()
     {
-        CommandStream.RetryBlocked();
+        CommandStream.NotifyFlipSlotAvailable();
         _lastProgressTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+    }
+
+    /// <summary>
+    /// The GPU finished everything up to this serial, so a compare against bytes a
+    /// shader, a fill or an image writeback produced may pass now. Without this a
+    /// wait on GPU-written memory would only be retried by the blocked-retry timer.
+    /// </summary>
+    internal void NotifyGpuCompleted(ulong completedSerial)
+    {
+        if (_commandStream is { } stream)
+        {
+            stream.NotifyCompletedGpuTick(completedSerial);
+        }
     }
 
     private void RetryBlockedIfDue()

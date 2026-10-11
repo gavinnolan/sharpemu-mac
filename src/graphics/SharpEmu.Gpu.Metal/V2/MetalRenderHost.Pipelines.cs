@@ -279,6 +279,7 @@ internal sealed partial class MetalRenderHost
             }
 
             nint error = 0;
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
             state = mesh is null
                 ? MetalNative.Send(
                     _device, MetalNative.Selector("newRenderPipelineStateWithDescriptor:error:"), descriptor, ref error)
@@ -289,6 +290,7 @@ internal sealed partial class MetalRenderHost
                     0,
                     0,
                     ref error);
+            Interlocked.Add(ref _pipelineTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
             if (state == 0)
             {
                 throw Fatal(
@@ -401,11 +403,16 @@ internal sealed partial class MetalRenderHost
     {
         var module = RequireModule(description.Program);
         nint error = 0;
+        // The driver turns the function into a GPU binary here, on the worker thread,
+        // and the guest's dispatch packet waits for it. Measured on Demon's Souls'
+        // load phase this is tens to hundreds of milliseconds per new shader.
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var state = MetalNative.Send(
             _device,
             MetalNative.Selector("newComputePipelineStateWithFunction:error:"),
             module.Function,
             ref error);
+        Interlocked.Add(ref _pipelineTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
         if (state == 0)
         {
             throw Fatal(
