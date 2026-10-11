@@ -448,6 +448,67 @@ public sealed class MslTranslationTests
             System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(result));
     }
 
+    /// <summary>The shape the hot Octopath dispatches actually have: a few V_CMPX whose
+    /// EXEC an S_CBRANCH_EXECZ reads, mixed with V_CMPs whose VCC nothing reads. The two
+    /// pairs are tracked separately, so the EXEC exchanges stay and the VCC ones go — one
+    /// exchange for the one live ballot, not one per comparison.</summary>
+    [Fact]
+    public void OnlyTheLiveHalfOfAMixedWave64ProgramKeepsItsExchange()
+    {
+        var words = new List<uint>
+        {
+            0x7D840100, // v_cmp_eq_u32 vcc, v0, v0    -> dead
+            0x7D840100, // v_cmp_eq_u32 vcc, v0, v0    -> dead
+            0x7DA40100, // v_cmpx_eq_u32 exec, v0, v0  -> read by the branch below
+            0xBF880000, // s_cbranch_execz +0
+            0x7D840100, // v_cmp_eq_u32 vcc, v0, v0    -> dead
+            0x7E0202FF, 0x5A5A5A5Au, // v_mov_b32 v1, 0x5A5A5A5A
+            0xE0700000, 0x80020100,  // buffer_store_dword v1, off, s[8:11], 0
+            0xBF810000,              // s_endpgm
+        };
+        var fixture = new Gen5ComputeFixture(
+            "wave64-mixed-ballots", [.. words], StoreScalarResourceBase: 8, StoreBackingBytes: 16);
+        var program = Gen5ComputeFixtures.DecodeOrThrow(fixture);
+        Assert.Equal("VCmpEqU32", program.Instructions[0].Opcode);
+        Assert.Equal("VCmpxEqU32", program.Instructions[2].Opcode);
+        Assert.Equal("SCbranchExecz", program.Instructions[3].Opcode);
+
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(
+            fixture, waveLaneCount: 64, localSizeX: 64);
+        var body = Body(shader);
+
+        // Four comparisons, one live. The entry seed exchanges once more to build the
+        // starting 64-lane EXEC, so two exchanges in all rather than five.
+        Assert.Equal(2, Occurrences(body, "sharpemu_wave_scratch[(sharpemu_lane >> 5)"));
+        // The register allocator has scalarized the file by now, so EXEC_LO reads s126.
+        Assert.Contains("s126 = sharpemu_wave_scratch[0];", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("s106 = sharpemu_wave_scratch[0];", body, StringComparison.Ordinal);
+
+        // Materializing everything is what it used to cost.
+        var request = Gen5ComputeFixtures.CreateComputeRequest(
+            fixture, waveLaneCount: 64, localSizeX: 64);
+        Assert.True(
+            Gen5MslTranslator.TryCompileProgram(
+                request,
+                out var every,
+                out var error,
+                new Gen5MslCodegenOptions(DeadMaskBallotElision: false)),
+            error);
+        Assert.Equal(5, Occurrences(Body(every), "sharpemu_wave_scratch[(sharpemu_lane >> 5)"));
+    }
+
+    private static int Occurrences(string source, string value)
+    {
+        var count = 0;
+        for (var index = source.IndexOf(value, StringComparison.Ordinal); index >= 0;
+            index = source.IndexOf(value, index + 1, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
+    }
+
     private static Gen5MslShader CompileWave64Compare(
         bool readsTheMask,
         Gen5MslCodegenOptions? options = null)
