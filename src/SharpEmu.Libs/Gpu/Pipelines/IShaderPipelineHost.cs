@@ -57,6 +57,11 @@ public interface IShaderPipelineHost
     // Reads one guest dword the CPU may see; a range the GPU wrote is downloaded first.
     bool TryReadGuestWord(ulong address, out uint word);
 
+    // Waits for recorded GPU work still writing these bytes, before shader code is hashed
+    // and decoded out of guest memory: a title that moves its shader code into place with
+    // a DMA copy otherwise has the decoder read whatever the bytes held before the copy.
+    void SynchronizeShaderCode(ulong address, ulong size) { }
+
     // Reads one guest dword only when no GPU work may still own the range.
     bool TryReadCleanGuestWord(ulong address, out uint word);
 

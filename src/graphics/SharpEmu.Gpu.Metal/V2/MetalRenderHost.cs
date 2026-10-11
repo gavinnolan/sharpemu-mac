@@ -974,6 +974,21 @@ internal sealed partial class MetalRenderHost :
             return _memory.TryRead(address, destination);
         }
 
+        WaitForGuestBytes(address, size);
+        return _memory.TryRead(address, destination);
+    }
+
+    public void SynchronizeShaderCode(ulong address, ulong size)
+    {
+        if (size != 0 && (_gpuWrites.MayCover(address, size) || _imageCache.MayOwn(address, size)))
+        {
+            WaitForGuestBytes(address, size);
+        }
+    }
+
+    // Lands every recorded write into the range: an image's writeback, or a store or copy.
+    private void WaitForGuestBytes(ulong address, ulong size)
+    {
         _lastReadAddress = address;
         _lastReadSize = size;
         if (_imageCache.HasGpuModifiedImageBytes(address, size))
@@ -982,7 +997,7 @@ internal sealed partial class MetalRenderHost :
             // to be committed before the bytes can be read.
             FlushGpuWrites(address, size, MetalWritebackCause.HostRead);
             FlushAndWaitForGpu(MetalWaitReason.ReadImage);
-            return _memory.TryRead(address, destination);
+            return;
         }
 
         var pending = _gpuWrites.PendingSerial(address, size, CompletedSerial);
@@ -997,8 +1012,6 @@ internal sealed partial class MetalRenderHost :
                 WaitForCommittedSerial(pending, MetalWaitReason.ReadRange);
             }
         }
-
-        return _memory.TryRead(address, destination);
     }
 
     /// <summary>

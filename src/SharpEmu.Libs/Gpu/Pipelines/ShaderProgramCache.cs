@@ -182,6 +182,21 @@ internal sealed class ShaderProgramCache
         return program;
     }
 
+    // What the code bytes held when they failed, and any command-processor write into
+    // them: code that is not code yet was read before whatever moves it into place.
+    private string DescribeCode(ulong address)
+    {
+        var bytes = new byte[16];
+        var words = _context.Memory.TryRead(address, bytes)
+            ? string.Join(' ', Enumerable.Range(0, 4).Select(index =>
+                System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(index * 4)).ToString("X8")))
+            : "unreadable";
+        var writes = GpuCommands.CommandProcessorWriteHistory.Find(address, 0x10000);
+        return $" words=[{words}] cp_writes={writes.Count}" +
+            string.Concat(writes.TakeLast(3).Select(write =>
+                $" [{write.Kind} q={write.QueueId} 0x{write.Address:X}+0x{write.Size:X} deferred={write.Deferred}]"));
+    }
+
     public ShaderProgram GetOrCompile(ShaderSource source, StageCompileOptions options, ref uint pushDataCursor, out ShaderStageResources stage)
     {
         try
@@ -538,7 +553,7 @@ internal sealed class ShaderProgramCache
             specialization, request, pushDataCursor, _nextProgramId + 1);
         if (!_compiler.TryCompileProgram(request, out var compiled, out var error) || compiled is null)
         {
-            throw new ShaderProgramRejectedException($"The shader program cannot be compiled: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} error={error}.");
+            throw new ShaderProgramRejectedException($"The shader program cannot be compiled: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} error={error}{DescribeCode(source.Address)}.");
         }
 
         ShaderCacheCounters.CountCompile();

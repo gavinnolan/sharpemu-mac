@@ -105,6 +105,11 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramSourceRead);
         var registered = _registry.Require(codeAddress, label);
+        foreach (var (address, sizeBytes) in registered.CodeRanges)
+        {
+            _host.SynchronizeShaderCode(address, sizeBytes);
+        }
+
         var hash = ShaderIdentity.Compute(_context.Memory, codeAddress, registered.CodeRanges, label);
         var userData = UserData(registers, declaredCount, probeWrittenRegisters, codeAddress, label);
         return new ShaderSource(registered, hash, userData, userDataBase, stage);
