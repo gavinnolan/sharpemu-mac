@@ -1320,6 +1320,9 @@ internal sealed partial class MetalRenderHost :
             $"compiles={compiles.Started}/{compiles.Finished} compile_waits={compiles.Deduped} " +
             $"compile_ms={compiles.Milliseconds.ToString("F1", culture)} compiling={PipelinesCompiling} " +
             $"images={_imageCache.ImageCount} image_mb={_imageCache.TotalUsedMemory / (1024 * 1024)} " +
+            // Shared (CPU-visible) memory the transfer staging and the upload rings hold.
+            $"staging_mb={((_transfer as MetalImageTransfer)?.Tiler.StagingBytes ?? 0) / (1024 * 1024)} " +
+            $"ring_mb={_guestMemory.RingBytes / (1024 * 1024)} " +
             $"sampled_dcc_clears={_imageCache.TakeSampledDccClears()} " +
             $"dcc_repeats_skipped={_imageCache.TakeDccRepeatsSkipped()} " +
             // Shaders whose control flow the structured emitter could express, against
