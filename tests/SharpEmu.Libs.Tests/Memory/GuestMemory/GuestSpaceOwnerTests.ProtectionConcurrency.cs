@@ -181,7 +181,12 @@ public sealed unsafe partial class GuestSpaceOwnerTests
                 using var fault = faultPath ? GpuMemoryAccessProfile.MeasureFault(FaultKind.Write) : default;
                 var succeeded = true;
                 for (var iteration = 0; iteration < 100; iteration++)
-                    succeeded &= owner.SetTransientAccess(address, Page, HostPageProtection.ReadWrite);
+                    // Page watchers reach the host through the derived-protection
+                    // receipt path (PageGuard -> SetDerivedAccess without ordinary
+                    // enrollment). Ordinary protection prepares mapped-copy
+                    // successors and allocates by design.
+                    succeeded &= owner.SetDerivedAccess(address, Page, GuestPageProtection.Read | GuestPageProtection.Write,
+                        HostPageProtection.ReadWrite, ordinaryEnrollment: false);
                 allocated = GC.GetAllocatedBytesForCurrentThread() - before;
                 Assert.True(succeeded);
             }
