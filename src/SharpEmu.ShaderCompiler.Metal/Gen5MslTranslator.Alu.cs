@@ -758,15 +758,24 @@ public static partial class Gen5MslTranslator
 
         private string EmitCvtPkrtzF16F32(Gen5ShaderInstruction instruction)
         {
-            // Round-to-zero via mantissa truncation before the half conversion,
-            // mirroring the SPIR-V translator's TruncateFloat32ForPack.
-            var first = Temp(
-                "float",
-                $"as_type<float>({AsUInt(F(instruction, 0))} & 0xFFFFE000u)");
-            var second = Temp(
-                "float",
-                $"as_type<float>({AsUInt(F(instruction, 1))} & 0xFFFFE000u)");
+            var first = TruncateFloat32ForPack(F(instruction, 0));
+            var second = TruncateFloat32ForPack(F(instruction, 1));
             return $"(((uint)as_type<ushort>(half({first}))) | (((uint)as_type<ushort>(half({second}))) << 16))";
+        }
+
+        // Rounds an f32 toward zero onto an f16 value, so half() then converts it exactly
+        // (V_CVT_PKRTZ_F16_F32). Toward zero, a finite value beyond the f16 range becomes
+        // +-65504, never infinity: Silent Hill's deferred lighting packs values past 65504
+        // and its fog pass scales them back down, while an infinity stays infinite, turns
+        // into NaN and blacks out the title-menu scene. Subnormal results keep whole 2^-24
+        // steps; NaN and infinity pass through to half() unchanged.
+        private string TruncateFloat32ForPack(string source)
+        {
+            var value = Temp("float", source);
+            var normal = $"as_type<float>(as_type<uint>(clamp({value}, -65504.0f, 65504.0f)) & 0xFFFFE000u)";
+            var subnormal = $"(trunc({value} * 16777216.0f) * 5.9604644775390625e-08f)";
+            var finite = $"(fabs({value}) < 6.103515625e-05f ? {subnormal} : {normal})";
+            return Temp("float", $"(isnan({value}) || isinf({value})) ? {value} : {finite}");
         }
 
         private string EmitFindFirstBitHigh(Gen5ShaderInstruction instruction, bool signed)
@@ -954,10 +963,13 @@ public static partial class Gen5MslTranslator
             int index)
         {
             var operand = instruction.Sources[index];
-            // Inline constants and literals are always read as a whole f32; only a
-            // register source can be narrowed to one of its halves.
+            // op_sel_hi narrows a register or a literal to one of its halves; an inline
+            // constant keeps its f32 value either way. A half-selected literal is an f16
+            // bit pattern: Silent Hill's luminance weights 0x34CD/0x38B8/0x2F0A read as
+            // f32 denormals made the luminance zero and the lighting divided by it.
             var readAsHalf = ((control.OpSelHiMask >> index) & 1) != 0 &&
-                operand.Kind is Gen5OperandKind.VectorRegister or Gen5OperandKind.ScalarRegister;
+                operand.Kind is Gen5OperandKind.VectorRegister or Gen5OperandKind.ScalarRegister or
+                    Gen5OperandKind.LiteralConstant;
             var value = readAsHalf
                 ? HalfToFloat(
                     Temp("uint", RawSource(instruction, index)),
