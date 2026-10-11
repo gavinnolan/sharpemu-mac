@@ -1045,8 +1045,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var layers = description.TransferLayers;
         var layerBytes = layers != 0 ? size / layers : 0;
         var stencilLayerBytes = description.HasStencil && layers != 0 ? description.Stencil.Size / layers : 0;
-        var moved = false;
-        var holes = 0UL;
+        var written = 0UL;
         for (var offset = 0UL; offset < size;)
         {
             var remaining = Math.Min(size - offset, MaxTransferPieceBytes);
@@ -1060,9 +1059,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 // covers. Step over everything that window reached - no subresource can
                 // start inside it either - and at least one page, so a range no window
                 // covers at all still advances.
-                var step = Math.Min(size - offset, Math.Max(run.Size, HoleStepBytes));
-                holes += step;
-                offset += step;
+                offset += Math.Min(size - offset, Math.Max(run.Size, HoleStepBytes));
                 continue;
             }
 
@@ -1075,21 +1072,24 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             _transfer.EncodeTextureToGuest(
                 context, in description, range, image.Texture,
                 run with { Size = pieceSize }, stencil, offset, pieceSize);
-            moved = true;
+            written += pieceSize;
             offset = end;
         }
 
-        if (holes != 0)
+        if (written < size)
         {
+            // Counted from what the runs carried rather than from the steps over holes:
+            // a block row the boundary falls inside is not carried either, and saying so
+            // is how a surface that comes out part stale is recognised.
             MetalV2Diagnostics.WarnOnce(
                 "writeback-unresolved",
-                $"A GPU-written image has guest bytes no window covers, so those stay in the texture: " +
+                $"A GPU-written image has guest bytes no run covers, so those stay in the texture: " +
                 $"address=0x{description.Data.Address:X16} size=0x{description.Data.Size:X} " +
-                $"unwritten=0x{holes:X} " +
+                $"unwritten=0x{size - written:X} " +
                 $"({_guestMemory.DescribeResolve(description.Data.Address, description.Data.Size)}).");
         }
 
-        return moved;
+        return written != 0;
     }
 
     // How far a run walk steps past guest bytes no window covers. One guest page: the
