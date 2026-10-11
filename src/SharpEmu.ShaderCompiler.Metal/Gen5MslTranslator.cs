@@ -97,6 +97,11 @@ public static partial class Gen5MslTranslator
         private readonly uint _waveLaneCount;
         private readonly IReadOnlyList<Gen5PixelOutputBinding> _pixelOutputBindings;
         private readonly bool _usesPixelValidMask;
+
+        // A translator-side probe, off unless someone is hunting a draw that covers
+        // nothing; see the vertex epilogue.
+        private static readonly bool DebugVertexPosition =
+            Environment.GetEnvironmentVariable("SHARPEMU_MSL_DEBUG_VS_POSITION") == "1";
         private readonly uint _pixelInputEnable;
         private readonly uint _pixelInputAddress;
         private readonly uint[] _pixelInputCntl;
@@ -656,6 +661,18 @@ public static partial class Gen5MslTranslator
             }
             else if (_stage == Gen5MslStage.Vertex)
             {
+                if (DebugVertexPosition)
+                {
+                    // SHARPEMU_MSL_DEBUG_VS_POSITION=1 throws the program's own clip
+                    // position away and puts every triple of vertices across the whole
+                    // of NDC. A draw that still covers nothing with this in place was
+                    // never about the vertex arithmetic.
+                    source.AppendLine(
+                        "    sharpemu_out.sharpemu_position = float4(" +
+                        "(float)(sharpemu_vertex_id % 3u) - 0.5f, " +
+                        "(float)((sharpemu_vertex_id / 3u) % 3u) - 1.0f, 0.5f, 1.0f);");
+                }
+
                 source.AppendLine("    return sharpemu_out;");
             }
 
