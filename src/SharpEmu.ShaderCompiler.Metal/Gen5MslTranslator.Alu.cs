@@ -1721,7 +1721,7 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
-                var mask = Temp("uint", combined);
+                var mask = Temp("uint", IsSingleLaneStage ? $"({combined}) & 1u" : combined);
                 StoreScalar(destination, oldExec);
                 Line($"s[{ExecLoRegister}] = {mask};");
                 Line($"s[{ExecHiRegister}] = 0u;");
@@ -1746,6 +1746,15 @@ public static partial class Gen5MslTranslator
                 {
                     var sign = Temp("uint", $"0u - ({left} >> 31u)");
                     var result = Temp("uint", $"({left} ^ {sign}) - {sign}");
+                    StoreScalar(destination, result);
+                    Line($"scc = {result} != 0u;");
+                    return true;
+                }
+                case "SWqmB32" when IsSingleLaneStage:
+                {
+                    // Whole-quad mode adds the lane's quad neighbours, which a single-lane
+                    // stage does not have: Metal runs a fragment's helper lanes itself.
+                    var result = Temp("uint", left);
                     StoreScalar(destination, result);
                     Line($"scc = {result} != 0u;");
                     return true;
@@ -2138,7 +2147,7 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
-                var mask = Temp("ulong", combined);
+                var mask = Temp("ulong", IsSingleLaneStage ? $"({combined}) & 1ul" : combined);
                 StoreScalar64(destination, oldExec);
                 Line($"s[{ExecLoRegister}] = (uint){mask};");
                 Line($"s[{ExecHiRegister}] = (uint)({mask} >> 32);");
@@ -2157,6 +2166,9 @@ public static partial class Gen5MslTranslator
                     break;
                 case "SNotB64":
                     value = $"~{left}";
+                    break;
+                case "SWqmB64" when IsSingleLaneStage:
+                    value = left;
                     break;
                 case "SWqmB64":
                 {

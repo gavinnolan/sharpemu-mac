@@ -130,6 +130,50 @@ public static partial class Gen5MslTranslator
         private const string StepCapReportCall =
             $"sharpemu_note_step_cap({ResourcesName}.{Gen5MslArgumentLayout.StepReportName});";
 
+        // SHARPEMU_MSL_STEPCAP_PROBE=s40,v41,...: a capped invocation also stores up to seven
+        // named registers (or `exec`) into the words after its step-report counter, so a loop
+        // that never exits says which value kept it going. SHARPEMU_MSL_STEPCAP_PROBE_HASH
+        // limits it to one program, since a register another program never names would not
+        // compile there.
+        private static readonly string[] StepCapProbeRegisters =
+            (Environment.GetEnvironmentVariable("SHARPEMU_MSL_STEPCAP_PROBE") ?? string.Empty)
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Take(7)
+                .ToArray();
+
+        private static readonly ulong StepCapProbeHash =
+            ulong.TryParse(
+                (Environment.GetEnvironmentVariable("SHARPEMU_MSL_STEPCAP_PROBE_HASH") ?? string.Empty)
+                    .Replace("0x", string.Empty, StringComparison.OrdinalIgnoreCase),
+                System.Globalization.NumberStyles.HexNumber,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var probeHash)
+                ? probeHash
+                : 0;
+
+        private string StepCapReportCode
+        {
+            get
+            {
+                if (StepCapProbeRegisters.Length == 0 || (StepCapProbeHash != 0 && StepCapProbeHash != _request.Hash))
+                {
+                    return StepCapReportCall;
+                }
+
+                var text = new StringBuilder(StepCapReportCall);
+                text.Append($" if ({ResourcesName}.{Gen5MslArgumentLayout.StepReportName} != nullptr) {{");
+                for (var index = 0; index < StepCapProbeRegisters.Length; index++)
+                {
+                    var name = StepCapProbeRegisters[index];
+                    var value = name == "exec" ? "(exec ? 1u : 0u)" : $"as_type<uint>({name})";
+                    text.Append($" atomic_store_explicit({ResourcesName}.{Gen5MslArgumentLayout.StepReportName} + {index + 1}, {value}, memory_order_relaxed);");
+                }
+
+                text.Append(" }");
+                return text.ToString();
+            }
+        }
+
         private readonly Gen5MslStage _stage;
         private readonly uint _localSizeX;
         private readonly uint _localSizeY;
@@ -683,7 +727,7 @@ public static partial class Gen5MslTranslator
                     body.AppendLine($"        if (++steps >= {_maxDispatcherSteps}u)");
                     body.AppendLine("        {");
                     body.AppendLine("            active = false;");
-                    body.AppendLine($"            {StepCapReportCall}");
+                    body.AppendLine($"            {StepCapReportCode}");
                     body.AppendLine("        }");
                 }
 
@@ -1103,8 +1147,8 @@ public static partial class Gen5MslTranslator
                 // also covers programs that parked plain data in VCC.
                 "SCbranchVccz" => $"(s[{VccLoRegister}] | s[{VccHiRegister}]) == 0u",
                 "SCbranchVccnz" => $"(s[{VccLoRegister}] | s[{VccHiRegister}]) != 0u",
-                "SCbranchExecz" => $"(s[{ExecLoRegister}] | s[{ExecHiRegister}]) == 0u",
-                "SCbranchExecnz" => $"(s[{ExecLoRegister}] | s[{ExecHiRegister}]) != 0u",
+                "SCbranchExecz" => IsSingleLaneStage ? "!exec" : $"(s[{ExecLoRegister}] | s[{ExecHiRegister}]) == 0u",
+                "SCbranchExecnz" => IsSingleLaneStage ? "exec" : $"(s[{ExecLoRegister}] | s[{ExecHiRegister}]) != 0u",
                 // The emulator does not expose a shader debug session.
                 "SCbranchCdbgsys" or
                 "SCbranchCdbguser" or
@@ -2250,7 +2294,11 @@ public static partial class Gen5MslTranslator
 
                 case ExecLoRegister:
                 {
-                    var value = Temp("uint", expression);
+                    // A single-lane stage has exactly one lane, bit 0. Any other bit is a
+                    // lane that does not exist - whole-quad mode or an all-ones move puts
+                    // them there - and it can never clear again, so an EXECZ loop exit
+                    // waits on it for ever.
+                    var value = Temp("uint", IsSingleLaneStage ? $"({expression}) & 1u" : expression);
                     Line($"s[{ExecLoRegister}] = {value};");
                     Line($"exec = {LaneBit(value, ScalarExpression(ExecHiRegister))};");
                     return;
@@ -2259,7 +2307,7 @@ public static partial class Gen5MslTranslator
                 case VccHiRegister:
                 case ExecHiRegister:
                 {
-                    var value = Temp("uint", expression);
+                    var value = Temp("uint", register == ExecHiRegister && IsSingleLaneStage ? "0u" : expression);
                     Line($"s[{register}] = {value};");
                     if (IsWave64)
                     {

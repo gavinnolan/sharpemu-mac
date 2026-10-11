@@ -16,6 +16,10 @@ namespace SharpEmu.Gpu.Metal.V2;
 internal sealed partial class MetalRenderHost
 {
     private const int StepReportSlots = 1024;
+
+    // Each program's report is a counter followed by seven probe words a capped invocation
+    // may fill (SHARPEMU_MSL_STEPCAP_PROBE).
+    private const int StepReportStride = 8;
     private const int MaxStepCapReports = 64;
 
     private nint _stepReportBuffer;
@@ -49,7 +53,7 @@ internal sealed partial class MetalRenderHost
             if (_stepReportBuffer == 0)
             {
                 _stepReportBuffer = _guestMemory.CreateReportBuffer(
-                    StepReportSlots * sizeof(uint),
+                    StepReportSlots * StepReportStride * sizeof(uint),
                     "SharpEmu StepReport",
                     out _stepReportContents,
                     out _stepReportGpuAddress);
@@ -63,13 +67,13 @@ internal sealed partial class MetalRenderHost
         }
 
         NoteUsedResource(_stepReportBuffer, Mtl.ResourceUsageRead | Mtl.ResourceUsageWrite);
-        return _stepReportGpuAddress + (ulong)(slot * sizeof(uint));
+        return _stepReportGpuAddress + (ulong)(slot * StepReportStride * sizeof(uint));
     }
 
     private unsafe Span<uint> StepReportWords =>
         _stepReportContents == 0
             ? []
-            : new Span<uint>((void*)_stepReportContents, StepReportSlots);
+            : new Span<uint>((void*)_stepReportContents, StepReportSlots * StepReportStride);
 
     /// <summary>
     /// Reads back and clears the step-report words. Called once per flush: the counts
@@ -86,13 +90,18 @@ internal sealed partial class MetalRenderHost
         var words = StepReportWords;
         for (var slot = 0; slot < _stepReportUsed; slot++)
         {
-            var hits = words[slot];
+            var hits = words[slot * StepReportStride];
             if (hits == 0)
             {
                 continue;
             }
 
-            words[slot] = 0;
+            words[slot * StepReportStride] = 0;
+            var probe = words.Slice(slot * StepReportStride + 1, StepReportStride - 1);
+            var probeText = probe.IndexOfAnyExcept(0u) < 0
+                ? string.Empty
+                : " probe=[" + string.Join(" ", probe.ToArray().Select(static word => $"{word:X8}")) + "]";
+            probe.Clear();
             _stepCapTotalBySlot[slot] += hits;
             if (_stepCapReports >= MaxStepCapReports)
             {
@@ -102,12 +111,13 @@ internal sealed partial class MetalRenderHost
             _stepCapReports++;
             Console.Error.WriteLine(string.Format(
                 CultureInfo.InvariantCulture,
-                "[METAL-V2][STEP-CAP] hash=0x{0:X16} stage={1} invocations={2} total={3}{4}",
+                "[METAL-V2][STEP-CAP] hash=0x{0:X16} stage={1} invocations={2} total={3}{5}{4}",
                 _stepReportHashBySlot[slot],
                 _stepReportStageBySlot[slot],
                 hits,
                 _stepCapTotalBySlot[slot],
-                _stepCapReports == MaxStepCapReports ? " (further reports suppressed)" : string.Empty));
+                _stepCapReports == MaxStepCapReports ? " (further reports suppressed)" : string.Empty,
+                probeText));
         }
     }
 

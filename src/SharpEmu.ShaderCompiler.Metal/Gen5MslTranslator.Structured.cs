@@ -362,7 +362,7 @@ public static partial class Gen5MslTranslator
             _structuredUsesSteps = true;
             AppendIndented(text, $"if (++steps >= {_maxDispatcherSteps}u)", indent);
             AppendIndented(text, "{", indent);
-            AppendIndented(text, StepCapReportCall, indent + 1);
+            AppendIndented(text, StepCapReportCode, indent + 1);
             AppendExit(text, indent + 1);
             AppendIndented(text, "}", indent);
         }

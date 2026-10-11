@@ -1364,6 +1364,8 @@ internal sealed partial class MetalRenderHost :
                 $"[METAL-V2][SLOT-TRAP] mismatches={_slotTrap.Mismatches} dropped={_slotTrap.Dropped}");
         }
 
+        ReportStalledHeads();
+
         if (!MetalV2Diagnostics.Verbose)
         {
             return;
@@ -1387,6 +1389,38 @@ internal sealed partial class MetalRenderHost :
         var builder = new System.Text.StringBuilder();
         _imageCache.AppendReleaseCauses(builder);
         return builder.ToString();
+    }
+
+    // A head parked on one packet for seconds is a deadlock in the making; name the packet
+    // and what it waits for once, with the words it compares, so the log says why.
+    private void ReportStalledHeads()
+    {
+        var stalls = CommandStream.TakeNewStalls(3000);
+        if (stalls.Count == 0)
+        {
+            return;
+        }
+
+        Span<uint> packet = stackalloc uint[8];
+        Span<uint> watched = stackalloc uint[2];
+        foreach (var (queueId, submissionId, kind, packetAddress, wait, milliseconds) in stalls)
+        {
+            packet.Clear();
+            _ = _memory.TryRead(packetAddress, System.Runtime.InteropServices.MemoryMarshal.AsBytes(packet));
+            var waited = "";
+            if (wait.Kind == SharpEmu.Libs.Gpu.GpuCommands.CommandWaitKind.GuestMemory && wait.Address != 0)
+            {
+                watched.Clear();
+                _ = _memory.TryRead(wait.Address, System.Runtime.InteropServices.MemoryMarshal.AsBytes(watched));
+                waited = $" value=0x{watched[1]:X8}{watched[0]:X8} gpu_pending={_gpuWrites.MayCover(wait.Address, wait.Size)}";
+            }
+
+            Console.Error.WriteLine(
+                $"[METAL-V2][STALL] queue={queueId} submission={submissionId} kind={kind} ms={milliseconds:F0} " +
+                $"packet=0x{packetAddress:X16} words=[{packet[0]:X8} {packet[1]:X8} {packet[2]:X8} {packet[3]:X8} " +
+                $"{packet[4]:X8} {packet[5]:X8} {packet[6]:X8} {packet[7]:X8}] wait={wait.Kind} " +
+                $"address=0x{wait.Address:X16} size=0x{wait.Size:X} handle={wait.Handle} index={wait.Index}{waited}");
+        }
     }
 
     public Exception Fatal(string message) => GpuFatal.Fatal(message);

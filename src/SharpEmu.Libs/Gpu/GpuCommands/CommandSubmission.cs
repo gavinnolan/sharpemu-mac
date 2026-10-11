@@ -137,6 +137,12 @@ public sealed class CommandSubmission
     // Address of the packet the blocked slice stopped on; diagnostics only.
     public ulong BlockedPacketAddress { get; internal set; }
 
+    // When this submission first stopped on its current packet, kept across retries of
+    // that same packet so a head that never moves on can be named; diagnostics only.
+    public long StalledSinceTicks { get; internal set; }
+
+    public bool StallReported { get; internal set; }
+
     // What the blocked slice is waiting for; the queue wakes it on that alone.
     public CommandWaitCondition Wait { get; internal set; } = CommandWaitCondition.Unknown;
 

@@ -777,7 +777,14 @@ public sealed class CommandStreamQueue
                 }
 
                 submission.BlockedSinceTicks = System.Diagnostics.Stopwatch.GetTimestamp();
-                submission.BlockedPacketAddress = submission.Commands.CurrentPacketAddress;
+                var packetAddress = submission.Commands.CurrentPacketAddress;
+                if (submission.StalledSinceTicks == 0 || submission.BlockedPacketAddress != packetAddress)
+                {
+                    submission.StalledSinceTicks = submission.BlockedSinceTicks;
+                    submission.StallReported = false;
+                }
+
+                submission.BlockedPacketAddress = packetAddress;
                 submission.Wait = submission.Commands.SuspendCondition;
                 _queues[submission.QueueId].AddFirst(submission);
                 _submissionCount++;
@@ -975,6 +982,39 @@ public sealed class CommandStreamQueue
 
         foreach (var cancel in cancellations)
             cancel();
+    }
+
+    // Heads that have sat on the same packet for at least minimumMilliseconds and have not
+    // been reported yet: each is named once per stall, so a deadlock says what it is
+    // waiting for instead of looking like an idle GPU.
+    public IReadOnlyList<(int QueueId, ulong SubmissionId, CommandSubmissionKind Kind, ulong PacketAddress,
+        CommandWaitCondition Wait, double Milliseconds)> TakeNewStalls(double minimumMilliseconds)
+    {
+        List<(int, ulong, CommandSubmissionKind, ulong, CommandWaitCondition, double)>? stalls = null;
+        lock (_gate)
+        {
+            var now = System.Diagnostics.Stopwatch.GetTimestamp();
+            for (var queueId = 0; queueId < QueueCount; queueId++)
+            {
+                if (_queues[queueId].First is not { } head || !head.Value.Blocked || head.Value.StallReported ||
+                    head.Value.StalledSinceTicks == 0)
+                {
+                    continue;
+                }
+
+                var milliseconds = (now - head.Value.StalledSinceTicks) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                if (milliseconds < minimumMilliseconds)
+                {
+                    continue;
+                }
+
+                head.Value.StallReported = true;
+                (stalls ??= []).Add((queueId, head.Value.SubmissionId, head.Value.Kind,
+                    head.Value.BlockedPacketAddress, head.Value.Wait, milliseconds));
+            }
+        }
+
+        return (IReadOnlyList<(int, ulong, CommandSubmissionKind, ulong, CommandWaitCondition, double)>?)stalls ?? [];
     }
 
     // A diagnostic view of the blocked heads: their count, the oldest age and one sample.
