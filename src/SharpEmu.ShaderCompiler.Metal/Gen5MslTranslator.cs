@@ -13,8 +13,30 @@ public static partial class Gen5MslTranslator
 {
     private const uint ScalarRegisterFileCount = 128;
     private const uint VectorRegisterFileCount = 256;
+    // The most LDS a dispatch can ask for, which is also Metal's threadgroup-memory
+    // limit: 8192 dwords is 32 KB either way.
     private const uint LdsDwordCount = 8192;
-    private const uint LdsDwordMask = LdsDwordCount - 1;
+
+    /// <summary>
+    /// The threadgroup memory a compute dispatch gets, from what it allocated
+    /// (COMPUTE_PGM_RSRC2.LDS_SIZE), rounded up to a power of two because LDS addresses
+    /// are masked into bounds rather than clamped. A dispatch that does not say falls
+    /// back to the whole 32 KB.
+    ///
+    /// This matters more than its size suggests. Threadgroup memory is a hard occupancy
+    /// limit on Apple GPUs: a threadgroup that asks for all 32 KB is the only one that
+    /// fits on a core, so a 64-thread guest workgroup leaves the core running 64 threads
+    /// where it could run hundreds. Octopath Traveler II's second- and fourth-heaviest
+    /// dispatches are 8x8x1 workgroups that were each declaring the full 32 KB — the
+    /// SPIR-V backend has always sized this from the allocation, and now so does this one.
+    /// </summary>
+    private static uint ComputeLdsDwordCount(ShaderCompileRequest request)
+    {
+        var declared = request.LocalDataShareDwords;
+        return declared == 0 || declared > LdsDwordCount
+            ? LdsDwordCount
+            : System.Numerics.BitOperations.RoundUpToPowerOf2(declared);
+    }
     // Graphics stages model LDS as per-invocation scratch; a full 32 KB array
     // per fragment/vertex invocation risks Metal compile limits, and
     // per-invocation write-then-read correctness only needs deterministic
@@ -549,15 +571,13 @@ public static partial class Gen5MslTranslator
             if (_stage == Gen5MslStage.Compute && IsWave64)
             {
                 source.AppendLine("    uint sharpemu_lane = sharpemu_tg_index & 63u;");
-                if (_usesWaveScratch && !_usesLds)
+                if (_usesWaveScratch && !AliasesWaveScratchIntoLds)
                 {
                     // Two dwords bridge each half's ballot; the third carries a
                     // broadcast value for read-first-lane. Indexed only by half,
                     // so correct for a one-wave (64-thread) workgroup — larger
                     // workgroups would need per-wave scratch (matches the SPIR-V
-                    // translator's bridge scope). When the shader also uses LDS the
-                    // bridge instead aliases the top of that allocation (below) so
-                    // total threadgroup memory stays within Metal's 32 KB limit.
+                    // translator's bridge scope).
                     source.AppendLine("    threadgroup uint sharpemu_wave_scratch[3];");
                 }
             }
@@ -581,9 +601,10 @@ public static partial class Gen5MslTranslator
                 }
                 else if (_stage == Gen5MslStage.Compute)
                 {
-                    // 32 KB of guest LDS as workgroup-shared memory; the address
-                    // is masked into bounds like the SPIR-V translator.
-                    source.AppendLine($"    threadgroup uint sharpemu_lds[{LdsDwordCount}];");
+                    // Guest LDS as workgroup-shared memory, sized from what the
+                    // dispatch allocated; the address is masked into bounds like the
+                    // SPIR-V translator, which is why it is a power of two.
+                    source.AppendLine($"    threadgroup uint sharpemu_lds[{_computeLdsDwords}];");
                 }
                 else
                 {
@@ -603,16 +624,16 @@ public static partial class Gen5MslTranslator
                 source.AppendLine($"    thread uint sharpemu_scratch[{_scratchDwordCount}] = {{}};");
             }
 
-            if (_usesWaveScratch && _usesLds && _stage == Gen5MslStage.Compute)
+            if (_usesWaveScratch && AliasesWaveScratchIntoLds)
             {
-                // Reuse the final three dwords of the LDS allocation for the
-                // wave64 bridge. A separate threadgroup array would push total
-                // threadgroup memory past Metal's 32 KB limit for shaders that
-                // request the full LDS (mirrors the SPIR-V translator). Guest LDS
-                // accesses are bounds-masked into the same allocation, so this
-                // trades a rare top-of-LDS collision for a compilable pipeline.
+                // Only a dispatch that asked for the whole 32 KB has no room left for
+                // the bridge, and then it aliases the top three dwords of the LDS
+                // allocation: a separate array would push total threadgroup memory
+                // past Metal's limit and the pipeline would not compile. Guest LDS
+                // accesses are bounds-masked into the same allocation, so this trades
+                // a rare top-of-LDS collision for a compilable pipeline.
                 source.AppendLine(
-                    $"    threadgroup uint* sharpemu_wave_scratch = &sharpemu_lds[{LdsDwordCount - 3}u];");
+                    $"    threadgroup uint* sharpemu_wave_scratch = &sharpemu_lds[{_computeLdsDwords - 3}u];");
             }
 
             if (_stage == Gen5MslStage.Mesh)
@@ -1556,7 +1577,7 @@ public static partial class Gen5MslTranslator
         {
             var wordMask = _stage switch
             {
-                Gen5MslStage.Compute => LdsDwordMask,
+                Gen5MslStage.Compute => _computeLdsDwords - 1,
                 Gen5MslStage.Mesh => _meshLdsDwords - 1,
                 _ => PrivateLdsDwordCount - 1,
             };

@@ -185,6 +185,70 @@ public sealed class MslTranslationTests
             System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(result));
     }
 
+    /// <summary>Threadgroup memory is a hard occupancy limit on Apple GPUs: a
+    /// threadgroup that asks for all 32 KB is the only one that fits on a core. The
+    /// declaration therefore follows what the dispatch allocated, rounded up to a power
+    /// of two because LDS addresses are masked into bounds rather than clamped — and the
+    /// mask has to follow the size, or an address would escape the array.</summary>
+    [Theory]
+    [InlineData(0u, 8192u)]      // the dispatch did not say: assume the whole 32 KB
+    [InlineData(1u, 1u)]
+    [InlineData(100u, 128u)]
+    [InlineData(256u, 256u)]
+    [InlineData(1024u, 1024u)]
+    [InlineData(8192u, 8192u)]
+    [InlineData(99999u, 8192u)]  // more than the hardware has: clamp to the ceiling
+    public void ComputeThreadgroupMemoryFollowsTheDispatchAllocation(uint declared, uint expected)
+    {
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(
+            Gen5ComputeFixtures.Lds,
+            localDataShareDwords: declared);
+
+        Assert.Contains(
+            $"threadgroup uint sharpemu_lds[{expected}];",
+            shader.Source,
+            StringComparison.Ordinal);
+        Assert.Contains($"& {expected - 1}u", shader.Source, StringComparison.Ordinal);
+    }
+
+    /// <summary>The wave64 ballot bridge only has to share the LDS allocation when the
+    /// dispatch asked for all of it; with room to spare it gets its own three dwords and
+    /// cannot collide with guest data.</summary>
+    [Theory]
+    [InlineData(1024u, false)]
+    [InlineData(8192u, true)]
+    public void TheWave64BridgeOnlySharesLdsWhenThereIsNoRoom(uint declared, bool aliased)
+    {
+        // v_readfirstlane is what makes a wave64 program need the bridge at all.
+        var fixture = new Gen5ComputeFixture(
+            "wave64-bridge-lds",
+            [
+                0x7E000280,             // v_mov_b32 v0, 0
+                0x7E0402FF, 0x00001234, // v_mov_b32 v2, 0x1234
+                0xD8340000, 0x00000200, // ds_write_b32 v0, v2
+                0x7E000500,             // v_readfirstlane_b32 s0, v0
+                0xBF810000,             // s_endpgm
+            ],
+            StoreScalarResourceBase: 0,
+            StoreBackingBytes: 0);
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(
+            fixture,
+            waveLaneCount: 64,
+            localSizeX: 64,
+            localDataShareDwords: declared);
+
+        Assert.Equal(
+            aliased,
+            shader.Source.Contains(
+                "threadgroup uint* sharpemu_wave_scratch = &sharpemu_lds[",
+                StringComparison.Ordinal));
+        Assert.Equal(
+            !aliased,
+            shader.Source.Contains(
+                "threadgroup uint sharpemu_wave_scratch[3];",
+                StringComparison.Ordinal));
+    }
+
     [Fact]
     public void ExecMaskedStoresAreGuarded()
     {

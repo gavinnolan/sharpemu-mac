@@ -146,6 +146,8 @@ public static partial class Gen5MslTranslator
                 _meshInfo = BuildMeshInfo(request, _meshLdsDwords);
             }
 
+            _computeLdsDwords = ComputeLdsDwordCount(request);
+
             _pixelOutputBindings = request.PixelOutputs;
             _usesPixelValidMask =
                 _stage == Gen5MslStage.Pixel &&
