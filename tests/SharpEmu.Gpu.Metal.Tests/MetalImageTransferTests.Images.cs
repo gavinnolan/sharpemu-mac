@@ -225,6 +225,21 @@ public sealed partial class MetalImageTransferTests
         RoundTrip(harness, Color2D(GuestPixelFormat.Bits8_8_8_8UNorm, GpuFormat.R8G8B8A8Unorm, 192, 96, 1, 1, GuestTileMode.RenderTarget), 15, "render target");
     }
 
+    // A comparison-sampled cube is a depth image in a colour tile mode, so its blocks are
+    // that mode's, not the 64 KiB depth block.
+    [Fact]
+    public void TiledSampledDepthImagesRoundTripThroughTheirTexture()
+    {
+        if (!RequireDevice()) return;
+        using var harness = new MetalTransferHarness(Device.Value);
+        var cube = Color2D(GuestPixelFormat.Bits16UNorm, GpuFormat.D16Unorm, 1, 1, 1, 6, GuestTileMode.Standard256B);
+        Assert.Equal(0x600UL, cube.Data.Size);
+        RoundTrip(harness, cube, 41, "d16 1x1x6 256b");
+        RoundTrip(harness, Color2D(GuestPixelFormat.Bits16UNorm, GpuFormat.D16Unorm, 64, 64, 1, 6, GuestTileMode.Standard4KB), 42, "d16 64x64x6 4kb");
+        RoundTrip(harness, Color2D(GuestPixelFormat.Bits16UNorm, GpuFormat.D16Unorm, 64, 64, 1, 6, GuestTileMode.Standard64KB), 43, "d16 64x64x6 64kb");
+        RoundTrip(harness, Color2D(GuestPixelFormat.Bits16UNorm, GpuFormat.D16Unorm, 64, 64, 1, 6, GuestTileMode.Depth), 44, "d16 64x64x6 depth");
+    }
+
     [Fact]
     public void VolumeAndCompressedImagesRoundTripThroughTheirTexture()
     {
