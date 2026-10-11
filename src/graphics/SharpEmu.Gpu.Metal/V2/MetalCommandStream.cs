@@ -161,6 +161,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     public void RecordEndOfPipe(in EndOfPipeWrite write)
     {
         _endOfPipeRecords++;
+        var label = write;
         var eventId = write.EventId;
         var contextId = write.ContextId;
         var requestId = write.FlipRequestId;
@@ -171,12 +172,17 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             case EndOfPipeWriteKind.Interrupt64:
             case EndOfPipeWriteKind.InterruptWriteBack32:
             case EndOfPipeWriteKind.InterruptWriteBack64:
-                QueueCompletion(() => TriggerInterrupt(eventId, contextId));
+                QueueCompletion(() =>
+                {
+                    PublishEndOfPipeLabel(in label);
+                    TriggerInterrupt(eventId, contextId);
+                });
                 break;
             case EndOfPipeWriteKind.Flip:
             case EndOfPipeWriteKind.FlipWithWrite32:
                 QueueCompletion(() =>
                 {
+                    PublishEndOfPipeLabel(in label);
                     VideoOutBackendServices.CompleteFlip(requestId);
                     MetalV2Presenter.SignalFlipPacer();
                 });
@@ -184,17 +190,92 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             case EndOfPipeWriteKind.FlipWithInterruptWriteBack32:
                 QueueCompletion(() =>
                 {
+                    PublishEndOfPipeLabel(in label);
                     VideoOutBackendServices.CompleteFlip(requestId);
                     MetalV2Presenter.SignalFlipPacer();
                     TriggerInterrupt(eventId, 0);
                 });
                 break;
             default:
-                // A plain label write, a clock write or a GDS write has no GPU
-                // completion: the interpreter already published its bytes.
+                // A plain label or clock write has no interrupt behind it, but it is
+                // still an end-of-pipe write: the guest polls it to learn that the work
+                // recorded before it has finished, and reuses what that work reads once
+                // it sees it. Only deferred when asked: a completion costs a flush, and
+                // a title that writes a label per pass pays one per pass.
+                if (DeferEndOfPipeLabels)
+                {
+                    QueueCompletion(() => PublishEndOfPipeLabel(in label));
+                }
+
                 break;
         }
     }
+
+    /// <summary>
+    /// Writes an end-of-pipe label's bytes into guest memory. The interpreter leaves
+    /// them to the host (<see cref="DefersEndOfPipeLabels"/>) because it runs ahead of
+    /// the GPU by design: publishing a label when its packet is parsed tells the guest
+    /// that work still queued has finished, and the guest then overwrites the constants
+    /// and vertex data that work has yet to read. Superliminal's level rendered from
+    /// whatever had replaced its view-projection matrix by the time the GPU got to it,
+    /// which came out as a degenerate clip position and an empty G-buffer.
+    /// </summary>
+    private void PublishEndOfPipeLabel(in EndOfPipeWrite write)
+    {
+        if (!DeferEndOfPipeLabels)
+        {
+            // The interpreter published the bytes as it parsed the packet.
+            return;
+        }
+
+        var bytes = write.Kind switch
+        {
+            EndOfPipeWriteKind.Write32 or EndOfPipeWriteKind.WriteBack32 or
+            EndOfPipeWriteKind.Interrupt32 or EndOfPipeWriteKind.InterruptWriteBack32 or
+            EndOfPipeWriteKind.FlipWithWrite32 or EndOfPipeWriteKind.FlipWithInterruptWriteBack32 => 4,
+            EndOfPipeWriteKind.Write64 or EndOfPipeWriteKind.WriteBack64 or
+            EndOfPipeWriteKind.Interrupt64 or EndOfPipeWriteKind.InterruptWriteBack64 or
+            EndOfPipeWriteKind.ClockWrite or EndOfPipeWriteKind.ClockWriteBack => 8,
+            // A GDS write was copied where the data share lives, and an interrupt or a
+            // bare flip carries no payload at all.
+            _ => 0,
+        };
+        if (bytes == 0)
+        {
+            return;
+        }
+
+        if (write.Destination == 0 || (ulong)bytes > ulong.MaxValue - write.Destination)
+        {
+            throw Fatal(
+                $"An end-of-pipe label has an invalid range: address=0x{write.Destination:X16} bytes={bytes}.");
+        }
+
+        Span<byte> payload = stackalloc byte[8];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(payload, write.Value);
+        if (!_memory.TryWrite(write.Destination, payload[..bytes]))
+        {
+            throw Fatal(
+                $"An end-of-pipe label cannot be written to guest memory: " +
+                $"address=0x{write.Destination:X16} bytes={bytes}.");
+        }
+    }
+
+    // SHARPEMU_METAL_V2_DEFER_EOP=1 hands every end-of-pipe label's bytes to the
+    // completion that reports its work, instead of letting the interpreter publish
+    // them as it parses the packet. That is what the hardware does and what V1 does,
+    // and it is what Superliminal's level needs - but a completion costs a command
+    // buffer flush, and a title that writes a label per render pass then pays one per
+    // pass: measured at 0.5 fps against 24. Off until the completion for a label that
+    // nothing has been recorded after can ride the previous submission instead.
+    private static readonly bool DeferEndOfPipeLabels =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEFER_EOP") == "1";
+
+    /// <summary>
+    /// The interpreter must not publish label bytes itself when this host defers them;
+    /// see <see cref="PublishEndOfPipeLabel"/>.
+    /// </summary>
+    public bool DefersEndOfPipeLabels => DeferEndOfPipeLabels;
 
     // The completion runs once the GPU finishes everything recorded so far, so the
     // command buffer is committed right away instead of waiting for the next flush.
@@ -221,17 +302,32 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             return;
         }
 
-        var serial = SubmissionSerial;
+        // Nothing has been recorded since the last flush, so everything this completion
+        // waits for is in the submission already committed: it rides that one's serial
+        // and needs no flush of its own. A run of end-of-pipe labels with no work
+        // between them is the common shape, and flushing once per label turned a frame
+        // into hundreds of empty submissions.
+        var pending = LastWorkSerial;
         var queued = System.Diagnostics.Stopwatch.GetTimestamp();
-        _completions.Enqueue(serial, () =>
+        if (pending != 0 && pending <= _previousSerial)
+        {
+            Enqueue(pending);
+            return;
+        }
+
+        var serial = SubmissionSerial;
+        Enqueue(serial);
+        FlushCommandBuffer();
+        return;
+
+        void Enqueue(ulong on) => _completions.Enqueue(on, () =>
         {
             var ran = System.Diagnostics.Stopwatch.GetTimestamp();
             Interlocked.Add(ref _completionLatencyTicks, ran - queued);
             Interlocked.Increment(ref _completionCount);
-            ReportSlowCompletion(serial, queued, ran);
+            ReportSlowCompletion(on, queued, ran);
             work();
         });
-        FlushCommandBuffer();
     }
 
     // An end-of-pipe completion the guest is waiting on that took long enough to cost
