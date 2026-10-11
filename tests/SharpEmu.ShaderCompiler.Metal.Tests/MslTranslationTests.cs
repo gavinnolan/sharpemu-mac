@@ -551,6 +551,14 @@ public sealed class MslTranslationTests
         // the relative number wraps into the register file.
         Assert.Contains("(55u + ", shader.Source, StringComparison.Ordinal);
         Assert.Contains("& 255u", shader.Source, StringComparison.Ordinal);
+
+        // These forms write the register M0 names, so the file stays an array. Resolving
+        // a read over the program's own registers is sound because a register it never
+        // writes holds undefined data; a write lands on one the program does mean to
+        // write and may read back through the same number later, so it cannot be dropped
+        // for being outside the set.
+        Assert.Contains("uint v[256] = {};", shader.Source, StringComparison.Ordinal);
+
         // V_MOVRELSD2 reads M0's two halves as independent offsets.
         Assert.Equal(
             opcode == "VMovrelsd2B32",

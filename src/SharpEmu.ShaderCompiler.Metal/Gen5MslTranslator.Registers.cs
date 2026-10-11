@@ -315,13 +315,15 @@ public static partial class Gen5MslTranslator
             var dynamicScalar = false;
             var dynamicVector = false;
             var markedVectorAccess = false;
+            var markedVectorWrite = false;
             var scalars = new SortedSet<uint>();
             var vectors = new SortedSet<uint>();
             foreach (var text in texts)
             {
+                markedVectorWrite |= text.Contains(DynamicVectorWrite, StringComparison.Ordinal);
                 markedVectorAccess |=
-                    text.Contains(DynamicVectorRead, StringComparison.Ordinal) ||
-                    text.Contains(DynamicVectorWrite, StringComparison.Ordinal);
+                    markedVectorWrite ||
+                    text.Contains(DynamicVectorRead, StringComparison.Ordinal);
                 foreach (var reference in ScanRegisterReferences(text))
                 {
                     if (reference.Index < 0)
@@ -341,7 +343,15 @@ public static partial class Gen5MslTranslator
             // file living in thread-private memory — v0..v31 against 256 slots for the
             // shader this was written for — but it stops being one if a program touches
             // most of the file, so past the limit the array stays.
-            if (markedVectorAccess && vectors.Count > MaxResolvedVectorRegisters)
+            //
+            // A run-time *write* keeps the array regardless. Resolving a read over the
+            // program's own registers is sound because a register it never writes holds
+            // undefined data, so any answer will do; a write breaks that, since the
+            // register it lands on is one the program does mean to write and may read
+            // back through the same number later. Only a write whose register the offset
+            // analysis pinned down is resolved, and that one never reaches here.
+            if (markedVectorAccess &&
+                (markedVectorWrite || vectors.Count > MaxResolvedVectorRegisters))
             {
                 dynamicVector = true;
             }
