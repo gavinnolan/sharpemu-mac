@@ -181,6 +181,14 @@ internal sealed partial class MetalRenderHost :
 
     public bool GraphicsSubgroupOperationsEnabled => false;
 
+    // Metal has no 64-bit atomics on threadgroup memory: MSL's atomic_ulong only offers
+    // atomic_min/max_explicit on device memory (newer GPU families), with no add, or, exchange or
+    // compare-exchange in any address space, so a threadgroup ulong atomic does not compile.
+    // A lock cannot stand in for it either: a 64-bit LDS read would have to take the same
+    // per-address lock to never see a half-updated pair. The translator instead runs
+    // DS_ADD_U64 / DS_OR_B64 as 32-bit atomics on each dword (folding the low dword's carry
+    // into the high one), whose final value is exact; only a concurrent read can observe
+    // the pair torn. The SPIR-V translator emits that same pair even when this is true.
     public bool SharedInt64AtomicsEnabled => false;
 
     // Every guest library is compiled with fast math off (MetalNative.ApplyMslCompileOptions),
