@@ -194,6 +194,7 @@ internal sealed unsafe class MetalTiler : IDisposable
     // nothing caps the size, so a 4096x4096 surface simply gets a bigger slab.
     public MetalBufferSpan Acquire(IMetalSubmissionContext context, ulong size)
     {
+        TrimIdleSlabs(context.CompletedSerial);
         if (size == 0)
         {
             throw GpuFatal.Fatal("A tiler staging request has no size.");
@@ -231,6 +232,43 @@ internal sealed unsafe class MetalTiler : IDisposable
         StagingBytes += capacity;
         StagingBufferCount++;
         return new MetalBufferSpan(buffer, 0, size);
+    }
+
+    // A loading screen uploads hundreds of megabytes inside a few command buffers, and
+    // every piece in flight holds its own slab, so the pool reached that burst's size and
+    // kept it as shared memory for the rest of the run (after its first load Demon's Souls
+    // held about 900 MB of shared buffers, mostly 16-64 MiB ones of this pool and the
+    // upload rings). A slab the GPU has been done with for this many serials is
+    // released; one small slab per size class stays for the steady per-frame traffic.
+    private const ulong IdleSlabSerials = 64;
+    private const ulong KeptSlabBytes = 4UL * 1024 * 1024;
+    private ulong _trimmedAtSerial;
+
+    private void TrimIdleSlabs(ulong completed)
+    {
+        if (completed < IdleSlabSerials || completed - _trimmedAtSerial < IdleSlabSerials / 4)
+        {
+            return;
+        }
+
+        _trimmedAtSerial = completed;
+        var retireBefore = completed - IdleSlabSerials;
+        foreach (var slabs in _staging.Values)
+        {
+            for (var index = slabs.Count - 1; index >= 0; index--)
+            {
+                var slab = slabs[index];
+                if (slab.Serial > retireBefore || (index == 0 && slab.Size <= KeptSlabBytes))
+                {
+                    continue;
+                }
+
+                Release(slab.Buffer);
+                slabs.RemoveAt(index);
+                StagingBytes -= slab.Size;
+                StagingBufferCount--;
+            }
+        }
     }
 
     public nint BeginCompute(IMetalSubmissionContext context)
