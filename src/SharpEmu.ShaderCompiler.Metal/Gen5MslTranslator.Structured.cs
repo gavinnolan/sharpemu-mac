@@ -74,6 +74,7 @@ public static partial class Gen5MslTranslator
             }
 
             _structureEmitted = new bool[count];
+            _regionDepth = 0;
             _structureFailed = false;
             _structuredUsesSteps = false;
             _openLoops.Clear();
@@ -111,6 +112,37 @@ public static partial class Gen5MslTranslator
             int follow,
             int indent,
             bool allowLoopHeader = false)
+        {
+            // Regions nest only where the guest program's conditionals nest, which is
+            // shallow in practice; the guard is there so a pathological program takes the
+            // dispatcher rather than the stack.
+            if (++_regionDepth > MaxRegionDepth)
+            {
+                _structureFailed = true;
+                _regionDepth--;
+                return false;
+            }
+
+            try
+            {
+                return EmitRegionCore(text, node, follow, indent, allowLoopHeader);
+            }
+            finally
+            {
+                _regionDepth--;
+            }
+        }
+
+        private const int MaxRegionDepth = 128;
+
+        private int _regionDepth;
+
+        private bool EmitRegionCore(
+            StringBuilder text,
+            int node,
+            int follow,
+            int indent,
+            bool allowLoopHeader)
         {
             var first = true;
             while (true)
@@ -163,7 +195,8 @@ public static partial class Gen5MslTranslator
                 AppendIndented(text, "}", indent);
 
                 var terminator = _blockTerminators[node];
-                if (terminator.Kind == TerminatorKind.Jump)
+                if (terminator.Kind == TerminatorKind.Jump ||
+                    terminator.TrueTarget == terminator.FalseTarget)
                 {
                     // The head of the loop turns the edge into sequencing, a fall out of
                     // the region, a continue, a break, a return, or a failure.
