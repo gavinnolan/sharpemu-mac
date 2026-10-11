@@ -921,10 +921,13 @@ public static partial class Gen5MslTranslator
         {
             if (!_usesWaveScratch)
             {
-                // No cross-lane ops: the high half stays zero and the low half
-                // is this simdgroup's ballot, matching the wave-agnostic path.
+                // No cross-lane ops, so there is no bridge to gather the other half's
+                // ballot through. Both halves get this simdgroup's ballot, which is what
+                // each half would have reported for itself: lanes 32..63 read the high
+                // half for their own bit, and a mask that said zero there would park them
+                // for good the moment the program restored EXEC.
                 source.AppendLine($"    s[{loRegister}] = sharpemu_ballot({condition});");
-                source.AppendLine($"    s[{loRegister + 1}] = 0u;");
+                source.AppendLine($"    s[{loRegister + 1}] = s[{loRegister}];");
                 return;
             }
 
@@ -2211,6 +2214,18 @@ public static partial class Gen5MslTranslator
             return name;
         }
 
+        /// <summary>This lane's bit of a 64-bit mask held as two dwords.
+        ///
+        /// A 64-lane guest wave runs as two 32-wide Apple simdgroups, so its lane index
+        /// goes up to 63 while each half of the mask is a 32-bit word. Shifting a uint by
+        /// 32 or more is undefined in MSL — in practice the count wraps, so lanes 32..63
+        /// were reading the low half's bits and seeing another lane's EXEC. The half has
+        /// to be selected before the shift.</summary>
+        private string LaneBit(string low, string high) =>
+            IsWave64
+                ? $"(((sharpemu_lane < 32u ? ({low}) : ({high})) >> (sharpemu_lane & 31u)) & 1u) != 0u"
+                : $"(({low}) >> sharpemu_lane & 1u) != 0u";
+
         // VCC (s106:s107) and EXEC (s126:s127) are architectural SGPRs: programs
         // freely use them as scratch data registers (s_buffer_load into s[106],
         // then v_rcp_f32 of that value is real RDNA2 code). The register file
@@ -2225,7 +2240,7 @@ public static partial class Gen5MslTranslator
                 {
                     var value = Temp("uint", expression);
                     Line($"s[{VccLoRegister}] = {value};");
-                    Line($"vcc = (({value}) >> sharpemu_lane & 1u) != 0u;");
+                    Line($"vcc = {LaneBit(value, ScalarExpression(VccHiRegister))};");
                     return;
                 }
 
@@ -2233,15 +2248,29 @@ public static partial class Gen5MslTranslator
                 {
                     var value = Temp("uint", expression);
                     Line($"s[{ExecLoRegister}] = {value};");
-                    Line($"exec = (({value}) >> sharpemu_lane & 1u) != 0u;");
+                    Line($"exec = {LaneBit(value, ScalarExpression(ExecHiRegister))};");
                     return;
                 }
 
                 case VccHiRegister:
                 case ExecHiRegister:
-                    // Wave32: the high halves carry no lanes, but keep the data.
-                    Line($"s[{register}] = {expression};");
+                {
+                    var value = Temp("uint", expression);
+                    Line($"s[{register}] = {value};");
+                    if (IsWave64)
+                    {
+                        // A 64-lane wave keeps lanes 32..63 here, so writing this half
+                        // moves the mask under those lanes and the cached view has to
+                        // follow. Wave32 carries no lanes here and only keeps the data.
+                        var low = ScalarExpression(
+                            register == VccHiRegister ? VccLoRegister : ExecLoRegister);
+                        Line(register == VccHiRegister
+                            ? $"vcc = {LaneBit(low, value)};"
+                            : $"exec = {LaneBit(low, value)};");
+                    }
+
                     return;
+                }
             }
 
             if (register < ScalarRegisterFileCount)

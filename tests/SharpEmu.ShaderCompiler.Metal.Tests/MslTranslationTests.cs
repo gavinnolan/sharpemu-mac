@@ -314,6 +314,63 @@ public sealed class MslTranslationTests
         }
     }
 
+    /// <summary>A 64-lane guest wave runs as two 32-wide Apple simdgroups, so its lane
+    /// index goes up to 63 while each half of EXEC is a 32-bit word. Shifting a uint by
+    /// 32 or more is undefined in MSL — the count wraps in practice, so lanes 32..63 were
+    /// reading the low half and seeing another lane's EXEC bit. The half has to be picked
+    /// before the shift.
+    ///
+    /// The program masks EXEC down to its high half, so only lanes 32..63 write v1, then
+    /// restores EXEC and has every lane add v1 into one word. Thirty-two lanes wrote a
+    /// one, so the sum is 32; reading the wrong half gives 0 or 64.</summary>
+    [Fact]
+    public void Wave64TakesEachLanesExecBitFromTheRightHalf()
+    {
+        var fixture = new Gen5ComputeFixture(
+            "wave64-exec-halves",
+            [
+                0xBEFE0380,             // s_mov_b32 exec_lo, 0
+                0xBEFF03C1,             // s_mov_b32 exec_hi, -1
+                0x7E020281,             // v_mov_b32 v1, 1      (lanes 32..63 only)
+                0xBEFE03C1,             // s_mov_b32 exec_lo, -1
+                0xBEFF03C1,             // s_mov_b32 exec_hi, -1
+                0xE0C80000, 0x80020100, // buffer_atomic_add v1, off, s[8:11], 0
+                0xBF810000,             // s_endpgm
+            ],
+            StoreScalarResourceBase: 8,
+            StoreBackingBytes: 16);
+
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(
+            fixture, waveLaneCount: 64, localSizeX: 64);
+
+        Assert.Contains("sharpemu_lane < 32u ?", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_lane & 31u", shader.Source, StringComparison.Ordinal);
+
+        if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") != "1")
+        {
+            return;
+        }
+
+        Assert.True(MetalNative.IsAvailable, "The required execution gate needs a Metal device.");
+        Assert.True(
+            MetalNative.TryCompileLibrary(shader.Source, out var library, out var metalError),
+            $"{metalError}\n{shader.Source}");
+        Assert.True(
+            MetalNative.TryExecuteWithArgumentBuffer(
+                library,
+                shader.EntryPoint,
+                new byte[fixture.StoreBackingBytes],
+                new byte[Resources.PushData.ByteSize],
+                shader.ArgumentLayout!,
+                threadsPerThreadgroup: 64,
+                out var result,
+                out var runError),
+            runError);
+        Assert.Equal(
+            32u,
+            System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(result));
+    }
+
     [Fact]
     public void ExecMaskedStoresAreGuarded()
     {
