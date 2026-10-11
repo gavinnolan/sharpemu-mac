@@ -85,7 +85,8 @@ internal sealed class MetalSlotTrap
         // flight is more memory than the answer is worth. A resolution whose destination
         // covers a watched slot is the answer; a transfer label is the context for it.
         var covered = 0UL;
-        if (size != 0 && !GuestSlotTrap.TryFindCoveredSlot(address, size, out covered))
+        if (size != 0 && !GuestSlotTrap.TryFindCoveredSlot(address, size, out covered) &&
+            !TryFindResolvedSlot(buffer, offset, size, out covered))
         {
             return;
         }
@@ -107,6 +108,8 @@ internal sealed class MetalSlotTrap
             _recording.Clear();
             return;
         }
+
+        RefreshSlotResolutions(count);
 
         var slot = Take();
         slot.InUse = true;
@@ -202,6 +205,54 @@ internal sealed class MetalSlotTrap
                 return;
             }
         }
+    }
+
+    private readonly List<(ulong Buffer, ulong Offset, ulong Slot)> _slotResolutions = new();
+    private int _resolvedBlockCount;
+
+    // The host bytes each watched slot lives in. A binding whose window offset range
+    // contains one of these writes that slot whatever guest address it asked for, which
+    // is the whole point: a guest range that does not cover the slot can still resolve
+    // onto its bytes, and only the resolved offsets show it.
+    private void RefreshSlotResolutions(int blockCount)
+    {
+        if (blockCount == _resolvedBlockCount || Memory is not { } guestMemory)
+        {
+            return;
+        }
+
+        _resolvedBlockCount = blockCount;
+        _slotResolutions.Clear();
+        for (var index = 0; index < blockCount; index++)
+        {
+            var slotAddress = _blocks[index] + GuestSlotTrap.Slot;
+            var range = guestMemory.ResolveWritable(slotAddress, 8);
+            if (range.IsValid)
+            {
+                _slotResolutions.Add(((ulong)range.Buffer, range.Offset, slotAddress));
+            }
+        }
+    }
+
+    private bool TryFindResolvedSlot(ulong buffer, ulong offset, ulong size, out ulong slot)
+    {
+        slot = 0;
+        if (buffer == 0 || size == 0)
+        {
+            return false;
+        }
+
+        var end = offset + size;
+        foreach (var (slotBuffer, slotOffset, slotAddress) in _slotResolutions)
+        {
+            if (slotBuffer == buffer && slotOffset >= offset && slotOffset < end)
+            {
+                slot = slotAddress;
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>Where the watched slot itself resolves to, for comparison with a binding's.</summary>
