@@ -259,7 +259,10 @@ internal static class MetalShaderPrewarm
         }
 
         var work = new ConcurrentQueue<(ComputePrewarmRecord Record, ShaderCodeCapture Code)>(pending);
-        var workerCount = Math.Clamp(Environment.ProcessorCount / 4, 1, 4);
+        // The MSL front end runs in the driver's compiler service, and the gate holds the
+        // guest meanwhile. Cold compiles of Demon's Souls' largest compute shaders finished
+        // twice as fast with four requests in flight as with two, and no faster with six.
+        var workerCount = Math.Clamp(Environment.ProcessorCount / 2, 1, 4);
         var remaining = workerCount;
         Gate.SetTotal(pending.Count);
         Console.Error.WriteLine(
