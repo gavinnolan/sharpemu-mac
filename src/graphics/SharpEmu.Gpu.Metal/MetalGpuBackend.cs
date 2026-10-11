@@ -48,11 +48,13 @@ public static class MetalGpuBackend
         }
 
         GuestGpu.Register(static () => new MetalV2Backend(), Name);
-        // V2 presents HDR on an EDR layer, so Auto follows the screen as on Vulkan.
+        // V2 presents HDR on an EDR layer for --hdr=on, but Auto stays SDR: on an EDR screen
+        // SILENT HILL's HDR path loads ~35 s slower and presents black, where SDR shows the
+        // Konami logo by 12 s. Auto can follow the screen, as on Vulkan, once that is fixed.
         HostVideoHost.RegisterPresenter(
             MetalV2Presenter.TryConfigureVideo,
             MetalV2Presenter.QueryHdrOutputSupport,
-            autoHdrAllowed: true);
+            autoHdrAllowed: false);
         Console.Error.WriteLine($"[LOADER][INFO] GPU backend: {Name} v2.");
     }
 }
