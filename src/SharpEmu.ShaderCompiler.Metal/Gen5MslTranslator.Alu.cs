@@ -40,6 +40,11 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
+            if (IsFloat64Opcode(instruction.Opcode))
+            {
+                return TryEmitFloat64(instruction, out error);
+            }
+
             if (instruction.Opcode.StartsWith("VCmp", StringComparison.Ordinal))
             {
                 return TryEmitVectorCompare(instruction, out error);

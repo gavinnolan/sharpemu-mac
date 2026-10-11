@@ -468,6 +468,7 @@ public static partial class Gen5MslTranslator
             }
 
             EmitPrelude(source);
+            EmitFloat64PreludeIfUsed(source);
             source.AppendLine();
 
             if (_stage == Gen5MslStage.Mesh)
