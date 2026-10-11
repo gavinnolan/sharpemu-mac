@@ -1282,7 +1282,11 @@ internal sealed partial class MetalRenderHost
 
         if (_computeEncoder != 0)
         {
-            MetalV2Native.SendMemoryBarrierScope(_computeEncoder, SelComputeMemoryBarrier, scope);
+            // A compute encoder has no render targets to order against, and Metal
+            // rejects a scope that names them: validation fails the assertion rather
+            // than ignoring the bit, which ends the process.
+            MetalV2Native.SendMemoryBarrierScope(
+                _computeEncoder, SelComputeMemoryBarrier, scope & ~Mtl.BarrierScopeRenderTargets);
         }
     }
 

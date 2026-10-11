@@ -185,8 +185,14 @@ internal sealed class MetalCachedImage : IDisposable
             GpuImageViewType.Type3D => type == Mtl.TextureType3D,
             GpuImageViewType.Type1D or GpuImageViewType.Type1DArray =>
                 type is Mtl.TextureType1D or Mtl.TextureType1DArray,
+            // A volume serves a flat view too: Vulkan makes a 2D-array view of a 3D
+            // image to render it slice by slice, and Metal names the slice with the
+            // attachment's depth plane. Refusing it would drop and recreate the volume
+            // on every acquisition - the description makes a 3D texture again - which
+            // is a 24 MB texture released out from under the submissions still reading
+            // it, every pass of a title's volumetric fog.
             _ => type is Mtl.TextureType2D or Mtl.TextureType2DArray or Mtl.TextureTypeCube or
-                Mtl.TextureType2DMultisample or Mtl.TextureType2DMultisampleArray,
+                Mtl.TextureType2DMultisample or Mtl.TextureType2DMultisampleArray or Mtl.TextureType3D,
         };
     }
 
@@ -242,6 +248,26 @@ internal sealed class MetalCachedImage : IDisposable
         if (!viewable && !identitySwizzle)
         {
             identitySwizzle = true;
+        }
+
+        // A volume rendered slice by slice asks for the 2D-array view Vulkan makes of a
+        // 3D image. Metal has no such view and raises rather than returning nil, but it
+        // does not need one: a render pass names the slice of a 3D attachment with its
+        // depth plane, which the attachment already carries, so the volume binds whole.
+        if (Shape.TextureType == Mtl.TextureType3D && viewType != Mtl.TextureType3D)
+        {
+            if ((requested.Usage & (GpuImageUsage.ColorAttachmentBit | GpuImageUsage.DepthStencilAttachmentBit)) == 0)
+            {
+                // Read as something other than a volume, the binding is wrong either
+                // way; being wrong is better than raising, which ends the process.
+                MetalV2Diagnostics.WarnOnce(
+                    $"volume-view:{viewType}",
+                    $"A volume cannot be viewed as another texture type; binding the volume instead: " +
+                    $"type=3D->{viewType} format={Shape.PixelFormat}->{viewFormat} " +
+                    $"layers={requested.BaseLayer}+{requested.LayerCount} usage={requested.Usage}.");
+            }
+
+            return Texture;
         }
 
         var wholeImage = requested.BaseLevel == 0 && requested.LevelCount >= Shape.MipLevels &&

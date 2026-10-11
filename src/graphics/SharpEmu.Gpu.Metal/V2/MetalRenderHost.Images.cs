@@ -100,7 +100,9 @@ internal sealed partial class MetalRenderHost
         var subresourceHeight = Math.Max(1u, shape.Height >> (int)view.BaseLevel);
         var wholeImage = view.BaseLevel == 0 && view.LevelCount >= shape.MipLevels &&
             view.BaseLayer == 0 && view.LayerCount >= shape.ArrayLength;
-        var level = wholeImage ? view.BaseLevel : 0;
+        // A volume attachment is always the texture itself - Metal slices it with the
+        // depth plane rather than with a view - so its level is the one asked for.
+        var level = wholeImage || volume ? view.BaseLevel : 0;
         var slice = wholeImage && !volume ? view.BaseLayer : 0;
         var depthPlane = volume ? view.BaseLayer : 0;
         if (color)
