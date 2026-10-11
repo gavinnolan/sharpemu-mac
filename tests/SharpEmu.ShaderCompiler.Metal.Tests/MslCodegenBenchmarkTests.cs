@@ -241,6 +241,75 @@ public sealed class MslCodegenBenchmarkTests(ITestOutputHelper output)
         Assert.Empty(failures);
     }
 
+    /// <summary>The new codegen has to compute what the old one computed. Each program
+    /// runs four ways on the device — the old dispatcher over the full register files, the
+    /// structured form, the structured form with every register zero-filled regardless of
+    /// liveness, and the dispatcher over allocated registers — and all four have to leave
+    /// the same bytes behind. The zero-fill comparison is what checks the liveness
+    /// analysis: if it ever decided a register needs no initial value when some path reads
+    /// it before writing, that run would differ.</summary>
+    [Fact]
+    public void EveryFormComputesTheSameResult()
+    {
+        if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") != "1")
+        {
+            output.WriteLine("Cross-form execution requires the exclusive Metal device gate.");
+            return;
+        }
+
+        Assert.True(MetalNative.IsAvailable, "The required execution gate needs a Metal device.");
+        var forms = new (string Name, Gen5MslCodegenOptions Options)[]
+        {
+            ("dispatcher+arrays", new Gen5MslCodegenOptions(false, false)),
+            ("structured", new Gen5MslCodegenOptions(true, true)),
+            ("structured+zerofill", new Gen5MslCodegenOptions(true, true, ForceRegisterInitialization: true)),
+            ("dispatcher+allocated", new Gen5MslCodegenOptions(false, true)),
+        };
+
+        var programs = new List<Gen5ComputeFixture>(Gen5ComputeFixtures.All.Where(
+            fixture => fixture.StoreBackingBytes != 0))
+        {
+            AluChain(),
+            LoopWithLiveState(),
+            BranchChain(),
+        };
+
+        foreach (var program in programs)
+        {
+            byte[]? reference = null;
+            foreach (var (name, options) in forms)
+            {
+                var request = Gen5ComputeFixtures.CreateComputeRequest(program);
+                Assert.True(
+                    Gen5MslTranslator.TryCompileProgram(request, out var shader, out var compileError, options),
+                    $"[{program.Name}/{name}] {compileError}");
+                Assert.True(
+                    MetalNative.TryCompileLibrary(shader.Source, out var library, out var metalError),
+                    $"[{program.Name}/{name}] {metalError}\n{shader.Source}");
+                Assert.True(
+                    MetalNative.TryExecuteWithArgumentBuffer(
+                        library,
+                        shader.EntryPoint,
+                        new byte[program.StoreBackingBytes],
+                        new byte[Resources.PushData.ByteSize],
+                        shader.ArgumentLayout!,
+                        threadsPerThreadgroup: 1,
+                        out var result,
+                        out var runError),
+                    $"[{program.Name}/{name}] {runError}");
+                if (reference is null)
+                {
+                    reference = result;
+                    continue;
+                }
+
+                Assert.Equal(reference, result);
+            }
+        }
+
+        output.WriteLine($"{programs.Count} programs agree across {forms.Length} codegen forms");
+    }
+
     private readonly record struct Measurement(
         int RegisterDwords,
         bool UsesDispatcher,
