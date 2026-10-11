@@ -39,6 +39,8 @@ public struct RenderingState : IEquatable<RenderingState>
     public uint Layers;
     public uint ColorAttachmentCount;
     public uint Samples;
+    // True when a pixel program runs with no attachment, so the area is real rather than a placeholder.
+    public bool RasterizesWithoutAttachments;
 
     public readonly GpuFormat DepthFormat => DepthStencilAttachment.HasDepth ? DepthStencilAttachment.Format : GpuFormat.Undefined;
 
@@ -47,7 +49,7 @@ public struct RenderingState : IEquatable<RenderingState>
     public readonly bool Equals(RenderingState other)
     {
         if (Width != other.Width || Height != other.Height || Layers != other.Layers ||
-            ColorAttachmentCount != other.ColorAttachmentCount || Samples != other.Samples ||
+            ColorAttachmentCount != other.ColorAttachmentCount || Samples != other.Samples || RasterizesWithoutAttachments != other.RasterizesWithoutAttachments ||
             !DepthStencilAttachment.Equals(other.DepthStencilAttachment))
         {
             return false;
@@ -68,7 +70,7 @@ public struct RenderingState : IEquatable<RenderingState>
 
     public override readonly int GetHashCode()
     {
-        var hash = HashCode.Combine(Width, Height, Layers, ColorAttachmentCount, Samples, DepthStencilAttachment);
+        var hash = HashCode.Combine(Width, Height, Layers, ColorAttachmentCount, Samples, DepthStencilAttachment, RasterizesWithoutAttachments);
         for (var i = 0; i < ColorAttachmentCapacity; i++)
         {
             hash = HashCode.Combine(hash, ColorAttachments[i]);

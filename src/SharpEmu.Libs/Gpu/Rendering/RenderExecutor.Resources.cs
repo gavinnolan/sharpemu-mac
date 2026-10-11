@@ -282,7 +282,7 @@ public sealed partial class RenderExecutor
             ? _host.ObtainBuffer(emission.IndirectArgumentsAddress, IndexedIndirectArgumentsSize, isWritten: false)
             : default;
         DropUnwrittenColorTargets(context, ref state, pixelProgram);
-        state.Rendering = AcquireAttachments(ref state);
+        state.Rendering = AcquireAttachments(context, ref state);
         // Nothing after the pipeline touches guest memory.
         var pipeline = _pipelines.CreateGraphicsPipeline(
             BoundColors(ref state),
@@ -359,7 +359,7 @@ public sealed partial class RenderExecutor
             writeStages |= GpuPipelineStage.VertexShaderBit;
         }
 
-        if (state.PixelActive && HasBufferWrites(pixelInput.Stage))
+        if (state.PixelActive && DrawWritesMemory(pixelInput.Stage))
         {
             writeStages |= GpuPipelineStage.FragmentShaderBit;
         }

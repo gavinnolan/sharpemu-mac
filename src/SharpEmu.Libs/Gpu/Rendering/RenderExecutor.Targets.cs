@@ -62,6 +62,16 @@ public sealed partial class RenderExecutor
             return true;
         }
 
+        if (state.ColorCount == 0 && !state.Depth.HasTarget && !state.PixelActive &&
+            banks.Shader.Pixel.Address != 0 && PixelStageWritesMemory(banks, ref state))
+        {
+            // No attachment, but the pixel program stores to memory (a storage image, a
+            // written buffer or a device address): a lookup-table bake or similar pass whose
+            // only output is what it stores. It runs for those stores alone.
+            TraceDrawDisposition(banks, in draw, "pixel-stores-only");
+            return true;
+        }
+
         if (state.ColorCount == 0 && !state.Depth.HasTarget && !state.PixelActive)
         {
             TraceDrawDisposition(banks, in draw, "no-framebuffer");
@@ -91,6 +101,27 @@ public sealed partial class RenderExecutor
         ResolveShaderPrograms(banks, ref state);
         var stage = state.Programs.VertexInput.Stage;
         return stage.Program is { } program && (WritesStorageImage(program) || HasBufferWrites(stage));
+    }
+
+    // Whether the pixel program of an attachment-less draw stores to memory. The pixel stage
+    // only decodes once it is active, so the program is compiled to find out; the answer is
+    // remembered per pixel program address because such draws arrive by the thousand. On a
+    // positive answer the pixel stage stays active; otherwise the state is left as it was.
+    private bool PixelStageWritesMemory(RegisterBanks banks, ref DrawState state)
+    {
+        var address = banks.Shader.Pixel.Address;
+        if (_pixelStoreDecisions.TryGetValue(address, out var known))
+        {
+            state.PixelActive = known;
+            return known;
+        }
+
+        state.PixelActive = true;
+        ResolveShaderPrograms(banks, ref state);
+        var writes = state.Programs.Available && DrawWritesMemory(state.Programs.PixelInput.Stage);
+        state.PixelActive = writes;
+        _pixelStoreDecisions[address] = writes;
+        return writes;
     }
 
     // Color control mode 3 resolves slot 0 into slot 1 instead of drawing; true consumes the draw.
@@ -231,7 +262,7 @@ public sealed partial class RenderExecutor
         ((pixelColorExportMasks >> (int)(slot * 4)) & 0xFu) == 0;
 
     // Acquires every attachment through the host and assembles the rendering scope.
-    private RenderingState AcquireAttachments(ref DrawState state)
+    private RenderingState AcquireAttachments(ContextRegisters context, ref DrawState state)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawAttachmentPreparation);
         var rendering = new RenderingState
@@ -338,6 +369,14 @@ public sealed partial class RenderExecutor
         {
             rendering.Width = _host.Limits.MaxFramebufferWidth;
             rendering.Height = _host.Limits.MaxFramebufferHeight;
+            if (state.PixelActive)
+            {
+                // Rasterization with no attachment: the scissor bounds the pixels the program runs on.
+                var scissor = ResolveScissor(context.ScreenViewport, context.ScanMode, rendering.Width, rendering.Height);
+                rendering.Width = (uint)Math.Max(1, scissor.Left + Math.Max(0, scissor.Right - scissor.Left));
+                rendering.Height = (uint)Math.Max(1, scissor.Top + Math.Max(0, scissor.Bottom - scissor.Top));
+                rendering.RasterizesWithoutAttachments = true;
+            }
         }
         else if (!IsSupportedSampleCount(attachmentSamples))
         {

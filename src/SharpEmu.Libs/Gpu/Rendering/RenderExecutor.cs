@@ -76,6 +76,8 @@ public sealed partial class RenderExecutor
         private ColorTargetState _element0;
     }
 
+    private readonly Dictionary<ulong, bool> _pixelStoreDecisions = new();
+
     private struct DrawState
     {
         public ColorTargetStates Colors;
