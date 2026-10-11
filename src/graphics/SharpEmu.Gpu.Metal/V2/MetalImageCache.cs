@@ -193,6 +193,18 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         {
             foreach (var candidate in candidates)
             {
+                // Resolving one overlap may release another candidate, or the image an
+                // earlier one chose, so each step starts from what is still live.
+                if (_slots.TryGet(candidate) is null)
+                {
+                    continue;
+                }
+
+                if (result.IsValid && _slots.TryGet(result) is null)
+                {
+                    result = ResourceSlotIdentifier.Invalid;
+                }
+
                 viewMip = -1;
                 viewLayer = -1;
                 var merged = result.IsValid ? _slots[result].Description : request.Description;
@@ -204,6 +216,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     viewLayer = overlap.Layer;
                 }
             }
+        }
+
+        if (result.IsValid && _slots.TryGet(result) is null)
+        {
+            result = ResourceSlotIdentifier.Invalid;
+            viewMip = -1;
+            viewLayer = -1;
         }
 
         if (result.IsValid)
@@ -910,7 +929,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var admitted = Admit(in description);
         var shape = _transfer.ShapeFor(in admitted);
         var texture = CreateTexture(in shape, in admitted);
-        var image = new MetalCachedImage(in admitted, in shape, texture);
+        // Stamped before the collection below runs: an image that has never been used
+        // reads as the oldest one in the cache, so an over-budget collection evicted the
+        // image it was making room for and the caller read a freed slot.
+        var image = new MetalCachedImage(in admitted, in shape, texture) { LastAccessTick = _collectionTick };
         var imageIdentifier = _slots.Insert(image);
         if (!ImageDescription.IsEmptyRange(description.Data))
         {
