@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Linq;
 using System.Text;
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
@@ -24,7 +25,8 @@ internal sealed class MetalSlotTrap
 {
     private const int MaxBlocks = 1024;
     private const int MaxPending = 512;
-    private const int MaxBindingsPerSubmission = 32;
+    private const int MaxBindingsPerSubmission = 64;
+    private const int MaxContextPerSubmission = 12;
     private const int MaxReports = 16;
 
     internal readonly record struct Binding(
@@ -39,6 +41,7 @@ internal sealed class MetalSlotTrap
         public readonly ulong[] Bases = new ulong[MaxBlocks];
         public int BlockCount;
         public readonly List<Binding> Bindings = new(MaxBindingsPerSubmission);
+        public readonly List<Binding> Context = new(MaxContextPerSubmission);
     }
 
     private readonly ICpuMemory _memory;
@@ -46,6 +49,7 @@ internal sealed class MetalSlotTrap
     private readonly ulong[] _blocks = new ulong[MaxBlocks];
     private readonly byte[] _current;
     private readonly List<Binding> _recording = new(MaxBindingsPerSubmission);
+    private readonly List<Binding> _context = new(MaxContextPerSubmission);
     private readonly int _blockBytes;
     private int _cursor;
     private long _mismatches;
@@ -91,12 +95,26 @@ internal sealed class MetalSlotTrap
             return;
         }
 
-        if (_recording.Count >= MaxBindingsPerSubmission)
+        // Two lists, because they compete: a submission encodes dozens of transfers and
+        // at most a couple of resolutions that reach a watched slot. Sharing one ring let
+        // the labels evict the evidence, which is how a submission came back reporting
+        // thirty-two transfers and not one of the resolutions that explained the write.
+        var entry = new Binding(owner, address, size, buffer, offset, gpuAddress, size == 0 ? 0 : covered);
+        if (size == 0)
         {
-            _recording.RemoveAt(0);
+            if (_context.Count >= MaxContextPerSubmission)
+            {
+                _context.RemoveAt(0);
+            }
+
+            _context.Add(entry);
+            return;
         }
 
-        _recording.Add(new Binding(owner, address, size, buffer, offset, gpuAddress, size == 0 ? 0 : covered));
+        if (_recording.Count < MaxBindingsPerSubmission)
+        {
+            _recording.Add(entry);
+        }
     }
 
     /// <summary>Snapshots the trapped blocks and takes ownership of this submission's bindings.</summary>
@@ -118,7 +136,10 @@ internal sealed class MetalSlotTrap
         slot.BlockCount = 0;
         slot.Bindings.Clear();
         slot.Bindings.AddRange(_recording);
+        slot.Context.Clear();
+        slot.Context.AddRange(_context);
         _recording.Clear();
+        _context.Clear();
         for (var index = 0; index < count; index++)
         {
             var watched = _blocks[index] + GuestSlotTrap.Slot;
@@ -285,12 +306,13 @@ internal sealed class MetalSlotTrap
             $"slot=0x{blockBase:X16} offset=0x{offset:X} " +
             $"was=0x{BitConverter.ToUInt64(before[(int)offset..]):X16} " +
             $"now=0x{BitConverter.ToUInt64(after[(int)offset..]):X16} " +
-            $"cpu_faults_in_interval={cpuFaults} bindings={slot.Bindings.Count} " +
+            $"cpu_faults_in_interval={cpuFaults} covering={slot.Bindings.Count} " +
+            $"context={slot.Context.Count} " +
             $"slot_resolves_to={DescribeSlotResolution(blockBase)}" +
             (cpuFaults == 0 ? " (no CPU write faulted: the GPU wrote it)" : string.Empty));
 
         var text = new StringBuilder();
-        foreach (var binding in slot.Bindings)
+        foreach (var binding in slot.Bindings.Concat(slot.Context))
         {
             text.Clear();
             text.Append("[METAL-V2][SLOT-TRAP]   ").Append(binding.Owner)
