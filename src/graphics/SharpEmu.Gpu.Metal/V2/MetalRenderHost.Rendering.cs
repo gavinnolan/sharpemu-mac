@@ -1102,12 +1102,15 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
+        var (primitiveType, drawVertexCount) = entry.StaticParameters is { } staticParameters
+            ? MetalV2Formats.RectangleDraw(staticParameters.Topology, indexed: false, vertexCount)
+            : (entry.PrimitiveType, vertexCount);
         MetalV2Native.SendDrawPrimitivesBaseInstance(
             _renderEncoder,
             SelDrawPrimitives,
-            entry.PrimitiveType,
+            primitiveType,
             firstVertex,
-            vertexCount,
+            drawVertexCount,
             Math.Max(instanceCount, 1),
             firstInstance);
         CountDraw(started);

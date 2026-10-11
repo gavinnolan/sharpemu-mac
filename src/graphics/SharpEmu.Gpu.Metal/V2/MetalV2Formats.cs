@@ -175,9 +175,24 @@ internal static class MetalV2Formats
         // and the vertex order of the first triangle matches, which is what the
         // metadata-clear and legacy quad paths rely on.
         GpuPrimitiveTopology.TriangleFan => Mtl.PrimitiveTriangle,
-        GpuPrimitiveTopology.PatchList => Mtl.PrimitiveTriangleStrip,
+        // A guest rectangle list; see RectangleDraw for how a non-indexed draw is shaped.
+        GpuPrimitiveTopology.PatchList => Mtl.PrimitiveTriangle,
         _ => Mtl.PrimitiveTriangle,
     };
+
+    // Vertices a single guest rectangle draws as a triangle strip: the guest supplies
+    // three corners and the hardware derives the fourth.
+    public const uint SingleRectangleVertexCount = 4;
+
+    // The primitive type and vertex count of a non-indexed draw. A rectangle list of
+    // one rectangle (1, 3 or 4 vertices) is a four-vertex strip, as on the Vulkan
+    // path; any other rectangle-list draw, and every indexed one, is a triangle list.
+    // Both are the triangle class, so one pipeline serves either.
+    public static (nuint PrimitiveType, uint VertexCount) RectangleDraw(
+        GpuPrimitiveTopology topology, bool indexed, uint vertexCount) =>
+        topology == GpuPrimitiveTopology.PatchList && !indexed && vertexCount is 1 or 3 or 4
+            ? (Mtl.PrimitiveTriangleStrip, SingleRectangleVertexCount)
+            : (Topology(topology), vertexCount);
 
     // MTLPrimitiveTopologyClass of the primitive type Topology picks.
     public static nuint TopologyClass(GpuPrimitiveTopology topology) => Topology(topology) switch
