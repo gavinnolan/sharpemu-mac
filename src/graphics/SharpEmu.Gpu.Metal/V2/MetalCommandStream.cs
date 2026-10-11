@@ -270,39 +270,39 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(value, write.Value);
         value[..bytes].CopyTo(payload);
 
-        var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.EndOfPipeLabel);
-        var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
-        if (encoder == 0)
+        var copy = new DeferredLabelCopy(
+            staging.Buffer, staging.Offset, destination.Buffer, destination.Offset, bytes);
+        ulong serial;
+        if (MetalV2Diagnostics.DeferLabelWrites && _renderEncoder != 0)
         {
-            throw Fatal("A Metal blit encoder could not be created for an end-of-pipe label.");
+            // Four bytes are not worth a framebuffer. Ending the open pass to copy them
+            // stores and reloads every attachment, which at 3840x2160 is tens of
+            // megabytes for a label the guest polls, so the copy waits for the next
+            // boundary between encoders instead — one the frame reaches anyway. It then
+            // lands after more work than the packet named, and a label that lands late
+            // still only ever says that the work before it has finished.
+            _deferredLabelCopies.Add(copy);
+            Interlocked.Increment(ref _deferredLabelWrites);
+            NoteRecordedWork();
+            serial = SubmissionSerial;
+        }
+        else
+        {
+            var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.EndOfPipeLabel);
+            EncodeLabelCopies(context.CommandBuffer, new ReadOnlySpan<DeferredLabelCopy>(in copy));
+
+            // Beginning the transfer marked this submission as carrying GPU work, which is
+            // what keeps a completion queued behind it — the interrupt of this same packet
+            // — from running inline ahead of the bytes.
+            context.ProfileEncoded($"eop label bytes={bytes}");
+            serial = context.SubmissionSerial;
         }
 
-        try
-        {
-            MetalNative.SendCopyBuffer(
-                encoder,
-                SelCopyBuffer,
-                staging.Buffer,
-                (nuint)staging.Offset,
-                destination.Buffer,
-                (nuint)destination.Offset,
-                (nuint)bytes);
-        }
-        finally
-        {
-            MetalNative.SendVoid(encoder, SelEndEncoding);
-        }
-
-        // Beginning the transfer marked this submission as carrying GPU work, which is what
-        // keeps a completion queued behind it — the interrupt of this same packet — from
-        // running inline ahead of the bytes.
-        context.ProfileEncoded($"eop label bytes={bytes}");
         // A command processor polling this label suspends until something says the bytes
         // changed, and the only thing that knows is the completion of this submission. The
         // worker reports completions when it next flushes, which is never while every head
         // is suspended, so one wake per submission is queued here: it costs no flush, and
         // without it a poll waits out the blocked-retry timer instead of a millisecond.
-        var serial = context.SubmissionSerial;
         if (_labelWakeSerial != serial)
         {
             _labelWakeSerial = serial;
@@ -344,6 +344,77 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         }
 
         FlushCommandBuffer();
+    }
+
+    // A label copy waiting for a boundary between encoders. Its staging allocation lives
+    // in this submission's ring, so the copy has to be encoded before the command buffer
+    // is committed, which is the last boundary there is.
+    private readonly record struct DeferredLabelCopy(
+        nint StagingBuffer,
+        ulong StagingOffset,
+        nint DestinationBuffer,
+        ulong DestinationOffset,
+        int Bytes);
+
+    private readonly List<DeferredLabelCopy> _deferredLabelCopies = [];
+    private bool _encodingDeferredLabels;
+    private long _deferredLabelWrites;
+
+    /// <summary>Labels whose bytes waited for a boundary instead of ending a pass.</summary>
+    public long TakeDeferredLabelWrites() => Interlocked.Exchange(ref _deferredLabelWrites, 0);
+
+    private static void EncodeLabelCopies(nint commandBuffer, ReadOnlySpan<DeferredLabelCopy> copies)
+    {
+        var encoder = MetalNative.Send(commandBuffer, SelBlitEncoder);
+        if (encoder == 0)
+        {
+            throw GpuFatal.Fatal("A Metal blit encoder could not be created for an end-of-pipe label.");
+        }
+
+        try
+        {
+            foreach (ref readonly var copy in copies)
+            {
+                MetalNative.SendCopyBuffer(
+                    encoder,
+                    SelCopyBuffer,
+                    copy.StagingBuffer,
+                    (nuint)copy.StagingOffset,
+                    copy.DestinationBuffer,
+                    (nuint)copy.DestinationOffset,
+                    (nuint)copy.Bytes);
+            }
+        }
+        finally
+        {
+            MetalNative.SendVoid(encoder, SelEndEncoding);
+        }
+    }
+
+    /// <summary>
+    /// Copies every label that waited for a boundary. Called where no encoder is open and
+    /// before the next one is created, so the bytes land after the work the labels report
+    /// and before whatever follows them.
+    /// </summary>
+    private void EncodeDeferredLabelCopies()
+    {
+        if (_deferredLabelCopies.Count == 0 || _encodingDeferredLabels)
+        {
+            return;
+        }
+
+        _encodingDeferredLabels = true;
+        try
+        {
+            EncodeLabelCopies(
+                EnsureCommandBuffer(),
+                System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deferredLabelCopies));
+            _deferredLabelCopies.Clear();
+        }
+        finally
+        {
+            _encodingDeferredLabels = false;
+        }
     }
 
     private ulong _pendingLabelWrites;

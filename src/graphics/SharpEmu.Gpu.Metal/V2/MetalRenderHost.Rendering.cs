@@ -117,6 +117,21 @@ internal sealed partial class MetalRenderHost
     private long _passesEmpty;
     private long _discardedBytes;
 
+    // The standalone clear passes: a load-clear encoder with no draws, which ends the
+    // open pass and then stores a whole attachment of its own. They are render passes
+    // too, and the ones the pass counters never saw.
+    private long _clearPasses;
+    private long _clearDepthPasses;
+    private long _clearPixels;
+
+    internal (long Passes, long DepthPasses, long Pixels) TakeClearPasses()
+    {
+        var passes = Interlocked.Exchange(ref _clearPasses, 0);
+        var depth = Interlocked.Exchange(ref _clearDepthPasses, 0);
+        var pixels = Interlocked.Exchange(ref _clearPixels, 0);
+        return (passes, depth, pixels);
+    }
+
     // A pass that renders into the same attachments as the pass before last: the
     // target set left them and came straight back, so the pair stored and reloaded
     // the whole framebuffer for whatever happened in between. This is the merge
@@ -287,11 +302,98 @@ internal sealed partial class MetalRenderHost
     private uint _depthAttachmentWidth;
     private uint _depthAttachmentHeight;
 
+    // The image texture behind each attachment view, and the subresource of it the
+    // view really addresses. A clear names the texture and its own subresource, so a
+    // clear that follows a pass can only be matched against the pass through these.
+    private readonly nint[] _attachmentTextures = new nint[MaxColorAttachments];
+    private readonly uint[] _attachmentRealLevels = new uint[MaxColorAttachments];
+    private readonly uint[] _attachmentRealLayers = new uint[MaxColorAttachments];
+    private nint _depthAttachmentTexture;
+    private uint _depthAttachmentRealLevel;
+    private uint _depthAttachmentRealLayer;
+
     // The pixel sizes the open pass was created with. The live arrays above belong to
     // whatever attachments were acquired most recently, which by the time a pass ends
     // is the pass about to begin.
     private readonly uint[] _passTexelBytes = new uint[MaxColorAttachments];
     private uint _passDepthTexelBytes;
+    private readonly nint[] _passTextures = new nint[MaxColorAttachments];
+    private readonly uint[] _passRealLevels = new uint[MaxColorAttachments];
+    private readonly uint[] _passRealLayers = new uint[MaxColorAttachments];
+    private readonly uint[] _passWidths = new uint[MaxColorAttachments];
+    private readonly uint[] _passHeights = new uint[MaxColorAttachments];
+    private nint _passDepthTexture;
+    private uint _passDepthRealLevel;
+    private uint _passDepthRealLayer;
+    private uint _passDepthWidth;
+    private uint _passDepthHeight;
+
+    // A clear that is about to be encoded, which is how the pass it ends learns that
+    // its stores are dead. Set just before the clear takes the pass's place and read
+    // once, as the pass resolves its store actions.
+    private nint _clearedTexture;
+    private uint _clearedBaseLevel;
+    private uint _clearedLevelCount;
+    private uint _clearedBaseLayer;
+    private uint _clearedLayerCount;
+    private uint _clearedWidth;
+    private uint _clearedHeight;
+    private bool _clearedDepth;
+    private bool _clearedStencil;
+
+    /// <summary>
+    /// Records the clear that is about to be encoded in place of the open pass, so the
+    /// pass can discard the stores it overwrites. The clear is the very next thing the
+    /// GPU does to that texture — nothing else is encoded between ending the pass and
+    /// encoding the clear — so a store it covers cannot be observed.
+    /// </summary>
+    private void NoteClearAboutToBeEncoded(
+        nint texture,
+        in SubresourceRange range,
+        uint width,
+        uint height,
+        bool depth,
+        bool stencil)
+    {
+        if (!_renderingActive || _renderEncoder == 0)
+        {
+            return;
+        }
+
+        _clearedTexture = texture;
+        _clearedBaseLevel = range.BaseLevel;
+        _clearedLevelCount = Math.Max(range.LevelCount, 1);
+        _clearedBaseLayer = range.BaseLayer;
+        _clearedLayerCount = Math.Max(range.LayerCount, 1);
+        _clearedWidth = width;
+        _clearedHeight = height;
+        _clearedDepth = depth;
+        _clearedStencil = stencil;
+    }
+
+    private void ForgetNotedClear() => _clearedTexture = 0;
+
+    private bool NotedClearCoversAttachment(
+        nint texture,
+        uint realLevel,
+        uint realLayer,
+        uint subresourceWidth,
+        uint subresourceHeight)
+    {
+        return _clearedTexture != 0 && texture == _clearedTexture &&
+            realLevel >= _clearedBaseLevel && realLevel < _clearedBaseLevel + _clearedLevelCount &&
+            realLayer >= _clearedBaseLayer &&
+            realLayer + _renderingState.Layers <= _clearedBaseLayer + _clearedLayerCount &&
+            MetalPassStores.ClearCoversAttachment(
+                _clearedWidth,
+                _clearedHeight,
+                _renderingState.Layers,
+                _renderingState.Samples,
+                _renderingState.Layers,
+                _renderingState.Samples,
+                subresourceWidth,
+                subresourceHeight);
+    }
 
     // The subresources the open pass was created with, so the next draw can tell
     // whether it renders into the very same attachments.
@@ -370,7 +472,14 @@ internal sealed partial class MetalRenderHost
         ref readonly var open = ref _renderingState;
         for (var index = 0; index < open.ColorAttachmentCount; index++)
         {
-            var discard = hasNext && NextPassClearsColorAttachment(in next, index);
+            var discard = hasNext
+                ? NextPassClearsColorAttachment(in next, index)
+                : index < MaxColorAttachments && NotedClearCoversAttachment(
+                    _passTextures[index],
+                    _passRealLevels[index],
+                    _passRealLayers[index],
+                    _passWidths[index],
+                    _passHeights[index]);
             MetalV2Native.SendSetStoreActionAtIndex(
                 _renderEncoder,
                 SelSetColorStoreAction,
@@ -386,7 +495,11 @@ internal sealed partial class MetalRenderHost
         ref readonly var openDepth = ref open.DepthStencilAttachment;
         if (openDepth.HasDepth && openDepth.View.Handle != 0)
         {
-            var discard = hasNext && NextPassClearsDepthStencil(in next, stencil: false);
+            var discard = hasNext
+                ? NextPassClearsDepthStencil(in next, stencil: false)
+                : _clearedDepth && NotedClearCoversAttachment(
+                    _passDepthTexture, _passDepthRealLevel, _passDepthRealLayer,
+                    _passDepthWidth, _passDepthHeight);
             MetalV2Native.SendVoidValue(
                 _renderEncoder,
                 SelSetDepthStoreAction,
@@ -399,7 +512,11 @@ internal sealed partial class MetalRenderHost
 
         if (openDepth.HasStencil && openDepth.View.Handle != 0)
         {
-            var discard = hasNext && NextPassClearsDepthStencil(in next, stencil: true);
+            var discard = hasNext
+                ? NextPassClearsDepthStencil(in next, stencil: true)
+                : _clearedStencil && NotedClearCoversAttachment(
+                    _passDepthTexture, _passDepthRealLevel, _passDepthRealLayer,
+                    _passDepthWidth, _passDepthHeight);
             MetalV2Native.SendVoidValue(
                 _renderEncoder,
                 SelSetStencilStoreAction,
@@ -409,6 +526,8 @@ internal sealed partial class MetalRenderHost
                 _discardedBytes += AttachmentBytes(in open, 1);
             }
         }
+
+        ForgetNotedClear();
     }
 
     // Discarding throws away the whole subresource, so the clear that follows has to
@@ -494,6 +613,7 @@ internal sealed partial class MetalRenderHost
 
         EndRenderingBefore(in state);
         EndComputeEncoder();
+        EncodeDeferredLabelCopies();
         var commandBuffer = EnsureCommandBuffer();
         var descriptor = MetalNative.Send(
             MetalNative.Send(MetalNative.Class("MTLRenderPassDescriptor"), MetalNative.Selector("alloc")),
@@ -610,6 +730,16 @@ internal sealed partial class MetalRenderHost
         Array.Copy(_attachmentSlices, _passSlices, MaxColorAttachments);
         Array.Copy(_attachmentDepthPlanes, _passDepthPlanes, MaxColorAttachments);
         Array.Copy(_attachmentTexelBytes, _passTexelBytes, MaxColorAttachments);
+        Array.Copy(_attachmentTextures, _passTextures, MaxColorAttachments);
+        Array.Copy(_attachmentRealLevels, _passRealLevels, MaxColorAttachments);
+        Array.Copy(_attachmentRealLayers, _passRealLayers, MaxColorAttachments);
+        Array.Copy(_attachmentWidths, _passWidths, MaxColorAttachments);
+        Array.Copy(_attachmentHeights, _passHeights, MaxColorAttachments);
+        _passDepthTexture = _depthAttachmentTexture;
+        _passDepthRealLevel = _depthAttachmentRealLevel;
+        _passDepthRealLayer = _depthAttachmentRealLayer;
+        _passDepthWidth = _depthAttachmentWidth;
+        _passDepthHeight = _depthAttachmentHeight;
         _passDepthLevel = _depthAttachmentLevel;
         _passDepthSlice = _depthAttachmentSlice;
         _passDepthTexelBytes = _depthTexelBytes;
@@ -650,6 +780,7 @@ internal sealed partial class MetalRenderHost
 
         _renderingActive = false;
         _renderingState = default;
+        ForgetNotedClear();
 
         ForgetEncoderState();
         DumpPassTargets(in ending);
@@ -712,6 +843,7 @@ internal sealed partial class MetalRenderHost
         }
 
         EndRendering();
+        EncodeDeferredLabelCopies();
         _computeEncoder = MetalNative.Send(EnsureCommandBuffer(), SelComputeEncoder);
         if (_computeEncoder == 0)
         {
@@ -1257,6 +1389,10 @@ internal sealed partial class MetalRenderHost
         bool clearDepth,
         bool clearStencil)
     {
+        _clearPasses++;
+        _clearDepthPasses++;
+        _clearPixels += (long)Math.Max(width, 1) * Math.Max(height, 1) * Math.Max(range.LayerCount, 1);
+        NoteClearAboutToBeEncoded(texture, in range, width, height, clearDepth, clearStencil);
         var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.DepthClear);
         var commandBuffer = context.CommandBuffer;
         var descriptor = MetalNative.Send(
@@ -1312,6 +1448,9 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
+        _clearPasses++;
+        _clearPixels += (long)Math.Max(width, 1) * Math.Max(height, 1) * Math.Max(range.LayerCount, 1);
+        NoteClearAboutToBeEncoded(texture, in range, width, height, depth: false, stencil: false);
         var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.ColorClear);
         var commandBuffer = context.CommandBuffer;
         var descriptor = MetalNative.Send(

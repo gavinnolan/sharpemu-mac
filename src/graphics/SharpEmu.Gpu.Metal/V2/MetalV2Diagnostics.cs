@@ -41,6 +41,14 @@ internal static class MetalV2Diagnostics
     public static readonly bool DeferStoreActions =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEFER_STORE"), "0", StringComparison.Ordinal);
 
+    // SHARPEMU_METAL_V2_DEFER_LABELS=0 makes an end-of-pipe label's bytes end the open
+    // render pass to be copied, as they did before. A label is four or eight bytes and
+    // a pass end on a tile-based GPU costs the whole framebuffer twice, so the copy
+    // waits for a boundary that was going to happen anyway — but it also means the
+    // guest sees the label slightly later, so the old behaviour stays reachable.
+    public static readonly bool DeferLabelWrites =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEFER_LABELS"), "0", StringComparison.Ordinal);
+
     public static void WarnOnce(string key, string message)
     {
         if (_reported.TryAdd(key, 0))

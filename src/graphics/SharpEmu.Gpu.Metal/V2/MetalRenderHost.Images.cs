@@ -42,7 +42,8 @@ internal sealed partial class MetalRenderHost
         var texture = _imageCache.AcquireColorTargetView(imageIdentifier, request with { Role = ImageRole.ColorTarget });
         var image = _imageCache.GetImage(imageIdentifier);
         RecordAttachmentSubresource(
-            request.View, image.Shape, image.Description.IsVolume, color: true, image.Description.BytesPerBlock);
+            request.View, image.Shape, image.Description.IsVolume, color: true,
+            image.Description.BytesPerBlock, image.Texture);
         return new ColorAttachmentAcquisition(
             imageIdentifier,
             new GpuImageHandle((ulong)texture),
@@ -77,7 +78,8 @@ internal sealed partial class MetalRenderHost
 
         var image = _imageCache.GetImage(imageIdentifier);
         RecordAttachmentSubresource(
-            request.View, image.Shape, image.Description.IsVolume, color: false, image.Description.BytesPerBlock);
+            request.View, image.Shape, image.Description.IsVolume, color: false,
+            image.Description.BytesPerBlock, image.Texture);
         return new DepthAttachmentAcquisition(
             new GpuImageHandle((ulong)texture), image.Shape.SampleCount, metadataClear);
     }
@@ -89,7 +91,8 @@ internal sealed partial class MetalRenderHost
         MetalTextureShape shape,
         bool volume,
         bool color,
-        uint texelBytes)
+        uint texelBytes,
+        nint texture)
     {
         // The subresource this attachment really is, which is what a discarded store
         // would throw away: only a pass that covers all of it can discard anything.
@@ -110,6 +113,9 @@ internal sealed partial class MetalRenderHost
                 _attachmentTexelBytes[_attachmentCount] = texelBytes;
                 _attachmentWidths[_attachmentCount] = subresourceWidth;
                 _attachmentHeights[_attachmentCount] = subresourceHeight;
+                _attachmentTextures[_attachmentCount] = texture;
+                _attachmentRealLevels[_attachmentCount] = view.BaseLevel;
+                _attachmentRealLayers[_attachmentCount] = view.BaseLayer;
                 _attachmentCount++;
             }
 
@@ -121,6 +127,9 @@ internal sealed partial class MetalRenderHost
         _depthTexelBytes = texelBytes;
         _depthAttachmentWidth = subresourceWidth;
         _depthAttachmentHeight = subresourceHeight;
+        _depthAttachmentTexture = texture;
+        _depthAttachmentRealLevel = view.BaseLevel;
+        _depthAttachmentRealLayer = view.BaseLayer;
     }
 
     public void TransitionDepthAttachment(in DepthAttachmentState depth, GpuImageLayout layout, GpuImageAspect writeAspects)

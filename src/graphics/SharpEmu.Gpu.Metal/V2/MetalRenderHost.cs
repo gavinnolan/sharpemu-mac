@@ -251,6 +251,8 @@ internal sealed partial class MetalRenderHost :
             _computeEncoder = 0;
             _boundComputePipeline = 0;
         }
+
+        EncodeDeferredLabelCopies();
     }
 
     /// <summary>Signals the shared event, commits, and opens no new command buffer.</summary>
@@ -1268,6 +1270,7 @@ internal sealed partial class MetalRenderHost :
             TakeAttachmentBandwidth();
         var (endClearCount, endTargetCount, endTransferCount, endComputeCount, targetlessCount) =
             TakePassBreakdown();
+        var (clearPasses, clearDepthPasses, clearPixels) = TakeClearPasses();
         Console.Error.WriteLine(
             $"[METAL-V2][TBDR] passes={passes} empty={emptyPasses} returned={returnedPasses} " +
             $"load_mb={(loadBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
@@ -1276,7 +1279,9 @@ internal sealed partial class MetalRenderHost :
             $"cleared_mb={(clearedBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
             $"end_clear={endClearCount} end_target={endTargetCount} end_transfer={endTransferCount} " +
             $"end_compute={endComputeCount} targetless={targetlessCount} " +
-            $"clears=[{TakeClearArrivals()}]");
+            $"clears=[{TakeClearArrivals()}] clear_passes={clearPasses} " +
+            $"clear_depth={clearDepthPasses} clear_mpx={(clearPixels / 1e6).ToString("F1", culture)} " +
+            $"labels_deferred={TakeDeferredLabelWrites()} transfers=[{TakeTransferCauses()}]");
         if (_guard is not null)
         {
             Console.Error.WriteLine($"[METAL-V2][GUARD] {_guard.Report()}");
@@ -1298,7 +1303,7 @@ internal sealed partial class MetalRenderHost :
         var blocked = CommandStream.SnapshotBlocked();
         Console.Error.WriteLine(
             $"[METAL-V2][TRACE] created={created} " +
-            $"transfer_causes=[{TakeTransferCauses()}] " +
+
             $"gpu_busy_n={gpuBusySamples} event_ready={eventReady} event_waited={eventWaited} " +
             $"event_wait_ms={eventWaitMs.ToString("F1", culture)} " +
             $"event_wake_ms={eventWakeMs.ToString("F1", culture)} " +
