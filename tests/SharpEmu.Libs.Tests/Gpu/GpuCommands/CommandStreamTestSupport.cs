@@ -50,6 +50,11 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandS
 
     public bool FlipSlot { get; set; } = true;
 
+    // A host that leaves end-of-pipe labels to the GPU, and the tick they land by.
+    public bool DefersEndOfPipeLabels { get; set; }
+
+    public ulong PendingLabelTick { get; set; }
+
     public bool FlipDone { get; set; } = true;
 
     public ulong NextFlipRequestId { get; set; } = 1;

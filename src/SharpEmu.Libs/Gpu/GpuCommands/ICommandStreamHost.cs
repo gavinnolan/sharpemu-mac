@@ -141,6 +141,15 @@ public interface ICommandStreamHost
 
     void RecordEndOfPipe(in EndOfPipeWrite write);
 
+    /// <summary>
+    /// The GPU tick a label deferred now will have landed by, or zero when this host does
+    /// not record such labels in GPU order. Other queues' waits may treat a recorded label
+    /// as written until that tick completes: every queue encodes into one GPU stream in
+    /// order, so their later work runs after the label all the same, while the guest CPU
+    /// still sees the bytes only when the GPU writes them.
+    /// </summary>
+    ulong PendingLabelTick => 0;
+
     // Delivers the interrupt now, without waiting for the GPU.
     void TriggerInterrupt(int eventId, uint contextId);
 

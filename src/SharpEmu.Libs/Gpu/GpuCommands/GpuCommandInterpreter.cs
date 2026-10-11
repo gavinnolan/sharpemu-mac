@@ -648,6 +648,14 @@ public sealed partial class GpuCommandInterpreter
     /// </summary>
     internal Action<ulong, ulong>? GuestMemoryWritten { get; init; }
 
+    /// <summary>Told when this interpreter defers a label to the GPU; the queue keeps it
+    /// visible to other queues' waits until it lands.</summary>
+    internal Action<ulong, int, ulong>? PendingLabelRecorded { get; init; }
+
+    internal PendingLabelReader? PendingLabelLookup { get; init; }
+
+    internal delegate bool PendingLabelReader(ulong address, bool is64Bit, out ulong value);
+
     internal void WriteBytes(ulong address, ReadOnlySpan<byte> source, string kind = "WRITE_BYTES")
     {
         if (!_host.TryWriteGuest(address, source, kind))
@@ -656,6 +664,15 @@ public sealed partial class GpuCommandInterpreter
         }
 
         GuestMemoryWritten?.Invoke(address, (ulong)source.Length);
+        if (source.Length is sizeof(uint) or sizeof(ulong))
+        {
+            CommandProcessorWriteHistory.Record(QueueId, address, source.Length,
+                source.Length == sizeof(uint)
+                    ? BinaryPrimitives.ReadUInt32LittleEndian(source)
+                    : BinaryPrimitives.ReadUInt64LittleEndian(source),
+                kind, deferred: false);
+        }
+
         _lastWriteLength = 0;
         if (source.Length is sizeof(uint) or sizeof(ulong))
         {

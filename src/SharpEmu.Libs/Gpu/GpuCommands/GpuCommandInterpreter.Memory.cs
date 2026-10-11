@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using SharpEmu.Libs.Gpu.GpuCommands.Packets;
 using SharpEmu.Libs.Gpu.Images;
@@ -112,6 +113,12 @@ public sealed partial class GpuCommandInterpreter
 
         if (sourceSelect == 2)
         {
+            if (!destinationIsGds)
+            {
+                CommandProcessorWriteHistory.Record(QueueId, destination, (int)Math.Min(byteCount, int.MaxValue),
+                    (uint)sourceOrImmediate, "DMA_FILL", deferred: false);
+            }
+
             _host.FillBuffer(destination, byteCount, (uint)sourceOrImmediate, destinationIsGds);
             if (!destinationIsGds)
             {
@@ -128,6 +135,23 @@ public sealed partial class GpuCommandInterpreter
         if (sourceIsGds && destinationIsGds)
         {
             throw _host.Fatal($"A GDS-to-GDS DMA copy is not supported: destination=0x{destination:X16} source=0x{sourceOrImmediate:X16} size={byteCount}.");
+        }
+
+        if (!destinationIsGds)
+        {
+            // The value is the source's, read now for the record only: a copy may land later.
+            ulong copied = 0;
+            if (!sourceIsGds && byteCount is 4 or 8)
+            {
+                Span<byte> bytes = stackalloc byte[8];
+                if (_host.Memory.TryRead(sourceOrImmediate, bytes[..(int)byteCount]))
+                {
+                    copied = byteCount == 4 ? BinaryPrimitives.ReadUInt32LittleEndian(bytes) : BinaryPrimitives.ReadUInt64LittleEndian(bytes);
+                }
+            }
+
+            CommandProcessorWriteHistory.Record(QueueId, destination, (int)Math.Min(byteCount, int.MaxValue),
+                copied, $"DMA_COPY from=0x{sourceOrImmediate:X}", deferred: false);
         }
 
         _host.CopyBuffer(destination, sourceOrImmediate, byteCount, destinationIsGds, sourceIsGds);

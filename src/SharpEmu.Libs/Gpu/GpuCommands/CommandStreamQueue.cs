@@ -153,6 +153,8 @@ public sealed class CommandStreamQueue
                 _host, queueId, queueId == 0 ? 0 : GpuCommandInterpreter.ComputeQueueBase + queueId - 1)
             {
                 GuestMemoryWritten = NotifyGuestMemoryWritten,
+                PendingLabelRecorded = NotePendingLabel,
+                PendingLabelLookup = TryGetPendingLabel,
             };
             _interpreters[queueId] = created;
             return created;
@@ -484,6 +486,50 @@ public sealed class CommandStreamQueue
 
     // A completed GPU tick can make a blocked memory wait ready. A flip slot or a
     // presented flip is not something a tick decides, so those heads stay asleep.
+    // Labels a queue recorded for the GPU to write and the tick they land by, keyed by
+    // address. A wait on another queue reads them as written: async compute waiting on a
+    // graphics fence would otherwise see it only once the GPU had written it and the guest
+    // had been told, and the guest recycles a fence slot as soon as it is told - by then
+    // the waiter reads someone else's bytes and never sees the value it was waiting for.
+    private readonly Dictionary<ulong, (ulong Value, int Size, ulong Tick)> _pendingLabels = new();
+
+    private void NotePendingLabel(ulong address, int size, ulong value)
+    {
+        var tick = _host.PendingLabelTick;
+        if (tick == 0)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            _pendingLabels[address] = (value, size, tick);
+            WakeMatchingLocked(wait => wait.Kind == CommandWaitKind.Unknown || wait.TouchedBy(address, (ulong)size));
+        }
+    }
+
+    private bool TryGetPendingLabel(ulong address, bool is64Bit, out ulong value)
+    {
+        lock (_gate)
+        {
+            if (_pendingLabels.TryGetValue(address, out var label) && label.Size >= (is64Bit ? 8 : 4))
+            {
+                value = is64Bit ? label.Value : (uint)label.Value;
+                return true;
+            }
+
+            // A 32-bit wait on the upper half of a 64-bit label.
+            if (!is64Bit && address >= 4 && _pendingLabels.TryGetValue(address - 4, out label) && label.Size == 8)
+            {
+                value = (uint)(label.Value >> 32);
+                return true;
+            }
+
+            value = 0;
+            return false;
+        }
+    }
+
     public void NotifyCompletedGpuTick(ulong completedTick)
     {
         lock (_gate)
@@ -494,6 +540,27 @@ public sealed class CommandStreamQueue
             }
 
             _lastCompletedGpuTick = completedTick;
+            if (_pendingLabels.Count != 0)
+            {
+                // A landed label is in memory now, where the guest may already have reused it.
+                List<ulong>? landed = null;
+                foreach (var (address, label) in _pendingLabels)
+                {
+                    if (label.Tick <= completedTick)
+                    {
+                        (landed ??= []).Add(address);
+                    }
+                }
+
+                if (landed is not null)
+                {
+                    foreach (var address in landed)
+                    {
+                        _pendingLabels.Remove(address);
+                    }
+                }
+            }
+
             WakeMatchingLocked(wait => wait.Kind is CommandWaitKind.GuestMemory or
                 CommandWaitKind.EngineCounter or CommandWaitKind.Unknown);
         }

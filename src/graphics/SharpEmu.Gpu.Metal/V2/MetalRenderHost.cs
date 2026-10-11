@@ -1415,6 +1415,18 @@ internal sealed partial class MetalRenderHost :
                 waited = $" value=0x{watched[1]:X8}{watched[0]:X8} gpu_pending={_gpuWrites.MayCover(wait.Address, wait.Size)}";
             }
 
+            if (wait.Kind == SharpEmu.Libs.Gpu.GpuCommands.CommandWaitKind.GuestMemory && wait.Address != 0)
+            {
+                var now = System.Diagnostics.Stopwatch.GetTimestamp();
+                foreach (var entry in SharpEmu.Libs.Gpu.GpuCommands.CommandProcessorWriteHistory.Find(wait.Address, wait.Size))
+                {
+                    Console.Error.WriteLine(
+                        $"[METAL-V2][STALL]   written queue={entry.QueueId} kind={entry.Kind} deferred={entry.Deferred} " +
+                        $"address=0x{entry.Address:X16} size={entry.Size} value=0x{entry.Value:X} " +
+                        $"ms_ago={(now - entry.Ticks) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F0}");
+                }
+            }
+
             Console.Error.WriteLine(
                 $"[METAL-V2][STALL] queue={queueId} submission={submissionId} kind={kind} ms={milliseconds:F0} " +
                 $"packet=0x{packetAddress:X16} words=[{packet[0]:X8} {packet[1]:X8} {packet[2]:X8} {packet[3]:X8} " +

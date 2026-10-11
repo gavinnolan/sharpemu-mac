@@ -39,6 +39,11 @@ public sealed partial class GpuCommandInterpreter
             _ = WaitOperation.TryCompare(ownValue, reference, mask, compareFunction, out satisfied);
         }
 
+        if (!satisfied && PendingLabelLookup is { } pending && pending(address, is64Bit, out var labelValue))
+        {
+            _ = WaitOperation.TryCompare(labelValue, reference, mask, compareFunction, out satisfied);
+        }
+
         if (!satisfied)
         {
             SuspendOn(CommandWaitCondition.Memory(address, is64Bit ? sizeof(ulong) : (ulong)sizeof(uint)));

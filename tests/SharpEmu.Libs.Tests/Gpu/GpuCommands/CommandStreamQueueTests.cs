@@ -262,6 +262,39 @@ public sealed class CommandStreamQueueTests
     /// asleep when other bytes are. Waking every head on every event is what made
     /// Demon's Souls run 952,889 slices for 371,022 submissions.
     /// </summary>
+    /// <summary>
+    /// Async compute waiting on a graphics fence the GPU has yet to write. Every queue
+    /// encodes into one GPU stream in order, so the waiter may go on as soon as the label
+    /// is recorded; waiting until the GPU wrote it and the guest was told let the guest
+    /// recycle the fence slot first, and SILENT HILL's compute queue then waited for ever
+    /// on bytes that had become a pool pointer.
+    /// </summary>
+    [Fact]
+    public void AnotherQueuesRecordedLabelSatisfiesAWaitUntilItLands()
+    {
+        var (host, queue) = NewQueue();
+        host.DefersEndOfPipeLabels = true;
+        host.PendingLabelTick = 5;
+        host.WriteDword(Label, 0);
+        EnqueueCompute(host, queue, 0x20, Compute, 1, WaitEqual(Label, 1), WriteLabel(Label + 8, 7));
+        Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+
+        Enqueue(host, queue, Graphics, 2, ReleaseMemoryInterrupt(Label, 1));
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+
+        // The GPU has not written the label, yet the compute head goes on.
+        Assert.Equal(0u, host.ReadDword(Label));
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Equal(7u, host.ReadDword(Label + 8));
+
+        // Once that tick completes the label is memory's business again: the slot still
+        // holds 0, so a later wait on it sleeps instead of seeing the old value.
+        queue.NotifyCompletedGpuTick(5);
+        EnqueueCompute(host, queue, 0x20, Compute, 3, WaitEqual(Label, 1), WriteLabel(Label + 8, 9));
+        Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+        Assert.Equal(7u, host.ReadDword(Label + 8));
+    }
+
     [Fact]
     public void MemoryWaitWakesOnlyForAWriteThatTouchesItsOwnBytes()
     {

@@ -222,13 +222,23 @@ public sealed partial class GpuCommandInterpreter
 
     private void WriteEndOfPipeDword(ulong destination, uint value, EndOfPipeWriteKind kind)
     {
-        if (_host.DefersEndOfPipeLabel(kind)) _lastWriteLength = 0;
+        if (_host.DefersEndOfPipeLabel(kind))
+        {
+            CommandProcessorWriteHistory.Record(QueueId, destination, sizeof(uint), value, kind.ToString(), deferred: true);
+            PendingLabelRecorded?.Invoke(destination, sizeof(uint), value);
+            _lastWriteLength = 0;
+        }
         else WriteDword(destination, value);
     }
 
     private void WriteEndOfPipeQword(ulong destination, ulong value, EndOfPipeWriteKind kind)
     {
-        if (_host.DefersEndOfPipeLabel(kind)) _lastWriteLength = 0;
+        if (_host.DefersEndOfPipeLabel(kind))
+        {
+            CommandProcessorWriteHistory.Record(QueueId, destination, sizeof(ulong), value, kind.ToString(), deferred: true);
+            PendingLabelRecorded?.Invoke(destination, sizeof(ulong), value);
+            _lastWriteLength = 0;
+        }
         else WriteQword(destination, value);
     }
 

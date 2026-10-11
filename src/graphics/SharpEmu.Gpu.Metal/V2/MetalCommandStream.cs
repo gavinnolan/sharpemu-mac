@@ -498,6 +498,13 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// </summary>
     public bool DefersEndOfPipeLabels => !PublishLabelsWhenParsed;
 
+    // A deferred label is encoded into the command buffer being recorded, before it is
+    // committed, so it has landed once that submission completes.
+    public ulong PendingLabelTick => PendingLabelsVisible ? SubmissionSerial : 0;
+
+    private static readonly bool PendingLabelsVisible =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_PENDING_LABELS") != "0";
+
     /// <summary>
     /// A timestamp keeps the value it was sampled with and is published as the packet is
     /// parsed; every other label waits for the work it reports.
