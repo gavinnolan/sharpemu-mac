@@ -196,11 +196,20 @@ internal sealed partial class MetalRenderHost :
     // DS_ADD_U64 / DS_OR_B64 as 32-bit atomics on each dword (folding the low dword's carry
     // into the high one), whose final value is exact; only a concurrent read can observe
     // the pair torn. The SPIR-V translator emits that same pair even when this is true.
-    public bool SharedInt64AtomicsEnabled => false;
+    public bool SharedInt64AtomicsEnabled => PrewarmSharedInt64Atomics;
 
     // Every guest library is compiled with fast math off (MetalNative.ApplyMslCompileOptions),
     // and Metal's precise math keeps F32 signed zero, infinity and NaN.
-    public bool ShaderSignedZeroInfNanPreserveFloat32Supported => true;
+    public bool ShaderSignedZeroInfNanPreserveFloat32Supported => PrewarmSignedZeroInfNanPreserve;
+
+    // The compile flags above, for the shader prewarm, which compiles before the host
+    // exists and has to build the same MSL the running title will. Exec-guard elision
+    // keeps the interface default.
+    internal const bool PrewarmSharedInt64Atomics = false;
+    internal const bool PrewarmSignedZeroInfNanPreserve = true;
+    internal const bool PrewarmExecGuardElision = true;
+
+    public ShaderPrewarmList? ShaderPrewarm => MetalShaderPrewarm.List;
 
     // Every Metal device has eight [[clip_distance]] planes, so the translator can spend
     // one on culling primitives with a zero position like the guest does.

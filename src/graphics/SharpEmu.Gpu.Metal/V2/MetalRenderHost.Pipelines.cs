@@ -70,11 +70,15 @@ internal sealed partial class MetalRenderHost
 
     public ulong CreateShaderModule(IGuestCompiledShader shader, ShaderStage stage, ulong hash, ulong programId)
     {
-        _ = stage;
         _ = programId;
         if (shader is not MetalCompiledGuestShader metal)
         {
             throw Fatal($"The shader handle was not compiled by the Metal backend: type={shader.GetType().Name}.");
+        }
+
+        if (stage == ShaderStage.Compute)
+        {
+            MetalShaderPrewarm.NoteRuntimeComputeModule(metal);
         }
 
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -117,6 +121,21 @@ internal sealed partial class MetalRenderHost
 
     private nint CompileLibrary(string source, ulong hash, bool usesPerVertexInputs)
     {
+        var library = TryCompileLibrary(_device, source, usesPerVertexInputs, out var error);
+        if (library == 0)
+        {
+            throw Fatal($"An MSL library failed to compile: hash=0x{hash:X16} {error}");
+        }
+
+        return library;
+    }
+
+    // The one MSL front-end call, shared with the shader prewarm so both ask the driver
+    // with the same options and hit the same cache entries. Zero and a description on
+    // failure; any thread.
+    internal static nint TryCompileLibrary(nint device, string source, bool usesPerVertexInputs, out string error)
+    {
+        error = string.Empty;
         var pool = MetalNative.objc_autoreleasePoolPush();
         try
         {
@@ -125,7 +144,8 @@ internal sealed partial class MetalRenderHost
                 MetalNative.Selector("init"));
             if (options == 0)
             {
-                throw Fatal("Metal compile options could not be created.");
+                error = "Metal compile options could not be created.";
+                return 0;
             }
 
             try
@@ -138,17 +158,16 @@ internal sealed partial class MetalRenderHost
                     MetalNative.SetMslLanguageVersion(options, Gen5MslShader.PerVertexInputsLanguageVersion);
                 }
 
-                nint error = 0;
+                nint compileError = 0;
                 var library = MetalNative.Send(
-                    _device,
+                    device,
                     MetalNative.Selector("newLibraryWithSource:options:error:"),
                     MetalNative.NsString(source),
                     options,
-                    ref error);
+                    ref compileError);
                 if (library == 0)
                 {
-                    throw Fatal(
-                        $"An MSL library failed to compile: hash=0x{hash:X16} {MetalNative.DescribeError(error)}");
+                    error = MetalNative.DescribeError(compileError);
                 }
 
                 return library;

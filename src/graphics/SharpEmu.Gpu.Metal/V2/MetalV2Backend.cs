@@ -57,7 +57,11 @@ internal sealed class MetalV2Backend : IGuestGpuBackend
 
     public void EnsureStarted(uint width, uint height) => MetalV2Presenter.EnsureStarted(width, height);
 
-    public void HideSplashScreen() => MetalV2Presenter.HideSplashScreen();
+    public void HideSplashScreen()
+    {
+        MetalShaderPrewarm.Gate.Wait("splash screen");
+        MetalV2Presenter.HideSplashScreen();
+    }
 
     public void Submit(byte[] bgraFrame, uint width, uint height) =>
         MetalV2Presenter.Submit(bgraFrame, width, height);
@@ -83,6 +87,7 @@ internal sealed class MetalV2Backend : IGuestGpuBackend
         _ = width;
         _ = height;
         _ = pitchInPixel;
+        MetalShaderPrewarm.Gate.Wait("first flip");
         if (!MetalV2Presenter.IsStarted)
         {
             return false;
@@ -110,6 +115,7 @@ internal sealed class MetalV2Backend : IGuestGpuBackend
         object? geometrySnapshots)
     {
         MetalV2Presenter.EnsureStarted(1280, 720);
+        MetalShaderPrewarm.Gate.Wait("first GPU submission");
         var host = MetalV2Presenter.EnsureHost();
         if (queue == 0)
         {

@@ -219,6 +219,7 @@ internal static partial class MetalV2Presenter
 
             EnsureDeviceLocked();
             _windowStarted = true;
+            MetalShaderPrewarm.Start(_device);
             if (HostMainThread.IsAvailable)
             {
                 HostMainThread.SetShutdownRequestHandler(RequestClose);
@@ -301,6 +302,7 @@ internal static partial class MetalV2Presenter
         }
 
         Volatile.Write(ref _closeRequested, true);
+        MetalShaderPrewarm.Stop();
         _host?.CommandStream.Wake();
         if (worker is null || worker == Thread.CurrentThread)
         {
