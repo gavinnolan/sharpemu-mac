@@ -226,8 +226,15 @@ public static partial class Gen5MslTranslator
         /// <summary>True when this stage emulates a 64-lane guest wave across two
         /// 32-wide Apple simdgroups (compute only; graphics stages run a wave as one
         /// simdgroup or a single lane regardless of guest wave size, and the host
-        /// requests wave32 for them, as it does for the SPIR-V translator).</summary>
-        private bool IsWave64 => _waveLaneCount == 64 && _stage == Gen5MslStage.Compute;
+        /// requests wave32 for them, as it does for the SPIR-V translator).
+        /// Only a one-wave (64-thread) workgroup is bridged, the SPIR-V translator's
+        /// scope: the bridge's barriers are threadgroup-wide, and the waves of a larger
+        /// workgroup take their own trip counts through the wave-uniform loops that hold
+        /// them, so a barrier inside one would never be met by the other waves and the
+        /// GPU hangs. Larger workgroups run each 32-wide simdgroup as a wave.</summary>
+        private bool IsWave64 =>
+            _waveLaneCount == 64 && _stage == Gen5MslStage.Compute &&
+            (ulong)_localSizeX * _localSizeY * _localSizeZ == 64;
 
         /// <summary>True for the stages whose Metal threads map one-to-one onto guest wave
         /// lanes, so ballots, shuffles and lane indices are real: compute dispatches, NGG
