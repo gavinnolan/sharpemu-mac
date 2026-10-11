@@ -278,7 +278,7 @@ internal sealed partial class MetalRenderHost :
 
         _slotTrap?.OnCommit(serial);
         MetalNative.SendVoid(_commandBuffer, SelCommit);
-        if (_pendingLabelWrites != 0 && ScheduleLabelSubmissions)
+        if (_pendingLabelWrites != 0 && ScheduleLabelSubmissions && _inFlightCount == 0)
         {
             // A queue that commits a hundred buffers in two seconds waits hundreds of
             // milliseconds for the driver to pick one up, which nothing noticed while the
@@ -287,6 +287,12 @@ internal sealed partial class MetalRenderHost :
             // second of them. Waiting until it is scheduled makes the driver take it now;
             // it is not waiting for the GPU, which is the whole point of writing the label
             // on the GPU in the first place.
+            //
+            // Only when nothing else is in flight: that is what a queue going quiet looks
+            // like, and it is the only state the driver dawdles in. Doing it on every
+            // label-carrying commit instead put Superliminal into long stalls, because a
+            // queue with work already in it needs no prompting and the wait is pure
+            // latency on the worker.
             MetalNative.SendVoid(_commandBuffer, SelWaitUntilScheduled);
             Interlocked.Increment(ref _scheduledLabelSubmissions);
         }
