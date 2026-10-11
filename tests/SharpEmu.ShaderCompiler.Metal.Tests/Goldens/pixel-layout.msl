@@ -317,9 +317,4 @@ fragment Gen5PsOut gen5_ps(
         discard_fragment();
     }
     return sharpemu_out;
-    if (!pixel_valid_mask_active)
-    {
-        discard_fragment();
-    }
-    return sharpemu_out;
 }

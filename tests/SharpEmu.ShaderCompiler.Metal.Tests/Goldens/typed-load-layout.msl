@@ -527,5 +527,4 @@ kernel void gen5_cs(
             sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t23 + 0u, v3, 4u);
         }
     }
-    return;
 }

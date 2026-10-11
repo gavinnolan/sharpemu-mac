@@ -98,6 +98,17 @@ public static partial class Gen5MslTranslator
             }
 
             body = text.ToString();
+
+            // The stage epilogue follows the body, so an exit that already sits at the
+            // end of it would emit the epilogue twice over.
+            var epilogue = new StringBuilder();
+            AppendExit(epilogue, 1);
+            var tail = epilogue.ToString();
+            if (body.EndsWith(tail, StringComparison.Ordinal))
+            {
+                body = body[..^tail.Length];
+            }
+
             return true;
         }
 

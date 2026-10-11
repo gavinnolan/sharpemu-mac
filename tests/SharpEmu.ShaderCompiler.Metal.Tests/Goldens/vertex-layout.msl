@@ -309,5 +309,4 @@ vertex Gen5VsOut gen5_vs(
         sharpemu_out.param0 = exec ? float4(as_type<float>(v1), as_type<float>(v1), as_type<float>(v0), as_type<float>(v1)) : sharpemu_out.param0;
     }
     return sharpemu_out;
-    return sharpemu_out;
 }

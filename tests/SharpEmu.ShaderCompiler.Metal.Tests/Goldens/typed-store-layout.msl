@@ -505,5 +505,4 @@ kernel void gen5_cs(
             sharpemu_store_element(b0, sharpemu_resources.buffer_bytes[0], t3, 1u, uint4(t6 | (t7 << 8u), 0u, 0u, 0u), uint4(0xFFFFu, 0x0u, 0x0u, 0x0u));
         }
     }
-    return;
 }

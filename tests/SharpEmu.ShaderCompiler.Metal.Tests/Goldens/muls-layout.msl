@@ -315,5 +315,4 @@ kernel void gen5_cs(
         uint t3 = as_type<uint>(mulhi(as_type<int>(v1), as_type<int>(v2)));
         if (exec) { v5 = t3; }
     }
-    return;
 }
