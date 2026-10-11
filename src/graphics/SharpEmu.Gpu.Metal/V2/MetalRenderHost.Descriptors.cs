@@ -49,6 +49,10 @@ internal sealed partial class MetalRenderHost
         public int BufferCount;
         public bool Committed;
 
+        // The images a host-decoded movie frame replaces in this stage, or -1.
+        public int MovieLuma = -1;
+        public int MovieChroma = -1;
+
         public ShaderStageResources Stage => StageResources;
 
         public void EnsureCapacity(int images, int samplers, int buffers, int shaderDwords)
@@ -112,6 +116,9 @@ internal sealed partial class MetalRenderHost
         {
             throw Fatal("A Metal resource preparation is already open.");
         }
+
+        // Acquire the decoded frame before any stage selects its movie planes.
+        PumpHostMovieFrame();
 
         // Keep each submission's command buffer bounded so completions and flips are
         // not stuck behind a frame's worth of recording.
@@ -214,8 +221,17 @@ internal sealed partial class MetalRenderHost
         prepared.EnsureCapacity(
             info.Images.Count, info.Samplers.Count, info.Buffers.Count, checked((int)layout.ShaderDataDwordCount));
         _preparedStageMask |= 1 << stageIndex;
+        var movie = FindHostMovieBindings(info, snapshot);
+        prepared.MovieLuma = movie.Luma;
+        prepared.MovieChroma = movie.Chroma;
         for (var index = 0; index < info.Images.Count; index++)
         {
+            if (index == movie.Luma || index == movie.Chroma)
+            {
+                PrepareHostMovieBinding(prepared, info.Images[index], snapshot.Images[index], index);
+                continue;
+            }
+
             ResolveImageBinding(prepared, info.Images[index], snapshot.Images[index], index);
         }
 
@@ -344,6 +360,12 @@ internal sealed partial class MetalRenderHost
         var snapshot = stage.StageResources.Resources;
         for (var index = 0; index < stage.ImageCount; index++)
         {
+            if (index == stage.MovieLuma || index == stage.MovieChroma)
+            {
+                stage.Textures[index] = AcquireHostMovieView(index == stage.MovieLuma ? 0 : 1);
+                continue;
+            }
+
             var request = stage.Requests[index];
             var identifier = stage.Images[index];
             if (!_imageCache.TryGetImage(identifier, out _))

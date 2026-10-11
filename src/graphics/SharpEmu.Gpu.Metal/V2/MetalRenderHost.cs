@@ -1519,6 +1519,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         _completions.Dispose();
+        DisposeHostMovie();
         DisposePipelines();
         (_transfer as IDisposable)?.Dispose();
         _imageCache.Dispose();

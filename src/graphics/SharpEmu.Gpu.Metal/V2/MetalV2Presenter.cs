@@ -468,6 +468,7 @@ internal static partial class MetalV2Presenter
 
         _drawableWidth = pixelWidth;
         _drawableHeight = pixelHeight;
+        SharpEmu.Libs.Media.MoviePresentationServices.SetPresentationSize((uint)pixelWidth, (uint)pixelHeight);
         MetalNative.SendVoidSize(
             _metalLayer,
             MetalNative.Selector("setDrawableSize:"),
@@ -524,9 +525,10 @@ internal static partial class MetalV2Presenter
             var texture = _presentTexture != 0 ? _presentTexture : _hostFrameTexture;
             var width = _presentTexture != 0 ? _presentWidth : _hostFrameWidth;
             var height = _presentTexture != 0 ? _presentHeight : _hostFrameHeight;
+            var movie = SelectHostMovieFallback(ref texture, ref width, ref height);
             if (texture != 0 && width != 0 && height != 0)
             {
-                EncodePresent(encoder, texture, width, height, _presentTexture != 0 && _presentIsHdr);
+                EncodePresent(encoder, texture, width, height, !movie && _presentTexture != 0 && _presentIsHdr);
             }
 
             MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
