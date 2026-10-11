@@ -300,6 +300,10 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
+                // Needs every block's text, so it cannot run during emission.
+                ResolveMaskBallots(blocks);
+                NoteWaveScratchUse();
+
                 var source = new StringBuilder();
                 EmitModule(source, blocks);
                 shader = new Gen5MslShader(
@@ -571,7 +575,7 @@ public static partial class Gen5MslTranslator
             if (_stage == Gen5MslStage.Compute && IsWave64)
             {
                 source.AppendLine("    uint sharpemu_lane = sharpemu_tg_index & 63u;");
-                if (_usesWaveScratch && !AliasesWaveScratchIntoLds)
+                if (DeclaresWaveScratch && !AliasesWaveScratchIntoLds)
                 {
                     // Two dwords bridge each half's ballot; the third carries a
                     // broadcast value for read-first-lane. Indexed only by half,
@@ -624,7 +628,7 @@ public static partial class Gen5MslTranslator
                 source.AppendLine($"    thread uint sharpemu_scratch[{_scratchDwordCount}] = {{}};");
             }
 
-            if (_usesWaveScratch && AliasesWaveScratchIntoLds)
+            if (DeclaresWaveScratch && AliasesWaveScratchIntoLds)
             {
                 // Only a dispatch that asked for the whole 32 KB has no room left for
                 // the bridge, and then it aliases the top three dwords of the LDS

@@ -275,6 +275,35 @@ public sealed class MslCodegenBenchmarkTests(ITestOutputHelper output)
         return new Gen5ComputeFixture("lds-chain", [.. words], 8, (int)(count * 4) + 16);
     }
 
+    /// <summary>A wave64 program full of comparisons whose VCC nothing reads. Each one
+    /// used to exchange both halves of the 64-bit mask through threadgroup memory, which
+    /// costs two threadgroup barriers, and a threadgroup barrier makes every simdgroup
+    /// wait. Octopath Traveler II's heaviest dispatch carried 27 of them.</summary>
+    private static Gen5ComputeFixture DeadMaskBallots()
+    {
+        const uint count = 12;
+        var words = new List<uint>();
+        for (var register = 1u; register <= count; register++)
+        {
+            words.Add(VMovLiteral(register));
+            words.Add(0x3F800000u + (register << 16));
+            words.Add(VFmac(register, 0, register));
+        }
+
+        for (var round = 0u; round < 4u; round++)
+        {
+            for (var register = 1u; register <= count; register++)
+            {
+                // v_cmp_eq_u32 vcc, v(register), v(register): balloted, never read.
+                words.Add(0x7D840000u | (register << 9) | (256u + register));
+                words.Add(VFmac(register, (register % count) + 1, ((register + 1) % count) + 1));
+            }
+        }
+
+        AppendStores(words, count);
+        return new Gen5ComputeFixture("dead-mask-ballots", [.. words], 8, (int)(count * 4) + 16);
+    }
+
     private static void AppendStores(List<uint> words, uint count)
     {
         for (var register = 1u; register <= count; register++)
@@ -407,33 +436,101 @@ public sealed class MslCodegenBenchmarkTests(ITestOutputHelper output)
         report.AppendLine("change                       form        gpu ms   speedup");
 
         // The dispatch allocates 1 KB; the old codegen declared 32 KB regardless.
-        var lds = LdsChain();
-        var declaredAll = MeasureCompute(
-            lds, new Gen5MslCodegenOptions(DispatchThreadgroupMemory: false), 256u, device);
-        Assert.Contains("sharpemu_lds[8192]", LastSource, StringComparison.Ordinal);
-        var declaredOwn = MeasureCompute(
-            lds, new Gen5MslCodegenOptions(), 256u, device);
-        Assert.Contains("sharpemu_lds[256]", LastSource, StringComparison.Ordinal);
-        Append(report, "threadgroup memory", "all 32 KB", declaredAll, 1.0);
-        Append(report, "threadgroup memory", "as allocated", declaredOwn,
-            Ratio(declaredAll, declaredOwn));
+        Compare(
+            report,
+            "threadgroup memory",
+            "all 32 KB",
+            "as allocated",
+            LdsChain(),
+            new Gen5MslCodegenOptions(DispatchThreadgroupMemory: false),
+            new Gen5MslCodegenOptions(),
+            localDataShareDwords: 256u,
+            device: device,
+            beforeMark: "sharpemu_lds[8192]",
+            afterMark: "sharpemu_lds[256]");
 
         // The uniform tables, read through the shader-data descriptor a graphics stage
         // takes, from device memory and then from the constant address space.
-        var table = ScalarTableReads();
-        var fromDevice = MeasureCompute(
-            table, new Gen5MslCodegenOptions(UniformTablesInConstantSpace: false), 0u, device,
-            pushDataStartDword: Resources.PushData.DwordCount);
-        Assert.Contains("device const uint* shader_data", LastSource, StringComparison.Ordinal);
-        var fromConstant = MeasureCompute(
-            table, new Gen5MslCodegenOptions(), 0u, device,
-            pushDataStartDword: Resources.PushData.DwordCount);
-        Assert.Contains("constant uint* shader_data", LastSource, StringComparison.Ordinal);
-        Append(report, "uniform tables", "device", fromDevice, 1.0);
-        Append(report, "uniform tables", "constant", fromConstant,
-            Ratio(fromDevice, fromConstant));
+        Compare(
+            report,
+            "uniform tables",
+            "device",
+            "constant",
+            ScalarTableReads(),
+            new Gen5MslCodegenOptions(UniformTablesInConstantSpace: false),
+            new Gen5MslCodegenOptions(),
+            device: device,
+            pushDataStartDword: Resources.PushData.DwordCount,
+            beforeMark: "device const uint* shader_data",
+            afterMark: "constant uint* shader_data");
+
+        // Wave64 comparisons whose mask nothing reads, with and without the exchange.
+        Compare(
+            report,
+            "wave64 mask ballots",
+            "every one",
+            "live only",
+            DeadMaskBallots(),
+            new Gen5MslCodegenOptions(DeadMaskBallotElision: false),
+            new Gen5MslCodegenOptions(),
+            device: device,
+            waveLaneCount: 64,
+            beforeMark: "sharpemu_wave_scratch[(sharpemu_lane >> 5)",
+            afterMark: "vcc = ");
 
         output.WriteLine(report.ToString());
+    }
+
+    /// <summary>Times two forms of the same program against each other. The forms are
+    /// interleaved and repeated because an idle GPU ramps its clock over the first
+    /// dispatches, which otherwise lands entirely on whichever form ran first; the
+    /// fastest pass of each is what gets compared. Each form's emitted MSL is also
+    /// checked for the mark that says the switch did something, so a flat result means
+    /// no effect rather than no change.</summary>
+    private static void Compare(
+        StringBuilder report,
+        string change,
+        string beforeName,
+        string afterName,
+        Gen5ComputeFixture program,
+        Gen5MslCodegenOptions before,
+        Gen5MslCodegenOptions after,
+        bool device,
+        uint localDataShareDwords = 0,
+        uint pushDataStartDword = 0,
+        uint waveLaneCount = 32,
+        string beforeMark = "",
+        string afterMark = "")
+    {
+        var beforeBest = double.MaxValue;
+        var afterBest = double.MaxValue;
+        for (var round = 0; round < 3; round++)
+        {
+            beforeBest = Math.Min(
+                beforeBest,
+                MeasureCompute(program, before, localDataShareDwords, device, pushDataStartDword, waveLaneCount));
+            if (round == 0 && beforeMark.Length != 0)
+            {
+                Assert.Contains(beforeMark, LastSource, StringComparison.Ordinal);
+            }
+
+            afterBest = Math.Min(
+                afterBest,
+                MeasureCompute(program, after, localDataShareDwords, device, pushDataStartDword, waveLaneCount));
+            if (round == 0 && afterMark.Length != 0)
+            {
+                Assert.Contains(afterMark, LastSource, StringComparison.Ordinal);
+            }
+        }
+
+        if (!device)
+        {
+            beforeBest = 0;
+            afterBest = 0;
+        }
+
+        Append(report, change, beforeName, beforeBest, 1.0);
+        Append(report, change, afterName, afterBest, Ratio(beforeBest, afterBest));
     }
 
     private static string LastSource = string.Empty;
@@ -483,10 +580,12 @@ public sealed class MslCodegenBenchmarkTests(ITestOutputHelper output)
         Gen5MslCodegenOptions options,
         uint localDataShareDwords,
         bool device,
-        uint pushDataStartDword = 0)
+        uint pushDataStartDword = 0,
+        uint waveLaneCount = 32)
     {
         var request = Gen5ComputeFixtures.CreateComputeRequest(
             program,
+            waveLaneCount: waveLaneCount,
             localSizeX: 64,
             localDataShareDwords: localDataShareDwords,
             pushDataStartDword: pushDataStartDword);
@@ -559,6 +658,7 @@ public sealed class MslCodegenBenchmarkTests(ITestOutputHelper output)
             ("unbounded-movrel", new Gen5MslCodegenOptions(BoundedRelativeMoves: false)),
             ("device-tables", new Gen5MslCodegenOptions(UniformTablesInConstantSpace: false)),
             ("all-threadgroup-memory", new Gen5MslCodegenOptions(DispatchThreadgroupMemory: false)),
+            ("every-mask-ballot", new Gen5MslCodegenOptions(DeadMaskBallotElision: false)),
         };
 
         var programs = new List<Gen5ComputeFixture>(Gen5ComputeFixtures.All.Where(
@@ -570,6 +670,7 @@ public sealed class MslCodegenBenchmarkTests(ITestOutputHelper output)
             RelativeMove(),
             BufferDwordChain(),
             WaterfallRelativeMove(),
+            DeadMaskBallots(),
         };
 
         foreach (var program in programs)

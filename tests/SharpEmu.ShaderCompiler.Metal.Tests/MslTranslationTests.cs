@@ -371,6 +371,135 @@ public sealed class MslTranslationTests
             System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(result));
     }
 
+    /// <summary>A guest wave64's 64-bit mask spans two Apple simdgroups, so a V_CMP has
+    /// to exchange halves through threadgroup memory — two barriers, and a threadgroup
+    /// barrier makes every simdgroup wait. The per-lane vcc bool needs no exchange at
+    /// all, so the barriers are only worth paying when the program reads the pair as
+    /// data. Here nothing does: v0 == v0 is balloted into VCC and never looked at.</summary>
+    [Fact]
+    public void AWave64BallotNothingReadsCostsNoBarriers()
+    {
+        var shader = CompileWave64Compare(readsTheMask: false);
+
+        Assert.DoesNotContain("threadgroup_barrier", Body(shader), StringComparison.Ordinal);
+        Assert.DoesNotContain("sharpemu_wave_scratch", Body(shader), StringComparison.Ordinal);
+        // The per-lane view is still set, which is what the EXEC guards read.
+        Assert.Contains("vcc = ", shader.Source, StringComparison.Ordinal);
+
+        // And it is the elision that removed them, not the program being trivial.
+        var materialized = CompileWave64Compare(
+            readsTheMask: false,
+            new Gen5MslCodegenOptions(DeadMaskBallotElision: false));
+        Assert.Contains("threadgroup_barrier", Body(materialized), StringComparison.Ordinal);
+
+        // A VOPC names VCC implicitly, so nothing in this program looks like a cross-lane
+        // operation and the pre-pass that decides whether to declare the bridge used to
+        // say no — leaving the exchange referring to an array that was never declared, so
+        // the library failed to compile and the dispatch was dropped. The declaration now
+        // follows the emitted body.
+        Assert.Contains(
+            "threadgroup uint sharpemu_wave_scratch[3];",
+            materialized.Source,
+            StringComparison.Ordinal);
+        if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") == "1")
+        {
+            Assert.True(MetalNative.IsAvailable, "The required execution gate needs a Metal device.");
+            Assert.True(
+                MetalNative.TryCompileLibrary(materialized.Source, out _, out var error),
+                error + materialized.Source);
+        }
+    }
+
+    /// <summary>And when the program does read the pair, the exchange has to be there and
+    /// has to be right. v0 == v0 holds in every lane, so the mask is all ones across both
+    /// halves and VCC_HI reads 0xFFFFFFFF — which only the exchange can produce, because
+    /// lanes 0..31 cannot see the other simdgroup's ballot.</summary>
+    [Fact]
+    public void AWave64BallotSomethingReadsKeepsItsBarriers()
+    {
+        var shader = CompileWave64Compare(readsTheMask: true);
+
+        Assert.Contains("threadgroup_barrier", Body(shader), StringComparison.Ordinal);
+        Assert.Contains("sharpemu_wave_scratch[0]", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_wave_scratch[1]", shader.Source, StringComparison.Ordinal);
+
+        if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") != "1")
+        {
+            return;
+        }
+
+        Assert.True(MetalNative.IsAvailable, "The required execution gate needs a Metal device.");
+        Assert.True(
+            MetalNative.TryCompileLibrary(shader.Source, out var library, out var metalError),
+            $"{metalError}\n{shader.Source}");
+        Assert.True(
+            MetalNative.TryExecuteWithArgumentBuffer(
+                library,
+                shader.EntryPoint,
+                new byte[16],
+                new byte[Resources.PushData.ByteSize],
+                shader.ArgumentLayout!,
+                threadsPerThreadgroup: 64,
+                out var result,
+                out var runError),
+            runError);
+        Assert.Equal(
+            0xFFFFFFFFu,
+            System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(result));
+    }
+
+    private static Gen5MslShader CompileWave64Compare(
+        bool readsTheMask,
+        Gen5MslCodegenOptions? options = null)
+    {
+        var words = new List<uint>
+        {
+            0x7D840100, // v_cmp_eq_u32 vcc, v0, v0   -> every lane, both halves
+        };
+        if (readsTheMask)
+        {
+            words.Add(0xBE80036B); // s_mov_b32 s0, vcc_hi
+            words.Add(0x7E020200); // v_mov_b32 v1, s0
+        }
+        else
+        {
+            words.Add(0x7E0202FF); // v_mov_b32 v1, 0x5A5A5A5A
+            words.Add(0x5A5A5A5Au);
+        }
+
+        words.Add(0xE0700000); // buffer_store_dword v1, off, s[8:11], 0
+        words.Add(0x80020100);
+        words.Add(0xBF810000); // s_endpgm
+
+        var fixture = new Gen5ComputeFixture(
+            readsTheMask ? "wave64-ballot-read" : "wave64-ballot-dead",
+            [.. words],
+            StoreScalarResourceBase: 8,
+            StoreBackingBytes: 16);
+        var program = Gen5ComputeFixtures.DecodeOrThrow(fixture);
+        Assert.Equal("VCmpEqU32", program.Instructions[0].Opcode);
+        if (options is null)
+        {
+            return Gen5ComputeFixtures.CompileRequestOrThrow(
+                fixture, waveLaneCount: 64, localSizeX: 64);
+        }
+
+        var request = Gen5ComputeFixtures.CreateComputeRequest(
+            fixture, waveLaneCount: 64, localSizeX: 64);
+        Assert.True(
+            Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error, options),
+            error);
+        return shader;
+    }
+
+    /// <summary>The translated function, without the shared prelude that every shader
+    /// carries (and whose helpers contain barriers of their own).</summary>
+    private static string Body(Gen5MslShader shader)
+    {
+        var entry = shader.Source.IndexOf("kernel void ", StringComparison.Ordinal);
+        return entry < 0 ? shader.Source : shader.Source[entry..];
+    }
+
     [Fact]
     public void ExecMaskedStoresAreGuarded()
     {

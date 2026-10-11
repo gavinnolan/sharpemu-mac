@@ -1454,6 +1454,16 @@ public static partial class Gen5MslTranslator
                 return;
             }
 
+            if (_options.DeadMaskBallotElision && MaskSlotOf(loRegister) >= 0)
+            {
+                // VCC or EXEC: the exchange costs two threadgroup barriers, and it is
+                // only worth them if the 64-bit pair is read before it is overwritten.
+                // That is not knowable until every block has been emitted, so leave a
+                // marker for Gen5MslTranslator.MaskBallots to resolve.
+                Line($"{MaskBallotMarker}({loRegister}, {condition});");
+                return;
+            }
+
             // simd_ballot is uniform across a simdgroup, so every lane of a half
             // writes the same 32-bit value to that half's slot — no first-lane
             // guard needed. Barrier, read both halves, barrier before the slot

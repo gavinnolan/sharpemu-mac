@@ -36,6 +36,10 @@ namespace SharpEmu.ShaderCompiler.Metal;
 /// allocated rather than the full 32 KB. Threadgroup memory is a hard occupancy limit, so
 /// this is the difference between one threadgroup per core and many.
 /// <c>SHARPEMU_MSL_LDSSIZE=0</c> declares all of it.</param>
+/// <param name="DeadMaskBallotElision">Skip a wave64 VCC or EXEC ballot whose 64-bit pair
+/// nothing reads before it is overwritten, which saves the two threadgroup barriers the
+/// cross-simdgroup exchange costs. <c>SHARPEMU_MSL_MASKBALLOT=0</c> materializes every
+/// ballot.</param>
 public sealed record Gen5MslCodegenOptions(
     bool StructuredControlFlow = true,
     bool RegisterAllocation = true,
@@ -44,7 +48,8 @@ public sealed record Gen5MslCodegenOptions(
     bool BoundedRelativeMoves = true,
     bool RawDwordAccess = true,
     bool UniformTablesInConstantSpace = true,
-    bool DispatchThreadgroupMemory = true)
+    bool DispatchThreadgroupMemory = true,
+    bool DeadMaskBallotElision = true)
 {
     public static Gen5MslCodegenOptions FromEnvironment { get; } = new(
         StructuredControlFlow: Environment.GetEnvironmentVariable("SHARPEMU_MSL_STRUCTURED") != "0",
@@ -55,5 +60,7 @@ public sealed record Gen5MslCodegenOptions(
         RawDwordAccess: Environment.GetEnvironmentVariable("SHARPEMU_MSL_DWORDACCESS") != "0",
         UniformTablesInConstantSpace:
             Environment.GetEnvironmentVariable("SHARPEMU_MSL_CONSTANTTABLES") != "0",
-        DispatchThreadgroupMemory: Environment.GetEnvironmentVariable("SHARPEMU_MSL_LDSSIZE") != "0");
+        DispatchThreadgroupMemory: Environment.GetEnvironmentVariable("SHARPEMU_MSL_LDSSIZE") != "0",
+        DeadMaskBallotElision:
+            Environment.GetEnvironmentVariable("SHARPEMU_MSL_MASKBALLOT") != "0");
 }

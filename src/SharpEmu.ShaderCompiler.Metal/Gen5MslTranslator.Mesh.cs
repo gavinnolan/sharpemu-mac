@@ -130,6 +130,7 @@ public static partial class Gen5MslTranslator
             _stage == Gen5MslStage.Compute && _usesLds &&
             _computeLdsDwords + 3 > LdsDwordCount;
 
+
         private Gen5MslMeshInfo Mesh => _meshInfo ??
             throw new InvalidOperationException("the mesh interface is only built for the mesh stage");
 
