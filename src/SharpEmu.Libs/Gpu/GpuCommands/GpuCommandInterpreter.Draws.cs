@@ -199,8 +199,22 @@ public sealed partial class GpuCommandInterpreter
         _indexExtents[IndexBaseAddress] = extentBytes;
     }
 
-    internal void DispatchDirect(uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator, ulong indirectArgumentsAddress = 0) =>
+    internal void DispatchDirect(uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator, ulong indirectArgumentsAddress = 0)
+    {
         _host.DispatchDirect(SubmitId, groupsX, groupsY, groupsZ, dispatchInitiator, indirectArgumentsAddress);
+        SuspendIfPipelineNotReady();
+    }
+
+    // A draw or dispatch whose pipeline is still compiling runs again from this same
+    // packet once the backend says the pipeline is ready. Nothing is skipped: the
+    // packet has not advanced, and the host touched nothing before it gave up.
+    private void SuspendIfPipelineNotReady()
+    {
+        if (_host.ConsumePipelineNotReady())
+        {
+            SuspendOn(new CommandWaitCondition(CommandWaitKind.Pipeline));
+        }
+    }
 
     internal void DispatchIndirect(uint dataOffset, uint dispatchInitiator)
     {

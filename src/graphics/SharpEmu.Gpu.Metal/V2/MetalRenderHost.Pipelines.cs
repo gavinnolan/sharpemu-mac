@@ -68,7 +68,11 @@ internal sealed partial class MetalRenderHost
         }
 
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        // The MSL front end runs here, and the driver's back end runs when a pipeline
+        // state is made from the function. They are separate costs with separate
+        // caches, so they are counted separately.
         var library = CompileLibrary(metal.Shader.Source, hash);
+        Interlocked.Add(ref _libraryTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
         var function = MetalNative.Send(
             library, MetalNative.Selector("newFunctionWithName:"), MetalNative.NsString(metal.Shader.EntryPoint));
         if (function == 0)
@@ -399,6 +403,84 @@ internal sealed partial class MetalRenderHost
         return descriptor;
     }
 
+    // Pipeline states are built off the command-stream thread unless this is set,
+    // which keeps the old blocking behaviour for comparison.
+    private static readonly bool SynchronousPipelines =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_SYNC_PIPELINES") == "1";
+
+    private MetalPipelineCompiler? _compiler;
+
+    private MetalPipelineCompiler Compiler => _compiler ??= new MetalPipelineCompiler(
+        () => _commandStream?.NotifyPipelineReady(),
+        Math.Max(2, Environment.ProcessorCount / 2));
+
+    /// <summary>Compiles that have been started, finished, shared and their time.</summary>
+    public (long Started, long Finished, long Deduped, double Milliseconds) TakeCompilerCounters() =>
+        _compiler?.TakeCounters() ?? (0, 0, 0, 0);
+
+    public int PipelinesCompiling => _compiler?.InFlight ?? 0;
+
+    public bool SupportsPipelineSuspend => !SynchronousPipelines;
+
+    public void NotePipelineNotReady() => _pipelineNotReady = true;
+
+    private bool _pipelineNotReady;
+
+    bool SharpEmu.Libs.Gpu.GpuCommands.ICommandStreamHost.ConsumePipelineNotReady()
+    {
+        var pending = _pipelineNotReady;
+        _pipelineNotReady = false;
+        return pending;
+    }
+
+    /// <summary>
+    /// The pipeline state for a dispatch, or false while the driver is still building
+    /// it on the compile pool. The caller suspends the packet and runs it again when
+    /// the compile reports in.
+    /// </summary>
+    public bool TryCreateComputePipeline(ComputePipelineDescription description, out PipelineHandle handle)
+    {
+        if (SynchronousPipelines)
+        {
+            handle = CreateComputePipeline(description);
+            return true;
+        }
+
+        handle = default;
+        var module = RequireModule(description.Program);
+        var function = module.Function;
+        var hash = description.Stage.Hash;
+        if (!Compiler.TryTake(description.Program.Id, () => BuildComputePipelineState(function, hash), out var state))
+        {
+            return false;
+        }
+
+        handle = RegisterComputePipeline(description, module, state);
+        return true;
+    }
+
+    // Runs on the compile pool: MTLDevice is thread safe, and nothing here touches
+    // the host's own state.
+    private nint BuildComputePipelineState(nint function, ulong hash)
+    {
+        nint error = 0;
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var state = MetalNative.Send(
+            _device,
+            MetalNative.Selector("newComputePipelineStateWithFunction:error:"),
+            function,
+            ref error);
+        Interlocked.Add(ref _pipelineTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
+        if (state == 0)
+        {
+            throw Fatal(
+                $"A Metal compute pipeline state could not be created: hash=0x{hash:X16} " +
+                $"{MetalNative.DescribeError(error)}");
+        }
+
+        return state;
+    }
+
     public PipelineHandle CreateComputePipeline(ComputePipelineDescription description)
     {
         var module = RequireModule(description.Program);
@@ -420,6 +502,16 @@ internal sealed partial class MetalRenderHost
                 $"{MetalNative.DescribeError(error)}");
         }
 
+        return RegisterComputePipeline(description, module, state);
+    }
+
+    // The pipeline entry for a finished compute state. Runs on the command stream, so
+    // the entry table and the identifier counter stay single threaded.
+    private PipelineHandle RegisterComputePipeline(
+        ComputePipelineDescription description,
+        MetalShaderModule module,
+        nint state)
+    {
         Interlocked.Increment(ref _pipelineCreations);
         var threads = new MtlSize
         {
@@ -646,6 +738,9 @@ internal sealed partial class MetalRenderHost
 
     private void DisposePipelines()
     {
+        // Let whatever is still compiling finish before the device goes away.
+        _compiler?.Dispose();
+        _compiler = null;
         foreach (var entry in _pipelineEntries.Values)
         {
             if (entry.State != 0)

@@ -91,6 +91,9 @@ internal sealed partial class MetalRenderHost :
     private long _pipelineCreations;
     // How long the driver spent turning functions into GPU binaries, on this thread.
     private long _pipelineTicks;
+
+    // How long the MSL front end spent turning sources into libraries.
+    private long _libraryTicks;
     private long _shaderCompilations;
     private long _flushes;
     private long _gpuWaits;
@@ -1083,6 +1086,7 @@ internal sealed partial class MetalRenderHost :
         var pipelines = Interlocked.Exchange(ref _pipelineCreations, 0);
         var pipelineMs = Interlocked.Exchange(ref _pipelineTicks, 0) * 1000.0 /
             System.Diagnostics.Stopwatch.Frequency;
+        var compiles = TakeCompilerCounters();
         var failed = Interlocked.Exchange(ref _failedSubmissions, 0);
         var (completions, completionMs) = TakeCompletionLatency();
         var (created, uploads, writebacks, evictions) = _imageCache.Counters;
@@ -1105,6 +1109,9 @@ internal sealed partial class MetalRenderHost :
             $"host_wait_ms={(waitTicks * 1000.0 / frequency).ToString("F1", culture)} " +
             $"idle_ms={(idleTicks * 1000.0 / frequency).ToString("F0", culture)} pipelines={pipelines} " +
             $"pipeline_ms={pipelineMs.ToString("F1", culture)} " +
+            $"library_ms={(Interlocked.Exchange(ref _libraryTicks, 0) * 1000.0 / frequency).ToString("F1", culture)} " +
+            $"compiles={compiles.Started}/{compiles.Finished} compile_waits={compiles.Deduped} " +
+            $"compile_ms={compiles.Milliseconds.ToString("F1", culture)} compiling={PipelinesCompiling} " +
             $"images={_imageCache.ImageCount} image_mb={_imageCache.TotalUsedMemory / (1024 * 1024)} " +
             $"sampled_dcc_clears={_imageCache.TakeSampledDccClears()} " +
             $"uploads={uploads} writebacks={writebacks} evictions={evictions} failed={failed}");

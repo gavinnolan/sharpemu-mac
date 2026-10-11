@@ -127,6 +127,18 @@ public interface IRenderHost
 
     void PrepareDeviceAddresses();
 
+    // True when a draw or dispatch whose pipeline is still compiling may be left for
+    // later: the packet suspends and runs again once the compile finishes, so the
+    // command stream serves its other queues meanwhile. A host that cannot do that
+    // keeps waiting for the compile in place, because a one-shot dispatch that is
+    // skipped never runs, and a later packet may be waiting on what it would write.
+    bool SupportsPipelineSuspend => false;
+
+    // The last draw or dispatch could not run: its pipeline is still compiling.
+    void NotePipelineNotReady()
+    {
+    }
+
     void BindResources(IPreparedBindings prepared);
 
     void CommitBindings(GpuBindPoint bindPoint, in PipelineHandle pipeline, ReadOnlySpan<IPreparedBindings> stages);

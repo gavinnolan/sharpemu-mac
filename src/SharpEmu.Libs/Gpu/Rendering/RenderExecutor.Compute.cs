@@ -152,9 +152,23 @@ public sealed partial class RenderExecutor
             // wait outside the pipeline cache's lock, so other queues can create their own
             // pipelines while this program compiles.
             PipelineHandle pipeline;
-            while (!_pipelines.TryCreateComputePipeline(input, computeProgram.Program, out pipeline))
+            if (_host.SupportsPipelineSuspend)
             {
-                Thread.Sleep(1);
+                // The packet suspends and runs again when the compile finishes, so the
+                // command stream can serve its other queues in the meantime. Nothing
+                // before this point has touched the host, so leaving now is clean.
+                if (!_pipelines.TryCreateComputePipeline(input, computeProgram.Program, out pipeline))
+                {
+                    _host.NotePipelineNotReady();
+                    return;
+                }
+            }
+            else
+            {
+                while (!_pipelines.TryCreateComputePipeline(input, computeProgram.Program, out pipeline))
+                {
+                    Thread.Sleep(1);
+                }
             }
 
             var bindings = PrepareBindings(input.Stage);

@@ -141,6 +141,11 @@ public interface ICommandStreamHost
 
     void DispatchDirect(ulong submitId, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator, ulong indirectArgumentsAddress = 0);
 
+    // True when the draw or dispatch just handed over could not run because its
+    // pipeline is still compiling. The packet then suspends and runs again when the
+    // backend reports the pipeline ready; nothing is skipped.
+    bool ConsumePipelineNotReady() => false;
+
     // True when an indirect dispatch in workgroup units reads its group counts on the
     // GPU, so the interpreter need not wait for the GPU to read them back first.
     bool ResolvesIndirectDispatchOnGpu => false;

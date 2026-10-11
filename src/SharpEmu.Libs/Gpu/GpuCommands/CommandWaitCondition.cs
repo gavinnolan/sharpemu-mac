@@ -23,6 +23,9 @@ public enum CommandWaitKind : byte
 
     /// <summary>More ring bytes from the guest, which only the guest's CPU writes.</summary>
     RingAppend,
+
+    /// <summary>A pipeline the backend is still compiling off the command stream.</summary>
+    Pipeline,
 }
 
 /// <summary>
