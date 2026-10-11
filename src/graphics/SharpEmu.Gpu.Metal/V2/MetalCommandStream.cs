@@ -200,8 +200,13 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 // A plain label or clock write has no interrupt behind it, but it is
                 // still an end-of-pipe write: the guest polls it to learn that the work
                 // recorded before it has finished, and reuses what that work reads once
-                // it sees it.
-                QueueCompletion(() => PublishEndOfPipeLabel(in label));
+                // it sees it. Only deferred when asked: a completion costs a flush, and
+                // a title that writes a label per pass pays one per pass.
+                if (DeferEndOfPipeLabels)
+                {
+                    QueueCompletion(() => PublishEndOfPipeLabel(in label));
+                }
+
                 break;
         }
     }
@@ -217,6 +222,12 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// </summary>
     private void PublishEndOfPipeLabel(in EndOfPipeWrite write)
     {
+        if (!DeferEndOfPipeLabels)
+        {
+            // The interpreter published the bytes as it parsed the packet.
+            return;
+        }
+
         var bytes = write.Kind switch
         {
             EndOfPipeWriteKind.Write32 or EndOfPipeWriteKind.WriteBack32 or
@@ -250,11 +261,21 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         }
     }
 
+    // SHARPEMU_METAL_V2_DEFER_EOP=1 hands every end-of-pipe label's bytes to the
+    // completion that reports its work, instead of letting the interpreter publish
+    // them as it parses the packet. That is what the hardware does and what V1 does,
+    // and it is what Superliminal's level needs - but a completion costs a command
+    // buffer flush, and a title that writes a label per render pass then pays one per
+    // pass: measured at 0.5 fps against 24. Off until the completion for a label that
+    // nothing has been recorded after can ride the previous submission instead.
+    private static readonly bool DeferEndOfPipeLabels =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEFER_EOP") == "1";
+
     /// <summary>
-    /// The interpreter must not publish label bytes itself; see
-    /// <see cref="PublishEndOfPipeLabel"/>.
+    /// The interpreter must not publish label bytes itself when this host defers them;
+    /// see <see cref="PublishEndOfPipeLabel"/>.
     /// </summary>
-    public bool DefersEndOfPipeLabels => true;
+    public bool DefersEndOfPipeLabels => DeferEndOfPipeLabels;
 
     // The completion runs once the GPU finishes everything recorded so far, so the
     // command buffer is committed right away instead of waiting for the next flush.
@@ -281,17 +302,32 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             return;
         }
 
-        var serial = SubmissionSerial;
+        // Nothing has been recorded since the last flush, so everything this completion
+        // waits for is in the submission already committed: it rides that one's serial
+        // and needs no flush of its own. A run of end-of-pipe labels with no work
+        // between them is the common shape, and flushing once per label turned a frame
+        // into hundreds of empty submissions.
+        var pending = LastWorkSerial;
         var queued = System.Diagnostics.Stopwatch.GetTimestamp();
-        _completions.Enqueue(serial, () =>
+        if (pending != 0 && pending <= _previousSerial)
+        {
+            Enqueue(pending);
+            return;
+        }
+
+        var serial = SubmissionSerial;
+        Enqueue(serial);
+        FlushCommandBuffer();
+        return;
+
+        void Enqueue(ulong on) => _completions.Enqueue(on, () =>
         {
             var ran = System.Diagnostics.Stopwatch.GetTimestamp();
             Interlocked.Add(ref _completionLatencyTicks, ran - queued);
             Interlocked.Increment(ref _completionCount);
-            ReportSlowCompletion(serial, queued, ran);
+            ReportSlowCompletion(on, queued, ran);
             work();
         });
-        FlushCommandBuffer();
     }
 
     // An end-of-pipe completion the guest is waiting on that took long enough to cost
