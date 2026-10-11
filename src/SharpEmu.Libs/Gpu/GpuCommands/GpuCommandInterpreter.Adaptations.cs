@@ -28,9 +28,15 @@ public sealed partial class GpuCommandInterpreter
         // A compare-swap loop applies once per try and suspends while the compare fails.
         var operation = CommandMemoryOperation.Atomic(atomic);
         _host.ExecuteCommandMemoryOperation(operation);
-        GuestMemoryWritten?.Invoke(atomic.Address, sizeof(ulong));
         var priorValue = operation.PriorValue;
         var comparePassed = operation.ComparePassed;
+
+        // A failed try of a compare-swap loop writes nothing; reporting it would wake every
+        // other loop parked on the address, and two such loops would wake each other forever.
+        if (atomic.Command != 1 || comparePassed)
+        {
+            GuestMemoryWritten?.Invoke(atomic.Address, sizeof(ulong));
+        }
 
         if (atomic.ReturnsData)
         {
