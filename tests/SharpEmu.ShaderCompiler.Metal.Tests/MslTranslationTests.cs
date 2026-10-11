@@ -185,6 +185,192 @@ public sealed class MslTranslationTests
             System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(result));
     }
 
+    /// <summary>Threadgroup memory is a hard occupancy limit on Apple GPUs: a
+    /// threadgroup that asks for all 32 KB is the only one that fits on a core. The
+    /// declaration therefore follows what the dispatch allocated, rounded up to a power
+    /// of two because LDS addresses are masked into bounds rather than clamped — and the
+    /// mask has to follow the size, or an address would escape the array.</summary>
+    [Theory]
+    [InlineData(0u, 8192u)]      // the dispatch did not say: assume the whole 32 KB
+    [InlineData(1u, 1u)]
+    [InlineData(100u, 128u)]
+    [InlineData(256u, 256u)]
+    [InlineData(1024u, 1024u)]
+    [InlineData(8192u, 8192u)]
+    [InlineData(99999u, 8192u)]  // more than the hardware has: clamp to the ceiling
+    public void ComputeThreadgroupMemoryFollowsTheDispatchAllocation(uint declared, uint expected)
+    {
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(
+            Gen5ComputeFixtures.Lds,
+            localDataShareDwords: declared);
+
+        Assert.Contains(
+            $"threadgroup uint sharpemu_lds[{expected}];",
+            shader.Source,
+            StringComparison.Ordinal);
+        Assert.Contains($"& {expected - 1}u", shader.Source, StringComparison.Ordinal);
+    }
+
+    /// <summary>The wave64 ballot bridge only has to share the LDS allocation when the
+    /// dispatch asked for all of it; with room to spare it gets its own three dwords and
+    /// cannot collide with guest data.</summary>
+    [Theory]
+    [InlineData(1024u, false)]
+    [InlineData(8192u, true)]
+    public void TheWave64BridgeOnlySharesLdsWhenThereIsNoRoom(uint declared, bool aliased)
+    {
+        // v_readfirstlane is what makes a wave64 program need the bridge at all.
+        var fixture = new Gen5ComputeFixture(
+            "wave64-bridge-lds",
+            [
+                0x7E000280,             // v_mov_b32 v0, 0
+                0x7E0402FF, 0x00001234, // v_mov_b32 v2, 0x1234
+                0xD8340000, 0x00000200, // ds_write_b32 v0, v2
+                0x7E000500,             // v_readfirstlane_b32 s0, v0
+                0xBF810000,             // s_endpgm
+            ],
+            StoreScalarResourceBase: 0,
+            StoreBackingBytes: 0);
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(
+            fixture,
+            waveLaneCount: 64,
+            localSizeX: 64,
+            localDataShareDwords: declared);
+
+        Assert.Equal(
+            aliased,
+            shader.Source.Contains(
+                "threadgroup uint* sharpemu_wave_scratch = &sharpemu_lds[",
+                StringComparison.Ordinal));
+        Assert.Equal(
+            !aliased,
+            shader.Source.Contains(
+                "threadgroup uint sharpemu_wave_scratch[3];",
+                StringComparison.Ordinal));
+    }
+
+    /// <summary>The user-data words are a read-only table the host fills before the
+    /// encode and nothing on the GPU writes, and every read of one is at an index the
+    /// program knows — so the pointer belongs in the constant address space, which is
+    /// Apple's uniform datapath. Read from "device" instead, a value that is the same in
+    /// every lane costs a per-lane memory access: the heaviest Octopath vertex shader
+    /// reads 32 of them in its preamble, once per wave on hardware and once per vertex
+    /// here, 12.5 million times a frame.
+    ///
+    /// Pushing the start cursor to the end of push data is what makes a program take the
+    /// shader-data descriptor instead, which is the path a graphics stage takes.</summary>
+    [Fact]
+    public void UserDataReadsGoThroughTheConstantAddressSpace()
+    {
+        var pushed = Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.ExecStore);
+        Assert.Contains("constant uint* sharpemu_push_data", pushed.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("shader_data", pushed.Source, StringComparison.Ordinal);
+
+        var tabled = Gen5ComputeFixtures.CompileRequestOrThrow(
+            Gen5ComputeFixtures.ExecStore,
+            pushDataStartDword: Resources.PushData.DwordCount);
+        Assert.Contains("constant uint* shader_data", tabled.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("device const uint* shader_data", tabled.Source, StringComparison.Ordinal);
+
+        if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") != "1")
+        {
+            return;
+        }
+
+        // Both layouts have to compile and run, and leave the same bytes behind: the
+        // address space is the only thing that differs between them.
+        Assert.True(MetalNative.IsAvailable, "The required execution gate needs a Metal device.");
+        Assert.Equal(Execute(pushed), Execute(tabled));
+
+        static byte[] Execute(Gen5MslShader shader)
+        {
+            Assert.True(
+                MetalNative.TryCompileLibrary(shader.Source, out var library, out var metalError),
+                $"{metalError}\n{shader.Source}");
+            Assert.True(
+                MetalNative.TryExecuteWithArgumentBuffer(
+                    library,
+                    shader.EntryPoint,
+                    SentinelBuffer(),
+                    new byte[Resources.PushData.ByteSize],
+                    shader.ArgumentLayout!,
+                    threadsPerThreadgroup: 1,
+                    out var result,
+                    out var runError),
+                runError);
+            return result;
+        }
+
+        static byte[] SentinelBuffer()
+        {
+            var buffer = new byte[64];
+            for (var offset = 0; offset < buffer.Length; offset += sizeof(uint))
+            {
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(
+                    buffer.AsSpan(offset), 0xDEADBEEFu);
+            }
+
+            return buffer;
+        }
+    }
+
+    /// <summary>A 64-lane guest wave runs as two 32-wide Apple simdgroups, so its lane
+    /// index goes up to 63 while each half of EXEC is a 32-bit word. Shifting a uint by
+    /// 32 or more is undefined in MSL — the count wraps in practice, so lanes 32..63 were
+    /// reading the low half and seeing another lane's EXEC bit. The half has to be picked
+    /// before the shift.
+    ///
+    /// The program masks EXEC down to its high half, so only lanes 32..63 write v1, then
+    /// restores EXEC and has every lane add v1 into one word. Thirty-two lanes wrote a
+    /// one, so the sum is 32; reading the wrong half gives 0 or 64.</summary>
+    [Fact]
+    public void Wave64TakesEachLanesExecBitFromTheRightHalf()
+    {
+        var fixture = new Gen5ComputeFixture(
+            "wave64-exec-halves",
+            [
+                0xBEFE0380,             // s_mov_b32 exec_lo, 0
+                0xBEFF03C1,             // s_mov_b32 exec_hi, -1
+                0x7E020281,             // v_mov_b32 v1, 1      (lanes 32..63 only)
+                0xBEFE03C1,             // s_mov_b32 exec_lo, -1
+                0xBEFF03C1,             // s_mov_b32 exec_hi, -1
+                0xE0C80000, 0x80020100, // buffer_atomic_add v1, off, s[8:11], 0
+                0xBF810000,             // s_endpgm
+            ],
+            StoreScalarResourceBase: 8,
+            StoreBackingBytes: 16);
+
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(
+            fixture, waveLaneCount: 64, localSizeX: 64);
+
+        Assert.Contains("sharpemu_lane < 32u ?", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_lane & 31u", shader.Source, StringComparison.Ordinal);
+
+        if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") != "1")
+        {
+            return;
+        }
+
+        Assert.True(MetalNative.IsAvailable, "The required execution gate needs a Metal device.");
+        Assert.True(
+            MetalNative.TryCompileLibrary(shader.Source, out var library, out var metalError),
+            $"{metalError}\n{shader.Source}");
+        Assert.True(
+            MetalNative.TryExecuteWithArgumentBuffer(
+                library,
+                shader.EntryPoint,
+                new byte[fixture.StoreBackingBytes],
+                new byte[Resources.PushData.ByteSize],
+                shader.ArgumentLayout!,
+                threadsPerThreadgroup: 64,
+                out var result,
+                out var runError),
+            runError);
+        Assert.Equal(
+            32u,
+            System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(result));
+    }
+
     [Fact]
     public void ExecMaskedStoresAreGuarded()
     {

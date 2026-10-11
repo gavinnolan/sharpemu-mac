@@ -120,6 +120,16 @@ public static partial class Gen5MslTranslator
         private readonly Gen5MslMeshInfo? _meshInfo;
         private readonly uint _meshLdsDwords;
 
+        /// <summary>Threadgroup memory this compute dispatch declares, in dwords.</summary>
+        private readonly uint _computeLdsDwords;
+
+        /// <summary>Whether the wave64 ballot bridge has to share the LDS allocation.
+        /// Only a dispatch that asked for the whole 32 KB leaves no room for its own
+        /// three dwords.</summary>
+        private bool AliasesWaveScratchIntoLds =>
+            _stage == Gen5MslStage.Compute && _usesLds &&
+            _computeLdsDwords + 3 > LdsDwordCount;
+
         private Gen5MslMeshInfo Mesh => _meshInfo ??
             throw new InvalidOperationException("the mesh interface is only built for the mesh stage");
 
