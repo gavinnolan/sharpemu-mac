@@ -1054,7 +1054,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             {
                 // The step over a hole landed inside a transfer whose other half it
                 // stepped past; that half carries nothing either.
-                trace ??= new StringBuilder();
+                trace ??= Opened(from, written);
                 Trace(trace, "skip", offset, Math.Min(size, start) - offset);
                 offset = start;
                 continue;
@@ -1072,7 +1072,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 // start inside it either - and at least one page, so a range no window
                 // covers at all still advances.
                 var step = Math.Min(size - offset, Math.Max(run.Size, HoleStepBytes));
-                trace ??= new StringBuilder();
+                trace ??= Opened(from, written);
                 Trace(trace, "skip", offset, step);
                 offset += step;
                 continue;
@@ -1111,6 +1111,19 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         return written != 0;
+    }
+
+    // The trace is opened at the first hole, so the runs before it are not in it; what
+    // they carried goes in as one entry, and the entries then account for every byte.
+    private static StringBuilder Opened(ulong from, ulong carried)
+    {
+        var trace = new StringBuilder();
+        if (carried != 0)
+        {
+            Trace(trace, "run", from, carried);
+        }
+
+        return trace;
     }
 
     // What a run walk did, for the warning that follows a walk which left bytes behind:
