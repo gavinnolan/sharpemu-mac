@@ -16,7 +16,11 @@ namespace SharpEmu.Libs.Tests.VideoOut;
 [Collection(SchedulingStateCollection.Name)]
 public sealed class MetalGraphDisabledSnapshotTests
 {
-    private const ulong Address = 0x71F0_0000_00;
+    // Outside the user address range of every host, so no allocation made
+    // by the runtime or another test can give the tracker a page to protect.
+    // 0x71F0_0000_00 sits inside the arm64 macOS allocation zone, where a
+    // longer run maps reserved memory under it and real protection arms.
+    private const ulong Address = 0x8000_0000_0000;
     // Production linear snapshots retain four256-byte padded rows.
     private const ulong Footprint = 1024;
 
@@ -43,9 +47,9 @@ public sealed class MetalGraphDisabledSnapshotTests
                 if (managedWriter) GuestImageWriteTracker.TrackManagedWriter(Address, Footprint);
                 else GuestImageWriteTracker.Track(Address, Footprint, protect: false);
             }
-            Assert.True(AgcBackendServices.TryDecodeTextureDescriptor(MetalTextureSourceLeaseTests.ResourceWords(), out var descriptor));
+            Assert.True(AgcBackendServices.TryDecodeTextureDescriptor(MetalTextureSourceLeaseTests.ResourceWords(Address), out var descriptor));
             var binding = new AgcExports.TranslatedImageBinding(descriptor, storage, 0, [],
-                ResourceDescriptor: MetalTextureSourceLeaseTests.ResourceWords(),
+                ResourceDescriptor: MetalTextureSourceLeaseTests.ResourceWords(Address),
                 Shape: new ShaderImageShape(false, false, storage, false, TextureNumericClass.Float),
                 Access: storage ? GuestImageAccess.Write : GuestImageAccess.Read);
             var memory = new Memory();
