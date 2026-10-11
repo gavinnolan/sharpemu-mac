@@ -110,6 +110,8 @@ public static class RenderPhaseProfile
         DrawVertexEvaluation,
         DrawBindingAssembly,
         ProgramPreparation,
+        // The part of program preparation that holds the pipeline cache's own lock.
+        ProgramPrepareLocked,
         ProgramSourceRead,
         VertexInputResolution,
         PixelInputResolution,

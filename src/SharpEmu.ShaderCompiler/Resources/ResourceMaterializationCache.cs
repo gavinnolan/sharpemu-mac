@@ -74,8 +74,19 @@ public sealed class ResourceMaterializationCache
         ref ResourceSpecialization specialization,
         out ResourceMaterializationFailure failure)
     {
-        var key = KeyOf(plan, inputs);
-        var found = TryFind(key, plan, inputs, out var cached);
+        ulong key;
+        using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.CacheKey))
+        {
+            key = KeyOf(plan, inputs);
+        }
+
+        bool found;
+        Entry cached;
+        using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.CacheFind))
+        {
+            found = TryFind(key, plan, inputs, out cached);
+        }
+
         if (found)
         {
             var unreadable = false;
@@ -124,17 +135,21 @@ public sealed class ResourceMaterializationCache
         var recorder = TakeRecorder();
         try
         {
-            var recording = new ResourceRuntimeInputs
+            ResourceRuntimeInputs recording;
+            using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.RecorderWrap))
             {
-                UserData = inputs.UserData,
-                ShaderBase = inputs.ShaderBase,
-                ReadMemory = recorder.Wrap(inputs.ReadMemory, clean: false),
-                ReadCleanMemory = recorder.Wrap(inputs.ReadCleanMemory, clean: true),
-                ReadResidentMemory = recorder.WrapResident(inputs.ReadResidentMemory),
-                ReadsClean = inputs.ReadsClean,
-                ComputeState = inputs.ComputeState,
-                TablePhase = recorder.TablePhase,
-            };
+                recording = new ResourceRuntimeInputs
+                {
+                    UserData = inputs.UserData,
+                    ShaderBase = inputs.ShaderBase,
+                    ReadMemory = recorder.Wrap(inputs.ReadMemory, clean: false),
+                    ReadCleanMemory = recorder.Wrap(inputs.ReadCleanMemory, clean: true),
+                    ReadResidentMemory = recorder.WrapResident(inputs.ReadResidentMemory),
+                    ReadsClean = inputs.ReadsClean,
+                    ComputeState = inputs.ComputeState,
+                    TablePhase = recorder.TablePhase,
+                };
+            }
             if (!ResourceMaterializer.Materialize(plan, recording, ref snapshot, ref specialization, out failure))
                 return false;
 
@@ -145,7 +160,11 @@ public sealed class ResourceMaterializationCache
                 return true;
             }
 
-            var built = recorder.Build(plan, inputs, snapshot, specialization);
+            Entry built;
+            using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.EntryBuild))
+            {
+                built = recorder.Build(plan, inputs, snapshot, specialization);
+            }
             if (found)
             {
                 built.Next = cached;

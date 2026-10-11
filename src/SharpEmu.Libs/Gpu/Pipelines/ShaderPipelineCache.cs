@@ -164,6 +164,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         ShaderStageResources pixelStage = default;
         lock (_gate)
         {
+            using var lockedScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPrepareLocked);
             var pushDataCursor = 0u;
             if (pixelSource is not null)
             {
@@ -386,6 +387,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         ShaderStageResources stage;
         lock (_gate)
         {
+            using var lockedScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPrepareLocked);
             var pushDataCursor = 0u;
             if (!TryPrepareProgram(
                 source,
