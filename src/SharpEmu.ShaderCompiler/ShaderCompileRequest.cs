@@ -52,7 +52,16 @@ public readonly record struct ShaderClipSpaceTransform(
     float OffsetX,
     float OffsetY,
     float HalfExtentX,
-    float HalfExtentY);
+    float HalfExtentY)
+{
+    // The guest's z runs over [-w, w]. The Vulkan host expresses this as pipeline state
+    // (depth clip control); a host with a fixed [0, w] clip volume remaps z in the program.
+    public bool DepthNegativeOneToOne { get; init; }
+
+    // The host viewport maps +y down the target, as Vulkan's NDC does. A host whose clip
+    // space is y-up and which cannot set a negative viewport height negates y instead.
+    public bool PositionYDown { get; init; }
+}
 
 // One bounded runtime V# table as the emitter sees it: a contiguous run of native buffer
 // candidates plus the flattened key mapping that selects among them.

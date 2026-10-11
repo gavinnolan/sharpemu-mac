@@ -646,7 +646,11 @@ internal sealed class ShaderProgramCache
                         info.ClipSpace.OffsetX,
                         info.ClipSpace.OffsetY,
                         info.ClipSpace.HalfExtentX,
-                        info.ClipSpace.HalfExtentY),
+                        info.ClipSpace.HalfExtentY)
+                    {
+                        DepthNegativeOneToOne = info.ClipSpace.DepthNegativeOneToOne,
+                        PositionYDown = info.ClipSpace.PositionYDown,
+                    },
                 };
             }
 

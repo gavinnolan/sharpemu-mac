@@ -1132,7 +1132,13 @@ public static partial class Gen5MslTranslator
                 values[component] = $"as_type<float>(v[{instruction.Sources[component].Value}])";
             }
 
-            Line($"{field} = {ExecSelect($"float4({values[0]}, {values[1]}, {values[2]}, {values[3]})", field)};");
+            var exported = $"float4({values[0]}, {values[1]}, {values[2]}, {values[3]})";
+            if (export.Target == 12)
+            {
+                exported = ToHostClipSpace(exported);
+            }
+
+            Line($"{field} = {ExecSelect(exported, field)};");
             if (export.Target == 12)
             {
                 EmitInvalidPositionDistance();

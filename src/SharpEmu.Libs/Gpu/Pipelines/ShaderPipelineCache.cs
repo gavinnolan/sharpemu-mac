@@ -237,7 +237,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         };
     }
 
-    // The vertex tables of the draw and the clip-space transform when clipping is off.
+    // The vertex tables of the draw, the clip-space transform when clipping is off and the
+    // draw's clip-space conventions.
     private VertexInputInfo PrepareVertexInput(ShaderSource source, ShaderInterfaceRegisters shaderInterface, ContextRegisters context)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VertexInputResolution);
@@ -256,6 +257,13 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 Math.Min(limits.MaxViewportHeight, MaxViewportDimension) * 0.5f);
         }
 
+        // The host viewport the draw state builds: the clip-disabled one is y-down, any
+        // other follows the sign of the guest's y scale.
+        clipSpace = clipSpace with
+        {
+            DepthNegativeOneToOne = !context.Clip.DirectXClipSpace,
+            PositionYDown = context.Clip.ClipDisable || context.ScreenViewport.Viewports[0].YScale > 0f,
+        };
         return VertexInputResolver.ResolveVertexInputs(_context, source.Registered, source.UserData,
             shaderInterface.VertexOutputControl, clipSpace);
     }

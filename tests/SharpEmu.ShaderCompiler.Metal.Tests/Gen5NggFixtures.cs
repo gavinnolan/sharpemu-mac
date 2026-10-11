@@ -187,7 +187,8 @@ internal static class Gen5NggFixtures
         Gen5NggStageInfo? stageInfo = null,
         int requiredVertexOutputCount = 1,
         ResourceRuntimeInputs? runtimeInputs = null,
-        uint positionExportControl = 0) =>
+        uint positionExportControl = 0,
+        ShaderClipSpaceTransform clipSpace = default) =>
         Gen5ComputeFixtures.RequestOrThrow(
             program,
             ShaderStage.Vertex,
@@ -195,16 +196,18 @@ internal static class Gen5NggFixtures
             runtimeInputs: runtimeInputs,
             primitiveShader: stageInfo ?? StageInfo,
             userDataBase: VertexUserDataBase,
-            positionExportControl: positionExportControl);
+            positionExportControl: positionExportControl,
+            clipSpace: clipSpace);
 
     public static Gen5MslShader CompileOrThrow(
         Gen5ShaderProgram program,
         Gen5NggStageInfo? stageInfo = null,
         int requiredVertexOutputCount = 1,
         ResourceRuntimeInputs? runtimeInputs = null,
-        uint positionExportControl = 0)
+        uint positionExportControl = 0,
+        ShaderClipSpaceTransform clipSpace = default)
     {
-        var request = Request(program, stageInfo, requiredVertexOutputCount, runtimeInputs, positionExportControl);
+        var request = Request(program, stageInfo, requiredVertexOutputCount, runtimeInputs, positionExportControl, clipSpace);
         if (!Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error))
         {
             throw new InvalidOperationException($"NGG mesh emit failed: {error}");

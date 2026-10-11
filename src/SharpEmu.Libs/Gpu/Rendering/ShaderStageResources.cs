@@ -113,7 +113,8 @@ public readonly record struct VertexAttributeResource(
     int BufferIndex,
     uint OffsetBytes);
 
-// The viewport transform a vertex program applies when clipping is off.
+// The viewport transform a vertex program applies when clipping is off, and the guest's
+// clip-space conventions a host may have to apply in the program.
 public readonly record struct ClipSpaceTransform(
     bool Enabled,
     float ScaleX,
@@ -121,7 +122,15 @@ public readonly record struct ClipSpaceTransform(
     float OffsetX,
     float OffsetY,
     float HalfExtentX,
-    float HalfExtentY);
+    float HalfExtentY)
+{
+    // PA_CL_CLIP_CNTL.DX_CLIP_SPACE_DEF clear: the program's z runs over [-w, w].
+    public bool DepthNegativeOneToOne { get; init; }
+
+    // The host viewport maps +y down the target: the clip-disabled viewport always, else a
+    // positive guest y scale. A host whose clip space is y-up negates the position's y then.
+    public bool PositionYDown { get; init; }
+}
 
 public sealed class VertexInputInfo
 {

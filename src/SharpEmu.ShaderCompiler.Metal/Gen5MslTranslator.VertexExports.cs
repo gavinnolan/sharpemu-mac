@@ -204,6 +204,67 @@ public static partial class Gen5MslTranslator
             ? "sharpemu_mesh_viewport"
             : "sharpemu_out.sharpemu_viewport";
 
+        private bool ConvertsPositionToHostClipSpace =>
+            _request.ClipSpace.Enabled ||
+            _request.ClipSpace.PositionYDown ||
+            _request.ClipSpace.DepthNegativeOneToOne;
+
+        /// <summary>The exported POS0 <paramref name="position"/> in Metal's clip space, held in
+        /// a temporary when anything changes.</summary>
+        private string ToHostClipSpace(string position)
+        {
+            if (!ConvertsPositionToHostClipSpace)
+            {
+                return position;
+            }
+
+            var converted = Temp("float4", position);
+            foreach (var statement in HostClipSpaceStatements(converted))
+            {
+                Line(statement);
+            }
+
+            return converted;
+        }
+
+        /// <summary>
+        /// Brings the guest position in <paramref name="position"/> to Metal's clip space in
+        /// place. A clip-disabled draw's window coordinates first go through the viewport
+        /// transform the SPIR-V translator applies (ConvertPositionToClipSpace), against the
+        /// same maximum-size viewport the draw state then sets. Vulkan's NDC is y-down and
+        /// Metal's y-up, and Metal takes no negative viewport height: where the host viewport
+        /// is y-down — the clip-disabled one always, else a positive guest y scale — y is
+        /// negated so the position lands on Vulkan's pixels. Metal's clip volume is z in
+        /// [0, w] with no negative-one-to-one control, so a guest [-w, w] depth becomes
+        /// (z + w) / 2, which the viewport's near and far then map exactly as Vulkan maps z.
+        /// </summary>
+        private IEnumerable<string> HostClipSpaceStatements(string position)
+        {
+            var clip = _request.ClipSpace;
+            if (clip.Enabled)
+            {
+                yield return
+                    $"{position}.x = ({position}.x * {FloatBits(clip.ScaleX)} + {FloatBits(clip.OffsetX)}) / " +
+                    $"{FloatBits(clip.HalfExtentX)} - 1.0f;";
+                yield return
+                    $"{position}.y = ({position}.y * {FloatBits(clip.ScaleY)} + {FloatBits(clip.OffsetY)}) / " +
+                    $"{FloatBits(clip.HalfExtentY)} - 1.0f;";
+            }
+
+            if (clip.PositionYDown)
+            {
+                yield return $"{position}.y = -{position}.y;";
+            }
+
+            if (clip.DepthNegativeOneToOne)
+            {
+                yield return $"{position}.z = ({position}.z + {position}.w) * 0.5f;";
+            }
+        }
+
+        private static string FloatBits(float value) =>
+            $"as_type<float>(0x{BitConverter.SingleToUInt32Bits(value):X8}u)";
+
         /// <summary>POS0's zero-position plane, written after the position itself.</summary>
         private void EmitInvalidPositionDistance()
         {
