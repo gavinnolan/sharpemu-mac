@@ -712,6 +712,33 @@ address=0x801C6F0000 size=0x400000`, now with its reason — *not one backed spa
 Souls only splits an image whose layers are separable, so a single-layer 4 MiB surface
 still falls back to the whole-range resolve and is skipped.
 
+### void tRrLM();++ //Void Terrarium++
+
+Reaches **controllable gameplay**. Twelve confirms walk the title and intro, after which
+the game puts its own "Move" prompt on screen with a D-pad glyph; arrow keys move the
+creature and the camera follows, the prompt clears, and play continues. Rendering matches
+the title's art direction — a very dark terrarium with volumetric light, ground detail,
+debris and plants, all of it legible.
+
+It is the cleanest title measured so far: **no `[METAL-V2][WARN]` lines at all**, no
+fatals, and `msl_structured=24 msl_dispatcher=0` — every shader it uses takes the
+structured control-flow path and none falls back to the PC dispatcher.
+
+Frame rate reaches 60 and holds a median of **44.8** across the active part of a
+200-second run (95 intervals above 5 fps, max 60.00). The GPU is busy 44% of wall and the
+worker idle 64% with no host waits, so neither is the limiter: 11988 draws and 2553
+passes per two seconds is about 133 draws and 28 passes a frame, and what keeps the
+median off 60 is upstream of the backend.
+
+### Quake
+
+Menus render correctly at over 100 fps — logo, Options, Accessibility text, all of it.
+Gameplay could not be reached: a **`CONNECTION ERROR` modal for Bethesda.net** sits over
+the menu and comes back after being dismissed, so the main menu cannot be navigated to
+start a game. Two runs with different key paths (confirms, and escapes back to the root
+first) end on the same modal. That is a networking or HLE matter rather than a rendering
+one, and it is what to clear before Quake can be checked in game.
+
 ## Process-level macOS tuning (separate workstream)
 
 - `Info.plist`: `LSSupportsGameMode`, `GCSupportsGameMode`, and
