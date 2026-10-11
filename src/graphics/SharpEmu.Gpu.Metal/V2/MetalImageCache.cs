@@ -994,7 +994,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         ref readonly var description = ref image.Description;
         if (!TrySplitLayers(in description, out var layers, out var layerBytes))
         {
-            return WriteBackInRuns(context, image);
+            return WriteBackInRuns(context, image, 0, description.Data.Size);
         }
 
         var batch = (uint)Math.Clamp(MaxTransferPieceBytes / layerBytes, 1, layers);
@@ -1008,12 +1008,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             var piece = _guestMemory.ResolveWritable(description.Data.Address + pieceBase, pieceSize);
             if (!piece.IsValid || piece.Size < pieceSize)
             {
-                MetalV2Diagnostics.WarnOnce(
-                    "writeback-piece-unresolved",
-                    $"A GPU-written image piece has no writable guest window, so those layers stay in the " +
-                    $"texture: address=0x{description.Data.Address + pieceBase:X16} size=0x{pieceSize:X} " +
-                    $"layers={first}+{count} " +
-                    $"({_guestMemory.DescribeResolve(description.Data.Address + pieceBase, pieceSize)}).");
+                // These layers are not one backed span; cut them into the runs that are
+                // rather than leaving the whole piece in the texture.
+                moved |= WriteBackInRuns(context, image, pieceBase, pieceBase + pieceSize);
                 continue;
             }
 
@@ -1030,27 +1027,27 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         return moved;
     }
 
-    // The last resort of a writeback: an image whose guest bytes are not one backed span
-    // at all. Each run is the longest prefix one window covers, pulled back to a
-    // boundary no subresource straddles, and the transfer is restricted to it. A run
+    // The last resort of a writeback: a range of an image whose guest bytes are not one
+    // backed span at all. Each run is the longest prefix one window covers, pulled back
+    // to a boundary no subresource straddles, and the transfer is restricted to it. A run
     // that resolves to nothing is a hole in the guest mapping: those bytes stay in the
     // texture, and the next run starts after them.
-    private bool WriteBackInRuns(IMetalSubmissionContext context, MetalCachedImage image)
+    private bool WriteBackInRuns(IMetalSubmissionContext context, MetalCachedImage image, ulong from, ulong to)
     {
         ref readonly var description = ref image.Description;
         var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
-        var size = description.Data.Size;
+        var size = Math.Min(to, description.Data.Size);
         // The stencil plane is named by layers, not by the depth plane's bytes: one
         // layer of stencil is a byte per texel where one layer of depth is four, so a
         // run's stencil bytes are its layers' stencil bytes.
         var layers = description.TransferLayers;
-        var layerBytes = layers != 0 ? size / layers : 0;
+        var layerBytes = layers != 0 ? description.Data.Size / layers : 0;
         var stencilLayerBytes = description.HasStencil && layers != 0 ? description.Stencil.Size / layers : 0;
         var written = 0UL;
         // What the walk did, kept only once something is left behind: a walk that covers
         // the image says nothing and allocates nothing.
         StringBuilder? trace = null;
-        for (var offset = 0UL; offset < size;)
+        for (var offset = from; offset < size;)
         {
             var start = _transfer.AlignRunStart(in description, offset);
             if (start > offset)
@@ -1099,7 +1096,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             offset = end;
         }
 
-        if (written < size)
+        if (written < size - from)
         {
             // Counted from what the runs carried rather than from the steps over holes:
             // a block row the boundary falls inside is not carried either, and saying so
@@ -1107,8 +1104,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             MetalV2Diagnostics.WarnOnce(
                 "writeback-unresolved",
                 $"A GPU-written image has guest bytes no run covers, so those stay in the texture: " +
-                $"address=0x{description.Data.Address:X16} size=0x{description.Data.Size:X} " +
-                $"unwritten=0x{size - written:X} " +
+                $"address=0x{description.Data.Address + from:X16} size=0x{size - from:X} " +
+                $"unwritten=0x{size - from - written:X} " +
                 $"{ProfileLabel("writeback", in description)} runs=[{trace}] " +
                 $"({_guestMemory.DescribeResolve(description.Data.Address, description.Data.Size)}).");
         }
