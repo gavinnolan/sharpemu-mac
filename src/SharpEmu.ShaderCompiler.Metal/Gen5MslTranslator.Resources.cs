@@ -473,6 +473,26 @@ public static partial class Gen5MslTranslator
 
         // ---- scalar memory ----
 
+        // One dword of a buffer whose V# lives in scalar registers rather than in a host
+        // binding. The descriptor's first two dwords are its base address, its stride and
+        // record count say how far it reaches, and a read past that is zero - the bound
+        // the hardware applies - rather than whatever guest bytes follow the buffer.
+        private string DeviceDescriptorWord(uint descriptorRegister, string byteOffset)
+        {
+            var word1 = Temp("uint", ScalarExpression(descriptorRegister + 1));
+            var stride = Temp("uint", $"(({word1} >> 16u) & 0x3FFFu)");
+            var records = Temp("uint", ScalarExpression(descriptorRegister + 2));
+            var size = Temp("ulong", $"({stride} == 0u ? (ulong){records} : (ulong){stride} * (ulong){records})");
+            var address = Temp(
+                "ulong",
+                $"(((ulong){ScalarExpression(descriptorRegister)} | ((ulong)({word1} & 0xFFFFu) << 32)) + " +
+                $"(ulong){byteOffset}) & {FormatULong(DeviceAddressPaging.AddressMask & ~3ul)}");
+            return Temp(
+                "uint",
+                $"(((ulong){byteOffset} + 3ul) < {size} ? " +
+                $"sharpemu_load_device_dword({DeviceArguments}, {address}) : 0u)");
+        }
+
         private bool TryEmitLayoutScalarMemory(Gen5ShaderInstruction instruction, Gen5ScalarMemoryControl control, out string error)
         {
             error = string.Empty;
@@ -522,14 +542,33 @@ public static partial class Gen5MslTranslator
 
                     value = Temp("uint", LoadFlattenedWord($"{slot}u"));
                 }
-                else if (entry.Kind == MemoryResourceKind.ScalarBuffer)
+                else if (entry.Kind == MemoryResourceKind.ScalarBuffer &&
+                         (entry.DeviceDescriptor || entry.Resource == MemoryAccessInfo.NoResource))
                 {
-                    if (entry.Resource == MemoryAccessInfo.NoResource)
+                    // The buffer this load addresses has no host binding: either its V#
+                    // was itself read on the device, or it is a runtime table entry the
+                    // draw cannot evaluate ahead of time. Its scalar registers hold the
+                    // descriptor either way, so the load reads it the way the hardware
+                    // does and goes through the device-address page table.
+                    if (instruction.Sources.Count == 0 || instruction.Sources[0].Kind != Gen5OperandKind.ScalarRegister)
                     {
-                        error = "scalar buffer load has no dense buffer";
+                        error = "scalar buffer load has no scalar descriptor";
                         return false;
                     }
 
+                    if (!_hasDeviceAddressTable)
+                    {
+                        error = "device address access without an address range binding";
+                        return false;
+                    }
+
+                    var descriptorOffset = Temp(
+                        "uint",
+                        $"({dynamicOffset} + {FormatUInt(unchecked((uint)control.ImmediateOffsetBytes + ((uint)component * sizeof(uint))))})");
+                    value = DeviceDescriptorWord(instruction.Sources[0].Value, descriptorOffset);
+                }
+                else if (entry.Kind == MemoryResourceKind.ScalarBuffer)
+                {
                     var bindingIndex = (int)entry.Resource;
                     var byteOffset = unchecked((uint)control.ImmediateOffsetBytes + ((uint)component * sizeof(uint)));
                     var address = Temp("uint", ApplyByteBias(bindingIndex, $"({dynamicOffset} + {FormatUInt(byteOffset)})"));
