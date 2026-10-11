@@ -20,9 +20,22 @@ public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
 {
     private const uint TargetSize = 32;
 
-    // The preserved rejected-draw capture, outside the repository source tree.
-    private const string VoidCaptureDirectory =
-        "/Users/xnetcat/Projects/sharpemu/sharpemu-mac/artifacts/validation/void-skipped-shader-400e5c64/shader-capture";
+    // The preserved rejected-draw capture, under the checkout's untracked artifacts directory.
+    private static readonly string VoidCaptureDirectory = Path.Combine(
+        FindCheckoutRoot(), "artifacts", "validation", "void-skipped-shader-400e5c64", "shader-capture");
+
+    private static string FindCheckoutRoot()
+    {
+        for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "SharpEmu.slnx")))
+            {
+                return directory.FullName;
+            }
+        }
+
+        return AppContext.BaseDirectory;
+    }
 
     [Fact]
     public void SyntheticPrimitiveShadersCompileWithTheRuntimeMetalCompiler()

@@ -72,7 +72,14 @@ undersized-source checks. Those additional checks do not execute on a GPU.
   and are rejected. Supplied 2D/array mip chains are uploaded; the existence
   and correctness of every guest mip snapshot is a separate translator task.
 - Incomplete array/depth or mip ranges fail explicitly. BVH instructions fail
-  compilation rather than manufacture all-zero miss results.
+  compilation rather than manufacture all-zero miss results (the Vulkan path
+  has `Gen5SpirvTranslator.RayIntersect.cs`; Metal has no port yet).
+- Vertex shaders stay single-lane: MSL documents SIMD-group functions only for
+  kernel and fragment functions. Pixel, compute and mesh stages run guest waves
+  on real SIMD-groups.
+- Per-vertex pixel inputs (P10/P20, pull model) need `metal::vertex_value`,
+  which only Apple10 GPUs execute; earlier GPUs use the interpolated fallback,
+  as Vulkan does without barycentric support.
 - Cube face selection has readback coverage, but seam filtering across faces
   is not equivalent to native cube filtering and is not qualified.
 - Gather has 2D/array coverage only. Comparison/PCF, sampler LOD bias, integer
@@ -122,10 +129,11 @@ one invocation, not a contention or cross-dispatch synchronization test.
 Swizzled addressing, other descriptor OOB modes, byte bias, and broad alias
 coherence still require separate qualification.
 
-Buffer Inc/Dec and 64-bit X2 atomics remain explicit unsupported cases.
-The inherited shared Global/GDS Inc/Dec builder currently ignores the DATA
-limit and is not qualified for AMD bounded increment/decrement semantics;
-this bounded SWAP change does not enable or correct it. Evidence and exact
+Buffer Inc/Dec and 64-bit X2 atomics have since been implemented
+(`sharpemu_atomic_step` in `Gen5MslTranslator.Resources.cs`; X2 forms in
+`Gen5MslTranslator.cs`) and run on the device in `Gen5MslBufferAtomicTests`.
+Inc/Dec wrap at +1/-1 like the SPIR-V path's `AtomicIIncrement`; neither
+backend yet applies AMD's DATA-bounded wrap, which the MSL image atomics do. Evidence and exact
 source/test provenance are preserved in
 `artifacts/validation/integrated-20261007/metal-atomics/`.
 
