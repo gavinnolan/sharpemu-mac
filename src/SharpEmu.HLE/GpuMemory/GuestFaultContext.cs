@@ -76,6 +76,29 @@ public static class GuestFaultContext
                 : text;
         }
 
+        /// <summary>
+        /// True when any general register holds this value. A store's operand is in a
+        /// register when it faults, so this is how a trap tells the write it is hunting
+        /// from every other write to the same address.
+        /// </summary>
+        public bool CarriesValue(ulong value)
+        {
+            if (!IsValid || Registers is null)
+            {
+                return false;
+            }
+
+            foreach (var register in Registers)
+            {
+                if (register == value)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         public string DescribeRegisters()
         {
             if (!IsValid || Registers is null)

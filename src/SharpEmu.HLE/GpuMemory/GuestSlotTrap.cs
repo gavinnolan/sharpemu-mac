@@ -41,6 +41,12 @@ public static class GuestSlotTrap
     // before the one that matters: the band is what points the trap at the right heap.
     private static readonly ulong BandHigh = Parse("SHARPEMU_TRAP_BAND_HI");
 
+    // SHARPEMU_TRAP_VALUE: report only the faults that are about to store this value, as
+    // told by the registers. The slot's legitimate traffic is the allocator pushing and
+    // popping pointers; one value among them is the corruption, and without this filter it
+    // is one line in thousands.
+    private static readonly ulong TrapValue = Parse("SHARPEMU_TRAP_VALUE");
+
     private const ulong PageBytes = 4096;
 
     private static readonly ulong[] BlockBases = new ulong[MaxBlocks];
@@ -91,6 +97,9 @@ public static class GuestSlotTrap
     /// <summary>The watched offset inside a block.</summary>
     public static ulong Slot => SlotOffset;
 
+    /// <summary>The value being hunted, or zero when any change is interesting.</summary>
+    public static ulong Value => TrapValue;
+
     /// <summary>Adopts a mapping whose shape matches the one the watched structure lives in.</summary>
     public static void OnDirectMapping(ulong mappedAddress, ulong length, int protection)
     {
@@ -98,6 +107,18 @@ public static class GuestSlotTrap
             !MatchesBand(mappedAddress, BandHigh))
         {
             return;
+        }
+
+        lock (BlockArmed)
+        {
+            var existing = Volatile.Read(ref _blockCount);
+            for (var scan = 0; scan < existing && scan < MaxBlocks; scan++)
+            {
+                if (Volatile.Read(ref BlockBases[scan]) == mappedAddress)
+                {
+                    return;
+                }
+            }
         }
 
         var index = Interlocked.Increment(ref _blockCount) - 1;
@@ -141,6 +162,7 @@ public static class GuestSlotTrap
             Report(address);
         }
 
+
         ReleaseBlock(index);
         return true;
     }
@@ -167,12 +189,16 @@ public static class GuestSlotTrap
 
     private static void Report(ulong address)
     {
-        if (Interlocked.Increment(ref _reports) > MaxReports)
+        var context = GuestFaultContext.Capture();
+        // The value a store is about to write is in one of its registers. Reporting only
+        // the faults that carry the watched value is what separates the corruption from
+        // the allocator's own traffic through the same slot.
+        var carries = TrapValue == 0 || context.CarriesValue(TrapValue);
+        if (!carries || Interlocked.Increment(ref _reports) > MaxReports)
         {
             return;
         }
 
-        var context = GuestFaultContext.Capture();
         Console.Error.WriteLine(
             $"[LOADER][WARN] slot_trap HIT dest=0x{address:X16} slot=0x{SlotOffset:X} " +
             $"rip=0x{context.Rip:X16} code={context.DescribeCode()}");
@@ -228,17 +254,19 @@ public static class GuestSlotTrap
             return;
         }
 
+        var page = PageOfSlot(baseAddress, SlotOffset);
         lock (BlockArmed)
         {
-            if (BlockArmed[index])
+            // Only take a page that nothing else is holding: the watch counts are shared,
+            // and an unbalanced change of them is fatal.
+            if (BlockArmed[index] || !pages.Allows(page, FaultKind.Write))
             {
                 return;
             }
 
             BlockArmed[index] = true;
+            pages.AddWatch(page, PageBytes, blockReads: false);
         }
-
-        pages.AddWatch(PageOfSlot(baseAddress, SlotOffset), PageBytes, blockReads: false);
     }
 
     private static void ReleaseBlock(int index)
@@ -250,6 +278,7 @@ public static class GuestSlotTrap
             return;
         }
 
+        var page = PageOfSlot(baseAddress, SlotOffset);
         lock (BlockArmed)
         {
             if (!BlockArmed[index])
@@ -258,9 +287,12 @@ public static class GuestSlotTrap
             }
 
             BlockArmed[index] = false;
+            // Someone else may have dropped the watch with the mapping it belonged to.
+            if (!pages.Allows(page, FaultKind.Write))
+            {
+                pages.RemoveWatch(page, PageBytes, blockReads: false);
+            }
         }
-
-        pages.RemoveWatch(PageOfSlot(baseAddress, SlotOffset), PageBytes, blockReads: false);
         Volatile.Write(ref _rearmPending, 1);
         Volatile.Write(ref _rearmTicks, Environment.TickCount64);
     }

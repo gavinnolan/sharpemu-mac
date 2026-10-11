@@ -172,6 +172,15 @@ internal sealed class MetalSlotTrap
                     continue;
                 }
 
+                // The slot's legitimate traffic is the allocator pushing and popping
+                // pointers through it. When a value is named, only becoming that value is
+                // the event worth a line.
+                if (GuestSlotTrap.Value != 0 &&
+                    BitConverter.ToUInt64(span[offset..]) != GuestSlotTrap.Value)
+                {
+                    continue;
+                }
+
                 _mismatches++;
                 Report(slot, slot.Bases[index], (ulong)offset, before, span, cpuFaults);
                 return;

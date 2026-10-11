@@ -96,6 +96,22 @@ public sealed class GuestFaultContextTests
         Assert.Equal("<unavailable>", GuestFaultContext.Capture().DescribeRegisters());
     }
 
+    // A store's operand is in a register when it faults, which is how a trap tells the
+    // write it is hunting from every other write to the same address.
+    [Fact]
+    public void AStoresValueIsFoundInTheFaultingRegisters()
+    {
+        Span<ulong> registers = stackalloc ulong[16];
+        registers[15] = 0x4000000040000000;
+        GuestFaultContext.Publish(0x8013B626B, registers);
+        var snapshot = GuestFaultContext.Capture();
+        Assert.True(snapshot.CarriesValue(0x4000000040000000));
+        Assert.False(snapshot.CarriesValue(0x3F8000003F800000));
+
+        GuestFaultContext.Clear();
+        Assert.False(GuestFaultContext.Capture().CarriesValue(0x4000000040000000));
+    }
+
     [Fact]
     public void CodeIsDescribedThroughTheInstalledReader()
     {
