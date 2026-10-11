@@ -128,6 +128,7 @@ internal sealed class MetalSlotTrap
         }
 
         RefreshSlotResolutions(count);
+        PollSlots(count, serial);
 
         var slot = Take();
         slot.InUse = true;
@@ -226,6 +227,74 @@ internal sealed class MetalSlotTrap
                 return;
             }
         }
+    }
+
+    private readonly Dictionary<ulong, ulong> _lastSeen = new();
+
+    // Compared on every commit against what the slot last held, rather than only across a
+    // submission that is still pending. Attribution by submission needs the snapshot to
+    // survive until the GPU signals it, and a run that ends first loses the report
+    // entirely - which happened in half the runs. This cannot miss the transition: it
+    // only needs the slot to be read twice with the write in between.
+    private void PollSlots(int count, ulong serial)
+    {
+        Span<byte> current = stackalloc byte[8];
+        for (var index = 0; index < count; index++)
+        {
+            var slotAddress = _blocks[index] + GuestSlotTrap.Slot;
+            if (!_memory.TryRead(slotAddress, current))
+            {
+                continue;
+            }
+
+            var value = BitConverter.ToUInt64(current);
+            var seen = _lastSeen.TryGetValue(slotAddress, out var previous);
+            _lastSeen[slotAddress] = value;
+            if (!seen || value == previous ||
+                (GuestSlotTrap.Value != 0 && value != GuestSlotTrap.Value))
+            {
+                continue;
+            }
+
+            ReportPoll(slotAddress, previous, value, serial);
+        }
+
+    }
+
+    private void ReportPoll(ulong slotAddress, ulong before, ulong after, ulong serial)
+    {
+        _mismatches++;
+        if (++_reports > MaxReports)
+        {
+            return;
+        }
+
+        Console.Error.WriteLine(
+            $"[METAL-V2][SLOT-TRAP] A watched slot took the hunted value: slot=0x{slotAddress:X16} " +
+            $"was=0x{before:X16} now=0x{after:X16} at_commit_of_serial={serial} " +
+            $"slot_resolves_to={DescribeSlotResolution(slotAddress)} " +
+            $"cpu_faults={GuestSlotTrap.Faults}");
+
+        // Every submission still in flight could have written it, so each one's covering
+        // resolutions are a candidate; the one whose destination holds the slot's bytes is
+        // the producer.
+        foreach (var pending in _pending)
+        {
+            if (!pending.InUse || pending.Bindings.Count == 0)
+            {
+                continue;
+            }
+
+            foreach (var binding in pending.Bindings)
+            {
+                Console.Error.WriteLine(
+                    $"[METAL-V2][SLOT-TRAP]   in-flight serial={pending.Serial} {binding.Owner} " +
+                    $"guest=0x{binding.Address:X16}+0x{binding.Size:X} buffer=0x{binding.Buffer:X} " +
+                    $"offset=0x{binding.Offset:X} covers_slot=0x{binding.CoveredSlot:X16}");
+            }
+        }
+
+        Console.Error.Flush();
     }
 
     private readonly List<(ulong Buffer, ulong Offset, ulong Slot)> _slotResolutions = new();
