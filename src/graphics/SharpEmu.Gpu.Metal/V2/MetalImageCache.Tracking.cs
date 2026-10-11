@@ -381,6 +381,17 @@ internal sealed partial class MetalImageCache
     /// <summary>Materializations skipped because the clear was already applied.</summary>
     public long TakeDccRepeatsSkipped() => Interlocked.Exchange(ref _dccRepeatsSkipped, 0);
 
+    /// <summary>
+    /// Claims this slice and clear code for materialization, or reports that it is
+    /// already done. The scan around it runs outside the cache lock — it reads guest
+    /// backing — so the claim takes the lock itself.
+    /// </summary>
+    private bool TryClaimMaterializedDcc(ulong address, byte code)
+    {
+        using var held = _lock.Hold();
+        return _materializedDccSlices.Add((address, code));
+    }
+
     /// <summary>Forgets what was materialized over a range, so the clear applies again.</summary>
     private void ReArmMaterializedDcc(ulong address, ulong size)
     {
@@ -669,7 +680,7 @@ internal sealed partial class MetalImageCache
                 // touching guest memory any earlier than before; a guest fill of the
                 // same metadata re-arms it, so a surface the game clears every frame
                 // keeps working.
-                if (UseMaterializedSet && !_materializedDccSlices.Add((address, code)))
+                if (UseMaterializedSet && !TryClaimMaterializedDcc(address, code))
                 {
                     Interlocked.Increment(ref _dccRepeatsSkipped);
                     continue;
