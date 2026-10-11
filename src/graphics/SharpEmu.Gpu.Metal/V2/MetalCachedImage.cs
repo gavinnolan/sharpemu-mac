@@ -248,9 +248,19 @@ internal sealed class MetalCachedImage : IDisposable
         // 3D image. Metal has no such view and raises rather than returning nil, but it
         // does not need one: a render pass names the slice of a 3D attachment with its
         // depth plane, which the attachment already carries, so the volume binds whole.
-        if (Shape.TextureType == Mtl.TextureType3D && viewType != Mtl.TextureType3D &&
-            (requested.Usage & (GpuImageUsage.ColorAttachmentBit | GpuImageUsage.DepthStencilAttachmentBit)) != 0)
+        if (Shape.TextureType == Mtl.TextureType3D && viewType != Mtl.TextureType3D)
         {
+            if ((requested.Usage & (GpuImageUsage.ColorAttachmentBit | GpuImageUsage.DepthStencilAttachmentBit)) == 0)
+            {
+                // Read as something other than a volume, the binding is wrong either
+                // way; being wrong is better than raising, which ends the process.
+                MetalV2Diagnostics.WarnOnce(
+                    $"volume-view:{viewType}",
+                    $"A volume cannot be viewed as another texture type; binding the volume instead: " +
+                    $"type=3D->{viewType} format={Shape.PixelFormat}->{viewFormat} " +
+                    $"layers={requested.BaseLayer}+{requested.LayerCount} usage={requested.Usage}.");
+            }
+
             return Texture;
         }
 
