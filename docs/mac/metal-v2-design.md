@@ -772,6 +772,38 @@ A second, smaller finding from the same run: after the modal, the title retries
 HLE import, because its PSN web-API user context was never created. It costs CPU and is
 downstream of being offline.
 
+### What limits Poppy Playtime, measured
+
+With GPU-timed end-of-pipe labels the title reaches its menu, plays its intro at a steady
+**11 fps** and loads its first level. The costs, from the counters of a 200 s run:
+
+- **The image cache's alias rule is half of all image traffic.** 97 `wb_overlap` and 75
+  `up_alias` per second, against 42 `wb_store`, 37 `up_gpu`, 4 `up_cpu` and 1 `up_new` —
+  so the churn is not the guest changing textures, it is the cache publishing and
+  reloading surfaces that share guest bytes. `SynchronizeAliases` is right to do it and
+  pays for it whole: a cached image is dirty as a boolean, so an overlap of any size
+  costs a full retile of one surface and a full detile of the other. The pairs are named
+  once each now; the worst is a 37 MiB `R16G16B16A16Unorm` target reloaded entire because
+  a 4 MiB surface inside it was written, and the post-process chain aliases every level of
+  itself (`712x400`, `356x200`, `178x100`, `89x50`, `45x25`) onto the same addresses.
+  The fix is sub-range dirty tracking — the Vulkan cache already has a piecewise upload
+  path and Metal v2 does not.
+- **That churn is what splits the command buffers.** Flushes track draws almost one for
+  one (596 flushes per 557 draws in one interval, 846 per 766 in another), because every
+  transfer closes the open encoders. At 600-850 commits a second the driver charges
+  300-450 ms of scheduling and 300-540 ms of completion per 2 s — more than the 550 ms the
+  GPU is busy in the same interval.
+- **Nothing is GPU-bound.** The GPU is busy 25-37 % of the wall clock and the worker has
+  nothing runnable for 51-65 % of it, with `host_waits=0` throughout.
+- **The guest blocks in `submitDone`, but that is a symptom.** It is inside
+  `CommandStreamQueue.Done` for 99 % of the wall clock, about seven calls a frame at
+  13.6 ms each, because it may be only one frame boundary ahead of the worker. Raising
+  `SHARPEMU_SUSPEND_POINTS_IN_FLIGHT` to 4 drops that to 38 % and does **not** move the
+  frame rate (mean 9.9 → 10.2 fps), so the handshake is where the guest waits rather than
+  what it waits for.
+- **After the intro the level load is CPU-bound.** Over 100 s with zero draws, zero
+  submissions and the worker 99.8 % idle: nothing for the GPU backend to do.
+
 ## Process-level macOS tuning (separate workstream)
 
 - `Info.plist`: `LSSupportsGameMode`, `GCSupportsGameMode`, and
