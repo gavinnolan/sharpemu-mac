@@ -1,0 +1,125 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+using SharpEmu.Gpu.Metal.V2;
+using SharpEmu.Libs.Gpu.Abstractions;
+using SharpEmu.Libs.Gpu.Images;
+using Xunit;
+
+namespace SharpEmu.Gpu.Metal.Tests;
+
+// An image whose guest bytes are not one backed span is transferred a run at a time, and
+// a run ends wherever a window does rather than on a layer boundary. What arrives has to
+// be what one whole transfer would have produced, byte for byte: a run that cuts a
+// surface part way down is carried by whole block rows, which are the finest cut whose
+// tiled bytes are still one contiguous range.
+public sealed partial class MetalImageTransferTests
+{
+    [Theory]
+    [InlineData((int)GuestTileMode.Standard64KB, 128u, 512u, 1u, 0x10000UL, "tiled 64KB")]
+    [InlineData((int)GuestTileMode.Standard64KB, 128u, 512u, 1u, 0x18000UL, "tiled 64KB/odd run")]
+    [InlineData((int)GuestTileMode.Standard4KB, 64u, 128u, 1u, 0x2000UL, "tiled 4KB")]
+    [InlineData((int)GuestTileMode.Standard4KB, 96u, 128u, 1u, 0x3000UL, "tiled 4KB/odd run")]
+    [InlineData((int)GuestTileMode.Linear, 64u, 128u, 1u, 0x2000UL, "linear")]
+    [InlineData((int)GuestTileMode.Linear, 96u, 100u, 1u, 0x1000UL, "linear/odd run")]
+    public void ATransferCutIntoByteRunsMatchesTheWholeTransfer(
+        int tile, uint width, uint height, uint layers, ulong runBytes, string name)
+    {
+        if (!RequireDevice()) return;
+        using var harness = new MetalTransferHarness(Device.Value);
+        var description = Color2D(
+            GuestPixelFormat.Bits8_8_8_8UNorm, GpuFormat.R8G8B8A8Unorm, width, height, 1, layers, (GuestTileMode)tile);
+        var guest = BuildGuest(description, 0x51 + (uint)name.Length);
+        var whole = TransferWhole(harness, description, guest);
+        var runs = TransferInByteRuns(harness, description, guest, runBytes, out var pieces);
+
+        Assert.Equal(whole, runs);
+        Assert.True(pieces > 1, $"{name} was not actually cut: pieces={pieces}");
+        output.WriteLine($"{name}: 0x{description.Data.Size:x} bytes in {pieces} runs of 0x{runBytes:x} matched");
+    }
+
+    [Fact]
+    public void ADepthSurfaceCutIntoByteRunsMatchesTheWholeTransfer()
+    {
+        if (!RequireDevice()) return;
+        using var harness = new MetalTransferHarness(Device.Value);
+        var description = Depth(GuestDepthFormat.Z32Float, stencil: false, 64, 64, 2);
+        var guest = BuildGuest(description, 0x37);
+        var runs = TransferInByteRuns(harness, description, guest, description.Data.Size / 2, out var pieces);
+
+        // Against the guest bytes themselves rather than against a whole-surface
+        // transfer: a depth plane is its own oracle, and the comparison then does not
+        // depend on what else the device did first.
+        Assert.Equal(guest, runs);
+        Assert.True(pieces > 1, $"the depth surface was not actually cut: pieces={pieces}");
+        output.WriteLine($"depth: 0x{description.Data.Size:x} bytes in {pieces} runs matched");
+    }
+
+    // A run end never falls inside a subresource the transfer cannot cut, so the caller
+    // can always hand a whole number of block rows over.
+    [Theory]
+    [InlineData((int)GuestTileMode.Standard64KB, 128u, 256u)]
+    [InlineData((int)GuestTileMode.Standard4KB, 96u, 96u)]
+    public void ARunEndIsPulledBackToABlockRowBoundary(int tile, uint width, uint height)
+    {
+        if (!RequireDevice()) return;
+        using var harness = new MetalTransferHarness(Device.Value);
+        var description = Color2D(
+            GuestPixelFormat.Bits8_8_8_8UNorm, GpuFormat.R8G8B8A8Unorm, width, height, 1, 1, (GuestTileMode)tile);
+        var size = description.Data.Size;
+        for (var candidate = 1UL; candidate < size; candidate += 0x400)
+        {
+            var end = harness.Transfer.AlignRunEnd(description, 0, candidate);
+            Assert.True(end <= candidate, $"a run end grew past what the window covered: 0x{end:x} > 0x{candidate:x}");
+        }
+
+        Assert.Equal(size, harness.Transfer.AlignRunEnd(description, 0, size));
+    }
+
+    private static long FirstDifference(byte[] left, byte[] right)
+    {
+        for (var index = 0; index < Math.Min(left.Length, right.Length); index++)
+        {
+            if (left[index] != right[index])
+            {
+                return index;
+            }
+        }
+
+        return left.Length == right.Length ? -1 : Math.Min(left.Length, right.Length);
+    }
+
+    // Each run is handed only its own bytes, exactly as the image cache hands one
+    // window-resolved run at a time, and the subresource range stays the whole image:
+    // what a run carries is decided by its bytes, not by whole layers.
+    private static byte[] TransferInByteRuns(
+        MetalTransferHarness harness, in ImageDescription description, byte[] guest, ulong runBytes, out int pieces)
+    {
+        var size = description.Data.Size;
+        var source = harness.Buffer(guest);
+        var target = harness.Buffer(size);
+        var texture = harness.Texture(harness.Transfer.ShapeFor(description));
+        var range = new SubresourceRange(0, description.Resources.Levels, 0, description.Resources.Layers);
+        pieces = 0;
+        for (var offset = 0UL; offset < size;)
+        {
+            var end = harness.Transfer.AlignRunEnd(description, offset, Math.Min(offset + runBytes, size));
+            Assert.True(end > offset, $"a run starting at 0x{offset:x} of 0x{runBytes:x} carried nothing");
+            var pieceSize = end - offset;
+            harness.Begin();
+            harness.Transfer.EncodeGuestToTexture(
+                harness, description, range, new MetalGuestRange(source, offset, pieceSize, 0), default,
+                texture, offset, pieceSize);
+            harness.Submit();
+            harness.Begin();
+            harness.Transfer.EncodeTextureToGuest(
+                harness, description, range, texture, new MetalGuestRange(target, offset, pieceSize, 0), default,
+                offset, pieceSize);
+            harness.Submit();
+            offset = end;
+            pieces++;
+        }
+
+        return harness.Read(target, 0, size);
+    }
+}
