@@ -642,15 +642,28 @@ They repeat because the sentinel is written by the GPU while the check that read
 is a host read of the same bytes. Between the fill being recorded and the GPU running it,
 every lookup of that surface sees the old uniform clear code and materializes again.
 
-Making the sentinel host-visible removes the repeat exactly as expected — `end_transfer`
-1536 to 111, the clear/fill pairs to zero, peak frame rate 32 to 57 — but it is **not
-landed**. Two runs after it showed the card panels missing where the run before had drawn
-them, on a machine loaded enough that one of those runs managed 0.5 fps, so a regression
-and the title simply not getting that far are indistinguishable. Writing guest memory
-earlier than before is a plausible cause of exactly that symptom. The cause is understood
-and the measurement stands; the fix needs a quiet machine to confirm, and a version that
-suppresses the repeat host-side without changing when guest memory is written is the
-safer shape.
+The cache now remembers which metadata slice and clear code it has already applied and
+skips the repeat, keyed on the code as well as the address so a different clear colour is
+a new clear. Guest memory is written exactly when it was before. The re-arm lives in
+`TryAbsorbDccFill` and **only** there: an earlier version also re-armed from
+`InvalidateMemoryFromGpu`, which `MaterializeDccClear`'s own sentinel fill reaches, so
+every materialization immediately forgot the claim it had just made and the set
+suppressed nothing — the A/B caught it, with the skip counter at zero in both arms.
+
+Measured back to back on a quiet machine, same input plan, 150 s each, with
+`SHARPEMU_METAL_V2_DCC_MATERIALIZED_SET=0` as the control:
+
+| | on | off |
+|---|---|---|
+| colour clears | **466** | 6544 |
+| repeats skipped | **3074** | 0 |
+| pass teardowns | **2627** | 9127 |
+| peak frame rate | 58.8 | 57.3 |
+
+The card screen renders identically in both arms — panels, artwork, glyphs all present —
+so the panel loss seen while chasing an earlier variant of this was machine load, not the
+change. Frame rate is not the discriminator here: both arms reach about 58 fps once the
+machine is quiet, and it is the counters that separate them.
 
 Separately, the panel text is **not** globally broken: the same run renders a full
 sentence of crisp white text on the loading screen. Whatever is missing from the card
