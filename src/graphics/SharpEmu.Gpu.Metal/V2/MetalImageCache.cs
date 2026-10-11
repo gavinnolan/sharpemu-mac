@@ -1052,6 +1052,17 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         StringBuilder? trace = null;
         for (var offset = 0UL; offset < size;)
         {
+            var start = _transfer.AlignRunStart(in description, offset);
+            if (start > offset)
+            {
+                // The step over a hole landed inside a transfer whose other half it
+                // stepped past; that half carries nothing either.
+                trace ??= new StringBuilder();
+                Trace(trace, "skip", offset, Math.Min(size, start) - offset);
+                offset = start;
+                continue;
+            }
+
             var remaining = Math.Min(size - offset, MaxTransferPieceBytes);
             var run = _guestMemory.ResolveWritablePrefix(description.Data.Address + offset, remaining);
             var end = run.IsValid

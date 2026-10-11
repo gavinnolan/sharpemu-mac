@@ -82,6 +82,11 @@ internal interface IMetalImageTransfer
     // should actually use, so every subresource is either wholly inside a run or wholly
     // inside another one.
     ulong AlignRunEnd(in ImageDescription description, ulong start, ulong end);
+
+    // Where the next run may begin, for a caller that had to step over guest bytes no
+    // window covers: a transfer the step landed inside carries nothing, so the run after
+    // it starts past that transfer rather than in the middle of it.
+    ulong AlignRunStart(in ImageDescription description, ulong offset);
 }
 
 // What MTLTextureDescriptor fields an image needs.

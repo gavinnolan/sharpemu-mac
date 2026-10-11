@@ -76,6 +76,76 @@ public sealed partial class MetalImageTransferTests
         Assert.Equal(size, harness.Transfer.AlignRunEnd(description, 0, size));
     }
 
+    // A walk stepped over a hole lands wherever the window ended, which is rarely a
+    // boundary a transfer can start at. Every byte such a walk claims has to be a byte it
+    // really writes, or the count of what stayed stale is a guess.
+    [Theory]
+    [InlineData((int)GuestTileMode.Standard64KB, 256u, 512u, 0x30000UL)]
+    [InlineData((int)GuestTileMode.Standard4KB, 128u, 128u, 0x1800UL)]
+    [InlineData((int)GuestTileMode.Linear, 96u, 64u, 0x500UL)]
+    public void AClaimedRunWritesEveryByteItClaims(int tile, uint width, uint height, ulong holeBytes)
+    {
+        if (!RequireDevice()) return;
+        using var harness = new MetalTransferHarness(Device.Value);
+        var description = Color2D(
+            GuestPixelFormat.Bits8_8_8_8UNorm, GpuFormat.R8G8B8A8Unorm, width, height, 1, 1, (GuestTileMode)tile);
+        var size = description.Data.Size;
+        var guest = BuildGuest(description, 0x6D);
+        var source = harness.Buffer(guest);
+        var target = harness.Buffer(size);
+        var texture = harness.Texture(harness.Transfer.ShapeFor(description));
+        var range = new SubresourceRange(0, description.Resources.Levels, 0, description.Resources.Layers);
+        var claimed = new bool[size];
+        var walked = 0;
+        for (var offset = holeBytes; offset < size;)
+        {
+            // The hole is the first bytes of the image, so the first run starts inside a
+            // row it cannot have: the start has to move off it.
+            var start = harness.Transfer.AlignRunStart(description, offset);
+            Assert.True(start >= offset, $"a run start moved backwards: 0x{start:x} < 0x{offset:x}");
+            if (start >= size)
+            {
+                break;
+            }
+
+            var end = harness.Transfer.AlignRunEnd(description, start, size);
+            Assert.True(end > start, $"a run from 0x{start:x} to the end of the image carried nothing");
+            var pieceSize = end - start;
+            harness.Begin();
+            harness.Transfer.EncodeGuestToTexture(
+                harness, description, range, new MetalGuestRange(source, start, pieceSize, 0), default,
+                texture, start, pieceSize);
+            harness.Submit();
+            harness.Begin();
+            harness.Transfer.EncodeTextureToGuest(
+                harness, description, range, texture, new MetalGuestRange(target, start, pieceSize, 0), default,
+                start, pieceSize);
+            harness.Submit();
+            for (var index = start; index < end; index++)
+            {
+                claimed[index] = true;
+            }
+
+            offset = end;
+            walked++;
+        }
+
+        Assert.True(walked != 0, $"the walk claimed nothing after a hole of 0x{holeBytes:x}");
+        var written = harness.Read(target, 0, size);
+        for (var index = 0UL; index < size; index++)
+        {
+            if (claimed[index])
+            {
+                Assert.True(written[index] == guest[index],
+                    $"a claimed byte was not written: index=0x{index:x} claimed run, " +
+                    $"guest=0x{guest[index]:x2} target=0x{written[index]:x2}");
+            }
+        }
+
+        output.WriteLine(
+            $"tile={(GuestTileMode)tile} hole=0x{holeBytes:x}: {walked} runs claimed and wrote every claimed byte");
+    }
+
     private static long FirstDifference(byte[] left, byte[] right)
     {
         for (var index = 0; index < Math.Min(left.Length, right.Length); index++)

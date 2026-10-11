@@ -653,6 +653,73 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         return aligned;
     }
 
+    /// <summary>
+    /// The first offset at or after <paramref name="offset"/> that a restricted transfer
+    /// can begin at. A caller steps over guest bytes no window covers and lands wherever
+    /// the window ended, which may be inside a block row or a texel row whose other half
+    /// it just stepped past: that row carries nothing now, so the run after it begins
+    /// past the row rather than inside it, and every byte a run is given is a byte the
+    /// run really writes.
+    /// </summary>
+    public ulong AlignRunStart(in ImageDescription description, ulong offset)
+    {
+        var plan = PlanFor(description);
+        if (plan.DepthStencil)
+        {
+            return plan.SliceSize == 0
+                ? offset
+                : (offset + plan.SliceSize - 1) / plan.SliceSize * plan.SliceSize;
+        }
+
+        // Pushing past one transfer can land inside the next, so the push repeats until
+        // it stands still. Two kinds of transfer and no overlap between them means it
+        // settles at once in practice; the bound is only there so it always ends.
+        var aligned = offset;
+        for (var pass = 0; pass < 4; pass++)
+        {
+            var moved = aligned;
+            foreach (var copy in plan.Copies)
+            {
+                var rowTexels = copy.BufferRowLength != 0 ? copy.BufferRowLength : copy.Width;
+                moved = AdvancePast(moved, copy.BufferOffset, CopyEnd(plan, copy),
+                    copy.Depth == 1 ? (ulong)RowBytes(plan, rowTexels) : 0);
+            }
+
+            foreach (var transfer in plan.Tiles)
+            {
+                var rowBytes = TryBandBytes(transfer, out var bandBytes, out _) ? bandBytes : 0;
+                moved = AdvancePast(moved, transfer.TiledOffset, transfer.TiledOffset + transfer.TiledSize, rowBytes);
+            }
+
+            if (moved == aligned)
+            {
+                break;
+            }
+
+            aligned = moved;
+        }
+
+        return aligned;
+    }
+
+    // Moves an offset that falls inside a transfer forward to the next row of it, or past
+    // it when it has no rows of its own; an offset outside the transfer stands still.
+    private static ulong AdvancePast(ulong offset, ulong from, ulong to, ulong rowBytes)
+    {
+        if (offset <= from || offset >= to)
+        {
+            return offset;
+        }
+
+        if (rowBytes == 0)
+        {
+            return to;
+        }
+
+        var rows = (offset - from + rowBytes - 1) / rowBytes;
+        return Math.Min(to, from + (rows * rowBytes));
+    }
+
     // Where a run may end inside one tile transfer: at a block-row boundary when the
     // transfer can be cut into rows, and otherwise before the transfer begins.
     private static ulong AlignToBands(in MetalTileTransfer transfer, ulong start, ulong end)
