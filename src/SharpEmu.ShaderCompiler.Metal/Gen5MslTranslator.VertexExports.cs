@@ -1,0 +1,290 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+using System.Numerics;
+using System.Text;
+
+namespace SharpEmu.ShaderCompiler.Metal;
+
+// The auxiliary position exports: POS1..POS3 carry point size, render target array
+// index, viewport index and the clip and cull distances. PA_CL_VS_OUT_CNTL (the
+// request's PositionExportControl) says which of the misc, CCDIST0 and CCDIST1 vectors
+// are exported and in which order they occupy the POS1.. slots; this mirrors the SPIR-V
+// translator's DeclareAuxPositionOutputs/EmitAuxPositionExport.
+//
+// Metal has [[point_size]], [[render_target_array_index]], [[viewport_array_index]] and
+// up to eight [[clip_distance]] planes, but no cull distance. A cull plane is folded into
+// the clip distance array: a negative guest distance becomes -1 and anything else (zero,
+// positive, NaN) becomes a huge positive value. A primitive with every vertex negative is
+// then clipped away whole, which is Vulkan's cull rule; a primitive with any vertex kept
+// is clipped only where the interpolated value drops below zero, which with the huge
+// value is the primitive's own edge between the negative vertices — nothing a sample can
+// land inside, so it stays whole as the cull rule requires.
+//
+// In the mesh stage the layer and the viewport index are per-primitive outputs in Metal.
+// The guest exports them per vertex and the primitive takes its provoking (first)
+// vertex's value, so each lane parks its values in threadgroup memory for the epilogue.
+public static partial class Gen5MslTranslator
+{
+    private const uint MaxHostClipDistances = 8;
+
+    // What a kept cull-distance vertex writes into its emulated clip plane.
+    private const string CullPassDistance = "1.0e18f";
+
+    private sealed partial class CompilationContext
+    {
+        private bool _writesPointSize;
+        private bool _writesLayer;
+        private bool _writesViewportIndex;
+        private uint _clipDistanceCount;
+        private uint _cullDistanceCount;
+        private uint _invalidPositionClipDistance = uint.MaxValue;
+
+        /// <summary>The host clip-distance planes this program writes: guest clip planes,
+        /// the zero-position plane, then the emulated cull planes.</summary>
+        private uint HostClipDistanceCount =>
+            Math.Min(_clipDistanceCount + _cullDistanceCount, MaxHostClipDistances);
+
+        private readonly record struct PositionExportComponent(
+            uint ClipDistance,
+            uint CullDistance,
+            bool PointSize,
+            bool Layer,
+            bool Viewport);
+
+        private static PositionExportComponent DecodePositionExportComponent(
+            uint control,
+            uint positionIndex,
+            uint component)
+        {
+            if (positionIndex == 0 || component >= 4)
+            {
+                return new(uint.MaxValue, uint.MaxValue, false, false, false);
+            }
+
+            // VS_OUT_MISC_VEC_ENA, VS_OUT_CCDIST0_VEC_ENA and VS_OUT_CCDIST1_VEC_ENA (bits
+            // 21-23) pack the enabled vectors into POS1 onwards in that order.
+            var slot = positionIndex - 1;
+            var vector = 3u;
+            for (var index = 0u; index < 3; index++)
+            {
+                if ((control & (1u << (int)(21 + index))) == 0)
+                {
+                    continue;
+                }
+
+                if (slot == 0)
+                {
+                    vector = index;
+                    break;
+                }
+
+                slot--;
+            }
+
+            if (vector == 3)
+            {
+                return new(uint.MaxValue, uint.MaxValue, false, false, false);
+            }
+
+            if (vector == 0)
+            {
+                // The misc vector: point size in x (USE_VTX_POINT_SIZE, bit 16), the render
+                // target array index and the viewport index share z (bits 18 and 19).
+                return new(
+                    uint.MaxValue,
+                    uint.MaxValue,
+                    component == 0 && (control & (1u << 16)) != 0,
+                    component == 2 && (control & (1u << 18)) != 0,
+                    component == 2 && (control & (1u << 19)) != 0);
+            }
+
+            var scalar = (vector - 1) * 4 + component;
+            var lower = scalar == 0 ? 0u : (1u << (int)scalar) - 1u;
+            var clip = control & 0xffu;
+            var cull = (control >> 8) & 0xffu;
+            return new(
+                (clip & (1u << (int)scalar)) != 0
+                    ? (uint)BitOperations.PopCount(clip & lower)
+                    : uint.MaxValue,
+                (cull & (1u << (int)scalar)) != 0
+                    ? (uint)BitOperations.PopCount(cull & lower)
+                    : uint.MaxValue,
+                false,
+                false,
+                false);
+        }
+
+        /// <summary>Discovers which auxiliary outputs the program writes. Runs before block
+        /// emission, since both the output struct and the exports depend on it.</summary>
+        private void DeclareAuxPositionOutputs()
+        {
+            var clipCount = 0u;
+            var cullCount = 0u;
+            foreach (var instruction in _request.Program.Instructions)
+            {
+                if (instruction.Control is not Gen5ExportControl { Target: >= 13 and < 16 } export)
+                {
+                    continue;
+                }
+
+                for (var component = 0u; component < 4; component++)
+                {
+                    if ((export.EnableMask & (1u << (int)component)) == 0)
+                    {
+                        continue;
+                    }
+
+                    var output = DecodePositionExportComponent(
+                        _request.PositionExportControl,
+                        export.Target - 12,
+                        component);
+                    _writesPointSize |= output.PointSize;
+                    _writesLayer |= output.Layer;
+                    _writesViewportIndex |= output.Viewport;
+                    if (output.ClipDistance != uint.MaxValue)
+                    {
+                        clipCount = Math.Max(clipCount, output.ClipDistance + 1);
+                    }
+
+                    if (output.CullDistance != uint.MaxValue)
+                    {
+                        cullCount = Math.Max(cullCount, output.CullDistance + 1);
+                    }
+                }
+            }
+
+            if (_request.SupportsClipDistance && clipCount + cullCount < MaxHostClipDistances &&
+                _request.Program.Instructions.Any(static instruction =>
+                    instruction.Control is Gen5ExportControl { Target: 12, EnableMask: not 0 }))
+            {
+                // Use a separate plane so auxiliary position exports keep their own distances.
+                _invalidPositionClipDistance = clipCount++;
+            }
+
+            _clipDistanceCount = clipCount;
+            _cullDistanceCount = cullCount;
+        }
+
+        /// <summary>The auxiliary fields of the vertex output struct (the vertex stage's
+        /// Gen5VsOut or the mesh stage's vertex). The layer and viewport index are
+        /// per-vertex only in the vertex stage.</summary>
+        private void EmitAuxPositionFields(StringBuilder source, bool perVertexLayer)
+        {
+            if (_writesPointSize)
+            {
+                source.AppendLine("    float sharpemu_point_size [[point_size]];");
+            }
+
+            if (perVertexLayer && _writesLayer)
+            {
+                source.AppendLine("    uint sharpemu_layer [[render_target_array_index]];");
+            }
+
+            if (perVertexLayer && _writesViewportIndex)
+            {
+                source.AppendLine("    uint sharpemu_viewport [[viewport_array_index]];");
+            }
+
+            if (HostClipDistanceCount != 0)
+            {
+                source.AppendLine(
+                    $"    float sharpemu_clip_distance [[clip_distance]] [{HostClipDistanceCount}];");
+            }
+        }
+
+        private bool MeshWritesPrimitiveOutputs =>
+            _stage == Gen5MslStage.Mesh && (_writesLayer || _writesViewportIndex);
+
+        private string LayerOutput => _stage == Gen5MslStage.Mesh
+            ? "sharpemu_mesh_layer"
+            : "sharpemu_out.sharpemu_layer";
+
+        private string ViewportOutput => _stage == Gen5MslStage.Mesh
+            ? "sharpemu_mesh_viewport"
+            : "sharpemu_out.sharpemu_viewport";
+
+        /// <summary>POS0's zero-position plane, written after the position itself.</summary>
+        private void EmitInvalidPositionDistance()
+        {
+            if (_invalidPositionClipDistance == uint.MaxValue)
+            {
+                return;
+            }
+
+            // A zero position has an undefined perspective divide. Collapse its primitive
+            // to the remaining edge, as the guest's clipping-error cull does.
+            Line(ExecGuarded(
+                $"sharpemu_out.sharpemu_clip_distance[{_invalidPositionClipDistance}] = " +
+                "all(sharpemu_out.sharpemu_position == float4(0.0f)) ? -1.0f : 0.0f;"));
+        }
+
+        private void EmitAuxPositionExport(
+            Gen5ShaderInstruction instruction,
+            Gen5ExportControl export)
+        {
+            var positionIndex = export.Target - 12;
+            for (var component = 0; component < 4; component++)
+            {
+                if ((export.EnableMask & (1u << component)) == 0)
+                {
+                    continue;
+                }
+
+                var output = DecodePositionExportComponent(
+                    _request.PositionExportControl,
+                    positionIndex,
+                    (uint)component);
+                var clipIndex = output.ClipDistance;
+                var cullIndex = output.CullDistance == uint.MaxValue
+                    ? uint.MaxValue
+                    : _clipDistanceCount + output.CullDistance;
+                if (cullIndex >= MaxHostClipDistances)
+                {
+                    cullIndex = uint.MaxValue;
+                }
+
+                if (!output.PointSize &&
+                    !output.Layer &&
+                    !output.Viewport &&
+                    clipIndex == uint.MaxValue &&
+                    cullIndex == uint.MaxValue)
+                {
+                    continue;
+                }
+
+                var raw = export.Compressed
+                    ? $"as_type<uint>((float)as_type<half2>(v[{instruction.Sources[component >> 1].Value}])[{component & 1}])"
+                    : $"v[{instruction.Sources[component].Value}]";
+                var bits = Temp("uint", raw);
+                var value = $"as_type<float>({bits})";
+                if (output.Layer)
+                {
+                    Line(ExecGuarded($"{LayerOutput} = {bits} & 0x7FFu;"));
+                }
+
+                if (output.Viewport)
+                {
+                    Line(ExecGuarded($"{ViewportOutput} = ({bits} >> 16u) & 0xFu;"));
+                }
+
+                if (output.PointSize)
+                {
+                    Line(ExecGuarded($"sharpemu_out.sharpemu_point_size = {value};"));
+                }
+
+                if (clipIndex != uint.MaxValue)
+                {
+                    Line(ExecGuarded($"sharpemu_out.sharpemu_clip_distance[{clipIndex}] = {value};"));
+                }
+
+                if (cullIndex != uint.MaxValue)
+                {
+                    Line(ExecGuarded(
+                        $"sharpemu_out.sharpemu_clip_distance[{cullIndex}] = " +
+                        $"{value} < 0.0f ? -1.0f : {CullPassDistance};"));
+                }
+            }
+        }
+    }
+}

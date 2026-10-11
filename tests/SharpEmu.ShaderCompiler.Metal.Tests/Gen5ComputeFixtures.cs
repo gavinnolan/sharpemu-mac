@@ -201,7 +201,8 @@ internal static class Gen5ComputeFixtures
     public static ShaderCompileRequest RequestOrThrow(Gen5ShaderProgram program, ShaderStage stage, uint waveLaneCount = 32, uint localSizeX = 32, int requiredVertexOutputCount = 0,
         IReadOnlyList<Gen5PixelOutputBinding>? pixelOutputs = null, ResourceRuntimeInputs? runtimeInputs = null,
         Gen5NggStageInfo? primitiveShader = null, uint userDataBase = 0, uint scratchDwords = 0,
-        uint localDataShareDwords = 0, uint pushDataStartDword = 0)
+        uint localDataShareDwords = 0, uint pushDataStartDword = 0, uint positionExportControl = 0,
+        bool supportsClipDistance = true)
     {
         var plan = ShaderResourcePlan.Extract(program, stage, RequestHash, userDataBase, UserDataCount);
         var specialization = ResourceSpecialization.Default(plan.Info);
@@ -228,6 +229,8 @@ internal static class Gen5ComputeFixtures
             PrimitiveShader = primitiveShader,
             ScratchDwords = scratchDwords,
             LocalDataShareDwords = localDataShareDwords,
+            PositionExportControl = positionExportControl,
+            SupportsClipDistance = supportsClipDistance,
         };
     }
 

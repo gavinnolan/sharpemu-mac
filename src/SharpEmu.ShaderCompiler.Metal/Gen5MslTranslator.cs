@@ -297,6 +297,11 @@ public static partial class Gen5MslTranslator
                     }
                 }
 
+                if (_stage is Gen5MslStage.Vertex or Gen5MslStage.Mesh)
+                {
+                    DeclareAuxPositionOutputs();
+                }
+
                 if (_stage == Gen5MslStage.Mesh)
                 {
                     // The paired pixel program is translated against the same param
@@ -364,7 +369,9 @@ public static partial class Gen5MslTranslator
                     _localSizeY,
                     _localSizeZ,
                     ArgumentLayout: _argumentLayout,
-                    MeshInfo: _meshInfo);
+                    MeshInfo: _meshInfo,
+                    WritesLayer: _writesLayer,
+                    WritesViewportIndex: _writesViewportIndex);
                 return true;
             }
             catch (Exception exception)
@@ -514,6 +521,7 @@ public static partial class Gen5MslTranslator
                 source.AppendLine("struct Gen5VsOut");
                 source.AppendLine("{");
                 source.AppendLine("    float4 sharpemu_position [[position]];");
+                EmitAuxPositionFields(source, perVertexLayer: true);
                 foreach (var location in _vertexOutputs)
                 {
                     source.AppendLine($"    float4 param{location} [[user(locn{location})]];");

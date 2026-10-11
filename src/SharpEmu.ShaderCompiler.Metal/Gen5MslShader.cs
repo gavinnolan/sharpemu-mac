@@ -59,4 +59,6 @@ public sealed record Gen5MslShader(
     uint ThreadgroupSizeY = 1,
     uint ThreadgroupSizeZ = 1,
     Gen5MslArgumentLayout? ArgumentLayout = null,
-    Gen5MslMeshInfo? MeshInfo = null);
+    Gen5MslMeshInfo? MeshInfo = null,
+    bool WritesLayer = false,
+    bool WritesViewportIndex = false);

@@ -51,6 +51,7 @@ public static partial class Gen5MslTranslator
     private const uint MeshLdsDwordCeiling = 4096;
 
     private const string MeshVertexStructName = "Gen5MeshVertex";
+    private const string MeshPrimitiveStructName = "Gen5MeshPrimitive";
     private const string MeshDrawInfoStructName = "Gen5MeshDrawInfo";
     private const string MeshOutputTypeName = "Gen5MeshOutput";
     private const string MeshOutputName = "sharpemu_mesh";
@@ -152,6 +153,7 @@ public static partial class Gen5MslTranslator
             source.AppendLine($"struct {MeshVertexStructName}");
             source.AppendLine("{");
             source.AppendLine("    float4 sharpemu_position [[position]];");
+            EmitAuxPositionFields(source, perVertexLayer: false);
             foreach (var location in _vertexOutputs)
             {
                 source.AppendLine($"    float4 param{location} [[user(locn{location})]];");
@@ -159,6 +161,27 @@ public static partial class Gen5MslTranslator
 
             source.AppendLine("};");
             source.AppendLine();
+
+            // The layer and viewport index are per-primitive in a Metal mesh.
+            var primitiveType = "void";
+            if (MeshWritesPrimitiveOutputs)
+            {
+                primitiveType = MeshPrimitiveStructName;
+                source.AppendLine($"struct {MeshPrimitiveStructName}");
+                source.AppendLine("{");
+                if (_writesLayer)
+                {
+                    source.AppendLine("    uint sharpemu_layer [[render_target_array_index]];");
+                }
+
+                if (_writesViewportIndex)
+                {
+                    source.AppendLine("    uint sharpemu_viewport [[viewport_array_index]];");
+                }
+
+                source.AppendLine("};");
+                source.AppendLine();
+            }
 
             // What the geometry engine would hand the merged stage in hardware registers.
             // The host fills one block per draw; docs/mac/ngg-mesh-shaders.md is the
@@ -184,7 +207,7 @@ public static partial class Gen5MslTranslator
             source.AppendLine("};");
             source.AppendLine();
             source.AppendLine(
-                $"using {MeshOutputTypeName} = mesh<{MeshVertexStructName}, void, " +
+                $"using {MeshOutputTypeName} = mesh<{MeshVertexStructName}, {primitiveType}, " +
                 $"{mesh.MaxVertices}, {mesh.MaxPrimitives}, {MeshTopologyName(mesh.Topology)}>;");
             source.AppendLine();
 
@@ -251,6 +274,15 @@ public static partial class Gen5MslTranslator
             // Metal expresses that, since a mesh primitive cannot be dropped in place.
             source.AppendLine("    uint3 sharpemu_mesh_prim = uint3(0u);");
             source.AppendLine("    bool sharpemu_mesh_culled = true;");
+            if (MeshWritesPrimitiveOutputs)
+            {
+                // This lane's exported layer and viewport index, and every vertex's copy
+                // for the epilogue: a primitive takes its provoking vertex's values.
+                source.AppendLine("    uint sharpemu_mesh_layer = 0u;");
+                source.AppendLine("    uint sharpemu_mesh_viewport = 0u;");
+                source.AppendLine($"    threadgroup uint2 sharpemu_mesh_vertex_target[{mesh.MaxVertices}];");
+            }
+
             source.AppendLine("    if (sharpemu_tg_index == 0u)");
             source.AppendLine("    {");
             source.AppendLine(
@@ -424,6 +456,17 @@ public static partial class Gen5MslTranslator
         private void EmitMeshEpilogue(StringBuilder source)
         {
             var mesh = Mesh;
+            if (MeshWritesPrimitiveOutputs)
+            {
+                source.AppendLine($"    if (sharpemu_tg_index < {mesh.MaxVertices}u)");
+                source.AppendLine("    {");
+                source.AppendLine(
+                    "        sharpemu_mesh_vertex_target[sharpemu_tg_index] = " +
+                    "uint2(sharpemu_mesh_layer, sharpemu_mesh_viewport);");
+                source.AppendLine("    }");
+                source.AppendLine();
+            }
+
             source.AppendLine("    threadgroup_barrier(mem_flags::mem_threadgroup);");
             source.AppendLine($"    if (sharpemu_tg_index < {mesh.MaxVertices}u)");
             source.AppendLine("    {");
@@ -443,6 +486,24 @@ public static partial class Gen5MslTranslator
             {
                 source.AppendLine(
                     $"        {MeshOutputName}.set_index(base + {component}u, indices[{Math.Min(component, 2u)}]);");
+            }
+
+            if (MeshWritesPrimitiveOutputs)
+            {
+                source.AppendLine(
+                    $"        const uint2 target = sharpemu_mesh_vertex_target[min(indices[0], {mesh.MaxVertices - 1}u)];");
+                source.AppendLine($"        {MeshPrimitiveStructName} primitive = {{}};");
+                if (_writesLayer)
+                {
+                    source.AppendLine("        primitive.sharpemu_layer = target.x;");
+                }
+
+                if (_writesViewportIndex)
+                {
+                    source.AppendLine("        primitive.sharpemu_viewport = target.y;");
+                }
+
+                source.AppendLine($"        {MeshOutputName}.set_primitive(sharpemu_tg_index, primitive);");
             }
 
             source.AppendLine("    }");
@@ -489,6 +550,14 @@ public static partial class Gen5MslTranslator
                 return true;
             }
 
+            if (export.Target is > Gen5NggExports.FirstPositionTarget and < Gen5NggExports.FirstPositionTarget + 4)
+            {
+                // POS1..POS3: point size, clip and cull distances land in this lane's
+                // vertex; the layer and viewport index wait for the epilogue's primitive.
+                EmitAuxPositionExport(instruction, export);
+                return true;
+            }
+
             string field;
             if (export.Target == Gen5NggExports.FirstPositionTarget)
             {
@@ -502,8 +571,7 @@ public static partial class Gen5MslTranslator
             }
             else
             {
-                // POS1..POS3 carry clip/cull distances and point size, which the mesh
-                // vertex interface does not expose yet; MRTZ never reaches this stage.
+                // MRTZ never reaches this stage.
                 return true;
             }
 
@@ -527,6 +595,11 @@ public static partial class Gen5MslTranslator
             }
 
             Line(ExecGuarded($"{field} = float4({values[0]}, {values[1]}, {values[2]}, {values[3]});"));
+            if (export.Target == Gen5NggExports.FirstPositionTarget)
+            {
+                EmitInvalidPositionDistance();
+            }
+
             return true;
         }
 

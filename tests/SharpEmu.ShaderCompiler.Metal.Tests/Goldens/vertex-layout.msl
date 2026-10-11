@@ -328,6 +328,7 @@ static inline void sharpemu_note_step_cap(device atomic_uint* report)
 struct Gen5VsOut
 {
     float4 sharpemu_position [[position]];
+    float sharpemu_clip_distance [[clip_distance]] [1];
     float4 param0 [[user(locn0)]];
 };
 
@@ -357,6 +358,7 @@ vertex Gen5VsOut gen5_vs(
         uint t1 = 0x3F800000u;
         v1 = t1;
         sharpemu_out.sharpemu_position = float4(as_type<float>(v0), as_type<float>(v0), as_type<float>(v0), as_type<float>(v1));
+        sharpemu_out.sharpemu_clip_distance[0] = all(sharpemu_out.sharpemu_position == float4(0.0f)) ? -1.0f : 0.0f;
         sharpemu_out.param0 = float4(as_type<float>(v1), as_type<float>(v1), as_type<float>(v0), as_type<float>(v1));
     }
     return sharpemu_out;

@@ -1089,8 +1089,15 @@ public static partial class Gen5MslTranslator
             Gen5ShaderInstruction instruction,
             Gen5ExportControl export)
         {
-            // Target 12 is POS0; 32..63 are the param outputs. Everything else
-            // (other position slots, MRTZ) is ignored like the SPIR-V side.
+            // Target 12 is POS0; 13..15 are POS1..POS3 (point size, layer, viewport
+            // index, clip and cull distances); 32..63 are the param outputs. MRTZ is
+            // ignored like the SPIR-V side.
+            if (export.Target is >= 13 and < 16)
+            {
+                EmitAuxPositionExport(instruction, export);
+                return true;
+            }
+
             string field;
             if (export.Target == 12)
             {
@@ -1126,6 +1133,11 @@ public static partial class Gen5MslTranslator
             }
 
             Line($"{field} = {ExecSelect($"float4({values[0]}, {values[1]}, {values[2]}, {values[3]})", field)};");
+            if (export.Target == 12)
+            {
+                EmitInvalidPositionDistance();
+            }
+
             return true;
         }
 
