@@ -1259,6 +1259,22 @@ internal sealed partial class MetalRenderHost :
             $"write_folds={_gpuWrites.Folds} handler_wakeups={_completions.HandlerWakeups} " +
             $"rings={_guestMemory.RingCount} rings_freed={_guestMemory.RingsReleased} " +
             $"ring_mb={_guestMemory.RingFallbackBytes / (1024 * 1024)}");
+        // On a tile-based GPU the attachments are the bandwidth: a pass loads every
+        // one it does not clear and stores every one it keeps, so this says what the
+        // passes cost in memory traffic and which splits are paying for it. Printed
+        // unconditionally because it is the one number that tells whether a pass
+        // split matters, and two seconds apart it costs nothing.
+        var (loadBytes, storeBytes, clearedBytes, emptyPasses, returnedPasses) = TakeAttachmentBandwidth();
+        var (endClearCount, endTargetCount, endTransferCount, endComputeCount, targetlessCount) =
+            TakePassBreakdown();
+        Console.Error.WriteLine(
+            $"[METAL-V2][TBDR] passes={passes} empty={emptyPasses} returned={returnedPasses} " +
+            $"load_mb={(loadBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
+            $"store_mb={(storeBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
+            $"cleared_mb={(clearedBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
+            $"end_clear={endClearCount} end_target={endTargetCount} end_transfer={endTransferCount} " +
+            $"end_compute={endComputeCount} targetless={targetlessCount} " +
+            $"clears=[{TakeClearArrivals()}]");
         if (_guard is not null)
         {
             Console.Error.WriteLine($"[METAL-V2][GUARD] {_guard.Report()}");
@@ -1276,13 +1292,11 @@ internal sealed partial class MetalRenderHost :
             return;
         }
 
-        var (endClear, endTarget, endTransfer, endCompute, targetless) = TakePassBreakdown();
         var (eventReady, eventWaited, eventWaitMs, eventWakeMs) = _completions.TakeWaitProfile();
         var blocked = CommandStream.SnapshotBlocked();
         Console.Error.WriteLine(
-            $"[METAL-V2][TRACE] created={created} end_clear={endClear} end_target={endTarget} " +
-            $"end_transfer={endTransfer} end_compute={endCompute} targetless={targetless} " +
-            $"transfer_causes=[{TakeTransferCauses()}] clears=[{TakeClearArrivals()}] " +
+            $"[METAL-V2][TRACE] created={created} " +
+            $"transfer_causes=[{TakeTransferCauses()}] " +
             $"gpu_busy_n={gpuBusySamples} event_ready={eventReady} event_waited={eventWaited} " +
             $"event_wait_ms={eventWaitMs.ToString("F1", culture)} " +
             $"event_wake_ms={eventWakeMs.ToString("F1", culture)} " +

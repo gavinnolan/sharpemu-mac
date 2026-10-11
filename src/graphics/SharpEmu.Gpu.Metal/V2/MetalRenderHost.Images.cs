@@ -41,7 +41,8 @@ internal sealed partial class MetalRenderHost
             in request, in target.Resolution, out var clearValue);
         var texture = _imageCache.AcquireColorTargetView(imageIdentifier, request with { Role = ImageRole.ColorTarget });
         var image = _imageCache.GetImage(imageIdentifier);
-        RecordAttachmentSubresource(request.View, image.Shape, image.Description.IsVolume, color: true);
+        RecordAttachmentSubresource(
+            request.View, image.Shape, image.Description.IsVolume, color: true, image.Description.BytesPerBlock);
         return new ColorAttachmentAcquisition(
             imageIdentifier,
             new GpuImageHandle((ulong)texture),
@@ -75,7 +76,8 @@ internal sealed partial class MetalRenderHost
         }
 
         var image = _imageCache.GetImage(imageIdentifier);
-        RecordAttachmentSubresource(request.View, image.Shape, image.Description.IsVolume, color: false);
+        RecordAttachmentSubresource(
+            request.View, image.Shape, image.Description.IsVolume, color: false, image.Description.BytesPerBlock);
         return new DepthAttachmentAcquisition(
             new GpuImageHandle((ulong)texture), image.Shape.SampleCount, metadataClear);
     }
@@ -86,7 +88,8 @@ internal sealed partial class MetalRenderHost
         ImageViewDescription view,
         MetalTextureShape shape,
         bool volume,
-        bool color)
+        bool color,
+        uint texelBytes)
     {
         var wholeImage = view.BaseLevel == 0 && view.LevelCount >= shape.MipLevels &&
             view.BaseLayer == 0 && view.LayerCount >= shape.ArrayLength;
@@ -100,6 +103,7 @@ internal sealed partial class MetalRenderHost
                 _attachmentLevels[_attachmentCount] = level;
                 _attachmentSlices[_attachmentCount] = slice;
                 _attachmentDepthPlanes[_attachmentCount] = depthPlane;
+                _attachmentTexelBytes[_attachmentCount] = texelBytes;
                 _attachmentCount++;
             }
 
@@ -108,6 +112,7 @@ internal sealed partial class MetalRenderHost
 
         _depthAttachmentLevel = level;
         _depthAttachmentSlice = slice;
+        _depthTexelBytes = texelBytes;
     }
 
     public void TransitionDepthAttachment(in DepthAttachmentState depth, GpuImageLayout layout, GpuImageAspect writeAspects)

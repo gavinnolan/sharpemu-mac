@@ -104,6 +104,103 @@ internal sealed partial class MetalRenderHost
         return builder.Length == 0 ? "none" : builder.ToString();
     }
 
+    // What the passes cost in memory traffic, which on a tile-based GPU is the whole
+    // story: a pass loads every attachment it does not clear and stores every one it
+    // keeps, so the bill is attachment bytes times passes, and each mid-frame split
+    // pays it again. Counted as the descriptor is built, from the real pixel size.
+    private long _loadBytes;
+    private long _storeBytes;
+    private long _clearedBytes;
+    private long _passesEmpty;
+
+    // A pass that renders into the same attachments as the pass before last: the
+    // target set left them and came straight back, so the pair stored and reloaded
+    // the whole framebuffer for whatever happened in between. This is the merge
+    // opportunity, counted rather than assumed.
+    private long _passesReturned;
+    private ulong _previousPassKey;
+    private ulong _passBeforeKey;
+
+    internal (long Load, long Store, long Cleared, long Empty, long Returned) TakeAttachmentBandwidth()
+    {
+        var load = Interlocked.Exchange(ref _loadBytes, 0);
+        var store = Interlocked.Exchange(ref _storeBytes, 0);
+        var cleared = Interlocked.Exchange(ref _clearedBytes, 0);
+        var empty = Interlocked.Exchange(ref _passesEmpty, 0);
+        var returned = Interlocked.Exchange(ref _passesReturned, 0);
+        return (load, store, cleared, empty, returned);
+    }
+
+    private void NotePassIdentity(in RenderingState state)
+    {
+        var first = state.ColorAttachmentCount != 0 ? state.ColorAttachments[0].View.Handle : 0;
+        var key = first ^ (state.DepthStencilAttachment.View.Handle * 0x9E3779B97F4A7C15UL);
+        if (key != 0 && key == _passBeforeKey && key != _previousPassKey)
+        {
+            _passesReturned++;
+        }
+
+        _passBeforeKey = _previousPassKey;
+        _previousPassKey = key;
+    }
+
+    // One attachment's cost for one pass: the render area, every sample, and the
+    // bytes one pixel of that attachment really occupies.
+    private static long AttachmentBytes(in RenderingState state, uint texelBytes) =>
+        (long)state.Width * state.Height * Math.Max(1u, state.Samples) * texelBytes;
+
+    private void NoteAttachmentTraffic(in RenderingState state)
+    {
+        for (var index = 0; index < state.ColorAttachmentCount; index++)
+        {
+            var bytes = AttachmentBytes(
+                in state, index < MaxColorAttachments ? _attachmentTexelBytes[index] : 0);
+            if (state.ColorAttachments[index].IsClear)
+            {
+                _clearedBytes += bytes;
+            }
+            else
+            {
+                _loadBytes += bytes;
+            }
+
+            _storeBytes += bytes;
+        }
+
+        ref readonly var depthStencil = ref state.DepthStencilAttachment;
+        if (depthStencil.HasDepth && depthStencil.View.Handle != 0)
+        {
+            var bytes = AttachmentBytes(in state, _depthTexelBytes);
+            if (depthStencil.DepthClear)
+            {
+                _clearedBytes += bytes;
+            }
+            else
+            {
+                _loadBytes += bytes;
+            }
+
+            _storeBytes += bytes;
+        }
+
+        if (depthStencil.HasStencil && depthStencil.View.Handle != 0)
+        {
+            // Metal keeps stencil in its own plane, one byte a pixel, whatever the
+            // combined format's element size says.
+            var bytes = AttachmentBytes(in state, 1);
+            if (depthStencil.StencilClear)
+            {
+                _clearedBytes += bytes;
+            }
+            else
+            {
+                _loadBytes += bytes;
+            }
+
+            _storeBytes += bytes;
+        }
+    }
+
     internal (long Clear, long Target, long Transfer, long Compute, long Targetless) TakePassBreakdown()
     {
         var clear = Interlocked.Exchange(ref _passEndClear, 0);
@@ -169,6 +266,12 @@ internal sealed partial class MetalRenderHost
     private int _attachmentCount;
     private uint _depthAttachmentLevel;
     private uint _depthAttachmentSlice;
+
+    // How wide one pixel of each attachment is, taken from the image the view was
+    // made from. A tile-based GPU's cost is the attachment's bytes, not its pixels,
+    // so this is what makes a pass split measurable rather than guessed at.
+    private readonly uint[] _attachmentTexelBytes = new uint[MaxColorAttachments];
+    private uint _depthTexelBytes;
 
     // The subresources the open pass was created with, so the next draw can tell
     // whether it renders into the very same attachments.
@@ -354,6 +457,8 @@ internal sealed partial class MetalRenderHost
         _renderingState = state;
         ForgetEncoderState();
         _renderPasses++;
+        NoteAttachmentTraffic(in state);
+        NotePassIdentity(in state);
         if (MetalV2Diagnostics.Verbose || _renderPasses < 4096)
         {
             var first = state.ColorAttachmentCount != 0 ? state.ColorAttachments[0] : default;
@@ -399,6 +504,11 @@ internal sealed partial class MetalRenderHost
 
         ForgetEncoderState();
         DumpPassTargets(in ending);
+        if (_passDrawCount == 0)
+        {
+            _passesEmpty++;
+        }
+
         _passDrawCount = 0;
         _passLastProfile = null;
     }
