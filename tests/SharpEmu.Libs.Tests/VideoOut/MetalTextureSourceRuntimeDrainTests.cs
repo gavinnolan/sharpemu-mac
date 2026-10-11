@@ -4,6 +4,7 @@ using System.Collections;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using SharpEmu.Gpu.Metal;
+using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
@@ -297,15 +298,20 @@ public sealed partial class MetalTextureSourceRuntimeDrainTests
         private readonly List<GuestDrawTexture> captures = [];
         private readonly Dictionary<object, long> sequences = new(ReferenceEqualityComparer.Instance);
         public long SequenceOf(object work) => sequences[work];
-        public State() => Field("_textureSourceGraphEnabled").SetValue(null, true);
+        public State()
+        {
+            Field("_textureSourceGraphEnabled").SetValue(null, true);
+            // The admitted color target owns its whole padded linear footprint.
+            GuestImageWriteTracker.TrackManagedWriter(Address, MetalTextureSourceLeaseTests.LinearColorFootprint);
+        }
         public GuestDrawTexture AdmitPendingSource(bool withDepth = false)
         {
             var target = new GuestRenderTarget(Address, 4, 4, 10, 0,
                 Registers: new ColorTargetWords(Address, 0, 10u << 2, 0, 3u | 3u << 14, 1u << 24, 0, 0, 0, 0, 0));
             MetalVideoPresenter.SubmitOffscreenTranslatedDraw(new(new Gen5MslShader("", "pending never encoded", Gen5MslStage.Pixel, 0)), [], [], 0, [target], null, 3, 1, 4, null, null, null,
                 withDepth ? new GuestDepthTarget(Address + 0x1000, Address + 0x1000, 4, 4, 3, 0, 1, false) : null, 0);
-            var read = new GuestDrawTexture(Address, 4, 4, 10, 0, [], false, false, Pitch: 4,
-                Descriptor: MetalTextureSourceLeaseTests.ResourceWords(), Shape: new ShaderImageShape(false, false, false, false, TextureNumericClass.Float), Access: GuestImageAccess.Read);
+            var read = new GuestDrawTexture(Address, 4, 4, 10, 0, [], false, false, Pitch: MetalTextureSourceLeaseTests.LinearColorPitch,
+                Descriptor: MetalTextureSourceLeaseTests.ResourceWords(pitch: MetalTextureSourceLeaseTests.LinearColorPitch), Shape: new ShaderImageShape(false, false, false, false, TextureNumericClass.Float), Access: GuestImageAccess.Read);
             Assert.True(MetalVideoPresenter.TryCaptureTextureSource(read, 64, false)); captures.Add(read); return read;
         }
         public object AdmitConsumer(GuestDrawTexture read)
