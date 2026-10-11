@@ -187,6 +187,10 @@ internal sealed partial class MetalRenderHost :
     // and Metal's precise math keeps F32 signed zero, infinity and NaN.
     public bool ShaderSignedZeroInfNanPreserveFloat32Supported => true;
 
+    // Every Metal device has eight [[clip_distance]] planes, so the translator can spend
+    // one on culling primitives with a zero position like the guest does.
+    public bool ClipDistanceEnabled => true;
+
     public GpuSampleCount NoAttachmentSampleCounts => GpuSampleCount.Count1Bit;
 
     public bool IsRecording => !_disposed && EnsureCommandBuffer() != 0;

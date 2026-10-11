@@ -37,6 +37,10 @@ internal sealed partial class MetalRenderHost
         // mesh function; the draw then launches threadgroups instead of vertices.
         public Gen5MslMeshInfo? Mesh;
 
+        // Set when the vertex program picks a viewport per primitive; the draw then
+        // fills every viewport slot rather than only the first.
+        public bool WritesViewportIndex;
+
         // The shader hashes behind this pipeline, formatted once for the per-draw GPU
         // profiler; null unless SHARPEMU_METAL_V2_PROFILE_SHADERS=1.
         public string? Profile;
@@ -232,6 +236,15 @@ internal sealed partial class MetalRenderHost
                     descriptor, MetalNative.Selector("setRasterSampleCount:"), Math.Max(parameters.Samples, 1));
             }
 
+            if (mesh is null && (vertexModule.Shader.WritesLayer || vertexModule.Shader.WritesViewportIndex))
+            {
+                // Layered and multi-viewport rendering need the primitive class up front.
+                MetalV2Native.SendVoidValue(
+                    descriptor,
+                    MetalNative.Selector("setInputPrimitiveTopology:"),
+                    MetalV2Formats.TopologyClass(parameters.Topology));
+            }
+
             if (pixelModule is not null)
             {
                 MetalNative.SendVoid(descriptor, MetalNative.Selector("setFragmentFunction:"), pixelModule.Function);
@@ -351,6 +364,7 @@ internal sealed partial class MetalRenderHost
             HasDepth = depthFormatOf(description) != MtlFormat.Invalid,
             HasStencil = description.Rendering.StencilFormat != GpuFormat.Undefined,
             Mesh = mesh,
+            WritesViewportIndex = vertexModule.Shader.WritesViewportIndex,
             Profile = ProfileLabelFor(vertexModule, pixelModule, mesh),
             VertexLayout = vertexLayout,
         };

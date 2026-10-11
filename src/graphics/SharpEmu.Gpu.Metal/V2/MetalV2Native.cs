@@ -325,6 +325,10 @@ internal static partial class MetalV2Native
         nuint count,
         nuint usage);
 
+    // -setViewports:count: / -setScissorRects:count:
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendVoidArray(nint receiver, nint selector, nint items, nuint count);
+
     // -encodeSignalEvent:value: / -encodeWaitForEvent:value:
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendEventValue(nint receiver, nint selector, nint @event, ulong value);

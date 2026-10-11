@@ -179,6 +179,14 @@ internal static class MetalV2Formats
         _ => Mtl.PrimitiveTriangle,
     };
 
+    // MTLPrimitiveTopologyClass of the primitive type Topology picks.
+    public static nuint TopologyClass(GpuPrimitiveTopology topology) => Topology(topology) switch
+    {
+        Mtl.PrimitivePoint => 1,
+        Mtl.PrimitiveLine or Mtl.PrimitiveLineStrip => 2,
+        _ => 3,
+    };
+
     public static nuint IndexType(GpuIndexType type) =>
         type == GpuIndexType.Uint32 ? Mtl.IndexTypeUInt32 : Mtl.IndexTypeUInt16;
 

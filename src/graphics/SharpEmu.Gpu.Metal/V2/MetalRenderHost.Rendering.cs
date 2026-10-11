@@ -45,6 +45,11 @@ internal sealed partial class MetalRenderHost
     private static readonly nint SelSetDepthStencilState = MetalNative.Selector("setDepthStencilState:");
     private static readonly nint SelSetViewport = MetalNative.Selector("setViewport:");
     private static readonly nint SelSetScissorRect = MetalNative.Selector("setScissorRect:");
+    private static readonly nint SelSetViewports = MetalNative.Selector("setViewports:count:");
+    private static readonly nint SelSetScissorRects = MetalNative.Selector("setScissorRects:count:");
+
+    // The guest's viewport index is four bits wide, and Metal takes sixteen viewports.
+    private const int ViewportSlotCount = 16;
     private static readonly nint SelSetCullMode = MetalNative.Selector("setCullMode:");
     private static readonly nint SelSetFrontFacingWinding = MetalNative.Selector("setFrontFacingWinding:");
     private static readonly nint SelSetDepthClipMode = MetalNative.Selector("setDepthClipMode:");
@@ -1021,7 +1026,7 @@ internal sealed partial class MetalRenderHost
             viewportHeight = -viewportHeight;
         }
 
-        MetalNative.SendVoidViewport(_renderEncoder, SelSetViewport, new MtlViewport
+        var viewport = new MtlViewport
         {
             OriginX = _dynamicState.ViewportX,
             OriginY = originY,
@@ -1029,7 +1034,7 @@ internal sealed partial class MetalRenderHost
             Height = viewportHeight,
             ZNear = Math.Clamp(_dynamicState.ViewportMinDepth, 0f, 1f),
             ZFar = Math.Clamp(_dynamicState.ViewportMaxDepth, 0f, 1f),
-        });
+        };
         var scissor = _dynamicState.Scissor;
         var left = (uint)Math.Clamp(scissor.Left, 0, (int)width);
         var top = (uint)Math.Clamp(scissor.Top, 0, (int)height);
@@ -1049,13 +1054,37 @@ internal sealed partial class MetalRenderHost
 
         // Metal refuses an empty scissor rectangle; an empty guest rectangle becomes
         // one pixel at its corner, which the clamped viewport keeps out of the image.
-        MetalNative.SendVoidScissor(_renderEncoder, SelSetScissorRect, new MtlScissorRect
+        var scissorRect = new MtlScissorRect
         {
             X = left,
             Y = top,
             Width = Math.Max(scissorWidth, 1),
             Height = Math.Max(scissorHeight, 1),
-        });
+        };
+        if (_boundGraphicsPipeline is not { WritesViewportIndex: true })
+        {
+            MetalNative.SendVoidViewport(_renderEncoder, SelSetViewport, viewport);
+            MetalNative.SendVoidScissor(_renderEncoder, SelSetScissorRect, scissorRect);
+            return;
+        }
+
+        // A program that writes the viewport index can name any of the sixteen slots,
+        // and Metal leaves a slot that was never set undefined. The draw state carries
+        // the first guest viewport only — the one the Vulkan presenter sets — so every
+        // slot gets it, which is what the Vulkan path's single viewport amounts to.
+        unsafe
+        {
+            var viewports = stackalloc MtlViewport[ViewportSlotCount];
+            var scissors = stackalloc MtlScissorRect[ViewportSlotCount];
+            for (var index = 0; index < ViewportSlotCount; index++)
+            {
+                viewports[index] = viewport;
+                scissors[index] = scissorRect;
+            }
+
+            MetalV2Native.SendVoidArray(_renderEncoder, SelSetViewports, (nint)viewports, ViewportSlotCount);
+            MetalV2Native.SendVoidArray(_renderEncoder, SelSetScissorRects, (nint)scissors, ViewportSlotCount);
+        }
     }
 
     public void Draw(uint vertexCount, uint instanceCount, uint firstVertex, uint firstInstance)
