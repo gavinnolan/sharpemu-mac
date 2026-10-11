@@ -256,6 +256,10 @@ internal sealed partial class MetalRenderHost :
         }
 
         EndEncoders();
+        // Compared here as well as when a command buffer opens: a run that ends between
+        // the two sees every snapshot it took go unchecked, which is how the one report
+        // this watch exists for was lost twice.
+        _slotTrap?.Verify(CompletedSerial);
         var serial = _submissionSerial;
         MetalV2Native.SendEventValue(_commandBuffer, SelEncodeSignalEvent, _sharedEvent, serial);
         if (_completions.WantsCompletionHandler)
@@ -1154,6 +1158,7 @@ internal sealed partial class MetalRenderHost :
 
         if (_slotTrap is not null)
         {
+            _slotTrap.Verify(CompletedSerial);
             Console.Error.WriteLine(
                 $"[METAL-V2][SLOT-TRAP] mismatches={_slotTrap.Mismatches} dropped={_slotTrap.Dropped}");
         }

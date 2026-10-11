@@ -504,6 +504,18 @@ internal sealed class MetalGuestMemory : IDisposable
         }
 
         resolved = new MetalGuestRange(window.Buffer, offset, size, window.GpuAddress + offset);
+        // Mappings are page-granular on both sides, so a page-aligned guest address has to
+        // resolve to a page-aligned window offset. When it does not, some view record's
+        // guest address and backing offset disagree below the page, and every range it
+        // resolves lands that far from where the guest put it.
+        if ((gpuVa & 0xFFF) != (offset & 0xFFF))
+        {
+            MetalV2Diagnostics.WarnOnce(
+                "unaligned-window-offset",
+                $"A guest address resolved to a window offset that disagrees with it below the page: " +
+                $"address=0x{gpuVa:X16} offset=0x{offset:X} window={index} delta=0x{(gpuVa ^ offset) & 0xFFF:X}.");
+        }
+
         Trap?.NoteBinding($"resolve[{index}]", gpuVa, size, (ulong)window.Buffer, offset, resolved.GpuAddress);
         return true;
     }
