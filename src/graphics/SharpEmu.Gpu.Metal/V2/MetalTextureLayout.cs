@@ -30,6 +30,10 @@ internal struct MetalTileTransfer
     public uint SurfaceZ;
     public uint Level;
     public uint Slice;
+
+    // The surface row this transfer's first row is, for a transfer cut down to a run
+    // of block rows; zero for one that covers its subresource from the top.
+    public uint BaseY;
 }
 
 // One buffer-to-texture (or texture-to-buffer) blit region. The Metal twin of
@@ -43,6 +47,9 @@ internal struct MetalSubresourceCopy
     public uint Level;
     public uint Slice;
     public uint OriginZ;
+
+    // The first texel row this copy writes, for a copy cut down to a run of rows.
+    public uint OriginY;
     public uint Width;
     public uint Height;
     public uint Depth;

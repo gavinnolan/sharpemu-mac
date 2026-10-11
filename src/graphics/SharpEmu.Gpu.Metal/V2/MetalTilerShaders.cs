@@ -27,8 +27,10 @@ internal enum MetalTileDirection
 // library per element size would be a hundred compiles instead.
 internal static class MetalTilerShaders
 {
-    // The 13 dwords every block-copy kernel reads, and the subset the conversions use.
-    public const int ArgumentCount = 13;
+    // The 14 dwords every block-copy kernel reads, and the subset the conversions use:
+    // the 13 the Vulkan tiler shares, and then baseY for a transfer cut down to a run of
+    // block rows.
+    public const int ArgumentCount = 14;
 
     public const int ArgumentBytes = ArgumentCount * sizeof(uint);
 
@@ -390,7 +392,11 @@ internal static class MetalTilerShaders
         #include <metal_stdlib>
         using namespace metal;
 
-        // The 13 dwords GpuTiler's TileTransferArguments carries, in the same order.
+        // The 13 dwords GpuTiler's TileTransferArguments carries, in the same order,
+        // and then baseY: the surface row this transfer's first row really is. A
+        // transfer restricted to a run of block rows addresses its own rows from zero
+        // on both sides, but the block offset swizzle folds in y bits above the block,
+        // so it has to be told where the run sits in the surface.
         struct TileArgs
         {
             uint sourceBase;
@@ -406,6 +412,7 @@ internal static class MetalTilerShaders
             uint tailX;
             uint tailY;
             uint tail;
+            uint baseY;
         };
 
         """;
@@ -443,7 +450,7 @@ internal static class MetalTilerShaders
 
         source.Append("        if (gid.x >= args.width || gid.y >= args.height)\n        {\n            return;\n        }\n\n");
         source.Append("        uint sx = tail ? gid.x + args.tailX : gid.x;\n");
-        source.Append("        uint sy = tail ? gid.y + args.tailY : gid.y;\n");
+        source.Append("        uint sy = gid.y + (tail ? args.tailY : args.baseY);\n");
         source.Append("        uint sz = gid.z + args.surfaceZ;\n");
         source.Append($"        uint block = tail ? 0u : ((gid.z >> {depthShift}u) * args.blocksPerSlice + " +
                       $"(gid.y >> {heightShift}u) * args.blocksPerRow + (gid.x >> {widthShift}u));\n");
@@ -521,15 +528,16 @@ internal static class MetalTilerShaders
               $"bx * {bytes}u;\n"
             : "                    uint to = 0u;\n");
         source.Append($"                    for (uint j = 0u; j < {dword.Height}u; ++j)\n                    {{\n");
-        source.Append("                        uint sy = by + j;\n");
-        source.Append("                        if (sy >= args.height)\n                        {\n                            break;\n                        }\n\n");
+        source.Append("                        uint ly = by + j;\n");
+        source.Append("                        if (ly >= args.height)\n                        {\n                            break;\n                        }\n\n");
+        source.Append("                        uint sy = ly + args.baseY;\n");
         source.Append($"                        for (uint i = 0u; i < {dword.Width}u; ++i)\n                        {{\n");
         source.Append("                            uint sx = bx + i;\n");
         source.Append("                            if (sx >= args.width)\n                            {\n                                break;\n                            }\n\n");
         source.Append($"                            uint tiled = args.{(detile ? "sourceBase" : "destinationBase")} + blockBase + " +
                       $"tiled_offset_{bytes}(sx, sy, sz);\n");
         source.Append($"                            uint linear = args.{(detile ? "destinationBase" : "sourceBase")} + " +
-                      $"gid.z * args.sliceBytes + sy * args.pitchBytes + sx * {bytes}u;\n");
+                      $"gid.z * args.sliceBytes + ly * args.pitchBytes + sx * {bytes}u;\n");
         source.Append($"                            uint from = {(detile ? "tiled" : "linear")};\n");
         source.Append($"                            uint shift = ({(detile ? "linear" : "tiled")} & 3u) * 8u;\n");
         if (!detile)
@@ -626,14 +634,14 @@ internal static class MetalTilerShaders
             source.Append($"    constant TileArgs& args [[buffer({ArgumentIndex})]],\n");
             source.Append("    uint3 gid [[thread_position_in_grid]])\n{\n");
             source.Append("    if (kElementBytes == 4u)\n    {\n");
-            source.Append("        uint sx = gid.x;\n        uint sy = gid.y;\n");
+            source.Append("        uint sx = gid.x;\n        uint sy = gid.y + args.baseY;\n");
             source.Append("        if (sx >= args.width || sy >= args.height)\n        {\n            return;\n        }\n\n");
             source.Append($"        uint block = (sy >> {Log2(wide.BlockHeight)}u) * args.blocksPerRow + " +
                           $"(sx >> {Log2(wide.BlockWidth)}u);\n");
             source.Append($"        uint to = args.destinationBase + block * {wide.BlockSize}u + " +
                           "tiled_offset_4(sx, sy, args.surfaceZ);\n");
             source.Append($"        target[to >> 2] = as_type<uint>({read});\n        return;\n    }}\n\n");
-            source.Append("    uint x0 = gid.x * 2u;\n    uint sy = gid.y;\n");
+            source.Append("    uint x0 = gid.x * 2u;\n    uint sy = gid.y + args.baseY;\n");
             source.Append("    if (x0 >= args.width || sy >= args.height)\n    {\n        return;\n    }\n\n");
             source.Append("    uint value = 0u;\n    uint mask = 0u;\n    uint to = 0u;\n");
             source.Append("    for (uint i = 0u; i < 2u; ++i)\n    {\n");
