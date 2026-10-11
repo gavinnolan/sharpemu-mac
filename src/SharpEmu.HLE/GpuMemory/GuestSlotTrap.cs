@@ -109,6 +109,41 @@ public static class GuestSlotTrap
     /// <summary>The value being hunted, or zero when any change is interesting.</summary>
     public static ulong Value => TrapValue;
 
+    /// <summary>
+    /// The watched slot a guest range covers, if any. A producer that names its
+    /// destination can be tested against every adopted slot as it records it, which is
+    /// what lets a watcher keep the handful of entries that could explain a change
+    /// instead of every binding a submission ever resolved.
+    /// </summary>
+    public static bool TryFindCoveredSlot(ulong address, ulong size, out ulong slot)
+    {
+        slot = 0;
+        if (size == 0 || address > ulong.MaxValue - size)
+        {
+            return false;
+        }
+
+        var end = address + size;
+        var count = Volatile.Read(ref _blockCount);
+        for (var index = 0; index < count && index < MaxBlocks; index++)
+        {
+            var baseAddress = Volatile.Read(ref BlockBases[index]);
+            if (baseAddress == 0)
+            {
+                continue;
+            }
+
+            var candidate = baseAddress + SlotOffset;
+            if (candidate >= address && candidate < end)
+            {
+                slot = candidate;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>Adopts a mapping whose shape matches the one the watched structure lives in.</summary>
     public static void OnDirectMapping(ulong mappedAddress, ulong length, int protection)
     {

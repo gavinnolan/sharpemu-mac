@@ -23,8 +23,8 @@ namespace SharpEmu.Gpu.Metal.V2;
 internal sealed class MetalSlotTrap
 {
     private const int MaxBlocks = 1024;
-    private const int MaxPending = 8;
-    private const int MaxBindingsPerSubmission = 512;
+    private const int MaxPending = 512;
+    private const int MaxBindingsPerSubmission = 32;
     private const int MaxReports = 16;
 
     internal readonly record struct Binding(
@@ -49,6 +49,7 @@ internal sealed class MetalSlotTrap
     private readonly int _blockBytes;
     private int _cursor;
     private long _mismatches;
+    private long _dropped;
     private int _reports;
 
     public MetalSlotTrap(ICpuMemory memory)
@@ -73,12 +74,24 @@ internal sealed class MetalSlotTrap
 
     public long Mismatches => _mismatches;
 
+    /// <summary>Snapshots the ring lost before the GPU finished their submission.</summary>
+    public long Dropped => _dropped;
+
     /// <summary>Notes a guest range this submission resolved, and what it resolved to.</summary>
     public void NoteBinding(string owner, ulong address, ulong size, ulong buffer, ulong offset, ulong gpuAddress)
     {
-        if (_recording.Count >= MaxBindingsPerSubmission)
+        // Only what could explain a change is worth carrying: a submission resolves
+        // hundreds of windows, and keeping all of them for every submission still in
+        // flight is more memory than the answer is worth. A resolution whose destination
+        // covers a watched slot is the answer; a transfer label is the context for it.
+        if (size != 0 && !GuestSlotTrap.TryFindCoveredSlot(address, size, out _))
         {
             return;
+        }
+
+        if (_recording.Count >= MaxBindingsPerSubmission)
+        {
+            _recording.RemoveAt(0);
         }
 
         _recording.Add(new Binding(owner, address, size, buffer, offset, gpuAddress));
@@ -145,10 +158,12 @@ internal sealed class MetalSlotTrap
             }
         }
 
-        // Full: the oldest submission is checked early rather than dropped. An early check
-        // can only miss a change, never invent one.
+        // Full: the oldest is reused, and it is *not* checked first. The GPU lags the
+        // command processor by a hundred submissions or more, so an early check reads
+        // memory the submission has not finished writing and reports nothing; losing the
+        // snapshot is the honest outcome, and the counter says how often it happened.
+        _dropped++;
         var oldest = _pending[_cursor];
-        Check(oldest);
         oldest.InUse = false;
         return oldest;
     }

@@ -1148,6 +1148,12 @@ internal sealed partial class MetalRenderHost :
             Console.Error.WriteLine($"[METAL-V2][GUARD] {_guard.Report()}");
         }
 
+        if (_slotTrap is not null)
+        {
+            Console.Error.WriteLine(
+                $"[METAL-V2][SLOT-TRAP] mismatches={_slotTrap.Mismatches} dropped={_slotTrap.Dropped}");
+        }
+
         if (!MetalV2Diagnostics.Verbose)
         {
             return;
