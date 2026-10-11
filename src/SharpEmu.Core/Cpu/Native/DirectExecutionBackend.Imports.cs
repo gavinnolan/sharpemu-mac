@@ -230,6 +230,24 @@ public sealed partial class DirectExecutionBackend
 				"Absence of an import from this log is not evidence the title never called it. " +
 				"SHARPEMU_PERF_HLE=1 counts every dispatch, leaves included.");
 		}
+		// SHARPEMU_LOG_IMPORT_FILTER does reach the leaf paths, because a filtered
+		// trace stays small enough to be worth the branch and because the questions
+		// that need it - is this status import ever called, and what does it answer -
+		// are about imports the all-imports log cannot see. The arguments are read
+		// before the dispatch: the leaf paths write results through the same pack.
+		var traceLeaf = (importStubEntry.IsLeaf || importStubEntry.IsTrivialLeaf) &&
+			!string.IsNullOrWhiteSpace(_importFilter) &&
+			MatchesImportFilter(in importStubEntry);
+		ulong leafArg0 = 0, leafArg1 = 0, leafArg2 = 0, leafArg3 = 0, leafReturnRip = 0;
+		if (traceLeaf)
+		{
+			leafArg0 = *(ulong*)argPackPtr;
+			leafArg1 = *(ulong*)(argPackPtr + 8);
+			leafArg2 = *(ulong*)(argPackPtr + 16);
+			leafArg3 = *(ulong*)(argPackPtr + 24);
+			leafReturnRip = *(ulong*)(argPackPtr + 96);
+		}
+
 		// The leaf paths skip the rest of the gateway entirely, so they mark
 		// their own body: without this the profile charges a memcpy's whole cost
 		// to "transition" and hides the work it actually did.
@@ -244,6 +262,12 @@ public sealed partial class DirectExecutionBackend
 			ImportProfile.MarkBodyEnd();
 			if (hotMemoryHandled)
 			{
+				if (traceLeaf)
+				{
+					TraceLeafImport(
+						in importStubEntry, num,
+						leafArg0, leafArg1, leafArg2, leafArg3, leafReturnRip, hotMemoryResult);
+				}
 				return hotMemoryResult;
 			}
 		}
@@ -253,6 +277,12 @@ public sealed partial class DirectExecutionBackend
 			ImportProfile.MarkBodyStart();
 			var trivialResult = DispatchTrivialLeaf(cpuContext, in importStubEntry, argPackPtr, num);
 			ImportProfile.MarkBodyEnd();
+			if (traceLeaf)
+			{
+				TraceLeafImport(
+					in importStubEntry, num,
+					leafArg0, leafArg1, leafArg2, leafArg3, leafReturnRip, trivialResult);
+			}
 			return trivialResult;
 		}
 
@@ -268,6 +298,12 @@ public sealed partial class DirectExecutionBackend
 			ImportProfile.MarkBodyEnd();
 			if (leafHandled)
 			{
+				if (traceLeaf)
+				{
+					TraceLeafImport(
+						in importStubEntry, num,
+						leafArg0, leafArg1, leafArg2, leafArg3, leafReturnRip, leafResult);
+				}
 				return leafResult;
 			}
 		}
@@ -1686,6 +1722,44 @@ public sealed partial class DirectExecutionBackend
 		}
 
 		return cpuContext[CpuRegister.Rax];
+	}
+
+	private bool MatchesImportFilter(in ImportStubEntry entry)
+	{
+		var filter = _importFilter;
+		if (string.IsNullOrWhiteSpace(filter))
+		{
+			return false;
+		}
+
+		if (entry.Export is { } export &&
+			(export.LibraryName.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+			export.Name.Contains(filter, StringComparison.OrdinalIgnoreCase)))
+		{
+			return true;
+		}
+
+		return entry.Nid.Contains(filter, StringComparison.OrdinalIgnoreCase);
+	}
+
+	// The leaf line carries rax as well as the arguments: what a status import
+	// answers is usually the whole question being asked of it.
+	private static void TraceLeafImport(
+		in ImportStubEntry entry,
+		long dispatchIndex,
+		ulong arg0,
+		ulong arg1,
+		ulong arg2,
+		ulong arg3,
+		ulong returnRip,
+		ulong result)
+	{
+		var library = entry.Export?.LibraryName ?? "?";
+		var name = entry.Export?.Name ?? entry.Nid;
+		Console.Error.WriteLine(
+			$"[LOADER][TRACE] Import#{dispatchIndex}: {library}:{name} ({entry.Nid}) leaf " +
+			$"rdi=0x{arg0:X16} rsi=0x{arg1:X16} rdx=0x{arg2:X16} rcx=0x{arg3:X16} " +
+			$"ret=0x{returnRip:X16} rax=0x{result:X16}");
 	}
 
 	internal static bool IsNoBlockLeafImport(string nid) =>
