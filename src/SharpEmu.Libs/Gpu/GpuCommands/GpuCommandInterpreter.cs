@@ -580,6 +580,33 @@ public sealed partial class GpuCommandInterpreter
         return BinaryPrimitives.ReadUInt32LittleEndian(bytes);
     }
 
+    /// <summary>
+    /// Reads the bytes a wait packet polls, as they are in memory right now.
+    /// </summary>
+    /// <remarks>
+    /// A poll is not an ordinary read: the hardware's command processor reads what memory
+    /// holds and stalls on the value it finds, so waiting here for work that may be about
+    /// to write those bytes only moves the stall onto the worker thread. An unmet compare
+    /// suspends the submission instead, and the host wakes it when the write lands.
+    /// </remarks>
+    internal ulong PollValue(ulong address, bool is64Bit)
+    {
+        var size = is64Bit ? sizeof(ulong) : sizeof(uint);
+        RenderPhaseProfile.RecordCommandRead(
+            is64Bit ? RenderPhaseProfile.CommandReadKind.Operand64 : RenderPhaseProfile.CommandReadKind.Operand32,
+            size);
+        Span<byte> bytes = stackalloc byte[sizeof(ulong)];
+        var destination = bytes[..size];
+        if (!_host.TryPollGuest(address, destination))
+        {
+            throw _host.Fatal($"The command stream cannot read guest memory: address=0x{address:X16} size={size}.");
+        }
+
+        return is64Bit
+            ? BinaryPrimitives.ReadUInt64LittleEndian(destination)
+            : BinaryPrimitives.ReadUInt32LittleEndian(destination);
+    }
+
     internal ulong ReadQword(ulong address)
     {
         RenderPhaseProfile.RecordCommandRead(RenderPhaseProfile.CommandReadKind.Operand64, sizeof(ulong));
