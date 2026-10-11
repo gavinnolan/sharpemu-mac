@@ -163,6 +163,24 @@ public sealed class MslCodegenBenchmarkTests(ITestOutputHelper output)
         return new Gen5ComputeFixture("branch-chain", [.. words], 8, (int)(count * 4) + 16);
     }
 
+    /// <summary>A relative move with a result that reaches memory. M0 comes from a
+    /// constant here, so the bounded path resolves it to one register and the unbounded
+    /// path resolves it over the registers the program touches; both have to land the
+    /// same dword.</summary>
+    private static Gen5ComputeFixture RelativeMove() => new(
+        "relative-move",
+        [
+            0xBEFC0382,             // s_mov_b32 m0, 2
+            0x7E1802FF, 0x11111111, // v_mov_b32 v12, 0x11111111
+            0x7E1A02FF, 0x22222222, // v_mov_b32 v13, 0x22222222
+            0x7E1C02FF, 0x33333333, // v_mov_b32 v14, 0x33333333
+            0x7E0A870C,             // v_movrels_b32 v5, v12   -> v14
+            0xE0700000, 0x80020500, // buffer_store_dword v5, off, s[8:11], 0
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 16);
+
     private static void AppendStores(List<uint> words, uint count)
     {
         for (var register = 1u; register <= count; register++)
@@ -273,6 +291,8 @@ public sealed class MslCodegenBenchmarkTests(ITestOutputHelper output)
             ("structured", new Gen5MslCodegenOptions(true, true)),
             ("structured+zerofill", new Gen5MslCodegenOptions(true, true, ForceRegisterInitialization: true)),
             ("dispatcher+allocated", new Gen5MslCodegenOptions(false, true)),
+            ("no-exec-elision", new Gen5MslCodegenOptions(ExecGuardElision: false)),
+            ("unbounded-movrel", new Gen5MslCodegenOptions(BoundedRelativeMoves: false)),
         };
 
         var programs = new List<Gen5ComputeFixture>(Gen5ComputeFixtures.All.Where(
@@ -281,6 +301,7 @@ public sealed class MslCodegenBenchmarkTests(ITestOutputHelper output)
             AluChain(),
             LoopWithLiveState(),
             BranchChain(),
+            RelativeMove(),
         };
 
         foreach (var program in programs)
@@ -317,6 +338,48 @@ public sealed class MslCodegenBenchmarkTests(ITestOutputHelper output)
         }
 
         output.WriteLine($"{programs.Count} programs agree across {forms.Length} codegen forms");
+    }
+
+    /// <summary>The cross-form test only proves the forms agree; this one proves they
+    /// agree on the right answer. M0 is 2 and the move reads v12, so v14 — 0x33333333 —
+    /// is what has to reach the buffer.</summary>
+    [Fact]
+    public void ARelativeMoveReadsTheRegisterM0Selects()
+    {
+        if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") != "1")
+        {
+            output.WriteLine("Relative-move execution requires the exclusive Metal device gate.");
+            return;
+        }
+
+        Assert.True(MetalNative.IsAvailable, "The required execution gate needs a Metal device.");
+        var program = RelativeMove();
+        foreach (var bounded in new[] { true, false })
+        {
+            var request = Gen5ComputeFixtures.CreateComputeRequest(program);
+            Assert.True(
+                Gen5MslTranslator.TryCompileProgram(
+                    request,
+                    out var shader,
+                    out var compileError,
+                    new Gen5MslCodegenOptions(BoundedRelativeMoves: bounded)),
+                compileError);
+            Assert.True(
+                MetalNative.TryCompileLibrary(shader.Source, out var library, out var metalError),
+                $"{metalError}\n{shader.Source}");
+            Assert.True(
+                MetalNative.TryExecuteWithArgumentBuffer(
+                    library,
+                    shader.EntryPoint,
+                    new byte[program.StoreBackingBytes],
+                    new byte[Resources.PushData.ByteSize],
+                    shader.ArgumentLayout!,
+                    threadsPerThreadgroup: 1,
+                    out var result,
+                    out var runError),
+                runError);
+            Assert.Equal(0x33333333u, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(result));
+        }
     }
 
     private readonly record struct Measurement(

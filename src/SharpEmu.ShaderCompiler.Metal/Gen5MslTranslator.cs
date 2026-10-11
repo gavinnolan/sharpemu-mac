@@ -2169,6 +2169,11 @@ public static partial class Gen5MslTranslator
             }
         }
 
+        /// <summary>One VGPR by number, wrapped into the file the way a relative move's
+        /// register arithmetic wraps.</summary>
+        private static string VectorExpression(uint register) =>
+            $"v[{register & (VectorRegisterFileCount - 1)}]";
+
         private string ScalarExpression(uint register) =>
             register < ScalarRegisterFileCount ? $"s[{register}]" : "0u";
 

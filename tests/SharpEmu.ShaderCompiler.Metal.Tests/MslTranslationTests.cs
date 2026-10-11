@@ -416,19 +416,65 @@ public sealed class MslTranslationTests
         var fixture = new Gen5ComputeFixture(
             "relative-vector-source",
             [
-                0x7E6E870C, // v_movrels_b32 v55, v12
-                0xBF810000, // s_endpgm
+                0x7E1802FF, 0x11111111, // v_mov_b32 v12, 0x11111111
+                0x7E1A02FF, 0x22222222, // v_mov_b32 v13, 0x22222222
+                0x7E6E870C,             // v_movrels_b32 v55, v12
+                0xBF810000,             // s_endpgm
             ],
             StoreScalarResourceBase: 0,
             StoreBackingBytes: 0);
 
         var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture);
 
-        // The register file is an array the emitted MSL indexes at run time, so
-        // the relative number is the encoded one plus M0, wrapped into the file.
-        Assert.Contains("v[(12u + ", shader.Source, StringComparison.Ordinal);
+        // The relative number is still the encoded one plus M0, wrapped into the file,
+        // but nothing indexes the register file with it: the read is a choice among the
+        // registers this program touches, so they all stay in hardware registers. A
+        // register the program never writes holds undefined data in hardware, which is
+        // why only its own registers have to be reachable.
+        Assert.Contains("(12u + ", shader.Source, StringComparison.Ordinal);
         Assert.Contains("s124", shader.Source, StringComparison.Ordinal);
-        Assert.Contains(") & 255u]", shader.Source, StringComparison.Ordinal);
+        Assert.Contains(") & 255u", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("== 12u ? v12", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("== 13u ? v13", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("uint v[256]", shader.Source, StringComparison.Ordinal);
+    }
+
+    /// <summary>When straight-line scalar code produces M0, the move reaches a known set
+    /// of registers and resolves to them directly — no run-time number at all.</summary>
+    [Fact]
+    public void RelativeVectorSourceWithAKnownM0ResolvesToOneRegister()
+    {
+        var fixture = new Gen5ComputeFixture(
+            "relative-vector-source-constant",
+            [
+                0xBEFC0382,             // s_mov_b32 m0, 2
+                0x7E1C02FF, 0x33333333, // v_mov_b32 v14, 0x33333333
+                0x7E6E870C,             // v_movrels_b32 v55, v12
+                0xBF810000,             // s_endpgm
+            ],
+            StoreScalarResourceBase: 0,
+            StoreBackingBytes: 0);
+
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture);
+
+        // 12 + 2: the source is v14 outright, with no register number to resolve.
+        Assert.Contains("= v14;", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("& 255u", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("== 14u ?", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("uint v[256]", shader.Source, StringComparison.Ordinal);
+
+        // With the analysis switched off the same program goes back to a run-time
+        // number resolved over the registers it touches.
+        var request = Gen5ComputeFixtures.CreateComputeRequest(fixture);
+        Assert.True(
+            Gen5MslTranslator.TryCompileProgram(
+                request,
+                out var unbounded,
+                out var error,
+                new Gen5MslCodegenOptions(BoundedRelativeMoves: false)),
+            error);
+        Assert.Contains("& 255u", unbounded.Source, StringComparison.Ordinal);
+        Assert.Contains("== 14u ? v14", unbounded.Source, StringComparison.Ordinal);
     }
 
     [Theory]

@@ -55,10 +55,12 @@ public static partial class Gen5MslTranslator
 
             public HashSet<uint> VectorNeedsInitialValue { get; } = [];
 
-            /// <summary>Rewrites s[14] into s14 for whichever file was scalarized. The
-            /// index form stays for a file kept as an array.</summary>
+            /// <summary>Rewrites s[14] into s14 for whichever file was scalarized, and
+            /// resolves the dynamic-access markers over the registers the program
+            /// touches. The index form stays for a file kept as an array.</summary>
             public string Rewrite(string text)
             {
+                text = ExpandDynamicVectorAccess(text);
                 if (ScalarArray && VectorArray)
                 {
                     return text;
@@ -83,7 +85,154 @@ public static partial class Gen5MslTranslator
                 result.Append(text, cursor, text.Length - cursor);
                 return result.ToString();
             }
+
+            /// <summary>Turns each marked run-time register access into a choice among the
+            /// registers the program actually touches.
+            ///
+            /// A relative move can name any register in the file, but a register the
+            /// program never writes holds whatever the previous wave left there — the
+            /// guest reads undefined data, so any value answers it. That is what makes
+            /// the expansion possible: only the registers this program uses have to be
+            /// reachable, and for the Octopath vertex shader that is v0..v31 rather than
+            /// all 256. A read becomes a select tree over them and a write becomes one
+            /// masked assignment each, which is more instructions at the four relative
+            /// moves and in exchange keeps the whole register file in hardware registers
+            /// instead of thread-private memory.</summary>
+            private string ExpandDynamicVectorAccess(string text)
+            {
+                if (!text.Contains(DynamicVectorRead, StringComparison.Ordinal) &&
+                    !text.Contains(DynamicVectorWrite, StringComparison.Ordinal))
+                {
+                    return text;
+                }
+
+                var result = new StringBuilder(text.Length);
+                var cursor = 0;
+                while (cursor < text.Length)
+                {
+                    var read = text.IndexOf(DynamicVectorRead, cursor, StringComparison.Ordinal);
+                    var write = text.IndexOf(DynamicVectorWrite, cursor, StringComparison.Ordinal);
+                    var at = read < 0 ? write : write < 0 ? read : Math.Min(read, write);
+                    if (at < 0)
+                    {
+                        break;
+                    }
+
+                    var isRead = at == read;
+                    var marker = isRead ? DynamicVectorRead : DynamicVectorWrite;
+                    if (!TryReadMarkerArguments(text, at + marker.Length, out var arguments, out var end))
+                    {
+                        // Not a call after all; copy it through and carry on.
+                        result.Append(text, cursor, at + marker.Length - cursor);
+                        cursor = at + marker.Length;
+                        continue;
+                    }
+
+                    result.Append(text, cursor, at - cursor);
+                    result.Append(isRead
+                        ? ExpandRead(arguments[0])
+                        : ExpandWrite(arguments[0], arguments[1]));
+                    cursor = end;
+                }
+
+                result.Append(text, cursor, text.Length - cursor);
+                return result.ToString();
+            }
+
+            private string ExpandRead(string index)
+            {
+                if (VectorArray)
+                {
+                    return $"v[{index}]";
+                }
+
+                if (Vectors.Count == 0)
+                {
+                    return "0u";
+                }
+
+                // The lowest register is the fallback arm: an index outside the set is a
+                // register the program never writes, so its value is undefined anyway.
+                var expression = $"v{Vectors.Min}";
+                foreach (var register in Vectors)
+                {
+                    if (register != Vectors.Min)
+                    {
+                        expression = $"({index} == {register}u ? v{register} : {expression})";
+                    }
+                }
+
+                return expression;
+            }
+
+            private string ExpandWrite(string index, string value)
+            {
+                if (VectorArray)
+                {
+                    return $"v[{index}] = {value};";
+                }
+
+                var statements = new StringBuilder("{");
+                foreach (var register in Vectors)
+                {
+                    statements.Append($" v{register} = {index} == {register}u ? {value} : v{register};");
+                }
+
+                return statements.Append(" }").ToString();
+            }
+
+            /// <summary>Splits a marker's parenthesised argument list, respecting nesting.</summary>
+            private static bool TryReadMarkerArguments(
+                string text,
+                int open,
+                out string[] arguments,
+                out int end)
+            {
+                arguments = [];
+                end = open;
+                if (open >= text.Length || text[open] != '(')
+                {
+                    return false;
+                }
+
+                var parts = new List<string>();
+                var depth = 0;
+                var start = open + 1;
+                for (var index = open; index < text.Length; index++)
+                {
+                    var character = text[index];
+                    if (character == '(')
+                    {
+                        depth++;
+                    }
+                    else if (character == ')')
+                    {
+                        depth--;
+                        if (depth == 0)
+                        {
+                            parts.Add(text[start..index].Trim());
+                            end = index + 1;
+                            arguments = [.. parts];
+                            return true;
+                        }
+                    }
+                    else if (character == ',' && depth == 1)
+                    {
+                        parts.Add(text[start..index].Trim());
+                        start = index + 1;
+                    }
+                }
+
+                return false;
+            }
         }
+
+        /// <summary>Marks a register read whose number is only known at run time. Resolved
+        /// by <see cref="RegisterPlan.Rewrite"/> once the register set is known.</summary>
+        private const string DynamicVectorRead = "SHARPEMU_VREAD";
+
+        /// <summary>Marks the matching write; takes the register number and the value.</summary>
+        private const string DynamicVectorWrite = "SHARPEMU_VWRITE";
 
         /// <summary>One s[...] or v[...] occurrence. <see cref="Index"/> is -1 when the
         /// subscript is not a decimal literal, which is how dynamic indexing shows up.</summary>
@@ -161,10 +310,14 @@ public static partial class Gen5MslTranslator
 
             var dynamicScalar = false;
             var dynamicVector = false;
+            var markedVectorAccess = false;
             var scalars = new SortedSet<uint>();
             var vectors = new SortedSet<uint>();
             foreach (var text in texts)
             {
+                markedVectorAccess |=
+                    text.Contains(DynamicVectorRead, StringComparison.Ordinal) ||
+                    text.Contains(DynamicVectorWrite, StringComparison.Ordinal);
                 foreach (var reference in ScanRegisterReferences(text))
                 {
                     if (reference.Index < 0)
@@ -184,6 +337,17 @@ public static partial class Gen5MslTranslator
             plan.Vectors.UnionWith(vectors);
 
             var live = LiveAtEntry(blocks, initialState);
+            if (markedVectorAccess)
+            {
+                // A run-time register number is resolved after this pass, so liveness
+                // cannot see which registers it reads. It may read any of them, so they
+                // all get an initial value.
+                for (var register = 0; register < VectorRegisterFileCount; register++)
+                {
+                    live[VectorSlotBase + register] = true;
+                }
+            }
+
             foreach (var register in plan.Scalars)
             {
                 if (live[ScalarSlotBase + (int)register])
