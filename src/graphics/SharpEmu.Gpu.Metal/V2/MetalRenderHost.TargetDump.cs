@@ -185,6 +185,10 @@ internal sealed partial class MetalRenderHost
             entry?.Profile ?? "-",
             kind, shape, entry?.PrimitiveType, _vertexBufferCount, masks));
         Console.Error.WriteLine($"[METAL-V2][DRAW]   #{_drawStateLines} {streams}");
+        if (entry?.VertexLayout is { Length: > 0 } layout)
+        {
+            Console.Error.WriteLine($"[METAL-V2][DRAW]   #{_drawStateLines} layout{layout}");
+        }
     }
 
     /// <summary>

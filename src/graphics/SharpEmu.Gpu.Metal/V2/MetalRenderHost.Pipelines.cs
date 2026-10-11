@@ -40,6 +40,12 @@ internal sealed partial class MetalRenderHost
         // The shader hashes behind this pipeline, formatted once for the per-draw GPU
         // profiler; null unless SHARPEMU_METAL_V2_PROFILE_SHADERS=1.
         public string? Profile;
+
+        // The vertex descriptor this pipeline was built with, for the draw-state report:
+        // a stride, a step function or an attribute format that does not match what the
+        // program fetches makes every vertex the same one, and the draw then rasterises
+        // nothing at all while looking perfectly ordinary from the outside.
+        public string? VertexLayout;
     }
 
     // One compiled MSL module: its library, its function, and the shader it came from.
@@ -182,6 +188,7 @@ internal sealed partial class MetalRenderHost
         }
 
         nint state;
+        string? vertexLayout = null;
         try
         {
             if (mesh is null)
@@ -273,7 +280,7 @@ internal sealed partial class MetalRenderHost
 
             if (mesh is null && description.VertexInput.AttributeCount != 0)
             {
-                var vertexDescriptor = CreateVertexDescriptor(description);
+                var vertexDescriptor = CreateVertexDescriptor(description, out vertexLayout);
                 MetalNative.SendVoid(descriptor, MetalNative.Selector("setVertexDescriptor:"), vertexDescriptor);
                 MetalNative.SendVoid(vertexDescriptor, SelRelease);
             }
@@ -321,6 +328,7 @@ internal sealed partial class MetalRenderHost
             HasStencil = description.Rendering.StencilFormat != GpuFormat.Undefined,
             Mesh = mesh,
             Profile = ProfileLabelFor(vertexModule, pixelModule, mesh),
+            VertexLayout = vertexLayout,
         };
         _pipelineEntries[entry.Id] = entry;
         return new PipelineHandle(entry.Id, 0, false);
@@ -339,8 +347,9 @@ internal sealed partial class MetalRenderHost
         MtlFormat.Rgba32Uint or MtlFormat.Rgba32Sint or MtlFormat.Rgb10A2Uint;
 
     // The vertex descriptor: one attribute per fetch, one layout per guest buffer.
-    private nint CreateVertexDescriptor(GraphicsPipelineDescription description)
+    private nint CreateVertexDescriptor(GraphicsPipelineDescription description, out string? layoutReport)
     {
+        var report = MetalV2Diagnostics.ReportVertexLayout ? new System.Text.StringBuilder() : null;
         var descriptor = MetalNative.Send(
             MetalNative.Send(MetalNative.Class("MTLVertexDescriptor"), MetalNative.Selector("alloc")),
             MetalNative.Selector("init"));
@@ -370,6 +379,10 @@ internal sealed partial class MetalRenderHost
             {
                 MetalV2Native.SendVoidValue(layout, MetalNative.Selector("setStepRate:"), 0);
             }
+
+            report?.Append(
+                System.Globalization.CultureInfo.InvariantCulture,
+                $" buf{VertexBufferSlotBase + binding}:stride={stride}{(vertexInput.Bindings[binding].Instance ? ":instance" : string.Empty)}");
         }
 
         for (var index = 0; index < vertexInput.AttributeCount; index++)
@@ -392,8 +405,13 @@ internal sealed partial class MetalRenderHost
                 attribute, MetalNative.Selector("setOffset:"), (nuint)vertexInput.Attributes[index].Offset);
             MetalV2Native.SendVoidValue(
                 attribute, MetalNative.Selector("setBufferIndex:"), (nuint)(VertexBufferSlotBase + binding));
+            report?.Append(
+                System.Globalization.CultureInfo.InvariantCulture,
+                $" a{index}:fmt={(int)format}:off={vertexInput.Attributes[index].Offset}" +
+                $":buf={VertexBufferSlotBase + binding}:guest={resource.Descriptor.Format}:used={usedComponents}");
         }
 
+        layoutReport = report?.ToString();
         return descriptor;
     }
 
