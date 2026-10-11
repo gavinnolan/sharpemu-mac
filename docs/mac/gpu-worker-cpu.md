@@ -42,6 +42,42 @@ ProgramPreparation=23.5%/n236   CommandStream=55.2%/n110  ResourceMaterializatio
 materialisations in a window with seventy draws. The preparation runs many times per
 draw or dispatch, which is the thing to look at next.
 
+**`ProgramPreparation`'s share was an artefact of where the scopes ended.** It had no
+scope for the part that holds the pipeline cache's lock, so everything that part did
+was charged to the enclosing phase's self time. With a `ProgramPrepareLocked` scope
+around it, `ProgramPreparation` keeps two tenths of a per cent and the locked region
+one tenth to four tenths in steady state — the lock is not contended and what it
+holds is not the cost either. `ResourceMaterialization` is: fifty-two to sixty-two
+per cent of the worker's wall clock, at some six thousand materialisations per
+five-second window.
+
+## What a materialization spends a millisecond on
+
+Splitting the cache's own work from the walk it caches
+(`SHARPEMU_PROFILE_MATERIALIZATION=1`) ended three more guesses:
+
+```
+Total=23235ms/n22626  Snapshot=23032ms/n22626
+CacheKey=42ms/n49398  CacheFind=38ms/n49398  RecorderWrap=5ms/n22626  EntryBuild=82ms/n22626
+allocated_bytes=80682744
+```
+
+A miss costs 1.03 ms. The cache's own work around it — hashing the key, finding and
+comparing the entry, wrapping the readers, building the entry that records what was
+read — is 167 ms of 23 s, seven tenths of a per cent, so pooling delegates, pooling
+entries and hashing fewer words cannot matter. `Snapshot` is 99.1 per cent of a miss:
+evaluating the branch conditions, the descriptor words and the flattened table, one
+graph value per word. The 3.5 KB a miss allocates is that table.
+
+The lever is therefore the *number* of misses, not what a miss does around its walk.
+Demon's Souls was missing on 42 to 55 per cent of materialisations while it rewrites
+user data every draw — and most of those words are inline constants that the shader
+reads straight from its binding layout and the descriptors never touch. Keying and
+comparing an entry on every user-data word threw away a materialization that would
+have evaluated identically. The walk now records the user-data words it reads and an
+entry is compared on those alone, which is the argument the recorded guest words
+already rested on.
+
 ## What this says about the caches
 
 Caching pipeline states across runs (`MTLBinaryArchive`) buys back `pipeline_ms`, and

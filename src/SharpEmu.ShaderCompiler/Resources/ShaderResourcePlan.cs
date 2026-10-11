@@ -42,6 +42,35 @@ public sealed class ShaderResourcePlan
     public bool RequiresSpecializationMemory { get; private set; }
     public ShaderResourceInfo Info { get; private set; } = new();
 
+    private long _userDataReadMask;
+
+    /// <summary>
+    /// The user-data word offsets materializing this plan has been seen to read, one bit
+    /// per offset, as a hint for bucketing cached materializations.
+    /// </summary>
+    /// <remarks>
+    /// The graph seeds a value for every register of the user-data window whether the
+    /// program reads it or not, so what a walk reads can only be learned by walking. This
+    /// union of past walks is therefore a hint and never an authority: a cache compares the
+    /// words its own entry recorded. Keying on the hint keeps draws that differ in words no
+    /// walk has read in one bucket, which is what lets the entry be reused at all.
+    /// </remarks>
+    public ulong UserDataReadMask => (ulong)Volatile.Read(ref _userDataReadMask);
+
+    /// <summary>Adds the offsets one walk read to <see cref="UserDataReadMask"/>.</summary>
+    public void NoteUserDataReads(ulong mask)
+    {
+        if (mask == 0) return;
+        var current = Volatile.Read(ref _userDataReadMask);
+        while (((ulong)current & mask) != mask)
+        {
+            var merged = (long)((ulong)current | mask);
+            var seen = Interlocked.CompareExchange(ref _userDataReadMask, merged, current);
+            if (seen == current) return;
+            current = seen;
+        }
+    }
+
     internal RawReadPrefetchPlan? RawReadPrefetch { get; set; }
     private readonly object _compileGate = new();
     private CompiledResourceEvaluator? _compiledEvaluator;

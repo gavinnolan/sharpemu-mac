@@ -167,6 +167,22 @@ public sealed class ResourceMaterializationCacheTests
         Assert.Equal((1, 2), (cache.Hits, cache.Misses));
     }
 
+    // Demon's Souls rewrites user data every draw, but most of those words are inline
+    // constants the descriptors never read: the walk is the same, so the entry must survive.
+    [Fact]
+    public void AWordTheWalkNeverReadsKeepsTheMaterialization()
+    {
+        var plan = ShaderResourcePlan.Extract(
+            DirectImageTableTests.CreateWaveIndexedDescriptorProgram(), ShaderStage.Compute, Hash, 0, 4);
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache();
+        Assert.True(Run(cache, plan, heap, [0x1000, 0, 0, 0], out var first, out _));
+        Assert.True(Run(cache, plan, heap, [0x1000, 0, 0xDEAD, 0xBEEF], out var second, out _));
+        Assert.Same(first, second);
+        Assert.Equal((1, 1), (cache.Hits, cache.Misses));
+        Assert.Equal(0ul, plan.UserDataReadMask & ~0b11ul);
+    }
+
     [Fact]
     public void AFailedReadIsNotCached()
     {

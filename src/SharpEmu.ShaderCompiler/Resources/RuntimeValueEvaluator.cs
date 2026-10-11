@@ -66,6 +66,9 @@ public sealed class RuntimeValueEvaluator
         if (_compiled is not null) _compiledValues.EnsureCapacity(_compiled.Count);
     }
 
+    // Whether this walk runs the plan's IL-compiled evaluator or interprets the graph.
+    internal bool UsesCompiledEvaluator => _compiled is not null;
+
     public bool Evaluate(ScalarValue value, out uint result)
     {
         if (!EvaluateWide(value, out var wide))
@@ -140,7 +143,9 @@ public sealed class RuntimeValueEvaluator
                     return false;
                 }
 
-                result = _inputs.UserData[(int)(register - _plan.UserDataBase)];
+                var offset = (int)(register - _plan.UserDataBase);
+                _inputs.UserDataReads?.Note(offset);
+                result = _inputs.UserData[offset];
                 return true;
             }
             case ScalarValueKind.ShaderBase:
@@ -339,6 +344,7 @@ public sealed class RuntimeValueEvaluator
     {
         result = 0;
         if ((uint)index >= (uint)_inputs.UserData.Count) return false;
+        _inputs.UserDataReads?.Note(index);
         result = _inputs.UserData[index];
         return true;
     }
@@ -446,35 +452,45 @@ public sealed class RuntimeValueEvaluator
         var cleanEvaluator = new RuntimeValueEvaluator(cleanScratch, plan, inputs.WithReader(inputs.ReadCleanMemory));
         var evaluator = new RuntimeValueEvaluator(scratch, plan, inputs, cleanFlatSlots, cleanEvaluator);
         if (evaluateTable && plan.ResourceBranches.Count != 0)
-            activeSources = EvaluateActiveSources(plan, inputs, cleanEvaluator, cleanScratch);
-        var evaluated = new List<DescriptorWords>(sources.Count);
-        RawReadPrefetch.PrefetchSources(plan, sources, activeSources, evaluator);
-        foreach (var sourceIndex in sources)
         {
-            if (sourceIndex >= plan.DescriptorSources.Count)
+            using var activeProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.ActiveSources);
+            activeSources = EvaluateActiveSources(plan, inputs, cleanEvaluator, cleanScratch);
+        }
+        var evaluated = new List<DescriptorWords>(sources.Count);
+        var descriptorWords = 0;
+        using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.DescriptorWords))
+        {
+            RawReadPrefetch.PrefetchSources(plan, sources, activeSources, evaluator);
+            foreach (var sourceIndex in sources)
             {
-                return false;
-            }
-
-            var source = plan.DescriptorSources[(int)sourceIndex];
-            var words = new uint[source.DwordCount];
-            if (activeSources.Length == 0 || activeSources[sourceIndex])
-            {
-                for (var index = 0; index < words.Length; index++)
+                if (sourceIndex >= plan.DescriptorSources.Count)
                 {
-                    if (!evaluator.EvaluateSourceWord((int)sourceIndex, index, out words[index]))
-                    {
-                        return false;
-                    }
+                    return false;
                 }
-            }
 
-            evaluated.Add(new DescriptorWords(words));
+                var source = plan.DescriptorSources[(int)sourceIndex];
+                var words = new uint[source.DwordCount];
+                if (activeSources.Length == 0 || activeSources[sourceIndex])
+                {
+                    for (var index = 0; index < words.Length; index++)
+                    {
+                        if (!evaluator.EvaluateSourceWord((int)sourceIndex, index, out words[index]))
+                        {
+                            return false;
+                        }
+                    }
+
+                    descriptorWords += words.Length;
+                }
+
+                evaluated.Add(new DescriptorWords(words));
+            }
         }
 
         uint[] flattened = [];
         if (evaluateTable)
         {
+            using var tableProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.TableEvaluation);
             flattened = new uint[checked(plan.TableReads.Count + additionalTableWords)];
             inputs.TablePhase?.Invoke(true);
             try
@@ -498,6 +514,9 @@ public sealed class RuntimeValueEvaluator
                 inputs.TablePhase?.Invoke(false);
             }
         }
+
+        ResourceMaterializationProfile.RecordWalk(
+            evaluateTable ? plan.TableReads.Count : 0, descriptorWords, evaluator.UsesCompiledEvaluator);
 
         results = evaluated;
         table = flattened;

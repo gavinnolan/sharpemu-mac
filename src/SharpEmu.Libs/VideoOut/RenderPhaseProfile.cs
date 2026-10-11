@@ -110,6 +110,8 @@ public static class RenderPhaseProfile
         DrawVertexEvaluation,
         DrawBindingAssembly,
         ProgramPreparation,
+        // The part of program preparation that holds the pipeline cache's own lock.
+        ProgramPrepareLocked,
         ProgramSourceRead,
         VertexInputResolution,
         PixelInputResolution,
@@ -445,6 +447,21 @@ public static class RenderPhaseProfile
         return previous;
     }
 
+    /// <summary>
+    /// Drives the report from the render thread without counting a frame.
+    /// </summary>
+    /// <remarks>
+    /// A title that presents nothing is the one whose breakdown is wanted most — where the
+    /// thread's second goes is the whole question when no frame comes out — and a report
+    /// driven only by presented frames never runs there. Callers pass through the same
+    /// window check, so this costs a timestamp per call.
+    /// </remarks>
+    public static void RecordProgress()
+    {
+        if (!Enabled) return;
+        ReportIfWindowElapsed();
+    }
+
     /// <summary>Called once per presented frame; also drives the report.</summary>
     public static void RecordFrame()
     {
@@ -469,6 +486,17 @@ public static class RenderPhaseProfile
             _frameTraceCount++;
         }
 
+        ReportWindow(now);
+    }
+
+    private static void ReportIfWindowElapsed()
+    {
+        Charge(_current);
+        ReportWindow(Stopwatch.GetTimestamp());
+    }
+
+    private static void ReportWindow(long now)
+    {
         var elapsedTicks = now - _windowStart;
         if (elapsedTicks < _reportSeconds * Stopwatch.Frequency)
         {

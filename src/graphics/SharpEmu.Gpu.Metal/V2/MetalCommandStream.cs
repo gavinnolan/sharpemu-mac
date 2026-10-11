@@ -756,6 +756,9 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     public void RunCommandStreamSlices(int maxSlices)
     {
         var stream = CommandStream;
+        // A title stuck before its first flip never reaches the frame boundary below, and
+        // that is the title whose breakdown is wanted: the report is driven from here too.
+        SharpEmu.Libs.VideoOut.RenderPhaseProfile.RecordProgress();
         for (var slice = 0; slice < maxSlices; slice++)
         {
             // The shared profile only charges its detail phases inside an enclosing
