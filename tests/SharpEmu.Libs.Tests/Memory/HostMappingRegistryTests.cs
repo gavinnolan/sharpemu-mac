@@ -224,15 +224,20 @@ public sealed class HostMappingRegistryTests
             old.Domain.DomainEpoch, out var pin));
         Assert.True(registry.TryBeginChange(new(Base, Page), [], out var mutation));
         using var started = new ManualResetEventSlim();
-        var drain = Task.Run(() => { started.Set(); return mutation!.TryDrain(TimeSpan.FromSeconds(2)); });
-        Assert.True(started.Wait(TimeSpan.FromSeconds(2)));
-        var release = Task.Run(() =>
+        // Dedicated threads: under a loaded parallel run the thread pool could take
+        // longer than a short drain budget to schedule the releasing task. A drain
+        // that held the registry gate would block the release until its own 30 s
+        // budget ran out, so the release bound below still catches that.
+        var drain = Task.Factory.StartNew(() => { started.Set(); return mutation!.TryDrain(TimeSpan.FromSeconds(30)); },
+            CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+        Assert.True(started.Wait(TimeSpan.FromSeconds(10)));
+        var release = Task.Factory.StartNew(() =>
         {
             Assert.Single(registry.Snapshot()); // requires registry gate while drain is in progress
             return old.Domain.Release(pin);
-        });
-        Assert.True(await release.WaitAsync(TimeSpan.FromSeconds(2)));
-        Assert.True(await drain.WaitAsync(TimeSpan.FromSeconds(2)));
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+        Assert.True(await release.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.True(await drain.WaitAsync(TimeSpan.FromSeconds(10)));
         Assert.True(mutation!.TryStartKernelOperation(out var operation));
         Assert.True(mutation.RecordKernelOutcome(operation!, operation!.Ranges, HostMappingKernelOutcome.AppliedWholeScope, 0));
         Assert.True(mutation.CompleteRecordedOperation(operation));
