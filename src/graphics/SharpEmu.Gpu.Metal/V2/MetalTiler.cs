@@ -49,6 +49,7 @@ internal struct MetalTileArguments
     public uint TailX;
     public uint TailY;
     public uint Tail;
+    public uint BaseY;
 }
 
 // The MSL RepackArgs struct.
@@ -556,6 +557,7 @@ internal sealed unsafe class MetalTiler : IDisposable
             TailX = transfer.TailX,
             TailY = transfer.TailY,
             Tail = transfer.Tail ? 1u : 0u,
+            BaseY = transfer.BaseY,
         };
     }
 

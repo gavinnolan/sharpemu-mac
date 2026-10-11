@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Text;
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Abstractions;
@@ -993,26 +994,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         ref readonly var description = ref image.Description;
         if (!TrySplitLayers(in description, out var layers, out var layerBytes))
         {
-            var destination = _guestMemory.ResolveWritable(description.Data.Address, description.Data.Size);
-            if (!destination.IsValid)
-            {
-                // Nothing in guest memory can receive the bytes; keep the texture
-                // authoritative rather than publishing a wrong result.
-                MetalV2Diagnostics.WarnOnce(
-                    "writeback-unresolved",
-                    $"A GPU-written image has no writable guest window: " +
-                    $"address=0x{description.Data.Address:X16} size=0x{description.Data.Size:X} " +
-                    $"({_guestMemory.DescribeResolve(description.Data.Address, description.Data.Size)}).");
-                return false;
-            }
-
-            var stencil = description.HasStencil
-                ? _guestMemory.ResolveWritable(description.Stencil.Address, description.Stencil.Size)
-                : default;
-            var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
-            _transfer.EncodeTextureToGuest(
-                context, in description, range, image.Texture, destination, stencil, 0, description.Data.Size);
-            return true;
+            return WriteBackInRuns(context, image, 0, description.Data.Size);
         }
 
         var batch = (uint)Math.Clamp(MaxTransferPieceBytes / layerBytes, 1, layers);
@@ -1026,12 +1008,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             var piece = _guestMemory.ResolveWritable(description.Data.Address + pieceBase, pieceSize);
             if (!piece.IsValid || piece.Size < pieceSize)
             {
-                MetalV2Diagnostics.WarnOnce(
-                    "writeback-piece-unresolved",
-                    $"A GPU-written image piece has no writable guest window, so those layers stay in the " +
-                    $"texture: address=0x{description.Data.Address + pieceBase:X16} size=0x{pieceSize:X} " +
-                    $"layers={first}+{count} " +
-                    $"({_guestMemory.DescribeResolve(description.Data.Address + pieceBase, pieceSize)}).");
+                // These layers are not one backed span; cut them into the runs that are
+                // rather than leaving the whole piece in the texture.
+                moved |= WriteBackInRuns(context, image, pieceBase, pieceBase + pieceSize);
                 continue;
             }
 
@@ -1047,6 +1026,127 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         return moved;
     }
+
+    // The last resort of a writeback: a range of an image whose guest bytes are not one
+    // backed span at all. Each run is the longest prefix one window covers, pulled back
+    // to a boundary no subresource straddles, and the transfer is restricted to it. A run
+    // that resolves to nothing is a hole in the guest mapping: those bytes stay in the
+    // texture, and the next run starts after them.
+    private bool WriteBackInRuns(IMetalSubmissionContext context, MetalCachedImage image, ulong from, ulong to)
+    {
+        ref readonly var description = ref image.Description;
+        var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
+        var size = Math.Min(to, description.Data.Size);
+        // The stencil plane is named by layers, not by the depth plane's bytes: one
+        // layer of stencil is a byte per texel where one layer of depth is four, so a
+        // run's stencil bytes are its layers' stencil bytes.
+        var layers = description.TransferLayers;
+        var layerBytes = layers != 0 ? description.Data.Size / layers : 0;
+        var stencilLayerBytes = description.HasStencil && layers != 0 ? description.Stencil.Size / layers : 0;
+        var written = 0UL;
+        // What the walk did, kept only once something is left behind: a walk that covers
+        // the image says nothing and allocates nothing.
+        StringBuilder? trace = null;
+        for (var offset = from; offset < size;)
+        {
+            var start = _transfer.AlignRunStart(in description, offset);
+            if (start > offset)
+            {
+                // The step over a hole landed inside a transfer whose other half it
+                // stepped past; that half carries nothing either.
+                trace ??= Opened(from, written);
+                Trace(trace, "skip", offset, Math.Min(size, start) - offset);
+                offset = start;
+                continue;
+            }
+
+            var remaining = Math.Min(size - offset, MaxTransferPieceBytes);
+            var run = _guestMemory.ResolveWritablePrefix(description.Data.Address + offset, remaining);
+            var end = run.IsValid
+                ? _transfer.AlignRunEnd(in description, offset, offset + run.Size)
+                : offset;
+            if (end <= offset)
+            {
+                // Nothing of the image both starts here and fits in what one window
+                // covers. Step over everything that window reached - no subresource can
+                // start inside it either - and at least one page, so a range no window
+                // covers at all still advances.
+                var step = Math.Min(size - offset, Math.Max(run.Size, HoleStepBytes));
+                trace ??= Opened(from, written);
+                Trace(trace, "skip", offset, step);
+                offset += step;
+                continue;
+            }
+
+            var pieceSize = end - offset;
+            var stencil = stencilLayerBytes != 0 && layerBytes != 0
+                ? _guestMemory.ResolveWritable(
+                    description.Stencil.Address + (stencilLayerBytes * (offset / layerBytes)),
+                    stencilLayerBytes * Math.Max(1UL, pieceSize / layerBytes))
+                : default;
+            _transfer.EncodeTextureToGuest(
+                context, in description, range, image.Texture,
+                run with { Size = pieceSize }, stencil, offset, pieceSize);
+            written += pieceSize;
+            if (trace != null)
+            {
+                Trace(trace, "run", offset, pieceSize);
+            }
+
+            offset = end;
+        }
+
+        if (written < size - from)
+        {
+            // Counted from what the runs carried rather than from the steps over holes:
+            // a block row the boundary falls inside is not carried either, and saying so
+            // is how a surface that comes out part stale is recognised.
+            MetalV2Diagnostics.WarnOnce(
+                "writeback-unresolved",
+                $"A GPU-written image has guest bytes no run covers, so those stay in the texture: " +
+                $"address=0x{description.Data.Address + from:X16} size=0x{size - from:X} " +
+                $"unwritten=0x{size - from - written:X} " +
+                $"{ProfileLabel("writeback", in description)} runs=[{trace}] " +
+                $"({_guestMemory.DescribeResolve(description.Data.Address, description.Data.Size)}).");
+        }
+
+        return written != 0;
+    }
+
+    // The trace is opened at the first hole, so the runs before it are not in it; what
+    // they carried goes in as one entry, and the entries then account for every byte.
+    private static StringBuilder Opened(ulong from, ulong carried)
+    {
+        var trace = new StringBuilder();
+        if (carried != 0)
+        {
+            Trace(trace, "run", from, carried);
+        }
+
+        return trace;
+    }
+
+    // What a run walk did, for the warning that follows a walk which left bytes behind:
+    // which offsets carried and which were stepped over says whether the loss is a gap
+    // in the guest mapping or a cut the transfer cannot make.
+    private static void Trace(StringBuilder trace, string kind, ulong offset, ulong bytes)
+    {
+        if (trace.Length > 512)
+        {
+            return;
+        }
+
+        if (trace.Length != 0)
+        {
+            trace.Append(' ');
+        }
+
+        trace.Append($"{kind}@0x{offset:X}+0x{bytes:X}");
+    }
+
+    // How far a run walk steps past guest bytes no window covers. One guest page: the
+    // smallest unit a mapping can begin on, so no backed run is skipped.
+    private const ulong HoleStepBytes = 4096;
 
     // What a transfer is, for the GPU profiler: the shape the tiler actually walks.
     private static string ProfileLabel(string direction, in ImageDescription description) =>

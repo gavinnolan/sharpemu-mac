@@ -76,6 +76,17 @@ internal interface IMetalImageTransfer
     void EncodeTextureToGuest(IMetalSubmissionContext context, in ImageDescription description,
         SubresourceRange range, nint texture, MetalGuestRange destination, MetalGuestRange stencilDestination,
         ulong guestBase, ulong pieceSize);
+
+    // Where a run of an image's guest bytes may end without cutting one of its transfers
+    // in half: a caller that found a window covering [start, end) asks for the end it
+    // should actually use, so every subresource is either wholly inside a run or wholly
+    // inside another one.
+    ulong AlignRunEnd(in ImageDescription description, ulong start, ulong end);
+
+    // Where the next run may begin, for a caller that had to step over guest bytes no
+    // window covers: a transfer the step landed inside carries nothing, so the run after
+    // it starts past that transfer rather than in the middle of it.
+    ulong AlignRunStart(in ImageDescription description, ulong offset);
 }
 
 // What MTLTextureDescriptor fields an image needs.

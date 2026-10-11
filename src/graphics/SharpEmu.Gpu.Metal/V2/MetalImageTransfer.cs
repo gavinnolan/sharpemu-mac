@@ -239,11 +239,11 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         var plan = PlanFor(description);
         if (plan.DepthStencil)
         {
-            EncodeDepthUpload(context, description, plan, range, source, stencilSource, texture, guestBase);
+            EncodeDepthUpload(context, description, plan, range, source, stencilSource, texture, guestBase, pieceSize);
             return;
         }
 
-        Select(plan, description, range, guestBase);
+        Select(plan, description, range, guestBase, pieceSize);
         if (_copies.Count == 0)
         {
             return;
@@ -259,7 +259,7 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
                 linear.Buffer, (nuint)offset, rowBytes, (nuint)((ulong)rowBytes * rows),
                 new MtlSize { Width = copy.Width, Height = copy.Height, Depth = copy.Depth },
                 texture, copy.Slice, copy.Level,
-                new MtlOrigin { X = 0, Y = 0, Z = copy.OriginZ }, (nuint)MtlBlitOption.None);
+                new MtlOrigin { X = 0, Y = copy.OriginY, Z = copy.OriginZ }, (nuint)MtlBlitOption.None);
         }
 
         MetalTiler.EndEncoding(encoder);
@@ -293,11 +293,11 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         var plan = PlanFor(description);
         if (plan.DepthStencil)
         {
-            EncodeDepthDownload(context, description, plan, range, texture, destination, stencilDestination, guestBase);
+            EncodeDepthDownload(context, description, plan, range, texture, destination, stencilDestination, guestBase, pieceSize);
             return;
         }
 
-        Select(plan, description, range, guestBase);
+        Select(plan, description, range, guestBase, pieceSize);
         if (_copies.Count == 0)
         {
             return;
@@ -319,7 +319,7 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
             var (offset, rowBytes, rows) = BlitRegion(plan, index, linear, tight);
             MetalNative.SendCopyTextureToBufferOptions(blit, SelCopyTextureToBuffer,
                 texture, copy.Slice, copy.Level,
-                new MtlOrigin { X = 0, Y = 0, Z = copy.OriginZ },
+                new MtlOrigin { X = 0, Y = copy.OriginY, Z = copy.OriginZ },
                 new MtlSize { Width = copy.Width, Height = copy.Height, Depth = copy.Depth },
                 linear.Buffer, (nuint)offset, rowBytes, (nuint)((ulong)rowBytes * rows),
                 (nuint)MtlBlitOption.None);
@@ -525,10 +525,22 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
     // become relative to the piece that was mapped, and the linear offsets to the start of
     // the piece's own staging, so the staging a transfer asks for is the piece's size and
     // never the whole image's.
-    private void Select(TransferPlan plan, in ImageDescription description, SubresourceRange range, ulong guestBase)
+    private void Select(
+        TransferPlan plan, in ImageDescription description, SubresourceRange range, ulong guestBase, ulong pieceSize)
     {
         _copies.Clear();
         _tiles.Clear();
+        // The guest bytes this transfer may touch, as offsets into the image. A caller
+        // that could only map part of the image hands over that part, and a subresource
+        // that straddles the end of it is cut down to the block rows inside rather than
+        // dropped: a run of whole block rows is a contiguous run of tiled bytes, so it
+        // is the finest cut whose two sides are both still one range.
+        // A piece that reaches the end of the image has no upper limit: a subresource's
+        // tiled extent is its block grid, which can run past the bytes the description
+        // claims, and the last piece owns whatever is there. Only a piece with more of
+        // the image after it has to stop where it stops.
+        var end = pieceSize > ulong.MaxValue - guestBase ? ulong.MaxValue : guestBase + pieceSize;
+        var limit = pieceSize == 0 || end >= description.Data.Size ? ulong.MaxValue : end;
         var lastLevel = range.LevelCount == 0 ? 0 : range.BaseLevel + range.LevelCount - 1;
         var lastLayer = range.LayerCount == 0 ? 0 : range.BaseLayer + range.LayerCount - 1;
         foreach (var copy in plan.Copies)
@@ -543,8 +555,13 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
                 continue;
             }
 
-            var rebased = copy;
-            rebased.BufferOffset = Rebase(copy.BufferOffset, guestBase, "a subresource copy");
+            if (!TryClipRows(plan, copy, guestBase, limit, out var clipped))
+            {
+                continue;
+            }
+
+            var rebased = clipped;
+            rebased.BufferOffset = Rebase(clipped.BufferOffset, guestBase, "a subresource copy");
             _copies.Add(rebased);
         }
 
@@ -556,7 +573,7 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         var linearBase = ulong.MaxValue;
         foreach (var transfer in plan.Tiles)
         {
-            if (Selected(plan, transfer, range, lastLevel, lastLayer))
+            if (Selected(plan, transfer, range, lastLevel, lastLayer) && Overlaps(transfer, guestBase, limit))
             {
                 linearBase = Math.Min(linearBase, transfer.LinearOffset);
             }
@@ -571,19 +588,272 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         ulong linear = 0;
         foreach (var transfer in plan.Tiles)
         {
-            if (!Selected(plan, transfer, range, lastLevel, lastLayer))
+            if (!Selected(plan, transfer, range, lastLevel, lastLayer) || !Overlaps(transfer, guestBase, limit))
             {
                 continue;
             }
 
-            var rebased = transfer;
-            rebased.TiledOffset = Rebase(transfer.TiledOffset, guestBase, "a tile transfer");
-            rebased.LinearOffset = transfer.LinearOffset - linearBase;
-            _tiles.Add(rebased);
-            linear = Math.Max(linear, rebased.LinearOffset + rebased.LinearSize);
+            foreach (var band in BandsWithin(transfer, guestBase, limit))
+            {
+                var rebased = band;
+                rebased.TiledOffset = Rebase(band.TiledOffset, guestBase, "a tile transfer");
+                rebased.LinearOffset = band.LinearOffset - linearBase;
+                _tiles.Add(rebased);
+                linear = Math.Max(linear, rebased.LinearOffset + rebased.LinearSize);
+            }
         }
 
         plan.LinearSize = Math.Max(linear, 4);
+    }
+
+    /// <summary>
+    /// The largest offset at or below <paramref name="end"/> that no part of this image's
+    /// transfer plan straddles, so a run ending there loses nothing: a transfer the run
+    /// would cut is either pulled back to a block-row boundary inside it or excluded
+    /// entirely. Zero means nothing of the image starts inside the run.
+    /// </summary>
+    public ulong AlignRunEnd(in ImageDescription description, ulong start, ulong end)
+    {
+        if (end <= start)
+        {
+            return start;
+        }
+
+        var plan = PlanFor(description);
+        if (plan.DepthStencil)
+        {
+            // The depth kernels walk a layer at a time, so a run of one ends where a
+            // layer does.
+            return plan.SliceSize == 0 ? start : Math.Max(start, end / plan.SliceSize * plan.SliceSize);
+        }
+
+        var aligned = end;
+        foreach (var copy in plan.Copies)
+        {
+            if (copy.BufferOffset >= aligned || CopyEnd(plan, copy) <= aligned)
+            {
+                continue;
+            }
+
+            var rowTexels = copy.BufferRowLength != 0 ? copy.BufferRowLength : copy.Width;
+            var rowBytes = (ulong)RowBytes(plan, rowTexels);
+            aligned = rowBytes != 0 && copy.Depth == 1
+                ? Math.Max(start, copy.BufferOffset + ((aligned - copy.BufferOffset) / rowBytes * rowBytes))
+                : Math.Max(start, copy.BufferOffset);
+        }
+
+        // The stencil plane needs no pass of its own: only a depth plan has one, and
+        // those ended above - and its offsets are in the stencil plane's bytes anyway,
+        // which are not the bytes a run is named in.
+        foreach (var transfer in plan.Tiles)
+        {
+            aligned = AlignToBands(transfer, start, aligned);
+        }
+
+        return aligned;
+    }
+
+    /// <summary>
+    /// The first offset at or after <paramref name="offset"/> that a restricted transfer
+    /// can begin at. A caller steps over guest bytes no window covers and lands wherever
+    /// the window ended, which may be inside a block row or a texel row whose other half
+    /// it just stepped past: that row carries nothing now, so the run after it begins
+    /// past the row rather than inside it, and every byte a run is given is a byte the
+    /// run really writes.
+    /// </summary>
+    public ulong AlignRunStart(in ImageDescription description, ulong offset)
+    {
+        var plan = PlanFor(description);
+        if (plan.DepthStencil)
+        {
+            return plan.SliceSize == 0
+                ? offset
+                : (offset + plan.SliceSize - 1) / plan.SliceSize * plan.SliceSize;
+        }
+
+        // Pushing past one transfer can land inside the next, so the push repeats until
+        // it stands still. Two kinds of transfer and no overlap between them means it
+        // settles at once in practice; the bound is only there so it always ends.
+        var aligned = offset;
+        for (var pass = 0; pass < 4; pass++)
+        {
+            var moved = aligned;
+            foreach (var copy in plan.Copies)
+            {
+                var rowTexels = copy.BufferRowLength != 0 ? copy.BufferRowLength : copy.Width;
+                moved = AdvancePast(moved, copy.BufferOffset, CopyEnd(plan, copy),
+                    copy.Depth == 1 ? (ulong)RowBytes(plan, rowTexels) : 0);
+            }
+
+            foreach (var transfer in plan.Tiles)
+            {
+                var rowBytes = TryBandBytes(transfer, out var bandBytes, out _) ? bandBytes : 0;
+                moved = AdvancePast(moved, transfer.TiledOffset, transfer.TiledOffset + transfer.TiledSize, rowBytes);
+            }
+
+            if (moved == aligned)
+            {
+                break;
+            }
+
+            aligned = moved;
+        }
+
+        return aligned;
+    }
+
+    // Moves an offset that falls inside a transfer forward to the next row of it, or past
+    // it when it has no rows of its own; an offset outside the transfer stands still.
+    private static ulong AdvancePast(ulong offset, ulong from, ulong to, ulong rowBytes)
+    {
+        if (offset <= from || offset >= to)
+        {
+            return offset;
+        }
+
+        if (rowBytes == 0)
+        {
+            return to;
+        }
+
+        var rows = (offset - from + rowBytes - 1) / rowBytes;
+        return Math.Min(to, from + (rows * rowBytes));
+    }
+
+    // Where a run may end inside one tile transfer: at a block-row boundary when the
+    // transfer can be cut into rows, and otherwise before the transfer begins.
+    private static ulong AlignToBands(in MetalTileTransfer transfer, ulong start, ulong end)
+    {
+        var transferEnd = transfer.TiledOffset + transfer.TiledSize;
+        if (transfer.TiledOffset >= end || transferEnd <= end)
+        {
+            return end;
+        }
+
+        if (!TryBandBytes(transfer, out var rowBytes, out _) || transfer.TiledOffset >= end)
+        {
+            return Math.Max(start, Math.Min(end, transfer.TiledOffset));
+        }
+
+        var rows = (end - transfer.TiledOffset) / rowBytes;
+        var band = transfer.TiledOffset + (rows * rowBytes);
+        return Math.Max(start, Math.Min(end, band));
+    }
+
+    // The bytes one block row of a tile transfer occupies, and the surface rows it
+    // carries. A mip tail is one block the layout places by hand and a volume's blocks
+    // span depth, so neither has rows that are their own contiguous run.
+    private static bool TryBandBytes(in MetalTileTransfer transfer, out ulong rowBytes, out uint rowHeight)
+    {
+        rowBytes = 0;
+        rowHeight = 0;
+        if (transfer.Tail || transfer.Depth != 1 || transfer.TiledWidth == 0 ||
+            !TileGeometry.TryGetBlockLayout(transfer.Kind, transfer.BytesPerElement, out var block) ||
+            block.BlockDepth != 1 || block.BlockHeight == 0 || block.BlockWidth == 0)
+        {
+            return false;
+        }
+
+        var columns = ((ulong)transfer.TiledWidth + block.BlockWidth - 1) / block.BlockWidth;
+        rowBytes = columns * block.BlockSize;
+        rowHeight = block.BlockHeight;
+        return rowBytes != 0;
+    }
+
+    /// <summary>
+    /// A subresource copy cut down to the rows whose guest bytes lie inside a run. A
+    /// linear row is one contiguous run of guest bytes, so a copy that only partly fits
+    /// keeps the rows that do; one that fits whole is kept as it is, and one whose rows
+    /// are not its own runs (a depth slice stack) is dropped.
+    /// </summary>
+    private static bool TryClipRows(
+        TransferPlan plan, in MetalSubresourceCopy copy, ulong from, ulong to, out MetalSubresourceCopy clipped)
+    {
+        clipped = copy;
+        var end = CopyEnd(plan, copy);
+        if (copy.BufferOffset >= from && end <= to)
+        {
+            return true;
+        }
+
+        if (end <= from || copy.BufferOffset >= to || copy.Depth != 1 || copy.Height == 0)
+        {
+            return false;
+        }
+
+        var rowTexels = copy.BufferRowLength != 0 ? copy.BufferRowLength : copy.Width;
+        var rowBytes = (ulong)RowBytes(plan, rowTexels);
+        var blockRows = BlockRows(plan, copy.Height);
+        if (rowBytes == 0 || blockRows == 0 || plan.TexelHeight == 0)
+        {
+            return false;
+        }
+
+        var firstRow = copy.BufferOffset >= from ? 0UL : (from - copy.BufferOffset + rowBytes - 1) / rowBytes;
+        var lastRow = Math.Min(blockRows, (ulong)((to - copy.BufferOffset) / rowBytes));
+        if (firstRow >= lastRow)
+        {
+            return false;
+        }
+
+        clipped.BufferOffset = copy.BufferOffset + (firstRow * rowBytes);
+        clipped.OriginY = copy.OriginY + (uint)(firstRow * plan.TexelHeight);
+        clipped.Height = (uint)((lastRow - firstRow) * plan.TexelHeight);
+        clipped.BufferImageHeight = clipped.Height;
+        return true;
+    }
+
+    /// <summary>The end of a subresource copy's guest bytes.</summary>
+    private static ulong CopyEnd(TransferPlan plan, in MetalSubresourceCopy copy)
+    {
+        var rowTexels = copy.BufferRowLength != 0 ? copy.BufferRowLength : copy.Width;
+        var rows = BlockRows(plan, copy.BufferImageHeight != 0 ? copy.BufferImageHeight : copy.Height);
+        return copy.BufferOffset + ((ulong)RowBytes(plan, rowTexels) * rows * Math.Max(copy.Depth, 1));
+    }
+
+    private static bool Overlaps(in MetalTileTransfer transfer, ulong from, ulong to) =>
+        transfer.TiledOffset < to && transfer.TiledOffset + transfer.TiledSize > from;
+
+    /// <summary>
+    /// The parts of a tile transfer whose tiled bytes lie inside a guest run. One whole
+    /// block row is one contiguous run of tiled bytes - the block index walks x before
+    /// y - so a transfer that only partly fits is cut at block-row boundaries. Anything
+    /// that cannot be cut that way (a mip tail, which is one block the layout places by
+    /// hand, or a volume whose blocks span depth) is kept whole or dropped whole.
+    /// </summary>
+    private IEnumerable<MetalTileTransfer> BandsWithin(MetalTileTransfer transfer, ulong from, ulong to)
+    {
+        if (transfer.TiledOffset >= from && transfer.TiledOffset + transfer.TiledSize <= to)
+        {
+            yield return transfer;
+            yield break;
+        }
+
+        var pitchBytes = (ulong)transfer.Pitch * transfer.BytesPerElement;
+        if (!TryBandBytes(transfer, out var rowBytes, out var rowHeight) || pitchBytes == 0)
+        {
+            yield break;
+        }
+
+        var transferEnd = transfer.TiledOffset + transfer.TiledSize;
+        for (uint row = 0; (ulong)row * rowHeight < transfer.Height; row++)
+        {
+            var tiledOffset = transfer.TiledOffset + (row * rowBytes);
+            if (tiledOffset < from || tiledOffset + rowBytes > to || tiledOffset + rowBytes > transferEnd)
+            {
+                continue;
+            }
+
+            var band = transfer;
+            band.BaseY = transfer.BaseY + (row * rowHeight);
+            band.Height = Math.Min(rowHeight, transfer.Height - (row * rowHeight));
+            band.TiledOffset = tiledOffset;
+            band.TiledSize = rowBytes;
+            band.TiledHeight = rowHeight;
+            band.LinearOffset = transfer.LinearOffset + (row * rowHeight * pitchBytes);
+            band.LinearSize = ((ulong)(band.Height - 1) * pitchBytes) + ((ulong)transfer.Width * transfer.BytesPerElement);
+            yield return band;
+        }
     }
 
     private static bool Selected(
@@ -780,15 +1050,41 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
     // The layers of one piece of a depth image. A depth plan is always a single level
     // with equal-sized layers (PlanDepth enforces both), so a piece is a run of layers and
     // guestBase has to be exactly where that run starts.
-    private static (uint Base, uint Count) DepthLayers(TransferPlan plan, SubresourceRange range, ulong guestBase)
+    // Which layers of a depth surface a piece carries. A depth plane is one 64 KiB
+    // block layout per layer and the kernels walk it a layer at a time, so a piece is
+    // named by its bytes and the layers are read back out of them - a caller that cuts
+    // by subresource and one that cuts by guest run then agree.
+    private static (uint Base, uint Count) DepthLayers(
+        TransferPlan plan, SubresourceRange range, ulong guestBase, ulong pieceSize)
     {
-        var first = Math.Min(range.BaseLayer, plan.Layers);
-        var count = Math.Min(range.LayerCount, plan.Layers - first);
-        if (guestBase != plan.SliceSize * first)
+        if (plan.SliceSize == 0)
+        {
+            return (0, 0);
+        }
+
+        if (guestBase % plan.SliceSize != 0)
         {
             throw GpuFatal.Fatal(
                 $"A depth piece does not start on a layer boundary: base=0x{guestBase:X} " +
-                $"layer={first} sliceSize=0x{plan.SliceSize:X}.");
+                $"sliceSize=0x{plan.SliceSize:X}.");
+        }
+
+        var first = Math.Max(Math.Min(range.BaseLayer, plan.Layers), (uint)(guestBase / plan.SliceSize));
+        if (first >= plan.Layers)
+        {
+            return (first, 0);
+        }
+
+        var lastInRange = range.LayerCount == 0
+            ? first
+            : Math.Min(plan.Layers, range.BaseLayer + range.LayerCount);
+        var count = first < lastInRange ? lastInRange - first : 0;
+        if (pieceSize != 0)
+        {
+            // Rounded up: a whole-surface piece whose size falls a little short of the
+            // last layer's padding still carries that layer, which is what naming the
+            // layers by subresource alone used to do.
+            count = Math.Min(count, (uint)((pieceSize + plan.SliceSize - 1) / plan.SliceSize));
         }
 
         return (first, count);
@@ -832,15 +1128,16 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
     }
 
     private void EncodeDepthUpload(IMetalSubmissionContext context, in ImageDescription description, TransferPlan plan,
-        SubresourceRange range, MetalGuestRange source, MetalGuestRange stencilSource, nint texture, ulong guestBase)
+        SubresourceRange range, MetalGuestRange source, MetalGuestRange stencilSource, nint texture, ulong guestBase,
+        ulong pieceSize)
     {
-        var (firstLayer, layerCount) = DepthLayers(plan, range, guestBase);
+        var (firstLayer, layerCount) = DepthLayers(plan, range, guestBase, pieceSize);
         if (layerCount == 0)
         {
             return;
         }
 
-        Select(plan, description, range, guestBase);
+        Select(plan, description, range, guestBase, pieceSize);
         var depthPiece = plan.SliceSize * layerCount;
         var stencilPiece = plan.StencilSliceSize * layerCount;
         var depthPlane = new MetalBufferSpan(source.Buffer, source.Offset, depthPiece);
@@ -929,9 +1226,9 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
     // asks for is what turns off the attachment's lossless compression while it renders.
     private void EncodeTiledDepthDownload(IMetalSubmissionContext context, in ImageDescription description,
         TransferPlan plan, SubresourceRange range, nint texture, MetalGuestRange destination,
-        MetalGuestRange stencilDestination, ulong guestBase)
+        MetalGuestRange stencilDestination, ulong guestBase, ulong pieceSize)
     {
-        var (firstLayer, layerCount) = DepthLayers(plan, range, guestBase);
+        var (firstLayer, layerCount) = DepthLayers(plan, range, guestBase, pieceSize);
         if (layerCount == 0)
         {
             return;
@@ -940,7 +1237,7 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         // The selected tiles carry the texture slice they came from and guest offsets
         // rebased onto this piece, so the kernel reads the right array slices and writes
         // inside the piece that was mapped.
-        Select(plan, description, range, guestBase);
+        Select(plan, description, range, guestBase, pieceSize);
         var depthPiece = plan.SliceSize * layerCount;
         var stencilPiece = plan.StencilSliceSize * layerCount;
         var stencilWanted = plan.StencilPlane && stencilDestination.IsValid && stencilDestination.Size >= stencilPiece;
@@ -976,9 +1273,9 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
 
     private void EncodeDepthDownload(IMetalSubmissionContext context, in ImageDescription description, TransferPlan plan,
         SubresourceRange range, nint texture, MetalGuestRange destination, MetalGuestRange stencilDestination,
-        ulong guestBase)
+        ulong guestBase, ulong pieceSize)
     {
-        var (firstLayer, layerCount) = DepthLayers(plan, range, guestBase);
+        var (firstLayer, layerCount) = DepthLayers(plan, range, guestBase, pieceSize);
         if (layerCount == 0)
         {
             return;
@@ -987,7 +1284,7 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         if (plan.Tiled)
         {
             EncodeTiledDepthDownload(
-                context, description, plan, range, texture, destination, stencilDestination, guestBase);
+                context, description, plan, range, texture, destination, stencilDestination, guestBase, pieceSize);
             return;
         }
 

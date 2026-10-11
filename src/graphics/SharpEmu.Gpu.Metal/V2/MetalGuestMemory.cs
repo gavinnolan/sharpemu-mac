@@ -395,6 +395,47 @@ internal sealed class MetalGuestMemory : IDisposable
         TryResolveWindow(gpuVa, size, out var resolved) ? resolved : default;
 
     /// <summary>
+    /// The longest prefix of a range that one window covers, or an invalid range when
+    /// not even the first byte is in one. Whether a range resolves is monotone in its
+    /// length - a window covers a prefix of whatever it covers - so the longest one is
+    /// a binary search, which is how an image too scattered to map in one piece is cut
+    /// into the pieces that do map.
+    /// </summary>
+    public MetalGuestRange ResolveWritablePrefix(ulong gpuVa, ulong size)
+    {
+        if (size == 0)
+        {
+            return default;
+        }
+
+        var whole = ResolveWritable(gpuVa, size);
+        if (whole.IsValid)
+        {
+            return whole;
+        }
+
+        var low = 0UL;
+        var high = size;
+        var found = default(MetalGuestRange);
+        while (high - low > 1)
+        {
+            var probe = low + ((high - low) / 2);
+            var resolved = ResolveWritable(gpuVa, probe);
+            if (resolved.IsValid)
+            {
+                found = resolved;
+                low = probe;
+            }
+            else
+            {
+                high = probe;
+            }
+        }
+
+        return found;
+    }
+
+    /// <summary>
     /// Why a range has no window, for diagnostics. A caller that has to fall back wants to
     /// say whether the guest bytes are not one backed span at all or merely straddle the
     /// boundary between two windows, because the two have different answers.
