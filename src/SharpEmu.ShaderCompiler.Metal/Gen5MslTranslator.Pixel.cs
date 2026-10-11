@@ -1202,10 +1202,11 @@ public static partial class Gen5MslTranslator
         // V_INTERP_MOV's selector picks one of the triangle's parameters: P0 is the
         // provoking vertex's value and P10/P20 the two deltas from it. Reading P0
         // alone is exactly what a flat input gives, so an attribute read only that
-        // way is declared flat. Reconstructing the deltas would need the three
-        // vertex values, which Metal has no barycentric input to recover, so the
-        // remaining attributes keep ordinary interpolation -- the same fallback the
-        // SPIR-V translator takes on a device without fragmentShaderBarycentric.
+        // way is declared flat. The deltas need the three vertex values, which
+        // vertex_value inputs give (see Gen5MslTranslator.Interpolation.cs); a host
+        // without them keeps ordinary interpolation for the remaining attributes --
+        // the same fallback the SPIR-V translator takes on a device without
+        // fragmentShaderBarycentric.
         private bool ReadsOnlyTheProvokingVertex(uint attribute)
         {
             var read = false;
@@ -1246,17 +1247,30 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
+            var destination = instruction.Destinations[0].Value;
+            if (_perVertexAttributes.Contains(interpolation.Attribute))
+            {
+                return TryEmitInterpolationParameter(instruction, interpolation, destination, out error);
+            }
+
+            if (_perVertexSourcedAttributes.TryGetValue(interpolation.Attribute, out var flatSource))
+            {
+                EmitPerVertexSourcedInterpolation(interpolation, destination, flatSource);
+                return true;
+            }
+
             StoreVector(
-                instruction.Destinations[0].Value,
-                AsUInt($"sharpemu_in.attr{interpolation.Attribute}[{interpolation.Channel}]"));
+                destination,
+                AsUInt($"{PixelInputField(interpolation.Attribute)}[{interpolation.Channel}]"));
             return true;
         }
 
         /// <summary>
         /// Seeds pixel input VGPRs in SPI_PS_INPUT_ADDR compact order: the
         /// interpolation slots reserve registers even though V_INTERP reads MSL
-        /// varyings directly, and the position inputs land in the
-        /// hardware-selected VGPRs from the fragment coordinate.
+        /// varyings directly (they carry the barycentrics when the program
+        /// interpolates per-vertex inputs by hand), and the position and system
+        /// inputs land in the hardware-selected VGPRs.
         /// </summary>
         private void EmitPixelInputState(StringBuilder source)
         {
@@ -1264,13 +1278,23 @@ public static partial class Gen5MslTranslator
 
             void Advance(int bit, uint dwordCount)
             {
-                if ((_pixelInputAddress & (1u << bit)) != 0)
+                if ((_pixelInputAddress & (1u << bit)) == 0)
                 {
-                    vgpr += dwordCount;
+                    return;
                 }
+
+                if (BarycentricInputRegisters(bit) is { } registers)
+                {
+                    for (var index = 0; index < registers.Length; index++)
+                    {
+                        source.AppendLine($"    v[{vgpr + (uint)index}] = as_type<uint>({registers[index]});");
+                    }
+                }
+
+                vgpr += dwordCount;
             }
 
-            void Position(int bit, string component)
+            void Input(int bit, string? value)
             {
                 var mask = 1u << bit;
                 if ((_pixelInputAddress & mask) == 0)
@@ -1278,15 +1302,15 @@ public static partial class Gen5MslTranslator
                     return;
                 }
 
-                if ((_pixelInputEnable & mask) != 0)
+                if ((_pixelInputEnable & mask) != 0 && value is not null)
                 {
-                    source.AppendLine(
-                        $"    v[{vgpr}] = as_type<uint>(sharpemu_in.sharpemu_frag_coord.{component});");
+                    source.AppendLine($"    v[{vgpr}] = {value};");
                 }
 
                 vgpr++;
             }
 
+            const string fragCoord = "sharpemu_in.sharpemu_frag_coord";
             Advance(0, 2);  // PERSP_SAMPLE
             Advance(1, 2);  // PERSP_CENTER
             Advance(2, 2);  // PERSP_CENTROID
@@ -1295,10 +1319,18 @@ public static partial class Gen5MslTranslator
             Advance(5, 2);  // LINEAR_CENTER
             Advance(6, 2);  // LINEAR_CENTROID
             Advance(7, 1);  // LINE_STIPPLE
-            Position(8, "x");
-            Position(9, "y");
-            Position(10, "z");
-            Position(11, "w");
+            Input(8, $"as_type<uint>({fragCoord}.x)");
+            Input(9, $"as_type<uint>({fragCoord}.y)");
+            Input(10, $"as_type<uint>({fragCoord}.z)");
+            // POS_W_FLOAT is W; [[position]].w is 1/W, like Vulkan's FragCoord.w.
+            Input(11, $"as_type<uint>(1.0f / {fragCoord}.w)");
+
+            // FRONT_FACE, ANCILLARY, SAMPLE_COVERAGE and POS_FIXED_PT follow the
+            // position inputs.
+            Input(12, PixelSystemInput(12));
+            Input(13, PixelSystemInput(13));
+            Input(14, PixelSystemInput(14));
+            Input(15, PixelSystemInput(15));
         }
     }
 }

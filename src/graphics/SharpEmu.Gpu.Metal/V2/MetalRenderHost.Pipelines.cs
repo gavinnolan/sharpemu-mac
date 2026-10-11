@@ -81,7 +81,7 @@ internal sealed partial class MetalRenderHost
         // The MSL front end runs here, and the driver's back end runs when a pipeline
         // state is made from the function. They are separate costs with separate
         // caches, so they are counted separately.
-        var library = CompileLibrary(metal.Shader.Source, hash);
+        var library = CompileLibrary(metal.Shader.Source, hash, metal.Shader.UsesPerVertexInputs);
         Interlocked.Add(ref _libraryTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
         var function = MetalNative.Send(
             library, MetalNative.Selector("newFunctionWithName:"), MetalNative.NsString(metal.Shader.EntryPoint));
@@ -115,7 +115,7 @@ internal sealed partial class MetalRenderHost
         return (ulong)index;
     }
 
-    private nint CompileLibrary(string source, ulong hash)
+    private nint CompileLibrary(string source, ulong hash, bool usesPerVertexInputs)
     {
         var pool = MetalNative.objc_autoreleasePoolPush();
         try
@@ -133,6 +133,11 @@ internal sealed partial class MetalRenderHost
                 // Fast math off (the translated GCN float semantics do not survive
                 // it) and an explicit MSL version, so texture atomics are available.
                 MetalNative.ApplyMslCompileOptions(options);
+                if (usesPerVertexInputs)
+                {
+                    MetalNative.SetMslLanguageVersion(options, Gen5MslShader.PerVertexInputsLanguageVersion);
+                }
+
                 nint error = 0;
                 var library = MetalNative.Send(
                     _device,

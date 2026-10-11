@@ -211,6 +211,9 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
     // F32 signed zero, infinity and NaN.
     bool IShaderPipelineHost.ShaderSignedZeroInfNanPreserveFloat32Supported => true;
 
+    // Per-vertex pixel inputs need MSL 4.0, and this host compiles every library at 3.2.
+    bool IShaderPipelineHost.PerVertexPixelInputsSupported => false;
+
     RenderHostLimits IShaderPipelineHost.Limits => new(MaxDimension, MaxDimension, MaxDimension, MaxDimension);
 
     GpuSampleCount IShaderPipelineHost.NoAttachmentSampleCounts =>

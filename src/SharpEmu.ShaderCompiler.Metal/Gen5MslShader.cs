@@ -61,4 +61,12 @@ public sealed record Gen5MslShader(
     Gen5MslArgumentLayout? ArgumentLayout = null,
     Gen5MslMeshInfo? MeshInfo = null,
     bool WritesLayer = false,
-    bool WritesViewportIndex = false);
+    bool WritesViewportIndex = false)
+{
+    /// <summary>MSL 4.0 (macOS 26), not the backend's usual version, compiles this source:
+    /// a pixel shader declares metal::vertex_value inputs, which only that version has.</summary>
+    public const nuint PerVertexInputsLanguageVersion = (4 << 16) | 0;
+
+    /// <summary>The source declares per-vertex pixel inputs; see <see cref="PerVertexInputsLanguageVersion"/>.</summary>
+    public bool UsesPerVertexInputs { get; init; }
+}
