@@ -130,9 +130,12 @@ public static partial class Gen5MslTranslator
                     var destination = DestinationVector(instruction);
                     var source = RawSource(instruction, 0);
                     var lane = RawSource(instruction, 1);
+                    // Under wave64 sharpemu_lane is the full 0..63 index, so only the
+                    // one matching lane writes; wave32 has 32 lanes.
+                    var laneMask = IsWave64 ? "63u" : "31u";
                     StoreVector(
                         destination,
-                        $"(sharpemu_lane == (({lane}) & 31u)) ? ({source}) : v[{destination}]",
+                        $"(sharpemu_lane == (({lane}) & {laneMask})) ? ({source}) : v[{destination}]",
                         guardWithExec: false);
                     return true;
                 }
