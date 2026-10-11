@@ -5,6 +5,7 @@ using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.Images;
 using NativeFixture = SharpEmu.ShaderCompiler.Metal.Tests.MetalNative;
 using SharpEmu.ShaderCompiler.Metal.Tests;
+using SharpEmu.ShaderCompiler.Resources;
 using Xunit;
 
 namespace SharpEmu.Gpu.Metal.Tests;
@@ -200,7 +201,7 @@ public sealed partial class MetalTextureMaterializationTests
             Assert.Contains(opcode.Contains("Gather", StringComparison.Ordinal) ? ".gather_compare(" : ".sample_compare(", shader!.Source);
             Assert.True(NativeFixture.TryCompileLibrary(shader.Source, out library, out var error), error + "\n" + shader.Source);
             sampler = (nint)Presenter.GetMethod("GetOrCreateSampler", Methods)!.Invoke(null, [Device.Value, samplerKey])!;
-            Assert.True(NativeFixture.TryExecuteWithArgumentBuffer(library, shader.EntryPoint, new byte[16], [],
+            Assert.True(NativeFixture.TryExecuteWithArgumentBuffer(library, shader.EntryPoint, new byte[16], new byte[PushData.ByteSize],
                 shader.ArgumentLayout!, 1, out var result, out error, depth, sampler), error);
             for (var component = 0; component < 4; component++)
                 Assert.Equal(expected[component], BitConverter.ToSingle(result, component * 4), precision: 5);
