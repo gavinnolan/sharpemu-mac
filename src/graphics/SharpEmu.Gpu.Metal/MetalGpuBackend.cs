@@ -48,10 +48,11 @@ public static class MetalGpuBackend
         }
 
         GuestGpu.Register(static () => new MetalV2Backend(), Name);
+        // V2 presents HDR on an EDR layer, so Auto follows the screen as on Vulkan.
         HostVideoHost.RegisterPresenter(
             MetalV2Presenter.TryConfigureVideo,
-            static () => false,
-            autoHdrAllowed: false);
+            MetalV2Presenter.QueryHdrOutputSupport,
+            autoHdrAllowed: true);
         Console.Error.WriteLine($"[LOADER][INFO] GPU backend: {Name} v2.");
     }
 }

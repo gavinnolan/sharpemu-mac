@@ -148,6 +148,32 @@ public sealed class MacHostWindow : IMetalHostWindow
 
     public nint CreateMetalLayer() => _metalLayer;
 
+    public (double Current, double Potential) EdrHeadroom
+    {
+        get
+        {
+            var screen = _window == 0 ? 0 : MacObjC.Send(_window, MacObjC.Selector("screen"));
+            if (screen == 0)
+            {
+                screen = MacObjC.Send(MacObjC.Class("NSScreen"), MacObjC.Selector("mainScreen"));
+            }
+
+            if (screen == 0)
+            {
+                return (1.0, 1.0);
+            }
+
+            var current = Math.Max(1.0, MacObjC.SendDouble(
+                screen, MacObjC.Selector("maximumExtendedDynamicRangeColorComponentValue")));
+            // macOS 10.15+; before it the current value is all there is.
+            var potentialSelector = MacObjC.Selector("maximumPotentialExtendedDynamicRangeColorComponentValue");
+            var potential = MacObjC.SendBool(screen, MacObjC.Selector("respondsToSelector:"), potentialSelector)
+                ? MacObjC.SendDouble(screen, potentialSelector)
+                : current;
+            return (current, Math.Max(current, potential));
+        }
+    }
+
     public bool ConsumeSurfaceRestore()
     {
         var pending = _surfaceRestorePending;

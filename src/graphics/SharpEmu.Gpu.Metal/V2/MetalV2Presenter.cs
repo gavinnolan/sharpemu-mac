@@ -20,7 +20,7 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// presented frame never travels through the CPU.
 /// </summary>
 [SupportedOSPlatform("macos")]
-internal static class MetalV2Presenter
+internal static partial class MetalV2Presenter
 {
     private const ulong PixelFormatBgra8Unorm = 80;
 
@@ -49,13 +49,15 @@ internal static class MetalV2Presenter
 
     // The frame the next present shows: a guest texture plus the serial it needs.
     // Published flips waiting for their submission and their refresh, oldest first.
-    private readonly record struct PendingFrame(nint Texture, uint Width, uint Height, ulong RequestId, ulong Serial);
+    private readonly record struct PendingFrame(
+        nint Texture, uint Width, uint Height, ulong RequestId, ulong Serial, bool IsHdr);
 
     private const int MaxPendingFrames = 4;
     private static readonly Queue<PendingFrame> _pendingFrames = new(MaxPendingFrames);
     private static nint _presentTexture;
     private static uint _presentWidth;
     private static uint _presentHeight;
+    private static bool _presentIsHdr;
     private static byte[]? _pendingHostFrame;
     private static uint _pendingHostWidth;
     private static uint _pendingHostHeight;
@@ -403,6 +405,7 @@ internal static class MetalV2Presenter
                 }
 
                 _presentSampler = CreateLinearSampler(_device);
+                InitializeHdrOutput(window);
                 SyncDrawableSize();
             }
             finally
@@ -430,6 +433,8 @@ internal static class MetalV2Presenter
             {
                 _closed = true;
             }
+
+            ReleaseHdrSupportWaiters();
         }
     }
 
@@ -494,6 +499,7 @@ internal static class MetalV2Presenter
             SyncDrawableSize();
             AdoptPendingFrame();
             UploadPendingHostFrame();
+            UpdateOutputColor(window);
             var drawable = MetalNative.Send(_metalLayer, MetalNative.Selector("nextDrawable"));
             if (drawable == 0)
             {
@@ -520,7 +526,7 @@ internal static class MetalV2Presenter
             var height = _presentTexture != 0 ? _presentHeight : _hostFrameHeight;
             if (texture != 0 && width != 0 && height != 0)
             {
-                EncodePresent(encoder, texture, width, height);
+                EncodePresent(encoder, texture, width, height, _presentTexture != 0 && _presentIsHdr);
             }
 
             MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
@@ -658,6 +664,7 @@ internal static class MetalV2Presenter
         _presentTexture = frame.Texture;
         _presentWidth = frame.Width;
         _presentHeight = frame.Height;
+        _presentIsHdr = frame.IsHdr;
         Interlocked.Increment(ref _presentedGuestFrames);
         PerfOverlay.RecordGuestPresent();
         if (frame.RequestId != 0)
@@ -747,9 +754,17 @@ internal static class MetalV2Presenter
         return pass;
     }
 
-    private static void EncodePresent(nint encoder, nint texture, uint frameWidth, uint frameHeight)
+    private static void EncodePresent(nint encoder, nint texture, uint frameWidth, uint frameHeight, bool isHdr)
     {
-        MetalNative.SendVoid(encoder, MetalNative.Selector("setRenderPipelineState:"), _presentPipeline);
+        if (_layerHdrActive)
+        {
+            EncodeHdrPresentState(encoder, _hdrPresentPipeline, isHdr, _edrCurrentHeadroom);
+        }
+        else
+        {
+            MetalNative.SendVoid(encoder, MetalNative.Selector("setRenderPipelineState:"), _presentPipeline);
+        }
+
         var scaleX = _drawableWidth / frameWidth;
         var scaleY = _drawableHeight / frameHeight;
         var viewportWidth = _drawableWidth;
@@ -788,7 +803,13 @@ internal static class MetalV2Presenter
             encoder, MetalNative.Selector("drawPrimitives:vertexStart:vertexCount:"), Mtl.PrimitiveTriangle, 0, 3);
     }
 
-    private static bool TryCreatePresentPipeline(nint device, out nint pipeline, out string error)
+    private static bool TryCreatePresentPipeline(
+        nint device,
+        out nint pipeline,
+        out string error,
+        string? fragmentSource = null,
+        string fragmentEntry = "present_fs",
+        ulong pixelFormat = PixelFormatBgra8Unorm)
     {
         pipeline = 0;
         error = string.Empty;
@@ -813,7 +834,7 @@ internal static class MetalV2Presenter
             fragmentLibrary = MetalNative.Send(
                 device,
                 MetalNative.Selector("newLibraryWithSource:options:error:"),
-                MetalNative.NsString(MslFixedShaders.CreatePresentFragment()),
+                MetalNative.NsString(fragmentSource ?? MslFixedShaders.CreatePresentFragment()),
                 options,
                 ref compileError);
             if (vertexLibrary == 0 || fragmentLibrary == 0)
@@ -824,7 +845,7 @@ internal static class MetalV2Presenter
 
             var newFunction = MetalNative.Selector("newFunctionWithName:");
             var vertexFunction = MetalNative.Send(vertexLibrary, newFunction, MetalNative.NsString("fullscreen_vs"));
-            var fragmentFunction = MetalNative.Send(fragmentLibrary, newFunction, MetalNative.NsString("present_fs"));
+            var fragmentFunction = MetalNative.Send(fragmentLibrary, newFunction, MetalNative.NsString(fragmentEntry));
             if (vertexFunction == 0 || fragmentFunction == 0)
             {
                 error = "the present entry points are missing from the compiled libraries";
@@ -841,7 +862,7 @@ internal static class MetalV2Presenter
                 MetalNative.Selector("objectAtIndexedSubscript:"),
                 0);
             MetalV2Native.SendVoidValue(
-                attachment, MetalNative.Selector("setPixelFormat:"), (nuint)PixelFormatBgra8Unorm);
+                attachment, MetalNative.Selector("setPixelFormat:"), (nuint)pixelFormat);
             nint pipelineError = 0;
             pipeline = MetalNative.Send(
                 device,
@@ -947,12 +968,11 @@ internal static class MetalV2Presenter
 
         public void PublishGuestFrame(nint texture, uint width, uint height, ulong requestId, ulong serial, bool isHdr)
         {
-            _ = isHdr;
             // The presenter owns one retain per queued or presented frame.
             MetalNative.Send(texture, MetalNative.Selector("retain"));
             lock (_frameGate)
             {
-                _pendingFrames.Enqueue(new PendingFrame(texture, width, height, requestId, serial));
+                _pendingFrames.Enqueue(new PendingFrame(texture, width, height, requestId, serial, isHdr));
                 _ = TryPromotePendingLocked();
                 _splashHidden = true;
             }
