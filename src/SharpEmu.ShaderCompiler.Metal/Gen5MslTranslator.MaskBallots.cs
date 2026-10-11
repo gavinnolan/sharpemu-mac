@@ -170,9 +170,11 @@ public static partial class Gen5MslTranslator
         {
             exposed = new bool[MaskRegisters.Length];
             defined = new bool[MaskRegisters.Length];
-            var depth = 0;
-            foreach (var line in lines)
+            var depths = BraceDepths(lines);
+            for (var index = 0; index < lines.Count; index++)
             {
+                var line = lines[index];
+                var depth = depths[index];
                 var trimmed = line.Trim();
                 if (TryReadBallotMarker(trimmed, out var loRegister, out _))
                 {
@@ -205,13 +207,6 @@ public static partial class Gen5MslTranslator
                         defined[slot] = true;
                     }
                 }
-
-                foreach (var character in line)
-                {
-                    depth += character == '{' ? 1 : character == '}' ? -1 : 0;
-                }
-
-                depth = Math.Max(depth, 0);
             }
 
             static void MarkDefined(bool[] exposed, bool[] defined, uint register)
@@ -224,6 +219,26 @@ public static partial class Gen5MslTranslator
             }
         }
 
+        /// <summary>Brace depth at the start of each line, so a write inside a
+        /// conditional can be told from one that always runs.</summary>
+        private static int[] BraceDepths(List<string> lines)
+        {
+            var depths = new int[lines.Count];
+            var depth = 0;
+            for (var index = 0; index < lines.Count; index++)
+            {
+                depths[index] = depth;
+                foreach (var character in lines[index])
+                {
+                    depth += character == '{' ? 1 : character == '}' ? -1 : 0;
+                }
+
+                depth = Math.Max(depth, 0);
+            }
+
+            return depths;
+        }
+
         /// <summary>Walks a block backwards and expands each marker, now that the live set
         /// at the end of the block is known.</summary>
         private string ResolveBlockBallots(
@@ -234,6 +249,7 @@ public static partial class Gen5MslTranslator
             // The terminator condition was appended for the liveness pass; it is not part
             // of the block's text.
             var bodyCount = hasTerminatorCondition ? lines.Count - 1 : lines.Count;
+            var depths = BraceDepths(lines);
             var live = (bool[])liveOut.Clone();
             if (hasTerminatorCondition)
             {
@@ -267,7 +283,11 @@ public static partial class Gen5MslTranslator
                 }
 
                 resolved[index] = line;
-                var definition = DefinitionTarget(trimmed);
+
+                // Only a write that always runs ends the previous value's life. One
+                // under a condition leaves the other path reading what was there, so it
+                // keeps the ballot that produced it alive.
+                var definition = depths[index] == 0 ? DefinitionTarget(trimmed) : -1;
                 if (definition >= ScalarSlotBase && definition < VectorSlotBase)
                 {
                     var slot = MaskSlotOf((uint)(definition - ScalarSlotBase));
