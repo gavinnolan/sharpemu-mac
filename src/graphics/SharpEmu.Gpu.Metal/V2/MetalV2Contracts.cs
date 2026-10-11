@@ -78,6 +78,13 @@ internal interface IMetalImageTransfer
         SubresourceRange range, nint texture, MetalGuestRange destination, MetalGuestRange stencilDestination,
         ulong guestBase, ulong pieceSize);
 
+    // Hands one cached surface's contents to another over the same guest bytes, on the
+    // device. False when the pair is not one the transfer can carry, and the caller
+    // publishes through guest memory instead.
+    bool TryEncodeTextureToTexture(IMetalSubmissionContext context,
+        in ImageDescription sourceDescription, nint sourceTexture,
+        in ImageDescription targetDescription, nint targetTexture);
+
     // Where a run of an image's guest bytes may end without cutting one of its transfers
     // in half: a caller that found a window covering [start, end) asks for the end it
     // should actually use, so every subresource is either wholly inside a run or wholly

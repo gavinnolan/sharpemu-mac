@@ -138,37 +138,163 @@ internal sealed class MetalCachedImage : IDisposable
     // Why the next upload will happen; purely diagnostic.
     public MetalImageDirtyCause DirtyCause { get; private set; } = MetalImageDirtyCause.Created;
 
-    public void MarkCpuDirty(MetalImageDirtyCause cause = MetalImageDirtyCause.Invalidated)
+    /// <summary>
+    /// The guest bytes of this image, as offsets into it, that guest memory holds a newer
+    /// version of than the texture does. One merged interval rather than a set: a second
+    /// range that does not touch the first widens it to cover both, which costs an upload
+    /// of the bytes between them and never an upload too few.
+    /// </summary>
+    public ulong DirtyStart { get; private set; }
+
+    public ulong DirtyEnd { get; private set; }
+
+    /// <summary>
+    /// The bytes already published to guest memory since this image was last written by
+    /// the GPU. A partial publication leaves the texture authoritative for the rest, so
+    /// the image stays GPU-modified and this is what keeps the next alias from publishing
+    /// the same bytes again.
+    /// </summary>
+    public ulong PublishedStart { get; private set; }
+
+    public ulong PublishedEnd { get; private set; }
+
+    public void MarkCpuDirty(MetalImageDirtyCause cause = MetalImageDirtyCause.Invalidated) =>
+        MarkCpuDirty(cause, 0, Description.Data.Size);
+
+    /// <summary>Guest memory is newer than the texture over <c>[start, end)</c> of the image.</summary>
+    public void MarkCpuDirty(MetalImageDirtyCause cause, ulong start, ulong end)
     {
+        end = Math.Min(end, Description.Data.Size);
+        if (end <= start)
+        {
+            return;
+        }
+
         if (!_cpuDirty)
         {
             DirtyCause = cause;
+            DirtyStart = start;
+            DirtyEnd = end;
+            _cpuDirty = true;
+            return;
         }
 
-        _cpuDirty = true;
+        DirtyStart = Math.Min(DirtyStart, start);
+        DirtyEnd = Math.Max(DirtyEnd, end);
     }
 
-    public void RefreshComplete() => _cpuDirty = false;
+    /// <summary>The whole image is in the texture again.</summary>
+    public void RefreshComplete()
+    {
+        _cpuDirty = false;
+        DirtyStart = 0;
+        DirtyEnd = 0;
+    }
+
+    /// <summary>Only <c>[start, end)</c> was uploaded; whatever is left stays dirty.</summary>
+    public void RefreshComplete(ulong start, ulong end)
+    {
+        if (!_cpuDirty)
+        {
+            return;
+        }
+
+        if (start <= DirtyStart && end >= DirtyEnd)
+        {
+            RefreshComplete();
+            return;
+        }
+
+        // A cut from the front or the back narrows the interval; a cut from the middle
+        // would split it, and one interval cannot hold two, so it keeps the wider half.
+        if (start <= DirtyStart && end > DirtyStart)
+        {
+            DirtyStart = end;
+        }
+        else if (end >= DirtyEnd && start < DirtyEnd)
+        {
+            DirtyEnd = start;
+        }
+
+        if (DirtyEnd <= DirtyStart)
+        {
+            RefreshComplete();
+        }
+    }
 
     public void MarkGpuModified()
     {
         _gpuModified = true;
         _cpuDirty = false;
+        DirtyStart = 0;
+        DirtyEnd = 0;
+        PublishedStart = 0;
+        PublishedEnd = 0;
         GpuWriteSequence = Interlocked.Increment(ref _gpuWriteCounter);
     }
 
-    public void ClearGpuModified() => _gpuModified = false;
+    /// <summary>Records that <c>[start, end)</c> of this image now also sits in guest memory.</summary>
+    public void MarkPublished(ulong start, ulong end)
+    {
+        end = Math.Min(end, Description.Data.Size);
+        if (end <= start)
+        {
+            return;
+        }
+
+        if (PublishedEnd <= PublishedStart)
+        {
+            PublishedStart = start;
+            PublishedEnd = end;
+            return;
+        }
+
+        PublishedStart = Math.Min(PublishedStart, start);
+        PublishedEnd = Math.Max(PublishedEnd, end);
+    }
+
+    /// <summary>True when guest memory already holds this run of the image.</summary>
+    public bool IsPublished(ulong start, ulong end) =>
+        PublishedEnd > PublishedStart && start >= PublishedStart && end <= PublishedEnd;
+
+    public void ClearGpuModified()
+    {
+        _gpuModified = false;
+        PublishedStart = 0;
+        PublishedEnd = 0;
+    }
 
     // A CPU write inside the image's bytes makes it dirty; a write that only shares a
     // tracker page with it does too, since the page watch cannot tell them apart.
     public void InvalidateCpuWrite(ulong address, ulong size)
     {
-        if (GuestRangeOverlap.Bytes(Description.Data.Address, Description.Data.Size, address, size) ||
-            GuestRangeOverlap.Pages(Description.Data.Address, Description.Data.Size, address, size))
+        // The bytes themselves are known; a write that only shares a tracker page cannot
+        // be narrowed, because the page watch cannot say where inside the page it landed.
+        if (GuestRangeOverlap.Bytes(Description.Data.Address, Description.Data.Size, address, size))
+        {
+            var (start, end) = OverlapWithin(address, size);
+            MarkCpuDirty(MetalImageDirtyCause.CpuWrite, start, end);
+            ClearGpuModified();
+        }
+        else if (GuestRangeOverlap.Pages(Description.Data.Address, Description.Data.Size, address, size))
         {
             MarkCpuDirty(MetalImageDirtyCause.CpuWrite);
-            _gpuModified = false;
+            ClearGpuModified();
         }
+    }
+
+    /// <summary>
+    /// A guest byte range intersected with this image, as offsets into the image. Empty
+    /// when the range does not reach it.
+    /// </summary>
+    public (ulong Start, ulong End) OverlapWithin(ulong address, ulong size)
+    {
+        var imageStart = Description.Data.Address;
+        var imageEnd = imageStart + Description.Data.Size;
+        var rangeEnd = size > ulong.MaxValue - address ? ulong.MaxValue : address + size;
+        var start = Math.Max(imageStart, address);
+        var end = Math.Min(imageEnd, rangeEnd);
+        return end > start ? (start - imageStart, end - imageStart) : (0, 0);
     }
 
     public bool Overlaps(ulong address, ulong size, bool pages = false) => pages
