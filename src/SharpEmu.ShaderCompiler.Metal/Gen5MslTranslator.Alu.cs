@@ -2202,7 +2202,7 @@ public static partial class Gen5MslTranslator
                 StoreScalar64(destination, oldExec);
                 Line($"s[{ExecLoRegister}] = (uint){mask};");
                 Line($"s[{ExecHiRegister}] = (uint)({mask} >> 32);");
-                Line($"exec = ((((uint){mask}) >> sharpemu_lane) & 1u) != 0u;");
+                Line($"exec = (({mask} >> sharpemu_lane) & 1ul) != 0ul;");
                 Line($"scc = {mask} != 0ul;");
                 return true;
             }
@@ -2592,7 +2592,9 @@ public static partial class Gen5MslTranslator
             { Kind: Gen5OperandKind.ScalarRegister, Value: VccLoRegister } => "vcc",
             { Kind: Gen5OperandKind.ScalarRegister, Value: ExecLoRegister } => "exec",
             { Kind: Gen5OperandKind.ScalarRegister } scalar =>
-                $"(((s[{scalar.Value}] >> sharpemu_lane) & 1u) != 0u)",
+                IsWave64
+                    ? $"({LaneBit($"s[{scalar.Value}]", $"s[{scalar.Value + 1}]")})"
+                    : $"(((s[{scalar.Value}] >> sharpemu_lane) & 1u) != 0u)",
             _ => throw new NotSupportedException("mask operand must be a scalar register"),
         };
     }
