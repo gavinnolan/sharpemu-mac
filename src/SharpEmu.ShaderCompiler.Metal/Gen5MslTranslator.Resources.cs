@@ -520,7 +520,7 @@ public static partial class Gen5MslTranslator
                     var bindingIndex = (int)entry.Resource;
                     var byteOffset = unchecked((uint)control.ImmediateOffsetBytes + ((uint)component * sizeof(uint)));
                     var address = Temp("uint", ApplyByteBias(bindingIndex, $"({dynamicOffset} + {FormatUInt(byteOffset)})"));
-                    value = Temp("uint", LoadWord(bindingIndex, address));
+                    value = Temp("uint", LoadDword(bindingIndex, address));
                 }
                 else
                 {
@@ -611,7 +611,7 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
-                Line($"if (exec && {allowed})");
+                Line($"if ({ExecCondition(allowed)})");
                 Line("{");
                 _indent++;
                 var valid = Temp("bool", "false");
@@ -634,7 +634,7 @@ public static partial class Gen5MslTranslator
 
             if (memoryOpcode.StartsWith("GlobalStore", StringComparison.Ordinal))
             {
-                Line($"if (exec && {allowed})");
+                Line($"if ({ExecCondition(allowed)})");
                 Line("{");
                 _indent++;
                 if (TryGetSubdwordStoreInfo(memoryOpcode, out var byteCount, out var sourceShift))
@@ -734,9 +734,7 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
-            Line("if (exec)");
-            Line("{");
-            _indent++;
+            BeginExecGuard();
             var offset = Temp("uint", $"(uint){address}");
             var aperture = Temp(
                 "uint",
@@ -816,8 +814,7 @@ public static partial class Gen5MslTranslator
                 Branch(isPrivate, Private, Global);
             }
 
-            _indent--;
-            Line("}");
+            EndExecGuard();
             return true;
         }
 
@@ -852,9 +849,7 @@ public static partial class Gen5MslTranslator
             var byteAddress = Temp("uint", address);
             if (instruction.Opcode.StartsWith("ScratchStore", StringComparison.Ordinal))
             {
-                Line("if (exec)");
-                Line("{");
-                _indent++;
+                BeginExecGuard();
                 if (TryGetSubdwordStoreInfo(instruction.Opcode, out var byteCount, out var sourceShift))
                 {
                     // A sub-dword store merges into the dword it lands in.
@@ -877,8 +872,7 @@ public static partial class Gen5MslTranslator
                     }
                 }
 
-                _indent--;
-                Line("}");
+                EndExecGuard();
                 return true;
             }
 
@@ -1285,9 +1279,7 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
-            Line("if (exec)");
-            Line("{");
-            _indent++;
+            BeginExecGuard();
             var address = Temp("uint", RawSource(instruction, 0));
             // Equal offsets select only the first source pair.
             var componentCount = control.Offset0 == control.Offset1 ? 2 : 4;
@@ -1301,8 +1293,7 @@ public static partial class Gen5MslTranslator
                 else
                     Line($"sharpemu_lds[{LdsIndex(address, byteOffset)}] = {value};");
             }
-            _indent--;
-            Line("}");
+            EndExecGuard();
             return true;
         }
 
@@ -1315,9 +1306,7 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
-            Line("if (exec)");
-            Line("{");
-            _indent++;
+            BeginExecGuard();
             var address = Temp("uint", RawSource(instruction, 0));
             var values = new string[4];
             // Capture both values before an overlapping destination changes the address.
@@ -1331,8 +1320,7 @@ public static partial class Gen5MslTranslator
             }
             for (var component = 0; component < values.Length; component++)
                 StoreVector(instruction.Destinations[component].Value, values[component], guardWithExec: false);
-            _indent--;
-            Line("}");
+            EndExecGuard();
             return true;
         }
 
@@ -1343,7 +1331,7 @@ public static partial class Gen5MslTranslator
             $"({index} < {GlobalDataShareWordsName} ? {GlobalDataShareName}[{index}] : 0u)";
 
         private void StoreGlobalDataShareWord(string index, string value) =>
-            Line($"if (exec && {index} < {GlobalDataShareWordsName}) {{ {GlobalDataShareName}[{index}] = {value}; }}");
+            Line(ExecGuarded($"if ({index} < {GlobalDataShareWordsName}) {{ {GlobalDataShareName}[{index}] = {value}; }}"));
 
         // The atomic suffix TryGetAtomicExpression knows for one DS opcode, shared
         // by the LDS and GDS paths because both encodings name the same operation.
@@ -1387,7 +1375,7 @@ public static partial class Gen5MslTranslator
             }
 
             var index = Temp("uint", GlobalDataShareIndex(RawSource(instruction, 0), control.SingleOffsetBytes));
-            Line($"if (exec && {index} < {GlobalDataShareWordsName})");
+            Line($"if ({ExecCondition($"{index} < {GlobalDataShareWordsName}")})");
             Line("{");
             _indent++;
             var original = Temp("uint", build($"{GlobalDataShareName} + {index}"));
@@ -1425,7 +1413,7 @@ public static partial class Gen5MslTranslator
             if (!HasRealWaveLanes)
             {
                 var original = Temp("uint", "0u");
-                Line($"if (exec && {inBounds}) {{ {original} = atomic_fetch_{operation}_explicit({word}, 1u, memory_order_relaxed); }}");
+                Line($"if ({ExecCondition(inBounds)}) {{ {original} = atomic_fetch_{operation}_explicit({word}, 1u, memory_order_relaxed); }}");
                 StoreVector(destination, $"{inBounds} ? {original} : 0u");
                 return true;
             }
@@ -1453,7 +1441,7 @@ public static partial class Gen5MslTranslator
             count = Temp("uint", $"popcount({mask})");
             first = Temp("uint", $"{mask} == 0u ? 0u : (uint)ctz({mask})");
             var firstValue = Temp("uint", "0u");
-            Line($"if (exec && {inBounds} && sharpemu_lane == {first})");
+            Line($"if ({ExecCondition($"{inBounds} && sharpemu_lane == {first}")})");
             Line("{");
             _indent++;
             Line($"{firstValue} = atomic_fetch_{operation}_explicit({word}, {count}, memory_order_relaxed);");

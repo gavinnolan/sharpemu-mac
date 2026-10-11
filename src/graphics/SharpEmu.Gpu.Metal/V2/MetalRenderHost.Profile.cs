@@ -74,6 +74,7 @@ internal sealed partial class MetalRenderHost
         // Remembered unconditionally, like _lastWorkLabel: it is what names the producer
         // in a write-guard violation and in a slow command buffer's report.
         _lastTransferLabel = label;
+        _slotTrap?.NoteBinding($"transfer {label}", 0, 0, 0, 0, 0);
         ProfileCommandBuffer("transfer", label, string.Empty);
     }
 

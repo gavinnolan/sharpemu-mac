@@ -584,10 +584,47 @@ beside them still zero. Not an overrun, not a mispaired copy piece, not stale me
 not an index that left its table: one targeted eight-byte store of `float2(2.0, 2.0)` into
 a slot the allocator had never used.
 
-What is left writes those bytes as guest code, through a pointer the guest itself holds.
-Catching it needs a write-protected page and a fault handler - the page guard the image
-cache already uses, armed on the table once it is identified - because no managed hook can
-see a native guest store.
+What was left wrote those bytes from the GPU, and the slot trap caught it doing so.
+
+#### The slot trap, and what it found
+
+`SHARPEMU_TRAP_SLOT=0x720 SHARPEMU_TRAP_BAND_HI=0x90 SHARPEMU_TRAP_VALUE=0x4000000040000000`
+names a structure by its offset inside an aligned block rather than by an address the run
+chooses, adopts every mapping of that shape in that band, and reports the moment one of
+those slots takes the value being hunted. Two halves, armable apart:
+
+- the CPU half write-protects the slot's page through `PageGuard` and reports the guest
+  RIP, instruction and registers of the store that faults. It caught the allocator's own
+  push — `mov [rcx],r15` storing a pointer — and never the corruption. Protecting a
+  hundred and fifty pool pages costs a signal per write and stalled the guest's clock at
+  27 s, so `SHARPEMU_TRAP_PAGE_GUARD=0` leaves it off;
+- the GPU half reads the slots at every submission commit. It costs a few bytes per commit
+  and does not perturb the run, and it is the half that answered:
+
+      [METAL-V2][SLOT-TRAP] A watched slot took the hunted value: slot=0x0000009003260720
+        was=0x0000000000000000 now=0x4000000040000000 at_commit_of_serial=4142
+        slot_resolves_to=buffer=0x7F8EA0A1D170+0x16370720 cpu_faults=0
+
+  `cpu_faults=0`: no CPU write faulted on that page. The GPU wrote it, and no submission
+  in flight had declared a destination anywhere near it.
+
+#### The cause: end-of-pipe labels published before the GPU runs
+
+V2 publishes an end-of-pipe label when the command processor parses it, not when the GPU
+finishes the work it ends. The guest polls the label, believes the GPU is done with a
+surface, frees it, and the allocator hands those bytes out again — while the writeback or
+transfer that was still queued lands in them. The float payload is the old owner's; the
+slot is the new one's.
+
+Measured both ways on the same build, same key plan:
+
+| | result | slot trap | guest |
+| --- | --- | --- | --- |
+| default | `rc=139 after 37-63 s` | poisoned, every run | MOB logo, then dead |
+| `SHARPEMU_METAL_V2_DEFER_EOP=1` | **alive at 110 s** | never fired | **main menu**, clock advancing |
+
+Deferring the labels to GPU completion is correct and slow (1-6 fps while it waits); the
+efficient form is GPU-timed label writes.
 
 ### The Oregon Trail
 
@@ -674,6 +711,33 @@ address=0x801C6F0000 size=0x400000`, now with its reason — *not one backed spa
 (contiguous prefix about 0x240000 of 0x400000)*. The piecewise writeback added for Demon's
 Souls only splits an image whose layers are separable, so a single-layer 4 MiB surface
 still falls back to the whole-range resolve and is skipped.
+
+### void tRrLM();++ //Void Terrarium++
+
+Reaches **controllable gameplay**. Twelve confirms walk the title and intro, after which
+the game puts its own "Move" prompt on screen with a D-pad glyph; arrow keys move the
+creature and the camera follows, the prompt clears, and play continues. Rendering matches
+the title's art direction — a very dark terrarium with volumetric light, ground detail,
+debris and plants, all of it legible.
+
+It is the cleanest title measured so far: **no `[METAL-V2][WARN]` lines at all**, no
+fatals, and `msl_structured=24 msl_dispatcher=0` — every shader it uses takes the
+structured control-flow path and none falls back to the PC dispatcher.
+
+Frame rate reaches 60 and holds a median of **44.8** across the active part of a
+200-second run (95 intervals above 5 fps, max 60.00). The GPU is busy 44% of wall and the
+worker idle 64% with no host waits, so neither is the limiter: 11988 draws and 2553
+passes per two seconds is about 133 draws and 28 passes a frame, and what keeps the
+median off 60 is upstream of the backend.
+
+### Quake
+
+Menus render correctly at over 100 fps — logo, Options, Accessibility text, all of it.
+Gameplay could not be reached: a **`CONNECTION ERROR` modal for Bethesda.net** sits over
+the menu and comes back after being dismissed, so the main menu cannot be navigated to
+start a game. Two runs with different key paths (confirms, and escapes back to the root
+first) end on the same modal. That is a networking or HLE matter rather than a rendering
+one, and it is what to clear before Quake can be checked in game.
 
 ## Process-level macOS tuning (separate workstream)
 

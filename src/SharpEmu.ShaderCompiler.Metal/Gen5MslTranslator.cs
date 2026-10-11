@@ -1121,6 +1121,7 @@ public static partial class Gen5MslTranslator
             out string error)
         {
             error = string.Empty;
+            BeginInstruction(instruction);
             switch (instruction.Opcode)
             {
                 // No shader trap handler is installed, so S_TRAP has no effect.
@@ -1478,7 +1479,7 @@ public static partial class Gen5MslTranslator
             var allowed = Temp(
                 "bool",
                 $"(({descriptorWord3} >> 12) & 0x7Fu) != 0u && {inBounds}");
-            Line($"if (exec && {allowed})");
+            Line($"if ({ExecCondition(allowed)})");
             Line("{");
             _indent++;
             if (Gfx10UnifiedFormat.HasWholeDwordComponents(dataFormat))
@@ -1488,7 +1489,10 @@ public static partial class Gen5MslTranslator
                 {
                     Gfx10UnifiedFormat.TryGetComponentLayout(dataFormat, component, out var byteOffset, out _, out _);
                     var address = byteOffset == 0 ? byteAddress : $"({byteAddress} + {byteOffset}u)";
-                    Line($"sharpemu_store_bytes(b{bindingIndex}, {BufferBytes(bindingIndex)}, {address}, v[{control.VectorData + component}], 4u);");
+                    Line(StoreDwordStatement(
+                        bindingIndex,
+                        address,
+                        $"v[{control.VectorData + component}]"));
                 }
             }
             else
@@ -1577,7 +1581,7 @@ public static partial class Gen5MslTranslator
             void StoreLds(string index, string value)
             {
                 // Exec-guarded like every other lane-visible write.
-                Line($"if (exec) {{ sharpemu_lds[{index}] = {value}; }}");
+                Line(ExecGuarded($"sharpemu_lds[{index}] = {value};"));
             }
 
             switch (instruction.Opcode)
@@ -1609,7 +1613,7 @@ public static partial class Gen5MslTranslator
                     {
                         var original = Temp("uint", $"sharpemu_lds[{index}]");
                         var assignment = operation == "add" ? "+=" : "-=";
-                        Line($"if (exec && {inBounds}) {{ sharpemu_lds[{index}] {assignment} 1u; }}");
+                        Line($"if ({ExecCondition(inBounds)}) {{ sharpemu_lds[{index}] {assignment} 1u; }}");
                         StoreVector(destination, $"{inBounds} ? {original} : 0u");
                         return true;
                     }
@@ -1638,7 +1642,7 @@ public static partial class Gen5MslTranslator
                     count = Temp("uint", $"popcount({mask})");
                     first = Temp("uint", $"{mask} == 0u ? 0u : (uint)ctz({mask})");
                     var firstValue = Temp("uint", "0u");
-                    Line($"if (exec && {inBounds} && sharpemu_lane == {first})");
+                    Line($"if ({ExecCondition($"{inBounds} && sharpemu_lane == {first}")})");
                     Line("{");
                     _indent++;
                     Line($"{firstValue} = atomic_fetch_{operation}_explicit((threadgroup atomic_uint*)&sharpemu_lds[{index}], {count}, memory_order_relaxed);");
@@ -1839,17 +1843,14 @@ public static partial class Gen5MslTranslator
             var index = Temp("uint", LdsIndex(address, control.SingleOffsetBytes));
             var first = Temp("uint", RawSource(instruction, 1));
             var second = takesThreeSources ? Temp("uint", RawSource(instruction, 2)) : "0u";
-            Line("if (exec)");
-            Line("{");
-            _indent++;
+            BeginExecGuard();
             var original = EmitDataShareAtomicWord(name, index, first, second);
             if (instruction.Destinations.Count > 0)
             {
                 Line($"v[{instruction.Destinations[0].Value}] = {original};");
             }
 
-            _indent--;
-            Line("}");
+            EndExecGuard();
             return true;
         }
 
@@ -1952,9 +1953,7 @@ public static partial class Gen5MslTranslator
             var highIndex = Temp("uint", LdsIndex(address, control.SingleOffsetBytes + sizeof(uint)));
             var low = Temp("uint", RawSource(instruction, 1));
             var high = Temp("uint", RawSource(instruction, 2));
-            Line("if (exec)");
-            Line("{");
-            _indent++;
+            BeginExecGuard();
             if (instruction.Opcode == "DsOrB64")
             {
                 EmitDataShareAtomicWord("Or", lowIndex, low, "0u");
@@ -1968,8 +1967,7 @@ public static partial class Gen5MslTranslator
                 EmitDataShareAtomicWord("Add", highIndex, highWithCarry, "0u");
             }
 
-            _indent--;
-            Line("}");
+            EndExecGuard();
             return true;
         }
 
@@ -2008,9 +2006,7 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
-                Line("if (exec)");
-                Line("{");
-                _indent++;
+                BeginExecGuard();
                 var bytes = BufferBytes(bindingIndex);
                 var width = words * sizeof(uint);
                 Line($"if ({width}u <= {bytes} && {byteAddress} <= {bytes} - {width}u && ({byteAddress} & 3u) == 0u)");
@@ -2042,8 +2038,7 @@ public static partial class Gen5MslTranslator
                     Line($"else {{{cleared} }}");
                 }
 
-                _indent--;
-                Line("}");
+                EndExecGuard();
                 return true;
             }
 
@@ -2051,9 +2046,7 @@ public static partial class Gen5MslTranslator
                 opcode.StartsWith("BufferStore", StringComparison.Ordinal) ||
                 opcode.StartsWith("TBufferStore", StringComparison.Ordinal))
             {
-                Line("if (exec)");
-                Line("{");
-                _indent++;
+                BeginExecGuard();
                 if (TryGetSubdwordStoreInfo(opcode, out var storeBytes, out var sourceShift))
                 {
                     var source = sourceShift == 0
@@ -2065,12 +2058,14 @@ public static partial class Gen5MslTranslator
                 {
                     for (uint index = 0; index < dwordCount; index++)
                     {
-                        Line($"sharpemu_store_bytes(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress} + {index * 4}u, v[{sourceVectorRegister + index}], 4u);");
+                        Line(StoreDwordStatement(
+                            bindingIndex,
+                            $"{byteAddress} + {index * 4}u",
+                            $"v[{sourceVectorRegister + index}]"));
                     }
                 }
 
-                _indent--;
-                Line("}");
+                EndExecGuard();
                 return true;
             }
 
@@ -2102,7 +2097,7 @@ public static partial class Gen5MslTranslator
                 {
                     StoreVector(
                         destinationVectorRegister + index,
-                        LoadWord(bindingIndex, $"({byteAddress} + {index * 4}u)"));
+                        LoadDword(bindingIndex, $"({byteAddress} + {index * 4}u)"));
                 }
 
                 return true;
@@ -2148,6 +2143,27 @@ public static partial class Gen5MslTranslator
 
         private string BufferBytes(int bindingIndex) =>
             $"{ResourcesName}.buffer_bytes[{bindingIndex}]";
+
+        /// <summary>A raw dword load, the form S_BUFFER_LOAD_DWORD* and
+        /// BUFFER_LOAD_DWORD* take: the byte address truncates to the dword it lands in
+        /// and the dword is read, out of range reading zero.
+        ///
+        /// This is what the SPIR-V backend does for the same opcodes, and it is the whole
+        /// of it — a shift, a compare and a load. The byte-combining
+        /// <see cref="LoadWord"/> below is for a format access, whose component really can
+        /// straddle two dwords because the descriptor's stride is a byte count. Using it
+        /// for raw dword loads cost an alignment branch and a four-iteration byte loop at
+        /// each of them, which Octopath Traveler II's shaders do 1661 times, 65 of them in
+        /// the dispatch that spends 19% of the frame's GPU time.</summary>
+        private string LoadDword(int bindingIndex, string byteAddress) =>
+            _options.RawDwordAccess
+                ? $"sharpemu_load_dword(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress})"
+                : LoadWord(bindingIndex, byteAddress);
+
+        private string StoreDwordStatement(int bindingIndex, string byteAddress, string value) =>
+            _options.RawDwordAccess
+                ? $"sharpemu_store_dword(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress}, {value});"
+                : $"sharpemu_store_bytes(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress}, {value}, 4u);";
 
         private string LoadWord(int bindingIndex, string byteAddress) =>
             $"sharpemu_load_word(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress})";
@@ -2220,7 +2236,7 @@ public static partial class Gen5MslTranslator
                 return;
             }
 
-            if (guardWithExec)
+            if (guardWithExec && !_execKnownFull)
             {
                 Line($"if (exec) {{ v[{register}] = {expression}; }}");
             }
@@ -2229,6 +2245,11 @@ public static partial class Gen5MslTranslator
                 Line($"v[{register}] = {expression};");
             }
         }
+
+        /// <summary>One VGPR by number, wrapped into the file the way a relative move's
+        /// register arithmetic wraps.</summary>
+        private static string VectorExpression(uint register) =>
+            $"v[{register & (VectorRegisterFileCount - 1)}]";
 
         private string ScalarExpression(uint register) =>
             register < ScalarRegisterFileCount ? $"s[{register}]" : "0u";
@@ -2279,7 +2300,40 @@ public static partial class Gen5MslTranslator
 
         private static string AsFloat(string expression) => $"as_type<float>({expression})";
 
-        private static string AsUInt(string expression) => $"as_type<uint>({expression})";
+        /// <summary>The uint bits of an expression. A value that was just reinterpreted
+        /// as a float is handed back as it came: the register file is uint, so an
+        /// instruction that reads a float and writes uint bits would otherwise emit
+        /// as_type&lt;uint&gt;(as_type&lt;float&gt;(v0)) — a no-op the Metal compiler folds
+        /// but which 120 lines of a game's shaders carry through the compiler first.</summary>
+        private static string AsUInt(string expression)
+        {
+            const string cast = "as_type<float>(";
+            if (expression.StartsWith(cast, StringComparison.Ordinal) &&
+                expression.EndsWith(')') &&
+                MatchingParenthesis(expression, cast.Length - 1) == expression.Length - 1)
+            {
+                return expression[cast.Length..^1];
+            }
+
+            return $"as_type<uint>({expression})";
+        }
+
+        /// <summary>The index of the parenthesis closing the one at
+        /// <paramref name="open"/>, or -1.</summary>
+        private static int MatchingParenthesis(string expression, int open)
+        {
+            var depth = 0;
+            for (var index = open; index < expression.Length; index++)
+            {
+                depth += expression[index] == '(' ? 1 : expression[index] == ')' ? -1 : 0;
+                if (depth == 0)
+                {
+                    return index;
+                }
+            }
+
+            return -1;
+        }
 
         // ---- basic blocks (ports BuildBasicBlocks from the SPIR-V translator) ----
 

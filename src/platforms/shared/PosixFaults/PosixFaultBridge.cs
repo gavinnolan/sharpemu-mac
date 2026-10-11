@@ -126,6 +126,7 @@ internal static unsafe class PosixFaultBridge
             Console.Error.WriteLine("[LOADER][INFO] Raw sentinel recovery disabled by SHARPEMU_DISABLE_RAW_HANDLER=1");
         }
 
+        InstallGuestCodeReader();
         GuestImageWriteTracker.InitializeNativeFaultDiagnostics();
         WarmUpSignalPath(handlers.WarmUp);
         GuestImageWriteTracker.WarmUp();
@@ -365,6 +366,34 @@ internal static unsafe class PosixFaultBridge
         return handled;
     }
 
+    // Guest code is identity-mapped, and a diagnostic only ever reads at an address the
+    // guest has just executed, so a direct read is safe; the indirection keeps the HLE
+    // layer free of unsafe code and of a disassembler reference.
+    private static void InstallGuestCodeReader()
+    {
+        GuestCodeReader.Reader ??= (address, count) =>
+        {
+            if (address < 0x10000 || count <= 0 || count > 64)
+            {
+                return null;
+            }
+
+            var bytes = new byte[count];
+            new ReadOnlySpan<byte>((void*)address, count).CopyTo(bytes);
+            return bytes;
+        };
+
+        GuestCodeReader.Disassembler ??= (address, bytes) =>
+        {
+            var decoder = Decoder.Create(64, new ByteArrayCodeReader(bytes), address);
+            var instruction = decoder.Decode();
+            var formatter = new NasmFormatter();
+            var output = new StringOutput();
+            formatter.Format(instruction, output);
+            return output.ToStringAndReset();
+        };
+    }
+
     private static bool TryResolveGpuFault(nint siginfo, nint ucontext)
     {
         byte* registers = PosixSignalLayout.GetRegisterBase(ucontext);
@@ -374,14 +403,40 @@ internal static unsafe class PosixFaultBridge
         }
 
         ulong faultAddress = GetFaultAddress(siginfo, registers);
-        ulong rip = *(ulong*)(registers + PosixSignalLayout.RegisterOffsets[16]);
+        ReadOnlySpan<int> offsets = PosixSignalLayout.RegisterOffsets;
+        ulong rip = *(ulong*)(registers + offsets[16]);
         var kind = GetAccessType(registers, faultAddress, rip) switch
         {
             0 => FaultKind.Read,
             1 => FaultKind.Write,
             _ => FaultKind.Unknown,
         };
-        return kind != FaultKind.Unknown && GuestGpuMemoryHook.TryResolveFault(kind, faultAddress);
+        if (kind == FaultKind.Unknown)
+        {
+            return false;
+        }
+
+        // A watch that fires knows the address but not the instruction. Publish the
+        // machine state so a recovery step that cares can name the guest code.
+        if (GuestSlotTrap.Armed)
+        {
+            Span<ulong> general = stackalloc ulong[16];
+            for (var index = 0; index < general.Length && index < offsets.Length; index++)
+            {
+                general[index] = *(ulong*)(registers + offsets[index]);
+            }
+
+            GuestFaultContext.Publish(rip, general);
+        }
+
+        try
+        {
+            return GuestGpuMemoryHook.TryResolveFault(kind, faultAddress);
+        }
+        finally
+        {
+            GuestFaultContext.Clear();
+        }
     }
 
     /// <summary>

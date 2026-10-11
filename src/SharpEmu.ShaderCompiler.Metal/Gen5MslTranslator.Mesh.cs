@@ -515,7 +515,7 @@ public static partial class Gen5MslTranslator
                 values[component] = $"as_type<float>(v[{instruction.Sources[component].Value}])";
             }
 
-            Line($"if (exec) {{ {field} = float4({values[0]}, {values[1]}, {values[2]}, {values[3]}); }}");
+            Line(ExecGuarded($"{field} = float4({values[0]}, {values[1]}, {values[2]}, {values[3]});"));
             return true;
         }
 
@@ -530,9 +530,7 @@ public static partial class Gen5MslTranslator
                 ? $"v[{instruction.Sources[0].Value}]"
                 : "0u";
             var value = Temp("uint", packed);
-            Line("if (exec)");
-            Line("{");
-            _indent++;
+            BeginExecGuard();
             var perPrimitive = Math.Max(Mesh.VerticesPerPrimitive, 1u);
             for (var vertex = 0u; vertex < perPrimitive; vertex++)
             {
@@ -547,8 +545,7 @@ public static partial class Gen5MslTranslator
             }
 
             Line($"sharpemu_mesh_culled = (({value} >> {Gen5NggExports.PrimitiveNullBit}u) & 1u) != 0u;");
-            _indent--;
-            Line("}");
+            EndExecGuard();
         }
     }
 }

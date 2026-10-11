@@ -560,11 +560,20 @@ public static partial class Gen5MslTranslator
         }
 
         // The relative moves address the VGPR file relative to the wave's own
-        // allocation base, which is exactly what the private register array models,
-        // so the encoded register number and M0 simply add. V_MOVRELSD2 is the one
-        // form that takes separate source and destination offsets, out of M0's two
-        // halves. Unlike the SPIR-V translator this needs no constant-offset
-        // analysis: the MSL register file is an array it can index at run time.
+        // allocation base, so the encoded register number and M0 simply add.
+        // V_MOVRELSD2 is the one form that takes separate source and destination
+        // offsets, out of M0's two halves.
+        //
+        // Indexing the register file at run time is what costs: it forces the file to
+        // stay an array, so none of it can be scalarized and all 256 dwords sit in
+        // per-thread memory. In Octopath Traveler II that happens to exactly one shader
+        // out of 67 — and it is the one that spends 44% of the frame's GPU time, a
+        // vertex program run 12.5 million times a frame with four relative moves in it.
+        //
+        // Gen5MoveRelativeOffsets (shared IR, already used by the SPIR-V backend) says
+        // which values M0 can hold at each relative move when straight-line scalar code
+        // produces it. Knowing them turns the move into a select among constant register
+        // numbers, and the file scalarizes like any other program's.
         private bool TryEmitMoveRelative(Gen5ShaderInstruction instruction, out string error)
         {
             error = string.Empty;
@@ -578,6 +587,21 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
+            if (_options.BoundedRelativeMoves)
+            {
+                _moveRelativeOffsets ??= Ir.Gen5MoveRelativeOffsets.Analyze(_request.Program);
+                if (_moveRelativeOffsets.TryGetValue(instruction.Pc, out var offsets) &&
+                    offsets.Length != 0)
+                {
+                    return TryEmitBoundedMoveRelative(instruction, offsets, out error);
+                }
+            }
+
+            // M0 that no straight-line reasoning bounds — the waterfall idiom
+            // (v_readfirstlane into M0, v_cmpx, v_movrels) is the common source, and it
+            // is what the hot Octopath vertex shader does. The register number is then
+            // only known at run time, so the access is marked here and resolved once the
+            // set of registers the program touches is known: see Gen5MslTranslator.Registers.
             var m0 = Temp("uint", ScalarExpression(M0Register));
             var sourceOffset = m0;
             var destinationOffset = m0;
@@ -603,9 +627,12 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
-                value = Temp(
+                var sourceIndex = Temp(
                     "uint",
-                    $"v[({source.Value}u + {sourceOffset}) & {VectorRegisterFileCount - 1}u]");
+                    $"({source.Value}u + {sourceOffset}) & {VectorRegisterFileCount - 1}u");
+                value = Temp("uint", _options.BoundedRelativeMoves
+                    ? $"{DynamicVectorRead}({sourceIndex})"
+                    : $"v[{sourceIndex}]");
             }
 
             var destination = instruction.Destinations[0].Value;
@@ -618,8 +645,92 @@ public static partial class Gen5MslTranslator
             var target = Temp(
                 "uint",
                 $"({destination}u + {destinationOffset}) & {VectorRegisterFileCount - 1}u");
-            Line($"if (exec) {{ v[{target}] = {value}; }}");
+            Line(ExecGuarded(_options.BoundedRelativeMoves
+                ? $"{DynamicVectorWrite}({target}, {value});"
+                : $"v[{target}] = {value};"));
             return true;
+        }
+
+        private IReadOnlyDictionary<uint, uint[]>? _moveRelativeOffsets;
+
+        /// <summary>A relative move whose M0 values are known: the source becomes a chain
+        /// of selects over constant register numbers and the destination a write per
+        /// reachable register, so nothing indexes the register file at run time.</summary>
+        private bool TryEmitBoundedMoveRelative(
+            Gen5ShaderInstruction instruction,
+            uint[] offsets,
+            out string error)
+        {
+            error = string.Empty;
+            var opcode = instruction.Opcode;
+            var m0 = Temp("uint", ScalarExpression(M0Register));
+            var sourceOffsets = offsets;
+            var destinationOffsets = offsets;
+            var sourceSelector = m0;
+            var destinationSelector = m0;
+            if (opcode == "VMovrelsd2B32")
+            {
+                // M0's halves are independent offsets, so each side selects on its own.
+                sourceSelector = Temp("uint", $"{m0} & 0x3FFu");
+                destinationSelector = Temp("uint", $"({m0} >> 16u) & 0x3FFu");
+                sourceOffsets = Distinct(offsets, value => value & 0x3FFu);
+                destinationOffsets = Distinct(offsets, value => (value >> 16) & 0x3FFu);
+            }
+
+            string value;
+            if (opcode == "VMovreldB32")
+            {
+                value = Temp("uint", RawSource(instruction, 0));
+            }
+            else
+            {
+                var source = instruction.Sources[0];
+                if (source.Kind != Gen5OperandKind.VectorRegister)
+                {
+                    error = $"{opcode} source must be a vector register";
+                    return false;
+                }
+
+                var selected = VectorExpression(source.Value + sourceOffsets[0]);
+                for (var index = 1; index < sourceOffsets.Length; index++)
+                {
+                    selected =
+                        $"({sourceSelector} == {FormatUInt(sourceOffsets[index])} " +
+                        $"? {VectorExpression(source.Value + sourceOffsets[index])} : {selected})";
+                }
+
+                value = Temp("uint", selected);
+            }
+
+            var destination = instruction.Destinations[0].Value;
+            if (opcode == "VMovrelsB32")
+            {
+                StoreVector(destination, value);
+                return true;
+            }
+
+            // Only the register M0 actually selects takes the value; the others keep
+            // theirs, which is what writing through the index would have done.
+            foreach (var offset in destinationOffsets)
+            {
+                var register = (destination + offset) & (VectorRegisterFileCount - 1);
+                StoreVector(
+                    register,
+                    $"{destinationSelector} == {FormatUInt(offset)} ? {value} : {VectorExpression(register)}");
+            }
+
+            return true;
+        }
+
+        private static uint[] Distinct(uint[] values, Func<uint, uint> project)
+        {
+            var projected = new SortedSet<uint>();
+            foreach (var value in values)
+            {
+                projected.Add(project(value));
+            }
+
+            return [.. projected];
         }
 
         // D.u64 = S1.u64 << or >> (S0.u32 & 0x3F), landing in the register pair.
@@ -647,10 +758,10 @@ public static partial class Gen5MslTranslator
             // mirroring the SPIR-V translator's TruncateFloat32ForPack.
             var first = Temp(
                 "float",
-                $"as_type<float>(as_type<uint>({F(instruction, 0)}) & 0xFFFFE000u)");
+                $"as_type<float>({AsUInt(F(instruction, 0))} & 0xFFFFE000u)");
             var second = Temp(
                 "float",
-                $"as_type<float>(as_type<uint>({F(instruction, 1)}) & 0xFFFFE000u)");
+                $"as_type<float>({AsUInt(F(instruction, 1))} & 0xFFFFE000u)");
             return $"(((uint)as_type<ushort>(half({first}))) | (((uint)as_type<ushort>(half({second}))) << 16))";
         }
 
@@ -1201,7 +1312,7 @@ public static partial class Gen5MslTranslator
 
             // Only EXEC-enabled lanes can pass; balloting the raw condition
             // would leak results from disabled lanes into saveexec/branches.
-            var active = Temp("bool", $"exec && {condition}");
+            var active = Temp("bool", ExecCondition(condition));
             if (instruction.Control is Gen5DppControl compareDpp)
             {
                 var writeEnabled = EmitDppWriteEnabled(compareDpp);
@@ -1266,7 +1377,7 @@ public static partial class Gen5MslTranslator
 
         private void StoreCarryOut(Gen5ShaderInstruction instruction, string carryCondition)
         {
-            var active = Temp("bool", $"exec && ({carryCondition})");
+            var active = Temp("bool", ExecCondition($"({carryCondition})"));
             var target = instruction.Control is Gen5Vop3Control { ScalarDestination: { } register }
                 ? register
                 : VccLoRegister;

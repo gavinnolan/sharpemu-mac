@@ -394,6 +394,9 @@ internal sealed partial class MetalRenderHost
                 NoteGuestMemoryWrite(descriptor.Address, size, MetalGpuWriteOrigin.StorageBuffer);
             }
 
+            _slotTrap?.NoteBinding(
+                $"storage[{index}] hash=0x{stage.Program.Hash:X16}{(written ? " written" : string.Empty)}",
+                descriptor.Address, size, (ulong)range.Buffer, range.Offset, range.GpuAddress);
             stage.Buffers[index] = range;
             stage.BufferLengths[index] = (uint)Math.Min(size, uint.MaxValue);
             ReportBufferBinding(stage, index, in descriptor, requested, size, range);
@@ -447,6 +450,9 @@ internal sealed partial class MetalRenderHost
 
             _imageCache.InvalidateMemoryFromGpu(range.Base, size);
             NoteGuestMemoryWrite(range.Base, size, MetalGpuWriteOrigin.DeviceAddress);
+            _slotTrap?.NoteBinding(
+                $"device_address handle={range.Handle} hash=0x{stage.Program.Hash:X16} written",
+                range.Base, size, 0, 0, 0);
             declaredWrite = true;
         }
 
