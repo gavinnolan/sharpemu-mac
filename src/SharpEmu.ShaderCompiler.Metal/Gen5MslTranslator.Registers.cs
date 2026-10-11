@@ -234,6 +234,10 @@ public static partial class Gen5MslTranslator
         /// <summary>Marks the matching write; takes the register number and the value.</summary>
         private const string DynamicVectorWrite = "SHARPEMU_VWRITE";
 
+        /// <summary>How many registers a resolved run-time access may choose among before
+        /// keeping the file as an array is the better trade.</summary>
+        private const int MaxResolvedVectorRegisters = 64;
+
         /// <summary>One s[...] or v[...] occurrence. <see cref="Index"/> is -1 when the
         /// subscript is not a decimal literal, which is how dynamic indexing shows up.</summary>
         private readonly record struct RegisterReference(
@@ -330,6 +334,16 @@ public static partial class Gen5MslTranslator
                         (reference.File == 's' ? scalars : vectors).Add((uint)reference.Index);
                     }
                 }
+            }
+
+            // Resolving a run-time register number costs one comparison per register the
+            // program touches, at each access. That is a good trade against the whole
+            // file living in thread-private memory — v0..v31 against 256 slots for the
+            // shader this was written for — but it stops being one if a program touches
+            // most of the file, so past the limit the array stays.
+            if (markedVectorAccess && vectors.Count > MaxResolvedVectorRegisters)
+            {
+                dynamicVector = true;
             }
 
             var plan = new RegisterPlan { ScalarArray = dynamicScalar, VectorArray = dynamicVector };
