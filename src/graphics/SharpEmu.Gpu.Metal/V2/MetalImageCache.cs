@@ -536,10 +536,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return;
         }
 
-        // A GPU write over metadata is the guest asking for whatever that metadata
-        // encodes again, so it re-arms a materialized clear even when nothing images
-        // the range. TryAbsorbDccFill is the usual route in; this catches the rest.
-        ReArmMaterializedDcc(address, size);
+        // Deliberately no re-arm here. MaterializeDccClear's own sentinel fill reaches
+        // this path, so re-arming from it would forget the claim the materialization
+        // just made and the clear would repeat exactly as before. The guest asking for
+        // the clear again arrives as TryAbsorbDccFill, which is where the re-arm lives.
         if (!_pageOwners.MayHaveOwners(address, size))
         {
             return;
