@@ -42,6 +42,14 @@ internal static partial class MetalV2Presenter
         }
 
         EnsureStarted((uint)options.Width, (uint)options.Height);
+        // Auto that this backend does not allow is SDR on any screen, so the answer does
+        // not wait for the window: on a busy host that wait held Demon's Souls' init for
+        // fourteen seconds in sceVideoOutGetOutputStatus.
+        if (!options.CanUseHdr(displayHdrEnabled: true, surfaceSupportsHdr: true))
+        {
+            return false;
+        }
+
         lock (_hdrGate)
         {
             while (!_edrStateKnown && !IsPresenterGone())

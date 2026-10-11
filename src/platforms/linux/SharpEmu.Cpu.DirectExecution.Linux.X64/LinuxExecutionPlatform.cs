@@ -127,6 +127,8 @@ public sealed unsafe class LinuxExecutionPlatform : IDirectExecutionPlatform
     public bool TryReadExecutableHostMemory(ulong address, byte* destination, int byteCount) =>
         LinuxHostMemoryProbe.TryRead(address, destination, byteCount);
 
+    public double HostLoadAverage => LinuxExecutionStubs.ReadLoadAverage();
+
     // ---------------------------------------------------------------------
     // Thread stack bounds
     // ---------------------------------------------------------------------

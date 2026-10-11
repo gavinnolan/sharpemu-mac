@@ -300,6 +300,16 @@ internal static unsafe class MacOSExecutionStubs
     private static extern int pthread_threadid_np(nint thread, ulong* threadId);
 
     [DllImport("libc")]
+    private static extern int getloadavg(double* loadAverage, int count);
+
+    /// <summary>The one-minute load average, or -1 when it cannot be read.</summary>
+    internal static double ReadLoadAverage()
+    {
+        double load;
+        return getloadavg(&load, 1) == 1 ? load : -1.0;
+    }
+
+    [DllImport("libc")]
     private static extern nint dispatch_semaphore_create(long value);
 
     [DllImport("libc")]

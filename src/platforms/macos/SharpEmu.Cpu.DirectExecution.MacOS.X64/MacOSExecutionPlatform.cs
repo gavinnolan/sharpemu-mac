@@ -124,6 +124,8 @@ public sealed unsafe class MacOSExecutionPlatform : IDirectExecutionPlatform
     public bool TryReadExecutableHostMemory(ulong address, byte* destination, int byteCount) =>
         MacOSHostMemoryProbe.TryRead(address, destination, byteCount);
 
+    public double HostLoadAverage => MacOSExecutionStubs.ReadLoadAverage();
+
     // ---------------------------------------------------------------------
     // Thread stack bounds
     // ---------------------------------------------------------------------

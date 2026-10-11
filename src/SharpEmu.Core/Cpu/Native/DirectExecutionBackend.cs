@@ -6718,6 +6718,22 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return 20;
 	}
 
+	// How many times the watchdog's period a stall must last before it ends the run: the
+	// one-minute load average per core, from one up to eight. The period is for a host
+	// with a core to spare per runnable thread, and a guest phase that makes no import
+	// call for seconds (Demon's Souls' resource-dependency pass) took over twenty under a
+	// load of a hundred and fifty on ten cores. A host without a load average keeps one.
+	private static double GetStallWatchdogLoadFactor()
+	{
+		var load = ExecutionPlatform.HostLoadAverage;
+		if (!double.IsFinite(load) || load <= 0)
+		{
+			return 1.0;
+		}
+
+		return Math.Clamp(load / Math.Max(Environment.ProcessorCount, 1), 1.0, 8.0);
+	}
+
 
 	private void StartStallWatchdog()
 	{
@@ -6803,11 +6819,17 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					MarkExecutionProgress();
 					continue;
 				}
+				var loadFactor = GetStallWatchdogLoadFactor();
+				if (num2 < (long)(num * loadFactor))
+				{
+					continue;
+				}
 				if (Interlocked.Exchange(ref _stallWatchdogTriggered, 1) != 0)
 				{
 					continue;
 				}
-				LastError = $"Execution stalled with no import progress for {stallWatchdogSeconds}s (imports={Volatile.Read(ref _importDispatchCount)}).";
+				LastError = $"Execution stalled with no import progress for {num2 / (double)Stopwatch.Frequency:F0}s " +
+					$"(period={stallWatchdogSeconds}s load_factor={loadFactor:F1} imports={Volatile.Read(ref _importDispatchCount)}).";
 				Console.Error.WriteLine("[LOADER][ERROR] " + LastError);
 				LogStallWatchdogSnapshot();
 				Console.Error.Flush();
