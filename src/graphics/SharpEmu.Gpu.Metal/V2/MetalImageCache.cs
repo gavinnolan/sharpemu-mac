@@ -290,14 +290,26 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
             if (other.IsGpuModified)
             {
-                // Correct and expensive: the overlap may be a fraction of either surface,
-                // but a cached image is dirty as a whole, so a 64 KiB overlap on a 19 MiB
-                // target costs a full retile of one and a full detile of the other, every
-                // time the pair is used. Naming the pairs once says which surfaces are
-                // paying it; the rate is in the CHURN line's wb_overlap and up_alias.
+                // Only the bytes the two actually share change hands. The overlap may be
+                // a fraction of either surface, and publishing or reloading the rest of
+                // them moves bytes neither image is asking about: a 64 KiB overlap on a
+                // 19 MiB target used to cost a full retile of one and a full detile of
+                // the other, every time the pair was used.
                 ReportAliasPair(image, other);
-                WriteBackToGuest(other, MetalWritebackCause.ImageOverlap);
-                image.MarkCpuDirty(MetalImageDirtyCause.AliasWrite);
+                if (TryPublishAliasOnDevice(image, other))
+                {
+                    _aliasPublishes++;
+                    continue;
+                }
+
+                var sharedStart = Math.Max(image.Description.Data.Address, other.Description.Data.Address);
+                var sharedEnd = Math.Min(
+                    image.Description.Data.Address + image.Description.Data.Size,
+                    other.Description.Data.Address + other.Description.Data.Size);
+                var sharedSize = sharedEnd > sharedStart ? sharedEnd - sharedStart : 0;
+                PublishAliasRange(other, sharedStart, sharedSize);
+                var (dirtyStart, dirtyEnd) = image.OverlapWithin(sharedStart, sharedSize);
+                image.MarkCpuDirty(MetalImageDirtyCause.AliasWrite, dirtyStart, dirtyEnd);
                 _aliasPublishes++;
             }
 
@@ -567,7 +579,19 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 $"extent={image.Description.Extent.Width}x{image.Description.Extent.Height} " +
                 $"format={image.Description.PixelFormat} gpu_modified={image.IsGpuModified}.");
             image.ClearGpuModified();
-            image.MarkCpuDirty(MetalImageDirtyCause.GpuWrite);
+            // Only the bytes the write names: a shader store into one corner of a surface
+            // leaves the rest of it as good as it was, and a page-granular overlap is the
+            // one case that cannot be narrowed, which FindImagesInRange already separates.
+            var (start, end) = image.OverlapWithin(address, size);
+            if (end > start)
+            {
+                image.MarkCpuDirty(MetalImageDirtyCause.GpuWrite, start, end);
+            }
+            else
+            {
+                image.MarkCpuDirty(MetalImageDirtyCause.GpuWrite);
+            }
+
             UnwatchImage(imageIdentifier);
         }
     }
@@ -598,6 +622,117 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         return false;
+    }
+
+    // Two surfaces over exactly the same guest bytes hand their contents over on the
+    // device, with guest memory left out of it entirely. The pair that costs the most is
+    // a depth-stencil target and the single-channel float alias something samples it
+    // through: the round trip retiles the depth plane out to guest memory and detiles it
+    // straight back, and the device can copy it instead.
+    //
+    // Guest memory is not updated, and does not need to be: the written image stays
+    // GPU-modified, so the lazy writeback rules still publish it the moment the CPU, a
+    // buffer binding or a differently shaped request wants those bytes.
+    private bool TryPublishAliasOnDevice(MetalCachedImage image, MetalCachedImage other)
+    {
+        if (!DeviceAliasPublishEnabled || image.Texture == 0 || other.Texture == 0 ||
+            image.Texture == other.Texture ||
+            image.Description.Data.Address != other.Description.Data.Address ||
+            image.Description.Data.Size != other.Description.Data.Size)
+        {
+            return false;
+        }
+
+        var context = _owner.BeginTransfer(MetalTransferCause.Writeback);
+        if (!_transfer.TryEncodeTextureToTexture(
+                context, in other.Description, other.Texture, in image.Description, image.Texture))
+        {
+            return false;
+        }
+
+        context.ProfileEncoded(ProfileLabel("alias-on-device", in image.Description));
+        // The target now holds what the source holds, so it owes guest memory no upload.
+        image.RefreshComplete();
+        _deviceAliasPublishes++;
+        return true;
+    }
+
+    private long _deviceAliasPublishes;
+
+    /// <summary>Alias publications the device served without touching guest memory.</summary>
+    public long TakeDeviceAliasPublishes() => Interlocked.Exchange(ref _deviceAliasPublishes, 0);
+
+    // SHARPEMU_METAL_V2_ALIAS_ON_DEVICE=1 hands aliases over on the device instead of
+    // through guest memory. Off by default because it is not yet right: with it on,
+    // MetalTextureMaterializationTests.ActualNativeDepthPcfUsesGuestComparisonFunction-
+    // BeforeLinearFiltering fails for every comparison function, which says a depth
+    // texture's texels are not the bits its guest plane holds - the tiler's depth path
+    // converts on the way through, and the alias reads the converted form. Narrowing the
+    // pair to an unwidened 32-bit depth source and a colour target of the same element
+    // size does not fix it, so the precondition is something the depth transfer owns
+    // rather than something this can test for from outside.
+    private static readonly bool DeviceAliasPublishEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ALIAS_ON_DEVICE") == "1";
+
+    // Publishes just the shared bytes of a GPU-written image, leaving the texture
+    // authoritative for the rest of it. The image stays GPU-modified, so what is left is
+    // still published when something asks for it; the published run is what stops the
+    // same bytes being written again on every use of the pair.
+    private void PublishAliasRange(MetalCachedImage other, ulong address, ulong size)
+    {
+        var (start, end) = other.OverlapWithin(address, size);
+        if (!SubRangeTransfersEnabled || end <= start || other.Description.HasStencil)
+        {
+            WriteBackToGuest(other, MetalWritebackCause.ImageOverlap);
+            return;
+        }
+
+        if (other.IsPublished(start, end))
+        {
+            return;
+        }
+
+        if (!TryWriteBackRun(other, start, end, MetalWritebackCause.ImageOverlap))
+        {
+            WriteBackToGuest(other, MetalWritebackCause.ImageOverlap);
+        }
+    }
+
+    // Retiles one run of a GPU-written image into guest memory. Unlike a whole writeback
+    // this leaves the image GPU-modified: the texture still owns every byte outside the
+    // run, and saying otherwise would lose them the next time anything read the image.
+    private bool TryWriteBackRun(MetalCachedImage image, ulong start, ulong end, MetalWritebackCause cause)
+    {
+        ref readonly var description = ref image.Description;
+        if (image.Texture == 0 || ImageDescription.IsEmptyRange(description.Data))
+        {
+            return false;
+        }
+
+        if (!TryCoveringRun(in description, start, end, out var aligned, out var alignedEnd))
+        {
+            return false;
+        }
+
+        var destination = _guestMemory.ResolveWritable(
+            description.Data.Address + aligned, alignedEnd - aligned);
+        if (!destination.IsValid || destination.Size < alignedEnd - aligned)
+        {
+            return false;
+        }
+
+        var context = _owner.BeginTransfer(MetalTransferCause.Writeback);
+        var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
+        _transfer.EncodeTextureToGuest(
+            context, in description, range, image.Texture, destination, default, aligned, alignedEnd - aligned);
+        context.ProfileEncoded(ProfileLabel("writeback-run", in description));
+        image.MarkPublished(aligned, alignedEnd);
+        _owner.NoteGuestWrite(description.Data.Address + aligned, alignedEnd - aligned);
+        _writebackCauses[(int)cause]++;
+        _partialWritebacks++;
+        _partialWritebackBytesSaved += (long)(description.Data.Size - (alignedEnd - aligned));
+        Interlocked.Increment(ref _writebacks);
+        return true;
     }
 
     // One line per distinct pair of aliasing surfaces, with the bytes each round trip
@@ -879,6 +1014,11 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         ref readonly var description = ref image.Description;
+        if (TryRefreshDirtyRun(image))
+        {
+            return;
+        }
+
         var context = _owner.BeginTransfer(MetalTransferCause.Upload);
         var whole = description.Data.Size <= MaxTransferPieceBytes
             ? _guestMemory.Resolve(description.Data.Address, description.Data.Size)
@@ -903,6 +1043,88 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         image.RefreshComplete();
         Interlocked.Increment(ref _uploads);
     }
+
+    // A surface whose dirty bytes are a small part of it is refreshed over just those
+    // bytes: the run is widened to where the transfer plan says both its ends fall on
+    // block-row boundaries, so every subresource it carries is carried whole. False when
+    // the run is most of the image, cannot be aligned or cannot be mapped - the whole
+    // image is then refreshed as before, because a partial refresh that loses bytes would
+    // leave the texture disagreeing with guest memory for good.
+    private bool TryRefreshDirtyRun(MetalCachedImage image)
+    {
+        ref readonly var description = ref image.Description;
+        if (!SubRangeTransfersEnabled || description.HasStencil ||
+            image.DirtyEnd <= image.DirtyStart ||
+            image.DirtyEnd - image.DirtyStart > description.Data.Size / 2)
+        {
+            return false;
+        }
+
+        if (!TryCoveringRun(in description, image.DirtyStart, image.DirtyEnd, out var start, out var end))
+        {
+            return false;
+        }
+
+        var source = _guestMemory.Resolve(description.Data.Address + start, end - start);
+        if (!source.IsValid || source.Size < end - start)
+        {
+            return false;
+        }
+
+        var context = _owner.BeginTransfer(MetalTransferCause.Upload);
+        var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
+        _transfer.EncodeGuestToTexture(
+            context, in description, range, source, default, image.Texture, start, end - start);
+        _uploadCauses[(int)image.DirtyCause]++;
+        _partialUploads++;
+        _partialUploadBytesSaved += (long)(description.Data.Size - (end - start));
+        context.ProfileEncoded(ProfileLabel("upload-run", in description));
+        image.RefreshComplete(start, end);
+        Interlocked.Increment(ref _uploads);
+        return true;
+    }
+
+    // The run a restricted transfer may be given for a dirty range. Both alignments move
+    // *into* the range - a start forward, an end back - because they exist to cut an
+    // image into runs that together cover it, where a byte one run drops the next one
+    // picks up. A single run has no next one, so a run that does not cover the whole
+    // dirty range is refused rather than taken: bytes it dropped would stay stale, and a
+    // texture that disagrees with guest memory never catches up.
+    private bool TryCoveringRun(
+        in ImageDescription description, ulong dirtyStart, ulong dirtyEnd, out ulong start, out ulong end)
+    {
+        // Always from the image's first byte. A run that begins in the middle is a run
+        // whose placement only the device can confirm, and the device test that confirms
+        // it covers a prefix: the saving that matters is the tail of a large surface
+        // whose dirty bytes are near its start, which a prefix already gives.
+        start = 0;
+        end = _transfer.AlignRunEnd(in description, start, dirtyEnd);
+        if (end < dirtyEnd)
+        {
+            // Nothing between the dirty end and the image's end can be dropped, so a run
+            // that reaches the end covers whatever the alignment would have cut.
+            end = description.Data.Size;
+        }
+
+        return end > start && end - start < description.Data.Size;
+    }
+
+    private long _partialUploads;
+    private long _partialUploadBytesSaved;
+    private long _partialWritebacks;
+    private long _partialWritebackBytesSaved;
+
+    /// <summary>What the sub-range transfers have saved, for the periodic report.</summary>
+    public (long Uploads, long UploadBytes, long Writebacks, long WritebackBytes) TakePartialTransfers() =>
+        (Interlocked.Exchange(ref _partialUploads, 0),
+         Interlocked.Exchange(ref _partialUploadBytesSaved, 0),
+         Interlocked.Exchange(ref _partialWritebacks, 0),
+         Interlocked.Exchange(ref _partialWritebackBytesSaved, 0));
+
+    // SHARPEMU_METAL_V2_SUBRANGE=0 refreshes and publishes whole images again, for a
+    // comparison or a bisect.
+    private static readonly bool SubRangeTransfersEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_SUBRANGE") != "0";
 
     // Moves an image that is too large to map or stage whole, a run of layers at a time.
     // A run that cannot be mapped is reported and skipped on its own; the rest still land.

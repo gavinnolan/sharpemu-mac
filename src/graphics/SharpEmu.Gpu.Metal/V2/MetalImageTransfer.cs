@@ -148,6 +148,110 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         _plans.Clear();
     }
 
+    /// <summary>
+    /// Hands one cached surface's contents to another that occupies the same guest bytes,
+    /// without going through guest memory. Two surfaces that alias each other every frame
+    /// otherwise cost a retile out to guest memory and a detile back in, and neither
+    /// result is any different from what the device could have copied directly.
+    ///
+    /// The bytes travel through a linear staging buffer, because the one pair that
+    /// matters most - a depth-stencil target and its single-channel float alias - has no
+    /// blit between the textures themselves. That route is bit-exact: it is the same
+    /// MTLBlitOptionDepthFromDepthStencil plane the tiler already writes guest memory
+    /// from. False when the pair is not one this can carry, and the caller publishes
+    /// through guest memory as before.
+    /// </summary>
+    public bool TryEncodeTextureToTexture(
+        IMetalSubmissionContext context,
+        in ImageDescription sourceDescription,
+        nint sourceTexture,
+        in ImageDescription targetDescription,
+        nint targetTexture)
+    {
+        if (_disposed || context.CommandBuffer == 0 || sourceTexture == 0 || targetTexture == 0 ||
+            sourceTexture == targetTexture)
+        {
+            return false;
+        }
+
+        var source = PlanFor(sourceDescription);
+        var target = PlanFor(targetDescription);
+        // One plane of equally sized texels, one mip, the same grid, and no multisampling:
+        // anything else is a reinterpretation this cannot claim to preserve.
+        // Only the direction that was measured to matter: a depth target read through a
+        // single-channel float alias. Depth is the side with no blit to a colour texture,
+        // which is why the pair costs a round trip through guest memory at all; every
+        // other pair either already has a texture view or is not what anything spends its
+        // time on, and claiming them without a device test behind each one is how a
+        // sampled surface quietly comes back wrong.
+        if (!SameTransferGrid(sourceDescription, targetDescription) ||
+            !sourceDescription.IsDepth || targetDescription.IsDepth ||
+            source.TransferBytes != target.TransferBytes || source.TransferBytes != sizeof(float) ||
+            // A depth surface the tiler widens or narrows on its way through guest memory
+            // does not hold the guest's bits in its texels, so the alias reading those
+            // bits cannot be handed the texture's.
+            source.TransferBytes != sourceDescription.BytesPerBlock ||
+            target.TransferBytes != targetDescription.BytesPerBlock ||
+            source.Swap || target.Swap ||
+            sourceDescription.Resources.Levels != 1 || targetDescription.Resources.Levels != 1 ||
+            targetDescription.HasStencil)
+        {
+            return false;
+        }
+
+        var layers = targetDescription.TransferLayers;
+        var rowBytes = (ulong)targetDescription.Extent.Width * target.TransferBytes;
+        var sliceBytes = rowBytes * targetDescription.Extent.Height;
+        if (layers == 0 || rowBytes == 0 || sliceBytes == 0 ||
+            sliceBytes > ulong.MaxValue / layers)
+        {
+            return false;
+        }
+
+        var staging = _tiler.Acquire(context, sliceBytes * layers);
+        if (!staging.IsValid)
+        {
+            return false;
+        }
+
+        var size = new MtlSize
+        {
+            Width = targetDescription.Extent.Width,
+            Height = targetDescription.Extent.Height,
+            Depth = 1,
+        };
+        var readOption = MetalGuestFormats.HasStencilPlane(source.Format)
+            ? MtlBlitOption.DepthFromDepthStencil
+            : MtlBlitOption.None;
+        var writeOption = MetalGuestFormats.HasStencilPlane(target.Format)
+            ? MtlBlitOption.DepthFromDepthStencil
+            : MtlBlitOption.None;
+        var blit = _tiler.BeginBlit(context);
+        for (uint layer = 0; layer < layers; layer++)
+        {
+            var offset = staging.Offset + (sliceBytes * layer);
+            MetalNative.SendCopyTextureToBufferOptions(blit, SelCopyTextureToBuffer,
+                sourceTexture, layer, 0, default, size,
+                staging.Buffer, (nuint)offset, (nuint)rowBytes, (nuint)sliceBytes, (nuint)readOption);
+            MetalNative.SendCopyBufferToTextureOptions(blit, SelCopyBufferToTexture,
+                staging.Buffer, (nuint)offset, (nuint)rowBytes, (nuint)sliceBytes,
+                size, targetTexture, layer, 0, default, (nuint)writeOption);
+        }
+
+        MetalTiler.EndEncoding(blit);
+        return true;
+    }
+
+    // The two surfaces cover the same texel grid, so a copy between them is a copy and
+    // not a resample.
+    private static bool SameTransferGrid(in ImageDescription left, in ImageDescription right) =>
+        left.Extent.Width == right.Extent.Width &&
+        left.Extent.Height == right.Extent.Height &&
+        left.Extent.Depth == right.Extent.Depth &&
+        left.TransferLayers == right.TransferLayers &&
+        left.Samples == 1 && right.Samples == 1 &&
+        !left.IsVolume && !right.IsVolume;
+
     public MetalTextureShape ShapeFor(in ImageDescription description)
     {
         if (!MetalGuestFormats.TryDecodeHostFormat(description.PixelFormat, out var format))

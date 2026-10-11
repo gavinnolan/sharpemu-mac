@@ -1249,6 +1249,7 @@ internal sealed partial class MetalRenderHost :
             .Append(" windows_touched=").Append(System.Numerics.BitOperations.PopCount(_guestMemory.TouchedWindows));
         Console.Error.WriteLine($"[METAL-V2][WAITS]{reasons}");
         var causes = _imageCache.TakeTransferCauses();
+        var subRange = _imageCache.TakePartialTransfers();
         var aliases = _imageCache.AliasCounters;
         Console.Error.WriteLine(
             $"[METAL-V2][CHURN] up_new={causes.Created} up_cpu={causes.CpuWrite} up_gpu={causes.GpuWrite} " +
@@ -1257,6 +1258,9 @@ internal sealed partial class MetalRenderHost :
             $"wb_read={causes.HostRead} wb_copy={causes.GuestCopy} wb_overlap={causes.Overlap} " +
             $"wb_release={causes.Release} wb_drain={causes.Drain}{ReleaseCauses()} " +
             $"alias_kept={aliases.Kept} alias_published={aliases.Published} " +
+            $"alias_on_device={_imageCache.TakeDeviceAliasPublishes()} " +
+            $"part_up={subRange.Uploads} part_up_mb={subRange.UploadBytes / (1024 * 1024)} " +
+            $"part_wb={subRange.Writebacks} part_wb_mb={subRange.WritebackBytes / (1024 * 1024)} " +
             $"write_ranges={_gpuWrites.Count} write_records={_gpuWrites.Recorded} " +
             $"write_folds={_gpuWrites.Folds} handler_wakeups={_completions.HandlerWakeups} " +
             $"rings={_guestMemory.RingCount} rings_freed={_guestMemory.RingsReleased} " +
