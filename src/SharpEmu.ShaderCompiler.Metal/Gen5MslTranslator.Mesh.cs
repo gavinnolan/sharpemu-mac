@@ -470,6 +470,14 @@ public static partial class Gen5MslTranslator
             source.AppendLine("    threadgroup_barrier(mem_flags::mem_threadgroup);");
             source.AppendLine($"    if (sharpemu_tg_index < {mesh.MaxVertices}u)");
             source.AppendLine("    {");
+
+            // A partial POS0 export keeps the components already written, so the position
+            // reaches Metal's clip space once, when it is final.
+            foreach (var statement in HostClipSpaceStatements("sharpemu_out.sharpemu_position"))
+            {
+                source.AppendLine($"        {statement}");
+            }
+
             source.AppendLine($"        {MeshOutputName}.set_vertex(sharpemu_tg_index, sharpemu_out);");
             source.AppendLine("    }");
             source.AppendLine();
