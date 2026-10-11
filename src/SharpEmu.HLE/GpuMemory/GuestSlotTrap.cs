@@ -47,6 +47,15 @@ public static class GuestSlotTrap
     // is one line in thousands.
     private static readonly ulong TrapValue = Parse("SHARPEMU_TRAP_VALUE");
 
+    // SHARPEMU_TRAP_PAGE_GUARD=0 adopts the blocks without write-protecting anything. A
+    // page the CPU cannot write without faulting costs a signal per write, and a title
+    // that maps a hundred and fifty pool blocks writes them constantly: the first run that
+    // armed them all stalled the guest's own clock at 27 seconds. Watching the slots from
+    // a submission boundary costs a few bytes per commit and does not perturb the run, so
+    // the two halves are separable.
+    private static readonly bool PageGuardEnabled =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_TRAP_PAGE_GUARD"), "0", StringComparison.Ordinal);
+
     private const ulong PageBytes = 4096;
 
     private static readonly ulong[] BlockBases = new ulong[MaxBlocks];
@@ -129,10 +138,14 @@ public static class GuestSlotTrap
         }
 
         Volatile.Write(ref BlockBases[index], mappedAddress);
-        Console.Error.WriteLine(
-            $"[LOADER][WARN] slot_trap armed on 0x{mappedAddress + SlotOffset:X16} " +
-            $"(block 0x{mappedAddress:X16}+0x{BlockBytes:X}, slot 0x{SlotOffset:X})");
-        Console.Error.Flush();
+        if (index < 4 || !PageGuardEnabled)
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] slot_trap adopted 0x{mappedAddress + SlotOffset:X16} " +
+                $"(block 0x{mappedAddress:X16}+0x{BlockBytes:X}, slot 0x{SlotOffset:X}, " +
+                $"page_guard={(PageGuardEnabled ? 1 : 0)}, block #{index})");
+            Console.Error.Flush();
+        }
         ArmBlock(index);
         EnsureRearmTimer();
     }
@@ -259,7 +272,7 @@ public static class GuestSlotTrap
         {
             // Only take a page that nothing else is holding: the watch counts are shared,
             // and an unbalanced change of them is fatal.
-            if (BlockArmed[index] || !pages.Allows(page, FaultKind.Write))
+            if (!PageGuardEnabled || BlockArmed[index] || !pages.Allows(page, FaultKind.Write))
             {
                 return;
             }
