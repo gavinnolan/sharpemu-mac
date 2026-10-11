@@ -31,7 +31,8 @@ public static class ResourceMaterializationProfile
 
     public static readonly bool Enabled = IsEnabled(
         Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_PERFORMANCE"),
-        Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE"));
+        Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE"),
+        Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_MATERIALIZATION"));
     private static readonly long[] _elapsedTicks = new long[(int)Phase.Count];
     private static readonly long[] _calls = new long[(int)Phase.Count];
     private static readonly long[] _allocatedBytesByPhase = new long[(int)Phase.Count];
@@ -39,7 +40,11 @@ public static class ResourceMaterializationProfile
     private static long _descriptorSources;
     private static long _inactiveSources;
 
-    internal static bool IsEnabled(string? performance, string? frameTrace) => performance == "1" && frameTrace == "1";
+    // The frame trace prints a line per guest flow and per mutex handoff, which on a
+    // submission-heavy title costs more than the materializations being measured, so these
+    // counters also answer to a switch of their own.
+    internal static bool IsEnabled(string? performance, string? frameTrace, string? materialization) =>
+        materialization == "1" || (performance == "1" && frameTrace == "1");
 
     public static Scope Measure(Phase phase) => Enabled ? new Scope(phase) : default;
 
