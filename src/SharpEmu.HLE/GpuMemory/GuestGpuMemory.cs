@@ -66,6 +66,13 @@ public sealed class GuestGpuMemory : IDisposable
     {
         using var profile = GpuMemoryAccessProfile.MeasureFault(kind);
         const ulong faultSize = 8;
+        // The slot trap owns its own pages and always resolves them: it reports the guest
+        // instruction and then releases the watch, so the store that faulted can land.
+        if (GuestSlotTrap.TryHandleFault(kind, address))
+        {
+            return true;
+        }
+
         if (!Covers(address, faultSize))
         {
             TraceFault("unregistered");

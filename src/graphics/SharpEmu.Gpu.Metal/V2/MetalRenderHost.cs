@@ -75,6 +75,10 @@ internal sealed partial class MetalRenderHost :
     // SHARPEMU_METAL_V2_GUARD_WRITES=1 only: checks that every declared GPU-side write
     // leaves the bytes either side of its range alone.
     private readonly MetalGuestWriteGuard? _guard;
+
+    // SHARPEMU_TRAP_SLOT only: watches the trapped blocks across each submission, for a
+    // GPU store that lands where no declared range said it would.
+    private readonly MetalSlotTrap? _slotTrap;
     // Without ranges every write is "somewhere in guest memory", which is what the
     // first version of this host did; kept for A/B measurement.
     private static readonly bool ConservativeReads =
@@ -123,7 +127,12 @@ internal sealed partial class MetalRenderHost :
         }
 
         _guard = MetalGuestWriteGuard.Enabled ? new MetalGuestWriteGuard(memory) : null;
-        _guestMemory = new MetalGuestMemory(device, backing, memory);
+        _slotTrap = MetalSlotTrap.Enabled ? new MetalSlotTrap(memory) : null;
+        _guestMemory = new MetalGuestMemory(device, backing, memory) { Trap = _slotTrap };
+        if (_slotTrap is not null)
+        {
+            _slotTrap.Memory = _guestMemory;
+        }
         _guestMemory.AttachToQueue(queue);
         _transfer = new MetalImageTransfer(device);
         _imageCache = new MetalImageCache(this, _transfer, _guestMemory, pages, backing);
@@ -199,6 +208,10 @@ internal sealed partial class MetalRenderHost :
         // Every watch whose submission the GPU has finished is checked here, on the one
         // thread that records them, rather than from the completion handler.
         _guard?.Verify(completed);
+        _slotTrap?.Verify(completed);
+        // The CPU trap releases a page to let a faulting store land; this is the steady
+        // point at which it is taken back.
+        SharpEmu.HLE.GpuMemory.GuestSlotTrap.Rearm();
         return _commandBuffer;
     }
 
@@ -249,6 +262,10 @@ internal sealed partial class MetalRenderHost :
         }
 
         EndEncoders();
+        // Compared here as well as when a command buffer opens: a run that ends between
+        // the two sees every snapshot it took go unchecked, which is how the one report
+        // this watch exists for was lost twice.
+        _slotTrap?.Verify(CompletedSerial);
         var serial = _submissionSerial;
         MetalV2Native.SendEventValue(_commandBuffer, SelEncodeSignalEvent, _sharedEvent, serial);
         if (_completions.WantsCompletionHandler)
@@ -258,6 +275,7 @@ internal sealed partial class MetalRenderHost :
             MetalNative.SendVoid(_commandBuffer, SelAddCompletedHandler, MetalCompletionSignal.Block);
         }
 
+        _slotTrap?.OnCommit(serial);
         MetalNative.SendVoid(_commandBuffer, SelCommit);
         _previousCommitTime = CACurrentMediaTime();
         _lastCommitTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -990,6 +1008,9 @@ internal sealed partial class MetalRenderHost :
             return NullBuffer;
         }
 
+        _slotTrap?.NoteBinding(
+            isWritten ? "binding(write)" : "binding(read)",
+            address, size, (ulong)range.Buffer, range.Offset, range.GpuAddress);
         if (isWritten)
         {
             _imageCache.InvalidateMemoryFromGpu(address, size);
@@ -1176,6 +1197,13 @@ internal sealed partial class MetalRenderHost :
         if (_guard is not null)
         {
             Console.Error.WriteLine($"[METAL-V2][GUARD] {_guard.Report()}");
+        }
+
+        if (_slotTrap is not null)
+        {
+            _slotTrap.Verify(CompletedSerial);
+            Console.Error.WriteLine(
+                $"[METAL-V2][SLOT-TRAP] mismatches={_slotTrap.Mismatches} dropped={_slotTrap.Dropped}");
         }
 
         if (!MetalV2Diagnostics.Verbose)
