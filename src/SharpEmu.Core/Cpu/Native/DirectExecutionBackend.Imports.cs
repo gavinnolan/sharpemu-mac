@@ -213,6 +213,23 @@ public sealed partial class DirectExecutionBackend
 			Console.Error.WriteLine($"[LOADER][TRACE] Raw sentinel recoveries: {num2} (last import index={importIndex})");
 			_lastReportedRawSentinelRecoveries = num2;
 		}
+		// The leaf paths answer the guest and return from this gateway before the
+		// [LOADER][TRACE] Import# block further down, so SHARPEMU_LOG_ALL_IMPORTS
+		// shows nothing at all for an import dispatched as a leaf. Reading that
+		// silence as "the title never calls it" is wrong, and it is an easy mistake
+		// to make: Quake reads scePadReadState roughly two hundred thousand times a
+		// second and an all-imports log of a Quake run contains not one line of it.
+		// Say so once, and name the counter that does see them.
+		if (_logAllImports &&
+			(importStubEntry.IsLeaf || importStubEntry.IsTrivialLeaf) &&
+			Interlocked.Exchange(ref _leafTraceGapAnnounced, 1) == 0)
+		{
+			Console.Error.WriteLine(
+				"[LOADER][WARNING] SHARPEMU_LOG_ALL_IMPORTS does not trace leaf-dispatched imports; " +
+				$"the first one was {importStubEntry.Export?.Name ?? importStubEntry.Nid}. " +
+				"Absence of an import from this log is not evidence the title never called it. " +
+				"SHARPEMU_PERF_HLE=1 counts every dispatch, leaves included.");
+		}
 		// The leaf paths skip the rest of the gateway entirely, so they mark
 		// their own body: without this the profile charges a memcpy's whole cost
 		// to "transition" and hides the work it actually did.

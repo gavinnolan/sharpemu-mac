@@ -473,6 +473,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private bool _logAllImports;
 
+	// Set once the all-imports trace has been told that it cannot see leaf dispatch.
+	private int _leafTraceGapAnnounced;
+
 	private bool _logImportPeriodic;
 
 	private bool _logImportFrames;
