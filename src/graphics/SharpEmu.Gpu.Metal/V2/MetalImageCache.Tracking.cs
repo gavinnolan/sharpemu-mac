@@ -676,13 +676,14 @@ internal sealed partial class MetalImageCache
 
                 using (var held = _lock.Hold())
                 {
-                    if (_slots.TryGet(imageIdentifier) is not { } image)
+                    if (_slots.TryGet(imageIdentifier) is null)
                     {
                         return;
                     }
 
                     ClearImageRange(
-                        image,
+                        imageIdentifier,
+                        view.Format,
                         new SubresourceRange(view.BaseLevel, view.LevelCount, imageFirst + slice, 1),
                         in clear);
                 }
@@ -715,17 +716,69 @@ internal sealed partial class MetalImageCache
         return true;
     }
 
-    // Clears one subresource range of an image to a color and takes GPU ownership.
-    private void ClearImageRange(MetalCachedImage image, in SubresourceRange range, in GpuClearColor clear)
+    /// <summary>
+    /// Clears one subresource range of an image to a color, in the format of the view
+    /// the clear was decoded for, and takes GPU ownership.
+    ///
+    /// Caller holds the lock.
+    /// </summary>
+    private void ClearImageRange(
+        ResourceSlotIdentifier imageIdentifier,
+        GpuFormat viewFormat,
+        in SubresourceRange range,
+        in GpuClearColor clear)
     {
+        var image = _slots[imageIdentifier];
         if (image.Texture == 0)
         {
             return;
         }
 
+        var shape = image.Shape;
+        var volume = shape.TextureType == Mtl.TextureType3D;
+        var layers = volume ? Math.Max(shape.Depth >> (int)range.BaseLevel, 1) : shape.ArrayLength;
+        var fullImage = range.BaseLevel == 0 && range.LevelCount >= shape.MipLevels &&
+            range.BaseLayer == 0 && range.LayerCount >= layers;
+        WatchImage(imageIdentifier);
+        if (!fullImage && image.IsCpuDirty)
+        {
+            // Taking GPU ownership drops the image's dirty state, so guest bytes not yet
+            // in the texture are uploaded first; otherwise the slices this clear leaves
+            // alone would keep stale contents and later be written back over the guest's.
+            SynchronizeAliases(imageIdentifier, takesGpuOwnership: false);
+            RefreshFromGuest(image);
+        }
+
+        // The clear colour was decoded for the view's format. A reinterpreting view of
+        // the one subresource carries it there when the texture's own format differs —
+        // an sRGB target over a UNORM image would otherwise store the unencoded value.
+        // A volume has no 2D view of one plane, so it is cleared in its own format, and
+        // only a colour-renderable view format is worth a view a render pass can clear.
+        var texture = image.Texture;
+        var clearRange = range;
+        if (!volume && PackedClearValue.SupportsDccFixedColor(viewFormat) &&
+            MetalV2Formats.PixelFormat(viewFormat) != shape.PixelFormat)
+        {
+            var view = image.GetOrCreateView(new ImageViewDescription(
+                viewFormat,
+                GpuImageViewType.Type2D,
+                GpuImageAspect.ColorBit,
+                range.BaseLevel,
+                1,
+                range.BaseLayer,
+                1,
+                default,
+                GpuImageUsage.ColorAttachmentBit));
+            if (view != image.Texture)
+            {
+                texture = view;
+                clearRange = new SubresourceRange(0, 1, 0, 1);
+            }
+        }
+
         var width = Math.Max(image.Description.Extent.Width >> (int)range.BaseLevel, 1);
         var height = Math.Max(image.Description.Extent.Height >> (int)range.BaseLevel, 1);
-        _owner.ClearTextureColor(image.Texture, image.Shape.PixelFormat, in range, width, height, in clear);
+        _owner.ClearTextureColor(texture, image.Shape.PixelFormat, in clearRange, width, height, in clear);
         image.RefreshComplete();
         image.MarkGpuModified();
         image.GpuWriteSerial = _owner.CurrentSerial;

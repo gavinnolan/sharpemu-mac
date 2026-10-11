@@ -365,7 +365,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             image.NoteUse(_owner.CurrentSerial);
         }
 
-        MaterializeSampledDccClear(image, in request);
+        MaterializeSampledDccClear(imageIdentifier, image, in request);
         return image.GetOrCreateView(request.View);
     }
 
@@ -384,7 +384,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     ///
     /// Caller holds the lock.
     /// </summary>
-    private void MaterializeSampledDccClear(MetalCachedImage image, in ImageRequest request)
+    private void MaterializeSampledDccClear(
+        ResourceSlotIdentifier imageIdentifier, MetalCachedImage image, in ImageRequest request)
     {
         const byte DccClearToZero = 0x00;
         ref readonly var description = ref image.Description;
@@ -418,7 +419,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 }
             }
 
-            ClearImageRange(image, new SubresourceRange(view.BaseLevel, 1, layer, 1), in clear);
+            ClearImageRange(imageIdentifier, view.Format, new SubresourceRange(view.BaseLevel, 1, layer, 1), in clear);
             Interlocked.Increment(ref _sampledDccClears);
             if (tracked)
             {

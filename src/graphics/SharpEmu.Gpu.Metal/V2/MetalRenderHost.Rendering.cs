@@ -30,6 +30,7 @@ internal sealed partial class MetalRenderHost
     private static readonly nint SelSetLevel = MetalNative.Selector("setLevel:");
     private static readonly nint SelSetSlice = MetalNative.Selector("setSlice:");
     private static readonly nint SelSetDepthPlane = MetalNative.Selector("setDepthPlane:");
+    private static readonly nint SelTextureType = MetalNative.Selector("textureType");
     private static readonly nint SelSetLoadAction = MetalNative.Selector("setLoadAction:");
     private static readonly nint SelSetStoreAction = MetalNative.Selector("setStoreAction:");
     private static readonly nint SelSetColorStoreAction = MetalNative.Selector("setColorStoreAction:atIndex:");
@@ -1669,7 +1670,10 @@ internal sealed partial class MetalRenderHost
     {
         MetalNative.SendVoid(attachment, SelSetTexture, texture);
         MetalV2Native.SendVoidValue(attachment, SelSetLevel, range.BaseLevel);
-        MetalV2Native.SendVoidValue(attachment, SelSetSlice, range.BaseLayer);
+        // A volume's layers are its depth planes, as on the attachments of a pass; its
+        // slice index must stay zero. A DCC clear of one slice of a volume clears one plane.
+        var volume = (ulong)MetalNative.Send(texture, SelTextureType) == Mtl.TextureType3D;
+        MetalV2Native.SendVoidValue(attachment, volume ? SelSetDepthPlane : SelSetSlice, range.BaseLayer);
         MetalV2Native.SendVoidValue(attachment, SelSetLoadAction, Mtl.LoadActionClear);
         MetalV2Native.SendVoidValue(attachment, SelSetStoreAction, Mtl.StoreActionStore);
     }
