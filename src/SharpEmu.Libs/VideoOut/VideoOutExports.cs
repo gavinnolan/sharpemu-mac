@@ -242,8 +242,17 @@ public static partial class VideoOutExports
         public int GpuQueueCount { get; set; }
         public int FlipPendingCount { get; set; }
         public int CurrentBuffer { get; set; } = -1;
-        public uint OutputWidth { get; set; } = 1920;
-        public uint OutputHeight { get; set; } = 1080;
+        // What the guest is told the display is, from the host policy — not the size of the
+        // buffers it registered. A title asks the system what the television is and sizes
+        // its render targets from the answer, so echoing its own buffers back told it
+        // nothing and confirmed whatever it had already guessed.
+        public uint OutputWidth { get; set; } = HostVideoHost.CurrentOptions.GuestDisplaySize.Width;
+        public uint OutputHeight { get; set; } = HostVideoHost.CurrentOptions.GuestDisplaySize.Height;
+
+        // The largest display buffer the title has registered, for the diagnostic that says
+        // whether it took the advertised display or went its own way.
+        public uint RegisteredWidth { get; set; }
+        public uint RegisteredHeight { get; set; }
         public uint RefreshRate { get; set; } = GuestRefreshRate;
         public ulong OutputMode { get; set; } = SceVideoOutOutputModeDefault;
         public float Gamma { get; set; } = 1.0f;
@@ -515,18 +524,46 @@ public static partial class VideoOutExports
         }
 
         Span<byte> status = stackalloc byte[VideoOutOutputStatusSize];
-        WriteOutputStatus(status, port.OutputWidth, port.OutputHeight, port.RefreshRate,
-            HostVideoHost.IsHdrOutputSupported);
+        WriteOutputStatus(status, HostVideoHost.CurrentOptions.GuestResolutionClass,
+            port.RefreshRate, HostVideoHost.IsHdrOutputSupported);
         return ctx.Memory.TryWrite(statusAddress, status)
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
             : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
     }
 
-    internal static void WriteOutputStatus(Span<byte> status, uint width, uint height, uint refreshRate,
+    /// <summary>The output status a title reads to size itself. The resolution class is the
+    /// host's display policy, which is the whole point: it used to be derived from the width
+    /// of the buffers the title had just registered, so the answer was always whatever the
+    /// title had already decided and no setting could change it.</summary>
+    /// <summary>Records the biggest display buffer a title registers and says once whether it
+    /// matched the display we advertised. A title that registers 3840x2160 while being told
+    /// the display is 1080p has decided its own resolution and no display setting will move
+    /// it — which is exactly what the line is for.</summary>
+    private static void NoteRegisteredDisplayBuffer(VideoOutPortState port, uint width, uint height)
+    {
+        if ((ulong)width * height <= (ulong)port.RegisteredWidth * port.RegisteredHeight)
+        {
+            return;
+        }
+
+        port.RegisteredWidth = width;
+        port.RegisteredHeight = height;
+        var advertised = HostVideoHost.CurrentOptions.GuestDisplaySize;
+        var verdict = width == advertised.Width && height == advertised.Height
+            ? "matches the advertised display"
+            : width > advertised.Width || height > advertised.Height
+                ? "exceeds the advertised display, so the title picked its own resolution"
+                : "is below the advertised display";
+        Console.Error.WriteLine(
+            $"[VIDEO-OUT][INFO] display buffer {width}x{height} {verdict} " +
+            $"(advertised {advertised.Width}x{advertised.Height}, " +
+            $"class {HostVideoHost.CurrentOptions.GuestResolutionClass}).");
+    }
+
+    internal static void WriteOutputStatus(Span<byte> status, int resolutionClass, uint refreshRate,
         bool hdrOutputSupported)
     {
         status.Clear();
-        var resolutionClass = width >= 3840 || height >= 2160 ? 2 : 1;
         BinaryPrimitives.WriteInt32LittleEndian(status[0x00..0x04], resolutionClass);
         BinaryPrimitives.WriteInt32LittleEndian(status[0x04..0x08], hdrOutputSupported ? 2 : 1);
         // The status uses a refresh-rate code, not the frequency used for pacing.
@@ -1391,8 +1428,7 @@ public static partial class VideoOutExports
 
             // Keep buffer addresses and membership when the guest switches SDR/HDR formats.
             port.Groups[setIndex] = new VideoOutBufferGroup { Index = setIndex, Attribute = attribute };
-            port.OutputWidth = attribute.Width;
-            port.OutputHeight = attribute.Height;
+            NoteRegisteredDisplayBuffer(port, attribute.Width, attribute.Height);
             var guestFormat = MapPixelFormatToGuestTextureFormat(attribute.PixelFormat);
             foreach (var slot in port.BufferSlots)
             {
@@ -1793,8 +1829,7 @@ public static partial class VideoOutExports
                 Index = groupIndex,
                 Attribute = attribute,
             };
-            port.OutputWidth = attribute.Width;
-            port.OutputHeight = attribute.Height;
+            NoteRegisteredDisplayBuffer(port, attribute.Width, attribute.Height);
 
             for (var i = 0; i < addresses.Length; i++)
             {

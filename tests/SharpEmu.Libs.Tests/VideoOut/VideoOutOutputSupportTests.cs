@@ -48,7 +48,13 @@ public sealed class VideoOutOutputSupportTests
         Assert.Equal(expectedHdr, supported);
 
         var bytes = Enumerable.Repeat((byte)0xA5, 0x32).ToArray();
-        VideoOutExports.WriteOutputStatus(bytes.AsSpan(1, 0x30), 3840, 2160, 120, supported);
+        // The resolution class is the host's display policy now, not a size derived from the
+        // buffers the title registered.
+        VideoOutExports.WriteOutputStatus(
+            bytes.AsSpan(1, 0x30),
+            new HostVideoOptions { DisplayResolution = GuestDisplayResolution.Uhd }.GuestResolutionClass,
+            120,
+            supported);
 
         Assert.Equal(0xA5, bytes[0]);
         Assert.Equal(0xA5, bytes[^1]);

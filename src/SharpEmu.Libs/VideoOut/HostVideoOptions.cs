@@ -25,6 +25,25 @@ public enum HostHdrMode
     Off,
 }
 
+/// <summary>
+/// The display resolution the guest is told it is driving. Separate from
+/// <see cref="HostVideoOptions.Width"/>, which is the host window: a title asks the system
+/// what the television is and sizes its render targets from the answer, so this is the
+/// number that decides how much pixel work it does, whatever size the window ends up.
+/// </summary>
+public enum GuestDisplayResolution
+{
+    /// <summary>1920x1080. The default: a 4K report costs up to four times the pixel work
+    /// for a panel the host is almost certainly not driving.</summary>
+    Hd,
+
+    /// <summary>2560x1440.</summary>
+    Qhd,
+
+    /// <summary>3840x2160.</summary>
+    Uhd,
+}
+
 public enum PerformanceOverlayCorner
 {
     TopLeft,
@@ -60,6 +79,10 @@ public sealed record HostVideoOptions
 
     public HostHdrMode HdrMode { get; init; } = HostHdrMode.Auto;
 
+    /// <summary>What the guest is told the display is. See
+    /// <see cref="GuestDisplayResolution"/> for why this is not the window size.</summary>
+    public GuestDisplayResolution DisplayResolution { get; init; } = GuestDisplayResolution.Hd;
+
     public bool OverlayEnabled { get; init; } = true;
     public PerformanceOverlayCorner OverlayCorner { get; init; } = PerformanceOverlayCorner.TopRight;
     public PerformanceOverlayMode OverlayMode { get; init; } = PerformanceOverlayMode.TitleBar;
@@ -68,6 +91,20 @@ public sealed record HostVideoOptions
     // Metal presenter registers false because it has no HDR (EDR) output path yet, so
     // reporting HDR would move titles onto render paths it cannot present.
     internal static bool AutoHdrAllowed => HostVideoHost.AutoHdrAllowed;
+
+    /// <summary>The display size every guest query reports, from
+    /// <see cref="DisplayResolution"/>. One place, so the answers cannot disagree.</summary>
+    public (uint Width, uint Height) GuestDisplaySize => DisplayResolution switch
+    {
+        GuestDisplayResolution.Uhd => (3840u, 2160u),
+        GuestDisplayResolution.Qhd => (2560u, 1440u),
+        _ => (1920u, 1080u),
+    };
+
+    /// <summary>The resolution class sceVideoOutGetOutputStatus reports: 2 is the 4K class,
+    /// 1 everything below it.</summary>
+    public int GuestResolutionClass =>
+        DisplayResolution == GuestDisplayResolution.Uhd ? 2 : 1;
 
     public bool CanUseHdr(bool displayHdrEnabled, bool surfaceSupportsHdr) =>
         CanUseHdr(displayHdrEnabled, surfaceSupportsHdr, AutoHdrAllowed);
@@ -82,6 +119,9 @@ public sealed record HostVideoOptions
         DisplayIndex = Math.Max(0, DisplayIndex),
         RefreshRate = Math.Clamp(RefreshRate, 0, 1000),
         HdrMode = Enum.IsDefined(HdrMode) ? HdrMode : HostHdrMode.Auto,
+        DisplayResolution = Enum.IsDefined(DisplayResolution)
+            ? DisplayResolution
+            : GuestDisplayResolution.Hd,
         OverlayCorner = Enum.IsDefined(OverlayCorner) ? OverlayCorner : PerformanceOverlayCorner.TopRight,
         OverlayMode = Enum.IsDefined(OverlayMode) ? OverlayMode : PerformanceOverlayMode.TitleBar,
     };
