@@ -206,6 +206,12 @@ public static partial class VideoOutExports
     private static void RequestHostShutdown(string reason)
     {
         Console.Error.WriteLine($"[LOADER][INFO] Host shutdown requested: {reason}");
+        // The bounded exit is armed before anything below that can block: closing the
+        // GPU backend joins its worker and closes the window. It runs on a thread of its
+        // own because the thread pool is exactly what a loading title saturates with
+        // blocked compile and file work, and a work item queued behind that backlog let
+        // a stopped game outlive SIGTERM by more than ten seconds.
+        StartShutdownDeadline();
         if (GuestGpuMemoryHook.TryTakeShutdownSummary(out var gpuSummary))
         {
             Console.Error.WriteLine("[LOADER][INFO] " + gpuSummary);
@@ -219,13 +225,23 @@ public static partial class VideoOutExports
         }
         HostSessionControl.RequestShutdown(reason);
         GuestGpu.Current.RequestClose();
+    }
 
-        // Give guest and GPU threads a bounded window to leave cooperatively.
-        ThreadPool.QueueUserWorkItem(static _ =>
+    // How long guest and GPU threads get to leave cooperatively (the GPU worker drains
+    // its submitted work on the way out) before the process exits regardless.
+    private const int ShutdownGraceMilliseconds = 4000;
+
+    private static void StartShutdownDeadline()
+    {
+        new Thread(static () =>
         {
-            Thread.Sleep(2000);
+            Thread.Sleep(ShutdownGraceMilliseconds);
             Environment.Exit(0);
-        });
+        })
+        {
+            IsBackground = true,
+            Name = "SharpEmu shutdown deadline",
+        }.Start();
     }
 
     private sealed class VideoOutPortState

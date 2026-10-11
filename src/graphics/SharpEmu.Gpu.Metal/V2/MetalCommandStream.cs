@@ -866,6 +866,14 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         SharpEmu.Libs.VideoOut.RenderPhaseProfile.RecordProgress();
         for (var slice = 0; slice < maxSlices; slice++)
         {
+            // A stopping session gets its teardown now, not after the rest of the budget:
+            // while a title loads, one slice can spend seconds building pipelines, and
+            // the worker's drain has to fit in the host's bounded shutdown window.
+            if (HostSessionControl.IsShutdownRequested)
+            {
+                break;
+            }
+
             // The shared profile only charges its detail phases inside an enclosing
             // scope, so that cache work on other threads stays out of the render
             // thread's counters. This is the v2 worker's equivalent of the Vulkan
