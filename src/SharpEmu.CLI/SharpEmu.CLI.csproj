@@ -214,6 +214,16 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
   </PropertyGroup>
 
+  <!-- The live managed heap is small (tens of MB) but loading leaves hundreds of
+       MB of dead large objects behind, and the large object heap is never
+       compacted by default, so that space stays committed for the whole run.
+       ConserveMemory lets a full GC compact it once fragmentation passes the
+       limit. Measured at 85 s: GC committed 385 -> 197 MB (Oregon) and
+       372 -> 236 MB (Superliminal). Windows and Linux keep the default. -->
+  <ItemGroup Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('osx'))">
+    <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="7" />
+  </ItemGroup>
+
   <!-- Building osx-arm64 is a mistake, not a configuration: the result cannot
        execute guest code and exits with code 5 on launch. Fail loudly at build
        time instead of shipping a binary that only fails once a user runs it. -->

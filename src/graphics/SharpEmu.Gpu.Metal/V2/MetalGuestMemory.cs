@@ -113,6 +113,7 @@ internal sealed class MetalGuestMemory : IDisposable
     private ulong _submissionSerial;
     private ulong _completedSerial;
     private long _ringFallbackBytes;
+    private long _ringBytes;
     private long _ringFallbacks;
     private bool _disposed;
 
@@ -284,6 +285,9 @@ internal sealed class MetalGuestMemory : IDisposable
 
     public ulong RingFallbacks => (ulong)Volatile.Read(ref _ringFallbacks);
 
+    // Shared memory the upload rings hold now, for the periodic counters line.
+    public ulong RingBytes => (ulong)Volatile.Read(ref _ringBytes);
+
     /// <summary>The serial a resource allocated now is retired at.</summary>
     public void BeginSubmission(ulong submissionSerial, ulong completedSerial)
     {
@@ -358,6 +362,7 @@ internal sealed class MetalGuestMemory : IDisposable
             RemoveResident(ring.Buffer);
             MetalNative.SendVoid(ring.Buffer, SelRelease);
             _rings.RemoveAt(index);
+            Interlocked.Add(ref _ringBytes, -(long)ring.Size);
             _ringsReleased++;
         }
     }
@@ -653,6 +658,7 @@ internal sealed class MetalGuestMemory : IDisposable
             Cursor = size,
         };
         _rings.Add(ring);
+        Interlocked.Add(ref _ringBytes, (long)capacity);
         AddResident(buffer);
         CommitResidency();
         offset = 0;

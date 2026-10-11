@@ -20,7 +20,8 @@
 # linked to an IOGPU kernel panic; SIGKILL is used only if it is still alive 10 s later.
 #
 # Output: artifacts/runs/<timestamp>-<game>-<tag>/ with game.log, result.txt, keys.log,
-# screenshots (when a window-id helper is available) and run.env.
+# footprint.log ("seconds footprint_mb rss_mb" per second), screenshots (when a window-id
+# helper is available) and run.env. SHARPEMU_MEM_LIMIT_MB bounds the physical footprint.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -158,14 +159,27 @@ INPUT_PID=$!
 next_shot=5
 shot_every="${SHARPEMU_SHOT_EVERY:-10}"
 peak_mb=0
+peak_fp_mb=0
+# SHARPEMU_FOOTPRINT_AT="60,120" records footprint -v and vmmap at the first sample at or after each second.
+footprint_at=()
+[[ -n "${SHARPEMU_FOOTPRINT_AT:-}" ]] && IFS=, read -r -a footprint_at <<< "$SHARPEMU_FOOTPRINT_AT"
 status=""
 while :; do
   now=$(( $(date +%s) - start ))
   if ! kill -0 "$GPID" 2>/dev/null; then wait "$GPID"; status="exited rc=$? after ${now}s"; GPID=""; break; fi
   (( now >= SECONDS_LIMIT )) && break
-  rss_mb=$(( $(ps -o rss= -p "$GPID" 2>/dev/null || echo 0) / 1024 ))
+  # Physical footprint (what Activity Monitor shows) includes compressed pages that
+  # ps -o rss leaves out; under memory pressure RSS understates a run several times over.
+  read -r fp_mb rss_mb < <(python3 "$REPO_ROOT/scripts/macos/footprint.py" "$GPID" 2>/dev/null || echo "0 0")
   (( rss_mb > peak_mb )) && peak_mb=$rss_mb
-  if (( rss_mb > MEM_LIMIT_MB )); then status="memory limit ${rss_mb}MB > ${MEM_LIMIT_MB}MB at ${now}s"; break; fi
+  (( fp_mb > peak_fp_mb )) && peak_fp_mb=$fp_mb
+  echo "$now $fp_mb $rss_mb" >> "$OUT/footprint.log"
+  if (( ${#footprint_at[@]} > 0 )) && (( now >= footprint_at[0] )); then
+    ( footprint -v "$GPID" > "$OUT/footprint-$now.txt" 2>&1
+      vmmap "$GPID" > "$OUT/vmmap-$now.txt" 2>&1 ) &
+    footprint_at=("${footprint_at[@]:1}")
+  fi
+  if (( fp_mb > MEM_LIMIT_MB )); then status="memory limit footprint ${fp_mb}MB > ${MEM_LIMIT_MB}MB at ${now}s"; break; fi
   if (( now >= next_shot )); then shot "$OUT/shot-$(printf %04d "$now").png"; next_shot=$(( now + shot_every )); fi
   if [[ -n "$INPUT_PID" ]] && ! kill -0 "$INPUT_PID" 2>/dev/null; then
     wait "$INPUT_PID"; input_rc=$?
@@ -185,6 +199,7 @@ if [[ -n "$GPID" ]]; then
   fi
 fi
 echo "$status" > "$OUT/result.txt"
+echo "peak_footprint_mb=$peak_fp_mb" >> "$OUT/result.txt"
 echo "peak_rss_mb=$peak_mb" >> "$OUT/result.txt"
 cleanup
 echo "$OUT"
