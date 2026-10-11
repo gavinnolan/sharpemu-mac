@@ -284,7 +284,7 @@ kernel void gen5_cs(
 {
     threadgroup uint sharpemu_lds[8192];
     uint s8, s9, s10, s11, s106, s107, s126, s127;
-    uint v0, v1, v2, v3 = 0u;
+    uint v0, v1, v2, v3;
     bool exec = true;
     bool vcc = false;
     bool scc = false;
@@ -314,18 +314,15 @@ kernel void gen5_cs(
 
     {
         uint t0 = 0u;
-        if (exec) { v0 = t0; }
+        v0 = t0;
         uint t1 = 0x1234u;
-        if (exec) { v2 = t1; }
+        v2 = t1;
         uint t2 = v0;
-        if (exec) { sharpemu_lds[(((t2) >> 2) & 8191u)] = v2; }
+        sharpemu_lds[(((t2) >> 2) & 8191u)] = v2;
         threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
         uint t3 = v0;
-        if (exec) { v3 = sharpemu_lds[(((t3) >> 2) & 8191u)]; }
+        v3 = sharpemu_lds[(((t3) >> 2) & 8191u)];
         uint t4 = ((0x0u + 0u + 0u + (0u * 0u)) + bias[0]);
-        if (exec)
-        {
-            sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t4 + 0u, v3, 4u);
-        }
+        sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t4 + 0u, v3, 4u);
     }
 }

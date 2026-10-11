@@ -286,7 +286,7 @@ vertex Gen5VsOut gen5_vs(
 {
     const uint sharpemu_lane = 0u;
     uint s106, s107, s126, s127;
-    uint v0 = 0u, v1 = 0u, v5, v8;
+    uint v0, v1, v5, v8;
     bool exec = true;
     bool vcc = false;
     bool scc = false;
@@ -301,11 +301,11 @@ vertex Gen5VsOut gen5_vs(
 
     {
         uint t0 = 0u;
-        if (exec) { v0 = t0; }
+        v0 = t0;
         uint t1 = 0x3F800000u;
-        if (exec) { v1 = t1; }
-        sharpemu_out.sharpemu_position = exec ? float4(as_type<float>(v0), as_type<float>(v0), as_type<float>(v0), as_type<float>(v1)) : sharpemu_out.sharpemu_position;
-        sharpemu_out.param0 = exec ? float4(as_type<float>(v1), as_type<float>(v1), as_type<float>(v0), as_type<float>(v1)) : sharpemu_out.param0;
+        v1 = t1;
+        sharpemu_out.sharpemu_position = float4(as_type<float>(v0), as_type<float>(v0), as_type<float>(v0), as_type<float>(v1));
+        sharpemu_out.param0 = float4(as_type<float>(v1), as_type<float>(v1), as_type<float>(v0), as_type<float>(v1));
     }
     return sharpemu_out;
 }

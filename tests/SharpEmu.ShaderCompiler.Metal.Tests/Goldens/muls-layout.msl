@@ -281,7 +281,7 @@ kernel void gen5_cs(
     uint sharpemu_lane [[thread_index_in_simdgroup]])
 {
     uint s0, s106, s107, s126, s127;
-    uint v0, v1, v2, v5 = 0u;
+    uint v0, v1, v2, v5;
     bool exec = true;
     bool vcc = false;
     bool scc = false;
@@ -306,12 +306,12 @@ kernel void gen5_cs(
 
     {
         uint t0 = ((v1) * (v2));
-        if (exec) { v5 = t0; }
+        v5 = t0;
         uint t1 = mulhi(v1, v2);
-        if (exec) { v5 = t1; }
+        v5 = t1;
         uint t2 = ((v1) * (v2));
-        if (exec) { v5 = t2; }
+        v5 = t2;
         uint t3 = as_type<uint>(mulhi(as_type<int>(v1), as_type<int>(v2)));
-        if (exec) { v5 = t3; }
+        v5 = t3;
     }
 }

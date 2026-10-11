@@ -1071,6 +1071,7 @@ public static partial class Gen5MslTranslator
             out string error)
         {
             error = string.Empty;
+            BeginInstruction(instruction);
             switch (instruction.Opcode)
             {
                 // No shader trap handler is installed, so S_TRAP has no effect.
@@ -1428,7 +1429,7 @@ public static partial class Gen5MslTranslator
             var allowed = Temp(
                 "bool",
                 $"(({descriptorWord3} >> 12) & 0x7Fu) != 0u && {inBounds}");
-            Line($"if (exec && {allowed})");
+            Line($"if ({ExecCondition(allowed)})");
             Line("{");
             _indent++;
             if (Gfx10UnifiedFormat.HasWholeDwordComponents(dataFormat))
@@ -1527,7 +1528,7 @@ public static partial class Gen5MslTranslator
             void StoreLds(string index, string value)
             {
                 // Exec-guarded like every other lane-visible write.
-                Line($"if (exec) {{ sharpemu_lds[{index}] = {value}; }}");
+                Line(ExecGuarded($"sharpemu_lds[{index}] = {value};"));
             }
 
             switch (instruction.Opcode)
@@ -1559,7 +1560,7 @@ public static partial class Gen5MslTranslator
                     {
                         var original = Temp("uint", $"sharpemu_lds[{index}]");
                         var assignment = operation == "add" ? "+=" : "-=";
-                        Line($"if (exec && {inBounds}) {{ sharpemu_lds[{index}] {assignment} 1u; }}");
+                        Line($"if ({ExecCondition(inBounds)}) {{ sharpemu_lds[{index}] {assignment} 1u; }}");
                         StoreVector(destination, $"{inBounds} ? {original} : 0u");
                         return true;
                     }
@@ -1588,7 +1589,7 @@ public static partial class Gen5MslTranslator
                     count = Temp("uint", $"popcount({mask})");
                     first = Temp("uint", $"{mask} == 0u ? 0u : (uint)ctz({mask})");
                     var firstValue = Temp("uint", "0u");
-                    Line($"if (exec && {inBounds} && sharpemu_lane == {first})");
+                    Line($"if ({ExecCondition($"{inBounds} && sharpemu_lane == {first}")})");
                     Line("{");
                     _indent++;
                     Line($"{firstValue} = atomic_fetch_{operation}_explicit((threadgroup atomic_uint*)&sharpemu_lds[{index}], {count}, memory_order_relaxed);");
@@ -1789,17 +1790,14 @@ public static partial class Gen5MslTranslator
             var index = Temp("uint", LdsIndex(address, control.SingleOffsetBytes));
             var first = Temp("uint", RawSource(instruction, 1));
             var second = takesThreeSources ? Temp("uint", RawSource(instruction, 2)) : "0u";
-            Line("if (exec)");
-            Line("{");
-            _indent++;
+            BeginExecGuard();
             var original = EmitDataShareAtomicWord(name, index, first, second);
             if (instruction.Destinations.Count > 0)
             {
                 Line($"v[{instruction.Destinations[0].Value}] = {original};");
             }
 
-            _indent--;
-            Line("}");
+            EndExecGuard();
             return true;
         }
 
@@ -1902,9 +1900,7 @@ public static partial class Gen5MslTranslator
             var highIndex = Temp("uint", LdsIndex(address, control.SingleOffsetBytes + sizeof(uint)));
             var low = Temp("uint", RawSource(instruction, 1));
             var high = Temp("uint", RawSource(instruction, 2));
-            Line("if (exec)");
-            Line("{");
-            _indent++;
+            BeginExecGuard();
             if (instruction.Opcode == "DsOrB64")
             {
                 EmitDataShareAtomicWord("Or", lowIndex, low, "0u");
@@ -1918,8 +1914,7 @@ public static partial class Gen5MslTranslator
                 EmitDataShareAtomicWord("Add", highIndex, highWithCarry, "0u");
             }
 
-            _indent--;
-            Line("}");
+            EndExecGuard();
             return true;
         }
 
@@ -1958,9 +1953,7 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
-                Line("if (exec)");
-                Line("{");
-                _indent++;
+                BeginExecGuard();
                 var bytes = BufferBytes(bindingIndex);
                 var width = words * sizeof(uint);
                 Line($"if ({width}u <= {bytes} && {byteAddress} <= {bytes} - {width}u && ({byteAddress} & 3u) == 0u)");
@@ -1992,8 +1985,7 @@ public static partial class Gen5MslTranslator
                     Line($"else {{{cleared} }}");
                 }
 
-                _indent--;
-                Line("}");
+                EndExecGuard();
                 return true;
             }
 
@@ -2001,9 +1993,7 @@ public static partial class Gen5MslTranslator
                 opcode.StartsWith("BufferStore", StringComparison.Ordinal) ||
                 opcode.StartsWith("TBufferStore", StringComparison.Ordinal))
             {
-                Line("if (exec)");
-                Line("{");
-                _indent++;
+                BeginExecGuard();
                 if (TryGetSubdwordStoreInfo(opcode, out var storeBytes, out var sourceShift))
                 {
                     var source = sourceShift == 0
@@ -2019,8 +2009,7 @@ public static partial class Gen5MslTranslator
                     }
                 }
 
-                _indent--;
-                Line("}");
+                EndExecGuard();
                 return true;
             }
 
@@ -2170,7 +2159,7 @@ public static partial class Gen5MslTranslator
                 return;
             }
 
-            if (guardWithExec)
+            if (guardWithExec && !_execKnownFull)
             {
                 Line($"if (exec) {{ v[{register}] = {expression}; }}");
             }

@@ -460,7 +460,7 @@ kernel void gen5_cs(
     uint sharpemu_lane [[thread_index_in_simdgroup]])
 {
     uint s8, s9, s10, s11, s106, s107, s126, s127;
-    uint v0, v1, v2, v3 = 0u;
+    uint v0, v1, v2, v3;
     bool exec = true;
     bool vcc = false;
     bool scc = false;
@@ -503,7 +503,7 @@ kernel void gen5_cs(
         uint t10 = sharpemu_load_word(b0, sharpemu_resources.buffer_bytes[0], (t1 + t4));
         uint t11 = t6 == 0u ? 0u : extract_bits(t10, t5, t6);
         uint t12 = t6 == 0u ? 0u : sharpemu_format_convert(t11, t6, 7u, 11u);
-        if (exec) { v2 = t3 ? t12 : 0u; }
+        v2 = t3 ? t12 : 0u;
         uint t13 = 0u;
         uint t14 = 0u;
         uint t15 = 0u;
@@ -514,16 +514,10 @@ kernel void gen5_cs(
         uint t19 = sharpemu_load_word(b0, sharpemu_resources.buffer_bytes[0], (t1 + t13));
         uint t20 = t15 == 0u ? 0u : extract_bits(t19, t14, t15);
         uint t21 = t15 == 0u ? 0u : sharpemu_format_convert(t20, t15, 7u, 11u);
-        if (exec) { v3 = t3 ? t21 : 0u; }
+        v3 = t3 ? t21 : 0u;
         uint t22 = ((0x10u + 0u + 0u + (0u * 0u)) + bias[0]);
-        if (exec)
-        {
-            sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t22 + 0u, v2, 4u);
-        }
+        sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t22 + 0u, v2, 4u);
         uint t23 = ((0x14u + 0u + 0u + (0u * 0u)) + bias[0]);
-        if (exec)
-        {
-            sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t23 + 0u, v3, 4u);
-        }
+        sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t23 + 0u, v3, 4u);
     }
 }

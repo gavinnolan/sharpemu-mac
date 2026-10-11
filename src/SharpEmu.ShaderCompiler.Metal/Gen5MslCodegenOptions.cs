@@ -18,13 +18,22 @@ namespace SharpEmu.ShaderCompiler.Metal;
 /// <param name="ForceRegisterInitialization">Zero-fill every declared register instead of
 /// only the ones some path reads before writing. <c>SHARPEMU_MSL_REGINIT=1</c> turns this
 /// on.</param>
+/// <param name="ExecGuardElision">Drop the per-lane EXEC guard where the program proves
+/// every lane is set. <c>SHARPEMU_MSL_EXECGUARD=0</c> keeps every guard.</param>
+/// <param name="BoundedRelativeMoves">Resolve V_MOVREL* through the registers its M0
+/// values can actually reach, so the register file needs no run-time index.
+/// <c>SHARPEMU_MSL_MOVREL=0</c> indexes the file instead.</param>
 public sealed record Gen5MslCodegenOptions(
     bool StructuredControlFlow = true,
     bool RegisterAllocation = true,
-    bool ForceRegisterInitialization = false)
+    bool ForceRegisterInitialization = false,
+    bool ExecGuardElision = true,
+    bool BoundedRelativeMoves = true)
 {
     public static Gen5MslCodegenOptions FromEnvironment { get; } = new(
         StructuredControlFlow: Environment.GetEnvironmentVariable("SHARPEMU_MSL_STRUCTURED") != "0",
         RegisterAllocation: Environment.GetEnvironmentVariable("SHARPEMU_MSL_REGALLOC") != "0",
-        ForceRegisterInitialization: Environment.GetEnvironmentVariable("SHARPEMU_MSL_REGINIT") == "1");
+        ForceRegisterInitialization: Environment.GetEnvironmentVariable("SHARPEMU_MSL_REGINIT") == "1",
+        ExecGuardElision: Environment.GetEnvironmentVariable("SHARPEMU_MSL_EXECGUARD") != "0",
+        BoundedRelativeMoves: Environment.GetEnvironmentVariable("SHARPEMU_MSL_MOVREL") != "0");
 }

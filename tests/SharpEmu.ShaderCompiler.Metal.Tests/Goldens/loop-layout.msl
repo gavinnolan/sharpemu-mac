@@ -316,13 +316,13 @@ kernel void gen5_cs(
         uint t0 = 5u;
         s0 = t0;
         uint t1 = 0u;
-        if (exec) { v1 = t1; }
+        v1 = t1;
     }
     while (true)
     {
         {
             uint t2 = ((s0) + (v1));
-            if (exec) { v1 = t2; }
+            v1 = t2;
             uint t3 = s0;
             uint t4 = 1u;
             uint t5 = (t3 - t4);
@@ -345,9 +345,6 @@ kernel void gen5_cs(
     }
     {
         uint t8 = ((0x0u + 0u + 0u + (0u * 0u)) + bias[0]);
-        if (exec)
-        {
-            sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t8 + 0u, v1, 4u);
-        }
+        sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t8 + 0u, v1, 4u);
     }
 }

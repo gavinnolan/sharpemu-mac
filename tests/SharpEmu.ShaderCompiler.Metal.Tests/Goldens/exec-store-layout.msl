@@ -283,7 +283,7 @@ kernel void gen5_cs(
     uint sharpemu_lane [[thread_index_in_simdgroup]])
 {
     uint s0, s8, s9, s10, s11, s106, s107, s126, s127;
-    uint v0, v1, v2, v3 = 0u, v4 = 0u, v5 = 0u, v6 = 0u;
+    uint v0, v1, v2, v3, v4, v5, v6;
     bool exec = true;
     bool vcc = false;
     bool scc = false;
@@ -314,36 +314,27 @@ kernel void gen5_cs(
 
     {
         uint t0 = 0x3FC00000u;
-        if (exec) { v0 = t0; }
+        v0 = t0;
         uint t1 = 0x40100000u;
-        if (exec) { v1 = t1; }
+        v1 = t1;
         uint t2 = 0x41200000u;
-        if (exec) { v2 = t2; }
+        v2 = t2;
         uint t3 = as_type<uint>((fma(as_type<float>(v0), as_type<float>(v1), as_type<float>(v2))));
-        if (exec) { v2 = t3; }
+        v2 = t3;
         uint t4 = 0x7FFFFFFFu;
-        if (exec) { v3 = t4; }
+        v3 = t4;
         uint t5 = 0x10003u;
-        if (exec) { v4 = t5; }
+        v4 = t5;
         uint t6 = as_type<uint>(mulhi(as_type<int>(v3), as_type<int>(v4)));
-        if (exec) { v5 = t6; }
+        v5 = t6;
         uint t7 = ((v3) * (v4));
-        if (exec) { v6 = t7; }
+        v6 = t7;
         uint t8 = ((0x0u + 0u + 0u + (0u * 0u)) + bias[0]);
-        if (exec)
-        {
-            sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t8 + 0u, v2, 4u);
-        }
+        sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t8 + 0u, v2, 4u);
         uint t9 = ((0x4u + 0u + 0u + (0u * 0u)) + bias[0]);
-        if (exec)
-        {
-            sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t9 + 0u, v5, 4u);
-        }
+        sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t9 + 0u, v5, 4u);
         uint t10 = ((0x8u + 0u + 0u + (0u * 0u)) + bias[0]);
-        if (exec)
-        {
-            sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t10 + 0u, v6, 4u);
-        }
+        sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t10 + 0u, v6, 4u);
         uint t11 = 0u;
         uint t12 = t11;
         s126 = t12;

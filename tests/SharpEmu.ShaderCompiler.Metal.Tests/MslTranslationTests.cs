@@ -95,6 +95,47 @@ public sealed class MslTranslationTests
         }
     }
 
+    /// <summary>The per-lane EXEC guard is dropped only where the program proves every
+    /// lane is set. A program that narrows EXEC keeps its guards from that point on, and
+    /// turning the elision off brings them all back — which is what the switch is for.</summary>
+    [Fact]
+    public void ExecGuardsSurviveWhereExecIsNarrowed()
+    {
+        // The fixture moves 0 into EXEC_LO, stores, then restores it: everything before
+        // the first EXEC write is unguarded, everything after it is guarded.
+        var request = Gen5ComputeFixtures.CreateComputeRequest(Gen5ComputeFixtures.ExecStore);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var elided, out var error), error);
+        var body = elided.Source;
+        var firstExecWrite = body.IndexOf("exec = ((", StringComparison.Ordinal);
+        Assert.True(firstExecWrite > 0, "the fixture is supposed to write EXEC");
+        Assert.DoesNotContain("if (exec)", body[..firstExecWrite], StringComparison.Ordinal);
+        Assert.Contains("if (exec)", body[firstExecWrite..], StringComparison.Ordinal);
+
+        Assert.True(
+            Gen5MslTranslator.TryCompileProgram(
+                request,
+                out var guarded,
+                out error,
+                new Gen5MslCodegenOptions(ExecGuardElision: false)),
+            error);
+        Assert.Contains("if (exec) { v0 = ", guarded.Source, StringComparison.Ordinal);
+        Assert.True(
+            CountOf(guarded.Source, "if (exec)") > CountOf(body, "if (exec)"),
+            "the switch has to put the guards back");
+    }
+
+    private static int CountOf(string source, string value)
+    {
+        var count = 0;
+        for (var index = source.IndexOf(value, StringComparison.Ordinal); index >= 0;
+            index = source.IndexOf(value, index + 1, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
+    }
+
     [Fact]
     public void ExecMaskedStoresAreGuarded()
     {
@@ -161,10 +202,11 @@ public sealed class MslTranslationTests
         Assert.Contains("[[color(0)]]", shader.Source, StringComparison.Ordinal);
         Assert.Contains("[[position]]", shader.Source, StringComparison.Ordinal);
 
-        // Interpolation reads land in VGPRs; the export writes MRT0 under EXEC
-        // and inactive lanes discard at the end.
+        // Interpolation reads land in VGPRs; the export writes MRT0 and inactive
+        // lanes discard at the end. This program never narrows EXEC, so the export
+        // assigns outright — ExecGuardsSurviveWhereExecIsNarrowed covers the masked form.
         Assert.Contains("as_type<uint>(sharpemu_in.attr0[0])", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("sharpemu_out.mrt0 = exec ?", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_out.mrt0 = vec<float, 4>(", shader.Source, StringComparison.Ordinal);
         Assert.Contains("discard_fragment();", shader.Source, StringComparison.Ordinal);
     }
 
@@ -258,8 +300,8 @@ public sealed class MslTranslationTests
         Assert.Contains("uint sharpemu_vertex_id [[vertex_id]],", shader.Source, StringComparison.Ordinal);
         Assert.Contains("v5 = sharpemu_vertex_id;", shader.Source, StringComparison.Ordinal);
         Assert.Contains("v8 = sharpemu_instance_id;", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("sharpemu_out.sharpemu_position = exec ?", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("sharpemu_out.param0 = exec ?", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_out.sharpemu_position = float4(", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_out.param0 = float4(", shader.Source, StringComparison.Ordinal);
         Assert.Contains("return sharpemu_out;", shader.Source, StringComparison.Ordinal);
     }
 
@@ -411,7 +453,6 @@ public sealed class MslTranslationTests
         // the relative number wraps into the register file.
         Assert.Contains("(55u + ", shader.Source, StringComparison.Ordinal);
         Assert.Contains("& 255u", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("if (exec) { v[", shader.Source, StringComparison.Ordinal);
         // V_MOVRELSD2 reads M0's two halves as independent offsets.
         Assert.Equal(
             opcode == "VMovrelsd2B32",
@@ -539,7 +580,6 @@ public sealed class MslTranslationTests
         // with a two-byte mask, and stored under the descriptor and element bounds.
         var shader = CompileTypedBufferAccess("TBufferStoreFormatXy", dwordCount: 2, typedFormat: 14);
 
-        Assert.Contains("if (exec && ", shader.Source, StringComparison.Ordinal);
         Assert.Contains("sharpemu_format_encode(v4, 8u, 0u, 3u)", shader.Source, StringComparison.Ordinal);
         Assert.Contains("sharpemu_format_encode(v5, 8u, 0u, 3u)", shader.Source, StringComparison.Ordinal);
         Assert.Contains("<< 8u), 0u, 0u, 0u), uint4(0xFFFFu, 0x0u, 0x0u, 0x0u));", shader.Source, StringComparison.Ordinal);

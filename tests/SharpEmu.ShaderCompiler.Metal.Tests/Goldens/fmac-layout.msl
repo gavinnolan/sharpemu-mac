@@ -306,12 +306,12 @@ kernel void gen5_cs(
 
     {
         uint t0 = as_type<uint>((fma(as_type<float>(v1), as_type<float>(v2), as_type<float>(v5))));
-        if (exec) { v5 = t0; }
+        v5 = t0;
         uint t1 = as_type<uint>((fma(as_type<float>(v1), as_type<float>(0x42280000u), as_type<float>(v2))));
-        if (exec) { v5 = t1; }
+        v5 = t1;
         uint t2 = as_type<uint>((fma(as_type<float>(v1), as_type<float>(v2), as_type<float>(0x42280000u))));
-        if (exec) { v5 = t2; }
+        v5 = t2;
         uint t3 = as_type<uint>((fma(as_type<float>(v1), as_type<float>(v2), as_type<float>(v5))));
-        if (exec) { v5 = t3; }
+        v5 = t3;
     }
 }

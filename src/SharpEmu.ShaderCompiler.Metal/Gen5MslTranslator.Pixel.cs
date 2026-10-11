@@ -151,7 +151,7 @@ public static partial class Gen5MslTranslator
                     : $"{imageClass.IntegerCoordinateType}({string.Join(", ", spatial.Select(part => $"(uint){part}"))})";
 
                 // Bounds-checked, EXEC-guarded write.
-                Line($"if (exec && {string.Join(" && ", guards)})");
+                Line($"if ({ExecCondition(string.Join(" && ", guards))})");
                 Line("{");
                 _indent++;
                 Line($"{texture}.write({VectorLiteral(kind)}({components[0]}, {components[1]}, {components[2]}, {components[3]}), {coordinate}{layerArgument});");
@@ -359,7 +359,7 @@ public static partial class Gen5MslTranslator
                 image.VectorData + 1 < VectorRegisterFileCount ? $"v[{image.VectorData + 1}]" : "0u");
             var access = $"{coordinate}{layerArgument}";
 
-            Line($"if (exec && {string.Join(" && ", guards)})");
+            Line($"if ({ExecCondition(string.Join(" && ", guards))})");
             Line("{");
             _indent++;
             var suffix = opcode["ImageAtomic".Length..];
@@ -1081,7 +1081,7 @@ public static partial class Gen5MslTranslator
 
             // A lane removed from EXEC keeps the previous output value; killed
             // fragments are discarded in the epilogue.
-            Line($"{field} = exec ? vec<{componentType}, 4>({values[0]}, {values[1]}, {values[2]}, {values[3]}) : {field};");
+            Line($"{field} = {ExecSelect($"vec<{componentType}, 4>({values[0]}, {values[1]}, {values[2]}, {values[3]})", field)};");
             return true;
         }
 
@@ -1125,7 +1125,7 @@ public static partial class Gen5MslTranslator
                 values[component] = $"as_type<float>(v[{instruction.Sources[component].Value}])";
             }
 
-            Line($"{field} = exec ? float4({values[0]}, {values[1]}, {values[2]}, {values[3]}) : {field};");
+            Line($"{field} = {ExecSelect($"float4({values[0]}, {values[1]}, {values[2]}, {values[3]})", field)};");
             return true;
         }
 

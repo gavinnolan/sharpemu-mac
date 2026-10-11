@@ -618,7 +618,7 @@ public static partial class Gen5MslTranslator
             var target = Temp(
                 "uint",
                 $"({destination}u + {destinationOffset}) & {VectorRegisterFileCount - 1}u");
-            Line($"if (exec) {{ v[{target}] = {value}; }}");
+            Line(ExecGuarded($"v[{target}] = {value};"));
             return true;
         }
 
@@ -1201,7 +1201,7 @@ public static partial class Gen5MslTranslator
 
             // Only EXEC-enabled lanes can pass; balloting the raw condition
             // would leak results from disabled lanes into saveexec/branches.
-            var active = Temp("bool", $"exec && {condition}");
+            var active = Temp("bool", ExecCondition(condition));
             if (instruction.Control is Gen5DppControl compareDpp)
             {
                 var writeEnabled = EmitDppWriteEnabled(compareDpp);
@@ -1266,7 +1266,7 @@ public static partial class Gen5MslTranslator
 
         private void StoreCarryOut(Gen5ShaderInstruction instruction, string carryCondition)
         {
-            var active = Temp("bool", $"exec && ({carryCondition})");
+            var active = Temp("bool", ExecCondition($"({carryCondition})"));
             var target = instruction.Control is Gen5Vop3Control { ScalarDestination: { } register }
                 ? register
                 : VccLoRegister;
