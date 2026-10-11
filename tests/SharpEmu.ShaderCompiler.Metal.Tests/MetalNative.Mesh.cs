@@ -233,10 +233,10 @@ internal static partial class MetalNative
             [data]);
     }
 
-    private static nint CreateRenderTarget(uint width, uint height)
+    private static nint CreateRenderTarget(uint width, uint height, nuint pixelFormat = ColorPixelFormat)
     {
         var descriptor = Send(Send(objc_getClass("MTLTextureDescriptor"), Selector("alloc")), Selector("init"));
-        SendInteger(descriptor, Selector("setPixelFormat:"), ColorPixelFormat);
+        SendInteger(descriptor, Selector("setPixelFormat:"), pixelFormat);
         SendInteger(descriptor, Selector("setTextureType:"), 2); // MTLTextureType2D
         SendInteger(descriptor, Selector("setWidth:"), width);
         SendInteger(descriptor, Selector("setHeight:"), height);

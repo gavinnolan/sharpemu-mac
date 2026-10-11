@@ -179,7 +179,13 @@ internal sealed partial class MetalRenderHost :
     // program is emitted as two wave32 halves by the translator.
     public bool ComputeWave64Supported => false;
 
-    public bool GraphicsSubgroupOperationsEnabled => false;
+    // Pixel shaders run each guest wave32 on one 32-wide fragment SIMD-group, with real
+    // ballots, shuffles and quad lanes (see Gen5MslTranslator.HasRealWaveLanes); vertex
+    // functions have no documented SIMD-group support and stay single-lane in the
+    // translator either way. SHARPEMU_GRAPHICS_SUBGROUPS=0 forces the single-lane model
+    // for pixel shaders too, the same switch the Vulkan backend reads.
+    public bool GraphicsSubgroupOperationsEnabled { get; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_GRAPHICS_SUBGROUPS") != "0";
 
     public bool SharedInt64AtomicsEnabled => false;
 
