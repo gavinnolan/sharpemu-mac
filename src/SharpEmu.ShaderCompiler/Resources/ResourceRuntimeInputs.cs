@@ -8,6 +8,30 @@ namespace SharpEmu.ShaderCompiler.Resources;
 // Reads one dword of guest memory; false when the address cannot be read.
 public delegate bool GuestWordReader(ulong address, out uint word);
 
+// The user-data word offsets one materialization read, collected while it runs. A cache
+// compares a cached materialization against a later draw on these words alone: the walk
+// evaluated to what it did without reading any other word, so no other word can change it.
+// Offsets past the mask's width set Overflowed, and a comparison then covers every word.
+public sealed class UserDataReadLog
+{
+    public const int Width = 64;
+
+    public ulong Mask { get; private set; }
+    public bool Overflowed { get; private set; }
+
+    public void Note(int offset)
+    {
+        if ((uint)offset >= Width) Overflowed = true;
+        else Mask |= 1ul << offset;
+    }
+
+    public void Reset()
+    {
+        Mask = 0;
+        Overflowed = false;
+    }
+}
+
 // What one draw supplies to materialise a plan: its user data, the shader base and
 // the two memory readers. The clean reader refuses memory the GPU may still own.
 public sealed class ResourceRuntimeInputs
@@ -26,6 +50,9 @@ public sealed class ResourceRuntimeInputs
 
     public bool ReadsClean { get; init; }
 
+    // Set by a cache that will compare its entry on the words this walk reads; null otherwise.
+    public UserDataReadLog? UserDataReads { get; init; }
+
     public ResourceRuntimeInputs WithReader(GuestWordReader? reader) => new()
     {
         UserData = UserData,
@@ -36,6 +63,7 @@ public sealed class ResourceRuntimeInputs
         TablePhase = TablePhase,
         ReadResidentMemory = ReadResidentMemory,
         ReadsClean = ReadsClean || ReferenceEquals(reader, ReadCleanMemory),
+        UserDataReads = UserDataReads,
     };
 }
 

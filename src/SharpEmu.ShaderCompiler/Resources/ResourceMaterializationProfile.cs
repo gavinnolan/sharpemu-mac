@@ -26,6 +26,12 @@ public static class ResourceMaterializationProfile
         CacheFind,
         RecorderWrap,
         EntryBuild,
+        // The three parts of the snapshot walk, which is where a miss spends almost all of
+        // its time: the branch conditions that decide which descriptor sources are live, the
+        // descriptor words themselves, and the flattened table, one graph value per word.
+        ActiveSources,
+        DescriptorWords,
+        TableEvaluation,
         Count,
     }
 
@@ -39,6 +45,10 @@ public static class ResourceMaterializationProfile
     private static long _branchEvaluations;
     private static long _descriptorSources;
     private static long _inactiveSources;
+    private static long _tableWords;
+    private static long _descriptorWords;
+    private static long _compiledEvaluators;
+    private static long _interpretedEvaluators;
 
     // The frame trace prints a line per guest flow and per mutex handoff, which on a
     // submission-heavy title costs more than the materializations being measured, so these
@@ -75,6 +85,17 @@ public static class ResourceMaterializationProfile
         }
     }
 
+    // How many graph values one walk evaluates, so the measured milliseconds can be read per
+    // word, and whether the plan had an IL-compiled evaluator or was interpreted.
+    internal static void RecordWalk(int tableWords, int descriptorWords, bool compiled)
+    {
+        if (!Enabled) return;
+        Interlocked.Add(ref _tableWords, tableWords);
+        Interlocked.Add(ref _descriptorWords, descriptorWords);
+        if (compiled) Interlocked.Increment(ref _compiledEvaluators);
+        else Interlocked.Increment(ref _interpretedEvaluators);
+    }
+
     internal static void RecordActivity(bool[] activeSources)
     {
         if (!Enabled) return;
@@ -95,6 +116,6 @@ public static class ResourceMaterializationProfile
         var parts = new List<string>();
         for (var index = 0; index < (int)Phase.Count; index++)
             parts.Add(FormattableString.Invariant($"{(Phase)index}={Interlocked.Read(ref _elapsedTicks[index]) * 1000.0 / Stopwatch.Frequency:F3}ms/n{Interlocked.Read(ref _calls[index])}"));
-        output.WriteLine($"[PERF][RESOURCE_MATERIALIZATION] cumulative=1 inclusive=1 allocated_bytes={Interlocked.Read(ref _allocatedBytesByPhase[(int)Phase.Total])} wrap_bytes={Interlocked.Read(ref _allocatedBytesByPhase[(int)Phase.RecorderWrap])} build_bytes={Interlocked.Read(ref _allocatedBytesByPhase[(int)Phase.EntryBuild])} branch_evaluations={Interlocked.Read(ref _branchEvaluations)} descriptor_sources={Interlocked.Read(ref _descriptorSources)} inactive_sources={Interlocked.Read(ref _inactiveSources)} {string.Join(" ", parts)}");
+        output.WriteLine($"[PERF][RESOURCE_MATERIALIZATION] cumulative=1 inclusive=1 allocated_bytes={Interlocked.Read(ref _allocatedBytesByPhase[(int)Phase.Total])} wrap_bytes={Interlocked.Read(ref _allocatedBytesByPhase[(int)Phase.RecorderWrap])} build_bytes={Interlocked.Read(ref _allocatedBytesByPhase[(int)Phase.EntryBuild])} branch_evaluations={Interlocked.Read(ref _branchEvaluations)} descriptor_sources={Interlocked.Read(ref _descriptorSources)} inactive_sources={Interlocked.Read(ref _inactiveSources)} table_words={Interlocked.Read(ref _tableWords)} descriptor_words={Interlocked.Read(ref _descriptorWords)} compiled_walks={Interlocked.Read(ref _compiledEvaluators)} interpreted_walks={Interlocked.Read(ref _interpretedEvaluators)}{string.Join(" ", parts)}");
     }
 }
