@@ -1122,13 +1122,13 @@ internal sealed partial class MetalRenderHost
         var entry = _boundGraphicsPipeline!;
         if (entry.Mesh is not null)
         {
-            // A mesh grid is sized from the counts, and Metal has no indirect mesh
-            // draw that reads them; the executor resolves such a draw on the CPU when
-            // the host says it cannot take one (ResolvesIndirectDrawOnGpu).
-            MetalV2Diagnostics.WarnOnce(
-                "mesh-indirect",
-                "An indexed indirect draw reached a mesh pipeline and was skipped; its counts are not on the host.");
-            return;
+            // TakesIndirectDrawArguments answers false for a mesh program, so the
+            // executor resolves the counts before the pass and this draw arrives with
+            // them. Reaching here means it did not, and dropping it would lose
+            // geometry silently.
+            throw Fatal(
+                "An indexed indirect draw reached a mesh pipeline with its counts still in guest memory: " +
+                $"pipeline={entry.Id} {entry.Profile}.");
         }
 
         MetalV2Native.SendDrawIndexedIndirect(

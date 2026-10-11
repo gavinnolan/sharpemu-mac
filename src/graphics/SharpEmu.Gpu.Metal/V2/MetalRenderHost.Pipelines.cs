@@ -169,6 +169,24 @@ internal sealed partial class MetalRenderHost
         }
     }
 
+    /// <summary>
+    /// Whether an indexed indirect draw with this vertex program can be handed over with
+    /// its counts still in guest memory. A primitive shader runs here as a mesh pipeline,
+    /// whose launch grid is sized from those counts, and Metal has no mesh draw that
+    /// reads them: such a draw is resolved before the pass instead.
+    /// </summary>
+    public bool TakesIndirectDrawArguments(ShaderProgram vertexProgram)
+    {
+        lock (_modules)
+        {
+            var index = (int)vertexProgram.Module - 1;
+            // An unknown module is not a mesh program as far as anything here knows; the
+            // draw path reports it where it can say which program it was.
+            return index < 0 || index >= _modules.Count ||
+                _modules[index].Shader.Stage != Gen5MslStage.Mesh;
+        }
+    }
+
     private MetalPipelineEntry RequirePipelineEntry(in PipelineHandle pipeline) =>
         _pipelineEntries.TryGetValue(pipeline.Pipeline, out var entry)
             ? entry

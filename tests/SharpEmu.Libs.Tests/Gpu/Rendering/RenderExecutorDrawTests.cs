@@ -102,6 +102,22 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_indexed ", StringComparison.Ordinal));
     }
 
+    // A primitive shader runs on Metal as a mesh pipeline, whose launch grid is sized
+    // from the counts the GPU would have read. The host says so and the draw is resolved
+    // here instead of being handed over - and never dropped.
+    [Fact]
+    public void IndirectIndexedDrawOnAMeshProgram_ReadsTheArgumentsOnTheCpu()
+    {
+        _host.IndirectDrawArgumentsTaken = false;
+        WriteIndirectArguments(6, 2, 4, 3, 1);
+        _pipelines.Graphics = Programs(vertexBuffers: [new VertexInputBuffer(VertexBase, 16, 4)]);
+        var arguments = Indexed(40, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments };
+        _executor.DrawIndexed(7, Banks(), arguments);
+
+        Assert.Contains(_host.Calls, c => c.StartsWith("draw_indexed 6 2 ", StringComparison.Ordinal));
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_indexed_indirect", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void IndirectIndexedStrip_ReadsTheArgumentsOnTheCpu()
     {

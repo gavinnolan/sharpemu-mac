@@ -326,6 +326,15 @@ internal sealed class RecordingRenderHost : IRenderHost
     public void DrawIndexedIndirect(BufferBinding arguments) =>
         Calls.Add($"draw_indexed_indirect {arguments.Handle:X}:{arguments.Offset:X}");
 
+    /// <summary>Set to false for a backend that runs the program as a mesh pipeline.</summary>
+    public bool IndirectDrawArgumentsTaken { get; set; } = true;
+
+    public bool TakesIndirectDrawArguments(ShaderProgram vertexProgram)
+    {
+        Calls.Add($"takes_indirect {vertexProgram.Id}");
+        return IndirectDrawArgumentsTaken;
+    }
+
     public void Dispatch(uint groupsX, uint groupsY, uint groupsZ) => Calls.Add($"dispatch {groupsX} {groupsY} {groupsZ}");
 
     public bool TryDispatchIndirect(ulong argumentsAddress) => false;

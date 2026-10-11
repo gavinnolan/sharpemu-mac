@@ -165,6 +165,13 @@ public interface IRenderHost
     void DrawIndexedIndirect(BufferBinding arguments) =>
         throw new NotSupportedException("The render host does not draw from indirect arguments.");
 
+    // True when the host can hand this vertex program an indexed indirect draw with its
+    // arguments still in guest memory. A program the backend runs as a mesh pipeline
+    // cannot take one - the launch grid is sized from the counts and Metal has no mesh
+    // draw that reads them - so the executor resolves such a draw from guest memory
+    // before the pass begins. No draw is dropped either way.
+    bool TakesIndirectDrawArguments(ShaderProgram vertexProgram) => true;
+
     void Dispatch(uint groupsX, uint groupsY, uint groupsZ);
 
     // Executes a dispatch from three uint32 group counts in guest memory when the backend can

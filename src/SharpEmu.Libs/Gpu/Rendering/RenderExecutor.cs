@@ -285,6 +285,15 @@ public sealed partial class RenderExecutor
         }
 
         ResolveShaderPrograms(banks, ref state);
+        if (arguments.IndirectArgumentsAddress != 0 && !_host.TakesIndirectDrawArguments(state.Programs.Vertex))
+        {
+            // The backend runs this program as a mesh pipeline, whose launch grid is
+            // sized from the very counts the GPU would have read; they are read here
+            // instead, before any pass is open, so the draw still happens.
+            DrawIndexedWithCpuArguments(submitId, banks, in arguments);
+            return;
+        }
+
         if (!ApplyProgramAdaptations(banks, in draw, ref state, new TargetlessDrawArguments(submitId, true, arguments, default)))
         {
             _host.ResetBindings();
