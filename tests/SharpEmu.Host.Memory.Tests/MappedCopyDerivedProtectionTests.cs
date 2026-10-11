@@ -116,14 +116,22 @@ public sealed unsafe partial class MappedCopyProtectionTests
         {
             Assert.True(state.Ledger.BeginDerivedProtection(State.Address, State.Size, RW, HostPageProtection.ReadOnly, out var warm));
             state.Ledger.CompleteDerivedProtection(warm, true);
-            var before = GC.GetAllocatedBytesForCurrentThread();
-            for (var index = 0; index < 1000; index++)
+            // Least of several rounds: a one-off runtime allocation (tiered recompilation
+            // on a busy machine) lands in one round only, while storage the helpers
+            // allocate shows in every round.
+            var least = long.MaxValue;
+            for (var round = 0; round < 5 && least != 0; round++)
             {
-                if (!state.Ledger.BeginDerivedProtection(State.Address, State.Size, RW, HostPageProtection.ReadOnly, out var receipt))
-                    throw new InvalidOperationException("Unexpected refusal during scalar allocation control.");
-                state.Ledger.CompleteDerivedProtection(receipt, true);
+                var before = GC.GetAllocatedBytesForCurrentThread();
+                for (var index = 0; index < 1000; index++)
+                {
+                    if (!state.Ledger.BeginDerivedProtection(State.Address, State.Size, RW, HostPageProtection.ReadOnly, out var receipt))
+                        throw new InvalidOperationException("Unexpected refusal during scalar allocation control.");
+                    state.Ledger.CompleteDerivedProtection(receipt, true);
+                }
+                least = Math.Min(least, GC.GetAllocatedBytesForCurrentThread() - before);
             }
-            var after = GC.GetAllocatedBytesForCurrentThread(); Assert.Equal(before, after);
+            Assert.Equal(0, least);
         }
         // Ordinary helper invocation only, not actual signal/provider/JIT closure proof.
     }
