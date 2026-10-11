@@ -332,7 +332,7 @@ internal sealed class MetalCachedImage : IDisposable
     // component mapping. Without it a single-channel font atlas samples as
     // (r, 0, 0, 1), so a shader that reads the glyph coverage out of .a gets 1
     // everywhere and every glyph quad fills in solid.
-    private static MtlTextureSwizzleChannels SwizzleOf(in GpuComponentMapping mapping, out bool identity)
+    internal static MtlTextureSwizzleChannels SwizzleOf(in GpuComponentMapping mapping, out bool identity)
     {
         var red = Channel(mapping.R, MtlTextureSwizzle.Red);
         var green = Channel(mapping.G, MtlTextureSwizzle.Green);
