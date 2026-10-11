@@ -286,8 +286,7 @@ vertex Gen5VsOut gen5_vs(
 {
     const uint sharpemu_lane = 0u;
     uint s106, s107, s126, s127;
-    uint v0 = 0u, v1 = 0u;
-    uint v5, v8;
+    uint v0 = 0u, v1 = 0u, v5, v8;
     bool exec = true;
     bool vcc = false;
     bool scc = false;

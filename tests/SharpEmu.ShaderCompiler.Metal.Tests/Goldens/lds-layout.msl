@@ -284,8 +284,7 @@ kernel void gen5_cs(
 {
     threadgroup uint sharpemu_lds[8192];
     uint s8, s9, s10, s11, s106, s107, s126, s127;
-    uint v3 = 0u;
-    uint v0, v1, v2;
+    uint v0, v1, v2, v3 = 0u;
     bool exec = true;
     bool vcc = false;
     bool scc = false;

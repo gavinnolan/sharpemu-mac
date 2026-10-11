@@ -283,8 +283,7 @@ kernel void gen5_cs(
     uint sharpemu_lane [[thread_index_in_simdgroup]])
 {
     uint s0, s8, s9, s10, s11, s106, s107, s126, s127;
-    uint v3 = 0u, v4 = 0u, v5 = 0u, v6 = 0u;
-    uint v0, v1, v2;
+    uint v0, v1, v2, v3 = 0u, v4 = 0u, v5 = 0u, v6 = 0u;
     bool exec = true;
     bool vcc = false;
     bool scc = false;

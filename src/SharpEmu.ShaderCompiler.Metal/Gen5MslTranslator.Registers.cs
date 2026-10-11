@@ -435,26 +435,21 @@ public static partial class Gen5MslTranslator
             }
         }
 
+        /// <summary>One declaration list per file, in register order, wrapped to stay
+        /// readable. Only a register some path reads before writing carries "= 0u", so a
+        /// dumped shader shows at a glance which of its registers are inputs.</summary>
         private static void AppendRegisterDeclarations(
             StringBuilder source,
             char file,
             SortedSet<uint> registers,
             HashSet<uint> needsInitialValue)
         {
-            AppendRegisterDeclaration(source, file, registers.Where(needsInitialValue.Contains), true);
-            AppendRegisterDeclaration(source, file, registers.Where(register => !needsInitialValue.Contains(register)), false);
-        }
-
-        private static void AppendRegisterDeclaration(
-            StringBuilder source,
-            char file,
-            IEnumerable<uint> registers,
-            bool initialize)
-        {
             var line = new StringBuilder();
             foreach (var register in registers)
             {
-                var name = initialize ? $"{file}{register} = 0u" : $"{file}{register}";
+                var name = needsInitialValue.Contains(register)
+                    ? $"{file}{register} = 0u"
+                    : $"{file}{register}";
                 if (line.Length == 0)
                 {
                     line.Append("    uint ").Append(name);
