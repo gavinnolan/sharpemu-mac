@@ -642,12 +642,10 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
                 : Math.Max(start, copy.BufferOffset);
         }
 
+        // The stencil plane needs no pass of its own: only a depth plan has one, and
+        // those ended above - and its offsets are in the stencil plane's bytes anyway,
+        // which are not the bytes a run is named in.
         foreach (var transfer in plan.Tiles)
-        {
-            aligned = AlignToBands(transfer, start, aligned);
-        }
-
-        foreach (var transfer in plan.StencilTiles)
         {
             aligned = AlignToBands(transfer, start, aligned);
         }
