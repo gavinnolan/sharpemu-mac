@@ -124,6 +124,10 @@ internal sealed partial class MetalRenderHost :
         _guard = MetalGuestWriteGuard.Enabled ? new MetalGuestWriteGuard(memory) : null;
         _slotTrap = MetalSlotTrap.Enabled ? new MetalSlotTrap(memory) : null;
         _guestMemory = new MetalGuestMemory(device, backing, memory) { Trap = _slotTrap };
+        if (_slotTrap is not null)
+        {
+            _slotTrap.Memory = _guestMemory;
+        }
         _guestMemory.AttachToQueue(queue);
         _transfer = new MetalImageTransfer(device);
         _imageCache = new MetalImageCache(this, _transfer, _guestMemory, pages, backing);

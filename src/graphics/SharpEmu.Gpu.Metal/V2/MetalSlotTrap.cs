@@ -28,7 +28,7 @@ internal sealed class MetalSlotTrap
     private const int MaxReports = 16;
 
     internal readonly record struct Binding(
-        string Owner, ulong Address, ulong Size, ulong Buffer, ulong Offset, ulong GpuAddress);
+        string Owner, ulong Address, ulong Size, ulong Buffer, ulong Offset, ulong GpuAddress, ulong CoveredSlot);
 
     private sealed class Pending
     {
@@ -84,7 +84,8 @@ internal sealed class MetalSlotTrap
         // hundreds of windows, and keeping all of them for every submission still in
         // flight is more memory than the answer is worth. A resolution whose destination
         // covers a watched slot is the answer; a transfer label is the context for it.
-        if (size != 0 && !GuestSlotTrap.TryFindCoveredSlot(address, size, out _))
+        var covered = 0UL;
+        if (size != 0 && !GuestSlotTrap.TryFindCoveredSlot(address, size, out covered))
         {
             return;
         }
@@ -94,7 +95,7 @@ internal sealed class MetalSlotTrap
             _recording.RemoveAt(0);
         }
 
-        _recording.Add(new Binding(owner, address, size, buffer, offset, gpuAddress));
+        _recording.Add(new Binding(owner, address, size, buffer, offset, gpuAddress, size == 0 ? 0 : covered));
     }
 
     /// <summary>Snapshots the trapped blocks and takes ownership of this submission's bindings.</summary>
@@ -203,6 +204,23 @@ internal sealed class MetalSlotTrap
         }
     }
 
+    /// <summary>Where the watched slot itself resolves to, for comparison with a binding's.</summary>
+    private string DescribeSlotResolution(ulong slotAddress)
+    {
+        if (Memory is not { } guestMemory)
+        {
+            return "<unknown>";
+        }
+
+        var range = guestMemory.ResolveWritable(slotAddress, 8);
+        return range.IsValid
+            ? $"buffer=0x{(ulong)range.Buffer:X}+0x{range.Offset:X}"
+            : "<unresolved>";
+    }
+
+    /// <summary>The window resolver, so a report can say where the slot itself lives.</summary>
+    internal MetalGuestMemory? Memory { get; set; }
+
     private void Report(
         Pending slot, ulong blockBase, ulong offset, ReadOnlySpan<byte> before, ReadOnlySpan<byte> after, long cpuFaults)
     {
@@ -216,7 +234,8 @@ internal sealed class MetalSlotTrap
             $"slot=0x{blockBase:X16} offset=0x{offset:X} " +
             $"was=0x{BitConverter.ToUInt64(before[(int)offset..]):X16} " +
             $"now=0x{BitConverter.ToUInt64(after[(int)offset..]):X16} " +
-            $"cpu_faults_in_interval={cpuFaults} bindings={slot.Bindings.Count}" +
+            $"cpu_faults_in_interval={cpuFaults} bindings={slot.Bindings.Count} " +
+            $"slot_resolves_to={DescribeSlotResolution(blockBase)}" +
             (cpuFaults == 0 ? " (no CPU write faulted: the GPU wrote it)" : string.Empty));
 
         var text = new StringBuilder();
@@ -228,7 +247,8 @@ internal sealed class MetalSlotTrap
                 .Append("+0x").Append(binding.Size.ToString("X"))
                 .Append(" buffer=0x").Append(binding.Buffer.ToString("X"))
                 .Append(" offset=0x").Append(binding.Offset.ToString("X"))
-                .Append(" gpu=0x").Append(binding.GpuAddress.ToString("X16"));
+                .Append(" gpu=0x").Append(binding.GpuAddress.ToString("X16"))
+                .Append(" covers_slot=0x").Append(binding.CoveredSlot.ToString("X16"));
             Console.Error.WriteLine(text.ToString());
         }
 
