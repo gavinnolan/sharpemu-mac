@@ -1439,7 +1439,7 @@ public static partial class Gen5MslTranslator
                 {
                     Gfx10UnifiedFormat.TryGetComponentLayout(dataFormat, component, out var byteOffset, out _, out _);
                     var address = byteOffset == 0 ? byteAddress : $"({byteAddress} + {byteOffset}u)";
-                    Line($"sharpemu_store_bytes(b{bindingIndex}, {BufferBytes(bindingIndex)}, {address}, v[{control.VectorData + component}], 4u);");
+                    Line($"sharpemu_store_dword(b{bindingIndex}, {BufferBytes(bindingIndex)}, {address}, v[{control.VectorData + component}]);");
                 }
             }
             else
@@ -2005,7 +2005,7 @@ public static partial class Gen5MslTranslator
                 {
                     for (uint index = 0; index < dwordCount; index++)
                     {
-                        Line($"sharpemu_store_bytes(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress} + {index * 4}u, v[{sourceVectorRegister + index}], 4u);");
+                        Line($"sharpemu_store_dword(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress} + {index * 4}u, v[{sourceVectorRegister + index}]);");
                     }
                 }
 
@@ -2041,7 +2041,7 @@ public static partial class Gen5MslTranslator
                 {
                     StoreVector(
                         destinationVectorRegister + index,
-                        LoadWord(bindingIndex, $"({byteAddress} + {index * 4}u)"));
+                        LoadDword(bindingIndex, $"({byteAddress} + {index * 4}u)"));
                 }
 
                 return true;
@@ -2087,6 +2087,20 @@ public static partial class Gen5MslTranslator
 
         private string BufferBytes(int bindingIndex) =>
             $"{ResourcesName}.buffer_bytes[{bindingIndex}]";
+
+        /// <summary>A raw dword load, the form S_BUFFER_LOAD_DWORD* and
+        /// BUFFER_LOAD_DWORD* take: the byte address truncates to the dword it lands in
+        /// and the dword is read, out of range reading zero.
+        ///
+        /// This is what the SPIR-V backend does for the same opcodes, and it is the whole
+        /// of it — a shift, a compare and a load. The byte-combining
+        /// <see cref="LoadWord"/> below is for a format access, whose component really can
+        /// straddle two dwords because the descriptor's stride is a byte count. Using it
+        /// for raw dword loads cost an alignment branch and a four-iteration byte loop at
+        /// each of them, which Octopath Traveler II's shaders do 1661 times, 65 of them in
+        /// the dispatch that spends 19% of the frame's GPU time.</summary>
+        private string LoadDword(int bindingIndex, string byteAddress) =>
+            $"sharpemu_load_dword(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress})";
 
         private string LoadWord(int bindingIndex, string byteAddress) =>
             $"sharpemu_load_word(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress})";

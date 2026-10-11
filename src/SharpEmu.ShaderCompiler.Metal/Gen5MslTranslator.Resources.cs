@@ -520,7 +520,7 @@ public static partial class Gen5MslTranslator
                     var bindingIndex = (int)entry.Resource;
                     var byteOffset = unchecked((uint)control.ImmediateOffsetBytes + ((uint)component * sizeof(uint)));
                     var address = Temp("uint", ApplyByteBias(bindingIndex, $"({dynamicOffset} + {FormatUInt(byteOffset)})"));
-                    value = Temp("uint", LoadWord(bindingIndex, address));
+                    value = Temp("uint", LoadDword(bindingIndex, address));
                 }
                 else
                 {

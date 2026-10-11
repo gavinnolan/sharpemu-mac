@@ -141,9 +141,11 @@ public sealed class MslTranslationTests
     {
         var shader = Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.ExecStore);
 
-        // Every buffer store must sit behind the per-lane EXEC guard.
+        // Every buffer store past the first EXEC write must sit behind the per-lane
+        // guard, and a whole-dword store goes out as one dword, not four bytes.
         Assert.Contains("if (exec)", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("sharpemu_store_bytes(b0,", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_store_dword(b0,", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("sharpemu_store_bytes(b0,", shader.Source, StringComparison.Ordinal);
 
         // s_mov_b32 exec_lo, 0 / -1 must drive the per-lane bool.
         Assert.Contains("exec = ((", shader.Source, StringComparison.Ordinal);
@@ -639,8 +641,8 @@ public sealed class MslTranslationTests
         // Format 77 is 32x4 float: four aligned dword stores, no encoding, one bounds test.
         var shader = CompileTypedBufferAccess("TBufferStoreFormatXyzw", dwordCount: 4, typedFormat: 77);
 
-        Assert.Contains(", v4, 4u);", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("+ 12u), v7, 4u);", shader.Source, StringComparison.Ordinal);
+        Assert.Contains(", v4);", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("+ 12u), v7);", shader.Source, StringComparison.Ordinal);
         Assert.Contains("16u <= sharpemu_resources.buffer_bytes[0] && ", shader.Source, StringComparison.Ordinal);
         Assert.DoesNotContain("sharpemu_format_encode(v[", shader.Source, StringComparison.Ordinal);
         Assert.DoesNotContain("sharpemu_store_element(b", shader.Source, StringComparison.Ordinal);
