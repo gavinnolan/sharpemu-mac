@@ -214,4 +214,11 @@ public unsafe interface IDirectExecutionPlatform
     /// fault dispatch.
     /// </summary>
     bool TryReadExecutableHostMemory(ulong address, byte* destination, int byteCount);
+
+    /// <summary>
+    /// The host's one-minute load average, or a negative value where the host
+    /// has none. The stall watchdog stretches its period by it, so a guest phase
+    /// slowed by other processes is not taken for a hang.
+    /// </summary>
+    double HostLoadAverage => -1.0;
 }

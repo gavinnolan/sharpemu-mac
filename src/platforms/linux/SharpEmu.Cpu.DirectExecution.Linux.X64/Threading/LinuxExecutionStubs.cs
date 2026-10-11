@@ -316,6 +316,16 @@ internal static unsafe class LinuxExecutionStubs
     private static extern int gettid();
 
     [DllImport("libc")]
+    private static extern int getloadavg(double* loadAverage, int count);
+
+    /// <summary>The one-minute load average, or -1 when it cannot be read.</summary>
+    internal static double ReadLoadAverage()
+    {
+        double load;
+        return getloadavg(&load, 1) == 1 ? load : -1.0;
+    }
+
+    [DllImport("libc")]
     private static extern int sem_init(nint semaphore, int shared, uint value);
 
     [DllImport("libc")]
