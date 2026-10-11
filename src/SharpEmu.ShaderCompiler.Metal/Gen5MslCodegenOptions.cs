@@ -28,13 +28,23 @@ namespace SharpEmu.ShaderCompiler.Metal;
 /// access, which is how the GCN ISA addresses it and what the SPIR-V backend emits,
 /// instead of assembling it from bytes. <c>SHARPEMU_MSL_DWORDACCESS=0</c> goes back to
 /// the byte path.</param>
+/// <param name="UniformTablesInConstantSpace">Point at the read-only uniform tables (the
+/// user-data words, the flattened resource table) through the constant address space,
+/// which is Apple's uniform datapath, instead of the device one.
+/// <c>SHARPEMU_MSL_CONSTANTTABLES=0</c> goes back to device.</param>
+/// <param name="DispatchThreadgroupMemory">Declare the threadgroup memory the dispatch
+/// allocated rather than the full 32 KB. Threadgroup memory is a hard occupancy limit, so
+/// this is the difference between one threadgroup per core and many.
+/// <c>SHARPEMU_MSL_LDSSIZE=0</c> declares all of it.</param>
 public sealed record Gen5MslCodegenOptions(
     bool StructuredControlFlow = true,
     bool RegisterAllocation = true,
     bool ForceRegisterInitialization = false,
     bool ExecGuardElision = true,
     bool BoundedRelativeMoves = true,
-    bool RawDwordAccess = true)
+    bool RawDwordAccess = true,
+    bool UniformTablesInConstantSpace = true,
+    bool DispatchThreadgroupMemory = true)
 {
     public static Gen5MslCodegenOptions FromEnvironment { get; } = new(
         StructuredControlFlow: Environment.GetEnvironmentVariable("SHARPEMU_MSL_STRUCTURED") != "0",
@@ -42,5 +52,8 @@ public sealed record Gen5MslCodegenOptions(
         ForceRegisterInitialization: Environment.GetEnvironmentVariable("SHARPEMU_MSL_REGINIT") == "1",
         ExecGuardElision: Environment.GetEnvironmentVariable("SHARPEMU_MSL_EXECGUARD") != "0",
         BoundedRelativeMoves: Environment.GetEnvironmentVariable("SHARPEMU_MSL_MOVREL") != "0",
-        RawDwordAccess: Environment.GetEnvironmentVariable("SHARPEMU_MSL_DWORDACCESS") != "0");
+        RawDwordAccess: Environment.GetEnvironmentVariable("SHARPEMU_MSL_DWORDACCESS") != "0",
+        UniformTablesInConstantSpace:
+            Environment.GetEnvironmentVariable("SHARPEMU_MSL_CONSTANTTABLES") != "0",
+        DispatchThreadgroupMemory: Environment.GetEnvironmentVariable("SHARPEMU_MSL_LDSSIZE") != "0");
 }

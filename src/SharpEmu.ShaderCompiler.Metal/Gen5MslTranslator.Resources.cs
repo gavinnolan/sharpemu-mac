@@ -146,7 +146,9 @@ public static partial class Gen5MslTranslator
                 _meshInfo = BuildMeshInfo(request, _meshLdsDwords);
             }
 
-            _computeLdsDwords = ComputeLdsDwordCount(request);
+            _computeLdsDwords = options.DispatchThreadgroupMemory
+                ? ComputeLdsDwordCount(request)
+                : LdsDwordCount;
 
             _pixelOutputBindings = request.PixelOutputs;
             _usesPixelValidMask =
@@ -304,10 +306,11 @@ public static partial class Gen5MslTranslator
         // Octopath Traveler II's heaviest vertex shader reads 32 user-data words in its
         // preamble, which the hardware does once per wave and we were doing 12.5 million
         // times a frame.
-        private static string PointerType(DescriptorBindingKind kind) => kind switch
+        private string PointerType(DescriptorBindingKind kind) => kind switch
         {
             DescriptorBindingKind.DeviceAddressPageTable => "device const Gen5AddressRange*",
-            DescriptorBindingKind.FlattenedResourceTable or DescriptorBindingKind.ShaderData => "constant uint*",
+            DescriptorBindingKind.FlattenedResourceTable or DescriptorBindingKind.ShaderData =>
+                _options.UniformTablesInConstantSpace ? "constant uint*" : "device const uint*",
             _ => "device uint*",
         };
 

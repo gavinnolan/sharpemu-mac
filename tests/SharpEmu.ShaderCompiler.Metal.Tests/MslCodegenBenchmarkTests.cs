@@ -242,6 +242,39 @@ public sealed class MslCodegenBenchmarkTests(ITestOutputHelper output)
         return new Gen5ComputeFixture("waterfall-movrel", [.. words], 8, (int)(count * 4) + 16);
     }
 
+    /// <summary>A dispatch that works through LDS. The declaration used to be the full
+    /// 32 KB whatever the dispatch allocated, and threadgroup memory is a hard occupancy
+    /// limit on Apple GPUs — one threadgroup per core instead of many. Octopath Traveler
+    /// II's second- and fourth-heaviest dispatches are this shape.</summary>
+    private static Gen5ComputeFixture LdsChain()
+    {
+        const uint count = 16;
+        var words = new List<uint>();
+        for (var register = 1u; register <= count; register++)
+        {
+            words.Add(VMovLiteral(register));
+            words.Add(0x3F800000u + (register << 16));
+            words.Add(VFmac(register, 0, register));
+        }
+
+        // v0 is the local id; use it as the LDS byte address so lanes do not collide.
+        words.Add(0x34000082u | (0u << 17));          // v_lshlrev_b32 v0, 2, v0
+        for (var round = 0u; round < 4u; round++)
+        {
+            for (var register = 1u; register <= count; register++)
+            {
+                // ds_write_b32 v0, v(register) then ds_read_b32 v(register), v0
+                words.Add(0xD8340000u);
+                words.Add(0x00000000u | (register << 8));
+                words.Add(0xD8D80000u);
+                words.Add(register << 24);
+            }
+        }
+
+        AppendStores(words, count);
+        return new Gen5ComputeFixture("lds-chain", [.. words], 8, (int)(count * 4) + 16);
+    }
+
     private static void AppendStores(List<uint> words, uint count)
     {
         for (var register = 1u; register <= count; register++)
@@ -348,6 +381,138 @@ public sealed class MslCodegenBenchmarkTests(ITestOutputHelper output)
         Assert.True(regressions.Count == 0, "slower than the dispatcher: " + string.Join(", ", regressions));
     }
 
+    /// <summary>The two round-three changes measured on their own: the threadgroup memory
+    /// a dispatch declares, and the address space its uniform tables are read through.
+    /// Neither shows up in register counts, so GPU time is the only read on them.</summary>
+    [Fact]
+    public void ThreadgroupMemoryAndConstantTablesEarnTheirKeep()
+    {
+        var device = Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") == "1";
+        if (!device)
+        {
+            output.WriteLine("No device gate: reporting codegen shape only.");
+        }
+        else
+        {
+            Assert.True(MetalNative.IsAvailable, "The benchmark gate needs a Metal device.");
+        }
+
+        var contended = System.Diagnostics.Process.GetProcessesByName("SharpEmu").Length != 0;
+        if (contended)
+        {
+            output.WriteLine("Another SharpEmu process holds the GPU: timings are indicative only.");
+        }
+
+        var report = new StringBuilder();
+        report.AppendLine("change                       form        gpu ms   speedup");
+
+        // The dispatch allocates 1 KB; the old codegen declared 32 KB regardless.
+        var lds = LdsChain();
+        var declaredAll = MeasureCompute(
+            lds, new Gen5MslCodegenOptions(DispatchThreadgroupMemory: false), 256u, device);
+        Assert.Contains("sharpemu_lds[8192]", LastSource, StringComparison.Ordinal);
+        var declaredOwn = MeasureCompute(
+            lds, new Gen5MslCodegenOptions(), 256u, device);
+        Assert.Contains("sharpemu_lds[256]", LastSource, StringComparison.Ordinal);
+        Append(report, "threadgroup memory", "all 32 KB", declaredAll, 1.0);
+        Append(report, "threadgroup memory", "as allocated", declaredOwn,
+            Ratio(declaredAll, declaredOwn));
+
+        // The uniform tables, read through the shader-data descriptor a graphics stage
+        // takes, from device memory and then from the constant address space.
+        var table = ScalarTableReads();
+        var fromDevice = MeasureCompute(
+            table, new Gen5MslCodegenOptions(UniformTablesInConstantSpace: false), 0u, device,
+            pushDataStartDword: Resources.PushData.DwordCount);
+        Assert.Contains("device const uint* shader_data", LastSource, StringComparison.Ordinal);
+        var fromConstant = MeasureCompute(
+            table, new Gen5MslCodegenOptions(), 0u, device,
+            pushDataStartDword: Resources.PushData.DwordCount);
+        Assert.Contains("constant uint* shader_data", LastSource, StringComparison.Ordinal);
+        Append(report, "uniform tables", "device", fromDevice, 1.0);
+        Append(report, "uniform tables", "constant", fromConstant,
+            Ratio(fromDevice, fromConstant));
+
+        output.WriteLine(report.ToString());
+    }
+
+    private static string LastSource = string.Empty;
+
+    private static double Ratio(double baseline, double measured) =>
+        baseline > 0 && measured > 0 ? baseline / measured : 0.0;
+
+    /// <summary>A program whose work is reading user-data words — the preamble shape every
+    /// guest shader has, and 32 words deep in the heaviest Octopath vertex shader.</summary>
+    private static Gen5ComputeFixture ScalarTableReads()
+    {
+        const uint count = 16;
+        var words = new List<uint>();
+        for (var register = 1u; register <= count; register++)
+        {
+            // v_mov_b32 v(register), s(register): the user-data word, per lane.
+            words.Add(0x7E000200u | (register << 17) | register);
+        }
+
+        for (var round = 0; round < 4; round++)
+        {
+            for (var register = 1u; register <= count; register++)
+            {
+                words.Add(VFmac(register, (register % count) + 1, ((register + 1) % count) + 1));
+            }
+        }
+
+        AppendStores(words, count);
+        return new Gen5ComputeFixture("table-reads", [.. words], 8, (int)(count * 4) + 16);
+    }
+
+    private static double Append(
+        StringBuilder report,
+        string change,
+        string form,
+        double milliseconds,
+        double speedup)
+    {
+        report.AppendLine(
+            $"{change,-28} {form,-12} {milliseconds,6:F3}   " +
+            $"{(speedup == 0.0 ? "-" : $"{speedup:F2}x"),7}");
+        return milliseconds;
+    }
+
+    private static double MeasureCompute(
+        Gen5ComputeFixture program,
+        Gen5MslCodegenOptions options,
+        uint localDataShareDwords,
+        bool device,
+        uint pushDataStartDword = 0)
+    {
+        var request = Gen5ComputeFixtures.CreateComputeRequest(
+            program,
+            localSizeX: 64,
+            localDataShareDwords: localDataShareDwords,
+            pushDataStartDword: pushDataStartDword);
+        Assert.True(
+            Gen5MslTranslator.TryCompileProgram(request, out var shader, out var compileError, options),
+            $"[{program.Name}] {compileError}");
+        LastSource = shader.Source;
+        if (!device)
+        {
+            return 0;
+        }
+
+        Assert.True(
+            MetalNative.TryBenchmark(
+                shader,
+                new byte[Math.Max(program.StoreBackingBytes, 16)],
+                new byte[Resources.PushData.ByteSize],
+                threadgroups: 4096,
+                threadsPerThreadgroup: 64,
+                iterations: 8,
+                out var result,
+                out var error),
+            $"[{program.Name}] {error}");
+        return result.GpuMilliseconds;
+    }
+
     /// <summary>The structured emitter has to cover the shapes real shaders are made of,
     /// not just the synthetic ones: every fixture in the suite must structure.</summary>
     [Fact]
@@ -392,6 +557,8 @@ public sealed class MslCodegenBenchmarkTests(ITestOutputHelper output)
             ("dispatcher+allocated", new Gen5MslCodegenOptions(false, true)),
             ("no-exec-elision", new Gen5MslCodegenOptions(ExecGuardElision: false)),
             ("unbounded-movrel", new Gen5MslCodegenOptions(BoundedRelativeMoves: false)),
+            ("device-tables", new Gen5MslCodegenOptions(UniformTablesInConstantSpace: false)),
+            ("all-threadgroup-memory", new Gen5MslCodegenOptions(DispatchThreadgroupMemory: false)),
         };
 
         var programs = new List<Gen5ComputeFixture>(Gen5ComputeFixtures.All.Where(
