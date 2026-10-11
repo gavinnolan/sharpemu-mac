@@ -289,48 +289,28 @@ fragment Gen5PsOut gen5_ps(
     constant Gen5StageResources& sharpemu_resources [[buffer(0)]])
 {
     const uint sharpemu_lane = 0u;
-    uint s[128] = {};
-    uint v[256] = {};
+    uint s106, s107, s126, s127;
+    uint v0 = 0u, v1 = 0u, v2 = 0u, v3 = 0u;
     bool exec = true;
     bool pixel_valid_mask_active = true;
     bool vcc = false;
     bool scc = false;
-    uint pc = 0u;
-    bool active = true;
-    uint steps = 0u;
     Gen5PsOut sharpemu_out = {};
     uint bias[1] = {};
-    s[106] = 0u;
-    s[107] = 0u;
-    s[126] = sharpemu_ballot(true);
-    s[127] = 0u;
+    s106 = 0u;
+    s107 = 0u;
+    s126 = sharpemu_ballot(true);
+    s127 = 0u;
 
-    while (active)
     {
-        switch (pc)
-        {
-        case 0u:
-        {
-            if (exec) { v[0] = as_type<uint>(sharpemu_in.attr0[0]); }
-            if (exec) { v[1] = as_type<uint>(sharpemu_in.attr0[1]); }
-            uint t0 = 0x3F800000u;
-            if (exec) { v[2] = t0; }
-            uint t1 = 0x3F000000u;
-            if (exec) { v[3] = t1; }
-            pixel_valid_mask_active = exec;
-            sharpemu_out.mrt0 = exec ? vec<float, 4>(as_type<float>(v[0]), as_type<float>(v[1]), as_type<float>(v[2]), as_type<float>(v[3])) : sharpemu_out.mrt0;
-            active = false;
-        }
-        break;
-        default:
-            active = false;
-            break;
-        }
-        if (++steps >= 100000u)
-        {
-            active = false;
-            sharpemu_note_step_cap(sharpemu_resources.step_report);
-        }
+        if (exec) { v0 = as_type<uint>(sharpemu_in.attr0[0]); }
+        if (exec) { v1 = as_type<uint>(sharpemu_in.attr0[1]); }
+        uint t0 = 0x3F800000u;
+        if (exec) { v2 = t0; }
+        uint t1 = 0x3F000000u;
+        if (exec) { v3 = t1; }
+        pixel_valid_mask_active = exec;
+        sharpemu_out.mrt0 = exec ? vec<float, 4>(as_type<float>(v0), as_type<float>(v1), as_type<float>(v2), as_type<float>(v3)) : sharpemu_out.mrt0;
     }
     if (!pixel_valid_mask_active)
     {

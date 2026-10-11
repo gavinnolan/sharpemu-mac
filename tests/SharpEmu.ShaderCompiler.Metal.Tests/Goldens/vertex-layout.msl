@@ -285,47 +285,27 @@ vertex Gen5VsOut gen5_vs(
     uint sharpemu_instance_id [[instance_id]])
 {
     const uint sharpemu_lane = 0u;
-    uint s[128] = {};
-    uint v[256] = {};
+    uint s106, s107, s126, s127;
+    uint v0 = 0u, v1 = 0u, v5, v8;
     bool exec = true;
     bool vcc = false;
     bool scc = false;
-    uint pc = 0u;
-    bool active = true;
-    uint steps = 0u;
     Gen5VsOut sharpemu_out = {};
     uint bias[1] = {};
-    v[5] = sharpemu_vertex_id;
-    v[8] = sharpemu_instance_id;
-    s[106] = 0u;
-    s[107] = 0u;
-    s[126] = sharpemu_ballot(true);
-    s[127] = 0u;
+    v5 = sharpemu_vertex_id;
+    v8 = sharpemu_instance_id;
+    s106 = 0u;
+    s107 = 0u;
+    s126 = sharpemu_ballot(true);
+    s127 = 0u;
 
-    while (active)
     {
-        switch (pc)
-        {
-        case 0u:
-        {
-            uint t0 = 0u;
-            if (exec) { v[0] = t0; }
-            uint t1 = 0x3F800000u;
-            if (exec) { v[1] = t1; }
-            sharpemu_out.sharpemu_position = exec ? float4(as_type<float>(v[0]), as_type<float>(v[0]), as_type<float>(v[0]), as_type<float>(v[1])) : sharpemu_out.sharpemu_position;
-            sharpemu_out.param0 = exec ? float4(as_type<float>(v[1]), as_type<float>(v[1]), as_type<float>(v[0]), as_type<float>(v[1])) : sharpemu_out.param0;
-            active = false;
-        }
-        break;
-        default:
-            active = false;
-            break;
-        }
-        if (++steps >= 100000u)
-        {
-            active = false;
-            sharpemu_note_step_cap(sharpemu_resources.step_report);
-        }
+        uint t0 = 0u;
+        if (exec) { v0 = t0; }
+        uint t1 = 0x3F800000u;
+        if (exec) { v1 = t1; }
+        sharpemu_out.sharpemu_position = exec ? float4(as_type<float>(v0), as_type<float>(v0), as_type<float>(v0), as_type<float>(v1)) : sharpemu_out.sharpemu_position;
+        sharpemu_out.param0 = exec ? float4(as_type<float>(v1), as_type<float>(v1), as_type<float>(v0), as_type<float>(v1)) : sharpemu_out.param0;
     }
     return sharpemu_out;
 }

@@ -282,78 +282,72 @@ kernel void gen5_cs(
     uint3 sharpemu_group_id [[threadgroup_position_in_grid]],
     uint sharpemu_lane [[thread_index_in_simdgroup]])
 {
-    uint s[128] = {};
-    uint v[256] = {};
+    uint s0, s8, s9, s10, s11, s106, s107, s126, s127;
+    uint v0, v1, v2;
     bool exec = true;
     bool vcc = false;
     bool scc = false;
-    uint pc = 0u;
     bool active = true;
     uint steps = 0u;
     device uint* b0 = sharpemu_resources.buffers[0];
     uint bias[1] = {};
-    s[8] = sharpemu_push_data[0];
-    s[9] = sharpemu_push_data[1];
-    s[10] = sharpemu_push_data[2];
-    s[11] = sharpemu_push_data[3];
+    s8 = sharpemu_push_data[0];
+    s9 = sharpemu_push_data[1];
+    s10 = sharpemu_push_data[2];
+    s11 = sharpemu_push_data[3];
     bias[0] = (sharpemu_push_data[4] >> 0u) & 0xFFu;
-    v[0] = sharpemu_local_id.x;
-    v[1] = sharpemu_local_id.y;
-    v[2] = sharpemu_local_id.z;
+    v0 = sharpemu_local_id.x;
+    v1 = sharpemu_local_id.y;
+    v2 = sharpemu_local_id.z;
     active = (sharpemu_group_id.x * 32u + sharpemu_local_id.x) < 0xFFFFFFFFu
         && (sharpemu_group_id.y * 1u + sharpemu_local_id.y) < 0xFFFFFFFFu
         && (sharpemu_group_id.z * 1u + sharpemu_local_id.z) < 0xFFFFFFFFu;
-    s[106] = 0u;
-    s[107] = 0u;
-    s[126] = sharpemu_ballot(true);
-    s[127] = 0u;
+    s106 = 0u;
+    s107 = 0u;
+    s126 = sharpemu_ballot(true);
+    s127 = 0u;
 
-    while (active)
+    if (!active)
     {
-        switch (pc)
+        return;
+    }
+
+    {
+        uint t0 = 5u;
+        s0 = t0;
+        uint t1 = 0u;
+        if (exec) { v1 = t1; }
+    }
+    while (true)
+    {
         {
-        case 0u:
-        {
-            uint t0 = 5u;
-            s[0] = t0;
-            uint t1 = 0u;
-            if (exec) { v[1] = t1; }
-            pc = 1u;
-        }
-        break;
-        case 1u:
-        {
-            uint t2 = ((s[0]) + (v[1]));
-            if (exec) { v[1] = t2; }
-            uint t3 = s[0];
+            uint t2 = ((s0) + (v1));
+            if (exec) { v1 = t2; }
+            uint t3 = s0;
             uint t4 = 1u;
             uint t5 = (t3 - t4);
-            s[0] = t5;
+            s0 = t5;
             scc = ((((t3 ^ t4)) & (t3 ^ t5)) >> 31) != 0u;
-            uint t6 = s[0];
+            uint t6 = s0;
             uint t7 = 0u;
             scc = (t6) != (t7);
-            pc = (scc) ? 1u : 2u;
         }
-        break;
-        case 2u:
+        if (scc)
         {
-            uint t8 = ((0x0u + 0u + 0u + (0u * 0u)) + bias[0]);
-            if (exec)
+            if (++steps >= 100000u)
             {
-                sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t8 + 0u, v[1], 4u);
+                sharpemu_note_step_cap(sharpemu_resources.step_report);
+                return;
             }
-            active = false;
+            continue;
         }
         break;
-        default:
-            active = false;
-            break;
-        }
-        if (++steps >= 100000u)
+    }
+    {
+        uint t8 = ((0x0u + 0u + 0u + (0u * 0u)) + bias[0]);
+        if (exec)
         {
-            active = false;
-            sharpemu_note_step_cap(sharpemu_resources.step_report);
+            sharpemu_store_bytes(b0, sharpemu_resources.buffer_bytes[0], t8 + 0u, v1, 4u);
         }
     }
 }

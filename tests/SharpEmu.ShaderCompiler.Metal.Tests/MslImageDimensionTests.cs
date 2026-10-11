@@ -151,7 +151,7 @@ public sealed class MslImageDimensionTests(ITestOutputHelper output)
     public void LoadMip_TakesTheLevelAfterTheCoordinates(uint descriptorType, int expectedRegister)
     {
         var shader = Gen5ImageFixtures.CompileOrThrow("ImageLoadMip", descriptorType);
-        Assert.Contains($"= v[{expectedRegister}];", shader.Source);
+        Assert.Contains($"= v{expectedRegister};", shader.Source);
     }
 
     // Multisampled textures carry no mip chain: the trailing operand is a sample index.
@@ -161,7 +161,7 @@ public sealed class MslImageDimensionTests(ITestOutputHelper output)
     public void MultisampledLoad_TakesASampleIndex(uint descriptorType, int expectedRegister)
     {
         var shader = Gen5ImageFixtures.CompileOrThrow("ImageLoad", descriptorType);
-        Assert.Contains($"= v[{expectedRegister}];", shader.Source);
+        Assert.Contains($"= v{expectedRegister};", shader.Source);
 
         // get_width() on a multisampled texture takes no level argument.
         Assert.DoesNotContain("get_width(t", shader.Source);

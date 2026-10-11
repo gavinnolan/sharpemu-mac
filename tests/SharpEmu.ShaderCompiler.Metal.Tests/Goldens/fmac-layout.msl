@@ -280,52 +280,38 @@ kernel void gen5_cs(
     uint3 sharpemu_group_id [[threadgroup_position_in_grid]],
     uint sharpemu_lane [[thread_index_in_simdgroup]])
 {
-    uint s[128] = {};
-    uint v[256] = {};
+    uint s0, s106, s107, s126, s127;
+    uint v0, v1, v2, v5 = 0u;
     bool exec = true;
     bool vcc = false;
     bool scc = false;
-    uint pc = 0u;
     bool active = true;
-    uint steps = 0u;
     uint bias[1] = {};
-    s[0] = sharpemu_push_data[0];
-    v[0] = sharpemu_local_id.x;
-    v[1] = sharpemu_local_id.y;
-    v[2] = sharpemu_local_id.z;
+    s0 = sharpemu_push_data[0];
+    v0 = sharpemu_local_id.x;
+    v1 = sharpemu_local_id.y;
+    v2 = sharpemu_local_id.z;
     active = (sharpemu_group_id.x * 32u + sharpemu_local_id.x) < 0xFFFFFFFFu
         && (sharpemu_group_id.y * 1u + sharpemu_local_id.y) < 0xFFFFFFFFu
         && (sharpemu_group_id.z * 1u + sharpemu_local_id.z) < 0xFFFFFFFFu;
-    s[106] = 0u;
-    s[107] = 0u;
-    s[126] = sharpemu_ballot(true);
-    s[127] = 0u;
+    s106 = 0u;
+    s107 = 0u;
+    s126 = sharpemu_ballot(true);
+    s127 = 0u;
 
-    while (active)
+    if (!active)
     {
-        switch (pc)
-        {
-        case 0u:
-        {
-            uint t0 = as_type<uint>((fma(as_type<float>(v[1]), as_type<float>(v[2]), as_type<float>(v[5]))));
-            if (exec) { v[5] = t0; }
-            uint t1 = as_type<uint>((fma(as_type<float>(v[1]), as_type<float>(0x42280000u), as_type<float>(v[2]))));
-            if (exec) { v[5] = t1; }
-            uint t2 = as_type<uint>((fma(as_type<float>(v[1]), as_type<float>(v[2]), as_type<float>(0x42280000u))));
-            if (exec) { v[5] = t2; }
-            uint t3 = as_type<uint>((fma(as_type<float>(v[1]), as_type<float>(v[2]), as_type<float>(v[5]))));
-            if (exec) { v[5] = t3; }
-            active = false;
-        }
-        break;
-        default:
-            active = false;
-            break;
-        }
-        if (++steps >= 100000u)
-        {
-            active = false;
-            sharpemu_note_step_cap(sharpemu_resources.step_report);
-        }
+        return;
+    }
+
+    {
+        uint t0 = as_type<uint>((fma(as_type<float>(v1), as_type<float>(v2), as_type<float>(v5))));
+        if (exec) { v5 = t0; }
+        uint t1 = as_type<uint>((fma(as_type<float>(v1), as_type<float>(0x42280000u), as_type<float>(v2))));
+        if (exec) { v5 = t1; }
+        uint t2 = as_type<uint>((fma(as_type<float>(v1), as_type<float>(v2), as_type<float>(0x42280000u))));
+        if (exec) { v5 = t2; }
+        uint t3 = as_type<uint>((fma(as_type<float>(v1), as_type<float>(v2), as_type<float>(v5))));
+        if (exec) { v5 = t3; }
     }
 }

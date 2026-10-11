@@ -1114,6 +1114,12 @@ internal sealed partial class MetalRenderHost :
             $"compile_ms={compiles.Milliseconds.ToString("F1", culture)} compiling={PipelinesCompiling} " +
             $"images={_imageCache.ImageCount} image_mb={_imageCache.TotalUsedMemory / (1024 * 1024)} " +
             $"sampled_dcc_clears={_imageCache.TakeSampledDccClears()} " +
+            // Shaders whose control flow the structured emitter could express, against
+            // the ones that fell back to the PC dispatcher: a dispatcher shader keeps the
+            // whole guest register file live across its loop, so a rising count here is
+            // the first thing to look at when GPU time will not come down.
+            $"msl_structured={ShaderCompiler.Metal.Gen5MslTranslator.Statistics.ControlFlowForms.Structured} " +
+            $"msl_dispatcher={ShaderCompiler.Metal.Gen5MslTranslator.Statistics.ControlFlowForms.Dispatcher} " +
             $"uploads={uploads} writebacks={writebacks} evictions={evictions} failed={failed}");
         _slowWaitReports = 0;
         ResetSlowCompletionReports();
@@ -1182,7 +1188,7 @@ internal sealed partial class MetalRenderHost :
         Console.Error.WriteLine(
             $"[METAL-V2][TRACE] created={created} end_clear={endClear} end_target={endTarget} " +
             $"end_transfer={endTransfer} end_compute={endCompute} targetless={targetless} " +
-            $"transfer_causes=[{TakeTransferCauses()}] " +
+            $"transfer_causes=[{TakeTransferCauses()}] clears=[{TakeClearArrivals()}] " +
             $"gpu_busy_n={gpuBusySamples} event_ready={eventReady} event_waited={eventWaited} " +
             $"event_wait_ms={eventWaitMs.ToString("F1", culture)} " +
             $"event_wake_ms={eventWakeMs.ToString("F1", culture)} " +
