@@ -623,6 +623,39 @@ guest fill that does not touch the open render target could be deferred to the n
 natural encoder boundary or done on the host. An upload bound mid-pass genuinely has to
 end the encoder, and there are only a handful of those.
 
+What those teardowns actually are is not what the first reading said. `end_transfer` is
+incremented inside `EndEncoders`, which `BeginTransfer` and `FlushCommandBuffer` both
+call, so it counts every pass closed on the way to a transfer *or* a flush rather than
+transfers alone. Counting the transfers by cause, and counting how a guest clear arrives,
+names the real source:
+
+    transfer_causes=[Upload=22 ColorClear=1490 GuestFill=1490]
+    clears=[no_pass=0 empty_pass=0 drawn_pass=0]
+
+`ClearColorTargets` is never called — the guest issues no clear at all. The 1490 colour
+clears and 1490 guest fills are one pair each, and that pairing is `MaterializeDccClear`:
+a real clear of the image followed by the fill that writes the already-materialized
+sentinel into the guest's DCC metadata. Twenty-four materializations a frame, two
+render-pass teardowns apiece.
+
+They repeat because the sentinel is written by the GPU while the check that reads it back
+is a host read of the same bytes. Between the fill being recorded and the GPU running it,
+every lookup of that surface sees the old uniform clear code and materializes again.
+
+Making the sentinel host-visible removes the repeat exactly as expected — `end_transfer`
+1536 to 111, the clear/fill pairs to zero, peak frame rate 32 to 57 — but it is **not
+landed**. Two runs after it showed the card panels missing where the run before had drawn
+them, on a machine loaded enough that one of those runs managed 0.5 fps, so a regression
+and the title simply not getting that far are indistinguishable. Writing guest memory
+earlier than before is a plausible cause of exactly that symptom. The cause is understood
+and the measurement stands; the fix needs a quiet machine to confirm, and a version that
+suppresses the repeat host-side without changing when guest memory is written is the
+safer shape.
+
+Separately, the panel text is **not** globally broken: the same run renders a full
+sentence of crisp white text on the loading screen. Whatever is missing from the card
+panels is specific to them.
+
 Still open from the earlier triage: `A GPU-written image has no writable guest window:
 address=0x801C6F0000 size=0x400000`, now with its reason — *not one backed span
 (contiguous prefix about 0x240000 of 0x400000)*. The piecewise writeback added for Demon's

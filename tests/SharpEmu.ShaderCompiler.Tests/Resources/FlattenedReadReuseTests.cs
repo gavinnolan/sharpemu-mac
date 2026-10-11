@@ -79,8 +79,8 @@ public sealed class FlattenedReadReuseTests
         Assert.DoesNotContain("sharpemu_load_device_dword", kernel);
         for (uint component = 0; component < components; component++)
         {
-            Assert.Contains($"s[{16 + component}] =", metal.Source);
-            Assert.Contains($"s[{32 + component}] =", metal.Source);
+            Assert.Contains($"s{16 + component} =", metal.Source);
+            Assert.Contains($"s{32 + component} =", metal.Source);
             Assert.Equal(2, metal.Source.Split($".flattened_table[{component}u]").Length - 1);
         }
     }

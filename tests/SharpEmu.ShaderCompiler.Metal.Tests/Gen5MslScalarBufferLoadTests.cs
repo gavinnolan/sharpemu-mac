@@ -24,19 +24,19 @@ public sealed class Gen5MslScalarBufferLoadTests
         var source = Compile(destination: 12, dynamicOffsetRegister: 12);
 
         // The offset is snapshotted once, before the first component's store.
-        Assert.Matches(@"uint t\d+ = s\[12\];", source);
+        Assert.Matches(@"uint t\d+ = s12;", source);
 
         // Neither component's address may be built from the register file, which the
         // first store clobbers.
-        Assert.DoesNotContain("(s[12] + 0u)", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("(s[12] + 4u)", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("(s12 + 0u)", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("(s12 + 4u)", source, StringComparison.Ordinal);
     }
 
     [Fact]
     public void MultiDwordLoadWithADisjointSoffsetStillAddressesBothComponents()
     {
         var source = Compile(destination: 12, dynamicOffsetRegister: 20);
-        Assert.Matches(@"uint t\d+ = s\[20\];", source);
+        Assert.Matches(@"uint t\d+ = s20;", source);
         Assert.Contains("+ 0u) + bias[0])", source, StringComparison.Ordinal);
         Assert.Contains("+ 4u) + bias[0])", source, StringComparison.Ordinal);
     }
