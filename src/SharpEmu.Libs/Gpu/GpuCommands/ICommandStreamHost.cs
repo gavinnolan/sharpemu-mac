@@ -131,6 +131,14 @@ public interface ICommandStreamHost
     // Other hosts retain the existing immediate interpreter label writes.
     bool DefersEndOfPipeLabels => false;
 
+    /// <summary>Whether this host publishes one kind of label itself, after its work.</summary>
+    /// <remarks>
+    /// Kinds differ in what the guest does with them. A fence the guest polls before reusing
+    /// the memory the work reads has to be published after that work or the reuse races it;
+    /// a timestamp is read for its value and not as permission to touch anything.
+    /// </remarks>
+    bool DefersEndOfPipeLabel(EndOfPipeWriteKind kind) => DefersEndOfPipeLabels;
+
     void RecordEndOfPipe(in EndOfPipeWrite write);
 
     // Delivers the interrupt now, without waiting for the GPU.

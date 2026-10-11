@@ -960,11 +960,22 @@ internal sealed partial class MetalRenderHost :
     /// something to wait for; the compare then suspends the submission, and the completion
     /// of that submission wakes it.
     /// </remarks>
+    // SHARPEMU_METAL_V2_POLL_WITHOUT_WAIT=0 makes a poll an ordinary read again, which
+    // waits for the GPU on the worker thread. For telling the two apart when a title
+    // misbehaves.
+    private static readonly bool PollWithoutWaiting =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_POLL_WITHOUT_WAIT") != "0";
+
     public bool TryPollGuest(ulong address, Span<byte> destination)
     {
         if (destination.IsEmpty)
         {
             return true;
+        }
+
+        if (!PollWithoutWaiting)
+        {
+            return TryReadGuest(address, destination);
         }
 
         var size = (ulong)destination.Length;

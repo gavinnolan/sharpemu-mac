@@ -247,8 +247,9 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 $"An end-of-pipe label has an invalid range: address=0x{write.Destination:X16} bytes={bytes}.");
         }
 
-        if (!GpuTimedLabels)
+        if (!GpuTimedLabels || !DefersEndOfPipeLabel(write.Kind))
         {
+            // The interpreter published these bytes as it parsed the packet.
             return false;
         }
 
@@ -366,8 +367,9 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     private void PublishEndOfPipeLabel(in EndOfPipeWrite write)
     {
         var bytes = EndOfPipeLabelBytes(write.Kind);
-        if (bytes == 0)
+        if (bytes == 0 || !DefersEndOfPipeLabel(write.Kind))
         {
+            // No payload, or the interpreter already wrote these bytes.
             return;
         }
 
@@ -402,7 +404,30 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// work has finished reuses the memory it still has to read. See
     /// <see cref="TryEncodeEndOfPipeLabel"/> and <see cref="PublishEndOfPipeLabel"/>.
     /// </summary>
-    public bool DefersEndOfPipeLabels => true;
+    public bool DefersEndOfPipeLabels => !PublishLabelsWhenParsed;
+
+    /// <summary>
+    /// A timestamp keeps the value it was sampled with and is published as the packet is
+    /// parsed; every other label waits for the work it reports.
+    /// </summary>
+    /// <remarks>
+    /// SHARPEMU_METAL_V2_EOP_CLOCKS=defer treats them like the rest. A GPU clock write is
+    /// read for its value — the guest divides by it and prints it — not as permission to
+    /// reuse memory, and deferring it only delays whoever reads it.
+    /// </remarks>
+    public bool DefersEndOfPipeLabel(EndOfPipeWriteKind kind) =>
+        DefersEndOfPipeLabels &&
+        (DeferClockLabels || kind is not (EndOfPipeWriteKind.ClockWrite or EndOfPipeWriteKind.ClockWriteBack));
+
+    private static readonly bool DeferClockLabels =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_EOP_CLOCKS") == "defer";
+
+    // SHARPEMU_METAL_V2_EOP_IMMEDIATE=1 restores publishing a label as its packet is
+    // parsed. It is wrong — it tells the guest that work still queued has finished — and
+    // it is here to tell a title that depends on the early value apart from one that
+    // merely runs slower without it.
+    private static readonly bool PublishLabelsWhenParsed =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_EOP_IMMEDIATE") == "1";
 
     // The completion runs once the GPU finishes everything recorded so far, so the
     // command buffer is committed right away instead of waiting for the next flush.
@@ -764,6 +789,12 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                     break;
             }
         }
+
+        // The batch can also end with its slice budget spent, and the worker then parks
+        // without coming back through the cases above. A label left in an uncommitted
+        // command buffer at that point is one the GPU never writes and the guest waits
+        // for: Quake's engine gave up and called abort.
+        FlushPendingLabelWrites();
     }
 
     // The presenter freed the flip slot: retry suspended heads now instead of at the
