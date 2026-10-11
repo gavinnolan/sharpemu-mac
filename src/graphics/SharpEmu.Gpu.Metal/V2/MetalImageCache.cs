@@ -1039,6 +1039,12 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         ref readonly var description = ref image.Description;
         var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
         var size = description.Data.Size;
+        // The stencil plane is named by layers, not by the depth plane's bytes: one
+        // layer of stencil is a byte per texel where one layer of depth is four, so a
+        // run's stencil bytes are its layers' stencil bytes.
+        var layers = description.TransferLayers;
+        var layerBytes = layers != 0 ? size / layers : 0;
+        var stencilLayerBytes = description.HasStencil && layers != 0 ? description.Stencil.Size / layers : 0;
         var moved = false;
         var holes = 0UL;
         for (var offset = 0UL; offset < size;)
@@ -1061,8 +1067,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             }
 
             var pieceSize = end - offset;
-            var stencil = description.HasStencil
-                ? _guestMemory.ResolveWritable(description.Stencil.Address + offset, pieceSize)
+            var stencil = stencilLayerBytes != 0 && layerBytes != 0
+                ? _guestMemory.ResolveWritable(
+                    description.Stencil.Address + (stencilLayerBytes * (offset / layerBytes)),
+                    stencilLayerBytes * Math.Max(1UL, pieceSize / layerBytes))
                 : default;
             _transfer.EncodeTextureToGuest(
                 context, in description, range, image.Texture,
