@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Text;
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Abstractions;
@@ -1046,6 +1047,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var layerBytes = layers != 0 ? size / layers : 0;
         var stencilLayerBytes = description.HasStencil && layers != 0 ? description.Stencil.Size / layers : 0;
         var written = 0UL;
+        // What the walk did, kept only once something is left behind: a walk that covers
+        // the image says nothing and allocates nothing.
+        StringBuilder? trace = null;
         for (var offset = 0UL; offset < size;)
         {
             var remaining = Math.Min(size - offset, MaxTransferPieceBytes);
@@ -1059,7 +1063,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 // covers. Step over everything that window reached - no subresource can
                 // start inside it either - and at least one page, so a range no window
                 // covers at all still advances.
-                offset += Math.Min(size - offset, Math.Max(run.Size, HoleStepBytes));
+                var step = Math.Min(size - offset, Math.Max(run.Size, HoleStepBytes));
+                trace ??= new StringBuilder();
+                Trace(trace, "skip", offset, step);
+                offset += step;
                 continue;
             }
 
@@ -1073,6 +1080,11 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 context, in description, range, image.Texture,
                 run with { Size = pieceSize }, stencil, offset, pieceSize);
             written += pieceSize;
+            if (trace != null)
+            {
+                Trace(trace, "run", offset, pieceSize);
+            }
+
             offset = end;
         }
 
@@ -1086,10 +1098,29 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 $"A GPU-written image has guest bytes no run covers, so those stay in the texture: " +
                 $"address=0x{description.Data.Address:X16} size=0x{description.Data.Size:X} " +
                 $"unwritten=0x{size - written:X} " +
+                $"{ProfileLabel("writeback", in description)} runs=[{trace}] " +
                 $"({_guestMemory.DescribeResolve(description.Data.Address, description.Data.Size)}).");
         }
 
         return written != 0;
+    }
+
+    // What a run walk did, for the warning that follows a walk which left bytes behind:
+    // which offsets carried and which were stepped over says whether the loss is a gap
+    // in the guest mapping or a cut the transfer cannot make.
+    private static void Trace(StringBuilder trace, string kind, ulong offset, ulong bytes)
+    {
+        if (trace.Length > 512)
+        {
+            return;
+        }
+
+        if (trace.Length != 0)
+        {
+            trace.Append(' ');
+        }
+
+        trace.Append($"{kind}@0x{offset:X}+0x{bytes:X}");
     }
 
     // How far a run walk steps past guest bytes no window covers. One guest page: the
