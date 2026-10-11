@@ -35,6 +35,7 @@ internal sealed partial class MetalRenderHost :
     private static readonly nint SelCommit = MetalNative.Selector("commit");
     private static readonly nint SelEndEncoding = MetalNative.Selector("endEncoding");
     private static readonly nint SelWaitUntilCompleted = MetalNative.Selector("waitUntilCompleted");
+    private static readonly nint SelWaitUntilScheduled = MetalNative.Selector("waitUntilScheduled");
     private static readonly nint SelEncodeSignalEvent = MetalNative.Selector("encodeSignalEvent:value:");
     private static readonly nint SelAddCompletedHandler = MetalNative.Selector("addCompletedHandler:");
     private static readonly nint SelSignaledValue = MetalNative.Selector("signaledValue");
@@ -291,6 +292,27 @@ internal sealed partial class MetalRenderHost :
 
         _slotTrap?.OnCommit(serial);
         MetalNative.SendVoid(_commandBuffer, SelCommit);
+        if (_pendingLabelWrites != 0 && ScheduleLabelSubmissions &&
+            System.Diagnostics.Stopwatch.GetTimestamp() - _lastCommitTimestamp > QuietQueueTicks)
+        {
+            // A queue that commits a hundred buffers in two seconds waits hundreds of
+            // milliseconds for the driver to pick one up, which nothing noticed while the
+            // host published labels itself. Now a guest thread is spinning on bytes this
+            // submission writes, and Quake's engine gives up and aborts after half a
+            // second of them. Waiting until it is scheduled makes the driver take it now;
+            // it is not waiting for the GPU, which is the whole point of writing the label
+            // on the GPU in the first place.
+            //
+            // Only on a queue that has gone quiet, which is the state the driver dawdles
+            // in: Quake commits one buffer every twenty milliseconds at its intro and
+            // waits, while Superliminal commits one every two or three and needs no
+            // prompting at all. Prompting on every label-carrying commit put Superliminal
+            // into long stalls instead, because the wait is then pure latency on the
+            // worker.
+            MetalNative.SendVoid(_commandBuffer, SelWaitUntilScheduled);
+            Interlocked.Increment(ref _scheduledLabelSubmissions);
+        }
+
         _previousCommitTime = CACurrentMediaTime();
         _lastCommitTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
         // A command buffer that fails never signals its serial, and the completion
@@ -998,6 +1020,11 @@ internal sealed partial class MetalRenderHost :
     private static readonly bool PollWithoutWaiting =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_POLL_WITHOUT_WAIT") != "0";
 
+    // SHARPEMU_METAL_V2_POLL_TRACE=1 names every address a wait packet polls and what it
+    // found there, which is the other half of the end-of-pipe trace.
+    private static readonly bool PollTrace =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_POLL_TRACE") == "1";
+
     public bool TryPollGuest(ulong address, Span<byte> destination)
     {
         if (destination.IsEmpty)
@@ -1008,6 +1035,18 @@ internal sealed partial class MetalRenderHost :
         if (!PollWithoutWaiting)
         {
             return TryReadGuest(address, destination);
+        }
+
+        if (PollTrace)
+        {
+            var read = _memory.TryRead(address, destination);
+            var polled = destination.Length >= sizeof(ulong)
+                ? System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(destination)
+                : System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(destination);
+            Console.Error.WriteLine(
+                $"[METAL-V2][POLL] address=0x{address:X16} bytes={destination.Length} value=0x{polled:X} " +
+                $"pending={_gpuWrites.PendingSerial(address, (ulong)destination.Length, CompletedSerial)} " +
+                $"submission={_submissionSerial} completed={CompletedSerial} read={read}");
         }
 
         var size = (ulong)destination.Length;
@@ -1034,6 +1073,18 @@ internal sealed partial class MetalRenderHost :
     }
 
     private long _pollFlushes;
+    private long _scheduledLabelSubmissions;
+
+    // SHARPEMU_METAL_V2_SCHEDULE_LABELS=0 leaves a label-carrying submission to the
+    // driver's own pace, which is what every title did before labels were honest.
+    private static readonly bool ScheduleLabelSubmissions =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_SCHEDULE_LABELS") != "0";
+
+    // How long since the previous commit makes this queue a quiet one.
+    private static readonly long QuietQueueTicks = System.Diagnostics.Stopwatch.Frequency / 250;
+
+    /// <summary>Label submissions the driver was asked to schedule at once.</summary>
+    public long TakeScheduledLabelSubmissions() => Interlocked.Exchange(ref _scheduledLabelSubmissions, 0);
 
     /// <summary>Commits a wait packet asked for so the bytes it polls can change.</summary>
     public long TakePollFlushes() => Interlocked.Exchange(ref _pollFlushes, 0);
@@ -1254,6 +1305,7 @@ internal sealed partial class MetalRenderHost :
             .Append(" gpu_labels=").Append(labels.GpuTimed)
             .Append(" host_labels=").Append(labels.WithoutWindow)
             .Append(" poll_flushes=").Append(TakePollFlushes())
+            .Append(" scheduled_labels=").Append(TakeScheduledLabelSubmissions())
             .Append(" keep_warm=").Append(Interlocked.Exchange(ref _keepWarmSubmissions, 0))
             .Append(" residency_skipped=").Append(TakeSkippedResidencyCalls())
             .Append(" device_address_writes=").Append(DeviceAddressWrites)

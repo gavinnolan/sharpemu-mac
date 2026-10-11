@@ -168,6 +168,13 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         var contextId = write.ContextId;
         var requestId = write.FlipRequestId;
         var encoded = TryEncodeEndOfPipeLabel(in write);
+        if (EndOfPipeTrace && !encoded)
+        {
+            Console.Error.WriteLine(
+                $"[METAL-V2][EOP] host kind={write.Kind} address=0x{write.Destination:X16} value=0x{write.Value:X16} " +
+                $"deferred={DefersEndOfPipeLabel(write.Kind)} event={write.EventId} flip={write.FlipRequestId}");
+        }
+
         switch (write.Kind)
         {
             case EndOfPipeWriteKind.InterruptOnly:
@@ -312,6 +319,20 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         NoteGuestMemoryWrite(write.Destination, (ulong)bytes, MetalGpuWriteOrigin.EndOfPipeLabel);
         _pendingLabelWrites++;
         Interlocked.Increment(ref _gpuTimedLabels);
+        if (EndOfPipeTrace)
+        {
+            var address = write.Destination;
+            var kind = write.Kind;
+            var labelValue = write.Value;
+            var queued = System.Diagnostics.Stopwatch.GetTimestamp();
+            Console.Error.WriteLine(
+                $"[METAL-V2][EOP] encode kind={kind} address=0x{address:X16} bytes={bytes} " +
+                $"value=0x{labelValue:X16} serial={serial}");
+            _completions.Enqueue(serial, () => Console.Error.WriteLine(
+                $"[METAL-V2][EOP] landed address=0x{address:X16} serial={serial} waited_ms=" +
+                ((System.Diagnostics.Stopwatch.GetTimestamp() - queued) * 1000.0 / System.Diagnostics.Stopwatch.Frequency)
+                    .ToString("F1", System.Globalization.CultureInfo.InvariantCulture)));
+        }
         return true;
     }
 
@@ -492,6 +513,12 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     private static readonly bool DeferClockLabels =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_EOP_CLOCKS") == "defer";
+
+    // SHARPEMU_METAL_V2_EOP_TRACE=1 names every label: what it is, where it goes, which
+    // submission carries it and how long that submission took to land. A title that gives
+    // up waiting for one is only diagnosable against that list.
+    private static readonly bool EndOfPipeTrace =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_EOP_TRACE") == "1";
 
     // SHARPEMU_METAL_V2_EOP_IMMEDIATE=1 restores publishing a label as its packet is
     // parsed. It is wrong — it tells the guest that work still queued has finished — and

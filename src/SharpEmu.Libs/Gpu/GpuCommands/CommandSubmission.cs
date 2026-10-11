@@ -139,4 +139,10 @@ public sealed class CommandSubmission
 
     // What the blocked slice is waiting for; the queue wakes it on that alone.
     public CommandWaitCondition Wait { get; internal set; } = CommandWaitCondition.Unknown;
+
+    // The wake generation this head was already kept runnable for. A wake that arrives
+    // while the slice runs is worth exactly one more run, and without remembering which
+    // one it was, a queue that is told of a completion every millisecond never parks at
+    // all: Poppy Playtime spun forty thousand slices in two seconds and drew nothing.
+    public ulong RacedWakeGeneration { get; internal set; }
 }

@@ -765,10 +765,14 @@ public sealed class CommandStreamQueue
                 // slice re-runs instead and reads what changed. Polling a label the GPU is
                 // about to write is exactly this race, and the timer is a hundred
                 // milliseconds against a submission that completes in one.
-                var raced = _wakeGeneration != sliceWakeGeneration;
+                var raced = _wakeGeneration != sliceWakeGeneration &&
+                    submission!.RacedWakeGeneration != _wakeGeneration;
                 submission!.Blocked = !raced;
                 if (raced)
                 {
+                    // One more run for this wake, and only one: a head that re-ran on
+                    // every wake would never park while completions keep arriving.
+                    submission.RacedWakeGeneration = _wakeGeneration;
                     WakesRacedWithSlice++;
                 }
 
