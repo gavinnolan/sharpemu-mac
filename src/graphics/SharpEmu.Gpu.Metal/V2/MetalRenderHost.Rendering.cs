@@ -32,6 +32,9 @@ internal sealed partial class MetalRenderHost
     private static readonly nint SelSetDepthPlane = MetalNative.Selector("setDepthPlane:");
     private static readonly nint SelSetLoadAction = MetalNative.Selector("setLoadAction:");
     private static readonly nint SelSetStoreAction = MetalNative.Selector("setStoreAction:");
+    private static readonly nint SelSetColorStoreAction = MetalNative.Selector("setColorStoreAction:atIndex:");
+    private static readonly nint SelSetDepthStoreAction = MetalNative.Selector("setDepthStoreAction:");
+    private static readonly nint SelSetStencilStoreAction = MetalNative.Selector("setStencilStoreAction:");
     private static readonly nint SelSetClearColor = MetalNative.Selector("setClearColor:");
     private static readonly nint SelSetClearDepth = MetalNative.Selector("setClearDepth:");
     private static readonly nint SelSetClearStencil = MetalNative.Selector("setClearStencil:");
@@ -112,6 +115,7 @@ internal sealed partial class MetalRenderHost
     private long _storeBytes;
     private long _clearedBytes;
     private long _passesEmpty;
+    private long _discardedBytes;
 
     // A pass that renders into the same attachments as the pass before last: the
     // target set left them and came straight back, so the pair stored and reloaded
@@ -121,14 +125,16 @@ internal sealed partial class MetalRenderHost
     private ulong _previousPassKey;
     private ulong _passBeforeKey;
 
-    internal (long Load, long Store, long Cleared, long Empty, long Returned) TakeAttachmentBandwidth()
+    internal (long Load, long Store, long Cleared, long Discarded, long Empty, long Returned)
+        TakeAttachmentBandwidth()
     {
         var load = Interlocked.Exchange(ref _loadBytes, 0);
         var store = Interlocked.Exchange(ref _storeBytes, 0);
         var cleared = Interlocked.Exchange(ref _clearedBytes, 0);
+        var discarded = Interlocked.Exchange(ref _discardedBytes, 0);
         var empty = Interlocked.Exchange(ref _passesEmpty, 0);
         var returned = Interlocked.Exchange(ref _passesReturned, 0);
-        return (load, store, cleared, empty, returned);
+        return (load, store, cleared, discarded, empty, returned);
     }
 
     private void NotePassIdentity(in RenderingState state)
@@ -273,6 +279,20 @@ internal sealed partial class MetalRenderHost
     private readonly uint[] _attachmentTexelBytes = new uint[MaxColorAttachments];
     private uint _depthTexelBytes;
 
+    // The subresource each attachment view addresses. A store can only be discarded
+    // when the pass covered all of it, because discarding throws the whole
+    // subresource away and not just the part the render area touched.
+    private readonly uint[] _attachmentWidths = new uint[MaxColorAttachments];
+    private readonly uint[] _attachmentHeights = new uint[MaxColorAttachments];
+    private uint _depthAttachmentWidth;
+    private uint _depthAttachmentHeight;
+
+    // The pixel sizes the open pass was created with. The live arrays above belong to
+    // whatever attachments were acquired most recently, which by the time a pass ends
+    // is the pass about to begin.
+    private readonly uint[] _passTexelBytes = new uint[MaxColorAttachments];
+    private uint _passDepthTexelBytes;
+
     // The subresources the open pass was created with, so the next draw can tell
     // whether it renders into the very same attachments.
     private readonly uint[] _passLevels = new uint[MaxColorAttachments];
@@ -332,6 +352,121 @@ internal sealed partial class MetalRenderHost
             (_depthAttachmentLevel == _passDepthLevel && _depthAttachmentSlice == _passDepthSlice);
     }
 
+    // What a pass asks for while it is open. Unknown is a promise to name the real
+    // action before encoding ends, which is the only way to let the work that follows
+    // the pass decide: a store whose pixels the very next pass clears is dead, and a
+    // tile-based GPU charges the full attachment for it.
+    private static nuint PendingStoreAction =>
+        MetalV2Diagnostics.DeferStoreActions ? Mtl.StoreActionUnknown : Mtl.StoreActionStore;
+
+    /// <summary>
+    /// Names every store action the open pass left as Unknown. A colour, depth or
+    /// stencil attachment whose whole subresource the next pass clears is discarded;
+    /// everything else is stored, including every attachment of a pass that ends with
+    /// nothing known to follow it.
+    /// </summary>
+    private void ResolveStoreActions(in RenderingState next, bool hasNext)
+    {
+        ref readonly var open = ref _renderingState;
+        for (var index = 0; index < open.ColorAttachmentCount; index++)
+        {
+            var discard = hasNext && NextPassClearsColorAttachment(in next, index);
+            MetalV2Native.SendSetStoreActionAtIndex(
+                _renderEncoder,
+                SelSetColorStoreAction,
+                discard ? Mtl.StoreActionDontCare : Mtl.StoreActionStore,
+                (nuint)index);
+            if (discard)
+            {
+                _discardedBytes += AttachmentBytes(
+                    in open, index < MaxColorAttachments ? _passTexelBytes[index] : 0);
+            }
+        }
+
+        ref readonly var openDepth = ref open.DepthStencilAttachment;
+        if (openDepth.HasDepth && openDepth.View.Handle != 0)
+        {
+            var discard = hasNext && NextPassClearsDepthStencil(in next, stencil: false);
+            MetalV2Native.SendVoidValue(
+                _renderEncoder,
+                SelSetDepthStoreAction,
+                discard ? Mtl.StoreActionDontCare : Mtl.StoreActionStore);
+            if (discard)
+            {
+                _discardedBytes += AttachmentBytes(in open, _passDepthTexelBytes);
+            }
+        }
+
+        if (openDepth.HasStencil && openDepth.View.Handle != 0)
+        {
+            var discard = hasNext && NextPassClearsDepthStencil(in next, stencil: true);
+            MetalV2Native.SendVoidValue(
+                _renderEncoder,
+                SelSetStencilStoreAction,
+                discard ? Mtl.StoreActionDontCare : Mtl.StoreActionStore);
+            if (discard)
+            {
+                _discardedBytes += AttachmentBytes(in open, 1);
+            }
+        }
+    }
+
+    // Discarding throws away the whole subresource, so the clear that follows has to
+    // cover the whole subresource: its render area at least as large as the mip, and
+    // at least as many layers as the pass being discarded wrote.
+    private bool NextPassClearsColorAttachment(in RenderingState next, int openIndex)
+    {
+        var handle = _renderingState.ColorAttachments[openIndex].View.Handle;
+        if (handle == 0)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < next.ColorAttachmentCount && index < MaxColorAttachments; index++)
+        {
+            ref readonly var candidate = ref next.ColorAttachments[index];
+            if (!candidate.IsClear || candidate.View.Handle != handle ||
+                _attachmentLevels[index] != _passLevels[openIndex] ||
+                _attachmentSlices[index] != _passSlices[openIndex] ||
+                _attachmentDepthPlanes[index] != _passDepthPlanes[openIndex])
+            {
+                continue;
+            }
+
+            return MetalPassStores.ClearCoversAttachment(
+                next.Width,
+                next.Height,
+                next.Layers,
+                next.Samples,
+                _renderingState.Layers,
+                _renderingState.Samples,
+                _attachmentWidths[index],
+                _attachmentHeights[index]);
+        }
+
+        return false;
+    }
+
+    private bool NextPassClearsDepthStencil(in RenderingState next, bool stencil)
+    {
+        ref readonly var nextDepth = ref next.DepthStencilAttachment;
+        var handle = _renderingState.DepthStencilAttachment.View.Handle;
+        return handle != 0 &&
+            nextDepth.View.Handle == handle &&
+            (stencil ? nextDepth.StencilClear : nextDepth.DepthClear) &&
+            _depthAttachmentLevel == _passDepthLevel &&
+            _depthAttachmentSlice == _passDepthSlice &&
+            MetalPassStores.ClearCoversAttachment(
+                next.Width,
+                next.Height,
+                next.Layers,
+                next.Samples,
+                _renderingState.Layers,
+                _renderingState.Samples,
+                _depthAttachmentWidth,
+                _depthAttachmentHeight);
+    }
+
     public void BeginRendering(in RenderingState state)
     {
         if (CanContinuePass(in state))
@@ -357,7 +492,7 @@ internal sealed partial class MetalRenderHost
             }
         }
 
-        EndRendering();
+        EndRenderingBefore(in state);
         EndComputeEncoder();
         var commandBuffer = EnsureCommandBuffer();
         var descriptor = MetalNative.Send(
@@ -382,7 +517,7 @@ internal sealed partial class MetalRenderHost
                     slot, SelSetDepthPlane, index < _attachmentCount ? _attachmentDepthPlanes[index] : 0);
                 MetalV2Native.SendVoidValue(
                     slot, SelSetLoadAction, attachment.IsClear ? Mtl.LoadActionClear : Mtl.LoadActionLoad);
-                MetalV2Native.SendVoidValue(slot, SelSetStoreAction, Mtl.StoreActionStore);
+                MetalV2Native.SendVoidValue(slot, SelSetStoreAction, PendingStoreAction);
                 if (attachment.IsClear)
                 {
                     MetalNative.SendVoidClearColor(slot, SelSetClearColor, ClearColorOf(in attachment));
@@ -398,7 +533,7 @@ internal sealed partial class MetalRenderHost
                 MetalV2Native.SendVoidValue(depth, SelSetSlice, _depthAttachmentSlice);
                 MetalV2Native.SendVoidValue(
                     depth, SelSetLoadAction, depthStencil.DepthClear ? Mtl.LoadActionClear : Mtl.LoadActionLoad);
-                MetalV2Native.SendVoidValue(depth, SelSetStoreAction, Mtl.StoreActionStore);
+                MetalV2Native.SendVoidValue(depth, SelSetStoreAction, PendingStoreAction);
                 if (depthStencil.DepthClear)
                 {
                     MetalNative.SendVoidDouble(
@@ -414,7 +549,7 @@ internal sealed partial class MetalRenderHost
                 MetalV2Native.SendVoidValue(stencil, SelSetSlice, _depthAttachmentSlice);
                 MetalV2Native.SendVoidValue(
                     stencil, SelSetLoadAction, depthStencil.StencilClear ? Mtl.LoadActionClear : Mtl.LoadActionLoad);
-                MetalV2Native.SendVoidValue(stencil, SelSetStoreAction, Mtl.StoreActionStore);
+                MetalV2Native.SendVoidValue(stencil, SelSetStoreAction, PendingStoreAction);
                 if (depthStencil.StencilClear)
                 {
                     MetalV2Native.SendVoidValue(stencil, SelSetClearStencil, (nuint)depthStencil.ClearWord1);
@@ -474,8 +609,10 @@ internal sealed partial class MetalRenderHost
         Array.Copy(_attachmentLevels, _passLevels, MaxColorAttachments);
         Array.Copy(_attachmentSlices, _passSlices, MaxColorAttachments);
         Array.Copy(_attachmentDepthPlanes, _passDepthPlanes, MaxColorAttachments);
+        Array.Copy(_attachmentTexelBytes, _passTexelBytes, MaxColorAttachments);
         _passDepthLevel = _depthAttachmentLevel;
         _passDepthSlice = _depthAttachmentSlice;
+        _passDepthTexelBytes = _depthTexelBytes;
     }
 
     private static MtlClearColor ClearColorOf(in RenderingAttachment attachment) => new()
@@ -486,7 +623,13 @@ internal sealed partial class MetalRenderHost
         Alpha = BitConverter.UInt32BitsToSingle(attachment.ClearWord3),
     };
 
-    public void EndRendering()
+    public void EndRendering() => FinishRendering(default, hasNext: false);
+
+    // The pass is ending because another one is about to begin, and that one is what
+    // decides whether this pass's stores are worth making.
+    private void EndRenderingBefore(in RenderingState next) => FinishRendering(in next, hasNext: true);
+
+    private void FinishRendering(in RenderingState next, bool hasNext)
     {
         if (!_renderingActive)
         {
@@ -494,13 +637,19 @@ internal sealed partial class MetalRenderHost
         }
 
         var ending = _renderingState;
-        _renderingActive = false;
-        _renderingState = default;
         if (_renderEncoder != 0)
         {
+            if (MetalV2Diagnostics.DeferStoreActions)
+            {
+                ResolveStoreActions(in next, hasNext);
+            }
+
             MetalNative.SendVoid(_renderEncoder, SelEndEncoding);
             _renderEncoder = 0;
         }
+
+        _renderingActive = false;
+        _renderingState = default;
 
         ForgetEncoderState();
         DumpPassTargets(in ending);

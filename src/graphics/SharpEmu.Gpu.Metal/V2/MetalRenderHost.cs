@@ -1264,13 +1264,15 @@ internal sealed partial class MetalRenderHost :
         // passes cost in memory traffic and which splits are paying for it. Printed
         // unconditionally because it is the one number that tells whether a pass
         // split matters, and two seconds apart it costs nothing.
-        var (loadBytes, storeBytes, clearedBytes, emptyPasses, returnedPasses) = TakeAttachmentBandwidth();
+        var (loadBytes, storeBytes, clearedBytes, discardedBytes, emptyPasses, returnedPasses) =
+            TakeAttachmentBandwidth();
         var (endClearCount, endTargetCount, endTransferCount, endComputeCount, targetlessCount) =
             TakePassBreakdown();
         Console.Error.WriteLine(
             $"[METAL-V2][TBDR] passes={passes} empty={emptyPasses} returned={returnedPasses} " +
             $"load_mb={(loadBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
-            $"store_mb={(storeBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
+            $"store_mb={((storeBytes - discardedBytes) / (1024.0 * 1024.0)).ToString("F1", culture)} " +
+            $"discarded_mb={(discardedBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
             $"cleared_mb={(clearedBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
             $"end_clear={endClearCount} end_target={endTargetCount} end_transfer={endTransferCount} " +
             $"end_compute={endComputeCount} targetless={targetlessCount} " +

@@ -33,6 +33,14 @@ internal static class MetalV2Diagnostics
     public static readonly bool ReportVertexLayout =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_REPORT_VERTEX_LAYOUT"), "1", StringComparison.Ordinal);
 
+    // SHARPEMU_METAL_V2_DEFER_STORE=0 makes every pass store every attachment the
+    // moment its descriptor is built, the way it did before the store action waited
+    // to see what the next pass does with the same attachment. Kept as a switch
+    // because asking Metal for MTLStoreActionUnknown changes what the driver can
+    // decide up front, and that is worth being able to measure against.
+    public static readonly bool DeferStoreActions =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEFER_STORE"), "0", StringComparison.Ordinal);
+
     public static void WarnOnce(string key, string message)
     {
         if (_reported.TryAdd(key, 0))

@@ -45,6 +45,11 @@ internal static class Mtl
     public const nuint StoreActionDontCare = 0;
     public const nuint StoreActionStore = 1;
 
+    // A descriptor that asks for Unknown promises to name the real action on the
+    // encoder before encoding ends, which is how a store can be discarded once the
+    // work that follows the pass is known.
+    public const nuint StoreActionUnknown = 4;
+
     // MTLPrimitiveType.
     public const nuint PrimitivePoint = 0;
     public const nuint PrimitiveLine = 1;
@@ -359,6 +364,15 @@ internal static partial class MetalV2Native
         nint selector,
         nint bytes,
         nuint length,
+        nuint index);
+
+    // -setColorStoreAction:atIndex: on a render encoder, which a descriptor's
+    // MTLStoreActionUnknown defers to.
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendSetStoreActionAtIndex(
+        nint receiver,
+        nint selector,
+        nuint action,
         nuint index);
 
     // -setBufferOffset:atIndex:

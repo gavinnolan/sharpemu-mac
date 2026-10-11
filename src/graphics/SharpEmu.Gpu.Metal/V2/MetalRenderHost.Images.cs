@@ -91,6 +91,10 @@ internal sealed partial class MetalRenderHost
         bool color,
         uint texelBytes)
     {
+        // The subresource this attachment really is, which is what a discarded store
+        // would throw away: only a pass that covers all of it can discard anything.
+        var subresourceWidth = Math.Max(1u, shape.Width >> (int)view.BaseLevel);
+        var subresourceHeight = Math.Max(1u, shape.Height >> (int)view.BaseLevel);
         var wholeImage = view.BaseLevel == 0 && view.LevelCount >= shape.MipLevels &&
             view.BaseLayer == 0 && view.LayerCount >= shape.ArrayLength;
         var level = wholeImage ? view.BaseLevel : 0;
@@ -104,6 +108,8 @@ internal sealed partial class MetalRenderHost
                 _attachmentSlices[_attachmentCount] = slice;
                 _attachmentDepthPlanes[_attachmentCount] = depthPlane;
                 _attachmentTexelBytes[_attachmentCount] = texelBytes;
+                _attachmentWidths[_attachmentCount] = subresourceWidth;
+                _attachmentHeights[_attachmentCount] = subresourceHeight;
                 _attachmentCount++;
             }
 
@@ -113,6 +119,8 @@ internal sealed partial class MetalRenderHost
         _depthAttachmentLevel = level;
         _depthAttachmentSlice = slice;
         _depthTexelBytes = texelBytes;
+        _depthAttachmentWidth = subresourceWidth;
+        _depthAttachmentHeight = subresourceHeight;
     }
 
     public void TransitionDepthAttachment(in DepthAttachmentState depth, GpuImageLayout layout, GpuImageAspect writeAspects)

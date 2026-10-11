@@ -1,0 +1,123 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+using SharpEmu.Gpu.Metal.V2;
+using Xunit;
+
+namespace SharpEmu.Gpu.Metal.Tests;
+
+// The rule that decides whether a render pass's store is dead work. Discarding one
+// is worth a whole attachment of bandwidth on a tile-based GPU and costs correctness
+// if the clear that follows does not really cover what was discarded, so the rule is
+// held to the conservative side on purpose.
+public sealed class MetalPassStoresTests
+{
+    private const uint Width = 3840;
+    private const uint Height = 2160;
+
+    [Fact]
+    public void AClearOverTheWholeSubresourceCoversTheStoreItReplaces()
+    {
+        Assert.True(MetalPassStores.ClearCoversAttachment(
+            nextWidth: Width,
+            nextHeight: Height,
+            nextLayers: 1,
+            nextSamples: 1,
+            endingLayers: 1,
+            endingSamples: 1,
+            subresourceWidth: Width,
+            subresourceHeight: Height));
+    }
+
+    [Fact]
+    public void AClearSmallerThanTheSubresourceLeavesPixelsNobodyWouldRewrite()
+    {
+        Assert.False(MetalPassStores.ClearCoversAttachment(
+            nextWidth: Width / 2,
+            nextHeight: Height,
+            nextLayers: 1,
+            nextSamples: 1,
+            endingLayers: 1,
+            endingSamples: 1,
+            subresourceWidth: Width,
+            subresourceHeight: Height));
+        Assert.False(MetalPassStores.ClearCoversAttachment(
+            nextWidth: Width,
+            nextHeight: Height - 1,
+            nextLayers: 1,
+            nextSamples: 1,
+            endingLayers: 1,
+            endingSamples: 1,
+            subresourceWidth: Width,
+            subresourceHeight: Height));
+    }
+
+    [Fact]
+    public void AClearLargerThanTheSubresourceStillCoversIt()
+    {
+        // The render area may exceed the mip it writes; what matters is that no pixel
+        // of the subresource is left behind.
+        Assert.True(MetalPassStores.ClearCoversAttachment(
+            nextWidth: Width,
+            nextHeight: Height,
+            nextLayers: 1,
+            nextSamples: 1,
+            endingLayers: 1,
+            endingSamples: 1,
+            subresourceWidth: Width / 2,
+            subresourceHeight: Height / 2));
+    }
+
+    [Fact]
+    public void AClearOfFewerLayersThanThePassWroteCoversNothing()
+    {
+        Assert.False(MetalPassStores.ClearCoversAttachment(
+            nextWidth: Width,
+            nextHeight: Height,
+            nextLayers: 1,
+            nextSamples: 1,
+            endingLayers: 6,
+            endingSamples: 1,
+            subresourceWidth: Width,
+            subresourceHeight: Height));
+        Assert.True(MetalPassStores.ClearCoversAttachment(
+            nextWidth: Width,
+            nextHeight: Height,
+            nextLayers: 6,
+            nextSamples: 1,
+            endingLayers: 6,
+            endingSamples: 1,
+            subresourceWidth: Width,
+            subresourceHeight: Height));
+    }
+
+    [Fact]
+    public void ADifferentlySampledClearIsAClearOfADifferentAttachment()
+    {
+        Assert.False(MetalPassStores.ClearCoversAttachment(
+            nextWidth: Width,
+            nextHeight: Height,
+            nextLayers: 1,
+            nextSamples: 1,
+            endingLayers: 1,
+            endingSamples: 4,
+            subresourceWidth: Width,
+            subresourceHeight: Height));
+    }
+
+    [Fact]
+    public void AnAttachmentOfUnknownSizeIsNeverProvenCovered()
+    {
+        // The pixel size and the subresource size both arrive with the attachment; a
+        // zero means nothing was recorded, and nothing recorded proves nothing.
+        Assert.False(MetalPassStores.ClearCoversAttachment(
+            nextWidth: Width,
+            nextHeight: Height,
+            nextLayers: 1,
+            nextSamples: 1,
+            endingLayers: 1,
+            endingSamples: 1,
+            subresourceWidth: 0,
+            subresourceHeight: Height));
+    }
+}
