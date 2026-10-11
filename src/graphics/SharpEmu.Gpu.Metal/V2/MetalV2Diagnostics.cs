@@ -33,13 +33,16 @@ internal static class MetalV2Diagnostics
     public static readonly bool ReportVertexLayout =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_REPORT_VERTEX_LAYOUT"), "1", StringComparison.Ordinal);
 
-    // SHARPEMU_METAL_V2_DEFER_STORE=0 makes every pass store every attachment the
-    // moment its descriptor is built, the way it did before the store action waited
-    // to see what the next pass does with the same attachment. Kept as a switch
-    // because asking Metal for MTLStoreActionUnknown changes what the driver can
-    // decide up front, and that is worth being able to measure against.
+    // SHARPEMU_METAL_V2_DEFER_STORE=1 lets a pass wait until it knows what follows it
+    // before naming its store actions, so a store the next operation clears outright is
+    // discarded. Off by default on the measurement: across Octopath and Sarah not one
+    // store was ever proven dead — no pass in either ends because a clear arrived, and
+    // the clears that do happen are materialising a surface about to be sampled rather
+    // than one just rendered into. Asking Metal for MTLStoreActionUnknown changes what
+    // the driver can decide before the pass runs, and that is not worth paying for a
+    // saving neither title has.
     public static readonly bool DeferStoreActions =
-        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEFER_STORE"), "0", StringComparison.Ordinal);
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEFER_STORE"), "1", StringComparison.Ordinal);
 
     // SHARPEMU_METAL_V2_DEFER_LABELS=0 makes an end-of-pipe label's bytes end the open
     // render pass to be copied, as they did before. A label is four or eight bytes and
