@@ -413,6 +413,12 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
         { failure = HostViewFailure.BackingUnavailable; return false; }
         try
         {
+            // Invalid arguments are refused with their own failure before the
+            // ledger's pre-effect revocation, which reports only a bare false.
+            if (address == 0 || address % PageSize != 0)
+            { failure = HostViewFailure.WrongHostAddress; return false; }
+            if (!HostViewMemory.IsValidOffset(backing, offset, size, PageSize))
+            { failure = HostViewFailure.OffsetOutOfBounds; return false; }
             lock (HostViewRegions.Gate)
             {
                 failure = HostViewFailure.WrongHostAddress;
