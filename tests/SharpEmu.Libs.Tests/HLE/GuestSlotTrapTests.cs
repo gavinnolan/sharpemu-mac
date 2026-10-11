@@ -58,6 +58,26 @@ public sealed class GuestSlotTrapTests
         Assert.Equal(0x9003263000UL, GuestSlotTrap.PageOfSlot(0x9003260000UL, 0x3720));
     }
 
+    // A producer that names its destination is tested against every adopted slot as it
+    // records it, which is what lets a watcher keep the handful of entries that could
+    // explain a change instead of every binding a submission ever resolved.
+    [Fact]
+    public void NoSlotIsCoveredWhenNoneHasBeenAdopted()
+    {
+        Assert.False(GuestSlotTrap.TryFindCoveredSlot(0x9003260000, 0x10000, out var slot));
+        Assert.Equal(0UL, slot);
+    }
+
+    [Theory]
+    [InlineData(0UL, 0UL)]
+    [InlineData(0x9003260000UL, 0UL)]
+    public void ACoveredSlotSearchRejectsAnEmptyRange(ulong address, ulong size) =>
+        Assert.False(GuestSlotTrap.TryFindCoveredSlot(address, size, out _));
+
+    [Fact]
+    public void ACoveredSlotSearchDoesNotOverflowAtTheTopOfTheAddressSpace() =>
+        Assert.False(GuestSlotTrap.TryFindCoveredSlot(ulong.MaxValue - 4, 16, out _));
+
     [Fact]
     public void AMappingOfTheWrongShapeIsIgnoredEvenWhenTheTrapIsOff()
     {
