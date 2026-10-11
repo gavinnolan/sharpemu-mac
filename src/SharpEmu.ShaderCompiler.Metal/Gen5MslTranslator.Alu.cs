@@ -100,6 +100,19 @@ public static partial class Gen5MslTranslator
                     }
 
                     var value = RawSource(instruction, 0);
+                    if (IsWave64)
+                    {
+                        // Lanes 32..63 live in the other simdgroup. Reading lane & 31 of
+                        // its own half gave each half a different scalar, and a loop
+                        // bounded by it ran a different trip count per half, so the
+                        // barriers inside it never met (a GPU hang).
+                        var wideLane = Temp("uint", $"({RawSource(instruction, 1)}) & 63u");
+                        StoreScalar(
+                            instruction.Destinations[0].Value,
+                            EmitWave64ReadLane(value, wideLane));
+                        return true;
+                    }
+
                     var lane = Temp("uint", $"({RawSource(instruction, 1)}) & 31u");
                     StoreScalar(
                         instruction.Destinations[0].Value,
@@ -1453,6 +1466,19 @@ public static partial class Gen5MslTranslator
                 $"({lo} != 0u) ? (uint)ctz({lo}) : (({hi} != 0u) ? (32u + (uint)ctz({hi})) : 0u)");
             var anyActive = Temp("bool", $"(({lo}) | ({hi})) != 0u");
             Line($"if ({anyActive} && sharpemu_lane == {first}) {{ sharpemu_wave_scratch[2] = {value}; }}");
+            Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+            var result = Temp("uint", "sharpemu_wave_scratch[2]");
+            Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+            return result;
+        }
+
+        /// <summary>Broadcasts <paramref name="value"/> from guest lane
+        /// <paramref name="lane"/> (0..63) to all lanes through the threadgroup
+        /// broadcast slot. Like V_READLANE it reads the lane whether or not EXEC
+        /// has it.</summary>
+        private string EmitWave64ReadLane(string value, string lane)
+        {
+            Line($"if (sharpemu_lane == {lane}) {{ sharpemu_wave_scratch[2] = {value}; }}");
             Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
             var result = Temp("uint", "sharpemu_wave_scratch[2]");
             Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
