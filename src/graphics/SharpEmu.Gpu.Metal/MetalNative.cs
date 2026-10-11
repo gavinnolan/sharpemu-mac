@@ -210,7 +210,11 @@ internal static partial class MetalNative
 
     /// <summary>Pins the MSL version a library is compiled against.</summary>
     public static void SetMslLanguageVersion(nint options) =>
-        SendVoidNUInt(options, Selector("setLanguageVersion:"), MslLanguageVersion);
+        SetMslLanguageVersion(options, MslLanguageVersion);
+
+    /// <summary>Pins a library to a specific MSL version, for source that needs a newer one.</summary>
+    public static void SetMslLanguageVersion(nint options, nuint version) =>
+        SendVoidNUInt(options, Selector("setLanguageVersion:"), version);
 
     /// <summary>
     /// The compile options every translated-guest MSL library is built with: fast

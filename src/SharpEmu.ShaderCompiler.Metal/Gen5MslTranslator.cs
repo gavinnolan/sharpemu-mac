@@ -297,6 +297,11 @@ public static partial class Gen5MslTranslator
                     }
                 }
 
+                if (_stage == Gen5MslStage.Pixel)
+                {
+                    ClassifyPixelInputs();
+                }
+
                 if (_stage == Gen5MslStage.Mesh)
                 {
                     // The paired pixel program is translated against the same param
@@ -364,7 +369,10 @@ public static partial class Gen5MslTranslator
                     _localSizeY,
                     _localSizeZ,
                     ArgumentLayout: _argumentLayout,
-                    MeshInfo: _meshInfo);
+                    MeshInfo: _meshInfo)
+                {
+                    UsesPerVertexInputs = UsesPerVertexPixelInputs,
+                };
                 return true;
             }
             catch (Exception exception)
@@ -534,23 +542,7 @@ public static partial class Gen5MslTranslator
                 source.AppendLine("struct Gen5PsIn");
                 source.AppendLine("{");
                 source.AppendLine("    float4 sharpemu_frag_coord [[position]];");
-                var attributes = _pixelAttributes.ToArray();
-                var locations = Gen5PixelInputMapping.ResolveLocations(
-                    _pixelInputCntl,
-                    attributes);
-                for (var index = 0; index < attributes.Length; index++)
-                {
-                    var attribute = attributes[index];
-                    var cntl = attribute < (uint)_pixelInputCntl.Length
-                        ? _pixelInputCntl[attribute]
-                        : attribute;
-                    var flat = (cntl & 0x400u) != 0 || ReadsOnlyTheProvokingVertex(attribute)
-                        ? ", flat"
-                        : string.Empty;
-                    source.AppendLine(
-                        $"    float4 attr{attribute} [[user(locn{locations[index]}){flat}]];");
-                }
-
+                EmitPixelInputMembers(source);
                 source.AppendLine("};");
                 source.AppendLine();
                 source.AppendLine("struct Gen5PsOut");

@@ -122,6 +122,7 @@ internal sealed partial class MetalRenderHost :
         _memory = memory;
         _backing = backing;
         _relay = relay;
+        PerVertexPixelInputsSupported = SupportsPerVertexPixelInputs(device);
         _sharedEvent = MetalNative.Send(device, SelNewSharedEvent);
         if (_sharedEvent == 0)
         {
@@ -188,6 +189,21 @@ internal sealed partial class MetalRenderHost :
     public bool ShaderSignedZeroInfNanPreserveFloat32Supported => true;
 
     public GpuSampleCount NoAttachmentSampleCounts => GpuSampleCount.Count1Bit;
+
+    // Per-vertex pixel inputs are MSL 4.0's metal::vertex_value (macOS 26). The feature set
+    // tables list "pre-raster per-vertex values" for Apple10 (M5) only; an M4 compiles the
+    // source but get() returns garbage, so nothing older may claim it.
+    public bool PerVertexPixelInputsSupported { get; }
+
+    private const nint GpuFamilyApple10 = 1010;
+
+    private static bool SupportsPerVertexPixelInputs(nint device)
+    {
+        var supportsFamily = MetalNative.Selector("supportsFamily:");
+        return OperatingSystem.IsMacOSVersionAtLeast(26) &&
+            MetalNative.SendBool(device, MetalNative.Selector("respondsToSelector:"), supportsFamily) &&
+            MetalNative.SendBool(device, supportsFamily, GpuFamilyApple10);
+    }
 
     public bool IsRecording => !_disposed && EnsureCommandBuffer() != 0;
 
