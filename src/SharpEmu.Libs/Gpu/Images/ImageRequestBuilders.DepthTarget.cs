@@ -58,6 +58,18 @@ public static partial class ImageRequestBuilders
         return GpuFormat.Undefined;
     }
 
+    // DB_STENCIL_READ_BASE zero with a write base set binds the stencil plane for writing only.
+    // The DB fetches stencil through the read base only when the draw tests stencil against
+    // memory: STENCIL_ENABLE without STENCIL_CLEAR_ENABLE. A draw that clears stencil, or does
+    // not test it, never reads the plane, so the attachment is the write-base plane and its prior
+    // contents stay what the draw leaves untouched. A draw that would test stencil against a
+    // missing read base stays unsupported.
+    private static bool IsWriteOnlyStencil(in DepthTargetWords depthWords) =>
+        depthWords.StencilReadBase == 0 &&
+        depthWords.StencilWriteBase != 0 &&
+        !depthWords.StencilWriteDisabled &&
+        (!depthWords.StencilTestEnabled || depthWords.StencilClearEnabled);
+
     // Builds the request for the bound depth target. Null when no depth or stencil state is active.
     public static DepthTargetResolution? DepthTarget(in DepthTargetWords depthWords, IImageFormatSupport device) =>
         DepthTargetCore(in depthWords, device, copyMode: false, writeBuffer: false);
@@ -85,6 +97,11 @@ public static partial class ImageRequestBuilders
 
         var depthAddress = copyMode && writeBuffer ? depthWords.ZWriteBase : depthWords.ZReadBase;
         var stencilAddress = copyMode && writeBuffer ? depthWords.StencilWriteBase : depthWords.StencilReadBase;
+        var stencilWriteOnly = !copyMode && hasStencil && IsWriteOnlyStencil(in depthWords);
+        if (stencilWriteOnly)
+        {
+            stencilAddress = depthWords.StencilWriteBase;
+        }
 
         // The size register is independent state; a zero encoding alone must not produce an attachment.
         var attachmentUnbound =
@@ -126,10 +143,11 @@ public static partial class ImageRequestBuilders
         if (hasStencil)
         {
             if (depthWords.StencilFormat != GuestStencilFormat.Stencil8UInt ||
-                stencilAddress == 0 || (!copyMode && !depthWords.StencilWriteDisabled && depthWords.StencilWriteBase != depthWords.StencilReadBase) || (stencilAddress & 0xFFFF) != 0)
+                stencilAddress == 0 || (!copyMode && !stencilWriteOnly && !depthWords.StencilWriteDisabled && depthWords.StencilWriteBase != depthWords.StencilReadBase) || (stencilAddress & 0xFFFF) != 0)
             {
                 throw GpuFatal.Fatal(
-                    $"The stencil attachment state is not supported: stencilInfo=0x{depthWords.StencilInfo:X8} htile={hasHtile} read=0x{depthWords.StencilReadBase:X16} write=0x{depthWords.StencilWriteBase:X16}.");
+                    $"The stencil attachment state is not supported: stencilInfo=0x{depthWords.StencilInfo:X8} htile={hasHtile} read=0x{depthWords.StencilReadBase:X16} write=0x{depthWords.StencilWriteBase:X16} " +
+                    $"depthControl=0x{depthWords.DepthControl:X8} renderControl=0x{depthWords.RenderControl:X8} view=0x{depthWords.DepthView:X8}.");
             }
         }
         else if (!copyMode && (depthWords.StencilReadBase != 0 || depthWords.StencilWriteBase != 0))
