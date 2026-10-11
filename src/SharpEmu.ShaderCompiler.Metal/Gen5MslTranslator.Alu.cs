@@ -195,8 +195,8 @@ public static partial class Gen5MslTranslator
                 "VTruncF32" => FloatResult(instruction, $"trunc({F(instruction, 0)})"),
                 "VRndneF32" => FloatResult(instruction, $"rint({F(instruction, 0)})"),
                 "VFractF32" => FloatResult(instruction, $"fract({F(instruction, 0)})"),
-                "VSqrtF32" => FloatResult(instruction, $"sqrt({F(instruction, 0)})"),
-                "VRsqF32" => FloatResult(instruction, $"rsqrt({F(instruction, 0)})"),
+                "VSqrtF32" => FloatResult(instruction, $"sqrt(sharpemu_flush_f32_denorm({F(instruction, 0)}))"),
+                "VRsqF32" => FloatResult(instruction, $"rsqrt(sharpemu_flush_f32_denorm({F(instruction, 0)}))"),
                 "VRcpF16" => Float16Result(instruction, destination, $"(1.0f / {F16(instruction, 0)})"),
                 "VSqrtF16" => Float16Result(instruction, destination, $"sqrt({F16(instruction, 0)})"),
                 "VLogF16" => Float16Result(instruction, destination, $"log2({F16(instruction, 0)})"),
@@ -212,12 +212,16 @@ public static partial class Gen5MslTranslator
                     instruction,
                     destination,
                     $"rsqrt({F16(instruction, 0)})"),
-                "VRcpF32" or "VRcpIflagF32" => FloatResult(instruction, $"(1.0f / {F(instruction, 0)})"),
-                "VLogF32" => FloatResult(instruction, $"log2({F(instruction, 0)})"),
-                "VExpF32" => FloatResult(instruction, $"exp2({F(instruction, 0)})"),
-                // GCN sin/cos take revolutions; mirror the SPIR-V Tau prescale.
-                "VSinF32" => FloatResult(instruction, $"sin({F(instruction, 0)} * {TauLiteral})"),
-                "VCosF32" => FloatResult(instruction, $"cos({F(instruction, 0)} * {TauLiteral})"),
+                // F32 denormal inputs reach rcp/rsq/sqrt/log/exp as a signed zero, as
+                // on the guest; the IEEE-flag reciprocal keeps the unflushed input.
+                "VRcpF32" => FloatResult(instruction, $"(1.0f / sharpemu_flush_f32_denorm({F(instruction, 0)}))"),
+                "VRcpIflagF32" => FloatResult(instruction, $"(1.0f / {F(instruction, 0)})"),
+                "VLogF32" => FloatResult(instruction, $"log2(sharpemu_flush_f32_denorm({F(instruction, 0)}))"),
+                "VExpF32" => FloatResult(instruction, $"exp2(sharpemu_flush_f32_denorm({F(instruction, 0)}))"),
+                // GCN sin/cos take revolutions; reduce to one cycle first, then mirror
+                // the SPIR-V Tau prescale. Only sine keeps the sign of a zero input.
+                "VSinF32" => FloatResult(instruction, $"sin(sharpemu_trig_cycle_f32({F(instruction, 0)}, true) * {TauLiteral})"),
+                "VCosF32" => FloatResult(instruction, $"cos(sharpemu_trig_cycle_f32({F(instruction, 0)}, false) * {TauLiteral})"),
                 "VLdexpF32" =>
                     FloatResult(instruction, $"ldexp({F(instruction, 0)}, as_type<int>({RawSource(instruction, 1)}))"),
                 "VMin3F16" => Float16Result(instruction, destination,

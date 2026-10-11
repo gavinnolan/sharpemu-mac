@@ -183,6 +183,10 @@ internal sealed partial class MetalRenderHost :
 
     public bool SharedInt64AtomicsEnabled => false;
 
+    // Every guest library is compiled with fast math off (MetalNative.ApplyMslCompileOptions),
+    // and Metal's precise math keeps F32 signed zero, infinity and NaN.
+    public bool ShaderSignedZeroInfNanPreserveFloat32Supported => true;
+
     public GpuSampleCount NoAttachmentSampleCounts => GpuSampleCount.Count1Bit;
 
     public bool IsRecording => !_disposed && EnsureCommandBuffer() != 0;

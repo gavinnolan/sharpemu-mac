@@ -207,6 +207,10 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
     // Metal has no 64-bit workgroup atomics here; keep the non-atomic 32-bit pair.
     bool IShaderPipelineHost.SharedInt64AtomicsEnabled => false;
 
+    // Guest libraries are compiled with fast math off, and Metal's precise math keeps
+    // F32 signed zero, infinity and NaN.
+    bool IShaderPipelineHost.ShaderSignedZeroInfNanPreserveFloat32Supported => true;
+
     RenderHostLimits IShaderPipelineHost.Limits => new(MaxDimension, MaxDimension, MaxDimension, MaxDimension);
 
     GpuSampleCount IShaderPipelineHost.NoAttachmentSampleCounts =>

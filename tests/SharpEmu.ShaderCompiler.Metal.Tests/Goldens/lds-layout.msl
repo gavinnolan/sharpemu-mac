@@ -280,6 +280,36 @@ static inline uint sharpemu_ballot(bool value)
     return (uint)(uint64_t)simd_ballot(value);
 }
 
+// The guest reciprocal, square-root, log and exp units read an F32 denormal input
+// as a zero of the same sign, so rcp/rsq/sqrt/log/exp flush it before the MSL call
+// rather than letting the denormal through to a finite result.
+static inline float sharpemu_flush_f32_denorm(float value)
+{
+    uint bits = as_type<uint>(value);
+    uint magnitude = bits & 0x7FFFFFFFu;
+    return magnitude != 0u && magnitude < 0x00800000u ? as_type<float>(bits & 0x80000000u) : value;
+}
+
+// Guest sin/cos take revolutions and reduce them to one cycle as x - floor(x), the
+// SPIR-V translator's Fract (MSL fract clamps just below 1.0, so it is not used).
+// A finite magnitude of 2^23 or more has no fraction and reduces to exactly zero;
+// infinity and NaN reduce to NaN. Sine passes a signed zero through so sin(-0) is -0.
+static inline float sharpemu_trig_cycle_f32(float value, bool preserveSignedZero)
+{
+    uint magnitude = as_type<uint>(value) & 0x7FFFFFFFu;
+    if (preserveSignedZero && magnitude == 0u)
+    {
+        return value;
+    }
+
+    if (magnitude >= 0x4B000000u && magnitude < 0x7F800000u)
+    {
+        return 0.0f;
+    }
+
+    return value - floor(value);
+}
+
 static constant float sharpemu_off_i4_table[16] =
 {
     0.0f, 0.0625f, 0.1250f, 0.1875f, 0.2500f, 0.3125f, 0.3750f, 0.4375f,
