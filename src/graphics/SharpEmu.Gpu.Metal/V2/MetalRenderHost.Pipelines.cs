@@ -403,10 +403,17 @@ internal sealed partial class MetalRenderHost
         return descriptor;
     }
 
-    // Pipeline states are built off the command-stream thread unless this is set,
-    // which keeps the old blocking behaviour for comparison.
-    private static readonly bool SynchronousPipelines =
-        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_SYNC_PIPELINES") == "1";
+    // Pipeline states can be built off the command-stream thread, which stops a long
+    // compile blocking every queue. Off by default: measured on Demon's Souls it
+    // removed the compile from the worker (pipeline_ms fell to four milliseconds a
+    // window) without making the title faster, because pipeline creation was never
+    // its cost — and a dispatch that suspends re-runs the program preparation and
+    // resource materialisation in front of the pipeline request, which are. Turning
+    // this on is worth it once a retry no longer repeats that work.
+    private static readonly bool AsynchronousPipelines =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ASYNC_PIPELINES") == "1";
+
+    private static bool SynchronousPipelines => !AsynchronousPipelines;
 
     private MetalPipelineCompiler? _compiler;
 
