@@ -31,9 +31,20 @@ public sealed class CommandStreamQueue
     public const int ComputeQueueCount = 56;
     public const int QueueCount = 1 + ComputeQueueCount;
     public const int AllBlockedRetryMilliseconds = 100;
-    // One boundary may run ahead; explicit zero keeps the synchronous diagnostic mode.
-    public static readonly int DefaultBoundariesInFlight =
-        Environment.GetEnvironmentVariable("SHARPEMU_SUSPEND_POINTS_IN_FLIGHT") == "0" ? 0 : 1;
+    // How many frame boundaries the guest may be ahead of the worker. One by default;
+    // explicit zero keeps the synchronous diagnostic mode, and a larger number is the
+    // knob for a title that calls submitDone several times a frame and spends the frame
+    // blocked in it - Poppy blocks for the whole wall clock across about seven calls a
+    // frame while the worker sits idle for sixty per cent of it.
+    public static readonly int DefaultBoundariesInFlight = ReadBoundariesInFlight();
+
+    private static int ReadBoundariesInFlight()
+    {
+        var text = Environment.GetEnvironmentVariable("SHARPEMU_SUSPEND_POINTS_IN_FLIGHT");
+        return !string.IsNullOrWhiteSpace(text) && int.TryParse(text, out var value) && value >= 0
+            ? Math.Min(value, 64)
+            : 1;
+    }
 
     private readonly ICommandStreamHost _host;
     private readonly object _gate = new();

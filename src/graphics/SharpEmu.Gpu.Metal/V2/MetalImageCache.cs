@@ -290,6 +290,12 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
             if (other.IsGpuModified)
             {
+                // Correct and expensive: the overlap may be a fraction of either surface,
+                // but a cached image is dirty as a whole, so a 64 KiB overlap on a 19 MiB
+                // target costs a full retile of one and a full detile of the other, every
+                // time the pair is used. Naming the pairs once says which surfaces are
+                // paying it; the rate is in the CHURN line's wb_overlap and up_alias.
+                ReportAliasPair(image, other);
                 WriteBackToGuest(other, MetalWritebackCause.ImageOverlap);
                 image.MarkCpuDirty(MetalImageDirtyCause.AliasWrite);
                 _aliasPublishes++;
@@ -592,6 +598,28 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         return false;
+    }
+
+    // One line per distinct pair of aliasing surfaces, with the bytes each round trip
+    // moves, so the cost can be attributed to the surfaces rather than to a counter.
+    private static void ReportAliasPair(MetalCachedImage requested, MetalCachedImage overlapped)
+    {
+        ref readonly var wanted = ref requested.Description;
+        ref readonly var held = ref overlapped.Description;
+        var overlapStart = Math.Max(wanted.Data.Address, held.Data.Address);
+        var overlapEnd = Math.Min(
+            wanted.Data.Address + wanted.Data.Size, held.Data.Address + held.Data.Size);
+        var shared = overlapEnd > overlapStart ? overlapEnd - overlapStart : 0;
+        MetalV2Diagnostics.WarnOnce(
+            $"alias-pair:{wanted.PixelFormat}:{wanted.Extent.Width}x{wanted.Extent.Height}:" +
+            $"{held.PixelFormat}:{held.Extent.Width}x{held.Extent.Height}",
+            "Two cached images share guest bytes, so every use of one publishes the other and " +
+            "reloads itself whole: " +
+            $"requested={wanted.PixelFormat} {wanted.Extent.Width}x{wanted.Extent.Height} " +
+            $"0x{wanted.Data.Address:X16}+0x{wanted.Data.Size:X}, " +
+            $"overlapped={held.PixelFormat} {held.Extent.Width}x{held.Extent.Height} " +
+            $"0x{held.Data.Address:X16}+0x{held.Data.Size:X}, " +
+            $"shared=0x{shared:X} of 0x{wanted.Data.Size:X}/0x{held.Data.Size:X}.");
     }
 
     private static bool SameExtent(in GpuExtent3D left, in GpuExtent3D right) =>

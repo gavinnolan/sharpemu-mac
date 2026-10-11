@@ -405,7 +405,7 @@ internal static class MetalGuestFormats
             (20, 0, _) => MtlPixelFormat.R32Uint,
             (29, 0, _) or (4, 0, _) => MtlPixelFormat.R32Float,
             (1, 0, _) or (36, 0, _) => MtlPixelFormat.R8Unorm,
-            (49, 0, _) => MtlPixelFormat.R8Uint,
+            (1, 4, _) or (49, 0, _) => MtlPixelFormat.R8Uint,
             (3, 0, _) => MtlPixelFormat.Rg8Unorm,
             (5, 0, _) => MtlPixelFormat.Rg16Unorm,
             (7, 0, _) => MtlPixelFormat.Rg11B10Float,
