@@ -282,6 +282,10 @@ internal sealed class ShaderProgramCache
             }
         }
 
+        // A cached materialization is shared with draws that differ in user-data words its
+        // plan never reads, so the words the binding layout hands the shader come from here.
+        snapshot = snapshot.WithUserData(source.UserData);
+
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPermutationLookup))
         {
             foreach (var candidate in entry.Permutations)

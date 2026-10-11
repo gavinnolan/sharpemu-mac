@@ -115,7 +115,7 @@ public sealed class ResourceMaterializationCache
                 unreadable |= variantUnreadable;
             }
 
-            if (TryRefreshTable(key, cached, plan, inputs, residentReader, out var refreshed))
+            if (TryRefreshTable(cached, plan, inputs, residentReader, out var refreshed))
             {
                 TableRefreshes++;
                 Interlocked.Increment(ref _totalRefreshes);
@@ -148,6 +148,7 @@ public sealed class ResourceMaterializationCache
                     ReadsClean = inputs.ReadsClean,
                     ComputeState = inputs.ComputeState,
                     TablePhase = recorder.TablePhase,
+                    UserDataReads = recorder.UserDataReads,
                 };
             }
             if (!ResourceMaterializer.Materialize(plan, recording, ref snapshot, ref specialization, out failure))
@@ -179,7 +180,9 @@ public sealed class ResourceMaterializationCache
                 }
             }
 
-            Store(key, built);
+            // The walk may have taught the plan a word no earlier walk read, which moves the
+            // bucket; the entry belongs in the one the next lookup of this draw will compute.
+            Store(KeyOf(plan, inputs), built);
             return true;
         }
         finally
@@ -194,7 +197,7 @@ public sealed class ResourceMaterializationCache
     // flattened table, only the table is evaluated again. It is refused when the plan's
     // specialization reads or extends the table (indirect or candidate tables), when the table
     // now reads a word the entry did not validate, or when a word moved between the two reads.
-    private bool TryRefreshTable(ulong key, Entry cached, ShaderResourcePlan plan, ResourceRuntimeInputs inputs,
+    private bool TryRefreshTable(Entry cached, ShaderResourcePlan plan, ResourceRuntimeInputs inputs,
         ResidentGuestBytesReader residentReader, out Entry refreshed)
     {
         refreshed = null!;
@@ -233,6 +236,7 @@ public sealed class ResourceMaterializationCache
                 ReadResidentMemory = recorder.WrapResident(inputs.ReadResidentMemory),
                 ReadsClean = inputs.ReadsClean,
                 ComputeState = inputs.ComputeState,
+                UserDataReads = recorder.UserDataReads,
             };
             var cachedTable = cached.Snapshot.FlattenedResourceTable;
             ReadingTable = true;
@@ -262,10 +266,18 @@ public sealed class ResourceMaterializationCache
                 cachedTable.AsSpan((int)slot, ShaderResourcePlan.WrittenRangeDwordCount).CopyTo(table.AsSpan((int)slot));
 
             var previous = cached.Snapshot;
+            // The refreshed table was evaluated from this draw's user data, and the walk may
+            // have read a word the cached entry never did, so the entry records both.
+            var userData = new uint[inputs.UserData.Count];
+            for (var index = 0; index < userData.Length; index++)
+                userData[index] = inputs.UserData[index];
+            plan.NoteUserDataReads(recorder.UserDataReads.Mask);
             refreshed = new Entry
             {
                 Plan = cached.Plan,
-                UserData = cached.UserData,
+                UserData = userData,
+                UserDataMask = cached.UserDataMask | recorder.UserDataReads.Mask,
+                UserDataAllWords = cached.UserDataAllWords || recorder.UserDataReads.Overflowed,
                 ShaderBase = cached.ShaderBase,
                 ComputeState = cached.ComputeState,
                 RangeAddresses = cached.RangeAddresses,
@@ -287,7 +299,7 @@ public sealed class ResourceMaterializationCache
                 Specialization = cached.Specialization,
                 Next = cached.Next,
             };
-            Store(key, refreshed);
+            Store(KeyOf(plan, inputs), refreshed);
             return true;
         }
         finally
@@ -338,6 +350,10 @@ public sealed class ResourceMaterializationCache
         return true;
     }
 
+    // Only the words a walk of this plan has been seen to read take part. A draw that rewrites
+    // any other word — inline constants the shader reads straight from its binding layout, say,
+    // which the descriptors never touch — then lands in the same bucket as the materialization
+    // it can reuse, and the entry's own recorded words decide whether it does.
     private static ulong KeyOf(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
     {
         var hash = new HashCode();
@@ -346,14 +362,19 @@ public sealed class ResourceMaterializationCache
         hash.Add(inputs.ComputeState);
         var userData = inputs.UserData;
         hash.Add(userData.Count);
-        for (var index = 0; index < userData.Count; index++)
-            hash.Add(userData[index]);
-        var low = (uint)hash.ToHashCode();
         // A second, independent mix keeps accidental collisions out of the 64-bit key.
         var high = 0x9E3779B9u;
-        for (var index = 0; index < userData.Count; index++)
-            high = (high ^ userData[index]) * 0x01000193u;
-        return ((ulong)high << 32) | low;
+        var mask = plan.UserDataReadMask;
+        var count = Math.Min(userData.Count, UserDataReadLog.Width);
+        for (var offset = 0; mask != 0 && offset < count; offset++, mask >>= 1)
+        {
+            if ((mask & 1) == 0) continue;
+            var word = userData[offset];
+            hash.Add(word);
+            high = (high ^ word) * 0x01000193u;
+        }
+
+        return ((ulong)high << 32) | (uint)hash.ToHashCode();
     }
 
     private bool TryFind(ulong key, ShaderResourcePlan plan, ResourceRuntimeInputs inputs, out Entry entry)
@@ -410,6 +431,10 @@ public sealed class ResourceMaterializationCache
         public required int[] RangeOffsets { get; init; }
         public required int[] RangeLengths { get; init; }
         public required bool[] RangeClean { get; init; }
+        // The user-data words this walk read, one bit per offset, and whether it read one
+        // past the mask's width, in which case every word is compared.
+        public required ulong UserDataMask { get; init; }
+        public required bool UserDataAllWords { get; init; }
         // Per recorded dword: read only while the flattened table was evaluated.
         public required bool[] WordTableOnly { get; init; }
         // The table has the plan's plain layout, so no specialization read or extended it.
@@ -419,14 +444,29 @@ public sealed class ResourceMaterializationCache
         public required ResourceSpecialization Specialization { get; init; }
         public Entry? Next { get; set; }
 
+        // Only the words this walk read are compared. It reached its descriptors without
+        // reading any other word, so a draw that differs in one of those evaluates the same.
         public bool Matches(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
         {
             if (!ReferenceEquals(Plan, plan) || ShaderBase != inputs.ShaderBase ||
                 !Nullable.Equals(ComputeState, inputs.ComputeState) || UserData.Length != inputs.UserData.Count)
                 return false;
-            for (var index = 0; index < UserData.Length; index++)
-                if (UserData[index] != inputs.UserData[index])
+            if (UserDataAllWords)
+            {
+                for (var index = 0; index < UserData.Length; index++)
+                    if (UserData[index] != inputs.UserData[index])
+                        return false;
+                return true;
+            }
+
+            var mask = UserDataMask;
+            for (var offset = 0; mask != 0; offset++, mask >>= 1)
+            {
+                if ((mask & 1) == 0) continue;
+                if (offset >= UserData.Length || UserData[offset] != inputs.UserData[offset])
                     return false;
+            }
+
             return true;
         }
     }
@@ -466,9 +506,12 @@ public sealed class ResourceMaterializationCache
             _residentReader = null;
             _inTable = false;
             Failed = false;
+            UserDataReads.Reset();
         }
 
         public bool Failed { get; private set; }
+
+        public UserDataReadLog UserDataReads { get; } = new();
 
         public List<(ulong Address, uint Word, bool Clean, bool Table)> Reads => _reads;
 
@@ -575,10 +618,13 @@ public sealed class ResourceMaterializationCache
             var userData = new uint[inputs.UserData.Count];
             for (var index = 0; index < userData.Length; index++)
                 userData[index] = inputs.UserData[index];
+            plan.NoteUserDataReads(UserDataReads.Mask);
             return new Entry
             {
                 Plan = plan,
                 UserData = userData,
+                UserDataMask = UserDataReads.Mask,
+                UserDataAllWords = UserDataReads.Overflowed,
                 ShaderBase = inputs.ShaderBase,
                 ComputeState = inputs.ComputeState,
                 RangeAddresses = addresses,

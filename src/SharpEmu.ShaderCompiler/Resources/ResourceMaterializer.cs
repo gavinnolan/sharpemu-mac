@@ -265,7 +265,10 @@ public static class ResourceMaterializer
             snapshot.BufferCandidateTables.Add(candidateTable);
         }
 
-        snapshot.UserData = inputs.UserData.ToArray();
+        // One draw's user data is built for that draw and never written again, so the snapshot
+        // can hold the array it was given; a copy only matters once the snapshot is cached,
+        // and a cached one is handed out carrying the user data of the draw that reuses it.
+        snapshot.UserData = inputs.UserData as uint[] ?? inputs.UserData.ToArray();
         return true;
     }
 
