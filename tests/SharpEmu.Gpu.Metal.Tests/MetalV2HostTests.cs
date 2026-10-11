@@ -14,6 +14,29 @@ namespace SharpEmu.Gpu.Metal.Tests;
 // translations between the neutral vocabulary and Metal.
 public sealed class MetalV2HostTests
 {
+    [Theory]
+    [InlineData(1u, 4u, true)]
+    [InlineData(3u, 4u, true)]
+    [InlineData(4u, 4u, true)]
+    [InlineData(6u, 6u, false)]
+    [InlineData(2u, 2u, false)]
+    public void RectangleListDrawIsAStripOnlyForOneRectangle(uint count, uint drawn, bool strip)
+    {
+        var (type, vertices) = MetalV2Formats.RectangleDraw(GpuPrimitiveTopology.PatchList, indexed: false, count);
+        Assert.Equal(drawn, vertices);
+        Assert.Equal(strip ? Mtl.PrimitiveTriangleStrip : Mtl.PrimitiveTriangle, type);
+    }
+
+    [Fact]
+    public void IndexedRectangleListAndOtherTopologiesKeepTheirCount()
+    {
+        var (type, vertices) = MetalV2Formats.RectangleDraw(GpuPrimitiveTopology.PatchList, indexed: true, 3);
+        Assert.Equal(3u, vertices);
+        Assert.Equal(Mtl.PrimitiveTriangle, type);
+        Assert.Equal(3u, MetalV2Formats.RectangleDraw(GpuPrimitiveTopology.TriangleList, indexed: false, 3).VertexCount);
+        Assert.Equal(3u, MetalV2Formats.TopologyClass(GpuPrimitiveTopology.PatchList));
+    }
+
     [Fact]
     public void ErasedImageSlotStopsResolvingAndItsIndexIsReused()
     {
