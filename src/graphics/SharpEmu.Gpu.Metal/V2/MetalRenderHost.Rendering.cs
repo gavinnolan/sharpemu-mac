@@ -165,10 +165,8 @@ internal sealed partial class MetalRenderHost
         _previousPassKey = key;
     }
 
-    // One attachment's cost for one pass: the render area, every sample, and the
-    // bytes one pixel of that attachment really occupies.
     private static long AttachmentBytes(in RenderingState state, uint texelBytes) =>
-        (long)state.Width * state.Height * Math.Max(1u, state.Samples) * texelBytes;
+        MetalPassStores.AttachmentBytes(state.Width, state.Height, state.Samples, texelBytes);
 
     private void NoteAttachmentTraffic(in RenderingState state)
     {

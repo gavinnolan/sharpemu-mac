@@ -10,6 +10,15 @@ namespace SharpEmu.Gpu.Metal.V2;
 internal static class MetalPassStores
 {
     /// <summary>
+    /// What one attachment costs a tile-based GPU for one pass: the render area, every
+    /// sample of it, and the bytes one pixel of that attachment really occupies. A load
+    /// pays it once and a store pays it again, which is why a pass split is expensive
+    /// however few draws the pass contained.
+    /// </summary>
+    public static long AttachmentBytes(uint width, uint height, uint samples, uint texelBytes) =>
+        (long)width * height * Math.Max(1u, samples) * texelBytes;
+
+    /// <summary>
     /// Whether the clear that the next pass performs on an attachment covers all of
     /// what the pass that is ending would have stored. Discarding a store throws away
     /// the entire subresource, not only the part the render area touched, so the clear

@@ -16,6 +16,25 @@ public sealed class MetalPassStoresTests
     private const uint Height = 2160;
 
     [Fact]
+    public void AnAttachmentCostsItsAreaItsSamplesAndItsPixelSize()
+    {
+        // A 4K RGBA16F colour target is 31.6 MiB to load and the same again to store,
+        // which is the whole reason a pass split is worth counting.
+        Assert.Equal(3840L * 2160 * 8, MetalPassStores.AttachmentBytes(Width, Height, 1, 8));
+        Assert.Equal(3840L * 2160 * 4 * 4, MetalPassStores.AttachmentBytes(Width, Height, 4, 4));
+
+        // A sample count of zero is the shared state saying nothing rather than saying
+        // no samples, and an attachment is never worth no pixels.
+        Assert.Equal(3840L * 2160 * 4, MetalPassStores.AttachmentBytes(Width, Height, 0, 4));
+    }
+
+    [Fact]
+    public void AnAttachmentWhosePixelSizeWasNeverRecordedCostsNothing()
+    {
+        Assert.Equal(0, MetalPassStores.AttachmentBytes(Width, Height, 1, 0));
+    }
+
+    [Fact]
     public void AClearOverTheWholeSubresourceCoversTheStoreItReplaces()
     {
         Assert.True(MetalPassStores.ClearCoversAttachment(
