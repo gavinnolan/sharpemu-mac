@@ -162,6 +162,71 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void Wave64ReadLaneReadsTheFullWaveInBothHalves()
+    {
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.Wave64ReadLane, new byte[512],
+            waveLaneCount: 64, localSizeX: 64, threadsPerThreadgroup: 64);
+
+        // Lane l holds 3 * l + 7: every lane, in either half, sees lane 63's and lane 5's.
+        for (var lane = 0; lane < 64; lane++)
+        {
+            Assert.Equal(3u * 63u + 7u, ReadDword(result, lane * 8));
+            Assert.Equal(3u * 5u + 7u, ReadDword(result, lane * 8 + 4));
+        }
+    }
+
+    [Fact]
+    public void Wave64WriteLaneChangesOnlyTheAddressedLane()
+    {
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.Wave64WriteLane, new byte[256],
+            waveLaneCount: 64, localSizeX: 64, threadsPerThreadgroup: 64);
+
+        // Lane 40 is in the upper half; lane 8 (its twin in the lower half) must not change.
+        for (var lane = 0; lane < 64; lane++)
+        {
+            Assert.Equal(lane == 40 ? 55u : (uint)lane, ReadDword(result, lane * 4));
+        }
+    }
+
+    [Fact]
+    public void Wave64MaskBitsAreReadAtTheFullLaneIndex()
+    {
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.Wave64MaskBits, new byte[512],
+            waveLaneCount: 64, localSizeX: 64, threadsPerThreadgroup: 64);
+
+        const ulong Mask = 0xF0F0F0F0_0000FFFFul;
+        for (var lane = 0; lane < 64; lane++)
+        {
+            var expected = (uint)((Mask >> lane) & 1ul);
+            Assert.Equal(expected, ReadDword(result, lane * 8));      // SGPR mask bit
+            Assert.Equal(expected, ReadDword(result, lane * 8 + 4));  // saveexec EXEC bit
+        }
+    }
+
+    [Fact]
+    public void Wave64InALargerWorkgroupTranslatesWithoutTheThreadgroupBridge()
+    {
+        // The SPIR-V translator bridges only a 64-thread (one-wave) workgroup; a 256-thread
+        // group would share the half-indexed scratch between its four waves.
+        var bridged = Gen5ComputeFixtures.CompileRequestOrThrow(
+            Gen5ComputeFixtures.Wave64Broadcast, waveLaneCount: 64, localSizeX: 64);
+        Assert.Contains("sharpemu_wave_scratch", bridged.Source);
+
+        foreach (var fixture in new[] { Gen5ComputeFixtures.Wave64Broadcast, Gen5ComputeFixtures.Wave64ReadLane })
+        {
+            var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture, waveLaneCount: 64, localSizeX: 256);
+            Assert.DoesNotContain("sharpemu_wave_scratch", shader.Source);
+            Assert.DoesNotContain("threadgroup_barrier", shader.Source);
+        }
+    }
+
+    [Fact]
     public void TypedLoadFixtureReturnsInstructionFormatComponents()
     {
         if (SkipWithoutMetalDevice("the execution test")) return;

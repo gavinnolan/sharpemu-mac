@@ -100,6 +100,19 @@ public static partial class Gen5MslTranslator
                     }
 
                     var value = RawSource(instruction, 0);
+                    if (IsWave64)
+                    {
+                        // Lanes 32..63 live in the other simdgroup. Reading lane & 31 of
+                        // its own half gave each half a different scalar, and a loop
+                        // bounded by it ran a different trip count per half, so the
+                        // barriers inside it never met (a GPU hang).
+                        var wideLane = Temp("uint", $"({RawSource(instruction, 1)}) & 63u");
+                        StoreScalar(
+                            instruction.Destinations[0].Value,
+                            EmitWave64ReadLane(value, wideLane));
+                        return true;
+                    }
+
                     var lane = Temp("uint", $"({RawSource(instruction, 1)}) & 31u");
                     StoreScalar(
                         instruction.Destinations[0].Value,
@@ -117,9 +130,12 @@ public static partial class Gen5MslTranslator
                     var destination = DestinationVector(instruction);
                     var source = RawSource(instruction, 0);
                     var lane = RawSource(instruction, 1);
+                    // Under wave64 sharpemu_lane is the full 0..63 index, so only the
+                    // one matching lane writes; wave32 has 32 lanes.
+                    var laneMask = IsWave64 ? "63u" : "31u";
                     StoreVector(
                         destination,
-                        $"(sharpemu_lane == (({lane}) & 31u)) ? ({source}) : v[{destination}]",
+                        $"(sharpemu_lane == (({lane}) & {laneMask})) ? ({source}) : v[{destination}]",
                         guardWithExec: false);
                     return true;
                 }
@@ -1459,6 +1475,19 @@ public static partial class Gen5MslTranslator
             return result;
         }
 
+        /// <summary>Broadcasts <paramref name="value"/> from guest lane
+        /// <paramref name="lane"/> (0..63) to all lanes through the threadgroup
+        /// broadcast slot. Like V_READLANE it reads the lane whether or not EXEC
+        /// has it.</summary>
+        private string EmitWave64ReadLane(string value, string lane)
+        {
+            Line($"if (sharpemu_lane == {lane}) {{ sharpemu_wave_scratch[2] = {value}; }}");
+            Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+            var result = Temp("uint", "sharpemu_wave_scratch[2]");
+            Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+            return result;
+        }
+
         /// <summary>Stores the wave ballot of <paramref name="condition"/> into the
         /// mask register pair (low, low+1). Wave32 fills the low dword and clears
         /// the high; wave64 bridges both 32-wide halves through threadgroup
@@ -2176,7 +2205,7 @@ public static partial class Gen5MslTranslator
                 StoreScalar64(destination, oldExec);
                 Line($"s[{ExecLoRegister}] = (uint){mask};");
                 Line($"s[{ExecHiRegister}] = (uint)({mask} >> 32);");
-                Line($"exec = ((((uint){mask}) >> sharpemu_lane) & 1u) != 0u;");
+                Line($"exec = (({mask} >> sharpemu_lane) & 1ul) != 0ul;");
                 Line($"scc = {mask} != 0ul;");
                 return true;
             }
@@ -2566,7 +2595,9 @@ public static partial class Gen5MslTranslator
             { Kind: Gen5OperandKind.ScalarRegister, Value: VccLoRegister } => "vcc",
             { Kind: Gen5OperandKind.ScalarRegister, Value: ExecLoRegister } => "exec",
             { Kind: Gen5OperandKind.ScalarRegister } scalar =>
-                $"(((s[{scalar.Value}] >> sharpemu_lane) & 1u) != 0u)",
+                IsWave64
+                    ? $"({LaneBit($"s[{scalar.Value}]", $"s[{scalar.Value + 1}]")})"
+                    : $"(((s[{scalar.Value}] >> sharpemu_lane) & 1u) != 0u)",
             _ => throw new NotSupportedException("mask operand must be a scalar register"),
         };
     }

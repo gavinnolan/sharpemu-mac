@@ -194,6 +194,67 @@ internal static class Gen5ComputeFixtures
         return shader;
     }
 
+    // Per-lane wave64 programs. Every lane stores its results at lane * 8 (v4), so a
+    // test can read each of the 64 lanes back. v0 = the full 0..63 lane index.
+    private static readonly uint[] Wave64LaneIndex =
+    [
+        0xD7650000, 0x000100C1, // v_mbcnt_lo_u32_b32 v0, -1, 0
+        0xD7660000, 0x000200C1, // v_mbcnt_hi_u32_b32 v0, -1, v0        lane 0..63
+    ];
+
+    // v1 = 3 * lane + 7; every lane reads lane 63 and lane 5 of the whole wave.
+    public static readonly Gen5ComputeFixture Wave64ReadLane = new(
+        "wave64-readlane",
+        [
+            .. Wave64LaneIndex,
+            0xD5430001, 0x021D0700, // v_mad_u32_u24 v1, v0, 3, 7
+            0xD7600000, 0x00017F01, // v_readlane_b32 s0, v1, 63
+            0xD7600001, 0x00010B01, // v_readlane_b32 s1, v1, 5
+            0x7E040200,             // v_mov_b32 v2, s0
+            0x7E060201,             // v_mov_b32 v3, s1
+            0x34080083,             // v_lshlrev_b32 v4, 3, v0
+            0xE0701000, 0x80020204, // buffer_store_dword v2, v4, s[8:11], 0 offen
+            0xE0701004, 0x80020304, // buffer_store_dword v3, v4, s[8:11], 0 offen offset:4
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 512);
+
+    // v1 = lane, then v_writelane_b32 v1, 55, 40 must change only lane 40.
+    public static readonly Gen5ComputeFixture Wave64WriteLane = new(
+        "wave64-writelane",
+        [
+            .. Wave64LaneIndex,
+            0x7E020300,             // v_mov_b32 v1, v0
+            0xD7610001, 0x000150B7, // v_writelane_b32 v1, 55, 40
+            0x34080082,             // v_lshlrev_b32 v4, 2, v0
+            0xE0701000, 0x80020104, // buffer_store_dword v1, v4, s[8:11], 0 offen
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 256);
+
+    // s[4:5] = 0xF0F0F0F0_0000FFFF. v2 = the lane's bit of s[4:5] through a VOP3
+    // v_cndmask_b32; v3 = 1 only on lanes that survive s_and_saveexec_b64 s[6:7], s[4:5].
+    public static readonly Gen5ComputeFixture Wave64MaskBits = new(
+        "wave64-mask-bits",
+        [
+            .. Wave64LaneIndex,
+            0xBE8403FF, 0x0000FFFF, // s_mov_b32 s4, 0x0000ffff
+            0xBE8503FF, 0xF0F0F0F0, // s_mov_b32 s5, 0xf0f0f0f0
+            0xD5010002, 0x00110280, // v_cndmask_b32 v2, 0, 1, s[4:5]
+            0x7E060280,             // v_mov_b32 v3, 0
+            0xBE862404,             // s_and_saveexec_b64 s[6:7], s[4:5]
+            0x7E060281,             // v_mov_b32 v3, 1
+            0xBEFE0406,             // s_mov_b64 exec, s[6:7]
+            0x34080083,             // v_lshlrev_b32 v4, 3, v0
+            0xE0701000, 0x80020204, // buffer_store_dword v2, v4, s[8:11], 0 offen
+            0xE0701004, 0x80020304, // buffer_store_dword v3, v4, s[8:11], 0 offen offset:4
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 512);
+
     // The request path: the fixture's own resource plan, default specialization and layout.
     private const ulong RequestHash = 0x5348_4152_5045_4D55;
     private const uint UserDataCount = 16;
