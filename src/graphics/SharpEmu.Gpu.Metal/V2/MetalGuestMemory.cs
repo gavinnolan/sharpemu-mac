@@ -264,6 +264,14 @@ internal sealed class MetalGuestMemory : IDisposable
         return recommended != 0 ? recommended : 4UL * 1024 * 1024 * 1024;
     }
 
+    /// <summary>
+    /// Records every window resolution while the slot trap is armed. The tiler and the
+    /// transfer paths bind their buffers straight to an encoder rather than through a
+    /// descriptor, so a submission that writes guest memory can resolve a window without
+    /// any binding the descriptor path ever sees.
+    /// </summary>
+    internal MetalSlotTrap? Trap { get; set; }
+
     public nint Device => _device;
 
     public nint GdsBuffer => _gdsBuffer;
@@ -496,6 +504,7 @@ internal sealed class MetalGuestMemory : IDisposable
         }
 
         resolved = new MetalGuestRange(window.Buffer, offset, size, window.GpuAddress + offset);
+        Trap?.NoteBinding($"resolve[{index}]", gpuVa, size, (ulong)window.Buffer, offset, resolved.GpuAddress);
         return true;
     }
 

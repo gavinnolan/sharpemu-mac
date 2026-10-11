@@ -24,7 +24,7 @@ internal sealed class MetalSlotTrap
 {
     private const int MaxBlocks = 1024;
     private const int MaxPending = 8;
-    private const int MaxBindingsPerSubmission = 96;
+    private const int MaxBindingsPerSubmission = 512;
     private const int MaxReports = 16;
 
     internal readonly record struct Binding(
