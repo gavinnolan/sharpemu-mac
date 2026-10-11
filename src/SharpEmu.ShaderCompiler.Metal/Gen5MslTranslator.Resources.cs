@@ -296,10 +296,18 @@ public static partial class Gen5MslTranslator
             source.AppendLine();
         }
 
+        // The user-data words and the flattened resource table are read-only tables the
+        // host fills before the encode and nothing on the GPU writes, and every read of
+        // them is at an index the program knows — so they belong in the constant address
+        // space, which is Apple's uniform datapath. A shader reading them from "device"
+        // pays a per-lane memory access for a value that is the same in every lane:
+        // Octopath Traveler II's heaviest vertex shader reads 32 user-data words in its
+        // preamble, which the hardware does once per wave and we were doing 12.5 million
+        // times a frame.
         private static string PointerType(DescriptorBindingKind kind) => kind switch
         {
             DescriptorBindingKind.DeviceAddressPageTable => "device const Gen5AddressRange*",
-            DescriptorBindingKind.FlattenedResourceTable or DescriptorBindingKind.ShaderData => "device const uint*",
+            DescriptorBindingKind.FlattenedResourceTable or DescriptorBindingKind.ShaderData => "constant uint*",
             _ => "device uint*",
         };
 

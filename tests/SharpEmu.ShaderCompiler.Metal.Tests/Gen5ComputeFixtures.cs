@@ -201,7 +201,7 @@ internal static class Gen5ComputeFixtures
     public static ShaderCompileRequest RequestOrThrow(Gen5ShaderProgram program, ShaderStage stage, uint waveLaneCount = 32, uint localSizeX = 32, int requiredVertexOutputCount = 0,
         IReadOnlyList<Gen5PixelOutputBinding>? pixelOutputs = null, ResourceRuntimeInputs? runtimeInputs = null,
         Gen5NggStageInfo? primitiveShader = null, uint userDataBase = 0, uint scratchDwords = 0,
-        uint localDataShareDwords = 0)
+        uint localDataShareDwords = 0, uint pushDataStartDword = 0)
     {
         var plan = ShaderResourcePlan.Extract(program, stage, RequestHash, userDataBase, UserDataCount);
         var specialization = ResourceSpecialization.Default(plan.Info);
@@ -217,7 +217,8 @@ internal static class Gen5ComputeFixtures
             BindingLayout.CollectUserDataRegisters(program, userDataBase, UserDataCount),
             BindingLayout.UsesGlobalDataShare(program),
             ShaderCompileRequest.RequiresFlattenedTable(plan, resources),
-            BindingLayout.ReadsShaderBase(program));
+            BindingLayout.ReadsShaderBase(program),
+            pushDataStartDword);
         return new ShaderCompileRequest(plan, resources, layout)
         {
             WaveSize = waveLaneCount,
@@ -231,9 +232,9 @@ internal static class Gen5ComputeFixtures
     }
 
     public static Gen5MslShader CompileRequestOrThrow(Gen5ComputeFixture fixture, uint waveLaneCount = 32, uint localSizeX = 32,
-        uint localDataShareDwords = 0)
+        uint localDataShareDwords = 0, uint pushDataStartDword = 0)
     {
-        var request = CreateComputeRequest(fixture, waveLaneCount, localSizeX, localDataShareDwords);
+        var request = CreateComputeRequest(fixture, waveLaneCount, localSizeX, localDataShareDwords, pushDataStartDword);
         if (!Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error))
         {
             throw new InvalidOperationException($"[{fixture.Name}] MSL request emit failed: {error}");
@@ -243,7 +244,7 @@ internal static class Gen5ComputeFixtures
     }
 
     public static ShaderCompileRequest CreateComputeRequest(Gen5ComputeFixture fixture, uint waveLaneCount = 32, uint localSizeX = 32,
-        uint localDataShareDwords = 0)
+        uint localDataShareDwords = 0, uint pushDataStartDword = 0)
     {
         var program = DecodeOrThrow(fixture);
         var hasBufferDescriptor = program.Instructions.Any(instruction => instruction.Control is Gen5BufferMemoryControl);
@@ -256,7 +257,8 @@ internal static class Gen5ComputeFixtures
         }
         return RequestOrThrow(program, ShaderStage.Compute, waveLaneCount, localSizeX,
             runtimeInputs: hasBufferDescriptor ? new ResourceRuntimeInputs { UserData = userData } : null,
-            localDataShareDwords: localDataShareDwords);
+            localDataShareDwords: localDataShareDwords,
+            pushDataStartDword: pushDataStartDword);
     }
 
     public static Gen5MslShader CompileStageRequestOrThrow(uint[] words, ShaderStage stage, int requiredVertexOutputCount = 0)

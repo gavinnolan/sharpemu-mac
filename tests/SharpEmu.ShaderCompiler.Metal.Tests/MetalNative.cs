@@ -238,6 +238,17 @@ internal static partial class MetalNative
                     case MslArgumentFieldKind.StepReport:
                         BitConverter.TryWriteBytes(arguments.AsSpan((int)field.ByteOffset), stepReportAddress);
                         break;
+                    case MslArgumentFieldKind.Pointer:
+                        // A read-only table the host fills before the encode: the user
+                        // data words, the flattened resource table, the address ranges.
+                        // Zero-filled here, which is what an untouched one holds.
+                        BitConverter.TryWriteBytes(
+                            arguments.AsSpan((int)field.ByteOffset), SharedTableAddress());
+                        break;
+                    case MslArgumentFieldKind.Word:
+                        BitConverter.TryWriteBytes(
+                            arguments.AsSpan((int)field.ByteOffset), SharedTableDwords);
+                        break;
                 }
             }
         }
@@ -254,7 +265,9 @@ internal static partial class MetalNative
                 library,
                 entryPoint,
                 [(argumentBuffer, (nuint)Gen5MslArgumentLayout.ResourcesBufferIndex), (pushBuffer, (nuint)Gen5MslArgumentLayout.PushDataBufferIndex)],
-                texture == 0 ? [buffer, stepReport] : [buffer, stepReport, texture],
+                texture == 0
+                    ? [buffer, stepReport, SharedTable.Value]
+                    : [buffer, stepReport, texture, SharedTable.Value],
                 threadsPerThreadgroup,
                 buffer,
                 bufferContents.Length,
@@ -407,6 +420,16 @@ internal static partial class MetalNative
         SendInteger(descriptor, Selector("setMipFilter:"), 1);
         return Send(Device.Value, Selector("newSamplerStateWithDescriptor:"), descriptor);
     }
+
+    // A zero-filled table for every read-only pointer field of an argument buffer, kept
+    // for the process so one allocation serves every execution.
+    private const uint SharedTableDwords = 256;
+
+    private static readonly Lazy<nint> SharedTable =
+        new(() => SharedBuffer(new byte[SharedTableDwords * sizeof(uint)]));
+
+    private static ulong SharedTableAddress() =>
+        SendULong(SharedTable.Value, Selector("gpuAddress"));
 
     // options 0 = MTLResourceStorageModeShared: CPU-visible for readback.
     private static nint SharedBuffer(byte[] contents)

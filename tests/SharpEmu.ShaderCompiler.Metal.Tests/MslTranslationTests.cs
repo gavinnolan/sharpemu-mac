@@ -249,6 +249,71 @@ public sealed class MslTranslationTests
                 StringComparison.Ordinal));
     }
 
+    /// <summary>The user-data words are a read-only table the host fills before the
+    /// encode and nothing on the GPU writes, and every read of one is at an index the
+    /// program knows — so the pointer belongs in the constant address space, which is
+    /// Apple's uniform datapath. Read from "device" instead, a value that is the same in
+    /// every lane costs a per-lane memory access: the heaviest Octopath vertex shader
+    /// reads 32 of them in its preamble, once per wave on hardware and once per vertex
+    /// here, 12.5 million times a frame.
+    ///
+    /// Pushing the start cursor to the end of push data is what makes a program take the
+    /// shader-data descriptor instead, which is the path a graphics stage takes.</summary>
+    [Fact]
+    public void UserDataReadsGoThroughTheConstantAddressSpace()
+    {
+        var pushed = Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.ExecStore);
+        Assert.Contains("constant uint* sharpemu_push_data", pushed.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("shader_data", pushed.Source, StringComparison.Ordinal);
+
+        var tabled = Gen5ComputeFixtures.CompileRequestOrThrow(
+            Gen5ComputeFixtures.ExecStore,
+            pushDataStartDword: Resources.PushData.DwordCount);
+        Assert.Contains("constant uint* shader_data", tabled.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("device const uint* shader_data", tabled.Source, StringComparison.Ordinal);
+
+        if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") != "1")
+        {
+            return;
+        }
+
+        // Both layouts have to compile and run, and leave the same bytes behind: the
+        // address space is the only thing that differs between them.
+        Assert.True(MetalNative.IsAvailable, "The required execution gate needs a Metal device.");
+        Assert.Equal(Execute(pushed), Execute(tabled));
+
+        static byte[] Execute(Gen5MslShader shader)
+        {
+            Assert.True(
+                MetalNative.TryCompileLibrary(shader.Source, out var library, out var metalError),
+                $"{metalError}\n{shader.Source}");
+            Assert.True(
+                MetalNative.TryExecuteWithArgumentBuffer(
+                    library,
+                    shader.EntryPoint,
+                    SentinelBuffer(),
+                    new byte[Resources.PushData.ByteSize],
+                    shader.ArgumentLayout!,
+                    threadsPerThreadgroup: 1,
+                    out var result,
+                    out var runError),
+                runError);
+            return result;
+        }
+
+        static byte[] SentinelBuffer()
+        {
+            var buffer = new byte[64];
+            for (var offset = 0; offset < buffer.Length; offset += sizeof(uint))
+            {
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(
+                    buffer.AsSpan(offset), 0xDEADBEEFu);
+            }
+
+            return buffer;
+        }
+    }
+
     [Fact]
     public void ExecMaskedStoresAreGuarded()
     {
