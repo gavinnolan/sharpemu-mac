@@ -359,6 +359,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
         else
         {
+            WatchImage(imageIdentifier);
             SynchronizeAliases(imageIdentifier, takesGpuOwnership: false);
             RefreshFromGuest(image);
             image.Uses.Texture = true;
@@ -560,6 +561,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         using var held = _lock.Hold();
         if (_slots.TryGet(imageIdentifier) is { } image)
         {
+            WatchImage(imageIdentifier);
             SynchronizeAliases(imageIdentifier, takesGpuOwnership: false);
             RefreshFromGuest(image);
         }
