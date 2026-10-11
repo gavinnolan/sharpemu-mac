@@ -48,6 +48,11 @@ internal sealed partial class MetalRenderHost
         // what names the shaders in a slow command buffer's SLOW-WAIT line.
         _lastWorkKind = kind;
         _lastWorkLabel = entry.Profile;
+        if (kind.StartsWith("draw", StringComparison.Ordinal))
+        {
+            NoteDrawState(kind, shape);
+        }
+
         ProfileCommandBuffer(kind, entry.Profile ?? "stage=?", shape);
     }
 
