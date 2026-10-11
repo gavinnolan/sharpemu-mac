@@ -22,7 +22,7 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// </summary>
 internal sealed class MetalSlotTrap
 {
-    private const int MaxBlocks = 64;
+    private const int MaxBlocks = 1024;
     private const int MaxPending = 8;
     private const int MaxBindingsPerSubmission = 96;
     private const int MaxReports = 16;
@@ -57,7 +57,7 @@ internal sealed class MetalSlotTrap
         // The slot's own page by default: the whole block, times every adopted block,
         // times every submission, is more copying than a diagnostic should cost.
         // SHARPEMU_TRAP_SNAPSHOT_BYTES takes the whole table when that is wanted.
-        _blockBytes = (int)Math.Min(GuestSlotTrap.SnapshotBytes, GuestSlotTrap.BlockSize);
+        _blockBytes = (int)Math.Max(8, Math.Min(GuestSlotTrap.SnapshotBytes, GuestSlotTrap.BlockSize));
         _current = new byte[_blockBytes];
         for (var index = 0; index < _pending.Length; index++)
         {
@@ -104,12 +104,13 @@ internal sealed class MetalSlotTrap
         _recording.Clear();
         for (var index = 0; index < count; index++)
         {
-            if (!_memory.TryRead(_blocks[index], slot.Blocks[slot.BlockCount].AsSpan(0, _blockBytes)))
+            var watched = _blocks[index] + GuestSlotTrap.Slot;
+            if (!_memory.TryRead(watched, slot.Blocks[slot.BlockCount].AsSpan(0, _blockBytes)))
             {
                 continue;
             }
 
-            slot.Bases[slot.BlockCount] = _blocks[index];
+            slot.Bases[slot.BlockCount] = watched;
             slot.BlockCount++;
         }
 
@@ -187,8 +188,8 @@ internal sealed class MetalSlotTrap
         }
 
         Console.Error.WriteLine(
-            $"[METAL-V2][SLOT-TRAP] A trapped block changed across a submission: serial={slot.Serial} " +
-            $"block=0x{blockBase:X16} offset=0x{offset:X} " +
+            $"[METAL-V2][SLOT-TRAP] A watched slot changed across a submission: serial={slot.Serial} " +
+            $"slot=0x{blockBase:X16} offset=0x{offset:X} " +
             $"was=0x{BitConverter.ToUInt64(before[(int)offset..]):X16} " +
             $"now=0x{BitConverter.ToUInt64(after[(int)offset..]):X16} " +
             $"cpu_faults_in_interval={cpuFaults} bindings={slot.Bindings.Count}" +

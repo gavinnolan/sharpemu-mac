@@ -22,7 +22,7 @@ namespace SharpEmu.HLE.GpuMemory;
 /// </summary>
 public static class GuestSlotTrap
 {
-    private const int MaxBlocks = 64;
+    private const int MaxBlocks = 1024;
     private const int MaxReports = 64;
 
     // How long a released page stays writable before the trap takes it back. Long enough
@@ -35,6 +35,11 @@ public static class GuestSlotTrap
     private static readonly ulong BlockBytes = ParseOr("SHARPEMU_TRAP_BLOCK_BYTES", 0x10000);
     private static readonly ulong Protection = ParseOr("SHARPEMU_TRAP_PROTECTION", 0xF2);
     private static readonly ulong SlotBytes = ParseOr("SHARPEMU_TRAP_SLOT_BYTES", 8);
+
+    // SHARPEMU_TRAP_BAND_HI: adopt only mappings whose top 32 address bits match. Without
+    // it the first blocks of the right shape take every slot, and a title maps hundreds
+    // before the one that matters: the band is what points the trap at the right heap.
+    private static readonly ulong BandHigh = Parse("SHARPEMU_TRAP_BAND_HI");
 
     private const ulong PageBytes = 4096;
 
@@ -76,11 +81,12 @@ public static class GuestSlotTrap
     public static ulong BlockSize => BlockBytes;
 
     /// <summary>
-    /// How much of a trapped block a watcher that snapshots it should take. The slot's own
-    /// page by default, because the whole block times every adopted block times every
-    /// submission is more copying than a diagnostic should cost.
+    /// How many bytes from the slot a watcher that snapshots it should take. The slot's own
+    /// neighbourhood by default: the whole block, times every adopted block, times every
+    /// submission, is more copying than a diagnostic should cost, and a page-mate that
+    /// changes is not the question being asked.
     /// </summary>
-    public static ulong SnapshotBytes { get; } = ParseOr("SHARPEMU_TRAP_SNAPSHOT_BYTES", PageBytes);
+    public static ulong SnapshotBytes { get; } = ParseOr("SHARPEMU_TRAP_SNAPSHOT_BYTES", 64);
 
     /// <summary>The watched offset inside a block.</summary>
     public static ulong Slot => SlotOffset;
@@ -88,7 +94,8 @@ public static class GuestSlotTrap
     /// <summary>Adopts a mapping whose shape matches the one the watched structure lives in.</summary>
     public static void OnDirectMapping(ulong mappedAddress, ulong length, int protection)
     {
-        if (!Armed || !MatchesShape(length, (ulong)protection, BlockBytes, Protection))
+        if (!Armed || !MatchesShape(length, (ulong)protection, BlockBytes, Protection) ||
+            !MatchesBand(mappedAddress, BandHigh))
         {
             return;
         }
@@ -146,6 +153,11 @@ public static class GuestSlotTrap
             return;
         }
 
+        // Taken back at once: a page left writable is a page whose writes the trap cannot
+        // see, and the caller is a submission boundary, so this runs hundreds of times a
+        // second without the trap ever having to single-step.
+
+
         var count = Volatile.Read(ref _blockCount);
         for (var index = 0; index < count && index < MaxBlocks; index++)
         {
@@ -174,6 +186,10 @@ public static class GuestSlotTrap
         var offset = address & slotMask;
         return offset >= slot && offset < slot + slotBytes;
     }
+
+    /// <summary>True when an address is in the watched band, or when no band was given.</summary>
+    internal static bool MatchesBand(ulong address, ulong bandHigh) =>
+        bandHigh == 0 || (address >> 32) == bandHigh;
 
     /// <summary>True when a mapping has the shape the watched structure lives in.</summary>
     internal static bool MatchesShape(ulong length, ulong protection, ulong blockBytes, ulong wantedProtection) =>

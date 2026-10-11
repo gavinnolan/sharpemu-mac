@@ -40,6 +40,16 @@ public sealed class GuestSlotTrapTests
     public void OnlyTheSlotItselfCountsAsAHit(ulong address, bool expected) =>
         Assert.Equal(expected, GuestSlotTrap.HitsSlot(address, Slot, Mask, slotBytes: 8));
 
+    // A title maps hundreds of blocks of the right shape before the one that matters, so
+    // without a band the trap spends every slot it has on the wrong heap.
+    [Theory]
+    [InlineData(0x9003260000UL, 0x90UL, true)]
+    [InlineData(0x7000010000UL, 0x90UL, false)]
+    [InlineData(0x7000010000UL, 0x70UL, true)]
+    [InlineData(0x7000010000UL, 0UL, true)]
+    public void OnlyMappingsInTheWatchedBandAreAdopted(ulong address, ulong band, bool expected) =>
+        Assert.Equal(expected, GuestSlotTrap.MatchesBand(address, band));
+
     [Fact]
     public void TheWatchedPageIsTheOneTheSlotLivesOn()
     {
