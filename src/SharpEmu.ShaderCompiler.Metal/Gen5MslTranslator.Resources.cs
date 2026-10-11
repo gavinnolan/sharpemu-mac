@@ -16,7 +16,11 @@ public static partial class Gen5MslTranslator
     public const uint AddressRangeSearchSteps = 7;
     public const uint MaxAddressRangeCount = 64;
 
-    public static bool TryCompileProgram(ShaderCompileRequest request, out Gen5MslShader shader, out string error)
+    public static bool TryCompileProgram(
+        ShaderCompileRequest request,
+        out Gen5MslShader shader,
+        out string error,
+        Gen5MslCodegenOptions? options = null)
     {
         shader = default!;
         try
@@ -42,7 +46,8 @@ public static partial class Gen5MslTranslator
             return false;
         }
 
-        if (!new CompilationContext(request).TryCompile(out shader, out error))
+        if (!new CompilationContext(request, options ?? Gen5MslCodegenOptions.FromEnvironment)
+                .TryCompile(out shader, out error))
         {
             return false;
         }
@@ -117,9 +122,12 @@ public static partial class Gen5MslTranslator
                 is ImageDimension.Dim2D or ImageDimension.Dim2DArray;
         }
 
-        public CompilationContext(ShaderCompileRequest request)
+        private readonly Gen5MslCodegenOptions _options;
+
+        public CompilationContext(ShaderCompileRequest request, Gen5MslCodegenOptions options)
         {
             _request = request;
+            _options = options;
             _argumentLayout = Gen5MslArgumentLayout.Build(request.Bindings);
             // An NGG primitive shader that exchanges data through LDS, synchronizes or asks
             // for export space is the merged ES/GS workgroup stage, which only a mesh
