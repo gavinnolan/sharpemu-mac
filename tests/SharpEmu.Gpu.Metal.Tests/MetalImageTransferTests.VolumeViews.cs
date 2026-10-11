@@ -42,6 +42,11 @@ public sealed partial class MetalImageTransferTests
         // And the whole volume, as the same builder describes an exclusive slice range.
         var wholeVolume = slice with { Type = GpuImageViewType.Type2DArray, BaseLayer = 0, LayerCount = 4 };
         Assert.Equal(texture, image.GetOrCreateView(wholeVolume));
+        // And the cache keeps the volume for such a request rather than dropping it:
+        // the description would only build the same 3D texture again, so refusing it
+        // releases a live texture once per pass for nothing.
+        Assert.True(image.SupportsViewType(slice));
+        Assert.True(image.SupportsViewType(wholeVolume));
         output.WriteLine("a volume attachment bound its own texture for both the slice and the whole-range view");
     }
 }
