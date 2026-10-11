@@ -244,6 +244,16 @@ internal sealed class MetalCachedImage : IDisposable
             identitySwizzle = true;
         }
 
+        // A volume rendered slice by slice asks for the 2D-array view Vulkan makes of a
+        // 3D image. Metal has no such view and raises rather than returning nil, but it
+        // does not need one: a render pass names the slice of a 3D attachment with its
+        // depth plane, which the attachment already carries, so the volume binds whole.
+        if (Shape.TextureType == Mtl.TextureType3D && viewType != Mtl.TextureType3D &&
+            (requested.Usage & (GpuImageUsage.ColorAttachmentBit | GpuImageUsage.DepthStencilAttachmentBit)) != 0)
+        {
+            return Texture;
+        }
+
         var wholeImage = requested.BaseLevel == 0 && requested.LevelCount >= Shape.MipLevels &&
             requested.BaseLayer == 0 && requested.LayerCount >= Shape.ArrayLength;
         if (wholeImage && identitySwizzle && viewFormat == Shape.PixelFormat && viewType == Shape.TextureType)
