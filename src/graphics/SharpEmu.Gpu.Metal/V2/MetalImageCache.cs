@@ -531,7 +531,16 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     /// <summary>A GPU shader or transfer wrote these guest bytes: the images reload.</summary>
     public void InvalidateMemoryFromGpu(ulong address, ulong size)
     {
-        if (!IsValidRange(address, size) || !_pageOwners.MayHaveOwners(address, size))
+        if (!IsValidRange(address, size))
+        {
+            return;
+        }
+
+        // A GPU write over metadata is the guest asking for whatever that metadata
+        // encodes again, so it re-arms a materialized clear even when nothing images
+        // the range. TryAbsorbDccFill is the usual route in; this catches the rest.
+        ReArmMaterializedDcc(address, size);
+        if (!_pageOwners.MayHaveOwners(address, size))
         {
             return;
         }

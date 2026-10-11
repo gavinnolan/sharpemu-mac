@@ -381,6 +381,27 @@ internal sealed partial class MetalImageCache
     /// <summary>Materializations skipped because the clear was already applied.</summary>
     public long TakeDccRepeatsSkipped() => Interlocked.Exchange(ref _dccRepeatsSkipped, 0);
 
+    /// <summary>Forgets what was materialized over a range, so the clear applies again.</summary>
+    private void ReArmMaterializedDcc(ulong address, ulong size)
+    {
+        if (!UseMaterializedSet)
+        {
+            return;
+        }
+
+        using var held = _lock.Hold();
+        ReArmMaterializedDccLocked(address, size);
+    }
+
+    private void ReArmMaterializedDccLocked(ulong address, ulong size)
+    {
+        if (_materializedDccSlices.Count != 0)
+        {
+            _materializedDccSlices.RemoveWhere(
+                entry => entry.Address >= address && entry.Address - address < size);
+        }
+    }
+
     private void RegisterDccMetadata(in ImageDescription description)
     {
         var address = description.Metadata.Range.Address;
@@ -523,8 +544,7 @@ internal sealed partial class MetalImageCache
         };
         using var held = _lock.Hold();
         // A guest fill of this metadata is the guest asking for the clear again.
-        _materializedDccSlices.RemoveWhere(
-            entry => entry.Address >= address && entry.Address - address < size);
+        ReArmMaterializedDccLocked(address, size);
         if (!_surfaceMetadata.TryGetValue(address, out var found))
         {
             // The fill may precede color-target discovery; a pending entry stays
