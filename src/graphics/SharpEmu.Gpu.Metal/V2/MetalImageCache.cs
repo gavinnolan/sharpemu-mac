@@ -495,13 +495,25 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         return image.GetOrCreateView(request.View);
     }
 
-    public nint AcquireDepthTargetView(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
+    /// <param name="writes">
+    /// False when the pass only tests against the target: no depth or stencil write and
+    /// no load clear. Such a pass reads the image like a sampled texture, so it neither
+    /// takes the bytes from the image's aliases nor leaves the image owing guest memory a
+    /// writeback - which is what made SILENT HILL retile its 4K depth plane out and back
+    /// through the R32 alias it samples for every soft-particle draw.
+    /// </param>
+    public nint AcquireDepthTargetView(ResourceSlotIdentifier imageIdentifier, in ImageRequest request, bool writes = true)
     {
         using var held = _lock.Hold();
         var image = _slots[imageIdentifier];
         image.LastAccessTick = _collectionTick;
-        WatchImage(imageIdentifier);
-        SynchronizeAliases(imageIdentifier, takesGpuOwnership: true);
+        writes |= !ReadOnlyDepthPassesEnabled;
+        if (writes)
+        {
+            WatchImage(imageIdentifier);
+        }
+
+        SynchronizeAliases(imageIdentifier, takesGpuOwnership: writes);
         RefreshFromGuest(image);
         image.Uses.DepthTarget = true;
         if (request.Description.HasMetadata)
@@ -515,11 +527,19 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             image.Description.Stencil = request.Description.Stencil;
         }
 
-        image.MarkGpuModified();
-        image.GpuWriteSerial = _owner.CurrentSerial;
-        image.NoteUse(image.GpuWriteSerial);
+        if (writes)
+        {
+            image.MarkGpuModified();
+            image.GpuWriteSerial = _owner.CurrentSerial;
+        }
+
+        image.NoteUse(writes ? image.GpuWriteSerial : _owner.CurrentSerial);
         return image.GetOrCreateView(request.View);
     }
+
+    // SHARPEMU_METAL_V2_READONLY_DEPTH=0 treats every depth attachment as written again.
+    private static readonly bool ReadOnlyDepthPassesEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_READONLY_DEPTH") != "0";
 
     public void MarkGpuWritten(ResourceSlotIdentifier imageIdentifier)
     {

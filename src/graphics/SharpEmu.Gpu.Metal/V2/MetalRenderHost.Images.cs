@@ -63,7 +63,11 @@ internal sealed partial class MetalRenderHost
             imageIdentifier = _imageCache.FindImage(ref request, exactFormat: false);
         }
 
-        var texture = _imageCache.AcquireDepthTargetView(imageIdentifier, request with { Role = ImageRole.DepthTarget });
+        // A metadata clear loads as a clear, so it writes even when the registers do not.
+        var writes = !depth.Target.State.IsReadOnly(resolution.Format) ||
+            (resolution.HasHtile && _imageCache.IsMetadataCleared(resolution.HtileAddress, request.View.BaseLayer));
+        var texture = _imageCache.AcquireDepthTargetView(
+            imageIdentifier, request with { Role = ImageRole.DepthTarget }, writes);
         var layer = request.View.BaseLayer;
         if (resolution.HasHtile && resolution.DepthClearEnabled)
         {
