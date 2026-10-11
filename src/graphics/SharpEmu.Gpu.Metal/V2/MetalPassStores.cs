@@ -19,6 +19,35 @@ internal static class MetalPassStores
         (long)width * height * Math.Max(1u, samples) * texelBytes;
 
     /// <summary>
+    /// Whether a clear that is waiting to be encoded is exactly what a pass about to
+    /// begin would do to one of its attachments as a load action. Exactly is the whole
+    /// rule, in both directions: a load action clears the render area and nothing else,
+    /// so a pass whose area is smaller than the clear leaves pixels uncleared, and a
+    /// pass whose area is larger clears pixels the clear would have left alone. One
+    /// subresource, one layer, and the render area, the clear and the attachment all the
+    /// same size.
+    /// </summary>
+    public static bool ClearIsExactlyTheAttachment(
+        uint clearLevelCount,
+        uint clearLayerCount,
+        uint passLayers,
+        uint passWidth,
+        uint passHeight,
+        uint clearWidth,
+        uint clearHeight,
+        uint attachmentWidth,
+        uint attachmentHeight) =>
+        clearLevelCount == 1 &&
+        clearLayerCount == 1 &&
+        passLayers == 1 &&
+        clearWidth != 0 &&
+        clearHeight != 0 &&
+        passWidth == clearWidth &&
+        passHeight == clearHeight &&
+        attachmentWidth == clearWidth &&
+        attachmentHeight == clearHeight;
+
+    /// <summary>
     /// Whether the clear that the next pass performs on an attachment covers all of
     /// what the pass that is ending would have stored. Discarding a store throws away
     /// the entire subresource, not only the part the render area touched, so the clear

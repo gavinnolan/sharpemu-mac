@@ -35,6 +35,59 @@ public sealed class MetalPassStoresTests
     }
 
     [Fact]
+    public void AWaitingClearBecomesALoadActionOnlyOverExactlyItsOwnPixels()
+    {
+        Assert.True(Folds(passWidth: Width, passHeight: Height, clearWidth: Width, clearHeight: Height));
+
+        // Smaller render area: pixels the clear reached would stay as they were.
+        Assert.False(Folds(passWidth: Width / 2, passHeight: Height, clearWidth: Width, clearHeight: Height));
+
+        // Larger render area: pixels the clear left alone would be cleared.
+        Assert.False(Folds(passWidth: Width, passHeight: Height, clearWidth: Width / 2, clearHeight: Height / 2));
+    }
+
+    [Fact]
+    public void AClearOfMoreThanOneSubresourceIsMoreThanALoadActionCanDo()
+    {
+        Assert.False(MetalPassStores.ClearIsExactlyTheAttachment(
+            clearLevelCount: 2, clearLayerCount: 1, passLayers: 1,
+            passWidth: Width, passHeight: Height, clearWidth: Width, clearHeight: Height,
+            attachmentWidth: Width, attachmentHeight: Height));
+        Assert.False(MetalPassStores.ClearIsExactlyTheAttachment(
+            clearLevelCount: 1, clearLayerCount: 6, passLayers: 1,
+            passWidth: Width, passHeight: Height, clearWidth: Width, clearHeight: Height,
+            attachmentWidth: Width, attachmentHeight: Height));
+
+        // A layered pass clears every layer it renders, which is more than the one the
+        // waiting clear covered.
+        Assert.False(MetalPassStores.ClearIsExactlyTheAttachment(
+            clearLevelCount: 1, clearLayerCount: 1, passLayers: 6,
+            passWidth: Width, passHeight: Height, clearWidth: Width, clearHeight: Height,
+            attachmentWidth: Width, attachmentHeight: Height));
+    }
+
+    [Fact]
+    public void AnAttachmentBiggerThanTheClearKeepsThePixelsOutsideIt()
+    {
+        Assert.False(MetalPassStores.ClearIsExactlyTheAttachment(
+            clearLevelCount: 1, clearLayerCount: 1, passLayers: 1,
+            passWidth: Width, passHeight: Height, clearWidth: Width, clearHeight: Height,
+            attachmentWidth: Width * 2, attachmentHeight: Height));
+    }
+
+    private static bool Folds(uint passWidth, uint passHeight, uint clearWidth, uint clearHeight) =>
+        MetalPassStores.ClearIsExactlyTheAttachment(
+            clearLevelCount: 1,
+            clearLayerCount: 1,
+            passLayers: 1,
+            passWidth: passWidth,
+            passHeight: passHeight,
+            clearWidth: clearWidth,
+            clearHeight: clearHeight,
+            attachmentWidth: clearWidth,
+            attachmentHeight: clearHeight);
+
+    [Fact]
     public void AClearOverTheWholeSubresourceCoversTheStoreItReplaces()
     {
         Assert.True(MetalPassStores.ClearCoversAttachment(

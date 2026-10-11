@@ -174,7 +174,8 @@ internal sealed partial class MetalRenderHost
         {
             var bytes = AttachmentBytes(
                 in state, index < MaxColorAttachments ? _attachmentTexelBytes[index] : 0);
-            if (state.ColorAttachments[index].IsClear)
+            if (state.ColorAttachments[index].IsClear ||
+                (index < MaxColorAttachments && _overrideClear[index]))
             {
                 _clearedBytes += bytes;
             }
@@ -542,7 +543,7 @@ internal sealed partial class MetalRenderHost
         for (var index = 0; index < next.ColorAttachmentCount && index < MaxColorAttachments; index++)
         {
             ref readonly var candidate = ref next.ColorAttachments[index];
-            if (!candidate.IsClear || candidate.View.Handle != handle ||
+            if ((!candidate.IsClear && !_overrideClear[index]) || candidate.View.Handle != handle ||
                 _attachmentLevels[index] != _passLevels[openIndex] ||
                 _attachmentSlices[index] != _passSlices[openIndex] ||
                 _attachmentDepthPlanes[index] != _passDepthPlanes[openIndex])
@@ -586,7 +587,11 @@ internal sealed partial class MetalRenderHost
 
     public void BeginRendering(in RenderingState state)
     {
-        if (CanContinuePass(in state))
+        // Before anything else, because this runs ahead of every draw and is therefore
+        // the last moment at which a waiting clear is still invisible. Whatever this
+        // pass cannot perform itself is encoded below, where no encoder is open.
+        var foldedClear = FoldPendingClearsInto(in state);
+        if (!foldedClear && _pendingClears.Count == 0 && CanContinuePass(in state))
         {
             return;
         }
@@ -612,6 +617,7 @@ internal sealed partial class MetalRenderHost
         EndRenderingBefore(in state);
         EndComputeEncoder();
         EncodeDeferredLabelCopies();
+        MaterializePendingClears();
         var commandBuffer = EnsureCommandBuffer();
         var descriptor = MetalNative.Send(
             MetalNative.Send(MetalNative.Class("MTLRenderPassDescriptor"), MetalNative.Selector("alloc")),
@@ -633,12 +639,16 @@ internal sealed partial class MetalRenderHost
                 MetalV2Native.SendVoidValue(slot, SelSetSlice, index < _attachmentCount ? _attachmentSlices[index] : 0);
                 MetalV2Native.SendVoidValue(
                     slot, SelSetDepthPlane, index < _attachmentCount ? _attachmentDepthPlanes[index] : 0);
+                var clears = attachment.IsClear || (index < MaxColorAttachments && _overrideClear[index]);
                 MetalV2Native.SendVoidValue(
-                    slot, SelSetLoadAction, attachment.IsClear ? Mtl.LoadActionClear : Mtl.LoadActionLoad);
+                    slot, SelSetLoadAction, clears ? Mtl.LoadActionClear : Mtl.LoadActionLoad);
                 MetalV2Native.SendVoidValue(slot, SelSetStoreAction, PendingStoreAction);
-                if (attachment.IsClear)
+                if (clears)
                 {
-                    MetalNative.SendVoidClearColor(slot, SelSetClearColor, ClearColorOf(in attachment));
+                    MetalNative.SendVoidClearColor(
+                        slot,
+                        SelSetClearColor,
+                        attachment.IsClear ? ClearColorOf(in attachment) : _overrideClearColor[index]);
                 }
             }
 
@@ -842,6 +852,7 @@ internal sealed partial class MetalRenderHost
 
         EndRendering();
         EncodeDeferredLabelCopies();
+        MaterializePendingClears();
         _computeEncoder = MetalNative.Send(EnsureCommandBuffer(), SelComputeEncoder);
         if (_computeEncoder == 0)
         {
@@ -1437,7 +1448,7 @@ internal sealed partial class MetalRenderHost
         context.ProfileEncoded($"clear {width}x{height} layers={range.LayerCount}");
     }
 
-    // One load-clear render pass with no draws: the cheapest full clear in Metal.
+    /// <summary>A clear of one subresource, either folded into a pass or encoded alone.</summary>
     private void ClearAttachmentTexture(
         nint texture,
         in SubresourceRange range,
@@ -1450,6 +1461,166 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
+        // A clear of a surface that is about to be the next pass's attachment is the
+        // pass's load action, and a load action is free: the pass would otherwise clear
+        // the surface here, store all of it, and then load all of it straight back. The
+        // clear waits to find out, and BeginRendering runs before every draw, so nothing
+        // can look at the surface before the wait is over.
+        if (MetalV2Diagnostics.FoldClearsIntoPasses)
+        {
+            // Retained for as long as it waits. A clear is asked for while its image is
+            // being looked up and the lookups that follow can replace that image's
+            // texture; asking the cache whether it still exists is not an option, because
+            // the cache's lock is held over the call that queued this and is fatal to
+            // take twice. Clearing a texture nothing will read costs nothing.
+            MetalNative.Send(texture, SelRetain);
+            _pendingClears.Add(new PendingClear(texture, range, width, height, color));
+            return;
+        }
+
+        EncodeClearPass(texture, in range, width, height, in color);
+    }
+
+    // A clear that has been asked for and not yet encoded. It is either folded into the
+    // load action of the pass that follows it or encoded as its own pass, and one of the
+    // two always happens before anything can observe the surface.
+    private readonly record struct PendingClear(
+        nint Texture,
+        SubresourceRange Range,
+        uint Width,
+        uint Height,
+        GpuClearColor Color);
+
+    private readonly List<PendingClear> _pendingClears = [];
+    private readonly bool[] _overrideClear = new bool[MaxColorAttachments];
+    private readonly MtlClearColor[] _overrideClearColor = new MtlClearColor[MaxColorAttachments];
+    private long _clearsFolded;
+    private long _clearsEncoded;
+
+    internal (long Folded, long Encoded) TakeClearFolding() =>
+        (Interlocked.Exchange(ref _clearsFolded, 0), Interlocked.Exchange(ref _clearsEncoded, 0));
+
+    /// <summary>
+    /// Encodes every clear that is still waiting. Called wherever something that could
+    /// observe a surface is about to be recorded and the pass about to begin — the only
+    /// thing that can absorb a clear — is not it.
+    /// </summary>
+    private void MaterializePendingClears()
+    {
+        if (_pendingClears.Count == 0 || _encodingPendingClears)
+        {
+            return;
+        }
+
+        _encodingPendingClears = true;
+        try
+        {
+            foreach (ref readonly var pending in
+                System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_pendingClears))
+            {
+                EncodeClearPass(
+                    pending.Texture, pending.Range, pending.Width, pending.Height, pending.Color);
+                MetalNative.SendVoid(pending.Texture, SelRelease);
+            }
+
+            _pendingClears.Clear();
+        }
+        finally
+        {
+            _encodingPendingClears = false;
+        }
+    }
+
+    private bool _encodingPendingClears;
+
+    /// <summary>
+    /// Hands the pass about to begin every waiting clear it can perform itself, as a
+    /// load action over the same pixels, and encodes the ones it cannot.
+    /// </summary>
+    private bool FoldPendingClearsInto(in RenderingState state)
+    {
+        Array.Clear(_overrideClear);
+        if (_pendingClears.Count == 0)
+        {
+            return false;
+        }
+
+        var folded = false;
+        for (var index = _pendingClears.Count - 1; index >= 0; index--)
+        {
+            var pending = _pendingClears[index];
+            var attachment = MatchingAttachment(in state, in pending);
+            if (attachment < 0)
+            {
+                continue;
+            }
+
+            if (!state.ColorAttachments[attachment].IsClear && !_overrideClear[attachment])
+            {
+                // The pass clears nothing here, so it clears this instead. The walk runs
+                // newest first, so the clear that was asked for last is the one that takes
+                // the attachment and an older clear of the same pixels is only dropped —
+                // which is what it would have been, overwritten where it lay. A pass that
+                // clears this attachment itself supersedes all of them the same way.
+                _overrideClear[attachment] = true;
+                _overrideClearColor[attachment] = new MtlClearColor
+                {
+                    Red = pending.Color.Float32_0,
+                    Green = pending.Color.Float32_1,
+                    Blue = pending.Color.Float32_2,
+                    Alpha = pending.Color.Float32_3,
+                };
+                folded = true;
+            }
+
+            MetalNative.SendVoid(pending.Texture, SelRelease);
+            _pendingClears.RemoveAt(index);
+            Interlocked.Increment(ref _clearsFolded);
+        }
+
+        return folded;
+    }
+
+    /// <summary>
+    /// The colour attachment of the pass about to begin that a waiting clear covers
+    /// exactly. Exactly is the whole rule: a load action clears the render area, so it
+    /// can only stand in for a clear of the same pixels — one subresource, the same mip,
+    /// the same layer, and a render area that is the whole of it.
+    /// </summary>
+    private int MatchingAttachment(in RenderingState state, in PendingClear pending)
+    {
+        for (var index = 0; index < state.ColorAttachmentCount && index < MaxColorAttachments; index++)
+        {
+            if (_attachmentTextures[index] == pending.Texture &&
+                _attachmentRealLevels[index] == pending.Range.BaseLevel &&
+                _attachmentRealLayers[index] == pending.Range.BaseLayer &&
+                MetalPassStores.ClearIsExactlyTheAttachment(
+                    pending.Range.LevelCount,
+                    pending.Range.LayerCount,
+                    state.Layers,
+                    state.Width,
+                    state.Height,
+                    pending.Width,
+                    pending.Height,
+                    _attachmentWidths[index],
+                    _attachmentHeights[index]))
+            {
+                return index;
+            }
+        }
+
+        return -1;
+    }
+
+    // One load-clear render pass with no draws: the cheapest full clear in Metal.
+    private void EncodeClearPass(
+        nint texture,
+        in SubresourceRange range,
+        uint width,
+        uint height,
+        in GpuClearColor color)
+    {
+        Interlocked.Increment(ref _clearsEncoded);
         _clearPasses++;
         _clearPixels += (long)Math.Max(width, 1) * Math.Max(height, 1) * Math.Max(range.LayerCount, 1);
         NoteClearAboutToBeEncoded(texture, in range, width, height, depth: false, stencil: false);
