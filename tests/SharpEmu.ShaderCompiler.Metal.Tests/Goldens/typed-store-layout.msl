@@ -340,22 +340,29 @@ struct Gen5StageResources
     device atomic_uint* step_report [[id(2)]];
 };
 
+// A raw dword load: the address truncates to the dword it lands in, which is what the
+// hardware does for S_BUFFER_LOAD_DWORD and BUFFER_LOAD_DWORD and what the SPIR-V
+// backend emits. Out of range reads zero.
+static inline uint sharpemu_load_dword(device uint* b, uint bytes, uint addr)
+{
+    uint index = addr >> 2;
+    return index < (bytes >> 2) ? b[index] : 0u;
+}
+
+// A dword a format access may straddle, assembled from the two it spans. Only the
+// format path needs this: a descriptor's stride is a byte count, so a component can
+// start at any byte.
 static inline uint sharpemu_load_word(device uint* b, uint bytes, uint addr)
 {
     if ((addr & 3u) == 0u)
     {
         return addr + 4u <= bytes ? b[addr >> 2] : 0u;
     }
-    uint value = 0u;
-    device const uchar* p = (device const uchar*)b;
-    for (uint i = 0u; i < 4u; i++)
-    {
-        if (addr + i < bytes)
-        {
-            value |= (uint)p[addr + i] << (i * 8u);
-        }
-    }
-    return value;
+    uint shift = (addr & 3u) * 8u;
+    uint aligned = addr & ~3u;
+    uint low = sharpemu_load_dword(b, bytes, aligned);
+    uint high = sharpemu_load_dword(b, bytes, aligned + 4u);
+    return (low >> shift) | (high << (32u - shift));
 }
 
 static inline uint sharpemu_load_bytes(device uint* b, uint bytes, uint addr, uint count, bool signExtend)
@@ -377,6 +384,21 @@ static inline uint sharpemu_load_bytes(device uint* b, uint bytes, uint addr, ui
     return value;
 }
 
+// A raw dword store, the counterpart of sharpemu_load_dword: BUFFER_STORE_DWORD and
+// GLOBAL_STORE_DWORD are dword-addressed by the GCN ISA, so the address truncates and
+// the dword is written. Out of range is dropped. Going through the byte path instead
+// turned one dword store into four byte stores, each with its own bounds check, which
+// device memory charges for four times over.
+static inline void sharpemu_store_dword(device uint* b, uint bytes, uint addr, uint value)
+{
+    uint index = addr >> 2;
+    if (index < (bytes >> 2))
+    {
+        b[index] = value;
+    }
+}
+
+// A sub-dword store: the bytes it names, each merged in place.
 static inline void sharpemu_store_bytes(device uint* b, uint bytes, uint addr, uint value, uint count)
 {
     device uchar* p = (device uchar*)b;
@@ -460,7 +482,7 @@ kernel void gen5_cs(
     uint sharpemu_lane [[thread_index_in_simdgroup]])
 {
     uint s8, s9, s10, s11, s106, s107, s126, s127;
-    uint v0, v1, v2, v3 = 0u;
+    uint v0, v1, v2, v3;
     bool exec = true;
     bool vcc = false;
     bool scc = false;
@@ -491,13 +513,13 @@ kernel void gen5_cs(
         uint t0 = 0x38FACu;
         s11 = t0;
         uint t1 = 0x3F800000u;
-        if (exec) { v2 = t1; }
+        v2 = t1;
         uint t2 = 0x3F000000u;
-        if (exec) { v3 = t2; }
+        v3 = t2;
         uint t3 = ((0x10u + 0u + 0u + (0u * 0u)) + bias[0]);
         bool t4 = 2u <= sharpemu_resources.buffer_bytes[0] && t3 <= sharpemu_resources.buffer_bytes[0] - 2u;
         bool t5 = ((0x38FACu >> 12) & 0x7Fu) != 0u && t4;
-        if (exec && t5)
+        if (t5)
         {
             uint t6 = sharpemu_format_encode(v2, 8u, 0u, 3u);
             uint t7 = sharpemu_format_encode(v3, 8u, 0u, 3u);

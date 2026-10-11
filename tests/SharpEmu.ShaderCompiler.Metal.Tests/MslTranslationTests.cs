@@ -95,14 +95,106 @@ public sealed class MslTranslationTests
         }
     }
 
+    /// <summary>The per-lane EXEC guard is dropped only where the program proves every
+    /// lane is set. A program that narrows EXEC keeps its guards from that point on, and
+    /// turning the elision off brings them all back — which is what the switch is for.</summary>
+    [Fact]
+    public void ExecGuardsSurviveWhereExecIsNarrowed()
+    {
+        // The fixture moves 0 into EXEC_LO, stores, then restores it: everything before
+        // the first EXEC write is unguarded, everything after it is guarded.
+        var request = Gen5ComputeFixtures.CreateComputeRequest(Gen5ComputeFixtures.ExecStore);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var elided, out var error), error);
+        var body = elided.Source;
+        var firstExecWrite = body.IndexOf("exec = ((", StringComparison.Ordinal);
+        Assert.True(firstExecWrite > 0, "the fixture is supposed to write EXEC");
+        Assert.DoesNotContain("if (exec)", body[..firstExecWrite], StringComparison.Ordinal);
+        Assert.Contains("if (exec)", body[firstExecWrite..], StringComparison.Ordinal);
+
+        Assert.True(
+            Gen5MslTranslator.TryCompileProgram(
+                request,
+                out var guarded,
+                out error,
+                new Gen5MslCodegenOptions(ExecGuardElision: false)),
+            error);
+        Assert.Contains("if (exec) { v0 = ", guarded.Source, StringComparison.Ordinal);
+        Assert.True(
+            CountOf(guarded.Source, "if (exec)") > CountOf(body, "if (exec)"),
+            "the switch has to put the guards back");
+    }
+
+    private static int CountOf(string source, string value)
+    {
+        var count = 0;
+        for (var index = source.IndexOf(value, StringComparison.Ordinal); index >= 0;
+            index = source.IndexOf(value, index + 1, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
+    }
+
+    /// <summary>The register file is uint, so an instruction that reads a float and
+    /// writes back raw bits used to emit as_type&lt;uint&gt;(as_type&lt;float&gt;(v0)) — a
+    /// no-op, but one the Metal compiler had to be handed first. V_CVT_PKRTZ_F16_F32
+    /// truncates its operands' mantissas before converting, which is where it showed up.
+    /// The packed halves still have to come out right: 1.5 is 0x3E00 and 2.0 is 0x4000.</summary>
+    [Fact]
+    public void PackedHalfConversionDoesNotRoundTripItsBitcasts()
+    {
+        var fixture = new Gen5ComputeFixture(
+            "pkrtz",
+            [
+                0x7E0002FF, 0x3FC00000, // v_mov_b32 v0, 1.5f
+                0x7E0202FF, 0x40000000, // v_mov_b32 v1, 2.0f
+                0x5E0A0300,             // v_cvt_pkrtz_f16_f32 v5, v0, v1
+                0xE0700000, 0x80020500, // buffer_store_dword v5, off, s[8:11], 0
+                0xBF810000,             // s_endpgm
+            ],
+            StoreScalarResourceBase: 8,
+            StoreBackingBytes: 16);
+
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture);
+        Assert.Contains("& 0xFFFFE000u", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("as_type<uint>(as_type<float>(", shader.Source, StringComparison.Ordinal);
+
+        if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") != "1")
+        {
+            return;
+        }
+
+        Assert.True(MetalNative.IsAvailable, "The required execution gate needs a Metal device.");
+        Assert.True(
+            MetalNative.TryCompileLibrary(shader.Source, out var library, out var metalError),
+            metalError);
+        Assert.True(
+            MetalNative.TryExecuteWithArgumentBuffer(
+                library,
+                shader.EntryPoint,
+                new byte[fixture.StoreBackingBytes],
+                new byte[Resources.PushData.ByteSize],
+                shader.ArgumentLayout!,
+                threadsPerThreadgroup: 1,
+                out var result,
+                out var runError),
+            runError);
+        Assert.Equal(
+            0x40003E00u,
+            System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(result));
+    }
+
     [Fact]
     public void ExecMaskedStoresAreGuarded()
     {
         var shader = Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.ExecStore);
 
-        // Every buffer store must sit behind the per-lane EXEC guard.
+        // Every buffer store past the first EXEC write must sit behind the per-lane
+        // guard, and a whole-dword store goes out as one dword, not four bytes.
         Assert.Contains("if (exec)", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("sharpemu_store_bytes(b0,", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_store_dword(b0,", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("sharpemu_store_bytes(b0,", shader.Source, StringComparison.Ordinal);
 
         // s_mov_b32 exec_lo, 0 / -1 must drive the per-lane bool.
         Assert.Contains("exec = ((", shader.Source, StringComparison.Ordinal);
@@ -161,10 +253,11 @@ public sealed class MslTranslationTests
         Assert.Contains("[[color(0)]]", shader.Source, StringComparison.Ordinal);
         Assert.Contains("[[position]]", shader.Source, StringComparison.Ordinal);
 
-        // Interpolation reads land in VGPRs; the export writes MRT0 under EXEC
-        // and inactive lanes discard at the end.
+        // Interpolation reads land in VGPRs; the export writes MRT0 and inactive
+        // lanes discard at the end. This program never narrows EXEC, so the export
+        // assigns outright — ExecGuardsSurviveWhereExecIsNarrowed covers the masked form.
         Assert.Contains("as_type<uint>(sharpemu_in.attr0[0])", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("sharpemu_out.mrt0 = exec ?", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_out.mrt0 = vec<float, 4>(", shader.Source, StringComparison.Ordinal);
         Assert.Contains("discard_fragment();", shader.Source, StringComparison.Ordinal);
     }
 
@@ -258,8 +351,8 @@ public sealed class MslTranslationTests
         Assert.Contains("uint sharpemu_vertex_id [[vertex_id]],", shader.Source, StringComparison.Ordinal);
         Assert.Contains("v5 = sharpemu_vertex_id;", shader.Source, StringComparison.Ordinal);
         Assert.Contains("v8 = sharpemu_instance_id;", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("sharpemu_out.sharpemu_position = exec ?", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("sharpemu_out.param0 = exec ?", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_out.sharpemu_position = float4(", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_out.param0 = float4(", shader.Source, StringComparison.Ordinal);
         Assert.Contains("return sharpemu_out;", shader.Source, StringComparison.Ordinal);
     }
 
@@ -374,19 +467,66 @@ public sealed class MslTranslationTests
         var fixture = new Gen5ComputeFixture(
             "relative-vector-source",
             [
-                0x7E6E870C, // v_movrels_b32 v55, v12
-                0xBF810000, // s_endpgm
+                0x7E1802FF, 0x11111111, // v_mov_b32 v12, 0x11111111
+                0x7E1A02FF, 0x22222222, // v_mov_b32 v13, 0x22222222
+                0x7E6E870C,             // v_movrels_b32 v55, v12
+                0xBF810000,             // s_endpgm
             ],
             StoreScalarResourceBase: 0,
             StoreBackingBytes: 0);
 
         var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture);
 
-        // The register file is an array the emitted MSL indexes at run time, so
-        // the relative number is the encoded one plus M0, wrapped into the file.
-        Assert.Contains("v[(12u + ", shader.Source, StringComparison.Ordinal);
+        // The relative number is still the encoded one plus M0, wrapped into the file,
+        // but nothing indexes the register file with it: the read is a choice among the
+        // registers this program touches, so they all stay in hardware registers. A
+        // register the program never writes holds undefined data in hardware, which is
+        // why only its own registers have to be reachable.
+        Assert.Contains("(12u + ", shader.Source, StringComparison.Ordinal);
         Assert.Contains("s124", shader.Source, StringComparison.Ordinal);
-        Assert.Contains(") & 255u]", shader.Source, StringComparison.Ordinal);
+        Assert.Contains(") & 255u", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("== 12u ? v12", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("== 13u ? v13", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("uint v[256]", shader.Source, StringComparison.Ordinal);
+    }
+
+    /// <summary>When straight-line scalar code produces M0, the move reaches a known set
+    /// of registers and resolves to them directly — no run-time number at all.</summary>
+    [Fact]
+    public void RelativeVectorSourceWithAKnownM0ResolvesToOneRegister()
+    {
+        var fixture = new Gen5ComputeFixture(
+            "relative-vector-source-constant",
+            [
+                0xBEFC0382,             // s_mov_b32 m0, 2
+                0x7E1C02FF, 0x33333333, // v_mov_b32 v14, 0x33333333
+                0x7E6E870C,             // v_movrels_b32 v55, v12
+                0xBF810000,             // s_endpgm
+            ],
+            StoreScalarResourceBase: 0,
+            StoreBackingBytes: 0);
+
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture);
+
+        // 12 + 2: the source is v14 outright, with no register number to resolve.
+        Assert.Contains("= v14;", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("& 255u", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("== 14u ?", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("uint v[256]", shader.Source, StringComparison.Ordinal);
+
+        // With the switch off the same program indexes the register file at run time,
+        // and the file has to stay an array for it.
+        var request = Gen5ComputeFixtures.CreateComputeRequest(fixture);
+        Assert.True(
+            Gen5MslTranslator.TryCompileProgram(
+                request,
+                out var unresolved,
+                out var error,
+                new Gen5MslCodegenOptions(BoundedRelativeMoves: false)),
+            error);
+        Assert.Contains("(12u + ", unresolved.Source, StringComparison.Ordinal);
+        Assert.Matches(@"v\[t\d+\]", unresolved.Source);
+        Assert.Contains("uint v[256] = {};", unresolved.Source, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -411,7 +551,14 @@ public sealed class MslTranslationTests
         // the relative number wraps into the register file.
         Assert.Contains("(55u + ", shader.Source, StringComparison.Ordinal);
         Assert.Contains("& 255u", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("if (exec) { v[", shader.Source, StringComparison.Ordinal);
+
+        // These forms write the register M0 names, so the file stays an array. Resolving
+        // a read over the program's own registers is sound because a register it never
+        // writes holds undefined data; a write lands on one the program does mean to
+        // write and may read back through the same number later, so it cannot be dropped
+        // for being outside the set.
+        Assert.Contains("uint v[256] = {};", shader.Source, StringComparison.Ordinal);
+
         // V_MOVRELSD2 reads M0's two halves as independent offsets.
         Assert.Equal(
             opcode == "VMovrelsd2B32",
@@ -539,7 +686,6 @@ public sealed class MslTranslationTests
         // with a two-byte mask, and stored under the descriptor and element bounds.
         var shader = CompileTypedBufferAccess("TBufferStoreFormatXy", dwordCount: 2, typedFormat: 14);
 
-        Assert.Contains("if (exec && ", shader.Source, StringComparison.Ordinal);
         Assert.Contains("sharpemu_format_encode(v4, 8u, 0u, 3u)", shader.Source, StringComparison.Ordinal);
         Assert.Contains("sharpemu_format_encode(v5, 8u, 0u, 3u)", shader.Source, StringComparison.Ordinal);
         Assert.Contains("<< 8u), 0u, 0u, 0u), uint4(0xFFFFu, 0x0u, 0x0u, 0x0u));", shader.Source, StringComparison.Ordinal);
@@ -553,8 +699,8 @@ public sealed class MslTranslationTests
         // Format 77 is 32x4 float: four aligned dword stores, no encoding, one bounds test.
         var shader = CompileTypedBufferAccess("TBufferStoreFormatXyzw", dwordCount: 4, typedFormat: 77);
 
-        Assert.Contains(", v4, 4u);", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("+ 12u), v7, 4u);", shader.Source, StringComparison.Ordinal);
+        Assert.Contains(", v4);", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("+ 12u), v7);", shader.Source, StringComparison.Ordinal);
         Assert.Contains("16u <= sharpemu_resources.buffer_bytes[0] && ", shader.Source, StringComparison.Ordinal);
         Assert.DoesNotContain("sharpemu_format_encode(v[", shader.Source, StringComparison.Ordinal);
         Assert.DoesNotContain("sharpemu_store_element(b", shader.Source, StringComparison.Ordinal);
