@@ -218,6 +218,27 @@ public sealed unsafe class MetalImageAliasTests(ITestOutputHelper output)
         output.WriteLine($"{name}: dirty 0x{image.DirtyStart:x}..0x{image.DirtyEnd:x} of 0x{LargeSize:x}");
     }
 
+    // The stale run at the tail of a linear surface is refreshed alone: a partial upload
+    // from the row it starts in, rather than the whole image.
+    [Fact]
+    public void ATailAliasRefreshesOnlyItsRun()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var large = rig.Acquire(ImageAddress, LargeSide, ImageRole.Texture);
+        var image = rig.Cache.GetImage(large);
+        rig.Acquire(ImageAddress + LargeSize - SmallSize, SmallSide, ImageRole.ColorTarget);
+        Assert.Equal(LargeSize - SmallSize, image.DirtyStart);
+        _ = rig.Cache.TakePartialTransfers();
+
+        rig.Acquire(ImageAddress, LargeSide, ImageRole.Texture);
+
+        Assert.False(image.IsCpuDirty);
+        var partial = rig.Cache.TakePartialTransfers();
+        Assert.Equal(1, partial.Uploads);
+        Assert.Equal((long)(LargeSize - SmallSize), partial.UploadBytes);
+    }
+
     // A GPU-written alias hands its whole texture to guest memory before it gives up
     // ownership, not just the run it shares: the rest of it lives in the texture only, and
     // the refresh that follows would otherwise replace it with the guest bytes it never

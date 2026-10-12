@@ -1168,22 +1168,43 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         return true;
     }
 
-    // The run a restricted transfer may be given for a dirty range. Both alignments move
-    // *into* the range - a start forward, an end back - because they exist to cut an
-    // image into runs that together cover it, where a byte one run drops the next one
-    // picks up. A single run has no next one, so a run that does not cover the whole
-    // dirty range is refused rather than taken: bytes it dropped would stay stale, and a
-    // texture that disagrees with guest memory never catches up.
+    // The run a restricted transfer may be given for a dirty range. The plan's own
+    // alignments move *into* a range - a start forward, an end back - because they exist
+    // to cut an image into runs that together cover it, where a byte one run drops the
+    // next one picks up. A single run has no next one, so here each end is moved *out*
+    // instead: the start back and the end forward, to the nearest cuts no part of the
+    // transfer plan straddles - a block row of a tiled surface, a texel row of a linear
+    // one, a layer of a depth plane. Each cut is confirmed by the opposite alignment
+    // standing still on it, and an end that cannot be confirmed reaches the image's end
+    // or its first byte instead. A run that widens to the whole image is refused, and
+    // the caller transfers the whole image as before: bytes a run dropped would stay
+    // stale, and a texture that disagrees with guest memory never catches up.
     private bool TryCoveringRun(
-        in ImageDescription description, ulong dirtyStart, ulong dirtyEnd, out ulong start, out ulong end)
+        in ImageDescription description, ulong dirtyStart, ulong dirtyEnd, out ulong start, out ulong end) =>
+        TryCoveringRun(_transfer, in description, dirtyStart, dirtyEnd, out start, out end);
+
+    internal static bool TryCoveringRun(
+        IMetalImageTransfer transfer, in ImageDescription description,
+        ulong dirtyStart, ulong dirtyEnd, out ulong start, out ulong end)
     {
-        // Always from the image's first byte. A run that begins in the middle is a run
-        // whose placement only the device can confirm, and the device test that confirms
-        // it covers a prefix: the saving that matters is the tail of a large surface
-        // whose dirty bytes are near its start, which a prefix already gives.
-        start = 0;
-        end = _transfer.AlignRunEnd(in description, start, dirtyEnd);
-        if (end < dirtyEnd)
+        // Only a linear colour surface begins a run past its first byte. A tiled run that
+        // begins in the middle or at the tail lands somewhere other than where a whole
+        // readback finds it - its placement is self-consistent, so a piece read back
+        // through the same parameters agrees, but the device shows the texels misplaced -
+        // and the depth kernels have no device test for it, so those runs still start at
+        // the image's first byte.
+        start = description.IsTiled || description.IsDepth
+            ? 0
+            : transfer.AlignRunEnd(in description, 0, Math.Min(dirtyStart, dirtyEnd));
+        if (transfer.AlignRunStart(in description, start) != start)
+        {
+            // Not a boundary a run may begin at after all; from the first byte, which is.
+            start = 0;
+        }
+
+        // The first cut at or after the dirty end, confirmed as one a run may end at.
+        end = Math.Min(transfer.AlignRunStart(in description, dirtyEnd), description.Data.Size);
+        if (end < dirtyEnd || transfer.AlignRunEnd(in description, start, end) != end)
         {
             // Nothing between the dirty end and the image's end can be dropped, so a run
             // that reaches the end covers whatever the alignment would have cut.
