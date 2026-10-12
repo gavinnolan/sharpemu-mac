@@ -649,12 +649,17 @@ public static partial class Gen5MslTranslator
                 source.AppendLine("    uint sharpemu_lane = sharpemu_tg_index & 63u;");
                 if (DeclaresWaveScratch && !AliasesWaveScratchIntoLds)
                 {
-                    // Two dwords bridge each half's ballot; the third carries a
-                    // broadcast value for read-first-lane. Indexed only by half,
+                    // Two sets of slots, alternated per exchange (see
+                    // Gen5MslTranslator.WaveExchange.cs). Indexed only by half,
                     // so correct for a one-wave (64-thread) workgroup — larger
                     // workgroups would need per-wave scratch (matches the SPIR-V
                     // translator's bridge scope).
-                    source.AppendLine("    threadgroup uint sharpemu_wave_scratch[3];");
+                    source.AppendLine($"    threadgroup uint sharpemu_wave_scratch[{WaveScratchDwords}];");
+                }
+
+                if (DeclaresWaveScratch)
+                {
+                    source.AppendLine("    uint sharpemu_wave_set = 0u;");
                 }
             }
             if (!HasRealWaveLanes)
@@ -702,13 +707,13 @@ public static partial class Gen5MslTranslator
             if (DeclaresWaveScratch && AliasesWaveScratchIntoLds)
             {
                 // Only a dispatch that asked for the whole 32 KB has no room left for
-                // the bridge, and then it aliases the top three dwords of the LDS
+                // the bridge, and then it aliases the top dwords of the LDS
                 // allocation: a separate array would push total threadgroup memory
                 // past Metal's limit and the pipeline would not compile. Guest LDS
                 // accesses are bounds-masked into the same allocation, so this trades
                 // a rare top-of-LDS collision for a compilable pipeline.
                 source.AppendLine(
-                    $"    threadgroup uint* sharpemu_wave_scratch = &sharpemu_lds[{_computeLdsDwords - 3}u];");
+                    $"    threadgroup uint* sharpemu_wave_scratch = &sharpemu_lds[{_computeLdsDwords - WaveScratchDwords}u];");
             }
 
             if (_stage == Gen5MslStage.Mesh)
@@ -988,40 +993,19 @@ public static partial class Gen5MslTranslator
             source.AppendLine($"    s[{VccHiRegister}] = 0u;");
             if (IsWave64)
             {
-                // All 64 lanes are active at entry (before the dispatcher masks
-                // any off), and this runs at a uniform point, so the bridge
-                // barriers are safe here too.
-                EmitBallotStoreAtEntry(source, ExecLoRegister, "true");
+                // A bridged wave is exactly one 64-thread threadgroup, and
+                // dispatchThreadgroups always launches every thread of it, so at
+                // entry (before the dispatcher masks any off) all 64 lanes are
+                // active: the mask is a constant and needs no ballot, no bridge and
+                // none of its two threadgroup barriers.
+                source.AppendLine($"    s[{ExecLoRegister}] = 0xFFFFFFFFu;");
+                source.AppendLine($"    s[{ExecHiRegister}] = 0xFFFFFFFFu;");
             }
             else
             {
                 source.AppendLine($"    s[{ExecLoRegister}] = sharpemu_ballot(true);");
                 source.AppendLine($"    s[{ExecHiRegister}] = 0u;");
             }
-        }
-
-        /// <summary>Entry-time form of <see cref="EmitBallotStore"/> writing to
-        /// <paramref name="source"/> at the fixed indent of the module prologue.</summary>
-        private void EmitBallotStoreAtEntry(StringBuilder source, uint loRegister, string condition)
-        {
-            if (!_usesWaveScratch)
-            {
-                // No cross-lane ops, so there is no bridge to gather the other half's
-                // ballot through. Both halves get this simdgroup's ballot, which is what
-                // each half would have reported for itself: lanes 32..63 read the high
-                // half for their own bit, and a mask that said zero there would park them
-                // for good the moment the program restored EXEC.
-                source.AppendLine($"    s[{loRegister}] = sharpemu_ballot({condition});");
-                source.AppendLine($"    s[{loRegister + 1}] = s[{loRegister}];");
-                return;
-            }
-
-            source.AppendLine(
-                $"    sharpemu_wave_scratch[(sharpemu_lane >> 5) & 1u] = sharpemu_ballot({condition});");
-            source.AppendLine("    threadgroup_barrier(mem_flags::mem_threadgroup);");
-            source.AppendLine($"    s[{loRegister}] = sharpemu_wave_scratch[0];");
-            source.AppendLine($"    s[{loRegister + 1}] = sharpemu_wave_scratch[1];");
-            source.AppendLine("    threadgroup_barrier(mem_flags::mem_threadgroup);");
         }
 
         private static void EmitComputeSystemRegister(
@@ -1852,18 +1836,9 @@ public static partial class Gen5MslTranslator
                     string first;
                     if (IsWave64)
                     {
-                        Line("sharpemu_wave_scratch[(sharpemu_lane >> 5) & 1u] = sharpemu_ballot(exec);");
-                        Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
-                        var low = Temp("uint", "sharpemu_wave_scratch[0]");
-                        var high = Temp("uint", "sharpemu_wave_scratch[1]");
-                        count = Temp("uint", $"popcount({low}) + popcount({high})");
-                        first = Temp(
-                            "uint",
-                            $"({low} != 0u) ? (uint)ctz({low}) : (({high} != 0u) ? (32u + (uint)ctz({high})) : 0u)");
-                        Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
-                        var atomic =
-                            $"atomic_fetch_{operation}_explicit((threadgroup atomic_uint*)&sharpemu_lds[{index}], {count}, memory_order_relaxed)";
-                        var broadcast = EmitWave64ReadFirstLane($"{inBounds} ? {atomic} : 0u");
+                        var broadcast = EmitWave64AppendAtomic(
+                            waveCount => $"atomic_fetch_{operation}_explicit((threadgroup atomic_uint*)&sharpemu_lds[{index}], {waveCount}, memory_order_relaxed)",
+                            inBounds);
                         StoreVector(destination, $"{inBounds} ? {broadcast} : 0u");
                         return true;
                     }

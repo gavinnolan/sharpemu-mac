@@ -126,10 +126,10 @@ public static partial class Gen5MslTranslator
 
         /// <summary>Whether the wave64 ballot bridge has to share the LDS allocation.
         /// Only a dispatch that asked for the whole 32 KB leaves no room for its own
-        /// three dwords.</summary>
+        /// slots.</summary>
         private bool AliasesWaveScratchIntoLds =>
             _stage == Gen5MslStage.Compute && _usesLds &&
-            _computeLdsDwords + 3 > LdsDwordCount;
+            _computeLdsDwords + WaveScratchDwords > LdsDwordCount;
 
 
         private Gen5MslMeshInfo Mesh => _meshInfo ??
