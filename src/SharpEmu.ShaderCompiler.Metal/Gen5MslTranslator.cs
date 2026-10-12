@@ -1370,22 +1370,62 @@ public static partial class Gen5MslTranslator
                 return TryEmitVertexInputFetch(control, vertexInput, out error);
             }
 
-            int bindingIndex;
-            string stride;
-            string descriptorWord3;
-            uint descriptorFormat;
+            if (_request.Memory.TryGetIndex(instruction.Pc, 0, out var accessMemoryIndex))
             {
-                // The dense buffer, its stride and its format come from the specialization.
-                if (!TryResolveLayoutBuffer(instruction.Pc, out bindingIndex, out var specialized))
+                var accessMemory = _request.Memory[accessMemoryIndex];
+                if (accessMemory.PlanningOnly)
                 {
-                    error = "missing buffer-memory binding";
-                    return false;
+                    // The dead linear tail of a fused shader: its descriptor is supplied by the
+                    // continuation object and is intentionally absent from this plan.
+                    return true;
                 }
 
-                stride = FormatUInt(specialized.PackedStride & 0x3FFF);
-                descriptorFormat = specialized.DescriptorFormat;
-                descriptorWord3 = FormatUInt((specialized.DescriptorFormat << 12) | (specialized.DescriptorSwizzle & 0xFFF));
+                var strategy = accessMemory.BufferDescriptor?.ChooseStrategy(
+                        control.Typed,
+                        accessMemory.Formatted,
+                        accessMemory.Access == MemoryAccess.Atomic)
+                    ?? BufferLoweringStrategy.NativeBinding;
+                if (accessMemory.DeviceDescriptor || strategy == BufferLoweringStrategy.PhysicalStorageBuffer)
+                {
+                    return TryEmitDeviceDescriptorBufferMemory(instruction, control, out error);
+                }
+
+                if (strategy == BufferLoweringStrategy.BoundedCandidateTable)
+                {
+                    return TryEmitBoundedCandidateTableMemory(instruction, control, accessMemoryIndex, out error);
+                }
             }
+
+            if (!TryResolveLayoutBuffer(instruction.Pc, out var resolvedBinding, out _))
+            {
+                error = "missing buffer-memory binding";
+                return false;
+            }
+
+            return EmitResolvedBufferMemory(instruction, control, resolvedBinding, out error);
+        }
+
+        // One buffer operation against a resolved binding: the dense binding path and every
+        // arm of a bounded candidate table share it.
+        private bool EmitResolvedBufferMemory(
+            Gen5ShaderInstruction instruction,
+            Gen5BufferMemoryControl control,
+            int bindingIndex,
+            out string error)
+        {
+            error = string.Empty;
+            var buffers = _request.Resources.Info.Buffers;
+            if (bindingIndex < 0 || bindingIndex >= buffers.Count)
+            {
+                error = $"buffer binding {bindingIndex} is out of range";
+                return false;
+            }
+
+            // The dense buffer, its stride and its format come from the specialization.
+            var specialized = buffers[bindingIndex];
+            var stride = FormatUInt(specialized.PackedStride & 0x3FFF);
+            var descriptorFormat = specialized.DescriptorFormat;
+            var descriptorWord3 = FormatUInt((specialized.DescriptorFormat << 12) | (specialized.DescriptorSwizzle & 0xFFF));
 
             var scalarOffset = instruction.Sources.Count > 2
                 ? SourceExpression(instruction.Sources[2], instruction)

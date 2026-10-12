@@ -477,20 +477,225 @@ public static partial class Gen5MslTranslator
         // binding. The descriptor's first two dwords are its base address, its stride and
         // record count say how far it reaches, and a read past that is zero - the bound
         // the hardware applies - rather than whatever guest bytes follow the buffer.
-        private string DeviceDescriptorWord(uint descriptorRegister, string byteOffset)
+        private string DeviceDescriptorWord(uint descriptorRegister, string byteOffset) =>
+            DeviceDescriptorWord(DeviceDescriptorBounds(descriptorRegister), byteOffset);
+
+        // The reach of a V# held in scalar registers: its base address, byte size and stride.
+        private (string Base, string Size, string Stride) DeviceDescriptorBounds(uint descriptorRegister)
         {
             var word1 = Temp("uint", ScalarExpression(descriptorRegister + 1));
             var stride = Temp("uint", $"(({word1} >> 16u) & 0x3FFFu)");
             var records = Temp("uint", ScalarExpression(descriptorRegister + 2));
             var size = Temp("ulong", $"({stride} == 0u ? (ulong){records} : (ulong){stride} * (ulong){records})");
+            var baseAddress = $"((ulong){ScalarExpression(descriptorRegister)} | ((ulong)({word1} & 0xFFFFu) << 32))";
+            return (baseAddress, size, stride);
+        }
+
+        // The byte offset may differ per lane; a read past the descriptor's size is zero.
+        private string DeviceDescriptorWord((string Base, string Size, string Stride) descriptor, string byteOffset)
+        {
             var address = Temp(
                 "ulong",
-                $"(((ulong){ScalarExpression(descriptorRegister)} | ((ulong)({word1} & 0xFFFFu) << 32)) + " +
-                $"(ulong){byteOffset}) & {FormatULong(DeviceAddressPaging.AddressMask & ~3ul)}");
+                $"({descriptor.Base} + (ulong){byteOffset}) & {FormatULong(DeviceAddressPaging.AddressMask & ~3ul)}");
             return Temp(
                 "uint",
-                $"(((ulong){byteOffset} + 3ul) < {size} ? " +
+                $"(((ulong){byteOffset} + 3ul) < {descriptor.Size} ? " +
                 $"sharpemu_load_device_dword({DeviceArguments}, {address}) : 0u)");
+        }
+
+        // A raw dword or subword-store buffer access whose V# lives in scalar registers: no
+        // host binding exists, so the access runs over the device-address page table, bounded
+        // by the descriptor. Out-of-range reads are zero and out-of-range stores are dropped.
+        private bool TryEmitDeviceDescriptorBufferMemory(
+            Gen5ShaderInstruction instruction,
+            Gen5BufferMemoryControl control,
+            out string error)
+        {
+            error = string.Empty;
+            var opcode = instruction.Opcode;
+            if (control.Typed || opcode.StartsWith("TBuffer", StringComparison.Ordinal) ||
+                opcode.Contains("Format", StringComparison.Ordinal))
+            {
+                error = $"device buffer descriptor does not support the formatted access {opcode}";
+                return false;
+            }
+
+            if (opcode.StartsWith("BufferAtomic", StringComparison.Ordinal))
+            {
+                error = $"device buffer descriptor does not support the atomic access {opcode}";
+                return false;
+            }
+
+            var isStore = opcode.StartsWith("BufferStore", StringComparison.Ordinal);
+            var isSubwordStore = TryGetSubdwordStoreInfo(opcode, out var storeBytes, out var sourceShift);
+            if (!isSubwordStore &&
+                !opcode.StartsWith("BufferLoadDword", StringComparison.Ordinal) &&
+                !opcode.StartsWith("BufferStoreDword", StringComparison.Ordinal))
+            {
+                error = $"unsupported device buffer descriptor opcode {opcode}";
+                return false;
+            }
+
+            if (instruction.Sources.Count < 2 || instruction.Sources[1].Kind != Gen5OperandKind.ScalarRegister)
+            {
+                error = "device buffer descriptor has no scalar resource base";
+                return false;
+            }
+
+            if (!_hasDeviceAddressTable)
+            {
+                error = "device address access without an address range binding";
+                return false;
+            }
+
+            var descriptor = DeviceDescriptorBounds(instruction.Sources[1].Value);
+            var scalarOffset = instruction.Sources.Count > 2
+                ? SourceExpression(instruction.Sources[2], instruction)
+                : "0u";
+            var vectorIndex = control.IndexEnabled ? $"v[{control.VectorAddress}]" : "0u";
+            var vectorOffset = control.OffsetEnabled
+                ? $"v[{control.VectorAddress + (control.IndexEnabled ? 1u : 0u)}]"
+                : "0u";
+            var byteOffset = Temp(
+                "uint",
+                $"(0x{unchecked((uint)control.OffsetBytes):X}u + {scalarOffset} + {vectorOffset} + ({vectorIndex} * {descriptor.Stride}))");
+
+            if (!isStore)
+            {
+                for (uint index = 0; index < control.DwordCount; index++)
+                {
+                    var componentOffset = index == 0 ? byteOffset : Temp("uint", $"{byteOffset} + {index * sizeof(uint)}u");
+                    StoreVector(control.VectorData + index, DeviceDescriptorWord(descriptor, componentOffset));
+                }
+
+                return true;
+            }
+
+            var mask = DeviceAddressPaging.AddressMask;
+            if (isSubwordStore)
+            {
+                var inRange = Temp("bool", $"((ulong){byteOffset} + {storeBytes - 1}ul) < {descriptor.Size}");
+                var address = Temp("ulong", $"({descriptor.Base} + (ulong){byteOffset}) & {FormatULong(mask)}");
+                var source = sourceShift == 0
+                    ? $"v[{control.VectorData}]"
+                    : $"(v[{control.VectorData}] >> {sourceShift})";
+                Line($"if ({ExecCondition(inRange)})");
+                Line("{");
+                _indent++;
+                Line($"sharpemu_store_device_bytes({DeviceArguments}, {address}, {source}, {storeBytes}u);");
+                _indent--;
+                Line("}");
+                return true;
+            }
+
+            for (uint index = 0; index < control.DwordCount; index++)
+            {
+                var componentOffset = index == 0 ? byteOffset : Temp("uint", $"{byteOffset} + {index * sizeof(uint)}u");
+                var inRange = Temp("bool", $"((ulong){componentOffset} + 3ul) < {descriptor.Size}");
+                var address = Temp("ulong", $"({descriptor.Base} + (ulong){componentOffset}) & {FormatULong(mask & ~3ul)}");
+                Line($"if ({ExecCondition(inRange)})");
+                Line("{");
+                _indent++;
+                Line($"sharpemu_store_device_dword({DeviceArguments}, {address}, v[{control.VectorData + index}]);");
+                _indent--;
+                Line("}");
+            }
+
+            return true;
+        }
+
+        // A runtime V# whose descriptors cannot be reconstructed from its raw words: its base
+        // dword probes the flattened candidate mapping and each arm runs the ordinary buffer
+        // operation against one native candidate binding.
+        private bool TryEmitBoundedCandidateTableMemory(
+            Gen5ShaderInstruction instruction,
+            Gen5BufferMemoryControl control,
+            int memoryIndex,
+            out string error)
+        {
+            error = string.Empty;
+            if (!_request.BufferCandidateTableByMemoryIndex.TryGetValue(memoryIndex, out var table))
+            {
+                // No finite, safe candidate set exists; a formatted load reads zero rather than
+                // reinterpreting an arbitrary device address with a guessed format.
+                if (instruction.Opcode.StartsWith("BufferLoadFormat", StringComparison.Ordinal))
+                {
+                    for (uint index = 0; index < control.DwordCount; index++)
+                    {
+                        StoreVector(control.VectorData + index, "0u");
+                    }
+
+                    return true;
+                }
+
+                error = $"runtime buffer descriptor has no candidate table for {instruction.Opcode}";
+                return false;
+            }
+
+            if (table.CandidateCount == 0)
+            {
+                error = "runtime buffer descriptor candidate table is empty";
+                return false;
+            }
+
+            if (table.CandidateCount == 1)
+            {
+                return EmitResolvedBufferMemory(instruction, control, (int)table.FirstCandidate, out error);
+            }
+
+            if (!_hasFlattenedTable)
+            {
+                error = "runtime buffer descriptor candidate table without a flattened table binding";
+                return false;
+            }
+
+            if (instruction.Sources.Count < 2 || instruction.Sources[1].Kind != Gen5OperandKind.ScalarRegister)
+            {
+                error = "runtime buffer descriptor has no scalar resource base";
+                return false;
+            }
+
+            var selector = SelectBufferCandidate(table, Temp("uint", ScalarExpression(instruction.Sources[1].Value)));
+            for (uint index = 0; index < table.CandidateCount; index++)
+            {
+                Line($"if ({selector} == {index}u)");
+                Line("{");
+                _indent++;
+                var emitted = EmitResolvedBufferMemory(instruction, control, (int)(table.FirstCandidate + index), out error);
+                _indent--;
+                Line("}");
+                if (!emitted)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        // Searches the sorted base-address mapping of a candidate table for the probe key; the
+        // result is the candidate-local index, candidate 0 when absent.
+        private string SelectBufferCandidate(BufferCandidateTableUse table, string key)
+        {
+            var mapping = table.MappingOffset;
+            var count = Temp("uint", LoadFlattenedWord($"{mapping}u"));
+            var low = Temp("uint", "0u");
+            var high = Temp("uint", count);
+            for (uint iteration = 0; iteration < table.SearchIterations; iteration++)
+            {
+                var middle = Temp("uint", $"{low} + (({high} - {low}) >> 1u)");
+                var probeSlot = Temp("uint", $"{mapping + 1}u + ({middle} << 1u)");
+                var probeKey = Temp("uint", LoadFlattenedWord(probeSlot));
+                var moveUp = Temp("bool", $"{probeKey} < {key} && {low} < {high}");
+                Line($"{low} = {moveUp} ? {middle} + 1u : {low};");
+                Line($"{high} = {moveUp} ? {high} : {middle};");
+            }
+
+            var foundSlot = Temp("uint", $"{mapping + 1}u + ({low} << 1u)");
+            var foundKey = Temp("uint", LoadFlattenedWord(foundSlot));
+            var found = Temp("bool", $"{low} < {count} && {foundKey} == {key}");
+            var mapped = Temp("uint", LoadFlattenedWord($"({foundSlot} + 1u)"));
+            return Temp("uint", $"{found} && {mapped} < {table.CandidateCount}u ? {mapped} : 0u");
         }
 
         private bool TryEmitLayoutScalarMemory(Gen5ShaderInstruction instruction, Gen5ScalarMemoryControl control, out string error)
