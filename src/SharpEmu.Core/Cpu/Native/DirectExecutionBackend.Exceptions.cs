@@ -1403,7 +1403,12 @@ public sealed partial class DirectExecutionBackend
 
 	private bool TryFormatNearestRuntimeSymbol(ulong address, out string text)
 	{
-		text = string.Empty;
+		// Guest modules are not dyld images, so a dladdr hit means a host address.
+		if (HostSymbolizer.TryFormat(address, out text))
+		{
+			return true;
+		}
+
 		KeyValuePair<string, ulong>[] runtimeSymbolsByAddress = _runtimeSymbolsByAddress;
 		if (runtimeSymbolsByAddress.Length == 0)
 		{
