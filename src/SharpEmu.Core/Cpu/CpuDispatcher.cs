@@ -8,7 +8,6 @@ using SharpEmu.Core.Cpu.Native;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
-using SharpEmu.Libs.Kernel;
 using SharpEmu.Logging;
 
 namespace SharpEmu.Core.Cpu;
@@ -498,8 +497,6 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         {
             return false;
         }
-
-        KernelExports.ConfigureProcessArguments(arguments.Count, entryParamsAddress + 0x08);
 
         if (arguments.Count > 1)
         {
