@@ -187,13 +187,20 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         // sampled surface quietly comes back wrong.
         if (!SameTransferGrid(sourceDescription, targetDescription) ||
             !sourceDescription.IsDepth || targetDescription.IsDepth ||
-            source.TransferBytes != target.TransferBytes || source.TransferBytes != sizeof(float) ||
+            source.TransferBytes != sizeof(float) ||
             // A depth surface the tiler widens or narrows on its way through guest memory
             // does not hold the guest's bits in its texels, so the alias reading those
             // bits cannot be handed the texture's.
             source.TransferBytes != sourceDescription.BytesPerBlock ||
-            target.TransferBytes != targetDescription.BytesPerBlock ||
-            source.Swap || target.Swap ||
+            // The colour side uploads guest bytes into its texels untouched only for a
+            // single 32-bit channel; every other format reorders or reinterprets them.
+            !IsRawSingleChannel32(target.Format) || targetDescription.BytesPerBlock != sizeof(float) ||
+            target.Swap ||
+            // Texel (x, y) of each surface has to come from the same guest bytes, which
+            // takes the same tile mode and the same pitch over the same footprint.
+            sourceDescription.TileMode != targetDescription.TileMode ||
+            sourceDescription.Pitch != targetDescription.Pitch ||
+            sourceDescription.Data.Size != targetDescription.Data.Size ||
             sourceDescription.Resources.Levels != 1 || targetDescription.Resources.Levels != 1 ||
             targetDescription.HasStencil)
         {
@@ -201,7 +208,7 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         }
 
         var layers = targetDescription.TransferLayers;
-        var rowBytes = (ulong)targetDescription.Extent.Width * target.TransferBytes;
+        var rowBytes = (ulong)targetDescription.Extent.Width * source.TransferBytes;
         var sliceBytes = rowBytes * targetDescription.Extent.Height;
         if (layers == 0 || rowBytes == 0 || sliceBytes == 0 ||
             sliceBytes > ulong.MaxValue / layers)
@@ -242,6 +249,9 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         MetalTiler.EndEncoding(blit);
         return true;
     }
+
+    private static bool IsRawSingleChannel32(MtlPixelFormat format) =>
+        format is MtlPixelFormat.R32Float or MtlPixelFormat.R32Uint or MtlPixelFormat.R32Sint;
 
     // The two surfaces cover the same texel grid, so a copy between them is a copy and
     // not a resample.
