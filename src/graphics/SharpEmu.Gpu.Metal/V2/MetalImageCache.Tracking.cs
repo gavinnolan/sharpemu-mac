@@ -218,13 +218,20 @@ internal sealed partial class MetalImageCache
     // touch no image page, and the owner bitmap answers those without the lock.
     bool IGuestImageStore.MarkCpuWrite(ulong address, ulong size)
     {
-        if (!IsValidRange(address, size) || !_pageOwners.MayHaveOwners(address, size))
+        if (!IsValidRange(address, size))
+        {
+            return false;
+        }
+
+        var mayOwn = _pageOwners.MayHaveOwners(address, size);
+        if (!mayOwn && Volatile.Read(ref _metadataWatchCount) == 0)
         {
             return false;
         }
 
         using var held = _lock.Hold();
-        return InvalidateAliases(address, size);
+        var metadataHit = OnMetadataCpuWriteLocked(address, size);
+        return (mayOwn && InvalidateAliases(address, size)) | metadataHit;
     }
 
     public void InvalidateMemory(ulong address, ulong size)
@@ -303,6 +310,13 @@ internal sealed partial class MetalImageCache
     {
         using var held = _lock.Hold();
         _watchingStopped = true;
+        foreach (var (watchBegin, watchSize) in _metadataWatches)
+        {
+            _pages.RemoveWatch(watchBegin, watchSize, blockReads: false);
+        }
+
+        _metadataWatches.Clear();
+        Volatile.Write(ref _metadataWatchCount, 0);
         var watched = new List<ResourceSlotIdentifier>();
         _slots.ForEach((imageIdentifier, image) =>
         {
@@ -365,18 +379,24 @@ internal sealed partial class MetalImageCache
         }
     }
 
-    // SHARPEMU_METAL_V2_DCC_MATERIALIZED_SET=0 turns the memory off and takes the
-    // repeated materialization back, for comparing one against the other.
-    private static readonly bool UseMaterializedSet = !string.Equals(
-        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DCC_MATERIALIZED_SET"),
-        "0",
-        StringComparison.Ordinal);
-
-    // Metadata slices whose clear has already been materialized, by address and clear
-    // code. Keyed on the code as well as the address so a different clear colour at the
-    // same metadata is a new clear rather than a skipped one.
-    private readonly HashSet<(ulong Address, byte Code)> _materializedDccSlices = new();
+    // Metadata slices whose clear has already been applied, by image, slice address and
+    // clear code. This is the only record of it: guest memory is never marked, because
+    // transient aliasing reuses a metadata range as live data (Poppy Playtime keeps
+    // indirect-dispatch counters there) and a sentinel written into it is read back as
+    // that data. Keyed on the code so a different clear colour at the same metadata is a
+    // new clear, and on the image so a second image over the same bytes is its own.
+    // A rewrite of the metadata by the guest, by the GPU or by a CPU store removes the
+    // claims over it, so a guest that clears every frame still gets one clear per clear
+    // while the same surface looked up 24 times between clears (The Oregon Trail) is
+    // cleared once.
+    private readonly HashSet<(ResourceSlotIdentifier Image, ulong Address, byte Code)> _materializedDccSlices = new();
     private long _dccRepeatsSkipped;
+
+    // Page-watched metadata ranges, 4 KiB aligned, address to size. A CPU store into
+    // one re-arms the claims over it and releases the watch; the next claim watches it
+    // again.
+    private readonly Dictionary<ulong, ulong> _metadataWatches = new();
+    private int _metadataWatchCount;
 
     /// <summary>Materializations skipped because the clear was already applied.</summary>
     public long TakeDccRepeatsSkipped() => Interlocked.Exchange(ref _dccRepeatsSkipped, 0);
@@ -386,10 +406,21 @@ internal sealed partial class MetalImageCache
     /// already done. The scan around it runs outside the cache lock — it reads guest
     /// backing — so the claim takes the lock itself.
     /// </summary>
-    private bool TryClaimMaterializedDcc(ulong address, byte code)
+    private bool TryClaimMaterializedDcc(ResourceSlotIdentifier image, ulong address, ulong size, byte code)
     {
         using var held = _lock.Hold();
-        return _materializedDccSlices.Add((address, code));
+        return TryClaimMaterializedDccLocked(image, address, size, code);
+    }
+
+    private bool TryClaimMaterializedDccLocked(ResourceSlotIdentifier image, ulong address, ulong size, byte code)
+    {
+        if (!_materializedDccSlices.Add((image, address, code)))
+        {
+            return false;
+        }
+
+        WatchMetadataLocked(address, size);
+        return true;
     }
 
     private void ReArmMaterializedDccLocked(ulong address, ulong size)
@@ -399,6 +430,70 @@ internal sealed partial class MetalImageCache
             _materializedDccSlices.RemoveWhere(
                 entry => entry.Address >= address && entry.Address - address < size);
         }
+    }
+
+    private void WatchMetadataLocked(ulong address, ulong size)
+    {
+        const ulong Page = TrackerLayout.PageBytes;
+        if (_watchingStopped || size == 0 || address > ulong.MaxValue - size - Page)
+        {
+            return;
+        }
+
+        var begin = address & ~(Page - 1);
+        var end = (address + size + Page - 1) & ~(Page - 1);
+        foreach (var (watchBegin, watchSize) in _metadataWatches)
+        {
+            if (watchBegin <= begin && end <= watchBegin + watchSize)
+            {
+                return;
+            }
+        }
+
+        // A watch the new range partly overlaps is replaced by the union, so each page
+        // carries at most one count from here.
+        foreach (var (watchBegin, watchSize) in _metadataWatches.ToArray())
+        {
+            if (watchBegin < end && begin < watchBegin + watchSize)
+            {
+                _pages.RemoveWatch(watchBegin, watchSize, blockReads: false);
+                _metadataWatches.Remove(watchBegin);
+                begin = Math.Min(begin, watchBegin);
+                end = Math.Max(end, watchBegin + watchSize);
+            }
+        }
+
+        _metadataWatches[begin] = end - begin;
+        _pages.AddWatch(begin, end - begin, blockReads: false);
+        Volatile.Write(ref _metadataWatchCount, _metadataWatches.Count);
+    }
+
+    // A CPU store reached a watched metadata range: the claims over it are forgotten
+    // and the watch is released so the store can land.
+    private bool OnMetadataCpuWriteLocked(ulong address, ulong size)
+    {
+        const ulong Page = TrackerLayout.PageBytes;
+        if (_metadataWatches.Count == 0 || size == 0)
+        {
+            return false;
+        }
+
+        var begin = address & ~(Page - 1);
+        var end = (address + size + Page - 1) & ~(Page - 1);
+        var hit = false;
+        foreach (var (watchBegin, watchSize) in _metadataWatches.ToArray())
+        {
+            if (watchBegin < end && begin < watchBegin + watchSize)
+            {
+                ReArmMaterializedDccLocked(watchBegin, watchSize);
+                _pages.RemoveWatch(watchBegin, watchSize, blockReads: false);
+                _metadataWatches.Remove(watchBegin);
+                hit = true;
+            }
+        }
+
+        Volatile.Write(ref _metadataWatchCount, _metadataWatches.Count);
+        return hit;
     }
 
     private void RegisterDccMetadata(in ImageDescription description)
@@ -419,6 +514,7 @@ internal sealed partial class MetalImageCache
         }
 
         metadata.Size = Math.Max(metadata.Size, description.DccSliceSize * description.TransferLayers);
+        WatchMetadataLocked(address, metadata.Size);
     }
 
     private void RegisterHtileMetadata(in ImageDescription description)
@@ -502,6 +598,10 @@ internal sealed partial class MetalImageCache
     public bool ClearMetadata(ulong address)
     {
         using var held = _lock.Hold();
+        // A broad clear of DCC metadata is the guest clearing it again, whether or not
+        // the clear can be applied here.
+        ReArmMaterializedDccLocked(
+            address, _surfaceMetadata.TryGetValue(address, out var existing) ? Math.Max(existing.Size, 1) : 1);
         if (!_surfaceMetadata.TryGetValue(address, out var found) ||
             found.Kind is SurfaceMetadataKind.PendingDcc or SurfaceMetadataKind.Dcc)
         {
@@ -638,6 +738,13 @@ internal sealed partial class MetalImageCache
             for (var slice = 0u; slice < count; slice++)
             {
                 var address = range.Address + sliceSize * (first + slice);
+                // The metadata may still be being written by recorded work; scanning it
+                // now reads half-written data, and claiming it would hide the real clear.
+                if (_owner.HasPendingGpuWrite(address, sliceSize))
+                {
+                    continue;
+                }
+
                 if (!_backing.TryReadBacking(address, firstByte))
                 {
                     continue;
@@ -659,16 +766,12 @@ internal sealed partial class MetalImageCache
                     continue;
                 }
 
-                // The sentinel that stops this repeating is written by the GPU, while
-                // the uniform-slice check above is a host read of those same bytes.
-                // Between the fill being recorded and the GPU running it, every lookup
-                // of this surface sees the old clear code and materializes again — in
-                // The Oregon Trail twenty-four times a frame, two render-pass teardowns
-                // apiece. Remembering what has been done closes that window without
-                // touching guest memory any earlier than before; a guest fill of the
-                // same metadata re-arms it, so a surface the game clears every frame
-                // keeps working.
-                if (UseMaterializedSet && !TryClaimMaterializedDcc(address, code))
+                // Nothing marks the metadata once it is materialized, so the lookups that
+                // follow see the same clear code again — in The Oregon Trail twenty-four
+                // times a frame, two render-pass teardowns apiece. The claim remembers
+                // what has been done; a rewrite of the metadata re-arms it, so a surface
+                // the game clears every frame keeps working.
+                if (!TryClaimMaterializedDcc(imageIdentifier, address, sliceSize, code))
                 {
                     Interlocked.Increment(ref _dccRepeatsSkipped);
                     continue;
@@ -686,11 +789,6 @@ internal sealed partial class MetalImageCache
                         view.Format,
                         new SubresourceRange(view.BaseLevel, view.LevelCount, imageFirst + slice, 1),
                         in clear);
-                }
-
-                if (request.Role != ImageRole.DisplaySurface)
-                {
-                    _owner.FillGuestRange(address, sliceSize, uint.MaxValue);
                 }
             }
         }
