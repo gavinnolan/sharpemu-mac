@@ -246,7 +246,7 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         var resolution = ImageRequestBuilders.ColorTarget(words, 0xF, 0, false);
 
         Assert.NotNull(resolution);
-        Assert.Equal(new Extent3D(64, 64, 64), resolution.Value.Request.Description.Extent);
+        Assert.Equal(new GpuExtent3D(64, 64, 64), resolution.Value.Request.Description.Extent);
         Assert.Equal(new SubresourceCount(2, 1), resolution.Value.Request.Description.Resources);
         Assert.Equal(firstSlice, resolution.Value.Request.View.BaseLayer);
         Assert.Equal(expectedLayers, resolution.Value.Request.View.LayerCount);

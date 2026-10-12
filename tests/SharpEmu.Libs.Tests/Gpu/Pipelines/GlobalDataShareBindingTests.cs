@@ -94,13 +94,13 @@ public sealed class GlobalDataShareBindingTests(HeadlessVulkanFixture fixture) :
             var pipeline = host.CreateComputePipeline(new ComputePipelineDescription { Input = input, Program = new ShaderProgram(1, module), Stage = program });
             if (omitCanonicalBinding)
             {
-                var error = Assert.Throws<SchedulerFatalException>(() => presenter.RenderHost.CommitBindings(PipelineBindPoint.Compute, pipeline, [bindings]));
+                var error = Assert.Throws<SchedulerFatalException>(() => presenter.RenderHost.CommitBindings(GpuBindPoint.Compute, pipeline, [bindings]));
                 Assert.Contains("image=0 occurrences=0 views=1", error.Message);
             }
             else
             {
-                presenter.RenderHost.CommitBindings(PipelineBindPoint.Compute, pipeline, [bindings]);
-                presenter.RenderHost.BindPipeline(PipelineBindPoint.Compute, pipeline);
+                presenter.RenderHost.CommitBindings(GpuBindPoint.Compute, pipeline, [bindings]);
+                presenter.RenderHost.BindPipeline(GpuBindPoint.Compute, pipeline);
                 presenter.RenderHost.Dispatch(1, 1, 1);
                 presenter.RenderHost.ShaderAccessBarrier();
             }

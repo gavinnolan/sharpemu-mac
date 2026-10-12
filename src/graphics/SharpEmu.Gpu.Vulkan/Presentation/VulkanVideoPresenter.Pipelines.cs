@@ -787,7 +787,7 @@ internal static unsafe partial class VulkanVideoPresenter
                          (separateAlpha && (parameters.GetAlphaSourceBlend(index) is >= 15 and <= 18 ||
                                             parameters.GetAlphaDestinationBlend(index) is >= 15 and <= 18)));
                     if (dualSource && (!_supportsDualSourceBlend ||
-                        (uint)colorCount > _shaderDescriptorLimits.MaxFragmentDualSrcAttachments))
+                        (uint)colorCount > _maxFragmentDualSrcAttachments))
                     {
                         throw SubmissionScheduler.Fatal("The device cannot support the requested dual-source blend attachments.");
                     }

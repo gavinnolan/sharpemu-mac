@@ -45,6 +45,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private uint _maxComputeWorkGroupSizeX;
         private uint _maxComputeWorkGroupSizeY;
         private uint _maxComputeWorkGroupSizeZ;
+        private uint _maxFragmentDualSrcAttachments;
         private uint _maxComputeWorkGroupInvocations;
         private ulong _minStorageBufferOffsetAlignment = 1;
         private bool _supportsIndependentBlend;
@@ -629,6 +630,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _maxComputeWorkGroupSizeX = properties.Limits.MaxComputeWorkGroupSize[0];
             _maxComputeWorkGroupSizeY = properties.Limits.MaxComputeWorkGroupSize[1];
             _maxComputeWorkGroupSizeZ = properties.Limits.MaxComputeWorkGroupSize[2];
+            _maxFragmentDualSrcAttachments = properties.Limits.MaxFragmentDualSrcAttachments;
             _maxComputeWorkGroupInvocations = properties.Limits.MaxComputeWorkGroupInvocations;
             _renderHostLimits = new RenderHostLimits(
                 properties.Limits.MaxFramebufferWidth,

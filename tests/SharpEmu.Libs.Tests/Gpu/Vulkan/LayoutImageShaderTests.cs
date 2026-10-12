@@ -320,8 +320,8 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         var imageClass = ImageDescriptorBinding.ForImage(run.Resources.Info.Images[0])!.Value;
         Assert.Equal(distinctImages ? 2 : 1, run.Request.Bindings.Find(imageClass)!.Resources.Count);
         Assert.Single(run.Request.Bindings.Find(DescriptorBindingKind.Samplers)!.Resources);
-        var first = run.Harness.CreateImage(Describe(0, Format.R32Sfloat, GuestPixelFormat.Bits32Float, 1, 1, 1));
-        var second = run.Harness.CreateImage(Describe(0x10000, Format.R32Sfloat, GuestPixelFormat.Bits32Float, 1, 1, 1));
+        var first = run.Harness.CreateImage(Describe(0, GpuFormat.R32Sfloat, GuestPixelFormat.Bits32Float, 1, 1, 1));
+        var second = run.Harness.CreateImage(Describe(0x10000, GpuFormat.R32Sfloat, GuestPixelFormat.Bits32Float, 1, 1, 1));
         run.Harness.UploadImage(first, MemoryMarshal.AsBytes<float>([0.25f]), ImageTestHarness.WholeImageCopies(first.Description, 0));
         run.Harness.UploadImage(second, MemoryMarshal.AsBytes<float>([0.75f]), ImageTestHarness.WholeImageCopies(second.Description, 0));
         var sampler = run.Runner.CreateSampler(Filter.Nearest);
