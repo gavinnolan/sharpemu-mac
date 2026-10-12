@@ -212,14 +212,33 @@ public static partial class Ngs2Exports
             return SetReturn(ctx, OrbisNgs2ErrorInvalidOutAddress);
         }
 
-        if (!TryCreateHandle(ctx, type: 2, systemHandle, out var handle) ||
-            !ctx.TryWriteUInt64(outHandleAddress, handle))
-        {
-            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
-        }
-
         lock (StateGate)
         {
+            // The system could have been destroyed after the validation above.
+            if (!Systems.ContainsKey(systemHandle))
+            {
+                return SetReturn(ctx, OrbisNgs2ErrorInvalidSystemHandle);
+            }
+
+            // Reserve ulong.MaxValue as an exhaustion sentinel so the counter
+            // cannot wrap and alias a stale rack handle.
+            if (_nextRackHandle == ulong.MaxValue)
+            {
+                return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN);
+            }
+
+            var handle = _nextRackHandle;
+            if (!ctx.TryWriteUInt64(outHandleAddress, handle))
+            {
+                return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+
+            _nextRackHandle++;
+            if (handle == 0)
+            {
+                _rackZeroBootstrapAvailable = false;
+            }
+
             Racks[handle] = new RackState(systemHandle, rackId);
         }
 
@@ -251,6 +270,10 @@ public static partial class Ngs2Exports
             }
 
             RemoveRackLocked(handle);
+            if (handle == 0)
+            {
+                _rackZeroBootstrapAvailable = false;
+            }
         }
 
         return SetReturn(ctx, 0);
@@ -268,7 +291,12 @@ public static partial class Ngs2Exports
         var outHandleAddress = ctx[CpuRegister.Rdx];
         lock (StateGate)
         {
-            if (!Racks.ContainsKey(rackHandle))
+            // Some titles request voices for rack zero before issuing the
+            // explicit rack-create call. Rack zero is the ABI's first-rack
+            // sentinel, so allow that bootstrap order while keeping every
+            // other unknown rack handle strict.
+            if (!Racks.ContainsKey(rackHandle) &&
+                (rackHandle != 0 || !_rackZeroBootstrapAvailable))
             {
                 return SetReturn(ctx, OrbisNgs2ErrorInvalidRackHandle);
             }
@@ -590,6 +618,21 @@ public static partial class Ngs2Exports
                      .ToArray())
         {
             Voices.Remove(voiceHandle);
+        }
+
+    }
+
+    internal static void ResetStateForTests()
+    {
+        lock (StateGate)
+        {
+            Systems.Clear();
+            Racks.Clear();
+            Voices.Clear();
+            _nextUid = 0;
+            _nextRackHandle = 0;
+            _rackZeroBootstrapAvailable = true;
+            _renderCount = 0;
         }
     }
 
