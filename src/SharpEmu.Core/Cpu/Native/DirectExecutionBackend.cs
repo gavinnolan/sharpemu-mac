@@ -307,6 +307,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	// deterministic address window for their stack and TLS regions.
 	private const int GuestThreadRegionSlots = 1024;
 
+	// Picking a free slot and mapping it must be one step. Thread creation and a
+	// thread's first nested-callback stack map from different host threads, and
+	// mapping over an existing range succeeds (zero-filling it), so two callers that
+	// both saw a slot free would share one live stack.
+	private static readonly object GuestThreadRegionMapGate = new();
+
 	[ThreadStatic]
 	private static List<(IVirtualMemory Memory, ulong Base)>? _nestedGuestCallbackStacks;
 
@@ -5416,7 +5422,34 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return false;
 	}
 
+	internal static bool TryMapGuestThreadRegionForTest(
+		IVirtualMemory virtualMemory,
+		ulong baseAddress,
+		ulong size,
+		out ulong mappedBase) =>
+		TryMapGuestThreadRegion(
+			virtualMemory,
+			baseAddress,
+			size,
+			ProgramHeaderFlags.Read | ProgramHeaderFlags.Write,
+			out mappedBase,
+			out _);
+
 	private static bool TryMapGuestThreadRegion(
+		IVirtualMemory virtualMemory,
+		ulong baseAddress,
+		ulong size,
+		ProgramHeaderFlags protection,
+		out ulong mappedBase,
+		out string? error)
+	{
+		lock (GuestThreadRegionMapGate)
+		{
+			return TryMapGuestThreadRegionLocked(virtualMemory, baseAddress, size, protection, out mappedBase, out error);
+		}
+	}
+
+	private static bool TryMapGuestThreadRegionLocked(
 		IVirtualMemory virtualMemory,
 		ulong baseAddress,
 		ulong size,
@@ -5454,6 +5487,17 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	}
 
 	private static bool TryMapGuestThreadTlsRegion(
+		IVirtualMemory virtualMemory,
+		out ulong tlsBase,
+		out string? error)
+	{
+		lock (GuestThreadRegionMapGate)
+		{
+			return TryMapGuestThreadTlsRegionLocked(virtualMemory, out tlsBase, out error);
+		}
+	}
+
+	private static bool TryMapGuestThreadTlsRegionLocked(
 		IVirtualMemory virtualMemory,
 		out ulong tlsBase,
 		out string? error)
