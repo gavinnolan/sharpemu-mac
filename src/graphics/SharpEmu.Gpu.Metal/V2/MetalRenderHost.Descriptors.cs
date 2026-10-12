@@ -817,7 +817,7 @@ internal sealed partial class MetalRenderHost
     };
 
     private const int AddressRangeEntryBytes = 24;
-    private const int MaxAddressRanges = 4096;
+    private const int MaxAddressRanges = (int)Gen5MslTranslator.MaxAddressRangeCount;
     private long _deviceAddressSpanVersion = long.MinValue;
 
     private long _deviceAddressWrites;
@@ -886,8 +886,10 @@ internal sealed partial class MetalRenderHost
         // not otherwise touch; remember the set the table needs and restore the rest.
         var touchedBefore = _guestMemory.TouchedWindows;
         _guestMemory.ClearTouchedWindows();
+        var spanCount = 0;
         gpuMemory?.ForEachSpan((address, size) =>
         {
+            spanCount++;
             var page = DeviceAddressPaging.PageSize;
             var start = (address + page - 1) & ~(page - 1);
             var end = (address + size) & ~(page - 1);
@@ -934,6 +936,14 @@ internal sealed partial class MetalRenderHost
                 start += length;
             }
         });
+        if (_deviceAddressEntries.Count >= MaxAddressRanges)
+        {
+            MetalV2Diagnostics.WarnOnce(
+                "device-address-table-full",
+                $"The device-address table is full and later guest spans are not addressable: " +
+                $"limit={MaxAddressRanges} spans={spanCount}.");
+        }
+
         _deviceAddressWindows = _guestMemory.TouchedWindows;
         _guestMemory.ClearTouchedWindows();
         _guestMemory.MarkWindowsTouched(touchedBefore | _deviceAddressWindows);

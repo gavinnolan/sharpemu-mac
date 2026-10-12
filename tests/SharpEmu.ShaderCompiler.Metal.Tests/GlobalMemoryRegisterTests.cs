@@ -62,6 +62,20 @@ public sealed class GlobalMemoryRegisterTests
         Assert.DoesNotMatch(@"\bv3\b", source);
     }
 
+    [Fact]
+    public void AddressRangeLookup_CoversTheWholeTable()
+    {
+        var source = Compile(12u);
+        Assert.Contains($"min(sharpemu_resources.address_range_count, {Gen5MslTranslator.MaxAddressRangeCount}u)", source);
+        Assert.Contains($"step < {Gen5MslTranslator.AddressRangeSearchSteps}u", source);
+        Assert.Contains("min(sharpemu_resources.address_range_count, 4096u)", source);
+        Assert.Contains("step < 13u", source);
+    }
+
+    [Fact]
+    public void AddressRangeSearchSteps_CoverTheMaximumCount()
+        => Assert.True((1UL << (int)Gen5MslTranslator.AddressRangeSearchSteps) > Gen5MslTranslator.MaxAddressRangeCount);
+
     private static string Compile(uint opcode, bool returnsValue = false)
     {
         var word = 0xDC00_8000u | (opcode << 18) | (returnsValue ? 1u << 16 : 0);

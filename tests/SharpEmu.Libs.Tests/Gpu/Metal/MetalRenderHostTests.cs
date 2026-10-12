@@ -740,7 +740,7 @@ public sealed partial class MetalRenderHostTests : IDisposable
     [Fact]
     public void RangeTableOverflow_IsFatalWithTheHash()
     {
-        using var wide = new MetalRenderHostTests(0x80_0000);
+        using var wide = new MetalRenderHostTests((int)(((Gen5MslTranslator.MaxAddressRangeCount + 2) * 2) * PageSize));
         var executor = wide.Executor(out var provider);
         var ranges = Enumerable.Range(0, (int)Gen5MslTranslator.MaxAddressRangeCount + 1)
             .Select(index => new DeviceAddressRange((uint)index, MemoryBase + ((ulong)index * 2 * PageSize), 0x10, Planned: true, Written: false))

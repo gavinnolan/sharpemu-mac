@@ -12,9 +12,10 @@ namespace SharpEmu.ShaderCompiler.Metal;
 // argument buffer, every descriptor index from the memory table, user data from push data.
 public static partial class Gen5MslTranslator
 {
-    // The range table holds at most 64 merged entries; seven halvings cover them.
-    public const uint AddressRangeSearchSteps = 7;
-    public const uint MaxAddressRangeCount = 64;
+    // The range table holds at most 4096 entries; the resolver's binary search needs
+    // 2^AddressRangeSearchSteps > MaxAddressRangeCount, so 13 steps cover 4096. Raise both together.
+    public const uint AddressRangeSearchSteps = 13;
+    public const uint MaxAddressRangeCount = 4096;
 
     public static bool TryCompileProgram(
         ShaderCompileRequest request,
