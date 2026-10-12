@@ -234,6 +234,25 @@ internal static class Gen5ComputeFixtures
         StoreScalarResourceBase: 8,
         StoreBackingBytes: 256);
 
+    // No s_barrier: lane l writes l + 1 to LDS slot l, then reads slot (l + 32) & 63, which the
+    // other 32-wide half wrote. A guest wave's LDS ops are in order, so this must see l' + 1.
+    public static readonly Gen5ComputeFixture Wave64LdsExchange = new(
+        "wave64-lds-exchange",
+        [
+            .. Wave64LaneIndex,
+            0xD5430001, 0x02050300, // v_mad_u32_u24 v1, v0, 1, 1           lane + 1
+            0x34080082,             // v_lshlrev_b32 v4, 2, v0
+            0xD8340000, 0x00000104, // ds_write_b32 v4, v1
+            0xD5430005, 0x02810300, // v_mad_u32_u24 v5, v0, 1, 32          lane + 32
+            0x360A0ABF,             // v_and_b32 v5, 63, v5
+            0x340A0A82,             // v_lshlrev_b32 v5, 2, v5
+            0xD8D80000, 0x03000005, // ds_read_b32 v3, v5
+            0xE0701000, 0x80020304, // buffer_store_dword v3, v4, s[8:11], 0 offen
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 256);
+
     // s[4:5] = 0xF0F0F0F0_0000FFFF. v2 = the lane's bit of s[4:5] through a VOP3
     // v_cndmask_b32; v3 = 1 only on lanes that survive s_and_saveexec_b64 s[6:7], s[4:5].
     public static readonly Gen5ComputeFixture Wave64MaskBits = new(
