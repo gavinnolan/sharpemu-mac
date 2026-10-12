@@ -1627,7 +1627,9 @@ internal sealed partial class MetalRenderHost
         Span<nint> roots = textures.Length <= 16 ? stackalloc nint[textures.Length] : new nint[textures.Length];
         for (var index = 0; index < textures.Length; index++)
         {
-            roots[index] = textures[index] == 0 ? 0 : RootTexture(textures[index]);
+            // A dispatch's used resources include buffers (the step report), which have
+            // no parentTexture; only textures can be, or be views of, a cleared texture.
+            roots[index] = textures[index] == 0 || !IsTexture(textures[index]) ? 0 : RootTexture(textures[index]);
         }
 
         _encodingPendingClears = true;
@@ -1698,6 +1700,11 @@ internal sealed partial class MetalRenderHost
     }
 
     private static readonly nint SelParentTexture = MetalNative.Selector("parentTexture");
+
+    private static bool IsTexture(nint resource) =>
+        MetalNative.SendBool(resource, SelRespondsToSelector, SelParentTexture);
+
+    private static readonly nint SelRespondsToSelector = MetalNative.Selector("respondsToSelector:");
 
     /// <summary>
     /// Hands the pass about to begin every waiting clear it can perform itself, as a
