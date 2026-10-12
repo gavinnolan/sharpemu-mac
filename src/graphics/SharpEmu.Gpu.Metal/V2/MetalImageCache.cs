@@ -1187,13 +1187,11 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         IMetalImageTransfer transfer, in ImageDescription description,
         ulong dirtyStart, ulong dirtyEnd, out ulong start, out ulong end)
     {
-        // Only a linear colour surface begins a run past its first byte. A tiled run that
-        // begins in the middle or at the tail lands somewhere other than where a whole
-        // readback finds it - its placement is self-consistent, so a piece read back
-        // through the same parameters agrees, but the device shows the texels misplaced -
-        // and the depth kernels have no device test for it, so those runs still start at
-        // the image's first byte.
-        start = description.IsTiled || description.IsDepth
+        // A colour surface begins a run at the cut it is dirty from: the texel row of a
+        // linear one, the block row of a tiled one - a tile row of a 4 KiB mode, a macro
+        // tile row of a 64 KiB one. The depth kernels have no device test for a run past
+        // the first byte, so a depth run still starts at the image's first byte.
+        start = description.IsDepth
             ? 0
             : transfer.AlignRunEnd(in description, 0, Math.Min(dirtyStart, dirtyEnd));
         if (transfer.AlignRunStart(in description, start) != start)

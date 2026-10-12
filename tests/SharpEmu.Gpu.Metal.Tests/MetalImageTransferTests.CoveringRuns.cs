@@ -10,10 +10,9 @@ namespace SharpEmu.Gpu.Metal.Tests;
 
 // The run the cache refreshes or publishes for a dirty range of an image. It covers the
 // whole range, widened outwards to the nearest cuts the transfer plan can make - whole
-// texel rows of a linear surface, whole block rows of a tiled one - and a linear
-// surface's run may begin wherever such a cut falls, so an alias over its tail or its
-// middle moves its own bytes rather than every byte of the image. A tiled surface's run
-// still begins at its first byte. Planning only: no device.
+// texel rows of a linear surface, whole block rows of a tiled one - and the run may
+// begin wherever such a cut falls, so an alias over its tail or its middle moves its own
+// bytes rather than every byte of the image. Planning only: no device.
 public sealed partial class MetalImageTransferTests
 {
     // 64x128 RGBA8, linear: 0x100 bytes a texel row, 0x8000 in all.
@@ -49,10 +48,10 @@ public sealed partial class MetalImageTransferTests
         Assert.Equal(0x2100UL, end);
     }
 
-    // The end still stops at the first block row past the overlap rather than running
-    // to the image's end, so a tiled surface's untouched tail stays out of the run.
+    // A tiled run starts at the macro tile row the overlap begins in and stops at the
+    // first one past it, so neither the untouched head nor the untouched tail is in it.
     [Fact]
-    public void ATiledMiddleOverlapIsCoveredFromTheImageStartToTheBlockRowAfterIt()
+    public void ATiledMiddleOverlapIsCoveredByTheBlockRowsAroundIt()
     {
         using var transfer = new MetalImageTransfer(RequireDevice() ? Device.Value : CreateHeadlessDevice());
         var description = FourBlockRows();
@@ -60,16 +59,42 @@ public sealed partial class MetalImageTransferTests
 
         Assert.True(MetalImageCache.TryCoveringRun(transfer, in description, 0x10100, 0x2FF00, out var start, out var end));
 
-        Assert.Equal(0UL, start);
+        Assert.Equal(0x10000UL, start);
         Assert.Equal(0x30000UL, end);
     }
 
+    [Fact]
+    public void ATiledTailOverlapIsCoveredFromTheBlockRowItStartsIn()
+    {
+        using var transfer = new MetalImageTransfer(RequireDevice() ? Device.Value : CreateHeadlessDevice());
+        var description = FourBlockRows();
+
+        Assert.True(MetalImageCache.TryCoveringRun(transfer, in description, 0x30100, 0x40000, out var start, out var end));
+
+        Assert.Equal(0x30000UL, start);
+        Assert.Equal(0x40000UL, end);
+    }
+
+    // A 4 KiB mode cuts at its own tile rows: 96x128 RGBA8 is three 32x32 tiles, 0x3000
+    // bytes, a row.
+    [Fact]
+    public void A4KiBTiledOverlapIsCoveredByTheTileRowsAroundIt()
+    {
+        using var transfer = new MetalImageTransfer(RequireDevice() ? Device.Value : CreateHeadlessDevice());
+        var description = Color2D(
+            GuestPixelFormat.Bits8_8_8_8UNorm, GpuFormat.R8G8B8A8Unorm, 96, 128, 1, 1, GuestTileMode.Standard4KB);
+        Assert.Equal(0xC000UL, description.Data.Size);
+
+        Assert.True(MetalImageCache.TryCoveringRun(transfer, in description, 0x4010, 0x5000, out var start, out var end));
+
+        Assert.Equal(0x3000UL, start);
+        Assert.Equal(0x6000UL, end);
+    }
+
     // Overlaps whose covering run is the whole image are refused, so the caller moves
-    // the whole image exactly as it did before: a tiled tail, a range inside a single
-    // block row that is the whole image, and a range no row boundary separates from
-    // either end.
+    // the whole image exactly as it did before: a range inside a single block row that
+    // is the whole image, and a range no row boundary separates from either end.
     [Theory]
-    [InlineData(128u, 512u, 0x30100UL, 0x40000UL)]
     [InlineData(256u, 128u, 0x100UL, 0x200UL)]
     [InlineData(128u, 512u, 0x100UL, 0x3FF00UL)]
     public void AnOverlapWhoseRunIsTheWholeImageFallsBack(uint width, uint height, ulong dirtyStart, ulong dirtyEnd)

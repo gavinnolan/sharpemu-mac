@@ -27,7 +27,7 @@ public sealed partial class MetalImageTransferTests
         var second = BuildGuest(description, 0xC4);
         Assert.True(TryCoveringRun(
             harness, in description, description.Data.Size / 3, description.Data.Size / 2, out var start, out var end));
-        Assert.Equal(0UL, start);
+        Assert.Equal(0x10000UL, start);
 
         var actual = TransferWholeThenRun(harness, description, first, second, start, end);
 
