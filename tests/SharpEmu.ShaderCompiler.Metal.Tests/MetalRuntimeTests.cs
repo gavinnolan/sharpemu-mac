@@ -273,6 +273,76 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void Vop3CompareDecodesItsScalarDestination()
+    {
+        var compare = Gen5ComputeFixtures.DecodeOrThrow(Gen5ComputeFixtures.Wave64Vop3CompareSgpr)
+            .Instructions.Single(static instruction => instruction.Opcode == "VCmpEqU32");
+        Assert.Equal(Gen5ShaderEncoding.Vop3, compare.Encoding);
+        Assert.Equal([Gen5Operand.Scalar(4)], compare.Destinations);
+    }
+
+    [Fact]
+    public void Vop3ClassCompareWritesTheScalarRegisterItNames()
+    {
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(new Gen5ComputeFixture(
+            "vop3-cmp-class-sgpr",
+            [
+                0xD4880004, 0x00020300, // v_cmp_class_f32_e64 s4, v0, v1
+                0xBF810000,             // s_endpgm
+            ],
+            0,
+            0));
+
+        // Registers may be emitted as s[4] or promoted to a local s4.
+        Assert.Matches(@"s\[?4\]? = sharpemu_ballot\(", shader.Source);
+        Assert.DoesNotMatch(@"s\[?106\]? = sharpemu_ballot\(", shader.Source);
+    }
+
+    [Theory]
+    [InlineData(64u)]
+    [InlineData(32u)]
+    public void Vop3CompareWritesTheScalarRegisterItNamesAndLeavesVccAlone(uint waveLanes)
+    {
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var wave64 = waveLanes == 64;
+        var fixture = wave64
+            ? Gen5ComputeFixtures.Wave64Vop3CompareSgpr
+            : Gen5ComputeFixtures.Wave32Vop3CompareSgpr;
+        var result = ExecuteRequestOrThrow(fixture, new byte[fixture.StoreBackingBytes],
+            waveLaneCount: waveLanes, localSizeX: waveLanes, threadsPerThreadgroup: waveLanes);
+
+        for (var lane = 0; lane < (int)waveLanes; lane++)
+        {
+            var hit = (lane & 3) == 0 ? 1u : 0u;
+            var offset = lane * 32;
+            Assert.Equal(hit, ReadDword(result, offset));                         // s[4:5] bit
+            Assert.Equal((0x0F0F0F0Fu >> (lane & 31)) & 1u, ReadDword(result, offset + 4)); // VCC bit
+            Assert.Equal(0x11111111u, ReadDword(result, offset + 8));            // s4
+            Assert.Equal(wave64 ? 0x11111111u : 0xA5A5A5A5u, ReadDword(result, offset + 12)); // s5
+            Assert.Equal(0x0F0F0F0Fu, ReadDword(result, offset + 16));           // vcc_lo
+            Assert.Equal(hit, ReadDword(result, offset + 20));                    // saveexec
+        }
+    }
+
+    [Fact]
+    public void Vop3CompareIntoNullWritesNothingAndIntoExecMasksTheWave()
+    {
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var fixture = Gen5ComputeFixtures.Wave64Vop3CompareNullAndExec;
+        var result = ExecuteRequestOrThrow(fixture, new byte[fixture.StoreBackingBytes],
+            waveLaneCount: 64, localSizeX: 64, threadsPerThreadgroup: 64);
+
+        for (var lane = 0; lane < 64; lane++)
+        {
+            Assert.Equal(1u, ReadDword(result, lane * 16));                           // EXEC intact
+            Assert.Equal((0x0F0F0F0Fu >> (lane & 31)) & 1u, ReadDword(result, lane * 16 + 4)); // VCC
+            Assert.Equal((lane & 3) == 0 ? 1u : 0u, ReadDword(result, lane * 16 + 8)); // EXEC = mask
+        }
+    }
+
+    [Fact]
     public void Vop3CarryOutWritesOnlyTheWave32ScalarAndNothingForNull()
     {
         if (SkipWithoutMetalDevice("the execution test")) return;

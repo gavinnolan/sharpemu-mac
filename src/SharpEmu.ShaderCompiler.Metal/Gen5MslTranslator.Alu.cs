@@ -1368,11 +1368,7 @@ public static partial class Gen5MslTranslator
             }
             else
             {
-                var target = instruction.Control is Gen5SdwaControl
-                    { ScalarDestination: { } scalarDestination }
-                    ? scalarDestination
-                    : VccLoRegister;
-                StoreMaskBit(target, active);
+                StoreMaskBit(CompareMaskDestination(instruction), active);
             }
 
             return true;
@@ -1407,6 +1403,16 @@ public static partial class Gen5MslTranslator
                 $"((({mask} >> 8) & 1u) != 0u && {normal} && !{negative}) || " +
                 $"((({mask} >> 9) & 1u) != 0u && {infinite} && !{negative})");
         }
+
+        /// <summary>The register a V_CMP writes its mask to: the VOP3 encoding names it in
+        /// the vdst byte (an SGPR pair, VCC, EXEC or NULL), SDWA in its sdst field, and
+        /// the VOPC encoding always writes VCC.</summary>
+        private static uint CompareMaskDestination(Gen5ShaderInstruction instruction) =>
+            instruction.Destinations is [{ Kind: Gen5OperandKind.ScalarRegister } destination, ..]
+                ? destination.Value
+                : instruction.Control is Gen5SdwaControl { ScalarDestination: { } scalarDestination }
+                    ? scalarDestination
+                    : VccLoRegister;
 
         private static string TrimCompare(string opcode)
         {
