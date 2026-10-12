@@ -357,21 +357,20 @@ internal sealed partial class MetalRenderHost
                     rectangleList ? RequireRectangleFunction(vertexModule) : vertexModule.Function);
                 MetalV2Native.SendVoidValue(
                     descriptor, MetalNative.Selector("setRasterSampleCount:"), Math.Max(parameters.Samples, 1));
-            }
-
-            if (rectangleList)
-            {
-                // Every patch is one rectangle tessellated at factor 1: the four corners as
-                // two triangles. Counter-clockwise output keeps the guest triangle's facing,
-                // since corners (0,0), (1,0) and (0,1) are its three vertices in order.
-                MetalV2Native.SendVoidValue(
-                    descriptor, MetalNative.Selector("setTessellationFactorStepFunction:"), Mtl.TessellationFactorStepFunctionConstant);
-                MetalV2Native.SendVoidValue(
-                    descriptor, MetalNative.Selector("setTessellationPartitionMode:"), Mtl.TessellationPartitionModeInteger);
-                MetalV2Native.SendVoidValue(
-                    descriptor, MetalNative.Selector("setTessellationOutputWindingOrder:"), (nuint)Mtl.WindingCounterClockwise);
-                MetalV2Native.SendVoidValue(
-                    descriptor, MetalNative.Selector("setTessellationControlPointIndexType:"), controlPointIndexType);
+                if (rectangleList)
+                {
+                    // Every patch is one rectangle tessellated at factor 1: the four corners as
+                    // two triangles. Counter-clockwise output keeps the guest triangle's facing,
+                    // since corners (0,0), (1,0) and (0,1) are its three vertices in order.
+                    MetalV2Native.SendVoidValue(
+                        descriptor, MetalNative.Selector("setTessellationFactorStepFunction:"), Mtl.TessellationFactorStepFunctionConstant);
+                    MetalV2Native.SendVoidValue(
+                        descriptor, MetalNative.Selector("setTessellationPartitionMode:"), Mtl.TessellationPartitionModeInteger);
+                    MetalV2Native.SendVoidValue(
+                        descriptor, MetalNative.Selector("setTessellationOutputWindingOrder:"), (nuint)Mtl.WindingCounterClockwise);
+                    MetalV2Native.SendVoidValue(
+                        descriptor, MetalNative.Selector("setTessellationControlPointIndexType:"), controlPointIndexType);
+                }
             }
             else
             {

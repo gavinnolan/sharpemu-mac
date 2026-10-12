@@ -1310,9 +1310,6 @@ internal sealed partial class MetalRenderHost
         return true;
     }
 
-    // One NGG subgroup per threadgroup, one instance per grid row. The counts the
-    // geometry engine would have put in registers travel in the draw-info block the
-    // mesh prologue reads (docs/mac/ngg-mesh-shaders.md).
     // A rectangle list: one three-control-point patch per rectangle, through the vertex
     // program's post-tessellation form (Gen5MslRectangleList), which returns the four
     // corners with the fourth derived from the other three's outputs. Metal's patch draws
@@ -1430,6 +1427,9 @@ internal sealed partial class MetalRenderHost
             firstInstance);
     }
 
+    // One NGG subgroup per threadgroup, one instance per grid row. The counts the
+    // geometry engine would have put in registers travel in the draw-info block the
+    // mesh prologue reads (docs/mac/ngg-mesh-shaders.md).
     private void DrawMesh(
         Gen5MslMeshInfo mesh,
         uint count,

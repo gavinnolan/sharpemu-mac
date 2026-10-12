@@ -93,6 +93,33 @@ public sealed unsafe class MetalRectangleListDrawTests(ITestOutputHelper output)
         AssertHalf(both, 1, true);
     }
 
+    // A pipeline of any other topology, through the same program, is an ordinary vertex
+    // pipeline: it builds without a mesh and draws the guest's three vertices as one triangle.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ATriangleListPipelineDrawsOneTriangleOfTheRectangle(bool indexed)
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value, fetched: false, GpuPrimitiveTopology.TriangleList);
+        var pixels = rig.Render(host =>
+        {
+            if (indexed)
+            {
+                rig.BindIndices(host, [0, 1, 2]);
+                ((IRenderHost)host).DrawIndexed(3, 1, 0, 0, 0);
+            }
+            else
+            {
+                host.Draw(3, 1, 0, 0);
+            }
+        });
+
+        Assert.Equal(0xFF, pixels[(int)((((Height - 1) * Width) + 0) * 4) + 3]);
+        Assert.Equal(0, pixels[(int)(((0 * Width) + HalfWidth - 1) * 4) + 3]);
+        AssertHalf(pixels, 1, false);
+    }
+
     private static void AssertHalf(byte[] pixels, uint half, bool filled)
     {
         for (var y = 0u; y < Height; y++)
@@ -229,13 +256,15 @@ public sealed unsafe class MetalRectangleListDrawTests(ITestOutputHelper output)
         private readonly PageGuard _pages;
         private readonly Backing _backing = new();
         private readonly bool _fetched;
+        private readonly GpuPrimitiveTopology _topology;
         private readonly List<nint> _buffers = [];
         private PipelineHandle? _pipeline;
 
-        public Rig(nint device, bool fetched)
+        public Rig(nint device, bool fetched, GpuPrimitiveTopology topology = GpuPrimitiveTopology.PatchList)
         {
             _device = device;
             _fetched = fetched;
+            _topology = topology;
             _queue = MetalNative.Send(device, MetalNative.Selector("newCommandQueue"));
             _pages = new PageGuard(_space);
             Host = new MetalRenderHost(device, _queue, _backing, _backing, _pages, new MetalGpuWorkerRelay(static () => { }));
@@ -310,7 +339,7 @@ public sealed unsafe class MetalRectangleListDrawTests(ITestOutputHelper output)
             var parameters = new PipelineStaticParameters
             {
                 ColorCount = 1,
-                Topology = GpuPrimitiveTopology.PatchList,
+                Topology = _topology,
                 Samples = 1,
             };
             parameters.SetColorMask(0, 0xF);
