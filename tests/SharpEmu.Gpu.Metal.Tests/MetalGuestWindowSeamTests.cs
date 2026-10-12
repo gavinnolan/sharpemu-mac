@@ -21,13 +21,13 @@ namespace SharpEmu.Gpu.Metal.Tests;
 /// </summary>
 public sealed unsafe class MetalGuestWindowSeamTests(ITestOutputHelper output)
 {
-    private const ulong GuestBase = 0x2_0000_0000;
-    private const ulong BackingSize = 4 * 1024 * 1024;
-    private const ulong WindowBytes = 1024 * 1024;
-    private const ulong SeamBytes = 64 * 1024;
+    internal const ulong GuestBase = 0x2_0000_0000;
+    internal const ulong BackingSize = 4 * 1024 * 1024;
+    internal const ulong WindowBytes = 1024 * 1024;
+    internal const ulong SeamBytes = 64 * 1024;
 
     // Half overlap would ask for 7 MiB; the seam layout asks for 4.25 MiB.
-    private const ulong Budget = BackingSize + (BackingSize / 8);
+    internal const ulong Budget = BackingSize + (BackingSize / 8);
 
     // 32 KiB on either side of the first tiled window edge.
     private const ulong StraddleAddress = GuestBase + WindowBytes - (32 * 1024);
@@ -43,7 +43,7 @@ public sealed unsafe class MetalGuestWindowSeamTests(ITestOutputHelper output)
     private static readonly nint SelCopy =
         MetalNative.Selector("copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:");
 
-    private sealed class Backing : IGuestBackedSpace, IDisposable
+    internal sealed class Backing : IGuestBackedSpace, IDisposable
     {
         private readonly void* _block = NativeMemory.AlignedAlloc((nuint)BackingSize, 16384);
 
@@ -85,7 +85,7 @@ public sealed unsafe class MetalGuestWindowSeamTests(ITestOutputHelper output)
     }
 
     // The CPU view of the same bytes, which is what the ring staged from.
-    private sealed class BackingMemory(Backing backing) : ICpuMemory
+    internal sealed class BackingMemory(Backing backing) : ICpuMemory
     {
         public bool TryRead(ulong virtualAddress, Span<byte> destination) => backing.TryReadBacking(virtualAddress, destination);
         public bool TryWrite(ulong virtualAddress, ReadOnlySpan<byte> source) => backing.TryWriteBacking(virtualAddress, source);
