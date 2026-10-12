@@ -79,7 +79,7 @@ public sealed class ShaderHeaderRegistry
             if (!_context.TryReadUInt16(parts.ContinuationHeaderAddress + ScratchDwordsPerThreadOffset,
                     out continuationScratchDwords))
             {
-                throw SubmissionScheduler.Fatal($"The continuation shader scratch size is unreadable: label={label} shader=0x{parts.ContinuationAddress:X16}.");
+                throw GpuFatal.Fatal($"The continuation shader scratch size is unreadable: label={label} shader=0x{parts.ContinuationAddress:X16}.");
             }
         }
 

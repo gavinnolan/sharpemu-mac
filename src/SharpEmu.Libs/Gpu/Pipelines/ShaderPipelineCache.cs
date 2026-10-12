@@ -362,7 +362,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         {
             if (outputs.Count != 1 || outputs[0].Kind != Gen5PixelOutputKind.Float)
             {
-                throw SubmissionScheduler.Fatal("Dual-source blending requires one floating-point color output.");
+                throw GpuFatal.Fatal("Dual-source blending requires one floating-point color output.");
             }
 
             // The second export feeds target zero's blend unit, not another attachment.

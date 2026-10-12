@@ -1839,21 +1839,6 @@ public static partial class Gen5MslTranslator
                     StoreScalar(destination, result);
                     return true;
                 }
-                case "SFlbitI32B32":
-                {
-                    // Leading zero count, 0xFFFFFFFF when the source is zero.
-                    var result = Temp(
-                        "uint",
-                        $"{left} == 0u ? 0xFFFFFFFFu : (uint)clz({left})");
-                    StoreScalar(destination, result);
-                    return true;
-                }
-                case "SBitreplicateB64B32":
-                    // S_BITREPLICATE_B64_B32 broadcasts the source dword into both
-                    // halves of its 64-bit SGPR destination and does not write SCC.
-                    StoreScalar(destination, left);
-                    StoreScalar(destination + 1, left);
-                    return true;
                 case "SBitset0B32":
                     StoreScalar(
                         destination,
