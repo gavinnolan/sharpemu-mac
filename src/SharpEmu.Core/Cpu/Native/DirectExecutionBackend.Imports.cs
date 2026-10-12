@@ -195,6 +195,7 @@ public sealed partial class DirectExecutionBackend
 		// nothing here mutates, and copying it was pure cost on every guest call.
 		ref readonly ImportStubEntry importStubEntry = ref _importEntries[importIndex];
 		using var registerPacketImport = SharpEmu.Libs.Diagnostics.AgcRegisterPacketProfile.MeasureImport(importStubEntry.Nid);
+		Volatile.Read(ref _activeImportSessionCounters)?.Record(importStubEntry.Nid);
 		if (_perfHleHistogram)
 		{
 			try { RecordPerfHleCall(importStubEntry.Export?.Name ?? importStubEntry.Nid); }
