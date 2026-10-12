@@ -578,7 +578,7 @@ internal sealed class MetalGuestMemory : IDisposable
         {
             MetalV2Diagnostics.WarnOnce(
                 $"window-straddle:{size:X}",
-                $"A backed guest range straddles the window edge and has to be staged: " +
+                $"A backed guest range straddles the window edge, so no single window covers it: " +
                 $"address=0x{gpuVa:X16} size=0x{size:X} alias=0x{alias:X16} window={index} " +
                 $"window_offset=0x{offset:X} window_size=0x{window.Size:X} " +
                 $"overlap=0x{_windowOverlap:X}.");
@@ -614,12 +614,14 @@ internal sealed class MetalGuestMemory : IDisposable
     {
         if (size > MaxUploadBytes)
         {
-            // An unbacked range this large is not data a draw reads whole; bind its
-            // prefix rather than staging gigabytes per submission.
+            // A range this large that no window covers is not data a draw reads whole;
+            // bind its prefix rather than staging gigabytes per submission. It may well
+            // be backed and merely cross a window edge, so the warning says which.
             MetalV2Diagnostics.WarnOnce(
                 "oversized-upload",
-                $"An unbacked guest range is too large to stage; binding its first 0x{MaxUploadBytes:X} bytes: " +
-                $"address=0x{gpuVa:X16} size=0x{size:X}.");
+                $"A guest range no single window covers is too large to stage; binding its first " +
+                $"0x{MaxUploadBytes:X} bytes: address=0x{gpuVa:X16} size=0x{size:X} " +
+                $"({DescribeResolve(gpuVa, size)}).");
             size = MaxUploadBytes;
         }
 

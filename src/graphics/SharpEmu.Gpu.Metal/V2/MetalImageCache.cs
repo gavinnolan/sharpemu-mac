@@ -1128,7 +1128,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
         else if (!UploadInPieces(context, image))
         {
-            image.RefreshComplete();
+            // Nothing reached the texture, so it still disagrees with guest memory: the
+            // image stays CPU-dirty and the next use tries again, rather than sampling
+            // whatever the texture held as though it were the guest's bytes.
             return;
         }
 
@@ -1240,21 +1242,19 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_SUBRANGE") != "0";
 
     // Moves an image that is too large to map or stage whole, a run of layers at a time.
-    // A run that cannot be mapped is reported and skipped on its own; the rest still land.
+    // Layers that are not one window-resident span are cut into the runs that are, so an
+    // image whose guest range crosses a window edge still lands whole.
     private bool UploadInPieces(IMetalSubmissionContext context, MetalCachedImage image)
     {
         ref readonly var description = ref image.Description;
         if (!TrySplitLayers(in description, out var layers, out var layerBytes))
         {
-            var source = _guestMemory.Resolve(description.Data.Address, description.Data.Size);
+            // One window, never the ring: a range this large is past what the ring
+            // stages, and staging it would carry only its prefix.
+            var source = _guestMemory.ResolveWritable(description.Data.Address, description.Data.Size);
             if (!source.IsValid)
             {
-                MetalV2Diagnostics.WarnOnce(
-                    "upload-unresolved",
-                    $"An image range could not be resolved for an upload: " +
-                    $"address=0x{description.Data.Address:X16} size=0x{description.Data.Size:X} " +
-                    $"({_guestMemory.DescribeResolve(description.Data.Address, description.Data.Size)}).");
-                return false;
+                return UploadInRuns(context, image, 0, description.Data.Size);
             }
 
             var stencil = description.HasStencil
@@ -1279,14 +1279,16 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             var count = Math.Min(batch, layers - first);
             var pieceBase = layerBytes * first;
             var pieceSize = layerBytes * count;
-            var piece = _guestMemory.Resolve(description.Data.Address + pieceBase, pieceSize);
+            // A piece past the run size - a single layer that large - is past what the
+            // ring stages whole, so only a window may carry it in one transfer.
+            var piece = pieceSize <= MaxTransferPieceBytes
+                ? _guestMemory.Resolve(description.Data.Address + pieceBase, pieceSize)
+                : _guestMemory.ResolveWritable(description.Data.Address + pieceBase, pieceSize);
             if (!piece.IsValid || piece.Size < pieceSize)
             {
-                MetalV2Diagnostics.WarnOnce(
-                    "upload-piece-unresolved",
-                    $"An image piece could not be resolved for an upload, so those layers keep what they hold: " +
-                    $"address=0x{description.Data.Address + pieceBase:X16} size=0x{pieceSize:X} layers={first}+{count} " +
-                    $"({_guestMemory.DescribeResolve(description.Data.Address + pieceBase, pieceSize)}).");
+                // These layers are not one span a transfer can read; cut them into the
+                // runs that are rather than leaving the whole piece stale.
+                moved |= UploadInRuns(context, image, pieceBase, pieceBase + pieceSize);
                 continue;
             }
 
@@ -1474,6 +1476,129 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         return written != 0;
+    }
+
+    /// <summary>One run of an upload walk: image bytes, and whether the ring stages them.</summary>
+    internal readonly record struct UploadRun(ulong Offset, ulong Size, bool Staged);
+
+    // The upload counterpart of WriteBackInRuns: a range of an image whose guest bytes
+    // are not one window-resident span - most often a large image that crosses the edge
+    // between two windows. Each run is the longest prefix one window covers, pulled back
+    // to a boundary no subresource straddles, and the transfer is restricted to it. A run
+    // is at most MaxTransferPieceBytes, and one that starts in a window always fits it
+    // whole, because adjacent windows overlap by the seam; so every backed byte reaches
+    // the texture through a window. The ring only stages what no window holds.
+    private bool UploadInRuns(IMetalSubmissionContext context, MetalCachedImage image, ulong from, ulong to)
+    {
+        ref readonly var description = ref image.Description;
+        var address = description.Data.Address;
+        var runs = new List<UploadRun>();
+        var uncovered = PlanUploadRuns(
+            _transfer, in description, from, to, MaxTransferPieceBytes,
+            (offset, size) => _guestMemory.ResolveWritablePrefix(address + offset, size).Size, runs);
+        var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
+        // The stencil plane is named by layers, as in WriteBackInRuns.
+        var layers = description.TransferLayers;
+        var layerBytes = layers != 0 ? description.Data.Size / layers : 0;
+        var stencilLayerBytes = description.HasStencil && layers != 0 ? description.Stencil.Size / layers : 0;
+        var moved = 0UL;
+        var staged = 0UL;
+        foreach (var run in runs)
+        {
+            var source = run.Staged
+                ? _guestMemory.Resolve(address + run.Offset, run.Size)
+                : _guestMemory.ResolveWritable(address + run.Offset, run.Size);
+            if (!source.IsValid || source.Size < run.Size)
+            {
+                uncovered += run.Size;
+                continue;
+            }
+
+            var stencil = stencilLayerBytes != 0 && layerBytes != 0
+                ? _guestMemory.Resolve(
+                    description.Stencil.Address + (stencilLayerBytes * (run.Offset / layerBytes)),
+                    stencilLayerBytes * Math.Max(1UL, run.Size / layerBytes))
+                : default;
+            _transfer.EncodeGuestToTexture(
+                context, in description, range, source with { Size = run.Size }, stencil, image.Texture,
+                run.Offset, run.Size);
+            moved += run.Size;
+            staged += run.Staged ? run.Size : 0;
+        }
+
+        MetalV2Diagnostics.InfoOnce(
+            "image-upload-runs",
+            $"An image that is not one window-resident span is uploaded in runs: " +
+            $"address=0x{address + from:X16} size=0x{Math.Min(to, description.Data.Size) - from:X} " +
+            $"runs={runs.Count} staged=0x{staged:X} " +
+            $"({_guestMemory.DescribeResolve(address, description.Data.Size)}).");
+        if (uncovered != 0)
+        {
+            MetalV2Diagnostics.WarnOnce(
+                "upload-unresolved",
+                $"An image has guest bytes no upload run covers, so the texture keeps what it holds there: " +
+                $"address=0x{address + from:X16} size=0x{Math.Min(to, description.Data.Size) - from:X} " +
+                $"uncovered=0x{uncovered:X} {ProfileLabel("upload", in description)} " +
+                $"({_guestMemory.DescribeResolve(address, description.Data.Size)}).");
+        }
+
+        return moved != 0;
+    }
+
+    // The runs an upload of [from, to) is cut into, given how many bytes from an image
+    // offset one window holds (zero when none holds the first byte). The walk is the one
+    // WriteBackInRuns makes: start where a run may begin, take the window's prefix up to
+    // maxRunBytes, pull its end back to a cut no subresource straddles. Where that leaves
+    // nothing - no window holds a whole block row from here - the bytes up to the first
+    // cut past what the window holds are staged instead, never more than maxRunBytes, so
+    // the ring stays inside its cap. Returns the bytes no run carries.
+    internal static ulong PlanUploadRuns(
+        IMetalImageTransfer transfer, in ImageDescription description, ulong from, ulong to, ulong maxRunBytes,
+        Func<ulong, ulong, ulong> windowPrefix, List<UploadRun> runs)
+    {
+        var size = Math.Min(to, description.Data.Size);
+        var uncovered = 0UL;
+        for (var offset = from; offset < size;)
+        {
+            var start = transfer.AlignRunStart(in description, offset);
+            if (start > offset)
+            {
+                // Inside a transfer whose head a step stepped past; nothing carries it.
+                uncovered += Math.Min(size, start) - offset;
+                offset = start;
+                continue;
+            }
+
+            var remaining = Math.Min(size - offset, maxRunBytes);
+            var resident = Math.Min(windowPrefix(offset, remaining), remaining);
+            var end = resident != 0
+                ? transfer.AlignRunEnd(in description, offset, offset + resident)
+                : offset;
+            if (end > offset)
+            {
+                runs.Add(new UploadRun(offset, end - offset, Staged: false));
+                offset = end;
+                continue;
+            }
+
+            // A hole in the guest mapping, or a window edge without the seam: stage up to
+            // the first cut past what the window holds, and at least past one page.
+            var cut = transfer.AlignRunStart(in description, offset + Math.Max(resident, HoleStepBytes));
+            end = transfer.AlignRunEnd(in description, offset, Math.Min(Math.Min(cut, size), offset + remaining));
+            if (end <= offset)
+            {
+                // One block row larger than a run: nothing may carry it.
+                var step = Math.Min(size - offset, Math.Max(resident, HoleStepBytes));
+                uncovered += step;
+                offset += step;
+                continue;
+            }
+
+            runs.Add(new UploadRun(offset, end - offset, Staged: true));
+            offset = end;
+        }
+
+        return uncovered;
     }
 
     // The trace is opened at the first hole, so the runs before it are not in it; what
