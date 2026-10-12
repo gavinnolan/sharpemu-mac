@@ -111,6 +111,17 @@ while :; do
   sleep 5
 done
 while pgrep -x SharpEmu >/dev/null; do echo "waiting for another SharpEmu to exit" >&2; sleep 5; done
+# Other workloads on the machine slow the guest enough to change what a run shows (a 10x slower
+# boot reaches no frames at all), so wait for the 1-minute load average to drop below
+# SHARPEMU_MAX_LOAD (default: CPU count) for up to SHARPEMU_LOAD_WAIT_SECONDS (default 1800).
+max_load="${SHARPEMU_MAX_LOAD:-$(sysctl -n hw.ncpu)}"
+load_deadline=$(( $(date +%s) + ${SHARPEMU_LOAD_WAIT_SECONDS:-1800} ))
+load_now() { sysctl -n vm.loadavg | awk '{print $2}'; }
+while awk -v l="$(load_now)" -v m="$max_load" 'BEGIN { exit !(l > m) }' && (( $(date +%s) < load_deadline )); do
+  echo "waiting for load $(load_now) to drop below $max_load" >&2
+  sleep 15
+done
+echo "load_at_start=$(load_now) max_load=$max_load" >> "$OUT/run.env"
 
 GPID=""
 INPUT_PID=""
