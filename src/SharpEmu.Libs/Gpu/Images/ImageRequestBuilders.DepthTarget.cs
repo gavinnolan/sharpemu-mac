@@ -58,17 +58,15 @@ public static partial class ImageRequestBuilders
         return GpuFormat.Undefined;
     }
 
-    // DB_STENCIL_READ_BASE zero with a write base set binds the stencil plane for writing only.
-    // The DB fetches stencil through the read base only when the draw tests stencil against
-    // memory: STENCIL_ENABLE without STENCIL_CLEAR_ENABLE. A draw that clears stencil, or does
-    // not test it, never reads the plane, so the attachment is the write-base plane and its prior
-    // contents stay what the draw leaves untouched. A draw that would test stencil against a
-    // missing read base stays unsupported.
-    private static bool IsWriteOnlyStencil(in DepthTargetWords depthWords) =>
+    // A guest that leaves DB_STENCIL_READ_BASE at zero while the write base is set reads stencil
+    // through the write-base plane, as it does for depth, whose read and write bases are equal.
+    // Demon's Souls ships a register table with no read-base entry.
+    private static bool ReadsThroughWriteBase(in DepthTargetWords depthWords) =>
         depthWords.StencilReadBase == 0 &&
         depthWords.StencilWriteBase != 0 &&
-        !depthWords.StencilWriteDisabled &&
-        (!depthWords.StencilTestEnabled || depthWords.StencilClearEnabled);
+        !depthWords.StencilWriteDisabled;
+
+    private static int _stencilReadBaseMissingTraced;
 
     // Builds the request for the bound depth target. Null when no depth or stencil state is active.
     public static DepthTargetResolution? DepthTarget(in DepthTargetWords depthWords, IImageFormatSupport device) =>
@@ -97,9 +95,13 @@ public static partial class ImageRequestBuilders
 
         var depthAddress = copyMode && writeBuffer ? depthWords.ZWriteBase : depthWords.ZReadBase;
         var stencilAddress = copyMode && writeBuffer ? depthWords.StencilWriteBase : depthWords.StencilReadBase;
-        var stencilWriteOnly = !copyMode && hasStencil && IsWriteOnlyStencil(in depthWords);
-        if (stencilWriteOnly)
+        var stencilReadsThroughWriteBase = !copyMode && hasStencil && ReadsThroughWriteBase(in depthWords);
+        if (stencilReadsThroughWriteBase)
         {
+            if (Rendering.RenderTrace.Enabled && System.Threading.Interlocked.Exchange(ref _stencilReadBaseMissingTraced, 1) == 0)
+            {
+                Rendering.RenderTrace.Write($"StencilReadBaseMissing write=0x{depthWords.StencilWriteBase:X}");
+            }
             stencilAddress = depthWords.StencilWriteBase;
         }
 
@@ -143,7 +145,7 @@ public static partial class ImageRequestBuilders
         if (hasStencil)
         {
             if (depthWords.StencilFormat != GuestStencilFormat.Stencil8UInt ||
-                stencilAddress == 0 || (!copyMode && !stencilWriteOnly && !depthWords.StencilWriteDisabled && depthWords.StencilWriteBase != depthWords.StencilReadBase) || (stencilAddress & 0xFFFF) != 0)
+                stencilAddress == 0 || (!copyMode && !stencilReadsThroughWriteBase && !depthWords.StencilWriteDisabled && depthWords.StencilWriteBase != depthWords.StencilReadBase) || (stencilAddress & 0xFFFF) != 0)
             {
                 throw GpuFatal.Fatal(
                     $"The stencil attachment state is not supported: stencilInfo=0x{depthWords.StencilInfo:X8} htile={hasHtile} read=0x{depthWords.StencilReadBase:X16} write=0x{depthWords.StencilWriteBase:X16} " +
