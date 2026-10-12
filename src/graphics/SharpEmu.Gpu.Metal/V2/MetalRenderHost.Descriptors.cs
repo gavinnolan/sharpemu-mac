@@ -971,7 +971,7 @@ internal sealed partial class MetalRenderHost
         return built;
     }
 
-    private void NoteUsedResource(nint resource, nuint usage)
+    internal void NoteUsedResource(nint resource, nuint usage)
     {
         for (var index = 0; index < _usedResourceCount; index++)
         {
