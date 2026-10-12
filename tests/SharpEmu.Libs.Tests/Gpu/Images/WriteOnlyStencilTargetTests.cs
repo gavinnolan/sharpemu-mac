@@ -60,12 +60,29 @@ public sealed class WriteOnlyStencilTargetTests
     }
 
     [Fact]
-    public void StencilTestWithoutReadBaseStaysFatal()
+    public void StencilTestWithoutReadBaseBindsTheWriteBasePlane()
     {
         using var fatal = new FatalScope();
-        Assert.Throws<SchedulerFatalException>(() =>
-            ImageRequestBuilders.DepthTarget(WriteOnly(StencilEnable), new AcceptingFormatSupport()));
-        Assert.Contains("stencil attachment state", Assert.Single(fatal.Messages));
+        var words = WriteOnly() with { StencilInfo = 0x20000181, DepthControl = 0x002002F3 };
+        var resolution = ImageRequestBuilders.DepthTarget(words, new AcceptingFormatSupport());
+
+        Assert.NotNull(resolution);
+        Assert.Equal(StencilWrite, resolution.Value.StencilAddress);
+        Assert.Empty(fatal.Messages);
+    }
+
+    [Fact]
+    public void FrontAndBackEqualStencilTestWithDepthTestBindsTheWriteBasePlane()
+    {
+        using var fatal = new FatalScope();
+        // STENCIL_ENABLE, Z_ENABLE, Z_WRITE off, ZFUNC LEQUAL, BACKFACE_ENABLE, STENCILFUNC and STENCILFUNC_BF EQUAL.
+        const uint depthControl = StencilEnable | (1u << 1) | (3u << 4) | (1u << 7) | (2u << 8) | (2u << 20);
+        var words = WriteOnly() with { DepthControl = depthControl };
+        var resolution = ImageRequestBuilders.DepthTarget(words, new AcceptingFormatSupport());
+
+        Assert.NotNull(resolution);
+        Assert.Equal(StencilWrite, resolution.Value.StencilAddress);
+        Assert.Empty(fatal.Messages);
     }
 
     [Fact]
