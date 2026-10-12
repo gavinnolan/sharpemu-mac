@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Ampr;
 using SharpEmu.Libs.Kernel;
 using Xunit;
 
@@ -224,5 +225,195 @@ public sealed class HostDirectoryIndexTests : IDisposable
         File.Delete(Path.Combine(_root, name + ".tmp"));
         HostDirectoryIndex.ClearForTests();
         return folds;
+    }
+
+    // A walk of a read-only image saves its listings; the next boot of the same
+    // dump answers from them without asking the host volume at all, which is
+    // what takes the cold metadata reads off the guest's resource scan.
+    [Fact]
+    public void WarmCore_SeedsListingsFromTheSnapshotAPreviousWalkSaved()
+    {
+        var tree = CreateTree();
+        var snapshot = Path.Combine(_root, "snapshot.idx");
+
+        Assert.False(HostDirectoryIndex.WarmCore(tree, snapshot, fingerprint: 42));
+        Assert.True(File.Exists(snapshot));
+
+        HostDirectoryIndex.ClearForTests();
+        // Gone from the host, so only the snapshot can still describe it.
+        File.Delete(Path.Combine(tree, "maps", "m01.bin"));
+
+        Assert.True(HostDirectoryIndex.WarmCore(tree, snapshot, fingerprint: 42));
+        var entry = HostDirectoryIndex.Describe(Path.Combine(tree, "maps", "m01.bin"));
+        Assert.Equal(HostDirectoryIndex.Verdict.File, entry.Verdict);
+        Assert.Equal(10, entry.Length);
+        Assert.Equal(
+            HostDirectoryIndex.Verdict.Directory,
+            HostDirectoryIndex.Describe(Path.Combine(tree, "maps", "deep")).Verdict);
+        Assert.Equal(
+            HostDirectoryIndex.Verdict.File,
+            HostDirectoryIndex.Describe(Path.Combine(tree, "maps", "deep", "d.bin")).Verdict);
+        Assert.Equal(
+            HostDirectoryIndex.Verdict.Absent,
+            HostDirectoryIndex.Describe(Path.Combine(tree, "maps", "missing.bin")).Verdict);
+    }
+
+    // The dump fingerprint is what vouches for the snapshot; a dump that changed
+    // is walked again and the snapshot replaced.
+    [Fact]
+    public void WarmCore_WalksAgainWhenTheDumpFingerprintChanged()
+    {
+        var tree = CreateTree();
+        var snapshot = Path.Combine(_root, "snapshot.idx");
+        Assert.False(HostDirectoryIndex.WarmCore(tree, snapshot, fingerprint: 42));
+        HostDirectoryIndex.ClearForTests();
+        File.Delete(Path.Combine(tree, "maps", "m01.bin"));
+
+        Assert.False(HostDirectoryIndex.WarmCore(tree, snapshot, fingerprint: 43));
+        Assert.Equal(
+            HostDirectoryIndex.Verdict.Absent,
+            HostDirectoryIndex.Describe(Path.Combine(tree, "maps", "m01.bin")).Verdict);
+
+        HostDirectoryIndex.ClearForTests();
+        Assert.True(HostDirectoryIndex.WarmCore(tree, snapshot, fingerprint: 43));
+    }
+
+    // Without a fingerprint there is nothing to validate a snapshot against, so
+    // none is written or read.
+    [Fact]
+    public void WarmCore_KeepsNoSnapshotWithoutAFingerprint()
+    {
+        var tree = CreateTree();
+        var snapshot = Path.Combine(_root, "snapshot.idx");
+
+        Assert.False(HostDirectoryIndex.WarmCore(tree, snapshot, fingerprint: 0));
+
+        Assert.False(File.Exists(snapshot));
+    }
+
+    // A snapshot cut short would seed a tree missing whole directories, whose
+    // files the index would then report as absent.
+    [Fact]
+    public void WarmCore_RejectsATruncatedSnapshot()
+    {
+        var tree = CreateTree();
+        var snapshot = Path.Combine(_root, "snapshot.idx");
+        Assert.False(HostDirectoryIndex.WarmCore(tree, snapshot, fingerprint: 42));
+        using (var stream = new FileStream(snapshot, FileMode.Open))
+        {
+            stream.SetLength(stream.Length - 4);
+        }
+
+        HostDirectoryIndex.ClearForTests();
+
+        Assert.False(HostDirectoryIndex.WarmCore(tree, snapshot, fingerprint: 42));
+    }
+
+    // The snapshot sits in front of the same containment guard as a live
+    // listing, so a link must come back as a link.
+    [Fact]
+    public void WarmCore_SnapshotKeepsSymlinksAsSymlinks()
+    {
+        var tree = CreateTree();
+        var link = Path.Combine(tree, "maps", "link");
+        try
+        {
+            Directory.CreateSymbolicLink(link, _root);
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException)
+        {
+            // An unprivileged host cannot create links; nothing to assert.
+            return;
+        }
+
+        var snapshot = Path.Combine(_root, "snapshot.idx");
+        Assert.False(HostDirectoryIndex.WarmCore(tree, snapshot, fingerprint: 42));
+        HostDirectoryIndex.ClearForTests();
+
+        Assert.True(HostDirectoryIndex.WarmCore(tree, snapshot, fingerprint: 42));
+        Assert.Equal(
+            HostDirectoryIndex.Verdict.Symlink,
+            HostDirectoryIndex.Describe(link).Verdict);
+    }
+
+    // The production boot path: BeginWarm finds the snapshot path and the dump
+    // fingerprint itself, and the boot that saved the listings and the boot that
+    // reads them back must land on the very same file.
+    [Fact]
+    public void BeginWarm_RoundTripsTheSnapshotThroughTheCacheDirectory()
+    {
+        var tree = CreateTree();
+        Directory.CreateDirectory(Path.Combine(tree, "sce_sys"));
+        File.WriteAllText(Path.Combine(tree, "sce_sys", "param.json"), "{}");
+        var previousCacheDir = Environment.GetEnvironmentVariable("SHARPEMU_AMPR_INDEX_CACHE");
+        Environment.SetEnvironmentVariable("SHARPEMU_AMPR_INDEX_CACHE", Path.Combine(_root, "cache"));
+        try
+        {
+            var snapshot = AmprFileRegistry.GetDirectoryIndexSnapshotPath(tree);
+            Assert.StartsWith(Path.Combine(_root, "cache"), snapshot, StringComparison.Ordinal);
+
+            HostDirectoryIndex.BeginWarm(tree, persistSnapshot: true);
+            Assert.True(HostDirectoryIndex.WaitForSnapshot(TimeSpan.FromSeconds(10)));
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (!File.Exists(snapshot) && DateTime.UtcNow < deadline)
+            {
+                Thread.Sleep(10);
+            }
+
+            Assert.True(File.Exists(snapshot));
+
+            HostDirectoryIndex.ClearForTests();
+            File.Delete(Path.Combine(tree, "maps", "m01.bin"));
+            HostDirectoryIndex.BeginWarm(tree, persistSnapshot: true);
+            Assert.True(HostDirectoryIndex.WaitForSnapshot(TimeSpan.FromSeconds(10)));
+
+            // Only a seeded listing can still describe the deleted file.
+            var entry = HostDirectoryIndex.Describe(Path.Combine(tree, "maps", "m01.bin"));
+            Assert.Equal(HostDirectoryIndex.Verdict.File, entry.Verdict);
+            Assert.Equal(10, entry.Length);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("SHARPEMU_AMPR_INDEX_CACHE", previousCacheDir);
+        }
+    }
+
+    // The id cache and the snapshot resolve their directory on two threads at
+    // once during boot; both must settle on the preferred directory rather than
+    // one of them falling back elsewhere.
+    [Fact]
+    public void CacheFilePaths_ResolvedConcurrentlyShareOneDirectory()
+    {
+        var tree = CreateTree();
+        var previousCacheDir = Environment.GetEnvironmentVariable("SHARPEMU_AMPR_INDEX_CACHE");
+        var cacheDir = Path.Combine(_root, "cache-concurrent");
+        Environment.SetEnvironmentVariable("SHARPEMU_AMPR_INDEX_CACHE", cacheDir);
+        try
+        {
+            var directories = new string?[32];
+            Parallel.For(
+                0,
+                directories.Length,
+                new ParallelOptions { MaxDegreeOfParallelism = directories.Length },
+                i => directories[i] = Path.GetDirectoryName(
+                    AmprFileRegistry.GetDirectoryIndexSnapshotPath(tree)));
+
+            Assert.All(directories, directory => Assert.Equal(cacheDir, directory));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("SHARPEMU_AMPR_INDEX_CACHE", previousCacheDir);
+        }
+    }
+
+    private string CreateTree()
+    {
+        var tree = Path.Combine(_root, "app0");
+        Directory.CreateDirectory(Path.Combine(tree, "maps", "deep"));
+        File.WriteAllBytes(Path.Combine(tree, "maps", "m01.bin"), new byte[10]);
+        File.WriteAllBytes(Path.Combine(tree, "maps", "deep", "d.bin"), [1]);
+        File.WriteAllBytes(Path.Combine(tree, "top.bin"), [1, 2, 3]);
+        return tree;
     }
 }

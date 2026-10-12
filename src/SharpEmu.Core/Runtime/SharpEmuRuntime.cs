@@ -190,6 +190,15 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             loadedModuleImages,
             activeImportStubs,
             activeRuntimeSymbols));
+        // Guest code starts with the initializers. The persisted app0 listings
+        // load while modules do; make sure they are in place before the guest
+        // resolves its first asset path, without letting a stalled volume hold
+        // boot hostage.
+        if (!SharpEmu.Libs.Kernel.HostDirectoryIndex.WaitForSnapshot(TimeSpan.FromSeconds(10)))
+        {
+            Console.Error.WriteLine("[RUNTIME][WARN] dir_index.snapshot_wait_timed_out");
+        }
+
         var initializerResult = RunAllInitializers(
             image,
             loadedModuleImages,
@@ -434,8 +443,9 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         SharpEmu.Libs.Ampr.AmprFileRegistry.BeginApp0IndexPreload(app0Root);
         // Same reason, for the directory listings the path resolver reads its
         // existence/symlink/size answers out of: pay the cold metadata walk
-        // here rather than on the guest thread that resolves first.
-        SharpEmu.Libs.Kernel.HostDirectoryIndex.BeginWarm(app0Root);
+        // here rather than on the guest thread that resolves first. app0 is
+        // read-only, so a later boot of the same dump reads them back instead.
+        SharpEmu.Libs.Kernel.HostDirectoryIndex.BeginWarm(app0Root, persistSnapshot: true);
         return new App0BindingScope(app0VariableName);
     }
 
