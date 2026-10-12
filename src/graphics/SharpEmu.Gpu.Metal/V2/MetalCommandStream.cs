@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Gpu.Images;
@@ -833,8 +834,22 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             view = view with { Format = linear };
         }
 
+        view = view with { Mapping = PresentSwizzle(request.Description.Bgra16, image.Description.Bgra16) };
         return image.GetOrCreateView(view);
     }
+
+    // A Bgra16 image has its guest bytes swapped on upload and download, so its texture
+    // holds logical R,G,B,A. A render target in the same B-first order is not swapped: its
+    // texture keeps memory order, channel 0 being blue. The flip's request resolves to
+    // either one (HasSameBacking ignores Bgra16), and the presenter must sample logical
+    // R,G,B,A from both, so a request and an image that disagree on the order read through
+    // a B,G,R,A view. The exchange is its own inverse, so the same view serves either
+    // direction of the disagreement.
+    internal static GpuComponentMapping PresentSwizzle(bool requestBgra16, bool imageBgra16) =>
+        requestBgra16 != imageBgra16
+            ? new GpuComponentMapping(
+                GpuComponentSwizzle.B, GpuComponentSwizzle.G, GpuComponentSwizzle.R, GpuComponentSwizzle.A)
+            : default;
 
     public void DrawIndexed(ulong submitId, in DrawIndexedArguments arguments) =>
         _translation!.DrawIndexed(submitId, in arguments);
