@@ -705,6 +705,9 @@ internal sealed partial class MetalRenderHost :
 
     void IMetalImageCacheOwner.WaitForGpu() => FlushAndWaitForGpu(MetalWaitReason.ImageCache);
 
+    bool IMetalImageCacheOwner.HasPendingGpuWrite(ulong address, ulong size) =>
+        _gpuWrites.PendingSerial(address, size, CompletedSerial) != 0;
+
     void IMetalImageCacheOwner.FillGuestRange(ulong address, ulong size, uint value) =>
         FillGuestMemory(address, size, value);
 

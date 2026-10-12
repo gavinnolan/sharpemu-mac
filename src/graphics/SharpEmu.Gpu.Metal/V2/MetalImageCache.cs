@@ -28,6 +28,10 @@ internal interface IMetalImageCacheOwner
     // Ends any open encoder and hands over the command buffer being recorded.
     IMetalSubmissionContext BeginTransfer(MetalTransferCause cause);
 
+    // Recorded or in-flight GPU work still writes into this guest range, so its bytes
+    // are not settled yet.
+    bool HasPendingGpuWrite(ulong address, ulong size);
+
     // Fills a guest byte range with a repeating dword on the GPU.
     void FillGuestRange(ulong address, ulong size, uint value);
 
@@ -410,12 +414,22 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             var guestSlice = 0UL;
             if (!tracked)
             {
+                // Metadata that recorded work is still writing is not settled enough to read.
                 if (sliceSize == 0 ||
+                    _owner.HasPendingGpuWrite(metadataAddress + sliceSize * layer, sliceSize) ||
                     !TryReadGuestDccClear(metadataAddress, sliceSize, layer, out guestSlice, out var code) ||
                     !PackedClearValue.TryDecodeDccColor(
                         view.Format, code * 0x01010101u, description.Metadata,
                         allowClearToRegister: false, out clear))
                 {
+                    continue;
+                }
+
+                // Nothing marks the guest bytes, so the claim is what keeps the next
+                // sample from clearing over whatever is drawn into the surface in between.
+                if (!TryClaimMaterializedDccLocked(imageIdentifier, guestSlice, sliceSize, code))
+                {
+                    Interlocked.Increment(ref _dccRepeatsSkipped);
                     continue;
                 }
             }
@@ -425,12 +439,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             if (tracked)
             {
                 SetMetadataSliceLocked(metadataAddress, layer, false);
-                continue;
             }
-
-            // The bytes become the "already materialized" sentinel, so the next sample
-            // does not clear over whatever is drawn into the surface in between.
-            _owner.FillGuestRange(guestSlice, sliceSize, uint.MaxValue);
         }
     }
 
@@ -597,10 +606,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return;
         }
 
-        // Deliberately no re-arm here. MaterializeDccClear's own sentinel fill reaches
-        // this path, so re-arming from it would forget the claim the materialization
-        // just made and the clear would repeat exactly as before. The guest asking for
-        // the clear again arrives as TryAbsorbDccFill, which is where the re-arm lives.
+        // A GPU write into DCC metadata is the guest asking for, or replacing, a clear.
+        if (_materializedDccSlices.Count != 0)
+        {
+            using var rearmHeld = _lock.Hold();
+            ReArmMaterializedDccLocked(address, size);
+        }
+
         if (!_pageOwners.MayHaveOwners(address, size))
         {
             return;
