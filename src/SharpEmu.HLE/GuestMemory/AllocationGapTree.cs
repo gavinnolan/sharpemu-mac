@@ -4,7 +4,7 @@
 namespace SharpEmu.HLE.GuestMemory;
 
 // Callers hold the memory-map lock for both updates and searches.
-internal sealed class AllocationGapTree
+public sealed class AllocationGapTree
 {
     private sealed class Node(ulong address, ulong end)
     {
