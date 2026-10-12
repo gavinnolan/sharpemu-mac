@@ -1289,7 +1289,7 @@ public static partial class Gen5MslTranslator
                         error = $"indirect candidate {candidate} has no declared binding class";
                         return false;
                     }
-                    var candidateElement = candidateClass.Resources.ToList().IndexOf(candidate);
+                    var candidateElement = candidateClass.Resources.ToList().IndexOf(info.GetCanonicalImageBinding(candidate));
                     if (candidateElement < 0)
                     {
                         error = $"indirect candidate {candidate} is not an element of {candidateKind.Value}";
