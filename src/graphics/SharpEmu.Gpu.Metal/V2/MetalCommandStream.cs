@@ -759,7 +759,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         if (_dumpThisFlip) { DumpTexture(image.Texture, "flip-after-refresh"); }
         var texture = PresentationViewOf(image, in request);
         var serial = SubmissionSerial;
-        FlushCommandBuffer();
+        FlushCommandBuffer(PassEndCause.Present);
         if (_flipTarget is null || texture == 0)
         {
             // The display surface resolved to no presentable texture, so there is nothing

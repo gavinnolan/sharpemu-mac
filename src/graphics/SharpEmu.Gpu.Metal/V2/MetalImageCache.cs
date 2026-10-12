@@ -28,6 +28,12 @@ internal interface IMetalImageCacheOwner
     // Ends any open encoder and hands over the command buffer being recorded.
     IMetalSubmissionContext BeginTransfer(MetalTransferCause cause);
 
+    // The same, for a transfer that reads or writes only these textures (zero for an
+    // unused one). A clear still waiting for its pass has to land before the transfer
+    // only when the transfer touches the cleared texture; every other one keeps waiting.
+    IMetalSubmissionContext BeginTransfer(MetalTransferCause cause, nint texture, nint otherTexture = 0) =>
+        BeginTransfer(cause);
+
     // Recorded or in-flight GPU work still writes into this guest range, so its bytes
     // are not settled yet.
     bool HasPendingGpuWrite(ulong address, ulong size);
@@ -732,7 +738,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return false;
         }
 
-        var context = _owner.BeginTransfer(MetalTransferCause.Writeback);
+        var context = _owner.BeginTransfer(MetalTransferCause.Writeback, other.Texture, image.Texture);
         if (!_transfer.TryEncodeTextureToTexture(
                 context, in other.Description, other.Texture, in image.Description, image.Texture))
         {
@@ -806,7 +812,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return false;
         }
 
-        var context = _owner.BeginTransfer(MetalTransferCause.Writeback);
+        var context = _owner.BeginTransfer(MetalTransferCause.Writeback, image.Texture);
         var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
         _transfer.EncodeTextureToGuest(
             context, in description, range, image.Texture, destination, default, aligned, alignedEnd - aligned);
@@ -1107,7 +1113,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return;
         }
 
-        var context = _owner.BeginTransfer(MetalTransferCause.Upload);
+        var context = _owner.BeginTransfer(MetalTransferCause.Upload, image.Texture);
         var whole = description.Data.Size <= MaxTransferPieceBytes
             ? _guestMemory.Resolve(description.Data.Address, description.Data.Size)
             : default;
@@ -1159,7 +1165,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return false;
         }
 
-        var context = _owner.BeginTransfer(MetalTransferCause.Upload);
+        var context = _owner.BeginTransfer(MetalTransferCause.Upload, image.Texture);
         var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
         _transfer.EncodeGuestToTexture(
             context, in description, range, source, default, image.Texture, start, end - start);
@@ -1311,7 +1317,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var destination = description.Data.Size <= MaxTransferPieceBytes
             ? _guestMemory.ResolveWritable(description.Data.Address, description.Data.Size)
             : default;
-        var context = _owner.BeginTransfer(MetalTransferCause.Writeback);
+        var context = _owner.BeginTransfer(MetalTransferCause.Writeback, image.Texture);
         if (destination.IsValid && destination.Size >= description.Data.Size)
         {
             var stencil = description.HasStencil

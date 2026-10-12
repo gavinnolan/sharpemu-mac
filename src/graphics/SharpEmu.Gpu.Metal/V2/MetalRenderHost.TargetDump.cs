@@ -314,7 +314,7 @@ internal sealed partial class MetalRenderHost
             var readback = _guestMemory.CreateReportBuffer(total, "SharpEmu TargetDump", out var contents, out _);
             try
             {
-                EndEncoders();
+                EndEncoders(PassEndCause.Other);
                 var blit = MetalNative.Send(EnsureCommandBuffer(), SelBlitEncoder);
                 if (blit == 0)
                 {

@@ -265,20 +265,40 @@ internal sealed partial class MetalRenderHost :
     }
 
     // Everything the cache and the transfers encode needs the encoders closed first.
-    IMetalSubmissionContext IMetalImageCacheOwner.BeginTransfer(MetalTransferCause cause)
+    IMetalSubmissionContext IMetalImageCacheOwner.BeginTransfer(MetalTransferCause cause) =>
+        BeginTransferTouching(cause, 0, 0);
+
+    IMetalSubmissionContext IMetalImageCacheOwner.BeginTransfer(
+        MetalTransferCause cause, nint texture, nint otherTexture) =>
+        BeginTransferTouching(cause, texture, otherTexture);
+
+    private IMetalSubmissionContext BeginTransferTouching(MetalTransferCause cause, nint texture, nint otherTexture)
     {
         _transferCauses[(int)cause]++;
         _ = EnsureCommandBuffer();
         NoteRecordedWork();
-        EndEncoders();
+        EndEncoders(PassEndCause.Transfer);
         // A transfer that reads or writes a texture has to see the clears that were
-        // asked for before it. A fill of guest memory and a label copy touch no texture,
-        // and draining for them would encode the very clears the next pass is about to
-        // absorb — the sentinel fill that follows a materialised fast-clear is exactly
-        // that case.
-        if (cause is not (MetalTransferCause.GuestFill or MetalTransferCause.EndOfPipeLabel))
+        // asked for before it - but only the clears of that texture: any other one keeps
+        // waiting for the pass that can absorb it as its load action. A transfer that
+        // does not say which textures it touches drains them all.
+        //
+        // A fill, a copy of guest memory and a label copy touch no texture at all. A
+        // clear changes nothing but its texture, so guest memory can only see one
+        // through the writeback of that texture, which is a transfer that names it: the
+        // copy writes back the images over its source first, and an image over its
+        // destination is uploaded again, by a transfer that names it, before it is used.
+        if (cause is MetalTransferCause.GuestFill or MetalTransferCause.EndOfPipeLabel or
+            MetalTransferCause.GuestCopy)
+        {
+        }
+        else if (texture == 0 && otherTexture == 0)
         {
             MaterializePendingClears();
+        }
+        else
+        {
+            MaterializePendingClearsOf([texture, otherTexture]);
         }
 
         NoteProfileTransfer();
@@ -295,12 +315,30 @@ internal sealed partial class MetalRenderHost :
     /// <summary>The newest submission that carries GPU work.</summary>
     public ulong LastWorkSerial => _lastWorkSerial;
 
+    // Why an open render pass was ended from outside the draw stream, for the TBDR
+    // line: a pass that ends early stores and reloads every attachment, and which of
+    // these ended it is the first thing that says whether the split can be avoided.
+    private enum PassEndCause
+    {
+        Transfer,
+        Flush,
+        Present,
+        Other,
+    }
+
     /// <summary>Ends whatever encoder is open; the next record opens the one it needs.</summary>
-    private void EndEncoders()
+    private void EndEncoders(PassEndCause cause)
     {
         if (_renderEncoder != 0)
         {
-            _passEndTransfer++;
+            switch (cause)
+            {
+                case PassEndCause.Transfer: _passEndTransfer++; break;
+                case PassEndCause.Flush: _passEndFlush++; break;
+                case PassEndCause.Present: _passEndPresent++; break;
+                default: _passEndOther++; break;
+            }
+
             EndRendering();
         }
 
@@ -315,14 +353,16 @@ internal sealed partial class MetalRenderHost :
     }
 
     /// <summary>Signals the shared event, commits, and opens no new command buffer.</summary>
-    public ulong FlushCommandBuffer()
+    public ulong FlushCommandBuffer() => FlushCommandBuffer(PassEndCause.Flush);
+
+    private ulong FlushCommandBuffer(PassEndCause cause)
     {
         if (_commandBuffer == 0)
         {
             return _nextSerial;
         }
 
-        EndEncoders();
+        EndEncoders(cause);
         MaterializePendingClears();
         // Compared here as well as when a command buffer opens: a run that ends between
         // the two sees every snapshot it took go unchecked, which is how the one report
@@ -1402,8 +1442,8 @@ internal sealed partial class MetalRenderHost :
         // split matters, and two seconds apart it costs nothing.
         var (loadBytes, storeBytes, clearedBytes, discardedBytes, emptyPasses, returnedPasses) =
             TakeAttachmentBandwidth();
-        var (endClearCount, endTargetCount, endTransferCount, endComputeCount, targetlessCount) =
-            TakePassBreakdown();
+        var (endClearCount, endTargetCount, endTransferCount, endComputeCount, endFlushCount, endPresentCount,
+            endOtherCount, targetlessCount) = TakePassBreakdown();
         var (clearPasses, clearDepthPasses, clearPixels) = TakeClearPasses();
         var (foldedClears, encodedClears) = TakeClearFolding();
         Console.Error.WriteLine(
@@ -1413,7 +1453,8 @@ internal sealed partial class MetalRenderHost :
             $"discarded_mb={(discardedBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
             $"cleared_mb={(clearedBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
             $"end_clear={endClearCount} end_target={endTargetCount} end_transfer={endTransferCount} " +
-            $"end_compute={endComputeCount} targetless={targetlessCount} " +
+            $"end_compute={endComputeCount} end_flush={endFlushCount} end_present={endPresentCount} " +
+            $"end_other={endOtherCount} targetless={targetlessCount} " +
             $"clears=[{TakeClearArrivals()}] clear_passes={clearPasses} " +
             $"clear_depth={clearDepthPasses} clear_mpx={(clearPixels / 1e6).ToString("F1", culture)} " +
             $"labels_deferred={TakeDeferredLabelWrites()} clears_folded={foldedClears} " +
@@ -1513,7 +1554,7 @@ internal sealed partial class MetalRenderHost :
         _disposed = true;
         try
         {
-            EndEncoders();
+            EndEncoders(PassEndCause.Other);
             MaterializePendingClears();
             if (_commandBuffer != 0)
             {

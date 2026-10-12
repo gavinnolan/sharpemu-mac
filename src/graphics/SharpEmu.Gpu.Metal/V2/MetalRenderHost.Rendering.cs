@@ -89,6 +89,9 @@ internal sealed partial class MetalRenderHost
     private long _passEndTarget;
     private long _passEndTransfer;
     private long _passEndCompute;
+    private long _passEndFlush;
+    private long _passEndPresent;
+    private long _passEndOther;
     private long _targetlessPasses;
 
     // Sized from the enum: a hard-coded length indexed by a cause is one new cause away
@@ -228,14 +231,18 @@ internal sealed partial class MetalRenderHost
         }
     }
 
-    internal (long Clear, long Target, long Transfer, long Compute, long Targetless) TakePassBreakdown()
+    internal (long Clear, long Target, long Transfer, long Compute, long Flush, long Present, long Other,
+        long Targetless) TakePassBreakdown()
     {
         var clear = Interlocked.Exchange(ref _passEndClear, 0);
         var target = Interlocked.Exchange(ref _passEndTarget, 0);
         var transfer = Interlocked.Exchange(ref _passEndTransfer, 0);
         var compute = Interlocked.Exchange(ref _passEndCompute, 0);
+        var flush = Interlocked.Exchange(ref _passEndFlush, 0);
+        var present = Interlocked.Exchange(ref _passEndPresent, 0);
+        var other = Interlocked.Exchange(ref _passEndOther, 0);
         var targetless = Interlocked.Exchange(ref _targetlessPasses, 0);
-        return (clear, target, transfer, compute, targetless);
+        return (clear, target, transfer, compute, flush, present, other, targetless);
     }
     private bool _renderingActive;
     private RenderingState _renderingState;
@@ -859,29 +866,48 @@ internal sealed partial class MetalRenderHost
         _boundComputePipeline = 0;
     }
 
-    private nint EnsureComputeEncoder()
+    internal nint EnsureComputeEncoder()
     {
         NoteRecordedWork();
+        if (_computeEncoder == 0)
+        {
+            if (_renderingActive)
+            {
+                _passEndCompute++;
+            }
+
+            EndRendering();
+            EncodeDeferredLabelCopies();
+        }
+
+        // Only the clears this dispatch can see are encoded ahead of it; the rest keep
+        // waiting for the pass that absorbs them. A clear is a pass of its own, so one
+        // the dispatch sees ends an open compute encoder and this opens another.
+        MaterializePendingClearsForCompute();
         if (_computeEncoder != 0)
         {
             return _computeEncoder;
         }
 
-        if (_renderingActive)
-        {
-            _passEndCompute++;
-        }
-
-        EndRendering();
-        EncodeDeferredLabelCopies();
-        MaterializePendingClears();
         _computeEncoder = MetalNative.Send(EnsureCommandBuffer(), SelComputeEncoder);
         if (_computeEncoder == 0)
         {
             throw Fatal("A Metal compute command encoder could not be created.");
         }
 
+        // A new encoder has none of the residency the last one was given.
+        ForgetResidentResources();
         return _computeEncoder;
+    }
+
+    // An encoder opened again after the pipeline was bound has no pipeline state.
+    private void EnsureComputePipelineState(nint encoder, MetalPipelineEntry entry)
+    {
+        if (_boundComputePipeline != entry.State)
+        {
+            MetalNative.SendVoid(encoder, SelSetComputePipelineState, entry.State);
+            _boundComputePipeline = entry.State;
+        }
     }
 
     public void BindVertexBuffers(ReadOnlySpan<BufferBinding> bindings, VertexInputInfo input)
@@ -923,13 +949,7 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        var encoder = EnsureComputeEncoder();
-        if (_boundComputePipeline != entry.State)
-        {
-            MetalNative.SendVoid(encoder, SelSetComputePipelineState, entry.State);
-            _boundComputePipeline = entry.State;
-        }
-
+        EnsureComputePipelineState(EnsureComputeEncoder(), entry);
         _pendingComputePipeline = entry;
     }
 
@@ -1209,6 +1229,7 @@ internal sealed partial class MetalRenderHost
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var encoder = EnsureComputeEncoder();
         var entry = _pendingComputePipeline ?? throw Fatal("A dispatch has no bound Metal compute pipeline state.");
+        EnsureComputePipelineState(encoder, entry);
         ApplyStageBindings(graphics: false);
         MetalNative.SendDispatch(
             encoder,
@@ -1236,6 +1257,7 @@ internal sealed partial class MetalRenderHost
         var encoder = EnsureComputeEncoder();
         var entry = _pendingComputePipeline ??
             throw Fatal("An indirect dispatch has no bound Metal compute pipeline state.");
+        EnsureComputePipelineState(encoder, entry);
         ApplyStageBindings(graphics: false);
         MetalV2Native.SendDispatchIndirect(
             encoder,
@@ -1455,7 +1477,7 @@ internal sealed partial class MetalRenderHost
         _clearDepthPasses++;
         _clearPixels += (long)Math.Max(width, 1) * Math.Max(height, 1) * Math.Max(range.LayerCount, 1);
         NoteClearAboutToBeEncoded(texture, in range, width, height, clearDepth, clearStencil);
-        var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.DepthClear);
+        var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.DepthClear, texture);
         var commandBuffer = context.CommandBuffer;
         var descriptor = MetalNative.Send(
             MetalNative.Send(MetalNative.Class("MTLRenderPassDescriptor"), MetalNative.Selector("alloc")),
@@ -1523,7 +1545,7 @@ internal sealed partial class MetalRenderHost
             // the cache's lock is held over the call that queued this and is fatal to
             // take twice. Clearing a texture nothing will read costs nothing.
             MetalNative.Send(texture, SelRetain);
-            _pendingClears.Add(new PendingClear(texture, range, width, height, color));
+            _pendingClears.Add(new PendingClear(texture, RootTexture(texture), range, width, height, color));
             return;
         }
 
@@ -1533,8 +1555,12 @@ internal sealed partial class MetalRenderHost
     // A clear that has been asked for and not yet encoded. It is either folded into the
     // load action of the pass that follows it or encoded as its own pass, and one of the
     // two always happens before anything can observe the surface.
+    //
+    // Root is the texture that owns the pixels: the clear may name a view of it, and
+    // whatever else touches the same pixels may name the texture or another view.
     private readonly record struct PendingClear(
         nint Texture,
+        nint Root,
         SubresourceRange Range,
         uint Width,
         uint Height,
@@ -1581,6 +1607,104 @@ internal sealed partial class MetalRenderHost
     }
 
     private bool _encodingPendingClears;
+
+    /// <summary>How many clears are waiting for a pass to absorb them.</summary>
+    internal int PendingClearCount => _pendingClears.Count;
+
+    /// <summary>
+    /// Encodes, in the order they were asked for, the waiting clears of the textures
+    /// something about to be recorded reads or writes, and leaves every other one
+    /// waiting. A texture and each of its views share the pixels, so they are compared
+    /// by the texture that owns them.
+    /// </summary>
+    private void MaterializePendingClearsOf(ReadOnlySpan<nint> textures)
+    {
+        if (_pendingClears.Count == 0 || _encodingPendingClears || textures.IsEmpty)
+        {
+            return;
+        }
+
+        Span<nint> roots = textures.Length <= 16 ? stackalloc nint[textures.Length] : new nint[textures.Length];
+        for (var index = 0; index < textures.Length; index++)
+        {
+            // A dispatch's used resources include buffers (the step report), which have
+            // no parentTexture; only textures can be, or be views of, a cleared texture.
+            roots[index] = textures[index] == 0 || !IsTexture(textures[index]) ? 0 : RootTexture(textures[index]);
+        }
+
+        _encodingPendingClears = true;
+        try
+        {
+            var kept = 0;
+            for (var index = 0; index < _pendingClears.Count; index++)
+            {
+                var pending = _pendingClears[index];
+                if (!roots.Contains(pending.Root))
+                {
+                    _pendingClears[kept++] = pending;
+                    continue;
+                }
+
+                EncodeClearPass(
+                    pending.Texture, pending.Range, pending.Width, pending.Height, pending.Color);
+                MetalNative.SendVoid(pending.Texture, SelRelease);
+            }
+
+            _pendingClears.RemoveRange(kept, _pendingClears.Count - kept);
+        }
+        finally
+        {
+            _encodingPendingClears = false;
+        }
+    }
+
+    /// <summary>
+    /// Encodes the waiting clears a compute dispatch about to be recorded can see: the
+    /// ones of every texture its bindings name, as a sampled or a storage image. Its
+    /// buffers and device addresses reach guest memory, which a clear only reaches
+    /// through the writeback of its texture - a transfer that names the texture and so
+    /// encodes the clear first. Outside a resource preparation the bindings are not
+    /// known, and every clear is encoded.
+    /// </summary>
+    private void MaterializePendingClearsForCompute()
+    {
+        if (_pendingClears.Count == 0)
+        {
+            return;
+        }
+
+        if (_preparation is null)
+        {
+            MaterializePendingClears();
+            return;
+        }
+
+        MaterializePendingClearsOf(new ReadOnlySpan<nint>(_usedResources, 0, _usedResourceCount));
+    }
+
+    // The texture a view was made from, or the texture itself.
+    private static nint RootTexture(nint texture)
+    {
+        for (var depth = 0; depth < 4 && texture != 0; depth++)
+        {
+            var parent = MetalNative.Send(texture, SelParentTexture);
+            if (parent == 0)
+            {
+                break;
+            }
+
+            texture = parent;
+        }
+
+        return texture;
+    }
+
+    private static readonly nint SelParentTexture = MetalNative.Selector("parentTexture");
+
+    private static bool IsTexture(nint resource) =>
+        MetalNative.SendBool(resource, SelRespondsToSelector, SelParentTexture);
+
+    private static readonly nint SelRespondsToSelector = MetalNative.Selector("respondsToSelector:");
 
     /// <summary>
     /// Hands the pass about to begin every waiting clear it can perform itself, as a
@@ -1673,7 +1797,7 @@ internal sealed partial class MetalRenderHost
         _clearPasses++;
         _clearPixels += (long)Math.Max(width, 1) * Math.Max(height, 1) * Math.Max(range.LayerCount, 1);
         NoteClearAboutToBeEncoded(texture, in range, width, height, depth: false, stencil: false);
-        var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.ColorClear);
+        var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.ColorClear, texture);
         var commandBuffer = context.CommandBuffer;
         var descriptor = MetalNative.Send(
             MetalNative.Send(MetalNative.Class("MTLRenderPassDescriptor"), MetalNative.Selector("alloc")),
