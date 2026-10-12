@@ -55,6 +55,10 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandS
 
     public ulong PendingLabelTick { get; set; }
 
+    public Func<EndOfPipeWriteKind, bool>? DefersKind { get; set; }
+
+    public bool DefersEndOfPipeLabel(EndOfPipeWriteKind kind) => DefersKind?.Invoke(kind) ?? DefersEndOfPipeLabels;
+
     public bool FlipDone { get; set; } = true;
 
     public ulong NextFlipRequestId { get; set; } = 1;
