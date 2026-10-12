@@ -132,6 +132,17 @@ public sealed unsafe class MetalImageAliasTests(ITestOutputHelper output)
         public MetalTransferHarness Harness { get; }
         public MetalImageCache Cache { get; }
 
+        // Straight into the backing, past the page watch, the way a store the cache has
+        // already been told about would land.
+        public void WriteGuest(ulong address, byte[] bytes) => Assert.True(_backing.TryWriteBacking(address, bytes));
+
+        public byte[] ReadGuest(ulong address, ulong size)
+        {
+            var bytes = new byte[size];
+            Assert.True(_backing.TryReadBacking(address, bytes));
+            return bytes;
+        }
+
         // A linear RGBA8 square, which every byte offset of is its own row-aligned run.
         public static ImageRequest Request(ulong address, uint side, ImageRole role)
         {
@@ -207,24 +218,34 @@ public sealed unsafe class MetalImageAliasTests(ITestOutputHelper output)
         output.WriteLine($"{name}: dirty 0x{image.DirtyStart:x}..0x{image.DirtyEnd:x} of 0x{LargeSize:x}");
     }
 
-    // An alias whose texture still holds bytes guest memory does not - written by the GPU
-    // and only partly published - cannot be refreshed over the shared run alone, so it is
-    // still marked stale as a whole.
+    // A GPU-written alias hands its whole texture to guest memory before it gives up
+    // ownership, not just the run it shares: the rest of it lives in the texture only, and
+    // the refresh that follows would otherwise replace it with the guest bytes it never
+    // published. Once guest memory holds all of it, only the shared run goes stale.
     [Fact]
-    public void AnAliasThatStillOwesGuestMemoryIsDirtiedWhole()
+    public void AGpuWrittenAliasIsWrittenBackWholeBeforeItGivesUpOwnership()
     {
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
+        var written = MetalTileOracle.Pattern((int)LargeSize, 0x5A);
+        rig.WriteGuest(ImageAddress, written);
         var large = rig.Acquire(ImageAddress, LargeSide, ImageRole.ColorTarget);
         var image = rig.Cache.GetImage(large);
         Assert.True(image.IsGpuModified);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        // What the GPU "wrote" is what the texture holds; guest memory holds something else.
+        rig.WriteGuest(ImageAddress, MetalTileOracle.Pattern((int)LargeSize, 0xC3));
 
         rig.Acquire(ImageAddress + 0x2000, SmallSide, ImageRole.ColorTarget);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
 
-        Assert.True(image.IsCpuDirty);
+        Assert.Equal(written, rig.ReadGuest(ImageAddress, LargeSize));
         Assert.False(image.IsGpuModified);
-        Assert.Equal(0UL, image.DirtyStart);
-        Assert.Equal(LargeSize, image.DirtyEnd);
+        Assert.True(image.IsCpuDirty);
+        Assert.Equal(0x2000UL, image.DirtyStart);
+        Assert.Equal(0x2000UL + SmallSize, image.DirtyEnd);
     }
 
     // Without a page watch a CPU store into the rest of the alias goes unseen, and the

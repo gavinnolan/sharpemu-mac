@@ -330,7 +330,19 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     image.Description.Data.Address + image.Description.Data.Size,
                     other.Description.Data.Address + other.Description.Data.Size);
                 var sharedSize = sharedEnd > sharedStart ? sharedEnd - sharedStart : 0;
-                PublishAliasRange(other, sharedStart, sharedSize);
+                if (takesGpuOwnership)
+                {
+                    // The other image gives up GPU ownership below, and nothing writes back
+                    // an image that does not own it: a run published on its own would leave
+                    // the rest of the other image in its texture only, for the refresh that
+                    // follows to replace with the stale guest bytes.
+                    WriteBackToGuest(other, MetalWritebackCause.ImageOverlap);
+                }
+                else
+                {
+                    PublishAliasRange(other, sharedStart, sharedSize);
+                }
+
                 var (dirtyStart, dirtyEnd) = image.OverlapWithin(sharedStart, sharedSize);
                 image.MarkCpuDirty(MetalImageDirtyCause.AliasWrite, dirtyStart, dirtyEnd);
                 _aliasPublishes++;
