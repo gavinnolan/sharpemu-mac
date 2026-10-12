@@ -118,9 +118,9 @@ public sealed class Gen5PixelOutputMappingTests
             }
             var load = Assert.Single(instructions, instruction =>
                 instruction.Opcode == SpirvOp.Load && instruction.Operands[1] == packedValue);
-            var address = Assert.Single(instructions, instruction =>
-                instruction.Opcode == SpirvOp.AccessChain && instruction.Operands[1] == load.Operands[2]);
-            Assert.Equal((uint)(component >> 1), constants[address.Operands[^1]]);
+            var name = Assert.Single(instructions, instruction =>
+                instruction.Opcode == SpirvOp.Name && instruction.Operands[0] == load.Operands[2]);
+            Assert.Equal($"v{component >> 1}", DecodeString(name.Operands[1..]));
         }
         Assert.DoesNotContain(instructions, instruction => instruction.Opcode is SpirvOp.ConvertFToU or SpirvOp.ConvertFToS);
         Assert.DoesNotContain(instructions, instruction => instruction.Opcode == SpirvOp.ExtInst && instruction.Operands[3] == 62);
@@ -134,10 +134,10 @@ public sealed class Gen5PixelOutputMappingTests
         var packedType = signed ? "short2" : "ushort2";
         var components = Enumerable.Range(0, 4).Select(component =>
             (enableMask & (1u << component)) != 0
-                ? $"{componentType}(as_type<{packedType}>(v[{component >> 1}])[{component & 1}])"
+                ? $"{componentType}(as_type<{packedType}>(v{component >> 1})[{component & 1}])"
                 : $"sharpemu_out.mrt0[{component}]");
         Assert.Contains($"vec<{componentType}, 4>({string.Join(", ", components)})", metal.Source);
-        Assert.DoesNotContain("as_type<half2>(v[", metal.Source);
+        Assert.DoesNotContain("as_type<half2>(v", metal.Source);
     }
 
     [Fact]
@@ -149,8 +149,8 @@ public sealed class Gen5PixelOutputMappingTests
         Assert.Equal(4, instructions.Count(instruction =>
             instruction.Opcode == SpirvOp.ExtInst && instruction.Operands[3] == 62));
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var metal, out error), error);
-        Assert.Contains("(float)as_type<half2>(v[0])[0]", metal.Source);
-        Assert.Contains("(float)as_type<half2>(v[1])[1]", metal.Source);
+        Assert.Contains("(float)as_type<half2>(v0)[0]", metal.Source);
+        Assert.Contains("(float)as_type<half2>(v1)[1]", metal.Source);
     }
 
     [Theory]
