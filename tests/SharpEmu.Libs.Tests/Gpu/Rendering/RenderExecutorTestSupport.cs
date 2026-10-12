@@ -335,6 +335,9 @@ internal sealed class RecordingRenderHost : IRenderHost
         return IndirectDrawArgumentsTaken;
     }
 
+    /// <summary>Set to false for a backend that draws a rectangle list as patches.</summary>
+    public bool TakesIndirectRectangleListArguments { get; set; } = true;
+
     public void Dispatch(uint groupsX, uint groupsY, uint groupsZ) => Calls.Add($"dispatch {groupsX} {groupsY} {groupsZ}");
 
     public bool TryDispatchIndirect(ulong argumentsAddress) => false;
@@ -518,6 +521,7 @@ internal static class RenderExecutorFixtures
     public const ulong ComputeShader = 0x2_0002_0000;
     public const uint PrimitiveTriangleList = 4;
     public const uint PrimitiveTriangleStrip = 6;
+    public const uint PrimitiveRectangleList = 7;
 
     private static Exception Fatal(string message) => new RenderExecutorFatalException(message);
 

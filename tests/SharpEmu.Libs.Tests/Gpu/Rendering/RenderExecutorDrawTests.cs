@@ -118,6 +118,22 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_indexed_indirect", StringComparison.Ordinal));
     }
 
+    // Metal draws a rectangle list as one patch per rectangle, sized from the index count.
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public void IndirectIndexedRectangleList_ReadsTheArgumentsOnTheCpuWhenTheHostAsks(bool taken, bool cpu)
+    {
+        _host.TakesIndirectRectangleListArguments = taken;
+        WriteIndirectArguments(6, 2, 4, 3, 1);
+        _pipelines.Graphics = Programs(vertexBuffers: [new VertexInputBuffer(VertexBase, 16, 4)]);
+        var arguments = Indexed(40, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments };
+        _executor.DrawIndexed(7, Banks(PrimitiveRectangleList), arguments);
+
+        Assert.Equal(cpu, _host.Calls.Any(c => c.StartsWith("draw_indexed 6 2 ", StringComparison.Ordinal)));
+        Assert.Equal(!cpu, _host.Calls.Any(c => c.StartsWith("draw_indexed_indirect", StringComparison.Ordinal)));
+    }
+
     [Fact]
     public void IndirectIndexedStrip_ReadsTheArgumentsOnTheCpu()
     {

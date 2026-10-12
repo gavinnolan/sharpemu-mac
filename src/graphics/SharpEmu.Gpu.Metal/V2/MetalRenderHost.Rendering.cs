@@ -72,6 +72,14 @@ internal sealed partial class MetalRenderHost
         "drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:instanceCount:baseVertex:baseInstance:");
     private static readonly nint SelDrawIndexedIndirect = MetalNative.Selector(
         "drawIndexedPrimitives:indexType:indexBuffer:indexBufferOffset:indirectBuffer:indirectBufferOffset:");
+    private static readonly nint SelDrawPatches = MetalNative.Selector(
+        "drawPatches:patchStart:patchCount:patchIndexBuffer:patchIndexBufferOffset:instanceCount:baseInstance:");
+    private static readonly nint SelDrawIndexedPatches = MetalNative.Selector(
+        "drawIndexedPatches:patchStart:patchCount:patchIndexBuffer:patchIndexBufferOffset:" +
+        "controlPointIndexBuffer:controlPointIndexBufferOffset:instanceCount:baseInstance:");
+    private static readonly nint SelSetTessellationFactorBuffer =
+        MetalNative.Selector("setTessellationFactorBuffer:offset:instanceStride:");
+    private static readonly nint SelSetVertexBytes = MetalNative.Selector("setVertexBytes:length:atIndex:");
     private static readonly nint SelDrawMeshThreadgroups = MetalNative.Selector(
         "drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:");
     private static readonly nint SelDispatchThreadgroups =
@@ -265,9 +273,14 @@ internal sealed partial class MetalRenderHost
     private readonly nint[] _boundVertexBuffers = new nint[MaxVertexBufferSlots];
     private readonly ulong[] _boundVertexOffsets = new ulong[MaxVertexBufferSlots];
 
+    // The pipeline state on the encoder, which for a rectangle list is one of the bound
+    // entry's per-index-type states rather than always its first.
+    private nint _boundRenderState;
+
     private void ForgetEncoderState()
     {
         _boundGraphicsPipeline = null;
+        _boundRenderState = 0;
         _boundDepthStencilState = 0;
         _boundBlendRed = float.NaN;
         _boundBlendGreen = float.NaN;
@@ -968,6 +981,7 @@ internal sealed partial class MetalRenderHost
         if (!ReferenceEquals(_boundGraphicsPipeline, entry))
         {
             MetalNative.SendVoid(_renderEncoder, SelSetRenderPipelineState, entry.State);
+            _boundRenderState = entry.State;
             MetalV2Native.SendVoidValue(
                 _renderEncoder, SelSetCullMode, (nuint)(MetalV2Diagnostics.IgnoreFragmentTests ? Mtl.CullModeNone : entry.CullMode));
             MetalV2Native.SendVoidValue(_renderEncoder, SelSetFrontFacingWinding, (nuint)entry.Winding);
@@ -1138,15 +1152,20 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        var (primitiveType, drawVertexCount) = entry.StaticParameters is { } staticParameters
-            ? MetalV2Formats.RectangleDraw(staticParameters.Topology, indexed: false, vertexCount)
-            : (entry.PrimitiveType, vertexCount);
+        if (entry.RectangleStates is not null)
+        {
+            DrawRectangles(entry, vertexCount, instanceCount, firstInstance, indexed: false, firstVertex, 0, 0);
+            CountDraw(started);
+            ProfileWork(entry, "draw-rectangles", $"vertices={vertexCount} instances={instanceCount}");
+            return;
+        }
+
         MetalV2Native.SendDrawPrimitivesBaseInstance(
             _renderEncoder,
             SelDrawPrimitives,
-            primitiveType,
+            entry.PrimitiveType,
             firstVertex,
-            drawVertexCount,
+            vertexCount,
             Math.Max(instanceCount, 1),
             firstInstance);
         CountDraw(started);
@@ -1169,6 +1188,14 @@ internal sealed partial class MetalRenderHost
                 baseVertex: vertexOffset, firstInstance: firstInstance);
             CountDraw(started);
             ProfileWork(entry, "draw-indexed-mesh", $"indices={indexCount} instances={instanceCount}");
+            return;
+        }
+
+        if (entry.RectangleStates is not null)
+        {
+            DrawRectangles(entry, indexCount, instanceCount, firstInstance, indexed: true, 0, firstIndex, vertexOffset);
+            CountDraw(started);
+            ProfileWork(entry, "draw-indexed-rectangles", $"indices={indexCount} instances={instanceCount}");
             return;
         }
 
@@ -1208,6 +1235,15 @@ internal sealed partial class MetalRenderHost
             // geometry silently.
             throw Fatal(
                 "An indexed indirect draw reached a mesh pipeline with its counts still in guest memory: " +
+                $"pipeline={entry.Id} {entry.Profile}.");
+        }
+
+        if (entry.RectangleStates is not null)
+        {
+            // TakesIndirectRectangleListArguments answers false, so the executor reads
+            // the counts first; a patch draw sizes its patch count from them.
+            throw Fatal(
+                "An indexed indirect draw reached a rectangle-list pipeline with its counts still in guest memory: " +
                 $"pipeline={entry.Id} {entry.Profile}.");
         }
 
@@ -1277,6 +1313,123 @@ internal sealed partial class MetalRenderHost
     // One NGG subgroup per threadgroup, one instance per grid row. The counts the
     // geometry engine would have put in registers travel in the draw-info block the
     // mesh prologue reads (docs/mac/ngg-mesh-shaders.md).
+    // A rectangle list: one three-control-point patch per rectangle, through the vertex
+    // program's post-tessellation form (Gen5MslRectangleList), which returns the four
+    // corners with the fourth derived from the other three's outputs. Metal's patch draws
+    // take no base vertex, so the per-vertex buffers are rebound at the first vertex (or
+    // the indexed draw's vertex offset) and the program gets the same vertex indices
+    // through the draw block.
+    private void DrawRectangles(
+        MetalPipelineEntry entry,
+        uint count,
+        uint instanceCount,
+        uint firstInstance,
+        bool indexed,
+        uint firstVertex,
+        uint firstIndex,
+        int vertexOffset)
+    {
+        var patches = MetalV2Formats.RectanglePatchCount(count);
+        if (patches == 0)
+        {
+            return;
+        }
+
+        var index32 = _indexType == Mtl.IndexTypeUInt32;
+        var state = entry.RectangleStates![indexed ? index32 ? 2 : 1 : 0];
+        if (_boundRenderState != state)
+        {
+            MetalNative.SendVoid(_renderEncoder, SelSetRenderPipelineState, state);
+            _boundRenderState = state;
+        }
+
+        var vertexBase = indexed ? vertexOffset : (long)firstVertex;
+        var strides = entry.RectangleVertexStrides!;
+        for (var binding = 0; vertexBase != 0 && binding < Math.Min(strides.Length, _vertexBufferCount); binding++)
+        {
+            if (strides[binding] == 0)
+            {
+                continue;
+            }
+
+            var offset = (long)_vertexOffsets[binding] + (vertexBase * strides[binding]);
+            if (offset < 0)
+            {
+                throw Fatal(
+                    $"A rectangle list's vertex offset reaches before its vertex buffer: binding={binding} " +
+                    $"offset={_vertexOffsets[binding]} stride={strides[binding]} base={vertexBase}.");
+            }
+
+            MetalNative.SendSetBuffer(
+                _renderEncoder, SelSetVertexBuffer, _vertexBuffers[binding], (nuint)offset, (nuint)(VertexBufferSlotBase + binding));
+            _boundVertexBuffers[binding] = _vertexBuffers[binding];
+            _boundVertexOffsets[binding] = (ulong)offset;
+        }
+
+        // vertex_base, vertex_offset, index_type, first_index; see Gen5RectDraw.
+        Span<uint> block = stackalloc uint[(int)(Gen5MslRectangleList.DrawInfoByteSize / sizeof(uint))];
+        block[0] = indexed ? 0 : firstVertex;
+        block[1] = unchecked((uint)vertexOffset);
+        block[2] = indexed ? index32 ? 2u : 1u : 0u;
+        block[3] = indexed ? firstIndex : 0;
+        unsafe
+        {
+            fixed (uint* words = block)
+            {
+                MetalV2Native.SendSetBytes(
+                    _renderEncoder,
+                    SelSetVertexBytes,
+                    (nint)words,
+                    Gen5MslRectangleList.DrawInfoByteSize,
+                    Gen5MslRectangleList.DrawInfoBufferIndex);
+            }
+        }
+
+        // The index slot is read as a dword stream and must be bound even for an
+        // automatic draw; the null buffer serves when the draw has no index buffer.
+        MetalNative.SendSetBuffer(
+            _renderEncoder,
+            SelSetVertexBuffer,
+            indexed ? _indexBuffer : _guestMemory.NullBuffer,
+            indexed ? (nuint)_indexOffset : 0,
+            Gen5MslRectangleList.IndexBufferIndex);
+        // Both slots are vertex-buffer slots another pipeline may use; forget them.
+        _boundVertexBuffers[Gen5MslRectangleList.IndexBufferIndex - VertexBufferSlotBase] = -1;
+        _boundVertexBuffers[Gen5MslRectangleList.DrawInfoBufferIndex - VertexBufferSlotBase] = -1;
+
+        // MTLQuadTessellationFactorsHalf: four edge and two inside factors, all 1.0.
+        var factors = _guestMemory.Allocate(6 * sizeof(ushort), 256, out var factorBytes);
+        System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ushort>(factorBytes).Fill(0x3C00);
+        MetalNative.SendSetBuffer(_renderEncoder, SelSetTessellationFactorBuffer, factors.Buffer, (nuint)factors.Offset, 0);
+        if (!indexed)
+        {
+            MetalV2Native.SendDrawPatches(
+                _renderEncoder,
+                SelDrawPatches,
+                Gen5MslRectangleList.VerticesPerRectangle,
+                0,
+                patches,
+                0,
+                0,
+                Math.Max(instanceCount, 1),
+                firstInstance);
+            return;
+        }
+
+        MetalV2Native.SendDrawIndexedPatches(
+            _renderEncoder,
+            SelDrawIndexedPatches,
+            Gen5MslRectangleList.VerticesPerRectangle,
+            0,
+            patches,
+            0,
+            0,
+            _indexBuffer,
+            (nuint)(_indexOffset + (firstIndex * (index32 ? 4UL : 2UL))),
+            Math.Max(instanceCount, 1),
+            firstInstance);
+    }
+
     private void DrawMesh(
         Gen5MslMeshInfo mesh,
         uint count,

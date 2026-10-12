@@ -37,6 +37,13 @@ internal sealed partial class MetalRenderHost
         // mesh function; the draw then launches threadgroups instead of vertices.
         public Gen5MslMeshInfo? Mesh;
 
+        // Set for a rectangle list: the pipeline state per control-point index type
+        // (none, 16-bit, 32-bit), and the stride of each vertex buffer the patch control
+        // points step through (zero for a per-instance or constant one), which a draw
+        // with a vertex offset rebinds at that offset.
+        public nint[]? RectangleStates;
+        public uint[]? RectangleVertexStrides;
+
         // Set when the vertex program picks a viewport per primitive; the draw then
         // fills every viewport slot rather than only the first.
         public bool WritesViewportIndex;
@@ -59,6 +66,11 @@ internal sealed partial class MetalRenderHost
         public nint Function;
         public Gen5MslShader Shader = null!;
         public ulong Hash;
+
+        // The post-tessellation form a rectangle-list pipeline draws through, built the
+        // first time one uses this vertex program.
+        public nint RectangleLibrary;
+        public nint RectangleFunction;
     }
 
     private static readonly nint SelSetAttachmentPixelFormat = MetalNative.Selector("setPixelFormat:");
@@ -117,6 +129,31 @@ internal sealed partial class MetalRenderHost
             $"ms={(System.Diagnostics.Stopwatch.GetTimestamp() - started) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1}");
         // Module zero never identifies a module, so the handle is the one-based index.
         return (ulong)index;
+    }
+
+    private nint RequireRectangleFunction(MetalShaderModule module)
+    {
+        lock (module)
+        {
+            if (module.RectangleFunction != 0)
+            {
+                return module.RectangleFunction;
+            }
+
+            var library = CompileLibrary(Gen5MslRectangleList.BuildSource(module.Shader), module.Hash, usesPerVertexInputs: false);
+            var function = MetalNative.Send(
+                library, MetalNative.Selector("newFunctionWithName:"), MetalNative.NsString(Gen5MslRectangleList.EntryPoint));
+            if (function == 0)
+            {
+                MetalNative.SendVoid(library, SelRelease);
+                throw Fatal(
+                    $"The rectangle-list MSL library has no entry point: entry={Gen5MslRectangleList.EntryPoint} hash=0x{module.Hash:X16}.");
+            }
+
+            module.RectangleLibrary = library;
+            module.RectangleFunction = function;
+            return function;
+        }
     }
 
     private nint CompileLibrary(string source, ulong hash, bool usesPerVertexInputs)
@@ -215,6 +252,10 @@ internal sealed partial class MetalRenderHost
         }
     }
 
+    /// <summary>A rectangle list draws one patch per rectangle, so its count is needed up
+    /// front; see <see cref="DrawRectangles"/>.</summary>
+    public bool TakesIndirectRectangleListArguments => false;
+
     private MetalPipelineEntry RequirePipelineEntry(in PipelineHandle pipeline) =>
         _pipelineEntries.TryGetValue(pipeline.Pipeline, out var entry)
             ? entry
@@ -228,6 +269,73 @@ internal sealed partial class MetalRenderHost
             ? RequireModule(description.PixelProgram)
             : null;
         var mesh = vertexModule.Shader.Stage == Gen5MslStage.Mesh ? vertexModule.Shader.MeshInfo : null;
+        // A rectangle list draws through the program's post-tessellation form (see
+        // Gen5MslRectangleList); the index type of its control points is part of the
+        // pipeline state, so one state is built for each kind of draw.
+        var rectangleList = mesh is null && parameters.Topology == GpuPrimitiveTopology.PatchList;
+        if (rectangleList && description.VertexInput.BindingCount > Gen5MslRectangleList.IndexBufferIndex - VertexBufferSlotBase)
+        {
+            throw Fatal(
+                $"A rectangle list binds vertex buffers into the slots its draw block and index buffer use: " +
+                $"buffers={description.VertexInput.BindingCount} vertex=0x{description.VertexStage.Hash:X16}.");
+        }
+
+        var state = CreateRenderPipelineState(
+            description, vertexModule, pixelModule, mesh, rectangleList, Mtl.ControlPointIndexTypeNone, out var vertexLayout);
+        nint[]? rectangleStates = rectangleList
+            ?
+            [
+                state,
+                CreateRenderPipelineState(
+                    description, vertexModule, pixelModule, mesh, true, Mtl.ControlPointIndexTypeUInt16, out _),
+                CreateRenderPipelineState(
+                    description, vertexModule, pixelModule, mesh, true, Mtl.ControlPointIndexTypeUInt32, out _),
+            ]
+            : null;
+
+        Interlocked.Increment(ref _pipelineCreations);
+        var entry = new MetalPipelineEntry
+        {
+            Id = ++_nextPipelineId,
+            State = state,
+            Graphics = true,
+            PrimitiveType = MetalV2Formats.Topology(parameters.Topology),
+            CullMode = parameters.CullFront && parameters.CullBack
+                ? Mtl.CullModeNone
+                : parameters.CullFront ? Mtl.CullModeFront : parameters.CullBack ? Mtl.CullModeBack : Mtl.CullModeNone,
+            CullsEverything = parameters.CullFront && parameters.CullBack,
+            Winding = parameters.FrontFaceClockwise ? Mtl.WindingClockwise : Mtl.WindingCounterClockwise,
+            DepthClipMode = parameters.DepthClipEnable ? Mtl.DepthClipModeClip : Mtl.DepthClipModeClamp,
+            FillMode = 0,
+            StaticParameters = parameters,
+            HasDepth = depthFormatOf(description) != MtlFormat.Invalid,
+            HasStencil = description.Rendering.StencilFormat != GpuFormat.Undefined,
+            Mesh = mesh,
+            RectangleStates = rectangleStates,
+            RectangleVertexStrides = rectangleList ? RectangleVertexStrides(description.VertexInput) : null,
+            WritesViewportIndex = vertexModule.Shader.WritesViewportIndex,
+            Profile = ProfileLabelFor(vertexModule, pixelModule, mesh),
+            VertexLayout = vertexLayout,
+        };
+        _pipelineEntries[entry.Id] = entry;
+        return new PipelineHandle(entry.Id, 0, false);
+
+        static ulong depthFormatOf(GraphicsPipelineDescription value) =>
+            value.Rendering.DepthFormat != GpuFormat.Undefined
+                ? MetalV2Formats.PixelFormat(value.Rendering.DepthFormat)
+                : MtlFormat.Invalid;
+    }
+
+    private nint CreateRenderPipelineState(
+        GraphicsPipelineDescription description,
+        MetalShaderModule vertexModule,
+        MetalShaderModule? pixelModule,
+        Gen5MslMeshInfo? mesh,
+        bool rectangleList,
+        nuint controlPointIndexType,
+        out string? vertexLayout)
+    {
+        var parameters = description.StaticParameters;
         var descriptorClass = mesh is null ? "MTLRenderPipelineDescriptor" : "MTLMeshRenderPipelineDescriptor";
         var descriptor = MetalNative.Send(
             MetalNative.Send(MetalNative.Class(descriptorClass), MetalNative.Selector("alloc")),
@@ -238,14 +346,32 @@ internal sealed partial class MetalRenderHost
         }
 
         nint state;
-        string? vertexLayout = null;
+        vertexLayout = null;
         try
         {
             if (mesh is null)
             {
-                MetalNative.SendVoid(descriptor, MetalNative.Selector("setVertexFunction:"), vertexModule.Function);
+                MetalNative.SendVoid(
+                    descriptor,
+                    MetalNative.Selector("setVertexFunction:"),
+                    rectangleList ? RequireRectangleFunction(vertexModule) : vertexModule.Function);
                 MetalV2Native.SendVoidValue(
                     descriptor, MetalNative.Selector("setRasterSampleCount:"), Math.Max(parameters.Samples, 1));
+            }
+
+            if (rectangleList)
+            {
+                // Every patch is one rectangle tessellated at factor 1: the four corners as
+                // two triangles. Counter-clockwise output keeps the guest triangle's facing,
+                // since corners (0,0), (1,0) and (0,1) are its three vertices in order.
+                MetalV2Native.SendVoidValue(
+                    descriptor, MetalNative.Selector("setTessellationFactorStepFunction:"), Mtl.TessellationFactorStepFunctionConstant);
+                MetalV2Native.SendVoidValue(
+                    descriptor, MetalNative.Selector("setTessellationPartitionMode:"), Mtl.TessellationPartitionModeInteger);
+                MetalV2Native.SendVoidValue(
+                    descriptor, MetalNative.Selector("setTessellationOutputWindingOrder:"), (nuint)Mtl.WindingCounterClockwise);
+                MetalV2Native.SendVoidValue(
+                    descriptor, MetalNative.Selector("setTessellationControlPointIndexType:"), controlPointIndexType);
             }
             else
             {
@@ -339,7 +465,7 @@ internal sealed partial class MetalRenderHost
 
             if (mesh is null && description.VertexInput.AttributeCount != 0)
             {
-                var vertexDescriptor = CreateVertexDescriptor(description, out vertexLayout);
+                var vertexDescriptor = CreateVertexDescriptor(description, rectangleList, out vertexLayout);
                 MetalNative.SendVoid(descriptor, MetalNative.Selector("setVertexDescriptor:"), vertexDescriptor);
                 MetalNative.SendVoid(vertexDescriptor, SelRelease);
             }
@@ -370,35 +496,7 @@ internal sealed partial class MetalRenderHost
             MetalNative.SendVoid(descriptor, SelRelease);
         }
 
-        Interlocked.Increment(ref _pipelineCreations);
-        var entry = new MetalPipelineEntry
-        {
-            Id = ++_nextPipelineId,
-            State = state,
-            Graphics = true,
-            PrimitiveType = MetalV2Formats.Topology(parameters.Topology),
-            CullMode = parameters.CullFront && parameters.CullBack
-                ? Mtl.CullModeNone
-                : parameters.CullFront ? Mtl.CullModeFront : parameters.CullBack ? Mtl.CullModeBack : Mtl.CullModeNone,
-            CullsEverything = parameters.CullFront && parameters.CullBack,
-            Winding = parameters.FrontFaceClockwise ? Mtl.WindingClockwise : Mtl.WindingCounterClockwise,
-            DepthClipMode = parameters.DepthClipEnable ? Mtl.DepthClipModeClip : Mtl.DepthClipModeClamp,
-            FillMode = 0,
-            StaticParameters = parameters,
-            HasDepth = depthFormatOf(description) != MtlFormat.Invalid,
-            HasStencil = description.Rendering.StencilFormat != GpuFormat.Undefined,
-            Mesh = mesh,
-            WritesViewportIndex = vertexModule.Shader.WritesViewportIndex,
-            Profile = ProfileLabelFor(vertexModule, pixelModule, mesh),
-            VertexLayout = vertexLayout,
-        };
-        _pipelineEntries[entry.Id] = entry;
-        return new PipelineHandle(entry.Id, 0, false);
-
-        static ulong depthFormatOf(GraphicsPipelineDescription value) =>
-            value.Rendering.DepthFormat != GpuFormat.Undefined
-                ? MetalV2Formats.PixelFormat(value.Rendering.DepthFormat)
-                : MtlFormat.Invalid;
+        return state;
     }
 
     private static bool IsIntegerFormat(ulong format) => format is
@@ -408,8 +506,21 @@ internal sealed partial class MetalRenderHost
         MtlFormat.Rgba8Uint or MtlFormat.Rgba8Sint or MtlFormat.Rgba16Uint or MtlFormat.Rgba16Sint or
         MtlFormat.Rgba32Uint or MtlFormat.Rgba32Sint or MtlFormat.Rgb10A2Uint;
 
-    // The vertex descriptor: one attribute per fetch, one layout per guest buffer.
-    private nint CreateVertexDescriptor(GraphicsPipelineDescription description, out string? layoutReport)
+    private static uint[] RectangleVertexStrides(PipelineVertexInputState vertexInput)
+    {
+        var strides = new uint[Math.Min((int)vertexInput.BindingCount, MaxVertexBufferSlots)];
+        for (var binding = 0; binding < strides.Length; binding++)
+        {
+            strides[binding] = vertexInput.Bindings[binding].Instance ? 0 : vertexInput.Bindings[binding].Stride;
+        }
+
+        return strides;
+    }
+
+    // The vertex descriptor: one attribute per fetch, one layout per guest buffer. A
+    // rectangle list steps its per-vertex buffers per patch control point, which is what
+    // hands each corner of the post-tessellation function all three guest vertices.
+    private nint CreateVertexDescriptor(GraphicsPipelineDescription description, bool rectangleList, out string? layoutReport)
     {
         var report = MetalV2Diagnostics.ReportVertexLayout ? new System.Text.StringBuilder() : null;
         var descriptor = MetalNative.Send(
@@ -436,7 +547,8 @@ internal sealed partial class MetalRenderHost
                 MetalNative.Selector("setStepFunction:"),
                 (nuint)(stride == 0
                     ? 0
-                    : vertexInput.Bindings[binding].Instance ? Mtl.StepFunctionPerInstance : Mtl.StepFunctionPerVertex));
+                    : vertexInput.Bindings[binding].Instance ? Mtl.StepFunctionPerInstance
+                    : rectangleList ? Mtl.StepFunctionPerPatchControlPoint : Mtl.StepFunctionPerVertex));
             if (stride == 0)
             {
                 MetalV2Native.SendVoidValue(layout, MetalNative.Selector("setStepRate:"), 0);
@@ -829,6 +941,12 @@ internal sealed partial class MetalRenderHost
             {
                 MetalNative.SendVoid(entry.State, SelRelease);
             }
+
+            // The first rectangle state is entry.State itself.
+            for (var index = 1; index < (entry.RectangleStates?.Length ?? 0); index++)
+            {
+                MetalNative.SendVoid(entry.RectangleStates![index], SelRelease);
+            }
         }
 
         _pipelineEntries.Clear();
@@ -848,6 +966,12 @@ internal sealed partial class MetalRenderHost
             if (module.Library != 0)
             {
                 MetalNative.SendVoid(module.Library, SelRelease);
+            }
+
+            if (module.RectangleFunction != 0)
+            {
+                MetalNative.SendVoid(module.RectangleFunction, SelRelease);
+                MetalNative.SendVoid(module.RectangleLibrary, SelRelease);
             }
         }
 
