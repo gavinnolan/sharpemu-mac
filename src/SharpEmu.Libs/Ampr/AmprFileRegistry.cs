@@ -309,6 +309,7 @@ internal static class AmprFileRegistry
 
             // Hash + dictionary fill dominates under Rosetta once the walk is
             // done; parallelize across cores without re-walking the tree.
+            var hashed = 0;
             Parallel.ForEach(
                 relatives,
                 new ParallelOptions
@@ -319,6 +320,13 @@ internal static class AmprFileRegistry
                 {
                     var hostPath = Path.Combine(normalizedRoot, relative.Replace('/', Path.DirectorySeparatorChar));
                     RegisterApp0Relative(relative, hostPath);
+
+                    // See the matching comment on the enumeration loop above --
+                    // same rationale, same fixed cadence.
+                    if (Interlocked.Increment(ref hashed) % 2000 == 0)
+                    {
+                        GuestThreadExecution.NotifyHostWorkProgress();
+                    }
                 });
 
             lock (_indexGate)
@@ -640,6 +648,7 @@ internal static class AmprFileRegistry
             }
 
             var relatives = new HashSet<string>(HostFsPath.Comparer);
+            var relativized = 0;
             foreach (var entry in _hostPathsById.Values)
             {
                 var relative = Path.GetRelativePath(normalizedRoot, entry.HostPath)
@@ -651,6 +660,15 @@ internal static class AmprFileRegistry
                 }
 
                 relatives.Add(relative);
+
+                // Same rationale as the walk above: this re-derives a relative
+                // path (and, below, re-hashes it) for every one of potentially
+                // several hundred thousand ids, which on its own can run past
+                // the stall watchdog's window on a large title.
+                if (++relativized % 2000 == 0)
+                {
+                    GuestThreadExecution.NotifyHostWorkProgress();
+                }
             }
 
             var tempPath = cachePath + ".tmp";
@@ -662,6 +680,7 @@ internal static class AmprFileRegistry
                 writer.Write(normalizedRoot);
                 writer.Write(relatives.Count);
                 writer.Write(paramTicks);
+                var written = 0;
                 foreach (var relative in relatives)
                 {
                     writer.Write(relative);
@@ -670,6 +689,11 @@ internal static class AmprFileRegistry
                     writer.Write(id1);
                     writer.Write(id2);
                     writer.Write(id3);
+
+                    if (++written % 2000 == 0)
+                    {
+                        GuestThreadExecution.NotifyHostWorkProgress();
+                    }
                 }
             }
 
