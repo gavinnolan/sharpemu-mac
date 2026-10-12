@@ -63,7 +63,8 @@ public static class PixelStageInputResolver
         ShaderInterfaceRegisters shaderInterface,
         ReadOnlySpan<byte> targetOutputModes,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
-        uint inputCount)
+        uint inputCount,
+        bool depthAspectBound)
     {
         var activeInputs = shaderInterface.PixelInputEnable & shaderInterface.PixelInputAddress;
         var customMask = 0u;
@@ -120,7 +121,9 @@ public static class PixelStageInputResolver
             SampleShading = (activeInputs & (InputPerspectiveSample | InputLinearSample)) != 0,
             NoPerspective = (activeInputs & InputLinearCenter) != 0,
             KillEnable = control.KillEnable,
-            DepthExportEnable = control.DepthExportEnable,
+            // Without a depth aspect the DB drops the exported depth, and Metal rejects a
+            // fragment function that writes depth into a pipeline without one.
+            DepthExportEnable = control.DepthExportEnable && depthAspectBound,
             SampleMaskExportEnable = control.MaskExportEnable,
             EarlyDepth = control.DepthExportOrder == 1 && !control.KillEnable && !control.DepthExportEnable && !control.MaskExportEnable,
             ExecuteOnNoop = control.ExecuteOnNoop,

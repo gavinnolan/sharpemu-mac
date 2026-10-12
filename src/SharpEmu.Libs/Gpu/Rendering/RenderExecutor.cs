@@ -702,7 +702,9 @@ public sealed partial class RenderExecutor
             context,
             targetExportMapping,
             state.PixelActive,
-            state.Depth.HasTarget);
+            state.Depth.HasTarget,
+            state.Depth.HasTarget &&
+                (ViewFormatRules.FullAspects(state.Depth.Target.Target.Format) & GpuImageAspect.DepthBit) != 0);
     }
 
     [System.Runtime.CompilerServices.InlineArray(RenderingState.ColorAttachmentCapacity)]

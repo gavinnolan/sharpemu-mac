@@ -668,6 +668,7 @@ internal sealed class ShaderProgramCache
                     SupportsSharedInt64Atomics = sharedInt64Atomics,
                     ShaderSignedZeroInfNanPreserveFloat32Supported = signedZeroInfNanPreserve,
                     PixelOutputs = options.PixelOutputs,
+                    PixelDepthExportEnable = info.DepthExportEnable,
                     PixelInputEnable = options.PixelInputEnable,
                     PixelCustomInterpolationMask = info.CustomInterpolationMask,
                     SupportsPerVertexPixelInputs = _host.PerVertexPixelInputsSupported,
