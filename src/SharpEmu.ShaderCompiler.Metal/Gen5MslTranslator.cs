@@ -690,8 +690,12 @@ public static partial class Gen5MslTranslator
                 {
                     // Graphics stages model LDS as per-invocation scratch (the
                     // SPIR-V translator's Private-array trick), sized smaller
-                    // because only write-then-read correctness is needed.
-                    source.AppendLine($"    thread uint sharpemu_lds[{PrivateLdsDwordCount}] = {{}};");
+                    // because only write-then-read correctness is needed. It is
+                    // left uninitialised like the threadgroup arrays above: a guest
+                    // reading LDS it never wrote sees a previous wave's leftovers
+                    // on hardware, and zero-filling 8 KB per fragment or vertex
+                    // costs more than the shader that uses it.
+                    source.AppendLine($"    thread uint sharpemu_lds[{PrivateLdsDwordCount}];");
                 }
             }
 
@@ -700,8 +704,11 @@ public static partial class Gen5MslTranslator
                 // Guest scratch is per-invocation private storage, so it is a
                 // thread-local array like the SPIR-V translator's Private one.
                 // The dword index wraps into it, so an out-of-range guest
-                // address never escapes the allocation.
-                source.AppendLine($"    thread uint sharpemu_scratch[{_scratchDwordCount}] = {{}};");
+                // address never escapes the allocation. Hardware scratch is
+                // uninitialised (it holds whatever the last wave on that slot
+                // left), so the array is too rather than being zero-filled on
+                // every invocation.
+                source.AppendLine($"    thread uint sharpemu_scratch[{_scratchDwordCount}];");
             }
 
             if (DeclaresWaveScratch && AliasesWaveScratchIntoLds)
