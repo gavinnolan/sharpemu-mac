@@ -506,20 +506,23 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_PENDING_LABELS") != "0";
 
     /// <summary>
-    /// A timestamp keeps the value it was sampled with and is published as the packet is
-    /// parsed; every other label waits for the work it reports.
+    /// Every end-of-pipe write waits for the work it reports, a clock included.
     /// </summary>
     /// <remarks>
-    /// SHARPEMU_METAL_V2_EOP_CLOCKS=defer treats them like the rest. A GPU clock write is
-    /// read for its value — the guest divides by it and prints it — not as permission to
-    /// reuse memory, and deferring it only delays whoever reads it.
+    /// End-of-pipe writes of a queue retire in order, so a clock lands with the labels before
+    /// it. Guests (Demon's Souls) gate memory reuse on it: published at parse time it let a
+    /// command buffer be recycled while an older deferred label to it was still owed.
+    /// SHARPEMU_METAL_V2_EOP_CLOCKS=parse opts back into publishing clocks as parsed.
     /// </remarks>
     public bool DefersEndOfPipeLabel(EndOfPipeWriteKind kind) =>
-        DefersEndOfPipeLabels &&
-        (DeferClockLabels || kind is not (EndOfPipeWriteKind.ClockWrite or EndOfPipeWriteKind.ClockWriteBack));
+        DefersLabelKind(kind, DefersEndOfPipeLabels, PublishClocksWhenParsed);
 
-    private static readonly bool DeferClockLabels =
-        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_EOP_CLOCKS") == "defer";
+    internal static bool DefersLabelKind(EndOfPipeWriteKind kind, bool defersLabels, bool publishClocksWhenParsed) =>
+        defersLabels &&
+        (!publishClocksWhenParsed || kind is not (EndOfPipeWriteKind.ClockWrite or EndOfPipeWriteKind.ClockWriteBack));
+
+    private static readonly bool PublishClocksWhenParsed =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_EOP_CLOCKS") == "parse";
 
     // SHARPEMU_METAL_V2_EOP_TRACE=1 names every label: what it is, where it goes, which
     // submission carries it and how long that submission took to land. A title that gives
