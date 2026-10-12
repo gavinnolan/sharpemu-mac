@@ -89,6 +89,9 @@ internal sealed partial class MetalRenderHost
     private long _passEndTarget;
     private long _passEndTransfer;
     private long _passEndCompute;
+    private long _passEndFlush;
+    private long _passEndPresent;
+    private long _passEndOther;
     private long _targetlessPasses;
 
     // Sized from the enum: a hard-coded length indexed by a cause is one new cause away
@@ -228,14 +231,18 @@ internal sealed partial class MetalRenderHost
         }
     }
 
-    internal (long Clear, long Target, long Transfer, long Compute, long Targetless) TakePassBreakdown()
+    internal (long Clear, long Target, long Transfer, long Compute, long Flush, long Present, long Other,
+        long Targetless) TakePassBreakdown()
     {
         var clear = Interlocked.Exchange(ref _passEndClear, 0);
         var target = Interlocked.Exchange(ref _passEndTarget, 0);
         var transfer = Interlocked.Exchange(ref _passEndTransfer, 0);
         var compute = Interlocked.Exchange(ref _passEndCompute, 0);
+        var flush = Interlocked.Exchange(ref _passEndFlush, 0);
+        var present = Interlocked.Exchange(ref _passEndPresent, 0);
+        var other = Interlocked.Exchange(ref _passEndOther, 0);
         var targetless = Interlocked.Exchange(ref _targetlessPasses, 0);
-        return (clear, target, transfer, compute, targetless);
+        return (clear, target, transfer, compute, flush, present, other, targetless);
     }
     private bool _renderingActive;
     private RenderingState _renderingState;
