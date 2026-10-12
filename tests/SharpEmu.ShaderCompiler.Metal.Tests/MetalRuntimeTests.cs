@@ -273,6 +273,27 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void Vop3CarryOutWritesOnlyTheWave32ScalarAndNothingForNull()
+    {
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var fixture = Gen5ComputeFixtures.Wave32Vop3CarryOutSgpr;
+        var result = ExecuteRequestOrThrow(fixture, new byte[fixture.StoreBackingBytes],
+            waveLaneCount: 32, localSizeX: 32, threadsPerThreadgroup: 32);
+
+        for (var lane = 0; lane < 32; lane++)
+        {
+            var offset = lane * 32;
+            Assert.Equal(lane >= 16 ? 1u : 0u, ReadDword(result, offset));  // s4 carry bit
+            Assert.Equal(0xFFFF0000u, ReadDword(result, offset + 4));       // s4
+            Assert.Equal(0xA5A5A5A5u, ReadDword(result, offset + 8));       // s5
+            Assert.Equal(0x0F0F0F0Fu, ReadDword(result, offset + 12));      // vcc_lo
+            Assert.Equal(0xFFFFFFFFu, ReadDword(result, offset + 16));      // exec_lo
+            Assert.Equal(unchecked((uint)lane - 16u), ReadDword(result, offset + 20)); // sum
+        }
+    }
+
+    [Fact]
     public void Wave64InALargerWorkgroupTranslatesWithoutTheThreadgroupBridge()
     {
         // The SPIR-V translator bridges only a 64-thread (one-wave) workgroup; a 256-thread

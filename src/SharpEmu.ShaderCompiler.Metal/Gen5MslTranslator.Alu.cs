@@ -1428,12 +1428,15 @@ public static partial class Gen5MslTranslator
         /// <summary>
         /// Writes this lane's bit of a wave mask: VCC/EXEC update the per-lane
         /// bool and mirror the ballot into their architectural SGPRs; a plain
-        /// SGPR receives the ballot of the per-lane condition.
+        /// SGPR receives the ballot of the per-lane condition (one SGPR in
+        /// wave32, a pair in wave64); NULL discards it.
         /// </summary>
         private void StoreMaskBit(uint register, string condition)
         {
             switch (register)
             {
+                case NullRegister:
+                    return;
                 case VccLoRegister:
                     Line($"vcc = {condition};");
                     EmitBallotStore(VccLoRegister, "vcc");
@@ -1443,11 +1446,19 @@ public static partial class Gen5MslTranslator
                     EmitBallotStore(ExecLoRegister, "exec");
                     return;
                 default:
-                    if (register < ScalarRegisterFileCount)
+                    if (register >= ScalarRegisterFileCount)
                     {
-                        EmitBallotStore(register, condition);
+                        return;
                     }
 
+                    if (!IsWave64)
+                    {
+                        // A wave32 mask is the single SGPR; the next one is not part of it.
+                        Line($"s[{register}] = sharpemu_ballot({condition});");
+                        return;
+                    }
+
+                    EmitBallotStore(register, condition);
                     return;
             }
         }
