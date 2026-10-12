@@ -1046,6 +1046,54 @@ public static partial class Gen5MslTranslator
             out BlockTerminator terminator,
             out string error)
         {
+            _ldsPhase = LdsPhase.None;
+            var emitted = TryEmitBlockBodyCore(blocks, blockIndex, out terminator, out error);
+            // Without a flow analysis the phase rule orders only within a block, so the
+            // block hands over with no half's LDS access still in flight.
+            if (emitted && _ldsPhase != LdsPhase.None && !(terminator.Kind == TerminatorKind.Jump && terminator.TrueTarget == ExitTarget))
+            {
+                Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+            }
+
+            return emitted;
+        }
+
+        private enum LdsPhase { None, Read, Write }
+
+        private LdsPhase _ldsPhase;
+        private bool _ldsOrderingBuilt;
+        private IReadOnlySet<uint>? _ldsBarriersBefore;
+
+        /// <summary>The pcs that need a threadgroup barrier before them so one 32-wide half
+        /// of a guest wave64 cannot overtake the other's LDS accesses (a guest wave's LDS
+        /// ops are in order on hardware, so its kernels use no S_BARRIER). Null when the
+        /// ordering is not needed or the program has dynamic control flow. These sit at
+        /// statement level between instructions, outside any per-lane exec guard, in blocks
+        /// every lane reaches: the branches of a bridged wave64 are wave-uniform.</summary>
+        private IReadOnlySet<uint>? LdsBarriersBefore()
+        {
+            if (!_ldsOrderingBuilt)
+            {
+                _ldsOrderingBuilt = true;
+                if (IsWave64 && _usesLds)
+                {
+                    var sharedFlatPcs = _request.Memory.Entries
+                        .Where(static memory => memory.AddressSpace is FlatAddressSpace.Shared or FlatAddressSpace.SharedOrPrivate)
+                        .Select(static memory => memory.Pc)
+                        .ToHashSet();
+                    _ldsBarriersBefore = Ir.Gen5Wave64SharedMemoryOrdering.BarriersBefore(_request.Program, sharedFlatPcs);
+                }
+            }
+
+            return _ldsBarriersBefore;
+        }
+
+        private bool TryEmitBlockBodyCore(
+            IReadOnlyList<ShaderBlock> blocks,
+            int blockIndex,
+            out BlockTerminator terminator,
+            out string error)
+        {
             error = string.Empty;
             terminator = BlockTerminator.Exit("active = false;");
             var block = blocks[blockIndex];
@@ -1059,6 +1107,39 @@ public static partial class Gen5MslTranslator
                 if (Gen5MslDump.Enabled)
                 {
                     Line($"// 0x{instruction.Pc:X4} {instruction.Opcode}");
+                }
+
+                if (IsWave64 && _usesLds)
+                {
+                    var barriers = LdsBarriersBefore();
+                    if (barriers is not null)
+                    {
+                        if (barriers.Contains(instruction.Pc))
+                        {
+                            Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+                        }
+                    }
+                    else
+                    {
+                        var nextPhase = instruction.Control is Gen5DataShareControl { Gds: false }
+                            ? instruction.Opcode.StartsWith("DsRead", StringComparison.Ordinal) ? LdsPhase.Read
+                            : instruction.Opcode.StartsWith("DsWrite", StringComparison.Ordinal) ? LdsPhase.Write : LdsPhase.None
+                            : LdsPhase.None;
+                        if (instruction.Opcode == "SBarrier")
+                        {
+                            _ldsPhase = LdsPhase.None;
+                        }
+
+                        if (nextPhase != LdsPhase.None)
+                        {
+                            if (_ldsPhase != LdsPhase.None && _ldsPhase != nextPhase)
+                            {
+                                Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+                            }
+
+                            _ldsPhase = nextPhase;
+                        }
+                    }
                 }
 
                 if (instruction.Opcode == "SEndpgm")

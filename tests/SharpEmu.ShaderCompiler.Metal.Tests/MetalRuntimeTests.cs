@@ -162,6 +162,35 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void Wave64LdsExchangeIsOrderedAcrossHalvesWithoutABarrier()
+    {
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(
+            Gen5ComputeFixtures.Wave64LdsExchange, waveLaneCount: 64, localSizeX: 64);
+        var write = shader.Source.IndexOf("sharpemu_lds[", StringComparison.Ordinal);
+        Assert.True(write >= 0, shader.Source);
+        var barrier = shader.Source.IndexOf("threadgroup_barrier", write, StringComparison.Ordinal);
+        Assert.True(barrier > write, $"no threadgroup_barrier after the LDS write\n{shader.Source}");
+        var read = shader.Source.IndexOf("sharpemu_lds[", barrier, StringComparison.Ordinal);
+        Assert.True(read > barrier, $"no LDS read after the barrier\n{shader.Source}");
+    }
+
+    [Fact]
+    public void Wave64LdsExchangeSeesTheOtherHalfsWrites()
+    {
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        for (var round = 0; round < 20; round++)
+        {
+            var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.Wave64LdsExchange, new byte[256],
+                waveLaneCount: 64, localSizeX: 64, threadsPerThreadgroup: 64);
+            for (var lane = 0; lane < 64; lane++)
+            {
+                Assert.Equal((uint)(((lane + 32) & 63) + 1), ReadDword(result, lane * 4));
+            }
+        }
+    }
+
+    [Fact]
     public void Wave64ReadLaneReadsTheFullWaveInBothHalves()
     {
         if (SkipWithoutMetalDevice("the execution test")) return;

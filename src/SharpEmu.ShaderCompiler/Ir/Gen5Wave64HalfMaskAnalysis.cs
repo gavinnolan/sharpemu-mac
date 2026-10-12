@@ -361,7 +361,7 @@ public static class Gen5Wave64HalfMaskAnalysis
         return true;
     }
 
-    private static (bool Reads, bool Writes) SharedMemoryAccess(Gen5ShaderInstruction instruction, IReadOnlySet<uint> sharedFlatPcs)
+    internal static (bool Reads, bool Writes) SharedMemoryAccess(Gen5ShaderInstruction instruction, IReadOnlySet<uint> sharedFlatPcs)
     {
         if (instruction.Control is Gen5DataShareControl { Gds: false })
         {
@@ -387,7 +387,7 @@ public static class Gen5Wave64HalfMaskAnalysis
         return sharedFlatPcs.Contains(instruction.Pc) ? (true, true) : (false, false);
     }
 
-    private static int[][]? BuildSuccessors(IReadOnlyList<Gen5ShaderInstruction> instructions)
+    internal static int[][]? BuildSuccessors(IReadOnlyList<Gen5ShaderInstruction> instructions)
     {
         var indexByPc = new Dictionary<uint, int>(instructions.Count);
         for (var index = 0; index < instructions.Count; index++)
