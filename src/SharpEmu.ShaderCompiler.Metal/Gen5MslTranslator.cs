@@ -988,40 +988,19 @@ public static partial class Gen5MslTranslator
             source.AppendLine($"    s[{VccHiRegister}] = 0u;");
             if (IsWave64)
             {
-                // All 64 lanes are active at entry (before the dispatcher masks
-                // any off), and this runs at a uniform point, so the bridge
-                // barriers are safe here too.
-                EmitBallotStoreAtEntry(source, ExecLoRegister, "true");
+                // A bridged wave is exactly one 64-thread threadgroup, and
+                // dispatchThreadgroups always launches every thread of it, so at
+                // entry (before the dispatcher masks any off) all 64 lanes are
+                // active: the mask is a constant and needs no ballot, no bridge and
+                // none of its two threadgroup barriers.
+                source.AppendLine($"    s[{ExecLoRegister}] = 0xFFFFFFFFu;");
+                source.AppendLine($"    s[{ExecHiRegister}] = 0xFFFFFFFFu;");
             }
             else
             {
                 source.AppendLine($"    s[{ExecLoRegister}] = sharpemu_ballot(true);");
                 source.AppendLine($"    s[{ExecHiRegister}] = 0u;");
             }
-        }
-
-        /// <summary>Entry-time form of <see cref="EmitBallotStore"/> writing to
-        /// <paramref name="source"/> at the fixed indent of the module prologue.</summary>
-        private void EmitBallotStoreAtEntry(StringBuilder source, uint loRegister, string condition)
-        {
-            if (!_usesWaveScratch)
-            {
-                // No cross-lane ops, so there is no bridge to gather the other half's
-                // ballot through. Both halves get this simdgroup's ballot, which is what
-                // each half would have reported for itself: lanes 32..63 read the high
-                // half for their own bit, and a mask that said zero there would park them
-                // for good the moment the program restored EXEC.
-                source.AppendLine($"    s[{loRegister}] = sharpemu_ballot({condition});");
-                source.AppendLine($"    s[{loRegister + 1}] = s[{loRegister}];");
-                return;
-            }
-
-            source.AppendLine(
-                $"    sharpemu_wave_scratch[(sharpemu_lane >> 5) & 1u] = sharpemu_ballot({condition});");
-            source.AppendLine("    threadgroup_barrier(mem_flags::mem_threadgroup);");
-            source.AppendLine($"    s[{loRegister}] = sharpemu_wave_scratch[0];");
-            source.AppendLine($"    s[{loRegister + 1}] = sharpemu_wave_scratch[1];");
-            source.AppendLine("    threadgroup_barrier(mem_flags::mem_threadgroup);");
         }
 
         private static void EmitComputeSystemRegister(

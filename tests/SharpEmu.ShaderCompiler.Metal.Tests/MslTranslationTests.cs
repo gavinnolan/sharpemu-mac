@@ -477,9 +477,11 @@ public sealed class MslTranslationTests
             fixture, waveLaneCount: 64, localSizeX: 64);
         var body = Body(shader);
 
-        // Four comparisons, one live. The entry seed exchanges once more to build the
-        // starting 64-lane EXEC, so two exchanges in all rather than five.
-        Assert.Equal(2, Occurrences(body, "sharpemu_wave_scratch[(sharpemu_lane >> 5)"));
+        // Four comparisons, one live, so one exchange rather than four. The starting
+        // 64-lane EXEC is a constant: a bridged wave is one full threadgroup.
+        Assert.Equal(1, Occurrences(body, "sharpemu_wave_scratch[(sharpemu_lane >> 5)"));
+        Assert.Contains("s126 = 0xFFFFFFFFu;", body, StringComparison.Ordinal);
+        Assert.Contains("s127 = 0xFFFFFFFFu;", body, StringComparison.Ordinal);
         // The register allocator has scalarized the file by now, so EXEC_LO reads s126.
         Assert.Contains("s126 = sharpemu_wave_scratch[0];", body, StringComparison.Ordinal);
         Assert.DoesNotContain("s106 = sharpemu_wave_scratch[0];", body, StringComparison.Ordinal);
@@ -494,7 +496,7 @@ public sealed class MslTranslationTests
                 out var error,
                 new Gen5MslCodegenOptions(DeadMaskBallotElision: false)),
             error);
-        Assert.Equal(5, Occurrences(Body(every), "sharpemu_wave_scratch[(sharpemu_lane >> 5)"));
+        Assert.Equal(4, Occurrences(Body(every), "sharpemu_wave_scratch[(sharpemu_lane >> 5)"));
     }
 
     private static int Occurrences(string source, string value)
