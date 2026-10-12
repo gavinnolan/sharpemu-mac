@@ -268,15 +268,11 @@ internal sealed class MetalCachedImage : IDisposable
     // tracker page with it does too, since the page watch cannot tell them apart.
     public void InvalidateCpuWrite(ulong address, ulong size)
     {
-        // The bytes themselves are known; a write that only shares a tracker page cannot
-        // be narrowed, because the page watch cannot say where inside the page it landed.
-        if (GuestRangeOverlap.Bytes(Description.Data.Address, Description.Data.Size, address, size))
-        {
-            var (start, end) = OverlapWithin(address, size);
-            MarkCpuDirty(MetalImageDirtyCause.CpuWrite, start, end);
-            ClearGpuModified();
-        }
-        else if (GuestRangeOverlap.Pages(Description.Data.Address, Description.Data.Size, address, size))
+        // The whole image is dirtied either way: the caller drops the page watch for the
+        // image and a page fault reports a fixed small size, so later stores go unseen
+        // until the next whole-image refresh.
+        if (GuestRangeOverlap.Bytes(Description.Data.Address, Description.Data.Size, address, size)
+            || GuestRangeOverlap.Pages(Description.Data.Address, Description.Data.Size, address, size))
         {
             MarkCpuDirty(MetalImageDirtyCause.CpuWrite);
             ClearGpuModified();

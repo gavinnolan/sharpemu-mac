@@ -109,6 +109,7 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         public ulong SliceSize;
         public uint TransferBytes;
         public bool StencilPlane;
+        public TileBlockKind BlockKind = TileBlockKind.Depth64KB;
         public uint StencilPitch;
         public ulong StencilSliceSize;
         public readonly List<MetalTileTransfer> StencilTiles = [];
@@ -1097,12 +1098,40 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
 
         if (plan.Tiled)
         {
-            AddPlaneTransfers(plan.Tiles, description.BytesPerBlock, description.Pitch,
-                description.Extent.Width, description.Extent.Height, layers, plan.SliceSize);
+            // A depth image is addressed by the block layout of its own tile mode: a
+            // comparison-sampled cube is Standard256B, not the 64 KiB depth block.
+            var tilerFormat = description.TileMode is GuestTileMode.RenderTarget or GuestTileMode.Depth
+                ? ImageDescription.RenderTargetTransferFormat(description.BytesPerBlock)
+                : description.GuestFormat;
+            if (!TileGeometry.TryGetTextureBlockLayout(tilerFormat, description.TileMode, false, out var texture) ||
+                !TileGeometry.TryGetTiledTextureLayout(
+                    new TiledSurfaceDescription(tilerFormat, description.TileMode, TileSurfaceDimension.Flat2D,
+                        description.Extent.Width, description.Extent.Height), out var surface))
+            {
+                throw GpuFatal.Fatal(
+                    $"The depth tile layout is not supported: format={(uint)tilerFormat} tile={(uint)description.TileMode}.");
+            }
+
+            if (plan.SliceSize != surface.BlockSliceSize)
+            {
+                throw GpuFatal.Fatal(
+                    $"The depth slice does not match its tile layout: slice=0x{plan.SliceSize:x} " +
+                    $"layout=0x{surface.BlockSliceSize:x} tile={(uint)description.TileMode}.");
+            }
+
+            plan.BlockKind = texture.Block.Kind;
+            AddPlaneTransfers(plan.Tiles, plan.BlockKind, description.BytesPerBlock, description.Pitch,
+                description.Extent.Width, description.Extent.Height, layers, plan.SliceSize,
+                surface.Mips[0].PaddedWidth, surface.Mips[0].PaddedHeight);
         }
 
         if (plan.StencilPlane)
         {
+            if (description.TileMode != GuestTileMode.Depth)
+            {
+                throw GpuFatal.Fatal($"A stencil plane needs the depth tile mode: tile={(uint)description.TileMode}.");
+            }
+
             if (description.Stencil.Size % layers != 0)
             {
                 throw GpuFatal.Fatal(
@@ -1113,8 +1142,8 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
             plan.StencilPitch = plan.Tiled ? TileGeometry.DepthPitch(description.Extent.Width, 1) : description.Pitch;
             if (plan.Tiled)
             {
-                AddPlaneTransfers(plan.StencilTiles, 1, plan.StencilPitch,
-                    description.Extent.Width, description.Extent.Height, layers, plan.StencilSliceSize);
+                AddPlaneTransfers(plan.StencilTiles, TileBlockKind.Depth64KB, 1, plan.StencilPitch,
+                    description.Extent.Width, description.Extent.Height, layers, plan.StencilSliceSize, 0, 0);
             }
         }
 
@@ -1123,9 +1152,9 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
 
     // One 64 KiB depth block transfer per array layer; the layer rides in SurfaceZ because
     // the depth kind folds it into every element offset.
-    private static void AddPlaneTransfers(List<MetalTileTransfer> transfers, uint bytes, uint pitch, uint width, uint height, uint layers, ulong sliceSize)
+    private static void AddPlaneTransfers(List<MetalTileTransfer> transfers, TileBlockKind kind, uint bytes, uint pitch, uint width, uint height, uint layers, ulong sliceSize, uint paddedWidth, uint paddedHeight)
     {
-        if (!TileGeometry.TryGetBlockLayout(TileBlockKind.Depth64KB, bytes, out _))
+        if (!TileGeometry.TryGetBlockLayout(kind, bytes, out _))
         {
             throw GpuFatal.Fatal($"The depth tile layout is not supported: bytesPerElement={bytes}.");
         }
@@ -1135,7 +1164,7 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         {
             transfers.Add(new MetalTileTransfer
             {
-                Kind = TileBlockKind.Depth64KB,
+                Kind = kind,
                 BytesPerElement = bytes,
                 LinearOffset = sliceSize * layer,
                 LinearSize = sliceSize,
@@ -1145,7 +1174,9 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
                 Height = height,
                 Depth = 1,
                 Pitch = pitch,
-                SurfaceZ = layer,
+                SurfaceZ = kind is TileBlockKind.Depth64KB or TileBlockKind.RenderTarget64KB or TileBlockKind.RenderTarget64KBGen5 ? layer : 0,
+                TiledWidth = paddedWidth,
+                TiledHeight = paddedHeight,
                 Slice = layer,
             });
         }
@@ -1361,6 +1392,12 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
             MetalTiler.EndEncoding(blit);
         }
 
+        if (plan.BlockKind != TileBlockKind.Depth64KB)
+        {
+            EncodeStagedTiledDepthDownload(context, description, plan, texture, destination, firstLayer, layerCount);
+            return;
+        }
+
         var compute = _tiler.BeginCompute(context);
         _tiler.EncodeDepthTextureWriteback(compute, texture,
             new MetalBufferSpan(destination.Buffer, destination.Offset, depthPiece),
@@ -1372,6 +1409,54 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
                 SelectStencilTiles(plan, firstLayer, layerCount));
         }
 
+        MetalTiler.EndEncoding(compute);
+    }
+
+    // The fused writeback only has Depth64KB offset functions, so any other tile mode
+    // goes out the way the linear download does: texture to a linear staging plane, then
+    // tiled out of it.
+    private void EncodeStagedTiledDepthDownload(IMetalSubmissionContext context, in ImageDescription description,
+        TransferPlan plan, nint texture, MetalGuestRange destination, uint firstLayer, uint layerCount)
+    {
+        var depthPiece = plan.SliceSize * layerCount;
+        var widening = plan.TransferBytes != description.BytesPerBlock;
+        var depthRowBytes = (ulong)description.Pitch * plan.TransferBytes;
+        var depthSliceBytes = widening ? depthRowBytes * description.Extent.Height : plan.SliceSize;
+        var staging = _tiler.Acquire(context, depthSliceBytes * layerCount);
+        var blit = _tiler.BeginBlit(context);
+        var depthOption = MetalGuestFormats.HasStencilPlane(plan.Format)
+            ? MtlBlitOption.DepthFromDepthStencil
+            : MtlBlitOption.None;
+        for (uint layer = 0; layer < layerCount; layer++)
+        {
+            MetalNative.SendCopyTextureToBufferOptions(blit, SelCopyTextureToBuffer,
+                texture, firstLayer + layer, 0, default,
+                new MtlSize { Width = description.Extent.Width, Height = description.Extent.Height, Depth = 1 },
+                staging.Buffer, (nuint)(staging.Offset + depthSliceBytes * layer),
+                (nuint)depthRowBytes, (nuint)depthSliceBytes, (nuint)depthOption);
+        }
+
+        MetalTiler.EndEncoding(blit);
+        var compute = _tiler.BeginCompute(context);
+        if (widening)
+        {
+            var narrowed = _tiler.Acquire(context, depthPiece);
+            _tiler.EncodeDepthConversion(compute, staging, narrowed, MetalDepthConversion.Narrow, float32: true,
+                new MetalDepthConversionLayout
+                {
+                    Width = description.Extent.Width,
+                    Height = description.Extent.Height,
+                    Layers = layerCount,
+                    SourceRowStride = depthRowBytes,
+                    TargetRowStride = (ulong)description.Pitch * description.BytesPerBlock,
+                    SourceSliceStride = depthSliceBytes,
+                    TargetSliceStride = plan.SliceSize,
+                });
+            staging = narrowed;
+        }
+
+        _tiler.EncodeTile(compute, staging,
+            new MetalBufferSpan(destination.Buffer, destination.Offset, depthPiece), _tiles);
         MetalTiler.EndEncoding(compute);
     }
 

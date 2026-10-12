@@ -192,14 +192,42 @@ public sealed class MetalV2HostTests
         Assert.False(MetalV2Formats.IsDepthFormat(MetalV2Formats.PixelFormat(GpuFormat.R8G8B8A8Unorm)));
     }
 
+    [Fact]
+    public void CpuWriteInsideAnImageDirtiesAllOfIt()
+    {
+        var image = CreateImage(0x10000, 0x10000);
+        image.RefreshComplete();
+
+        image.InvalidateCpuWrite(0x10100, 8);
+
+        Assert.True(image.IsCpuDirty);
+        Assert.Equal(0UL, image.DirtyStart);
+        Assert.Equal(0x10000UL, image.DirtyEnd);
+    }
+
+    [Fact]
+    public void CpuWriteClearsGpuOwnership()
+    {
+        var image = CreateImage(0x10000, 0x10000);
+        image.MarkGpuModified();
+
+        image.InvalidateCpuWrite(0x10100, 8);
+
+        Assert.False(image.IsGpuModified);
+        Assert.True(image.IsCpuDirty);
+        Assert.Equal(0UL, image.DirtyStart);
+        Assert.Equal(0x10000UL, image.DirtyEnd);
+    }
+
     // A cached image with no texture: enough for the slot table, which never looks
     // at the native handle.
-    private static MetalCachedImage CreateImage()
+    private static MetalCachedImage CreateImage(ulong address = 0, ulong size = 0)
     {
         var description = SharpEmu.Libs.Gpu.Images.ImageDescription.Create();
         description.PixelFormat = GpuFormat.R8G8B8A8Unorm;
         description.BytesPerBlock = 4;
         description.Pitch = 1;
+        description.Data = new SharpEmu.HLE.GpuMemory.GuestSpan(address, size);
         var shape = new MetalTextureShape(
             MtlFormat.Rgba8Unorm, Mtl.TextureType2D, 1, 1, 1, 1, 1, 1, Mtl.TextureUsageShaderRead);
         return new MetalCachedImage(in description, in shape, 0);
