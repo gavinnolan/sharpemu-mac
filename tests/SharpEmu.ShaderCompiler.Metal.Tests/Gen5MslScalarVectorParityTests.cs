@@ -59,7 +59,7 @@ public sealed class Gen5MslScalarVectorParityTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public void BitReplicateBroadcastsTheSourceIntoBothHalvesOfThePair()
+    public void BitReplicateDoublesEverySourceBitAcrossThePair()
     {
         var result = Run("s-bitreplicate",
         [
@@ -72,8 +72,9 @@ public sealed class Gen5MslScalarVectorParityTests(ITestOutputHelper output)
             SEndpgm,
         ], 16);
         if (result is null) return;
-        Assert.Equal(0x12345678u, BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(0)));
-        Assert.Equal(0x12345678u, BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(4)));
+        // Bit i of the source becomes bits 2i and 2i+1 of the pair.
+        Assert.Equal(0x333C3FC0u, BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(0)));
+        Assert.Equal(0x030C0F30u, BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(4)));
     }
 
     [Theory]
