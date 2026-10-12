@@ -42,6 +42,7 @@ internal sealed partial class MetalRenderHost
     private static readonly nint SelSetRenderTargetWidth = MetalNative.Selector("setRenderTargetWidth:");
     private static readonly nint SelSetRenderTargetHeight = MetalNative.Selector("setRenderTargetHeight:");
     private static readonly nint SelSetRenderTargetArrayLength = MetalNative.Selector("setRenderTargetArrayLength:");
+    private static readonly nint SelSetDefaultRasterSampleCount = MetalNative.Selector("setDefaultRasterSampleCount:");
     private static readonly nint SelSetRenderPipelineState = MetalNative.Selector("setRenderPipelineState:");
     private static readonly nint SelSetDepthStencilState = MetalNative.Selector("setDepthStencilState:");
     private static readonly nint SelSetViewport = MetalNative.Selector("setViewport:");
@@ -659,8 +660,10 @@ internal sealed partial class MetalRenderHost
             }
 
             ref readonly var depthStencil = ref state.DepthStencilAttachment;
+            var attached = state.ColorAttachmentCount != 0;
             if (depthStencil.HasDepth && depthStencil.View.Handle != 0)
             {
+                attached = true;
                 var depth = MetalNative.Send(descriptor, SelDepthAttachment);
                 MetalNative.SendVoid(depth, SelSetTexture, (nint)depthStencil.View.Handle);
                 MetalV2Native.SendVoidValue(depth, SelSetLevel, _depthAttachmentLevel);
@@ -677,6 +680,7 @@ internal sealed partial class MetalRenderHost
 
             if (depthStencil.HasStencil && depthStencil.View.Handle != 0)
             {
+                attached = true;
                 var stencil = MetalNative.Send(descriptor, SelStencilAttachment);
                 MetalNative.SendVoid(stencil, SelSetTexture, (nint)depthStencil.View.Handle);
                 MetalV2Native.SendVoidValue(stencil, SelSetLevel, _depthAttachmentLevel);
@@ -696,10 +700,9 @@ internal sealed partial class MetalRenderHost
             // framebuffer, and a tile-based GPU would walk every one of a
             // 16384x16384 area's tiles for it, so the pass takes the smallest area
             // Metal accepts.
-            if (state.ColorAttachmentCount == 0 && !depthStencil.HasDepth && !depthStencil.HasStencil)
+            if (!attached)
             {
-                MetalV2Native.SendVoidValue(descriptor, SelSetRenderTargetWidth, 1);
-                MetalV2Native.SendVoidValue(descriptor, SelSetRenderTargetHeight, 1);
+                ConfigureAttachmentlessPass(descriptor, state.Samples);
                 _targetlessPasses++;
             }
 
@@ -757,6 +760,19 @@ internal sealed partial class MetalRenderHost
         _passDepthLevel = _depthAttachmentLevel;
         _passDepthSlice = _depthAttachmentSlice;
         _passDepthTexelBytes = _depthTexelBytes;
+    }
+
+    // A pass with no attachment takes its area and its sample count from the
+    // descriptor. The sample count defaults to zero, which Metal does not accept:
+    // the x86-64 AGX driver divides by it while it sizes the pass's tiles, and the
+    // process dies of an integer divide fault inside renderCommandEncoderWithDescriptor:.
+    // A zero sample count in the shared state means unspecified, as it does for
+    // the pipeline's raster sample count, which this one must equal.
+    internal static void ConfigureAttachmentlessPass(nint descriptor, uint samples)
+    {
+        MetalV2Native.SendVoidValue(descriptor, SelSetRenderTargetWidth, 1);
+        MetalV2Native.SendVoidValue(descriptor, SelSetRenderTargetHeight, 1);
+        MetalV2Native.SendVoidValue(descriptor, SelSetDefaultRasterSampleCount, Math.Max(samples, 1));
     }
 
     private static MtlClearColor ClearColorOf(in RenderingAttachment attachment) => new()
