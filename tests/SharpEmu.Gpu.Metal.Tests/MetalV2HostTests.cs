@@ -219,6 +219,26 @@ public sealed class MetalV2HostTests
         Assert.Equal(0x10000UL, image.DirtyEnd);
     }
 
+    // Two published runs with a gap between them never claim the gap: a run that starts
+    // past the image's first byte made disjoint runs possible, and a widened interval
+    // would skip publishing bytes guest memory never got.
+    [Fact]
+    public void DisjointPublishedRunsNeverClaimTheGapBetweenThem()
+    {
+        var image = CreateImage(0x10000, 0x10000);
+        image.MarkGpuModified();
+
+        image.MarkPublished(0x0000, 0x2000);
+        image.MarkPublished(0x8000, 0xC000);
+
+        Assert.False(image.IsPublished(0x2000, 0x8000));
+        Assert.False(image.IsPublished(0x0000, 0xC000));
+        Assert.True(image.IsPublished(0x8000, 0xC000));
+
+        image.MarkPublished(0x6000, 0x8000);
+        Assert.True(image.IsPublished(0x6000, 0xC000));
+    }
+
     // A cached image with no texture: enough for the slot table, which never looks
     // at the native handle.
     private static MetalCachedImage CreateImage(ulong address = 0, ulong size = 0)

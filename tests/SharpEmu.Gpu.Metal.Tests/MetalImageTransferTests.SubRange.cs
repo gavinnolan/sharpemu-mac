@@ -27,7 +27,7 @@ public sealed partial class MetalImageTransferTests
         var second = BuildGuest(description, 0xC4);
         Assert.True(TryCoveringRun(
             harness, in description, description.Data.Size / 3, description.Data.Size / 2, out var start, out var end));
-        Assert.Equal(0UL, start);
+        Assert.Equal(0x10000UL, start);
 
         var actual = TransferWholeThenRun(harness, description, first, second, start, end);
 
@@ -83,6 +83,55 @@ public sealed partial class MetalImageTransferTests
         Assert.Equal(sentinel.AsSpan(0, (int)start).ToArray(), written.AsSpan(0, (int)start).ToArray());
         Assert.Equal(sentinel.AsSpan((int)end).ToArray(), written.AsSpan((int)end).ToArray());
         output.WriteLine($"writeback of 0x{start:x}..0x{end:x} left the sentinel intact either side");
+    }
+
+    // A linear surface's run may begin past its first byte: in the middle of it, for an
+    // alias over the middle, or at its tail. Refreshing it from new guest bytes and
+    // writing it back both leave every byte outside it as it was.
+    [Theory]
+    [InlineData(0x2010UL, 0x4020UL, "middle")]
+    [InlineData(0x6010UL, 0x8000UL, "tail")]
+    public void ALinearRunPastTheFirstByteMovesOnlyItsOwnBytes(ulong dirtyStart, ulong dirtyEnd, string name)
+    {
+        if (!RequireDevice()) return;
+        using var harness = new MetalTransferHarness(Device.Value);
+        var description = Color2D(
+            GuestPixelFormat.Bits8_8_8_8UNorm, GpuFormat.R8G8B8A8Unorm, 64, 128, 1, 1, GuestTileMode.Linear);
+        Assert.True(TryCoveringRun(harness, in description, dirtyStart, dirtyEnd, out var start, out var end));
+        Assert.True(start > 0 && start <= dirtyStart && end >= dirtyEnd);
+        var first = BuildGuest(description, 0x29);
+        var second = BuildGuest(description, 0x9E);
+
+        var refreshed = TransferWholeThenRun(harness, description, first, second, start, end);
+        Assert.Equal(first.AsSpan(0, (int)start).ToArray(), refreshed.AsSpan(0, (int)start).ToArray());
+        Assert.Equal(
+            second.AsSpan((int)start, (int)(end - start)).ToArray(),
+            refreshed.AsSpan((int)start, (int)(end - start)).ToArray());
+        Assert.Equal(first.AsSpan((int)end).ToArray(), refreshed.AsSpan((int)end).ToArray());
+
+        var texture = harness.Texture(harness.Transfer.ShapeFor(description));
+        var whole = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
+        var source = harness.Buffer(first);
+        harness.Begin();
+        harness.Transfer.EncodeGuestToTexture(
+            harness, description, whole, new MetalGuestRange(source, 0, description.Data.Size, 0), default,
+            texture, 0, description.Data.Size);
+        harness.Submit();
+        var sentinel = new byte[description.Data.Size];
+        Array.Fill(sentinel, (byte)0xA5);
+        var target = harness.Buffer(sentinel);
+        harness.Begin();
+        harness.Transfer.EncodeTextureToGuest(
+            harness, description, whole, texture,
+            new MetalGuestRange(target, start, end - start, 0), default, start, end - start);
+        harness.Submit();
+        var written = harness.Read(target, 0, description.Data.Size);
+        Assert.Equal(
+            first.AsSpan((int)start, (int)(end - start)).ToArray(),
+            written.AsSpan((int)start, (int)(end - start)).ToArray());
+        Assert.Equal(sentinel.AsSpan(0, (int)start).ToArray(), written.AsSpan(0, (int)start).ToArray());
+        Assert.Equal(sentinel.AsSpan((int)end).ToArray(), written.AsSpan((int)end).ToArray());
+        output.WriteLine($"{name}: run 0x{start:x}..0x{end:x} refreshed and written back alone");
     }
 
     // A piece has to name the same bytes whether or not the other pieces travel with it.
@@ -197,17 +246,8 @@ public sealed partial class MetalImageTransferTests
     // The cache's own rule, so the tests measure what it will really ask for.
     private static bool TryCoveringRun(
         MetalTransferHarness harness, in ImageDescription description,
-        ulong dirtyStart, ulong dirtyEnd, out ulong start, out ulong end)
-    {
-        start = 0;
-        end = harness.Transfer.AlignRunEnd(in description, start, dirtyEnd);
-        if (end < dirtyEnd)
-        {
-            end = description.Data.Size;
-        }
-
-        return end > start && end - start < description.Data.Size;
-    }
+        ulong dirtyStart, ulong dirtyEnd, out ulong start, out ulong end) =>
+        MetalImageCache.TryCoveringRun(harness.Transfer, in description, dirtyStart, dirtyEnd, out start, out end);
 
     // Uploads first, then refreshes just the run from a second set of guest bytes.
     private static byte[] TransferWholeThenRun(
