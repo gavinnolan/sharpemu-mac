@@ -338,9 +338,24 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
             if (takesGpuOwnership)
             {
-                // Whatever this image is about to write leaves the others stale.
+                // Whatever this image is about to write leaves the others stale - but only
+                // over the bytes it shares with them. The rest of the other image already
+                // agrees with guest memory when it owes guest memory nothing and its page
+                // watch still reports every CPU store, so its next refresh needs only the
+                // shared run. Otherwise the whole image is marked as before: an image
+                // still GPU-modified here has bytes only its texture holds, and one with
+                // no watch may have missed CPU stores a whole refresh would pick up.
+                var narrow = !other.IsGpuModified && other.IsWatched;
                 other.ClearGpuModified();
-                other.MarkCpuDirty(MetalImageDirtyCause.AliasWrite);
+                var (staleStart, staleEnd) = other.OverlapWithin(address, size);
+                if (narrow && staleEnd > staleStart)
+                {
+                    other.MarkCpuDirty(MetalImageDirtyCause.AliasWrite, staleStart, staleEnd);
+                }
+                else
+                {
+                    other.MarkCpuDirty(MetalImageDirtyCause.AliasWrite);
+                }
             }
         }
     }
