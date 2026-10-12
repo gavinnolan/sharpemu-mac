@@ -46,6 +46,17 @@ static inline uint sharpemu_load_device_dword(device const Gen5AddressRange* ran
     return valid ? *word : 0u;
 }
 
+// Resolves the first dword of a contiguous multi-dword read once for the whole span.
+// A span that stays inside one 16 KB page is contiguous host memory, so its dwords
+// index off the one pointer; one that crosses a page reports invalid and the caller
+// reads it dword by dword, which is what every dword would have cost before.
+static inline device uint* sharpemu_resolve_device_span(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, ulong address, uint bytes, thread bool& valid)
+{
+    device uint* first = sharpemu_resolve_device_address(ranges, range_count, faults, fault_words, address, valid);
+    valid = valid && (address & 0x3FFFul) + bytes <= 0x4000ul;
+    return first;
+}
+
 // An unaligned value assembled from the two aligned dwords it spans.
 static inline uint sharpemu_load_device_unaligned(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, ulong address, uint count)
 {

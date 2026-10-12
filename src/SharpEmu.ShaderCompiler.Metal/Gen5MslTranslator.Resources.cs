@@ -713,6 +713,8 @@ public static partial class Gen5MslTranslator
                 ? Temp("uint", ScalarExpression(register))
                 : "0u";
             string? deviceAddress = null;
+            string? deviceSpan = null;
+            string? deviceSpanValid = null;
             for (var component = 0; component < instruction.Destinations.Count; component++)
             {
                 var destination = instruction.Destinations[component];
@@ -803,7 +805,26 @@ public static partial class Gen5MslTranslator
                     }
 
                     var componentAddress = component == 0 ? deviceAddress : $"({deviceAddress} + {component * sizeof(uint)}ul)";
-                    value = Temp("uint", $"sharpemu_load_device_dword({DeviceArguments}, {componentAddress})");
+                    var componentLoad = $"sharpemu_load_device_dword({DeviceArguments}, {componentAddress})";
+                    if (instruction.Destinations.Count > 1)
+                    {
+                        // Every dword of an S_LOAD_DWORDXn is one page-table walk if
+                        // resolved alone; the walk is a 13-step dependent binary search, so
+                        // the span is resolved once and its dwords index off that pointer.
+                        if (deviceSpan is null)
+                        {
+                            deviceSpanValid = Temp("bool", "false");
+                            deviceSpan = Temp(
+                                "device uint*",
+                                $"sharpemu_resolve_device_span({DeviceArguments}, {deviceAddress}, {instruction.Destinations.Count * sizeof(uint)}u, {deviceSpanValid})");
+                        }
+
+                        value = Temp("uint", $"{deviceSpanValid} ? {deviceSpan}[{component}] : {componentLoad}");
+                    }
+                    else
+                    {
+                        value = Temp("uint", componentLoad);
+                    }
                 }
 
                 if (!request.IndirectOffsetKeyMemoryIndices.Contains(memoryIndex) &&
