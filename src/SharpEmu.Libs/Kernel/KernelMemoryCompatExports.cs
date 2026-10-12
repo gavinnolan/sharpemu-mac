@@ -4044,6 +4044,17 @@ public static partial class KernelMemoryCompatExports
         var bufferSize = ctx[CpuRegister.Rsi];
         var formatAddress = ctx[CpuRegister.Rdx];
 
+        if (TryFastSnprintf(
+                ctx,
+                destination,
+                bufferSize,
+                formatAddress,
+                new RegisterPrintfArgumentSource(ctx, 3),
+                out var fastResult))
+        {
+            return fastResult;
+        }
+
         if (!TryReadCString(ctx, formatAddress, 1_048_576, out var formatBytes))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
@@ -4061,6 +4072,12 @@ public static partial class KernelMemoryCompatExports
         var bufferSize = ctx[CpuRegister.Rsi];
         var formatAddress = ctx[CpuRegister.Rdx];
         var vaListAddress = ctx[CpuRegister.Rcx];
+
+        if (TryCreateVaListCursor(ctx, vaListAddress, out var fastCursor)
+            && TryFastSnprintf(ctx, destination, bufferSize, formatAddress, fastCursor, out var fastResult))
+        {
+            return fastResult;
+        }
 
         if (!TryReadCString(ctx, formatAddress, 1_048_576, out var formatBytes))
         {
@@ -4674,7 +4691,15 @@ public static partial class KernelMemoryCompatExports
                         else if (spaceForSign && value >= 0)
                             formatted = " " + formatted;
 
-                        sb.Append(PadString(formatted, width, leftAlign, padWithZero && !leftAlign));
+                        if (padWithZero && !leftAlign && width > formatted.Length && formatted[0] is '-' or '+' or ' ')
+                        {
+                            // C99: zero padding goes between the sign and the digits.
+                            sb.Append(formatted[0]).Append('0', width - formatted.Length).Append(formatted, 1, formatted.Length - 1);
+                        }
+                        else
+                        {
+                            sb.Append(PadString(formatted, width, leftAlign, padWithZero && !leftAlign));
+                        }
                     }
                     break;
 
