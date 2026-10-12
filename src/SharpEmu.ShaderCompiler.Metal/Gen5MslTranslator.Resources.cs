@@ -63,7 +63,7 @@ public static partial class Gen5MslTranslator
         private const string PushDataName = "sharpemu_push_data";
         private const string GlobalDataShareName = "sharpemu_gds";
         private const string GlobalDataShareWordsName = "sharpemu_gds_words";
-        private const string DeviceArguments = "sharpemu_ranges, sharpemu_range_count, sharpemu_faults, sharpemu_fault_words";
+        private const string DeviceArguments = "sharpemu_ranges, sharpemu_range_count, sharpemu_faults, sharpemu_fault_words, sharpemu_range_cache";
 
         private readonly ShaderCompileRequest _request;
         private readonly Gen5MslArgumentLayout? _argumentLayout;
@@ -355,6 +355,7 @@ public static partial class Gen5MslTranslator
                 source.AppendLine($"    uint sharpemu_range_count = min({ResourcesName}.address_range_count, {MaxAddressRangeCount}u);");
                 source.AppendLine($"    device uint* sharpemu_faults = {ResourcesName}.fault_bits;");
                 source.AppendLine($"    uint sharpemu_fault_words = {ResourcesName}.fault_word_count;");
+                source.AppendLine("    Gen5RangeCache sharpemu_range_cache = { 0ul, 0ul, nullptr };");
             }
 
             for (var index = 0; index < layout.UserDataRegisters.Count; index++)
