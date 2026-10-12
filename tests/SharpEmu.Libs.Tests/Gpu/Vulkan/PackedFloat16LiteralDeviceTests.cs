@@ -10,6 +10,8 @@ using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 
+using SharpEmu.Gpu.Vulkan.Buffers;
+
 namespace SharpEmu.Libs.Tests.Gpu.Vulkan;
 
 // The 32-bit literal of a packed f16 instruction is a pair of halves, like a register: op_sel and op_sel_hi pick the half that feeds

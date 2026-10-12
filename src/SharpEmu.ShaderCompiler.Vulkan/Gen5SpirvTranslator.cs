@@ -23,38 +23,6 @@ public static partial class Gen5SpirvTranslator
         uint numberType) =>
         CompilationContext.DecodeStorageImageFormat(dataFormat, numberType);
 
-    // Vulkan only guarantees maxComputeWorkGroupSize >= (1024, 1024, 64) and
-    // maxComputeWorkGroupInvocations >= 1024, but a GNM NUM_THREAD layout can put its
-    // largest axis on Z (real PS5 hardware has no such asymmetry between axes). Remap
-    // logical GNM axes onto physical SPIR-V/dispatch axes so the largest logical size
-    // always lands on the physical axis with the most headroom (X), and the smallest
-    // lands on Z, which is the only axis with a tight guaranteed limit. This is a pure
-    // function of the three thread-group sizes so the host dispatch path (which permutes
-    // vkCmdDispatch's group counts the same way) can recompute it independently without
-    // any shader-compiler metadata plumbing.
-    //
-    // Returns physicalAxisOfLogical: physicalAxisOfLogical[logical 0=X/1=Y/2=Z] is the
-    // physical axis (0=X/1=Y/2=Z) that logical axis is remapped onto.
-    public static int[] ComputeWorkgroupAxisOrder(uint sizeX, uint sizeY, uint sizeZ)
-    {
-        if (sizeZ <= 64)
-        {
-            return [0, 1, 2];
-        }
-
-        var sizes = new[] { sizeX, sizeY, sizeZ };
-        var byDescendingSize = new[] { 0, 1, 2 };
-        Array.Sort(byDescendingSize, (a, b) => sizes[b].CompareTo(sizes[a]));
-
-        var physicalAxisOfLogical = new int[3];
-        for (var physical = 0; physical < 3; physical++)
-        {
-            physicalAxisOfLogical[byDescendingSize[physical]] = physical;
-        }
-
-        return physicalAxisOfLogical;
-    }
-
     private sealed partial class CompilationContext
     {
         private const int ScalarRegisterCount = 128;
@@ -239,7 +207,10 @@ public static partial class Gen5SpirvTranslator
             uint ConversionFormat = 0,
             uint ShaderSwizzle = 0,
             int EmulatedCompareFunction = -1,
-            int ResourceIndex = -1);
+            int ResourceIndex = -1,
+            // The loaded sampler a sampled access combined with the image; another block that
+            // needs the combined object makes its own (OpSampledImage is block-local).
+            uint Sampler = 0);
 
         private readonly record struct SpirvVertexInput(
             uint Variable,
@@ -256,7 +227,7 @@ public static partial class Gen5SpirvTranslator
             Gen5PixelOutputKind Kind,
             Gen5ColorComponentMapping ComponentMapping,
             uint DualSourceAlphaVariable = 0,
-            Gen5PixelExportFormat ExportFormat = Gen5PixelExportFormat.Float16);
+            Gen5ColorExportFormat? ExportFormat = null);
 
         public bool TryCompile(out Gen5SpirvShader shader, out string error, ref ShaderTranslationProfile.Scope profile)
         {
@@ -296,11 +267,19 @@ public static partial class Gen5SpirvTranslator
                     }
                 }
 
+                if (_request.ClipSpace.HasProgramOnlyConventions)
+                {
+                    error = $"the SPIR-V translator does not apply these clip-space conventions: {_request.ClipSpace}";
+                    return false;
+                }
+
                 profile.Switch(ShaderTranslationProfile.Part.Blocks);
                 var blocks = BuildBasicBlocks(_request.Program.Instructions, _stage == Gen5SpirvStage.Mesh);
                 profile.Switch(ShaderTranslationProfile.Part.FlowAnalysis);
                 ShaderTranslationProfile.RecordBlocks(_request.Program.Instructions.Count, blocks.Count);
-                // Mesh blocks use their own barrier convergence path.
+                // The fallback when the full structurer declines: blocks in program order behind a
+                // next-block guard, with natural loops as structured loops. Mesh blocks use their
+                // own barrier convergence path.
                 var structuredForward = _stage != Gen5SpirvStage.Mesh && StructuredForwardBlocks &&
                     blocks.Count != 0 && TryBuildLoopRegions(blocks, out _loopLatchByHeader);
                 if (blocks.Count == 0)
@@ -1032,9 +1011,9 @@ public static partial class Gen5SpirvTranslator
                         variable,
                         SpirvDecoration.Location,
                         binding.HostLocation);
-                    if (binding.Index != 0)
+                    if (binding.BlendSourceIndex != 0)
                     {
-                        _module.AddDecoration(variable, SpirvDecoration.Index, binding.Index);
+                        _module.AddDecoration(variable, SpirvDecoration.Index, binding.BlendSourceIndex);
                     }
                     var alphaVariable = 0u;
                     if (binding.DualSourceAlpha && binding.Kind == Gen5PixelOutputKind.Float)
@@ -1260,7 +1239,7 @@ public static partial class Gen5SpirvTranslator
                     // gl_LocalInvocationId/gl_WorkGroupId are indexed by the physical SPIR-V
                     // axis, which can differ from the logical GNM axis when the workgroup was
                     // remapped to respect the device's tighter Z-axis limit (see
-                    // ComputeWorkgroupAxisOrder).
+                    // Gen5WorkgroupAxisOrder.Compute).
                     var physicalComponent = (uint)_physicalAxisOfLogical[component];
                     var localComponent = _module.AddInstruction(
                         SpirvOp.CompositeExtract,
@@ -3474,7 +3453,14 @@ public static partial class Gen5SpirvTranslator
                 return true;
             }
 
-            if (control.Typed && instruction.Opcode.Contains("D16", StringComparison.Ordinal))
+            if (control.Tfe || control.Lds)
+            {
+                // The decoder accepts these for the Metal backend; this one does not model them.
+                error = $"unsupported buffer {(control.Tfe ? "TFE" : "LDS")} access {instruction.Opcode}";
+                return false;
+            }
+
+            if (instruction.Opcode.Contains("FormatD16", StringComparison.Ordinal))
             {
                 error = $"unsupported buffer opcode {instruction.Opcode}";
                 return false;
@@ -5849,7 +5835,6 @@ public static partial class Gen5SpirvTranslator
 
                 RecordMipStatistics(
                     resource,
-                    imageObject,
                     coordinates,
                     hasZeroLod || hasLod ? lod : null,
                     hasBias ? lodOrBias : Float(0));
@@ -6907,8 +6892,8 @@ public static partial class Gen5SpirvTranslator
                     {
                         if (output.Kind == Gen5PixelOutputKind.Float)
                         {
-                            values[component] = output.ExportFormat is Gen5PixelExportFormat.Unorm16 or Gen5PixelExportFormat.Snorm16
-                                ? LoadNormalizedExportComponent(instruction, component, output.ExportFormat == Gen5PixelExportFormat.Snorm16)
+                            values[component] = output.ExportFormat is Gen5ColorExportFormat.Unorm16Abgr or Gen5ColorExportFormat.Snorm16Abgr
+                                ? LoadNormalizedExportComponent(instruction, component, output.ExportFormat == Gen5ColorExportFormat.Snorm16Abgr)
                                 : LoadCompressedExportComponent(instruction, component);
                         }
                         else
@@ -7468,13 +7453,17 @@ public static partial class Gen5SpirvTranslator
                     component);
             }
 
+            // Window x = x / w * scale + offset, so x' = (x * scale + offset * w) / half - w
+            // keeps w for the divide and for perspective-correct interpolation.
             components[0] = ConvertClipCoordinate(
                 components[0],
+                components[3],
                 transform.ScaleX,
                 transform.OffsetX,
                 transform.HalfExtentX);
             components[1] = ConvertClipCoordinate(
                 components[1],
+                components[3],
                 transform.ScaleY,
                 transform.OffsetY,
                 transform.HalfExtentY);
@@ -7486,6 +7475,7 @@ public static partial class Gen5SpirvTranslator
 
         private uint ConvertClipCoordinate(
             uint coordinate,
+            uint w,
             float scale,
             float offset,
             float halfExtent)
@@ -7495,11 +7485,16 @@ public static partial class Gen5SpirvTranslator
                 _floatType,
                 coordinate,
                 Float(scale));
+            var scaledOffset = _module.AddInstruction(
+                SpirvOp.FMul,
+                _floatType,
+                Float(offset),
+                w);
             var biased = _module.AddInstruction(
                 SpirvOp.FAdd,
                 _floatType,
                 window,
-                Float(offset));
+                scaledOffset);
             var divided = _module.AddInstruction(
                 SpirvOp.FDiv,
                 _floatType,
@@ -7509,7 +7504,7 @@ public static partial class Gen5SpirvTranslator
                 SpirvOp.FSub,
                 _floatType,
                 divided,
-                Float(1f));
+                w);
         }
 
         private bool PixelExportDebugAddressMatches()

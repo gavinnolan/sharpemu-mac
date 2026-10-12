@@ -3,7 +3,7 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
-using SharpEmu.Libs.Gpu.Buffers;
+using SharpEmu.Gpu.Vulkan.Buffers;
 using SharpEmu.Libs.Tests.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using SharpEmu.ShaderCompiler;

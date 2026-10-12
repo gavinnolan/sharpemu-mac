@@ -10,6 +10,8 @@ using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 
+using SharpEmu.Gpu.Vulkan.Buffers;
+
 namespace SharpEmu.Libs.Tests.Gpu.Vulkan;
 
 // The unsigned 24-bit multiplies use the low 24 bits of both sources: V_MUL_U32_U24 returns the low 32 bits of S0.u24 * S1.u24, V_MUL_HI_U32_U24 the bits above

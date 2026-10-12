@@ -11,6 +11,8 @@ using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 
+using SharpEmu.Gpu.Vulkan.Buffers;
+
 namespace SharpEmu.Libs.Tests.Gpu.Vulkan;
 
 public sealed class BufferAtomicRangeDeviceTests(HeadlessVulkanFixture fixture) : IClassFixture<HeadlessVulkanFixture>

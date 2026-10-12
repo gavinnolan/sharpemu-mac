@@ -10,6 +10,8 @@ using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 
+using SharpEmu.Gpu.Vulkan.Buffers;
+
 namespace SharpEmu.Libs.Tests.Gpu.Vulkan;
 
 // V_CVT_U16_F16, V_CVT_I16_F16 and V_CVT_F16_F32 have a 16-bit result, and a 16-bit result is one half of the destination register: the plain (VOP1) and the VOP3 forms

@@ -10,6 +10,8 @@ using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 
+using SharpEmu.Gpu.Vulkan.Buffers;
+
 namespace SharpEmu.Libs.Tests.Gpu.Vulkan;
 
 // 16-bit VOP3 operations on the device: the halves op_sel selects, the f16 input modifiers and the clamp bit.

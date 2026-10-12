@@ -10,6 +10,8 @@ using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 
+using SharpEmu.Gpu.Vulkan.Buffers;
+
 namespace SharpEmu.Libs.Tests.Gpu.Vulkan;
 
 // The output modifiers of a float instruction (clamp and omod) belong to its result whatever the encoding or the width: VOP3 and SDWA carry them, and a 16-bit result

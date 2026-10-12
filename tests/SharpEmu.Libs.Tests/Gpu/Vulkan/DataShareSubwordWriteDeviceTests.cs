@@ -11,6 +11,8 @@ using Xunit;
 using Xunit.Abstractions;
 using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 
+using SharpEmu.Gpu.Vulkan.Buffers;
+
 namespace SharpEmu.Libs.Tests.Gpu.Vulkan;
 
 // DS_WRITE_B8, DS_WRITE_B16 and DS_MSKOR_B32 on the LDS a workgroup shares.

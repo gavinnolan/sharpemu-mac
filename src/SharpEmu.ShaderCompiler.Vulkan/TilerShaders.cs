@@ -210,7 +210,9 @@ public static class TilerShaders
 
     private static AddressBit[] BXY(byte x, byte y) => [BX(x), BY(y)];
 
-    // Keep the RB+ address bits consistent with the CPU tile layout.
+    // PS5 Oberon RB+ R_X addressing. The destination bit index is the array
+    // index. Keep this in lockstep with GnmTiling.RbPlus64KRenderX and
+    // TileGeometry.RenderTargetOffset.
     private static readonly AddressBit[][][] RenderTargetAddressBits =
     [
         [

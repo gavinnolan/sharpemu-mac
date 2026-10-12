@@ -8,6 +8,7 @@ using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
+using SharpEmu.Gpu.Vulkan.Buffers;
 using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 
 namespace SharpEmu.Libs.Tests.Gpu.Vulkan;

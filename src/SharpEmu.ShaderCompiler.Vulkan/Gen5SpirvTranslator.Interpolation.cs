@@ -47,7 +47,7 @@ public static partial class Gen5SpirvTranslator
                     if (_request.Program.Instructions.All(instruction =>
                             instruction.Control is not Gen5InterpolationControl control ||
                             control.Attribute != attribute ||
-                            (instruction.Opcode == "VInterpMovF32" && (instruction.Words[0] & 0xFFu) == 2)))
+                            (instruction.Opcode == "VInterpMovF32" && control.Parameter == 2)))
                     {
                         _perVertexAttributes.Remove(attribute);
                         _flatParameterAttributes.Add(attribute);
@@ -269,7 +269,7 @@ public static partial class Gen5SpirvTranslator
             uint result;
             if (instruction.Opcode == "VInterpMovF32")
             {
-                var mode = instruction.Words[0] & 0xFFu;
+                var mode = interpolation.Parameter;
                 if (mode >= 3)
                 {
                     error = "reserved interpolation parameter selector";

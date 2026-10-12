@@ -10,6 +10,8 @@ using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 
+using SharpEmu.Gpu.Vulkan.Buffers;
+
 namespace SharpEmu.Libs.Tests.Gpu.Vulkan;
 
 // S_BITCMP0_B64 sets SCC when bit S1[5:0] of the 64-bit value S0 is clear, S_BITCMP1_B64 when it is set. Only the low six bits of the index count.

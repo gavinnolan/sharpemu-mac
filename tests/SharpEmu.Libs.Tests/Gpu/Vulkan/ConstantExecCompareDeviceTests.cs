@@ -10,6 +10,8 @@ using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 
+using SharpEmu.Gpu.Vulkan.Buffers;
+
 namespace SharpEmu.Libs.Tests.Gpu.Vulkan;
 
 // V_CMPX_F_{I32,U32} writes an empty execution mask and V_CMPX_T_{I32,U32} leaves the mask as it was. The 64-bit forms and the plain compares already worked.

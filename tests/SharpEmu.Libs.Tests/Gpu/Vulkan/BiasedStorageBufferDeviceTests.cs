@@ -11,6 +11,10 @@ using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 
+using SharpEmu.Gpu.Vulkan.Buffers;
+
+using SharpEmu.Gpu.Vulkan.Presentation;
+
 namespace SharpEmu.Libs.Tests.Gpu.Vulkan;
 
 // A storage buffer whose guest base is two bytes past a dword: the view starts at the dword before it, and the shader

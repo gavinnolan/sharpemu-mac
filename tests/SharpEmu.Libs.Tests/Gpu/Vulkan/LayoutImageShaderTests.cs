@@ -4,8 +4,11 @@
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using SharpEmu.HLE.GpuMemory;
-using SharpEmu.Libs.Gpu.Buffers;
+using SharpEmu.Libs.Gpu.Abstractions;
+using SharpEmu.Gpu.Vulkan.Buffers;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Gpu.Vulkan.Images;
+using SharpEmu.Gpu.Vulkan;
 using SharpEmu.Libs.Tests.Gpu.Images;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
@@ -132,13 +135,13 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         return Program([.. instructions]);
     }
 
-    private static ImageDescription Describe(ulong guestOffset, Format format, GuestPixelFormat guestFormat, uint width, uint height, uint levels, uint bytesPerBlock = 4)
+    private static ImageDescription Describe(ulong guestOffset, GpuFormat format, GuestPixelFormat guestFormat, uint width, uint height, uint levels, uint bytesPerBlock = 4)
     {
         var description = ImageDescription.Create();
         description.Data = new GuestSpan(ArrayBackedSpace.Base + guestOffset, (ulong)width * height * bytesPerBlock * 2);
         description.PixelFormat = format;
         description.GuestFormat = guestFormat;
-        description.Extent = new Extent3D(width, height, 1);
+        description.Extent = new GpuExtent3D(width, height, 1);
         description.Resources = new SubresourceCount(levels, 1);
         description.Pitch = width;
         description.BytesPerBlock = bytesPerBlock;
@@ -253,14 +256,14 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
     private static DescriptorImageInfo SampledView(CachedImage image, uint levelCount = 1, bool arrayed = false) =>
         new()
         {
-            ImageView = image.GetOrCreateView(ImageViewDescription.Default with { Format = image.Backing.Format, Usage = ImageUsageFlags.SampledBit, LevelCount = levelCount, Type = arrayed ? ImageViewType.Type2DArray : ImageViewType.Type2D }),
+            ImageView = image.GetOrCreateView(ImageViewDescription.Default with { Format = image.Backing.Format.ToNeutral(), Usage = GpuImageUsage.SampledBit, LevelCount = levelCount, Type = arrayed ? GpuImageViewType.Type2DArray : GpuImageViewType.Type2D }),
             ImageLayout = ImageLayout.ShaderReadOnlyOptimal,
         };
 
     private static DescriptorImageInfo StorageView(CachedImage image, uint mip) =>
         new()
         {
-            ImageView = image.GetOrCreateView(ImageViewDescription.Default with { Format = image.Backing.Format, Usage = ImageUsageFlags.StorageBit, BaseLevel = mip, LevelCount = 1 }),
+            ImageView = image.GetOrCreateView(ImageViewDescription.Default with { Format = image.Backing.Format.ToNeutral(), Usage = GpuImageUsage.StorageBit, BaseLevel = mip, LevelCount = 1 }),
             ImageLayout = ImageLayout.General,
         };
 
@@ -278,8 +281,8 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         Assert.Equal(2, run.Request.Bindings.Find(floatClass)!.Resources.Count);
         Assert.Single(run.Resources.Info.Samplers);
 
-        var first = run.Harness.CreateImage(Describe(0, Format.R32Sfloat, GuestPixelFormat.Bits32Float, 1, 1, 1));
-        var second = run.Harness.CreateImage(Describe(0x10000, Format.R32Sfloat, GuestPixelFormat.Bits32Float, 1, 1, 1));
+        var first = run.Harness.CreateImage(Describe(0, GpuFormat.R32Sfloat, GuestPixelFormat.Bits32Float, 1, 1, 1));
+        var second = run.Harness.CreateImage(Describe(0x10000, GpuFormat.R32Sfloat, GuestPixelFormat.Bits32Float, 1, 1, 1));
         run.Harness.UploadImage(first, MemoryMarshal.AsBytes<float>([0.25f]), ImageTestHarness.WholeImageCopies(first.Description, 0));
         run.Harness.UploadImage(second, MemoryMarshal.AsBytes<float>([0.75f]), ImageTestHarness.WholeImageCopies(second.Description, 0));
         var sampler = run.Runner.CreateSampler(Filter.Linear);
@@ -370,8 +373,8 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         Assert.Equal(1, samplers.Count(sampler => sampler.ForcePointFiltering));
 
         // Between the two texels a linear sampler averages; the integer image needs its point duplicate.
-        var floatImage = run.Harness.CreateImage(Describe(0, Format.R32Sfloat, GuestPixelFormat.Bits32Float, 2, 1, 1));
-        var integerImage = run.Harness.CreateImage(Describe(0x10000, Format.R32Sint, GuestPixelFormat.Bits32SInt, 2, 1, 1));
+        var floatImage = run.Harness.CreateImage(Describe(0, GpuFormat.R32Sfloat, GuestPixelFormat.Bits32Float, 2, 1, 1));
+        var integerImage = run.Harness.CreateImage(Describe(0x10000, GpuFormat.R32Sint, GuestPixelFormat.Bits32SInt, 2, 1, 1));
         run.Harness.UploadImage(floatImage, MemoryMarshal.AsBytes<float>([1.0f, 3.0f]), ImageTestHarness.WholeImageCopies(floatImage.Description, 0));
         run.Harness.UploadImage(integerImage, MemoryMarshal.AsBytes<int>([5, 9]), ImageTestHarness.WholeImageCopies(integerImage.Description, 0));
         var hostSamplers = samplers.Select(sampler => run.Runner.CreateSampler(sampler.ForcePointFiltering ? Filter.Nearest : Filter.Linear)).ToArray();
@@ -415,8 +418,8 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         var imageClass = ImageDescriptorBinding.ForImage(run.Resources.Info.Images[0])!.Value;
         Assert.Equal(distinctImages ? 2 : 1, run.Request.Bindings.Find(imageClass)!.Resources.Count);
         Assert.Single(run.Request.Bindings.Find(DescriptorBindingKind.Samplers)!.Resources);
-        var first = run.Harness.CreateImage(Describe(0, Format.R32Sfloat, GuestPixelFormat.Bits32Float, 1, 1, 1));
-        var second = run.Harness.CreateImage(Describe(0x10000, Format.R32Sfloat, GuestPixelFormat.Bits32Float, 1, 1, 1));
+        var first = run.Harness.CreateImage(Describe(0, GpuFormat.R32Sfloat, GuestPixelFormat.Bits32Float, 1, 1, 1));
+        var second = run.Harness.CreateImage(Describe(0x10000, GpuFormat.R32Sfloat, GuestPixelFormat.Bits32Float, 1, 1, 1));
         run.Harness.UploadImage(first, MemoryMarshal.AsBytes<float>([0.25f]), ImageTestHarness.WholeImageCopies(first.Description, 0));
         run.Harness.UploadImage(second, MemoryMarshal.AsBytes<float>([0.75f]), ImageTestHarness.WholeImageCopies(second.Description, 0));
         var sampler = run.Runner.CreateSampler(Filter.Nearest);
@@ -470,7 +473,7 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         float[] texels = [0.5f, 1.0f, 2.0f];
         for (var index = 0; index < 3; index++)
         {
-            var description = Describe((ulong)index * 0x10000, Format.R32Sfloat, GuestPixelFormat.Bits32Float, levels, levels, levels);
+            var description = Describe((ulong)index * 0x10000, GpuFormat.R32Sfloat, GuestPixelFormat.Bits32Float, levels, levels, levels);
             images[index] = harness.CreateImage(description);
             var data = Enumerable.Repeat(texels[index], (int)(levels * levels)).Concat(levels > 1 ? [texels[index] + 0.5f] : Array.Empty<float>()).ToArray();
             harness.UploadImage(images[index], MemoryMarshal.AsBytes<float>(data), ImageTestHarness.WholeImageCopies(description, 0));
@@ -546,7 +549,7 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         var views = new DescriptorImageInfo[images.Length];
         for (var index = 0; index < images.Length; index++)
         {
-            var description = Describe((ulong)index * 0x10000, Format.R32Uint, GuestPixelFormat.Bits32UInt, 1, 1, 1);
+            var description = Describe((ulong)index * 0x10000, GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt, 1, 1, 1);
             images[index] = harness.CreateImage(description);
             uint[] texel = [snapshot.Images[index][0] == 0x1000 ? 11u : 22u];
             harness.UploadImage(images[index], MemoryMarshal.AsBytes<uint>(texel), ImageTestHarness.WholeImageCopies(description, 0));
@@ -586,7 +589,7 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         for (var index = 0; index < images.Length; index++)
         {
             var array = request.Resources.Info.Images[index].Dimension == ImageDimension.Dim2DArray;
-            var description = Describe((ulong)index * 0x10000, Format.R32Uint, GuestPixelFormat.Bits32UInt, 1, 1, 1);
+            var description = Describe((ulong)index * 0x10000, GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt, 1, 1, 1);
             description.Resources = new SubresourceCount(1, array ? 2u : 1u);
             images[index] = harness.CreateImage(description);
             uint[] texels = array ? [13u, 37u] : [91u];
@@ -595,8 +598,8 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
             {
                 ImageView = images[index].GetOrCreateView(ImageViewDescription.Default with
                 {
-                    Format = Format.R32Uint,
-                    Type = array ? ImageViewType.Type2DArray : ImageViewType.Type2D,
+                    Format = GpuFormat.R32Uint,
+                    Type = array ? GpuImageViewType.Type2DArray : GpuImageViewType.Type2D,
                     LayerCount = description.Resources.Layers,
                 }),
                 ImageLayout = ImageLayout.ShaderReadOnlyOptimal,
@@ -630,7 +633,7 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         Assert.Equal(ImageNumericClass.Uint64, run.Resources.Info.Images[0].NumericClass);
 
         // A 32_32 UINT image whose texels the shader sees as one 64-bit integer each.
-        var description = Describe(0, Format.R32G32Uint, GuestPixelFormat.Bits32_32UInt, 4, 4, 1, bytesPerBlock: 8);
+        var description = Describe(0, GpuFormat.R32G32Uint, GuestPixelFormat.Bits32_32UInt, 4, 4, 1, bytesPerBlock: 8);
         var target = run.Harness.CreateImage(description);
         var copies = ImageTestHarness.WholeImageCopies(description, 0);
         var texelBytes = ImageTestHarness.WholeImageBytes(description);
@@ -640,7 +643,7 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         run.Harness.UploadImage(target, MemoryMarshal.AsBytes<uint>(texels), copies);
         var wideView = new DescriptorImageInfo
         {
-            ImageView = target.GetOrCreateView(ImageViewDescription.Default with { Format = Format.R64Uint, Usage = ImageUsageFlags.StorageBit }),
+            ImageView = target.GetOrCreateView(ImageViewDescription.Default with { Format = GpuFormat.R64Uint, Usage = GpuImageUsage.StorageBit }),
             ImageLayout = ImageLayout.General,
         };
         var views = new Dictionary<int, DescriptorImageInfo[]> { [0] = [wideView] };
@@ -681,7 +684,7 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         }
 
         using var run = new Run(vulkan, GatherAtLevelProgram(u, v, lod), UserData(), 1);
-        var description = Describe(0, Format.R32Sfloat, GuestPixelFormat.Bits32Float, 8, 8, 4);
+        var description = Describe(0, GpuFormat.R32Sfloat, GuestPixelFormat.Bits32Float, 8, 8, 4);
         var image = run.Harness.CreateImage(description);
         var texels = new List<float>();
         for (var level = 0; level < 4; level++)
@@ -724,7 +727,7 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         var storageClass = ImageDescriptorBinding.ForImage(image)!.Value;
         Assert.Equal(2, run.Request.Bindings.Find(storageClass)!.Resources.Count);
 
-        var description = Describe(0, Format.R32Uint, GuestPixelFormat.Bits32UInt, 2, 2, 2);
+        var description = Describe(0, GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt, 2, 2, 2);
         var target = run.Harness.CreateImage(description);
         var copies = ImageTestHarness.WholeImageCopies(description, 0);
         var texelCount = (int)(ImageTestHarness.WholeImageBytes(description) / 4);

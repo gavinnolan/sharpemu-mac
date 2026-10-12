@@ -48,18 +48,18 @@ public static partial class Gen5SpirvTranslator
         if (request.Stage == ShaderStage.Pixel)
         {
             if (request.PixelOutputs.Any(output => output.DualSourceAlpha) &&
-                (request.PixelOutputs.Count != 1 || request.PixelOutputs[0].Index != 0 ||
+                (request.PixelOutputs.Count != 1 || request.PixelOutputs[0].BlendSourceIndex != 0 ||
                  request.PixelOutputs[0].HostLocation != 0 || request.PixelOutputs[0].Kind != Gen5PixelOutputKind.Float))
             {
                 error = "synthetic alpha requires one floating-point primary output at location zero";
                 return false;
             }
-            var dualSource = request.PixelOutputs.Any(output => output.Index != 0);
+            var dualSource = request.PixelOutputs.Any(output => output.BlendSourceIndex != 0);
             if (dualSource && (request.PixelOutputs.Count != 2 ||
                 request.PixelOutputs.Any(output => output.HostLocation != 0 || output.Kind != Gen5PixelOutputKind.Float) ||
-                !request.PixelOutputs.Select(output => output.Index).Order().SequenceEqual(new uint[] { 0, 1 })))
+                !request.PixelOutputs.Select(output => output.BlendSourceIndex).Order().SequenceEqual(new uint[] { 0, 1 })))
             {
-                error = "dual-source pixel outputs require a primary and second source at host location zero with indices zero and one";
+                error = "dual-source pixel outputs need one target and its second source, at host location zero with indices zero and one";
                 return false;
             }
             if (request.PixelOutputs.Count > 8 || request.PixelOutputs.Any(output => output.GuestSlot > 7))
@@ -70,16 +70,16 @@ public static partial class Gen5SpirvTranslator
 
             // A dual-source second output shares location 0 with index 1; every other output
             // has index 0 and its own location.
-            var targets = request.PixelOutputs.Count(output => output.Index == 0);
+            var targets = request.PixelOutputs.Count(output => output.BlendSourceIndex == 0);
             if (request.PixelOutputs.Select(output => output.GuestSlot).Distinct().Count() != request.PixelOutputs.Count ||
-                request.PixelOutputs.Select(output => (output.HostLocation, output.Index)).Distinct().Count() != request.PixelOutputs.Count)
+                request.PixelOutputs.Select(output => (output.HostLocation, output.BlendSourceIndex)).Distinct().Count() != request.PixelOutputs.Count)
             {
                 error = "pixel output guest slots and host locations must be unique";
                 return false;
             }
 
-            if (request.PixelOutputs.Any(output => output.HostLocation >= targets || output.Index > 1 ||
-                    (output.Index == 1 && (output.HostLocation != 0 || targets != 1))))
+            if (request.PixelOutputs.Any(output => output.HostLocation >= targets || output.BlendSourceIndex > 1 ||
+                    (output.BlendSourceIndex == 1 && (output.HostLocation != 0 || targets != 1))))
             {
                 error = "pixel output host locations must be dense in the 0..N-1 range, with a second source only at location 0 of one target";
                 return false;
@@ -157,7 +157,7 @@ public static partial class Gen5SpirvTranslator
             _localSizeX = Math.Max(request.LocalSizeX, 1);
             _localSizeY = Math.Max(request.LocalSizeY, 1);
             _localSizeZ = Math.Max(request.LocalSizeZ, 1);
-            _physicalAxisOfLogical = ComputeWorkgroupAxisOrder(_localSizeX, _localSizeY, _localSizeZ);
+            _physicalAxisOfLogical = Gen5WorkgroupAxisOrder.Compute(_localSizeX, _localSizeY, _localSizeZ);
             // A wave64 runs as one 64-lane host subgroup when the host pins it to one
             // (HostWave64Supported). Hosts without 64-lane subgroups bridge the two 32-lane
             // halves through workgroup memory.
@@ -1576,6 +1576,14 @@ public static partial class Gen5SpirvTranslator
                 return true;
             }
 
+            if (imageInfo.BindlessSlot != DescriptorConstants.NoIndex)
+            {
+                // A V#-described table is read through a device table of texture handles,
+                // which only the Metal backend binds. Here the access reads its root alone: the
+                // null descriptor, as such an access read before Metal bound these tables.
+                return false;
+            }
+
             if (request.IndirectRootByMemoryIndex.TryGetValue(memoryIndex, out var keyMemoryIndex) && imageInfo.IndirectSearchIterations != 0)
             {
                 if (!HasFlattenedTable)
@@ -1673,7 +1681,8 @@ public static partial class Gen5SpirvTranslator
             // Several descriptors (per-mip elements, indirect candidates) need the caller's constant case.
             var severalDescriptors =
                 (imageInfo.MipMode == ImageMipMode.DynamicStorage && instruction.Opcode is "ImageLoadMip" or "ImageStoreMip") ||
-                (request.IndirectRootByMemoryIndex.ContainsKey(memoryIndex) && imageInfo.IndirectSearchIterations != 0);
+                (request.IndirectRootByMemoryIndex.ContainsKey(memoryIndex) && imageInfo.IndirectSearchIterations != 0 &&
+                 imageInfo.BindlessSlot == DescriptorConstants.NoIndex);
             if (fixedElement is null && severalDescriptors)
             {
                 error = "image access over several descriptors needs a constant element case";
@@ -1684,6 +1693,7 @@ public static partial class Gen5SpirvTranslator
             var elementPointer = _module.AddInstruction(SpirvOp.AccessChain, imageClass.ElementPointer, imageClass.Variable, elementIndex);
             var imageValue = Load(imageClass.ImageType, elementPointer);
             uint objectType;
+            uint samplerValue = 0;
             if (UsesSampler(instruction.Opcode))
             {
                 if (_samplerArray == 0)
@@ -1706,9 +1716,9 @@ public static partial class Gen5SpirvTranslator
                 var samplerElement = request.Bindings.Find(DescriptorBindingKind.Samplers)!.Resources.ToList()
                     .IndexOf(info.SamplerBinding(samplerIndex));
                 var samplerPointer = _module.AddInstruction(SpirvOp.AccessChain, _samplerPointer, _samplerArray, UInt((uint)samplerElement));
-                var sampler = Load(_samplerType, samplerPointer);
+                samplerValue = Load(_samplerType, samplerPointer);
                 objectType = _module.TypeSampledImage(imageClass.ImageType);
-                imageObject = _module.AddInstruction(SpirvOp.SampledImage, objectType, imageValue, sampler);
+                imageObject = _module.AddInstruction(SpirvOp.SampledImage, objectType, imageValue, samplerValue);
             }
             else
             {
@@ -1731,7 +1741,8 @@ public static partial class Gen5SpirvTranslator
                 imageInfo.ConversionFormat,
                 imageInfo.ShaderSwizzle,
                 imageInfo.EmulatedCompareFunction,
-                resourceIndex);
+                resourceIndex,
+                samplerValue);
             dstSelect = imageInfo.ShaderSwizzle;
             return true;
         }
@@ -1739,7 +1750,7 @@ public static partial class Gen5SpirvTranslator
         private const uint MipStatisticsEntries = 257;
         private const uint MipStatisticsNoCounter = 0x8000;
 
-        private void RecordMipStatistics(SpirvImageResource resource, uint imageObject, uint coordinates, uint? explicitLod, uint bias)
+        private void RecordMipStatistics(SpirvImageResource resource, uint coordinates, uint? explicitLod, uint bias)
         {
             if (_mipStatistics == 0 || _stage != Gen5SpirvStage.Pixel || resource.ResourceIndex < 0 ||
                 resource.IsStorage || resource.Multisampled || resource.Cube)
@@ -1747,7 +1758,16 @@ public static partial class Gen5SpirvTranslator
                 return;
             }
 
+            // The bound T#'s MIP_STATS_ENABLE is runtime state in the field (bit 15 set when it
+            // is clear), so the program is the same either way; a slot without a counter skips
+            // everything, the LOD query included, on a branch uniform across the draw.
             var field = LoadShaderDataDword(UInt(_request.Bindings.MipStatisticsDword + (uint)resource.ResourceIndex));
+            var enabled = _module.AddInstruction(SpirvOp.IEqual, _boolType, BitwiseAnd(field, UInt(MipStatisticsNoCounter)), UInt(0));
+            EmitConditional(enabled, () => RecordMipStatisticsSample(resource, coordinates, explicitLod, bias, field));
+        }
+
+        private void RecordMipStatisticsSample(SpirvImageResource resource, uint coordinates, uint? explicitLod, uint bias, uint field)
+        {
             uint lod;
             if (explicitLod is { } value)
             {
@@ -1755,10 +1775,16 @@ public static partial class Gen5SpirvTranslator
             }
             else
             {
+                // The sample's combined image lives in its own block; this one combines again.
+                var sampledImage = _module.AddInstruction(
+                    SpirvOp.SampledImage,
+                    resource.ObjectType,
+                    Load(resource.ImageType, resource.Variable),
+                    resource.Sampler);
                 var queried = _module.AddInstruction(
                     SpirvOp.ImageQueryLod,
                     _vec2Type,
-                    imageObject,
+                    sampledImage,
                     SpatialCoordinates(resource, coordinates));
                 lod = _module.AddInstruction(
                     SpirvOp.FAdd,
@@ -1777,10 +1803,7 @@ public static partial class Gen5SpirvTranslator
             var absolute = Ext(43, _floatType, _module.AddInstruction(SpirvOp.FAdd, _floatType, lod, baseLevel), Float(0f), Float(14f));
             var level = _module.AddInstruction(SpirvOp.ConvertFToU, _uintType, absolute);
             var clamped = _module.AddInstruction(SpirvOp.FOrdLessThan, _boolType, absolute, threshold);
-            var record = LogicalAnd(
-                Load(_boolType, _exec),
-                _module.AddInstruction(SpirvOp.IEqual, _boolType, BitwiseAnd(field, UInt(MipStatisticsNoCounter)), UInt(0)));
-            record = LogicalAnd(record, _module.AddInstruction(SpirvOp.LogicalNot, _boolType, Load(_boolType, HelperInvocationInput())));
+            var record = LogicalAnd(Load(_boolType, _exec), _module.AddInstruction(SpirvOp.LogicalNot, _boolType, Load(_boolType, HelperInvocationInput())));
             var finestPointer = MipStatisticsPointer(counter);
             var countPointer = MipStatisticsPointer(IAdd(counter, UInt(MipStatisticsEntries)));
             EmitConditional(record, () =>
