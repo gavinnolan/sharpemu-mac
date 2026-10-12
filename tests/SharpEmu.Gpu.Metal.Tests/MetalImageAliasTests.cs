@@ -56,7 +56,13 @@ public sealed unsafe class MetalImageAliasTests(ITestOutputHelper output)
 
         public void Dispose() => NativeMemory.AlignedFree(_block);
 
+        // A guest address no resolved range may cross, as if the bytes either side of it
+        // were two mappings that are not one span; zero for none.
+        public ulong Split { get; set; }
+
         private bool Contains(ulong address, ulong length) => address >= GuestBase && address - GuestBase + length <= Size;
+
+        private bool Crosses(ulong address, ulong length) => Split != 0 && address < Split && address + length > Split;
 
         public bool TryHoldRange(ulong address, ulong size) => false;
         public bool TryHoldRangeAtOrAbove(ulong searchStart, ulong size, ulong alignment, out ulong address) { address = 0; return false; }
@@ -69,9 +75,12 @@ public sealed unsafe class MetalImageAliasTests(ITestOutputHelper output)
 
         public bool TryResolveBackingAlias(ulong address, ulong size, out ulong alias)
         {
-            alias = Contains(address, size) ? (ulong)_block + (address - GuestBase) : 0;
+            alias = Contains(address, size) && !Crosses(address, size) ? (ulong)_block + (address - GuestBase) : 0;
             return alias != 0;
         }
+
+        public bool TryResolveBackingAliasSpan(ulong address, ulong size, out ulong alias) =>
+            TryResolveBackingAlias(address, size, out alias);
 
         public bool TryWriteBacking(ulong address, ReadOnlySpan<byte> data)
         {
@@ -132,6 +141,8 @@ public sealed unsafe class MetalImageAliasTests(ITestOutputHelper output)
         public MetalTransferHarness Harness { get; }
         public MetalImageCache Cache { get; }
 
+        public void SplitGuestAt(ulong address) => _backing.Split = address;
+
         // Straight into the backing, past the page watch, the way a store the cache has
         // already been told about would land.
         public void WriteGuest(ulong address, byte[] bytes) => Assert.True(_backing.TryWriteBacking(address, bytes));
@@ -170,9 +181,27 @@ public sealed unsafe class MetalImageAliasTests(ITestOutputHelper output)
             return new ImageRequest(description, view, role);
         }
 
-        public ResourceSlotIdentifier Acquire(ulong address, uint side, ImageRole role)
+        // A 64 KiB-tiled RGBA8 square target: a macro tile is 128x128 texels, so every 128
+        // rows are one macro tile row.
+        public static ImageRequest TiledRequest(ulong address, uint side)
         {
-            var request = Request(address, side, role);
+            var request = Request(address, side, ImageRole.ColorTarget);
+            var description = request.Description;
+            var size = TileGeometry.TextureTotalSize(
+                GuestPixelFormat.Bits8_8_8_8UNorm, side, side, 1, 1, GuestTileMode.Standard64KB, volume: false).Size;
+            description.Data = new GuestSpan(address, size);
+            description.Pitch = TileGeometry.TexturePitch(GuestPixelFormat.Bits8_8_8_8UNorm, side, GuestTileMode.Standard64KB);
+            description.TileMode = GuestTileMode.Standard64KB;
+            description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = size, Pitch = description.Pitch, Height = side };
+            return new ImageRequest(description, request.View, ImageRole.ColorTarget);
+        }
+
+        public ResourceSlotIdentifier Acquire(ulong address, uint side, ImageRole role) =>
+            Acquire(Request(address, side, role));
+
+        public ResourceSlotIdentifier Acquire(ImageRequest request)
+        {
+            var role = request.Role;
             var identifier = Cache.FindImage(ref request);
             if (role == ImageRole.ColorTarget)
             {
@@ -267,6 +296,45 @@ public sealed unsafe class MetalImageAliasTests(ITestOutputHelper output)
         Assert.True(image.IsCpuDirty);
         Assert.Equal(0x2000UL, image.DirtyStart);
         Assert.Equal(0x2000UL + SmallSize, image.DirtyEnd);
+    }
+
+    // A tiled target whose guest bytes are two spans, split at a macro tile row, is
+    // written back a span at a time, and the span past the split carries its own rows:
+    // the whole of guest memory reads back what the texture holds.
+    [Fact]
+    public void ATiledTargetSplitAcrossTwoSpansIsWrittenBackInPlace()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var request = Rig.TiledRequest(ImageAddress, 256);
+        var size = request.Description.Data.Size;
+        Assert.Equal(0x40000UL, size);
+        var written = MetalTileOracle.Pattern((int)size, 0x6E);
+        rig.WriteGuest(ImageAddress, written);
+        var image = rig.Cache.GetImage(rig.Acquire(request));
+        Assert.True(image.IsGpuModified);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        var stale = MetalTileOracle.Pattern((int)size, 0x19);
+        rig.WriteGuest(ImageAddress, stale);
+        // The transfer stages through a reused buffer, and the upload above left the
+        // image's own linear rows in it, where a misplaced read would still find them. A
+        // transfer of other bytes of the same shape overwrites them first.
+        var description = request.Description;
+        var decoy = rig.Harness.Texture(rig.Harness.Transfer.ShapeFor(description));
+        rig.Harness.Transfer.EncodeGuestToTexture(
+            rig.Harness, description, new SubresourceRange(0, 1, 0, 1),
+            new MetalGuestRange(rig.Harness.Buffer(stale), 0, size, 0), default, decoy, 0, size);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+
+        rig.SplitGuestAt(ImageAddress + (size / 2));
+        rig.Cache.FlushGpuWrites(ImageAddress, size, MetalWritebackCause.HostRead);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+
+        Assert.False(image.IsGpuModified);
+        Assert.Equal(written, rig.ReadGuest(ImageAddress, size));
     }
 
     // Without a page watch a CPU store into the rest of the alias goes unseen, and the

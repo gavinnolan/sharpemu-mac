@@ -648,49 +648,31 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         var limit = pieceSize == 0 || end >= description.Data.Size ? ulong.MaxValue : end;
         var lastLevel = range.LevelCount == 0 ? 0 : range.BaseLevel + range.LevelCount - 1;
         var lastLayer = range.LayerCount == 0 ? 0 : range.BaseLayer + range.LayerCount - 1;
-        foreach (var copy in plan.Copies)
-        {
-            if (copy.Level < range.BaseLevel || copy.Level > lastLevel || range.LevelCount == 0)
-            {
-                continue;
-            }
-
-            if (!plan.Volume && (copy.Slice < range.BaseLayer || copy.Slice > lastLayer || range.LayerCount == 0))
-            {
-                continue;
-            }
-
-            if (!TryClipRows(plan, copy, guestBase, limit, out var clipped))
-            {
-                continue;
-            }
-
-            var rebased = clipped;
-            rebased.BufferOffset = Rebase(clipped.BufferOffset, guestBase, "a subresource copy");
-            _copies.Add(rebased);
-        }
-
         if (!plan.Tiled)
         {
-            return;
-        }
-
-        var linearBase = ulong.MaxValue;
-        foreach (var transfer in plan.Tiles)
-        {
-            if (Selected(plan, transfer, range, lastLevel, lastLayer) && Overlaps(transfer, guestBase, limit))
+            foreach (var copy in plan.Copies)
             {
-                linearBase = Math.Min(linearBase, transfer.LinearOffset);
-            }
-        }
+                if (!Selected(plan, copy, range, lastLevel, lastLayer) ||
+                    !TryClipRows(plan, copy, guestBase, limit, out var clipped))
+                {
+                    continue;
+                }
 
-        if (linearBase == ulong.MaxValue)
-        {
-            plan.LinearSize = 4;
+                var rebased = clipped;
+                rebased.BufferOffset = Rebase(clipped.BufferOffset, guestBase, "a subresource copy");
+                _copies.Add(rebased);
+            }
+
             return;
         }
 
-        ulong linear = 0;
+        // A tiled piece names tiled bytes, but its copies and its staging are linear, and
+        // the two are different offsets: a band past the first starts at its own linear
+        // row, and a subresource's tiled extent is padded to whole blocks where its linear
+        // one is not. So the piece first picks the block rows whose tiled bytes it holds;
+        // those rows, in linear offsets, are what the copies are cut to and what the
+        // staging is rebased onto.
+        var linearBase = ulong.MaxValue;
         foreach (var transfer in plan.Tiles)
         {
             if (!Selected(plan, transfer, range, lastLevel, lastLayer) || !Overlaps(transfer, guestBase, limit))
@@ -702,10 +684,36 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
             {
                 var rebased = band;
                 rebased.TiledOffset = Rebase(band.TiledOffset, guestBase, "a tile transfer");
-                rebased.LinearOffset = band.LinearOffset - linearBase;
                 _tiles.Add(rebased);
-                linear = Math.Max(linear, rebased.LinearOffset + rebased.LinearSize);
+                linearBase = Math.Min(linearBase, band.LinearOffset);
             }
+        }
+
+        if (linearBase == ulong.MaxValue)
+        {
+            plan.LinearSize = 4;
+            return;
+        }
+
+        foreach (var copy in plan.Copies)
+        {
+            if (!Selected(plan, copy, range, lastLevel, lastLayer) || !TryClipToBands(plan, copy, out var clipped))
+            {
+                continue;
+            }
+
+            var rebased = clipped;
+            rebased.BufferOffset = Rebase(clipped.BufferOffset, linearBase, "a tiled subresource copy");
+            _copies.Add(rebased);
+        }
+
+        ulong linear = 0;
+        for (var index = 0; index < _tiles.Count; index++)
+        {
+            var rebased = _tiles[index];
+            rebased.LinearOffset -= linearBase;
+            _tiles[index] = rebased;
+            linear = Math.Max(linear, rebased.LinearOffset + rebased.LinearSize);
         }
 
         plan.LinearSize = Math.Max(linear, 4);
@@ -733,7 +741,7 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         }
 
         var aligned = end;
-        foreach (var copy in plan.Copies)
+        foreach (var copy in RunCopies(plan))
         {
             if (copy.BufferOffset >= aligned || CopyEnd(plan, copy) <= aligned)
             {
@@ -783,7 +791,7 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         for (var pass = 0; pass < 4; pass++)
         {
             var moved = aligned;
-            foreach (var copy in plan.Copies)
+            foreach (var copy in RunCopies(plan))
             {
                 var rowTexels = copy.BufferRowLength != 0 ? copy.BufferRowLength : copy.Width;
                 moved = AdvancePast(moved, copy.BufferOffset, CopyEnd(plan, copy),
@@ -806,6 +814,12 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
 
         return aligned;
     }
+
+    private static readonly List<MetalSubresourceCopy> NoCopies = [];
+
+    // The copies whose guest bytes bound a run: a linear plan's, and none of a tiled
+    // plan's, whose copies are named in linear staging offsets and cut from its bands.
+    private static List<MetalSubresourceCopy> RunCopies(TransferPlan plan) => plan.Tiled ? NoCopies : plan.Copies;
 
     // Moves an offset that falls inside a transfer forward to the next row of it, or past
     // it when it has no rows of its own; an offset outside the transfer stands still.
@@ -903,10 +917,43 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
 
         clipped.BufferOffset = copy.BufferOffset + (firstRow * rowBytes);
         clipped.OriginY = copy.OriginY + (uint)(firstRow * plan.TexelHeight);
-        clipped.Height = (uint)((lastRow - firstRow) * plan.TexelHeight);
+        // The last block row of a block-compressed copy can run past the texels it has.
+        clipped.Height = (uint)Math.Min((lastRow - firstRow) * plan.TexelHeight, copy.Height - (firstRow * plan.TexelHeight));
         clipped.BufferImageHeight = clipped.Height;
         return true;
     }
+
+    // A tiled subresource copy cut down to the block rows the selected bands carry. The
+    // bands still hold their offsets in the whole image's linear staging, as the copy
+    // does, so the rows of the copy a band overlaps are the rows it carries.
+    private bool TryClipToBands(TransferPlan plan, in MetalSubresourceCopy copy, out MetalSubresourceCopy clipped)
+    {
+        var copyEnd = CopyEnd(plan, copy);
+        var from = ulong.MaxValue;
+        ulong to = 0;
+        foreach (var band in _tiles)
+        {
+            var pitchBytes = (ulong)band.Pitch * band.BytesPerElement;
+            var sliceBytes = band.LinearSliceStride != 0 ? band.LinearSliceStride : pitchBytes * band.Height;
+            var bandEnd = band.LinearOffset + (sliceBytes * (Math.Max(band.Depth, 1u) - 1)) + (pitchBytes * band.Height);
+            if (band.LinearOffset >= copyEnd || bandEnd <= copy.BufferOffset)
+            {
+                continue;
+            }
+
+            from = Math.Min(from, band.LinearOffset);
+            to = Math.Max(to, bandEnd);
+        }
+
+        clipped = copy;
+        return from != ulong.MaxValue && TryClipRows(plan, copy, from, to, out clipped);
+    }
+
+    private static bool Selected(
+        TransferPlan plan, in MetalSubresourceCopy copy, SubresourceRange range, uint lastLevel, uint lastLayer) =>
+        range.LevelCount != 0 &&
+        copy.Level >= range.BaseLevel && copy.Level <= lastLevel &&
+        (plan.Volume || (range.LayerCount != 0 && copy.Slice >= range.BaseLayer && copy.Slice <= lastLayer));
 
     /// <summary>The end of a subresource copy's guest bytes.</summary>
     private static ulong CopyEnd(TransferPlan plan, in MetalSubresourceCopy copy)
