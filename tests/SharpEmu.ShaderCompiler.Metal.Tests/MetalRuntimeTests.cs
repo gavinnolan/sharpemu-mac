@@ -207,6 +207,40 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void Wave64ReadFirstLaneTakesTheFirstActiveLaneOfEitherHalf()
+    {
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.Wave64ReadFirstLane, new byte[512],
+            waveLaneCount: 64, localSizeX: 64, threadsPerThreadgroup: 64);
+
+        // Lane 44 when only the upper half has EXEC, lane 8 when only the lower half does.
+        for (var lane = 0; lane < 64; lane++)
+        {
+            Assert.Equal(3u * 44u + 7u, ReadDword(result, lane * 8));
+            Assert.Equal(3u * 8u + 7u, ReadDword(result, lane * 8 + 4));
+        }
+    }
+
+    [Fact]
+    public void Wave64ExchangesInALoopNeverReadAnOverwrittenSlot()
+    {
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        // 128 exchanges back to back at one barrier each: a trip that read a slot the next
+        // exchange had already rewritten would add another trip's value into the sum.
+        for (var round = 0; round < 20; round++)
+        {
+            var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.Wave64ExchangeLoop, new byte[256],
+                waveLaneCount: 64, localSizeX: 64, threadsPerThreadgroup: 64);
+            for (var lane = 0; lane < 64; lane++)
+            {
+                Assert.Equal(8512u, ReadDword(result, lane * 4));
+            }
+        }
+    }
+
+    [Fact]
     public void Wave64WriteLaneChangesOnlyTheAddressedLane()
     {
         if (SkipWithoutMetalDevice("the execution test")) return;

@@ -1453,46 +1453,35 @@ public static partial class Gen5MslTranslator
         }
 
         /// <summary>Broadcasts <paramref name="value"/> from the first guest-active
-        /// lane (lowest set bit of the 64-lane EXEC mask) to all lanes, through the
-        /// threadgroup broadcast slot — mirroring the SPIR-V translator's
-        /// BroadcastFirstWave64Active. Returns the temp holding the result.</summary>
+        /// lane (lowest set bit of the 64-lane EXEC mask) to all lanes — mirroring the
+        /// SPIR-V translator's BroadcastFirstWave64Active — in one exchange: each half
+        /// publishes its EXEC ballot and the value of its own first active lane, and the
+        /// low half's wins unless it has none. Returns the temp holding the result.</summary>
         private string EmitWave64ReadFirstLane(string value)
         {
-            Line("if (sharpemu_lane == 0u) { sharpemu_wave_scratch[2] = 0u; }");
-            // 64-lane EXEC mask across both halves (slots 0/1), broadcast in 2.
-            Line("sharpemu_wave_scratch[(sharpemu_lane >> 5) & 1u] = sharpemu_ballot(exec);");
-            Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
-            var lo = Temp("uint", "sharpemu_wave_scratch[0]");
-            var hi = Temp("uint", "sharpemu_wave_scratch[1]");
-            var first = Temp(
-                "uint",
-                $"({lo} != 0u) ? (uint)ctz({lo}) : (({hi} != 0u) ? (32u + (uint)ctz({hi})) : 0u)");
-            var anyActive = Temp("bool", $"(({lo}) | ({hi})) != 0u");
-            Line($"if ({anyActive} && sharpemu_lane == {first}) {{ sharpemu_wave_scratch[2] = {value}; }}");
-            Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
-            var result = Temp("uint", "sharpemu_wave_scratch[2]");
-            Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
-            return result;
+            Line(WaveSetFlip);
+            var ballot = Temp("uint", "sharpemu_ballot(exec)");
+            // The ballot only has lanes that are running, so the shuffle reads one.
+            var halfFirst = Temp("uint", ShuffleLane(value, $"({ballot} == 0u ? 0u : (uint)ctz({ballot}))"));
+            Line($"{WaveHalfBallotSlot} = {ballot};");
+            Line($"{WaveHalfValueSlot} = {halfFirst};");
+            Line(WaveExchangeBarrier);
+            var lo = Temp("uint", WaveSlot(0));
+            var hi = Temp("uint", WaveSlot(1));
+            return Temp("uint", $"({lo} != 0u) ? {WaveSlot(2)} : (({hi} != 0u) ? {WaveSlot(3)} : 0u)");
         }
 
         /// <summary>Broadcasts <paramref name="value"/> from guest lane
-        /// <paramref name="lane"/> (0..63) to all lanes through the threadgroup
-        /// broadcast slot. Like V_READLANE it reads the lane whether or not EXEC
-        /// has it.</summary>
-        private string EmitWave64ReadLane(string value, string lane)
-        {
-            Line($"if (sharpemu_lane == {lane}) {{ sharpemu_wave_scratch[2] = {value}; }}");
-            Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
-            var result = Temp("uint", "sharpemu_wave_scratch[2]");
-            Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
-            return result;
-        }
+        /// <paramref name="lane"/> (0..63) to all lanes. Like V_READLANE it reads the
+        /// lane whether or not EXEC has it.</summary>
+        private string EmitWave64ReadLane(string value, string lane) =>
+            EmitWave64BroadcastFromLane(value, lane);
 
         /// <summary>Stores the wave ballot of <paramref name="condition"/> into the
         /// mask register pair (low, low+1). Wave32 fills the low dword and clears
         /// the high; wave64 bridges both 32-wide halves through threadgroup
-        /// scratch so the pair holds the full 64-lane mask. The bridging barriers
-        /// are safe because the guest program's scalar PC keeps all 64 lanes in
+        /// scratch so the pair holds the full 64-lane mask. The bridging barrier
+        /// is safe because the guest program's scalar PC keeps all 64 lanes in
         /// lockstep through the dispatcher (one wave per threadgroup).</summary>
         private void EmitBallotStore(uint loRegister, string condition)
         {
@@ -1510,27 +1499,24 @@ public static partial class Gen5MslTranslator
 
             if (_options.DeadMaskBallotElision && MaskSlotOf(loRegister) >= 0)
             {
-                // VCC or EXEC: the exchange costs two threadgroup barriers, and it is
-                // only worth them if the 64-bit pair is read before it is overwritten.
+                // VCC or EXEC: the exchange costs a threadgroup barrier, and it is
+                // only worth it if the 64-bit pair is read before it is overwritten.
                 // That is not knowable until every block has been emitted, so leave a
                 // marker for Gen5MslTranslator.MaskBallots to resolve.
                 Line($"{MaskBallotMarker}({loRegister}, {condition});");
                 return;
             }
 
-            // simd_ballot is uniform across a simdgroup, so every lane of a half
-            // writes the same 32-bit value to that half's slot — no first-lane
-            // guard needed. Barrier, read both halves, barrier before the slot
-            // can be reused by the next ballot.
-            Line($"sharpemu_wave_scratch[(sharpemu_lane >> 5) & 1u] = sharpemu_ballot({condition});");
-            Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
-            Line($"s[{loRegister}] = sharpemu_wave_scratch[0];");
-            if (hiRegister < ScalarRegisterFileCount)
+            foreach (var statement in WaveBallotExchange(condition))
             {
-                Line($"s[{hiRegister}] = sharpemu_wave_scratch[1];");
+                Line(statement);
             }
 
-            Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+            Line($"s[{loRegister}] = {WaveSlot(0)};");
+            if (hiRegister < ScalarRegisterFileCount)
+            {
+                Line($"s[{hiRegister}] = {WaveSlot(1)};");
+            }
         }
 
         // ---- permlane / cube ----

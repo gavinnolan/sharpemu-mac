@@ -212,7 +212,7 @@ public sealed class MslTranslationTests
     }
 
     /// <summary>The wave64 ballot bridge only has to share the LDS allocation when the
-    /// dispatch asked for all of it; with room to spare it gets its own three dwords and
+    /// dispatch asked for all of it; with room to spare it gets its own eight dwords and
     /// cannot collide with guest data.</summary>
     [Theory]
     [InlineData(1024u, false)]
@@ -245,7 +245,7 @@ public sealed class MslTranslationTests
         Assert.Equal(
             !aliased,
             shader.Source.Contains(
-                "threadgroup uint sharpemu_wave_scratch[3];",
+                "threadgroup uint sharpemu_wave_scratch[8];",
                 StringComparison.Ordinal));
     }
 
@@ -372,7 +372,7 @@ public sealed class MslTranslationTests
     }
 
     /// <summary>A guest wave64's 64-bit mask spans two Apple simdgroups, so a V_CMP has
-    /// to exchange halves through threadgroup memory — two barriers, and a threadgroup
+    /// to exchange halves through threadgroup memory — a barrier, and a threadgroup
     /// barrier makes every simdgroup wait. The per-lane vcc bool needs no exchange at
     /// all, so the barriers are only worth paying when the program reads the pair as
     /// data. Here nothing does: v0 == v0 is balloted into VCC and never looked at.</summary>
@@ -398,7 +398,7 @@ public sealed class MslTranslationTests
         // the library failed to compile and the dispatch was dropped. The declaration now
         // follows the emitted body.
         Assert.Contains(
-            "threadgroup uint sharpemu_wave_scratch[3];",
+            "threadgroup uint sharpemu_wave_scratch[8];",
             materialized.Source,
             StringComparison.Ordinal);
         if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") == "1")
@@ -419,9 +419,9 @@ public sealed class MslTranslationTests
     {
         var shader = CompileWave64Compare(readsTheMask: true);
 
-        Assert.Contains("threadgroup_barrier", Body(shader), StringComparison.Ordinal);
-        Assert.Contains("sharpemu_wave_scratch[0]", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("sharpemu_wave_scratch[1]", shader.Source, StringComparison.Ordinal);
+        Assert.Equal(1, Occurrences(Body(shader), "threadgroup_barrier"));
+        Assert.Contains("sharpemu_wave_scratch[sharpemu_wave_set]", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_wave_scratch[sharpemu_wave_set + 1u]", shader.Source, StringComparison.Ordinal);
 
         if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") != "1")
         {
@@ -483,8 +483,8 @@ public sealed class MslTranslationTests
         Assert.Contains("s126 = 0xFFFFFFFFu;", body, StringComparison.Ordinal);
         Assert.Contains("s127 = 0xFFFFFFFFu;", body, StringComparison.Ordinal);
         // The register allocator has scalarized the file by now, so EXEC_LO reads s126.
-        Assert.Contains("s126 = sharpemu_wave_scratch[0];", body, StringComparison.Ordinal);
-        Assert.DoesNotContain("s106 = sharpemu_wave_scratch[0];", body, StringComparison.Ordinal);
+        Assert.Contains("s126 = sharpemu_wave_scratch[sharpemu_wave_set];", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("s106 = sharpemu_wave_scratch[sharpemu_wave_set];", body, StringComparison.Ordinal);
 
         // Materializing everything is what it used to cost.
         var request = Gen5ComputeFixtures.CreateComputeRequest(
@@ -497,6 +497,67 @@ public sealed class MslTranslationTests
                 new Gen5MslCodegenOptions(DeadMaskBallotElision: false)),
             error);
         Assert.Equal(4, Occurrences(Body(every), "sharpemu_wave_scratch[(sharpemu_lane >> 5)"));
+    }
+
+    /// <summary>A wave64 exchange — V_READFIRSTLANE, V_READLANE, a ballot the program reads —
+    /// costs one threadgroup barrier: the slots are double-buffered, so the barrier that
+    /// used to follow each read to protect it from the next write is gone. Each exchange
+    /// flips the slot set once, so flips and barriers match.</summary>
+    [Theory]
+    [InlineData("readfirstlane", 2)]
+    [InlineData("readlane", 2)]
+    [InlineData("loop", 2)]
+    public void EveryWave64ExchangeCostsOneBarrier(string program, int exchanges)
+    {
+        var fixture = program switch
+        {
+            "readfirstlane" => Gen5ComputeFixtures.Wave64ReadFirstLane,
+            "readlane" => Gen5ComputeFixtures.Wave64ReadLane,
+            _ => Gen5ComputeFixtures.Wave64ExchangeLoop,
+        };
+        var body = Body(Gen5ComputeFixtures.CompileRequestOrThrow(fixture, waveLaneCount: 64, localSizeX: 64));
+
+        Assert.Equal(exchanges, Occurrences(body, "threadgroup_barrier"));
+        Assert.Equal(exchanges, Occurrences(body, "sharpemu_wave_set ^= 4u;"));
+    }
+
+    /// <summary>DS_APPEND counts the wave's active lanes in one exchange and broadcasts the
+    /// one atomic's result in a second: two barriers, where it used to take five.</summary>
+    [Fact]
+    public void AWave64DataShareCounterCostsTwoBarriers()
+    {
+        var fixture = new Gen5ComputeFixture(
+            "wave64-data-share-counter",
+            [
+                0xD8F80014, 0x07000000, // ds_append v7 offset:20
+                0xBF810000,             // s_endpgm
+            ],
+            StoreScalarResourceBase: 0,
+            StoreBackingBytes: 0);
+        var body = Body(Gen5ComputeFixtures.CompileRequestOrThrow(fixture, waveLaneCount: 64, localSizeX: 64));
+
+        Assert.Equal(2, Occurrences(body, "sharpemu_wave_set ^= 4u;"));
+        Assert.Equal(2, Occurrences(body, "threadgroup_barrier"));
+        Assert.Equal(1, Occurrences(body, "atomic_fetch_add_explicit"));
+    }
+
+    /// <summary>The loop's exchanges sit in a block the dispatcher re-enters, so the slot
+    /// set cannot be chosen when the MSL is emitted: it is a variable every exchange
+    /// flips, declared once before the first block, never reset inside the loop.</summary>
+    [Fact]
+    public void TheWave64SlotSetIsCarriedAcrossLoopTripsAtRuntime()
+    {
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(
+            Gen5ComputeFixtures.Wave64ExchangeLoop, waveLaneCount: 64, localSizeX: 64);
+
+        Assert.Equal(1, Occurrences(shader.Source, "uint sharpemu_wave_set = 0u;"));
+        Assert.DoesNotContain("sharpemu_wave_set = 0u;", Body(shader).Replace(
+            "uint sharpemu_wave_set = 0u;", string.Empty, StringComparison.Ordinal), StringComparison.Ordinal);
+        if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") == "1")
+        {
+            Assert.True(MetalNative.IsAvailable, "The required execution gate needs a Metal device.");
+            Assert.True(MetalNative.TryCompileLibrary(shader.Source, out _, out var error), error + shader.Source);
+        }
     }
 
     private static int Occurrences(string source, string value)

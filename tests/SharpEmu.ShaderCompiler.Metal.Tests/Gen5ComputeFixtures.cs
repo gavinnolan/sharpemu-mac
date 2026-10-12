@@ -220,6 +220,57 @@ internal static class Gen5ComputeFixtures
         StoreScalarResourceBase: 8,
         StoreBackingBytes: 512);
 
+    // v1 = 3 * lane + 7. Two V_READFIRSTLANEs back to back under narrowed EXECs: the first
+    // active lane is 44 (upper half only), then 8 (lower half only). Every lane, with EXEC
+    // restored, stores both: 139 and 31.
+    public static readonly Gen5ComputeFixture Wave64ReadFirstLane = new(
+        "wave64-readfirstlane",
+        [
+            .. Wave64LaneIndex,
+            0xD5430001, 0x021D0700, // v_mad_u32_u24 v1, v0, 3, 7
+            0xBEFE0380,             // s_mov_b32 exec_lo, 0
+            0xBEFF03FF, 0xF0F0F000, // s_mov_b32 exec_hi, 0xf0f0f000     lanes 44.. of 32..63
+            0x7E000501,             // v_readfirstlane_b32 s0, v1
+            0xBEFE03FF, 0x00000100, // s_mov_b32 exec_lo, 0x100          lane 8
+            0xBEFF0380,             // s_mov_b32 exec_hi, 0
+            0x7E020501,             // v_readfirstlane_b32 s1, v1
+            0xBEFE04C1,             // s_mov_b64 exec, -1
+            0x7E040200,             // v_mov_b32 v2, s0
+            0x7E060201,             // v_mov_b32 v3, s1
+            0x34080083,             // v_lshlrev_b32 v4, 3, v0
+            0xE0701000, 0x80020204, // buffer_store_dword v2, v4, s[8:11], 0 offen
+            0xE0701004, 0x80020304, // buffer_store_dword v3, v4, s[8:11], 0 offen offset:4
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 512);
+
+    // A loop of 64 trips, each with two exchanges: V_READLANE of lane i (3i + 7) and the
+    // 64-bit VCC of lane > i (63 - i lanes, counted by S_BCNT1). The sum, 6496 + 2016 =
+    // 8512, is only right if no trip reads a slot the next exchange has overwritten.
+    public static readonly Gen5ComputeFixture Wave64ExchangeLoop = new(
+        "wave64-exchange-loop",
+        [
+            .. Wave64LaneIndex,
+            0xD5430001, 0x021D0700, // v_mad_u32_u24 v1, v0, 3, 7
+            0xBE820380,             // s_mov_b32 s2, 0                   sum
+            0xBE830380,             // s_mov_b32 s3, 0                   i
+            0xD7600000, 0x00000701, // loop: v_readlane_b32 s0, v1, s3
+            0x80020002,             // s_add_u32 s2, s2, s0
+            0x7D820003,             // v_cmp_lt_u32 vcc, s3, v0
+            0xBE84106A,             // s_bcnt1_i32_b64 s4, vcc
+            0x80020402,             // s_add_u32 s2, s2, s4
+            0x80038103,             // s_add_u32 s3, s3, 1
+            0xBF0AC003,             // s_cmp_lt_u32 s3, 64
+            0xBF85FFF7,             // s_cbranch_scc1 loop
+            0x7E040202,             // v_mov_b32 v2, s2
+            0x34080082,             // v_lshlrev_b32 v4, 2, v0
+            0xE0701000, 0x80020204, // buffer_store_dword v2, v4, s[8:11], 0 offen
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 256);
+
     // v1 = lane, then v_writelane_b32 v1, 55, 40 must change only lane 40.
     public static readonly Gen5ComputeFixture Wave64WriteLane = new(
         "wave64-writelane",

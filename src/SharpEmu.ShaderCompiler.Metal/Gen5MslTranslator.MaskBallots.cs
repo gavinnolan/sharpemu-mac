@@ -9,11 +9,12 @@ namespace SharpEmu.ShaderCompiler.Metal;
 //
 // A guest wave64 runs as two 32-wide Apple simdgroups, so the 64-bit mask a V_CMP or
 // V_CMPX produces spans both of them. simd_ballot only sees its own simdgroup, so the
-// two halves are exchanged through threadgroup memory, and that exchange needs a barrier
-// each way: write your half, barrier, read both, barrier so the next ballot cannot
-// overwrite a slot someone is still reading.
+// two halves are exchanged through threadgroup memory: write your half, barrier, read
+// both (Gen5MslTranslator.WaveExchange.cs). This elision dates from when every exchange
+// also needed a second barrier so the next ballot could not overwrite a slot someone was
+// still reading.
 //
-// That is two threadgroup barriers per comparison, and a threadgroup barrier makes every
+// That was two threadgroup barriers per comparison, and a threadgroup barrier makes every
 // simdgroup wait. Profiling Octopath Traveler II found 27 of them in the dispatch that
 // spends 19% of the frame's GPU time, 17 in the next one and 8 in the one after.
 //
@@ -339,19 +340,18 @@ public static partial class Gen5MslTranslator
             var pad = markerLine[..indent];
             var text = new StringBuilder();
 
-            // simd_ballot is uniform across a simdgroup, so every lane of a half writes
-            // the same 32-bit value to that half's slot — no first-lane guard needed.
-            // Barrier, read both halves, barrier before the slot can be reused.
-            text.AppendLine(
-                $"{pad}sharpemu_wave_scratch[(sharpemu_lane >> 5) & 1u] = sharpemu_ballot({condition});");
-            text.AppendLine($"{pad}threadgroup_barrier(mem_flags::mem_threadgroup);");
-            text.AppendLine($"{pad}s[{loRegister}] = sharpemu_wave_scratch[0];");
-            if (loRegister + 1 < ScalarRegisterFileCount)
+            foreach (var statement in WaveBallotExchange(condition))
             {
-                text.AppendLine($"{pad}s[{loRegister + 1}] = sharpemu_wave_scratch[1];");
+                text.AppendLine($"{pad}{statement}");
             }
 
-            text.Append($"{pad}threadgroup_barrier(mem_flags::mem_threadgroup);");
+            text.Append($"{pad}s[{loRegister}] = {WaveSlot(0)};");
+            if (loRegister + 1 < ScalarRegisterFileCount)
+            {
+                text.AppendLine();
+                text.Append($"{pad}s[{loRegister + 1}] = {WaveSlot(1)};");
+            }
+
             return text.ToString();
         }
 

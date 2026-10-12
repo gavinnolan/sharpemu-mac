@@ -1680,17 +1680,9 @@ public static partial class Gen5MslTranslator
             string first;
             if (IsWave64)
             {
-                Line("sharpemu_wave_scratch[(sharpemu_lane >> 5) & 1u] = sharpemu_ballot(exec);");
-                Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
-                var low = Temp("uint", "sharpemu_wave_scratch[0]");
-                var high = Temp("uint", "sharpemu_wave_scratch[1]");
-                count = Temp("uint", $"popcount({low}) + popcount({high})");
-                first = Temp(
-                    "uint",
-                    $"({low} != 0u) ? (uint)ctz({low}) : (({high} != 0u) ? (32u + (uint)ctz({high})) : 0u)");
-                Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
-                var atomic = $"atomic_fetch_{operation}_explicit({word}, {count}, memory_order_relaxed)";
-                var broadcast = EmitWave64ReadFirstLane($"{inBounds} ? {atomic} : 0u");
+                var broadcast = EmitWave64AppendAtomic(
+                    waveCount => $"atomic_fetch_{operation}_explicit({word}, {waveCount}, memory_order_relaxed)",
+                    inBounds);
                 StoreVector(destination, $"{inBounds} ? {broadcast} : 0u");
                 return true;
             }
