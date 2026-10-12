@@ -249,6 +249,20 @@ internal sealed class MetalCachedImage : IDisposable
             return;
         }
 
+        if (start > PublishedEnd || end < PublishedStart)
+        {
+            // Two runs with unpublished bytes between them: one interval cannot hold both,
+            // and widening it over the gap would claim bytes guest memory never got. The
+            // longer run is kept; forgetting the other only costs publishing it again.
+            if (end - start > PublishedEnd - PublishedStart)
+            {
+                PublishedStart = start;
+                PublishedEnd = end;
+            }
+
+            return;
+        }
+
         PublishedStart = Math.Min(PublishedStart, start);
         PublishedEnd = Math.Max(PublishedEnd, end);
     }
