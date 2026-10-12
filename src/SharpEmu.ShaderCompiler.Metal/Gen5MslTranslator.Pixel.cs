@@ -1001,6 +1001,17 @@ public static partial class Gen5MslTranslator
                 Line("pixel_valid_mask_active = exec;");
             }
 
+            if (export.Target == MrtzExportTarget)
+            {
+                if (_pixelDepthExport && !export.Compressed && (export.EnableMask & 1u) != 0)
+                {
+                    const string depth = "sharpemu_out.sharpemu_depth";
+                    Line($"{depth} = {ExecSelect($"as_type<float>(v[{instruction.Sources[0].Value}])", depth)};");
+                }
+
+                return true;
+            }
+
             Gen5PixelOutputBinding? binding = null;
             foreach (var candidate in _pixelOutputBindings)
             {

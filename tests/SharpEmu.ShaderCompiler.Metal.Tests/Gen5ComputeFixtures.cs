@@ -334,7 +334,7 @@ internal static class Gen5ComputeFixtures
         Gen5NggStageInfo? primitiveShader = null, uint userDataBase = 0, uint scratchDwords = 0,
         uint localDataShareDwords = 0, uint pushDataStartDword = 0, uint positionExportControl = 0,
         bool supportsClipDistance = true, bool enableGraphicsSubgroupOperations = true,
-        ShaderClipSpaceTransform clipSpace = default)
+        ShaderClipSpaceTransform clipSpace = default, bool pixelDepthExportEnable = false)
     {
         var plan = ShaderResourcePlan.Extract(program, stage, RequestHash, userDataBase, UserDataCount);
         var specialization = ResourceSpecialization.Default(plan.Info);
@@ -365,6 +365,7 @@ internal static class Gen5ComputeFixtures
             SupportsClipDistance = supportsClipDistance,
             EnableGraphicsSubgroupOperations = enableGraphicsSubgroupOperations,
             ClipSpace = clipSpace,
+            PixelDepthExportEnable = pixelDepthExportEnable,
         };
     }
 

@@ -23,7 +23,7 @@ public sealed partial class MetalRenderHostTests
     private VertexInputInfo PrefixInput(TwoStageProvider provider, uint stride = 32, uint records = 64)
     {
         var original = provider.GetGraphicsPrograms(_banks.Shader.Vertex, _banks.Shader.Pixel,
-            _banks.Context.ShaderInterface, _banks.Context, [], true, false).VertexInput;
+            _banks.Context.ShaderInterface, _banks.Context, [], true, false, false).VertexInput;
         return new VertexInputInfo
         {
             Buffers = [new(VertexBase, stride, records)],

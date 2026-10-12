@@ -194,7 +194,8 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
             ContextRegisters context,
             ReadOnlySpan<ColorComponentMap> targetExportMapping,
             bool pixelActive,
-            bool depthBound)
+            bool depthBound,
+            bool depthAspectBound)
         {
             EnsureModules();
             return new()

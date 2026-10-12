@@ -47,6 +47,8 @@ public static partial class Gen5MslTranslator
     private const uint M0Register = 124;
     private const uint ExecLoRegister = 126;
     private const uint ExecHiRegister = 127;
+    // EXP target MRTZ: depth, stencil, sample mask and MRT0 alpha per SPI_SHADER_Z_FORMAT.
+    private const uint MrtzExportTarget = 8;
 
     private static bool ValidatePixelOutputs(IReadOnlyList<Gen5PixelOutputBinding> outputs, out string error)
     {
@@ -181,6 +183,7 @@ public static partial class Gen5MslTranslator
         private readonly uint _waveLaneCount;
         private readonly IReadOnlyList<Gen5PixelOutputBinding> _pixelOutputBindings;
         private readonly bool _usesPixelValidMask;
+        private readonly bool _pixelDepthExport;
 
         // A translator-side probe, off unless someone is hunting a draw that covers
         // nothing; see the vertex epilogue.
@@ -595,6 +598,11 @@ public static partial class Gen5MslTranslator
                         $"    {fieldType} mrt{binding.GuestSlot} [[color({binding.HostLocation})]];");
                 }
 
+                if (_pixelDepthExport)
+                {
+                    source.AppendLine("    float sharpemu_depth [[depth(any)]];");
+                }
+
                 source.AppendLine("};");
                 source.AppendLine();
                 source.AppendLine($"fragment Gen5PsOut {EntryPointName}(");
@@ -783,6 +791,11 @@ public static partial class Gen5MslTranslator
             if (_stage == Gen5MslStage.Pixel)
             {
                 source.AppendLine("    Gen5PsOut sharpemu_out = {};");
+                if (_pixelDepthExport)
+                {
+                    // Lanes that never export MRTZ under EXEC keep the rasterized depth.
+                    source.AppendLine("    sharpemu_out.sharpemu_depth = sharpemu_in.sharpemu_frag_coord.z;");
+                }
             }
             else if (_stage == Gen5MslStage.Vertex)
             {

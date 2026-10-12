@@ -184,6 +184,10 @@ public sealed class ShaderCompileRequest
     public Gen5ComputeSystemRegisters? ComputeSystemRegisters { get; init; }
 
     public IReadOnlyList<Gen5PixelOutputBinding> PixelOutputs { get; init; } = [];
+
+    // DB_SHADER_CONTROL.Z_EXPORT_ENABLE with a depth aspect bound: the MRTZ export's
+    // first component replaces the fragment depth.
+    public bool PixelDepthExportEnable { get; init; }
     public uint PixelInputEnable { get; init; }
     public uint PixelCustomInterpolationMask { get; init; }
 
