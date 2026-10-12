@@ -5,11 +5,30 @@ struct Gen5AddressRange
     device uint* base;
 };
 
+// The range this invocation resolved last. Guest accesses cluster: a loop-invariant
+// base read every trip, a stream walking one buffer, a read-modify-write of the word it
+// just read. A hit skips the binary search; the ranges cannot change while a dispatch
+// runs, and the cache lives only as long as the invocation, so it is never stale. A
+// zero page_count matches nothing, which is the empty cache.
+struct Gen5RangeCache
+{
+    ulong first_page;
+    ulong page_count;
+    device uint* base;
+};
+
 // Finds the mapped range of a guest address; a miss records the page in the fault bitmap.
-static inline device uint* sharpemu_resolve_device_address(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, ulong address, thread bool& valid)
+static inline device uint* sharpemu_resolve_device_address(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, thread Gen5RangeCache& cache, ulong address, thread bool& valid)
 {
     ulong masked = address & {{address_mask}};
     ulong page = masked >> {{page_bits}}u;
+    if (page - cache.first_page < cache.page_count)
+    {
+        valid = true;
+        ulong byte_offset = ((page - cache.first_page) << {{page_bits}}u) + (masked & {{page_offset_mask}});
+        return (device uint*)((device uchar*)cache.base + byte_offset);
+    }
+
     uint low = 0u;
     uint high = range_count;
     for (uint step = 0u; step < {{search_steps}}u; step++)
@@ -26,6 +45,9 @@ static inline device uint* sharpemu_resolve_device_address(device const Gen5Addr
         if (page - range.first_page < range.page_count)
         {
             valid = true;
+            cache.first_page = range.first_page;
+            cache.page_count = range.page_count;
+            cache.base = range.base;
             ulong byte_offset = ((page - range.first_page) << {{page_bits}}u) + (masked & {{page_offset_mask}});
             return (device uint*)((device uchar*)range.base + byte_offset);
         }
@@ -39,42 +61,53 @@ static inline device uint* sharpemu_resolve_device_address(device const Gen5Addr
     return nullptr;
 }
 
-static inline uint sharpemu_load_device_dword(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, ulong address)
+static inline uint sharpemu_load_device_dword(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, thread Gen5RangeCache& cache, ulong address)
 {
     bool valid = false;
-    device uint* word = sharpemu_resolve_device_address(ranges, range_count, faults, fault_words, address, valid);
+    device uint* word = sharpemu_resolve_device_address(ranges, range_count, faults, fault_words, cache, address, valid);
     return valid ? *word : 0u;
 }
 
+// Resolves the first dword of a contiguous multi-dword read once for the whole span.
+// A span that stays inside one 16 KB page is contiguous host memory, so its dwords
+// index off the one pointer; one that crosses a page reports invalid and the caller
+// reads it dword by dword, which is what every dword would have cost before.
+static inline device uint* sharpemu_resolve_device_span(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, thread Gen5RangeCache& cache, ulong address, uint bytes, thread bool& valid)
+{
+    device uint* first = sharpemu_resolve_device_address(ranges, range_count, faults, fault_words, cache, address, valid);
+    valid = valid && (address & 0x3FFFul) + bytes <= 0x4000ul;
+    return first;
+}
+
 // An unaligned value assembled from the two aligned dwords it spans.
-static inline uint sharpemu_load_device_unaligned(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, ulong address, uint count)
+static inline uint sharpemu_load_device_unaligned(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, thread Gen5RangeCache& cache, ulong address, uint count)
 {
     uint alignment = (uint)(address & 3ul);
     ulong aligned = address & ~3ul;
     uint shift = alignment * 8u;
-    uint low = sharpemu_load_device_dword(ranges, range_count, faults, fault_words, aligned);
-    uint high = (alignment + count > 4u) ? sharpemu_load_device_dword(ranges, range_count, faults, fault_words, aligned + 4ul) : 0u;
+    uint low = sharpemu_load_device_dword(ranges, range_count, faults, fault_words, cache, aligned);
+    uint high = (alignment + count > 4u) ? sharpemu_load_device_dword(ranges, range_count, faults, fault_words, cache, aligned + 4ul) : 0u;
     return (low >> shift) | (shift == 0u ? 0u : (high << (32u - shift)));
 }
 
-static inline void sharpemu_store_device_dword(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, ulong address, uint value)
+static inline void sharpemu_store_device_dword(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, thread Gen5RangeCache& cache, ulong address, uint value)
 {
     bool valid = false;
-    device uint* word = sharpemu_resolve_device_address(ranges, range_count, faults, fault_words, address, valid);
+    device uint* word = sharpemu_resolve_device_address(ranges, range_count, faults, fault_words, cache, address, valid);
     if (valid)
     {
         *word = value;
     }
 }
 
-static inline void sharpemu_store_device_masked_word(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, ulong address, uint value, uint mask)
+static inline void sharpemu_store_device_masked_word(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, thread Gen5RangeCache& cache, ulong address, uint value, uint mask)
 {
     if (mask == 0u)
     {
         return;
     }
     bool valid = false;
-    device uint* word = sharpemu_resolve_device_address(ranges, range_count, faults, fault_words, address, valid);
+    device uint* word = sharpemu_resolve_device_address(ranges, range_count, faults, fault_words, cache, address, valid);
     if (!valid)
     {
         return;
@@ -92,7 +125,7 @@ static inline void sharpemu_store_device_masked_word(device const Gen5AddressRan
 }
 
 // A sub-dword store merges into the dwords it touches.
-static inline void sharpemu_store_device_bytes(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, ulong address, uint value, uint count)
+static inline void sharpemu_store_device_bytes(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, thread Gen5RangeCache& cache, ulong address, uint value, uint count)
 {
     uint element_mask = count == 1u ? 0xFFu : 0xFFFFu;
     uint alignment = (uint)(address & 3ul);
@@ -101,8 +134,8 @@ static inline void sharpemu_store_device_bytes(device const Gen5AddressRange* ra
     uint carry_shift = 32u - shift;
     bool crosses = alignment + count > 4u;
     uint masked = value & element_mask;
-    sharpemu_store_device_masked_word(ranges, range_count, faults, fault_words, aligned, masked << shift, element_mask << shift);
-    sharpemu_store_device_masked_word(ranges, range_count, faults, fault_words, aligned + 4ul, crosses ? (masked >> carry_shift) : 0u, crosses ? (element_mask >> carry_shift) : 0u);
+    sharpemu_store_device_masked_word(ranges, range_count, faults, fault_words, cache, aligned, masked << shift, element_mask << shift);
+    sharpemu_store_device_masked_word(ranges, range_count, faults, fault_words, cache, aligned + 4ul, crosses ? (masked >> carry_shift) : 0u, crosses ? (element_mask >> carry_shift) : 0u);
 }
 
 static inline uint sharpemu_atomic_step(device atomic_uint* word, bool increment)

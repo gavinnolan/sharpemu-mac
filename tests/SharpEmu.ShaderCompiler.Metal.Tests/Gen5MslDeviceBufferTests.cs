@@ -35,6 +35,29 @@ public sealed class Gen5MslDeviceBufferTests
     }
 
     [Fact]
+    public void AWideScalarLoadFromADeviceAddressWalksThePageTableOnce()
+    {
+        // Demon's Souls' bokeh pass reads a 16-byte tap record per loop trip this way;
+        // one page-table walk per dword was four 13-step searches per tap.
+        var source = Compile(
+            ReadFirstLane(0, 4, 0),
+            MoveScalar(4, 5, 0),
+            ScalarLoad(8, baseRegister: 4, destination: 8, count: 4),
+            End(16));
+
+        Assert.Equal(1, CountOccurrences(source, "sharpemu_resolve_device_span(sharpemu_ranges"));
+
+        // Every device access shares the invocation's one-entry range cache, so the next
+        // access to the same range skips the search entirely.
+        Assert.Contains("Gen5RangeCache sharpemu_range_cache = { 0ul, 0ul, nullptr };", source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_fault_words, sharpemu_range_cache, ", source, StringComparison.Ordinal);
+        for (var component = 0; component < 4; component++)
+        {
+            Assert.Matches($@"uint t\d+ = t\d+ \? t\d+\[{component}\] : sharpemu_load_device_dword\(sharpemu_ranges", source);
+        }
+    }
+
+    [Fact]
     public void ABufferStoreThroughADescriptorReadByAScalarLoadIsBoundedAndMasked()
     {
         var source = Compile(
