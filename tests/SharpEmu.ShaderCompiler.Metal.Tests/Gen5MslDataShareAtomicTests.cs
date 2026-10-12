@@ -138,6 +138,46 @@ public sealed class Gen5MslDataShareAtomicTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void GraphicsStageLdsIsNotZeroFilledPerInvocation()
+    {
+        // Hardware LDS a wave never wrote holds stale data, so the per-invocation
+        // stand-in is not zero-filled on every fragment.
+        var words = new uint[]
+        {
+            0x7E000280,                           // v_mov_b32 v0, 0
+            MovLiteral(2), Initial,               // v_mov_b32 v2, Initial
+            DsWord0(0x0D), DsWord1(0, 2, 0, 0),   // ds_write_b32 v0, v2
+            DsWord0(0x36), DsWord1(0, 0, 0, 3),   // ds_read_b32 v3, v0
+            0xF800180F, 0x03030303,               // exp mrt0 v3, v3, v3, v3 done vm
+            0xBF810000,                           // s_endpgm
+        };
+        var shader = Gen5ComputeFixtures.CompileStageRequestOrThrow(words, ShaderStage.Pixel);
+        Assert.Contains("    thread uint sharpemu_lds[2048];", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("sharpemu_lds[2048] = {}", shader.Source, StringComparison.Ordinal);
+        if (!RequireDevice()) return;
+        Assert.True(MetalNative.TryCompileLibrary(shader.Source, out _, out var error), $"{error}\n{shader.Source}");
+    }
+
+    [Fact]
+    public void PixelShaderWithoutDataShareOpsDeclaresNoLdsArray()
+    {
+        // DS_SWIZZLE is a cross-lane op that never touches LDS memory, so it must
+        // not pull the per-invocation LDS stand-in in either.
+        var words = new uint[]
+        {
+            MovLiteral(2), Initial,               // v_mov_b32 v2, Initial
+            DsWord0(0x35, 0x1F, 0x80), DsWord1(2, 0, 0, 3), // ds_swizzle_b32 v3, v2 offset:0x801F
+            0xF800180F, 0x03030303,               // exp mrt0 v3, v3, v3, v3 done vm
+            0xBF810000,                           // s_endpgm
+        };
+        var shader = Gen5ComputeFixtures.CompileStageRequestOrThrow(words, ShaderStage.Pixel);
+        Assert.DoesNotContain("sharpemu_lds", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("sharpemu_scratch", shader.Source, StringComparison.Ordinal);
+        if (!RequireDevice()) return;
+        Assert.True(MetalNative.TryCompileLibrary(shader.Source, out _, out var error), $"{error}\n{shader.Source}");
+    }
+
+    [Fact]
     public void ComputeAtomicsUseThreadgroupAtomicsAndCompileOnTheDevice()
     {
         var shader = Gen5ComputeFixtures.CompileRequestOrThrow(
