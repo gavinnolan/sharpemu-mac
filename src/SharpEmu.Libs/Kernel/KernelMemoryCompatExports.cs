@@ -4041,6 +4041,17 @@ public static partial class KernelMemoryCompatExports
         var bufferSize = ctx[CpuRegister.Rsi];
         var formatAddress = ctx[CpuRegister.Rdx];
 
+        if (TryFastSnprintf(
+                ctx,
+                destination,
+                bufferSize,
+                formatAddress,
+                new RegisterPrintfArgumentSource(ctx, 3),
+                out var fastResult))
+        {
+            return fastResult;
+        }
+
         if (!TryReadCString(ctx, formatAddress, 1_048_576, out var formatBytes))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
@@ -4058,6 +4069,12 @@ public static partial class KernelMemoryCompatExports
         var bufferSize = ctx[CpuRegister.Rsi];
         var formatAddress = ctx[CpuRegister.Rdx];
         var vaListAddress = ctx[CpuRegister.Rcx];
+
+        if (TryCreateVaListCursor(ctx, vaListAddress, out var fastCursor)
+            && TryFastSnprintf(ctx, destination, bufferSize, formatAddress, fastCursor, out var fastResult))
+        {
+            return fastResult;
+        }
 
         if (!TryReadCString(ctx, formatAddress, 1_048_576, out var formatBytes))
         {
