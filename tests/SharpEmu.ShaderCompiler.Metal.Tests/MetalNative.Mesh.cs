@@ -52,7 +52,8 @@ internal static partial class MetalNative
         out float[] pixels,
         out string error,
         IReadOnlyList<nint>? extraResidentBuffers = null,
-        uint layers = 1)
+        uint layers = 1,
+        bool volume = false)
     {
         pixels = [];
         error = string.Empty;
@@ -94,7 +95,9 @@ internal static partial class MetalNative
             return false;
         }
 
-        var target = CreateRenderTarget(width, height, layers);
+        // A volume target is one 3D texture whose depth planes are the layers; the pass
+        // still needs renderTargetArrayLength set to that depth for a layered draw.
+        var target = CreateRenderTarget(width, height, layers, volume: volume);
         if (target == 0)
         {
             error = "failed to create the render target";
@@ -165,7 +168,9 @@ internal static partial class MetalNative
             return false;
         }
 
-        var bytesOut = ReadFloatTexture(target, width, height, layers, 1);
+        var bytesOut = volume
+            ? ReadFloatTexture(target, width, height, 1, layers)
+            : ReadFloatTexture(target, width, height, layers, 1);
         pixels = new float[width * height * layers * 4];
         Buffer.BlockCopy(bytesOut, 0, pixels, 0, bytesOut.Length);
         return true;
@@ -238,14 +243,17 @@ internal static partial class MetalNative
             [data]);
     }
 
-    private static nint CreateRenderTarget(uint width, uint height, uint layers = 1, nuint pixelFormat = ColorPixelFormat)
+    private static nint CreateRenderTarget(uint width, uint height, uint layers = 1, nuint pixelFormat = ColorPixelFormat,
+        bool volume = false)
     {
         var descriptor = Send(Send(objc_getClass("MTLTextureDescriptor"), Selector("alloc")), Selector("init"));
         SendInteger(descriptor, Selector("setPixelFormat:"), pixelFormat);
-        SendInteger(descriptor, Selector("setTextureType:"), layers > 1 ? 3u : 2u); // MTLTextureType2DArray / 2D
+        // MTLTextureType3D / 2DArray / 2D
+        SendInteger(descriptor, Selector("setTextureType:"), volume ? 7u : layers > 1 ? 3u : 2u);
         SendInteger(descriptor, Selector("setWidth:"), width);
         SendInteger(descriptor, Selector("setHeight:"), height);
-        SendInteger(descriptor, Selector("setArrayLength:"), layers);
+        SendInteger(descriptor, Selector("setDepth:"), volume ? layers : 1u);
+        SendInteger(descriptor, Selector("setArrayLength:"), volume ? 1u : layers);
         SendInteger(descriptor, Selector("setStorageMode:"), 0); // Shared, for readback
         SendInteger(descriptor, Selector("setUsage:"), 5); // RenderTarget | ShaderRead
         return Send(Device.Value, Selector("newTextureWithDescriptor:"), descriptor);
