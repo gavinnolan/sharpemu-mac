@@ -106,7 +106,7 @@ LOCK_HELD=0
 while :; do
   if mkdir "$SHARPEMU_GAME_LOCK" 2>/dev/null; then echo $$ > "$SHARPEMU_GAME_LOCK/pid"; LOCK_HELD=1; break; fi
   owner="$(cat "$SHARPEMU_GAME_LOCK/pid" 2>/dev/null || true)"
-  if [[ -n "$owner" ]] && ! kill -0 "$owner" 2>/dev/null; then rm -rf "$SHARPEMU_GAME_LOCK"; continue; fi
+  if [[ -n "$owner" ]] && ! ps -p "$owner" >/dev/null 2>&1; then rm -rf "$SHARPEMU_GAME_LOCK"; continue; fi
   echo "waiting for game lock held by ${owner:-unknown}" >&2
   sleep 5
 done
