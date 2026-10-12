@@ -325,6 +325,124 @@ internal static class Gen5ComputeFixtures
         StoreScalarResourceBase: 8,
         StoreBackingBytes: 512);
 
+    // A VOP3-encoded V_CMP names its mask SGPR pair: s[4:5] = (lane & 3) == 0, with VCC
+    // preset to 0x0f0f0f0f_0f0f0f0f and left alone. Per lane at lane * 32: the s[4:5]
+    // bit (v_cndmask), the VCC bit, s4, s5, vcc_lo, and whether the lane survives
+    // s_and_saveexec_b64 s[6:7], s[4:5].
+    public static readonly Gen5ComputeFixture Wave64Vop3CompareSgpr = new(
+        "wave64-vop3-compare-sgpr",
+        [
+            .. Wave64LaneIndex,
+            0xBEEA03FF, 0x0F0F0F0F, // s_mov_b32 vcc_lo, 0x0f0f0f0f
+            0xBEEB03FF, 0x0F0F0F0F, // s_mov_b32 vcc_hi, 0x0f0f0f0f
+            0x36040083,             // v_and_b32 v2, 3, v0
+            0xD4C20004, 0x00010102, // v_cmp_eq_u32_e64 s[4:5], v2, 0
+            0xD5010001, 0x00110280, // v_cndmask_b32 v1, 0, 1, s[4:5]
+            0xD5010002, 0x01A90280, // v_cndmask_b32 v2, 0, 1, vcc
+            0x7E060204,             // v_mov_b32 v3, s4
+            0x7E0A0205,             // v_mov_b32 v5, s5
+            0x7E0C026A,             // v_mov_b32 v6, vcc_lo
+            0x7E0E0280,             // v_mov_b32 v7, 0
+            0xBE862404,             // s_and_saveexec_b64 s[6:7], s[4:5]
+            0x7E0E0281,             // v_mov_b32 v7, 1
+            0xBEFE0406,             // s_mov_b64 exec, s[6:7]
+            0x34080085,             // v_lshlrev_b32 v4, 5, v0
+            0xE0701000, 0x80020104, // buffer_store_dword v1, v4, s[8:11], 0 offen
+            0xE0701004, 0x80020204, // buffer_store_dword v2, v4, s[8:11], 0 offen offset:4
+            0xE0701008, 0x80020304, // buffer_store_dword v3, v4, s[8:11], 0 offen offset:8
+            0xE070100C, 0x80020504, // buffer_store_dword v5, v4, s[8:11], 0 offen offset:12
+            0xE0701010, 0x80020604, // buffer_store_dword v6, v4, s[8:11], 0 offen offset:16
+            0xE0701014, 0x80020704, // buffer_store_dword v7, v4, s[8:11], 0 offen offset:20
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 2048);
+
+    // The wave32 form: the compare's mask is the single SGPR s4, so s5 keeps 0xa5a5a5a5.
+    public static readonly Gen5ComputeFixture Wave32Vop3CompareSgpr = new(
+        "wave32-vop3-compare-sgpr",
+        [
+            0xD7650000, 0x000100C1, // v_mbcnt_lo_u32_b32 v0, -1, 0         lane 0..31
+            0xBEEA03FF, 0x0F0F0F0F, // s_mov_b32 vcc_lo, 0x0f0f0f0f
+            0xBE8503FF, 0xA5A5A5A5, // s_mov_b32 s5, 0xa5a5a5a5
+            0x36040083,             // v_and_b32 v2, 3, v0
+            0xD4C20004, 0x00010102, // v_cmp_eq_u32_e64 s4, v2, 0
+            0xD5010001, 0x00110280, // v_cndmask_b32 v1, 0, 1, s4
+            0xD5010002, 0x01A90280, // v_cndmask_b32 v2, 0, 1, vcc_lo
+            0x7E060204,             // v_mov_b32 v3, s4
+            0x7E0A0205,             // v_mov_b32 v5, s5
+            0x7E0C026A,             // v_mov_b32 v6, vcc_lo
+            0x7E0E0280,             // v_mov_b32 v7, 0
+            0xBE863C04,             // s_and_saveexec_b32 s6, s4
+            0x7E0E0281,             // v_mov_b32 v7, 1
+            0xBEFE0306,             // s_mov_b32 exec_lo, s6
+            0x34080085,             // v_lshlrev_b32 v4, 5, v0
+            0xE0701000, 0x80020104, // buffer_store_dword v1, v4, s[8:11], 0 offen
+            0xE0701004, 0x80020204, // buffer_store_dword v2, v4, s[8:11], 0 offen offset:4
+            0xE0701008, 0x80020304, // buffer_store_dword v3, v4, s[8:11], 0 offen offset:8
+            0xE070100C, 0x80020504, // buffer_store_dword v5, v4, s[8:11], 0 offen offset:12
+            0xE0701010, 0x80020604, // buffer_store_dword v6, v4, s[8:11], 0 offen offset:16
+            0xE0701014, 0x80020704, // buffer_store_dword v7, v4, s[8:11], 0 offen offset:20
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 1024);
+
+    // VOP3 compares into NULL (writes nothing) and into EXEC. Per lane at lane * 16: the
+    // EXEC bit after the NULL compare (all lanes), the VCC bit (preset, untouched), and 1
+    // only on lanes the EXEC compare kept ((lane & 3) == 0).
+    public static readonly Gen5ComputeFixture Wave64Vop3CompareNullAndExec = new(
+        "wave64-vop3-compare-null-exec",
+        [
+            .. Wave64LaneIndex,
+            0xBEEA03FF, 0x0F0F0F0F, // s_mov_b32 vcc_lo, 0x0f0f0f0f
+            0xBEEB03FF, 0x0F0F0F0F, // s_mov_b32 vcc_hi, 0x0f0f0f0f
+            0x36040083,             // v_and_b32 v2, 3, v0
+            0x7E0E0280,             // v_mov_b32 v7, 0
+            0xD4C2007D, 0x00010102, // v_cmp_eq_u32_e64 null, v2, 0
+            0xD5010001, 0x01F90280, // v_cndmask_b32 v1, 0, 1, exec
+            0xD4C2007E, 0x00010102, // v_cmp_eq_u32_e64 exec, v2, 0
+            0x7E0E0281,             // v_mov_b32 v7, 1
+            0xBEFE04C1,             // s_mov_b64 exec, -1
+            0xD5010002, 0x01A90280, // v_cndmask_b32 v2, 0, 1, vcc
+            0x34080084,             // v_lshlrev_b32 v4, 4, v0
+            0xE0701000, 0x80020104, // buffer_store_dword v1, v4, s[8:11], 0 offen
+            0xE0701004, 0x80020204, // buffer_store_dword v2, v4, s[8:11], 0 offen offset:4
+            0xE0701008, 0x80020704, // buffer_store_dword v7, v4, s[8:11], 0 offen offset:8
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 1024);
+
+    // VOP3B carry-out in wave32: v_add_co_u32 v3, s4, v0, -16 carries on lanes >= 16 into
+    // the single SGPR s4 (s5 keeps 0xa5a5a5a5); a second add sends its carry to NULL and
+    // must leave EXEC and VCC alone. Per lane at lane * 32: the s4 bit, s4, s5, vcc_lo,
+    // exec_lo, the sum.
+    public static readonly Gen5ComputeFixture Wave32Vop3CarryOutSgpr = new(
+        "wave32-vop3-carry-out-sgpr",
+        [
+            0xD7650000, 0x000100C1, // v_mbcnt_lo_u32_b32 v0, -1, 0         lane 0..31
+            0xBEEA03FF, 0x0F0F0F0F, // s_mov_b32 vcc_lo, 0x0f0f0f0f
+            0xBE8503FF, 0xA5A5A5A5, // s_mov_b32 s5, 0xa5a5a5a5
+            0xD70F0403, 0x0001A100, // v_add_co_u32 v3, s4, v0, -16
+            0xD70F7D08, 0x0001A100, // v_add_co_u32 v8, null, v0, -16
+            0xD5010001, 0x00110280, // v_cndmask_b32 v1, 0, 1, s4
+            0x7E040204,             // v_mov_b32 v2, s4
+            0x7E0A0205,             // v_mov_b32 v5, s5
+            0x7E0C026A,             // v_mov_b32 v6, vcc_lo
+            0x7E0E027E,             // v_mov_b32 v7, exec_lo
+            0x34080085,             // v_lshlrev_b32 v4, 5, v0
+            0xE0701000, 0x80020104, // buffer_store_dword v1, v4, s[8:11], 0 offen
+            0xE0701004, 0x80020204, // buffer_store_dword v2, v4, s[8:11], 0 offen offset:4
+            0xE0701008, 0x80020504, // buffer_store_dword v5, v4, s[8:11], 0 offen offset:8
+            0xE070100C, 0x80020604, // buffer_store_dword v6, v4, s[8:11], 0 offen offset:12
+            0xE0701010, 0x80020704, // buffer_store_dword v7, v4, s[8:11], 0 offen offset:16
+            0xE0701014, 0x80020804, // buffer_store_dword v8, v4, s[8:11], 0 offen offset:20
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 1024);
+
     // The request path: the fixture's own resource plan, default specialization and layout.
     private const ulong RequestHash = 0x5348_4152_5045_4D55;
     private const uint UserDataCount = 16;

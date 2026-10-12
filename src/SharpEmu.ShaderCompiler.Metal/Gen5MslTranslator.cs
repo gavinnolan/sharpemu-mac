@@ -45,6 +45,7 @@ public static partial class Gen5MslTranslator
     private const uint VccLoRegister = 106;
     private const uint VccHiRegister = 107;
     private const uint M0Register = 124;
+    private const uint NullRegister = 125;
     private const uint ExecLoRegister = 126;
     private const uint ExecHiRegister = 127;
 
