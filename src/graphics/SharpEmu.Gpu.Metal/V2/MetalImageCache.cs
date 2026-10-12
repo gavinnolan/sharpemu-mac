@@ -648,7 +648,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         // A GPU write into DCC metadata is the guest asking for, or replacing, a clear.
-        if (_materializedDccSlices.Count != 0)
+        if (_materializedDccSlices.Count != 0 || _deferredDccSlices.Count != 0)
         {
             using var rearmHeld = _lock.Hold();
             ReArmMaterializedDccLocked(address, size);

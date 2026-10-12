@@ -401,17 +401,6 @@ internal sealed partial class MetalImageCache
     /// <summary>Materializations skipped because the clear was already applied.</summary>
     public long TakeDccRepeatsSkipped() => Interlocked.Exchange(ref _dccRepeatsSkipped, 0);
 
-    /// <summary>
-    /// Claims this slice and clear code for materialization, or reports that it is
-    /// already done. The scan around it runs outside the cache lock — it reads guest
-    /// backing — so the claim takes the lock itself.
-    /// </summary>
-    private bool TryClaimMaterializedDcc(ResourceSlotIdentifier image, ulong address, ulong size, byte code)
-    {
-        using var held = _lock.Hold();
-        return TryClaimMaterializedDccLocked(image, address, size, code);
-    }
-
     private bool TryClaimMaterializedDccLocked(ResourceSlotIdentifier image, ulong address, ulong size, byte code)
     {
         if (!_materializedDccSlices.Add((image, address, code)))
@@ -430,6 +419,79 @@ internal sealed partial class MetalImageCache
             _materializedDccSlices.RemoveWhere(
                 entry => entry.Address >= address && entry.Address - address < size);
         }
+
+        // A new clear of the metadata starts a new deferral: what was drawn before it is
+        // what the new clear is meant to wipe.
+        if (_deferredDccSlices.Count != 0)
+        {
+            foreach (var key in _deferredDccSlices.Keys)
+            {
+                if (key.Address >= address && key.Address - address < size)
+                {
+                    _deferredDccSlices.Remove(key);
+                }
+            }
+        }
+    }
+
+    // Slices whose clear a lookup met while recorded work was still writing the metadata,
+    // by image and slice address, with the image's GPU-write sequence at that lookup. The
+    // clear could not be applied then, and the target was then drawn: per draw the colour
+    // target lookup skips the slice and the draw lands on the uncleared image. Applying the
+    // clear once the metadata settles — at the next draw's lookup or at the texture lookup
+    // that samples the result — would wipe those draws, which is what made The Oregon
+    // Trail's menu art flicker black. A clear the image has been written past since it was
+    // deferred is dropped instead. Keyed per slice, not per image, so drawing one layer of
+    // an array does not cost the next layer its clear.
+    private readonly Dictionary<(ResourceSlotIdentifier Image, ulong Address), long> _deferredDccSlices = new();
+    private long _dccClearsDropped;
+
+    /// <summary>Deferred DCC clears dropped because the image was drawn to since.</summary>
+    public long TakeDccClearsDropped() => Interlocked.Exchange(ref _dccClearsDropped, 0);
+
+    private void DeferDccSlice(ResourceSlotIdentifier image, ulong address, long imageWriteSequence)
+    {
+        using var held = _lock.Hold();
+        _deferredDccSlices.TryAdd((image, address), imageWriteSequence);
+    }
+
+    // The metadata settled to something that is not a clear: there is no deferred clear left.
+    private void ForgetDeferredDccSlice(ResourceSlotIdentifier image, ulong address)
+    {
+        if (_deferredDccSlices.Count == 0)
+        {
+            return;
+        }
+
+        using var held = _lock.Hold();
+        _deferredDccSlices.Remove((image, address));
+    }
+
+    private enum DccClearDecision
+    {
+        Apply,
+        Repeat,
+        Drop,
+    }
+
+    /// <summary>
+    /// Claims a uniform clear for this slice and decides what becomes of it: applied,
+    /// already applied, or dropped because the image was written after the clear was
+    /// deferred. A dropped clear stays claimed, so later lookups do not apply it either.
+    /// The scan around it runs outside the cache lock — it reads guest backing — so the
+    /// claim takes the lock itself.
+    /// </summary>
+    private DccClearDecision DecideDccClear(
+        ResourceSlotIdentifier image, ulong address, ulong size, byte code, long imageWriteSequence)
+    {
+        using var held = _lock.Hold();
+        var deferred = _deferredDccSlices.Remove((image, address), out var deferredAt);
+        if (!TryClaimMaterializedDccLocked(image, address, size, code))
+        {
+            return DccClearDecision.Repeat;
+        }
+
+        return deferred && imageWriteSequence > deferredAt ? DccClearDecision.Drop : DccClearDecision.Apply;
     }
 
     private void WatchMetadataLocked(ulong address, ulong size)
@@ -691,6 +753,7 @@ internal sealed partial class MetalImageCache
 
         var description = request.Description;
         var range = description.Metadata.Range;
+        long imageWriteSequence;
         using (var held = _lock.Hold())
         {
             if (_slots.TryGet(imageIdentifier) is not { } found)
@@ -698,6 +761,8 @@ internal sealed partial class MetalImageCache
                 return;
             }
 
+            // Taken before this lookup clears anything: its own clears are not draws.
+            imageWriteSequence = found.GpuWriteSequence;
             found.Description.Metadata = description.Metadata;
             if (range.Size == 0 || description.Resources.Levels != 1 || found.Description.Resources.Levels != 1)
             {
@@ -740,8 +805,11 @@ internal sealed partial class MetalImageCache
                 var address = range.Address + sliceSize * (first + slice);
                 // The metadata may still be being written by recorded work; scanning it
                 // now reads half-written data, and claiming it would hide the real clear.
+                // The deferral is remembered, so a draw that lands before it settles is not
+                // wiped by applying it later.
                 if (_owner.HasPendingGpuWrite(address, sliceSize))
                 {
+                    DeferDccSlice(imageIdentifier, address, imageWriteSequence);
                     continue;
                 }
 
@@ -758,11 +826,13 @@ internal sealed partial class MetalImageCache
                         allowClearToRegister: request.Role == ImageRole.ColorTarget,
                         out var clear))
                 {
+                    ForgetDeferredDccSlice(imageIdentifier, address);
                     continue;
                 }
 
                 if (!IsUniformSlice(address, sliceSize, code, buffer))
                 {
+                    ForgetDeferredDccSlice(imageIdentifier, address);
                     continue;
                 }
 
@@ -771,9 +841,16 @@ internal sealed partial class MetalImageCache
                 // times a frame, two render-pass teardowns apiece. The claim remembers
                 // what has been done; a rewrite of the metadata re-arms it, so a surface
                 // the game clears every frame keeps working.
-                if (!TryClaimMaterializedDcc(imageIdentifier, address, sliceSize, code))
+                var decision = DecideDccClear(imageIdentifier, address, sliceSize, code, imageWriteSequence);
+                if (decision == DccClearDecision.Repeat)
                 {
                     Interlocked.Increment(ref _dccRepeatsSkipped);
+                    continue;
+                }
+
+                if (decision == DccClearDecision.Drop)
+                {
+                    Interlocked.Increment(ref _dccClearsDropped);
                     continue;
                 }
 

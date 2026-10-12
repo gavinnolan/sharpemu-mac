@@ -280,6 +280,82 @@ public sealed unsafe partial class MetalDccMaterializationTests(ITestOutputHelpe
         Assert.Equal(1, rig.Owner.Clears);
     }
 
+    // The Oregon Trail: the target is bound and drawn while the guest's metadata clear is
+    // still being written, and the composite that samples it would apply the clear late.
+    [Fact]
+    public void MaterializeDcc_DeferredClearIsDroppedOnceDrawnTo()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.Lookup(ImageRole.ColorTarget);
+        rig.FillMetadata(0x00);
+        rig.Cache.InvalidateMemoryFromGpu(MetadataAddress, SliceSize);
+        rig.Owner.Pending = true;
+
+        var target = rig.Lookup(ImageRole.ColorTarget);
+        rig.Cache.MarkGpuWritten(target);
+        rig.Owner.Pending = false;
+        rig.Lookup();
+        rig.Lookup(ImageRole.ColorTarget);
+
+        Assert.Equal(0, rig.Owner.Clears);
+        Assert.Equal(1, rig.Cache.TakeDccClearsDropped());
+    }
+
+    [Fact]
+    public void MaterializeDcc_ReArmedClearAppliesToTextureLookup()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.Lookup(ImageRole.ColorTarget);
+        rig.FillMetadata(0x00);
+        rig.Cache.InvalidateMemoryFromGpu(MetadataAddress, SliceSize);
+
+        rig.Lookup();
+
+        Assert.Equal(1, rig.Owner.Clears);
+        Assert.Equal(0, rig.Cache.TakeDccClearsDropped());
+    }
+
+    [Fact]
+    public void MaterializeDcc_TargetClearIsNotRepeatedOverDraws()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.Lookup(ImageRole.ColorTarget);
+        rig.FillMetadata(0x00);
+        rig.Cache.InvalidateMemoryFromGpu(MetadataAddress, SliceSize);
+
+        var target = rig.Lookup(ImageRole.ColorTarget);
+        Assert.Equal(1, rig.Owner.Clears);
+        rig.Cache.MarkGpuWritten(target);
+        rig.Lookup();
+
+        Assert.Equal(1, rig.Owner.Clears);
+        Assert.Equal(0, rig.Cache.TakeDccClearsDropped());
+    }
+
+    // A deferral is per guest clear: a new clear of the metadata applies again.
+    [Fact]
+    public void MaterializeDcc_DroppedClearReArms()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.Lookup(ImageRole.ColorTarget);
+        rig.FillMetadata(0x00);
+        rig.Owner.Pending = true;
+        var target = rig.Lookup(ImageRole.ColorTarget);
+        rig.Cache.MarkGpuWritten(target);
+        rig.Owner.Pending = false;
+        rig.Lookup();
+        Assert.Equal(0, rig.Owner.Clears);
+
+        rig.Cache.InvalidateMemoryFromGpu(MetadataAddress, SliceSize);
+        rig.Lookup(ImageRole.ColorTarget);
+
+        Assert.Equal(1, rig.Owner.Clears);
+    }
+
     private bool RequireDevice()
     {
         if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") != "1")
