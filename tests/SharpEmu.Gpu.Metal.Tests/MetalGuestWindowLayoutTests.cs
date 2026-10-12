@@ -30,6 +30,64 @@ public sealed class MetalGuestWindowLayoutTests
         Assert.True(mapped <= aliasSize);
     }
 
+    // The measured Demon's Souls case: a 16.4375 GiB backing and an 18186 MiB working set.
+    // Half overlap does not fit, but a seam per edge does, and the ~2 MiB binding at alias
+    // offset 0xFFE60000 that used to straddle the first edge now lies inside one window.
+    [Fact]
+    public void BackingTooLargeForHalfOverlapStillOverlapsByTheSeam()
+    {
+        const ulong aliasSize = 0x41C000000;
+        const ulong budget = 18186UL * 1024 * 1024;
+        var seam = MetalGuestMemory.SeamOverlapBytes;
+        var (stride, count, mapped) = MetalGuestMemory.ChooseWindowLayout(aliasSize, 4 * Gib, budget);
+
+        Assert.Equal(4 * Gib - seam, stride);
+        Assert.Equal(5, count);
+        Assert.Equal(aliasSize + ((ulong)(count - 1) * seam), mapped);
+        Assert.True(mapped <= budget);
+        Assert.True(FitsOneWindow(0xFFE60000, 0x234000, aliasSize, 4 * Gib, stride, count));
+    }
+
+    // Every range up to the seam, wherever it sits around an edge, fits the window its
+    // first byte selects - the selection the resolver makes.
+    [Fact]
+    public void EveryRangeUpToTheSeamFitsTheWindowItsFirstByteSelects()
+    {
+        const ulong aliasSize = 0x41C000000;
+        var seam = MetalGuestMemory.SeamOverlapBytes;
+        var (stride, count, _) = MetalGuestMemory.ChooseWindowLayout(aliasSize, 4 * Gib, 18186UL * 1024 * 1024);
+        for (var edge = 1; edge < count; edge++)
+        {
+            var tiledEdge = (ulong)edge * 4 * Gib;
+            foreach (var before in new ulong[] { 1, 4096, seam / 2, seam - 1, seam })
+            {
+                var start = tiledEdge - before;
+                var size = Math.Min(seam, aliasSize - start);
+                Assert.True(FitsOneWindow(start, size, aliasSize, 4 * Gib, stride, count),
+                    $"edge={edge} start=0x{start:X} size=0x{size:X}");
+            }
+        }
+    }
+
+    // Without room even for the seam the windows tile; the seam is never forced past the budget.
+    [Fact]
+    public void ABudgetWithoutRoomForTheSeamTiles()
+    {
+        const ulong aliasSize = 0x41C000000;
+        var (stride, _, mapped) = MetalGuestMemory.ChooseWindowLayout(aliasSize, 4 * Gib, aliasSize + 1);
+
+        Assert.Equal(4 * Gib, stride);
+        Assert.Equal(aliasSize, mapped);
+    }
+
+    private static bool FitsOneWindow(ulong offset, ulong size, ulong aliasSize, ulong windowBytes, ulong stride, int count)
+    {
+        var index = (ulong)Math.Min(offset / stride, (ulong)(count - 1));
+        var windowBase = index * stride;
+        var windowSize = Math.Min(windowBytes, aliasSize - windowBase);
+        return offset >= windowBase && offset + size <= windowBase + windowSize;
+    }
+
     // A device with room for it keeps the overlap, so no range up to one stride straddles.
     [Fact]
     public void BackingThatFitsTwiceKeepsTheOverlap()
