@@ -126,6 +126,9 @@ internal sealed class FakeShaderCompiler(Func<ShaderCompileRequest, byte[]>? com
 
     public string BackendName => "Fake";
 
+    // Stands in for a backend with mesh pipelines (Metal v2); Vulkan leaves it false.
+    public bool SupportsPrimitiveShaderMeshPipelines { get; set; }
+
 
     public bool TryCompileProgram(ShaderCompileRequest request, out IGuestCompiledShader? shader, out string error)
     {
@@ -190,6 +193,7 @@ internal sealed class PipelineTestGuest
     public static readonly uint[] FormatLoadProgram = [0xE0000000, 0x80000000, 0xBF810000];
 
     private readonly Dictionary<ulong, ulong> _headers = new();
+    private readonly Dictionary<ulong, FusedProgramParts> _fused = new();
 
     public PipelineTestGuest(Func<ShaderCompileRequest, byte[]>? compile = null)
     {
@@ -197,7 +201,8 @@ internal sealed class PipelineTestGuest
         Context = new CpuContext(Memory, Generation.Gen5);
         Host = new FakePipelineHost(Memory);
         Compiler = new FakeShaderCompiler(compile);
-        Registry = new ShaderHeaderRegistry(Context, code => _headers.TryGetValue(code, out var header) ? header : 0, _ => null);
+        Registry = new ShaderHeaderRegistry(Context, code => _headers.TryGetValue(code, out var header) ? header : 0,
+            code => _fused.TryGetValue(code, out var parts) ? parts : null);
         Programs = new ShaderProgramCache(Context, Compiler, Host);
     }
 
@@ -230,6 +235,18 @@ internal sealed class PipelineTestGuest
         BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan((int)InputSemanticsCountOffset), inputSemanticsCount);
         Write(headerAddress, header);
         _headers[codeAddress] = headerAddress;
+    }
+
+    // Two registered code objects joined the way sceAgcFuseShaderHalves joins them: the
+    // entry ends in S_SETPC_B64 and the decoder continues at the continuation.
+    public void RegisterFusedProgram(ulong entryAddress, ulong entryHeaderAddress, uint[] entryWords,
+        ulong continuationAddress, ulong continuationHeaderAddress, uint[] continuationWords, ulong entryUserDataAddress = 0)
+    {
+        RegisterProgram(entryAddress, entryHeaderAddress, entryWords, entryUserDataAddress);
+        RegisterProgram(continuationAddress, continuationHeaderAddress, continuationWords);
+        _fused[entryAddress] = new FusedProgramParts(continuationAddress, continuationHeaderAddress);
+        Gen5ShaderTranslator.RegisterFusedProgram(Context, entryAddress, entryHeaderAddress,
+            continuationAddress, continuationHeaderAddress);
     }
 
     public void Write(ulong address, byte[] bytes)

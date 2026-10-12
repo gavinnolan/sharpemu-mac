@@ -439,6 +439,97 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         Assert.Equal(expected, description.StaticParameters.SampleShadingEnable);
     }
 
+    // A geometry-stage draw on a backend with mesh pipelines: the merged program at the
+    // export address, the GS program address register and the GS user-data address written.
+    private static RegisterBanks GeometryStageBanks(ulong exportAddress, ulong geometryUserDataAddress)
+    {
+        var banks = Banks();
+        banks.Context.ShaderStages = 0x00C02030;
+        banks.Context.ShaderInterface.MaxOutputPerSubgroup = 0x40;
+        banks.Context.ShaderInterface.GeometryMaxVerticesOut = 3;
+        banks.Context.ShaderInterface.GeometryOutputPrimitiveType = 2;
+        banks.Shader.Vertex.ExportAddress = exportAddress;
+        banks.Shader.Vertex.GeometryAddress = exportAddress;
+        banks.Shader.Vertex.GeometryUserDataAddress = geometryUserDataAddress;
+        return banks;
+    }
+
+    private static GraphicsPrograms PrepareVertexOnly(ShaderPipelineCache cache, RegisterBanks banks) =>
+        cache.GetGraphicsPrograms(banks.Shader.Vertex, banks.Shader.Pixel, banks.Context.ShaderInterface, banks.Context,
+            Enumerable.Repeat(ColorComponentMap.Identity, 8).ToArray(), pixelActive: false, depthBound: false);
+
+    [Fact]
+    public void FusedGeometryProgram_ReadsItsUserDataThroughTheGeometryUserDataAddress()
+    {
+        var guest = new PipelineTestGuest();
+        guest.Compiler.SupportsPrimitiveShaderMeshPipelines = true;
+        var entry = PipelineTestGuest.MemoryBase + 0x1000;
+        var continuation = PipelineTestGuest.MemoryBase + 0x1100;
+        var userDataTable = PipelineTestGuest.MemoryBase + 0x9000;
+        var data = PipelineTestGuest.MemoryBase + 0xA000;
+
+        // The front half jumps to the back half; the back half loads its V# through s[0:1],
+        // fetches with it and synchronizes the subgroup, so it is a workgroup program.
+        guest.RegisterFusedProgram(
+            entry, PipelineTestGuest.MemoryBase + 0x8000, [0xBF800000, 0xBE802000],
+            continuation, PipelineTestGuest.MemoryBase + 0x8100,
+            [0xF4080200, 0xFA000000, 0xE00C2000, 0x80020401, 0xBF8A0000, 0xBF810000],
+            entryUserDataAddress: PipelineTestGuest.MemoryBase + 0xB000);
+        guest.WriteWords(userDataTable, PipelineTestGuest.BufferDescriptor(data, 16, 4, Format32x4Float));
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+
+        var programs = PrepareVertexOnly(cache, GeometryStageBanks(entry, userDataTable));
+
+        Assert.True(programs.Available);
+        var request = Assert.Single(guest.Compiler.Requests);
+        Assert.NotNull(request.PrimitiveShader);
+
+        // The user data starts at s0 with the pointer, and s2..s7 stay system scalars.
+        Assert.Equal(0u, request.UserDataBase);
+        Assert.Equal(0xFCUL, request.ExcludedUserDataRegisters);
+        var userData = programs.VertexInput.Stage.Resources.UserData;
+        Assert.Equal((uint)userDataTable, userData[0]);
+        Assert.Equal((uint)(userDataTable >> 32), userData[1]);
+
+        // The V# behind the pointer was planned, so the fetch has a buffer binding.
+        Assert.NotEmpty(request.Resources.Info.Buffers);
+    }
+
+    [Fact]
+    public void UnfusedPrimitiveShader_KeepsItsUserDataAtS8()
+    {
+        var guest = new PipelineTestGuest();
+        guest.Compiler.SupportsPrimitiveShaderMeshPipelines = true;
+        var program = PipelineTestGuest.MemoryBase + 0x1000;
+        guest.RegisterProgram(program, PipelineTestGuest.MemoryBase + 0x8000, [0xBF8A0000, 0xBF810000],
+            userDataAddress: PipelineTestGuest.MemoryBase + 0xB000);
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+
+        Assert.True(PrepareVertexOnly(cache, GeometryStageBanks(program, PipelineTestGuest.MemoryBase + 0x9000)).Available);
+
+        // The geometry program address no longer keeps the draw off the merged stage.
+        var request = Assert.Single(guest.Compiler.Requests);
+        Assert.NotNull(request.PrimitiveShader);
+        Assert.Equal(8u, request.UserDataBase);
+        Assert.Equal(0UL, request.ExcludedUserDataRegisters);
+    }
+
+    [Fact]
+    public void GeometryStageProgram_KeepsThePerVertexStateWithoutMeshPipelines()
+    {
+        var guest = new PipelineTestGuest();
+        var program = PipelineTestGuest.MemoryBase + 0x1000;
+        guest.RegisterProgram(program, PipelineTestGuest.MemoryBase + 0x8000, [0xBF8A0000, 0xBF810000],
+            userDataAddress: PipelineTestGuest.MemoryBase + 0xB000);
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+
+        Assert.True(PrepareVertexOnly(cache, GeometryStageBanks(program, PipelineTestGuest.MemoryBase + 0x9000)).Available);
+
+        var request = Assert.Single(guest.Compiler.Requests);
+        Assert.Null(request.PrimitiveShader);
+        Assert.Equal(8u, request.UserDataBase);
+    }
+
     [Fact]
     public void MissingPrograms_AreFatal()
     {

@@ -171,6 +171,24 @@ public sealed class NggMeshTranslationTests
     }
 
     [Fact]
+    public void ExcludedSystemScalarsAreSeededWhenTheUserDataStartsAtS0()
+    {
+        // A fused program's user data starts at s0 so the geometry user-data pointer can
+        // occupy s[0:1]; s2..s7 are excluded from it and are still the launch state.
+        var request = Gen5ComputeFixtures.RequestOrThrow(
+            Gen5NggFixtures.CullingTriangle(),
+            ShaderStage.Vertex,
+            primitiveShader: Gen5NggFixtures.StageInfo,
+            userDataBase: 0,
+            excludedUserDataRegisters: 0xFC);
+        Assert.Equal(0xFCUL, request.ExcludedUserDataRegisters);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.Equal(Gen5MslStage.Mesh, shader.Stage);
+        Assert.Contains("s3 = sharpemu_mesh_wave_verts", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("s2 =", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void SubgroupBudgetIsClampedToWhatAMeshThreadgroupCanCarry()
     {
         // A title that programs more than the hardware's 256 output vertices, or leaves the

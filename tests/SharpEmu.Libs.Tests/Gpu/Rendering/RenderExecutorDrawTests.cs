@@ -364,14 +364,54 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_", StringComparison.Ordinal));
     }
 
-    [Fact]
-    public void MeshPipelines_DoNotAdmitASeparateGeometryProgram()
+    // A vertex+geometry shader pair the way UE4 renders a volume LUT slice by slice: the
+    // geometry stage enabled in VGT_SHADER_STAGES_EN, an output budget in
+    // VGT_GS_MAX_VERT_OUT, and the geometry program address register written. Gen5 runs the
+    // pair as one merged ES/GS program at the export address.
+    private static void ApplyGeometryStageDraw(RegisterBanks banks, uint maxVerticesOut)
     {
-        // A real geometry program is a second stage no primitive shader implements.
-        var banks = Banks();
-        ApplyCullingPrimitiveShaderDraw(banks);
+        banks.Context.ShaderStages = 0x00C02030;
+        banks.Context.ShaderInterface.PrimitiveShaderSubgroupControl = 1;
+        banks.Context.ShaderInterface.MaxOutputPerSubgroup = 0x40;
+        banks.Context.ShaderInterface.GeometryMaxVerticesOut = maxVerticesOut;
+        banks.Context.ShaderInterface.GeometryOutputPrimitiveType = 2;
         banks.Shader.Vertex.GeometryAddress = 0x3000;
-        banks.Context.ShaderInterface.GeometryMaxVerticesOut = 4;
+        banks.Shader.Vertex.GeometryUserDataAddress = 0x4000;
+    }
+
+    [Theory]
+    [InlineData(0u)]
+    [InlineData(3u)]
+    public void MeshPipelines_RunAGeometryStageDraw(uint maxVerticesOut)
+    {
+        var banks = Banks();
+        ApplyGeometryStageDraw(banks, maxVerticesOut);
+        _pipelines.SupportsPrimitiveShaderMeshPipelines = true;
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        Assert.Contains(_host.Calls, c => c.StartsWith("draw_indexed", StringComparison.Ordinal));
+        Assert.Empty(_pipelines.UnsupportedGraphics);
+    }
+
+    [Fact]
+    public void GeometryStageDraw_WithAnOutputBudgetIsSkippedWithoutMeshPipelines()
+    {
+        // Vulkan's behavior is unchanged: the per-vertex path cannot run the GS half.
+        var banks = Banks();
+        ApplyGeometryStageDraw(banks, maxVerticesOut: 3);
+        Assert.False(_pipelines.SupportsPrimitiveShaderMeshPipelines);
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        Assert.Empty(_pipelines.Calls);
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void MeshPipelines_DoNotAdmitAGeometryStageBesideTheLegacyVertexStage()
+    {
+        var banks = Banks();
+        ApplyGeometryStageDraw(banks, maxVerticesOut: 3);
+        banks.Context.ShaderStages |= 0x40; // VS_EN
         _pipelines.SupportsPrimitiveShaderMeshPipelines = true;
         _executor.DrawIndexed(1, banks, Indexed(3));
 

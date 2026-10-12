@@ -57,8 +57,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         // compiled as the merged ES/GS stage with no mesh pipeline to run it - and an
         // ordinary vertex program that happens to touch LDS would have its workgroup sized
         // from geometry-engine registers the draw never programmed.
-        if (!SupportsPrimitiveShaderMeshPipelines || vertex.GeometryAddress != 0 ||
-            !VgtShaderStages.SelectsPrimitiveShaderOnly(shaderStages))
+        if (!SupportsPrimitiveShaderMeshPipelines || !VgtShaderStages.SelectsPrimitiveShaderOnly(shaderStages))
         {
             return null;
         }
@@ -76,6 +75,34 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             // see; they are per-draw launch state and travel in the mesh draw-info block.
             VertexGroupSize: 0,
             PrimitiveGroupSize: 0);
+    }
+
+    // s2..s7 of the merged stage: the launch state the geometry engine loads, never user data.
+    private const ulong MergedStageSystemScalars = 0xFCUL;
+
+    // Every merged ES/GS wave starts with SPI_SHADER_USER_DATA_ADDR_LO/HI_GS in s[0:1]. The
+    // GS half of a fused program reads its own user data through that pointer, so a fused
+    // program compiled as the merged workgroup stage takes the pointer as user data: its
+    // user data starts at s0, the pointer fills s[0:1], and s2..s7 stay the system scalars
+    // the mesh prologue seeds. Any other program keeps its user data at s8.
+    internal ShaderSource WithGeometryUserDataAddress(ShaderSource source, ulong geometryUserDataAddress)
+    {
+        if (!source.Registered.IsFused || source.UserDataBase != VertexUserDataBase ||
+            !ShaderCompileRequest.RequiresPrimitiveShaderWorkgroup(_programs.Decode(source)))
+        {
+            return source;
+        }
+
+        var userData = new uint[VertexUserDataBase + source.UserData.Length];
+        userData[0] = (uint)geometryUserDataAddress;
+        userData[1] = (uint)(geometryUserDataAddress >> 32);
+        source.UserData.CopyTo(userData, (int)VertexUserDataBase);
+        return source with
+        {
+            UserData = userData,
+            UserDataBase = 0,
+            ExcludedUserDataRegisters = MergedStageSystemScalars,
+        };
     }
 
     public ShaderProgramCache Programs => _programs;
@@ -165,6 +192,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             pixelInfo.IeeeMode = pixel.Resource1.IeeeMode;
         }
 
+        var primitiveShader = PrimitiveShaderStageInfo(vertex, shaderInterface, context.ShaderStages);
+        var vertexCompileSource = primitiveShader is null
+            ? vertexSource
+            : WithGeometryUserDataAddress(vertexSource, vertex.GeometryUserDataAddress);
         ShaderProgram vertexProgram;
         ShaderProgram pixelProgramHandle = default;
         ShaderStageResources vertexStage;
@@ -191,12 +222,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             }
 
             if (!TryPrepareProgram(
-                vertexSource,
+                vertexCompileSource,
                 new StageCompileOptions
                 {
                     VertexInfo = vertexInfo,
                     RequiredVertexOutputCount = (int)attributeCount,
-                    PrimitiveShader = PrimitiveShaderStageInfo(vertex, shaderInterface, context.ShaderStages),
+                    PrimitiveShader = primitiveShader,
                 },
                 ref pushDataCursor,
                 out vertexProgram,
