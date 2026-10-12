@@ -19,7 +19,11 @@ using SharpEmu.Libs.Diagnostics;
 
 namespace SharpEmu.Core.Cpu.Native;
 
-public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, IGuestThreadScheduler, IDisposable
+public sealed unsafe partial class DirectExecutionBackend :
+	INativeCpuBackend,
+	INativeCpuSessionStatisticsProvider,
+	IGuestThreadScheduler,
+	IDisposable
 {
 	private static readonly SharpEmu.Logging.SharpEmuLogger Log = SharpEmu.Logging.SharpEmuLog.For("Native");
 
@@ -333,6 +337,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private nint _guestContextTransferStub;
 
 	private long _importDispatchCount;
+
+	private NativeImportSessionCounters? _activeImportSessionCounters;
+
+	private int _lastSessionImportsHit;
+
+	private int _lastSessionUniqueNidsHit;
 
 	private const int ImportDispatchBlockSize = 256;
 
