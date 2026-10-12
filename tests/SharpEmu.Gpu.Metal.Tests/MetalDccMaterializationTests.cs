@@ -19,7 +19,7 @@ namespace SharpEmu.Gpu.Metal.Tests;
 /// metadata bytes are never written to remember it: transient aliasing reuses that range
 /// as live data. Device work is behind the exclusive device gate.
 /// </summary>
-public sealed unsafe class MetalDccMaterializationTests(ITestOutputHelper output)
+public sealed unsafe partial class MetalDccMaterializationTests(ITestOutputHelper output)
 {
     private const ulong GuestBase = 0x2_0000_0000;
     private const ulong ImageAddress = GuestBase + 0x1000;

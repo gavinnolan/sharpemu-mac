@@ -322,6 +322,14 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 if (TryPublishAliasOnDevice(image, other))
                 {
                     _aliasPublishes++;
+                    // A device copy leaves the source GPU-modified, so a write through this
+                    // image still has to take ownership from it, or both would publish.
+                    if (takesGpuOwnership)
+                    {
+                        other.ClearGpuModified();
+                        other.MarkCpuDirty(MetalImageDirtyCause.AliasWrite);
+                    }
+
                     continue;
                 }
 
@@ -716,17 +724,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     /// <summary>Alias publications the device served without touching guest memory.</summary>
     public long TakeDeviceAliasPublishes() => Interlocked.Exchange(ref _deviceAliasPublishes, 0);
 
-    // SHARPEMU_METAL_V2_ALIAS_ON_DEVICE=1 hands aliases over on the device instead of
-    // through guest memory. Off by default because it is not yet right: with it on,
-    // MetalTextureMaterializationTests.ActualNativeDepthPcfUsesGuestComparisonFunction-
-    // BeforeLinearFiltering fails for every comparison function, which says a depth
-    // texture's texels are not the bits its guest plane holds - the tiler's depth path
-    // converts on the way through, and the alias reads the converted form. Narrowing the
-    // pair to an unwidened 32-bit depth source and a colour target of the same element
-    // size does not fix it, so the precondition is something the depth transfer owns
-    // rather than something this can test for from outside.
+    // SHARPEMU_METAL_V2_ALIAS_ON_DEVICE=0 sends every alias through guest memory again.
+    // The device copy only claims a 32-bit depth plane and an R32 colour alias with the
+    // same tile mode, pitch and footprint (MetalImageTransfer.TryEncodeTextureToTexture):
+    // the depth upload converts nothing for that pair, so texel for texel the alias gets
+    // exactly the bits the round trip would have detiled into it.
     private static readonly bool DeviceAliasPublishEnabled =
-        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ALIAS_ON_DEVICE") == "1";
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ALIAS_ON_DEVICE") != "0";
 
     // Publishes just the shared bytes of a GPU-written image, leaving the texture
     // authoritative for the rest of it. The image stays GPU-modified, so what is left is
