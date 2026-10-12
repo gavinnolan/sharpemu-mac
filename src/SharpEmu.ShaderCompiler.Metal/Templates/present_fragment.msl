@@ -14,3 +14,16 @@ fragment float4 present_fs(
 {
     return tex0.sample(smp0, float2(in.attr0.x, 1.0f - in.attr0.y));
 }
+
+// A linear float flip (scRGB light) shown on an SDR drawable: the exact sRGB OETF.
+fragment float4 present_linear_fs(
+    PresentIn in [[stage_in]],
+    texture2d<float> tex0 [[texture(0)]],
+    sampler smp0 [[sampler(0)]])
+{
+    float4 color = tex0.sample(smp0, float2(in.attr0.x, 1.0f - in.attr0.y));
+    float3 linearRgb = saturate(color.rgb);
+    float3 low = linearRgb * 12.92f;
+    float3 high = 1.055f * pow(linearRgb, float3(1.0f / 2.4f)) - 0.055f;
+    return float4(select(high, low, linearRgb <= 0.0031308f), color.a);
+}

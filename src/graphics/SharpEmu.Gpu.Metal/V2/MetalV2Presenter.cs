@@ -38,6 +38,7 @@ internal static partial class MetalV2Presenter
     private static nint _metalLayer;
     private static nint _presentQueue;
     private static nint _presentPipeline;
+    private static nint _presentLinearPipeline;
     private static nint _presentSampler;
     private static double _drawableWidth;
     private static double _drawableHeight;
@@ -406,7 +407,14 @@ internal static partial class MetalV2Presenter
                     return;
                 }
 
-                _presentSampler = CreateLinearSampler(_device);
+                if (!TryCreatePresentPipeline(
+                        _device, out _presentLinearPipeline, out error, fragmentEntry: "present_linear_fs"))
+                {
+                    Console.Error.WriteLine($"[METAL-V2][ERROR] The linear present pipeline failed: {error}");
+                    return;
+                }
+
+                _presentSampler =CreateLinearSampler(_device);
                 InitializeHdrOutput(window);
                 SyncDrawableSize();
             }
@@ -758,6 +766,12 @@ internal static partial class MetalV2Presenter
         return pass;
     }
 
+    // Float VideoOut flip buffers hold linear light (the Vulkan presenter's
+    // IsLinearFloatPresentSource); only an SDR drawable needs them encoded, an
+    // extended-range layer takes the linear values as they are.
+    internal static bool NeedsLinearEncode(ulong pixelFormat, bool hdr) =>
+        !hdr && pixelFormat is MtlFormat.Rgba16Float or MtlFormat.Rgba32Float;
+
     private static void EncodePresent(nint encoder, nint texture, uint frameWidth, uint frameHeight, bool isHdr)
     {
         if (_layerHdrActive)
@@ -766,7 +780,11 @@ internal static partial class MetalV2Presenter
         }
         else
         {
-            MetalNative.SendVoid(encoder, MetalNative.Selector("setRenderPipelineState:"), _presentPipeline);
+            // Linear float flips hold scRGB light, which a BGRA8 drawable shows as an
+            // sRGB-encoded frame only after the encode, as the Vulkan presenter does.
+            var format = (ulong)MetalNative.Send(texture, MetalNative.Selector("pixelFormat"));
+            var pipeline = NeedsLinearEncode(format, _layerHdrActive) ? _presentLinearPipeline : _presentPipeline;
+            MetalNative.SendVoid(encoder, MetalNative.Selector("setRenderPipelineState:"), pipeline);
         }
 
         var scaleX = _drawableWidth / frameWidth;
