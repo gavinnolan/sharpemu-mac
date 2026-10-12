@@ -17,7 +17,7 @@ static inline device uint* sharpemu_resolve_device_address(device const Gen5Addr
     ulong page = masked >> 14u;
     uint low = 0u;
     uint high = range_count;
-    for (uint step = 0u; step < 7u; step++)
+    for (uint step = 0u; step < 13u; step++)
     {
         uint middle = low + ((high - low) >> 1u);
         bool move_up = low < high && ranges[middle].first_page <= page;
