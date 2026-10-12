@@ -13,8 +13,9 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// cover all of it: every vertex, index, constant, storage and indirect binding is
 /// then a (window, offset) pair and no guest byte is ever copied.
 ///
-/// A range that is not backed, or that straddles two windows, falls back to a
-/// per-command-buffer upload ring. The windows and the live ring buffers sit in an
+/// Adjacent windows overlap by at least <see cref="SeamOverlapBytes"/>, so a binding up
+/// to that size never straddles a window edge. A range that is not backed, or a larger
+/// one that straddles two windows, falls back to a per-command-buffer upload ring. The windows and the live ring buffers sit in an
 /// <c>MTLResidencySet</c> attached to the queue, so no encoder needs
 /// <c>useResource:</c> for them.
 /// </summary>
@@ -25,6 +26,18 @@ internal sealed class MetalGuestMemory : IDisposable
     private const ulong PreferredWindowBytes = 4UL * 1024 * 1024 * 1024;
     private const int MaxWindows = 16;
     private const ulong MaxUploadBytes = 64UL * 1024 * 1024;
+
+    /// <summary>
+    /// How far adjacent windows overlap when the device cannot hold the half overlap.
+    /// A range staged into the ring is copied on the CPU at record time, so it misses
+    /// GPU writes still in flight to those bytes, and a shader's stores into it land in
+    /// the ring instead of guest memory. With this overlap every range up to its size
+    /// lies wholly inside the window its first byte selects and binds the guest bytes
+    /// directly, ordered like any other window access. It matches the ring's own cap,
+    /// so no range the ring could stage whole still needs it for straddling an edge,
+    /// and it costs one overlap of resident bytes per window edge.
+    /// </summary>
+    internal const ulong SeamOverlapBytes = MaxUploadBytes;
     private const ulong RingBufferBytes = 32UL * 1024 * 1024;
     private const ulong RingAlignment = 256;
     public const ulong GdsBytes = ManagedCommandStreamHost.GdsBytes;
@@ -102,6 +115,7 @@ internal sealed class MetalGuestMemory : IDisposable
     private readonly ICpuMemory _memory;
     private readonly Window[] _windows;
     private readonly ulong _windowStride;
+    private readonly ulong _windowOverlap;
     private readonly int _windowCount;
     private readonly ulong _aliasBase;
     private readonly ulong _aliasSize;
@@ -118,6 +132,18 @@ internal sealed class MetalGuestMemory : IDisposable
     private bool _disposed;
 
     public MetalGuestMemory(nint device, IGuestBackedSpace backing, ICpuMemory memory)
+        : this(device, backing, memory, PreferredWindowBytes, SeamOverlapBytes, budgetOverride: 0)
+    {
+    }
+
+    /// <summary>A layout with explicit window, overlap and budget sizes, for tests on a small backing.</summary>
+    internal MetalGuestMemory(
+        nint device,
+        IGuestBackedSpace backing,
+        ICpuMemory memory,
+        ulong preferredWindowBytes,
+        ulong seamBytes,
+        ulong budgetOverride)
     {
         _device = device;
         _backing = backing;
@@ -131,9 +157,9 @@ internal sealed class MetalGuestMemory : IDisposable
         _aliasBase = aliasBase;
         _aliasSize = aliasSize;
         var maxBufferLength = (ulong)MetalV2Native.SendValue(device, SelMaxBufferLength);
-        var windowBytes = Math.Min(PreferredWindowBytes, maxBufferLength == 0 ? PreferredWindowBytes : maxBufferLength);
-        var budget = WindowBudget(device);
-        var (windowStride, windowCount, mappedBytes) = ChooseWindowLayout(aliasSize, windowBytes, budget);
+        var windowBytes = Math.Min(preferredWindowBytes, maxBufferLength == 0 ? preferredWindowBytes : maxBufferLength);
+        var budget = budgetOverride != 0 ? budgetOverride : WindowBudget(device);
+        var (windowStride, windowCount, mappedBytes) = ChooseWindowLayout(aliasSize, windowBytes, budget, seamBytes);
         if (mappedBytes > budget)
         {
             MetalV2Diagnostics.WarnOnce(
@@ -180,6 +206,7 @@ internal sealed class MetalGuestMemory : IDisposable
 
         _windowCount = windowCount;
         _windowStride = windowStride;
+        _windowOverlap = windowCount > 1 ? windowBytes - windowStride : 0;
         _gdsBuffer = CreateSharedBuffer(GdsBytes, "guest.gds", out _, out _);
         _nullBuffer = CreateSharedBuffer(256, "guest.null", out _nullContents, out _);
         // Both are reached through an address in an argument buffer, so the encoder
@@ -197,7 +224,7 @@ internal sealed class MetalGuestMemory : IDisposable
         var mapSeconds = seconds.ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
         Console.Error.WriteLine(
             $"[METAL-V2][INFO] guest memory mapped windows={windowCount} window_bytes=0x{windowBytes:X} " +
-            $"stride=0x{windowStride:X} mapped_mb={mappedBytes / (1024 * 1024)} " +
+            $"stride=0x{windowStride:X} overlap=0x{_windowOverlap:X} mapped_mb={mappedBytes / (1024 * 1024)} " +
             $"budget_mb={budget / (1024 * 1024)} " +
             $"alias=0x{aliasBase:X16}+0x{aliasSize:X} map_seconds={mapSeconds} residency_set={(_residencySet != 0 ? 1 : 0)}");
     }
@@ -215,20 +242,35 @@ internal sealed class MetalGuestMemory : IDisposable
     /// (<c>kIOGPUCommandBufferCallbackErrorOutOfMemory</c>) — with no draw ever reaching
     /// the framebuffer. On a 24 GB M4 a 16.4 GiB backing in half-overlapping 4 GiB
     /// windows asks for 30.4 GiB and every single submission failed. The overlap is
-    /// therefore taken only while the mapped total fits the device's working set;
-    /// otherwise the windows tile the alias exactly and a straddling range takes the ring
-    /// (reads) or splits into runs (which the device-address table already does).
+    /// therefore taken only while the mapped total fits the device's working set.
+    ///
+    /// Short of that, the windows overlap by the seam alone, which adds one seam of
+    /// resident bytes per window edge and still keeps every range up to the seam inside
+    /// one window. Only when even that does not fit do the windows tile the alias exactly,
+    /// and a straddling range takes the ring (reads) or splits into runs (which the
+    /// device-address table already does).
     /// </summary>
     internal static (ulong Stride, int Count, ulong MappedBytes) ChooseWindowLayout(
         ulong aliasSize,
         ulong windowBytes,
-        ulong budget)
+        ulong budget,
+        ulong seamBytes = SeamOverlapBytes)
     {
         var overlapped = windowBytes / 2;
         if (overlapped != 0 && MappedBytes(aliasSize, windowBytes, overlapped) <= budget)
         {
             return (overlapped, WindowCount(aliasSize, windowBytes, overlapped),
                 MappedBytes(aliasSize, windowBytes, overlapped));
+        }
+
+        if (seamBytes != 0 && seamBytes < overlapped)
+        {
+            var seamed = windowBytes - seamBytes;
+            if (MappedBytes(aliasSize, windowBytes, seamed) <= budget)
+            {
+                return (seamed, WindowCount(aliasSize, windowBytes, seamed),
+                    MappedBytes(aliasSize, windowBytes, seamed));
+            }
         }
 
         return (windowBytes, WindowCount(aliasSize, windowBytes, windowBytes),
@@ -538,7 +580,8 @@ internal sealed class MetalGuestMemory : IDisposable
                 $"window-straddle:{size:X}",
                 $"A backed guest range straddles the window edge and has to be staged: " +
                 $"address=0x{gpuVa:X16} size=0x{size:X} alias=0x{alias:X16} window={index} " +
-                $"window_offset=0x{offset:X} window_size=0x{window.Size:X}.");
+                $"window_offset=0x{offset:X} window_size=0x{window.Size:X} " +
+                $"overlap=0x{_windowOverlap:X}.");
             return false;
         }
 
