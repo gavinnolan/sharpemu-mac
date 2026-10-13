@@ -221,6 +221,76 @@ public sealed class RenderExecutorAdaptationTests : IDisposable
         Assert.Contains(_host.Calls, call => call.StartsWith("draw 3", StringComparison.Ordinal));
     }
 
+    private RegisterBanks PixelStoreBanks()
+    {
+        var banks = Banks();
+        banks.Context.RenderTargetMask = 0;
+        banks.Context.ColorTargets[0] = default;
+        banks.Context.ShaderInterface.DepthShaderControl = default;
+        banks.Context.ScreenViewport.ScreenScissorLeft = 4;
+        banks.Context.ScreenViewport.ScreenScissorTop = 2;
+        banks.Context.ScreenViewport.ScreenScissorRight = 36;
+        banks.Context.ScreenViewport.ScreenScissorBottom = 18;
+        return banks;
+    }
+
+    [Fact]
+    public void PixelProgramStoringToAnImage_DrawsWithoutAttachmentsOverTheScissor()
+    {
+        _pipelines.Graphics = Programs(pixelStage: Stage(Program(ShaderStageKind.Pixel, images: [new ImageResourceInfo(ImageResourceClass.Storage, true)])));
+        _executor.DrawAuto(1, PixelStoreBanks(), Auto(3));
+
+        Assert.Contains(_host.Calls, call => call.StartsWith("draw 3", StringComparison.Ordinal));
+        var rendering = Assert.Single(_host.BegunRenderings);
+        Assert.Equal(0u, rendering.ColorAttachmentCount);
+        Assert.True(rendering.RasterizesWithoutAttachments);
+        Assert.Equal(36u, rendering.Width);
+        Assert.Equal(18u, rendering.Height);
+    }
+
+    [Fact]
+    public void PixelProgramWritingABuffer_DrawsAndIsNeverRetained()
+    {
+        _host.RetainTargetlessDraws = true;
+        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        _pipelines.Graphics = Programs(pixelStage: Stage(Program(ShaderStageKind.Pixel, buffers: [written], images: [new ImageResourceInfo(ImageResourceClass.Sampled, false)]), buffers: [BufferDescriptor(VertexBase, 4, 16)]));
+        _executor.DrawAuto(1, PixelStoreBanks(), Auto(3));
+
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("retain_targetless", StringComparison.Ordinal));
+        Assert.Contains(_host.Calls, call => call.StartsWith("draw 3", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void PixelStoreDrawWithoutAPixelShader_DrawsNothing()
+    {
+        var banks = PixelStoreBanks();
+        banks.Shader.Pixel.Address = 0;
+        _pipelines.Graphics = Programs(pixelStage: Stage(Program(ShaderStageKind.Pixel, images: [new ImageResourceInfo(ImageResourceClass.Storage, true)])));
+        _executor.DrawAuto(1, banks, Auto(3));
+
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("draw", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void PixelProgramWithoutStores_AndNoTarget_DrawsNothingAndIsNotRetained()
+    {
+        _host.RetainTargetlessDraws = true;
+        _pipelines.Graphics = Programs(pixelStage: Stage(Program(ShaderStageKind.Pixel)));
+        _executor.DrawAuto(1, PixelStoreBanks(), Auto(3));
+
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("draw", StringComparison.Ordinal));
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("retain_targetless", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void PixelProgramSamplingOnly_AndNoTarget_DrawsNothing()
+    {
+        _pipelines.Graphics = Programs(pixelStage: Stage(Program(ShaderStageKind.Pixel, images: [new ImageResourceInfo(ImageResourceClass.Sampled, false)])));
+        _executor.DrawAuto(1, PixelStoreBanks(), Auto(3));
+
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("draw", StringComparison.Ordinal));
+    }
+
     [Theory]
     [InlineData(false, false)]
     [InlineData(false, true)]

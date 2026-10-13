@@ -715,15 +715,23 @@ internal sealed partial class MetalRenderHost
                 }
             }
 
-            // A draw without attachments reaches the executor only when it has no
-            // pixel stage: its output is what the vertex stage stores, and no
-            // fragment ever runs. The shared state still asks for the maximum
-            // framebuffer, and a tile-based GPU would walk every one of a
-            // 16384x16384 area's tiles for it, so the pass takes the smallest area
-            // Metal accepts.
+            // A draw without attachments is either vertex-only (its output is what the vertex
+            // stage stores, no fragment ever runs) or a pixel program that stores to memory.
+            // The shared state asks for the maximum framebuffer in the vertex-only case, and a
+            // tile-based GPU would walk every one of a 16384x16384 area's tiles for it, so
+            // that pass takes the smallest area Metal accepts. A pixel program needs the real
+            // area, or its fragments run for a single pixel.
             if (!attached)
             {
-                ConfigureAttachmentlessPass(descriptor, state.Samples);
+                if (state.RasterizesWithoutAttachments)
+                {
+                    ConfigureAttachmentlessPass(descriptor, state.Samples, state.Width, state.Height);
+                }
+                else
+                {
+                    ConfigureAttachmentlessPass(descriptor, state.Samples);
+                }
+
                 _targetlessPasses++;
             }
 
@@ -789,10 +797,10 @@ internal sealed partial class MetalRenderHost
     // process dies of an integer divide fault inside renderCommandEncoderWithDescriptor:.
     // A zero sample count in the shared state means unspecified, as it does for
     // the pipeline's raster sample count, which this one must equal.
-    internal static void ConfigureAttachmentlessPass(nint descriptor, uint samples)
+    internal static void ConfigureAttachmentlessPass(nint descriptor, uint samples, uint width = 1, uint height = 1)
     {
-        MetalV2Native.SendVoidValue(descriptor, SelSetRenderTargetWidth, 1);
-        MetalV2Native.SendVoidValue(descriptor, SelSetRenderTargetHeight, 1);
+        MetalV2Native.SendVoidValue(descriptor, SelSetRenderTargetWidth, Math.Max(width, 1));
+        MetalV2Native.SendVoidValue(descriptor, SelSetRenderTargetHeight, Math.Max(height, 1));
         MetalV2Native.SendVoidValue(descriptor, SelSetDefaultRasterSampleCount, Math.Max(samples, 1));
     }
 
