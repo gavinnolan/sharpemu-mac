@@ -467,6 +467,108 @@ internal sealed partial class MetalImageCache
         _deferredDccSlices.Remove((image, address));
     }
 
+    // Clear-code fills of DCC metadata that run as recorded GPU work, by metadata address.
+    // While such a fill is still in flight its bytes cannot be read back, so a lookup
+    // would defer the clear and the draws that follow land on the uncleared surface —
+    // which is how OCTOPATH TRAVELER II's separate translucency kept every frame's
+    // particles and drew them as trails across the traveler map. The fill is recorded
+    // in submission order before the lookup, so the code it stores is the metadata's
+    // content by the time the clear executes. A record lasts until any other store
+    // reaches its range; AwaitingOwnWrite lets the fill's own dispatch, bound right
+    // after it was absorbed, through.
+    private readonly Dictionary<ulong, RecordedDccFill> _recordedDccFills = new();
+
+    private struct RecordedDccFill
+    {
+        public ulong Size;
+        public byte Code;
+        public bool AwaitingOwnWrite;
+    }
+
+    /// <summary>Caller holds the lock.</summary>
+    private void RecordDccFillLocked(ulong address, ulong size, byte code, bool record)
+    {
+        ForgetRecordedDccFillsLocked(address, size);
+        if (record)
+        {
+            _recordedDccFills[address] = new RecordedDccFill { Size = size, Code = code, AwaitingOwnWrite = true };
+        }
+    }
+
+    /// <summary>
+    /// A recorded GPU store reached this range. The store a fill's own dispatch makes
+    /// keeps that fill; every other one replaces whatever the fill stored.
+    ///
+    /// Caller holds the lock.
+    /// </summary>
+    private void NoteRecordedDccStoreLocked(ulong address, ulong size)
+    {
+        if (_recordedDccFills.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var (start, fill) in _recordedDccFills.ToArray())
+        {
+            if (address >= start + fill.Size || start >= address + size)
+            {
+                continue;
+            }
+
+            if (fill.AwaitingOwnWrite && address >= start && address + size <= start + fill.Size)
+            {
+                _recordedDccFills[start] = fill with { AwaitingOwnWrite = false };
+                continue;
+            }
+
+            _recordedDccFills.Remove(start);
+        }
+    }
+
+    /// <summary>Caller holds the lock.</summary>
+    private void ForgetRecordedDccFillsLocked(ulong address, ulong size)
+    {
+        if (_recordedDccFills.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var (start, fill) in _recordedDccFills.ToArray())
+        {
+            if (address < start + fill.Size && start < address + size)
+            {
+                _recordedDccFills.Remove(start);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The clear code a recorded fill leaves in one metadata slice whose bytes are still
+    /// being written. A slice whose bytes have settled has no further use for the record:
+    /// from then on the guest bytes are what count.
+    /// </summary>
+    private bool TryTakeRecordedDccFill(ulong address, ulong size, bool pending, out byte code)
+    {
+        code = 0;
+        using var held = _lock.Hold();
+        if (!pending)
+        {
+            ForgetRecordedDccFillsLocked(address, size);
+            return false;
+        }
+
+        foreach (var (start, fill) in _recordedDccFills)
+        {
+            if (address >= start && address + size <= start + fill.Size)
+            {
+                code = fill.Code;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private enum DccClearDecision
     {
         Apply,
@@ -548,6 +650,7 @@ internal sealed partial class MetalImageCache
             if (watchBegin < end && begin < watchBegin + watchSize)
             {
                 ReArmMaterializedDccLocked(watchBegin, watchSize);
+                ForgetRecordedDccFillsLocked(watchBegin, watchSize);
                 _pages.RemoveWatch(watchBegin, watchSize, blockReads: false);
                 _metadataWatches.Remove(watchBegin);
                 hit = true;
@@ -706,7 +809,11 @@ internal sealed partial class MetalImageCache
         using var held = _lock.Hold();
         // A guest fill of this metadata is the guest asking for the clear again.
         ReArmMaterializedDccLocked(address, size);
-        if (!_surfaceMetadata.TryGetValue(address, out var found))
+        _surfaceMetadata.TryGetValue(address, out var found);
+        // Only a fill this returns false for runs as written; one tracked here never does.
+        RecordDccFillLocked(
+            address, size, code, dccClearMask != 0 && (found is null || found.Kind == SurfaceMetadataKind.PendingDcc));
+        if (found is null)
         {
             // The fill may precede color-target discovery; a pending entry stays
             // invisible to the metadata queries until the target classifies it.
@@ -807,18 +914,24 @@ internal sealed partial class MetalImageCache
                 // now reads half-written data, and claiming it would hide the real clear.
                 // The deferral is remembered, so a draw that lands before it settles is not
                 // wiped by applying it later.
-                if (_owner.HasPendingGpuWrite(address, sliceSize))
+                var pending = _owner.HasPendingGpuWrite(address, sliceSize);
+                var recorded = TryTakeRecordedDccFill(address, sliceSize, pending, out var code);
+                if (pending && !recorded)
                 {
                     DeferDccSlice(imageIdentifier, address, imageWriteSequence);
                     continue;
                 }
 
-                if (!_backing.TryReadBacking(address, firstByte))
+                if (!recorded)
                 {
-                    continue;
+                    if (!_backing.TryReadBacking(address, firstByte))
+                    {
+                        continue;
+                    }
+
+                    code = firstByte[0];
                 }
 
-                var code = firstByte[0];
                 if (!PackedClearValue.TryDecodeDccColor(
                         view.Format,
                         code * 0x01010101u,
@@ -830,7 +943,7 @@ internal sealed partial class MetalImageCache
                     continue;
                 }
 
-                if (!IsUniformSlice(address, sliceSize, code, buffer))
+                if (!recorded && !IsUniformSlice(address, sliceSize, code, buffer))
                 {
                     ForgetDeferredDccSlice(imageIdentifier, address);
                     continue;
