@@ -569,6 +569,10 @@ internal sealed partial class MetalRenderHost :
     /// </summary>
     public void FlushAndWaitForGpu(MetalWaitReason reason)
     {
+        // Charged to a phase of its own, so the phase that asked (a resource walk reading
+        // bytes the GPU wrote, say) does not report the GPU's time as its own work.
+        using var waitProfile = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
+            SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandGpuWait);
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var serial = FlushCommandBuffer();
         var waited = _previousCommandBuffer;
@@ -598,6 +602,8 @@ internal sealed partial class MetalRenderHost :
     /// </summary>
     private void WaitForCommittedSerial(ulong serial, MetalWaitReason reason)
     {
+        using var waitProfile = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
+            SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandGpuWait);
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var profile = _completions.WaitFor(serial);
         ReportWait(serial, started, started, waited: 0, in profile, reason, partial: true);
