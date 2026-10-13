@@ -589,7 +589,7 @@ public sealed partial class GpuCommandInterpreter
     /// to write those bytes only moves the stall onto the worker thread. An unmet compare
     /// suspends the submission instead, and the host wakes it when the write lands.
     /// </remarks>
-    internal ulong PollValue(ulong address, bool is64Bit)
+    internal ulong PollValue(ulong address, bool is64Bit, bool commitPendingWrite)
     {
         var size = is64Bit ? sizeof(ulong) : sizeof(uint);
         RenderPhaseProfile.RecordCommandRead(
@@ -597,7 +597,7 @@ public sealed partial class GpuCommandInterpreter
             size);
         Span<byte> bytes = stackalloc byte[sizeof(ulong)];
         var destination = bytes[..size];
-        if (!_host.TryPollGuest(address, destination))
+        if (!_host.TryPollGuest(address, destination, commitPendingWrite))
         {
             throw _host.Fatal($"The command stream cannot read guest memory: address=0x{address:X16} size={size}.");
         }
