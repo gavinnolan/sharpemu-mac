@@ -80,19 +80,6 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandS
         return GuestMemory.TryRead(address, destination);
     }
 
-    // Polls that asked the host to commit the recording buffer so a pending write can land.
-    public List<ulong> PollCommits { get; } = new();
-
-    public bool TryPollGuest(ulong address, Span<byte> destination, bool commitPendingWrite)
-    {
-        if (commitPendingWrite)
-        {
-            PollCommits.Add(address);
-        }
-
-        return TryReadGuest(address, destination);
-    }
-
     public void RunPendingCommands()
     {
         PendingCommandRuns++;

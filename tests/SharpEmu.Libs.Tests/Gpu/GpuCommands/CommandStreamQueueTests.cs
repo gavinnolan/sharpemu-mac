@@ -295,31 +295,6 @@ public sealed class CommandStreamQueueTests
         Assert.Equal(7u, host.ReadDword(Label + 8));
     }
 
-    /// <summary>
-    /// A wait on this queue's own recorded label is satisfied by the label, so nothing is
-    /// committed for it: a commit would end the open render pass and store every attachment
-    /// for a wait that never sleeps. Only a wait nothing recorded satisfies commits.
-    /// </summary>
-    [Fact]
-    public void AWaitItsOwnRecordedLabelSatisfiesCommitsNothing()
-    {
-        var (host, queue) = NewQueue();
-        host.DefersEndOfPipeLabels = true;
-        host.PendingLabelTick = 5;
-        host.WriteDword(Label, 0);
-        Enqueue(host, queue, Graphics, 1, ReleaseMemoryInterrupt(Label, 1), WaitEqual(Label, 1), WriteLabel(Label + 8, 7));
-
-        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
-        Assert.Equal(0u, host.ReadDword(Label));
-        Assert.Equal(7u, host.ReadDword(Label + 8));
-        Assert.Empty(host.PollCommits);
-
-        Enqueue(host, queue, Graphics, 2, WaitEqual(Label, 2), WriteLabel(Label + 8, 9));
-        Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
-        Assert.Equal(new[] { Label }, host.PollCommits);
-        Assert.Equal(7u, host.ReadDword(Label + 8));
-    }
-
     [Fact]
     public void MemoryWaitWakesOnlyForAWriteThatTouchesItsOwnBytes()
     {

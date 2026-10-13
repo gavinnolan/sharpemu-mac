@@ -28,12 +28,7 @@ public sealed partial class GpuCommandInterpreter
             return;
         }
 
-        // The first look commits nothing. Committing the recording command buffer so a
-        // pending write can land ends the open render pass, and when this queue's own store
-        // or a recorded label satisfies the wait the commit buys nothing: nine in ten poll
-        // commits on Void Terrarium, Superliminal and Quake resumed without suspending, each
-        // one storing and reloading every attachment of the pass.
-        var value = PollValue(address, is64Bit, commitPendingWrite: false);
+        var value = PollValue(address, is64Bit);
         if (!WaitOperation.TryCompare(value, reference, mask, compareFunction, out var satisfied))
         {
             throw _host.Fatal($"The wait compare function is unknown: function={compareFunction} address=0x{address:X16}.");
@@ -47,14 +42,6 @@ public sealed partial class GpuCommandInterpreter
         if (!satisfied && PendingLabelLookup is { } pending && pending(address, is64Bit, out var labelValue))
         {
             _ = WaitOperation.TryCompare(labelValue, reference, mask, compareFunction, out satisfied);
-        }
-
-        if (!satisfied)
-        {
-            // Nothing recorded will satisfy it, so the bytes have to change: make sure the
-            // work that writes them is on its way before the submission sleeps on them.
-            value = PollValue(address, is64Bit, commitPendingWrite: true);
-            _ = WaitOperation.TryCompare(value, reference, mask, compareFunction, out satisfied);
         }
 
         if (!satisfied)

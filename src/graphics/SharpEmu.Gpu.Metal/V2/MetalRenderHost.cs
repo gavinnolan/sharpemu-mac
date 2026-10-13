@@ -1128,7 +1128,7 @@ internal sealed partial class MetalRenderHost :
     private static readonly bool PollTrace =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_POLL_TRACE") == "1";
 
-    public bool TryPollGuest(ulong address, Span<byte> destination, bool commitPendingWrite)
+    public bool TryPollGuest(ulong address, Span<byte> destination)
     {
         if (destination.IsEmpty)
         {
@@ -1160,7 +1160,7 @@ internal sealed partial class MetalRenderHost :
             return TryReadGuest(address, destination);
         }
 
-        if (commitPendingWrite && _commandBuffer != 0 &&
+        if (_commandBuffer != 0 &&
             _gpuWrites.MayCover(address, size) &&
             _gpuWrites.PendingSerial(address, size, CompletedSerial) >= _submissionSerial)
         {

@@ -92,13 +92,9 @@ public interface ICommandStreamHost
     /// poll must not wait for work that is about to write those bytes: an unmet compare
     /// suspends the submission and the host wakes it when the write lands. A host that puts
     /// the write in a command buffer has to make sure that buffer is on its way, or nothing
-    /// will ever change the bytes - when <paramref name="commitPendingWrite"/> is set: the
-    /// first look at a wait commits nothing, because the queue's own store or a recorded
-    /// label may satisfy it without the bytes changing. Hosts whose reads do not wait need
-    /// no override.
+    /// will ever change the bytes. Hosts whose reads do not wait need no override.
     /// </remarks>
-    bool TryPollGuest(ulong address, Span<byte> destination, bool commitPendingWrite) =>
-        TryReadGuest(address, destination);
+    bool TryPollGuest(ulong address, Span<byte> destination) => TryReadGuest(address, destination);
 
     // Immediate hosts retain their ordinary memory effects. An ordered host
     // must finish this owned operation before interpreter results are consumed.
