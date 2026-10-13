@@ -364,6 +364,12 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
             return;
         }
 
+        if (TryEncodeTextureTiles(context, plan, texture,
+                new MetalBufferSpan(source.Buffer, source.Offset, TiledCapacity(source)), MetalTileDirection.Detile))
+        {
+            return;
+        }
+
         var linear = StageUpload(context, plan, source, out var tight);
         var encoder = _tiler.BeginBlit(context);
         for (var index = 0; index < _copies.Count; index++)
@@ -418,6 +424,12 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
             return;
         }
 
+        if (TryEncodeTextureTiles(context, plan, texture,
+                new MetalBufferSpan(destination.Buffer, destination.Offset, pieceSize), MetalTileDirection.Tile))
+        {
+            return;
+        }
+
         // A readback lands in staging first whenever the retile reads it, the channels
         // need swapping, or the guest offset and pitch are not something a blit can write.
         var staged = BuildStagedOffsets(plan);
@@ -466,6 +478,121 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
         }
 
         MetalTiler.EndEncoding(compute);
+    }
+
+    // SHARPEMU_METAL_V2_TEXTURE_TILER=0 stages every tiled colour transfer through a
+    // linear buffer and a blit again, for a comparison or a bisect.
+    private static readonly bool TextureTilerEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_TEXTURE_TILER") != "0";
+
+    private static readonly nint SelPixelFormat = MetalNative.Selector("pixelFormat");
+    private static readonly nint SelUsage = MetalNative.Selector("usage");
+    private static readonly nint SelTextureType = MetalNative.Selector("textureType");
+    private static readonly nint SelMipmapLevelCount = MetalNative.Selector("mipmapLevelCount");
+    private static readonly nint SelArrayLength = MetalNative.Selector("arrayLength");
+    private static readonly nint SelNewTextureView =
+        MetalNative.Selector("newTextureViewWithPixelFormat:textureType:levels:slices:");
+    private static readonly nint SelReleaseView = MetalNative.Selector("release");
+
+    /// <summary>
+    /// The unsigned-integer view format whose texel is exactly one element of this colour
+    /// format, or Invalid when the format is not one a texture block copy may carry: an
+    /// sRGB format (no shader writes, and a read would decode it), a shared-exponent or
+    /// compressed one, or one whose texel is not 4, 8 or 16 bytes.
+    /// </summary>
+    internal static MtlPixelFormat TextureTileViewFormat(MtlPixelFormat format) => format switch
+    {
+        MtlPixelFormat.R32Uint or MtlPixelFormat.R32Sint or MtlPixelFormat.R32Float or
+        MtlPixelFormat.Rg16Unorm or MtlPixelFormat.Rg16Snorm or MtlPixelFormat.Rg16Uint or
+        MtlPixelFormat.Rg16Sint or MtlPixelFormat.Rg16Float or
+        MtlPixelFormat.Rgba8Unorm or MtlPixelFormat.Rgba8Snorm or MtlPixelFormat.Rgba8Uint or
+        MtlPixelFormat.Rgba8Sint or MtlPixelFormat.Bgra8Unorm or
+        MtlPixelFormat.Rgb10A2Unorm or MtlPixelFormat.Rgb10A2Uint or MtlPixelFormat.Bgr10A2Unorm or
+        MtlPixelFormat.Rg11B10Float => MtlPixelFormat.R32Uint,
+        MtlPixelFormat.Rg32Uint or MtlPixelFormat.Rg32Sint or MtlPixelFormat.Rg32Float or
+        MtlPixelFormat.Rgba16Unorm or MtlPixelFormat.Rgba16Snorm or MtlPixelFormat.Rgba16Uint or
+        MtlPixelFormat.Rgba16Sint or MtlPixelFormat.Rgba16Float => MtlPixelFormat.Rg32Uint,
+        MtlPixelFormat.Rgba32Uint or MtlPixelFormat.Rgba32Sint or MtlPixelFormat.Rgba32Float => MtlPixelFormat.Rgba32Uint,
+        _ => MtlPixelFormat.Invalid,
+    };
+
+    private static uint ViewElementBytes(MtlPixelFormat view) => view switch
+    {
+        MtlPixelFormat.R32Uint => 4,
+        MtlPixelFormat.Rg32Uint => 8,
+        MtlPixelFormat.Rgba32Uint => 16,
+        _ => 0,
+    };
+
+    // A tiled colour transfer moved in one pass between the guest surface and the texture,
+    // instead of through a linear staging buffer and a blit: half the bytes moved, and on
+    // a frame that ping-pongs aliased render targets through guest memory the transfers
+    // are most of the GPU's time. Only what the one-pass kernels address exactly the way
+    // the staged path does qualifies - whole-element texels of a plain 2D or 2D-array
+    // texture, no mip tail, no channel swap - and the staged path keeps the rest.
+    private bool TryEncodeTextureTiles(
+        IMetalSubmissionContext context, TransferPlan plan, nint texture, MetalBufferSpan guest, MetalTileDirection direction)
+    {
+        if (!TextureTilerEnabled || !plan.Tiled || plan.Swap || plan.Volume || plan.TexelWidth != 1 ||
+            plan.TexelHeight != 1 || _tiles.Count == 0 || guest.Offset % 4 != 0)
+        {
+            return false;
+        }
+
+        var format = (MtlPixelFormat)(uint)MetalV2Native.SendValue(texture, SelPixelFormat);
+        var viewFormat = TextureTileViewFormat(format);
+        if (viewFormat == MtlPixelFormat.Invalid || ViewElementBytes(viewFormat) != plan.ElementBytes)
+        {
+            return false;
+        }
+
+        var usage = (MtlTextureUsage)(uint)MetalV2Native.SendValue(texture, SelUsage);
+        var needed = direction == MetalTileDirection.Detile ? MtlTextureUsage.ShaderWrite : MtlTextureUsage.ShaderRead;
+        if ((usage & needed) == 0 || (format != viewFormat && (usage & MtlTextureUsage.PixelFormatView) == 0))
+        {
+            return false;
+        }
+
+        var type = (MtlTextureType)(uint)MetalV2Native.SendValue(texture, SelTextureType);
+        if (type is not (MtlTextureType.Type2D or MtlTextureType.Type2DArray))
+        {
+            return false;
+        }
+
+        var levels = MetalV2Native.SendValue(texture, SelMipmapLevelCount);
+        var slices = MetalV2Native.SendValue(texture, SelArrayLength);
+        foreach (var transfer in _tiles)
+        {
+            if (transfer.Tail || transfer.Depth != 1 || transfer.BytesPerElement != plan.ElementBytes ||
+                transfer.Level >= levels || transfer.Slice >= slices)
+            {
+                return false;
+            }
+        }
+
+        var view = MetalV2Native.SendNewTextureView(
+            texture, SelNewTextureView, (nuint)viewFormat, (nuint)MtlTextureType.Type2DArray,
+            new NsRange { Location = 0, Length = levels }, new NsRange { Location = 0, Length = slices });
+        if (view == 0)
+        {
+            throw GpuFatal.Fatal(
+                $"The texture tiler could not make its view: format={format} view={viewFormat} type={type} " +
+                $"levels={levels} slices={slices}.");
+        }
+
+        try
+        {
+            var compute = _tiler.BeginCompute(context);
+            _tiler.EncodeTextureBlockCopies(compute, guest, view, _tiles, direction);
+            MetalTiler.EndEncoding(compute);
+        }
+        finally
+        {
+            // The command buffer holds the view for as long as the encoded work needs it.
+            MetalNative.SendVoid(view, SelReleaseView);
+        }
+
+        return true;
     }
 
     private bool Ready(

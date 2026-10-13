@@ -121,6 +121,7 @@ internal sealed unsafe class MetalTiler : IDisposable
     private readonly nint[] _blockPipelines = new nint[PipelineCount];
     private readonly Dictionary<string, nint> _conversionPipelines = new(StringComparer.Ordinal);
     private readonly Dictionary<int, List<StagingSlab>> _staging = new();
+    private readonly Dictionary<(TileBlockKind Kind, MetalTileDirection Direction), nint> _textureLibraries = [];
     private nint _conversionLibrary;
     private nint _depthWritebackLibrary;
     private bool _disposed;
@@ -167,6 +168,12 @@ internal sealed unsafe class MetalTiler : IDisposable
         _conversionLibrary = 0;
         Release(_depthWritebackLibrary);
         _depthWritebackLibrary = 0;
+        foreach (var library in _textureLibraries.Values)
+        {
+            Release(library);
+        }
+
+        _textureLibraries.Clear();
         foreach (var slabs in _staging.Values)
         {
             foreach (var slab in slabs)
@@ -460,6 +467,82 @@ internal sealed unsafe class MetalTiler : IDisposable
         pipeline = CreatePipeline(DepthWritebackLibrary(), name, elementBytes, null, $"tiler {key}");
         _conversionPipelines[key] = pipeline;
         return pipeline;
+    }
+
+    private nint TextureCopyPipeline(TileBlockKind kind, MetalTileDirection direction, uint elementBytes)
+    {
+        var name = MetalTilerShaders.TextureKernelName(kind, direction);
+        var key = $"{name}/{elementBytes}";
+        if (_conversionPipelines.TryGetValue(key, out var pipeline))
+        {
+            return pipeline;
+        }
+
+        if (!_textureLibraries.TryGetValue((kind, direction), out var library))
+        {
+            library = CompileLibrary(MetalTilerShaders.CreateTextureBlockCopyLibrary(kind, direction),
+                $"tiler texture kind={kind} direction={direction}");
+            _textureLibraries[(kind, direction)] = library;
+        }
+
+        pipeline = CreatePipeline(library, name, elementBytes, null, $"tiler {key}");
+        _conversionPipelines[key] = pipeline;
+        return pipeline;
+    }
+
+    /// <summary>
+    /// Moves tiled guest bytes straight into a texture (detile) or straight out of one
+    /// (tile), one dispatch per transfer, through an unsigned-integer 2D-array view whose
+    /// texel is the transfer's element. The caller decides that every transfer qualifies
+    /// (<see cref="MetalTilerShaders.SupportsTextureCopy"/>, no mip tail, one slice deep);
+    /// one that does not is a caller bug, not a fallback.
+    /// </summary>
+    public void EncodeTextureBlockCopies(
+        nint encoder, MetalBufferSpan tiled, nint view, List<MetalTileTransfer> transfers, MetalTileDirection direction)
+    {
+        if (view == 0 || transfers.Count == 0 || !tiled.IsValid)
+        {
+            throw GpuFatal.Fatal(
+                $"The texture tile transfer is not encodable: view=0x{view:x} transfers={transfers.Count} tiled=0x{tiled.Size:x}.");
+        }
+
+        var tile = direction == MetalTileDirection.Tile;
+        var tiledBase = FoldBase(tiled.Offset, tiled.Size, out var tiledBind, "texture tile transfer");
+        if (tiledBase % 4 != 0)
+        {
+            throw GpuFatal.Fatal($"The texture tile transfer guest range is not dword aligned: offset=0x{tiled.Offset:x}.");
+        }
+
+        MetalV2Native.SendSetResourceAtIndex(encoder, SelSetTexture, view, MetalTilerShaders.TextureIndex);
+        MetalNative.SendSetBuffer(encoder, SelSetBuffer, tiled.Buffer, (nuint)tiledBind,
+            tile ? MetalTilerShaders.TargetIndex : MetalTilerShaders.SourceIndex);
+        var pipelineKind = (TileBlockKind)uint.MaxValue;
+        uint pipelineBytes = 0;
+        var subresource = stackalloc uint[2];
+        foreach (ref readonly var transfer in CollectionsMarshal.AsSpan(transfers))
+        {
+            if (!MetalTilerShaders.SupportsTextureCopy(transfer.BytesPerElement) || transfer.Tail || transfer.Depth != 1)
+            {
+                throw GpuFatal.Fatal(
+                    $"The texture tile transfer does not qualify: kind={(uint)transfer.Kind} bytes={transfer.BytesPerElement} " +
+                    $"tail={transfer.Tail} depth={transfer.Depth}.");
+            }
+
+            var arguments = Prepare(transfer, tile, tile ? 0u : tiledBase, tile ? tiledBase : 0u, tiled.Size,
+                ulong.MaxValue, out _);
+            if (pipelineKind != transfer.Kind || pipelineBytes != transfer.BytesPerElement)
+            {
+                MetalNative.SendVoid(encoder, SelSetPipeline, TextureCopyPipeline(transfer.Kind, direction, transfer.BytesPerElement));
+                pipelineKind = transfer.Kind;
+                pipelineBytes = transfer.BytesPerElement;
+            }
+
+            subresource[0] = transfer.Slice;
+            subresource[1] = transfer.Level;
+            MetalNative.SendSetBytes(encoder, SelSetBytes, (nint)subresource, (nuint)sizeof(uint) * 2,
+                MetalTilerShaders.SubresourceIndex);
+            Dispatch(encoder, arguments, MetalTilerShaders.Threadgroup(transfer.Kind));
+        }
     }
 
     private static void BindTarget(nint encoder, nint buffer, ulong offset)
