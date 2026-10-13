@@ -14,26 +14,26 @@ namespace SharpEmu.Gpu.Metal.Tests;
 // translations between the neutral vocabulary and Metal.
 public sealed class MetalV2HostTests
 {
+    // Every complete group of three is one rectangle (one patch); a trailing incomplete
+    // group draws nothing.
     [Theory]
-    [InlineData(1u, 4u, true)]
-    [InlineData(3u, 4u, true)]
-    [InlineData(4u, 4u, true)]
-    [InlineData(6u, 6u, false)]
-    [InlineData(2u, 2u, false)]
-    public void RectangleListDrawIsAStripOnlyForOneRectangle(uint count, uint drawn, bool strip)
+    [InlineData(0u, 0u)]
+    [InlineData(1u, 0u)]
+    [InlineData(2u, 0u)]
+    [InlineData(3u, 1u)]
+    [InlineData(4u, 1u)]
+    [InlineData(5u, 1u)]
+    [InlineData(6u, 2u)]
+    [InlineData(300u, 100u)]
+    public void ARectangleListDrawsOnePatchPerCompleteRectangle(uint count, uint patches)
     {
-        var (type, vertices) = MetalV2Formats.RectangleDraw(GpuPrimitiveTopology.PatchList, indexed: false, count);
-        Assert.Equal(drawn, vertices);
-        Assert.Equal(strip ? Mtl.PrimitiveTriangleStrip : Mtl.PrimitiveTriangle, type);
+        Assert.Equal(patches, MetalV2Formats.RectanglePatchCount(count));
     }
 
     [Fact]
-    public void IndexedRectangleListAndOtherTopologiesKeepTheirCount()
+    public void ARectangleListRasterizesTriangles()
     {
-        var (type, vertices) = MetalV2Formats.RectangleDraw(GpuPrimitiveTopology.PatchList, indexed: true, 3);
-        Assert.Equal(3u, vertices);
-        Assert.Equal(Mtl.PrimitiveTriangle, type);
-        Assert.Equal(3u, MetalV2Formats.RectangleDraw(GpuPrimitiveTopology.TriangleList, indexed: false, 3).VertexCount);
+        Assert.Equal(Mtl.PrimitiveTriangle, MetalV2Formats.Topology(GpuPrimitiveTopology.PatchList));
         Assert.Equal(3u, MetalV2Formats.TopologyClass(GpuPrimitiveTopology.PatchList));
     }
 

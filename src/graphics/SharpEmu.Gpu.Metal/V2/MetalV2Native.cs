@@ -117,6 +117,16 @@ internal static class Mtl
     // MTLVertexStepFunction.
     public const nint StepFunctionPerVertex = 1;
     public const nint StepFunctionPerInstance = 2;
+    public const nint StepFunctionPerPatchControlPoint = 4;
+
+    // Tessellation, which a rectangle list draws through (see Gen5MslRectangleList):
+    // MTLTessellationFactorStepFunction, MTLTessellationPartitionMode and
+    // MTLTessellationControlPointIndexType.
+    public const nuint TessellationFactorStepFunctionConstant = 0;
+    public const nuint TessellationPartitionModeInteger = 1;
+    public const nuint ControlPointIndexTypeNone = 0;
+    public const nuint ControlPointIndexTypeUInt16 = 1;
+    public const nuint ControlPointIndexTypeUInt32 = 2;
 
     // MTLMutability, for pipeline buffer arguments the shader only reads.
     public const nuint MutabilityImmutable = 1;
@@ -269,6 +279,36 @@ internal static partial class MetalV2Native
         nuint primitiveType,
         nuint vertexStart,
         nuint vertexCount,
+        nuint instanceCount,
+        nuint baseInstance);
+
+    // -drawPatches:patchStart:patchCount:patchIndexBuffer:patchIndexBufferOffset:
+    //  instanceCount:baseInstance:
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendDrawPatches(
+        nint receiver,
+        nint selector,
+        nuint numberOfPatchControlPoints,
+        nuint patchStart,
+        nuint patchCount,
+        nint patchIndexBuffer,
+        nuint patchIndexBufferOffset,
+        nuint instanceCount,
+        nuint baseInstance);
+
+    // -drawIndexedPatches:patchStart:patchCount:patchIndexBuffer:patchIndexBufferOffset:
+    //  controlPointIndexBuffer:controlPointIndexBufferOffset:instanceCount:baseInstance:
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendDrawIndexedPatches(
+        nint receiver,
+        nint selector,
+        nuint numberOfPatchControlPoints,
+        nuint patchStart,
+        nuint patchCount,
+        nint patchIndexBuffer,
+        nuint patchIndexBufferOffset,
+        nint controlPointIndexBuffer,
+        nuint controlPointIndexBufferOffset,
         nuint instanceCount,
         nuint baseInstance);
 

@@ -285,11 +285,14 @@ public sealed partial class RenderExecutor
         }
 
         ResolveShaderPrograms(banks, ref state);
-        if (arguments.IndirectArgumentsAddress != 0 && !_host.TakesIndirectDrawArguments(state.Programs.Vertex))
+        if (arguments.IndirectArgumentsAddress != 0 &&
+            (!_host.TakesIndirectDrawArguments(state.Programs.Vertex) ||
+                ((GuestPrimitiveType)banks.UserConfig.PrimitiveType == GuestPrimitiveType.RectangleList &&
+                    !_host.TakesIndirectRectangleListArguments)))
         {
-            // The backend runs this program as a mesh pipeline, whose launch grid is
-            // sized from the very counts the GPU would have read; they are read here
-            // instead, before any pass is open, so the draw still happens.
+            // The backend runs this program as a mesh pipeline, or this rectangle list as
+            // patches, whose launch is sized from the very counts the GPU would have read;
+            // they are read here instead, before any pass is open, so the draw still happens.
             DrawIndexedWithCpuArguments(submitId, banks, in arguments);
             return;
         }

@@ -172,6 +172,11 @@ public interface IRenderHost
     // before the pass begins. No draw is dropped either way.
     bool TakesIndirectDrawArguments(ShaderProgram vertexProgram) => true;
 
+    // The same question for a rectangle list. A host that draws each rectangle as one
+    // patch sizes the draw from the index count, which an indirect patch draw cannot
+    // read in the guest's argument layout, so the executor resolves such a draw first.
+    bool TakesIndirectRectangleListArguments => true;
+
     void Dispatch(uint groupsX, uint groupsY, uint groupsZ);
 
     // Executes a dispatch from three uint32 group counts in guest memory when the backend can
