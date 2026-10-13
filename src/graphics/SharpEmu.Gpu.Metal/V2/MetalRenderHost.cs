@@ -275,6 +275,14 @@ internal sealed partial class MetalRenderHost :
     private IMetalSubmissionContext BeginTransferTouching(MetalTransferCause cause, nint texture, nint otherTexture)
     {
         _transferCauses[(int)cause]++;
+        if (_preparation is null)
+        {
+            // Between packets the open pass is all a commit costs. Inside a preparation
+            // the images already acquired are stamped with this serial, so the bound
+            // waits for the next preparation to begin.
+            CommitIfTransientOverBudget();
+        }
+
         _ = EnsureCommandBuffer();
         NoteRecordedWork();
         EndEncoders(PassEndCause.Transfer);
@@ -1189,6 +1197,65 @@ internal sealed partial class MetalRenderHost :
 
     private long _pollFlushes;
     private long _scheduledLabelSubmissions;
+    private long _transientCommits;
+
+    // The shared memory a submission borrows while it is recorded - the upload rings
+    // that carry a range no window serves, a staged storage copy or a transient
+    // binding, and the staging a transfer detiles or writes back through - returns to
+    // its pool only when that command buffer has completed. A buffer that keeps
+    // recording therefore holds every ring and slab it touched, and each pool grows by
+    // one more. Silent Hill's loading moves a gigabyte a second through the rings and
+    // reloads 4K surfaces that alias each other on every use; while every poll
+    // committed the buffer, the rings and slabs returned within a few draws, and once
+    // polls stopped committing one command buffer took the ring pool from 128 MB to
+    // 9.9 GB in eight seconds (310 rings) before the memory limit ended the run.
+    // Committing at a budget hands the GPU the work early, which is all a commit is:
+    // copies and detiles of this size take the GPU well under a millisecond, and the
+    // pools then see their memory back. The budget is a handful of the largest
+    // surfaces, because every commit costs the open pass a store and a reload of its
+    // attachments. SHARPEMU_METAL_V2_TRANSIENT_COMMIT_MB overrides it, for measuring.
+    private const ulong DefaultTransientCommitBytes = 256UL * 1024 * 1024;
+
+    internal ulong TransientCommitBytes { get; set; } =
+        ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_TRANSIENT_COMMIT_MB"), out var megabytes) &&
+        megabytes != 0
+            ? megabytes * 1024 * 1024
+            : DefaultTransientCommitBytes;
+
+    /// <summary>The staging pool the transfers draw on; tests lend from it directly.</summary>
+    internal MetalTiler? StagingTiler => (_transfer as MetalImageTransfer)?.Tiler;
+
+    /// <summary>The ring and staging memory the pools have lent to the submission being recorded.</summary>
+    internal ulong RecordingTransientBytes
+    {
+        get
+        {
+            if (_commandBuffer == 0)
+            {
+                return 0;
+            }
+
+            var staging = _transfer is MetalImageTransfer { Tiler: var tiler } && tiler.RecordingSerial == _submissionSerial
+                ? tiler.RecordingBytes
+                : 0;
+            return staging + _guestMemory.RecordingBytes;
+        }
+    }
+
+    /// <summary>Commits the recording command buffer when the memory lent to it passed the budget.</summary>
+    private void CommitIfTransientOverBudget()
+    {
+        if (_commandBuffer == 0 || RecordingTransientBytes < TransientCommitBytes)
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref _transientCommits);
+        FlushCommandBuffer(PassEndCause.Transfer);
+    }
+
+    /// <summary>Commits the transient budget asked for so rings and slabs could return.</summary>
+    public long TakeTransientCommits() => Interlocked.Exchange(ref _transientCommits, 0);
 
     // SHARPEMU_METAL_V2_SCHEDULE_LABELS=0 leaves a label-carrying submission to the
     // driver's own pace, which is what every title did before labels were honest.
@@ -1424,6 +1491,7 @@ internal sealed partial class MetalRenderHost :
             .Append(" gpu_labels=").Append(labels.GpuTimed)
             .Append(" host_labels=").Append(labels.WithoutWindow)
             .Append(" poll_flushes=").Append(TakePollFlushes())
+            .Append(" transient_commits=").Append(TakeTransientCommits())
             .Append(" scheduled_labels=").Append(TakeScheduledLabelSubmissions())
             .Append(" keep_warm=").Append(Interlocked.Exchange(ref _keepWarmSubmissions, 0))
             .Append(" residency_skipped=").Append(TakeSkippedResidencyCalls())

@@ -330,11 +330,20 @@ internal sealed class MetalGuestMemory : IDisposable
     // Shared memory the upload rings hold now, for the periodic counters line.
     public ulong RingBytes => (ulong)Volatile.Read(ref _ringBytes);
 
+    /// <summary>
+    /// Shared memory the rings handed to the submission being recorded hold. A ring
+    /// returns to the pool only when the submission that last used it completes, so a
+    /// submission that keeps allocating holds every ring it touched and grows the pool
+    /// by a ring at a time; the host commits it at a budget.
+    /// </summary>
+    public ulong RecordingBytes { get; private set; }
+
     /// <summary>The serial a resource allocated now is retired at.</summary>
     public void BeginSubmission(ulong submissionSerial, ulong completedSerial)
     {
         _submissionSerial = submissionSerial;
         _completedSerial = completedSerial;
+        RecordingBytes = 0;
         // Residency is per submission: naming every window on every encoder asks the
         // kernel to make the whole 16 GiB backing writable-resident for a draw that
         // touches one window, which measured as tens of milliseconds between -commit
@@ -700,6 +709,13 @@ internal sealed class MetalGuestMemory : IDisposable
         }
 
         var ring = Reserve(size, Math.Max(alignment, 16), out var offset);
+        if (ring.LastUsedSerial != _submissionSerial)
+        {
+            // The whole ring is this submission's until it completes, however little
+            // of it the reservation took.
+            RecordingBytes += ring.Size;
+        }
+
         ring.LastUsedSerial = _submissionSerial;
         unsafe
         {

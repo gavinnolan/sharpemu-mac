@@ -212,11 +212,18 @@ internal sealed unsafe class MetalTiler : IDisposable
         // A slab handed out during this command buffer must not be handed out again, so
         // its serial always lands past the completed one even when the two are equal.
         var held = Math.Max(context.SubmissionSerial, completed + 1);
+        if (held != RecordingSerial)
+        {
+            RecordingSerial = held;
+            RecordingBytes = 0;
+        }
+
         foreach (var candidate in slabs)
         {
             if (candidate.Serial <= completed && candidate.Size >= rounded)
             {
                 candidate.Serial = held;
+                RecordingBytes += candidate.Size;
                 return new MetalBufferSpan(candidate.Buffer, 0, size);
             }
         }
@@ -231,8 +238,19 @@ internal sealed unsafe class MetalTiler : IDisposable
         slabs.Add(new StagingSlab { Buffer = buffer, Size = capacity, Serial = held });
         StagingBytes += capacity;
         StagingBufferCount++;
+        RecordingBytes += capacity;
         return new MetalBufferSpan(buffer, 0, size);
     }
+
+    /// <summary>The submission the slabs in <see cref="RecordingBytes"/> were handed to.</summary>
+    public ulong RecordingSerial { get; private set; }
+
+    /// <summary>
+    /// Shared memory the slabs handed to the submission being recorded hold. None of it
+    /// returns before that command buffer completes, so a buffer that keeps recording
+    /// transfers holds every slab it was given; the host commits it at a budget.
+    /// </summary>
+    public ulong RecordingBytes { get; private set; }
 
     // A loading screen uploads hundreds of megabytes inside a few command buffers, and
     // every piece in flight holds its own slab, so the pool reached that burst's size and

@@ -121,10 +121,15 @@ internal sealed partial class MetalRenderHost
         PumpHostMovieFrame();
 
         // Keep each submission's command buffer bounded so completions and flips are
-        // not stuck behind a frame's worth of recording.
+        // not stuck behind a frame's worth of recording, and so the rings and staging
+        // a draw's uploads borrowed return before the next draw borrows more.
         if (_recordedCommands >= 2048)
         {
             FlushCommandBuffer();
+        }
+        else
+        {
+            CommitIfTransientOverBudget();
         }
 
         _ = EnsureCommandBuffer();
