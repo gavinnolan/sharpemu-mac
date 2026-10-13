@@ -143,9 +143,19 @@ public sealed class ComputePrewarmRecord
 
 public sealed class ShaderPrewarmList : IDisposable
 {
-    public const string FileName = "shader-prewarm.bin";
-    public const string StampFileName = "shader-prewarm.stamp";
-    public const string ProgressFileName = "shader-prewarm.progress";
+    // Each record schema keeps its own list, stamp and progress: builds whose records
+    // differ share the title's directory, and one list for all of them was emptied by
+    // whichever build opened it last, so the next start of the other had nothing to
+    // prewarm. The lists of other schemas are kept, the most recently written first,
+    // up to MaxOtherLists.
+    public const int MaxOtherLists = 3;
+    private const string FilePrefix = "shader-prewarm";
+    private const string LegacyStem = FilePrefix;
+
+    public static string Stem => $"{FilePrefix}-{SchemaFingerprint.ToString("x8", CultureInfo.InvariantCulture)}";
+    public static string FileName => Stem + ".bin";
+    public static string StampFileName => Stem + ".stamp";
+    public static string ProgressFileName => Stem + ".progress";
 
     private const uint Magic = 0x57504553;
     private const uint FormatVersion = 3;
@@ -179,6 +189,7 @@ public sealed class ShaderPrewarmList : IDisposable
         {
             Directory.CreateDirectory(directory);
             var path = Path.Combine(directory, FileName);
+            AdoptLegacyList(directory, path);
             var file = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
             var list = new ShaderPrewarmList(file, Path.Combine(directory, StampFileName), Path.Combine(directory, ProgressFileName));
             try
@@ -191,12 +202,91 @@ public sealed class ShaderPrewarmList : IDisposable
                 throw;
             }
 
+            PruneOtherLists(directory);
             return list;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             Console.Error.WriteLine($"[LOADER][WARN] Shader prewarm list unavailable: {exception.Message}");
             return null;
+        }
+    }
+
+    // A list from before the per-schema names is taken over when its schema is this one.
+    private static void AdoptLegacyList(string directory, string path)
+    {
+        try
+        {
+            AdoptLegacyListCore(directory, path);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] Shader prewarm could not adopt the older list: {exception.Message}");
+        }
+    }
+
+    private static void AdoptLegacyListCore(string directory, string path)
+    {
+        var legacy = Path.Combine(directory, LegacyStem + ".bin");
+        if (File.Exists(path) || !File.Exists(legacy) || ReadSchema(legacy) != SchemaFingerprint)
+        {
+            return;
+        }
+
+        // Copied, not moved: a build from before the per-schema names may still run on
+        // this title, and it keeps its list until the bound on other lists removes it.
+        foreach (var (from, to) in new[] { (".stamp", StampFileName), (".progress", ProgressFileName) })
+        {
+            var source = Path.Combine(directory, LegacyStem + from);
+            if (File.Exists(source))
+            {
+                File.Copy(source, Path.Combine(directory, to), overwrite: true);
+            }
+        }
+
+        File.Copy(legacy, path);
+    }
+
+    private static uint? ReadSchema(string path)
+    {
+        Span<byte> header = stackalloc byte[3 * sizeof(uint)];
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        if (stream.ReadAtLeast(header, header.Length, throwOnEndOfStream: false) < header.Length ||
+            BitConverter.ToUInt32(header) != Magic ||
+            BitConverter.ToUInt32(header[sizeof(uint)..]) != FormatVersion)
+        {
+            return null;
+        }
+
+        return BitConverter.ToUInt32(header[(2 * sizeof(uint))..]);
+    }
+
+    private static void PruneOtherLists(string directory)
+    {
+        try
+        {
+            PruneOtherListsCore(directory);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] Shader prewarm could not remove older lists: {exception.Message}");
+        }
+    }
+
+    private static void PruneOtherListsCore(string directory)
+    {
+        var others = new DirectoryInfo(directory)
+            .EnumerateFiles(FilePrefix + "*.bin")
+            .Where(file => !string.Equals(file.Name, FileName, StringComparison.Ordinal))
+            .OrderByDescending(file => file.LastWriteTimeUtc)
+            .Skip(MaxOtherLists);
+        foreach (var file in others)
+        {
+            var stem = Path.GetFileNameWithoutExtension(file.Name);
+            foreach (var extension in new[] { ".bin", ".stamp", ".progress" })
+            {
+                File.Delete(Path.Combine(directory, stem + extension));
+            }
         }
     }
 
