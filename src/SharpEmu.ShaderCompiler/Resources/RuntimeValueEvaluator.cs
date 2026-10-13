@@ -460,7 +460,11 @@ public sealed class RuntimeValueEvaluator
         var descriptorWords = 0;
         using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.DescriptorWords))
         {
-            RawReadPrefetch.PrefetchSources(plan, sources, activeSources, evaluator);
+            using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.GuestRead))
+            {
+                RawReadPrefetch.PrefetchSources(plan, sources, activeSources, evaluator);
+            }
+
             foreach (var sourceIndex in sources)
             {
                 if (sourceIndex >= plan.DescriptorSources.Count)
@@ -495,7 +499,11 @@ public sealed class RuntimeValueEvaluator
             inputs.TablePhase?.Invoke(true);
             try
             {
-                RawReadPrefetch.PrefetchTable(plan, evaluator, cleanEvaluator, cleanFlatSlots);
+                using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.CleanGuestRead))
+                {
+                    RawReadPrefetch.PrefetchTable(plan, evaluator, cleanEvaluator, cleanFlatSlots);
+                }
+
                 for (var index = 0; index < plan.TableReads.Count; index++)
                 {
                     var read = plan.TableReads[index];
