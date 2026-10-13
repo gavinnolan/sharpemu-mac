@@ -256,4 +256,62 @@ public sealed class ShaderPrewarmListTests : IDisposable
         Assert.Equal(new byte[] { 3, 4, 5, 6 }, word.ToArray());
         Assert.False(replay.TryRead(PipelineTestGuest.MemoryBase + 0x106, word));
     }
+
+    [Fact]
+    public void AListOfAnotherSchemaIsLeftAlone()
+    {
+        Directory.CreateDirectory(_directory);
+        var other = Path.Combine(_directory, "shader-prewarm-deadbeef.bin");
+        File.WriteAllBytes(other, [1, 2, 3, 4]);
+        using (var list = Open())
+            CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
+
+        using var reloaded = Open();
+        Assert.Equal(1, reloaded.LoadedComputeCount);
+        Assert.Equal(new byte[] { 1, 2, 3, 4 }, File.ReadAllBytes(other));
+        Assert.NotEqual("shader-prewarm.bin", ShaderPrewarmList.FileName);
+    }
+
+    [Fact]
+    public void AnUnkeyedListOfThisSchemaIsAdoptedWithItsStamp()
+    {
+        using (var list = Open())
+        {
+            CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
+            list.WriteStamp("build-a");
+        }
+
+        File.Move(Path.Combine(_directory, ShaderPrewarmList.FileName), Path.Combine(_directory, "shader-prewarm.bin"));
+        File.Move(Path.Combine(_directory, ShaderPrewarmList.StampFileName), Path.Combine(_directory, "shader-prewarm.stamp"));
+        using var reloaded = Open();
+        Assert.Equal(1, reloaded.LoadedComputeCount);
+        Assert.True(reloaded.IsStampCurrent("build-a"));
+        Assert.True(File.Exists(Path.Combine(_directory, "shader-prewarm.bin")));
+    }
+
+    [Fact]
+    public void OnlyTheMostRecentlyWrittenListsOfOtherSchemasAreKept()
+    {
+        Directory.CreateDirectory(_directory);
+        var now = DateTime.UtcNow;
+        var others = Enumerable.Range(0, ShaderPrewarmList.MaxOtherLists + 2)
+            .Select(index => Path.Combine(_directory, $"shader-prewarm-{index:x8}"))
+            .ToArray();
+        for (var index = 0; index < others.Length; index++)
+        {
+            File.WriteAllBytes(others[index] + ".bin", [1]);
+            File.WriteAllText(others[index] + ".stamp", "stamp");
+            File.SetLastWriteTimeUtc(others[index] + ".bin", now.AddMinutes(-index));
+        }
+
+        using var list = Open();
+        for (var index = 0; index < others.Length; index++)
+        {
+            var kept = index < ShaderPrewarmList.MaxOtherLists;
+            Assert.Equal(kept, File.Exists(others[index] + ".bin"));
+            Assert.Equal(kept, File.Exists(others[index] + ".stamp"));
+        }
+
+        Assert.True(File.Exists(Path.Combine(_directory, ShaderPrewarmList.FileName)));
+    }
 }

@@ -136,7 +136,7 @@ internal sealed class MetalShaderPrewarmGate(bool disabled)
 }
 
 /// <summary>
-/// Compiles the compute pipelines a previous run recorded (shader-prewarm.bin) on
+/// Compiles the compute pipelines a previous run recorded (shader-prewarm-*.bin) on
 /// background threads at startup: the MSL library, its function and the compute
 /// pipeline state, which fills the driver's shader cache, so the first dispatch of
 /// each shader no longer waits for the driver. Uses the shared list and record
