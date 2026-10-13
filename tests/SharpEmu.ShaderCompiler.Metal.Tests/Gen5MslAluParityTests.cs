@@ -105,6 +105,32 @@ public sealed class Gen5MslAluParityTests(ITestOutputHelper output)
         Assert.Equal(0xFC00u, Execute(negative));
     }
 
+    // V_CVT_F32_F16 reads a half, so its negate flips bit 15 of the selected half. Flipping
+    // bit 31 of the register instead left the value positive: Silent Hill's motion blur
+    // negates one velocity component this way and blurred the wrong way along x.
+    [Theory]
+    [InlineData(0x12343E00u, 6u, 1u, 0u, 0xBFC00000u)] // SDWA dword, negate: -1.5
+    [InlineData(0x3E001234u, 5u, 1u, 0u, 0xBFC00000u)] // SDWA high word, negate: -1.5
+    [InlineData(0x1234BE00u, 6u, 0u, 1u, 0x3FC00000u)] // SDWA dword, abs: 1.5
+    public void HalfToFloatAppliesSdwaModifiersToTheHalf(uint source, uint select, uint neg, uint abs, uint expected)
+    {
+        var shader = Compile("VCvtF32F16", source, 0u, 0u, 0u, 0u, 0u, 0u, 0u, false,
+            control: new Gen5SdwaControl(6, 0, select, 6, false, false, abs, neg, 0, false, null));
+        Assert.DoesNotContain("^ 0x80000000u", shader.Source, StringComparison.Ordinal);
+        if (!RequireDevice()) return;
+        Assert.Equal(expected, Execute(shader));
+    }
+
+    [Theory]
+    [InlineData(0x40001234u, 1u, 0u, 0x40000000u)] // op_sel picks the high half: 2.0
+    [InlineData(0x12344000u, 0u, 1u, 0xC0000000u)] // VOP3 negate: -2.0
+    public void HalfToFloatAppliesVop3SelectAndNegate(uint source, uint select, uint neg, uint expected)
+    {
+        var shader = Compile("VCvtF32F16", source, 0u, 0u, 0u, select, 0u, neg, 0u, false);
+        if (!RequireDevice()) return;
+        Assert.Equal(expected, Execute(shader));
+    }
+
     private bool RequireDevice()
     {
         if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") != "1")
@@ -151,7 +177,8 @@ public sealed class Gen5MslAluParityTests(ITestOutputHelper output)
     }
 
     private static Gen5MslShader Compile(string opcode, uint a, uint b, uint c, uint old,
-        uint select, uint high, uint neg, uint abs, bool clamp, Gen5Operand? firstSource = null)
+        uint select, uint high, uint neg, uint abs, bool clamp, Gen5Operand? firstSource = null,
+        Gen5InstructionControl? control = null)
     {
         // Actual decoded register initialization and store, with a direct IR opcode
         // insertion so each semantic case can exercise the control masks independently.
@@ -160,7 +187,7 @@ public sealed class Gen5MslAluParityTests(ITestOutputHelper output)
             0xE0700000, 0x80020300, 0xBF810000], 8, 16);
         var program = Gen5ComputeFixtures.DecodeOrThrow(fixture);
         var instructions = program.Instructions.ToList();
-        Gen5InstructionControl? control = opcode.StartsWith("VPk", StringComparison.Ordinal) && opcode != "VPkFmacF16" ||
+        control ??= opcode.StartsWith("VPk", StringComparison.Ordinal) && opcode != "VPkFmacF16" ||
             opcode.StartsWith("VFmaMix", StringComparison.Ordinal)
             ? new Gen5Vop3pControl(select, high, neg, abs, clamp)
             : new Gen5Vop3Control(abs, neg, 0, clamp, select, null);
