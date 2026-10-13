@@ -356,6 +356,67 @@ public sealed unsafe class MetalImageAliasTests(ITestOutputHelper output)
         Assert.Equal(LargeSize, image.DirtyEnd);
     }
 
+    // A host write of known bytes through the backing - a packet-sized fill or copy -
+    // leaves an image stale over those bytes alone and keeps its page watch, so the
+    // guest's own later stores to the rest of it still fault.
+    [Fact]
+    public void AHostWriteDirtiesOnlyItsBytesAndKeepsTheWatch()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var image = rig.Cache.GetImage(rig.Acquire(ImageAddress, LargeSide, ImageRole.Texture));
+        Assert.True(image.IsWatched);
+        Assert.False(image.IsCpuDirty);
+
+        rig.Cache.InvalidateMemory(ImageAddress + 0x2000, 0x40);
+        ((IGuestImageStore)rig.Cache).MarkPreciseCpuWrite(ImageAddress + 0x2100, 0x10);
+
+        Assert.True(image.IsCpuDirty);
+        Assert.Equal(0x2000UL, image.DirtyStart);
+        Assert.Equal(0x2110UL, image.DirtyEnd);
+        Assert.True(image.IsWatched);
+    }
+
+    // A host write that only shares a page with a GPU-written image touches none of its
+    // bytes: the image keeps what only its texture holds.
+    [Fact]
+    public void AHostWriteSharingOnlyAPageLeavesAGpuWrittenImageAlone()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var image = rig.Cache.GetImage(rig.Acquire(ImageAddress + 0x100, SmallSide, ImageRole.ColorTarget));
+        Assert.True(image.IsGpuModified);
+
+        rig.Cache.InvalidateMemory(ImageAddress + 0x100 + SmallSize + 0x10, 0x40);
+
+        Assert.True(image.IsGpuModified);
+        Assert.False(image.IsCpuDirty);
+    }
+
+    // A fault names a page, not the bytes stored, and a write the backing cannot take
+    // goes through the guest mapping the watch protects: both still drop the watch and
+    // mark the whole image stale.
+    [Fact]
+    public void AFaultOrAWriteOutsideTheBackingStillDirtiesTheWholeImage()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var faulted = rig.Cache.GetImage(rig.Acquire(ImageAddress, LargeSide, ImageRole.Texture));
+        Assert.True(((IGuestImageStore)rig.Cache).MarkCpuWrite(ImageAddress + 0x2000, 4));
+        Assert.Equal(0UL, faulted.DirtyStart);
+        Assert.Equal(LargeSize, faulted.DirtyEnd);
+        Assert.False(faulted.IsWatched);
+
+        var second = ImageAddress + 0x20000;
+        var unbacked = rig.Cache.GetImage(rig.Acquire(second, LargeSide, ImageRole.Texture));
+        Assert.True(unbacked.IsWatched);
+        rig.SplitGuestAt(second + 0x2020);
+        rig.Cache.InvalidateMemory(second + 0x2000, 0x40);
+        Assert.Equal(0UL, unbacked.DirtyStart);
+        Assert.Equal(LargeSize, unbacked.DirtyEnd);
+        Assert.False(unbacked.IsWatched);
+    }
+
     private bool RequireDevice()
     {
         if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") != "1")
