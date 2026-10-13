@@ -205,6 +205,9 @@ public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
         yield return ("clamped subgroup", Gen5NggFixtures.CompileOrThrow(
             Gen5NggFixtures.CullingTriangle(),
             Gen5NggFixtures.StageInfo with { VerticesPerSubgroup = 4096, PrimitivesPerSubgroup = 4096 }));
+        yield return ("gs half", Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.CullingTriangle(),
+            Gen5NggFixtures.StageInfo with { GeometryVerticesOut = 3 }));
     }
 
     private float[] RenderOrThrow(Gen5ShaderProgram program)

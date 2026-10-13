@@ -1293,6 +1293,18 @@ internal sealed partial class MetalRenderHost
         var subgroups = Math.Max(
             (primitives + maxPrimitives - 1) / maxPrimitives,
             (count + maxVertices - 1) / maxVertices);
+
+        // A GS half assembles its input primitives from the draw's own topology, so the
+        // draw splits by input primitives and the prologue learns where each subgroup's
+        // share starts and how many vertices the draw has.
+        var input = MeshInputTopology(_boundGraphicsPipeline?.StaticParameters?.Topology);
+        var inputPrimitivesPerSubgroup = mesh.HasGeometryHalf ? mesh.InputPrimitivesPerSubgroup(input) : 0;
+        if (mesh.HasGeometryHalf)
+        {
+            var inputPrimitives = Gen5MslMeshInfo.InputPrimitiveCount(input, count);
+            subgroups = (inputPrimitives + inputPrimitivesPerSubgroup - 1) / inputPrimitivesPerSubgroup;
+        }
+
         if (subgroups == 0 || instanceCount == 0)
         {
             return;
@@ -1309,6 +1321,9 @@ internal sealed partial class MetalRenderHost
         words[5] = unchecked((uint)baseVertex);
         words[6] = instanceCount;
         words[7] = firstInstance;
+        words[13] = (uint)input;
+        words[14] = inputPrimitivesPerSubgroup;
+        words[15] = count;
         MetalNative.SendSetBuffer(
             _renderEncoder, SelSetMeshBuffer, drawInfo.Buffer, (nuint)drawInfo.Offset, (nuint)mesh.DrawInfoBufferIndex);
         // The index slot is read as a dword stream and must be bound even for an
@@ -1324,6 +1339,13 @@ internal sealed partial class MetalRenderHost
             new MtlSize { Width = 1, Height = 1, Depth = 1 },
             new MtlSize { Width = Math.Max(mesh.ThreadsPerThreadgroup, 1), Height = 1, Depth = 1 });
     }
+
+    private static Gen5MslMeshInputTopology MeshInputTopology(GpuPrimitiveTopology? topology) => topology switch
+    {
+        GpuPrimitiveTopology.TriangleStrip => Gen5MslMeshInputTopology.TriangleStrip,
+        GpuPrimitiveTopology.PointList => Gen5MslMeshInputTopology.PointList,
+        _ => Gen5MslMeshInputTopology.TriangleList,
+    };
 
     private void CountDraw(long startedTicks)
     {

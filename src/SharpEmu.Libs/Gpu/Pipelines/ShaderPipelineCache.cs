@@ -193,6 +193,13 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         var primitiveShader = PrimitiveShaderStageInfo(vertex, shaderInterface, context.ShaderStages);
+        if (primitiveShader is { } ngg && vertexSource.Registered.IsFused)
+        {
+            // The GS half of a fused program assembles its input primitives from LDS, so the
+            // mesh prologue needs to know there is one and how much each primitive can emit.
+            primitiveShader = ngg with { GeometryVerticesOut = Math.Max(shaderInterface.GeometryMaxVerticesOut, 1u) };
+        }
+
         var vertexCompileSource = primitiveShader is null
             ? vertexSource
             : WithGeometryUserDataAddress(vertexSource, vertex.GeometryUserDataAddress);

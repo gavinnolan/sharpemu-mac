@@ -163,7 +163,9 @@ position.
 | 10 | `user_vector_enable` | `GE_USER_VGPR_EN` bits 0-2. Informational today. |
 | 11 | `primitive_amplification` | `GE_NGG_SUBGRP_CNTL`. Informational today. |
 | 12 | `object_id` | `VGT_OBJECT_ID`. Informational today. |
-| 13-15 | reserved | Zero. |
+| 13 | `gs_input_topology` | Fused (ES+GS) programs only: the draw's input topology, `Gen5MslMeshInputTopology` (0 triangle list, 1 triangle strip, 2 point list). |
+| 14 | `gs_input_primitives` | Fused programs only: input primitives per subgroup, `Gen5MslMeshInfo.InputPrimitivesPerSubgroup`. The host launches one subgroup per this many. |
+| 15 | `input_vertex_count` | Fused programs only: the draw's vertex or index count, which bounds the last subgroup. |
 
 The index buffer at slot 3 is read as a dword stream: a 16-bit index is the containing
 dword shifted, so one binding serves both types. For an automatic draw the lane's vertex
@@ -233,7 +235,13 @@ reflects what `GS_ALLOC_REQ` asked for, so slots past the allocation are never r
 
 These are the parts the synthetic fixtures pin but the guest has not confirmed:
 
-1. **Primitive assembly for the GS vertex offsets.** `v0`/`v1`/`v4` are seeded as if the
+1. **Primitive assembly for the GS vertex offsets.** A fused program (one with a GS half,
+   `Gen5NggStageInfo.GeometryVerticesOut != 0`) gets its offsets assembled from the draw's
+   input topology — list, strip (odd triangles swap their first two vertices) or point —
+   each as the subgroup-local ES vertex shifted left by two, which is what the guest's GS
+   half decodes (`v_bfe_u32 v, v0, 2, 14`, then its own ES stride), and the subgroup's ES
+   vertex and GS primitive counts come from its share of the draw. Every other primitive
+   shader is still seeded as if the
    subgroup were a triangle *list*: primitive *p* uses ES slots `3p, 3p+1, 3p+2`. Strips,
    fans and indexed draws with vertex reuse pack the subgroup differently, and
    `GE_CNTL`'s group sizes are what bound that packing. A program that reads these offsets
