@@ -62,6 +62,7 @@ public static class StageStaticKey
             key.Add(ngg.LocalDataShareBytes);
             key.Add(ngg.VertexGroupSize);
             key.Add(ngg.PrimitiveGroupSize);
+            key.Add(ngg.GeometryVerticesOut);
         }
 
         foreach (var attribute in info.Attributes)

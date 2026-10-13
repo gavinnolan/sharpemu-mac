@@ -272,4 +272,59 @@ public sealed class NggMeshTranslationTests
         Assert.Equal(Gen5MslMeshTopology.Point, Assert.IsType<Gen5MslMeshInfo>(point.MeshInfo).Topology);
         Assert.Contains("topology::point", point.Source, StringComparison.Ordinal);
     }
+    [Fact]
+    public void AGsHalfAssemblesItsInputPrimitivesFromTheDrawTopology()
+    {
+        // A fused program's GS half reads its input vertices back from LDS through the GS
+        // vertex offsets: the guest takes bits 2-15 of each half as the ES vertex, so the
+        // offsets carry the vertex index shifted by two, and the subgroup takes its share
+        // of the draw's input primitives rather than a full budget.
+        var shader = Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.CullingTriangle(),
+            Gen5NggFixtures.StageInfo with { GeometryVerticesOut = 3 });
+        var mesh = Assert.IsType<Gen5MslMeshInfo>(shader.MeshInfo);
+        Assert.True(mesh.HasGeometryHalf);
+        Assert.Contains("v0 = ((sharpemu_gs_v0 << 2u) & 0xFFFFu) |", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("(((sharpemu_gs_v1 << 2u) & 0xFFFFu) << 16u);", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("v1 = (sharpemu_gs_v2 << 2u) & 0xFFFFu;", shader.Source, StringComparison.Ordinal);
+        Assert.Contains(
+            "const uint sharpemu_mesh_vertex_slot = sharpemu_gs_vertex_start + sharpemu_tg_index;",
+            shader.Source,
+            StringComparison.Ordinal);
+        Assert.Contains("sharpemu_draw.input_vertex_count", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("sharpemu_mesh_prim_base", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void APrimitiveShaderWithoutAGsHalfKeepsTheListOffsets()
+    {
+        var shader = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.CullingTriangle());
+        Assert.False(Assert.IsType<Gen5MslMeshInfo>(shader.MeshInfo).HasGeometryHalf);
+        Assert.Contains("const uint sharpemu_mesh_prim_base = sharpemu_tg_index * 3u;", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("sharpemu_gs_v0", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(Gen5MslMeshInputTopology.TriangleList, 3u, 21u)]
+    [InlineData(Gen5MslMeshInputTopology.TriangleStrip, 3u, 21u)]
+    [InlineData(Gen5MslMeshInputTopology.PointList, 3u, 21u)]
+    [InlineData(Gen5MslMeshInputTopology.TriangleStrip, 4u, 16u)]
+    [InlineData(Gen5MslMeshInputTopology.TriangleStrip, 1u, 62u)]
+    public void AGsSubgroupTakesWhatItsInputsAndOutputsFit(
+        Gen5MslMeshInputTopology input, uint verticesOut, uint expected)
+    {
+        var mesh = new Gen5MslMeshInfo(
+            ThreadsPerThreadgroup: 64, WavesPerThreadgroup: 2, MaxVertices: 64, MaxPrimitives: 64,
+            VerticesPerPrimitive: 3, Topology: Gen5MslMeshTopology.Triangle, ThreadgroupMemoryBytes: 4096,
+            DrawInfoBufferIndex: 2, IndexBufferIndex: 3, ReadsIndexBuffer: true, GeometryVerticesOut: verticesOut);
+        Assert.Equal(expected, mesh.InputPrimitivesPerSubgroup(input));
+    }
+
+    [Theory]
+    [InlineData(Gen5MslMeshInputTopology.TriangleStrip, 4u, 2u)]
+    [InlineData(Gen5MslMeshInputTopology.TriangleStrip, 2u, 0u)]
+    [InlineData(Gen5MslMeshInputTopology.TriangleList, 6u, 2u)]
+    [InlineData(Gen5MslMeshInputTopology.PointList, 5u, 5u)]
+    public void AGsDrawCountsItsInputPrimitivesByTopology(Gen5MslMeshInputTopology input, uint count, uint expected) =>
+        Assert.Equal(expected, Gen5MslMeshInfo.InputPrimitiveCount(input, count));
 }

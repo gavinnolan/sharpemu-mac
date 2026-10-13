@@ -94,7 +94,8 @@ public static partial class Gen5MslTranslator
             ThreadgroupMemoryBytes: ldsDwords * sizeof(uint),
             DrawInfoBufferIndex: MeshDrawInfoBufferIndex,
             IndexBufferIndex: MeshIndexBufferIndex,
-            ReadsIndexBuffer: true);
+            ReadsIndexBuffer: true,
+            GeometryVerticesOut: ngg.GeometryVerticesOut);
     }
 
     // Round the stage's LDS allocation up to a power of two inside the mesh budget; the
@@ -201,9 +202,9 @@ public static partial class Gen5MslTranslator
             source.AppendLine("    uint user_vector_enable;");
             source.AppendLine("    uint primitive_amplification;");
             source.AppendLine("    uint object_id;");
-            source.AppendLine("    uint reserved0;");
-            source.AppendLine("    uint reserved1;");
-            source.AppendLine("    uint reserved2;");
+            source.AppendLine("    uint gs_input_topology;");
+            source.AppendLine("    uint gs_input_primitives;");
+            source.AppendLine("    uint input_vertex_count;");
             source.AppendLine("};");
             source.AppendLine();
             source.AppendLine(
@@ -283,12 +284,51 @@ public static partial class Gen5MslTranslator
                 source.AppendLine($"    threadgroup uint2 sharpemu_mesh_vertex_target[{mesh.MaxVertices}];");
             }
 
+            if (mesh.HasGeometryHalf)
+            {
+                // A GS half takes this subgroup's share of the draw's input primitives, and
+                // the ES half the vertices they are assembled from: a list's primitives own
+                // three vertices each, a strip's share all but the first two.
+                source.AppendLine($"    const uint sharpemu_gs_input = {MeshDrawInfoName}.gs_input_topology;");
+                source.AppendLine(
+                    $"    const uint sharpemu_gs_prim_start = sharpemu_mesh_subgroup * {MeshDrawInfoName}.gs_input_primitives;");
+                source.AppendLine(
+                    "    const uint sharpemu_gs_vertex_start = sharpemu_gs_input == " +
+                    $"{(uint)Gen5MslMeshInputTopology.TriangleList}u ? sharpemu_gs_prim_start * 3u : sharpemu_gs_prim_start;");
+            }
+
             source.AppendLine("    if (sharpemu_tg_index == 0u)");
             source.AppendLine("    {");
-            source.AppendLine(
-                $"        sharpemu_mesh_alloc[0] = min({MeshDrawInfoName}.vertices_per_subgroup, {mesh.MaxVertices}u);");
-            source.AppendLine(
-                $"        sharpemu_mesh_alloc[1] = min({MeshDrawInfoName}.primitives_per_subgroup, {mesh.MaxPrimitives}u);");
+            if (mesh.HasGeometryHalf)
+            {
+                var list = (uint)Gen5MslMeshInputTopology.TriangleList;
+                var strip = (uint)Gen5MslMeshInputTopology.TriangleStrip;
+                source.AppendLine(
+                    $"        const uint sharpemu_gs_per = {MeshDrawInfoName}.gs_input_primitives;");
+                source.AppendLine(
+                    $"        const uint sharpemu_gs_left = {MeshDrawInfoName}.input_vertex_count > sharpemu_gs_vertex_start");
+                source.AppendLine(
+                    $"            ? {MeshDrawInfoName}.input_vertex_count - sharpemu_gs_vertex_start : 0u;");
+                source.AppendLine(
+                    $"        const uint sharpemu_gs_verts = min(sharpemu_gs_left, sharpemu_gs_input == {list}u ? sharpemu_gs_per * 3u");
+                source.AppendLine(
+                    $"            : sharpemu_gs_input == {strip}u ? sharpemu_gs_per + 2u : sharpemu_gs_per);");
+                source.AppendLine(
+                    $"        const uint sharpemu_gs_prims = sharpemu_gs_input == {list}u ? sharpemu_gs_verts / 3u");
+                source.AppendLine(
+                    $"            : sharpemu_gs_input == {strip}u ? (sharpemu_gs_verts > 2u ? sharpemu_gs_verts - 2u : 0u)");
+                source.AppendLine("            : sharpemu_gs_verts;");
+                source.AppendLine($"        sharpemu_mesh_alloc[0] = min(sharpemu_gs_verts, {mesh.MaxVertices}u);");
+                source.AppendLine($"        sharpemu_mesh_alloc[1] = min(sharpemu_gs_prims, {mesh.MaxPrimitives}u);");
+            }
+            else
+            {
+                source.AppendLine(
+                    $"        sharpemu_mesh_alloc[0] = min({MeshDrawInfoName}.vertices_per_subgroup, {mesh.MaxVertices}u);");
+                source.AppendLine(
+                    $"        sharpemu_mesh_alloc[1] = min({MeshDrawInfoName}.primitives_per_subgroup, {mesh.MaxPrimitives}u);");
+            }
+
             source.AppendLine("    }");
             source.AppendLine();
             source.AppendLine("    threadgroup_barrier(mem_flags::mem_threadgroup);");
@@ -324,12 +364,22 @@ public static partial class Gen5MslTranslator
 
             // The lane's ES vertex and GS primitive inside the subgroup, and the guest
             // vertex the geometry engine's index fetch would have produced for it.
-            source.AppendLine(
-                "    const uint sharpemu_mesh_vertex_slot = sharpemu_mesh_subgroup * " +
-                $"{mesh.MaxVertices}u + sharpemu_tg_index;");
-            source.AppendLine(
-                "    const uint sharpemu_mesh_prim_slot = sharpemu_mesh_subgroup * " +
-                $"{mesh.MaxPrimitives}u + sharpemu_tg_index;");
+            if (mesh.HasGeometryHalf)
+            {
+                source.AppendLine(
+                    "    const uint sharpemu_mesh_vertex_slot = sharpemu_gs_vertex_start + sharpemu_tg_index;");
+                source.AppendLine(
+                    "    const uint sharpemu_mesh_prim_slot = sharpemu_gs_prim_start + sharpemu_tg_index;");
+            }
+            else
+            {
+                source.AppendLine(
+                    "    const uint sharpemu_mesh_vertex_slot = sharpemu_mesh_subgroup * " +
+                    $"{mesh.MaxVertices}u + sharpemu_tg_index;");
+                source.AppendLine(
+                    "    const uint sharpemu_mesh_prim_slot = sharpemu_mesh_subgroup * " +
+                    $"{mesh.MaxPrimitives}u + sharpemu_tg_index;");
+            }
             source.AppendLine(
                 $"    const uint sharpemu_mesh_vertex_index = (uint)((int)sharpemu_mesh_index({MeshIndexBufferName}, " +
                 $"{MeshDrawInfoName}, sharpemu_mesh_vertex_slot) + {MeshDrawInfoName}.base_vertex);");
@@ -377,14 +427,45 @@ public static partial class Gen5MslTranslator
             // GS invocation id in v3. The ES/VS block follows the GS one, which is why the
             // vertex index lands in v5 and the instance index in v8 — the same registers
             // the per-vertex path seeds.
-            var perPrimitive = Math.Max(mesh.VerticesPerPrimitive, 1u);
-            source.AppendLine(
-                $"    const uint sharpemu_mesh_prim_base = sharpemu_tg_index * {perPrimitive}u;");
-            source.AppendLine(
-                $"    v[{Gen5NggExports.GsVertexOffset01Register}] = (sharpemu_mesh_prim_base & 0xFFFFu) |");
-            source.AppendLine("        (((sharpemu_mesh_prim_base + 1u) & 0xFFFFu) << 16u);");
-            source.AppendLine(
-                $"    v[{Gen5NggExports.GsVertexOffset23Register}] = (sharpemu_mesh_prim_base + 2u) & 0xFFFFu;");
+            if (mesh.HasGeometryHalf)
+            {
+                // A GS half's offsets name the ES vertices of the lane's input primitive, in
+                // the draw's topology, each as the subgroup-local vertex index shifted left by
+                // two: the guest extracts bits 2-15 of each half and scales by its own ES
+                // stride. An odd strip triangle swaps its first two vertices to keep winding.
+                var list = (uint)Gen5MslMeshInputTopology.TriangleList;
+                var point = (uint)Gen5MslMeshInputTopology.PointList;
+                var strip = (uint)Gen5MslMeshInputTopology.TriangleStrip;
+                source.AppendLine(
+                    $"    uint sharpemu_gs_v0 = sharpemu_gs_input == {list}u ? sharpemu_tg_index * 3u : sharpemu_tg_index;");
+                source.AppendLine(
+                    $"    uint sharpemu_gs_v1 = sharpemu_gs_input == {point}u ? 0u : sharpemu_gs_v0 + 1u;");
+                source.AppendLine(
+                    $"    const uint sharpemu_gs_v2 = sharpemu_gs_input == {point}u ? 0u : sharpemu_gs_v0 + 2u;");
+                source.AppendLine(
+                    $"    if (sharpemu_gs_input == {strip}u && ((sharpemu_gs_prim_start + sharpemu_tg_index) & 1u) != 0u)");
+                source.AppendLine("    {");
+                source.AppendLine("        const uint sharpemu_gs_swap = sharpemu_gs_v0;");
+                source.AppendLine("        sharpemu_gs_v0 = sharpemu_gs_v1;");
+                source.AppendLine("        sharpemu_gs_v1 = sharpemu_gs_swap;");
+                source.AppendLine("    }");
+                source.AppendLine(
+                    $"    v[{Gen5NggExports.GsVertexOffset01Register}] = ((sharpemu_gs_v0 << 2u) & 0xFFFFu) |");
+                source.AppendLine("        (((sharpemu_gs_v1 << 2u) & 0xFFFFu) << 16u);");
+                source.AppendLine(
+                    $"    v[{Gen5NggExports.GsVertexOffset23Register}] = (sharpemu_gs_v2 << 2u) & 0xFFFFu;");
+            }
+            else
+            {
+                var perPrimitive = Math.Max(mesh.VerticesPerPrimitive, 1u);
+                source.AppendLine(
+                    $"    const uint sharpemu_mesh_prim_base = sharpemu_tg_index * {perPrimitive}u;");
+                source.AppendLine(
+                    $"    v[{Gen5NggExports.GsVertexOffset01Register}] = (sharpemu_mesh_prim_base & 0xFFFFu) |");
+                source.AppendLine("        (((sharpemu_mesh_prim_base + 1u) & 0xFFFFu) << 16u);");
+                source.AppendLine(
+                    $"    v[{Gen5NggExports.GsVertexOffset23Register}] = (sharpemu_mesh_prim_base + 2u) & 0xFFFFu;");
+            }
             source.AppendLine($"    v[{Gen5NggExports.GsPrimitiveIdRegister}] = sharpemu_mesh_prim_slot;");
             source.AppendLine($"    v[{Gen5NggExports.GsInvocationIdRegister}] = 0u;");
             source.AppendLine($"    v[{Gen5NggExports.GsVertexOffset45Register}] = 0u;");

@@ -172,7 +172,15 @@ public readonly record struct Gen5NggStageInfo(
     uint PrimitiveAmplificationFactor,
     uint LocalDataShareBytes,
     uint VertexGroupSize,
-    uint PrimitiveGroupSize);
+    uint PrimitiveGroupSize)
+{
+    /// <summary>VGT_GS_MAX_VERT_OUT of a fused program, whose GS half runs after the ES
+    /// half in the same workgroup; zero for a primitive shader without a GS half. A GS
+    /// half reads its input vertices back from LDS through the GS vertex offsets, so the
+    /// launch state has to assemble those from the draw's input topology, and every input
+    /// primitive can emit up to this many vertices into the subgroup's output.</summary>
+    public uint GeometryVerticesOut { get; init; }
+}
 
 public readonly record struct Gen5Operand(Gen5OperandKind Kind, uint Value)
 {
