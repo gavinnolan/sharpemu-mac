@@ -109,6 +109,17 @@ public sealed class RenderExecutorStateTests : IDisposable
         Assert.True(_host.BegunRenderings[0].DepthStencilAttachment.DepthClear);
     }
 
+    [Fact]
+    public void DynamicState_ADepthWriteWithoutTheDepthTestWritesNothing()
+    {
+        var banks = Banks(withDepth: true);
+        banks.Context.DepthTarget = RegisterWords.Depth(DepthBase, 64, 64, depthTest: false, depthWrite: true);
+        var state = DrawAndTakeState(banks);
+
+        Assert.False(state.DepthTestEnabled);
+        Assert.False(state.DepthWriteEnabled);
+    }
+
     [Theory]
     [InlineData(true, false, false, false, true, 2f)]
     [InlineData(false, true, false, false, true, 4f)]
