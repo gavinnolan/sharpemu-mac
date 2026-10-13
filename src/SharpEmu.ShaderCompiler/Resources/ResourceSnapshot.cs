@@ -24,7 +24,7 @@ public sealed class ResourceSnapshot
     /// from the draw, not from the entry that was cached with it.
     /// </remarks>
     public ResourceSnapshot WithUserData(uint[] userData) =>
-        ReferenceEquals(UserData, userData)
+        ReferenceEquals(UserData, userData) || UserData.AsSpan().SequenceEqual(userData)
             ? this
             : new ResourceSnapshot
             {

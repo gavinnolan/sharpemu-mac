@@ -81,20 +81,27 @@ public interface ICommandStreamHost
 {
     ICpuMemory Memory { get; }
 
+    bool TryRecordLodStatistics(ulong destination, uint size) => false;
+
     // Reads guest memory the GPU may have written; the host synchronizes GPU-owned pages first.
     bool TryReadGuest(ulong address, Span<byte> destination);
 
+    // Reads a packet operand (a label, a predicate, indirect arguments): memory earlier work may
+    // write, unlike the packets themselves. A host that defers work completes it first.
+    bool TryReadGuestOperand(ulong address, Span<byte> destination) => TryReadGuest(address, destination);
+
     /// <summary>
-    /// Reads bytes a wait packet is polling, as memory holds them now.
+    /// Reads the label a wait packet polls, as memory holds it now.
     /// </summary>
     /// <remarks>
     /// The hardware's command processor reads memory and stalls on the value it finds, so a
     /// poll must not wait for work that is about to write those bytes: an unmet compare
-    /// suspends the submission and the host wakes it when the write lands. A host that puts
-    /// the write in a command buffer has to make sure that buffer is on its way, or nothing
-    /// will ever change the bytes. Hosts whose reads do not wait need no override.
+    /// suspends the submission and the host wakes it when the write lands, so a stale value
+    /// only delays the wait until a retry. A host that puts the write in a command buffer has
+    /// to make sure that buffer is on its way, or nothing will ever change the bytes. Hosts
+    /// whose operand reads do not wait need no override.
     /// </remarks>
-    bool TryPollGuest(ulong address, Span<byte> destination) => TryReadGuest(address, destination);
+    bool TryReadGuestWaitOperand(ulong address, Span<byte> destination) => TryReadGuestOperand(address, destination);
 
     // Immediate hosts retain their ordinary memory effects. An ordered host
     // must finish this owned operation before interpreter results are consumed.
@@ -111,6 +118,10 @@ public interface ICommandStreamHost
     void BeginSubmission(int queueId, ulong submissionId, object? geometrySnapshots);
 
     void Flush();
+
+    // A frame boundary: submits what the frame recorded. The submitter resumes once it returns, so a
+    // host that runs the stream ahead of its recording returns only after the frame is recorded.
+    void FlushFrame() => Flush();
 
     void FlushAndWait();
 

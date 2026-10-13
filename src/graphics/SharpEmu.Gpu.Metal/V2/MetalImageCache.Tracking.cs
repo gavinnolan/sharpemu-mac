@@ -1195,7 +1195,7 @@ internal sealed partial class MetalImageCache
         }
         else
         {
-            if (!PackedClearValue.TryDecodeColor(description.PixelFormat, packedClear, out var color))
+            if (!PackedClearValue.TryDecodeBufferColor(description.PixelFormat, packedClear, out var color))
             {
                 return false;
             }

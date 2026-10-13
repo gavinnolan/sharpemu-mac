@@ -144,7 +144,6 @@ public sealed class RuntimeValueEvaluator
                 }
 
                 var offset = (int)(register - _plan.UserDataBase);
-                _inputs.UserDataReads?.Note(offset);
                 result = _inputs.UserData[offset];
                 return true;
             }
@@ -344,7 +343,6 @@ public sealed class RuntimeValueEvaluator
     {
         result = 0;
         if ((uint)index >= (uint)_inputs.UserData.Count) return false;
-        _inputs.UserDataReads?.Note(index);
         result = _inputs.UserData[index];
         return true;
     }

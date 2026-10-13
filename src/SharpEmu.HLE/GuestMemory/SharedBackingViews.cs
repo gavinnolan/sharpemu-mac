@@ -474,6 +474,47 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
         }
     }
 
+    // The lock-free single-view write; false (with nothing written) for anything else. A backing
+    // enrolled in managed-write admission is left to TryWriteBacking, which captures the original
+    // mapping identity before it asks for admission and can wait out a busy publication.
+    public bool TryWriteSingleView(ulong address, ReadOnlySpan<byte> data)
+    {
+        if (data.IsEmpty || _backing?.ManagedWrites is not null)
+        {
+            return false;
+        }
+
+        var interval = _backing?.BeginManagedWriteOperation() ?? default;
+        if (!HostManagedWriteIntervals.AllowsBytes(interval))
+        {
+            return false;
+        }
+
+        var succeeded = false;
+        try
+        {
+            if (!TryAccessSingleView(address, (ulong)data.Length, out var target))
+            {
+                return false;
+            }
+
+            try
+            {
+                CopyToCanonicalAlias(target, data);
+                succeeded = true;
+                return true;
+            }
+            finally
+            {
+                ExitAliasAccess();
+            }
+        }
+        finally
+        {
+            HostBackingObject.EndManagedWrite(interval, succeeded);
+        }
+    }
+
     public bool TryReadBacking(ulong address, Span<byte> data)
     {
         if (TryAccessSingleView(address, (ulong)data.Length, out var source))

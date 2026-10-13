@@ -35,6 +35,8 @@ public static class VulkanGpuBackend
         // The resource caches behind the Vulkan presenter add their counters to the
         // shared per-window render report.
         RenderPhaseProfile.RegisterReportProvider(GuestBufferCache.TakeAsyncReadbackReport);
+        RenderPhaseProfile.RegisterReportProvider(GpuSyncProfile.TakeReport);
         RenderPhaseProfile.RegisterReportProvider(GuestImageCache.TakeLookupReport);
+        RenderPhaseProfile.RegisterReportProvider(GuestImageCache.TakeDccReport);
     }
 }

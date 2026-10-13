@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.HLE.FileSystem;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Diagnostics;
 using SharpEmu.Libs.Kernel;
@@ -101,13 +102,25 @@ public static class AmprExports
         public uint Flush;
     }
 
+    // A host file, or a file of an archive-mounted app0 that is not on disk.
     private sealed class CachedHostFile : IDisposable
     {
+        private readonly SafeFileHandle? _handle;
+        private readonly ZArchiveFileStream? _archived;
         private long _nextSequentialOffset = -1;
 
         public CachedHostFile(string path)
         {
-            Handle = File.OpenHandle(
+            // Only an archive-mounted app0 has files that are not on disk; without one, skip the
+            // existence probe so an open costs no extra metadata read.
+            if (App0Archive.IsMounted && !File.Exists(path) && App0Archive.OpenRead(path) is { } archived)
+            {
+                _archived = archived;
+                Length = archived.Length;
+                return;
+            }
+
+            _handle = File.OpenHandle(
                 path,
                 FileMode.Open,
                 FileAccess.Read,
@@ -118,11 +131,13 @@ public static class AmprExports
             // external game volume, and an asset storm pays it per open.
             Length = KernelMemoryCompatExports.TryGetReadOnlyImageLength(path, out var known)
                 ? known
-                : RandomAccess.GetLength(Handle);
+                : RandomAccess.GetLength(_handle);
         }
 
-        public SafeFileHandle Handle { get; }
         public long Length { get; }
+
+        public int Read(Span<byte> buffer, long offset) =>
+            _archived?.ReadAt(buffer, offset) ?? RandomAccess.Read(_handle!, buffer, offset);
 
         /// <summary>
         /// Asks the kernel to start pulling in the bytes after a read that
@@ -140,11 +155,12 @@ public static class AmprExports
         ///
         /// Only a continuing offset is advised: hinting ahead of a genuinely
         /// random read would evict pages a different stream still wants, and
-        /// the handle cache is shared by all of a title's AMPR reads.
+        /// the handle cache is shared by all of a title's AMPR reads. A file
+        /// read out of an archive has no host handle to advise.
         /// </remarks>
         public void AdviseSequentialReadAhead(long offset, int length)
         {
-            if (!HostReadAhead.Enabled || length <= 0)
+            if (_handle is null || !HostReadAhead.Enabled || length <= 0)
             {
                 return;
             }
@@ -158,10 +174,14 @@ public static class AmprExports
             }
 
             var window = (int)Math.Min(HostReadAhead.WindowBytes, Length - completed);
-            HostReadAhead.Advise(Handle, completed, window);
+            HostReadAhead.Advise(_handle, completed, window);
         }
 
-        public void Dispose() => Handle.Dispose();
+        public void Dispose()
+        {
+            _handle?.Dispose();
+            _archived?.Dispose();
+        }
     }
 
     private sealed class CachedHostFileEntry
@@ -1387,8 +1407,7 @@ public static class AmprExports
                 }
 
                 var request = (int)Math.Min((ulong)buffer.Length, size - bytesRead);
-                var read = RandomAccess.Read(
-                    cachedFile.Handle,
+                var read = cachedFile.Read(
                     buffer.AsSpan(0, request),
                     unchecked((long)absoluteOffset));
 

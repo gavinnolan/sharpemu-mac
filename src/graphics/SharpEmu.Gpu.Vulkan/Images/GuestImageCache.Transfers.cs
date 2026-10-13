@@ -9,6 +9,7 @@ using SharpEmu.Libs.VideoOut;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Gpu.Vulkan.Buffers;
 using SharpEmu.Gpu.Vulkan.Scheduling;
+using SharpEmu.Libs.Gpu.Scheduling;
 
 namespace SharpEmu.Gpu.Vulkan.Images;
 
@@ -763,6 +764,7 @@ public sealed unsafe partial class GuestImageCache
         _scheduler.QueuePriorityCompletionAction(() =>
         {
             download.Invalidate(offset, range.Size);
+            GpuWritebackEpoch.Advance();
             if (!backing.TryWriteBacking(range.Address, download.Mapped.Slice((int)offset, (int)range.Size)))
             {
                 throw SubmissionScheduler.Fatal($"The image readback could not be written to guest memory: address=0x{range.Address:X16} size=0x{range.Size:X}.");
@@ -835,7 +837,7 @@ public sealed unsafe partial class GuestImageCache
         byte stencilClear = 0;
         if (aspect == ImageAspectFlags.ColorBit)
         {
-            if (!PackedClearValue.TryDecodeColor(image.Description.PixelFormat, packedClear, out colorClear))
+            if (!PackedClearValue.TryDecodeBufferColor(image.Description.PixelFormat, packedClear, out colorClear))
             {
                 return false;
             }

@@ -212,6 +212,7 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMap
             if (Monitor.IsEntered(stripe))
                 throw new InvalidOperationException("Ordinary write wait cannot hold guest protection gates.");
     }
+    public bool TryWriteSingleView(ulong address, ReadOnlySpan<byte> data) => _views.TryWriteSingleView(address, data);
 
     public object AliasSnapshot => _views.AliasSnapshot;
 

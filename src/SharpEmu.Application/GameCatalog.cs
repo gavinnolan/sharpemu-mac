@@ -9,7 +9,12 @@ public sealed record CatalogGame(string Name, string? TitleId, string? Version, 
 
 public static class GameCatalog
 {
-    public static List<CatalogGame> ScanFolders(IReadOnlyList<string> folders, IReadOnlySet<string> excludedPaths)
+    /// <param name="archiveMetadataPath">
+    /// When given, game archives (<c>*.zar</c>) are listed too; it maps an archive to the eboot path
+    /// whose sce_sys folder holds that archive's metadata, or null when none could be read.
+    /// </param>
+    public static List<CatalogGame> ScanFolders(IReadOnlyList<string> folders, IReadOnlySet<string> excludedPaths,
+        Func<string, string?>? archiveMetadataPath = null)
     {
         var games = new List<CatalogGame>();
         var seen = new HashSet<string>(GameLibraryPath.Comparer);
@@ -29,7 +34,14 @@ public static class GameCatalog
 
             try
             {
-                foreach (var file in Directory.EnumerateFiles(folder, "eboot.bin", enumeration))
+                // A game is a folder with eboot.bin or, when the caller can read them, a .zar archive of one.
+                var files = Directory.EnumerateFiles(folder, "eboot.bin", enumeration);
+                if (archiveMetadataPath is not null)
+                {
+                    files = files.Concat(Directory.EnumerateFiles(folder, "*.zar", enumeration));
+                }
+
+                foreach (var file in files)
                 {
                     var fullPath = Path.GetFullPath(file);
                     if (!seen.Add(fullPath) || excludedPaths.Contains(fullPath))
@@ -48,10 +60,19 @@ public static class GameCatalog
                             $"[GUI][WARN] Could not inspect executable '{fullPath}': {exception.Message}");
                     }
 
-                    var (title, titleId, version) = TryReadParamJson(fullPath);
+                    // An archive's metadata is read from where the caller unpacked it, which stands in
+                    // for the game folder.
+                    var metadataPath = fullPath;
+                    if (archiveMetadataPath is not null &&
+                        fullPath.EndsWith(".zar", StringComparison.OrdinalIgnoreCase))
+                    {
+                        metadataPath = archiveMetadataPath(fullPath) ?? fullPath;
+                    }
+
+                    var (title, titleId, version) = TryReadParamJson(metadataPath);
                     games.Add(new CatalogGame(
-                        title ?? GameNameFor(fullPath), titleId, version, fullPath, size,
-                        FindCoverFor(fullPath), FindBackgroundFor(fullPath)));
+                        title ?? GameNameFor(metadataPath), titleId, version, fullPath, size,
+                        FindCoverFor(metadataPath), FindBackgroundFor(metadataPath)));
                 }
             }
             catch (Exception exception)

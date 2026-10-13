@@ -540,6 +540,7 @@ public static class RenderPhaseProfile
             $"[PERF][RENDER_MS] window_s={seconds:F1} frames={frames} " +
             string.Join(" ", parts.Select(part => $"{part.Phase}={part.Milliseconds:F2}ms/n{part.Entries}")));
 
+        GpuWaitSiteProfile.Report();
         ReportImageUploads();
         BufferUploadProfile.Report();
         Console.Error.WriteLine(SharpEmu.ShaderCompiler.Resources.ResourceMaterializationCache.TakeReport());

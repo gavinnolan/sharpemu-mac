@@ -18,6 +18,7 @@ using Avalonia.Threading;
 using Avalonia.VisualTree;
 using SharpEmu.Core.Cpu;
 using SharpEmu.Core.Runtime;
+using SharpEmu.HLE.FileSystem;
 using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Pad;
 using SharpEmu.Libs.VideoOut;
@@ -405,6 +406,7 @@ public partial class MainWindow : Window
             await CopyToClipboardAsync((GameList.SelectedItem as GameEntry)?.TitleId);
         CtxGameSettings.Click += (_, _) => OpenSelectedGameSettings();
         CtxRemove.Click += (_, _) => RemoveSelectedFromLibrary();
+        CtxPackZar.Click += async (_, _) => await PackSelectedAsZarAsync();
 
         Opened += async (_, _) => await OnOpenedAsync();
         Closing += (_, _) => BeginWindowClosing();
@@ -1970,6 +1972,19 @@ public partial class MainWindow : Window
     /// </summary>
     private static long ComputeInstallSize(string ebootPath)
     {
+        // An archive is the whole game; the folder it sits in may hold other games.
+        if (ZArchive.IsArchivePath(ebootPath))
+        {
+            try
+            {
+                return new FileInfo(ebootPath).Length;
+            }
+            catch (IOException)
+            {
+                return 0;
+            }
+        }
+
         var directory = Path.GetDirectoryName(ebootPath);
         if (directory is null)
         {
@@ -1999,8 +2014,25 @@ public partial class MainWindow : Window
     }
 
     private static List<GameEntry> ScanFolders(IReadOnlyList<string> folders, IReadOnlySet<string> excludedPaths) =>
-        GameCatalog.ScanFolders(folders, excludedPaths).Select(game => new GameEntry(game.Name, game.TitleId,
+        GameCatalog.ScanFolders(folders, excludedPaths, ArchiveMetadataPath).Select(game => new GameEntry(game.Name, game.TitleId,
             game.Version, game.Path, game.SizeBytes, game.CoverPath, game.BackgroundPath)).ToList();
+
+    // An archive's metadata is read from its cache folder, which stands in for the game folder.
+    private static string? ArchiveMetadataPath(string archivePath)
+    {
+        try
+        {
+            return ZArchiveCache.ExtractMetadata(archivePath) is { } cacheRoot
+                ? Path.Combine(cacheRoot, "eboot.bin")
+                : null;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            Console.Error.WriteLine(
+                $"[GUI][WARN] Could not read archive '{archivePath}': {exception.Message}");
+            return null;
+        }
+    }
 
     private static (string? Title, string? TitleId, string? Version) TryReadParamJson(string path) => GameCatalog.TryReadParamJson(path);
     private static string? FindCoverFor(string path) => GameCatalog.FindCoverFor(path);
@@ -2280,6 +2312,100 @@ public partial class MainWindow : Window
         CtxLaunch.IsEnabled = !_isRunning;
         CtxCopyTitleId.IsEnabled = game.TitleId is not null;
         CtxGameSettings.IsEnabled = !string.IsNullOrWhiteSpace(game.TitleId);
+        CtxPackZar.IsEnabled = !ZArchive.IsArchivePath(game.Path);
+    }
+
+    // Packs the selected game's folder into a .zar chosen by the user, beside the folder by default.
+    private async Task PackSelectedAsZarAsync()
+    {
+        if (GameList.SelectedItem is not GameEntry game || ZArchive.IsArchivePath(game.Path) ||
+            Path.GetDirectoryName(game.Path) is not { } gameFolder)
+        {
+            return;
+        }
+
+        var loc = Localization.Instance;
+        var options = new FilePickerSaveOptions
+        {
+            Title = loc.Get("Dialog.SaveZar"),
+            SuggestedFileName = SuggestedArchiveName(Path.GetFileName(gameFolder), game.TitleId, game.Version),
+            DefaultExtension = "zar",
+            FileTypeChoices = [new FilePickerFileType(loc.Get("Dialog.ZarFiles")) { Patterns = ["*.zar"] }],
+        };
+        if (Path.GetDirectoryName(gameFolder) is { } parent &&
+            await StorageProvider.TryGetFolderFromPathAsync(parent) is { } startFolder)
+        {
+            options.SuggestedStartLocation = startFolder;
+        }
+
+        var file = await StorageProvider.SaveFilePickerAsync(options);
+        var destination = file?.TryGetLocalPath();
+        if (string.IsNullOrEmpty(destination))
+        {
+            return;
+        }
+
+        // A running game may hold files in the folder open, so it is never deleted then.
+        var dialog = new ZarPackDialog(game.Name, gameFolder, destination, canDeleteSource: !_isRunning);
+        dialog.MuteMusicChanged += SetTitleMusicMuted;
+        try
+        {
+            if (await dialog.ShowDialog<bool>(this))
+            {
+                AppendConsoleLine(loc.Format("Status.PackedZar", destination), SuccessLineBrush);
+            }
+        }
+        finally
+        {
+            SetTitleMusicMuted(false);
+        }
+    }
+
+    // TITLEID-version (PPSA01234-1.004): the title id differs between regions of the same game and
+    // the version between updates, so each archive gets its own name and cache folder. Without a
+    // title id the game folder's name stands in.
+    internal static string SuggestedArchiveName(string folderName, string? titleId, string? version)
+    {
+        var name = string.IsNullOrWhiteSpace(titleId) ? folderName : titleId.Trim();
+        var shortVersion = ShortVersion(version);
+        if (shortVersion.Length > 0)
+        {
+            name = $"{name}-{shortVersion}";
+        }
+
+        foreach (var invalid in Path.GetInvalidFileNameChars())
+        {
+            name = name.Replace(invalid, '_');
+        }
+
+        return name;
+    }
+
+    // "01.004.000" reads as "1.004": the leading zeros of the major number go, and the last part
+    // stays only when it is not zero. A version in another form is kept as it is.
+    private static string ShortVersion(string? version)
+    {
+        var text = version?.Trim() ?? string.Empty;
+        var parts = text.Split('.');
+        if (parts.Length < 2 || !parts.All(part => part.Length > 0 && part.All(char.IsAsciiDigit)))
+        {
+            return text;
+        }
+
+        var major = parts[0].TrimStart('0');
+        var shortened = $"{(major.Length == 0 ? "0" : major)}.{parts[1]}";
+        return parts.Length > 2 && parts[2].Any(digit => digit != '0')
+            ? $"{shortened}.{string.Join('.', parts[2..])}"
+            : shortened;
+    }
+
+    private void SetTitleMusicMuted(bool muted)
+    {
+        _sndPreview.Muted = muted;
+        if (!muted && WindowState != WindowState.Minimized)
+        {
+            _sndPreview.Resume();
+        }
     }
 
     private void OpenSelectedGameFolder()
@@ -2455,7 +2581,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        var directory = Path.GetDirectoryName(game.Path);
+        var directory = ZArchive.IsArchivePath(game.Path)
+            ? ZArchiveCache.GetCacheRoot(game.Path)
+            : Path.GetDirectoryName(game.Path);
         var sndPath = directory is null ? null : Path.Combine(directory, "sce_sys", "snd0.at9");
         if (sndPath is not null && File.Exists(sndPath))
         {
@@ -2563,7 +2691,7 @@ public partial class MainWindow : Window
             FileTypeFilter = new[]
             {
                 new FilePickerFileType(Localization.Instance.Get("Dialog.PsExecutables"))
-                    { Patterns = new[] { "eboot.bin", "*.bin", "*.self", "*.elf" } },
+                    { Patterns = new[] { "eboot.bin", "*.bin", "*.self", "*.elf", "*.zar" } },
                 FilePickerFileTypes.All,
             },
         });

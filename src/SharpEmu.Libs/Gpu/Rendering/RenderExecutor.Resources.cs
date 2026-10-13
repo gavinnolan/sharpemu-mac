@@ -51,7 +51,8 @@ public sealed partial class RenderExecutor
             throw _host.Fatal($"The vertex input has too many buffers: count={buffers.Length} max={VertexInputInfo.MaxBuffers}.");
         }
 
-        Span<VertexBufferRange> ranges = stackalloc VertexBufferRange[VertexInputInfo.MaxBuffers];
+        // Sized to this draw's buffers: a MaxBuffers span is over a kilobyte, zeroed on every draw.
+        Span<VertexBufferRange> ranges = stackalloc VertexBufferRange[buffers.Length];
         Span<ulong> sizes = stackalloc ulong[buffers.Length];
         for (var slot = 0; slot < buffers.Length; slot++) sizes[slot] = buffers[slot].Size;
         foreach (var attribute in vertexInput.Attributes)
@@ -82,7 +83,7 @@ public sealed partial class RenderExecutor
         }
 
         ranges[..rangeCount].Sort(static (left, right) => left.BaseAddress.CompareTo(right.BaseAddress));
-        Span<VertexBufferRange> merged = stackalloc VertexBufferRange[VertexInputInfo.MaxBuffers];
+        Span<VertexBufferRange> merged = stackalloc VertexBufferRange[buffers.Length];
         var mergedCount = 0;
         for (var i = 0; i < rangeCount; i++)
         {

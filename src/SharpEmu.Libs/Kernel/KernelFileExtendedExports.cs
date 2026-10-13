@@ -4,6 +4,7 @@
 using SharpEmu.HLE;
 using SharpEmu.Libs.Diagnostics;
 using System.Buffers;
+using SharpEmu.HLE.FileSystem;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Threading;
@@ -36,11 +37,37 @@ public static partial class KernelMemoryCompatExports
     private static long _nextAioSubmitId = 1;
     private static readonly ConcurrentDictionary<uint, int> _aioResults = new();
 
-    private static FileStream? GetOpenFile(int fd)
+    private static Stream? GetOpenFile(int fd)
     {
         lock (_fdGate)
         {
             return _openFiles.TryGetValue(fd, out var stream) ? stream : null;
+        }
+    }
+
+    // A descriptor is a host file or a read-only file served from a mounted archive.
+    private static int ReadOpenFileAt(Stream stream, Span<byte> buffer, long offset) => stream switch
+    {
+        FileStream file => RandomAccess.Read(file.SafeFileHandle, buffer, offset),
+        ZArchiveFileStream archived => archived.ReadAt(buffer, offset),
+        _ => throw new IOException("The descriptor does not support positional reads."),
+    };
+
+    private static void WriteOpenFileAt(Stream stream, ReadOnlySpan<byte> payload, long offset)
+    {
+        if (stream is not FileStream file)
+        {
+            throw new IOException("The descriptor is read-only.");
+        }
+
+        RandomAccess.Write(file.SafeFileHandle, payload, offset);
+    }
+
+    private static void FlushOpenFileToDisk(Stream stream)
+    {
+        if (stream is FileStream file)
+        {
+            file.Flush(flushToDisk: true);
         }
     }
 
@@ -91,7 +118,7 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
-        FileIoProfile.NotePath(stream.Name);
+        FileIoProfile.NotePath(OpenFileName(stream));
 
         if (requested == 0)
         {
@@ -108,19 +135,20 @@ public static partial class KernelMemoryCompatExports
             int read;
             try
             {
-                read = RandomAccess.Read(stream.SafeFileHandle, buffer.AsSpan(0, requested), offset);
+                read = ReadOpenFileAt(stream, buffer.AsSpan(0, requested), offset);
             }
             catch (IOException)
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
             }
 
-            if (read > 0)
+            if (read > 0 && stream is FileStream file)
             {
                 // pread never advances the file offset, so the kernel's own
                 // read-ahead cannot see that a chunked archive read is
-                // sequential; say so explicitly.
-                AdvisePreadReadAhead(fd, stream, offset, read);
+                // sequential; say so explicitly. A file served from a mounted
+                // archive has no host handle to advise.
+                AdvisePreadReadAhead(fd, file, offset, read);
             }
 
             SharpEmu.HLE.GuestLoadProgress.NoteFileRead(read);
@@ -251,7 +279,7 @@ public static partial class KernelMemoryCompatExports
 
             try
             {
-                RandomAccess.Write(stream.SafeFileHandle, payload.AsSpan(0, requested), offset);
+                WriteOpenFileAt(stream, payload.AsSpan(0, requested), offset);
             }
             catch (IOException)
             {
@@ -308,7 +336,7 @@ public static partial class KernelMemoryCompatExports
 
         try
         {
-            stream.Flush(flushToDisk: true);
+            FlushOpenFileToDisk(stream);
         }
         catch (IOException)
         {
@@ -326,7 +354,7 @@ public static partial class KernelMemoryCompatExports
         {
             foreach (var stream in _openFiles.Values)
             {
-                try { stream.Flush(flushToDisk: true); } catch (IOException) { }
+                try { FlushOpenFileToDisk(stream); } catch (IOException) { }
             }
         }
 
@@ -755,11 +783,11 @@ public static partial class KernelMemoryCompatExports
                     return -1;
                 }
 
-                RandomAccess.Write(stream.SafeFileHandle, scratch, offset);
+                WriteOpenFileAt(stream, scratch, offset);
                 return nbyte;
             }
 
-            var read = RandomAccess.Read(stream.SafeFileHandle, scratch, offset);
+            var read = ReadOpenFileAt(stream, scratch, offset);
             if (read > 0 && !ctx.Memory.TryWrite(buf, scratch.AsSpan(0, read)))
             {
                 return -1;

@@ -209,16 +209,16 @@ public sealed class CommandMemoryOperation
                 else host.CopyBuffer(Address, SourceAddress, ByteCount, DestinationIsGds, SourceIsGds);
                 break;
             case OperationKind.Atomic:
-                if (!atomic.TryApply(host.TryReadGuest, host.Memory, out var prior, out _, out var compared))
+                if (!atomic.TryApply(host.TryReadGuestOperand, host.Memory, out var prior, out _, out var compared))
                     throw host.Fatal($"The atomic address cannot be accessed: address=0x{Address:X16} size={ByteCount}.");
                 PriorValue = prior; ComparePassed = compared;
                 break;
             case OperationKind.SemaphoreSignal:
-                if (!semaphore.IsSupported || !MemorySemaphorePacket.TrySignal(host.TryReadGuest, host.Memory, Address, semaphore.WriteSignal, out _))
+                if (!semaphore.IsSupported || !MemorySemaphorePacket.TrySignal(host.TryReadGuestOperand, host.Memory, Address, semaphore.WriteSignal, out _))
                     throw host.Fatal($"The semaphore cannot be signaled: address=0x{Address:X16}.");
                 break;
             case OperationKind.SemaphoreConsume:
-                if (!semaphore.IsSupported || !MemorySemaphorePacket.TryConsume(host.TryReadGuest, host.Memory, Address, out var previous))
+                if (!semaphore.IsSupported || !MemorySemaphorePacket.TryConsume(host.TryReadGuestOperand, host.Memory, Address, out var previous))
                     throw host.Fatal($"The semaphore cannot be read: address=0x{Address:X16}.");
                 PriorValue = previous;
                 break;

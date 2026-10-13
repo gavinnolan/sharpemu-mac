@@ -1140,7 +1140,7 @@ internal sealed partial class MetalRenderHost :
     private static readonly bool PollTrace =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_POLL_TRACE") == "1";
 
-    public bool TryPollGuest(ulong address, Span<byte> destination)
+    public bool TryReadGuestWaitOperand(ulong address, Span<byte> destination)
     {
         if (destination.IsEmpty)
         {

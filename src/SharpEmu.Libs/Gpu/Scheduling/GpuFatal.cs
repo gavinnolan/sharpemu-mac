@@ -17,6 +17,13 @@ public static class GpuFatal
 {
     internal static Action<string> OnFatal = message => Environment.FailFast(message);
 
+    // Set on a thread that does work ahead of the render thread: there a fatal condition only
+    // abandons that work, which the render thread then does itself and fails on if it is real.
+    [ThreadStatic]
+    internal static bool ThrowOnFatal;
+
+    public sealed class AbandonedWorkException(string message) : Exception(message);
+
     /// <summary>
     /// Reports the fatal error, then returns an exception for the caller to
     /// throw so control stops there.
@@ -27,6 +34,11 @@ public static class GpuFatal
     /// <summary>Reports a GPU failure without losing its original cause.</summary>
     public static Exception Fatal(string message, Exception? innerException)
     {
+        if (ThrowOnFatal)
+        {
+            throw new AbandonedWorkException(message);
+        }
+
         var diagnostic = innerException is null ? message : $"{message}{Environment.NewLine}{innerException}";
         Console.Error.WriteLine($"[GPU][FATAL] {diagnostic}");
         OnFatal(diagnostic);

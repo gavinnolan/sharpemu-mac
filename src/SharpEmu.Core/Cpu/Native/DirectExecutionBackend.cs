@@ -5640,18 +5640,21 @@ public sealed unsafe partial class DirectExecutionBackend :
 		return true;
 	}
 
+	private static readonly bool LegacyGuestPriorities =
+		string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_GUEST_PRIORITY"), "legacy", StringComparison.OrdinalIgnoreCase);
+
 	private static ThreadPriority MapGuestThreadPriority(int priority)
 	{
 		if (priority <= 478)
 		{
-			return ThreadPriority.Highest;
+			return LegacyGuestPriorities ? ThreadPriority.Highest : ThreadPriority.Normal;
 		}
 		if (priority >= 733)
 		{
 			return ThreadPriority.Lowest;
 		}
 
-		return ThreadPriority.Normal;
+		return LegacyGuestPriorities ? ThreadPriority.Normal : ThreadPriority.BelowNormal;
 	}
 
 	private void ApplyGuestThreadAffinity(ulong guestAffinityMask)
