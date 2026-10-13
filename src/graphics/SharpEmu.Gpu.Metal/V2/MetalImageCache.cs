@@ -739,6 +739,16 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return false;
         }
 
+        // Nothing has touched either texture since the last copy between them: the alias
+        // already holds what the copy would put there. A depth target that only tests
+        // depth (soft particles) leaves its version alone, so every draw after the first
+        // samples the alias without a copy - and without the copy ending the open pass.
+        if (AliasReuseEnabled && image.StillHoldsPublicationFrom(other))
+        {
+            _deviceAliasReuses++;
+            return true;
+        }
+
         var context = _owner.BeginTransfer(MetalTransferCause.Writeback, other.Texture, image.Texture);
         if (!_transfer.TryEncodeTextureToTexture(
                 context, in other.Description, other.Texture, in image.Description, image.Texture))
@@ -749,11 +759,20 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         context.ProfileEncoded(ProfileLabel("alias-on-device", in image.Description));
         // The target now holds what the source holds, so it owes guest memory no upload.
         image.RefreshComplete();
+        image.NotePublishedFrom(other);
         _deviceAliasPublishes++;
         return true;
     }
 
     private long _deviceAliasPublishes;
+    private long _deviceAliasReuses;
+
+    // SHARPEMU_METAL_V2_ALIAS_REUSE=0 copies the alias on every use again, for a comparison.
+    private static readonly bool AliasReuseEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ALIAS_REUSE") != "0";
+
+    /// <summary>Alias publications whose copy the alias already held.</summary>
+    public long TakeDeviceAliasReuses() => Interlocked.Exchange(ref _deviceAliasReuses, 0);
 
     /// <summary>Alias publications the device served without touching guest memory.</summary>
     public long TakeDeviceAliasPublishes() => Interlocked.Exchange(ref _deviceAliasPublishes, 0);
