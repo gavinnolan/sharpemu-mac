@@ -207,6 +207,8 @@ internal sealed partial class MetalRenderHost
     {
         var context = ((IMetalImageCacheOwner)this).BeginTransfer(
             MetalTransferCause.ImageCopy, source.Texture, destination.Texture);
+        // A copy rewrites the destination whether or not its caller marks it written.
+        destination.NoteContentChanged();
         var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
         if (encoder == 0)
         {

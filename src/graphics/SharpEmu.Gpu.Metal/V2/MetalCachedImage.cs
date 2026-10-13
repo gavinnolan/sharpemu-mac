@@ -87,7 +87,45 @@ internal sealed class MetalCachedImage : IDisposable
         // A newly created image starts with the guest's bytes as its contents, so the
         // first use uploads unless the GPU takes ownership first.
         _cpuDirty = !ImageDescription.IsEmptyRange(description.Data);
+        NoteContentChanged();
     }
+
+    private static long _contentCounter;
+
+    /// <summary>
+    /// Changes whenever what the texture holds may have changed: a GPU write is about to
+    /// happen, guest memory got newer bytes for it, an upload or a copy landed, or the
+    /// texture itself was replaced. One counter across every image, so a version names
+    /// one state of one texture and can never match another image's.
+    /// </summary>
+    public long ContentVersion { get; private set; }
+
+    public void NoteContentChanged() => ContentVersion = Interlocked.Increment(ref _contentCounter);
+
+    // What the last device publication into this image copied: the source texture and
+    // its version, and this image's own version once the copy landed. While all three
+    // still hold, this texture already holds what a new copy would put there.
+    private nint _publishedSourceTexture;
+    private long _publishedSourceVersion;
+    private long _publishedOwnVersion;
+
+    /// <summary>Records that this image now holds a device copy of the source as it is.</summary>
+    public void NotePublishedFrom(MetalCachedImage source)
+    {
+        _publishedSourceTexture = source.Texture;
+        _publishedSourceVersion = source.ContentVersion;
+        _publishedOwnVersion = ContentVersion;
+    }
+
+    /// <summary>
+    /// True when the last device publication into this image was from this source, and
+    /// neither texture has changed since: a copy now would rewrite the same texels.
+    /// </summary>
+    public bool StillHoldsPublicationFrom(MetalCachedImage source) =>
+        !_cpuDirty && Texture != 0 && source.Texture != 0 &&
+        _publishedSourceTexture == source.Texture &&
+        _publishedSourceVersion == source.ContentVersion &&
+        _publishedOwnVersion == ContentVersion;
 
     public ImageDescription Description;
 
@@ -170,6 +208,7 @@ internal sealed class MetalCachedImage : IDisposable
             return;
         }
 
+        NoteContentChanged();
         if (!_cpuDirty)
         {
             DirtyCause = cause;
@@ -186,6 +225,7 @@ internal sealed class MetalCachedImage : IDisposable
     /// <summary>The whole image is in the texture again.</summary>
     public void RefreshComplete()
     {
+        NoteContentChanged();
         _cpuDirty = false;
         DirtyStart = 0;
         DirtyEnd = 0;
@@ -199,6 +239,7 @@ internal sealed class MetalCachedImage : IDisposable
             return;
         }
 
+        NoteContentChanged();
         if (start <= DirtyStart && end >= DirtyEnd)
         {
             RefreshComplete();
@@ -224,6 +265,7 @@ internal sealed class MetalCachedImage : IDisposable
 
     public void MarkGpuModified()
     {
+        NoteContentChanged();
         _gpuModified = true;
         _cpuDirty = false;
         DirtyStart = 0;
@@ -498,6 +540,7 @@ internal sealed class MetalCachedImage : IDisposable
 
         Texture = texture;
         Shape = shape;
+        NoteContentChanged();
     }
 
     private void ReleaseViews()

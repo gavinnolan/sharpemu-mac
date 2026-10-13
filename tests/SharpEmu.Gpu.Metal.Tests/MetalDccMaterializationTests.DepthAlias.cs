@@ -84,11 +84,13 @@ public sealed unsafe partial class MetalDccMaterializationTests
         Assert.True(rig.Cache.GetImage(depth).IsGpuModified);
 
         // A write through the alias is handed the depth target's contents first and then
-        // takes the bytes from it, exactly as it does through guest memory.
+        // takes the bytes from it, exactly as it does through guest memory. Neither
+        // texture changed since the copy above, so the alias already holds them.
         var storageRequest = DepthAliasRequest(ImageRole.StorageImage);
         Assert.Equal(alias, rig.Cache.FindImage(ref storageRequest));
         rig.Cache.AcquireTextureView(alias, in storageRequest);
-        Assert.Equal(1, rig.Cache.TakeDeviceAliasPublishes());
+        Assert.Equal(0, rig.Cache.TakeDeviceAliasPublishes());
+        Assert.Equal(1, rig.Cache.TakeDeviceAliasReuses());
         Assert.False(rig.Cache.GetImage(depth).IsGpuModified);
         Assert.True(rig.Cache.GetImage(depth).IsCpuDirty);
         Assert.True(rig.Cache.GetImage(alias).IsGpuModified);
@@ -98,5 +100,77 @@ public sealed unsafe partial class MetalDccMaterializationTests
         rig.Cache.AcquireDepthTargetView(depth, in depthRequest);
         Assert.Equal(0, rig.Cache.TakeDeviceAliasPublishes());
         rig.Harness.Submit();
+    }
+
+    // The alias is copied again only when one of the two textures changed since the last
+    // copy: a depth target that only tests depth leaves it current, a draw that writes
+    // depth does not, and neither does guest memory handing the alias newer bytes.
+    [Fact]
+    public void AnAliasIsCopiedAgainOnlyAfterEitherTextureChanged()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var depthRequest = DepthAliasRequest(ImageRole.DepthTarget);
+        var depth = rig.Cache.FindImage(ref depthRequest);
+        rig.Cache.AcquireDepthTargetView(depth, in depthRequest);
+        var textureRequest = DepthAliasRequest(ImageRole.Texture);
+        var alias = rig.Cache.FindImage(ref textureRequest);
+        rig.Cache.AcquireTextureView(alias, in textureRequest);
+        Assert.Equal(1, rig.Cache.TakeDeviceAliasPublishes());
+
+        // Sampled again, and again behind a pass that only tests depth: nothing to copy.
+        rig.Cache.AcquireTextureView(alias, in textureRequest);
+        rig.Cache.AcquireDepthTargetView(depth, in depthRequest, writes: false);
+        rig.Cache.AcquireTextureView(alias, in textureRequest);
+        Assert.Equal(0, rig.Cache.TakeDeviceAliasPublishes());
+        Assert.Equal(2, rig.Cache.TakeDeviceAliasReuses());
+        Assert.True(rig.Cache.GetImage(depth).IsGpuModified);
+        Assert.False(rig.Cache.GetImage(alias).IsCpuDirty);
+
+        // A draw that writes depth changes what the alias has to hold.
+        rig.Cache.AcquireDepthTargetView(depth, in depthRequest);
+        rig.Cache.AcquireTextureView(alias, in textureRequest);
+        Assert.Equal(1, rig.Cache.TakeDeviceAliasPublishes());
+
+        // So does a change to the alias's own texture.
+        rig.Cache.GetImage(alias).NoteContentChanged();
+        rig.Cache.AcquireTextureView(alias, in textureRequest);
+        Assert.Equal(1, rig.Cache.TakeDeviceAliasPublishes());
+
+        // And any other GPU write to the depth target (a copy or resolve into it).
+        rig.Cache.MarkGpuWritten(depth);
+        rig.Cache.AcquireTextureView(alias, in textureRequest);
+        Assert.Equal(1, rig.Cache.TakeDeviceAliasPublishes());
+        Assert.Equal(0, rig.Cache.TakeDeviceAliasReuses());
+        rig.Harness.Submit();
+    }
+
+    // A version names one state of one texture, so a copy from another source is never
+    // mistaken for the one the alias holds.
+    [Fact]
+    public void ContentVersionsAreDistinctAcrossImagesAndAdvanceOnEveryChange()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var depthRequest = DepthAliasRequest(ImageRole.DepthTarget);
+        var depth = rig.Cache.GetImage(rig.Cache.FindImage(ref depthRequest));
+        var textureRequest = DepthAliasRequest(ImageRole.Texture);
+        var alias = rig.Cache.GetImage(rig.Cache.FindImage(ref textureRequest));
+        Assert.NotEqual(depth.ContentVersion, alias.ContentVersion);
+
+        var before = alias.ContentVersion;
+        alias.MarkCpuDirty(MetalImageDirtyCause.CpuWrite, 0, 4);
+        Assert.NotEqual(before, alias.ContentVersion);
+        before = alias.ContentVersion;
+        alias.RefreshComplete();
+        Assert.NotEqual(before, alias.ContentVersion);
+        before = alias.ContentVersion;
+        alias.MarkGpuModified();
+        Assert.NotEqual(before, alias.ContentVersion);
+        Assert.False(alias.StillHoldsPublicationFrom(depth));
+        alias.NotePublishedFrom(depth);
+        Assert.True(alias.StillHoldsPublicationFrom(depth));
+        depth.MarkGpuModified();
+        Assert.False(alias.StillHoldsPublicationFrom(depth));
     }
 }
