@@ -245,13 +245,13 @@ public static partial class Gen5MslTranslator
                 "VMax3F16" => Float16Result(instruction, destination,
                     $"fmax(fmax({F16(instruction, 0)}, {F16(instruction, 1)}), {F16(instruction, 2)})"),
                 "VMed3F16" => Float16Result(instruction, destination,
-                    $"fmax(fmin({F16(instruction, 0)}, {F16(instruction, 1)}), fmin(fmax({F16(instruction, 0)}, {F16(instruction, 1)}), {F16(instruction, 2)}))"),
+                    Median(F16(instruction, 0), F16(instruction, 1), F16(instruction, 2))),
                 "VMin3F32" =>
                     FloatResult(instruction, $"fmin(fmin({F(instruction, 0)}, {F(instruction, 1)}), {F(instruction, 2)})"),
                 "VMax3F32" =>
                     FloatResult(instruction, $"fmax(fmax({F(instruction, 0)}, {F(instruction, 1)}), {F(instruction, 2)})"),
                 "VMed3F32" =>
-                    FloatResult(instruction, $"fmax(fmin({F(instruction, 0)}, {F(instruction, 1)}), fmin(fmax({F(instruction, 0)}, {F(instruction, 1)}), {F(instruction, 2)}))"),
+                    FloatResult(instruction, Median(F(instruction, 0), F(instruction, 1), F(instruction, 2))),
 
                 // ---- conversions ----
                 "VCvtF32I32" => FloatResult(instruction, $"(float)as_type<int>({RawSource(instruction, 0)})"),
@@ -2464,6 +2464,18 @@ public static partial class Gen5MslTranslator
         }
 
         /// <summary>Float view of a source with abs/neg modifiers from VOP3/SDWA/DPP.</summary>
+        /// <summary>V_MED3 on a NaN operand answers MIN3 of all three, and the min skips the
+        /// NaN, so a clamp compiled to med3(hi, x, lo) flushes a NaN x to lo. The min/max
+        /// network alone returns hi for that x.</summary>
+        private string Median(string a, string b, string c)
+        {
+            var x = Temp("float", a);
+            var y = Temp("float", b);
+            var z = Temp("float", c);
+            return $"((isnan({x}) || isnan({y}) || isnan({z})) ? fmin(fmin({x}, {y}), {z}) : " +
+                $"fmax(fmin({x}, {y}), fmin(fmax({x}, {y}), {z})))";
+        }
+
         private string F(Gen5ShaderInstruction instruction, int sourceIndex)
         {
             var expression = AsFloat(
