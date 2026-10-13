@@ -245,6 +245,61 @@ public sealed class MslVertexExportTests(ITestOutputHelper output)
         Assert.Equal(1.0f, Green(pixels, 1, TargetSize / 2, TargetSize / 2), 3);
     }
 
+    [Fact]
+    public void MeshLayerIndexRendersIntoTheVolumeDepthPlane()
+    {
+        // A volume LUT rendered slice by slice: the primitive's layer selects the depth
+        // plane of a 3D colour attachment, which Metal renders only with the pass's
+        // renderTargetArrayLength set to the texture's depth.
+        if (SkipWithoutMetalDevice("the volume mesh draw")) return;
+
+        const uint depth = 4;
+        const uint layer = 2;
+        var shader = Gen5NggFixtures.CompileOrThrow(MeshWithPos1(layer), positionExportControl:
+            MiscVector | UseVertexLayer);
+        var mesh = shader.MeshInfo!;
+        var source = shader.Source + FragmentSource;
+        Assert.True(MetalNative.TryCompileLibrary(source, out var library, out var compileError), compileError);
+        var drawInfo = new uint[Gen5MslMeshInfo.DrawInfoDwordCount];
+        drawInfo[0] = mesh.MaxVertices;
+        drawInfo[1] = mesh.MaxPrimitives;
+        drawInfo[6] = 1;
+        drawInfo[8] = mesh.MaxVertices;
+        drawInfo[9] = mesh.MaxPrimitives;
+        var drawInfoBytes = new byte[drawInfo.Length * sizeof(uint)];
+        Buffer.BlockCopy(drawInfo, 0, drawInfoBytes, 0, drawInfoBytes.Length);
+        Assert.True(
+            MetalNative.TryRenderMesh(
+                library,
+                shader.EntryPoint,
+                "gen5_export_test_fs",
+                [
+                    (new byte[Math.Max(shader.ArgumentLayout?.ByteSize ?? 0, 8)], 0u),
+                    (new byte[64], 1u),
+                    (drawInfoBytes, mesh.DrawInfoBufferIndex),
+                    (new byte[16], mesh.IndexBufferIndex),
+                ],
+                threadgroups: 1,
+                mesh.ThreadsPerThreadgroup,
+                TargetSize,
+                TargetSize,
+                out var pixels,
+                out var renderError,
+                layers: depth,
+                volume: true),
+            renderError);
+
+        for (var plane = 0u; plane < depth; plane++)
+        {
+            if (plane != layer)
+            {
+                AssertLayerClear(pixels, plane);
+            }
+        }
+
+        Assert.Equal(1.0f, Green(pixels, layer, TargetSize / 2, TargetSize / 2), 3);
+    }
+
     // ---- helpers ----
 
     private static Gen5MslShader CompileVertex(

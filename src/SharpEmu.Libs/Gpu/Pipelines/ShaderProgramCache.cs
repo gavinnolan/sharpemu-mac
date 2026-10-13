@@ -16,6 +16,9 @@ namespace SharpEmu.Libs.Gpu.Pipelines;
 // One program as a draw names it: the registered code, its identity and the user data of the draw.
 public sealed record ShaderSource(RegisteredShader Registered, ulong Hash, uint[] UserData, uint UserDataBase, ShaderStage Stage)
 {
+    // Registers inside the user-data range that are system values, not uniform user data.
+    public ulong ExcludedUserDataRegisters { get; init; }
+
     public ulong Address => Registered.CodeAddress;
 
     public uint CodeSize => Registered.TotalCodeSizeBytes;
@@ -407,7 +410,8 @@ internal sealed class ShaderProgramCache
                 fetch?.Loads.Select(load => load.Pc).ToHashSet(),
                 beforeResourceTracking: dumpPlanning ? resourcePlan => ShaderPlanningDump.WriteGraph(source, resourcePlan) : null,
                 // Graphics stages compile as wave32 (see the compile request); compute follows the dispatch.
-                waveSize: source.Stage == ShaderStage.Compute ? options.ComputeInfo?.WaveSize ?? 64u : 32u);
+                waveSize: source.Stage == ShaderStage.Compute ? options.ComputeInfo?.WaveSize ?? 64u : 32u,
+                excludedUserDataRegisters: source.ExcludedUserDataRegisters);
         }
         catch (ResourcePlanException exception)
         {

@@ -452,9 +452,11 @@ internal static class Gen5ComputeFixtures
         Gen5NggStageInfo? primitiveShader = null, uint userDataBase = 0, uint scratchDwords = 0,
         uint localDataShareDwords = 0, uint pushDataStartDword = 0, uint positionExportControl = 0,
         bool supportsClipDistance = true, bool enableGraphicsSubgroupOperations = true,
-        ShaderClipSpaceTransform clipSpace = default, bool pixelDepthExportEnable = false)
+        ShaderClipSpaceTransform clipSpace = default, bool pixelDepthExportEnable = false,
+        ulong excludedUserDataRegisters = 0)
     {
-        var plan = ShaderResourcePlan.Extract(program, stage, RequestHash, userDataBase, UserDataCount);
+        var plan = ShaderResourcePlan.Extract(program, stage, RequestHash, userDataBase, UserDataCount,
+            excludedUserDataRegisters: excludedUserDataRegisters);
         var specialization = ResourceSpecialization.Default(plan.Info);
         if (runtimeInputs is not null)
         {
@@ -465,7 +467,7 @@ internal static class Gen5ComputeFixtures
         var resources = ResourceMaterializer.ApplyTo(plan, specialization);
         var layout = BindingLayout.Allocate(
             resources.Info,
-            BindingLayout.CollectUserDataRegisters(program, userDataBase, UserDataCount),
+            BindingLayout.CollectUserDataRegisters(program, userDataBase, UserDataCount, excludedUserDataRegisters),
             BindingLayout.UsesGlobalDataShare(program),
             ShaderCompileRequest.RequiresFlattenedTable(plan, resources),
             BindingLayout.ReadsShaderBase(program),

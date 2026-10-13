@@ -294,6 +294,13 @@ public static partial class Gen5MslTranslator
             source.AppendLine("    threadgroup_barrier(mem_flags::mem_threadgroup);");
         }
 
+        // A system scalar is one the user data does not cover: below the user-data base, or
+        // excluded from it - a fused program's user data starts at s0 so the geometry
+        // user-data pointer can occupy s[0:1], and s2..s7 stay the launch state.
+        private bool IsMeshSystemScalar(uint register) =>
+            _request.UserDataBase > register ||
+            (register < 64 && (_request.ExcludedUserDataRegisters & (1UL << (int)register)) != 0);
+
         // The merged ES/GS launch state. Hardware splits one subgroup across waves and
         // hands each wave its own counts plus packed per-lane inputs; the same values are
         // reconstructed here from the thread's position and the draw block.
@@ -336,7 +343,7 @@ public static partial class Gen5MslTranslator
             // EXEC from the first pair, so a wrong value either kills every lane or leaves
             // a waterfall loop waiting on lanes that do not exist. Written only when the
             // register is not also user data for this program.
-            if (_request.UserDataBase > Gen5NggExports.MergedWaveInfoRegister)
+            if (IsMeshSystemScalar(Gen5NggExports.MergedWaveInfoRegister))
             {
                 source.AppendLine(
                     $"    s[{Gen5NggExports.MergedWaveInfoRegister}] = sharpemu_mesh_wave_verts |");
@@ -353,7 +360,7 @@ public static partial class Gen5MslTranslator
             // Merged group info: the workgroup's ES vertex count in bits 12-20 and its
             // input primitive count in bits 22-30. The ordered-append id below them stays
             // zero; no primitive shader seen so far consumes it.
-            if (_request.UserDataBase > Gen5NggExports.MergedGroupInfoRegister)
+            if (IsMeshSystemScalar(Gen5NggExports.MergedGroupInfoRegister))
             {
                 source.AppendLine(
                     $"    s[{Gen5NggExports.MergedGroupInfoRegister}] =");

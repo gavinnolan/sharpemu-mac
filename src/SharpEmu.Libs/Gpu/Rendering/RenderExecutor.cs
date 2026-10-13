@@ -517,13 +517,17 @@ public sealed partial class RenderExecutor
              (shaderInterface.GeometryMaxVerticesOut == 0 && IsKnownGeometryOutputPrimitiveType(shaderInterface.GeometryOutputPrimitiveType)));
         // A backend with mesh pipelines runs the merged ES/GS stage as it really is, so the
         // NGG setup registers that defeat the per-vertex path stop being rejections: the
-        // primitive shader itself consumes the subgroup control and the output budget.
+        // primitive shader itself consumes the subgroup control and the output budget. That
+        // includes a draw with the geometry stage enabled: Gen5 has no separate geometry
+        // program, the GS half is the continuation of the merged program at the export
+        // address, so a stored geometry address or output budget is no reason to refuse it.
         var primitiveShaderMeshPath =
             _pipelines.SupportsPrimitiveShaderMeshPipelines &&
-            vertex.ExportAddress != 0 && vertex.GeometryAddress == 0 &&
+            vertex.ExportAddress != 0 &&
             VgtShaderStages.SelectsPrimitiveShaderOnly(stages);
         var unsupportedStageMask = stages != 0 && !IsPrimitiveShaderStageMask(stages) && !primitiveShaderMeshPath;
-        var unsupportedGeometryStage = vertex.ExportAddress != 0 && vertex.GeometryAddress != 0 && !primitiveShaderVertexPath;
+        var unsupportedGeometryStage = vertex.ExportAddress != 0 && vertex.GeometryAddress != 0 &&
+            !primitiveShaderVertexPath && !primitiveShaderMeshPath;
         var geometryRegisters = !primitiveShaderVertexPath && !primitiveShaderMeshPath &&
             ((shaderInterface.PrimitiveShaderSubgroupControl != 0 && shaderInterface.PrimitiveShaderSubgroupControl != 1) ||
              shaderInterface.GeometryMaxVerticesOut != 0 ||
