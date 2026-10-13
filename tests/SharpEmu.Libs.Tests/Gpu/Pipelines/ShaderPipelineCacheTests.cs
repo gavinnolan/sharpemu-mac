@@ -456,7 +456,7 @@ public sealed class ShaderPipelineCacheTests : IDisposable
 
     private static GraphicsPrograms PrepareVertexOnly(ShaderPipelineCache cache, RegisterBanks banks) =>
         cache.GetGraphicsPrograms(banks.Shader.Vertex, banks.Shader.Pixel, banks.Context.ShaderInterface, banks.Context,
-            Enumerable.Repeat(ColorComponentMap.Identity, 8).ToArray(), pixelActive: false, depthBound: false);
+            Enumerable.Repeat(ColorComponentMap.Identity, 8).ToArray(), pixelActive: false, depthBound: false, depthAspectBound: false);
 
     [Fact]
     public void FusedGeometryProgram_ReadsItsUserDataThroughTheGeometryUserDataAddress()
