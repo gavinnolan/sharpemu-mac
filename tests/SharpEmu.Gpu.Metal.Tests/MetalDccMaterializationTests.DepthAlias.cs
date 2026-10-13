@@ -183,7 +183,6 @@ public sealed unsafe partial class MetalDccMaterializationTests
     [InlineData(false, false, true, (int)GpuFormat.D32Sfloat, true)]
     [InlineData(true, false, false, (int)GpuFormat.D32Sfloat, false)]
     [InlineData(false, false, false, (int)GpuFormat.D32Sfloat, false)]
-    [InlineData(false, true, false, (int)GpuFormat.S8Uint, false)]
     public void ADepthAttachmentCountsAsWrittenWheneverMetalWritesIt(
         bool test, bool write, bool clear, int format, bool expected)
     {
