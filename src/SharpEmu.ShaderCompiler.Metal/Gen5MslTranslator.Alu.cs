@@ -269,8 +269,9 @@ public static partial class Gen5MslTranslator
                 "VCvtF32Ubyte3" => FloatResult(instruction, $"(float)((({RawSource(instruction, 0)}) >> 24) & 0xFFu)"),
                 "VCvtF16F32" =>
                     $"((uint)as_type<ushort>(half({F(instruction, 0)})))",
-                "VCvtF32F16" =>
-                    AsUInt($"(float)as_type<half>((ushort)(({RawSource(instruction, 0)}) & 0xFFFFu))"),
+                // The source is a half: an SDWA or VOP3 negate flips its sign bit 15, not
+                // bit 31 of the register, and VOP3 op_sel can pick the high half.
+                "VCvtF32F16" => FloatResult(instruction, F16(instruction, 0)),
                 "VCvtOffF32I4" =>
                     AsUInt($"sharpemu_off_i4_table[({RawSource(instruction, 0)}) & 15u]"),
                 "VCvtPkU8F32" =>
