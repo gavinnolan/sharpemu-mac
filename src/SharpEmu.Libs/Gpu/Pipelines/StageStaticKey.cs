@@ -10,7 +10,7 @@ namespace SharpEmu.Libs.Gpu.Pipelines;
 public static class StageStaticKey
 {
     // The nine trailing words are the NGG primitive-shader state (see the vertex key).
-    public const int MaxWords = 15 + 9 + VertexInputInfo.MaxBuffers * 13;
+    public const int MaxWords = 16 + 9 + VertexInputInfo.MaxBuffers * 13;
 
     private static uint Bits(float value) => BitConverter.SingleToUInt32Bits(value);
 
@@ -34,6 +34,7 @@ public static class StageStaticKey
         key.Add((uint)info.FetchAttributeRegister);
         key.Add((uint)info.FetchBufferRegister);
         key.Add((uint)info.Attributes.Length);
+        key.Add(Bit(info.IeeeMode));
         key.Add(info.ScratchDwords);
         key.Add(info.PositionExportControl);
         key.Add(Bit(info.ClipSpace.Enabled));
@@ -85,6 +86,7 @@ public static class StageStaticKey
     public static void Build(PixelInputInfo info, List<uint> key)
     {
         key.Clear();
+        key.Add(Bit(info.IeeeMode));
         key.Add(info.ScratchDwords);
         key.Add(info.InputCount);
         key.Add(info.SystemInputBase);
@@ -130,6 +132,7 @@ public static class StageStaticKey
         key.Add(info.WaveSize);
         key.Add((uint)info.ThreadIdCount);
         key.Add(info.LocalDataShareDwords);
+        key.Add(Bit(info.IeeeMode));
         key.Add(info.ScratchDwords);
         key.Add(Bit(info.NeedsLocalDataShareBarriers));
         key.Add(Bit(info.DispatchThreadDimensions));

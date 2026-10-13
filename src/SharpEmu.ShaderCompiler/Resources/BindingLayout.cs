@@ -366,7 +366,8 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 
     // The user-data registers live at program entry: those some path reads before it
     // writes them, found by liveness over the control-flow graph, in ascending order.
-    public static IReadOnlyList<uint> CollectUserDataRegisters(Gen5ShaderProgram program, uint userDataBase, uint userDataCount)
+    public static IReadOnlyList<uint> CollectUserDataRegisters(Gen5ShaderProgram program, uint userDataBase, uint userDataCount,
+        ulong excludedUserDataRegisters = 0)
     {
         var controlFlow = IrControlFlowGraph.Build(program.Instructions, Gen5IrBranchResolver.Instance);
         var blockCount = controlFlow.Blocks.Count;
@@ -433,7 +434,8 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         for (uint index = 0; index < userDataCount && blockCount != 0; index++)
         {
             var register = userDataBase + index;
-            if (register < ScalarRegisterCount && (liveIn[register >> 6] & (1UL << (int)(register & 63))) != 0)
+            if (register < ScalarRegisterCount && (liveIn[register >> 6] & (1UL << (int)(register & 63))) != 0 &&
+                (register >= 64 || (excludedUserDataRegisters & (1UL << (int)register)) == 0))
             {
                 registers.Add(register);
             }
@@ -466,19 +468,19 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             }
         }
 
-        // These read the register their destination field names: the bit sets and the SOPK
-        // accumulations modify it, and the SOPK compares only read it.
+        // Include prior destination values for partial updates and conditional moves.
+        // SOPK comparisons read the destination field without writing it.
         var comparesDestination = instruction.Encoding == Gen5ShaderEncoding.Sopk &&
             instruction.Opcode.StartsWith("SCmpk", StringComparison.Ordinal);
         if (comparesDestination ||
-            instruction.Opcode is "SBitset0B32" or "SBitset1B32" ||
+            instruction.Opcode is "SBitset0B32" or "SBitset1B32" or "SCmovB64" ||
             instruction.Encoding == Gen5ShaderEncoding.Sopk && instruction.Opcode is "SAddkI32" or "SMulkI32" or "SCmovkI32")
         {
             foreach (var destination in instruction.Destinations)
             {
                 if (destination.Kind == Gen5OperandKind.ScalarRegister)
                 {
-                    Use(destination.Value, 1);
+                    Use(destination.Value, instruction.Opcode == "SCmovB64" ? 2u : 1u);
                 }
             }
         }
@@ -539,7 +541,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             return;
         }
 
-        var perDestination = scalarDestinations.Count > 1 ? 1u : width;
+        var perDestination = scalarDestinations.Count > 1 ? 1u : instruction.DestinationWidth;
         foreach (var destination in scalarDestinations)
         {
             for (uint index = 0; index < perDestination && destination.Value + index < ScalarRegisterCount; index++)
@@ -580,6 +582,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         var imageGroups = new List<uint>[ImageBindingCount];
         for (var index = 0; index < info.Images.Count; index++)
         {
+            if (info.GetCanonicalImageBinding((uint)index) != index) continue;
             var image = info.Images[index];
             var kind = ImageDescriptorBinding.ForImage(image);
             if (kind is null)
@@ -614,7 +617,8 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 
         if (info.Samplers.Count != 0)
         {
-            descriptors.Add(new DescriptorBinding(DescriptorBindingKind.Samplers, Enumerable.Range(0, info.Samplers.Count).Select(index => (uint)index).ToArray()));
+            descriptors.Add(new DescriptorBinding(DescriptorBindingKind.Samplers, Enumerable.Range(0, info.Samplers.Count)
+                .Select(index => (uint)index).Where(index => info.SamplerBinding(index) == index).ToArray()));
         }
 
         if (usesGlobalDataShare)

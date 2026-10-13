@@ -4,6 +4,7 @@
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.VideoOut;
 
@@ -25,6 +26,21 @@ public sealed partial class RenderExecutor
 
     private readonly record struct PreparedIndexBuffer(BufferBinding Binding, ulong Size, GpuIndexType Type);
 
+    // The bytes one fetch of a descriptor format reads (formats 113 and 121 are the two the
+    // vertex input accepts outside the unified table).
+    private uint ConstantAttributeByteSize(in BufferDescriptorWords descriptor)
+    {
+        if (descriptor.Format == 113) return 16;
+        if (descriptor.Format == 121) return 4;
+        if (SharpEmu.ShaderCompiler.Gfx10UnifiedFormat.TryDecode(descriptor.Format, out var dataFormat, out _))
+        {
+            var bytes = SharpEmu.ShaderCompiler.Gfx10UnifiedFormat.GetAccessByteSize(dataFormat, 4);
+            if (bytes != 0) return bytes;
+        }
+
+        throw _host.Fatal($"The vertex buffer format is unknown: format={descriptor.Format}.");
+    }
+
     // Merges the vertex ranges, obtains one host buffer per merged range and offsets every slot into it.
     private BufferBinding[] AcquireVertexBuffers(VertexInputInfo vertexInput)
     {
@@ -36,10 +52,22 @@ public sealed partial class RenderExecutor
         }
 
         Span<VertexBufferRange> ranges = stackalloc VertexBufferRange[VertexInputInfo.MaxBuffers];
-        var rangeCount = 0;
-        foreach (ref readonly var vertex in buffers.AsSpan())
+        Span<ulong> sizes = stackalloc ulong[buffers.Length];
+        for (var slot = 0; slot < buffers.Length; slot++) sizes[slot] = buffers[slot].Size;
+        foreach (var attribute in vertexInput.Attributes)
         {
-            var size = vertex.Size;
+            var slot = attribute.BufferIndex;
+            var descriptor = attribute.Descriptor;
+            if (buffers[slot].Stride != 0 || descriptor.RecordCount == 0 || descriptor.OutOfBounds != 2) continue;
+            // This bounds mode tests only whether the record count is nonzero.
+            // Constant attributes still need the full format extent.
+            sizes[slot] = Math.Max(sizes[slot], (ulong)attribute.OffsetBytes + ConstantAttributeByteSize(descriptor));
+        }
+        var rangeCount = 0;
+        for (var slot = 0; slot < buffers.Length; slot++)
+        {
+            ref readonly var vertex = ref buffers[slot];
+            var size = sizes[slot];
             if (size == 0)
             {
                 continue;
@@ -81,7 +109,7 @@ public sealed partial class RenderExecutor
         for (var slot = 0; slot < buffers.Length; slot++)
         {
             ref readonly var vertex = ref buffers[slot];
-            if (vertex.Size == 0)
+            if (sizes[slot] == 0)
             {
                 nullBuffer ??= _host.NullBuffer;
                 prepared[slot] = nullBuffer.Value;

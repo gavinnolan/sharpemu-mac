@@ -706,9 +706,20 @@ internal sealed partial class MetalRenderHost
                     WriteTextureField(stage, field, span, ref imageCursor, stageIndex);
                     break;
                 case MslArgumentFieldKind.Samplers:
-                    for (var index = 0; index < field.Count && index < stage.SamplerCount; index++)
+                    // The layout lists only canonical samplers (equal descriptors share one
+                    // element), so each element names the resource it binds.
+                    var samplerResources = layout.Find(DescriptorBindingKind.Samplers)?.Resources;
+                    for (var index = 0; index < field.Count; index++)
                     {
-                        var sampler = stage.Samplers[index];
+                        var resource = samplerResources is not null && index < samplerResources.Count
+                            ? (int)samplerResources[index]
+                            : index;
+                        if (resource >= stage.SamplerCount)
+                        {
+                            continue;
+                        }
+
+                        var sampler = stage.Samplers[resource];
                         if (sampler != 0)
                         {
                             BinaryPrimitives.WriteUInt64LittleEndian(

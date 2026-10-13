@@ -135,6 +135,8 @@ public readonly record struct Gen5PixelOutputBinding(
 
     private readonly uint? _exportTarget;
 
+    public uint BlendSourceIndex { get; init; }
+
     // The EXP MRT target that feeds this slot. It differs from the slot when the pixel
     // program skips targets, because the hardware packs color exports into the slots
     // that CB_SHADER_MASK enables.
@@ -362,6 +364,8 @@ public sealed record Gen5ShaderInstruction(
     public ulong? AddressOffset { get; init; }
 
     public ulong ProgramOffset => AddressOffset ?? Pc;
+    public uint DestinationWidth => Opcode is "SBcnt1I32B64" or "SFF1I32B64" or "SFlbitI32B64"
+        ? 1u : Opcode.Contains("64", StringComparison.Ordinal) ? 2u : 1u;
 }
 
 public sealed record Gen5ShaderProgram(

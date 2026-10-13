@@ -127,6 +127,7 @@ public static partial class Gen5SpirvTranslator
         private uint _vcc;
         private uint _exec;
         private uint _reachedPixelExport;
+        private uint _pixelDepthOutput;
         private uint _pixelValidMaskActive;
         private uint _programCounter;
         private uint _programActive;
@@ -496,6 +497,10 @@ public static partial class Gen5SpirvTranslator
                 if (_stage == Gen5SpirvStage.Pixel)
                 {
                     _module.AddExecutionMode(main, SpirvExecutionMode.OriginUpperLeft);
+                    if (_pixelDepthOutput != 0)
+                    {
+                        _module.AddExecutionMode(main, SpirvExecutionMode.DepthReplacing);
+                    }
                 }
                 else if (_stage == Gen5SpirvStage.Compute)
                 {
@@ -1030,6 +1035,16 @@ public static partial class Gen5SpirvTranslator
                 _interfaces.Add(_fragCoordInput);
                 DeclarePixelSystemInputs();
 
+                if (_request.PixelDepthExportEnable && _request.Program.Instructions.Any(static instruction =>
+                        instruction.Control is Gen5ExportControl { Target: 8 } export && (export.EnableMask & 1) != 0))
+                {
+                    _pixelDepthOutput = _module.AddGlobalVariable(
+                        _module.TypePointer(SpirvStorageClass.Output, _floatType), SpirvStorageClass.Output);
+                    _module.AddName(_pixelDepthOutput, "gl_FragDepth");
+                    _module.AddDecoration(_pixelDepthOutput, SpirvDecoration.BuiltIn, (uint)SpirvBuiltIn.FragDepth);
+                    _interfaces.Add(_pixelDepthOutput);
+                }
+
                 var declaredPixelOutputs =
                     Environment.GetEnvironmentVariable(
                         "SHARPEMU_FORCE_TITLE_SINGLE_MRT") == "1" &&
@@ -1049,6 +1064,10 @@ public static partial class Gen5SpirvTranslator
                         variable,
                         SpirvDecoration.Location,
                         binding.HostLocation);
+                    if (binding.BlendSourceIndex != 0)
+                    {
+                        _module.AddDecoration(variable, SpirvDecoration.Index, binding.BlendSourceIndex);
+                    }
                     _pixelOutputs.Add(
                         binding.ExportTarget,
                         new SpirvPixelOutput(
@@ -1229,6 +1248,11 @@ public static partial class Gen5SpirvTranslator
             {
                 var fragCoord = Load(_vec4Type, _fragCoordInput);
                 EmitPixelInputState(fragCoord);
+                if (_pixelDepthOutput != 0)
+                {
+                    // Keep raster depth on paths that do not export a replacement.
+                    Store(_pixelDepthOutput, _module.AddInstruction(SpirvOp.CompositeExtract, _floatType, fragCoord, 2));
+                }
                 foreach (var output in _pixelOutputs.Values)
                 {
                     Store(output.Variable, _module.ConstantNull(output.Type));
@@ -6310,6 +6334,17 @@ public static partial class Gen5SpirvTranslator
                     Store(_pixelValidMaskActive, Load(_boolType, _exec));
                 }
 
+                if (export.Target == 8)
+                {
+                    if (_pixelDepthOutput != 0 && (export.EnableMask & 1) != 0)
+                    {
+                        var depth = Bitcast(_floatType, LoadV(instruction.Sources[0].Value));
+                        Store(_pixelDepthOutput, _module.AddInstruction(SpirvOp.Select, _floatType,
+                            Load(_boolType, _exec), depth, Load(_floatType, _pixelDepthOutput)));
+                    }
+                    return true;
+                }
+
                 if (!_pixelOutputs.TryGetValue(export.Target, out var output))
                 {
                     return true;
@@ -6351,21 +6386,21 @@ public static partial class Gen5SpirvTranslator
 
                     if (export.Compressed)
                     {
-                        var value = LoadCompressedExportComponent(
-                            instruction,
-                            component);
-                        values[component] = output.Kind switch
+                        if (output.Kind == Gen5PixelOutputKind.Float)
                         {
-                            Gen5PixelOutputKind.Uint => _module.AddInstruction(
-                                SpirvOp.ConvertFToU,
-                                _uintType,
-                                value),
-                            Gen5PixelOutputKind.Sint => _module.AddInstruction(
-                                SpirvOp.ConvertFToS,
-                                _intType,
-                                value),
-                            _ => value,
-                        };
+                            values[component] = LoadCompressedExportComponent(instruction, component);
+                        }
+                        else
+                        {
+                            var packed = LoadV(instruction.Sources[component >> 1].Value);
+                            var signed = output.Kind == Gen5PixelOutputKind.Sint;
+                            values[component] = _module.AddInstruction(
+                                signed ? SpirvOp.BitFieldSExtract : SpirvOp.BitFieldUExtract,
+                                signed ? _intType : _uintType,
+                                signed ? Bitcast(_intType, packed) : packed,
+                                UInt((uint)(component & 1) * 16),
+                                UInt(16));
+                        }
                         continue;
                     }
 

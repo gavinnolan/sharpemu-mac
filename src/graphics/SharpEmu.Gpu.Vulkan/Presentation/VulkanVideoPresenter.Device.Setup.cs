@@ -45,9 +45,11 @@ internal static unsafe partial class VulkanVideoPresenter
         private uint _maxComputeWorkGroupSizeX;
         private uint _maxComputeWorkGroupSizeY;
         private uint _maxComputeWorkGroupSizeZ;
+        private uint _maxFragmentDualSrcAttachments;
         private uint _maxComputeWorkGroupInvocations;
         private ulong _minStorageBufferOffsetAlignment = 1;
         private bool _supportsIndependentBlend;
+        private bool _supportsDualSourceBlend;
         private bool _supportsDepthBiasClamp;
         private bool _supportsShaderSignedZeroInfNanPreserveFloat32;
         private uint _maxColorAttachments;
@@ -628,6 +630,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _maxComputeWorkGroupSizeX = properties.Limits.MaxComputeWorkGroupSize[0];
             _maxComputeWorkGroupSizeY = properties.Limits.MaxComputeWorkGroupSize[1];
             _maxComputeWorkGroupSizeZ = properties.Limits.MaxComputeWorkGroupSize[2];
+            _maxFragmentDualSrcAttachments = properties.Limits.MaxFragmentDualSrcAttachments;
             _maxComputeWorkGroupInvocations = properties.Limits.MaxComputeWorkGroupInvocations;
             _renderHostLimits = new RenderHostLimits(
                 properties.Limits.MaxFramebufferWidth,
@@ -755,6 +758,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             _vk.GetPhysicalDeviceFeatures(_physicalDevice, out var supportedFeatures);
             _supportsIndependentBlend = supportedFeatures.IndependentBlend;
+            _supportsDualSourceBlend = supportedFeatures.DualSrcBlend;
             _supportsDepthBiasClamp = supportedFeatures.DepthBiasClamp;
             _supportsDepthBounds = supportedFeatures.DepthBounds;
             _supportsShaderClipDistance = supportedFeatures.ShaderClipDistance;
@@ -763,6 +767,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 DepthBounds = supportedFeatures.DepthBounds,
                 IndependentBlend = supportedFeatures.IndependentBlend,
+                DualSrcBlend = supportedFeatures.DualSrcBlend,
                 VertexPipelineStoresAndAtomics = supportedFeatures.VertexPipelineStoresAndAtomics,
                 FragmentStoresAndAtomics = supportedFeatures.FragmentStoresAndAtomics,
                 ShaderInt64 = supportedFeatures.ShaderInt64,

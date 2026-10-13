@@ -130,6 +130,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             vertex.ExportAddress, ShaderStage.Vertex, "vertex", vertex.GeometryUserScalars, vertex.GeometryResource2.UserScalarCount,
             probeWrittenRegisters: true, VertexUserDataBase);
         var vertexInfo = PrepareVertexInput(vertexSource, shaderInterface, context);
+        vertexInfo.IeeeMode = vertex.GeometryResource1.IeeeMode;
         ShaderSource? pixelSource = null;
         PixelInputInfo? pixelInfo = null;
         Gen5PixelOutputBinding[] pixelOutputs = [];
@@ -163,6 +164,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             // SPI_PS_INPUT_CNTL can map an input to any parameter export, beyond the input count;
             // the vertex program must declare every location the pixel program reads.
             attributeCount = Math.Max(attributeCount, ReadVertexOutputCount(pixelProgram, pixelInfo));
+            pixelInfo.IeeeMode = pixel.Resource1.IeeeMode;
         }
 
         ShaderProgram vertexProgram;
@@ -355,6 +357,19 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             {
                 ExportTarget = exportTarget >= 0 ? (uint)exportTarget : ContextRegisters.ColorTargetCount + slot,
             });
+        }
+
+        if (context.BlendControls[0].UsesSecondarySource && (context.ColorTargets[0].Info & (1u << 16)) == 0 &&
+            outputs.Any(output => output.GuestSlot == 0))
+        {
+            if (outputs.Count != 1 || outputs[0].Kind != Gen5PixelOutputKind.Float)
+            {
+                throw GpuFatal.Fatal("Dual-source blending requires one floating-point color output.");
+            }
+
+            // The second export feeds target zero's blend unit, not another attachment.
+            outputs[0] = outputs[0] with { ExportTarget = 0 };
+            outputs.Add(outputs[0] with { GuestSlot = 1, ExportTarget = 1, BlendSourceIndex = 1 });
         }
 
         return outputs.ToArray();

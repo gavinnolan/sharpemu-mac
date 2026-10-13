@@ -401,6 +401,44 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
     }
 
+    internal bool TryAllocateWithinRange(ulong start, ulong end, ulong size, out ulong address)
+    {
+        address = 0;
+        if (size == 0 || size > ulong.MaxValue - (PageSize - 1) ||
+            start > ulong.MaxValue - (HostAllocationGranularity - 1)) return false;
+        var alignedSize = AlignUp(size, PageSize);
+        var cursor = AlignUp(Math.Max(start, HostAllocationGranularity), HostAllocationGranularity);
+        if (cursor >= end || alignedSize > end - cursor) return false;
+        if (TryAllocateAtExact(cursor, alignedSize, executable: true, out address)) return true;
+        if (cursor > ulong.MaxValue - HostAllocationGranularity) return false;
+        cursor += HostAllocationGranularity;
+
+        foreach (var candidate in EnumerateFreeHostRanges(cursor, end, alignedSize, HostAllocationGranularity))
+        {
+            if (TryAllocateAtExact(candidate, alignedSize, executable: true, out address)) return true;
+        }
+
+        // A host query can fail, or a listed range can be taken before allocation.
+        // Keep exact-address checks for the remaining aligned candidates.
+        while (cursor < end && alignedSize <= end - cursor)
+        {
+            // Try owned reservations before skipping occupied host regions.
+            if (TryAllocateAtExact(cursor, alignedSize, executable: true, out address)) return true;
+            var next = cursor + HostAllocationGranularity;
+            if (next <= cursor) break;
+            if (_hostMemory.Query(cursor, out var region) && region.State != HostRegionState.Free &&
+                region.BaseAddress <= cursor && region.RegionSize <= ulong.MaxValue - region.BaseAddress)
+            {
+                var regionEnd = region.BaseAddress + region.RegionSize;
+                if (regionEnd > ulong.MaxValue - (HostAllocationGranularity - 1)) break;
+                next = Math.Max(next, AlignUp(regionEnd, HostAllocationGranularity));
+            }
+            cursor = next;
+        }
+        address = 0;
+        return false;
+    }
+
     public string DescribeAddressForDiagnostics(ulong address)
     {
         if (!_hostMemory.Query(address, out var info))
@@ -577,127 +615,135 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
         var granuleStart = AlignDown(requestStart, HostAllocationGranularity);
 
-        lock (_fixedAllocationGate)
+        _gate.EnterReadLock();
+        try
         {
-            var newReservations = new List<ulong>();
-
-            void Reject(ulong segmentAddress, string reason)
+            lock (_fixedAllocationGate)
             {
-                if (traceReject)
-                {
-                    Log.Warn(
-                        $"fixed-alloc reject: want=0x{desiredAddress:X16}+0x{alignedSize:X} segment=0x{segmentAddress:X16} {reason}");
-                }
-                foreach (var reservationBase in newReservations)
-                {
-                    _hostMemory.Free(reservationBase);
-                    _fixedGranuleReservationBases.Remove(reservationBase);
-                }
-            }
+                var newReservations = new List<ulong>();
 
-            var cursor = granuleStart;
-            while (cursor < granuleEnd)
-            {
-                if (!_hostMemory.Query(cursor, out var info))
+                void Reject(ulong segmentAddress, string reason)
                 {
-                    Reject(cursor, "query-failed");
-                    return 0;
-                }
-
-                var segmentEnd = info.RegionSize > ulong.MaxValue - info.BaseAddress
-                    ? ulong.MaxValue
-                    : info.BaseAddress + info.RegionSize;
-                segmentEnd = Math.Min(segmentEnd, granuleEnd);
-                if (segmentEnd <= cursor)
-                {
-                    Reject(cursor, "query-no-progress");
-                    return 0;
-                }
-
-                if (info.State == HostRegionState.Free)
-                {
-                    var alignedReserveBase = AlignUp(cursor, HostAllocationGranularity);
-                    var unreservableEnd = Math.Min(segmentEnd, alignedReserveBase);
-                    if (unreservableEnd > cursor && cursor < requestEnd && unreservableEnd > requestStart)
+                    if (traceReject)
                     {
-                        Reject(cursor, $"free-but-unreservable head (granule base 0x{AlignDown(cursor, HostAllocationGranularity):X16} owned elsewhere)");
+                        Log.Warn(
+                            $"fixed-alloc reject: want=0x{desiredAddress:X16}+0x{alignedSize:X} segment=0x{segmentAddress:X16} {reason}");
+                    }
+                    foreach (var reservationBase in newReservations)
+                    {
+                        _hostMemory.Free(reservationBase);
+                        _fixedGranuleReservationBases.Remove(reservationBase);
+                    }
+                }
+
+                var cursor = granuleStart;
+                while (cursor < granuleEnd)
+                {
+                    if (!_hostMemory.Query(cursor, out var info))
+                    {
+                        Reject(cursor, "query-failed");
                         return 0;
                     }
 
-                    if (alignedReserveBase < segmentEnd)
+                    var segmentEnd = info.RegionSize > ulong.MaxValue - info.BaseAddress
+                        ? ulong.MaxValue
+                        : info.BaseAddress + info.RegionSize;
+                    segmentEnd = Math.Min(segmentEnd, granuleEnd);
+                    if (segmentEnd <= cursor)
                     {
-                        var reserved = _hostMemory.Reserve(alignedReserveBase, segmentEnd - alignedReserveBase, HostPageProtection.ReadWrite);
-                        if (reserved != alignedReserveBase)
-                        {
-                            if (reserved != 0)
-                            {
-                                _hostMemory.Free(reserved);
-                            }
+                        Reject(cursor, "query-no-progress");
+                        return 0;
+                    }
 
-                            Reject(alignedReserveBase, "reserve-failed");
+                    if (info.State == HostRegionState.Free)
+                    {
+                        var alignedReserveBase = AlignUp(cursor, HostAllocationGranularity);
+                        var unreservableEnd = Math.Min(segmentEnd, alignedReserveBase);
+                        if (unreservableEnd > cursor && cursor < requestEnd && unreservableEnd > requestStart)
+                        {
+                            Reject(cursor, $"free-but-unreservable head (granule base 0x{AlignDown(cursor, HostAllocationGranularity):X16} owned elsewhere)");
                             return 0;
                         }
 
-                        _fixedGranuleReservationBases.Add(alignedReserveBase);
-                        newReservations.Add(alignedReserveBase);
+                        if (alignedReserveBase < segmentEnd)
+                        {
+                            var reserved = _hostMemory.Reserve(alignedReserveBase, segmentEnd - alignedReserveBase, HostPageProtection.ReadWrite);
+                            if (reserved != alignedReserveBase)
+                            {
+                                if (reserved != 0)
+                                {
+                                    _hostMemory.Free(reserved);
+                                }
+
+                                Reject(alignedReserveBase, "reserve-failed");
+                                return 0;
+                            }
+
+                            _fixedGranuleReservationBases.Add(alignedReserveBase);
+                            newReservations.Add(alignedReserveBase);
+                        }
                     }
-                }
-                else
-                {
-                    // Shared reservations permit adjacent allocations, not reuse of live pages.
-                    if (info.State == HostRegionState.Committed && cursor < requestEnd && segmentEnd > requestStart)
+                    else
                     {
-                        Reject(cursor, "already-committed pages");
+                        // Shared reservations permit adjacent allocations, not reuse of live pages.
+                        if (info.State == HostRegionState.Committed && cursor < requestEnd && segmentEnd > requestStart)
+                        {
+                            Reject(cursor, "already-committed pages");
+                            return 0;
+                        }
+
+                        var trusted = _fixedGranuleReservationBases.Contains(info.AllocationBase) ||
+                            IsTrackedRegionBase(info.AllocationBase);
+                        if (!trusted && cursor < requestEnd && segmentEnd > requestStart)
+                        {
+                            Reject(cursor, $"foreign {info.State} allocBase=0x{info.AllocationBase:X16} prot=0x{info.RawProtection:X}");
+                            return 0;
+                        }
+                    }
+
+                    cursor = segmentEnd;
+                }
+
+                var commitCursor = requestStart;
+                while (commitCursor < requestEnd)
+                {
+                    if (!_hostMemory.Query(commitCursor, out var info))
+                    {
+                        Reject(commitCursor, "commit-query-failed");
                         return 0;
                     }
 
-                    var trusted = _fixedGranuleReservationBases.Contains(info.AllocationBase) ||
-                        IsTrackedRegionBase(info.AllocationBase);
-                    if (!trusted && cursor < requestEnd && segmentEnd > requestStart)
+                    var segmentEnd = info.RegionSize > ulong.MaxValue - info.BaseAddress
+                        ? ulong.MaxValue
+                        : info.BaseAddress + info.RegionSize;
+                    segmentEnd = Math.Min(segmentEnd, requestEnd);
+                    if (segmentEnd <= commitCursor)
                     {
-                        Reject(cursor, $"foreign {info.State} allocBase=0x{info.AllocationBase:X16} prot=0x{info.RawProtection:X}");
+                        Reject(commitCursor, "commit-no-progress");
                         return 0;
                     }
+
+                    if (info.State != HostRegionState.Committed &&
+                        !_hostMemory.Commit(commitCursor, segmentEnd - commitCursor, hostProtection))
+                    {
+                        Reject(commitCursor, "commit-failed");
+                        return 0;
+                    }
+
+                    commitCursor = segmentEnd;
                 }
 
-                cursor = segmentEnd;
-            }
-
-            var commitCursor = requestStart;
-            while (commitCursor < requestEnd)
-            {
-                if (!_hostMemory.Query(commitCursor, out var info))
+                if (newReservations.Count == 0)
                 {
-                    Reject(commitCursor, "commit-query-failed");
-                    return 0;
+                    TraceVmem($"Fixed alloc committed into existing granule reservations: 0x{desiredAddress:X16}+0x{alignedSize:X}");
                 }
 
-                var segmentEnd = info.RegionSize > ulong.MaxValue - info.BaseAddress
-                    ? ulong.MaxValue
-                    : info.BaseAddress + info.RegionSize;
-                segmentEnd = Math.Min(segmentEnd, requestEnd);
-                if (segmentEnd <= commitCursor)
-                {
-                    Reject(commitCursor, "commit-no-progress");
-                    return 0;
-                }
-
-                if (info.State != HostRegionState.Committed &&
-                    !_hostMemory.Commit(commitCursor, segmentEnd - commitCursor, hostProtection))
-                {
-                    Reject(commitCursor, "commit-failed");
-                    return 0;
-                }
-
-                commitCursor = segmentEnd;
+                return desiredAddress;
             }
-
-            if (newReservations.Count == 0)
-            {
-                TraceVmem($"Fixed alloc committed into existing granule reservations: 0x{desiredAddress:X16}+0x{alignedSize:X}");
-            }
-
-            return desiredAddress;
+        }
+        finally
+        {
+            _gate.ExitReadLock();
         }
     }
 
@@ -1467,6 +1513,13 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     }
 
     public bool TryHoldRangeAtOrAbove(ulong searchStart, ulong size, ulong alignment, out ulong address)
+        => TrySelectBackingRange(searchStart, size, alignment, false, out address);
+
+    public bool TryHoldAvailableRange(ulong searchStart, ulong size, ulong alignment, out ulong address)
+        => TrySelectBackingRange(searchStart, size, alignment, true, out address);
+
+    private bool TrySelectBackingRange(ulong searchStart, ulong size, ulong alignment,
+        bool preferOwnedReservation, out ulong address)
     {
         address = 0;
         const ulong limit = 0x0000_00FC_0000_0000;
@@ -1491,6 +1544,11 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
             var start = Math.Max(searchStart, GuestMemoryLayout.GuestPage);
             var reservedCandidate = _backedSpace!.FindFreeAddress(start, limit, size, alignment);
+            if (preferOwnedReservation && reservedCandidate != 0)
+            {
+                address = reservedCandidate;
+                return true;
+            }
 
             while (start < limit && size <= limit - start)
             {
@@ -1610,17 +1668,36 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             }
 
             var end = address + size;
-            foreach (var region in _regions.Where(r => r.IsBackedView && r.VirtualAddress < end &&
-                         address < r.VirtualAddress + r.Size).ToArray())
+            var searchStart = 0;
+            var searchEnd = _regions.Count;
+            while (searchStart < searchEnd)
             {
+                var middle = searchStart + (searchEnd - searchStart) / 2;
+                if (_regions[middle].VirtualAddress < end)
+                    searchStart = middle + 1;
+                else
+                    searchEnd = middle;
+            }
+
+            // Reverse order keeps earlier indices valid when a region is split.
+            for (var index = searchStart - 1; index >= 0; index--)
+            {
+                var region = _regions[index];
                 var oldEnd = region.VirtualAddress + region.Size;
-                _regions.Remove(region);
+                if (oldEnd <= address)
+                    break;
+                if (!region.IsBackedView)
+                    continue;
+                _regions.RemoveAt(index);
                 if (region.VirtualAddress < address)
                 {
                     InsertRegionSorted(new MemoryRegion
                     {
-                        VirtualAddress = region.VirtualAddress, Size = address - region.VirtualAddress,
-                        IsBackedView = true, IsExecutable = region.IsExecutable, Protection = region.Protection,
+                        VirtualAddress = region.VirtualAddress,
+                        Size = address - region.VirtualAddress,
+                        IsBackedView = true,
+                        IsExecutable = region.IsExecutable,
+                        Protection = region.Protection,
                     });
                 }
 
@@ -1628,8 +1705,11 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 {
                     InsertRegionSorted(new MemoryRegion
                     {
-                        VirtualAddress = end, Size = oldEnd - end, IsBackedView = true,
-                        IsExecutable = region.IsExecutable, Protection = region.Protection,
+                        VirtualAddress = end,
+                        Size = oldEnd - end,
+                        IsBackedView = true,
+                        IsExecutable = region.IsExecutable,
+                        Protection = region.Protection,
                     });
                 }
             }
@@ -1689,8 +1769,21 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             }
 
             var end = address + size;
-            foreach (var region in _regions)
+            var searchStart = 0;
+            var searchEnd = _regions.Count;
+            while (searchStart < searchEnd)
             {
+                var middle = searchStart + (searchEnd - searchStart) / 2;
+                if (_regions[middle].VirtualAddress <= address)
+                    searchStart = middle + 1;
+                else
+                    searchEnd = middle;
+            }
+
+            // Regions do not overlap. Only the preceding region can contain the start.
+            for (var index = Math.Max(0, searchStart - 1); index < _regions.Count; index++)
+            {
+                var region = _regions[index];
                 if (region.VirtualAddress >= end)
                 {
                     break;
@@ -1793,10 +1886,10 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     {
         lock (_guestAllocationGate)
         {
-            lock (_fixedAllocationGate)
+            _gate.EnterWriteLock();
+            try
             {
-                _gate.EnterWriteLock();
-                try
+                lock (_fixedAllocationGate)
                 {
                     var freedBases = new HashSet<ulong>();
                     foreach (var region in _regions)
@@ -1825,10 +1918,10 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                     }
                     Interlocked.Increment(ref _mappingGeneration);
                 }
-                finally
-                {
-                    _gate.ExitWriteLock();
-                }
+            }
+            finally
+            {
+                _gate.ExitWriteLock();
             }
 
             _guestAllocationArenaBase = 0;

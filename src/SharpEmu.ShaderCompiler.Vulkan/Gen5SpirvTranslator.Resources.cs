@@ -23,7 +23,8 @@ public static partial class Gen5SpirvTranslator
             BindingLayoutValidator.Validate(
                 request.Bindings,
                 request.Resources.Info,
-                BindingLayout.CollectUserDataRegisters(request.Program, request.UserDataBase, request.UserDataCount),
+                BindingLayout.CollectUserDataRegisters(request.Program, request.UserDataBase, request.UserDataCount,
+                    request.ExcludedUserDataRegisters),
                 request.UsesGlobalDataShare,
                 request.UsesFlattenedTable,
                 request.ReadsShaderBase,
@@ -38,6 +39,14 @@ public static partial class Gen5SpirvTranslator
 
         if (request.Stage == ShaderStage.Pixel)
         {
+            var dualSource = request.PixelOutputs.Any(output => output.BlendSourceIndex != 0);
+            if (dualSource && (request.PixelOutputs.Count != 2 ||
+                request.PixelOutputs.Any(output => output.HostLocation != 0 || output.Kind != Gen5PixelOutputKind.Float) ||
+                !request.PixelOutputs.Select(output => output.BlendSourceIndex).Order().SequenceEqual(new uint[] { 0, 1 })))
+            {
+                error = "dual-source pixel outputs require indices zero and one at host location zero";
+                return false;
+            }
             if (request.PixelOutputs.Count > 8 || request.PixelOutputs.Any(output => output.GuestSlot > 7))
             {
                 error = "pixel outputs must contain at most eight guest slots in the 0..7 range";
@@ -45,7 +54,7 @@ public static partial class Gen5SpirvTranslator
             }
 
             if (request.PixelOutputs.Select(output => output.GuestSlot).Distinct().Count() != request.PixelOutputs.Count ||
-                request.PixelOutputs.Select(output => output.HostLocation).Distinct().Count() != request.PixelOutputs.Count)
+                request.PixelOutputs.Select(output => (output.HostLocation, output.BlendSourceIndex)).Distinct().Count() != request.PixelOutputs.Count)
             {
                 error = "pixel output guest slots and host locations must be unique";
                 return false;
@@ -1422,7 +1431,7 @@ public static partial class Gen5SpirvTranslator
             }
 
             var classElements = imageClass.Resources.ToList();
-            var element = classElements.IndexOf((uint)resourceIndex);
+            var element = classElements.IndexOf(info.GetCanonicalImageBinding((uint)resourceIndex));
             if (element < 0)
             {
                 return false;
@@ -1525,7 +1534,7 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
-            var element = imageClass.Resources.ToList().IndexOf((uint)resourceIndex);
+            var element = imageClass.Resources.ToList().IndexOf(info.GetCanonicalImageBinding((uint)resourceIndex));
             if (element < 0)
             {
                 error = $"image {resourceIndex} is not an element of {kind.Value}";
@@ -1565,7 +1574,9 @@ public static partial class Gen5SpirvTranslator
                     return false;
                 }
 
-                var samplerPointer = _module.AddInstruction(SpirvOp.AccessChain, _samplerPointer, _samplerArray, UInt(samplerIndex));
+                var samplerElement = request.Bindings.Find(DescriptorBindingKind.Samplers)!.Resources.ToList()
+                    .IndexOf(info.SamplerBinding(samplerIndex));
+                var samplerPointer = _module.AddInstruction(SpirvOp.AccessChain, _samplerPointer, _samplerArray, UInt((uint)samplerElement));
                 var sampler = Load(_samplerType, samplerPointer);
                 objectType = _module.TypeSampledImage(imageClass.ImageType);
                 imageObject = _module.AddInstruction(SpirvOp.SampledImage, objectType, imageValue, sampler);

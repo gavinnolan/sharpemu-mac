@@ -3,6 +3,7 @@
 
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.ShaderCompiler;
 using Silk.NET.Vulkan;
 
 namespace SharpEmu.Gpu.Vulkan.Pipelines;

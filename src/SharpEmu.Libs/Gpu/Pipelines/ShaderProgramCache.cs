@@ -20,6 +20,10 @@ public sealed record ShaderSource(RegisteredShader Registered, ulong Hash, uint[
 
     public uint CodeSize => Registered.TotalCodeSizeBytes;
 
+    public ulong ContinuationAddressOffset => Registered.IsFused
+        ? unchecked(Registered.ContinuationAddress - Address)
+        : 0;
+
     public string Label => Stage switch
     {
         ShaderStage.Vertex => "vertex",
@@ -49,12 +53,14 @@ public sealed class StageCompileOptions
 // The key of a program entry: what the emitter reads besides the resource specialization.
 public sealed class ProgramKey : IEquatable<ProgramKey>
 {
-    public ProgramKey(ShaderStage stage, ulong hash, uint userDataCount, uint codeSize, uint[] staticState)
+    public ProgramKey(ShaderStage stage, ulong hash, uint userDataCount, uint codeSize,
+        ulong continuationAddressOffset, uint[] staticState)
     {
         Stage = stage;
         Hash = hash;
         UserDataCount = userDataCount;
         CodeSize = codeSize;
+        ContinuationAddressOffset = continuationAddressOffset;
         StaticState = staticState;
     }
 
@@ -62,16 +68,19 @@ public sealed class ProgramKey : IEquatable<ProgramKey>
     public ulong Hash { get; }
     public uint UserDataCount { get; }
     public uint CodeSize { get; }
+    public ulong ContinuationAddressOffset { get; }
     public uint[] StaticState { get; }
 
     public bool Equals(ProgramKey? other) =>
         other is not null && Stage == other.Stage && Hash == other.Hash && UserDataCount == other.UserDataCount &&
-        CodeSize == other.CodeSize && StaticState.AsSpan().SequenceEqual(other.StaticState);
+        CodeSize == other.CodeSize && ContinuationAddressOffset == other.ContinuationAddressOffset &&
+        StaticState.AsSpan().SequenceEqual(other.StaticState);
 
     public override bool Equals(object? obj) => Equals(obj as ProgramKey);
 
     // Same-shape variants share a bucket; equality does the one exact comparison of the state words.
-    public override int GetHashCode() => HashCode.Combine(Stage, Hash, UserDataCount, CodeSize, StaticState.Length);
+    public override int GetHashCode() =>
+        HashCode.Combine(Stage, Hash, UserDataCount, CodeSize, ContinuationAddressOffset, StaticState.Length);
 }
 
 // One compiled module of a program entry for one specialization and push-data start.
@@ -109,8 +118,8 @@ internal sealed class ShaderProgramCache
     private readonly IGuestGpuBackend _compiler;
     private readonly IShaderPipelineHost _host;
     private readonly Dictionary<ProgramKey, ProgramSourceEntry> _programs = new();
-    private readonly Dictionary<(ulong Hash, uint CodeSize), Gen5ShaderProgram> _decoded = new();
-    private readonly Dictionary<(ulong Hash, uint CodeSize), ShaderCodeCapture> _codeCaptures = new();
+    private readonly Dictionary<(ulong Hash, uint CodeSize, ulong ContinuationAddressOffset), Gen5ShaderProgram> _decoded = new();
+    private readonly Dictionary<(ulong Hash, uint CodeSize, ulong ContinuationAddressOffset), ShaderCodeCapture> _codeCaptures = new();
     private readonly List<uint> _staticState = new(StageStaticKey.MaxWords);
     // Draws that re-bind unchanged resources reuse the last materialization.
     // SHARPEMU_RESOURCE_CACHE=0 materializes every draw, for A/B comparisons.
@@ -149,7 +158,7 @@ internal sealed class ShaderProgramCache
     // The decoded instructions of a program, shared by every static variant of the same code.
     public Gen5ShaderProgram Decode(ShaderSource source)
     {
-        var key = (source.Hash, source.CodeSize);
+        var key = (source.Hash, source.CodeSize, source.ContinuationAddressOffset);
         if (_decoded.TryGetValue(key, out var program))
         {
             return program;
@@ -242,7 +251,8 @@ internal sealed class ShaderProgramCache
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramCacheLookup))
         {
             BuildStaticState(source.Stage, options);
-            key = new ProgramKey(source.Stage, source.Hash, (uint)source.UserData.Length, source.CodeSize, _staticState.ToArray());
+            key = new ProgramKey(source.Stage, source.Hash, (uint)source.UserData.Length, source.CodeSize,
+                source.ContinuationAddressOffset, _staticState.ToArray());
             _programs.TryGetValue(key, out entry);
         }
         var sourceWasCached = entry is not null;
@@ -355,6 +365,13 @@ internal sealed class ShaderProgramCache
                 break;
             case ShaderStage.Pixel:
                 StageStaticKey.Build(options.PixelInfo ?? throw new ArgumentException("The pixel lookup has no pixel input info."), _staticState);
+                foreach (var output in options.PixelOutputs)
+                {
+                    _staticState.Add(output.GuestSlot);
+                    _staticState.Add(output.HostLocation);
+                    _staticState.Add(output.ExportTarget);
+                    _staticState.Add(output.BlendSourceIndex);
+                }
                 break;
             default:
                 StageStaticKey.Build(options.ComputeInfo ?? throw new ArgumentException("The compute lookup has no compute input info."), _staticState);
@@ -586,13 +603,14 @@ internal sealed class ShaderProgramCache
         var info = CreateProgramInfo(source, entry, resources, layout, request);
         if (source.Stage == ShaderStage.Compute &&
             _host.ShaderPrewarm is { } prewarm &&
-            _codeCaptures.TryGetValue((source.Hash, source.CodeSize), out var capture))
+            _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var capture))
         {
             prewarm.RecordCompute(capture, new ComputePrewarmRecord
             {
                 Hash = source.Hash,
                 CodeSize = source.CodeSize,
                 Address = capture.Address,
+                ContinuationAddressOffset = source.ContinuationAddressOffset,
                 UserDataBase = source.UserDataBase,
                 UserDataCount = (uint)source.UserData.Length,
                 PushDataCursor = pushDataCursor,
@@ -630,6 +648,7 @@ internal sealed class ShaderProgramCache
                 {
                     WaveSize = 32,
                     TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
+                    IeeeMode = info.IeeeMode,
                     ScratchDwords = info.ScratchDwords,
                     EnableGraphicsSubgroupOperations = enableGraphicsSubgroups,
                     SupportsSharedInt64Atomics = sharedInt64Atomics,
@@ -663,6 +682,7 @@ internal sealed class ShaderProgramCache
                 {
                     WaveSize = 32,
                     TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
+                    IeeeMode = info.IeeeMode,
                     ScratchDwords = info.ScratchDwords,
                     EnableGraphicsSubgroupOperations = enableGraphicsSubgroups,
                     SupportsSharedInt64Atomics = sharedInt64Atomics,
@@ -687,7 +707,7 @@ internal sealed class ShaderProgramCache
         uint userDataBase, uint userDataCount, uint pushDataCursor, bool usesDispatchThreadLimits) =>
         BindingLayout.Allocate(
             resources.Info,
-            BindingLayout.CollectUserDataRegisters(program, userDataBase, userDataCount),
+            BindingLayout.CollectUserDataRegisters(program, userDataBase, userDataCount, plan.Graph.ExcludedUserDataRegisters),
             BindingLayout.UsesGlobalDataShare(program),
             ShaderCompileRequest.RequiresFlattenedTable(plan, resources),
             BindingLayout.ReadsShaderBase(program),
@@ -701,6 +721,7 @@ internal sealed class ShaderProgramCache
         {
             WaveSize = info.WaveSize,
             EnableExecGuardElision = info.WaveSize != 64 || execGuardElision,
+            IeeeMode = info.IeeeMode,
             TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
             ScratchDwords = info.ScratchDwords,
             SupportsSharedInt64Atomics = sharedInt64Atomics,
