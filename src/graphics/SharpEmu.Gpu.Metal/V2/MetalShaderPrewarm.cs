@@ -239,18 +239,7 @@ internal static class MetalShaderPrewarm
             return false;
         }
 
-        if (list.IsStampCurrent(stamp))
-        {
-            _finished = true;
-            Console.Error.WriteLine(
-                $"[LOADER][INFO] Shader prewarm skipped: compute={list.LoadedComputeCount} reason=same-build-and-driver");
-            return false;
-        }
-
-        var completed = list.ReadProgress(stamp);
-        var pending = list.LoadedComputes()
-            .Where(item => !completed.Contains(ShaderPrewarmList.Identity(item.Record)))
-            .ToList();
+        var pending = PendingComputes(list, stamp, out var resumed);
         var started = Stopwatch.GetTimestamp();
         if (pending.Count == 0)
         {
@@ -266,7 +255,7 @@ internal static class MetalShaderPrewarm
         var remaining = workerCount;
         Gate.SetTotal(pending.Count);
         Console.Error.WriteLine(
-            $"[LOADER][INFO] Shader prewarm started: compute={pending.Count} resumed={completed.Count} workers={workerCount}");
+            $"[LOADER][INFO] Shader prewarm started: compute={pending.Count} resumed={resumed} workers={workerCount}");
         Gate.SetRunning(true);
         var threads = new Thread[workerCount];
         for (var index = 0; index < workerCount; index++)
@@ -303,6 +292,29 @@ internal static class MetalShaderPrewarm
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// The recorded computes this start compiles: every one, but those an interrupted
+    /// prewarm under the same stamp already finished. A current stamp does not skip the
+    /// rest. The libraries land in macOS's per-app Metal shader cache, which the OS caps
+    /// and evicts by itself while other titles and builds under the same bundle fill it,
+    /// so a finished prewarm says nothing about what the cache still holds. Skipping on
+    /// the stamp left Demon's Souls, after an eviction, compiling every compute library
+    /// cold on the GPU worker at its first dispatch, drawing nothing for about 100 s.
+    /// A library the cache still holds compiles in milliseconds, and a warm prewarm
+    /// finishes before the game reaches its splash hold.
+    /// </summary>
+    internal static List<(ComputePrewarmRecord Record, ShaderCodeCapture Code)> PendingComputes(
+        ShaderPrewarmList list,
+        string stamp,
+        out int resumed)
+    {
+        var completed = list.ReadProgress(stamp);
+        resumed = completed.Count;
+        return list.LoadedComputes()
+            .Where(item => !completed.Contains(ShaderPrewarmList.Identity(item.Record)))
+            .ToList();
     }
 
     private static void FlushProgress(ShaderPrewarmList list, string stamp)
