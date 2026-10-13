@@ -65,17 +65,26 @@ public sealed record Gen5MslMeshInfo(
     /// </summary>
     public uint InputPrimitivesPerSubgroup(Gen5MslMeshInputTopology input)
     {
+        // A wave64 GS half numbers its ES vertices, GS primitives and emitted vertices as
+        // (merged-wave subgroup id << 6) + lane. A mesh wave is 32 lanes, so the second
+        // wave's lanes land at 64 + lane while the offsets the prologue packs count on
+        // from 32: a subgroup has to stay inside the first wave to line up.
+        var vertices = Math.Min(MaxVertices, WaveLanes);
+        var primitives = Math.Min(MaxPrimitives, WaveLanes);
         var byInput = input switch
         {
-            Gen5MslMeshInputTopology.TriangleStrip => MaxVertices > 2 ? MaxVertices - 2 : 1,
-            Gen5MslMeshInputTopology.PointList => MaxVertices,
-            _ => Math.Max(MaxVertices / 3, 1),
+            Gen5MslMeshInputTopology.TriangleStrip => vertices > 2 ? vertices - 2 : 1,
+            Gen5MslMeshInputTopology.PointList => vertices,
+            _ => Math.Max(vertices / 3, 1),
         };
         var emitted = Math.Max(GeometryVerticesOut, 1);
-        var byOutputVertices = Math.Max(MaxVertices / emitted, 1);
-        var byOutputPrimitives = Math.Max(MaxPrimitives / (emitted > 2 ? emitted - 2 : 1), 1);
-        return Math.Min(Math.Min(byInput, MaxPrimitives), Math.Min(byOutputVertices, byOutputPrimitives));
+        var byOutputVertices = Math.Max(vertices / emitted, 1);
+        var byOutputPrimitives = Math.Max(primitives / (emitted > 2 ? emitted - 2 : 1), 1);
+        return Math.Min(Math.Min(byInput, primitives), Math.Min(byOutputVertices, byOutputPrimitives));
     }
+
+    /// <summary>Lanes in one mesh wave (one Apple simdgroup).</summary>
+    public const uint WaveLanes = 32;
 
     /// <summary>The input primitives a fused draw of <paramref name="count"/> vertices or
     /// indices assembles.</summary>
