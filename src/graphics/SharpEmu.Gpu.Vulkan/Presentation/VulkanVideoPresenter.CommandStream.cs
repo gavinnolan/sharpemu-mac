@@ -375,7 +375,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 : _commandThread!.ReadOverlay(address, destination);
         }
 
-        public bool TryReadGuestWaitOperand(ulong address, Span<byte> destination) =>
+        public bool TryReadGuestWaitOperand(ulong address, Span<byte> destination, bool commitPendingWrite) =>
             OnCommandThread ? ReadOnCommandThread(address, destination) : TryReadGuestOperand(address, destination);
 
         public bool TryReadGuestOperand(ulong address, Span<byte> destination)
