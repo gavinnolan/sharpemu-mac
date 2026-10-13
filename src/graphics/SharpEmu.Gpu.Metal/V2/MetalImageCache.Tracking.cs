@@ -234,6 +234,28 @@ internal sealed partial class MetalImageCache
         return (mayOwn && InvalidateAliases(address, size)) | metadataHit;
     }
 
+    // A managed write of exactly these bytes. Unlike a fault it names the bytes it
+    // changes, so an image is marked stale over those bytes alone.
+    bool IGuestImageStore.MarkPreciseCpuWrite(ulong address, ulong size)
+    {
+        if (!IsValidRange(address, size))
+        {
+            return false;
+        }
+
+        var mayOwn = _pageOwners.MayHaveOwners(address, size);
+        if (!mayOwn && Volatile.Read(ref _metadataWatchCount) == 0)
+        {
+            return false;
+        }
+
+        var backed = mayOwn && _guestMemory.IsBacked(address, size);
+        using var held = _lock.Hold();
+        var metadataHit = OnMetadataCpuWriteLocked(address, size);
+        return (mayOwn && InvalidatePreciseWrite(address, size, backed)) | metadataHit;
+    }
+
+    /// <summary>The host wrote exactly <c>[address, address + size)</c> of guest memory.</summary>
     public void InvalidateMemory(ulong address, ulong size)
     {
         if (!IsValidRange(address, size))
@@ -241,8 +263,49 @@ internal sealed partial class MetalImageCache
             return;
         }
 
+        var backed = _guestMemory.IsBacked(address, size);
         using var held = _lock.Hold();
-        InvalidateAliases(address, size);
+        InvalidatePreciseWrite(address, size, backed);
+    }
+
+    // A write of known bytes through the backing never meets the page watch, so the
+    // watch can stay and keeps catching the guest's own stores to the rest of the image:
+    // a watched image that holds nothing the GPU wrote is stale over the written bytes
+    // and nowhere else, and an image that only shares a page with them is not stale at
+    // all. Re-uploading the whole image instead - and dropping its watch, to take it
+    // again on the next use - is what a packet-sized host fill next to a texture cost,
+    // hundreds of times a frame, each upload ending the render pass it fell in.
+    // A write that goes through the guest mapping needs the watch gone first, and an
+    // image already without one, or with bytes only its texture holds, is handled as a
+    // fault is: the whole image is refreshed.
+    private bool InvalidatePreciseWrite(ulong address, ulong size, bool backed)
+    {
+        if (!backed)
+        {
+            return InvalidateAliases(address, size);
+        }
+
+        var covered = false;
+        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: false))
+        {
+            if (_slots.TryGet(imageIdentifier) is not { } image)
+            {
+                continue;
+            }
+
+            covered = true;
+            var (start, end) = image.OverlapWithin(address, size);
+            if (image.IsWatched && !image.IsGpuModified)
+            {
+                image.MarkCpuDirty(MetalImageDirtyCause.CpuWrite, start, end);
+                continue;
+            }
+
+            image.InvalidateCpuWrite(address, size);
+            UnwatchImage(imageIdentifier);
+        }
+
+        return covered;
     }
 
     private bool InvalidateAliases(ulong address, ulong size)

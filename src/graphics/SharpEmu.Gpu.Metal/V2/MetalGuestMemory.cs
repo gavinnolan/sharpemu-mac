@@ -437,6 +437,14 @@ internal sealed class MetalGuestMemory : IDisposable
         return Upload(gpuVa, size);
     }
 
+    /// <summary>
+    /// True when the whole range lives in the backing. A managed write to such a range
+    /// lands through the backing alias, never through the guest mapping a page watch
+    /// protects.
+    /// </summary>
+    public bool IsBacked(ulong gpuVa, ulong size) =>
+        size != 0 && size <= ulong.MaxValue - gpuVa && _backing.TryResolveBackingAliasSpan(gpuVa, size, out _);
+
     /// <summary>The window range of an address that must be written by the GPU; zero when it is not backed.</summary>
     public MetalGuestRange ResolveWritable(ulong gpuVa, ulong size) =>
         TryResolveWindow(gpuVa, size, out var resolved) ? resolved : default;

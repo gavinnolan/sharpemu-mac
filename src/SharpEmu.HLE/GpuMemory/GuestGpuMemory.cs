@@ -149,7 +149,7 @@ public sealed class GuestGpuMemory : IDisposable
         }
 
         _ = Buffers?.MarkCpuWrite(address, size);
-        _ = Images?.MarkCpuWrite(address, size);
+        _ = Images?.MarkPreciseCpuWrite(address, size);
         return true;
     }
 
