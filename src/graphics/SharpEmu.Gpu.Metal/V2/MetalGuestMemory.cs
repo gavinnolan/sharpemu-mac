@@ -438,6 +438,20 @@ internal sealed class MetalGuestMemory : IDisposable
     }
 
     /// <summary>
+    /// The window a binding of the range reads and writes in place; false when no one
+    /// window covers it and it has to be staged (<see cref="Stage"/>).
+    /// </summary>
+    public bool TryResolveInPlace(ulong gpuVa, ulong size, out MetalGuestRange range)
+    {
+        range = default;
+        return !StageEverything && TryResolveWindow(gpuVa, size, out range);
+    }
+
+    /// <summary>A ring copy of the guest bytes the CPU sees now.</summary>
+    public MetalGuestRange Stage(ulong gpuVa, ulong size) =>
+        size == 0 || gpuVa == 0 || size > ulong.MaxValue - gpuVa ? default : Upload(gpuVa, size);
+
+    /// <summary>
     /// True when the whole range lives in the backing. A managed write to such a range
     /// lands through the backing alias, never through the guest mapping a page watch
     /// protects.
@@ -652,6 +666,29 @@ internal sealed class MetalGuestMemory : IDisposable
         Interlocked.Add(ref _ringFallbackBytes, (long)size);
         Interlocked.Increment(ref _ringFallbacks);
         return range;
+    }
+
+    /// <summary>A second ring copy of bytes already staged in the ring; invalid when the range is not a ring range.</summary>
+    public unsafe MetalGuestRange Duplicate(in MetalGuestRange staged)
+    {
+        nint source = 0;
+        foreach (var ring in _rings)
+        {
+            if (ring.Buffer == staged.Buffer && staged.Offset + staged.Size <= ring.Size)
+            {
+                source = ring.Contents + (nint)staged.Offset;
+                break;
+            }
+        }
+
+        if (source == 0 || staged.Size == 0)
+        {
+            return default;
+        }
+
+        var copy = Allocate(staged.Size, RingAlignment, out var span);
+        new ReadOnlySpan<byte>((void*)source, checked((int)staged.Size)).CopyTo(span);
+        return copy;
     }
 
     /// <summary>Reserves ring bytes and hands back the host span to fill.</summary>

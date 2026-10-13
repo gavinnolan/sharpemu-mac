@@ -143,6 +143,9 @@ internal sealed partial class MetalRenderHost
 
     private void EndPreparation()
     {
+        // The draw or dispatch is recorded, so the stores it makes into staged copies
+        // can be written back at the next encoder boundary.
+        _stagedStorageCopies?.Arm();
         _preparation = null;
         _preparedStageMask = 0;
     }
@@ -409,7 +412,7 @@ internal sealed partial class MetalRenderHost
             var size = ClampMappedSize(descriptor.Address, requested);
             var written = info.Buffers[index].Written;
             FlushGpuWrites(descriptor.Address, size, MetalWritebackCause.StorageDescriptor);
-            var range = _guestMemory.Resolve(descriptor.Address, size);
+            var range = ResolveStorageBuffer(descriptor.Address, size, written);
             if (written)
             {
                 _imageCache.InvalidateMemoryFromGpu(descriptor.Address, size);
@@ -464,6 +467,7 @@ internal sealed partial class MetalRenderHost
             }
 
             var size = ClampMappedSize(range.Base, range.Size);
+            OrderAfterStagedStores(range.Base, size);
             FlushGpuWrites(range.Base, size, MetalWritebackCause.StorageDescriptor);
             if (!range.Written)
             {

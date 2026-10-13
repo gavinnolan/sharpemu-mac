@@ -643,6 +643,7 @@ internal sealed partial class MetalRenderHost
 
         EndRenderingBefore(in state);
         EndComputeEncoder();
+        EncodeStagedStores();
         EncodeDeferredLabelCopies();
         MaterializePendingClears();
         var commandBuffer = EnsureCommandBuffer();
@@ -890,6 +891,7 @@ internal sealed partial class MetalRenderHost
             }
 
             EndRendering();
+            EncodeStagedStores();
             EncodeDeferredLabelCopies();
         }
 

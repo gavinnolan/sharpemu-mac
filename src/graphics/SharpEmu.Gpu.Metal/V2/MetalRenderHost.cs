@@ -349,6 +349,7 @@ internal sealed partial class MetalRenderHost :
             _boundComputePipeline = 0;
         }
 
+        EncodeStagedStores();
         EncodeDeferredLabelCopies();
     }
 
@@ -364,6 +365,7 @@ internal sealed partial class MetalRenderHost :
 
         EndEncoders(cause);
         MaterializePendingClears();
+        _stagedStorageCopies?.EndSubmission();
         // Compared here as well as when a command buffer opens: a run that ends between
         // the two sees every snapshot it took go unchecked, which is how the one report
         // this watch exists for was lost twice.
@@ -722,6 +724,7 @@ internal sealed partial class MetalRenderHost :
     /// <summary>Recorded work stores into this guest range.</summary>
     public void NoteGuestMemoryWrite(ulong address, ulong size, MetalGpuWriteOrigin origin)
     {
+        _stagedStorageCopies?.Forget(address, size);
         if (_guard is not null && size != 0)
         {
             // A fill, copy or writeback has just been encoded, so the last transfer label
@@ -800,6 +803,7 @@ internal sealed partial class MetalRenderHost :
 
         WriteGuestPattern(address, size, value);
         _imageCache.InvalidateMemory(address, size);
+        _stagedStorageCopies?.Forget(address, size);
         Interlocked.Increment(ref _hostFills);
         return true;
     }
@@ -942,6 +946,7 @@ internal sealed partial class MetalRenderHost :
         if (!target.IsValid || !origin.IsValid)
         {
             CopyGuestBytesOnHost(destination, source, size);
+            _stagedStorageCopies?.Forget(destination, size);
             return;
         }
 
@@ -951,6 +956,7 @@ internal sealed partial class MetalRenderHost :
         {
             CopyGuestBytesOnHost(destination, source, size);
             _imageCache.InvalidateMemory(destination, size);
+            _stagedStorageCopies?.Forget(destination, size);
             Interlocked.Increment(ref _hostCopies);
             return;
         }
