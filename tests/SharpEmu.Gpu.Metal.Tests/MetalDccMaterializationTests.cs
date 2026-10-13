@@ -356,6 +356,85 @@ public sealed unsafe partial class MetalDccMaterializationTests(ITestOutputHelpe
         Assert.Equal(1, rig.Owner.Clears);
     }
 
+    // OCTOPATH TRAVELER II: the separate-translucency target's metadata is filled with a
+    // clear code by a dispatch recorded just before the target is bound, so the bytes are
+    // still in flight at that lookup. The recorded fill is what the metadata holds by the
+    // time the clear runs, and the particles drawn after it must not survive into the
+    // next frame.
+    [Fact]
+    public void MaterializeDcc_RecordedFillClearsWhileItsBytesAreInFlight()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.Lookup(ImageRole.ColorTarget);
+
+        for (var frame = 1; frame <= 2; frame++)
+        {
+            Assert.False(rig.Cache.TryAbsorbDccFill(MetadataAddress, SliceSize, 0));
+            rig.Cache.InvalidateMemoryFromGpu(MetadataAddress, SliceSize);
+            rig.Owner.Pending = true;
+
+            var target = rig.Lookup(ImageRole.ColorTarget);
+            Assert.Equal(frame, rig.Owner.Clears);
+            rig.Cache.MarkGpuWritten(target);
+            rig.Lookup();
+            Assert.Equal(frame, rig.Owner.Clears);
+        }
+
+        Assert.Equal(0, rig.Cache.TakeDccClearsDropped());
+        Assert.Equal(0, rig.Owner.Fills);
+    }
+
+    // A store over the metadata after the fill replaces what the fill wrote.
+    [Fact]
+    public void MaterializeDcc_RecordedFillOverwrittenStillDefers()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.Lookup(ImageRole.ColorTarget);
+        rig.Cache.TryAbsorbDccFill(MetadataAddress, SliceSize, 0);
+        rig.Cache.InvalidateMemoryFromGpu(MetadataAddress, SliceSize);
+        rig.Cache.InvalidateMemoryFromGpu(MetadataAddress, SliceSize);
+        rig.Owner.Pending = true;
+
+        rig.Lookup(ImageRole.ColorTarget);
+
+        Assert.Equal(0, rig.Owner.Clears);
+    }
+
+    [Fact]
+    public void MaterializeDcc_RecordedFillWithoutClearCodeDefers()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.Lookup(ImageRole.ColorTarget);
+        rig.Cache.TryAbsorbDccFill(MetadataAddress, SliceSize, 0x55555555);
+        rig.Cache.InvalidateMemoryFromGpu(MetadataAddress, SliceSize);
+        rig.Owner.Pending = true;
+
+        rig.Lookup(ImageRole.ColorTarget);
+
+        Assert.Equal(0, rig.Owner.Clears);
+    }
+
+    // Once the fill's bytes have landed they are what count, not the record.
+    [Fact]
+    public void MaterializeDcc_SettledMetadataOutranksRecordedFill()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.Lookup(ImageRole.ColorTarget);
+        rig.Cache.TryAbsorbDccFill(MetadataAddress, SliceSize, 0);
+        rig.Cache.InvalidateMemoryFromGpu(MetadataAddress, SliceSize);
+
+        rig.Lookup(ImageRole.ColorTarget);
+        Assert.Equal(0, rig.Owner.Clears);
+
+        rig.Owner.Pending = true;
+        rig.Lookup(ImageRole.ColorTarget);
+        Assert.Equal(0, rig.Owner.Clears);
+    }
+
     private bool RequireDevice()
     {
         if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") != "1")
