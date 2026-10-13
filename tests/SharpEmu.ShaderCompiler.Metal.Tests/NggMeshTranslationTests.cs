@@ -305,11 +305,11 @@ public sealed class NggMeshTranslationTests
     }
 
     [Theory]
-    [InlineData(Gen5MslMeshInputTopology.TriangleList, 3u, 21u)]
-    [InlineData(Gen5MslMeshInputTopology.TriangleStrip, 3u, 21u)]
-    [InlineData(Gen5MslMeshInputTopology.PointList, 3u, 21u)]
-    [InlineData(Gen5MslMeshInputTopology.TriangleStrip, 4u, 16u)]
-    [InlineData(Gen5MslMeshInputTopology.TriangleStrip, 1u, 62u)]
+    [InlineData(Gen5MslMeshInputTopology.TriangleList, 3u, 10u)]
+    [InlineData(Gen5MslMeshInputTopology.TriangleStrip, 3u, 10u)]
+    [InlineData(Gen5MslMeshInputTopology.PointList, 3u, 10u)]
+    [InlineData(Gen5MslMeshInputTopology.TriangleStrip, 4u, 8u)]
+    [InlineData(Gen5MslMeshInputTopology.TriangleStrip, 1u, 30u)]
     public void AGsSubgroupTakesWhatItsInputsAndOutputsFit(
         Gen5MslMeshInputTopology input, uint verticesOut, uint expected)
     {
