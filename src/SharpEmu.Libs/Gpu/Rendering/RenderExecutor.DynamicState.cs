@@ -126,7 +126,10 @@ public sealed partial class RenderExecutor
             blend.Blue,
             blend.Alpha,
             depthState.DepthTestEnabled,
-            depthState.DepthWriteEnabled && !depthState.DepthClearEnabled,
+            // The DB writes depth only when it tests it: Z_WRITE_ENABLE without Z_ENABLE
+            // leaves the buffer alone, which a host that writes under an always-pass compare
+            // would not.
+            depthState.DepthTestEnabled && depthState.DepthWriteEnabled && !depthState.DepthClearEnabled,
             depthState.DepthCompare,
             depthBiasEnabled,
             depthBiasConstant,
