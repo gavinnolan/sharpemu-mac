@@ -51,6 +51,14 @@ internal static class MetalTilerShaders
     // The depth texture a writeback reads, at [[texture(0)]] of the writeback kernels.
     public const uint TextureIndex = 0;
 
+    // The subresource a texture block copy reads or writes: array slice and mip level of
+    // the unsigned-integer 2D-array view, bound with setBytes beside the tile arguments.
+    public const uint SubresourceIndex = 4;
+
+    // The element sizes a texture block copy carries: one, two or four 32-bit channels
+    // of the view, which is every colour texel the tiled transfers move whole.
+    public static bool SupportsTextureCopy(uint elementBytes) => elementBytes is 4 or 8 or 16;
+
     public const string DepthWriteback = "writeback_depth";
     public const string DepthWritebackArray = "writeback_depth_array";
 
@@ -594,6 +602,86 @@ internal static class MetalTilerShaders
         foreach (var bytes in ElementSizes)
         {
             AppendBody(source, kind, direction, bytes);
+        }
+
+        source.Append("}\n");
+        return source.ToString();
+    }
+
+    public static string TextureKernelName(TileBlockKind kind, MetalTileDirection direction) =>
+        $"{(direction == MetalTileDirection.Detile ? "detile_to_texture" : "tile_from_texture")}_{kind.ToString().ToLowerInvariant()}";
+
+    // The colour twin of the depth writeback, in both directions: one pass between the
+    // tiled guest surface and the texture itself, through an unsigned-integer 2D-array
+    // view whose texel is the guest element bit for bit. The buffer path detiles into a
+    // staging buffer and blits that into the texture (or blits out and retiles), so it
+    // moves every byte twice; this moves it once. The addressing is the block copy's own:
+    // the same block index, the same in-block offset and the same baseY for a run of
+    // block rows, whose texel rows start at baseY.
+    public static string CreateTextureBlockCopyLibrary(TileBlockKind kind, MetalTileDirection direction)
+    {
+        var source = new StringBuilder(Preamble);
+        source.Append("constant uint kElementBytes [[function_constant(0)]];\n\n");
+        source.Append("struct TextureSubresource\n{\n    uint slice;\n    uint level;\n};\n\n");
+        var any = false;
+        foreach (var bytes in ElementSizes)
+        {
+            if (SupportsTextureCopy(bytes) && TileGeometry.TryGetBlockLayout(kind, bytes, out _))
+            {
+                AppendOffsetFunction(source, kind, bytes);
+                any = true;
+            }
+        }
+
+        if (!any)
+        {
+            throw GpuFatal.Fatal($"The texture tiler has no block layout for this kind: kind={(uint)kind}.");
+        }
+
+        var detile = direction == MetalTileDirection.Detile;
+        source.Append($"kernel void {TextureKernelName(kind, direction)}(\n");
+        source.Append(detile
+            ? $"    device const uint* source [[buffer({SourceIndex})]],\n" +
+              $"    texture2d_array<uint, access::write> surface [[texture({TextureIndex})]],\n"
+            : $"    texture2d_array<uint, access::read> surface [[texture({TextureIndex})]],\n" +
+              $"    device uint* target [[buffer({TargetIndex})]],\n");
+        source.Append($"    constant TileArgs& args [[buffer({ArgumentIndex})]],\n");
+        source.Append($"    constant TextureSubresource& subresource [[buffer({SubresourceIndex})]],\n");
+        source.Append("    uint3 gid [[thread_position_in_grid]])\n{\n");
+        source.Append("    if (gid.x >= args.width || gid.y >= args.height)\n    {\n        return;\n    }\n\n");
+        source.Append("    uint sy = gid.y + args.baseY;\n");
+        source.Append("    uint2 texel = uint2(gid.x, sy);\n");
+        foreach (var bytes in ElementSizes)
+        {
+            if (!SupportsTextureCopy(bytes) || !TileGeometry.TryGetBlockLayout(kind, bytes, out var block))
+            {
+                continue;
+            }
+
+            source.Append($"    if (kElementBytes == {bytes}u)\n    {{\n");
+            source.Append($"        uint block = (gid.y >> {Log2(block.BlockHeight)}u) * args.blocksPerRow + " +
+                          $"(gid.x >> {Log2(block.BlockWidth)}u);\n");
+            source.Append($"        uint tiled = block * {block.BlockSize}u + tiled_offset_{bytes}(gid.x, sy, args.surfaceZ);\n");
+            var words = bytes / 4;
+            if (detile)
+            {
+                source.Append("        uint at = (args.sourceBase + tiled) >> 2;\n");
+                source.Append("        uint4 value = uint4(source[at], ");
+                source.Append(words > 1 ? "source[at + 1u], " : "0u, ");
+                source.Append(words > 2 ? "source[at + 2u], source[at + 3u]);\n" : "0u, 0u);\n");
+                source.Append("        surface.write(value, texel, subresource.slice, subresource.level);\n");
+            }
+            else
+            {
+                source.Append("        uint4 value = surface.read(texel, subresource.slice, subresource.level);\n");
+                source.Append("        uint at = (args.destinationBase + tiled) >> 2;\n");
+                for (uint word = 0; word < words; word++)
+                {
+                    source.Append($"        target[at + {word}u] = value[{word}];\n");
+                }
+            }
+
+            source.Append("        return;\n    }\n");
         }
 
         source.Append("}\n");
