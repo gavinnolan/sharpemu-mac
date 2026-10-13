@@ -38,6 +38,12 @@ public sealed class Gen5MslAluParityTests(ITestOutputHelper output)
         new object[] { "VAddNcU16", 0xFFFFu, 2u, 0u, 0xABCD5678u, 0u, 0u, 0u, 0u, false, 0xABCD0001u },
         new object[] { "VAshrrevI16", 4u, 0x8000u, 0u, 0xABCD5678u, 0u, 0u, 0u, 0u, false, 0xABCDF800u },
         new object[] { "VMaxI16", 0xFFFFu, 2u, 0u, 0xABCD5678u, 0u, 0u, 0u, 0u, false, 0xABCD0002u },
+        // A NaN operand makes V_MED3 answer MIN3, whose min skips the NaN: the clamp
+        // med3(65504, x, 0) flushes a NaN x to 0 rather than to 65504.
+        new object[] { "VMed3F32", 0x477FE000u, 0x7FC00000u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0u },
+        new object[] { "VMed3F32", 0x7FC00000u, 0x40E00000u, 0x40A00000u, 0u, 0u, 0u, 0u, 0u, false, 0x40A00000u }, // min3(NaN, 7, 5) = 5
+        new object[] { "VMed3F32", 0x477FE000u, 0x40000000u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0x40000000u }, // med3(65504, 2, 0) = 2
+        new object[] { "VMed3F16", 0x7E00u, 0x4700u, 0x4500u, 0xABCD5678u, 0u, 0u, 0u, 0u, false, 0xABCD4500u }, // min3(NaN, 7, 5) = 5
     };
 
     public static IEnumerable<object[]> TranslationCases => Cases.Select(static row => row[..^1]);
