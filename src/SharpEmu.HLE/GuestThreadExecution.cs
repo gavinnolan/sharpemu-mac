@@ -281,6 +281,28 @@ public static class GuestThreadExecution
         }
     }
 
+    /// <summary>
+    /// Fired by an HLE call that is doing real, progressing work synchronously
+    /// on the guest thread but can legitimately take longer than the native
+    /// backend's stall-watchdog window (e.g. a first-boot asset-tree index).
+    /// The backend subscribes to reset its "no progress" timer, so a slow but
+    /// live operation is not mistaken for a genuine stuck guest and killed.
+    /// </summary>
+    public static event Action? HostWorkProgressObserved;
+
+    public static void NotifyHostWorkProgress()
+    {
+        try
+        {
+            HostWorkProgressObserved?.Invoke();
+        }
+        catch
+        {
+            // Best-effort signal only; a broken subscriber must not fault the
+            // HLE call that's reporting real progress.
+        }
+    }
+
     public static bool IsGuestThread => _currentGuestThreadHandle != 0;
 
     public static ulong CurrentGuestThreadHandle => _currentGuestThreadHandle;
@@ -344,6 +366,100 @@ public static class GuestThreadExecution
     public static void RestoreFiber(ulong previousFiberAddress)
     {
         _currentFiberAddress = previousFiberAddress;
+    }
+
+    // A nested guest exception handler (delivered synchronously from
+    // inside an outer import's own dispatch, before that import's own pending
+    // dispatch outcome -- a block request, an entry/exit, or a context
+    // transfer -- has been consumed) runs its own imports on the same
+    // native thread and therefore the same ThreadStatic slots. Without
+    // suspending the outer request first, an unrelated inner import (e.g. a
+    // trivial pthread_self call the handler happens to make) can consume --
+    // and misattribute -- the outer call's still-pending outcome, or simply
+    // clobber it. Save/clear all three groups before the nested call,
+    // restore after.
+    public readonly struct PendingBlockSnapshot
+    {
+        internal readonly string? Reason;
+        internal readonly bool ContinuationValid;
+        internal readonly GuestCpuContinuation Continuation;
+        internal readonly string? WakeKey;
+        internal readonly IGuestThreadBlockWaiter? Waiter;
+        internal readonly long DeadlineTimestamp;
+        internal readonly bool EntryExitPending;
+        internal readonly ulong EntryExitValue;
+        internal readonly string? EntryExitReason;
+        internal readonly bool ContextTransferPending;
+        internal readonly GuestCpuContinuation ContextTransferTarget;
+
+        internal PendingBlockSnapshot(
+            string? reason,
+            bool continuationValid,
+            GuestCpuContinuation continuation,
+            string? wakeKey,
+            IGuestThreadBlockWaiter? waiter,
+            long deadlineTimestamp,
+            bool entryExitPending,
+            ulong entryExitValue,
+            string? entryExitReason,
+            bool contextTransferPending,
+            GuestCpuContinuation contextTransferTarget)
+        {
+            Reason = reason;
+            ContinuationValid = continuationValid;
+            Continuation = continuation;
+            WakeKey = wakeKey;
+            Waiter = waiter;
+            DeadlineTimestamp = deadlineTimestamp;
+            EntryExitPending = entryExitPending;
+            EntryExitValue = entryExitValue;
+            EntryExitReason = entryExitReason;
+            ContextTransferPending = contextTransferPending;
+            ContextTransferTarget = contextTransferTarget;
+        }
+    }
+
+    public static PendingBlockSnapshot SuspendPendingBlock()
+    {
+        var snapshot = new PendingBlockSnapshot(
+            _pendingBlockReason,
+            _pendingBlockContinuationValid,
+            _pendingBlockContinuation,
+            _pendingBlockWakeKey,
+            _pendingBlockWaiter,
+            _pendingBlockDeadlineTimestamp,
+            _pendingEntryExit,
+            _pendingEntryExitValue,
+            _pendingEntryExitReason,
+            _pendingContextTransfer,
+            _pendingContextTransferTarget);
+        _pendingBlockReason = null;
+        _pendingBlockContinuation = default;
+        _pendingBlockContinuationValid = false;
+        _pendingBlockWakeKey = null;
+        _pendingBlockWaiter = null;
+        _pendingBlockDeadlineTimestamp = 0;
+        _pendingEntryExit = false;
+        _pendingEntryExitValue = 0;
+        _pendingEntryExitReason = null;
+        _pendingContextTransfer = false;
+        _pendingContextTransferTarget = default;
+        return snapshot;
+    }
+
+    public static void RestorePendingBlock(PendingBlockSnapshot snapshot)
+    {
+        _pendingEntryExit = snapshot.EntryExitPending;
+        _pendingEntryExitValue = snapshot.EntryExitValue;
+        _pendingEntryExitReason = snapshot.EntryExitReason;
+        _pendingContextTransfer = snapshot.ContextTransferPending;
+        _pendingContextTransferTarget = snapshot.ContextTransferTarget;
+        _pendingBlockReason = snapshot.Reason;
+        _pendingBlockContinuationValid = snapshot.ContinuationValid;
+        _pendingBlockContinuation = snapshot.Continuation;
+        _pendingBlockWakeKey = snapshot.WakeKey;
+        _pendingBlockWaiter = snapshot.Waiter;
+        _pendingBlockDeadlineTimestamp = snapshot.DeadlineTimestamp;
     }
 
     public static bool RequestCurrentThreadBlock(string reason) => RequestCurrentThreadBlock(null, reason);
