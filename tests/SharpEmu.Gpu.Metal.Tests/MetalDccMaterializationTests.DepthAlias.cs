@@ -5,6 +5,7 @@ using SharpEmu.Gpu.Metal.V2;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Rendering;
 using Xunit;
 
 namespace SharpEmu.Gpu.Metal.Tests;
@@ -172,5 +173,28 @@ public sealed unsafe partial class MetalDccMaterializationTests
         Assert.True(alias.StillHoldsPublicationFrom(depth));
         depth.MarkGpuModified();
         Assert.False(alias.StillHoldsPublicationFrom(depth));
+    }
+    // What decides whether the alias copied from a depth target is still current: a draw
+    // the guest calls read-only but Metal writes (writes on, test off) has to count.
+    [Theory]
+    [InlineData(true, true, false, (int)GpuFormat.D32Sfloat, true)]
+    [InlineData(false, true, false, (int)GpuFormat.D32Sfloat, true)]
+    [InlineData(false, true, false, (int)GpuFormat.D32SfloatS8Uint, true)]
+    [InlineData(false, false, true, (int)GpuFormat.D32Sfloat, true)]
+    [InlineData(true, false, false, (int)GpuFormat.D32Sfloat, false)]
+    [InlineData(false, false, false, (int)GpuFormat.D32Sfloat, false)]
+    [InlineData(false, true, false, (int)GpuFormat.S8Uint, false)]
+    public void ADepthAttachmentCountsAsWrittenWheneverMetalWritesIt(
+        bool test, bool write, bool clear, int format, bool expected)
+    {
+        var state = default(DepthStencilState) with
+        {
+            DepthTestEnabled = test,
+            DepthWriteEnabled = write,
+            DepthClearEnabled = clear,
+            DepthCompare = GpuCompareOp.Less,
+        };
+
+        Assert.Equal(expected, MetalRenderHost.WritesAttachment(in state, (GpuFormat)format));
     }
 }

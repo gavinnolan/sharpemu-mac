@@ -1430,7 +1430,7 @@ internal sealed partial class MetalRenderHost :
             $"wb_release={causes.Release} wb_drain={causes.Drain}{ReleaseCauses()} " +
             $"alias_kept={aliases.Kept} alias_published={aliases.Published} " +
             $"alias_on_device={_imageCache.TakeDeviceAliasPublishes()} " +
-            $"alias_reused={_imageCache.TakeDeviceAliasReuses()} " +
+            $"alias_reused={_imageCache.TakeDeviceAliasReuses()} untested_depth_writes={TakeUntestedDepthWrites()} " +
             $"part_up={subRange.Uploads} part_up_mb={subRange.UploadBytes / (1024 * 1024)} " +
             $"part_wb={subRange.Writebacks} part_wb_mb={subRange.WritebackBytes / (1024 * 1024)} " +
             $"write_ranges={_gpuWrites.Count} write_records={_gpuWrites.Recorded} " +

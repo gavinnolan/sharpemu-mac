@@ -742,7 +742,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         // already holds what the copy would put there. A depth target that only tests
         // depth (soft particles) leaves its version alone, so every draw after the first
         // samples the alias without a copy - and without the copy ending the open pass.
-        if (image.StillHoldsPublicationFrom(other))
+        if (AliasReuseEnabled && image.StillHoldsPublicationFrom(other))
         {
             _deviceAliasReuses++;
             return true;
@@ -765,6 +765,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
     private long _deviceAliasPublishes;
     private long _deviceAliasReuses;
+
+    // SHARPEMU_METAL_V2_ALIAS_REUSE=0 copies the alias on every use again, for a comparison.
+    private static readonly bool AliasReuseEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ALIAS_REUSE") != "0";
 
     /// <summary>Alias publications whose copy the alias already held.</summary>
     public long TakeDeviceAliasReuses() => Interlocked.Exchange(ref _deviceAliasReuses, 0);

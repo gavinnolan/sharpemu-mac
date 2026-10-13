@@ -53,6 +53,36 @@ internal sealed partial class MetalRenderHost
             clearValue);
     }
 
+    private long _untestedDepthWrites;
+
+    internal long TakeUntestedDepthWrites() => Interlocked.Exchange(ref _untestedDepthWrites, 0);
+
+    // Whether the attachment's texture can change under this draw. The guest state calls a
+    // draw with depth writes on and the depth test off read-only, but the Metal state
+    // writes depth whenever writes are on (the test becomes Always), so such a draw does
+    // change the texture, and whatever copied it - an R32 alias - no longer holds it.
+    // A metadata clear loads as a clear, so it writes even when the registers do not.
+    private bool DepthAttachmentWrites(in DepthAttachmentState depth, uint layer)
+    {
+        var resolution = depth.Target.Target;
+        var state = depth.Target.State;
+        if (WritesAttachment(in state, resolution.Format))
+        {
+            if (state.IsReadOnly(resolution.Format))
+            {
+                Interlocked.Increment(ref _untestedDepthWrites);
+            }
+
+            return true;
+        }
+
+        return resolution.HasHtile && _imageCache.IsMetadataCleared(resolution.HtileAddress, layer);
+    }
+
+    internal static bool WritesAttachment(in DepthStencilState state, GpuFormat format) =>
+        !state.IsReadOnly(format) ||
+        (state.DepthWriteEnabled && (ViewFormatRules.DepthAspects(format) & GpuImageAspect.DepthBit) != 0);
+
     DepthAttachmentAcquisition IRenderHost.AcquireDepthAttachment(in DepthAttachmentState depth)
     {
         var resolution = depth.Target.Target;
@@ -63,9 +93,7 @@ internal sealed partial class MetalRenderHost
             imageIdentifier = _imageCache.FindImage(ref request, exactFormat: false);
         }
 
-        // A metadata clear loads as a clear, so it writes even when the registers do not.
-        var writes = !depth.Target.State.IsReadOnly(resolution.Format) ||
-            (resolution.HasHtile && _imageCache.IsMetadataCleared(resolution.HtileAddress, request.View.BaseLayer));
+        var writes = DepthAttachmentWrites(in depth, request.View.BaseLayer);
         var texture = _imageCache.AcquireDepthTargetView(
             imageIdentifier, request with { Role = ImageRole.DepthTarget }, writes);
         var layer = request.View.BaseLayer;
