@@ -948,6 +948,33 @@ public sealed class MslTranslationTests
         Assert.DoesNotContain("uint v[256]", shader.Source, StringComparison.Ordinal);
     }
 
+    /// <summary>A program past 64 VGPRs still resolves a run-time read: the switch costs a
+    /// few compares however many registers it chooses among, so the file never falls back
+    /// to a thread-private array (Silent Hill's FFT bloom touches 124).</summary>
+    [Fact]
+    public void RelativeVectorSourceResolvesPastSixtyFourRegisters()
+    {
+        var words = new List<uint>();
+        for (var register = 1u; register <= 80u; register++)
+        {
+            words.Add(0x7E0002FFu | (register << 17)); // v_mov_b32 vN, literal
+            words.Add(register);
+        }
+
+        words.Add(0x7E00870Cu | (100u << 17)); // v_movrels_b32 v100, v12
+        words.Add(0xBF810000);                 // s_endpgm
+        var fixture = new Gen5ComputeFixture(
+            "relative-vector-source-wide",
+            [.. words],
+            StoreScalarResourceBase: 0,
+            StoreBackingBytes: 0);
+
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture);
+
+        Assert.DoesNotContain("uint v[256]", shader.Source, StringComparison.Ordinal);
+        Assert.Matches(@"case 80u: t\d+ = v80; break;", shader.Source);
+    }
+
     /// <summary>When straight-line scalar code produces M0, the move reaches a known set
     /// of registers and resolves to them directly — no run-time number at all.</summary>
     [Fact]
