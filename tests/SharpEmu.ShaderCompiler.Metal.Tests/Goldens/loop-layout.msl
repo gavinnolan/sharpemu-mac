@@ -401,12 +401,10 @@ kernel void gen5_cs(
     bool active = true;
     uint steps = 0u;
     device uint* b0 = sharpemu_resources.buffers[0];
-    uint bias[1] = {};
     s8 = sharpemu_push_data[0];
     s9 = sharpemu_push_data[1];
     s10 = sharpemu_push_data[2];
     s11 = sharpemu_push_data[3];
-    bias[0] = (sharpemu_push_data[4] >> 0u) & 0xFFu;
     v0 = sharpemu_local_id.x;
     v1 = sharpemu_local_id.y;
     v2 = sharpemu_local_id.z;
@@ -455,7 +453,7 @@ kernel void gen5_cs(
         break;
     }
     {
-        uint t8 = ((0x0u + 0u + 0u + (0u * 0u)) + bias[0]);
+        uint t8 = (0x0u + 0u + 0u + (0u * 0u));
         sharpemu_store_dword(b0, sharpemu_resources.buffer_bytes[0], t8 + 0u, v1);
     }
 }

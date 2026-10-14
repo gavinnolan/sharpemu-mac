@@ -403,7 +403,6 @@ vertex Gen5VsOut gen5_vs(
     bool vcc = false;
     bool scc = false;
     Gen5VsOut sharpemu_out = {};
-    uint bias[1] = {};
     v5 = sharpemu_vertex_id;
     v8 = sharpemu_instance_id;
     s106 = 0u;

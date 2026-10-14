@@ -885,7 +885,7 @@ public static partial class Gen5MslTranslator
                     source.AppendLine(
                         $"    if ({ResourcesName}.{Gen5MslArgumentLayout.StepReportName} != nullptr) " +
                         $"atomic_store_explicit({ResourcesName}.{Gen5MslArgumentLayout.StepReportName}, 0x40000000u | " +
-                        $"(bias[{DebugVertexWord}] << 20u) | " +
+                        $"({(_options.ElideByteBias ? "0u" : $"bias[{DebugVertexWord}]")} << 20u) | " +
                         $"({ResourcesName}.buffer_bytes[{DebugVertexWord}] & 0xFFFFFu) | " +
                         $"(b{DebugVertexWord} == nullptr ? 0x80000000u : 0u), memory_order_relaxed);");
                 }
@@ -2590,7 +2590,7 @@ public static partial class Gen5MslTranslator
             $"sharpemu_load_word(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress})";
 
         private string ApplyByteBias(int bindingIndex, string byteAddress) =>
-            $"({byteAddress} + bias[{bindingIndex}])";
+            _options.ElideByteBias ? byteAddress : $"({byteAddress} + bias[{bindingIndex}])";
 
         // ---- writer helpers ----
 

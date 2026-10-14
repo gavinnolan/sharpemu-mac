@@ -577,11 +577,9 @@ kernel void gen5_cs(
     bool scc = false;
     bool active = true;
     device uint* b0 = sharpemu_resources.buffers[0];
-    uint bias[1] = {};
     s8 = sharpemu_push_data[0];
     s9 = sharpemu_push_data[1];
     s10 = sharpemu_push_data[2];
-    bias[0] = (sharpemu_push_data[3] >> 0u) & 0xFFu;
     v0 = sharpemu_local_id.x;
     v1 = sharpemu_local_id.y;
     v2 = sharpemu_local_id.z;
@@ -605,7 +603,7 @@ kernel void gen5_cs(
         v2 = t1;
         uint t2 = 0x3F000000u;
         v3 = t2;
-        uint t3 = ((0x10u + 0u + 0u + (0u * 0u)) + bias[0]);
+        uint t3 = (0x10u + 0u + 0u + (0u * 0u));
         bool t4 = 2u <= sharpemu_resources.buffer_bytes[0] && t3 <= sharpemu_resources.buffer_bytes[0] - 2u;
         bool t5 = ((0x38FACu >> 12) & 0x7Fu) != 0u && t4;
         if (t5)

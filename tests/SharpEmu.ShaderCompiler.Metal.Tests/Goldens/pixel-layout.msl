@@ -407,7 +407,6 @@ fragment Gen5PsOut gen5_ps(
     bool vcc = false;
     bool scc = false;
     Gen5PsOut sharpemu_out = {};
-    uint bias[1] = {};
     s106 = 0u;
     s107 = 0u;
     s126 = sharpemu_ballot(true);

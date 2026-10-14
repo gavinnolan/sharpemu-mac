@@ -577,11 +577,9 @@ kernel void gen5_cs(
     bool scc = false;
     bool active = true;
     device uint* b0 = sharpemu_resources.buffers[0];
-    uint bias[1] = {};
     s8 = sharpemu_push_data[0];
     s9 = sharpemu_push_data[1];
     s10 = sharpemu_push_data[2];
-    bias[0] = (sharpemu_push_data[3] >> 0u) & 0xFFu;
     v0 = sharpemu_local_id.x;
     v1 = sharpemu_local_id.y;
     v2 = sharpemu_local_id.z;
@@ -601,7 +599,7 @@ kernel void gen5_cs(
     {
         uint t0 = 0x38FACu;
         s11 = t0;
-        uint t1 = ((0x0u + 0u + 0u + (0u * 0u)) + bias[0]);
+        uint t1 = (0x0u + 0u + 0u + (0u * 0u));
         bool t2 = 8u <= sharpemu_resources.buffer_bytes[0] && t1 <= sharpemu_resources.buffer_bytes[0] - 8u;
         bool t3 = ((0x38FACu >> 12) & 0x7Fu) != 0u && t2;
         uint4 t4 = sharpemu_load_words<2>(b0, sharpemu_resources.buffer_bytes[0], t1);
@@ -609,9 +607,9 @@ kernel void gen5_cs(
         v2 = t3 ? t5 : 0u;
         uint t6 = sharpemu_format_convert(t4[1], 32u, 7u, 11u);
         v3 = t3 ? t6 : 0u;
-        uint t7 = ((0x10u + 0u + 0u + (0u * 0u)) + bias[0]);
+        uint t7 = (0x10u + 0u + 0u + (0u * 0u));
         sharpemu_store_dword(b0, sharpemu_resources.buffer_bytes[0], t7 + 0u, v2);
-        uint t8 = ((0x14u + 0u + 0u + (0u * 0u)) + bias[0]);
+        uint t8 = (0x14u + 0u + 0u + (0u * 0u));
         sharpemu_store_dword(b0, sharpemu_resources.buffer_bytes[0], t8 + 0u, v3);
     }
 }

@@ -397,7 +397,6 @@ kernel void gen5_cs(
     bool vcc = false;
     bool scc = false;
     bool active = true;
-    uint bias[1] = {};
     s0 = sharpemu_push_data[0];
     v0 = sharpemu_local_id.x;
     v1 = sharpemu_local_id.y;
