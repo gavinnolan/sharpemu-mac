@@ -1147,7 +1147,9 @@ public sealed class MslTranslationTests
         var scalars = new uint[256];
         scalars[8] = 0x2000;
         scalars[10] = 64;
-        scalars[11] = 77u << 12;
+        // The untyped load takes the descriptor's format. 8_8 is not whole dwords, so it keeps
+        // the table form (a whole-dword literal format loads as one run, tested separately).
+        scalars[11] = (typed ? 77u : 14u) << 12;
         var shader = CompileMaterialized(new Gen5ShaderProgram(0, [load, end]), scalars[..12]);
 
         if (typed)
