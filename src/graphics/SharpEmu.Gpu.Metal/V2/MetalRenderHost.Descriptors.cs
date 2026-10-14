@@ -37,7 +37,9 @@ internal sealed partial class MetalRenderHost
         public ShaderProgramInfo Program = null!;
         public nint[] Textures = [];
         public uint[] TextureLevels = [];
+        public ulong[] TextureIds = [];
         public nint[] Samplers = [];
+        public ulong[] SamplerIds = [];
         public ResourceSlotIdentifier[] Images = [];
         public ImageRequest[] Requests = [];
         public bool[] IsStorage = [];
@@ -60,6 +62,7 @@ internal sealed partial class MetalRenderHost
             if (Textures.Length < images)
             {
                 Textures = new nint[images];
+                TextureIds = new ulong[images];
                 TextureLevels = new uint[images];
                 Images = new ResourceSlotIdentifier[images];
                 Requests = new ImageRequest[images];
@@ -69,6 +72,7 @@ internal sealed partial class MetalRenderHost
             if (Samplers.Length < samplers)
             {
                 Samplers = new nint[samplers];
+                SamplerIds = new ulong[samplers];
             }
 
             if (Buffers.Length < buffers)
@@ -96,8 +100,16 @@ internal sealed partial class MetalRenderHost
     private readonly MetalStageBindings[] _stageBindings =
         [new MetalStageBindings(), new MetalStageBindings(), new MetalStageBindings()];
 
-    private readonly Dictionary<BindingLayout, Gen5MslArgumentLayout> _argumentLayouts = new();
-    private readonly Dictionary<(uint, uint, uint, uint, bool), nint> _samplers = new();
+    // The argument layout of one binding layout, with the per-field resource indices that
+    // a draw would otherwise look up by scanning the descriptors.
+    private sealed class ArgumentPlan(Gen5MslArgumentLayout layout, int[]?[] fieldResources)
+    {
+        public readonly Gen5MslArgumentLayout Layout = layout;
+        public readonly int[]?[] FieldResources = fieldResources;
+    }
+
+    private readonly Dictionary<BindingLayout, ArgumentPlan> _argumentLayouts = new();
+    private readonly Dictionary<(uint, uint, uint, uint, bool), (nint Handle, ulong ResourceId)> _samplers = new();
     private readonly nint[] _stageArgumentBuffers = new nint[StageCount];
     private readonly ulong[] _stageArgumentOffsets = new ulong[StageCount];
     private readonly bool[] _stageArgumentValid = new bool[StageCount];
@@ -246,7 +258,7 @@ internal sealed partial class MetalRenderHost
         for (var index = 0; index < info.Samplers.Count; index++)
         {
             prepared.Samplers[index] = ResolveSampler(
-                info, prepared, info.Samplers[index], snapshot.Samplers[index], index);
+                info, prepared, info.Samplers[index], snapshot.Samplers[index], index, out prepared.SamplerIds[index]);
         }
 
         var shaderData = prepared.ShaderData;
@@ -303,7 +315,8 @@ internal sealed partial class MetalRenderHost
         MetalStageBindings prepared,
         SamplerResource sampler,
         uint[] words,
-        int index)
+        int index,
+        out ulong resourceId)
     {
         if (words.Length < 4)
         {
@@ -329,7 +342,7 @@ internal sealed partial class MetalRenderHost
         }
 
         var descriptor = new SamplerDescriptorWords(native);
-        return GetSampler(in descriptor, SamplesIntegerViews(info, prepared, index));
+        return GetSampler(in descriptor, SamplesIntegerViews(info, prepared, index), out resourceId);
     }
 
     // A sampler takes the numeric class of the views it samples; integer only when
@@ -371,6 +384,7 @@ internal sealed partial class MetalRenderHost
             if (index == stage.MovieLuma || index == stage.MovieChroma)
             {
                 stage.Textures[index] = AcquireHostMovieView(index == stage.MovieLuma ? 0 : 1);
+                stage.TextureIds[index] = MetalNative.SendGpuResourceId(stage.Textures[index], SelGpuResourceId);
                 continue;
             }
 
@@ -390,7 +404,8 @@ internal sealed partial class MetalRenderHost
                 stage.Requests[index] = request;
             }
 
-            stage.Textures[index] = _imageCache.AcquireTextureView(identifier, request with { Role = role });
+            stage.Textures[index] = _imageCache.AcquireTextureView(
+                identifier, request with { Role = role }, out stage.TextureIds[index]);
             NotePendingInputDump(stage.Textures[index], identifier, index, role);
         }
 
@@ -680,7 +695,8 @@ internal sealed partial class MetalRenderHost
     private void WriteArgumentBuffer(MetalStageBindings stage, int stageIndex)
     {
         var layout = stage.Program.Bindings!;
-        var argumentLayout = ArgumentLayoutOf(layout);
+        var plan = ArgumentPlanOf(layout);
+        var argumentLayout = plan.Layout;
         if (argumentLayout.Fields.Count == 0)
         {
             _stageArgumentValid[stageIndex] = false;
@@ -690,8 +706,10 @@ internal sealed partial class MetalRenderHost
         var range = _guestMemory.Allocate(Math.Max(argumentLayout.ByteSize, 16u), 256, out var argument);
         argument.Clear();
         var imageCursor = 0;
-        foreach (var field in argumentLayout.Fields)
+        var fields = argumentLayout.Fields;
+        for (var fieldIndex = 0; fieldIndex < fields.Count; fieldIndex++)
         {
+            var field = fields[fieldIndex];
             var span = argument.Slice((int)field.ByteOffset, (int)field.ByteSize);
             switch (field.FieldKind)
             {
@@ -712,16 +730,16 @@ internal sealed partial class MetalRenderHost
 
                     break;
                 case MslArgumentFieldKind.Textures:
-                    WriteTextureField(stage, field, span, ref imageCursor, stageIndex);
+                    WriteTextureField(stage, field, plan.FieldResources[fieldIndex], span, ref imageCursor, stageIndex);
                     break;
                 case MslArgumentFieldKind.Samplers:
                     // The layout lists only canonical samplers (equal descriptors share one
                     // element), so each element names the resource it binds.
-                    var samplerResources = layout.Find(DescriptorBindingKind.Samplers)?.Resources;
+                    var samplerResources = plan.FieldResources[fieldIndex];
                     for (var index = 0; index < field.Count; index++)
                     {
-                        var resource = samplerResources is not null && index < samplerResources.Count
-                            ? (int)samplerResources[index]
+                        var resource = samplerResources is not null && index < samplerResources.Length
+                            ? samplerResources[index]
                             : index;
                         if (resource >= stage.SamplerCount)
                         {
@@ -733,7 +751,7 @@ internal sealed partial class MetalRenderHost
                         {
                             BinaryPrimitives.WriteUInt64LittleEndian(
                                 span[(index * sizeof(ulong))..],
-                                MetalNative.SendGpuResourceId(sampler, SelGpuResourceId));
+                                stage.SamplerIds[resource]);
                         }
                     }
 
@@ -761,16 +779,15 @@ internal sealed partial class MetalRenderHost
     private void WriteTextureField(
         MetalStageBindings stage,
         MslArgumentField field,
+        int[]? bindingResources,
         Span<byte> span,
         ref int imageCursor,
         int stageIndex)
     {
-        var layout = stage.Program.Bindings!;
-        var binding = FindBinding(layout, field.Kind);
         for (var index = 0; index < field.Count; index++)
         {
-            var resource = binding is not null && index < binding.Resources.Count
-                ? (int)binding.Resources[index]
+            var resource = bindingResources is not null && index < bindingResources.Length
+                ? bindingResources[index]
                 : imageCursor + index;
             if (resource < 0 || resource >= stage.ImageCount)
             {
@@ -784,26 +801,13 @@ internal sealed partial class MetalRenderHost
             }
 
             BinaryPrimitives.WriteUInt64LittleEndian(
-                span[(index * sizeof(ulong))..], MetalNative.SendGpuResourceId(texture, SelGpuResourceId));
+                span[(index * sizeof(ulong))..], stage.TextureIds[resource]);
             var usage = Mtl.ResourceUsageRead | (stage.IsStorage[resource] ? Mtl.ResourceUsageWrite : 0);
             NoteUsedResource(texture, usage);
         }
 
         _ = stageIndex;
         imageCursor += (int)field.Count;
-    }
-
-    private static DescriptorBinding? FindBinding(BindingLayout layout, DescriptorBindingKind kind)
-    {
-        foreach (var binding in layout.Descriptors)
-        {
-            if (binding.Kind == kind)
-            {
-                return binding;
-            }
-        }
-
-        return null;
     }
 
     private ulong PointerFieldValue(MetalStageBindings stage, DescriptorBindingKind kind)
@@ -979,7 +983,7 @@ internal sealed partial class MetalRenderHost
         return range.GpuAddress;
     }
 
-    private Gen5MslArgumentLayout ArgumentLayoutOf(BindingLayout layout)
+    private ArgumentPlan ArgumentPlanOf(BindingLayout layout)
     {
         if (_argumentLayouts.TryGetValue(layout, out var found))
         {
@@ -987,8 +991,33 @@ internal sealed partial class MetalRenderHost
         }
 
         var built = Gen5MslArgumentLayout.Build(layout);
-        _argumentLayouts[layout] = built;
-        return built;
+        var fieldResources = new int[]?[built.Fields.Count];
+        for (var index = 0; index < fieldResources.Length; index++)
+        {
+            var field = built.Fields[index];
+            IReadOnlyList<uint>? resources = field.FieldKind switch
+            {
+                MslArgumentFieldKind.Textures => layout.Find(field.Kind)?.Resources,
+                MslArgumentFieldKind.Samplers => layout.Find(DescriptorBindingKind.Samplers)?.Resources,
+                _ => null,
+            };
+            if (resources is null)
+            {
+                continue;
+            }
+
+            var converted = new int[resources.Count];
+            for (var item = 0; item < converted.Length; item++)
+            {
+                converted[item] = (int)resources[item];
+            }
+
+            fieldResources[index] = converted;
+        }
+
+        var plan = new ArgumentPlan(built, fieldResources);
+        _argumentLayouts[layout] = plan;
+        return plan;
     }
 
     internal void NoteUsedResource(nint resource, nuint usage)
@@ -1149,16 +1178,18 @@ internal sealed partial class MetalRenderHost
     }
 
     // One MTLSamplerState per distinct guest descriptor and view numeric class.
-    private nint GetSampler(in SamplerDescriptorWords words, bool integerView)
+    private nint GetSampler(in SamplerDescriptorWords words, bool integerView, out ulong resourceId)
     {
         var key = (words[0], words[1], words[2], words[3], integerView);
         if (_samplers.TryGetValue(key, out var existing))
         {
-            return existing;
+            resourceId = existing.ResourceId;
+            return existing.Handle;
         }
 
         var sampler = CreateSampler(in words, integerView);
-        _samplers[key] = sampler;
+        resourceId = sampler != 0 ? MetalNative.SendGpuResourceId(sampler, SelGpuResourceId) : 0;
+        _samplers[key] = (sampler, resourceId);
         return sampler;
     }
 
