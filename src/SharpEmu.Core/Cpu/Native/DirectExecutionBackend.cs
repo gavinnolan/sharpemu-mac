@@ -2507,6 +2507,9 @@ public sealed unsafe partial class DirectExecutionBackend :
 		return true;
 	}
 
+	private static readonly bool _lockFreeTransferRipProbe =
+		!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_TRANSFER_RIP_PROBE_LOCKFREE"), "0", StringComparison.Ordinal);
+
 	internal static bool TryValidateGuestContextTransferTarget(
 		ICpuMemory memory,
 		in GuestCpuContinuation target,
@@ -2518,9 +2521,15 @@ public sealed unsafe partial class DirectExecutionBackend :
 			return false;
 		}
 
-		// DSTRACE §7 in-run A/B (SHARPEMU_DSTRACE_AB_RIPCACHE): during ON windows a target
-		// inside a committed executable page is accepted through the lock-free page cache.
-		if (DsTraceAb.Enabled && DsTraceAb.RipCacheActive && IsExecutableAddress(target.Rip))
+		// A target RIP inside a committed executable page is accepted through the lock-free
+		// executable-page cache instead of a 1-byte ICpuMemory.TryRead. Titles whose text
+		// segment is execute-only (Demon's Souls: PT_LOAD flags=0x1) otherwise escalate that
+		// read to the global address-space write lock plus two mprotect calls on EVERY fiber
+		// switch, which also stalls every other thread's guest-memory access (DS: ~2x frame
+		// time). SHARPEMU_TRANSFER_RIP_PROBE_LOCKFREE=0 restores the old probe; the DSTRACE
+		// §7 in-run A/B (SHARPEMU_DSTRACE_AB_RIPCACHE) alternates it when enabled.
+		var lockFreeProbe = DsTraceAb.Enabled ? DsTraceAb.RipCacheActive : _lockFreeTransferRipProbe;
+		if (lockFreeProbe && IsExecutableAddress(target.Rip))
 		{
 			if (DsTrace.Fiber)
 			{
