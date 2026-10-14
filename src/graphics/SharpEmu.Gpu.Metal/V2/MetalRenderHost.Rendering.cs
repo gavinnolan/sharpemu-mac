@@ -639,6 +639,12 @@ internal sealed partial class MetalRenderHost
             {
                 _passEndTarget++;
             }
+
+            PassProfileNoteEnd(clears ? "clear" : "target");
+        }
+        else if (_computeEncoder != 0)
+        {
+            PassProfileNoteEnd("render");
         }
 
         EndRenderingBefore(in state);
@@ -740,6 +746,11 @@ internal sealed partial class MetalRenderHost
                 MetalV2Native.SendVoidValue(descriptor, SelSetRenderTargetArrayLength, state.Layers);
             }
 
+            if (PassProfileEnabled)
+            {
+                PassProfileAttachRender(descriptor);
+            }
+
             _renderEncoder = MetalNative.Send(commandBuffer, SelRenderEncoder, descriptor);
             if (_renderEncoder == 0)
             {
@@ -758,7 +769,13 @@ internal sealed partial class MetalRenderHost
         _renderingState = state;
         ForgetEncoderState();
         _renderPasses++;
+        var loadBefore = _loadBytes;
+        var storeBefore = _storeBytes;
         NoteAttachmentTraffic(in state);
+        if (PassProfileEnabled)
+        {
+            PassProfileDescribe(in state, _loadBytes - loadBefore, _storeBytes - storeBefore);
+        }
         NotePassIdentity(in state);
         if (MetalV2Diagnostics.Verbose || _renderPasses < 4096)
         {
@@ -835,6 +852,7 @@ internal sealed partial class MetalRenderHost
 
             MetalNative.SendVoid(_renderEncoder, SelEndEncoding);
             _renderEncoder = 0;
+            PassProfileClose();
         }
 
         _renderingActive = false;
@@ -886,6 +904,7 @@ internal sealed partial class MetalRenderHost
         MetalNative.SendVoid(_computeEncoder, SelEndEncoding);
         _computeEncoder = 0;
         _boundComputePipeline = 0;
+        PassProfileClose();
     }
 
     internal nint EnsureComputeEncoder()
@@ -896,6 +915,7 @@ internal sealed partial class MetalRenderHost
             if (_renderingActive)
             {
                 _passEndCompute++;
+                PassProfileNoteEnd("compute");
             }
 
             EndRendering();
@@ -912,7 +932,13 @@ internal sealed partial class MetalRenderHost
             return _computeEncoder;
         }
 
-        _computeEncoder = MetalNative.Send(EnsureCommandBuffer(), SelComputeEncoder);
+        var computeBuffer = EnsureCommandBuffer();
+        _computeEncoder = PassProfileEnabled ? PassProfileComputeEncoder(computeBuffer) : 0;
+        if (_computeEncoder == 0)
+        {
+            _computeEncoder = MetalNative.Send(computeBuffer, SelComputeEncoder);
+        }
+
         if (_computeEncoder == 0)
         {
             throw Fatal("A Metal compute command encoder could not be created.");
@@ -1495,6 +1521,11 @@ internal sealed partial class MetalRenderHost
         var indexOffset = indexed && _indexBuffer != 0 ? _indexOffset : 0;
         MetalNative.SendSetBuffer(
             _renderEncoder, SelSetMeshBuffer, indexBuffer, (nuint)indexOffset, (nuint)mesh.IndexBufferIndex);
+        if (PassProfileEnabled)
+        {
+            PassProfileNoteGroups((ulong)subgroups * instanceCount);
+        }
+
         MetalNative.SendDrawMesh(
             _renderEncoder,
             SelDrawMeshThreadgroups,

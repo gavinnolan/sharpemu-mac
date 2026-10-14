@@ -274,6 +274,11 @@ internal sealed partial class MetalRenderHost :
     private IMetalSubmissionContext BeginTransferTouching(MetalTransferCause cause, nint texture, nint otherTexture)
     {
         _transferCauses[(int)cause]++;
+        if (PassProfileEnabled)
+        {
+            _ppTransferCause = $"transfer:{cause}";
+        }
+
         if (_preparation is null)
         {
             // Between packets the open pass is all a commit costs. Inside a preparation
@@ -338,6 +343,7 @@ internal sealed partial class MetalRenderHost :
     {
         if (_renderEncoder != 0)
         {
+            PassProfileNoteEnd(cause == PassEndCause.Transfer ? _ppTransferCause : cause.ToString().ToLowerInvariant());
             switch (cause)
             {
                 case PassEndCause.Transfer: _passEndTransfer++; break;
@@ -351,9 +357,11 @@ internal sealed partial class MetalRenderHost :
 
         if (_computeEncoder != 0)
         {
+            PassProfileNoteEnd(cause == PassEndCause.Transfer ? _ppTransferCause : cause.ToString().ToLowerInvariant());
             MetalNative.SendVoid(_computeEncoder, SelEndEncoding);
             _computeEncoder = 0;
             _boundComputePipeline = 0;
+            PassProfileClose();
         }
 
         EncodeStagedStores();
@@ -387,6 +395,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         _slotTrap?.OnCommit(serial);
+        PassProfileCommit(serial, cause == PassEndCause.Present);
         MetalNative.SendVoid(_commandBuffer, SelCommit);
         if (_pendingLabelWrites != 0 && ScheduleLabelSubmissions &&
             System.Diagnostics.Stopwatch.GetTimestamp() - _lastCommitTimestamp > QuietQueueTicks)
@@ -475,6 +484,15 @@ internal sealed partial class MetalRenderHost :
             _inFlightHead = (_inFlightHead + 1) % MaxInFlightSubmissions;
             _inFlightCount--;
             _unsampledSubmissions++;
+            if (PassProfileEnabled)
+            {
+                MetalNative.SendVoid(oldest, SelWaitUntilCompleted);
+            }
+
+            PassProfileResolve(
+                _inFlightSerials[(_inFlightHead + MaxInFlightSubmissions - 1) % MaxInFlightSubmissions],
+                PassProfileEnabled,
+                0);
             MetalNative.SendVoid(oldest, SelRelease);
         }
 
@@ -514,6 +532,13 @@ internal sealed partial class MetalRenderHost :
     private void SampleSubmission(nint buffer, ulong serial)
     {
         var status = MetalV2Native.SendValue(buffer, MetalNative.Selector("status"));
+        if (PassProfileEnabled && status != CommandBufferStatusCompleted && status != CommandBufferStatusError)
+        {
+            // Its serial is signalled from inside it, so it is all but finished; the pass
+            // profile needs its timestamps, which are readable only once it has completed.
+            MetalNative.SendVoid(buffer, SelWaitUntilCompleted);
+            status = MetalV2Native.SendValue(buffer, MetalNative.Selector("status"));
+        }
         if (status == CommandBufferStatusError)
         {
             Interlocked.Increment(ref _failedSubmissions);
@@ -522,12 +547,14 @@ internal sealed partial class MetalRenderHost :
                 "submission-failed",
                 $"A Metal submission failed and will never signal its serial: serial={serial} " +
                 $"{MetalNative.DescribeError(error)}");
+            PassProfileResolve(serial, false, 0);
             return;
         }
 
         if (status != CommandBufferStatusCompleted)
         {
             _unsampledSubmissions++;
+            PassProfileResolve(serial, false, 0);
             return;
         }
 
@@ -541,6 +568,8 @@ internal sealed partial class MetalRenderHost :
             _gpuBusySeconds += gpuEnd - gpuStart;
             _gpuBusySamples++;
         }
+
+        PassProfileResolve(serial, true, Math.Max(gpuEnd - gpuStart, 0));
 
         var kernelStart = MetalNative.SendDouble(buffer, SelKernelStartTime);
         var kernelEnd = MetalNative.SendDouble(buffer, SelKernelEndTime);

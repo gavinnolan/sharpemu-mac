@@ -477,11 +477,19 @@ public static partial class Gen5MslTranslator
 
         // The dispatcher loop. Unlike the other stages the loop body is the barrier point:
         // see the file header for why S_BARRIER cannot be emitted where it appears.
+        //
+        // A wave runs its blocks back to back until it parks at an S_BARRIER or ends, and
+        // only then meets the rest of the workgroup. The pc is wave-uniform, so the inner
+        // loop keeps a simdgroup converged, and nothing but S_BARRIER orders two waves in
+        // hardware either. Meeting after every block instead cost two threadgroup barriers
+        // and three atomics per block: SILENT HILL's cube-shadow primitive shader has no
+        // S_BARRIER at all and still paid that on each of its blocks, which made its shadow
+        // passes half of the title's GPU time.
         private void EmitMeshDispatcher(StringBuilder source, string body)
         {
             source.AppendLine("    for (;;)");
             source.AppendLine("    {");
-            source.AppendLine("        if (active && !sharpemu_mesh_wait)");
+            source.AppendLine("        while (active && !sharpemu_mesh_wait)");
             source.AppendLine("        {");
             source.AppendLine("            switch (pc)");
             source.AppendLine("            {");

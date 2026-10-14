@@ -111,7 +111,7 @@ public sealed class NggMeshTranslationTests
         // the only place a threadgroup_barrier may appear, because two waves of the same
         // subgroup can sit at different pc values.
         Assert.Contains("sharpemu_mesh_wait = true;", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("if (active && !sharpemu_mesh_wait)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("while (active && !sharpemu_mesh_wait)", shader.Source, StringComparison.Ordinal);
         Assert.Contains("case 1u:", shader.Source, StringComparison.Ordinal);
         Assert.Contains("atomic_fetch_add_explicit(&sharpemu_mesh_parked", shader.Source, StringComparison.Ordinal);
     }
