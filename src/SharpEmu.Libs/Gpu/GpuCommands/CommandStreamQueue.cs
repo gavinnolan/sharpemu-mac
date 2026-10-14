@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.HLE.DsTrace;
 using SharpEmu.Libs.VideoOut;
 
@@ -307,6 +308,13 @@ public sealed class CommandStreamQueue
         }
     }
 
+    // Exception filter: logs a rewritten DCB, then lets the fatal propagate untouched.
+    private bool VerifyOnFatal(CommandSubmission submission)
+    {
+        GpuStreamDiagnostics.Verify(_host, submission, "fatal");
+        return false;
+    }
+
     private void EnqueueLocked(CommandSubmission submission)
     {
         if (!_accepting)
@@ -320,6 +328,14 @@ public sealed class CommandStreamQueue
         }
 
         submission.AdmissionOrdinal = ++_admissionOrdinal;
+        if (GpuStreamDiagnostics.DcbHashEnabled && submission.DwordCount != 0 &&
+            submission.Kind is CommandSubmissionKind.Graphics or CommandSubmissionKind.Compute &&
+            GpuStreamDiagnostics.TryHashGuest(_host, submission.Address, submission.DwordCount, out var submitHash))
+        {
+            submission.DcbHash = submitHash;
+            submission.DcbHashed = true;
+        }
+
         _queues[submission.QueueId].AddLast(submission);
         _submissionCount++;
         if (submission.Kind is not (CommandSubmissionKind.FlipPreparation or CommandSubmissionKind.FrameBoundary))
@@ -1046,7 +1062,21 @@ public sealed class CommandStreamQueue
         var sliceStarted = PacketProfile.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
         _host.BeginSubmission(submission.QueueId, submission.SubmissionId, submission.GeometrySnapshots);
         processor.ConstantEngineComplete = true;
-        var complete = processor.Process(submission.Commands, submission.Address, submission.DwordCount) == SubmissionProgress.Complete;
+        if (firstSlice)
+        {
+            GpuStreamDiagnostics.Verify(_host, submission, "first-slice");
+        }
+
+        bool complete;
+        try
+        {
+            complete = processor.Process(submission.Commands, submission.Address, submission.DwordCount) == SubmissionProgress.Complete;
+        }
+        catch (GpuFatalException) when (VerifyOnFatal(submission))
+        {
+            throw;
+        }
+
         if (PacketProfile.Enabled)
         {
             PacketProfile.RecordSlice(System.Diagnostics.Stopwatch.GetTimestamp() - sliceStarted, !complete);

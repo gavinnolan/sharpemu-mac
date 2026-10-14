@@ -28,6 +28,9 @@ public sealed partial class GpuCommandInterpreter
     public const uint ConstantRamDwords = 0x3000;
     public const uint RingChunkBytes = 0x10000;
 
+    // SHARPEMU_GPU_STRICT_HEADERS: fail at the first header that is not a type-3 packet.
+    internal bool StrictHeaders { get; set; } = GpuStreamDiagnostics.StrictHeaders;
+
     private readonly ICommandStreamHost _host;
     private readonly List<uint[]> _payloadScratchByDepth = new();
     private readonly uint[] _constantRam = new uint[ConstantRamDwords];
@@ -430,9 +433,18 @@ public sealed partial class GpuCommandInterpreter
             // Ring memory the guest has not written yet; retry after it appends more.
             if (header == 0 && cursor.FollowedChunkAdvance)
             {
+                GpuStreamDiagnostics.RecordRingSuspend();
                 execution.Suspended = true;
                 execution.SuspendCondition = new CommandWaitCondition(CommandWaitKind.RingAppend);
                 return;
+            }
+
+            if (StrictHeaders && PacketHeader.PacketType(header) != 3)
+            {
+                ReportStreamContext("Strict header check");
+                throw _host.Fatal(
+                    $"The packet header is not type 3: offset=0x{offset:X5} header=0x{header:X8} " +
+                    $"type={PacketHeader.PacketType(header)} address=0x{packetAddress:X16}.");
             }
 
             if (remaining < 2)

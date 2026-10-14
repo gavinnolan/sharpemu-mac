@@ -108,6 +108,11 @@ public sealed class CommandSubmission
 
     internal ulong AdmissionOrdinal { get; set; }
 
+    // SHARPEMU_DCB_HASH: hash of the top-level DCB dwords when it was submitted.
+    internal ulong DcbHash { get; set; }
+
+    internal bool DcbHashed { get; set; }
+
     // Snapshots captured at submit time; the processor never reads them.
     public object? GeometrySnapshots { get; }
 

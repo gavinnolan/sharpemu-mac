@@ -59,6 +59,40 @@ public sealed class GpuCommandInterpreterLoopTests
         Assert.Contains("offset=0x00002", fatal.Message);
     }
 
+    [Fact]
+    public void StrictHeaders_RejectANonType3HeaderAtTheFirstBadDword()
+    {
+        var runner = new StreamRunner();
+        runner.Interpreter.StrictHeaders = true;
+
+        var fatal = runner.RunExpectingFatal(CreateInstanceCountPacket(2), new uint[] { 0x0000_0041u, 0 });
+
+        Assert.Contains("not type 3", fatal.Message);
+        Assert.Contains("offset=0x00002", fatal.Message);
+    }
+
+    [Fact]
+    public void StrictHeaders_StillAcceptTheFillerHeaderAndType3Packets()
+    {
+        var runner = new StreamRunner();
+        runner.Interpreter.StrictHeaders = true;
+
+        var progress = runner.Run(new[] { PacketHeader.FillerHeader }, CreateInstanceCountPacket(9));
+
+        Assert.Equal(SubmissionProgress.Complete, progress);
+        Assert.Equal(9u, runner.Interpreter.InstanceCount);
+    }
+
+    [Fact]
+    public void UnknownEventType_IsStillFatal()
+    {
+        var runner = new StreamRunner();
+
+        var fatal = runner.RunExpectingFatal(StreamRunner.Packet(PacketOpcode.EventWrite, 1u));
+
+        Assert.Contains("The event type is unknown: type=0x00000001 index=0x00000000", fatal.Message);
+    }
+
     // A handler that reports a fixed size for the variant it knows must not be
     // able to leave the cursor inside the packet body it did not finish. The
     // register-NOP offsets return two dwords whatever the header declares, so a

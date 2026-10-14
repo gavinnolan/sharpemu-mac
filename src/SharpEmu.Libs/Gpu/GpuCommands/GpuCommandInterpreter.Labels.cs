@@ -436,7 +436,7 @@ public sealed partial class GpuCommandInterpreter
             case 0x2E:
                 if (!validCacheEventIndex)
                 {
-                    throw _host.Fatal($"The event type is unknown: type=0x{eventType:X8} index=0x{eventIndex:X8}.");
+                    throw FatalUnknownEvent(eventType, eventIndex);
                 }
 
                 _host.EmitGlobalBarrier();
@@ -472,7 +472,7 @@ public sealed partial class GpuCommandInterpreter
             }
 
             default:
-                throw _host.Fatal($"The event type is unknown: type=0x{eventType:X8} index=0x{eventIndex:X8}.");
+                throw FatalUnknownEvent(eventType, eventIndex);
         }
     }
 
