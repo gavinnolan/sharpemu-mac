@@ -158,6 +158,50 @@ public sealed class GpuCommandInterpreterDrawTests
     }
 
     [Fact]
+    public void NonIndexedIndirectDraws_LeaveArgumentsOnTheGpuWhenTheHostCan()
+    {
+        var runner = new StreamRunner();
+        runner.Host.ResolvesIndirectAutoDrawOnGpu = true;
+        runner.Host.WriteWords(Arguments + 16, new uint[] { 30, 3, 4, 1 });
+
+        runner.Run(
+            SetBase(Arguments, dispatch: false),
+            StreamRunner.Packet(PacketOpcode.DrawIndirect, 16, 0, 0, 2));
+
+        var auto = Assert.Single(runner.Host.AutoDraws);
+        Assert.Equal((Arguments + 16, DrawOffsetSource.IndirectArguments), (auto.IndirectArgumentsAddress, auto.OffsetSource));
+        Assert.DoesNotContain(runner.Host.GuestReads, address => address >= Arguments + 16 && address < Arguments + 32);
+
+        // A later draw that inherits the instance count reads it then.
+        runner.Run(StreamRunner.Packet(PacketOpcode.DrawIndexAuto, 5, 0));
+        Assert.Equal(3u, runner.Host.AutoDraws[1].InstanceCount);
+    }
+
+    // Arguments no GPU work still writes cost nothing to read, and a draw with its counts
+    // needs no launch written on the GPU.
+    [Fact]
+    public void NonIndexedIndirectDraws_ReadArgumentsNoGpuWorkStillWritesOnTheCpu()
+    {
+        var runner = new StreamRunner();
+        runner.Host.ResolvesIndirectAutoDrawOnGpu = true;
+        runner.Host.PendingGpuWrites = [(Arguments + 64, 16)];
+        runner.Host.WriteWords(Arguments + 16, new uint[] { 30, 3, 4, 1 });
+        runner.Host.WriteWords(Arguments + 64, new uint[] { 6, 1, 0, 0 });
+
+        runner.Run(
+            SetBase(Arguments, dispatch: false),
+            StreamRunner.Packet(PacketOpcode.DrawIndirect, 16, 0, 0, 2),
+            StreamRunner.Packet(PacketOpcode.DrawIndirect, 64, 0, 0, 2));
+
+        Assert.Equal(2, runner.Host.AutoDraws.Count);
+        var final = runner.Host.AutoDraws[0];
+        Assert.Equal((0ul, 30u, 3u, 4u, 1u),
+            (final.IndirectArgumentsAddress, final.VertexCount, final.InstanceCount, final.FirstVertex, final.FirstInstance));
+        Assert.Equal(Arguments + 64, runner.Host.AutoDraws[1].IndirectArgumentsAddress);
+        Assert.Equal([Arguments + 16], runner.Host.IndirectCpuReads);
+    }
+
+    [Fact]
     public void UnsizedIndexedIndirectDraws_LearnTheIndexRangeBeforeUsingTheGpu()
     {
         var runner = new StreamRunner();

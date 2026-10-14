@@ -207,6 +207,19 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandS
 
     public bool ResolvesIndirectDrawOnGpu { get; set; }
 
+    public bool ResolvesIndirectAutoDrawOnGpu { get; set; }
+
+    /// <summary>Guest ranges GPU work still writes; null answers every range as pending.</summary>
+    public List<(ulong Address, ulong Size)>? PendingGpuWrites { get; set; }
+
+    public bool HasPendingGpuWrite(ulong address, ulong size) =>
+        PendingGpuWrites is not { } pending ||
+        pending.Exists(range => address < range.Address + range.Size && range.Address < address + size);
+
+    public List<ulong> IndirectCpuReads { get; } = [];
+
+    public void NoteIndirectArgumentsReadOnCpu(ulong address, ulong size) => IndirectCpuReads.Add(address);
+
     public void OnQueueReset(int queueId) => Calls.Add($"queue_reset {queueId}");
 
     public Exception Fatal(string message) => new CommandStreamFatalException(message);
