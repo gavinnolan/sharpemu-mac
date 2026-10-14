@@ -118,6 +118,78 @@ public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void ABarrierEmittedInPlaceDrawsTheSamePixelsAsTheDispatcher()
+    {
+        if (SkipWithoutMetalDevice("the barrier form comparison")) return;
+
+        float[] Render(bool structured)
+        {
+            var request = Gen5NggFixtures.Request(Gen5NggFixtures.CullingTriangle());
+            Assert.True(
+                Gen5MslTranslator.TryCompileProgram(
+                    request, out var shader, out var error, new Gen5MslCodegenOptions(StructuredControlFlow: structured)),
+                error);
+            var mesh = shader.MeshInfo!;
+            Assert.Equal(structured, !shader.Source.Contains("while (active && !sharpemu_mesh_wait)", StringComparison.Ordinal));
+            var source = shader.Source + FragmentSource;
+            if (!MetalNative.TryCompileLibrary(source, out var library, out var compileError))
+            {
+                throw new InvalidOperationException($"Metal rejected the mesh MSL: {compileError}\n{source}");
+            }
+
+            Assert.True(
+                MetalNative.TryRenderMesh(
+                    library,
+                    shader.EntryPoint,
+                    "gen5_mesh_test_fs",
+                    [
+                        (BuildArgumentBuffer(shader), 0u),
+                        (new byte[64], 1u),
+                        (BuildDrawInfo(mesh), mesh.DrawInfoBufferIndex),
+                        (new byte[16], mesh.IndexBufferIndex),
+                    ],
+                    threadgroups: 1,
+                    mesh.ThreadsPerThreadgroup,
+                    TargetSize,
+                    TargetSize,
+                    out var pixels,
+                    out var renderError),
+                $"the mesh draw failed: {renderError}");
+            return pixels;
+        }
+
+        var dispatched = Render(structured: false);
+        var inPlace = Render(structured: true);
+        Assert.Equal(1.0f, Green(inPlace, TargetSize / 2, TargetSize / 2), 3);
+        Assert.Equal(dispatched, inPlace);
+    }
+
+    [Fact]
+    public void LinearAndDispatchedBarrierLoopsCompileWithTheRuntimeMetalCompiler()
+    {
+        if (SkipWithoutMetalDevice("the barrier loop compile")) return;
+
+        var stage = Gen5NggFixtures.StageInfo with
+        {
+            VerticesPerSubgroup = 32,
+            PrimitivesPerSubgroup = 1,
+            MaxOutputPerSubgroup = 32,
+        };
+        foreach (var (name, program, info) in new[]
+        {
+            ("linear", Gen5NggFixtures.BarrierLoopWithTwoExits(), stage),
+            ("dispatched", Gen5NggFixtures.BarrierLoopWithTwoExits(), Gen5NggFixtures.StageInfo),
+            ("branch", Gen5NggFixtures.BarrierInDivergentBranch(), Gen5NggFixtures.StageInfo),
+        })
+        {
+            var shader = Gen5NggFixtures.CompileOrThrow(program, info);
+            Assert.True(
+                MetalNative.TryCompileLibrary(shader.Source, out _, out var error),
+                $"[{name}] Metal rejected the emitted mesh MSL: {error}\n{shader.Source}");
+        }
+    }
+
+    [Fact]
     public void CachedMeshletsDrawTheSamePixelsAsWholeTriangleSubgroups()
     {
         if (SkipWithoutMetalDevice("the meshlet mesh execution test")) return;

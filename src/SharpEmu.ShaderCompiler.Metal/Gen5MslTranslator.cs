@@ -772,10 +772,19 @@ public static partial class Gen5MslTranslator
                 structured = true;
                 body.Append(meshBody);
             }
+            else if (_stage == Gen5MslStage.Mesh &&
+                _options.StructuredControlFlow && ProgramHasBarrier() &&
+                TryBuildMeshBarrierBody(blocks, out meshBody, out var linearBarrierBody))
+            {
+                // Every S_BARRIER is workgroup-uniform, so it is emitted in place and the
+                // body needs no rendezvous (see Gen5MslTranslator.MeshBarrier.cs).
+                structured = !linearBarrierBody;
+                body.Append(meshBody);
+            }
             else if (_stage == Gen5MslStage.Mesh)
             {
-                // With S_BARRIER the mesh stage keeps the dispatcher: the barrier parks a
-                // wave between blocks, which needs a resumable pc (see
+                // A barrier that is not workgroup-uniform keeps the dispatcher: the barrier
+                // parks a wave between blocks, which needs a resumable pc (see
                 // Gen5MslTranslator.Mesh.cs).
                 EmitMeshDispatcher(body, BuildDispatcherSwitchBody(blocks, baseIndent: 3));
             }
@@ -2468,6 +2477,8 @@ public static partial class Gen5MslTranslator
             _writesDeviceMemory ??= _request.Program.Instructions.Any(static instruction =>
                 !instruction.Opcode.StartsWith("Ds", StringComparison.Ordinal) &&
                 !instruction.Opcode.StartsWith("Image", StringComparison.Ordinal) &&
+                // Scratch is thread-private (a thread-local array), never device memory.
+                !instruction.Opcode.StartsWith("Scratch", StringComparison.Ordinal) &&
                 (instruction.Opcode.Contains("Store", StringComparison.Ordinal) ||
                  instruction.Opcode.Contains("Atomic", StringComparison.Ordinal)));
 

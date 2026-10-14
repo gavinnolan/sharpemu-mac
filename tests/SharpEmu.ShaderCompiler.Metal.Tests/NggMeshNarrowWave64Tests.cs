@@ -8,6 +8,75 @@ namespace SharpEmu.ShaderCompiler.Metal.Tests;
 /// <summary>Structural checks over the narrow-wave64 lowering of mesh programs.</summary>
 public sealed class NggMeshNarrowWave64Tests
 {
+    private static Gen5MslShader Compile(
+        Gen5ShaderProgram program, Gen5NggStageInfo? stage, bool structured)
+    {
+        var request = Gen5NggFixtures.Request(program, stage);
+        Assert.True(
+            Gen5MslTranslator.TryCompileProgram(
+                request, out var shader, out var error, new Gen5MslCodegenOptions(StructuredControlFlow: structured)),
+            error);
+        return shader;
+    }
+
+    [Fact]
+    public void ATopLevelBarrierIsEmittedInPlaceWithoutTheRendezvous()
+    {
+        // Two waves, one barrier outside any branch: every thread runs it exactly once.
+        var shader = Compile(Gen5NggFixtures.CullingTriangle(), null, structured: true);
+        Assert.Equal(2u, Assert.IsType<Gen5MslMeshInfo>(shader.MeshInfo).WavesPerThreadgroup);
+        Assert.DoesNotContain("while (active && !sharpemu_mesh_wait)", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("sharpemu_mesh_wait = true", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("threadgroup_barrier(mem_flags::mem_threadgroup);", shader.Source, StringComparison.Ordinal);
+
+        var dispatched = Compile(Gen5NggFixtures.CullingTriangle(), null, structured: false);
+        Assert.Contains("while (active && !sharpemu_mesh_wait)", dispatched.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ABarrierInsideABranchKeepsTheDispatcherWhenThreadsSpanWaves()
+    {
+        var shader = Compile(Gen5NggFixtures.BarrierInDivergentBranch(), null, structured: true);
+        Assert.Equal(2u, Assert.IsType<Gen5MslMeshInfo>(shader.MeshInfo).WavesPerThreadgroup);
+        Assert.Contains("while (active && !sharpemu_mesh_wait)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_mesh_wait = true;", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ABarrierInsideABranchIsEmittedInPlaceInAOneWaveGroup()
+    {
+        // One wave: the pc is uniform, so a barrier under a scalar branch is reached by all.
+        var stage = Gen5NggFixtures.StageInfo with
+        {
+            VerticesPerSubgroup = 32,
+            PrimitivesPerSubgroup = 1,
+            MaxOutputPerSubgroup = 32,
+        };
+        var shader = Compile(Gen5NggFixtures.BarrierInDivergentBranch(), stage, structured: true);
+        Assert.Equal(1u, Assert.IsType<Gen5MslMeshInfo>(shader.MeshInfo).WavesPerThreadgroup);
+        Assert.DoesNotContain("while (active && !sharpemu_mesh_wait)", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AControlFlowTheStructuredFormCannotNestTakesTheLinearForm()
+    {
+        var stage = Gen5NggFixtures.StageInfo with
+        {
+            VerticesPerSubgroup = 32,
+            PrimitivesPerSubgroup = 1,
+            MaxOutputPerSubgroup = 32,
+        };
+        var shader = Compile(Gen5NggFixtures.BarrierLoopWithTwoExits(), stage, structured: true);
+        Assert.DoesNotContain("while (active && !sharpemu_mesh_wait)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("while (active && pc >= 1u && pc <= 3u)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("if (active && pc == 2u)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("threadgroup_barrier(mem_flags::mem_threadgroup);", shader.Source, StringComparison.Ordinal);
+
+        // Several waves around a barrier inside a loop: back to the dispatcher.
+        var wide = Compile(Gen5NggFixtures.BarrierLoopWithTwoExits(), null, structured: true);
+        Assert.Contains("while (active && !sharpemu_mesh_wait)", wide.Source, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void CompareIntoAScalarPairClearsTheHighDword()
     {

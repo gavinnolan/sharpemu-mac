@@ -198,6 +198,11 @@ public static partial class Gen5MslTranslator
                 }
 
                 _structureEmitted[node] = true;
+                if (indent > 1 && _meshBarrierBlocks is { } barrierBlocks && barrierBlocks[node])
+                {
+                    _meshBarrierNested = true;
+                }
+
                 AppendIndented(
                     text,
                     Gen5MslDump.Enabled ? $"{{ // block {node}" : "{",
