@@ -1297,7 +1297,7 @@ internal sealed partial class MetalRenderHost :
             $"staged_invalid_fault={c.Fault} staged_invalid_precise={c.Precise} staged_invalid_host={c.Host} " +
             $"staged_invalid_gpu={c.Gpu} staged_invalid_unmap={c.Unmap} staged_evictions={c.Evictions} " +
             $"staged_cache_mb={cache.CacheBytes / (1024 * 1024)} staged_entries={g.Entries} staged_watched={g.Watched} " +
-            $"staged_dirty={g.Dirty} " +
+            $"staged_dirty={g.Dirty} staged_stale={g.Stale} staged_unwatched_current={g.UnwatchedCurrent} " +
             $"staged_verify_checks={c.VerifyChecks} staged_verify_mismatches={c.VerifyMismatches}";
     }
 
