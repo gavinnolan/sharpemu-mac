@@ -618,12 +618,6 @@ internal sealed partial class MetalImageCache
     /// <summary>Deferred DCC clears dropped because the image was drawn to since.</summary>
     public long TakeDccClearsDropped() => Interlocked.Exchange(ref _dccClearsDropped, 0);
 
-    private void DeferDccSlice(ResourceSlotIdentifier image, ulong address, long imageWriteSequence)
-    {
-        using var held = _lock.Hold();
-        _deferredDccSlices.TryAdd((image, address), imageWriteSequence);
-    }
-
     // The metadata settled to something that is not a clear: there is no deferred clear left.
     private void ForgetDeferredDccSlice(ResourceSlotIdentifier image, ulong address)
     {
@@ -713,19 +707,13 @@ internal sealed partial class MetalImageCache
 
     /// <summary>
     /// The clear code a recorded fill leaves in one metadata slice whose bytes are still
-    /// being written. A slice whose bytes have settled has no further use for the record:
-    /// from then on the guest bytes are what count.
+    /// being written.
+    ///
+    /// Caller holds the lock.
     /// </summary>
-    private bool TryTakeRecordedDccFill(ulong address, ulong size, bool pending, out byte code)
+    private bool TryFindRecordedDccFillLocked(ulong address, ulong size, out byte code)
     {
         code = 0;
-        using var held = _lock.Hold();
-        if (!pending)
-        {
-            ForgetRecordedDccFillsLocked(address, size);
-            return false;
-        }
-
         foreach (var (start, fill) in _recordedDccFills)
         {
             if (address >= start && address + size <= start + fill.Size)
@@ -1090,32 +1078,57 @@ internal sealed partial class MetalImageCache
                 // The deferral is remembered, so a draw that lands before it settles is not
                 // wiped by applying it later.
                 var pending = _owner.HasPendingGpuWrite(address, sliceSize);
-                var recorded = TryTakeRecordedDccFill(address, sliceSize, pending, out var code);
-                if (pending && !recorded)
+                // Settled metadata says what it holds through its guest bytes; the first one
+                // is read before the lock, which the backing does not need.
+                var readable = !pending && _backing.TryReadBacking(address, firstByte);
+                byte code;
+                var recorded = false;
+                GpuClearColor clear;
+                using (var held = _lock.Hold())
                 {
-                    DeferDccSlice(imageIdentifier, address, imageWriteSequence);
-                    continue;
-                }
-
-                if (!recorded)
-                {
-                    if (!_backing.TryReadBacking(address, firstByte))
+                    if (!pending)
                     {
+                        // A slice whose bytes have settled has no further use for a recorded
+                        // fill: from then on the guest bytes are what count.
+                        ForgetRecordedDccFillsLocked(address, sliceSize);
+                        if (!readable)
+                        {
+                            continue;
+                        }
+
+                        code = firstByte[0];
+                    }
+                    else if (TryFindRecordedDccFillLocked(address, sliceSize, out code))
+                    {
+                        recorded = true;
+                    }
+                    else
+                    {
+                        _deferredDccSlices.TryAdd((imageIdentifier, address), imageWriteSequence);
                         continue;
                     }
 
-                    code = firstByte[0];
-                }
+                    if (!PackedClearValue.TryDecodeDccColor(
+                            view.Format,
+                            code * 0x01010101u,
+                            description.Metadata,
+                            allowClearToRegister: request.Role == ImageRole.ColorTarget,
+                            out clear))
+                    {
+                        _deferredDccSlices.Remove((imageIdentifier, address));
+                        continue;
+                    }
 
-                if (!PackedClearValue.TryDecodeDccColor(
-                        view.Format,
-                        code * 0x01010101u,
-                        description.Metadata,
-                        allowClearToRegister: request.Role == ImageRole.ColorTarget,
-                        out var clear))
-                {
-                    ForgetDeferredDccSlice(imageIdentifier, address);
-                    continue;
+                    // A slice already cleared with this code is settled without scanning it
+                    // again: every rewrite of the metadata removes the claim, so a claim that
+                    // stands means the bytes still hold the clear it was taken for. This is
+                    // the repeat DecideDccClear would reach after the scan, deferral and all.
+                    if (_materializedDccSlices.Contains((imageIdentifier, address, code)))
+                    {
+                        _deferredDccSlices.Remove((imageIdentifier, address));
+                        Interlocked.Increment(ref _dccRepeatsSkipped);
+                        continue;
+                    }
                 }
 
                 if (!recorded && !IsUniformSlice(address, sliceSize, code, buffer))

@@ -72,9 +72,17 @@ public sealed unsafe partial class MetalDccMaterializationTests(ITestOutputHelpe
             return true;
         }
 
+        // Bytes read from the metadata slice, so a test can tell a scan from a peek.
+        public long MetadataBytesRead;
+
         public bool TryReadBacking(ulong address, Span<byte> data)
         {
             if (!Contains(address, (ulong)data.Length)) return false;
+            if (address < MetadataAddress + SliceSize && MetadataAddress < address + (ulong)data.Length)
+            {
+                MetadataBytesRead += data.Length;
+            }
+
             new ReadOnlySpan<byte>((byte*)_block + (address - GuestBase), data.Length).CopyTo(data);
             return true;
         }
@@ -215,6 +223,28 @@ public sealed unsafe partial class MetalDccMaterializationTests(ITestOutputHelpe
 
         Assert.Equal(1, rig.Owner.Clears);
         Assert.Equal(1, rig.Cache.TakeDccRepeatsSkipped());
+    }
+
+    // A slice that already holds the clear it was claimed for is settled from its first
+    // byte; the claim, not a scan of the slice, says it is a repeat.
+    [Fact]
+    public void MaterializeDcc_ClaimedSliceIsNotScanned()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.Lookup(ImageRole.ColorTarget);
+        rig.FillMetadata(0x00);
+        rig.Lookup();
+        Assert.Equal(1, rig.Owner.Clears);
+        Assert.True(rig.Cache.MetadataWatchOverlaps(MetadataAddress, SliceSize));
+
+        rig.Backing.MetadataBytesRead = 0;
+        rig.Lookup();
+        rig.Lookup(ImageRole.ColorTarget);
+
+        Assert.Equal(1, rig.Owner.Clears);
+        Assert.Equal(2, rig.Cache.TakeDccRepeatsSkipped());
+        Assert.Equal(2, rig.Backing.MetadataBytesRead);
     }
 
     public enum Rewrite
