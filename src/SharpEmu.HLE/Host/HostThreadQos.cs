@@ -96,6 +96,27 @@ public static partial class HostThreadQualityOfService
         }
     }
 
+    /// <summary>Raw qos_class_t of the calling thread (diagnostics only); 0 off macOS.</summary>
+    public static uint GetCurrentThreadClassForDiagnostics()
+    {
+        if (!OperatingSystem.IsMacOS())
+        {
+            return 0;
+        }
+
+        try
+        {
+            return qos_class_self();
+        }
+        catch (Exception)
+        {
+            return 0;
+        }
+    }
+
     [LibraryImport("libSystem.B.dylib")]
     private static partial int pthread_set_qos_class_self_np(uint qosClass, int relativePriority);
+
+    [LibraryImport("libSystem.B.dylib")]
+    private static partial uint qos_class_self();
 }

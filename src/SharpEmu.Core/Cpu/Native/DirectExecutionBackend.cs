@@ -793,8 +793,31 @@ public sealed unsafe partial class DirectExecutionBackend :
 			}
 		}
 
+		// Diagnostic: SHARPEMU_GUEST_THREAD_QOS=interactive|initiated|default|utility forces a QoS class
+		// on every guest pthread executor; SHARPEMU_LOG_GUEST_THREAD_QOS=1 logs the class each one starts with.
+		private static readonly string? _guestThreadQosOverride =
+			Environment.GetEnvironmentVariable("SHARPEMU_GUEST_THREAD_QOS");
+		private static readonly bool _logGuestThreadQos =
+			Environment.GetEnvironmentVariable("SHARPEMU_LOG_GUEST_THREAD_QOS") == "1";
+
 		private void ThreadMain(ulong guestThreadHandle)
 		{
+			var inheritedQos = SharpEmu.HLE.Host.HostThreadQualityOfService.GetCurrentThreadClassForDiagnostics();
+			bool? applied = _guestThreadQosOverride switch
+			{
+				"interactive" => SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(SharpEmu.HLE.Host.HostThreadQos.UserInteractive),
+				"initiated" => SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(SharpEmu.HLE.Host.HostThreadQos.UserInitiated),
+				"default" => SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(SharpEmu.HLE.Host.HostThreadQos.Default),
+				"utility" => SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(SharpEmu.HLE.Host.HostThreadQos.Utility),
+				_ => null,
+			};
+			if (_logGuestThreadQos)
+			{
+				Console.Error.WriteLine(
+					$"[LOADER][INFO] guest_thread.qos name='{_thread.Name}' inherited=0x{inheritedQos:X2} " +
+					$"override={_guestThreadQosOverride ?? "none"} applied={applied?.ToString() ?? "n/a"} " +
+					$"now=0x{SharpEmu.HLE.Host.HostThreadQualityOfService.GetCurrentThreadClassForDiagnostics():X2}");
+			}
 			var previousGuestThreadHandle = GuestThreadExecution.EnterGuestThread(guestThreadHandle);
 			try
 			{
@@ -4047,7 +4070,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 				thread.State = GuestThreadRunState.Ready;
 				thread.BlockReason = null;
 				thread.BlockDeadlineTimestamp = 0;
-				EnqueueReadyGuestThreadLocked(thread);
+				EnqueueReadyGuestThreadLocked(thread, GuestThreadExecution.IsGuestThread ? "signal" : "host_signal");
 				wakeCount++;
 			}
 		}
@@ -4165,7 +4188,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 				thread.State = GuestThreadRunState.Ready;
 				thread.BlockReason = null;
 				thread.BlockDeadlineTimestamp = 0;
-				EnqueueReadyGuestThreadLocked(thread);
+				EnqueueReadyGuestThreadLocked(thread, "timeout");
 				wakeCount++;
 			}
 		}
@@ -5902,7 +5925,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 							thread.State = GuestThreadRunState.Ready;
 							thread.BlockReason = null;
 							thread.BlockDeadlineTimestamp = 0;
-							EnqueueReadyGuestThreadLocked(thread);
+							EnqueueReadyGuestThreadLocked(thread, "block_recheck");
 						}
 						break;
 					default:
@@ -7163,9 +7186,9 @@ public sealed unsafe partial class DirectExecutionBackend :
 		_readyDispatchThread = null;
 	}
 
-	private void EnqueueReadyGuestThreadLocked(GuestThreadState thread)
+	private void EnqueueReadyGuestThreadLocked(GuestThreadState thread, string? source = null)
 	{
-		ProfileGuestThreadReady(thread);
+		ProfileGuestThreadReady(thread, source);
 		_readyGuestThreads.Enqueue(thread);
 		Interlocked.Increment(ref _readyGuestThreadCount);
 		Monitor.PulseAll(_guestThreadGate);
