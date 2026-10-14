@@ -251,6 +251,7 @@ internal sealed partial class MetalRenderHost
         in SubresourceRange destinationRange,
         in GpuExtent3D extent)
     {
+        _imageCache.PrepareImageWrite(destination);
         var context = ((IMetalImageCacheOwner)this).BeginTransfer(
             MetalTransferCause.ImageCopy, source.Texture, destination.Texture);
         // A copy rewrites the destination whether or not its caller marks it written.

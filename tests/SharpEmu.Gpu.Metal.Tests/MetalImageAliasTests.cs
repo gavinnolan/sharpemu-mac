@@ -129,8 +129,12 @@ public sealed unsafe class MetalImageAliasTests(ITestOutputHelper output)
         private readonly MetalGuestMemory _memory;
         private readonly Backing _backing = new();
 
-        public Rig(nint device)
+        private readonly bool _savedLinearViews = MetalLinearWindowView.Enabled;
+
+        // The alias tests are about owned textures; window views have their own tests.
+        public Rig(nint device, bool linearViews = false)
         {
+            MetalLinearWindowView.Enabled = linearViews;
             Harness = new MetalTransferHarness(device);
             Harness.Begin();
             _pages = new PageGuard(_space);
@@ -222,6 +226,7 @@ public sealed unsafe class MetalImageAliasTests(ITestOutputHelper output)
             _pages.Dispose();
             Harness.Dispose();
             _backing.Dispose();
+            MetalLinearWindowView.Enabled = _savedLinearViews;
         }
     }
 
@@ -443,6 +448,111 @@ public sealed unsafe class MetalImageAliasTests(ITestOutputHelper output)
         Assert.Equal(written, rig.ReadGuest(ImageAddress, LargeSize));
         Assert.False(linear.IsGpuModified);
         Assert.True(tiled.IsGpuModified);
+    }
+
+    // A linear image that is only sampled is a texture over the guest window: nothing to
+    // watch, upload or dirty, and a guest store between draws needs no notice.
+    [Fact]
+    public void ASampledLinearImageReadsTheWindowWithNoUploadOrWatch()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value, linearViews: true);
+        rig.WriteGuest(ImageAddress, MetalTileOracle.Pattern((int)LargeSize, 0x21));
+        var uploadsBefore = rig.Cache.Counters.Uploads;
+
+        var image = rig.Cache.GetImage(rig.Acquire(ImageAddress, LargeSide, ImageRole.Texture));
+
+        Assert.True(image.IsWindowLinearView);
+        Assert.False(image.IsCpuDirty);
+        Assert.False(image.IsWatched);
+        Assert.False(image.IsGpuModified);
+        Assert.Equal(1, rig.Cache.LinearViewCount);
+
+        // The guest rewrites it, and the cache is told as a fault would tell it.
+        rig.WriteGuest(ImageAddress, MetalTileOracle.Pattern((int)LargeSize, 0x77));
+        ((IGuestImageStore)rig.Cache).MarkCpuWrite(ImageAddress, 8);
+        rig.Acquire(ImageAddress, LargeSide, ImageRole.Texture);
+
+        Assert.False(image.IsCpuDirty);
+        Assert.Equal(uploadsBefore, rig.Cache.Counters.Uploads);
+        Assert.Equal(0, rig.Cache.TakeLinearViewPromotions());
+    }
+
+    // A target, a storage image and a copy destination write a texture, so the view gives
+    // way to an owned texture that is filled from guest memory like any other.
+    [Theory]
+    [InlineData(ImageRole.ColorTarget)]
+    [InlineData(ImageRole.StorageImage)]
+    public void AWrittenLinearImageBecomesAnOwnedTexture(ImageRole role)
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value, linearViews: true);
+        var identifier = rig.Acquire(ImageAddress, LargeSide, ImageRole.Texture);
+        var image = rig.Cache.GetImage(identifier);
+        var viewTexture = image.Texture;
+        Assert.True(image.IsWindowLinearView);
+
+        var request = Rig.Request(ImageAddress, LargeSide, role);
+        if (role == ImageRole.ColorTarget)
+        {
+            rig.Cache.AcquireColorTargetView(identifier, request);
+        }
+        else
+        {
+            rig.Cache.AcquireTextureView(identifier, request);
+        }
+
+        Assert.False(image.IsWindowLinearView);
+        Assert.NotEqual(viewTexture, image.Texture);
+        Assert.True(image.IsGpuModified);
+        Assert.Equal(0, rig.Cache.LinearViewCount);
+        Assert.Equal(1, rig.Cache.TakeLinearViewPromotions());
+    }
+
+    // A buffer-backed texture makes swizzled views like any other, so a swizzle alone
+    // does not cost the image its window view.
+    [Fact]
+    public void ASwizzledSampleOfALinearViewStaysAWindowView()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value, linearViews: true);
+        var identifier = rig.Acquire(ImageAddress, LargeSide, ImageRole.Texture);
+        var image = rig.Cache.GetImage(identifier);
+        var request = Rig.Request(ImageAddress, LargeSide, ImageRole.Texture);
+        request.View = request.View with
+        {
+            Mapping = new GpuComponentMapping(
+                GpuComponentSwizzle.R, GpuComponentSwizzle.R, GpuComponentSwizzle.R, GpuComponentSwizzle.R),
+        };
+
+        var view = rig.Cache.AcquireTextureView(identifier, request);
+
+        Assert.NotEqual(0, view);
+        Assert.NotEqual(image.Texture, view);
+        Assert.True(image.IsWindowLinearView);
+        Assert.Equal(0, rig.Cache.TakeLinearViewPromotions());
+
+        // A view in another format is not something the window texture serves.
+        request.View = request.View with { Format = GpuFormat.B8G8R8A8Unorm };
+        rig.Cache.AcquireTextureView(identifier, request);
+
+        Assert.False(image.IsWindowLinearView);
+        Assert.Equal(1, rig.Cache.TakeLinearViewPromotions());
+    }
+
+    // The guest unmapping the range drops the view before the window bytes are reused.
+    [Fact]
+    public void UnmappingTheRangeDropsTheWindowView()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value, linearViews: true);
+        rig.Acquire(ImageAddress, LargeSide, ImageRole.Texture);
+        Assert.Equal(1, rig.Cache.LinearViewCount);
+
+        ((IGuestImageStore)rig.Cache).Unregister(ImageAddress, LargeSize);
+
+        Assert.Equal(0, rig.Cache.LinearViewCount);
+        Assert.Equal(0, rig.Cache.ImageCount);
     }
 
     private bool RequireDevice()

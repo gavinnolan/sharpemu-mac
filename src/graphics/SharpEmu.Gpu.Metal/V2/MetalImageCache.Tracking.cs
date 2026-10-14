@@ -71,6 +71,11 @@ internal sealed partial class MetalImageCache
             return;
         }
 
+        if (image.IsWindowLinearView)
+        {
+            Interlocked.Decrement(ref _linearViews);
+        }
+
         if (image.IsGpuModified)
         {
             WriteBackToGuest(image, MetalWritebackCause.Release);
@@ -130,7 +135,9 @@ internal sealed partial class MetalImageCache
     private void WatchImage(ResourceSlotIdentifier imageIdentifier)
     {
         var image = _slots[imageIdentifier];
-        if (_watchingStopped || !image.Registered || ImageDescription.IsEmptyRange(image.Description.Data))
+        // A window view reads guest memory in place: a store to it needs no notice.
+        if (_watchingStopped || !image.Registered || image.IsWindowLinearView ||
+            ImageDescription.IsEmptyRange(image.Description.Data))
         {
             return;
         }
@@ -1085,6 +1092,7 @@ internal sealed partial class MetalImageCache
             return;
         }
 
+        PromoteLinearView(image);
         var shape = image.Shape;
         var volume = shape.TextureType == Mtl.TextureType3D;
         var layers = volume ? Math.Max(shape.Depth >> (int)range.BaseLevel, 1) : shape.ArrayLength;
@@ -1173,6 +1181,7 @@ internal sealed partial class MetalImageCache
         }
 
         var image = _slots[selected];
+        PromoteLinearView(image);
         ref readonly var description = ref image.Description;
         var range = new SubresourceRange(0, image.Shape.MipLevels, 0, image.Shape.ArrayLength);
         if (description.IsDepth)

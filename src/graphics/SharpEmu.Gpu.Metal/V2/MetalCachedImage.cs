@@ -33,6 +33,9 @@ internal enum MetalImageReleaseCause : byte
     OverlapEvicted,
     Budget,
     Unmapped,
+    // A texture that read the guest window in place became an owned texture because the
+    // image was written, stored to, copied into, or needed a view the window texture cannot give.
+    LinearViewPromoted,
 }
 
 // Why a GPU-written image had to be published into guest memory.
@@ -78,6 +81,7 @@ internal sealed class MetalCachedImage : IDisposable
     private bool _cpuDirty;
     private bool _gpuModified;
     private bool _disposed;
+    private bool _windowLinearView;
 
     public MetalCachedImage(in ImageDescription description, in MetalTextureShape shape, nint texture)
     {
@@ -183,6 +187,58 @@ internal sealed class MetalCachedImage : IDisposable
 
     public bool IsCpuDirty => _cpuDirty;
 
+    /// <summary>
+    /// True while the texture is a linear texture over the guest window buffer: it reads
+    /// the guest bytes in place, so it has no contents of its own to upload, watch or write
+    /// back. The image still owns and releases the texture object; the texture retains the
+    /// window buffer, which is never freed under it.
+    /// </summary>
+    public bool IsWindowLinearView => _windowLinearView;
+
+    /// <summary>Marks the texture the image was made with as a window view: never dirty, never uploaded.</summary>
+    public void MarkWindowLinearView()
+    {
+        _windowLinearView = true;
+        _cpuDirty = false;
+        DirtyStart = 0;
+        DirtyEnd = 0;
+        NoteContentChanged();
+    }
+
+    /// <summary>
+    /// Whether the window texture can serve this view: the whole image in its own format
+    /// and type. A component swizzle is fine; a buffer-backed texture makes those views.
+    /// </summary>
+    public bool CanWindowViewServe(in ImageViewDescription requested)
+    {
+        return MetalV2Formats.PixelFormat(requested.Format) == Shape.PixelFormat &&
+            MetalV2Formats.ViewTextureType(requested.Type, Shape.SampleCount) == Shape.TextureType &&
+            requested.BaseLevel == 0 && requested.LevelCount >= Shape.MipLevels &&
+            requested.BaseLayer == 0 && requested.LayerCount >= Shape.ArrayLength;
+    }
+
+    /// <summary>
+    /// Gives the image an owned texture in place of its window view. The old texture and its
+    /// views move to the returned image, which the cache retires once the GPU is done with it.
+    /// The new texture holds nothing yet, so the image is CPU-dirty over its whole range.
+    /// </summary>
+    public MetalCachedImage PromoteToOwned(nint texture, in MetalTextureShape shape)
+    {
+        var retired = new MetalCachedImage(in Description, Shape, Texture) { LastUseSerial = LastUseSerial };
+        lock (_viewGate)
+        {
+            retired._views.AddRange(_views);
+            _views.Clear();
+        }
+
+        Texture = texture;
+        Shape = shape;
+        _windowLinearView = false;
+        MarkCpuDirty(MetalImageDirtyCause.Invalidated);
+        NoteContentChanged();
+        return retired;
+    }
+
     public bool IsGpuModified => _gpuModified;
 
     public bool IsWatched => WatchBegin != 0 && WatchEnd != 0;
@@ -219,6 +275,12 @@ internal sealed class MetalCachedImage : IDisposable
     /// <summary>Guest memory is newer than the texture over <c>[start, end)</c> of the image.</summary>
     public void MarkCpuDirty(MetalImageDirtyCause cause, ulong start, ulong end)
     {
+        // A window view reads guest memory in place, so guest memory is never newer.
+        if (_windowLinearView)
+        {
+            return;
+        }
+
         end = Math.Min(end, Description.Data.Size);
         if (end <= start)
         {
