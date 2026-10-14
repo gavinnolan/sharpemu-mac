@@ -695,7 +695,12 @@ public static partial class Gen5MslTranslator
                     // A primitive shader's LDS is the real thing: its waves exchange
                     // vertex data through it. Sized from the stage's own allocation
                     // because the mesh output payload shares the threadgroup budget.
-                    source.AppendLine($"    threadgroup uint sharpemu_lds[{_meshLdsDwords}];");
+                    //
+                    // Above the device threshold the array is a slot of the shared device
+                    // pool instead; the pointer is formed once the slot is acquired.
+                    source.AppendLine(UsesDeviceLds
+                        ? "    threadgroup uint sharpemu_lds_slot;"
+                        : $"    threadgroup uint sharpemu_lds[{_meshLdsDwords}];");
                 }
                 else if (_stage == Gen5MslStage.Compute)
                 {
@@ -1840,7 +1845,7 @@ public static partial class Gen5MslTranslator
 
             // The mesh LDS is declared at exactly the guest allocation, so the masked index
             // can name a dword past it; clamp to the last one.
-            return _stage == Gen5MslStage.Mesh && wordMask != _meshLdsDwords - 1
+            return _stage == Gen5MslStage.Mesh && !UsesDeviceLds && wordMask != _meshLdsDwords - 1
                 ? $"min({index}, {_meshLdsDwords - 1}u)"
                 : index;
         }
@@ -1903,7 +1908,7 @@ public static partial class Gen5MslTranslator
                     if (IsWave64)
                     {
                         var broadcast = EmitWave64AppendAtomic(
-                            waveCount => $"atomic_fetch_{operation}_explicit((threadgroup atomic_uint*)&sharpemu_lds[{index}], {waveCount}, memory_order_relaxed)",
+                            waveCount => $"atomic_fetch_{operation}_explicit(({LdsAddressSpace} atomic_uint*)&sharpemu_lds[{index}], {waveCount}, memory_order_relaxed)",
                             inBounds);
                         StoreVector(destination, $"{inBounds} ? {broadcast} : 0u");
                         return true;
@@ -1916,7 +1921,7 @@ public static partial class Gen5MslTranslator
                     Line($"if ({ExecCondition($"{inBounds} && sharpemu_lane == {first}")})");
                     Line("{");
                     _indent++;
-                    Line($"{firstValue} = atomic_fetch_{operation}_explicit((threadgroup atomic_uint*)&sharpemu_lds[{index}], {count}, memory_order_relaxed);");
+                    Line($"{firstValue} = atomic_fetch_{operation}_explicit(({LdsAddressSpace} atomic_uint*)&sharpemu_lds[{index}], {count}, memory_order_relaxed);");
                     _indent--;
                     Line("}");
                     var result = Temp("uint", $"simd_broadcast({firstValue}, {first})");
@@ -2157,7 +2162,7 @@ public static partial class Gen5MslTranslator
                 return observed;
             }
 
-            var pointer = $"(threadgroup atomic_uint*)&{word}";
+            var pointer = $"({LdsAddressSpace} atomic_uint*)&{word}";
             var direct = name switch
             {
                 "Add" => $"atomic_fetch_add_explicit({pointer}, {first}, memory_order_relaxed)",
@@ -2167,8 +2172,8 @@ public static partial class Gen5MslTranslator
                 "Dec" => $"atomic_fetch_sub_explicit({pointer}, 1u, memory_order_relaxed)",
                 "Umin" => $"atomic_fetch_min_explicit({pointer}, {first}, memory_order_relaxed)",
                 "Umax" => $"atomic_fetch_max_explicit({pointer}, {first}, memory_order_relaxed)",
-                "Smin" => $"(uint)atomic_fetch_min_explicit((threadgroup atomic_int*)&{word}, as_type<int>({first}), memory_order_relaxed)",
-                "Smax" => $"(uint)atomic_fetch_max_explicit((threadgroup atomic_int*)&{word}, as_type<int>({first}), memory_order_relaxed)",
+                "Smin" => $"(uint)atomic_fetch_min_explicit(({LdsAddressSpace} atomic_int*)&{word}, as_type<int>({first}), memory_order_relaxed)",
+                "Smax" => $"(uint)atomic_fetch_max_explicit(({LdsAddressSpace} atomic_int*)&{word}, as_type<int>({first}), memory_order_relaxed)",
                 "And" => $"atomic_fetch_and_explicit({pointer}, {first}, memory_order_relaxed)",
                 "Or" => $"atomic_fetch_or_explicit({pointer}, {first}, memory_order_relaxed)",
                 "Xor" => $"atomic_fetch_xor_explicit({pointer}, {first}, memory_order_relaxed)",
@@ -2183,7 +2188,7 @@ public static partial class Gen5MslTranslator
             // The remaining forms have no single Metal atomic: they read, derive
             // the replacement from what they observed and swap it in, retrying
             // until the word they computed from is still the one in memory.
-            var pointerName = Temp("threadgroup atomic_uint*", pointer);
+            var pointerName = Temp($"{LdsAddressSpace} atomic_uint*", pointer);
             var expected = Temp("uint", $"atomic_load_explicit({pointerName}, memory_order_relaxed)");
             var next = name switch
             {

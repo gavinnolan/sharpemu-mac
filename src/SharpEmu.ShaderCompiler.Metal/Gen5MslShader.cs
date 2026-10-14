@@ -50,8 +50,26 @@ public sealed record Gen5MslMeshInfo(
     uint IndexBufferIndex,
     bool ReadsIndexBuffer,
     uint GeometryVerticesOut = 0,
-    bool NarrowWave64 = false)
+    bool NarrowWave64 = false,
+    bool DeviceLds = false)
 {
+    /// <summary>The mesh slot the device-memory LDS pool is bound at when
+    /// <see cref="DeviceLds"/> is set.</summary>
+    public const uint LdsPoolBufferIndex = 5;
+
+    /// <summary>Slots in the device LDS pool; a threadgroup holds one for its lifetime.</summary>
+    public const uint LdsPoolSlots = 2048;
+
+    /// <summary>Dwords of the pool header: a probe counter and one busy flag per slot.</summary>
+    public const uint LdsPoolHeaderDwords = 4096;
+
+    /// <summary>Dwords of one pool slot, the most guest LDS a mesh stage declares.</summary>
+    public const uint LdsPoolSlotDwords = 4096;
+
+    /// <summary>Bytes of the whole pool: the zeroed header and every slot's data.</summary>
+    public const ulong LdsPoolByteSize =
+        (LdsPoolHeaderDwords + (ulong)LdsPoolSlots * LdsPoolSlotDwords) * sizeof(uint);
+
     /// <summary>Primitives one subgroup of a program without a GS half holds. Every
     /// primitive owns its vertices (no reuse), so a subgroup is whole primitives: as many as
     /// fit both the primitive extent and the vertex extent. The host splits the draw by this

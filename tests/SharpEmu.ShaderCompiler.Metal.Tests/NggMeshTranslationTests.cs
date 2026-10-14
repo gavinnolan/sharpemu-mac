@@ -399,6 +399,41 @@ public sealed class NggMeshTranslationTests
     }
 
     [Fact]
+    public void ALargeLocalDataShareLivesInASlotOfTheDevicePool()
+    {
+        var shader = Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.CullingTriangle(),
+            Gen5NggFixtures.StageInfo with { LocalDataShareBytes = 15 * 1024 });
+        var mesh = Assert.IsType<Gen5MslMeshInfo>(shader.MeshInfo);
+        Assert.True(mesh.DeviceLds);
+        Assert.Equal(0u, mesh.ThreadgroupMemoryBytes);
+        Assert.DoesNotContain("threadgroup uint sharpemu_lds[", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("threadgroup uint sharpemu_lds_slot;", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("device atomic_uint* sharpemu_lds_pool [[buffer(5)]]", shader.Source, StringComparison.Ordinal);
+        Assert.Contains(
+            "device uint* sharpemu_lds = (device uint*)sharpemu_lds_pool + 4096u + sharpemu_lds_slot * 4096u;",
+            shader.Source,
+            StringComparison.Ordinal);
+        Assert.Contains("atomic_compare_exchange_weak_explicit(&sharpemu_lds_pool[1u + sharpemu_slot]", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("atomic_store_explicit(&sharpemu_lds_pool[1u + sharpemu_lds_slot], 0u", shader.Source, StringComparison.Ordinal);
+
+        // Addresses stay inside the slot by mask alone.
+
+        // Every workgroup barrier orders device memory too, where the data now lives.
+        Assert.DoesNotContain("threadgroup_barrier(mem_flags::mem_threadgroup);", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ALocalDataShareUnderTheThresholdStaysInThreadgroupMemory()
+    {
+        var shader = Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.CullingTriangle(),
+            Gen5NggFixtures.StageInfo with { LocalDataShareBytes = 12 * 1024 });
+        Assert.False(Assert.IsType<Gen5MslMeshInfo>(shader.MeshInfo).DeviceLds);
+        Assert.DoesNotContain("sharpemu_lds_pool", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void LocalDataShareIsDeclaredAtTheGuestSize()
     {
         // 9 KB (the shape of a culling template's allocation) is 2304 dwords, not 4096.

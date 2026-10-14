@@ -1528,6 +1528,12 @@ internal sealed partial class MetalRenderHost
         var indexOffset = indexed && _indexBuffer != 0 ? _indexOffset : 0;
         MetalNative.SendSetBuffer(
             _renderEncoder, SelSetMeshBuffer, indexBuffer, (nuint)indexOffset, (nuint)mesh.IndexBufferIndex);
+        if (mesh.DeviceLds)
+        {
+            MetalNative.SendSetBuffer(
+                _renderEncoder, SelSetMeshBuffer, _guestMemory.MeshLdsPool, 0, Gen5MslMeshInfo.LdsPoolBufferIndex);
+        }
+
         if (PassProfileEnabled)
         {
             PassProfileNoteGroups((ulong)subgroups * instanceCount);

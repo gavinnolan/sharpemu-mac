@@ -806,6 +806,40 @@ internal sealed class MetalGuestMemory : IDisposable
     public nint CreateReportBuffer(ulong size, string label, out nint contents, out ulong gpuAddress) =>
         CreateSharedBuffer(size, label, out contents, out gpuAddress);
 
+    private nint _meshLdsPool;
+    private readonly object _meshLdsPoolLock = new();
+
+    /// <summary>The device-memory LDS pool of mesh programs whose guest LDS is too large for
+    /// threadgroup memory (see <c>Gen5MslMeshInfo.DeviceLds</c>): a zeroed header of a probe
+    /// counter and one busy flag per slot, then one slot of data per resident threadgroup.
+    /// Created on first use and never reset: a threadgroup frees its slot when it ends.</summary>
+    public nint MeshLdsPool
+    {
+        get
+        {
+            lock (_meshLdsPoolLock)
+            {
+                if (_meshLdsPool == 0)
+                {
+                    var buffer = CreateSharedBuffer(
+                        SharpEmu.ShaderCompiler.Metal.Gen5MslMeshInfo.LdsPoolByteSize, "mesh.lds-pool", out var contents, out _);
+                    unsafe
+                    {
+                        new Span<byte>(
+                            (void*)contents,
+                            (int)(SharpEmu.ShaderCompiler.Metal.Gen5MslMeshInfo.LdsPoolHeaderDwords * sizeof(uint))).Clear();
+                    }
+
+                    AddResident(buffer);
+                    CommitResidency();
+                    _meshLdsPool = buffer;
+                }
+
+                return _meshLdsPool;
+            }
+        }
+    }
+
     private nint CreateSharedBuffer(ulong size, string label, out nint contents, out ulong gpuAddress)
     {
         var buffer = MetalNative.SendNewBuffer(

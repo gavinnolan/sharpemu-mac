@@ -72,6 +72,51 @@ public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
         Assert.Equal(0.0f, Green(pixels, TargetSize - 2, 1), 3);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void DeviceLdsPrimitiveShaderExchangesThroughTheSlotAndBarrier(bool nullPrimitive)
+    {
+        if (SkipWithoutMetalDevice("the device LDS mesh execution test")) return;
+
+        // The same program as the threadgroup-memory case, with its LDS in the device pool:
+        // the exchange across both waves only survives if the slot is acquired before the
+        // first access and every barrier orders device memory.
+        var shader = Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.CullingTriangle(nullPrimitive),
+            Gen5NggFixtures.StageInfo with { LocalDataShareBytes = 15 * 1024 });
+        var mesh = shader.MeshInfo!;
+        Assert.True(mesh.DeviceLds);
+        var source = shader.Source + FragmentSource;
+        if (!MetalNative.TryCompileLibrary(source, out var library, out var compileError))
+        {
+            throw new InvalidOperationException($"Metal rejected the mesh MSL: {compileError}\n{source}");
+        }
+
+        Assert.True(
+            MetalNative.TryRenderMesh(
+                library,
+                shader.EntryPoint,
+                "gen5_mesh_test_fs",
+                [
+                    (BuildArgumentBuffer(shader), 0u),
+                    (new byte[64], 1u),
+                    (BuildDrawInfo(mesh), mesh.DrawInfoBufferIndex),
+                    (new byte[16], mesh.IndexBufferIndex),
+                    (new byte[Gen5MslMeshInfo.LdsPoolByteSize], Gen5MslMeshInfo.LdsPoolBufferIndex),
+                ],
+                threadgroups: 4,
+                mesh.ThreadsPerThreadgroup,
+                TargetSize,
+                TargetSize,
+                out var pixels,
+                out var renderError),
+            $"the mesh draw failed: {renderError}");
+
+        Assert.Equal(nullPrimitive ? 0.0f : 1.0f, Green(pixels, TargetSize / 2, TargetSize / 2), 3);
+        Assert.Equal(0.0f, Green(pixels, 1, 1), 3);
+    }
+
     [Fact]
     public void IndexedWave64PrimitiveShaderDrawsTrianglesFromEverySubgroup()
     {
@@ -271,6 +316,12 @@ public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
         yield return ("clamped subgroup", Gen5NggFixtures.CompileOrThrow(
             Gen5NggFixtures.CullingTriangle(),
             Gen5NggFixtures.StageInfo with { VerticesPerSubgroup = 4096, PrimitivesPerSubgroup = 4096 }));
+        yield return ("device lds", Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.CullingTriangle(),
+            Gen5NggFixtures.StageInfo with { LocalDataShareBytes = 15 * 1024 }));
+        yield return ("device lds null primitive", Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.CullingTriangle(nullPrimitive: true),
+            Gen5NggFixtures.StageInfo with { LocalDataShareBytes = 15 * 1024 }));
         yield return ("narrow wave64", Gen5NggFixtures.CompileOrThrow(
             Gen5NggFixtures.Wave64Triangles(), Gen5NggFixtures.Wave64StageInfo));
         yield return ("narrow wave64 lane probe", Gen5NggFixtures.CompileOrThrow(
