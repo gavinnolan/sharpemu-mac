@@ -38,7 +38,11 @@ public readonly record struct DrawAutoArguments(
     uint InstanceCount,
     uint FirstVertex,
     uint FirstInstance,
-    DrawOffsetSource OffsetSource);
+    DrawOffsetSource OffsetSource,
+    // Nonzero when the counts are still in guest memory at this address, laid out as
+    // (vertexCount, instanceCount, firstVertex, firstInstance). VertexCount is then a
+    // placeholder and the other counts are unused.
+    ulong IndirectArgumentsAddress = 0);
 
 public enum EndOfPipeWriteKind
 {
@@ -196,6 +200,18 @@ public interface ICommandStreamHost
     // True when an indexed indirect draw may be handed over with its arguments still in
     // guest memory (DrawIndexedArguments.IndirectArgumentsAddress).
     bool ResolvesIndirectDrawOnGpu => false;
+
+    // The same for a non-indexed indirect draw (DrawAutoArguments.IndirectArgumentsAddress).
+    // Such a draw is handed over that way only while HasPendingGpuWrite says reading its
+    // arguments would wait; final arguments are read at once.
+    bool ResolvesIndirectAutoDrawOnGpu => false;
+
+    // True when GPU work already recorded may still write these guest bytes, so that a CPU
+    // read of them now would wait for it.
+    bool HasPendingGpuWrite(ulong address, ulong size) => true;
+
+    // Called before the CPU reads an indirect draw's arguments; a host may count it.
+    void NoteIndirectArgumentsReadOnCpu(ulong address, ulong size) { }
 
     // Called when a queue reset packet clears the processor.
     void OnQueueReset(int queueId);

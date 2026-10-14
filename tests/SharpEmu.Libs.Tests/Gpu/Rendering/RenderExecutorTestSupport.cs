@@ -326,20 +326,30 @@ internal sealed class RecordingRenderHost : IRenderHost
     public void DrawIndexed(uint indexCount, uint instanceCount, uint firstIndex, int vertexOffset, uint firstInstance) =>
         Calls.Add($"draw_indexed {indexCount} {instanceCount} {firstIndex} {vertexOffset} {firstInstance}");
 
+    public void PrepareIndirectDraw(in PipelineHandle pipeline, ulong argumentsAddress, BufferBinding arguments, bool indexed, uint indexLimit) =>
+        Calls.Add($"prepare_indirect {argumentsAddress:X} {arguments.Handle:X}:{arguments.Offset:X} indexed={indexed} limit={indexLimit}");
+
+    public void DrawIndirect(BufferBinding arguments) =>
+        Calls.Add($"draw_indirect {arguments.Handle:X}:{arguments.Offset:X}");
+
     public void DrawIndexedIndirect(BufferBinding arguments) =>
         Calls.Add($"draw_indexed_indirect {arguments.Handle:X}:{arguments.Offset:X}");
 
     /// <summary>Set to false for a backend that runs the program as a mesh pipeline.</summary>
     public bool IndirectDrawArgumentsTaken { get; set; } = true;
 
-    public bool TakesIndirectDrawArguments(ShaderProgram vertexProgram)
+    public bool TakesIndirectDrawArguments(ShaderProgram vertexProgram, ulong argumentsAddress, ulong argumentsSize)
     {
-        Calls.Add($"takes_indirect {vertexProgram.Id}");
+        Calls.Add($"takes_indirect {vertexProgram.Id} {argumentsAddress:X} {argumentsSize}");
         return IndirectDrawArgumentsTaken;
     }
 
     /// <summary>Set to false for a backend that draws a rectangle list as patches.</summary>
     public bool TakesIndirectRectangleListArguments { get; set; } = true;
+
+    public bool TakesTargetlessIndirectDrawArguments { get; set; }
+
+    public void NoteIndirectArgumentsReadOnCpu(ulong address, ulong size) => Calls.Add($"indirect_cpu {address:X} {size}");
 
     public void Dispatch(uint groupsX, uint groupsY, uint groupsZ) => Calls.Add($"dispatch {groupsX} {groupsY} {groupsZ}");
 

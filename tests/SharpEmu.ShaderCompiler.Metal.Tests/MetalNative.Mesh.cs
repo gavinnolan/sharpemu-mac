@@ -39,7 +39,9 @@ internal static partial class MetalNative
 
     /// <summary>Renders one mesh draw into a width x height RGBA32Float target and returns
     /// its texels. <paramref name="meshBuffers"/> is bound to the mesh stage at the given
-    /// buffer indices; each entry is raw bytes the helper uploads.</summary>
+    /// buffer indices; each entry is raw bytes the helper uploads. With
+    /// <paramref name="indirect"/> the draw launches from the grid the launch kernel writes
+    /// instead of <paramref name="threadgroups"/>.</summary>
     public static bool TryRenderMesh(
         nint library,
         string meshEntryPoint,
@@ -53,7 +55,8 @@ internal static partial class MetalNative
         out string error,
         IReadOnlyList<nint>? extraResidentBuffers = null,
         uint layers = 1,
-        bool volume = false)
+        bool volume = false,
+        MeshIndirectLaunch? indirect = null)
     {
         pixels = [];
         error = string.Empty;
@@ -125,6 +128,17 @@ internal static partial class MetalNative
 
         var queue = Send(Device.Value, Selector("newCommandQueue"));
         var commandBuffer = Send(queue, Selector("commandBuffer"));
+        nint launchSlot = 0;
+        nint launchFence = 0;
+        if (indirect is not null)
+        {
+            launchSlot = EncodeMeshLaunch(commandBuffer, indirect, out launchFence, out error);
+            if (launchSlot == 0)
+            {
+                return false;
+            }
+        }
+
         var encoder = Send(commandBuffer, Selector("renderCommandEncoderWithDescriptor:"), pass);
         if (encoder == 0)
         {
@@ -158,12 +172,20 @@ internal static partial class MetalNative
         }
 
         var one = new MtlSize { Width = 1, Height = 1, Depth = 1 };
-        SendDrawMesh(
-            encoder,
-            Selector("drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:"),
-            new MtlSize { Width = threadgroups, Height = 1, Depth = 1 },
-            one,
-            new MtlSize { Width = threadsPerThreadgroup, Height = 1, Depth = 1 });
+        if (indirect is not null)
+        {
+            DrawMeshLaunch(encoder, indirect, launchSlot, launchFence, threadsPerThreadgroup);
+        }
+        else
+        {
+            SendDrawMesh(
+                encoder,
+                Selector("drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:"),
+                new MtlSize { Width = threadgroups, Height = 1, Depth = 1 },
+                one,
+                new MtlSize { Width = threadsPerThreadgroup, Height = 1, Depth = 1 });
+        }
+
         SendVoid(encoder, Selector("endEncoding"));
         SendVoid(commandBuffer, Selector("commit"));
         SendVoid(commandBuffer, Selector("waitUntilCompleted"));
@@ -173,6 +195,11 @@ internal static partial class MetalNative
         {
             error = "GPU execution failed: " + DescribeError(commandError);
             return false;
+        }
+
+        if (indirect is not null)
+        {
+            indirect.Written = ReadSharedBuffer(launchSlot, indirect.Slot.Length);
         }
 
         var bytesOut = volume

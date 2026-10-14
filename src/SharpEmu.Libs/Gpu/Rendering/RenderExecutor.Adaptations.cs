@@ -42,11 +42,7 @@ public sealed partial class RenderExecutor
             return false;
         }
 
-        // Later draws can read these stores before flip. Do not defer their producer.
-        if (state.ColorCount == 0 && !state.Depth.HasTarget && state.PixelActive &&
-            programs.PixelInput.Stage.Program is { Images.Length: > 0 } &&
-            !DrawWritesMemory(programs.PixelInput.Stage) && !DrawWritesMemory(programs.VertexInput.Stage) &&
-            _host.TryRetainTargetlessDraw(banks, programs, in arguments))
+        if (MayRetainTargetlessDraw(ref state) && _host.TryRetainTargetlessDraw(banks, programs, in arguments))
         {
             TraceTargetlessAttachments(banks, arguments.SubmitId);
             TraceDrawDisposition(banks, in draw, "retained-targetless-draw");
@@ -55,6 +51,14 @@ public sealed partial class RenderExecutor
 
         return true;
     }
+
+    // A targetless draw whose pixel program samples images and stores nothing may be
+    // retained and replayed later, so it needs its counts. Later draws can read stores
+    // before flip, so a draw that stores is never deferred.
+    private bool MayRetainTargetlessDraw(ref DrawState state) =>
+        state.ColorCount == 0 && !state.Depth.HasTarget && state.PixelActive &&
+        state.Programs.PixelInput.Stage.Program is { Images.Length: > 0 } &&
+        !DrawWritesMemory(state.Programs.PixelInput.Stage) && !DrawWritesMemory(state.Programs.VertexInput.Stage);
 
     private static void TraceDrawDisposition(RegisterBanks banks, in DrawCall draw, string reason)
     {

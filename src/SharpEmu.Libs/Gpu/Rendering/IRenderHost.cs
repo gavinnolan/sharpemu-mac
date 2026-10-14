@@ -172,17 +172,39 @@ public interface IRenderHost
     void DrawIndexedIndirect(BufferBinding arguments) =>
         throw new NotSupportedException("The render host does not draw from indirect arguments.");
 
-    // True when the host can hand this vertex program an indexed indirect draw with its
-    // arguments still in guest memory. A program the backend runs as a mesh pipeline
-    // cannot take one - the launch grid is sized from the counts and Metal has no mesh
-    // draw that reads them - so the executor resolves such a draw from guest memory
-    // before the pass begins. No draw is dropped either way.
-    bool TakesIndirectDrawArguments(ShaderProgram vertexProgram) => true;
+    // Called before the BeginRendering of a draw whose counts the GPU reads from the buffer
+    // (guest address argumentsAddress), so a host that must turn them into a launch of its
+    // own (a mesh grid) can encode that work where no pass is open. indexLimit bounds an
+    // indexed draw's count, as the bound index range does.
+    void PrepareIndirectDraw(in PipelineHandle pipeline, ulong argumentsAddress, BufferBinding arguments, bool indexed, uint indexLimit) { }
+
+    // One non-indexed draw whose counts the GPU reads from the buffer (VkDrawIndirectCommand layout).
+    void DrawIndirect(BufferBinding arguments) =>
+        throw new NotSupportedException("The render host does not draw from indirect arguments.");
+
+    // True when the host can hand this vertex program an indirect draw with its arguments
+    // (argumentsSize bytes at argumentsAddress) still in guest memory. A host that runs the
+    // program as a mesh pipeline sizes the launch grid from the counts; unless it builds that
+    // grid on the GPU in PrepareIndirectDraw, it answers false and the executor resolves such
+    // a draw from guest memory before the pass begins. No draw is dropped either way.
+    bool TakesIndirectDrawArguments(ShaderProgram vertexProgram, ulong argumentsAddress, ulong argumentsSize) => true;
+
+    // True when a targetless indirect draw that cannot be retained for replay may keep its
+    // counts on the GPU; otherwise every targetless indirect draw is resolved first.
+    bool TakesTargetlessIndirectDrawArguments => false;
+
+    // Called before the executor reads an indirect draw's arguments on the CPU; a host may count it.
+    void NoteIndirectArgumentsReadOnCpu(ulong address, ulong size) { }
 
     // The same question for a rectangle list. A host that draws each rectangle as one
     // patch sizes the draw from the index count, which an indirect patch draw cannot
     // read in the guest's argument layout, so the executor resolves such a draw first.
     bool TakesIndirectRectangleListArguments => true;
+
+    // The same for a non-indexed rectangle list with this vertex input; a host may build
+    // its patch draw on the GPU in PrepareIndirectDraw.
+    bool TakesIndirectAutoRectangleListArguments(VertexInputInfo vertexInput, ulong argumentsAddress, ulong argumentsSize) =>
+        TakesIndirectRectangleListArguments;
 
     void Dispatch(uint groupsX, uint groupsY, uint groupsZ);
 

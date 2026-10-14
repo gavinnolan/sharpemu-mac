@@ -107,10 +107,12 @@ public sealed class RenderExecutorDrawTests : IDisposable
         AssertOrder(
             "obtain 100500000 50 written=False",
             "obtain 100600000 14 written=False",
+            "prepare_indirect",
             "begin_rendering",
             "bind_pipeline Graphics A1",
             "draw_indexed_indirect",
             "reset_bindings");
+        Assert.Contains(_host.Calls, c => c.StartsWith("prepare_indirect", StringComparison.Ordinal) && c.EndsWith("indexed=True limit=40", StringComparison.Ordinal));
         Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_indexed ", StringComparison.Ordinal));
     }
 
@@ -155,6 +157,65 @@ public sealed class RenderExecutorDrawTests : IDisposable
 
         AssertOrder("obtain 100500008 C written=False", "draw_indexed 6 2 0 3 1", "reset_bindings");
         Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_indexed_indirect", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void IndirectAutoDraw_LetsTheGpuReadTheArguments()
+    {
+        var arguments = Auto(uint.MaxValue, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments };
+        _executor.DrawAuto(7, Banks(), arguments);
+
+        AssertOrder(
+            "obtain 100600000 10 written=False",
+            "prepare_indirect",
+            "begin_rendering",
+            "bind_pipeline Graphics A1",
+            "draw_indirect",
+            "reset_bindings");
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw ", StringComparison.Ordinal));
+    }
+
+    // A rectangle list without per-vertex buffers takes its first vertex through the draw
+    // block, so its counts can stay on the GPU; one whose vertex buffers would have to be
+    // rebound at the first vertex is read first when the host says so.
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void IndirectAutoRectangleList_ReadsTheArgumentsOnTheCpuWhenTheHostAsks(bool taken, bool cpu)
+    {
+        _host.TakesIndirectRectangleListArguments = taken;
+        WriteIndirectArguments(6, 2, 4, 1);
+        var arguments = Auto(uint.MaxValue, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments };
+        _executor.DrawAuto(7, Banks(PrimitiveRectangleList), arguments);
+
+        Assert.Equal(cpu, _host.Calls.Contains("draw 6 2 4 1"));
+        Assert.Equal(!cpu, _host.Calls.Any(c => c.StartsWith("draw_indirect", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void IndirectAutoDrawOnAMeshProgram_ReadsTheArgumentsOnTheCpu()
+    {
+        _host.IndirectDrawArgumentsTaken = false;
+        WriteIndirectArguments(6, 2, 4, 1);
+        var arguments = Auto(uint.MaxValue, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments };
+        _executor.DrawAuto(7, Banks(), arguments);
+
+        Assert.Contains("draw 6 2 4 1", _host.Calls);
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_indirect", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void IndirectAutoStrip_ReadsTheArgumentsOnTheCpuAndSkipsAnEmptyDraw()
+    {
+        WriteIndirectArguments(6, 2, 4, 1);
+        var arguments = Auto(uint.MaxValue, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments };
+        _executor.DrawAuto(7, Banks(PrimitiveTriangleStrip), arguments);
+        Assert.Contains("draw 6 2 4 1", _host.Calls);
+
+        _host.Calls.Clear();
+        WriteIndirectArguments(6, 0, 4, 1);
+        _executor.DrawAuto(8, Banks(PrimitiveTriangleStrip), arguments);
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw", StringComparison.Ordinal));
     }
 
     [Fact]
