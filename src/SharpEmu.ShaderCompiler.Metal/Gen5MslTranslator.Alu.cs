@@ -190,6 +190,30 @@ public static partial class Gen5MslTranslator
         {
             error = string.Empty;
             var destination = DestinationVector(instruction);
+            // The clamp bit saturates an integer result to the type's range (ISA 6.5).
+            // The add/sub family and V_MAD_U32_U16 implement it; the other integer ops the
+            // hardware can clamp are refused rather than silently wrapped.
+            var intClamp = instruction.Control is Gen5Vop3Control { Clamp: true } or Gen5SdwaControl { Clamp: true };
+            if (intClamp)
+            {
+                if (instruction.Opcode is "VMulU32U24" or "VMulI32I24" or "VMadU32U24" or "VMadI32I24" or
+                    "VSadU32" or "VMadU64U32")
+                {
+                    error = $"{instruction.Opcode}: clamped integer results are not supported";
+                    return false;
+                }
+
+                if (instruction.Control is Gen5SdwaControl { DestinationSelect: < 6 } &&
+                    instruction.Opcode is "VAddU32" or "VAddI32" or "VSubU32" or "VSubI32" or "VSubrevU32" or
+                        "VSubrevI32" or "VAddCoU32" or "VSubCoU32" or "VSubrevCoU32" or "VAddcU32" or
+                        "VAddCoCiU32" or "VSubbU32" or "VSubbrevU32" or "VSubCoCiU32" or "VSubrevCoCiU32" or
+                        "VMadU32U16")
+                {
+                    error = $"{instruction.Opcode}: clamped results into a partial SDWA destination are not supported";
+                    return false;
+                }
+            }
+
             string? expression = instruction.Opcode switch
             {
                 "VMovB32" => RawSource(instruction, 0),
@@ -283,13 +307,13 @@ public static partial class Gen5MslTranslator
                 // ---- conversions ----
                 "VCvtF32I32" => FloatResult(instruction, $"(float)as_type<int>({RawSource(instruction, 0)})"),
                 "VCvtF32U32" => FloatResult(instruction, $"(float)({RawSource(instruction, 0)})"),
-                "VCvtU32F32" => $"(uint)({F(instruction, 0)})",
+                "VCvtU32F32" => SaturatedFloatToUint(Temp("float", F(instruction, 0))),
                 "VCvtU16F16" =>
                     $"(uint)clamp(trunc(isnan({F16(instruction, 0)}) ? 0.0f : {F16(instruction, 0)}), 0.0f, 65535.0f)",
-                "VCvtI32F32" => AsUInt($"(int)({F(instruction, 0)})"),
-                // RPI rounds toward positive infinity; FLR toward negative.
-                "VCvtRpiI32F32" => AsUInt($"(int)ceil({F(instruction, 0)})"),
-                "VCvtFlrI32F32" => AsUInt($"(int)floor({F(instruction, 0)})"),
+                "VCvtI32F32" => SaturatedFloatToInt(Temp("float", F(instruction, 0))),
+                // RPI is floor(x + 0.5) (round to nearest, ties up); FLR is floor(x).
+                "VCvtRpiI32F32" => SaturatedFloatToInt(Temp("float", $"floor({F(instruction, 0)} + 0.5f)")),
+                "VCvtFlrI32F32" => SaturatedFloatToInt(Temp("float", $"floor({F(instruction, 0)})")),
                 "VCvtF32Ubyte0" => FloatResult(instruction, $"(float)(({RawSource(instruction, 0)}) & 0xFFu)"),
                 "VCvtF32Ubyte1" => FloatResult(instruction, $"(float)((({RawSource(instruction, 0)}) >> 8) & 0xFFu)"),
                 "VCvtF32Ubyte2" => FloatResult(instruction, $"(float)((({RawSource(instruction, 0)}) >> 16) & 0xFFu)"),
@@ -317,20 +341,27 @@ public static partial class Gen5MslTranslator
 
                 // ---- integer arithmetic ----
                 "VAddU32" or "VAddI32" =>
-                    $"(({RawSource(instruction, 0)}) + ({RawSource(instruction, 1)}))",
+                    intClamp
+                        ? SaturatedAddSub(instruction, subtract: false, reverse: false, signed: instruction.Opcode == "VAddI32")
+                        : $"(({RawSource(instruction, 0)}) + ({RawSource(instruction, 1)}))",
                 "VSubU32" or "VSubI32" =>
-                    $"(({RawSource(instruction, 0)}) - ({RawSource(instruction, 1)}))",
+                    intClamp
+                        ? SaturatedAddSub(instruction, subtract: true, reverse: false, signed: instruction.Opcode == "VSubI32")
+                        : $"(({RawSource(instruction, 0)}) - ({RawSource(instruction, 1)}))",
                 "VSubrevU32" or "VSubrevI32" =>
-                    $"(({RawSource(instruction, 1)}) - ({RawSource(instruction, 0)}))",
+                    intClamp
+                        ? SaturatedAddSub(instruction, subtract: true, reverse: true, signed: instruction.Opcode == "VSubrevI32")
+                        : $"(({RawSource(instruction, 1)}) - ({RawSource(instruction, 0)}))",
                 "VMulI32I24" =>
                     EmitSignedMultiply24(instruction),
                 // The 24-bit product wraps in 32 bits before the addend joins it.
                 "VMadI32I24" =>
                     $"({EmitSignedMultiply24(instruction)} + ({RawSource(instruction, 2)}))",
-                // The SPIR-V translator treats the U24 multiply as a full 32-bit
-                // multiply (only the Hi/Mad forms mask); mirror it exactly.
-                "VMulLoU32" or "VMulLoI32" or "VMulU32U24" =>
+                "VMulLoU32" or "VMulLoI32" =>
                     $"(({RawSource(instruction, 0)}) * ({RawSource(instruction, 1)}))",
+                // D.u = S0.u[23:0] * S1.u[23:0]: bits 31:24 of each source are ignored.
+                "VMulU32U24" =>
+                    $"((({RawSource(instruction, 0)}) & 0xFFFFFFu) * (({RawSource(instruction, 1)}) & 0xFFFFFFu))",
                 "VMulHiU32" =>
                     $"mulhi({RawSource(instruction, 0)}, {RawSource(instruction, 1)})",
                 "VMulHiU32U24" =>
@@ -339,8 +370,10 @@ public static partial class Gen5MslTranslator
                     AsUInt($"mulhi(as_type<int>({RawSource(instruction, 0)}), as_type<int>({RawSource(instruction, 1)}))"),
                 "VMadU32U24" =>
                     $"(((({RawSource(instruction, 0)}) & 0xFFFFFFu) * (({RawSource(instruction, 1)}) & 0xFFFFFFu)) + ({RawSource(instruction, 2)}))",
-                "VMadU32U16" =>
-                    $"(((({RawSource(instruction, 0)}) & 0xFFFFu) * (({RawSource(instruction, 1)}) & 0xFFFFu)) + ({RawSource(instruction, 2)}))",
+                // The multiplicands are the op_sel-selected halves; the addend is whole.
+                "VMadU32U16" => intClamp
+                    ? $"((uint)min((ulong)({Int16Source(instruction, 0, signed: false)}) * (ulong)({Int16Source(instruction, 1, signed: false)}) + (ulong)({RawSource(instruction, 2)}), 0xFFFFFFFFul))"
+                    : $"((({Int16Source(instruction, 0, signed: false)}) * ({Int16Source(instruction, 1, signed: false)})) + ({RawSource(instruction, 2)}))",
                 "VAdd3U32" =>
                     $"(({RawSource(instruction, 0)}) + ({RawSource(instruction, 1)}) + ({RawSource(instruction, 2)}))",
                 "VXadU32" =>
@@ -393,12 +426,11 @@ public static partial class Gen5MslTranslator
                     AsUInt($"(as_type<int>({RawSource(instruction, 0)}) >> (({RawSource(instruction, 1)}) & 31u))"),
                 "VAshrrevI32" =>
                     AsUInt($"(as_type<int>({RawSource(instruction, 1)}) >> (({RawSource(instruction, 0)}) & 31u))"),
+                // extract_bits is undefined once offset + width passes 32, which the ISA
+                // allows: the field is just the shifted value masked to `width` bits.
                 "VBfeU32" =>
-                    $"extract_bits({RawSource(instruction, 0)}, ({RawSource(instruction, 1)}) & 31u, ({RawSource(instruction, 2)}) & 31u)",
-                // Same field as VBfeU32; the signed overload sign-extends from the
-                // field's top bit, so the source has to enter extract_bits as int.
-                "VBfeI32" =>
-                    AsUInt($"extract_bits(as_type<int>({RawSource(instruction, 0)}), ({RawSource(instruction, 1)}) & 31u, ({RawSource(instruction, 2)}) & 31u)"),
+                    $"((({RawSource(instruction, 0)}) >> (({RawSource(instruction, 1)}) & 31u)) & ((1u << (({RawSource(instruction, 2)}) & 31u)) - 1u))",
+                "VBfeI32" => EmitBfeI32(instruction),
                 "VBfiB32" =>
                     $"((({RawSource(instruction, 0)}) & ({RawSource(instruction, 1)})) | (~({RawSource(instruction, 0)}) & ({RawSource(instruction, 2)})))",
                 "VAlignbitB32" =>
@@ -448,8 +480,9 @@ public static partial class Gen5MslTranslator
                         var left = Temp("uint", RawSource(instruction, 0));
                         var right = Temp("uint", RawSource(instruction, 1));
                         var sum = Temp("uint", $"{left} + {right}");
-                        StoreCarryOut(instruction, $"{sum} < {left}");
-                        expression = sum;
+                        var carry = Temp("bool", $"{sum} < {left}");
+                        StoreCarryOut(instruction, carry);
+                        expression = intClamp ? $"({carry} ? 0xFFFFFFFFu : {sum})" : sum;
                         break;
                     }
                     case "VSubCoU32":
@@ -458,8 +491,9 @@ public static partial class Gen5MslTranslator
                         var reverse = instruction.Opcode == "VSubrevCoU32";
                         var left = Temp("uint", RawSource(instruction, reverse ? 1 : 0));
                         var right = Temp("uint", RawSource(instruction, reverse ? 0 : 1));
-                        StoreCarryOut(instruction, $"{left} < {right}");
-                        expression = $"({left} - {right})";
+                        var borrowOut = Temp("bool", $"{left} < {right}");
+                        StoreCarryOut(instruction, borrowOut);
+                        expression = intClamp ? $"({borrowOut} ? 0u : ({left} - {right}))" : $"({left} - {right})";
                         break;
                     }
                     case "VAddcU32":
@@ -472,8 +506,9 @@ public static partial class Gen5MslTranslator
                             : "vcc";
                         var partial = Temp("uint", $"{left} + {right}");
                         var sum = Temp("uint", $"{partial} + (({carryIn}) ? 1u : 0u)");
-                        StoreCarryOut(instruction, $"({partial} < {left}) || ({sum} < {partial})");
-                        expression = sum;
+                        var carry = Temp("bool", $"({partial} < {left}) || ({sum} < {partial})");
+                        StoreCarryOut(instruction, carry);
+                        expression = intClamp ? $"({carry} ? 0xFFFFFFFFu : {sum})" : sum;
                         break;
                     }
                     case "VSubbU32":
@@ -489,8 +524,9 @@ public static partial class Gen5MslTranslator
                             : "vcc";
                         var borrow = Temp("uint", $"({borrowIn}) ? 1u : 0u");
                         var partial = Temp("uint", $"{left} - {right}");
-                        StoreCarryOut(instruction, $"({left} < {right}) || ({partial} < {borrow})");
-                        expression = $"({partial} - {borrow})";
+                        var borrowOut = Temp("bool", $"({left} < {right}) || ({partial} < {borrow})");
+                        StoreCarryOut(instruction, borrowOut);
+                        expression = intClamp ? $"({borrowOut} ? 0u : ({partial} - {borrow}))" : $"({partial} - {borrow})";
                         break;
                     }
                     case "VMadU64U32":
@@ -597,6 +633,47 @@ public static partial class Gen5MslTranslator
 
             StoreVector(destination, result);
             return true;
+        }
+
+        // D.u = (unsigned)S0.f: out-of-range values (infinity included) saturate and NaN
+        // is 0 (ISA 12.8, V_CVT_U32_F32). A bare MSL float-to-uint cast is undefined there.
+        private static string SaturatedFloatToUint(string x) =>
+            $"({x} >= 4294967296.0f ? 0xFFFFFFFFu : (uint)clamp(isnan({x}) ? 0.0f : {x}, 0.0f, 4294967040.0f))";
+
+        // V_CVT_I32_F32 and the rounding variants: saturate to INT_MIN..INT_MAX, NaN is 0.
+        private string SaturatedFloatToInt(string x) =>
+            AsUInt($"({x} >= 2147483648.0f ? 2147483647 : (int)clamp(isnan({x}) ? 0.0f : {x}, -2147483648.0f, 2147483520.0f))");
+
+        // ISA 12.12: D.i = (S0.i >> S1[4:0]) & ((1 << S2[4:0]) - 1), the field sign-extended
+        // from its top bit; a zero width gives 0 and offset + width may pass 32.
+        private string EmitBfeI32(Gen5ShaderInstruction instruction)
+        {
+            var shifted = Temp("int", $"as_type<int>({RawSource(instruction, 0)}) >> (({RawSource(instruction, 1)}) & 31u)");
+            var width = Temp("uint", $"({RawSource(instruction, 2)}) & 31u");
+            var up = Temp("uint", $"(32u - {width}) & 31u");
+            return AsUInt($"({width} == 0u ? 0 : (as_type<int>(as_type<uint>({shifted}) << {up}) >> {up}))");
+        }
+
+        // The clamp bit on the 32-bit add/sub family saturates the result: unsigned
+        // forms to 0..0xFFFFFFFF, signed forms to INT_MIN..INT_MAX.
+        private string SaturatedAddSub(
+            Gen5ShaderInstruction instruction,
+            bool subtract,
+            bool reverse,
+            bool signed)
+        {
+            var left = Temp("uint", RawSource(instruction, reverse ? 1 : 0));
+            var right = Temp("uint", RawSource(instruction, reverse ? 0 : 1));
+            if (signed)
+            {
+                var op = subtract ? "-" : "+";
+                return AsUInt(
+                    $"((int)clamp((long)as_type<int>({left}) {op} (long)as_type<int>({right}), -2147483648l, 2147483647l))");
+            }
+
+            return subtract
+                ? $"({left} < {right} ? 0u : {left} - {right})"
+                : $"((uint)min((ulong){left} + (ulong){right}, 0xFFFFFFFFul))";
         }
 
         private string EmitSignedMultiply24(Gen5ShaderInstruction instruction)
@@ -803,7 +880,9 @@ public static partial class Gen5MslTranslator
 
         private string EmitCvtPkU8F32(Gen5ShaderInstruction instruction)
         {
-            var converted = Temp("uint", $"(uint)({F(instruction, 0)})");
+            // flt32_to_uint8 saturates to 0..255 and maps NaN to 0.
+            var source = Temp("float", F(instruction, 0));
+            var converted = Temp("uint", $"(uint)clamp(isnan({source}) ? 0.0f : {source}, 0.0f, 255.0f)");
             var offset = Temp("uint", $"(({RawSource(instruction, 1)}) & 3u) << 3");
             var baseValue = Temp("uint", RawSource(instruction, 2));
             return $"(({baseValue} & ~(0xFFu << {offset})) | (({converted} & 0xFFu) << {offset}))";
@@ -973,8 +1052,12 @@ public static partial class Gen5MslTranslator
                     ? $"(({value} >> 16) & 0xFFFFu)"
                     : $"({value} & 0xFFFFu)";
 
-            string Lane(uint mask) =>
-                $"(({SelectHalf(left, mask, 0)} {op} {SelectHalf(right, mask, 1)}) & 0xFFFFu)";
+            static string Signed16(string half) => $"(as_type<int>({half} << 16u) >> 16)";
+
+            // With clamp each lane saturates to the signed 16-bit range (ISA 6.5).
+            string Lane(uint mask) => control.Clamp
+                ? $"(as_type<uint>(clamp({Signed16(SelectHalf(left, mask, 0))} {op} {Signed16(SelectHalf(right, mask, 1))}, -32768, 32767)) & 0xFFFFu)"
+                : $"(({SelectHalf(left, mask, 0)} {op} {SelectHalf(right, mask, 1)}) & 0xFFFFu)";
 
             return $"({Lane(control.OpSelMask)} | ({Lane(control.OpSelHiMask)} << 16))";
         }
@@ -1520,7 +1603,9 @@ public static partial class Gen5MslTranslator
             Line(WaveExchangeBarrier);
             var lo = Temp("uint", WaveSlot(0));
             var hi = Temp("uint", WaveSlot(1));
-            return Temp("uint", $"({lo} != 0u) ? {WaveSlot(2)} : (({hi} != 0u) ? {WaveSlot(3)} : 0u)");
+            // With no active lane in either half the first lane is lane 0, which the low
+            // half's shuffle already read into slot 2.
+            return Temp("uint", $"({lo} != 0u || {hi} == 0u) ? {WaveSlot(2)} : {WaveSlot(3)}");
         }
 
         /// <summary>Broadcasts <paramref name="value"/> from guest lane
@@ -2065,7 +2150,8 @@ public static partial class Gen5MslTranslator
                 {
                     var shift = (uint)(instruction.Opcode[5] - '0');
                     resultExpression = $"(({left} << {shift}) + {right})";
-                    sccStatement = string.Empty;
+                    // SCC is the unsigned carry out of the 64-bit sum.
+                    sccStatement = $"((((ulong){left}) << {shift}) + (ulong){right}) > 0xFFFFFFFFul";
                     break;
                 }
                 case "SPackLlB32B16":
