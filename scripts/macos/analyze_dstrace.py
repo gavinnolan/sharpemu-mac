@@ -71,66 +71,68 @@ NWORKERS = 13
 SUBMIT_FLIP_NAMES = ('sceAgcDriverSubmitDcb', 'sceAgcDcbSetFlip', 'sceAgcSuspendPoint')
 PTHREAD_COND_NAMES = ('pthread_cond', 'scePthreadCond')
 
-_P113 = ['q%d' % i for i in range(11)]
-FALLBACK_SCHEMA = {
-    'GF': 'kind guest name reason wake nid arg0 arg1 deadline',
-    'BRA': 'guest nid ra1 ra2 ra3',
-    'WAKE': 'enter_ts gate_wait_ns total_ns wake scanned woken first_woken pumped',
+# Verbatim copy of the sink's schema table (src/SharpEmu.HLE/DsTrace/DsSchema.cs, diag-ds-trace 5ac4f003c).
+# Suffix :x = hex, :s = STR id, otherwise signed decimal. Used as the fallback when a log lacks a SCHEMA line
+# and by --selftest to generate SCHEMA lines in the sink's exact format.
+SINK_SCHEMA = {
+    'GF': 'kind guest:x name:s reason:s wake:s nid:s arg0:x arg1:x deadline',
+    'BRA': 'guest:x nid:s ra1:x ra2:x ra3:x',
+    'WAKE': 'enter_ts gate_wait_ns total_ns wake:s scanned woken first_woken:x pumped',
     'PUMPA': 'calls cas_lost cap_hit claimed wake_expired_ns',
-    'USLA': 'ra1 count req_us_sum actual_ns_sum pump_ns_sum sleep0_count',
-    'USLP': 'ra1 ra2 req_us actual_ns pump_ns branch',
-    'HLE': 'enter_ts dur_ns cpu_ns import rdi rsi rdx ra1 ra2 outcome rax',
-    'HLEA': 'import count wall_sum_ns wall_max_ns n_ge_100us n_ge_1ms n_ge_10ms cpu_sum_ns cpu_n wall_sum_of_cpu_sampled_ns',
+    'USLA': 'ra1:x count req_us_sum actual_ns_sum pump_ns_sum sleep0_count',
+    'USLP': 'ra1:x ra2:x req_us actual_ns pump_ns branch',
+    'HLE': 'enter_ts dur_ns cpu_ns import:s rdi:x rsi:x rdx:x ra1:x ra2:x outcome rax:x',
+    'HLEA': 'import:s count wall_sum_ns wall_max_ns n_ge_100us n_ge_1ms n_ge_10ms cpu_sum_ns cpu_n wall_sum_of_cpu_sampled_ns',
     'CPUPT': 'cpu_ns',
-    'FSW': 'enter_ts total_ns gate_wait_ns body_ns prep_ns probe_code probe_wlock_wait_ns probe_mprotect_ns cpu_ns from to ra2 ra1',
-    'FSJ': 'job counter value target cond_flags aff_grp q08 q10 q58 q60 ra3 ra4 ra5',
-    'MXQ': 'mutex waiter owner qlen spin_ns outcome ra1',
-    'MXH': 'mutex from to to_parked qlen_after',
-    'MXR': 'mutex guest wait_ns',
-    'EVF': 'handle bits mode path total_ns loop_iters ra1',
-    'EVS': 'handle bits woken',
-    'APR': 'ra1 ra2 n_cmds total_ns pread_ns waitaddr_ns waitaddr_iters bytes',
-    'MLW': 'site wait_ns hold_ns import thread_class in_rip_probe',
+    'FSW': 'enter_ts total_ns gate_wait_ns body_ns prep_ns probe_code probe_wlock_wait_ns probe_mprotect_ns cpu_ns from:x to:x ra2:x ra1:x',
+    'FSJ': 'job:x counter:x value target cond_flags aff_grp q08:x q10:x q58:x q60:x ra3:x ra4:x ra5:x',
+    'MXQ': 'mutex:x waiter:x owner:x qlen spin_ns outcome ra1:x',
+    'MXH': 'mutex:x from:x to:x to_parked qlen_after',
+    'MXR': 'mutex:x guest:x wait_ns',
+    'EVF': 'handle:x bits:x mode path total_ns loop_iters ra1:x',
+    'EVS': 'handle:x bits:x woken',
+    'APR': 'ra1:x ra2:x n_cmds total_ns pread_ns waitaddr_ns waitaddr_iters bytes',
+    'MLW': 'site wait_ns hold_ns import:s thread_class in_rip_probe',
     'MLA': 'site tid count slow_count wait_sum_ns wait_max_ns hold_sum_ns hold_max_ns',
-    'FLIP': 'seq rdi rsi rdx rcx r8 ra1 ra2',
-    'SUBMIT': 'rdi dwords gate_wait_ns total_ns submission_id ra2',
+    'FLIP': 'seq rdi:x rsi:x rdx:x rcx:x r8:x ra1:x ra2:x',
+    'SUBMIT': 'rdi:x dwords gate_wait_ns total_ns submission_id ra2:x',
     'SUSP': 'wait_ns boundaries_pending',
     'FLIPDONE': 'request_id buffer',
     'PRESENT': 'request_id',
     'QENQ': 'queue submission_id kind dwords',
-    'SLICE': 'start_ts dur_ns queue submission_id packets outcome wait_addr cpu_ns',
-    'CPS': 'queue kind addr ref mask func cur',
+    'SLICE': 'start_ts dur_ns queue submission_id packets outcome wait_addr:x cpu_ns',
+    'CPS': 'queue kind addr:x ref:x mask:x func cur:x',
     'CPW': 'source woken oldest_blocked_ns',
-    'WIDLE': 'start_ts dur_ns reason outstanding sample_addr oldest_age_us cpu_ns',
+    'WIDLE': 'start_ts dur_ns reason outstanding sample_addr:x oldest_age_us cpu_ns',
     'MCOMMIT': 'serial cause pending_labels submission_id',
     'MGPU': 'serial kstart_ns kend_ns gstart_ns gend_ns late',
-    'LENC': 'serial addr value deferred kind',
+    'LENC': 'serial addr:x value:x deferred kind',
     'LLAND': 'serial',
-    'RRW': 'waited_serial committed_serial completed_serial wait_ns reason addr',
-    'ROOTS': 'j s g s48 s4c sb90 rtpp ctx disp ok_bits',
-    'SRT': 'old new rt wait_accum',
-    'SFC': 'i ctr label0 label1 exp0 exp1 lp0 lp1',
-    'SWK': 'w cur fiber q08 q10 q58 q60 flags_aff last_job_tsc mailbox',
-    'SLK': 'ef8 f78',
-    'CSAT': 'job counter value target cond suspend_ts eligible_idle idle_mask',
-    'JD': 'key chunk ' + ' '.join(_P113),
-    'SCNT': 'c2_0_3 c2_4_7 c2_8_11 c2_12 c3_0_3 c3_4_7 c3_8_11 c3_12',
+    'RRW': 'waited_serial committed_serial completed_serial wait_ns reason addr:x',
+    'ROOTS': 'j:x s:x g:x s48:x s4c:x sb90 rtpp:x ctx:x disp:x ok_bits:x',
+    'SRT': 'old new rt:x wait_accum',
+    'SFC': 'i ctr label0:x label1:x exp0:x exp1:x lp0:x lp1:x',
+    'SWK': 'w cur:x fiber:x q08:x q10:x q58:x q60:x flags_aff last_job_tsc mailbox:x',
+    'SLK': 'ef8:x f78:x',
+    'CSAT': 'job:x counter:x value target cond suspend_ts eligible_idle idle_mask:x',
+    'JD': 'key:x chunk q0:x q1:x q2:x q3:x q4:x q5:x q6:x q7:x q8:x q9:x q10:x',
+    'SCNT': 'c2_0_3:x c2_4_7:x c2_8_11:x c2_12:x c3_0_3:x c3_4_7:x c3_8_11:x c3_12:x',
     'SGRP': 'g sum_count waiting_full external_full',
     'SPOOL': 'ec8 ef0 ed0',
     'SFM': 'mode r34 r2c hz',
     'SSTAT': 'ticks max_gap_ns p99_gap_ns avg_tick_cost_ns',
-    'THR': 'kind port thread_id guest name worker_idx',
+    'THR': 'kind port thread_id guest:x name:s worker_idx',
     'TATTR': 'qos_apply qos_class relpri policy sched_prio managed_priority',
     'CLK': 'sw_mid tsc mat_ns ca_ns gap_ns',
     'PROC': 'user_ns sys_ns p_user_ns p_sys_ns runnable_ns instr cycles intr_wkups idle_wkups footprint load1x100 nthreads',
-    'OTHER': 'others_cpu_ns pid1 cpu1 name1 pid2 cpu2 name2 pid3 cpu3 name3',
-    'TCPU': 'thread_id user_us sys_us cpu_usage run_state flags name port',
+    'OTHER': 'others_cpu_ns pid1 cpu1 name1:s pid2 cpu2 name2:s pid3 cpu3 name3:s',
+    'TCPU': 'thread_id user_us sys_us cpu_usage run_state flags name:s port',
     'WCPU': 'd0_1 d2_3 d4_5 d6_7 d8_9 d10_11 d12_13 running_mask',
     'GC': 'gen0 gen1 gen2 pause_total_ns alloc_bytes lock_contention threadpool_threads',
     'AB': 'phase window_idx',
-    'WSTAT': 'written dropped max_occ writer_cpu_ns',
+    'WSTAT': 'written dropped max_occupancy writer_cpu_ns',
 }
-FALLBACK_SCHEMA = {k: v.split() for k, v in FALLBACK_SCHEMA.items()}
+FALLBACK_SCHEMA = {k: [x.split(':')[0] for x in v.split()] for k, v in SINK_SCHEMA.items()}
 # Field names whose value is a Stopwatch timestamp (converted to seconds since start_ts).
 TS_FIELDS = {'HLE': ('enter_ts',), 'FSW': ('enter_ts',), 'WAKE': ('enter_ts',), 'SLICE': ('start_ts',),
              'WIDLE': ('start_ts',), 'CSAT': ('suspend_ts',)}
@@ -278,6 +280,7 @@ class Data:
         self.strs = {}
         self.header = {}
         self.end = {}
+        self.config = {}
         self.unknown = Counter()
         self.short = Counter()
         self.bad_lines = 0
@@ -327,6 +330,9 @@ class Data:
         return (ticks - self.t0) / self.freq
 
 
+_STR_ESC = re.compile(r'\\(.)')
+
+
 def _toint(x):
     try:
         return int(x, 0)
@@ -374,6 +380,16 @@ def parse_log(path, D, progress=False):
                     p = line.split()
                     if len(p) >= 3:
                         schema_lines[p[2]] = [x.split(':')[0] for x in p[3:]]
+                elif line.startswith('# TSC'):
+                    for tok in line.split()[2:]:
+                        if tok.startswith('tsc_hz='):
+                            D.header['tsc_hz'] = tok.split('=', 1)[1]
+                            D.header['tsc_hz_late'] = '1'
+                elif line.startswith('# CONFIG'):
+                    for tok in line.split()[2:]:
+                        if '=' in tok:
+                            k, v = tok.split('=', 1)
+                            D.config[k] = v
                 elif line.startswith('# END'):
                     for tok in line.split()[2:]:
                         if '=' in tok:
@@ -398,7 +414,7 @@ def parse_log(path, D, progress=False):
                     parts = line.rstrip('\n').split(' ', 4)
                     sid = int(parts[3])
                     txt = parts[4] if len(parts) > 4 else ''
-                    strs[sid] = txt.replace('\\n', '\n').replace('\\\\', '\\')
+                    strs[sid] = _STR_ESC.sub(lambda m: {'n': '\n', 'r': '\r'}.get(m.group(1), m.group(1)), txt) if '\\' in txt else txt
                 except (ValueError, IndexError):
                     D.bad_lines += 1
                 continue
@@ -663,6 +679,14 @@ class Ctx:
             f = linfit([float(r[C[dom]]) for r in use], ys)
             if f:
                 self.fits[dom] = f
+        try:
+            hz = float(D.header.get('tsc_hz', 0))
+        except ValueError:
+            hz = 0.0
+        self.tsc_hz = hz
+        if 'tsc' not in self.fits and hz > 0 and use:
+            r0 = use[0]
+            self.fits['tsc'] = (1.0 / hz, float(r0[C['tsc']]), ys[0], 0.0, 0.0)   # slope from tsc_hz, no residual info
 
     def dom_to_s(self, dom, x):
         f = self.fits.get(dom)
@@ -2217,7 +2241,10 @@ def build_sanity(C, rows, R):
     # CLK
     if C.fits:
         for dom, f in C.fits.items():
-            L.append('CLK fit %-6s: rms=%.2f us max=%.2f us slope=%.9g  %s (pass < 20 us)' % (dom, f[3] * 1e6, f[4] * 1e6, f[0], ok(f[4] * 1e6 < 20)))
+            extra = ''
+            if dom == 'tsc' and getattr(C, 'tsc_hz', 0) > 0:
+                extra = '  fitted %.4g Hz vs header tsc_hz=%.4g (%s)' % (1.0 / f[0], C.tsc_hz, 'late # TSC line' if D.header.get('tsc_hz_late') else 'header')
+            L.append('CLK fit %-6s: rms=%.2f us max=%.2f us slope=%.9g  %s (pass < 20 us)%s' % (dom, f[3] * 1e6, f[4] * 1e6, f[0], ok(f[4] * 1e6 < 20), extra))
     else:
         L.append('CLK fit: n/a (fewer than 2 usable CLK records)')
     # WSTAT / END
@@ -2226,8 +2253,8 @@ def build_sanity(C, rows, R):
         last = D.L('WSTAT')[-1]
         wr, dr = last[W['written']], last[W['dropped']]
         frac = dr / (wr + dr) if wr + dr else 0
-        L.append('WSTAT last: written=%d dropped=%d (%.4f%%) max_occ=%d writer_cpu=%.2fs  %s (pass <= 0.1%%)' % (
-            wr, dr, 100 * frac, last[W['max_occ']], last[W['writer_cpu_ns']] / 1e9, ok(frac <= 0.001)))
+        L.append('WSTAT last: written=%d dropped=%d (%.4f%%) max_occupancy=%d writer_cpu=%.2fs  %s (pass <= 0.1%%)' % (
+            wr, dr, 100 * frac, last[W['max_occupancy']], last[W['writer_cpu_ns']] / 1e9, ok(frac <= 0.001)))
     else:
         L.append('WSTAT: none')
     L.append('END line: %s' % (D.end if D.end else 'absent (log truncated or process killed before shutdown)'))
@@ -2453,20 +2480,15 @@ def _finish(R, log, C, D, why):
 # Self-test: synthetic dstrace.log + game.log
 # --------------------------------------------------------------------------------------
 _ST_START = 5_000_000_000_000
-HEX_FIELDS = {'guest', 'arg0', 'arg1', 'rdi', 'rsi', 'rdx', 'rcx', 'r8', 'ra1', 'ra2', 'ra3', 'ra4', 'ra5', 'rax', 'mutex', 'waiter',
-              'owner', 'handle', 'bits', 'addr', 'ref', 'mask', 'cur', 'job', 'counter', 'q08', 'q10', 'q58', 'q60', 'from', 'to',
-              'j', 's', 'g', 's48', 's4c', 'ctx', 'disp', 'rtpp', 'rt', 'sample_addr', 'wait_addr', 'idle_mask', 'fiber', 'mailbox',
-              'label0', 'label1', 'exp0', 'exp1', 'lp0', 'lp1', 'ef8', 'f78', 'first_woken', 'value'}
-HEX_FIELDS.discard('value')
-
-
 class Synth:
+    """Writes a log in the sink's exact format (header, CONFIG, late TSC line, SCHEMA lines with :x/:s)."""
+
     def __init__(self):
         self.lines = []
         self.seq = 0
         self.strs = {}
         self.schema = {t: list(v) for t, v in FALLBACK_SCHEMA.items()}
-        self.schema['SLK'] = ['f78', 'ef8']            # deliberately different from the fallback order
+        self.hexn = {t: {x.split(':')[0] for x in v.split() if x.endswith(':x')} for t, v in SINK_SCHEMA.items()}
         self.no_schema = {'SPOOL'}                    # emitted without a SCHEMA line (fallback path)
         self.counts = Counter()
 
@@ -2484,19 +2506,25 @@ class Synth:
                 v = self.sid(v)
             if n in TS_FIELDS.get(typ, ()):
                 v = _ST_START + int(v) * 1000
-            vals.append(('0x%x' % v) if (n in HEX_FIELDS and v >= 0) else str(v))
+            vals.append(('0x%x' % v) if (n in self.hexn[typ] and v >= 0) else str(v))
         self.seq += 1
         self.counts[typ] += 1
-        self.lines.append((_ST_START + int(us) * 1000, self.seq, '%d %s %d %s' % (_ST_START + int(us) * 1000, typ, _tid, ' '.join(vals))))
+        ts = _ST_START + int(us) * 1000
+        self.lines.append((ts, self.seq, '%d %s %d %s' % (ts, typ, _tid, ' '.join(vals))))
 
     def text(self):
-        out = ['# DSTRACE 1 freq=1000000000 pid=4242 start_ts=%d start_unix_ms=1760000000000 tsc_hz=3000000000 tb_hz=24000000 rev=selftest' % _ST_START]
-        for t, names in self.schema.items():
-            if t in self.no_schema:
-                continue
-            out.append('# SCHEMA %s %s' % (t, ' '.join(n + (':x' if n in HEX_FIELDS else '') for n in names)))
+        out = ['# DSTRACE 1 freq=1000000000 pid=4242 start_ts=%d start_unix_ms=1760000000000 tsc_hz=0 tb_hz=24000000 rev=selftest' % _ST_START,
+               '# CONFIG groups=all arm_s=30 flush_s=2 ring_log2=18 sampler_hz=1000 wcpu_hz=1000 hle_slow_us=1000 hle_cpu_every=64 mlw_us=50 '
+               'ab_ripcache=10 ab_start_s=70 raw_reads=0']
+        for t, fields in SINK_SCHEMA.items():
+            if t not in self.no_schema:
+                out.append('# SCHEMA %s %s' % (t, fields))
+        out.append('# FUTURE some unknown comment line the parser must ignore')
+        out.append('# TSC tsc_hz=3000000000')
         for s, i in self.strs.items():
-            out.append('%d STR 1 %d %s' % (_ST_START, i, s.replace('\\', '\\\\').replace('\n', '\\n')))
+            out.append('%d STR 1 %d %s' % (_ST_START, i, s.replace('\\', '\\\\').replace('\n', '\\n').replace('\r', '\\r')))
+        self.sid_special = self.sid('line\r\nwith \\ backslash')
+        out.append('%d STR 1 %d %s' % (_ST_START, self.sid_special, 'line\\r\\nwith \\\\ backslash'))
         out.append('this line is garbage')
         for _, _, l in sorted(self.lines):
             out.append(l)
@@ -2657,7 +2685,7 @@ def gen_synth(dirpath):
           runnable_ns=k * 400_000_000, instr=1000 * k, cycles=2000 * k, intr_wkups=100 * k, idle_wkups=50 * k, footprint=3 << 30, load1x100=150, nthreads=40)
         E(us, 'GC', 1, gen0=10 * k, gen1=k, gen2=0, pause_total_ns=1_000_000 * k, alloc_bytes=10_000_000 * k, lock_contention=5 * k, threadpool_threads=4)
         E(us, 'SSTAT', 1, ticks=2000, max_gap_ns=1_500_000, p99_gap_ns=800_000, avg_tick_cost_ns=7_000)
-        E(us, 'WSTAT', 1, written=1000 * (k + 1), dropped=0, max_occ=100, writer_cpu_ns=10_000_000)
+        E(us, 'WSTAT', 1, written=1000 * (k + 1), dropped=0, max_occupancy=100, writer_cpu_ns=10_000_000)
     for us in (10_000_000, 15_000_000):
         E(us, 'OTHER', 1, others_cpu_ns=300_000_000, pid1=77, cpu1=200_000_000, name1='WindowServer', pid2=78, cpu2=50_000_000, name2='mds', pid3=0, cpu3=0, name3='')
     E(10_000_000, 'ROOTS', 1, j=0x8030fd5b0, s=0x7400000, g=0x7410000, s48=0x1fff, s4c=0xfffff5fe, sb90=13, rtpp=0x803181450, ctx=0x8031810c0,
@@ -2718,7 +2746,11 @@ def selftest(keep=False):
         missing = [t for t in FALLBACK_SCHEMA if S.counts[t] == 0]
         assert not missing, 'generator does not cover: %s' % missing
         assert C.D.unknown.get('ZZZ') == 1 and C.D.bad_lines >= 1
-        assert C.D.schema['SLK'] == ['f78', 'ef8'] and C.D.schema_src['SLK'] == 'log'
+        assert C.D.schema['SLK'] == ['ef8', 'f78'] and C.D.schema_src['SLK'] == 'log'
+        assert C.D.schema['WSTAT'][2] == 'max_occupancy' and C.D.schema['THR'][4] == 'name'      # ':s' / ':x' suffixes stripped
+        assert C.D.header['tsc_hz'] == '3000000000' and C.D.config.get('arm_s') == '30', (C.D.header, C.D.config)
+        assert C.D.strs[S.sid_special] == 'line\r\nwith \\ backslash', repr(C.D.strs[S.sid_special])
+        assert abs(1.0 / C.fits['tsc'][0] - 3e9) < 1e3
         assert C.D.schema_src['SPOOL'] == 'fallback'
         for fn in ('frames.csv', 'frames_summary.txt', 'workers.csv', 'wake_latency.txt', 'fiber.txt', 'memlock.txt', 'hostcpu.txt',
                    'gpu_roundtrip.csv', 'metal.txt', 'ab.txt', 'timeline_median.txt', 'timeline_p90.txt', 'sanity.txt', 'gamelog.txt', 'skipped.txt'):
