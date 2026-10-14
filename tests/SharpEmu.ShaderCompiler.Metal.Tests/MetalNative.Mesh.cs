@@ -58,6 +58,13 @@ internal static partial class MetalNative
         pixels = [];
         error = string.Empty;
 
+        // The meshlet slot is always bound (the null buffer when a draw uses none), as the
+        // host does; a test that does not supply cached meshlets gets an empty one.
+        if (!meshBuffers.Any(static buffer => buffer.Index == Gen5MslMeshInfo.MeshletBufferIndex))
+        {
+            meshBuffers = [.. meshBuffers, (new byte[16], Gen5MslMeshInfo.MeshletBufferIndex)];
+        }
+
         var meshFunction = Send(library, Selector("newFunctionWithName:"), NsString(meshEntryPoint));
         var fragmentFunction = Send(library, Selector("newFunctionWithName:"), NsString(fragmentEntryPoint));
         if (meshFunction == 0 || fragmentFunction == 0)

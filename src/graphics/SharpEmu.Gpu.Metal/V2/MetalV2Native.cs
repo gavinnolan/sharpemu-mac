@@ -220,6 +220,10 @@ internal static partial class MetalV2Native
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint SendWithValue(nint receiver, nint selector, nuint value);
 
+    // A selector taking one NSRange, which the ABI passes as its two words.
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial nint SendRange(nint receiver, nint selector, nuint location, nuint length);
+
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendVoidValue(nint receiver, nint selector, nuint value);
 

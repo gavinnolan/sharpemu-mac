@@ -390,6 +390,17 @@ public static partial class Gen5MslTranslator
                 case Gen5MslStage.Vertex:
                     AppendIndented(text, "return sharpemu_out;", indent);
                     return;
+                case Gen5MslStage.Mesh:
+                    // The mesh epilogue publishes the whole workgroup's output after a
+                    // threadgroup barrier, so every thread has to reach it: an exit at the
+                    // end of the program falls into it, and one anywhere else would leave
+                    // the barrier to a part of the group, so that shape stays dispatched.
+                    if (indent > 1)
+                    {
+                        _structureFailed = true;
+                    }
+
+                    return;
                 default:
                     AppendIndented(text, "return;", indent);
                     return;

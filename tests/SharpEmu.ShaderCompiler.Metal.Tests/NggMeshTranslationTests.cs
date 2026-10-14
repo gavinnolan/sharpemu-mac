@@ -111,7 +111,7 @@ public sealed class NggMeshTranslationTests
         // the only place a threadgroup_barrier may appear, because two waves of the same
         // subgroup can sit at different pc values.
         Assert.Contains("sharpemu_mesh_wait = true;", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("if (active && !sharpemu_mesh_wait)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("while (active && !sharpemu_mesh_wait)", shader.Source, StringComparison.Ordinal);
         Assert.Contains("case 1u:", shader.Source, StringComparison.Ordinal);
         Assert.Contains("atomic_fetch_add_explicit(&sharpemu_mesh_parked", shader.Source, StringComparison.Ordinal);
     }
@@ -302,6 +302,174 @@ public sealed class NggMeshTranslationTests
         Assert.False(Assert.IsType<Gen5MslMeshInfo>(shader.MeshInfo).HasGeometryHalf);
         Assert.Contains("const uint sharpemu_mesh_prim_base = sharpemu_tg_index * 3u;", shader.Source, StringComparison.Ordinal);
         Assert.DoesNotContain("sharpemu_gs_v0", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AProgramWithoutAGsHalfReadsCachedMeshletsWhenTheDrawAsksForThem()
+    {
+        var shader = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.CullingTriangle());
+        Assert.Contains("uint meshlet_count;", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("device const uint* sharpemu_meshlets [[buffer(4)]]", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_meshlets_on = sharpemu_draw.meshlet_count != 0u;", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_mesh_alloc[0] = min(sharpemu_ml.w & 0xFFFFu,", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_meshlets[sharpemu_draw.meshlet_vertex_base + sharpemu_ml.x + sharpemu_tg_index]", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_meshlets_on ? sharpemu_ml.z + sharpemu_tg_index", shader.Source, StringComparison.Ordinal);
+        Assert.Equal(80u, Gen5MslMeshInfo.DrawInfoByteSize);
+
+        // A GS half assembles its own input primitives and takes no meshlets.
+        var fused = Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.CullingTriangle(), Gen5NggFixtures.StageInfo with { GeometryVerticesOut = 3 });
+        Assert.DoesNotContain("sharpemu_meshlets", fused.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ALocalPrimitiveSeedsItsVerticesInTheFieldsTheGuestDecodes()
+    {
+        // The guest reads bfe(v0, 2, 14), v0 >> 18 and bfe(v1, 2, 14): the local vertex index
+        // sits in bits 2-15 of each 16-bit field, exactly as the GS half packs it.
+        var shader = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.CullingTriangle());
+        Assert.Contains(
+            ": (((sharpemu_mesh_prim_base << 2u) & 0xFFFFu) |", shader.Source, StringComparison.Ordinal);
+        Assert.Contains(
+            "((((sharpemu_mesh_prim_base + 1u) << 2u) & 0xFFFFu) << 16u));", shader.Source, StringComparison.Ordinal);
+        Assert.Contains(
+            ": (((sharpemu_mesh_prim_base + 2u) << 2u) & 0xFFFFu);", shader.Source, StringComparison.Ordinal);
+
+        // A cached meshlet's triangle (three 8-bit local indices) is seeded in the same fields.
+        Assert.Contains(
+            "(((sharpemu_mesh_prim_packed & 0xFFu) << 2u) | (((sharpemu_mesh_prim_packed >> 8u) & 0xFFu) << 18u))",
+            shader.Source, StringComparison.Ordinal);
+        Assert.Contains(
+            "(((sharpemu_mesh_prim_packed >> 16u) & 0xFFu) << 2u)", shader.Source, StringComparison.Ordinal);
+
+        foreach (var lane in new[] { 0u, 1u, 9u, 10u, 31u })
+        {
+            var @base = lane * 3;
+            var v0 = ((@base << 2) & 0xFFFFu) | ((((@base + 1) << 2) & 0xFFFFu) << 16);
+            var v1 = ((@base + 2) << 2) & 0xFFFFu;
+            Assert.Equal(@base, (v0 >> 2) & 0x3FFFu);
+            Assert.Equal(@base + 1, v0 >> 18);
+            Assert.Equal(@base + 2, (v1 >> 2) & 0x3FFFu);
+        }
+    }
+
+    [Theory]
+    [InlineData(64u, 64u, 3u, 21u, 63u)]
+    [InlineData(64u, 10u, 3u, 10u, 30u)]
+    [InlineData(30u, 64u, 3u, 10u, 30u)]
+    [InlineData(64u, 64u, 2u, 32u, 64u)]
+    [InlineData(64u, 64u, 1u, 64u, 64u)]
+    [InlineData(2u, 64u, 3u, 1u, 3u)]
+    public void ASubgroupWithoutVertexReuseHoldsWholePrimitives(
+        uint maxVertices, uint maxPrimitives, uint perPrimitive, uint primitives, uint vertices)
+    {
+        var mesh = new Gen5MslMeshInfo(
+            ThreadsPerThreadgroup: 64, WavesPerThreadgroup: 2, MaxVertices: maxVertices, MaxPrimitives: maxPrimitives,
+            VerticesPerPrimitive: perPrimitive, Topology: Gen5MslMeshTopology.Triangle, ThreadgroupMemoryBytes: 4096,
+            DrawInfoBufferIndex: 2, IndexBufferIndex: 3, ReadsIndexBuffer: true);
+        Assert.Equal(primitives, mesh.PrimitivesPerSubgroup);
+        Assert.Equal(vertices, mesh.VerticesPerSubgroup);
+
+        // Every subgroup starts on a primitive boundary: its first vertex slot is a multiple
+        // of the primitive size, so a triangle is never split across two subgroups.
+        for (var subgroup = 0u; subgroup < 8; subgroup++)
+        {
+            Assert.Equal(0u, subgroup * mesh.VerticesPerSubgroup % perPrimitive);
+            Assert.Equal(subgroup * mesh.PrimitivesPerSubgroup * perPrimitive, subgroup * mesh.VerticesPerSubgroup);
+        }
+    }
+
+    [Fact]
+    public void AWave64PrimitiveShaderRunsAsOneNarrowWave()
+    {
+        var shader = Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.Wave64Triangles(), Gen5NggFixtures.Wave64StageInfo);
+        var mesh = Assert.IsType<Gen5MslMeshInfo>(shader.MeshInfo);
+        Assert.True(mesh.NarrowWave64);
+        Assert.Equal(32u, mesh.ThreadsPerThreadgroup);
+        Assert.Equal(1u, mesh.WavesPerThreadgroup);
+        Assert.Equal(30u, mesh.MaxVertices);
+        Assert.Equal(10u, mesh.MaxPrimitives);
+        Assert.Equal(30u, mesh.VerticesPerSubgroup);
+        Assert.Contains("max_total_threads_per_threadgroup(32)", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AWave32OrFusedPrimitiveShaderKeepsItsLaunch()
+    {
+        var wave32 = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.Wave64Triangles());
+        Assert.False(Assert.IsType<Gen5MslMeshInfo>(wave32.MeshInfo).NarrowWave64);
+
+        var fused = Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.Wave64Triangles(), Gen5NggFixtures.Wave64StageInfo with { GeometryVerticesOut = 3 });
+        Assert.False(Assert.IsType<Gen5MslMeshInfo>(fused.MeshInfo).NarrowWave64);
+    }
+
+    [Fact]
+    public void NarrowWave64LowersTheUpperHalfAsInactive()
+    {
+        var shader = Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.Wave64LaneProbe(), Gen5NggFixtures.Wave64StageInfo);
+        Assert.True(Assert.IsType<Gen5MslMeshInfo>(shader.MeshInfo).NarrowWave64);
+
+        // v_readlane of lane 63 reads an inactive lane: zero, not lane 31.
+        Assert.Contains(" >= 32u ? 0u : simd_shuffle(", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("& 63u", shader.Source, StringComparison.Ordinal);
+
+        // v_mbcnt_hi has no lanes to count: the addend passes through.
+        Assert.DoesNotContain("popcount", shader.Source, StringComparison.Ordinal);
+
+        // An all-ones EXEC_HI write leaves the upper half empty.
+        Assert.Matches(@"uint (t\d+) = 0u;\s+s127 = \1;", shader.Source);
+    }
+
+    [Fact]
+    public void ALargeLocalDataShareLivesInASlotOfTheDevicePool()
+    {
+        var shader = Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.CullingTriangle(),
+            Gen5NggFixtures.StageInfo with { LocalDataShareBytes = 15 * 1024 });
+        var mesh = Assert.IsType<Gen5MslMeshInfo>(shader.MeshInfo);
+        Assert.True(mesh.DeviceLds);
+        Assert.Equal(0u, mesh.ThreadgroupMemoryBytes);
+        Assert.DoesNotContain("threadgroup uint sharpemu_lds[", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("threadgroup uint sharpemu_lds_slot;", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("device atomic_uint* sharpemu_lds_pool [[buffer(5)]]", shader.Source, StringComparison.Ordinal);
+        Assert.Contains(
+            "device uint* sharpemu_lds = (device uint*)sharpemu_lds_pool + 4096u + sharpemu_lds_slot * 4096u;",
+            shader.Source,
+            StringComparison.Ordinal);
+        Assert.Contains("atomic_compare_exchange_weak_explicit(&sharpemu_lds_pool[1u + sharpemu_slot]", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("atomic_store_explicit(&sharpemu_lds_pool[1u + sharpemu_lds_slot], 0u", shader.Source, StringComparison.Ordinal);
+
+        // Addresses stay inside the slot by mask alone.
+
+        // Every workgroup barrier orders device memory too, where the data now lives.
+        Assert.DoesNotContain("threadgroup_barrier(mem_flags::mem_threadgroup);", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ALocalDataShareUnderTheThresholdStaysInThreadgroupMemory()
+    {
+        var shader = Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.CullingTriangle(),
+            Gen5NggFixtures.StageInfo with { LocalDataShareBytes = 12 * 1024 });
+        Assert.False(Assert.IsType<Gen5MslMeshInfo>(shader.MeshInfo).DeviceLds);
+        Assert.DoesNotContain("sharpemu_lds_pool", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LocalDataShareIsDeclaredAtTheGuestSize()
+    {
+        // 9 KB (the shape of a culling template's allocation) is 2304 dwords, not 4096.
+        var shader = Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.CullingTriangle(),
+            Gen5NggFixtures.StageInfo with { LocalDataShareBytes = 9216 });
+        Assert.Contains("threadgroup uint sharpemu_lds[2304];", shader.Source, StringComparison.Ordinal);
+        Assert.Equal(9216u, Assert.IsType<Gen5MslMeshInfo>(shader.MeshInfo).ThreadgroupMemoryBytes);
+
+        // Addresses mask to the covering power of two and clamp to the last declared dword.
+        Assert.Contains("& 4095u), 2303u)", shader.Source, StringComparison.Ordinal);
     }
 
     [Theory]

@@ -815,6 +815,56 @@ internal sealed class MetalGuestMemory : IDisposable
     public nint CreateReportBuffer(ulong size, string label, out nint contents, out ulong gpuAddress) =>
         CreateSharedBuffer(size, label, out contents, out gpuAddress);
 
+    /// <summary>A resident shared buffer for one cached meshlet list; see
+    /// <see cref="MetalMeshletCache"/>.</summary>
+    public nint CreateMeshletBuffer(ulong size, out nint contents)
+    {
+        var buffer = CreateSharedBuffer(size, "mesh.meshlets", out contents, out _);
+        AddResident(buffer);
+        CommitResidency();
+        return buffer;
+    }
+
+    public void ReleaseMeshletBuffer(nint buffer)
+    {
+        RemoveResident(buffer);
+        MetalNative.SendVoid(buffer, MetalNative.Selector("release"));
+    }
+
+    private nint _meshLdsPool;
+    private readonly object _meshLdsPoolLock = new();
+
+    /// <summary>The device-memory LDS pool of mesh programs whose guest LDS is too large for
+    /// threadgroup memory (see <c>Gen5MslMeshInfo.DeviceLds</c>): a zeroed header of a probe
+    /// counter and one busy flag per slot, then one slot of data per resident threadgroup.
+    /// Created on first use and never reset: a threadgroup frees its slot when it ends.</summary>
+    public nint MeshLdsPool
+    {
+        get
+        {
+            lock (_meshLdsPoolLock)
+            {
+                if (_meshLdsPool == 0)
+                {
+                    var buffer = CreateSharedBuffer(
+                        SharpEmu.ShaderCompiler.Metal.Gen5MslMeshInfo.LdsPoolByteSize, "mesh.lds-pool", out var contents, out _);
+                    unsafe
+                    {
+                        new Span<byte>(
+                            (void*)contents,
+                            (int)(SharpEmu.ShaderCompiler.Metal.Gen5MslMeshInfo.LdsPoolHeaderDwords * sizeof(uint))).Clear();
+                    }
+
+                    AddResident(buffer);
+                    CommitResidency();
+                    _meshLdsPool = buffer;
+                }
+
+                return _meshLdsPool;
+            }
+        }
+    }
+
     private nint CreateSharedBuffer(ulong size, string label, out nint contents, out ulong gpuAddress)
     {
         var buffer = MetalNative.SendNewBuffer(

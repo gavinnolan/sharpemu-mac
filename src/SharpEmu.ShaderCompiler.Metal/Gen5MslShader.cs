@@ -49,8 +49,38 @@ public sealed record Gen5MslMeshInfo(
     uint DrawInfoBufferIndex,
     uint IndexBufferIndex,
     bool ReadsIndexBuffer,
-    uint GeometryVerticesOut = 0)
+    uint GeometryVerticesOut = 0,
+    bool NarrowWave64 = false,
+    bool DeviceLds = false)
 {
+    /// <summary>The mesh slot the device-memory LDS pool is bound at when
+    /// <see cref="DeviceLds"/> is set.</summary>
+    public const uint LdsPoolBufferIndex = 5;
+
+    /// <summary>Slots in the device LDS pool; a threadgroup holds one for its lifetime.</summary>
+    public const uint LdsPoolSlots = 2048;
+
+    /// <summary>Dwords of the pool header: a probe counter and one busy flag per slot.</summary>
+    public const uint LdsPoolHeaderDwords = 4096;
+
+    /// <summary>Dwords of one pool slot, the most guest LDS a mesh stage declares.</summary>
+    public const uint LdsPoolSlotDwords = 4096;
+
+    /// <summary>Bytes of the whole pool: the zeroed header and every slot's data.</summary>
+    public const ulong LdsPoolByteSize =
+        (LdsPoolHeaderDwords + (ulong)LdsPoolSlots * LdsPoolSlotDwords) * sizeof(uint);
+
+    /// <summary>Primitives one subgroup of a program without a GS half holds. Every
+    /// primitive owns its vertices (no reuse), so a subgroup is whole primitives: as many as
+    /// fit both the primitive extent and the vertex extent. The host splits the draw by this
+    /// number and the mesh prologue maps a lane's slot from the same one.</summary>
+    public uint PrimitivesPerSubgroup =>
+        Math.Max(Math.Min(MaxPrimitives, MaxVertices / Math.Max(VerticesPerPrimitive, 1)), 1);
+
+    /// <summary>Vertices one subgroup of a program without a GS half holds: three own
+    /// vertices per triangle, so a subgroup never starts or ends mid-primitive.</summary>
+    public uint VerticesPerSubgroup => PrimitivesPerSubgroup * Math.Max(VerticesPerPrimitive, 1);
+
     /// <summary>Whether the program has a GS half that assembles its input primitives
     /// from the draw's topology; see <see cref="InputPrimitivesPerSubgroup"/>.</summary>
     public bool HasGeometryHalf => GeometryVerticesOut != 0;
@@ -97,7 +127,12 @@ public sealed record Gen5MslMeshInfo(
 
     /// <summary>Byte size of the Gen5MeshDrawInfo block the host fills at
     /// <see cref="DrawInfoBufferIndex"/>; see the generated struct of the same name.</summary>
-    public const uint DrawInfoByteSize = 64;
+    public const uint DrawInfoByteSize = 80;
+
+    /// <summary>The mesh slot of the cached-meshlet buffer a program without a GS half reads
+    /// when the draw-info block's meshlet_count is not zero; bound (to the null buffer when
+    /// off) for every such draw.</summary>
+    public const uint MeshletBufferIndex = 4;
 
     /// <summary>Dword count of that block, for a host that fills it as words.</summary>
     public const uint DrawInfoDwordCount = DrawInfoByteSize / 4;
