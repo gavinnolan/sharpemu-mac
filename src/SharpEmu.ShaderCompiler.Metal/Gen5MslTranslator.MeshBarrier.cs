@@ -151,6 +151,7 @@ public static partial class Gen5MslTranslator
             }
 
             var text = new StringBuilder();
+            var statement = MeshBarrierStatement;
             var open = new Stack<int>();
             for (var index = 0; index < count; index++)
             {
@@ -178,13 +179,30 @@ public static partial class Gen5MslTranslator
                         : $"if (active && pc == {index}u)",
                     depth);
                 AppendIndented(text, "{", depth);
-                AppendBlockText(text, _blockText[index], depth + 1);
+
+                // With several waves the barrier must not sit under "active && pc == N": a
+                // wave that ran out of steps clears active and would skip it while the others
+                // wait. These blocks post-dominate the entry and lie outside every loop, so
+                // every thread reaches the barrier once, and it can stand just after the block.
+                var blockText = _blockText[index];
+                var unguardedBarrier = !oneWave && hasBarrier[index];
+                if (unguardedBarrier)
+                {
+                    blockText = blockText.Replace(statement, string.Empty, StringComparison.Ordinal);
+                }
+
+                AppendBlockText(text, blockText, depth + 1);
                 foreach (var line in _blockTerminators[index].DispatcherLines)
                 {
                     AppendIndented(text, line, depth + 1);
                 }
 
                 AppendIndented(text, "}", depth);
+                if (unguardedBarrier)
+                {
+                    AppendIndented(text, statement, depth);
+                }
+
                 while (open.Count != 0 && open.Peek() == index)
                 {
                     open.Pop();

@@ -219,6 +219,36 @@ internal static class Gen5NggFixtures
         return new Gen5ShaderProgram(0, instructions);
     }
 
+    /// <summary>The same two-exit loop, then a barrier after it: the loop holds no barrier,
+    /// so every thread reaches the barrier once whatever the number of waves.</summary>
+    public static Gen5ShaderProgram BarrierAfterLoopWithTwoExits()
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        instructions.Add(new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Ds, "DsWriteB32", [0],
+            [Vector(11), Vector(10)], [], new Gen5DataShareControl(0, 0, false)));
+        pc += 4;
+        instructions.Add(new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Sopp, "SCbranchScc1",
+            [Branch(BranchScc1Word, pc, 20)], [], [], null));
+        pc += 4;
+        instructions.Add(new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Sop1, "SMovB32", [0],
+            [Inline(0)], [Scalar(20)], null));
+        pc += 4;
+        instructions.Add(new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Sopp, "SCbranchScc0",
+            [Branch(BranchScc0Word, pc, 4)], [], [], null));
+        pc += 4;
+        instructions.Add(new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Sopp, "SBranch",
+            [Branch(BranchWord, pc, 24)], [], [], null));
+        pc += 4;
+        instructions.Add(new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Sop1, "SMovB32", [0],
+            [Inline(0)], [Scalar(20)], null));
+        pc += 4;
+        instructions.Add(new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Sopp, "SBarrier", [0], [], [], null));
+        pc += 4;
+        AppendTail(instructions, ref pc);
+        return new Gen5ShaderProgram(0, instructions);
+    }
+
     /// <summary>The stage state of a wave64 primitive shader with no GS half.</summary>
     public static Gen5NggStageInfo Wave64StageInfo { get; } = StageInfo with
     {

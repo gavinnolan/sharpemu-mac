@@ -78,6 +78,39 @@ public sealed class NggMeshNarrowWave64Tests
     }
 
     [Fact]
+    public void ALinearBarrierOfSeveralWavesStandsOutsideItsPcGuard()
+    {
+        // A wave that runs out of steps clears active; a barrier under that guard would be
+        // skipped by it while the other waves wait. So it follows the guarded block.
+        var shader = Compile(Gen5NggFixtures.BarrierAfterLoopWithTwoExits(), null, structured: true);
+        Assert.Equal(2u, Assert.IsType<Gen5MslMeshInfo>(shader.MeshInfo).WavesPerThreadgroup);
+        Assert.Contains("while (active && pc >= ", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("while (active && !sharpemu_mesh_wait)", shader.Source, StringComparison.Ordinal);
+
+        var lines = shader.Source.Split('\n');
+        var body = Array.FindIndex(lines, static line => line.Contains("if (active && pc == 0u)", StringComparison.Ordinal));
+        var barrier = Array.FindIndex(lines, body, static line => line.Trim() == "threadgroup_barrier(mem_flags::mem_threadgroup);");
+        Assert.True(barrier > 0, "no in-place barrier was emitted");
+        Assert.Equal("}", lines[barrier - 1].Trim());
+        Assert.Equal(lines[barrier - 1].Length - lines[barrier - 1].TrimStart().Length,
+            lines[barrier].Length - lines[barrier].TrimStart().Length);
+
+        // The same shape with one wave keeps it inside the guard.
+        var stage = Gen5NggFixtures.StageInfo with
+        {
+            VerticesPerSubgroup = 32,
+            PrimitivesPerSubgroup = 1,
+            MaxOutputPerSubgroup = 32,
+        };
+        var oneWave = Compile(Gen5NggFixtures.BarrierAfterLoopWithTwoExits(), stage, structured: true);
+        var oneLines = oneWave.Source.Split('\n');
+        var oneBody = Array.FindIndex(oneLines, static line => line.Contains("if (active && pc == 0u)", StringComparison.Ordinal));
+        var oneBarrier = Array.FindIndex(oneLines, oneBody, static line => line.Trim() == "threadgroup_barrier(mem_flags::mem_threadgroup);");
+        Assert.True(oneBarrier > 0);
+        Assert.NotEqual("}", oneLines[oneBarrier - 1].Trim());
+    }
+
+    [Fact]
     public void CompareIntoAScalarPairClearsTheHighDword()
     {
         // A wave64 v_cmp into s[0:1] defines both dwords; the upper lanes do not exist, so
