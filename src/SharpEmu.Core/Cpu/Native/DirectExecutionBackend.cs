@@ -754,7 +754,10 @@ public sealed unsafe partial class DirectExecutionBackend :
 	{
 		private readonly object _gate = new();
 		private readonly AutoResetEvent _workAvailable = new(false);
-		private readonly Thread _thread;
+		private readonly Thread? _thread;
+		private readonly SharpEmu.HLE.Host.HostQosThread? _qosThread;
+		private readonly string _hostName;
+		private readonly SharpEmu.HLE.Host.HostThreadQos? _qosClass;
 		private Action? _work;
 		private volatile bool _stopping;
 
@@ -768,10 +771,26 @@ public sealed unsafe partial class DirectExecutionBackend :
 
 		public GuestExecutionRunner(ulong guestThreadHandle, string name, ThreadPriority priority)
 		{
+			_hostName = $"SharpEmu-{name}";
+			// A matched QoS rule wins over the explicit host priority: CoreCLR-created
+			// threads can never take a QoS class afterwards (EPERM), so such a thread is
+			// created natively with the class in its attributes and gets no priority.
+			if (SharpEmu.HLE.Host.GuestThreadQosPolicy.TryGetClassForNewThread(name, out var qosClass))
+			{
+				_qosClass = qosClass;
+				_qosThread = SharpEmu.HLE.Host.HostQosThread.TryStart(
+					_hostName, qosClass, GuestExecutionStackBytes, () => ThreadMain(guestThreadHandle), out var errno);
+				if (_qosThread is not null)
+				{
+					return;
+				}
+				Console.Error.WriteLine(
+					$"[SCHED][QOS] thread={name} class={qosClass} ok=False errno={errno} (native thread create failed, using managed thread)");
+			}
 			_thread = new Thread(() => ThreadMain(guestThreadHandle), GuestExecutionStackBytes)
 			{
 				IsBackground = true,
-				Name = $"SharpEmu-{name}",
+				Name = _hostName,
 				Priority = priority,
 			};
 			_thread.Start();
@@ -815,27 +834,22 @@ public sealed unsafe partial class DirectExecutionBackend :
 			if (_logGuestThreadQos)
 			{
 				Console.Error.WriteLine(
-					$"[LOADER][INFO] guest_thread.qos name='{_thread.Name}' inherited=0x{inheritedQos:X2} " +
+					$"[LOADER][INFO] guest_thread.qos name='{_hostName}' inherited=0x{inheritedQos:X2} " +
 					$"override={_guestThreadQosOverride ?? "none"} applied={applied?.ToString() ?? "n/a"} " +
 					$"now=0x{SharpEmu.HLE.Host.HostThreadQualityOfService.GetCurrentThreadClassForDiagnostics():X2}");
 			}
 			if (DsTrace.On)
 			{
-				var dsName = _thread.Name ?? string.Empty;
+				var dsName = _hostName;
 				if (dsName.StartsWith("SharpEmu-", StringComparison.Ordinal))
 				{
 					dsName = dsName["SharpEmu-".Length..];
 				}
 				DsTrace.RegisterThread(1, guestThreadHandle, dsName, applied is null ? 2 : applied.Value ? 1 : 0);
 			}
-			if (SharpEmu.HLE.Host.GuestThreadQosPolicy.IsEnabled)
+			if (_qosThread is not null)
 			{
-				var qosName = _thread.Name ?? string.Empty;
-				if (qosName.StartsWith("SharpEmu-", StringComparison.Ordinal))
-				{
-					qosName = qosName["SharpEmu-".Length..];
-				}
-				SharpEmu.HLE.Host.GuestThreadQosPolicy.ApplyToCurrentThread(qosName);
+				SharpEmu.HLE.Host.GuestThreadQosPolicy.LogNativeThreadStart(_hostName["SharpEmu-".Length..], _qosClass!.Value);
 			}
 			var previousGuestThreadHandle = GuestThreadExecution.EnterGuestThread(guestThreadHandle);
 			try
@@ -880,9 +894,16 @@ public sealed unsafe partial class DirectExecutionBackend :
 		public void Dispose()
 		{
 			RequestStop();
-			if (!ReferenceEquals(Thread.CurrentThread, _thread))
+			if (_qosThread is not null)
 			{
-				_thread.Join(500);
+				if (!_qosThread.IsCurrentThread)
+				{
+					_qosThread.Join(500);
+				}
+			}
+			else if (!ReferenceEquals(Thread.CurrentThread, _thread))
+			{
+				_thread!.Join(500);
 			}
 		}
 	}

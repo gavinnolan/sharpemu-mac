@@ -135,8 +135,29 @@ public static class GuestThreadQosPolicy
             return;
         }
 
-        var ok = HostThreadQualityOfService.TryApplyToCurrentThread(qos);
-        Console.Error.WriteLine($"[SCHED][QOS] thread={name} class={qos} ok={ok}");
+        LogApply(name, qos, HostThreadQualityOfService.TryApplyToCurrentThread(qos, out var errno), errno);
+    }
+
+    private static void LogApply(string name, HostThreadQos qos, bool ok, int errno, string suffix = "")
+    {
+        Console.Error.WriteLine(
+            $"[SCHED][QOS] thread={name} class={qos} ok={ok}{(ok ? string.Empty : $" errno={errno}")}{suffix}");
+    }
+
+    /// <summary>The class a thread with this name should be created at, if any rule matches.</summary>
+    public static bool TryGetClassForNewThread(string? name, out HostThreadQos qos)
+    {
+        qos = default;
+        var rules = s_rules;
+        return rules is not null && !string.IsNullOrEmpty(name) && TryResolve(rules, name, out qos);
+    }
+
+    /// <summary>Verifies and logs the class of a thread created with <see cref="HostQosThread"/>;
+    /// call from that thread.</summary>
+    public static void LogNativeThreadStart(string name, HostThreadQos qos)
+    {
+        var actual = HostThreadQualityOfService.GetCurrentThreadClassForDiagnostics();
+        LogApply(name, qos, actual == HostThreadQualityOfService.ToDarwinClass(qos), 0, " (native thread)");
     }
 
     /// <summary>
@@ -181,7 +202,7 @@ public static class GuestThreadQosPolicy
         }
 
         Interlocked.Decrement(ref s_pendingCount);
-        var ok = HostThreadQualityOfService.TryApplyToCurrentThread(qos);
-        Console.Error.WriteLine($"[SCHED][QOS] thread=0x{guestHandle:X} class={qos} ok={ok} (deferred rename)");
+        var ok = HostThreadQualityOfService.TryApplyToCurrentThread(qos, out var errno);
+        LogApply($"0x{guestHandle:X}", qos, ok, errno, " (deferred rename)");
     }
 }

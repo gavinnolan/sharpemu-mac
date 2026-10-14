@@ -66,27 +66,26 @@ public static partial class HostThreadQualityOfService
     /// thread keeps running at whatever class it inherited, so no caller needs to
     /// handle the failure.
     /// </summary>
-    public static bool TryApplyToCurrentThread(HostThreadQos qos)
+    public static bool TryApplyToCurrentThread(HostThreadQos qos) => TryApplyToCurrentThread(qos, out _);
+
+    /// <summary>As above; <paramref name="errno"/> is the Darwin error code on failure (-1: no host support).</summary>
+    public static bool TryApplyToCurrentThread(HostThreadQos qos, out int errno)
     {
+        errno = -1;
         if (!OperatingSystem.IsMacOS())
         {
             return false;
         }
 
-        var qosClass = qos switch
-        {
-            HostThreadQos.UserInteractive => QosClassUserInteractive,
-            HostThreadQos.UserInitiated => QosClassUserInitiated,
-            HostThreadQos.Utility => QosClassUtility,
-            _ => QosClassDefault,
-        };
+        var qosClass = ToDarwinClass(qos);
 
         try
         {
             // relative_priority is 0: the only legal values are 0 and negative
             // offsets within the class, and nothing here wants to sit below its
             // own class's floor.
-            return pthread_set_qos_class_self_np(qosClass, 0) == 0;
+            errno = pthread_set_qos_class_self_np(qosClass, 0);
+            return errno == 0;
         }
         catch (Exception)
         {
@@ -95,6 +94,14 @@ public static partial class HostThreadQualityOfService
             return false;
         }
     }
+
+    internal static uint ToDarwinClass(HostThreadQos qos) => qos switch
+    {
+        HostThreadQos.UserInteractive => QosClassUserInteractive,
+        HostThreadQos.UserInitiated => QosClassUserInitiated,
+        HostThreadQos.Utility => QosClassUtility,
+        _ => QosClassDefault,
+    };
 
     /// <summary>Raw qos_class_t of the calling thread (diagnostics only); 0 off macOS.</summary>
     public static uint GetCurrentThreadClassForDiagnostics()

@@ -62,4 +62,27 @@ public sealed class GuestThreadQosPolicyTests
         Assert.False(GuestThreadQosPolicy.TryParseRules("Foo*", out _, out var error));
         Assert.Contains("PATTERN=CLASS", error);
     }
+
+    [Fact]
+    public void NativeQosThreadRunsBodyAtRequestedClassAndKeepsName()
+    {
+        if (!OperatingSystem.IsMacOS())
+        {
+            return;
+        }
+
+        uint actual = 0;
+        string? name = null;
+        var thread = HostQosThread.TryStart("qos-test", HostThreadQos.Utility, 1024 * 1024, () =>
+        {
+            actual = HostThreadQualityOfService.GetCurrentThreadClassForDiagnostics();
+            name = Thread.CurrentThread.Name;
+        }, out var errno);
+
+        Assert.NotNull(thread);
+        Assert.True(thread!.Join(5000));
+        Assert.Equal(0x11u, actual);
+        Assert.Equal("qos-test", name);
+        Assert.Equal(0, errno);
+    }
 }
