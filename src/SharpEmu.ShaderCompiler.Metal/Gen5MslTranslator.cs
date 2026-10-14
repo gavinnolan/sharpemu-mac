@@ -1363,7 +1363,12 @@ public static partial class Gen5MslTranslator
                         return true;
                     }
 
-                    Line("threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);");
+                    // The device fence only orders this program's own buffer writes for
+                    // the rest of the group. A program with none — an LDS-only kernel
+                    // like a UE5 FFT pass, 48 barriers per thread — skips it.
+                    Line(ProgramWritesDeviceMemory()
+                        ? "threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);"
+                        : "threadgroup_barrier(mem_flags::mem_threadgroup);");
                     return true;
             }
 
@@ -2417,6 +2422,18 @@ public static partial class Gen5MslTranslator
 
             _body.AppendLine(text);
         }
+
+        private bool? _writesDeviceMemory;
+
+        /// <summary>Whether any instruction stores to or atomically updates buffer or
+        /// global memory. LDS (Ds*) stays in threadgroup memory and image writes go to
+        /// textures, which the barrier's device fence never covered.</summary>
+        private bool ProgramWritesDeviceMemory() =>
+            _writesDeviceMemory ??= _request.Program.Instructions.Any(static instruction =>
+                !instruction.Opcode.StartsWith("Ds", StringComparison.Ordinal) &&
+                !instruction.Opcode.StartsWith("Image", StringComparison.Ordinal) &&
+                (instruction.Opcode.Contains("Store", StringComparison.Ordinal) ||
+                 instruction.Opcode.Contains("Atomic", StringComparison.Ordinal)));
 
         private string Temp(string type, string expression)
         {
