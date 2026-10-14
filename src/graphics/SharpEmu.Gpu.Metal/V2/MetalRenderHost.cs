@@ -1694,6 +1694,10 @@ internal sealed partial class MetalRenderHost :
             // re-queued and re-run, so slices far above guest submissions is retry churn,
             // not the guest sending more work.
             $"guest_submissions={CommandStream.SubmissionsStarted} slices={CommandStream.SlicesRun} " +
+            $"ring_follows={SharpEmu.Libs.Gpu.GpuCommands.GpuStreamDiagnostics.RingFollows} ring_suspends={SharpEmu.Libs.Gpu.GpuCommands.GpuStreamDiagnostics.RingSuspends} " +
+            (SharpEmu.Libs.Gpu.GpuCommands.GpuStreamDiagnostics.DcbHashEnabled
+                ? $"dcbhash_checks={SharpEmu.Libs.Gpu.GpuCommands.GpuStreamDiagnostics.HashChecks} dcbhash_mismatches={SharpEmu.Libs.Gpu.GpuCommands.GpuStreamDiagnostics.HashMismatches} "
+                : string.Empty) +
             $"draws={draws} passes={passes} flushes={flushes} " +
             $"draw_ms={(drawTicks * 1000.0 / frequency).ToString("F1", culture)} " +
             $"gpu_busy_ms={gpuBusyMs.ToString("F1", culture)} " +

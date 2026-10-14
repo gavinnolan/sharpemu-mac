@@ -291,6 +291,7 @@ public sealed partial class GpuCommandInterpreter
         if (address == 1 && ringChunkBase != 0)
         {
             var nextChunk = ringChunkBase + RingChunkBytes;
+            GpuStreamDiagnostics.RecordRingFollow();
             ChainToBuffer(nextChunk, RingChunkBytes / sizeof(uint), followedChunkAdvance: true);
         }
 
