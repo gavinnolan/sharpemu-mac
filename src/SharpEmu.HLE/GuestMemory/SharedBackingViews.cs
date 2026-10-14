@@ -541,7 +541,7 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
 
         try
         {
-            var interval = _backing!.BeginManagedWriteOperation();
+            var interval = _backing?.BeginManagedWriteOperation() ?? default;
             if (!HostManagedWriteIntervals.AllowsBytes(interval))
             {
                 return false;
