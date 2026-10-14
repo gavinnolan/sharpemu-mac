@@ -73,7 +73,8 @@ internal static class Gen5ImageFixtures
         uint[]? addressValues = null,
         bool storeResults = false,
         uint[]? storeValues = null,
-        bool glc = false)
+        bool glc = false,
+        bool unorm = false)
     {
         var isArray = arrayed ?? descriptorType is ImageType1DArray or ImageType2DArray or ImageTypeCube or ImageType2DMsaaArray;
         var dimension = instructionDimension ?? descriptorType switch
@@ -104,7 +105,10 @@ internal static class Gen5ImageFixtures
             Glc: glc,
             Slc: false,
             A16: a16,
-            D16: d16);
+            D16: d16)
+        {
+            Unorm = unorm,
+        };
         var imageInstruction = new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Mimg, opcode, [], [], [], control);
         var end = new Gen5ShaderInstruction(8, Gen5ShaderEncoding.Sopp, "SEndpgm", [SEndpgm], [], [], null);
         var instructions = new List<Gen5ShaderInstruction>();

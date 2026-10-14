@@ -44,6 +44,70 @@ public sealed class Gen5MslAluParityTests(ITestOutputHelper output)
         new object[] { "VMed3F32", 0x7FC00000u, 0x40E00000u, 0x40A00000u, 0u, 0u, 0u, 0u, 0u, false, 0x40A00000u }, // min3(NaN, 7, 5) = 5
         new object[] { "VMed3F32", 0x477FE000u, 0x40000000u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0x40000000u }, // med3(65504, 2, 0) = 2
         new object[] { "VMed3F16", 0x7E00u, 0x4700u, 0x4500u, 0xABCD5678u, 0u, 0u, 0u, 0u, false, 0xABCD4500u }, // min3(NaN, 7, 5) = 5
+
+        // Integer clamp saturates (ISA 6.5): unsigned to 0..0xFFFFFFFF, signed to INT_MIN..INT_MAX.
+        new object[] { "VAddU32", 0xFFFFFFF0u, 0x20u, 0u, 0u, 0u, 0u, 0u, 0u, true, 0xFFFFFFFFu },
+        new object[] { "VAddU32", 0xFFFFFFF0u, 0x20u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0x10u },
+        new object[] { "VSubU32", 1u, 2u, 0u, 0u, 0u, 0u, 0u, 0u, true, 0u },
+        new object[] { "VSubU32", 1u, 2u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0xFFFFFFFFu },
+        new object[] { "VSubrevU32", 2u, 1u, 0u, 0u, 0u, 0u, 0u, 0u, true, 0u },
+        new object[] { "VAddI32", 0x7FFFFFFFu, 1u, 0u, 0u, 0u, 0u, 0u, 0u, true, 0x7FFFFFFFu },
+        new object[] { "VAddI32", 0x80000000u, 0xFFFFFFFFu, 0u, 0u, 0u, 0u, 0u, 0u, true, 0x80000000u },
+        new object[] { "VSubI32", 0x80000000u, 1u, 0u, 0u, 0u, 0u, 0u, 0u, true, 0x80000000u },
+        new object[] { "VSubrevI32", 1u, 0x80000000u, 0u, 0u, 0u, 0u, 0u, 0u, true, 0x80000000u },
+        new object[] { "VSubrevI32", 0xFFFFFFFFu, 0x7FFFFFFFu, 0u, 0u, 0u, 0u, 0u, 0u, true, 0x7FFFFFFFu },
+        new object[] { "VAddCoU32", 0xFFFFFFF0u, 0x20u, 0u, 0u, 0u, 0u, 0u, 0u, true, 0xFFFFFFFFu },
+        new object[] { "VAddCoU32", 0xFFFFFFF0u, 0x20u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0x10u },
+        new object[] { "VSubCoU32", 3u, 5u, 0u, 0u, 0u, 0u, 0u, 0u, true, 0u },
+        new object[] { "VSubCoU32", 3u, 5u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0xFFFFFFFEu },
+        new object[] { "VSubrevCoU32", 5u, 3u, 0u, 0u, 0u, 0u, 0u, 0u, true, 0u },
+        // V_MUL_U32_U24 and V_MAD_U32_U24 read only bits 23:0 of each multiplicand.
+        new object[] { "VMulU32U24", 0x01000003u, 2u, 0u, 0u, 0u, 0u, 0u, 0u, false, 6u },
+        new object[] { "VMulU32U24", 0xFF000003u, 5u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0xFu },
+        new object[] { "VMadU32U24", 0x01000003u, 2u, 1u, 0u, 0u, 0u, 0u, 0u, false, 7u },
+        // V_MAD_U32_U16 multiplies the op_sel-selected halves and adds the whole addend.
+        new object[] { "VMadU32U16", 0x00030005u, 4u, 10u, 0u, 1u, 0u, 0u, 0u, false, 22u }, // op_sel:[1,0]: 3*4+10
+        new object[] { "VMadU32U16", 0x00030005u, 0x00020000u, 10u, 0u, 3u, 0u, 0u, 0u, false, 16u }, // op_sel:[1,1]: 3*2+10
+        new object[] { "VMadU32U16", 0x00030005u, 0x00040000u, 0x10000u, 0u, 2u, 0u, 0u, 0u, false, 0x10014u }, // op_sel:[0,1]: 5*4+0x10000
+        new object[] { "VMadU32U16", 0xFFFFu, 0xFFFFu, 0xFFFFFFFFu, 0u, 0u, 0u, 0u, 0u, false, 0xFFFE0000u },
+        new object[] { "VMadU32U16", 0xFFFFu, 0xFFFFu, 0xFFFFFFFFu, 0u, 0u, 0u, 0u, 0u, true, 0xFFFFFFFFu },
+        // V_PK_ADD/SUB_I16 clamp saturates each lane to the signed 16-bit range.
+        new object[] { "VPkAddI16", 0x7FFF7FFFu, 0x00010001u, 0u, 0u, 0u, 3u, 0u, 0u, true, 0x7FFF7FFFu },
+        new object[] { "VPkSubI16", 0x80008000u, 0x00010001u, 0u, 0u, 0u, 3u, 0u, 0u, true, 0x80008000u },
+        new object[] { "VPkAddI16", 0x80007FFFu, 0xFFFF0001u, 0u, 0u, 0u, 3u, 0u, 0u, true, 0x80007FFFu }, // lo 0x7FFF+1 saturates; hi -32768-1 saturates
+        // Float to integer conversions saturate and map NaN to 0 (ISA 12.8).
+        new object[] { "VCvtRpiI32F32", Bits(0.3f), 0u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0u },
+        new object[] { "VCvtRpiI32F32", Bits(2.2f), 0u, 0u, 0u, 0u, 0u, 0u, 0u, false, 2u },
+        new object[] { "VCvtRpiI32F32", Bits(-1.7f), 0u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0xFFFFFFFEu },
+        new object[] { "VCvtRpiI32F32", Bits(0.5f), 0u, 0u, 0u, 0u, 0u, 0u, 0u, false, 1u },
+        new object[] { "VCvtRpiI32F32", Bits(float.NaN), 0u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0u },
+        new object[] { "VCvtRpiI32F32", Bits(float.PositiveInfinity), 0u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0x7FFFFFFFu },
+        new object[] { "VCvtFlrI32F32", Bits(-0.5f), 0u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0xFFFFFFFFu },
+        new object[] { "VCvtFlrI32F32", Bits(float.NegativeInfinity), 0u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0x80000000u },
+        new object[] { "VCvtU32F32", Bits(-1.0f), 0u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0u },
+        new object[] { "VCvtU32F32", Bits(float.NaN), 0u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0u },
+        new object[] { "VCvtU32F32", Bits(float.PositiveInfinity), 0u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0xFFFFFFFFu },
+        new object[] { "VCvtU32F32", Bits(4294967296f), 0u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0xFFFFFFFFu },
+        new object[] { "VCvtU32F32", Bits(4294967040f), 0u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0xFFFFFF00u },
+        new object[] { "VCvtU32F32", Bits(3.9f), 0u, 0u, 0u, 0u, 0u, 0u, 0u, false, 3u },
+        new object[] { "VCvtI32F32", Bits(3.0e9f), 0u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0x7FFFFFFFu },
+        new object[] { "VCvtI32F32", Bits(-3.0e9f), 0u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0x80000000u },
+        new object[] { "VCvtI32F32", Bits(float.NaN), 0u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0u },
+        new object[] { "VCvtI32F32", Bits(float.NegativeInfinity), 0u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0x80000000u },
+        new object[] { "VCvtI32F32", Bits(-2.9f), 0u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0xFFFFFFFEu },
+        // V_CVT_PK_U8_F32 saturates to 0..255, NaN is 0, and the byte lands at S1[1:0].
+        new object[] { "VCvtPkU8F32", Bits(300f), 0u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0xFFu },
+        new object[] { "VCvtPkU8F32", Bits(-5f), 0u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0u },
+        new object[] { "VCvtPkU8F32", Bits(float.NaN), 0u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0u },
+        new object[] { "VCvtPkU8F32", Bits(float.PositiveInfinity), 1u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0xFF00u },
+        new object[] { "VCvtPkU8F32", Bits(3.7f), 1u, 0xAABBCCDDu, 0u, 0u, 0u, 0u, 0u, false, 0xAABB03DDu },
+        // V_BFE: offset + width may pass 32, a zero width gives 0 (ISA 12.12).
+        new object[] { "VBfeU32", 0xFFFFFFFFu, 28u, 8u, 0u, 0u, 0u, 0u, 0u, false, 0xFu },
+        new object[] { "VBfeU32", 0xFFFFFFFFu, 31u, 31u, 0u, 0u, 0u, 0u, 0u, false, 1u },
+        new object[] { "VBfeU32", 0xFFFFFFFFu, 4u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0u },
+        new object[] { "VBfeI32", 0xF0000000u, 28u, 8u, 0u, 0u, 0u, 0u, 0u, false, 0xFFFFFFFFu },
+        new object[] { "VBfeI32", 0x70000000u, 28u, 8u, 0u, 0u, 0u, 0u, 0u, false, 7u },
+        new object[] { "VBfeI32", 0xFFFFFFFFu, 4u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0u },
     };
 
     public static IEnumerable<object[]> TranslationCases => Cases.Select(static row => row[..^1]);
@@ -204,6 +268,98 @@ public sealed class Gen5MslAluParityTests(ITestOutputHelper output)
         var fixture = new Gen5ComputeFixture(expected, [first, second, 0xBF810000], 0, 0);
         Assert.Equal(expected, Gen5ComputeFixtures.DecodeOrThrow(fixture).Instructions[0].Opcode);
         Assert.NotEmpty(Gen5ComputeFixtures.CompileRequestOrThrow(fixture).Source);
+    }
+
+    // The carry-in forms read VCC (clear here) with two explicit sources. Clamp saturates
+    // the sum or difference; the carry out itself is unaffected.
+    [Theory]
+    [InlineData("VAddcU32", 0xFFFFFFFFu, 1u, true, 0xFFFFFFFFu)]
+    [InlineData("VAddcU32", 0xFFFFFFFFu, 1u, false, 0u)]
+    [InlineData("VAddCoCiU32", 0xFFFFFFF0u, 0x20u, true, 0xFFFFFFFFu)]
+    [InlineData("VSubbU32", 0u, 1u, true, 0u)]
+    [InlineData("VSubbU32", 0u, 1u, false, 0xFFFFFFFFu)]
+    [InlineData("VSubbrevU32", 1u, 0u, true, 0u)]
+    [InlineData("VSubCoCiU32", 3u, 5u, true, 0u)]
+    [InlineData("VSubrevCoCiU32", 5u, 3u, true, 0u)]
+    public void CarryFormsSaturateWithClamp(string opcode, uint a, uint b, bool clamp, uint expected)
+    {
+        var shader = CompileInserted(
+            out var error,
+            Vector3(opcode, [Gen5Operand.Vector(0), Gen5Operand.Vector(1)],
+                new Gen5Vop3Control(0, 0, 0, clamp, 0, null)),
+            a, b);
+        Assert.True(shader is not null, error);
+        if (!RequireDevice()) return;
+        Assert.Equal(expected, Execute(shader!));
+    }
+
+    // Integer ops the clamp bit applies to but that are not implemented fail loudly instead
+    // of wrapping silently, like the 16-bit forms.
+    [Theory]
+    [InlineData("VMulU32U24")]
+    [InlineData("VMulI32I24")]
+    [InlineData("VMadU32U24")]
+    [InlineData("VMadI32I24")]
+    [InlineData("VSadU32")]
+    public void UnimplementedIntegerClampIsRejected(string opcode)
+    {
+        var shader = CompileInserted(
+            out var error,
+            Vector3(opcode, [Gen5Operand.Vector(0), Gen5Operand.Vector(1), Gen5Operand.Vector(2)],
+                new Gen5Vop3Control(0, 0, 0, true, 0, null)),
+            1u, 2u);
+        Assert.Null(shader);
+        Assert.Contains("clamped integer results are not supported", error, StringComparison.Ordinal);
+    }
+
+    // S_LSHLn_ADD_U32 sets SCC to the carry out of the 64-bit sum, which a following
+    // S_CSELECT_B32 observes (7 when set, else 9). SCC is first put in the opposite state
+    // by an S_CMP_EQ_U32, so a stale SCC gives the wrong answer either way.
+    [Theory]
+    [InlineData("SLshl2AddU32", 0x80000000u, 5u, false, 7u)]  // 2^33 + 5 carries
+    [InlineData("SLshl1AddU32", 1u, 1u, true, 9u)]            // 3 does not
+    [InlineData("SLshl4AddU32", 0x10000000u, 0xFu, false, 7u)] // 2^32 + 15 carries
+    [InlineData("SLshl3AddU32", 0x1FFFFFFFu, 0xFFFFFFFFu, false, 7u)] // 0xFFFFFFF8 + 0xFFFFFFFF carries
+    [InlineData("SLshl3AddU32", 0x1FFFFFFFu, 7u, true, 9u)]   // 0xFFFFFFF8 + 7 = 0xFFFFFFFF fits
+    public void ShiftAddWritesTheCarryToScc(string opcode, uint left, uint right, bool sccBefore, uint expected)
+    {
+        var shader = CompileInserted(
+            out var error,
+            [
+                new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Sopc, "SCmpEqU32", [0u],
+                    [Gen5Operand.Source(128), Gen5Operand.Source(sccBefore ? 128u : 129u)], [], null),
+                ScalarOp(opcode,
+                    [new Gen5Operand(Gen5OperandKind.LiteralConstant, left), new Gen5Operand(Gen5OperandKind.LiteralConstant, right)],
+                    Gen5Operand.Scalar(10)),
+                ScalarOp("SCselectB32", [Gen5Operand.Source(128 + 7), Gen5Operand.Source(128 + 9)], Gen5Operand.Scalar(11)),
+                new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Vop1, "VMovB32", [0u], [Gen5Operand.Scalar(11)], [Gen5Operand.Vector(3)], null),
+            ],
+            0u, 0u);
+        Assert.True(shader is not null, error);
+        if (!RequireDevice()) return;
+        Assert.Equal(expected, Execute(shader!));
+    }
+
+    private static Gen5ShaderInstruction ScalarOp(string opcode, Gen5Operand[] sources, params Gen5Operand[] destinations) =>
+        new(0, Gen5ShaderEncoding.Sop2, opcode, [0u], sources, destinations, null);
+
+    private static Gen5ShaderInstruction Vector3(string opcode, Gen5Operand[] sources, Gen5InstructionControl control) =>
+        new(28, Gen5ShaderEncoding.Vop3, opcode, [], sources, [Gen5Operand.Vector(3)], control);
+
+    // v0 = a, v1 = b, v2 = 0; the inserted instructions run before the store of v3.
+    private static Gen5MslShader? CompileInserted(out string error, Gen5ShaderInstruction inserted, uint a, uint b) =>
+        CompileInserted(out error, [inserted], a, b);
+
+    private static Gen5MslShader? CompileInserted(out string error, Gen5ShaderInstruction[] inserted, uint a, uint b)
+    {
+        var fixture = new Gen5ComputeFixture("inserted", [
+            0x7E0002FF, a, 0x7E0202FF, b, 0x7E0402FF, 0u, 0x7E0602FF, 0u,
+            0xE0700000, 0x80020300, 0xBF810000], 8, 16);
+        var program = Gen5ComputeFixtures.DecodeOrThrow(fixture);
+        var instructions = program.Instructions.ToList();
+        instructions.InsertRange(4, inserted);
+        var request = Gen5ComputeFixtures.RequestOrThrow(program with { Instructions = instructions }, ShaderStage.Compute);
+        return Gen5MslTranslator.TryCompileProgram(request, out var shader, out error) ? shader : null;
     }
 
     private static Gen5MslShader Compile(string opcode, uint a, uint b, uint c, uint old,

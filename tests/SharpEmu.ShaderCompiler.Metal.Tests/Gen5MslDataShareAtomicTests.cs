@@ -22,8 +22,14 @@ public sealed class Gen5MslDataShareAtomicTests(ITestOutputHelper output)
     // Returning forms: VDST takes the pre-operation word.
     [InlineData("DsAddRtnU32", 0x20u, Initial, Operand, Compare, Initial, 0x00001245u)]
     [InlineData("DsSubRtnU32", 0x21u, Initial, Operand, Compare, Initial, 0x00001223u)]
-    [InlineData("DsIncRtnU32", 0x23u, Initial, Operand, Compare, Initial, 0x00001235u)]
-    [InlineData("DsDecRtnU32", 0x24u, Initial, Operand, Compare, Initial, 0x00001233u)]
+    // INC/DEC wrap against DATA0 (RDNA2 ISA DS_INC_U32/DS_DEC_U32): Initial >= Operand, so INC wraps to 0
+    // and DEC (Initial > Operand) takes the limit; below the limit they step by one.
+    [InlineData("DsIncRtnU32", 0x23u, Initial, Operand, Compare, Initial, 0u)]
+    [InlineData("DsIncRtnU32-below", 0x23u, 5u, Operand, Compare, 5u, 6u)]
+    [InlineData("DsDecRtnU32-below", 0x24u, 5u, Operand, Compare, 5u, 4u)]
+    [InlineData("DsDecRtnU32-zero", 0x24u, 0u, Operand, Compare, 0u, Operand)]
+    [InlineData("DsIncRtnU32-equal", 0x23u, Operand, Operand, Compare, Operand, 0u)]
+    [InlineData("DsDecRtnU32", 0x24u, Initial, Operand, Compare, Initial, Operand)]
     [InlineData("DsMinRtnI32", 0x25u, Initial, Operand, Compare, Initial, Operand)]
     [InlineData("DsMaxRtnI32", 0x26u, Initial, Operand, Compare, Initial, Initial)]
     [InlineData("DsMinRtnU32", 0x27u, Initial, Operand, Compare, Initial, Operand)]
@@ -43,8 +49,8 @@ public sealed class Gen5MslDataShareAtomicTests(ITestOutputHelper output)
     // Non-returning forms leave VDST alone.
     [InlineData("DsAddU32", 0x00u, Initial, Operand, Compare, Sentinel, 0x00001245u)]
     [InlineData("DsSubU32", 0x01u, Initial, Operand, Compare, Sentinel, 0x00001223u)]
-    [InlineData("DsIncU32", 0x03u, Initial, Operand, Compare, Sentinel, 0x00001235u)]
-    [InlineData("DsDecU32", 0x04u, Initial, Operand, Compare, Sentinel, 0x00001233u)]
+    [InlineData("DsIncU32", 0x03u, Initial, Operand, Compare, Sentinel, 0u)]
+    [InlineData("DsDecU32", 0x04u, Initial, Operand, Compare, Sentinel, Operand)]
     [InlineData("DsMinI32", 0x05u, Initial, Operand, Compare, Sentinel, Operand)]
     [InlineData("DsMaxI32", 0x06u, Initial, Operand, Compare, Sentinel, Initial)]
     [InlineData("DsMinU32", 0x07u, Initial, Operand, Compare, Sentinel, Operand)]

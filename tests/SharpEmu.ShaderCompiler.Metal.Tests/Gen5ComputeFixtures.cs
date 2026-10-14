@@ -245,6 +245,24 @@ internal static class Gen5ComputeFixtures
         StoreScalarResourceBase: 8,
         StoreBackingBytes: 512);
 
+    // v1 = 3 * lane + 7. With EXEC empty in both halves the first lane is lane 0 (ISA
+    // V_READFIRSTLANE_B32), so every lane stores 7.
+    public static readonly Gen5ComputeFixture Wave64ReadFirstLaneEmptyExec = new(
+        "wave64-readfirstlane-empty-exec",
+        [
+            .. Wave64LaneIndex,
+            0xD5430001, 0x021D0700, // v_mad_u32_u24 v1, v0, 3, 7
+            0xBEFE0480,             // s_mov_b64 exec, 0
+            0x7E000501,             // v_readfirstlane_b32 s0, v1
+            0xBEFE04C1,             // s_mov_b64 exec, -1
+            0x7E040200,             // v_mov_b32 v2, s0
+            0x34080083,             // v_lshlrev_b32 v4, 3, v0
+            0xE0701000, 0x80020204, // buffer_store_dword v2, v4, s[8:11], 0 offen
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 512);
+
     // A loop of 64 trips, each with two exchanges: V_READLANE of lane i (3i + 7) and the
     // 64-bit VCC of lane > i (63 - i lanes, counted by S_BCNT1). The sum, 6496 + 2016 =
     // 8512, is only right if no trip reads a slot the next exchange has overwritten.
@@ -453,7 +471,7 @@ internal static class Gen5ComputeFixtures
         uint localDataShareDwords = 0, uint pushDataStartDword = 0, uint positionExportControl = 0,
         bool supportsClipDistance = true, bool enableGraphicsSubgroupOperations = true,
         ShaderClipSpaceTransform clipSpace = default, bool pixelDepthExportEnable = false,
-        ulong excludedUserDataRegisters = 0)
+        ulong excludedUserDataRegisters = 0, bool ieeeMode = false)
     {
         var plan = ShaderResourcePlan.Extract(program, stage, RequestHash, userDataBase, UserDataCount,
             excludedUserDataRegisters: excludedUserDataRegisters);
@@ -475,6 +493,7 @@ internal static class Gen5ComputeFixtures
         return new ShaderCompileRequest(plan, resources, layout)
         {
             WaveSize = waveLaneCount,
+            IeeeMode = ieeeMode,
             LocalSizeX = stage == ShaderStage.Compute ? localSizeX : 1,
             PixelOutputs = pixelOutputs ?? (stage == ShaderStage.Pixel ? [new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float)] : []),
             RequiredVertexOutputCount = requiredVertexOutputCount,
