@@ -828,6 +828,15 @@ public sealed unsafe partial class DirectExecutionBackend :
 				}
 				DsTrace.RegisterThread(1, guestThreadHandle, dsName, applied is null ? 2 : applied.Value ? 1 : 0);
 			}
+			if (SharpEmu.HLE.Host.GuestThreadQosPolicy.IsEnabled)
+			{
+				var qosName = _thread.Name ?? string.Empty;
+				if (qosName.StartsWith("SharpEmu-", StringComparison.Ordinal))
+				{
+					qosName = qosName["SharpEmu-".Length..];
+				}
+				SharpEmu.HLE.Host.GuestThreadQosPolicy.ApplyToCurrentThread(qosName);
+			}
 			var previousGuestThreadHandle = GuestThreadExecution.EnterGuestThread(guestThreadHandle);
 			try
 			{
@@ -7315,7 +7324,11 @@ public sealed unsafe partial class DirectExecutionBackend :
 				MapGuestThreadPriority(thread.Priority));
 		}
 		ProfileGuestThreadScheduled(thread);
-		runner.Schedule(() => RunGuestThread(thread, reason));
+		runner.Schedule(() =>
+		{
+			SharpEmu.HLE.Host.GuestThreadQosPolicy.ApplyPendingForCurrentThread(thread.ThreadHandle);
+			RunGuestThread(thread, reason);
+		});
 	}
 
 	// Caller must hold _guestThreadGate. A guest wait can be satisfied before
