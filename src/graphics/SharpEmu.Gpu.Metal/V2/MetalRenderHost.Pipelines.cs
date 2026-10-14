@@ -52,6 +52,9 @@ internal sealed partial class MetalRenderHost
         // profiler; null unless SHARPEMU_METAL_V2_PROFILE_SHADERS=1.
         public string? Profile;
 
+        // The vertex module's hash, for the tiny-pass diagnostics.
+        public ulong VertexHash;
+
         // The vertex descriptor this pipeline was built with, for the draw-state report:
         // a stride, a step function or an attribute format that does not match what the
         // program fetches makes every vertex the same one, and the draw then rasterises
@@ -343,6 +346,7 @@ internal sealed partial class MetalRenderHost
             RectangleVertexStrides = rectangleList ? RectangleVertexStrides(description.VertexInput) : null,
             WritesViewportIndex = vertexModule.Shader.WritesViewportIndex,
             Profile = ProfileLabelFor(vertexModule, pixelModule, mesh),
+            VertexHash = vertexModule.Hash,
             VertexLayout = vertexLayout,
         };
         _pipelineEntries[entry.Id] = entry;
