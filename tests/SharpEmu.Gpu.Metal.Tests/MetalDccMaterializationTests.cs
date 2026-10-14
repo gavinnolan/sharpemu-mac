@@ -261,6 +261,27 @@ public sealed unsafe partial class MetalDccMaterializationTests(ITestOutputHelpe
         Assert.Equal(2, rig.Owner.Clears);
     }
 
+    // The lock-free test a CPU store makes sees the claimed slice's watch to its exact
+    // edges, and the store that re-arms the claim leaves no watch behind it.
+    [Fact]
+    public void MaterializeDcc_ClaimWatchIsSeenWithoutTheLock()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        Assert.False(rig.Cache.MetadataWatchOverlaps(MetadataAddress, SliceSize));
+        rig.Lookup(ImageRole.ColorTarget);
+        rig.FillMetadata(0x00);
+        rig.Lookup();
+
+        Assert.True(rig.Cache.MetadataWatchOverlaps(MetadataAddress, 1));
+        Assert.True(rig.Cache.MetadataWatchOverlaps(MetadataAddress + SliceSize - 1, 1));
+        Assert.False(rig.Cache.MetadataWatchOverlaps(MetadataAddress - 8, 8));
+        Assert.False(rig.Cache.MetadataWatchOverlaps(MetadataAddress + SliceSize, 8));
+
+        Assert.True(((IGuestImageStore)rig.Cache).MarkPreciseCpuWrite(MetadataAddress + 0x40, 8));
+        Assert.False(rig.Cache.MetadataWatchOverlaps(MetadataAddress, SliceSize));
+    }
+
     [Fact]
     public void MaterializeDcc_SkipsWhilePendingGpuWrite()
     {

@@ -233,11 +233,12 @@ internal sealed partial class MetalImageCache
         // A cached staged copy over the page is stale from here; the store may land once its watch is gone.
         var stagedHit = StagedRanges?.OnCpuWrite(address, size) ?? false;
         var mayOwn = _pageOwners.MayHaveOwners(address, size);
-        if (!mayOwn && Volatile.Read(ref _metadataWatchCount) == 0)
+        if (!mayOwn && !MetadataWatchOverlaps(address, size))
         {
             return stagedHit;
         }
 
+        CountLockedCpuWrite(mayOwn);
         using var held = _lock.Hold();
         var metadataHit = OnMetadataCpuWriteLocked(address, size);
         return (mayOwn && InvalidateAliases(address, size)) | metadataHit | stagedHit;
@@ -259,11 +260,12 @@ internal sealed partial class MetalImageCache
         }
 
         var mayOwn = _pageOwners.MayHaveOwners(address, size);
-        if (!mayOwn && Volatile.Read(ref _metadataWatchCount) == 0)
+        if (!mayOwn && !MetadataWatchOverlaps(address, size))
         {
             return stagedHit;
         }
 
+        CountLockedCpuWrite(mayOwn);
         var backed = mayOwn && _guestMemory.IsBacked(address, size);
         using var held = _lock.Hold();
         var metadataHit = OnMetadataCpuWriteLocked(address, size);
@@ -397,7 +399,7 @@ internal sealed partial class MetalImageCache
         }
 
         _metadataWatches.Clear();
-        Volatile.Write(ref _metadataWatchCount, 0);
+        PublishMetadataWatchesLocked();
         var watched = new List<ResourceSlotIdentifier>();
         _slots.ForEach((imageIdentifier, image) =>
         {
@@ -477,7 +479,93 @@ internal sealed partial class MetalImageCache
     // one re-arms the claims over it and releases the watch; the next claim watches it
     // again.
     private readonly Dictionary<ulong, ulong> _metadataWatches = new();
-    private int _metadataWatchCount;
+
+    // The watched ranges as the CPU-write fast path reads them, without the lock: sorted
+    // by Begin and disjoint, because a watch that would overlap another is merged into
+    // it. Replaced whole, never edited, so a reader sees one consistent set. Republished
+    // under the lock whenever _metadataWatches changes, before a new watch reaches the
+    // page guard, so a store that faults on a metadata page always finds it here.
+    private MetadataWatchSpan[] _metadataWatchSnapshot = [];
+
+    internal readonly record struct MetadataWatchSpan(ulong Begin, ulong End);
+
+    // CPU writes that took the cache lock in this window: because an image may own the
+    // page, or because the write reached a watched metadata range.
+    private long _cpuWritesLockedForOwner;
+    private long _cpuWritesLockedForMetadata;
+
+    public (long Owner, long Metadata) TakeLockedCpuWrites() =>
+        (Interlocked.Exchange(ref _cpuWritesLockedForOwner, 0),
+         Interlocked.Exchange(ref _cpuWritesLockedForMetadata, 0));
+
+    private void CountLockedCpuWrite(bool mayOwn)
+    {
+        if (mayOwn)
+        {
+            Interlocked.Increment(ref _cpuWritesLockedForOwner);
+        }
+        else
+        {
+            Interlocked.Increment(ref _cpuWritesLockedForMetadata);
+        }
+    }
+
+    /// <summary>
+    /// Whether <c>[address, address + size)</c> meets a watched metadata range. Lock free:
+    /// it reads the published snapshot, so a CPU write that reaches no metadata need not
+    /// wait for the cache lock however many other ranges are watched.
+    /// </summary>
+    internal bool MetadataWatchOverlaps(ulong address, ulong size) =>
+        AnySpanOverlaps(Volatile.Read(ref _metadataWatchSnapshot), address, size);
+
+    /// <summary>Whether a range meets any of <paramref name="spans"/>, sorted by Begin and disjoint.</summary>
+    internal static bool AnySpanOverlaps(ReadOnlySpan<MetadataWatchSpan> spans, ulong address, ulong size)
+    {
+        if (spans.Length == 0 || size == 0)
+        {
+            return false;
+        }
+
+        // The last span that begins before the range ends. Spans are disjoint and sorted,
+        // so their ends ascend too: if that one ends at or before the range, all do.
+        var end = address + size;
+        int low = 0, high = spans.Length - 1, found = -1;
+        while (low <= high)
+        {
+            var middle = low + ((high - low) >> 1);
+            if (spans[middle].Begin < end)
+            {
+                found = middle;
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        return found >= 0 && spans[found].End > address;
+    }
+
+    /// <summary>Caller holds the lock.</summary>
+    private void PublishMetadataWatchesLocked()
+    {
+        if (_metadataWatches.Count == 0)
+        {
+            Volatile.Write(ref _metadataWatchSnapshot, []);
+            return;
+        }
+
+        var spans = new MetadataWatchSpan[_metadataWatches.Count];
+        var index = 0;
+        foreach (var (watchBegin, watchSize) in _metadataWatches)
+        {
+            spans[index++] = new MetadataWatchSpan(watchBegin, watchBegin + watchSize);
+        }
+
+        Array.Sort(spans, static (left, right) => left.Begin.CompareTo(right.Begin));
+        Volatile.Write(ref _metadataWatchSnapshot, spans);
+    }
 
     /// <summary>Materializations skipped because the clear was already applied.</summary>
     public long TakeDccRepeatsSkipped() => Interlocked.Exchange(ref _dccRepeatsSkipped, 0);
@@ -709,8 +797,10 @@ internal sealed partial class MetalImageCache
         }
 
         _metadataWatches[begin] = end - begin;
+        // Published before the page guard takes the watch: a store that faults on it
+        // must see the range, or the fast path would turn the fault away.
+        PublishMetadataWatchesLocked();
         _pages.AddWatch(begin, end - begin, blockReads: false);
-        Volatile.Write(ref _metadataWatchCount, _metadataWatches.Count);
     }
 
     // A CPU store reached a watched metadata range: the claims over it are forgotten
@@ -738,7 +828,11 @@ internal sealed partial class MetalImageCache
             }
         }
 
-        Volatile.Write(ref _metadataWatchCount, _metadataWatches.Count);
+        if (hit)
+        {
+            PublishMetadataWatchesLocked();
+        }
+
         return hit;
     }
 

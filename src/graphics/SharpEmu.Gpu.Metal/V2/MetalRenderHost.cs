@@ -1593,6 +1593,7 @@ internal sealed partial class MetalRenderHost :
         var causes = _imageCache.TakeTransferCauses();
         var subRange = _imageCache.TakePartialTransfers();
         var aliases = _imageCache.AliasCounters;
+        var lockedCpuWrites = _imageCache.TakeLockedCpuWrites();
         Console.Error.WriteLine(
             $"[METAL-V2][CHURN] up_new={causes.Created} up_cpu={causes.CpuWrite} up_gpu={causes.GpuWrite} " +
             $"up_other={causes.Invalidated} up_alias={causes.Alias} " +
@@ -1608,7 +1609,10 @@ internal sealed partial class MetalRenderHost :
             $"write_ranges={_gpuWrites.Count} write_records={_gpuWrites.Recorded} " +
             $"write_folds={_gpuWrites.Folds} handler_wakeups={_completions.HandlerWakeups} " +
             $"rings={_guestMemory.RingCount} rings_freed={_guestMemory.RingsReleased} " +
-            $"ring_mb={_guestMemory.RingFallbackBytes / (1024 * 1024)}{StagedRangeCounters()}");
+            $"ring_mb={_guestMemory.RingFallbackBytes / (1024 * 1024)} " +
+            // CPU writes that waited on the image cache lock: an image may own the page,
+            // or the write reached watched DCC metadata.
+            $"cpu_write_locked={lockedCpuWrites.Owner}/{lockedCpuWrites.Metadata}{StagedRangeCounters()}");
         // On a tile-based GPU the attachments are the bandwidth: a pass loads every
         // one it does not clear and stores every one it keeps, so this says what the
         // passes cost in memory traffic and which splits are paying for it. Printed
