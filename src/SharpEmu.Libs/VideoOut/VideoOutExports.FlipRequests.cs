@@ -4,6 +4,7 @@
 using System.Buffers;
 using System.Diagnostics;
 using SharpEmu.HLE;
+using SharpEmu.HLE.DsTrace;
 using SharpEmu.Libs.Diagnostics;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Scheduling;
@@ -251,6 +252,11 @@ public static partial class VideoOutExports
 
             RemoveIfFinishedLocked(request);
             Monitor.PulseAll(_stateGate);
+        }
+
+        if (DsTrace.Gpu && DsTrace.Armed)
+        {
+            DsTrace.Emit(DsEv.FLIPDONE, requestId, (ulong)request.BufferIndex);
         }
 
         var flipEvents = request.FlipEvents;
