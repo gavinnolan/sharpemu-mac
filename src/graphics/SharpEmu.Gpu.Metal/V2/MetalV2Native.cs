@@ -325,6 +325,41 @@ internal static partial class MetalV2Native
         nuint instanceCount,
         nuint baseInstance);
 
+    // -drawMeshThreadgroupsWithIndirectBuffer:indirectBufferOffset:
+    //  threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendDrawMeshIndirect(
+        nint receiver,
+        nint selector,
+        nint indirectBuffer,
+        nuint indirectBufferOffset,
+        MtlSize threadsPerObjectThreadgroup,
+        MtlSize threadsPerMeshThreadgroup);
+
+    // -drawPatches:patchIndexBuffer:patchIndexBufferOffset:indirectBuffer:indirectBufferOffset:
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendDrawPatchesIndirect(
+        nint receiver,
+        nint selector,
+        nuint numberOfPatchControlPoints,
+        nint patchIndexBuffer,
+        nuint patchIndexBufferOffset,
+        nint indirectBuffer,
+        nuint indirectBufferOffset);
+
+    // -waitForFence:beforeStages:
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendWaitForFence(nint receiver, nint selector, nint fence, nuint stages);
+
+    // -drawPrimitives:indirectBuffer:indirectBufferOffset:
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendDrawIndirect(
+        nint receiver,
+        nint selector,
+        nuint primitiveType,
+        nint indirectBuffer,
+        nuint indirectBufferOffset);
+
     // -drawIndexedPrimitives:indexType:indexBuffer:indexBufferOffset:
     //  indirectBuffer:indirectBufferOffset:
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]

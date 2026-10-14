@@ -280,7 +280,10 @@ public sealed partial class RenderExecutor
         var vertexBuffers = AcquireVertexBuffers(vertexInput);
         var indexBuffer = AcquireIndexBuffer(in indexSource);
         var indirectArguments = emission.IndirectArgumentsAddress != 0
-            ? _host.ObtainBuffer(emission.IndirectArgumentsAddress, IndexedIndirectArgumentsSize, isWritten: false)
+            ? _host.ObtainBuffer(
+                emission.IndirectArgumentsAddress,
+                emission.Indexed ? IndexedIndirectArgumentsSize : AutoIndirectArgumentsSize,
+                isWritten: false)
             : default;
         DropUnwrittenColorTargets(context, ref state, pixelProgram);
         state.Rendering = AcquireAttachments(context, ref state);
@@ -333,6 +336,12 @@ public sealed partial class RenderExecutor
             _host.PrepareMemoryWritingDraw();
         }
 
+        if (emission.IndirectArgumentsAddress != 0)
+        {
+            _host.PrepareIndirectDraw(
+                in pipeline, emission.IndirectArgumentsAddress, indirectArguments, emission.Indexed, emission.IndirectIndexLimit);
+        }
+
         _host.BeginRendering(in state.Rendering);
         _host.BindPipeline(GpuBindPoint.Graphics, in pipeline);
         if (setAutoDebug)
@@ -344,7 +353,14 @@ public sealed partial class RenderExecutor
         {
             // Uploads and shader writes end with barriers to all commands, so the
             // indirect read sees them.
-            _host.DrawIndexedIndirect(indirectArguments);
+            if (emission.Indexed)
+            {
+                _host.DrawIndexedIndirect(indirectArguments);
+            }
+            else
+            {
+                _host.DrawIndirect(indirectArguments);
+            }
         }
         else
         {

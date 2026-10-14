@@ -1156,6 +1156,11 @@ internal sealed partial class MetalRenderHost :
         var pending = _gpuWrites.PendingSerial(address, size, CompletedSerial);
         if (pending != 0)
         {
+            if (size <= SmallReadWaitBytes)
+            {
+                ReportSmallReadWaitSite(address, size);
+            }
+
             if (_commandBuffer != 0 && pending >= _submissionSerial)
             {
                 FlushAndWaitForGpu(MetalWaitReason.ReadRange);
@@ -1165,6 +1170,47 @@ internal sealed partial class MetalRenderHost :
                 WaitForCommittedSerial(pending, MetalWaitReason.ReadRange);
             }
         }
+    }
+
+    // A read this small that waits for the GPU is a command-processor operand (an indirect
+    // draw's arguments, a count, a predicate) rather than data; each distinct reader is
+    // named once, with its stack, so the stall can be traced to the packet that asked.
+    private const ulong SmallReadWaitBytes = 0x14;
+    private const int MaxSmallReadWaitSites = 64;
+    private readonly HashSet<string> _smallReadWaitSites = new(StringComparer.Ordinal);
+
+    private void ReportSmallReadWaitSite(ulong address, ulong size)
+    {
+        if (_smallReadWaitSites.Count >= MaxSmallReadWaitSites)
+        {
+            return;
+        }
+
+        // The first frame past this host's and the interpreter's read helpers says who read.
+        var site = "unknown";
+        foreach (var frame in new System.Diagnostics.StackTrace(1, false).GetFrames())
+        {
+            var method = frame.GetMethod();
+            var type = method?.DeclaringType;
+            if (method is null || type is null || type == typeof(MetalRenderHost) ||
+                method.Name.StartsWith("Read", StringComparison.Ordinal) ||
+                method.Name.StartsWith("TryRead", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            site = $"{type.FullName}.{method.Name}";
+            break;
+        }
+
+        if (!_smallReadWaitSites.Add(site))
+        {
+            return;
+        }
+
+        Console.Error.WriteLine(
+            $"[METAL-V2][SMALL-READ-WAIT] read=0x{address:X16}+0x{size:X} site={site}{Environment.NewLine}" +
+            Environment.StackTrace);
     }
 
     /// <summary>
@@ -1545,7 +1591,7 @@ internal sealed partial class MetalRenderHost :
             $"msl_structured={ShaderCompiler.Metal.Gen5MslTranslator.Statistics.ControlFlowForms.Structured} " +
             $"msl_dispatcher={ShaderCompiler.Metal.Gen5MslTranslator.Statistics.ControlFlowForms.Dispatcher} " +
             $"uploads={uploads} writebacks={writebacks} evictions={evictions} failed={failed} " +
-            (_meshletCache?.TakeCounters() ?? "meshlet_draws=0"));
+            (_meshletCache?.TakeCounters() ?? "meshlet_draws=0") + " " + TakeIndirectCounters());
         _slowWaitReports = 0;
         ResetSlowCompletionReports();
         var reasons = new System.Text.StringBuilder();
@@ -1632,7 +1678,7 @@ internal sealed partial class MetalRenderHost :
             $"cleared_mb={(clearedBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
             $"end_clear={endClearCount} end_target={endTargetCount} end_transfer={endTransferCount} " +
             $"end_compute={endComputeCount} end_flush={endFlushCount} end_present={endPresentCount} " +
-            $"end_other={endOtherCount} targetless={targetlessCount} " +
+            $"end_other={endOtherCount} end_indirect={TakeIndirectPassEnds()} targetless={targetlessCount} " +
             $"clears=[{TakeClearArrivals()}] clear_passes={clearPasses} " +
             $"clear_depth={clearDepthPasses} clear_mpx={(clearPixels / 1e6).ToString("F1", culture)} " +
             $"labels_deferred={TakeDeferredLabelWrites()} clears_folded={foldedClears} " +

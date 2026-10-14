@@ -70,6 +70,8 @@ internal sealed partial class MetalRenderHost
         MetalNative.Selector("drawPrimitives:vertexStart:vertexCount:instanceCount:baseInstance:");
     private static readonly nint SelDrawIndexedPrimitives = MetalNative.Selector(
         "drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:instanceCount:baseVertex:baseInstance:");
+    private static readonly nint SelDrawIndirect = MetalNative.Selector(
+        "drawPrimitives:indirectBuffer:indirectBufferOffset:");
     private static readonly nint SelDrawIndexedIndirect = MetalNative.Selector(
         "drawIndexedPrimitives:indexType:indexBuffer:indexBufferOffset:indirectBuffer:indirectBufferOffset:");
     private static readonly nint SelDrawPatches = MetalNative.Selector(
@@ -618,12 +620,21 @@ internal sealed partial class MetalRenderHost
         // the last moment at which a waiting clear is still invisible. Whatever this
         // pass cannot perform itself is encoded below, where no encoder is open.
         var foldedClear = FoldPendingClearsInto(in state);
-        if (!foldedClear && _pendingClears.Count == 0 && CanContinuePass(in state))
+        var launch = _requestedLaunch;
+        _requestedLaunch = null;
+        var continues = !foldedClear && _pendingClears.Count == 0 && CanContinuePass(in state);
+        if (continues && (launch is not { } requested || TryTakePreparedLaunch(requested)))
         {
             return;
         }
 
-        if (_renderingActive)
+        if (continues)
+        {
+            // Only the indirect launch this draw needs written ends the pass.
+            _passEndIndirect++;
+            PassProfileNoteEnd("indirect");
+        }
+        else if (_renderingActive)
         {
             var clears = state.DepthStencilAttachment.DepthClear || state.DepthStencilAttachment.StencilClear;
             for (var index = 0; index < state.ColorAttachmentCount && !clears; index++)
@@ -652,6 +663,11 @@ internal sealed partial class MetalRenderHost
         EncodeStagedStores();
         EncodeDeferredLabelCopies();
         MaterializePendingClears();
+        if (launch is { } pending)
+        {
+            EncodeIndirectLaunches(pending);
+        }
+
         var commandBuffer = EnsureCommandBuffer();
         var descriptor = MetalNative.Send(
             MetalNative.Send(MetalNative.Class("MTLRenderPassDescriptor"), MetalNative.Selector("alloc")),
@@ -768,6 +784,11 @@ internal sealed partial class MetalRenderHost
         _renderingActive = true;
         _renderingState = state;
         ForgetEncoderState();
+        if (launch is not null)
+        {
+            WaitForIndirectLaunches();
+        }
+
         _renderPasses++;
         var loadBefore = _loadBytes;
         var storeBefore = _storeBytes;
@@ -857,6 +878,7 @@ internal sealed partial class MetalRenderHost
 
         _renderingActive = false;
         _renderingState = default;
+        _renderPassSerial++;
         ForgetNotedClear();
 
         ForgetEncoderState();
@@ -1262,6 +1284,40 @@ internal sealed partial class MetalRenderHost
         ProfileWork(entry, "draw-indexed", $"indices={indexCount} instances={instanceCount}");
     }
 
+    void IRenderHost.DrawIndirect(BufferBinding arguments)
+    {
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        // The guest's argument layout is (vertexCount, instanceCount, firstVertex,
+        // firstInstance), which is exactly MTLDrawPrimitivesIndirectArguments.
+        ApplyGraphicsState();
+        var entry = _boundGraphicsPipeline!;
+        if (entry.Mesh is { } mesh)
+        {
+            DrawMeshIndirect(entry, mesh, arguments, indexed: false);
+            CountDraw(started);
+            ProfileWork(entry, "draw-mesh-indirect", "indirect");
+            return;
+        }
+
+        if (entry.RectangleStates is not null)
+        {
+            DrawRectanglesIndirect(entry, arguments);
+            CountDraw(started);
+            ProfileWork(entry, "draw-rectangles-indirect", "indirect");
+            return;
+        }
+
+        MetalV2Native.SendDrawIndirect(
+            _renderEncoder,
+            SelDrawIndirect,
+            entry.PrimitiveType,
+            (nint)arguments.Handle,
+            (nuint)arguments.Offset);
+        Interlocked.Increment(ref _indirectGpuDraws);
+        CountDraw(started);
+        ProfileWork(entry, "draw-indirect", "indirect");
+    }
+
     void IRenderHost.DrawIndexedIndirect(BufferBinding arguments)
     {
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -1274,15 +1330,12 @@ internal sealed partial class MetalRenderHost
         // vertexOffset, firstInstance), which is exactly MTLDrawIndexedPrimitivesIndirectArguments.
         ApplyGraphicsState();
         var entry = _boundGraphicsPipeline!;
-        if (entry.Mesh is not null)
+        if (entry.Mesh is { } mesh)
         {
-            // TakesIndirectDrawArguments answers false for a mesh program, so the
-            // executor resolves the counts before the pass and this draw arrives with
-            // them. Reaching here means it did not, and dropping it would lose
-            // geometry silently.
-            throw Fatal(
-                "An indexed indirect draw reached a mesh pipeline with its counts still in guest memory: " +
-                $"pipeline={entry.Id} {entry.Profile}.");
+            DrawMeshIndirect(entry, mesh, arguments, indexed: true);
+            CountDraw(started);
+            ProfileWork(entry, "draw-indexed-mesh-indirect", "indirect");
+            return;
         }
 
         if (entry.RectangleStates is not null)
@@ -1303,6 +1356,7 @@ internal sealed partial class MetalRenderHost
             (nuint)_indexOffset,
             (nint)arguments.Handle,
             (nuint)arguments.Offset);
+        Interlocked.Increment(ref _indirectGpuDraws);
         CountDraw(started);
         ProfileWork(entry, "draw-indexed-indirect", "indirect");
     }
@@ -1486,32 +1540,10 @@ internal sealed partial class MetalRenderHost
         int baseVertex,
         uint firstInstance)
     {
-        var verticesPerPrimitive = Math.Max(mesh.VerticesPerPrimitive, 1);
-        var primitives = count / verticesPerPrimitive;
-        var maxPrimitives = Math.Max(mesh.MaxPrimitives, 1);
-        var maxVertices = Math.Max(mesh.MaxVertices, 1);
-
-        // Without a GS half every primitive owns its vertices, so a subgroup is whole
-        // primitives: the prologue maps slot -> index position from the same counts.
-        var primitivesPerSubgroup = mesh.HasGeometryHalf ? maxPrimitives : mesh.PrimitivesPerSubgroup;
-        var verticesPerSubgroup = mesh.HasGeometryHalf ? maxVertices : mesh.VerticesPerSubgroup;
-        var subgroups = mesh.HasGeometryHalf
-            ? Math.Max(
-                (primitives + maxPrimitives - 1) / maxPrimitives,
-                (count + maxVertices - 1) / maxVertices)
-            : (primitives + primitivesPerSubgroup - 1) / primitivesPerSubgroup;
-
-        // A GS half assembles its input primitives from the draw's own topology, so the
-        // draw splits by input primitives and the prologue learns where each subgroup's
-        // share starts and how many vertices the draw has.
+        // The subgroup split and the draw-info words are Gen5MslMeshLaunch's, which the
+        // indirect launch kernel computes the same way on the GPU (DrawMeshIndirect).
         var input = MeshInputTopology(_boundGraphicsPipeline?.StaticParameters?.Topology);
-        var inputPrimitivesPerSubgroup = mesh.HasGeometryHalf ? mesh.InputPrimitivesPerSubgroup(input) : 0;
-        if (mesh.HasGeometryHalf)
-        {
-            var inputPrimitives = Gen5MslMeshInfo.InputPrimitiveCount(input, count);
-            subgroups = (inputPrimitives + inputPrimitivesPerSubgroup - 1) / inputPrimitivesPerSubgroup;
-        }
-
+        var subgroups = Gen5MslMeshLaunch.SubgroupCount(mesh, input, count);
         if (subgroups == 0 || instanceCount == 0)
         {
             return;
@@ -1531,17 +1563,17 @@ internal sealed partial class MetalRenderHost
         var drawInfo = _guestMemory.Allocate(Gen5MslMeshInfo.DrawInfoByteSize, 256, out var span);
         span.Clear();
         var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(span);
-        words[0] = verticesPerSubgroup;
-        words[1] = primitivesPerSubgroup;
-        words[2] = indexed ? count : 0;
-        words[3] = indexed ? (_indexType == Mtl.IndexTypeUInt32 ? 2u : 1u) : 0u;
-        words[4] = indexed ? firstIndexOrVertex : 0;
-        words[5] = unchecked((uint)baseVertex);
-        words[6] = instanceCount;
-        words[7] = firstInstance;
-        words[13] = (uint)input;
-        words[14] = inputPrimitivesPerSubgroup;
-        words[15] = count;
+        Gen5MslMeshLaunch.FillDrawInfo(
+            mesh,
+            input,
+            words,
+            count,
+            instanceCount,
+            indexed,
+            _indexType == Mtl.IndexTypeUInt32 ? 2u : 1u,
+            firstIndexOrVertex,
+            baseVertex,
+            firstInstance);
         if (useMeshlets)
         {
             words[16] = meshlets.Count;

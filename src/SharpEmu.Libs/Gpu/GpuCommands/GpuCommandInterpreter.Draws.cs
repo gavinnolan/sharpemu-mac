@@ -105,6 +105,18 @@ public sealed partial class GpuCommandInterpreter
     {
         if (!indexed)
         {
+            if (_host.ResolvesIndirectAutoDrawOnGpu && _host.HasPendingGpuWrite(argumentsAddress, DrawIndirectArgumentsSize))
+            {
+                // GPU work still writes the arguments, so reading them here would wait for it.
+                // The host reads the four arguments on the GPU, or itself when the draw needs
+                // the counts; the instance count is read only if a later draw needs it.
+                _deferredInstanceCountAddress = argumentsAddress + 4;
+                _host.DrawAuto(SubmitId, new DrawAutoArguments(
+                    packetAddress, opcode, uint.MaxValue, 1, 0, 0, DrawOffsetSource.IndirectArguments, argumentsAddress));
+                return;
+            }
+
+            _host.NoteIndirectArgumentsReadOnCpu(argumentsAddress, DrawIndirectArgumentsSize);
             var vertexCount = ReadDword(argumentsAddress);
             var instanceCount = ReadDword(argumentsAddress + 4);
             var startVertex = ReadDword(argumentsAddress + 8);
@@ -126,6 +138,7 @@ public sealed partial class GpuCommandInterpreter
             return;
         }
 
+        _host.NoteIndirectArgumentsReadOnCpu(argumentsAddress, DrawIndexedIndirectArgumentsSize);
         var indexCountPerInstance = ReadDword(argumentsAddress);
         var indexedInstanceCount = ReadDword(argumentsAddress + 4);
         var startIndex = ReadDword(argumentsAddress + 8);
