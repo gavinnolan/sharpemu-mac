@@ -417,6 +417,34 @@ public sealed unsafe class MetalImageAliasTests(ITestOutputHelper output)
         Assert.False(unbacked.IsWatched);
     }
 
+    // A guest CPU reads a linear surface in place once an end-of-pipe write says the work
+    // that wrote it is done, so the next end-of-pipe write publishes it; a tiled target
+    // keeps its texture authoritative until something asks for its bytes.
+    [Fact]
+    public void ALinearGpuWriteIsPublishedAtTheNextEndOfPipeWriteAndATiledTargetIsNot()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var written = MetalTileOracle.Pattern((int)LargeSize, 0x5A);
+        rig.WriteGuest(ImageAddress, written);
+        var linear = rig.Cache.GetImage(rig.Acquire(ImageAddress, LargeSide, ImageRole.ColorTarget));
+        var tiled = rig.Cache.GetImage(rig.Acquire(Rig.TiledRequest(GuestBase + 0x80000, 128)));
+        Assert.True(linear.IsGpuModified);
+        Assert.True(tiled.IsGpuModified);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        // What the GPU "wrote" is what the texture holds; guest memory holds something else.
+        rig.WriteGuest(ImageAddress, MetalTileOracle.Pattern((int)LargeSize, 0xC3));
+
+        rig.Cache.PublishLinearGpuWrites();
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+
+        Assert.Equal(written, rig.ReadGuest(ImageAddress, LargeSize));
+        Assert.False(linear.IsGpuModified);
+        Assert.True(tiled.IsGpuModified);
+    }
+
     private bool RequireDevice()
     {
         if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") != "1")
