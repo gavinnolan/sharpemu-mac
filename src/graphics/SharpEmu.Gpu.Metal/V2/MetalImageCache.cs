@@ -182,26 +182,28 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         var metadataBaseLayer = request.View.BaseLayer;
-        var result = LookUpImage(ref request, exactFormat);
-        if (request.Role is ImageRole.Texture or ImageRole.StorageImage)
+        ResourceSlotIdentifier result;
+        bool scanDcc;
+        long imageWriteSequence;
+        // One hold for the lookup and the DCC metadata the request brings: a texture
+        // binding takes the lock once, and only a DCC slice scan takes it again.
+        using (var held = _lock.Hold())
         {
-            using var held = _lock.Hold();
-            var image = _slots[result];
-            if (request.Description.Metadata.Kind == MetadataKind.Dcc &&
-                request.Description.Metadata.Range.Size == 0 &&
-                image.Description.Metadata.Kind == MetadataKind.None)
-            {
-                image.Description.Metadata = request.Description.Metadata;
-            }
+            result = LookUpImageLocked(ref request, exactFormat);
+            scanDcc = AdoptDccMetadataLocked(result, in request, out imageWriteSequence);
         }
 
-        MaterializeDccClear(result, in request, metadataBaseLayer);
+        if (scanDcc)
+        {
+            MaterializeDccClear(result, in request, metadataBaseLayer, imageWriteSequence);
+        }
+
         return result;
     }
 
-    private ResourceSlotIdentifier LookUpImage(ref ImageRequest request, bool exactFormat)
+    // Caller holds the lock.
+    private ResourceSlotIdentifier LookUpImageLocked(ref ImageRequest request, bool exactFormat)
     {
-        using var held = _lock.Hold();
         var candidates = FindImagesInRange(request.Description.Data.Address, request.Description.Data.Size, pageOverlap: false);
         var result = ResourceSlotIdentifier.Invalid;
         foreach (var candidate in candidates)
@@ -771,8 +773,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     }
 
     /// <summary>
-    /// Whether any image has ever covered these pages. Lock-free and never wrong in
-    /// the direction that matters: a false answer means no image can own the bytes,
+    /// Whether a live image covers these pages. Lock-free and never wrong in the
+    /// direction that matters: a false answer means no image can own the bytes,
     /// which is what lets the command stream read a packet without the full test.
     /// </summary>
     public bool MayOwn(ulong address, ulong size) =>

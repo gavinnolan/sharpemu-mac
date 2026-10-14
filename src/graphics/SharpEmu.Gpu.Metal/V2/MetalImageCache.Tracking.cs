@@ -22,18 +22,16 @@ internal sealed partial class MetalImageCache
         }
 
         if (!MetalImagePageOwners.TryGetPageRange(
-                image.Description.Data.Address, image.Description.Data.Size, out var first, out var lastExclusive))
+                image.Description.Data.Address, image.Description.Data.Size, out _, out _))
         {
             throw GpuFatal.Fatal(
                 $"The image registration is outside the guest address space: address=0x{image.Description.Data.Address:X16} " +
                 $"size=0x{image.Description.Data.Size:X}.");
         }
 
-        for (var page = first; page < lastExclusive; page++)
-        {
-            _pageOwners.GetOrCreate(page).Add(imageIdentifier);
-        }
-
+        // Counted before anything can find the image or arm its watch: a CPU write that
+        // reads no owner without the lock must never have an image over its bytes.
+        _pageOwners.Add(image.Description.Data.Address, image.Description.Data.Size, imageIdentifier);
         image.Registered = true;
         _totalUsedMemory += image.AccountedSize;
     }
@@ -46,15 +44,9 @@ internal sealed partial class MetalImageCache
             return;
         }
 
+        // The watch goes first and the count last, once no lookup can find the image.
         UnwatchImage(imageIdentifier);
-        if (MetalImagePageOwners.TryGetPageRange(
-                image.Description.Data.Address, image.Description.Data.Size, out var first, out var lastExclusive))
-        {
-            for (var page = first; page < lastExclusive; page++)
-            {
-                _pageOwners.Find(page)?.Remove(imageIdentifier);
-            }
-        }
+        _pageOwners.Remove(image.Description.Data.Address, image.Description.Data.Size, imageIdentifier);
 
         var accounted = image.AccountedSize;
         _totalUsedMemory -= Math.Min(accounted, _totalUsedMemory);
@@ -222,7 +214,7 @@ internal sealed partial class MetalImageCache
     }
 
     // A CPU write on the faulting thread. Most writes (command building, labels)
-    // touch no image page, and the owner bitmap answers those without the lock.
+    // touch no image page, and the live-owner counts answer those without the lock.
     bool IGuestImageStore.MarkCpuWrite(ulong address, ulong size)
     {
         if (!IsValidRange(address, size))
@@ -241,7 +233,9 @@ internal sealed partial class MetalImageCache
         CountLockedCpuWrite(mayOwn);
         using var held = _lock.Hold();
         var metadataHit = OnMetadataCpuWriteLocked(address, size);
-        return (mayOwn && InvalidateAliases(address, size)) | metadataHit | stagedHit;
+        var imageHit = mayOwn && InvalidateAliases(address, size);
+        CountOwnerCpuWriteOutcome(mayOwn, imageHit);
+        return imageHit | metadataHit | stagedHit;
     }
 
     // A managed write of exactly these bytes. Unlike a fault it names the bytes it
@@ -269,7 +263,9 @@ internal sealed partial class MetalImageCache
         var backed = mayOwn && _guestMemory.IsBacked(address, size);
         using var held = _lock.Hold();
         var metadataHit = OnMetadataCpuWriteLocked(address, size);
-        return (mayOwn && InvalidatePreciseWrite(address, size, backed)) | metadataHit | stagedHit;
+        var imageHit = mayOwn && InvalidatePreciseWrite(address, size, backed);
+        CountOwnerCpuWriteOutcome(mayOwn, imageHit);
+        return imageHit | metadataHit | stagedHit;
     }
 
     /// <summary>The host wrote exactly <c>[address, address + size)</c> of guest memory.</summary>
@@ -494,9 +490,34 @@ internal sealed partial class MetalImageCache
     private long _cpuWritesLockedForOwner;
     private long _cpuWritesLockedForMetadata;
 
-    public (long Owner, long Metadata) TakeLockedCpuWrites() =>
+    // Of the writes locked because an image may own the page, those that found an image
+    // over their bytes and those that found none: the second is lock traffic the owner
+    // index could have answered without the lock.
+    private long _cpuWritesOwnerFound;
+    private long _cpuWritesOwnerNone;
+
+    public (long Owner, long Metadata, long OwnerFound, long OwnerNone) TakeLockedCpuWrites() =>
         (Interlocked.Exchange(ref _cpuWritesLockedForOwner, 0),
-         Interlocked.Exchange(ref _cpuWritesLockedForMetadata, 0));
+         Interlocked.Exchange(ref _cpuWritesLockedForMetadata, 0),
+         Interlocked.Exchange(ref _cpuWritesOwnerFound, 0),
+         Interlocked.Exchange(ref _cpuWritesOwnerNone, 0));
+
+    private void CountOwnerCpuWriteOutcome(bool mayOwn, bool imageHit)
+    {
+        if (!mayOwn)
+        {
+            return;
+        }
+
+        if (imageHit)
+        {
+            Interlocked.Increment(ref _cpuWritesOwnerFound);
+        }
+        else
+        {
+            Interlocked.Increment(ref _cpuWritesOwnerNone);
+        }
+    }
 
     private void CountLockedCpuWrite(bool mayOwn)
     {
@@ -1010,38 +1031,44 @@ internal sealed partial class MetalImageCache
     }
 
     /// <summary>
+    /// The image takes the DCC metadata a request names, in the lookup's own hold. True
+    /// when its slices are then to be scanned for a clear by MaterializeDccClear, with
+    /// the image's GPU write sequence as it stood before that scan. Caller holds the lock.
+    /// </summary>
+    private bool AdoptDccMetadataLocked(
+        ResourceSlotIdentifier imageIdentifier, in ImageRequest request, out long imageWriteSequence)
+    {
+        imageWriteSequence = 0;
+        if (request.Description.Metadata.Kind != MetadataKind.Dcc ||
+            _slots.TryGet(imageIdentifier) is not { } found)
+        {
+            return false;
+        }
+
+        ref readonly var description = ref request.Description;
+        var range = description.Metadata.Range;
+        // Taken before this lookup clears anything: its own clears are not draws.
+        imageWriteSequence = found.GpuWriteSequence;
+        found.Description.Metadata = description.Metadata;
+        if (range.Size == 0 || description.Resources.Levels != 1 || found.Description.Resources.Levels != 1)
+        {
+            return false;
+        }
+
+        _surfaceMetadata.Remove(range.Address);
+        return true;
+    }
+
+    /// <summary>
     /// A uniform DCC key over a whole slice means the surface is logically cleared to
     /// one color. The texture takes that color and the metadata becomes uncompressed,
     /// which is what makes the following draws and texture reads see the clear.
     /// </summary>
-    private void MaterializeDccClear(ResourceSlotIdentifier imageIdentifier, in ImageRequest request, uint metadataBaseLayer)
+    private void MaterializeDccClear(
+        ResourceSlotIdentifier imageIdentifier, in ImageRequest request, uint metadataBaseLayer, long imageWriteSequence)
     {
-        if (request.Description.Metadata.Kind != MetadataKind.Dcc)
-        {
-            return;
-        }
-
         var description = request.Description;
         var range = description.Metadata.Range;
-        long imageWriteSequence;
-        using (var held = _lock.Hold())
-        {
-            if (_slots.TryGet(imageIdentifier) is not { } found)
-            {
-                return;
-            }
-
-            // Taken before this lookup clears anything: its own clears are not draws.
-            imageWriteSequence = found.GpuWriteSequence;
-            found.Description.Metadata = description.Metadata;
-            if (range.Size == 0 || description.Resources.Levels != 1 || found.Description.Resources.Levels != 1)
-            {
-                return;
-            }
-
-            _surfaceMetadata.Remove(range.Address);
-        }
-
         var layers = description.TransferLayers;
         const ulong MetadataBlockSize = 0x1000;
         if (!ImageDescription.IsValidRange(range) || range.Address % MetadataBlockSize != 0 || layers == 0 ||

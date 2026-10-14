@@ -75,9 +75,29 @@ internal sealed class MetalImageSlots
     }
 }
 
-// The images that own one 1 MiB guest page. Sparse two-level lookup; a query never
-// allocates a bucket, and the "ever owned" bitmap lets a CPU write on the faulting
-// thread skip the cache lock when no image has ever covered the page.
+// The images that own one 1 MiB guest page, in a sparse two-level lookup that a query
+// never allocates a bucket for, and beside it a count of the live owners of each
+// 64 KiB page, which lets a CPU write on the faulting thread skip the cache lock when
+// no image covers the bytes it touches.
+//
+// The lists are read and written only under the image cache lock. The counts are
+// written only under it too, but read without it, and they stay correct for such a
+// reader because of the order Add and Remove keep:
+//
+//  * Add raises the counts before the image goes into any owner list. Nothing finds an
+//    image except through those lists, and the cache arms an image's page watch only
+//    after it is registered, so by the time a lookup can return the image or a store
+//    can fault on its watch, every count over its bytes is already non-zero. Each
+//    increment is a full fence, so no later store can be seen ahead of it.
+//  * Remove takes the image out of every list before it lowers the counts, and the
+//    cache drops the page watch before either. An image a count no longer shows is
+//    one no lookup can find and no watch can report.
+//
+// So a reader that sees zero over a range sees what a locked lookup at that moment
+// would have found: no image over those bytes. The count only gates the lock; the
+// locked path still asks the lists and the byte and page overlap tests. A count page
+// spans whole 4 KiB tracker pages, so the page-granular overlap a fault uses can never
+// reach an image the count does not show.
 internal sealed class MetalImagePageOwners
 {
     public const int PageBits = 20;
@@ -88,10 +108,19 @@ internal sealed class MetalImagePageOwners
     public const ulong PageCount = 1UL << (AddressSpaceBits - PageBits);
     public const ulong AddressSpaceSize = 1UL << AddressSpaceBits;
 
+    // Finer than the owner lists: a command buffer the guest builds next to a texture
+    // shares its 1 MiB page often enough to send every store through the lock.
+    public const int CountPageBits = 16;
+    private const int CountLeafBits = 12;
+    private const int CountRootBits = AddressSpaceBits - CountPageBits - CountLeafBits;
+    private const ulong CountLeafMask = (1UL << CountLeafBits) - 1;
+
     private readonly List<ResourceSlotIdentifier>?[]?[] _firstLevel =
         new List<ResourceSlotIdentifier>?[]?[1 << FirstLevelBits];
 
-    private readonly long[] _everOwnedPages = new long[PageCount / 64];
+    // Live owners per 64 KiB page. A leaf, once published, is never replaced or freed,
+    // so a lock-free reader that finds it may keep reading it.
+    private readonly int[]?[] _liveOwners = new int[]?[1 << CountRootBits];
 
     public static bool IsValidPage(ulong page) => page < PageCount;
 
@@ -100,33 +129,106 @@ internal sealed class MetalImagePageOwners
             ? bucket[page & (BucketEntries - 1)]
             : null;
 
-    public List<ResourceSlotIdentifier> GetOrCreate(ulong page)
-    {
-        if (!IsValidPage(page))
-        {
-            throw GpuFatal.Fatal($"The owner-table page is outside the guest address space: page={page}.");
-        }
-
-        ref var bucket = ref _firstLevel[page >> SecondLevelBits];
-        bucket ??= new List<ResourceSlotIdentifier>?[BucketEntries];
-        var owners = bucket[page & (BucketEntries - 1)] ??= new List<ResourceSlotIdentifier>(4);
-        Interlocked.Or(ref _everOwnedPages[page / 64], 1L << (int)(page % 64));
-        return owners;
-    }
-
-    // Bits are never cleared, so a false answer is safe without the cache lock.
-    public bool MayHaveOwners(ulong address, ulong size)
+    /// <summary>
+    /// Registers an image over <c>[address, address + size)</c>: counts first, then the
+    /// owner lists. Caller holds the image cache lock.
+    /// </summary>
+    public void Add(ulong address, ulong size, ResourceSlotIdentifier imageIdentifier)
     {
         if (!TryGetPageRange(address, size, out var first, out var lastExclusive))
         {
-            return false;
+            throw GpuFatal.Fatal(
+                $"The owner-table range is outside the guest address space: address=0x{address:X16} size=0x{size:X}.");
+        }
+
+        AdjustLiveOwners(address, size, 1);
+        for (var page = first; page < lastExclusive; page++)
+        {
+            GetOrCreate(page).Add(imageIdentifier);
+        }
+    }
+
+    /// <summary>
+    /// Unregisters an image added over the same range: the owner lists first, then the
+    /// counts. Caller holds the image cache lock.
+    /// </summary>
+    public void Remove(ulong address, ulong size, ResourceSlotIdentifier imageIdentifier)
+    {
+        if (!TryGetPageRange(address, size, out var first, out var lastExclusive))
+        {
+            return;
         }
 
         for (var page = first; page < lastExclusive; page++)
         {
-            if ((Volatile.Read(ref _everOwnedPages[page / 64]) & (1L << (int)(page % 64))) != 0)
+            Find(page)?.Remove(imageIdentifier);
+        }
+
+        AdjustLiveOwners(address, size, -1);
+    }
+
+    private List<ResourceSlotIdentifier> GetOrCreate(ulong page)
+    {
+        ref var bucket = ref _firstLevel[page >> SecondLevelBits];
+        bucket ??= new List<ResourceSlotIdentifier>?[BucketEntries];
+        return bucket[page & (BucketEntries - 1)] ??= new List<ResourceSlotIdentifier>(4);
+    }
+
+    // Caller holds the image cache lock, so the counts have one writer at a time.
+    private void AdjustLiveOwners(ulong address, ulong size, int delta)
+    {
+        var first = address >> CountPageBits;
+        var last = (address + size - 1) >> CountPageBits;
+        for (var page = first; page <= last; page++)
+        {
+            ref var leaf = ref _liveOwners[page >> CountLeafBits];
+            if (leaf is null)
             {
-                return true;
+                if (delta < 0)
+                {
+                    throw GpuFatal.Fatal($"An image left a page it was never counted on: page=0x{page:X}.");
+                }
+
+                Volatile.Write(ref leaf, new int[1 << CountLeafBits]);
+            }
+
+            if (Interlocked.Add(ref leaf[page & CountLeafMask], delta) < 0)
+            {
+                throw GpuFatal.Fatal($"An image left a page it was never counted on: page=0x{page:X}.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether a live image covers any 64 KiB page of the range. Lock free; see the
+    /// class comment for why a false answer is as good as a locked lookup.
+    /// </summary>
+    public bool MayHaveOwners(ulong address, ulong size)
+    {
+        if (!TryGetPageRange(address, size, out _, out _))
+        {
+            return false;
+        }
+
+        var page = address >> CountPageBits;
+        var last = (address + size - 1) >> CountPageBits;
+        while (page <= last)
+        {
+            var leaf = Volatile.Read(ref _liveOwners[page >> CountLeafBits]);
+            if (leaf is null)
+            {
+                // No image has ever been counted anywhere in this leaf.
+                page = (page | CountLeafMask) + 1;
+                continue;
+            }
+
+            var leafLast = Math.Min(last, page | CountLeafMask);
+            for (; page <= leafLast; page++)
+            {
+                if (Volatile.Read(ref leaf[page & CountLeafMask]) != 0)
+                {
+                    return true;
+                }
             }
         }
 
