@@ -85,16 +85,16 @@ public static partial class Gen5MslTranslator
         var perPrimitive = Gen5NggExports.VerticesPerPrimitive(ngg.OutputPrimitiveType);
 
         // A wave64 program with no GS half runs as a narrow wave64: one 32-lane simdgroup
-        // that stands for the low half of the guest wave, so the whole subgroup (one lane
-        // per vertex, one per primitive) has to fit in 32 lanes.
+        // that stands for the low half of the guest wave, so a subgroup (one lane per
+        // vertex, one per primitive) has to fit in 32 lanes. The pipeline declares the full
+        // 32 of each; how many a draw uses is per-draw state (draw-info words 0/1 for the
+        // whole-triangle path, the meshlet header otherwise), never the declared extent.
         var deviceLds = ldsDwords * sizeof(uint) > MeshDeviceLdsThresholdBytes;
         var narrow = IsNarrowWave64(request);
         if (narrow)
         {
-            var fitting = Math.Max(Math.Min(primitives, MeshWaveLanes / perPrimitive), 1);
-            primitives = fitting;
-            vertices = Math.Min(Math.Max(vertices, perPrimitive), MeshWaveLanes);
-            vertices = Math.Min(vertices, fitting * perPrimitive);
+            vertices = MeshWaveLanes;
+            primitives = MeshWaveLanes;
         }
 
         var waves = Clamp((Math.Max(vertices, primitives) + MeshWaveLanes - 1) / MeshWaveLanes, 1, MeshMaxWaves);
@@ -745,7 +745,13 @@ public static partial class Gen5MslTranslator
                 source.AppendLine("    }");
             }
 
-            source.AppendLine($"    if (sharpemu_tg_index < {mesh.MaxVertices}u)");
+            // Only the lanes inside this subgroup's allocation export: the counts are per draw
+            // (the last subgroup, or a meshlet, holds fewer than the declared extent).
+            source.AppendLine(
+                $"    const uint sharpemu_mesh_out_verts = min(sharpemu_mesh_alloc[0], {mesh.MaxVertices}u);");
+            source.AppendLine(
+                $"    const uint sharpemu_mesh_out_prims = min(sharpemu_mesh_alloc[1], {mesh.MaxPrimitives}u);");
+            source.AppendLine("    if (sharpemu_tg_index < sharpemu_mesh_out_verts)");
             source.AppendLine("    {");
 
             // A partial POS0 export keeps the components already written, so the position
@@ -758,7 +764,7 @@ public static partial class Gen5MslTranslator
             source.AppendLine($"        {MeshOutputName}.set_vertex(sharpemu_tg_index, sharpemu_out);");
             source.AppendLine("    }");
             source.AppendLine();
-            source.AppendLine($"    if (sharpemu_tg_index < {mesh.MaxPrimitives}u)");
+            source.AppendLine("    if (sharpemu_tg_index < sharpemu_mesh_out_prims)");
             source.AppendLine("    {");
 
             // A culled or never-exported primitive becomes degenerate: Metal has no
