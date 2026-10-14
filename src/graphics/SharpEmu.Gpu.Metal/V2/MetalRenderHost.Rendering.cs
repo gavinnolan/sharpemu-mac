@@ -770,6 +770,12 @@ internal sealed partial class MetalRenderHost
                 MetalV2Native.SendVoidValue(descriptor, SelSetRenderTargetArrayLength, state.Layers);
             }
 
+            _tinyPass = IsTinyPass(in state);
+            if (PpProbe && _tinyPass)
+            {
+                EncodeTinyPassProbe(commandBuffer);
+            }
+
             if (PassProfileEnabled)
             {
                 PassProfileAttachRender(descriptor);
@@ -1260,6 +1266,13 @@ internal sealed partial class MetalRenderHost
             vertexCount,
             Math.Max(instanceCount, 1),
             firstInstance);
+        for (var repeat = 1; _tinyPass && repeat < PpRepeat; repeat++)
+        {
+            MetalV2Native.SendDrawPrimitivesBaseInstance(
+                _renderEncoder, SelDrawPrimitives, entry.PrimitiveType, firstVertex, vertexCount,
+                Math.Max(instanceCount, 1), firstInstance);
+        }
+
         CountDraw(started);
         ProfileWork(entry, "draw", WorkShape.Vertices(vertexCount, instanceCount));
     }
@@ -1303,6 +1316,14 @@ internal sealed partial class MetalRenderHost
             Math.Max(instanceCount, 1),
             vertexOffset,
             firstInstance);
+        for (var repeat = 1; _tinyPass && repeat < PpRepeat; repeat++)
+        {
+            MetalV2Native.SendDrawIndexedBaseVertex(
+                _renderEncoder, SelDrawIndexedPrimitives, entry.PrimitiveType, indexCount, _indexType, _indexBuffer,
+                (nuint)(_indexOffset + (firstIndex * indexBytes)), Math.Max(instanceCount, 1), vertexOffset,
+                firstInstance);
+        }
+
         CountDraw(started);
         ProfileWork(entry, "draw-indexed", WorkShape.Indices(indexCount, instanceCount));
     }

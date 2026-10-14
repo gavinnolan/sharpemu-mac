@@ -800,6 +800,15 @@ internal sealed partial class MetalRenderHost
                 continue;
             }
 
+            var dummy = TinyPassDummyTexture(texture, resource);
+            if (dummy != 0)
+            {
+                BinaryPrimitives.WriteUInt64LittleEndian(
+                    span[(index * sizeof(ulong))..], MetalNative.SendGpuResourceId(dummy, SelGpuResourceId));
+                NoteUsedResource(dummy, Mtl.ResourceUsageRead);
+                continue;
+            }
+
             BinaryPrimitives.WriteUInt64LittleEndian(
                 span[(index * sizeof(ulong))..], stage.TextureIds[resource]);
             var usage = Mtl.ResourceUsageRead | (stage.IsStorage[resource] ? Mtl.ResourceUsageWrite : 0);
