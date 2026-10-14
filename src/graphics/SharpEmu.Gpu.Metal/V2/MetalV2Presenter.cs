@@ -532,13 +532,43 @@ internal static partial class MetalV2Presenter
                 return;
             }
 
-            var texture = _presentTexture != 0 ? _presentTexture : _hostFrameTexture;
-            var width = _presentTexture != 0 ? _presentWidth : _hostFrameWidth;
-            var height = _presentTexture != 0 ? _presentHeight : _hostFrameHeight;
-            var movie = SelectHostMovieFallback(ref texture, ref width, ref height);
-            if (texture != 0 && width != 0 && height != 0)
+            // The GPU worker promotes frames too, when it publishes one and when it asks
+            // for a flip slot, and a promotion releases the frame it replaces. So the
+            // presented frame is read under the gate and held until the encoder has bound
+            // it (the command buffer then keeps its own reference): read bare, a promotion
+            // in between released it and the bind retained freed memory.
+            nint presented;
+            uint presentedWidth, presentedHeight;
+            bool presentedHdr;
+            lock (_frameGate)
             {
-                EncodePresent(encoder, texture, width, height, !movie && _presentTexture != 0 && _presentIsHdr);
+                presented = _presentTexture;
+                presentedWidth = _presentWidth;
+                presentedHeight = _presentHeight;
+                presentedHdr = _presentIsHdr;
+                if (presented != 0)
+                {
+                    MetalNative.Send(presented, MetalNative.Selector("retain"));
+                }
+            }
+
+            try
+            {
+                var texture = presented != 0 ? presented : _hostFrameTexture;
+                var width = presented != 0 ? presentedWidth : _hostFrameWidth;
+                var height = presented != 0 ? presentedHeight : _hostFrameHeight;
+                var movie = SelectHostMovieFallback(ref texture, ref width, ref height);
+                if (texture != 0 && width != 0 && height != 0)
+                {
+                    EncodePresent(encoder, texture, width, height, !movie && presented != 0 && presentedHdr);
+                }
+            }
+            finally
+            {
+                if (presented != 0)
+                {
+                    MetalNative.SendVoid(presented, MetalNative.Selector("release"));
+                }
             }
 
             MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
