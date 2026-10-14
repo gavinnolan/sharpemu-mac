@@ -349,6 +349,16 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             });
         }
 
+        if (GpuClobberDiagnostics.Enabled)
+        {
+            // SHARPEMU_GPU_CLOBBER_DIAG: the bytes are in guest memory once this serial completes.
+            var landedAddress = write.Destination;
+            var landedValue = bytes == sizeof(uint) ? (uint)write.Value : write.Value;
+            var landedKind = GpuClobberDiagnostics.LandedKind(write.Kind);
+            _completions.Enqueue(serial, () => CommandProcessorWriteHistory.Record(
+                -1, landedAddress, bytes, landedValue, landedKind, deferred: true));
+        }
+
         NoteGuestMemoryWrite(write.Destination, (ulong)bytes, MetalGpuWriteOrigin.EndOfPipeLabel);
         _pendingLabelWrites++;
         Interlocked.Increment(ref _gpuTimedLabels);
@@ -542,6 +552,12 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             throw Fatal(
                 $"An end-of-pipe label cannot be written to guest memory: " +
                 $"address=0x{write.Destination:X16} bytes={bytes}.");
+        }
+
+        if (GpuClobberDiagnostics.Enabled)
+        {
+            CommandProcessorWriteHistory.Record(-1, write.Destination, bytes,
+                bytes == sizeof(uint) ? (uint)write.Value : write.Value, GpuClobberDiagnostics.LandedKind(write.Kind), deferred: true);
         }
     }
 

@@ -49,6 +49,13 @@ public sealed partial class GpuCommandInterpreter
         }
 
         var clock = GpuReferenceClock.Read();
+        if (_host.DefersEndOfPipeLabel(EndOfPipeWriteKind.ClockWrite) &&
+            (byteCount == sizeof(ulong) || _host.DefersEndOfPipeLabel(EndOfPipeWriteKind.Write32)))
+        {
+            RecordReferenceClock(destination, byteCount, clock);
+            return;
+        }
+
         if (byteCount == sizeof(uint))
         {
             WriteDword(destination, (uint)clock);
@@ -57,6 +64,28 @@ public sealed partial class GpuCommandInterpreter
         {
             WriteQword(destination, clock);
         }
+    }
+
+    /// <summary>
+    /// Hands a reference-clock copy to the host like an end-of-pipe clock: the value is the
+    /// clock as the packet was parsed, and it lands after the labels recorded before it.
+    /// </summary>
+    /// <remarks>
+    /// Demon's Souls recycles command memory once a GPU timestamp it reads back passes the
+    /// one it recorded. Written at parse time, the timestamp overtook end-of-pipe labels the
+    /// GPU still owed, and a late 64-bit label then landed in a recycled command buffer.
+    /// Same gate as end-of-pipe clocks: SHARPEMU_METAL_V2_EOP_CLOCKS=parse writes it at parse.
+    /// A four-byte copy rides a 32-bit label so the host writes exactly the bytes asked for.
+    /// </remarks>
+    private void RecordReferenceClock(ulong destination, uint byteCount, ulong clock)
+    {
+        var is64Bit = byteCount == sizeof(ulong);
+        var value = is64Bit ? clock : (uint)clock;
+        CommandProcessorWriteHistory.Record(QueueId, destination, (int)byteCount, value, "COPY_DATA_CLOCK", deferred: true);
+        PendingLabelRecorded?.Invoke(destination, (int)byteCount, value);
+        _lastWriteLength = 0;
+        _host.RecordEndOfPipe(new EndOfPipeWrite(
+            is64Bit ? EndOfPipeWriteKind.ClockWrite : EndOfPipeWriteKind.Write32, SubmitId, destination, value));
     }
 
     // Selectors 0 and 3 are memory, 1 is GDS, 2 is immediate data (source) or nowhere (destination).
