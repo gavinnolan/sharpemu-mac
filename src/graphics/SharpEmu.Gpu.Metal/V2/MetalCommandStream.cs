@@ -187,6 +187,14 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 $"deferred={DefersEndOfPipeLabel(write.Kind)} event={write.EventId} flip={write.FlipRequestId}");
         }
 
+        // A label the GPU could not write is owed until its completion publishes it, and
+        // while one is owed every later label waits behind it (see OrderedEndOfPipe).
+        var owed = !encoded && EndOfPipeLabelBytes(write.Kind) != 0 && DefersEndOfPipeLabel(write.Kind);
+        if (owed)
+        {
+            Interlocked.Increment(ref _owedHostLabels);
+        }
+
         switch (write.Kind)
         {
             case EndOfPipeWriteKind.InterruptOnly:
@@ -196,7 +204,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             case EndOfPipeWriteKind.InterruptWriteBack64:
                 QueueCompletion(() =>
                 {
-                    if (!encoded) PublishEndOfPipeLabel(in label);
+                    if (!encoded) PublishHostLabel(in label, owed);
                     TriggerInterrupt(eventId, contextId);
                 });
                 break;
@@ -204,7 +212,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             case EndOfPipeWriteKind.FlipWithWrite32:
                 QueueCompletion(() =>
                 {
-                    if (!encoded) PublishEndOfPipeLabel(in label);
+                    if (!encoded) PublishHostLabel(in label, owed);
                     VideoOutBackendServices.CompleteFlip(requestId);
                     MetalV2Presenter.SignalFlipPacer();
                 });
@@ -212,7 +220,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             case EndOfPipeWriteKind.FlipWithInterruptWriteBack32:
                 QueueCompletion(() =>
                 {
-                    if (!encoded) PublishEndOfPipeLabel(in label);
+                    if (!encoded) PublishHostLabel(in label, owed);
                     VideoOutBackendServices.CompleteFlip(requestId);
                     MetalV2Presenter.SignalFlipPacer();
                     TriggerInterrupt(eventId, 0);
@@ -226,7 +234,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 // every window has to be published by a completion, which costs a flush.
                 if (!encoded)
                 {
-                    QueueCompletion(() => PublishEndOfPipeLabel(in label));
+                    QueueCompletion(() => PublishHostLabel(in label, owed));
                 }
 
                 break;
@@ -269,6 +277,15 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         if (!GpuTimedLabels || !DefersEndOfPipeLabel(write.Kind))
         {
             // The interpreter published these bytes as it parsed the packet.
+            return false;
+        }
+
+        if (!MayEncodeLabelOnGpu(OrderedEndOfPipe, Volatile.Read(ref _owedHostLabels)))
+        {
+            // An older label is still owed by a completion. Written by the GPU now, this one
+            // would land first, and a guest that reuses memory on the newer signal then has
+            // the older label land in it. Its completion is queued behind the owed one's.
+            Interlocked.Increment(ref _orderedHostLabels);
             return false;
         }
 
@@ -560,6 +577,52 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 bytes == sizeof(uint) ? (uint)write.Value : write.Value, GpuClobberDiagnostics.LandedKind(write.Kind), deferred: true);
         }
     }
+
+    /// <summary>
+    /// Publishes a label the GPU did not write, from the completion that reports its work,
+    /// and stops owing it.
+    /// </summary>
+    private void PublishHostLabel(in EndOfPipeWrite label, bool owed)
+    {
+        try
+        {
+            PublishEndOfPipeLabel(in label);
+        }
+        finally
+        {
+            if (owed)
+            {
+                Interlocked.Decrement(ref _owedHostLabels);
+            }
+        }
+    }
+
+    // Labels a completion still has to publish; nonzero sends every later label there too.
+    private long _owedHostLabels;
+    private long _orderedHostLabels;
+
+    /// <summary>Labels published by a completion only to stay behind an older owed one.</summary>
+    public long TakeOrderedHostLabels() => Interlocked.Exchange(ref _orderedHostLabels, 0);
+
+    /// <summary>
+    /// End-of-pipe writes of a stream land in the order they were recorded.
+    /// </summary>
+    /// <remarks>
+    /// A label the GPU cannot write - no window covers it, or the GPU copy was refused - is
+    /// published by the completion of its submission, which runs after the GPU finished it
+    /// and the host noticed. A later label the GPU writes itself lands as soon as the GPU
+    /// reaches it, which is earlier, so without this the newer signal is in memory first:
+    /// a guest that recycles memory on it (Demon's Souls gates command memory on GPU-written
+    /// signals) then has the older label land in what it already reused. Completions run in
+    /// submission order, so while any label is owed, later ones are published there as well.
+    /// SHARPEMU_METAL_V2_EOP_ORDERED=0 lets a later label be written by the GPU regardless.
+    /// </remarks>
+    internal bool OrderedEndOfPipe { get; set; } = OrderedEndOfPipeDefault;
+
+    private static readonly bool OrderedEndOfPipeDefault =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_EOP_ORDERED") != "0";
+
+    internal static bool MayEncodeLabelOnGpu(bool ordered, long owedHostLabels) => !ordered || owedHostLabels == 0;
 
     // SHARPEMU_METAL_V2_GPU_LABELS=0 goes back to publishing every label from the
     // completion that reports its work. That is correct and it is what V1 does, but a
