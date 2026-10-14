@@ -1572,7 +1572,9 @@ public static partial class Gen5ShaderTranslator
         out uint sizeDwords,
         out string error)
     {
-        var opcode = ((word >> 18) & 0x7F) | ((word & 1) << 7);
+        // GFX10 MUBUF: OFFSET [11:0], OP [24:18] with op[7] in bit 25 (BUFInstructions.td
+        // MUBUF_Real_gfx10). Bit 0 is offset[0]; only MIMG takes opcode bit 7 from bit 0.
+        var opcode = (word >> 18) & 0xFF;
         name = opcode switch
         {
             0x00 => "BufferLoadFormatX",
@@ -1618,7 +1620,6 @@ public static partial class Gen5ShaderTranslator
             0x3B => "BufferAtomicXor",
             0x3C => "BufferAtomicInc",
             0x3D => "BufferAtomicDec",
-            0x3E => "BufferWbinvl1",
             0x3F => "BufferAtomicFmin",
             0x40 => "BufferAtomicFmax",
             // GFX9 buffer atomic encodings used by the guest shaders.
@@ -1635,10 +1636,36 @@ public static partial class Gen5ShaderTranslator
             0x4C => "BufferAtomicInc",
             0x50 => "BufferAtomicSwapX2",
             0x5A => "BufferAtomicOrX2",
+            0x80 => "BufferLoadFormatD16X",
+            0x81 => "BufferLoadFormatD16Xy",
+            0x82 => "BufferLoadFormatD16Xyz",
+            0x83 => "BufferLoadFormatD16Xyzw",
+            0x84 => "BufferStoreFormatD16X",
+            0x85 => "BufferStoreFormatD16Xy",
+            0x86 => "BufferStoreFormatD16Xyz",
+            0x87 => "BufferStoreFormatD16Xyzw",
             _ => $"MubufRaw{opcode:X2}",
         };
         sizeDwords = (extra >> 24) == 0xFF ? 3u : 2u;
         error = string.Empty;
+        if (opcode == 0x3E)
+        {
+            // gfx10 op 0x3E is BUFFER_ATOMIC_FCMPSWAP; BUFFER_WBINVL1 only exists on gfx6/7/8/9.
+            name = string.Empty;
+            error = $"unsupported-mubuf buffer_atomic_fcmpswap op=0x3E word=0x{word:X8}";
+            return false;
+        }
+
+        // TFE (extra bit 23) appends a status VGPR and LDS (word bit 16) redirects the
+        // result to LDS; neither is implemented, so refuse the shader rather than miscompile.
+        if (((extra >> 23) & 1) != 0 || ((word >> 16) & 1) != 0)
+        {
+            var feature = ((extra >> 23) & 1) != 0 ? "tfe" : "lds";
+            name = string.Empty;
+            error = $"unsupported-mubuf-{feature} op=0x{opcode:X2} word=0x{word:X8} extra=0x{extra:X8}";
+            return false;
+        }
+
         return true;
     }
 
@@ -1649,7 +1676,9 @@ public static partial class Gen5ShaderTranslator
         out string error)
     {
         var segment = (word >> 14) & 0x3;
-        var opcode = ((word >> 18) & 0x7F) | ((word & 1) << 7);
+        // GFX10 FLAT: OFFSET [11:0], DLC [12], SEG [15:14], GLC [16], SLC [17], OP [24:18]
+        // (FLATInstructions.td:2990); there is no opcode bit 7, bit 0 is offset[0].
+        var opcode = (word >> 18) & 0x7F;
         sizeDwords = 2;
         error = string.Empty;
         var prefix = segment switch
@@ -1860,6 +1889,16 @@ public static partial class Gen5ShaderTranslator
             0xE7 => "ImageBvh64IntersectRay",
             _ => string.Empty,
         };
+
+        if (name.Length != 0 && (word & ((1u << 16) | (1u << 17))) != 0)
+        {
+            // GFX10 MIMG TFE [16] and LWE [17] append a status dword after the fetched VGPRs
+            // (SIInstrFormats.td MIMGe_gfx10); that write is not implemented, so refuse the shader.
+            var feature = (word & (1u << 16)) != 0 ? "tfe" : "lwe";
+            error = $"unsupported-mimg-{feature} op=0x{opcode:X2} word=0x{word:X8}";
+            name = string.Empty;
+            return false;
+        }
 
         return FinishDecode(name, $"unknown-mimg op=0x{opcode:X2}", out error);
     }
@@ -2715,7 +2754,7 @@ public static partial class Gen5ShaderTranslator
                     sourceVectorRegister,
                     destinationVectorRegister,
                     usesFlatAddress ? uint.MaxValue : scalarAddress,
-                    SignExtend(word & 0x1FFF, 13),
+                    FlatOffset(word, usesFlatAddress),
                     globallyCoherent,
                     ((word >> 17) & 1) != 0,
                     usesFlatAddress);
@@ -2991,6 +3030,11 @@ public static partial class Gen5ShaderTranslator
         "ScratchStoreDwordx4" => 4,
         _ => 0,
     };
+
+    // RDNA2 ISA FLAT field table: OFFSET [11:0]; Scratch/Global are 12-bit signed, Flat
+    // "must be positive". DLC is bit 12 and never part of the address.
+    internal static int FlatOffset(uint word, bool isFlatSegment) =>
+        isFlatSegment ? (int)(word & 0x7FF) : SignExtend(word & 0xFFF, 12);
 
     private static int SignExtend(uint value, int bits)
     {

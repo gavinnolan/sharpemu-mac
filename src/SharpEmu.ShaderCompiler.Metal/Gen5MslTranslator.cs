@@ -1488,7 +1488,7 @@ public static partial class Gen5MslTranslator
                 return true;
             }
 
-            if (control.Typed && instruction.Opcode.Contains("D16", StringComparison.Ordinal))
+            if (instruction.Opcode.Contains("FormatD16", StringComparison.Ordinal))
             {
                 error = $"unsupported buffer opcode {instruction.Opcode}";
                 return false;

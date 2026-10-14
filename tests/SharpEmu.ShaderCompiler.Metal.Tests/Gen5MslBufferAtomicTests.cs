@@ -119,16 +119,14 @@ public sealed class Gen5MslBufferAtomicTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public void CacheWritebackInvalidateIsANoOpWithoutABufferBinding()
+    public void Op3EIsRefusedBecauseGfx10DefinesItAsFloatCompareSwap()
     {
-        // buffer_wbinvl1 names no resource: it invalidates a cache level, which
-        // the host storage path never needs.
-        var fixture = new Gen5ComputeFixture("buffer-wbinvl1",
+        // gfx10 op 0x3E is buffer_atomic_fcmpswap (BUFFER_WBINVL1 is gfx6-gfx9 only). The
+        // translator has no float compare-swap, so the shader must be refused, not no-op'd.
+        var fixture = new Gen5ComputeFixture("buffer-op3e",
             [0xE0F80000, 0x00000000, 0xBF810000], 8, 0);
-        var instruction = Assert.Single(Gen5ComputeFixtures.DecodeOrThrow(fixture).Instructions,
-            static candidate => candidate.Opcode == "BufferWbinvl1");
-        Assert.IsType<Gen5BufferMemoryControl>(instruction.Control);
-        Assert.True(Gen5MslTranslator.TryCompileProgram(Request(fixture, 0), out _, out var error), error);
+        var exception = Assert.Throws<InvalidOperationException>(() => Gen5ComputeFixtures.DecodeOrThrow(fixture));
+        Assert.Contains("fcmpswap", exception.Message);
     }
 
     [Fact]
