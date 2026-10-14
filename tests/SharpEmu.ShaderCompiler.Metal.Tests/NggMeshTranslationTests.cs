@@ -388,9 +388,17 @@ public sealed class NggMeshTranslationTests
         Assert.True(mesh.NarrowWave64);
         Assert.Equal(32u, mesh.ThreadsPerThreadgroup);
         Assert.Equal(1u, mesh.WavesPerThreadgroup);
-        Assert.Equal(30u, mesh.MaxVertices);
-        Assert.Equal(10u, mesh.MaxPrimitives);
+        // One lane per vertex and one per primitive: the pipeline declares the whole wave of
+        // each, and the whole-triangle path takes 10 triangles / 30 vertices of it per draw.
+        Assert.Equal(32u, mesh.MaxVertices);
+        Assert.Equal(32u, mesh.MaxPrimitives);
+        Assert.Equal(10u, mesh.PrimitivesPerSubgroup);
         Assert.Equal(30u, mesh.VerticesPerSubgroup);
+        Assert.Contains("mesh<Gen5MeshVertex, void, 32, 32, topology::triangle>", shader.Source, StringComparison.Ordinal);
+
+        // The export gating follows the allocation, not the declared extent.
+        Assert.Contains("if (sharpemu_tg_index < sharpemu_mesh_out_verts)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("if (sharpemu_tg_index < sharpemu_mesh_out_prims)", shader.Source, StringComparison.Ordinal);
         Assert.Contains("max_total_threads_per_threadgroup(32)", shader.Source, StringComparison.Ordinal);
     }
 

@@ -51,7 +51,9 @@ public sealed record Gen5MslMeshInfo(
     bool ReadsIndexBuffer,
     uint GeometryVerticesOut = 0,
     bool NarrowWave64 = false,
-    bool DeviceLds = false)
+    bool DeviceLds = false,
+    bool Wave64 = false,
+    uint LdsBytes = 0)
 {
     /// <summary>The mesh slot the device-memory LDS pool is bound at when
     /// <see cref="DeviceLds"/> is set.</summary>
