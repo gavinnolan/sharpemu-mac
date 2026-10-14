@@ -4047,7 +4047,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 				thread.State = GuestThreadRunState.Ready;
 				thread.BlockReason = null;
 				thread.BlockDeadlineTimestamp = 0;
-				EnqueueReadyGuestThreadLocked(thread);
+				EnqueueReadyGuestThreadLocked(thread, GuestThreadExecution.IsGuestThread ? "signal" : "host_signal");
 				wakeCount++;
 			}
 		}
@@ -4165,7 +4165,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 				thread.State = GuestThreadRunState.Ready;
 				thread.BlockReason = null;
 				thread.BlockDeadlineTimestamp = 0;
-				EnqueueReadyGuestThreadLocked(thread);
+				EnqueueReadyGuestThreadLocked(thread, "timeout");
 				wakeCount++;
 			}
 		}
@@ -5902,7 +5902,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 							thread.State = GuestThreadRunState.Ready;
 							thread.BlockReason = null;
 							thread.BlockDeadlineTimestamp = 0;
-							EnqueueReadyGuestThreadLocked(thread);
+							EnqueueReadyGuestThreadLocked(thread, "block_recheck");
 						}
 						break;
 					default:
@@ -7163,9 +7163,9 @@ public sealed unsafe partial class DirectExecutionBackend :
 		_readyDispatchThread = null;
 	}
 
-	private void EnqueueReadyGuestThreadLocked(GuestThreadState thread)
+	private void EnqueueReadyGuestThreadLocked(GuestThreadState thread, string? source = null)
 	{
-		ProfileGuestThreadReady(thread);
+		ProfileGuestThreadReady(thread, source);
 		_readyGuestThreads.Enqueue(thread);
 		Interlocked.Increment(ref _readyGuestThreadCount);
 		Monitor.PulseAll(_guestThreadGate);

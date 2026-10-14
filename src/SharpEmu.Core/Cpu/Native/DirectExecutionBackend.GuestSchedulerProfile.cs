@@ -44,7 +44,10 @@ public sealed unsafe partial class DirectExecutionBackend
             StringComparison.Ordinal);
 
     private readonly ConcurrentDictionary<ulong, GuestSchedulerThreadStats> _guestSchedulerStats = new();
-    private readonly GuestThreadFlowProfile _guestThreadFlowProfile = new();
+    private readonly GuestThreadFlowProfile _guestThreadFlowProfile = new(
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_GUEST_FLOW_CAPACITY"), out var capacity) && capacity > 0
+            ? capacity
+            : 131072);
     private readonly object _guestTraceOutputGate = new();
     private long _guestSchedulerProfileWindowStart = Stopwatch.GetTimestamp();
     private long _guestSchedulerProfileNextReport =
@@ -101,9 +104,9 @@ public sealed unsafe partial class DirectExecutionBackend
         return stats;
     }
 
-    private void ProfileGuestThreadReady(GuestThreadState thread)
+    private void ProfileGuestThreadReady(GuestThreadState thread, string? source = null)
     {
-        RecordGuestThreadFlow(thread, GuestThreadFlowProfile.EventKind.Ready);
+        RecordGuestThreadFlow(thread, GuestThreadFlowProfile.EventKind.Ready, source);
         if (!_profileGuestScheduler)
         {
             return;
