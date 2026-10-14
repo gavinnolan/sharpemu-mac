@@ -1762,6 +1762,7 @@ internal sealed partial class MetalRenderHost :
             .Append(" inline_eop=").Append(TakeInlineCompletions())
             .Append(" gpu_labels=").Append(labels.GpuTimed)
             .Append(" host_labels=").Append(labels.WithoutWindow)
+            .Append(" ordered_labels=").Append(TakeOrderedHostLabels())
             .Append(" poll_flushes=").Append(TakePollFlushes())
             .Append(" transient_commits=").Append(TakeTransientCommits())
             .Append(" scheduled_labels=").Append(TakeScheduledLabelSubmissions())
