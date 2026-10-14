@@ -35,7 +35,6 @@ internal sealed partial class MetalRenderHost :
     private static readonly nint SelCommit = MetalNative.Selector("commit");
     private static readonly nint SelEndEncoding = MetalNative.Selector("endEncoding");
     private static readonly nint SelWaitUntilCompleted = MetalNative.Selector("waitUntilCompleted");
-    private static readonly nint SelWaitUntilScheduled = MetalNative.Selector("waitUntilScheduled");
     private static readonly nint SelEncodeSignalEvent = MetalNative.Selector("encodeSignalEvent:value:");
     private static readonly nint SelAddCompletedHandler = MetalNative.Selector("addCompletedHandler:");
     private static readonly nint SelSignaledValue = MetalNative.Selector("signaledValue");
@@ -406,7 +405,12 @@ internal sealed partial class MetalRenderHost :
             // prompting at all. Prompting on every label-carrying commit put Superliminal
             // into long stalls instead, because the wait is then pure latency on the
             // worker.
-            MetalNative.SendVoid(_commandBuffer, SelWaitUntilScheduled);
+            //
+            // The wait itself happens on a thread of its own: it returns only once the
+            // kernel has fed the whole buffer to the GPU, which for Silent Hill's frames
+            // is most of their GPU time, and the worker waiting for it stopped recording
+            // for that long every frame.
+            (_scheduleNudge ??= new MetalScheduleNudge()).Nudge(_commandBuffer);
             Interlocked.Increment(ref _scheduledLabelSubmissions);
         }
 
@@ -1265,6 +1269,9 @@ internal sealed partial class MetalRenderHost :
     // How long since the previous commit makes this queue a quiet one.
     private static readonly long QuietQueueTicks = System.Diagnostics.Stopwatch.Frequency / 250;
 
+    // Started by the first nudge: most titles never need one.
+    private MetalScheduleNudge? _scheduleNudge;
+
     /// <summary>Label submissions the driver was asked to schedule at once.</summary>
     public long TakeScheduledLabelSubmissions() => Interlocked.Exchange(ref _scheduledLabelSubmissions, 0);
 
@@ -1647,6 +1654,7 @@ internal sealed partial class MetalRenderHost :
             }
 
             _previousCommandBuffer = 0;
+            _scheduleNudge?.Dispose();
             ReleaseInFlightSubmissions();
             ReportStepCaps();
             DisposeStepReport();
