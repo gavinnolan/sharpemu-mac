@@ -767,8 +767,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     }
 
     /// <summary>
-    /// Whether any image has ever covered these pages. Lock-free and never wrong in
-    /// the direction that matters: a false answer means no image can own the bytes,
+    /// Whether a live image covers these pages. Lock-free and never wrong in the
+    /// direction that matters: a false answer means no image can own the bytes,
     /// which is what lets the command stream read a packet without the full test.
     /// </summary>
     public bool MayOwn(ulong address, ulong size) =>

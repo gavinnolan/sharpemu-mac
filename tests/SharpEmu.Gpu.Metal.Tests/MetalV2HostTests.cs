@@ -67,21 +67,102 @@ public sealed class MetalV2HostTests
         Assert.Null(slots.TryGet(ResourceSlotIdentifier.Invalid));
     }
 
+    // The owner count answers for the 64 KiB pages a live image covers and no others,
+    // and forgets an image once the last one over a page is gone.
     [Fact]
-    public void PageOwnersAnswerOnlyForPagesAnImageHasEverCovered()
+    public void PageOwnersAnswerOnlyForPagesALiveImageCovers()
     {
         var owners = new MetalImagePageOwners();
         const ulong page = 1UL << MetalImagePageOwners.PageBits;
+        const ulong countPage = 1UL << MetalImagePageOwners.CountPageBits;
         Assert.False(owners.MayHaveOwners(page, 0x1000));
 
         var identifier = new ResourceSlotIdentifier(7, 3);
-        owners.GetOrCreate(page >> MetalImagePageOwners.PageBits).Add(identifier);
-        Assert.True(owners.MayHaveOwners(page, 0x1000));
+        var alias = new ResourceSlotIdentifier(8, 1);
+        owners.Add(page + 0x1000, 0x1000, identifier);
+        owners.Add(page, 0x4000, alias);
+        Assert.True(owners.MayHaveOwners(page + 0x1800, 8));
+        Assert.False(owners.MayHaveOwners(page + countPage, 0x1000));
         Assert.False(owners.MayHaveOwners(page + (2 * page), 0x1000));
+        // A range that starts in a leaf nothing was ever counted in still finds the owner.
+        Assert.True(owners.MayHaveOwners(0, page + 1));
 
         var list = owners.Find(page >> MetalImagePageOwners.PageBits);
         Assert.NotNull(list);
         Assert.Contains(identifier, list!);
+
+        owners.Remove(page + 0x1000, 0x1000, identifier);
+        Assert.True(owners.MayHaveOwners(page + 0x1800, 8));
+        owners.Remove(page, 0x4000, alias);
+        Assert.False(owners.MayHaveOwners(page, page));
+        Assert.Empty(owners.Find(page >> MetalImagePageOwners.PageBits)!);
+    }
+
+    // The order the image cache relies on when a CPU write reads the count without the
+    // lock: the image becomes reachable only after it is counted and stops being reachable
+    // before it is uncounted. A reader that saw it reachable on both sides of its count
+    // read must have seen a live owner, however the add and remove race it.
+    [Fact]
+    public void ALockFreeReaderNeverMissesAReachableOwner()
+    {
+        var owners = new MetalImagePageOwners();
+        var gate = new object();
+        // Straddles two count pages, so the read of the last one races the first.
+        const ulong address = 0x2_0000_0000 + 0xF000;
+        const ulong size = 0x2000;
+        var identifier = new ResourceSlotIdentifier(1, 1);
+        // Odd while the image is reachable: the stand-in for its slot and page watch.
+        long phase = 0;
+        var stop = 0;
+        long violations = 0;
+        long checkedWhileReachable = 0;
+
+        var readers = Enumerable.Range(0, 2).Select(_ => new Thread(() =>
+        {
+            while (Volatile.Read(ref stop) == 0)
+            {
+                var before = Volatile.Read(ref phase);
+                var owned = owners.MayHaveOwners(address + size - 8, 8);
+                var after = Volatile.Read(ref phase);
+                if (before == after && (before & 1) == 1)
+                {
+                    Interlocked.Increment(ref checkedWhileReachable);
+                    if (!owned)
+                    {
+                        Interlocked.Increment(ref violations);
+                    }
+                }
+            }
+        })).ToArray();
+        foreach (var reader in readers)
+        {
+            reader.Start();
+        }
+
+        for (var cycle = 0; cycle < 50_000; cycle++)
+        {
+            lock (gate)
+            {
+                owners.Add(address, size, identifier);
+                Volatile.Write(ref phase, phase + 1);
+            }
+
+            lock (gate)
+            {
+                Volatile.Write(ref phase, phase + 1);
+                owners.Remove(address, size, identifier);
+            }
+        }
+
+        Volatile.Write(ref stop, 1);
+        foreach (var reader in readers)
+        {
+            reader.Join();
+        }
+
+        Assert.Equal(0, violations);
+        Assert.True(checkedWhileReachable > 0);
+        Assert.False(owners.MayHaveOwners(address, size));
     }
 
     [Theory]

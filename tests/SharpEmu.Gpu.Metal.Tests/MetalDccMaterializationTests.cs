@@ -312,6 +312,29 @@ public sealed unsafe partial class MetalDccMaterializationTests(ITestOutputHelpe
         Assert.False(rig.Cache.MetadataWatchOverlaps(MetadataAddress, SliceSize));
     }
 
+    // A CPU store waits on the cache lock for an image only while one lives on its 64 KiB
+    // page: not for a neighbour further along the same megabyte, and not once it is gone.
+    [Fact]
+    public void CpuWriteLocksOnlyForALiveImageNearIt()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var store = (IGuestImageStore)rig.Cache;
+        rig.Lookup();
+        _ = rig.Cache.TakeLockedCpuWrites();
+
+        Assert.True(store.MarkPreciseCpuWrite(ImageAddress, 8));
+        var live = rig.Cache.TakeLockedCpuWrites();
+        Assert.Equal((1L, 1L, 0L), (live.Owner, live.OwnerFound, live.OwnerNone));
+
+        Assert.False(store.MarkPreciseCpuWrite(GuestBase + 0x20000, 8));
+        Assert.Equal(0L, rig.Cache.TakeLockedCpuWrites().Owner);
+
+        store.Unregister(ImageAddress, 0x1000);
+        Assert.False(store.MarkPreciseCpuWrite(ImageAddress, 8));
+        Assert.Equal(0L, rig.Cache.TakeLockedCpuWrites().Owner);
+    }
+
     [Fact]
     public void MaterializeDcc_SkipsWhilePendingGpuWrite()
     {

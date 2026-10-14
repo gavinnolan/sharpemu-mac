@@ -22,18 +22,16 @@ internal sealed partial class MetalImageCache
         }
 
         if (!MetalImagePageOwners.TryGetPageRange(
-                image.Description.Data.Address, image.Description.Data.Size, out var first, out var lastExclusive))
+                image.Description.Data.Address, image.Description.Data.Size, out _, out _))
         {
             throw GpuFatal.Fatal(
                 $"The image registration is outside the guest address space: address=0x{image.Description.Data.Address:X16} " +
                 $"size=0x{image.Description.Data.Size:X}.");
         }
 
-        for (var page = first; page < lastExclusive; page++)
-        {
-            _pageOwners.GetOrCreate(page).Add(imageIdentifier);
-        }
-
+        // Counted before anything can find the image or arm its watch: a CPU write that
+        // reads no owner without the lock must never have an image over its bytes.
+        _pageOwners.Add(image.Description.Data.Address, image.Description.Data.Size, imageIdentifier);
         image.Registered = true;
         _totalUsedMemory += image.AccountedSize;
     }
@@ -46,15 +44,9 @@ internal sealed partial class MetalImageCache
             return;
         }
 
+        // The watch goes first and the count last, once no lookup can find the image.
         UnwatchImage(imageIdentifier);
-        if (MetalImagePageOwners.TryGetPageRange(
-                image.Description.Data.Address, image.Description.Data.Size, out var first, out var lastExclusive))
-        {
-            for (var page = first; page < lastExclusive; page++)
-            {
-                _pageOwners.Find(page)?.Remove(imageIdentifier);
-            }
-        }
+        _pageOwners.Remove(image.Description.Data.Address, image.Description.Data.Size, imageIdentifier);
 
         var accounted = image.AccountedSize;
         _totalUsedMemory -= Math.Min(accounted, _totalUsedMemory);
@@ -222,7 +214,7 @@ internal sealed partial class MetalImageCache
     }
 
     // A CPU write on the faulting thread. Most writes (command building, labels)
-    // touch no image page, and the owner bitmap answers those without the lock.
+    // touch no image page, and the live-owner counts answer those without the lock.
     bool IGuestImageStore.MarkCpuWrite(ulong address, ulong size)
     {
         if (!IsValidRange(address, size))
