@@ -192,7 +192,7 @@ public static partial class Gen5MslTranslator
             var destination = DestinationVector(instruction);
             string? expression = instruction.Opcode switch
             {
-                "VMovB32" => RawSource(instruction, 0),
+                "VMovB32" => SignModifiedSource(instruction, 0),
 
                 // ---- float arithmetic ----
                 "VAddF32" => FloatResult(instruction, $"{F(instruction, 0)} + {F(instruction, 1)}"),
@@ -294,8 +294,9 @@ public static partial class Gen5MslTranslator
                 "VCvtF32Ubyte1" => FloatResult(instruction, $"(float)((({RawSource(instruction, 0)}) >> 8) & 0xFFu)"),
                 "VCvtF32Ubyte2" => FloatResult(instruction, $"(float)((({RawSource(instruction, 0)}) >> 16) & 0xFFu)"),
                 "VCvtF32Ubyte3" => FloatResult(instruction, $"(float)((({RawSource(instruction, 0)}) >> 24) & 0xFFu)"),
+                // Clamp and omod apply to the f32 result before it is rounded to f16.
                 "VCvtF16F32" =>
-                    $"((uint)as_type<ushort>(half({F(instruction, 0)})))",
+                    $"((uint)as_type<ushort>(half({ApplyFloatOutputModifiers(instruction, F(instruction, 0))})))",
                 // The source is a half: an SDWA or VOP3 negate flips its sign bit 15, not
                 // bit 31 of the register, and VOP3 op_sel can pick the high half.
                 "VCvtF32F16" => FloatResult(instruction, F16(instruction, 0)),
@@ -871,8 +872,9 @@ public static partial class Gen5MslTranslator
         }
 
         // Both lanes read the same sources, so each one is hoisted into a single
-        // temp. A constant operand is one f32 value rather than a packed pair: both
+        // temp. An inline constant is one f32 value rather than a packed pair: both
         // lanes take it whole, which is why it is held as a float and not as raw bits.
+        // A 32-bit literal is a packed pair like a register and op_sel picks its half.
         private string[] PackedSources(
             Gen5ShaderInstruction instruction,
             Gen5Vop3pControl control,
@@ -890,7 +892,7 @@ public static partial class Gen5MslTranslator
         }
 
         private static bool IsPackedConstant(Gen5Operand operand) =>
-            operand.Kind is Gen5OperandKind.EncodedConstant or Gen5OperandKind.LiteralConstant;
+            operand.Kind is Gen5OperandKind.EncodedConstant;
 
         private string EmitPackedF16Lane(
             Gen5ShaderInstruction instruction,
@@ -931,7 +933,7 @@ public static partial class Gen5MslTranslator
             bool highLane)
         {
             var negateMask = highLane ? control.NegHiMask : control.NegLoMask;
-            // A constant has no half to select; only the lane's negate applies.
+            // An inline constant has no half to select; only the lane's negate applies.
             var value = IsPackedConstant(instruction.Sources[index])
                 ? sources[index]
                 : HalfToFloat(
@@ -1046,10 +1048,24 @@ public static partial class Gen5MslTranslator
         // is what makes the fused form expressible directly.
         private string EmitPackedF16Fmac(Gen5ShaderInstruction instruction, uint destination)
         {
-            var left = Temp("half2", $"as_type<half2>({RawSource(instruction, 0)})");
-            var right = Temp("half2", $"as_type<half2>({RawSource(instruction, 1)})");
+            var left = Temp("half2", $"as_type<half2>({PackedFmacSource(instruction, 0)})");
+            var right = Temp("half2", $"as_type<half2>({PackedFmacSource(instruction, 1)})");
             var accumulator = Temp("half2", $"as_type<half2>(v[{destination}])");
             return AsUInt($"fma({left}, {right}, {accumulator})");
+        }
+
+        // Before gfx11 a float inline constant (0.5 .. 1/2pi, encodings 240-248) is an f16
+        // in the low 16 bits with zero above, not the f32 the other encodings widen it to.
+        private string PackedFmacSource(Gen5ShaderInstruction instruction, int sourceIndex)
+        {
+            var operand = instruction.Sources[sourceIndex];
+            if (operand.Kind == Gen5OperandKind.EncodedConstant && operand.Value is >= 240 and <= 248)
+            {
+                ReadOnlySpan<ushort> halves = [0x3800, 0xB800, 0x3C00, 0xBC00, 0x4000, 0xC000, 0x4400, 0xC400, 0x3118];
+                return $"0x{halves[(int)(operand.Value - 240)]:X4}u";
+            }
+
+            return RawSource(instruction, sourceIndex);
         }
 
         // RDNA2 ISA section 12.7: DOT2C accumulates the two half products
@@ -1182,7 +1198,9 @@ public static partial class Gen5MslTranslator
             var shuffled = Temp("uint", ShuffleLane(stored, safeTarget));
             if (control.FetchInactive)
             {
-                return shuffled;
+                // FI only lets an EXEC-inactive source lane be read; a lane whose source is
+                // out of the row (row_shl/row_shr) still reads zero, for bound_ctrl to write.
+                return Temp("uint", $"({inRange}) ? {shuffled} : 0u");
             }
 
             var sourceActive = Temp("bool", LaneActiveExpression(safeTarget));
@@ -1209,8 +1227,16 @@ public static partial class Gen5MslTranslator
         private string EmitDppWriteEnabled(Gen5DppControl control)
         {
             var (_, inRange) = EmitDppSourceLane(control);
-            var rowEnabled = $"(({control.RowMask}u >> (sharpemu_lane >> 4)) & 1u) != 0u";
-            var bankEnabled = $"(({control.BankMask}u >> (sharpemu_lane & 3u)) & 1u) != 0u";
+            // A wave64 in a workgroup wider than one wave runs as 32-wide simdgroups whose
+            // lane index is 0..31; the thread's position in the workgroup tells which half
+            // of its guest wave it is, and the upper half is rows 2 and 3.
+            var row = _waveLaneCount == 64 && _stage == Gen5MslStage.Compute && !IsWave64
+                ? $"((sharpemu_lane >> 4) + ((((sharpemu_local_id.x + sharpemu_local_id.y * {_localSizeX}u + " +
+                    $"sharpemu_local_id.z * {_localSizeX * _localSizeY}u) >> 5) & 1u) << 1))"
+                : "(sharpemu_lane >> 4)";
+            var rowEnabled = $"(({control.RowMask}u >> {row}) & 1u) != 0u";
+            // Each BANK_MASK bit gates four consecutive lanes (bit 24: lanes 0-3, 16-19...).
+            var bankEnabled = $"(({control.BankMask}u >> ((sharpemu_lane >> 2) & 3u)) & 1u) != 0u";
             var sourceAllows = control.BoundControl ? "true" : inRange;
             return Temp("bool", $"({rowEnabled}) && ({bankEnabled}) && ({sourceAllows})");
         }
@@ -1390,7 +1416,10 @@ public static partial class Gen5MslTranslator
             if (instruction.Control is Gen5DppControl compareDpp)
             {
                 var writeEnabled = EmitDppWriteEnabled(compareDpp);
-                active = Temp("bool", $"({writeEnabled}) ? {active} : vcc");
+                // A lane whose write is disabled keeps what it had: its VCC bit for V_CMP,
+                // its EXEC bit for V_CMPX (VCC is unrelated to a V_CMPX).
+                var kept = opcode.StartsWith("VCmpx", StringComparison.Ordinal) ? "exec" : "vcc";
+                active = Temp("bool", $"({writeEnabled}) ? {active} : {kept}");
             }
 
             if (opcode.StartsWith("VCmpx", StringComparison.Ordinal))
@@ -1410,9 +1439,9 @@ public static partial class Gen5MslTranslator
         private string EmitCompareClass(Gen5ShaderInstruction instruction)
         {
             var source = Temp("float", F(instruction, 0));
-            var raw = Temp("uint", RawSource(instruction, 0));
             var mask = Temp("uint", RawSource(instruction, 1));
-            var negative = Temp("bool", $"({raw} & 0x80000000u) != 0u");
+            // The class and the sign both describe the value after abs/neg.
+            var negative = Temp("bool", $"(as_type<uint>({source}) & 0x80000000u) != 0u");
             var nan = Temp("bool", $"isnan({source})");
             var infinite = Temp("bool", $"isinf({source})");
             var zero = Temp("bool", $"{source} == 0.0f");
@@ -2453,19 +2482,58 @@ public static partial class Gen5MslTranslator
         private string SignModifiedSource(Gen5ShaderInstruction instruction, int sourceIndex)
         {
             var value = RawSource(instruction, sourceIndex);
-            if (instruction.Control is not Gen5Vop3Control control)
+            // RawSource already applied an SDWA abs/neg to the selected byte or word.
+            if (instruction.Control is not (Gen5Vop3Control or Gen5DppControl))
             {
                 return value;
             }
 
-            if ((control.AbsoluteMask & (1u << sourceIndex)) != 0)
+            var (absoluteMask, negateMask) = SourceModifierMasks(instruction);
+            if ((absoluteMask & (1u << sourceIndex)) != 0)
             {
                 value = $"(({value}) & 0x7FFFFFFFu)";
             }
 
-            return (control.NegateMask & (1u << sourceIndex)) != 0
+            return (negateMask & (1u << sourceIndex)) != 0
                 ? $"(({value}) ^ 0x80000000u)"
                 : value;
+        }
+
+        /// <summary>The per-source abs/neg masks of whichever encoding carries them.</summary>
+        private static (uint Absolute, uint Negate) SourceModifierMasks(Gen5ShaderInstruction instruction) =>
+            instruction.Control switch
+            {
+                Gen5Vop3Control control => (control.AbsoluteMask, control.NegateMask),
+                Gen5SdwaControl control => (control.AbsoluteMask, control.NegateMask),
+                Gen5DppControl control => (control.AbsoluteMask, control.NegateMask),
+                _ => (0u, 0u),
+            };
+
+        /// <summary>The output modifier and clamp of a VOP3 or SDWA float result. Output
+        /// modifiers are ignored when MODE.IEEE is set (RDNA2 ISA 6.2.2).</summary>
+        private (uint OutputModifier, bool Clamp) FloatOutputModifiers(Gen5ShaderInstruction instruction)
+        {
+            var (outputModifier, clamp) = instruction.Control switch
+            {
+                Gen5Vop3Control control => (control.OutputModifier, control.Clamp),
+                Gen5SdwaControl control => (control.OutputModifier, control.Clamp),
+                _ => (0u, false),
+            };
+            return (_request.IeeeMode ? 0u : outputModifier, clamp);
+        }
+
+        /// <summary>Scales a float result by omod, then saturates it to [0, 1] for clamp.</summary>
+        private string ApplyFloatOutputModifiers(Gen5ShaderInstruction instruction, string expression)
+        {
+            var (outputModifier, clamp) = FloatOutputModifiers(instruction);
+            expression = outputModifier switch
+            {
+                1 => $"(({expression}) * 2.0f)",
+                2 => $"(({expression}) * 4.0f)",
+                3 => $"(({expression}) * 0.5f)",
+                _ => expression,
+            };
+            return clamp ? $"clamp({expression}, 0.0f, 1.0f)" : expression;
         }
 
         /// <summary>64-bit source: SGPR/VGPR pair, sign-extended inline, or zero-extended 32-bit.</summary>
@@ -2667,14 +2735,14 @@ public static partial class Gen5MslTranslator
             var bits = MinimumHalfBits(ReadMinimumHalfBits(instruction, 0), ReadMinimumHalfBits(instruction, 1));
             if (ternary) bits = MinimumHalfBits(bits, ReadMinimumHalfBits(instruction, 2));
             var control = instruction.Control as Gen5Vop3Control;
-            var modifier = _request.IeeeMode ? 0u : control?.OutputModifier ?? 0u;
+            var (modifier, clamp) = FloatOutputModifiers(instruction);
             if (modifier != 0)
             {
                 var scale = modifier == 1 ? "2.0f" : modifier == 2 ? "4.0f" : "0.5f";
                 bits = Temp("uint", $"(({bits} & 0x7FFFu) > 0x7C00u ? {bits} : " +
                     $"(uint)as_type<ushort>(half((float)as_type<half>((ushort){bits}) * {scale})))");
             }
-            if (control?.Clamp == true)
+            if (clamp)
                 bits = Temp("uint", $"((({bits} & 0x8000u) != 0u || ({bits} & 0x7FFFu) > 0x7C00u) ? 0u : min({bits}, 0x3C00u))");
             return ((control?.OperandSelect ?? 0) & 8) != 0
                 ? $"((v[{destination}] & 0x0000FFFFu) | ({bits} << 16))"
@@ -2688,17 +2756,7 @@ public static partial class Gen5MslTranslator
             string expression)
         {
             var control = instruction.Control as Gen5Vop3Control;
-            expression = (control?.OutputModifier ?? 0) switch
-            {
-                1 => $"(({expression}) * 2.0f)",
-                2 => $"(({expression}) * 4.0f)",
-                3 => $"(({expression}) * 0.5f)",
-                _ => expression,
-            };
-            if (control?.Clamp == true)
-            {
-                expression = $"clamp({expression}, 0.0f, 1.0f)";
-            }
+            expression = ApplyFloatOutputModifiers(instruction, expression);
 
             var packed = $"(uint)as_type<ushort>(half({expression}))";
             return ((control?.OperandSelect ?? 0) & 8) != 0
@@ -2712,25 +2770,7 @@ public static partial class Gen5MslTranslator
         /// </summary>
         private string FloatResult(Gen5ShaderInstruction instruction, string expression)
         {
-            var (outputModifier, clamp) = instruction.Control switch
-            {
-                Gen5Vop3Control control => (control.OutputModifier, control.Clamp),
-                Gen5SdwaControl control => (control.OutputModifier, control.Clamp),
-                _ => (0u, false),
-            };
-            expression = outputModifier switch
-            {
-                1 => $"(({expression}) * 2.0f)",
-                2 => $"(({expression}) * 4.0f)",
-                3 => $"(({expression}) * 0.5f)",
-                _ => expression,
-            };
-            if (clamp)
-            {
-                expression = $"clamp({expression}, 0.0f, 1.0f)";
-            }
-
-            return AsUInt($"({expression})");
+            return AsUInt($"({ApplyFloatOutputModifiers(instruction, expression)})");
         }
 
         /// <summary>The lane's bit of a mask operand (VCC/EXEC/SGPR mask).</summary>
