@@ -235,6 +235,15 @@ internal static partial class MetalV2Native
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint SendWithError(nint receiver, nint selector, nint argument, ref nint error);
 
+    // -[MTLBuffer newTextureWithDescriptor:offset:bytesPerRow:]
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial nint SendNewBufferTexture(
+        nint receiver,
+        nint selector,
+        nint descriptor,
+        nuint offset,
+        nuint bytesPerRow);
+
     // -newTextureViewWithPixelFormat:textureType:levels:slices:
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint SendNewTextureView(
