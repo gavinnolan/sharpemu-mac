@@ -8,6 +8,7 @@ using System.Diagnostics;
 using System.Threading;
 using System.Diagnostics.CodeAnalysis;
 using SharpEmu.Libs.Diagnostics;
+using SharpEmu.HLE.DsTrace;
 
 namespace SharpEmu.Libs.Kernel;
 
@@ -145,6 +146,9 @@ public static class KernelPthreadCompatExports
         public int Granted;
         // Set while the waiter spins for its grant instead of parking; the unlock then skips the wake.
         public int Spinning;
+        // DSTRACE only: Stopwatch timestamp at enqueue (0 = not a traced lock waiter).
+        public long DsEnqueueTs;
+        public ulong DsMutexAddress;
     }
 
     private sealed class PthreadCondState
@@ -1053,7 +1057,27 @@ public static class KernelPthreadCompatExports
             acquiredWhileQueueing = TryGrantMutexWaiterLocked(state, waiter);
         }
 
-        if (acquiredWhileQueueing || SpinForMutexGrant(state, waiter!))
+        var dsSync = DsTrace.Sync && DsTrace.Armed;
+        var dsSpinStart = 0L;
+        var dsOwner = 0UL;
+        var dsQlen = 0;
+        if (dsSync)
+        {
+            waiter!.DsEnqueueTs = Stopwatch.GetTimestamp();
+            waiter.DsMutexAddress = mutexAddress;
+            dsOwner = state.OwnerThreadId;
+            dsQlen = state.QueuedWaiterCount;
+            dsSpinStart = waiter.DsEnqueueTs;
+        }
+
+        var dsSpun = acquiredWhileQueueing || SpinForMutexGrant(state, waiter!);
+        var dsSpinNs = dsSync ? (ulong)DsTrace.TicksToNs(Stopwatch.GetTimestamp() - dsSpinStart) : 0UL;
+        if (dsSync && dsSpun)
+        {
+            DsTrace.Emit(DsEv.MXQ, mutexAddress, currentThreadId, dsOwner, (ulong)dsQlen, dsSpinNs, 0UL, DsTrace.CurrentRa1);
+        }
+
+        if (dsSpun)
         {
             waiter!.HostSignal?.Dispose();
             TracePthreadMutex(ctx, "lock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
@@ -1068,11 +1092,30 @@ public static class KernelPthreadCompatExports
                 () => CompleteBlockedMutexLock(ctx, mutexAddress, resolvedAddress, state, waiter),
                 () => TryGrantBlockedMutexLock(ctx, mutexAddress, resolvedAddress, state, waiter)))
         {
+            if (dsSync)
+            {
+                DsTrace.Emit(DsEv.MXQ, mutexAddress, currentThreadId, dsOwner, (ulong)dsQlen, dsSpinNs, 1UL, DsTrace.CurrentRa1);
+            }
+
             TracePthreadMutex(ctx, "lock-block", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
+        if (dsSync)
+        {
+            DsTrace.Emit(DsEv.MXQ, mutexAddress, currentThreadId, dsOwner, (ulong)dsQlen, dsSpinNs, 2UL, DsTrace.CurrentRa1);
+        }
+
         var hostResult = WaitForHostMutexLock(ctx, state, waiter!);
+        if (dsSync)
+        {
+            DsTrace.Emit(
+                DsEv.MXR,
+                mutexAddress,
+                currentThreadId,
+                (ulong)DsTrace.TicksToNs(Stopwatch.GetTimestamp() - waiter!.DsEnqueueTs));
+        }
+
         TracePthreadMutex(ctx, "lock", mutexAddress, resolvedAddress, state, currentThreadId, hostResult);
         return hostResult;
     }
@@ -1105,7 +1148,7 @@ public static class KernelPthreadCompatExports
                 ProfileMutexHandoff(state, "Released", mutexAddress);
                 if (state.QueuedWaiterCount != 0)
                 {
-                    WakeFirstMutexWaiter(state);
+                    WakeFirstMutexWaiter(state, mutexAddress, currentThreadId);
                 }
 
                 TracePthreadMutex(ctx, "unlock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
@@ -1158,6 +1201,17 @@ public static class KernelPthreadCompatExports
         if (nextWaiter is { Cooperative: true } && Volatile.Read(ref nextWaiter.Spinning) == 0)
         {
             WakeProfiledMutexWaiter(state, nextWaiter);
+        }
+
+        if (nextWaiter is not null && DsTrace.Sync && DsTrace.Armed)
+        {
+            DsTrace.Emit(
+                DsEv.MXH,
+                mutexAddress,
+                currentThreadId,
+                nextWaiter.ThreadId,
+                nextWaiter.Cooperative && Volatile.Read(ref nextWaiter.Spinning) == 0 ? 1UL : 0UL,
+                (ulong)state.QueuedWaiterCount);
         }
 
         TracePthreadMutex(ctx, "unlock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
@@ -2257,7 +2311,7 @@ public static class KernelPthreadCompatExports
         return true;
     }
 
-    private static void WakeFirstMutexWaiter(PthreadMutexState state)
+    private static void WakeFirstMutexWaiter(PthreadMutexState state, ulong dsMutexAddress = 0, ulong dsFrom = 0)
     {
         PthreadMutexWaiter? nextWaiter;
         lock (state.SyncRoot)
@@ -2279,6 +2333,10 @@ public static class KernelPthreadCompatExports
         if (nextWaiter is { Cooperative: true } && Volatile.Read(ref nextWaiter.Spinning) == 0)
         {
             WakeProfiledMutexWaiter(state, nextWaiter);
+            if (DsTrace.Sync && DsTrace.Armed)
+            {
+                DsTrace.Emit(DsEv.MXH, dsMutexAddress, dsFrom, nextWaiter.ThreadId, 1UL, (ulong)state.QueuedWaiterCount);
+            }
         }
     }
 
@@ -2410,6 +2468,15 @@ public static class KernelPthreadCompatExports
         PthreadMutexWaiter waiter)
     {
         var currentThreadId = KernelPthreadState.GetCurrentThreadHandle();
+        if (waiter.DsEnqueueTs != 0 && DsTrace.Sync && DsTrace.Armed && Volatile.Read(ref waiter.Granted) == 1)
+        {
+            DsTrace.Emit(
+                DsEv.MXR,
+                waiter.DsMutexAddress,
+                currentThreadId,
+                (ulong)DsTrace.TicksToNs(Stopwatch.GetTimestamp() - waiter.DsEnqueueTs));
+        }
+
         if (Volatile.Read(ref waiter.Granted) == 1)
         {
             TracePthreadMutex(ctx, "lock-resume", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);

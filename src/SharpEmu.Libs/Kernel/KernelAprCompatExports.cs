@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.HLE.DsTrace;
 using SharpEmu.Libs.Ampr;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Threading;
 
 namespace SharpEmu.Libs.Kernel;
@@ -47,11 +49,35 @@ public static class KernelAprCompatExports
             submissionId = unchecked((uint)Interlocked.Increment(ref _nextSubmissionId));
         }
 
+        var dsApr = DsTrace.Io && DsTrace.Armed;
+        var dsStart = 0L;
+        if (dsApr)
+        {
+            DsAprAcc.Reset();
+            dsStart = Stopwatch.GetTimestamp();
+        }
+
         var completionResult = AmprExports.CompleteCommandBuffer(
             ctx,
             commandBuffer,
             out var executionResult,
             out var errorOffset);
+        if (dsApr)
+        {
+            Span<ulong> dsRa = stackalloc ulong[1];
+            _ = DsGuestMem.ReturnChain(ctx[CpuRegister.Rbp], ctx[CpuRegister.Rsp], dsRa);
+            DsTrace.Emit(
+                DsEv.APR,
+                DsTrace.CurrentRa1,
+                dsRa[0],
+                (ulong)DsAprAcc.Cmds,
+                (ulong)DsTrace.TicksToNs(Stopwatch.GetTimestamp() - dsStart),
+                (ulong)DsTrace.TicksToNs(DsAprAcc.PreadTicks),
+                (ulong)DsTrace.TicksToNs(DsAprAcc.WaitTicks),
+                (ulong)DsAprAcc.WaitIters,
+                (ulong)DsAprAcc.Bytes);
+        }
+
         if (completionResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
         {
             AprFailureDiagnostics.Failed("submit-command-state", commandBuffer, commandBuffer, 0,

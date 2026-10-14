@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.HLE.DsTrace;
 using SharpEmu.HLE.FileSystem;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Diagnostics;
@@ -9,10 +10,30 @@ using SharpEmu.Libs.Kernel;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Threading;
 using Microsoft.Win32.SafeHandles;
 
 namespace SharpEmu.Libs.Ampr;
+
+/// <summary>DSTRACE APR inner timings, passed from CompleteCommandBuffer to the APR submit export (same thread).</summary>
+internal static class DsAprAcc
+{
+    [ThreadStatic] public static long PreadTicks;
+    [ThreadStatic] public static long WaitTicks;
+    [ThreadStatic] public static long WaitIters;
+    [ThreadStatic] public static long Bytes;
+    [ThreadStatic] public static long Cmds;
+
+    public static void Reset()
+    {
+        PreadTicks = 0;
+        WaitTicks = 0;
+        WaitIters = 0;
+        Bytes = 0;
+        Cmds = 0;
+    }
+}
 
 public static class AmprExports
 {
@@ -1007,6 +1028,12 @@ public static class AmprExports
         }
         commands.Sort(static (left, right) => left.Offset.CompareTo(right.Offset));
 
+        var dsApr = DsTrace.Io && DsTrace.Armed;
+        if (dsApr)
+        {
+            DsAprAcc.Cmds = commands.Count;
+        }
+
         foreach (var commandEntry in commands)
         {
             switch (commandEntry.Kind)
@@ -1014,7 +1041,14 @@ public static class AmprExports
                 case 0:
                     {
                         var readCommand = readCommands[commandEntry.Index];
+                        var dsT0 = dsApr ? Stopwatch.GetTimestamp() : 0;
                         var readResult = CompleteReadFileRecord(ctx, commandBuffer, readCommand);
+                        if (dsApr)
+                        {
+                            DsAprAcc.PreadTicks += Stopwatch.GetTimestamp() - dsT0;
+                            DsAprAcc.Bytes += unchecked((long)readCommand.Size);
+                        }
+
                         if (readResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
                         {
                             executionResult = readResult;
@@ -1049,7 +1083,13 @@ public static class AmprExports
 
                 case 3:
                     var waitCommand = waitAddressCommands[commandEntry.Index];
+                    var dsW0 = dsApr ? Stopwatch.GetTimestamp() : 0;
                     var waitResult = WaitForAddress(ctx, waitCommand);
+                    if (dsApr)
+                    {
+                        DsAprAcc.WaitTicks += Stopwatch.GetTimestamp() - dsW0;
+                    }
+
                     if (waitResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
                     {
                         executionResult = waitResult;
@@ -1861,6 +1901,11 @@ public static class AmprExports
         var spinWait = new SpinWait();
         while (true)
         {
+            if (DsTrace.Io)
+            {
+                DsAprAcc.WaitIters += 1;
+            }
+
             if (command.Flush != 0)
             {
                 Thread.MemoryBarrier();

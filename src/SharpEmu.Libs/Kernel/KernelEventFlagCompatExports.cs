@@ -3,8 +3,10 @@
 
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Text;
 using SharpEmu.HLE;
+using SharpEmu.HLE.DsTrace;
 using SharpEmu.Libs.Fiber;
 
 namespace SharpEmu.Libs.Kernel;
@@ -143,7 +145,12 @@ public static class KernelEventFlagCompatExports
             if (_traceEventFlag) TraceEventFlag($"set handle=0x{handle:X16} pattern=0x{pattern:X16} bits=0x{state.Bits:X16} ret=0x{returnRip:X16}");
         }
 
-        _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(GetEventFlagWakeKey(handle));
+        var dsWoken = GuestThreadExecution.Scheduler?.WakeBlockedThreads(GetEventFlagWakeKey(handle)) ?? 0;
+        if (DsTrace.Sync && DsTrace.Armed)
+        {
+            DsTrace.Emit(DsEv.EVS, handle, pattern, (ulong)dsWoken);
+        }
+
         return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
@@ -210,6 +217,19 @@ public static class KernelEventFlagCompatExports
         }
     }
 
+    private static void DsEvfExit(ulong handle, ulong bits, uint mode, ulong path, long startTs, ulong iters)
+    {
+        DsTrace.Emit(
+            DsEv.EVF,
+            handle,
+            bits,
+            mode,
+            path,
+            (ulong)DsTrace.TicksToNs(Stopwatch.GetTimestamp() - startTs),
+            iters,
+            DsTrace.CurrentRa1);
+    }
+
     [SysAbiExport(
         Nid = "JTvBflhYazQ",
         ExportName = "sceKernelWaitEventFlag",
@@ -223,6 +243,8 @@ public static class KernelEventFlagCompatExports
         var resultAddress = ctx[CpuRegister.Rcx];
         var timeoutAddress = ctx[CpuRegister.R8];
         var returnRip = GetCurrentReturnRip();
+        var dsEvf = DsTrace.Sync && DsTrace.Armed;
+        var dsStart = dsEvf ? Stopwatch.GetTimestamp() : 0;
 
         if (!_eventFlags.TryGetValue(handle, out var state))
         {
@@ -245,6 +267,11 @@ public static class KernelEventFlagCompatExports
         {
             if (TryCompleteSatisfiedWait(ctx, state, pattern, waitMode, resultAddress, out var immediateWaitResult))
             {
+                if (dsEvf)
+                {
+                    DsEvfExit(handle, pattern, waitMode, 0, dsStart, 0);
+                }
+
                 return SetReturn(ctx, immediateWaitResult);
             }
 
@@ -289,6 +316,11 @@ public static class KernelEventFlagCompatExports
                     }
 
                     _ = TryWriteResultPattern(ctx, resultAddress, state.Bits);
+                    if (dsEvf)
+                    {
+                        DsEvfExit(handle, pattern, waitMode, 3, dsStart, 0);
+                    }
+
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
                 },
                 () =>
@@ -322,10 +354,12 @@ public static class KernelEventFlagCompatExports
                 state.WaitingThreads++;
                 if (_traceEventFlag) TraceEventFlag($"wait-pump handle=0x{handle:X16} pattern=0x{pattern:X16} waiters={state.WaitingThreads} guest_thread=0x{currentGuestThread:X16} fiber=0x{currentFiber:X16} managed={managedThread} ret=0x{returnRip:X16}");
                 var releaseWaiter = true;
+                var dsIters = 0UL;
                 try
                 {
                     while (true)
                     {
+                        dsIters++;
                         Monitor.Exit(state.Gate);
                         try
                         {
@@ -341,6 +375,11 @@ public static class KernelEventFlagCompatExports
                             state.WaitingThreads = Math.Max(0, state.WaitingThreads - 1);
                             releaseWaiter = false;
                             if (_traceEventFlag) TraceEventFlag($"wait-wake handle=0x{handle:X16} pattern=0x{pattern:X16} bits=0x{state.Bits:X16} waiters={state.WaitingThreads} ret=0x{returnRip:X16}");
+                            if (dsEvf)
+                            {
+                                DsEvfExit(handle, pattern, waitMode, 2, dsStart, dsIters);
+                            }
+
                             return SetReturn(ctx, pumpedWaitResult);
                         }
 
@@ -352,6 +391,11 @@ public static class KernelEventFlagCompatExports
                             _ = TryWriteUInt32(ctx, timeoutAddress, 0);
                             _ = TryWriteResultPattern(ctx, resultAddress, state.Bits);
                             if (_traceEventFlag) TraceEventFlag($"wait-timeout handle=0x{handle:X16} pattern=0x{pattern:X16} bits=0x{state.Bits:X16} ret=0x{returnRip:X16}");
+                            if (dsEvf)
+                            {
+                                DsEvfExit(handle, pattern, waitMode, 3, dsStart, dsIters);
+                            }
+
                             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT);
                         }
 
@@ -365,6 +409,12 @@ public static class KernelEventFlagCompatExports
                         state.WaitingThreads = Math.Max(0, state.WaitingThreads - 1);
                     }
                 }
+            }
+
+            if (dsEvf)
+            {
+                // Cooperative path: total_ns covers only the time to the block request; the parked time is not visible here.
+                DsEvfExit(handle, pattern, waitMode, 1, dsStart, 0);
             }
 
             state.WaitingThreads++;
