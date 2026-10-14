@@ -48,6 +48,10 @@ internal sealed partial class MetalRenderHost
         // what names the shaders in a slow command buffer's SLOW-WAIT line.
         _lastWorkKind = kind;
         _lastWorkLabel = entry.Profile;
+        if (PassProfileEnabled)
+        {
+            PassProfileNoteWork(entry.Profile, kind);
+        }
         if (kind.StartsWith("draw", StringComparison.Ordinal))
         {
             NoteDrawState(kind, shape);
@@ -74,6 +78,7 @@ internal sealed partial class MetalRenderHost
         // Remembered unconditionally, like _lastWorkLabel: it is what names the producer
         // in a write-guard violation and in a slow command buffer's report.
         _lastTransferLabel = label;
+        PassProfileNoteBetween(label);
         _slotTrap?.NoteBinding($"transfer {label}", 0, 0, 0, 0, 0);
         ProfileCommandBuffer("transfer", label, string.Empty);
     }
