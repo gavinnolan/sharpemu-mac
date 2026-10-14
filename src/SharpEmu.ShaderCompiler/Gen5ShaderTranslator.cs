@@ -2900,7 +2900,10 @@ public static partial class Gen5ShaderTranslator
                     ((word >> 13) & 1) != 0,
                     ((word >> 25) & 1) != 0,
                     ((extra >> 30) & 1) != 0,
-                    ((extra >> 31) & 1) != 0);
+                    ((extra >> 31) & 1) != 0)
+                {
+                    Unorm = ((word >> 12) & 1) != 0,
+                };
                 break;
             }
             case Gen5ShaderEncoding.Exp:

@@ -26,7 +26,7 @@ public sealed class Gen5MslRuntimeScalarBufferTests
 
         // The descriptor's own registers are the base address: its low dword, then the
         // low sixteen bits of the second dword.
-        Assert.Matches(@"ulong t\d+ = \(\(\(ulong\)s12 \| \(\(ulong\)\(t\d+ & 0xFFFFu\) << 32\)\)", source);
+        Assert.Matches(@"ulong t\d+ = \(\(ulong\)s12 \| \(\(ulong\)\(t\d+ & 0xFFFFu\) << 32\)\);", source);
 
         // Stride and record count bound it, and the read goes through the page table.
         Assert.Matches(@"uint t\d+ = \(\(t\d+ >> 16u\) & 0x3FFFu\);", source);

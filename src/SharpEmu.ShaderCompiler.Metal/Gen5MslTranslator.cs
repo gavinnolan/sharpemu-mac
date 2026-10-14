@@ -1350,6 +1350,20 @@ public static partial class Gen5MslTranslator
 
         // ---- instruction dispatch ----
 
+        private static bool SetregTouchesIeeeOrClamp(uint simm16)
+        {
+            const uint ModeRegister = 1;
+            if ((simm16 & 0x3Fu) != ModeRegister)
+            {
+                return false;
+            }
+
+            var offset = (simm16 >> 6) & 0x1Fu;
+            var size = ((simm16 >> 11) & 0x1Fu) + 1u;
+            var touched = (uint)(((1ul << (int)size) - 1ul) << (int)offset);
+            return (touched & 0x300u) != 0;
+        }
+
         private bool TryEmitInstruction(
             Gen5ShaderInstruction instruction,
             out string error)
@@ -1361,8 +1375,21 @@ public static partial class Gen5MslTranslator
                 // No shader trap handler is installed, so S_TRAP has no effect.
                 case "STrap":
                     return true;
-                case "SNop":
+                // S_SETREG_B32 simm16 = hwreg id[5:0], offset[10:6], size-1[15:11]. The translator
+                // honours MODE only through the launch-time IeeeMode / DX10_CLAMP state (ALU output
+                // modifiers), so a write to MODE bits 8..9 would silently desync from it and is refused.
+                // FP_ROUND / FP_DENORM (bits 0..7) are not honoured anywhere in this translator (Metal has
+                // no per-instruction rounding and denorm flushing is fixed), and the other registers
+                // (TRAPSTS, HW_ID, ...) do not affect results, so those writes stay no-ops.
                 case "SSetregB32":
+                    if (instruction.Sources.Count > 1 && SetregTouchesIeeeOrClamp(instruction.Sources[1].Value))
+                    {
+                        error = "s_setreg_b32 writes MODE.IEEE/DX10_CLAMP, which is fixed at launch and not supported";
+                        return false;
+                    }
+
+                    return true;
+                case "SNop":
                 case "SWaitcnt":
                 // A dependency-counter wait: the emitted MSL has no hardware
                 // counters to wait on, so it is a hint like S_WAITCNT.
@@ -1553,6 +1580,16 @@ public static partial class Gen5MslTranslator
 
             // The dense buffer, its stride and its format come from the specialization.
             var specialized = buffers[bindingIndex];
+            // PackedStride bit 14 is V# SWIZZLE_ENABLE and bit 20 is ADD_TID_ENABLE (RDNA2 ISA Table 33,
+            // "Swizzled Buffer Addressing"). Both change the address formula (lane term, index_stride
+            // interleave) and the bounds rule; the linear math below implements neither, so translating
+            // them would silently address the wrong bytes.
+            if ((specialized.PackedStride & ((1u << 14) | (1u << 20))) != 0)
+            {
+                error = $"buffer {instruction.Opcode} uses a swizzled or add_tid V# (packed stride 0x{specialized.PackedStride:X}), which is not supported";
+                return false;
+            }
+
             var stride = FormatUInt(specialized.PackedStride & 0x3FFF);
             var descriptorFormat = specialized.DescriptorFormat;
             var descriptorWord3 = FormatUInt((specialized.DescriptorFormat << 12) | (specialized.DescriptorSwizzle & 0xFFF));
@@ -2143,8 +2180,8 @@ public static partial class Gen5MslTranslator
                 {
                     "Add" => $"{observed} + {first}",
                     "Sub" => $"{observed} - {first}",
-                    "Inc" => $"{observed} + 1u",
-                    "Dec" => $"{observed} - 1u",
+                    "Inc" => $"{observed} >= {first} ? 0u : {observed} + 1u",
+                    "Dec" => $"({observed} == 0u || {observed} > {first}) ? {first} : {observed} - 1u",
                     "Smin" => $"(uint)min(as_type<int>({observed}), as_type<int>({first}))",
                     "Smax" => $"(uint)max(as_type<int>({observed}), as_type<int>({first}))",
                     "Umin" => $"min({observed}, {first})",
@@ -2167,9 +2204,6 @@ public static partial class Gen5MslTranslator
             {
                 "Add" => $"atomic_fetch_add_explicit({pointer}, {first}, memory_order_relaxed)",
                 "Sub" => $"atomic_fetch_sub_explicit({pointer}, {first}, memory_order_relaxed)",
-                // DS_INC/DEC_U32 wrap, so they are an add and a subtract of one.
-                "Inc" => $"atomic_fetch_add_explicit({pointer}, 1u, memory_order_relaxed)",
-                "Dec" => $"atomic_fetch_sub_explicit({pointer}, 1u, memory_order_relaxed)",
                 "Umin" => $"atomic_fetch_min_explicit({pointer}, {first}, memory_order_relaxed)",
                 "Umax" => $"atomic_fetch_max_explicit({pointer}, {first}, memory_order_relaxed)",
                 "Smin" => $"(uint)atomic_fetch_min_explicit(({LdsAddressSpace} atomic_int*)&{word}, as_type<int>({first}), memory_order_relaxed)",
@@ -2193,6 +2227,9 @@ public static partial class Gen5MslTranslator
             var next = name switch
             {
                 "Cmpswap" => $"{expected} == {first} ? {second} : {expected}",
+                // DS_INC/DEC_U32 wrap against DATA0, so they are not a plain add/sub of one.
+                "Inc" => $"{expected} >= {first} ? 0u : {expected} + 1u",
+                "Dec" => $"({expected} == 0u || {expected} > {first}) ? {first} : {expected} - 1u",
                 "Mskor" => $"({expected} & ~{first}) | {second}",
                 // GFX10's DS_MIN_F32 replaces memory when DATA1 < memory and
                 // DS_MAX_F32 when memory > DATA1 -- the same predicate, which is
