@@ -304,6 +304,114 @@ public sealed class NggMeshTranslationTests
         Assert.DoesNotContain("sharpemu_gs_v0", shader.Source, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void ALocalPrimitiveSeedsItsVerticesInTheFieldsTheGuestDecodes()
+    {
+        // The guest reads bfe(v0, 2, 14), v0 >> 18 and bfe(v1, 2, 14): the local vertex index
+        // sits in bits 2-15 of each 16-bit field, exactly as the GS half packs it.
+        var shader = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.CullingTriangle());
+        Assert.Contains(
+            "v0 = ((sharpemu_mesh_prim_base << 2u) & 0xFFFFu) |", shader.Source, StringComparison.Ordinal);
+        Assert.Contains(
+            "((((sharpemu_mesh_prim_base + 1u) << 2u) & 0xFFFFu) << 16u);", shader.Source, StringComparison.Ordinal);
+        Assert.Contains(
+            "v1 = ((sharpemu_mesh_prim_base + 2u) << 2u) & 0xFFFFu;", shader.Source, StringComparison.Ordinal);
+
+        foreach (var lane in new[] { 0u, 1u, 9u, 10u, 31u })
+        {
+            var @base = lane * 3;
+            var v0 = ((@base << 2) & 0xFFFFu) | ((((@base + 1) << 2) & 0xFFFFu) << 16);
+            var v1 = ((@base + 2) << 2) & 0xFFFFu;
+            Assert.Equal(@base, (v0 >> 2) & 0x3FFFu);
+            Assert.Equal(@base + 1, v0 >> 18);
+            Assert.Equal(@base + 2, (v1 >> 2) & 0x3FFFu);
+        }
+    }
+
+    [Theory]
+    [InlineData(64u, 64u, 3u, 21u, 63u)]
+    [InlineData(64u, 10u, 3u, 10u, 30u)]
+    [InlineData(30u, 64u, 3u, 10u, 30u)]
+    [InlineData(64u, 64u, 2u, 32u, 64u)]
+    [InlineData(64u, 64u, 1u, 64u, 64u)]
+    [InlineData(2u, 64u, 3u, 1u, 3u)]
+    public void ASubgroupWithoutVertexReuseHoldsWholePrimitives(
+        uint maxVertices, uint maxPrimitives, uint perPrimitive, uint primitives, uint vertices)
+    {
+        var mesh = new Gen5MslMeshInfo(
+            ThreadsPerThreadgroup: 64, WavesPerThreadgroup: 2, MaxVertices: maxVertices, MaxPrimitives: maxPrimitives,
+            VerticesPerPrimitive: perPrimitive, Topology: Gen5MslMeshTopology.Triangle, ThreadgroupMemoryBytes: 4096,
+            DrawInfoBufferIndex: 2, IndexBufferIndex: 3, ReadsIndexBuffer: true);
+        Assert.Equal(primitives, mesh.PrimitivesPerSubgroup);
+        Assert.Equal(vertices, mesh.VerticesPerSubgroup);
+
+        // Every subgroup starts on a primitive boundary: its first vertex slot is a multiple
+        // of the primitive size, so a triangle is never split across two subgroups.
+        for (var subgroup = 0u; subgroup < 8; subgroup++)
+        {
+            Assert.Equal(0u, subgroup * mesh.VerticesPerSubgroup % perPrimitive);
+            Assert.Equal(subgroup * mesh.PrimitivesPerSubgroup * perPrimitive, subgroup * mesh.VerticesPerSubgroup);
+        }
+    }
+
+    [Fact]
+    public void AWave64PrimitiveShaderRunsAsOneNarrowWave()
+    {
+        var shader = Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.Wave64Triangles(), Gen5NggFixtures.Wave64StageInfo);
+        var mesh = Assert.IsType<Gen5MslMeshInfo>(shader.MeshInfo);
+        Assert.True(mesh.NarrowWave64);
+        Assert.Equal(32u, mesh.ThreadsPerThreadgroup);
+        Assert.Equal(1u, mesh.WavesPerThreadgroup);
+        Assert.Equal(30u, mesh.MaxVertices);
+        Assert.Equal(10u, mesh.MaxPrimitives);
+        Assert.Equal(30u, mesh.VerticesPerSubgroup);
+        Assert.Contains("max_total_threads_per_threadgroup(32)", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AWave32OrFusedPrimitiveShaderKeepsItsLaunch()
+    {
+        var wave32 = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.Wave64Triangles());
+        Assert.False(Assert.IsType<Gen5MslMeshInfo>(wave32.MeshInfo).NarrowWave64);
+
+        var fused = Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.Wave64Triangles(), Gen5NggFixtures.Wave64StageInfo with { GeometryVerticesOut = 3 });
+        Assert.False(Assert.IsType<Gen5MslMeshInfo>(fused.MeshInfo).NarrowWave64);
+    }
+
+    [Fact]
+    public void NarrowWave64LowersTheUpperHalfAsInactive()
+    {
+        var shader = Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.Wave64LaneProbe(), Gen5NggFixtures.Wave64StageInfo);
+        Assert.True(Assert.IsType<Gen5MslMeshInfo>(shader.MeshInfo).NarrowWave64);
+
+        // v_readlane of lane 63 reads an inactive lane: zero, not lane 31.
+        Assert.Contains(" >= 32u ? 0u : simd_shuffle(", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("& 63u", shader.Source, StringComparison.Ordinal);
+
+        // v_mbcnt_hi has no lanes to count: the addend passes through.
+        Assert.DoesNotContain("popcount", shader.Source, StringComparison.Ordinal);
+
+        // An all-ones EXEC_HI write leaves the upper half empty.
+        Assert.Matches(@"uint (t\d+) = 0u;\s+s127 = \1;", shader.Source);
+    }
+
+    [Fact]
+    public void LocalDataShareIsDeclaredAtTheGuestSize()
+    {
+        // 9 KB (the shape of a culling template's allocation) is 2304 dwords, not 4096.
+        var shader = Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.CullingTriangle(),
+            Gen5NggFixtures.StageInfo with { LocalDataShareBytes = 9216 });
+        Assert.Contains("threadgroup uint sharpemu_lds[2304];", shader.Source, StringComparison.Ordinal);
+        Assert.Equal(9216u, Assert.IsType<Gen5MslMeshInfo>(shader.MeshInfo).ThreadgroupMemoryBytes);
+
+        // Addresses mask to the covering power of two and clamp to the last declared dword.
+        Assert.Contains("& 4095u), 2303u)", shader.Source, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(Gen5MslMeshInputTopology.TriangleList, 3u, 10u)]
     [InlineData(Gen5MslMeshInputTopology.TriangleStrip, 3u, 10u)]

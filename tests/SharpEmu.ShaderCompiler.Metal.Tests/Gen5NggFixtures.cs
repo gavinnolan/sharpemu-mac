@@ -138,6 +138,103 @@ internal static class Gen5NggFixtures
         return new Gen5ShaderProgram(0, instructions);
     }
 
+    /// <summary>The stage state of a wave64 primitive shader with no GS half.</summary>
+    public static Gen5NggStageInfo Wave64StageInfo { get; } = StageInfo with
+    {
+        PrimitivesPerSubgroup = 64,
+        IsWave64 = true,
+    };
+
+    /// <summary>A subgroup of 10 triangles over 30 vertices, the narrow-wave64 launch.</summary>
+    public const uint Wave64SubgroupAllocation = 30u | (10u << Gen5NggExports.AllocationPrimitiveCountShift);
+
+    /// <summary>The compiler-generated culling template's shape, reduced: no barrier, no LDS,
+    /// every primitive owning three vertices. A vertex's position comes from its fetched
+    /// index (x = 0.8 * index - 0.8, y = 1.6 * (index &amp; 1) - 0.8), and a primitive decodes
+    /// its three local vertices from v0/v1 the way the guest does (bits 2-15 of each 16-bit
+    /// field) before exporting them.</summary>
+    public static Gen5ShaderProgram Wave64Triangles()
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+
+        void Add(string opcode, Gen5ShaderEncoding encoding, Gen5Operand[] sources,
+            Gen5Operand[] destinations, Gen5InstructionControl? control = null, uint word = 0)
+        {
+            instructions.Add(new Gen5ShaderInstruction(
+                pc, encoding, opcode, [word], sources, destinations, control));
+            pc += sizeof(uint);
+        }
+
+        Add("DsWriteB32", Gen5ShaderEncoding.Ds,
+            [Vector(11), Vector(10)], [], new Gen5DataShareControl(0, 0, false));
+        Add("VMovB32", Gen5ShaderEncoding.Vop1, [Vector(Gen5NggExports.EsVertexIndexRegister)], [Vector(14)]);
+        Add("VCvtF32U32", Gen5ShaderEncoding.Vop1, [Vector(14)], [Vector(15)]);
+        Add("VMulF32", Gen5ShaderEncoding.Vop2, [Literal(Bits(0.8f)), Vector(15)], [Vector(16)]);
+        Add("VAddF32", Gen5ShaderEncoding.Vop2, [Literal(Bits(-0.8f)), Vector(16)], [Vector(16)]);
+        Add("VAndB32", Gen5ShaderEncoding.Vop2, [Inline(1), Vector(14)], [Vector(17)]);
+        Add("VCvtF32U32", Gen5ShaderEncoding.Vop1, [Vector(17)], [Vector(18)]);
+        Add("VMulF32", Gen5ShaderEncoding.Vop2, [Literal(Bits(1.6f)), Vector(18)], [Vector(19)]);
+        Add("VAddF32", Gen5ShaderEncoding.Vop2, [Literal(Bits(-0.8f)), Vector(19)], [Vector(19)]);
+        Add("VMovB32", Gen5ShaderEncoding.Vop1, [Inline(0)], [Vector(20)]);
+        Add("VMovB32", Gen5ShaderEncoding.Vop1, [Literal(Bits(1.0f))], [Vector(21)]);
+        Add("SMovB32", Gen5ShaderEncoding.Sop1, [Literal(Wave64SubgroupAllocation)], [Scalar(124)]);
+        Add("SSendmsg", Gen5ShaderEncoding.Sopp, [], [], word: SendMessageWord);
+        Add("Exp", Gen5ShaderEncoding.Exp,
+            [Vector(16), Vector(19), Vector(20), Vector(21)], [],
+            new Gen5ExportControl(Gen5NggExports.FirstPositionTarget, 0xF, false, false, false));
+        Add("Exp", Gen5ShaderEncoding.Exp,
+            [Vector(15), Vector(20), Vector(20), Vector(21)], [],
+            new Gen5ExportControl(Gen5NggExports.FirstParameterTarget, 0xF, false, false, false));
+
+        // i0 = bfe(v0, 2, 14), i1 = v0 >> 18, i2 = bfe(v1, 2, 14), packed one per 10-bit field.
+        Add("VLshrrevB32", Gen5ShaderEncoding.Vop2, [Inline(2), Vector(Gen5NggExports.GsVertexOffset01Register)], [Vector(30)]);
+        Add("VAndB32", Gen5ShaderEncoding.Vop2, [Literal(0x3FFF), Vector(30)], [Vector(30)]);
+        Add("VLshrrevB32", Gen5ShaderEncoding.Vop2, [Literal(18), Vector(Gen5NggExports.GsVertexOffset01Register)], [Vector(31)]);
+        Add("VLshlrevB32", Gen5ShaderEncoding.Vop2, [Literal(Gen5NggExports.PrimitiveIndexStride), Vector(31)], [Vector(31)]);
+        Add("VLshrrevB32", Gen5ShaderEncoding.Vop2, [Inline(2), Vector(Gen5NggExports.GsVertexOffset23Register)], [Vector(32)]);
+        Add("VAndB32", Gen5ShaderEncoding.Vop2, [Literal(0x3FFF), Vector(32)], [Vector(32)]);
+        Add("VLshlrevB32", Gen5ShaderEncoding.Vop2, [Literal(2 * Gen5NggExports.PrimitiveIndexStride), Vector(32)], [Vector(32)]);
+        Add("VOrB32", Gen5ShaderEncoding.Vop2, [Vector(31), Vector(30)], [Vector(22)]);
+        Add("VOrB32", Gen5ShaderEncoding.Vop2, [Vector(32), Vector(22)], [Vector(22)]);
+        Add("Exp", Gen5ShaderEncoding.Exp,
+            [Vector(22), Vector(22), Vector(22), Vector(22)], [],
+            new Gen5ExportControl(Gen5NggExports.PrimitiveTarget, 0x1, false, true, false));
+        Add("SEndpgm", Gen5ShaderEncoding.Sopp, [], [], word: EndProgramWord);
+        return new Gen5ShaderProgram(0, instructions);
+    }
+
+    /// <summary>The cross-lane operations whose wave64 behaviour the narrow lowering pins:
+    /// v_readlane of lane 63, v_mbcnt_hi, and an all-ones write to EXEC_HI.</summary>
+    public static Gen5ShaderProgram Wave64LaneProbe()
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+
+        void Add(string opcode, Gen5ShaderEncoding encoding, Gen5Operand[] sources,
+            Gen5Operand[] destinations, Gen5InstructionControl? control = null, uint word = 0)
+        {
+            instructions.Add(new Gen5ShaderInstruction(
+                pc, encoding, opcode, [word], sources, destinations, control));
+            pc += sizeof(uint);
+        }
+
+        Add("DsWriteB32", Gen5ShaderEncoding.Ds,
+            [Vector(11), Vector(10)], [], new Gen5DataShareControl(0, 0, false));
+        Add("VReadlaneB32", Gen5ShaderEncoding.Vop3,
+            [Vector(Gen5NggExports.EsVertexIndexRegister), Literal(63)], [Scalar(20)]);
+        Add("VMbcntHiU32B32", Gen5ShaderEncoding.Vop3, [Scalar(20), Vector(11)], [Vector(12)]);
+        Add("SMovB32", Gen5ShaderEncoding.Sop1, [Literal(0xFFFF_FFFFu)], [Scalar(127)]);
+        Add("VMovB32", Gen5ShaderEncoding.Vop1, [Literal(Bits(1.0f))], [Vector(21)]);
+        Add("SMovB32", Gen5ShaderEncoding.Sop1, [Literal(Wave64SubgroupAllocation)], [Scalar(124)]);
+        Add("SSendmsg", Gen5ShaderEncoding.Sopp, [], [], word: SendMessageWord);
+        Add("Exp", Gen5ShaderEncoding.Exp,
+            [Vector(12), Vector(21), Vector(21), Vector(21)], [],
+            new Gen5ExportControl(Gen5NggExports.FirstPositionTarget, 0xF, false, false, false));
+        Add("SEndpgm", Gen5ShaderEncoding.Sopp, [], [], word: EndProgramWord);
+        return new Gen5ShaderProgram(0, instructions);
+    }
+
     /// <summary>A primitive shader with no LDS and no barrier: the passthrough shape that
     /// must keep using the per-vertex path.</summary>
     public static Gen5ShaderProgram Passthrough()

@@ -150,8 +150,8 @@ position.
 
 | Dword | Field | Value |
 | --- | --- | --- |
-| 0 | `vertices_per_subgroup` | ES vertices in one subgroup. `VGT_GS_ONCHIP_CNTL.ES_VERTS_PER_SUBGRP`, else `GE_MAX_OUTPUT_PER_SUBGROUP`. Clamped in-shader to `MaxVertices`. |
-| 1 | `primitives_per_subgroup` | `VGT_GS_ONCHIP_CNTL.GS_PRIMS_PER_SUBGRP`, else `GE_MAX_OUTPUT_PER_SUBGROUP`. Clamped to `MaxPrimitives`. |
+| 0 | `vertices_per_subgroup` | ES vertices in one subgroup. `VGT_GS_ONCHIP_CNTL.ES_VERTS_PER_SUBGRP`, else `GE_MAX_OUTPUT_PER_SUBGROUP`. Clamped in-shader to `MaxVertices`. Without a GS half the host sends `PrimitivesPerSubgroup * vertices-per-primitive` (whole primitives, no vertex reuse) and a lane's vertex slot is `subgroup * vertices_per_subgroup + lane`. |
+| 1 | `primitives_per_subgroup` | `VGT_GS_ONCHIP_CNTL.GS_PRIMS_PER_SUBGRP`, else `GE_MAX_OUTPUT_PER_SUBGROUP`. Clamped to `MaxPrimitives`. Without a GS half the host sends `min(MaxPrimitives, MaxVertices / vertices-per-primitive)`; the last subgroup is cut to the primitives `input_vertex_count` leaves. |
 | 2 | `index_count` | Indices the draw has. Zero means an automatic (non-indexed) draw. |
 | 3 | `index_type` | 0 none, 1 = 16-bit indices, 2 = 32-bit. |
 | 4 | `first_index` | Index of the draw's first index, in elements. |

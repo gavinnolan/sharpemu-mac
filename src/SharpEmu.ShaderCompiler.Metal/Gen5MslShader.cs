@@ -49,8 +49,20 @@ public sealed record Gen5MslMeshInfo(
     uint DrawInfoBufferIndex,
     uint IndexBufferIndex,
     bool ReadsIndexBuffer,
-    uint GeometryVerticesOut = 0)
+    uint GeometryVerticesOut = 0,
+    bool NarrowWave64 = false)
 {
+    /// <summary>Primitives one subgroup of a program without a GS half holds. Every
+    /// primitive owns its vertices (no reuse), so a subgroup is whole primitives: as many as
+    /// fit both the primitive extent and the vertex extent. The host splits the draw by this
+    /// number and the mesh prologue maps a lane's slot from the same one.</summary>
+    public uint PrimitivesPerSubgroup =>
+        Math.Max(Math.Min(MaxPrimitives, MaxVertices / Math.Max(VerticesPerPrimitive, 1)), 1);
+
+    /// <summary>Vertices one subgroup of a program without a GS half holds: three own
+    /// vertices per triangle, so a subgroup never starts or ends mid-primitive.</summary>
+    public uint VerticesPerSubgroup => PrimitivesPerSubgroup * Math.Max(VerticesPerPrimitive, 1);
+
     /// <summary>Whether the program has a GS half that assembles its input primitives
     /// from the draw's topology; see <see cref="InputPrimitivesPerSubgroup"/>.</summary>
     public bool HasGeometryHalf => GeometryVerticesOut != 0;

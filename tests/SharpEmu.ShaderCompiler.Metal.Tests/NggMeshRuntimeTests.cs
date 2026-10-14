@@ -73,6 +73,72 @@ public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void IndexedWave64PrimitiveShaderDrawsTrianglesFromEverySubgroup()
+    {
+        if (SkipWithoutMetalDevice("the narrow wave64 mesh execution test")) return;
+
+        // 12 triangles, 36 indices, two subgroups of 10 and 2 triangles. Triangles 0-9 use
+        // index 3 for every corner, so they are degenerate; triangle 10 is the first of the
+        // second subgroup and uses indices 0/1/2, the triangle through the screen center.
+        // It only appears if the seeded local vertices decode, the second subgroup starts on
+        // a triangle boundary (slot 30, not 64) and the narrow wave launches.
+        var shader = Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.Wave64Triangles(), Gen5NggFixtures.Wave64StageInfo);
+        var mesh = shader.MeshInfo!;
+        Assert.Equal(32u, mesh.ThreadsPerThreadgroup);
+        var source = shader.Source + FragmentSource;
+        if (!MetalNative.TryCompileLibrary(source, out var library, out var compileError))
+        {
+            throw new InvalidOperationException($"Metal rejected the mesh MSL: {compileError}\n{source}");
+        }
+
+        var indices = new uint[36];
+        for (var i = 0; i < indices.Length; i++)
+        {
+            indices[i] = 3;
+        }
+
+        indices[30] = 0;
+        indices[31] = 1;
+        indices[32] = 2;
+        var indexBytes = new byte[indices.Length * sizeof(uint)];
+        Buffer.BlockCopy(indices, 0, indexBytes, 0, indexBytes.Length);
+
+        var words = new uint[Gen5MslMeshInfo.DrawInfoDwordCount];
+        words[0] = mesh.VerticesPerSubgroup;
+        words[1] = mesh.PrimitivesPerSubgroup;
+        words[2] = (uint)indices.Length;
+        words[3] = 2; // 32-bit indices.
+        words[6] = 1;
+        words[15] = (uint)indices.Length;
+        var drawInfo = new byte[words.Length * sizeof(uint)];
+        Buffer.BlockCopy(words, 0, drawInfo, 0, drawInfo.Length);
+
+        Assert.True(
+            MetalNative.TryRenderMesh(
+                library,
+                shader.EntryPoint,
+                "gen5_mesh_test_fs",
+                [
+                    (BuildArgumentBuffer(shader), 0u),
+                    (new byte[64], 1u),
+                    (drawInfo, mesh.DrawInfoBufferIndex),
+                    (indexBytes, mesh.IndexBufferIndex),
+                ],
+                threadgroups: 2,
+                mesh.ThreadsPerThreadgroup,
+                TargetSize,
+                TargetSize,
+                out var pixels,
+                out var renderError),
+            $"the mesh draw failed: {renderError}");
+
+        Assert.Equal(1.0f, Green(pixels, TargetSize / 2, TargetSize / 2), 3);
+        Assert.Equal(0.0f, Green(pixels, 1, 1), 3);
+        Assert.Equal(0.0f, Green(pixels, TargetSize - 2, 1), 3);
+    }
+
+    [Fact]
     public void BufferFetchedVerticesRasterizeThroughAMeshPipeline()
     {
         if (SkipWithoutMetalDevice("the mesh vertex-fetch test")) return;
@@ -205,6 +271,10 @@ public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
         yield return ("clamped subgroup", Gen5NggFixtures.CompileOrThrow(
             Gen5NggFixtures.CullingTriangle(),
             Gen5NggFixtures.StageInfo with { VerticesPerSubgroup = 4096, PrimitivesPerSubgroup = 4096 }));
+        yield return ("narrow wave64", Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.Wave64Triangles(), Gen5NggFixtures.Wave64StageInfo));
+        yield return ("narrow wave64 lane probe", Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.Wave64LaneProbe(), Gen5NggFixtures.Wave64StageInfo));
         yield return ("gs half", Gen5NggFixtures.CompileOrThrow(
             Gen5NggFixtures.CullingTriangle(),
             Gen5NggFixtures.StageInfo with { GeometryVerticesOut = 3 }));

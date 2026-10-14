@@ -76,6 +76,20 @@ public static partial class Gen5MslTranslator
         var fallback = ngg.MaxOutputPerSubgroup != 0 ? ngg.MaxOutputPerSubgroup : MeshWaveLanes;
         var vertices = Clamp(ngg.VerticesPerSubgroup != 0 ? ngg.VerticesPerSubgroup : fallback, 1, MeshMaxVertices);
         var primitives = Clamp(ngg.PrimitivesPerSubgroup != 0 ? ngg.PrimitivesPerSubgroup : fallback, 1, MeshMaxPrimitives);
+        var perPrimitive = Gen5NggExports.VerticesPerPrimitive(ngg.OutputPrimitiveType);
+
+        // A wave64 program with no GS half runs as a narrow wave64: one 32-lane simdgroup
+        // that stands for the low half of the guest wave, so the whole subgroup (one lane
+        // per vertex, one per primitive) has to fit in 32 lanes.
+        var narrow = IsNarrowWave64(request);
+        if (narrow)
+        {
+            var fitting = Math.Max(Math.Min(primitives, MeshWaveLanes / perPrimitive), 1);
+            primitives = fitting;
+            vertices = Math.Min(Math.Max(vertices, perPrimitive), MeshWaveLanes);
+            vertices = Math.Min(vertices, fitting * perPrimitive);
+        }
+
         var waves = Clamp((Math.Max(vertices, primitives) + MeshWaveLanes - 1) / MeshWaveLanes, 1, MeshMaxWaves);
         var topology = ngg.OutputPrimitiveType switch
         {
@@ -95,24 +109,26 @@ public static partial class Gen5MslTranslator
             DrawInfoBufferIndex: MeshDrawInfoBufferIndex,
             IndexBufferIndex: MeshIndexBufferIndex,
             ReadsIndexBuffer: true,
-            GeometryVerticesOut: ngg.GeometryVerticesOut);
+            GeometryVerticesOut: ngg.GeometryVerticesOut,
+            NarrowWave64: narrow);
     }
 
-    // Round the stage's LDS allocation up to a power of two inside the mesh budget; the
-    // mask-based LDS addressing needs the power of two, and a program that asks for
+    /// <summary>True when the program is a wave64 primitive shader without a GS half. The
+    /// Metal wave is 32 lanes, so the guest's upper 32 lanes are modelled as architecturally
+    /// inactive (see <see cref="CompilationContext.IsNarrowWave64"/>).</summary>
+    private static bool IsNarrowWave64(ShaderCompileRequest request) =>
+        request.PrimitiveShader is { IsWave64: true, GeometryVerticesOut: 0 };
+
+    // The stage's LDS allocation, exactly, inside the mesh budget: the declared threadgroup
+    // memory sets occupancy, so it is not rounded up. Addressing masks to the power of two
+    // that covers it and clamps to the last dword (see LdsIndex). A program that asks for
     // nothing still gets the floor so a stray address stays in bounds.
     private static uint MeshLdsDwordCount(ShaderCompileRequest request)
     {
         var requested = request.PrimitiveShader is { LocalDataShareBytes: var bytes } && bytes != 0
             ? (bytes + sizeof(uint) - 1) / sizeof(uint)
             : request.LocalDataShareDwords;
-        var count = MeshLdsDwordFloor;
-        while (count < requested && count < MeshLdsDwordCeiling)
-        {
-            count *= 2;
-        }
-
-        return count;
+        return requested == 0 ? MeshLdsDwordFloor : Math.Min(requested, MeshLdsDwordCeiling);
     }
 
     private static uint Clamp(uint value, uint low, uint high) => Math.Min(Math.Max(value, low), high);
@@ -132,6 +148,12 @@ public static partial class Gen5MslTranslator
             _stage == Gen5MslStage.Compute && _usesLds &&
             _computeLdsDwords + WaveScratchDwords > LdsDwordCount;
 
+
+        /// <summary>A wave64 primitive shader with no GS half, run as one 32-lane simdgroup.
+        /// Guest lanes 32..63 do not exist: a lane-mask write to an SGPR pair leaves the high
+        /// dword 0, EXEC_HI is 0, V_READLANE / V_READFIRSTLANE of a lane >= 32 read 0,
+        /// V_MBCNT_HI passes its addend through and V_WRITELANE to such a lane is a no-op.</summary>
+        private bool IsNarrowWave64 => _meshInfo is { NarrowWave64: true };
 
         private Gen5MslMeshInfo Mesh => _meshInfo ??
             throw new InvalidOperationException("the mesh interface is only built for the mesh stage");
@@ -323,10 +345,26 @@ public static partial class Gen5MslTranslator
             }
             else
             {
+                // The last subgroup holds only the primitives the draw has left; a draw that
+                // reports no vertex count (input_vertex_count == 0) is not bounded.
+                var perPrimitive = Math.Max(mesh.VerticesPerPrimitive, 1u);
                 source.AppendLine(
-                    $"        sharpemu_mesh_alloc[0] = min({MeshDrawInfoName}.vertices_per_subgroup, {mesh.MaxVertices}u);");
+                    $"        const uint sharpemu_mesh_prims_total = {MeshDrawInfoName}.input_vertex_count / {perPrimitive}u;");
                 source.AppendLine(
-                    $"        sharpemu_mesh_alloc[1] = min({MeshDrawInfoName}.primitives_per_subgroup, {mesh.MaxPrimitives}u);");
+                    $"        const uint sharpemu_mesh_prims_first = sharpemu_mesh_subgroup * {MeshDrawInfoName}.primitives_per_subgroup;");
+                source.AppendLine(
+                    $"        const uint sharpemu_mesh_prims_left = {MeshDrawInfoName}.input_vertex_count == 0u ? 0xFFFFFFFFu");
+                source.AppendLine(
+                    "            : (sharpemu_mesh_prims_total > sharpemu_mesh_prims_first ? sharpemu_mesh_prims_total - sharpemu_mesh_prims_first : 0u);");
+                source.AppendLine(
+                    $"        const uint sharpemu_mesh_prims = min(min({MeshDrawInfoName}.primitives_per_subgroup, {mesh.MaxPrimitives}u), sharpemu_mesh_prims_left);");
+                source.AppendLine(
+                    $"        const uint sharpemu_mesh_verts = min({MeshDrawInfoName}.vertices_per_subgroup, {mesh.MaxVertices}u);");
+                source.AppendLine(
+                    $"        sharpemu_mesh_alloc[0] = sharpemu_mesh_prims_left < {MeshDrawInfoName}.primitives_per_subgroup");
+                source.AppendLine(
+                    $"            ? min(sharpemu_mesh_verts, sharpemu_mesh_prims * {perPrimitive}u) : sharpemu_mesh_verts;");
+                source.AppendLine("        sharpemu_mesh_alloc[1] = sharpemu_mesh_prims;");
             }
 
             source.AppendLine("    }");
@@ -373,12 +411,15 @@ public static partial class Gen5MslTranslator
             }
             else
             {
+                // Every primitive owns its vertices, so a subgroup of P primitives owns
+                // vertices_per_subgroup = P * vertices-per-primitive consecutive slots and
+                // never splits a primitive; the host sizes both from the same numbers.
                 source.AppendLine(
                     "    const uint sharpemu_mesh_vertex_slot = sharpemu_mesh_subgroup * " +
-                    $"{mesh.MaxVertices}u + sharpemu_tg_index;");
+                    $"{MeshDrawInfoName}.vertices_per_subgroup + sharpemu_tg_index;");
                 source.AppendLine(
                     "    const uint sharpemu_mesh_prim_slot = sharpemu_mesh_subgroup * " +
-                    $"{mesh.MaxPrimitives}u + sharpemu_tg_index;");
+                    $"{MeshDrawInfoName}.primitives_per_subgroup + sharpemu_tg_index;");
             }
             source.AppendLine(
                 $"    const uint sharpemu_mesh_vertex_index = (uint)((int)sharpemu_mesh_index({MeshIndexBufferName}, " +
@@ -457,14 +498,17 @@ public static partial class Gen5MslTranslator
             }
             else
             {
+                // Each primitive owns vertices local_prim * N .. +N-1. The guest decodes a vertex
+                // as bits 2-15 of each 16-bit field (v0 = vertices 0/1, v1 = vertex 2), so the
+                // local index is shifted left by two, as in the GS half above.
                 var perPrimitive = Math.Max(mesh.VerticesPerPrimitive, 1u);
                 source.AppendLine(
                     $"    const uint sharpemu_mesh_prim_base = sharpemu_tg_index * {perPrimitive}u;");
                 source.AppendLine(
-                    $"    v[{Gen5NggExports.GsVertexOffset01Register}] = (sharpemu_mesh_prim_base & 0xFFFFu) |");
-                source.AppendLine("        (((sharpemu_mesh_prim_base + 1u) & 0xFFFFu) << 16u);");
+                    $"    v[{Gen5NggExports.GsVertexOffset01Register}] = ((sharpemu_mesh_prim_base << 2u) & 0xFFFFu) |");
+                source.AppendLine("        ((((sharpemu_mesh_prim_base + 1u) << 2u) & 0xFFFFu) << 16u);");
                 source.AppendLine(
-                    $"    v[{Gen5NggExports.GsVertexOffset23Register}] = (sharpemu_mesh_prim_base + 2u) & 0xFFFFu;");
+                    $"    v[{Gen5NggExports.GsVertexOffset23Register}] = ((sharpemu_mesh_prim_base + 2u) << 2u) & 0xFFFFu;");
             }
             source.AppendLine($"    v[{Gen5NggExports.GsPrimitiveIdRegister}] = sharpemu_mesh_prim_slot;");
             source.AppendLine($"    v[{Gen5NggExports.GsInvocationIdRegister}] = 0u;");

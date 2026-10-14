@@ -1831,12 +1831,18 @@ public static partial class Gen5MslTranslator
             var wordMask = _stage switch
             {
                 Gen5MslStage.Compute => _computeLdsDwords - 1,
-                Gen5MslStage.Mesh => _meshLdsDwords - 1,
+                Gen5MslStage.Mesh => (uint)(System.Numerics.BitOperations.RoundUpToPowerOf2(_meshLdsDwords) - 1),
                 _ => PrivateLdsDwordCount - 1,
             };
-            return offsetBytes == 0
+            var index = offsetBytes == 0
                 ? $"((({address}) >> 2) & {wordMask}u)"
                 : $"(((({address}) + {offsetBytes}u) >> 2) & {wordMask}u)";
+
+            // The mesh LDS is declared at exactly the guest allocation, so the masked index
+            // can name a dword past it; clamp to the last one.
+            return _stage == Gen5MslStage.Mesh && wordMask != _meshLdsDwords - 1
+                ? $"min({index}, {_meshLdsDwords - 1}u)"
+                : index;
         }
 
         private bool TryEmitDataShare(
@@ -2504,6 +2510,7 @@ public static partial class Gen5MslTranslator
         private string ClampExecToLanes64(string expression) =>
             IsSingleLaneStage ? $"({expression}) & 1ul"
             : ClampsExecToLanes ? $"({expression}) & (ulong)sharpemu_ballot(true)"
+            : IsNarrowWave64 ? $"({expression}) & 0xFFFFFFFFul"
             : expression;
 
         // VCC (s106:s107) and EXEC (s126:s127) are architectural SGPRs: programs
@@ -2535,7 +2542,7 @@ public static partial class Gen5MslTranslator
                 case VccHiRegister:
                 case ExecHiRegister:
                 {
-                    var value = Temp("uint", register == ExecHiRegister && ClampsExecToLanes ? "0u" : expression);
+                    var value = Temp("uint", register == ExecHiRegister && (ClampsExecToLanes || IsNarrowWave64) ? "0u" : expression);
                     Line($"s[{register}] = {value};");
                     if (IsWave64)
                     {

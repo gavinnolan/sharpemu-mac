@@ -1479,9 +1479,16 @@ internal sealed partial class MetalRenderHost
         var primitives = count / verticesPerPrimitive;
         var maxPrimitives = Math.Max(mesh.MaxPrimitives, 1);
         var maxVertices = Math.Max(mesh.MaxVertices, 1);
-        var subgroups = Math.Max(
-            (primitives + maxPrimitives - 1) / maxPrimitives,
-            (count + maxVertices - 1) / maxVertices);
+
+        // Without a GS half every primitive owns its vertices, so a subgroup is whole
+        // primitives: the prologue maps slot -> index position from the same counts.
+        var primitivesPerSubgroup = mesh.HasGeometryHalf ? maxPrimitives : mesh.PrimitivesPerSubgroup;
+        var verticesPerSubgroup = mesh.HasGeometryHalf ? maxVertices : mesh.VerticesPerSubgroup;
+        var subgroups = mesh.HasGeometryHalf
+            ? Math.Max(
+                (primitives + maxPrimitives - 1) / maxPrimitives,
+                (count + maxVertices - 1) / maxVertices)
+            : (primitives + primitivesPerSubgroup - 1) / primitivesPerSubgroup;
 
         // A GS half assembles its input primitives from the draw's own topology, so the
         // draw splits by input primitives and the prologue learns where each subgroup's
@@ -1502,8 +1509,8 @@ internal sealed partial class MetalRenderHost
         var drawInfo = _guestMemory.Allocate(Gen5MslMeshInfo.DrawInfoByteSize, 256, out var span);
         span.Clear();
         var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(span);
-        words[0] = maxVertices;
-        words[1] = maxPrimitives;
+        words[0] = verticesPerSubgroup;
+        words[1] = primitivesPerSubgroup;
         words[2] = indexed ? count : 0;
         words[3] = indexed ? (_indexType == Mtl.IndexTypeUInt32 ? 2u : 1u) : 0u;
         words[4] = indexed ? firstIndexOrVertex : 0;

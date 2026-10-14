@@ -14,6 +14,12 @@ public static class VgtShaderStages
     // always compile as wave32, so they never change the path.
     public const uint WaveSizeBits = (1u << 22) | (1u << 23);
 
+    /// <summary>GS_W32_EN (bit 22): set selects wave32, clear selects wave64 for the
+    /// merged ES/GS stage.</summary>
+    public const uint GeometryWave32Bit = 1u << 22;
+
+    public static bool IsGeometryWave64(uint stages) => (stages & GeometryWave32Bit) == 0;
+
     // Bits 0-1 (LS_EN), 2 (HS_EN) and 6-7 (VS_EN) select stages no primitive shader
     // implements: tessellation and the legacy vertex stage.
     public const uint ForeignStageBits = 0x7u | (0x3u << 6);
