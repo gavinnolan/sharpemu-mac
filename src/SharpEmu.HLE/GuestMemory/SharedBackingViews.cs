@@ -503,30 +503,51 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
         }
     }
 
-    // The lock-free single-view write; false (with nothing written) for anything else. A backing
-    // enrolled in managed-write admission is left to TryWriteBacking, which captures the original
-    // mapping identity before it asks for admission and can wait out a busy publication.
+    // SHARPEMU_SINGLE_VIEW_WRITE_FASTPATH=0 restores the old bail on managed-write-enrolled
+    // backings (every macOS backing), sending every such write through the PVM-locked
+    // TryWriteBacking path. Read once; for bisecting a regression without a rebuild.
+    private static readonly bool SingleViewWriteFastPath =
+        Environment.GetEnvironmentVariable("SHARPEMU_SINGLE_VIEW_WRITE_FASTPATH") != "0";
+
+    // The lock-free single-view write; false, with no bytes written, no admission held and
+    // no receipt minted, for anything else. The caller (PVM.TryWriteCore) then takes its
+    // locked TryWriteBacking path as a new first attempt: a refused admission holds nothing,
+    // so that attempt is only a later first attempt, and it alone captures the original
+    // region/mapping identity and mints the publication-busy receipt it may wait on.
+    //
+    // Invariants, unchanged from the locked path:
+    // - The view is resolved (and the alias pin taken) BEFORE ordinary admission. A lookup
+    //   miss must never End an admitted operation token: End(token, false) invalidates
+    //   every read watch on the whole backing (HostManagedWriteIntervals.End).
+    // - No byte lands without an admitted ordinary operation token, so a held publication
+    //   reservation excludes this write exactly as it excludes TryWriteBacking.
+    // - CopyToCanonicalAlias brackets the bytes with a per-chunk interval that invalidates
+    //   overlapping read watches before the bytes land.
+    // - The alias pin is held until after the bytes and the operation's completion.
+    // - Nothing here waits, so callers that already hold the PVM gate stay safe.
+    // Relaxed, as for TryReadSingleView: the write is not ordered against a concurrent PVM
+    // unmap/remap of the same range, because the PVM gate is not taken.
     public bool TryWriteSingleView(ulong address, ReadOnlySpan<byte> data)
     {
-        if (data.IsEmpty || _backing?.ManagedWrites is not null)
+        if (data.IsEmpty || (!SingleViewWriteFastPath && _backing?.ManagedWrites is not null))
         {
             return false;
         }
 
-        var interval = _backing?.BeginManagedWriteOperation() ?? default;
-        if (!HostManagedWriteIntervals.AllowsBytes(interval))
+        if (!TryAccessSingleView(address, (ulong)data.Length, out var target))
         {
             return false;
         }
 
-        var succeeded = false;
         try
         {
-            if (!TryAccessSingleView(address, (ulong)data.Length, out var target))
+            var interval = _backing?.BeginManagedWriteOperation() ?? default;
+            if (!HostManagedWriteIntervals.AllowsBytes(interval))
             {
                 return false;
             }
 
+            var succeeded = false;
             try
             {
                 CopyToCanonicalAlias(target, data);
@@ -535,12 +556,12 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
             }
             finally
             {
-                ExitAliasAccess();
+                HostBackingObject.EndManagedWrite(interval, succeeded);
             }
         }
         finally
         {
-            HostBackingObject.EndManagedWrite(interval, succeeded);
+            ExitAliasAccess();
         }
     }
 

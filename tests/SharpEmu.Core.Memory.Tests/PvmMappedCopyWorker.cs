@@ -10,7 +10,7 @@ using Xunit;
 
 namespace SharpEmu.Core.Memory.Tests;
 
-internal static class PvmMappedCopyWorker
+internal static partial class PvmMappedCopyWorker
 {
     public static int Main(string[] args)
     {
@@ -69,7 +69,8 @@ internal static class PvmMappedCopyWorker
 #if SHARPEMU_HOST_MACOS
     private static void Execute(IHostMemory memory, IHostViewMemory views, ulong kernelPage, string scenario)
     {
-        if (scenario is not ("full-copy" or "unrelated-canonical" or "aba-close" or "unsupported-wrapper"))
+        if (scenario is not ("full-copy" or "unrelated-canonical" or "aba-close" or "unsupported-wrapper") &&
+            !IsSingleViewWriteScenario(scenario))
             throw new ArgumentException("Unknown worker scenario.", nameof(scenario));
         PhysicalVirtualMemory? pvm = null;
         Exception? primary = null;
@@ -86,6 +87,11 @@ internal static class PvmMappedCopyWorker
                 preReserveGuestAddressSpace: false);
             constructorReturned = true;
             Stage("real-constructor-self-test-return", scenario);
+            if (IsSingleViewWriteScenario(scenario))
+            {
+                ExecuteSingleViewWrite(pvm, views, kernelPage, scenario);
+                return;
+            }
             var tracked = new TrackedCpuMemory(pvm);
             var extent = 2 * GuestMemoryLayout.GuestPage;
             var alignment = Math.Max(views.Granularity, GuestMemoryLayout.GuestPage);
