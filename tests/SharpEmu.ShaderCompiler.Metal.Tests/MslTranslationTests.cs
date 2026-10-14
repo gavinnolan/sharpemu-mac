@@ -1153,7 +1153,7 @@ public sealed class MslTranslationTests
         if (typed)
         {
             Assert.DoesNotContain("sharpemu_gfx10_formats[(", shader.Source, StringComparison.Ordinal);
-            Assert.Contains("sharpemu_format_layout(4u, 0u,", shader.Source, StringComparison.Ordinal);
+            Assert.Contains("sharpemu_load_words<1>(b0, ", shader.Source, StringComparison.Ordinal);
         }
         else
         {
@@ -1162,6 +1162,29 @@ public sealed class MslTranslationTests
             Assert.Contains(": true);", shader.Source, StringComparison.Ordinal);
             Assert.DoesNotContain("sharpemu_format_bytes", shader.Source, StringComparison.Ordinal);
         }
+    }
+
+    [Theory]
+    [InlineData("TBufferLoadFormatX", 1u, 22u)]
+    [InlineData("TBufferLoadFormatXy", 2u, 64u)]
+    [InlineData("TBufferLoadFormatXyzw", 4u, 77u)]
+    public void TypedLoadOfWholeDwordComponentsReadsOneRunFromOneAddress(string opcode, uint count, uint format)
+    {
+        // Unified formats 22, 64 and 77 are 32, 32_32 and 32_32_32_32.
+        var shader = CompileTypedBufferAccess(opcode, count, format);
+
+        Assert.Contains($"sharpemu_load_words<{count}>(b0, ", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("sharpemu_load_word(b0, ", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TypedLoadOfSubDwordComponentsKeepsThePerComponentPath()
+    {
+        // Format 14 is 8_8 unorm.
+        var shader = CompileTypedBufferAccess("TBufferLoadFormatXy", 2, typedFormat: 14);
+
+        Assert.DoesNotContain("sharpemu_load_words<", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_load_word(b0, ", shader.Source, StringComparison.Ordinal);
     }
 
     [Fact]

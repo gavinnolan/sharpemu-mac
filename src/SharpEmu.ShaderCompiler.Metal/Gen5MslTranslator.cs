@@ -1724,9 +1724,37 @@ public static partial class Gen5MslTranslator
             var valid = Temp(
                 "bool",
                 $"(({descriptorWord3} >> 12) & 0x7Fu) != 0u && {inBounds}");
+
+            // Formats of whole dword components sit at byte offsets 0, 4, 8 and 12 of the
+            // element: the address is added once and the run is loaded by one helper, with a
+            // plain aligned read when it is aligned and inside the binding.
+            string? dwordRun = null;
+            var runCount = Math.Min(control.DwordCount, componentCount);
+            if (Gfx10UnifiedFormat.HasWholeDwordComponents(dataFormat) && runCount is >= 1 and <= 4)
+            {
+                var consecutive = true;
+                for (uint component = 0; component < runCount; component++)
+                {
+                    consecutive &= Gfx10UnifiedFormat.TryGetComponentLayout(
+                            dataFormat, component, out var componentOffset, out var componentBit, out var componentBits) &&
+                        componentOffset == component * sizeof(uint) && componentBit == 0 && componentBits == 32;
+                }
+
+                if (consecutive)
+                {
+                    dwordRun = Temp(
+                        "uint4",
+                        $"sharpemu_load_words<{runCount}>(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress})");
+                }
+            }
+
             for (uint destination = 0; destination < control.DwordCount; destination++)
             {
-                var value = destination < componentCount
+                var value = dwordRun is not null && destination < runCount
+                    ? Temp(
+                        "uint",
+                        $"sharpemu_format_convert({dwordRun}[{destination}], 32u, {numberFormat}u, {dataFormat}u)")
+                    : destination < componentCount
                     ? LoadFormatComponent(
                         bindingIndex,
                         byteAddress,
