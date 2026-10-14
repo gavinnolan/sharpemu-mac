@@ -41,6 +41,11 @@ public sealed unsafe partial class HostMappedCopyLedger
     private const int MaximumReadWatches = 128;
     private bool unknownAlias;
     private int aliasEffectsInFlight;
+    // Bumped under Gate after each change an ordinary write identity is captured from:
+    // the views, the aliases, the unknown-alias quarantine and a view's copy, access,
+    // incarnation or revocation. A write samples it before its first admission and
+    // captures only once refused; an unchanged value means nothing it reads has moved.
+    private long mappingEpoch;
     // Ordinary test-only pause, default null. Never called under provider Gate,
     // on a signal path, or by legacy reads. No public setter/callback contract.
     private Action? afterCaptureForControl = null;
@@ -96,11 +101,12 @@ public sealed unsafe partial class HostMappedCopyLedger
             !TryEffectRange(backing.AliasBase, backing.Size, out var range))
             throw new ArgumentException("Canonical backing alias has no complete native footprint.", nameof(backing));
         aliases.Add(backing, new(range));
+        NoteMappingChangedLocked();
     }
 
     // Setup's own cleanup may have an unknown native outcome before a backing
     // object was publishable. Do not allocate to retain this quarantine.
-    public void QuarantineUnknownAlias() { RequireGate(); unknownAlias = true; RevokeAll(); }
+    public void QuarantineUnknownAlias() { RequireGate(); unknownAlias = true; RevokeAll(); NoteMappingChangedLocked(); }
 
     public View? PrepareView(HostBackingObject backing, ulong address, ulong size,
         ulong offset, HostPageProtection protection)
@@ -127,6 +133,7 @@ public sealed unsafe partial class HostMappedCopyLedger
             prepared.Backing.IsClosing || prepared.Backing.IsDisposed)
             throw new InvalidOperationException("Mapping publication has no exact live provider owner.");
         views.Add(prepared.Address, prepared);
+        NoteMappingChangedLocked();
     }
 
     /// <summary>Before ANY participating kernel effect. Internal aliases are
@@ -174,7 +181,7 @@ public sealed unsafe partial class HostMappedCopyLedger
         // sticky unknown quarantine. A replay cannot steal another alias count.
         alias.ReleaseState = 2;
         aliasEffectsInFlight--;
-        if (nativeSuccess) aliases.Remove(backing);
+        if (nativeSuccess) { aliases.Remove(backing); NoteMappingChangedLocked(); }
         else QuarantineUnknownAlias();
     }
 
@@ -423,7 +430,10 @@ public sealed unsafe partial class HostMappedCopyLedger
             RevokeAt(index);
         }
     }
-    private void RevokeAt(int index) { Volatile.Write(ref views.Values[index].Revoked, 1); views.RemoveAt(index); }
+    private void RevokeAt(int index)
+    { Volatile.Write(ref views.Values[index].Revoked, 1); views.RemoveAt(index); NoteMappingChangedLocked(); }
+    // Single writer under Gate; ordinary writes read it without the gate.
+    private void NoteMappingChangedLocked() => Volatile.Write(ref mappingEpoch, mappingEpoch + 1);
     private void RevokeAll() { for (var index = views.Count - 1; index >= 0; index--) RevokeAt(index); }
     private int FindAtOrBelow(ulong address)
     {

@@ -34,6 +34,16 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
         return null;
     }
 
+    public long? OrdinaryWriteMappingEpoch => MacMappedCopyState.Ledger?.OrdinaryWriteMappingEpoch;
+
+    public HostMappedCopyLedger.OrdinaryWriteIdentity? CaptureOrdinaryWriteIdentity(
+        HostBackingObject backing, ulong address, ulong size, long mappingEpochBeforeAdmission, out bool mappingChanged)
+    {
+        mappingChanged = false;
+        return MacMappedCopyState.Ledger?.CaptureOrdinaryWriteIdentity(
+            backing, address, size, mappingEpochBeforeAdmission, out mappingChanged);
+    }
+
     public CpuMappedPublicationPreparationResult TryPrepareMappedReadValidation(HostBackingObject backing,
         CpuMappedCopyObservation original, out CpuMappedReadValidation? validation)
     {

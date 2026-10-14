@@ -301,7 +301,16 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
     public bool TryWriteBacking(ulong address, ReadOnlySpan<byte> data, out OrdinaryBackingWriteReservation? busy,
         out SharedWriteFailure failure) => TryWriteBackingAdmission(address, data, true, out busy, out failure);
 
+    // Deferred captures that may find the mapping moved before the write falls back to
+    // capturing first. Diagnostics always capture first, so their capture reason is exact.
+    private const int DeferredOriginalCaptures = 4;
+
     private bool TryWriteBackingAdmission(ulong address, ReadOnlySpan<byte> data, bool captureBusy,
+        out OrdinaryBackingWriteReservation? busy, out SharedWriteFailure failure)
+        => TryWriteBackingAdmission(address, data, captureBusy,
+            OrdinaryWriteFailureDiagnostics.Enabled ? 0 : DeferredOriginalCaptures, out busy, out failure);
+
+    private bool TryWriteBackingAdmission(ulong address, ReadOnlySpan<byte> data, bool captureBusy, int deferredCaptures,
         out OrdinaryBackingWriteReservation? busy, out SharedWriteFailure failure)
     {
         busy = null; failure = default;
@@ -313,16 +322,31 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
         // first admission. A later lookup may never repair a busy refusal.
         string? originalCaptureReason = null;
         HostMappedCopyLedger.OrdinaryWriteIdentity? originalMapping = null;
+        IHostMappedPublicationMemory? deferredProvider = null;
+        long mappingEpoch = 0;
         if (captureBusy && _backing?.ManagedWrites is not null &&
             _host is IHostMappedPublicationMemory originalProvider && originalProvider.CanWaitForOrdinaryWriteAdmission)
         {
-            originalMapping = OrdinaryWriteFailureDiagnostics.Enabled
+            // Every guest write comes here and almost none is refused, so a provider that
+            // versions its mapping takes the capture only on refusal, from the same
+            // records this one would read, or reports that they moved.
+            if (deferredCaptures > 0 && originalProvider.OrdinaryWriteMappingEpoch is { } epoch)
+            { deferredProvider = originalProvider; mappingEpoch = epoch; }
+            else originalMapping = OrdinaryWriteFailureDiagnostics.Enabled
                 ? originalProvider.CaptureOrdinaryWriteIdentity(_backing, address, (ulong)data.Length, out originalCaptureReason)
                 : originalProvider.CaptureOrdinaryWriteIdentity(_backing, address, (ulong)data.Length);
         }
         var interval = _backing?.BeginManagedWriteOperation() ?? default;
         if (!HostManagedWriteIntervals.AllowsBytes(interval))
         {
+            if (deferredProvider is not null)
+            {
+                originalMapping = deferredProvider.CaptureOrdinaryWriteIdentity(
+                    _backing!, address, (ulong)data.Length, mappingEpoch, out var mappingChanged);
+                // A refused admission holds nothing, so starting over is only a later first attempt.
+                if (mappingChanged)
+                    return TryWriteBackingAdmission(address, data, captureBusy, deferredCaptures - 1, out busy, out failure);
+            }
             // Exact rejected token is the provenance, never a later admission sample.
             // Save the FIRST existing short-circuit guard; never borrow a
             // later admission or original-currentness sample for diagnostics.

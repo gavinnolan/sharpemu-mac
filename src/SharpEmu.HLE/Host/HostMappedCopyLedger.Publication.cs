@@ -228,7 +228,10 @@ public sealed unsafe partial class HostMappedCopyLedger
             Admission?.Unknown();
             state = 3; writers.QuarantinePublication();
             if (Original.OwnerIdentity is Capture capture)
+            {
                 foreach (var view in capture.States) Volatile.Write(ref view.Revoked, 1);
+                owner.NoteMappingChangedLocked();
+            }
             return CpuMappedPublicationResult.PartialUnknown;
         }
         internal override void Cancel()

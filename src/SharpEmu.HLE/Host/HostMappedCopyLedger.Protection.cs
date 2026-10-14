@@ -115,7 +115,7 @@ public sealed unsafe partial class HostMappedCopyLedger
                 if (next.Backing.IsClosing || next.Backing.IsDisposed || unknownAlias) return;
             }
             foreach (var old in prepared.Original)
-            { Volatile.Write(ref old.Revoked, 1); views.Remove(old.Address); }
+            { Volatile.Write(ref old.Revoked, 1); views.Remove(old.Address); NoteMappingChangedLocked(); }
             foreach (var next in prepared.Successors) PublishView(next);
         }
         catch
@@ -126,6 +126,7 @@ public sealed unsafe partial class HostMappedCopyLedger
                 Volatile.Write(ref next.Revoked, 1);
                 if (views.TryGetValue(next.Address, out var current) && ReferenceEquals(current, next))
                     views.Remove(next.Address); // exact rollback, never remove a newer owner
+                NoteMappingChangedLocked();
             }
             throw;
         }
@@ -148,5 +149,6 @@ public sealed unsafe partial class HostMappedCopyLedger
             Volatile.Write(ref view.CopyAvailable, 0);
             if (guestRightsUnknown) view.GuestAccessKnown = false;
         }
+        NoteMappingChangedLocked();
     }
 }

@@ -227,6 +227,34 @@ public sealed partial class MappedPublicationTests
         Assert.Equal(bytes, state.Bytes().AsSpan(32, bytes.Length).ToArray());
     }
 
+    [Fact]
+    public void PublicationBusyCapturesBeforeAdmissionWithoutProviderEpoch()
+    {
+        using var state = new State(); state.Host.DefersOriginalCapture = false;
+        var original = state.Capture();
+        using var publication = state.Prepare(original, State.Address, [7]);
+        using var reservation = Busy(state);
+        publication.Dispose();
+        Assert.Equal(OrdinaryBackingWriteAdmission.Admitted, reservation.TryAcquire(TimeSpan.Zero));
+    }
+
+    [Fact]
+    public void DeferredOriginalCaptureRefusesAnyMappingChangeSinceTheSample()
+    {
+        using var state = new State(); _ = state.Capture();
+        var ledger = state.Host.Ledger;
+        var sample = ledger.OrdinaryWriteMappingEpoch;
+        var deferred = ledger.CaptureOrdinaryWriteIdentity(state.Backing, State.Address, 8, sample, out var changed);
+        Assert.False(changed); Assert.True(deferred.HasValue); Assert.True(deferred.Value.IsCurrent);
+        // A change elsewhere moves the epoch too: the capture cannot tell it from its own view.
+        Assert.True(state.Host.Effect(State.Address + State.Page, State.Page));
+        Assert.Null(ledger.CaptureOrdinaryWriteIdentity(state.Backing, State.Address, 8, sample, out changed));
+        Assert.True(changed);
+        Assert.True(ledger.CaptureOrdinaryWriteIdentity(
+            state.Backing, State.Address, 8, ledger.OrdinaryWriteMappingEpoch, out changed).HasValue);
+        Assert.False(changed);
+    }
+
     [Theory]
     [InlineData(1, true)]
     [InlineData(16384, true)]
