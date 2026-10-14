@@ -29,7 +29,7 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// staged value of every byte the shader left alone, over whatever anything else wrote
 /// there in the meantime.
 /// </remarks>
-internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory)
+internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory, MetalStagedRangeCache? cache = null)
 {
     private const ulong PageBytes = 4096;
     private const uint ThreadsPerGroup = 256;
@@ -105,24 +105,9 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory)
 
     private nint _writebackPipeline;
 
-    private sealed class Copy
-    {
-        public ulong Address;
-        public ulong Size;
-        public MetalGuestRange Staging;
-
-        // What guest memory held when the copy was staged, as of its last writeback.
-        public MetalGuestRange Pristine;
-
-        // The shader may have stored into the copy, so guest memory is behind it.
-        public bool Dirty;
-
-        // The work that stores into it has been recorded. A copy bound for the draw being
-        // prepared is written back only after that draw, never before it has run.
-        public bool Armed;
-    }
-
-    private readonly List<Copy> _copies = new();
+    // The entries bound in the command buffer being recorded: a ring copy lives here alone,
+    // a cached range lives on in the cache and is listed for its stores, flags and sharing.
+    private readonly List<MetalStagedRangeCache.Entry> _copies = new();
 
     public int Count => _copies.Count;
 
@@ -131,13 +116,25 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory)
     {
         foreach (var copy in _copies)
         {
-            if (copy.Address != address || copy.Size != size)
+            if (copy.Address != address || copy.Size != size || copy.Removed)
+            {
+                continue;
+            }
+
+            // A cached copy something has written since is not the guest's bytes any more.
+            if (copy.Cached && !copy.Dirty && Volatile.Read(ref copy.Stale) != 0)
             {
                 continue;
             }
 
             if (written)
             {
+                // A copy staged for reading has no pristine bytes to tell its stores by.
+                if (!copy.Pristine.IsValid)
+                {
+                    continue;
+                }
+
                 copy.Dirty = true;
                 copy.Armed = false;
             }
@@ -148,6 +145,25 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory)
 
         staging = default;
         return false;
+    }
+
+    /// <summary>
+    /// A cached range was bound for this command buffer: its stores, if the binding
+    /// writes, are written back after the work that makes them.
+    /// </summary>
+    public void Bind(MetalStagedRangeCache.Entry entry, bool written)
+    {
+        if (!entry.InList)
+        {
+            entry.InList = true;
+            _copies.Add(entry);
+        }
+
+        if (written)
+        {
+            entry.Dirty = true;
+            entry.Armed = false;
+        }
     }
 
     /// <summary>
@@ -189,13 +205,14 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory)
     /// holds the same bytes as the copy before any shader stores into it.
     /// </summary>
     public void Add(ulong address, ulong size, MetalGuestRange staging, MetalGuestRange pristine, bool written) =>
-        _copies.Add(new Copy
+        _copies.Add(new MetalStagedRangeCache.Entry
         {
             Address = address,
             Size = size,
             Staging = staging,
             Pristine = pristine,
             Dirty = written,
+            InList = true,
         });
 
     /// <summary>The draw or dispatch the copies were bound for has been recorded.</summary>
@@ -218,7 +235,16 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory)
             return;
         }
 
-        _copies.RemoveAll(copy => !copy.Dirty && Overlaps(copy, address, size));
+        _copies.RemoveAll(copy =>
+        {
+            if (copy.Dirty || !Overlaps(copy, address, size))
+            {
+                return false;
+            }
+
+            copy.InList = false;
+            return true;
+        });
     }
 
     /// <summary>
@@ -232,7 +258,25 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory)
             return;
         }
 
-        _copies.RemoveAll(copy => !copy.Dirty || copy.Armed);
+        _copies.RemoveAll(copy =>
+        {
+            if (copy.Dirty && !copy.Armed)
+            {
+                return false;
+            }
+
+            // Stores recorded but never written back are lost, as they always were; a cached
+            // copy must not go on standing for guest bytes it never reached.
+            if (copy.Cached && copy.Dirty)
+            {
+                copy.Dirty = false;
+                Volatile.Write(ref copy.Stale, 1);
+            }
+
+            copy.Armed = false;
+            copy.InList = false;
+            return true;
+        });
     }
 
     /// <summary>
@@ -240,7 +284,7 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory)
     /// with a compute encoder opened on the command buffer after the work that stored.
     /// </summary>
     /// <returns>The ranges written back, which the caller records as GPU writes.</returns>
-    public List<(ulong Address, ulong Size)> EncodeWritebacks(nint commandBuffer)
+    public List<(ulong Address, ulong Size)> EncodeWritebacks(nint commandBuffer, ulong submissionSerial = 0)
     {
         var written = new List<(ulong, ulong)>();
         nint encoder = 0;
@@ -248,9 +292,16 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory)
         {
             foreach (var copy in _copies)
             {
-                if (!copy.Dirty || !copy.Armed)
+                if (!copy.Dirty || !copy.Armed || copy.Removed)
                 {
                     continue;
+                }
+
+                // This submission reads the copy's buffers now, so they are not reusable before it completes.
+                if (copy.Cached)
+                {
+                    cache?.Touch(copy, submissionSerial);
+                    cache?.MarkSelfWriteback(copy);
                 }
 
                 if (encoder == 0)
@@ -293,16 +344,23 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory)
     {
         foreach (var copy in _copies)
         {
-            if (copy.Armed)
+            if (!copy.Armed)
             {
-                copy.Dirty = false;
+                continue;
             }
+
+            if (copy.Cached && copy.Dirty)
+            {
+                cache?.OnWrittenBack(copy);
+            }
+
+            copy.Dirty = false;
         }
     }
 
     /// <summary>
     /// Fills a staged copy from the windows on the GPU, after whatever the GPU still has to
-    /// write there, then its pristine copy from it. Bytes no window covers keep what the
+    /// write there, then its pristine copy from it, when it has one. Bytes no window covers keep what the
     /// CPU staged. Each step is an encoder of its own, which is what orders them.
     /// </summary>
     public void EncodeGather(nint commandBuffer, ulong address, in MetalGuestRange staging, in MetalGuestRange pristine)
@@ -332,6 +390,11 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory)
             MetalNative.SendVoid(gather, SelEndEncoding);
         }
 
+        if (!pristine.IsValid)
+        {
+            return;
+        }
+
         var snapshot = BlitEncoder(commandBuffer);
         try
         {
@@ -358,7 +421,7 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory)
     }
 
     // One dispatch per run of the range one window covers. Returns the bytes no window covers.
-    private ulong EncodeWriteback(nint encoder, Copy copy)
+    private ulong EncodeWriteback(nint encoder, MetalStagedRangeCache.Entry copy)
     {
         var size = copy.Staging.Size;
         var missed = 0UL;
@@ -439,6 +502,6 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory)
         }
     }
 
-    private static bool Overlaps(Copy copy, ulong address, ulong size) =>
+    private static bool Overlaps(MetalStagedRangeCache.Entry copy, ulong address, ulong size) =>
         address < copy.Address + copy.Size && copy.Address < address + size;
 }

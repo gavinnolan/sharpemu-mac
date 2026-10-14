@@ -102,6 +102,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     private readonly RegionLock _lock = new(RegionLock.Category.ImageCache);
     private readonly MetalImageSlots _slots = new();
     private readonly MetalImagePageOwners _pageOwners = new();
+
+    /// <summary>The staged guest ranges whose page watches and invalidations share this cache's hooks.</summary>
+    public MetalStagedRangeCache? StagedRanges { get; set; }
     private readonly SortedDictionary<ulong, SurfaceMetadata> _surfaceMetadata = new();
     private readonly Dictionary<GpuFormat, ResourceSlotIdentifier> _nullImages = new();
 

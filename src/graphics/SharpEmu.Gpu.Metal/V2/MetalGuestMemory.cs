@@ -657,24 +657,33 @@ internal sealed class MetalGuestMemory : IDisposable
         }
 
         var range = Allocate(size, RingAlignment, out var span);
-        if (!_memory.TryRead(gpuVa, span))
-        {
-            // A partially mapped range still binds: the readable prefix is what the
-            // guest shader would have seen, and the rest reads as zero.
-            span.Clear();
-            for (var offset = 0UL; offset < size; offset += 4096)
-            {
-                var chunk = (int)Math.Min(4096, size - offset);
-                if (!_memory.TryRead(gpuVa + offset, span.Slice((int)offset, chunk)))
-                {
-                    break;
-                }
-            }
-        }
-
+        ReadForStaging(gpuVa, span);
         Interlocked.Add(ref _ringFallbackBytes, (long)size);
         Interlocked.Increment(ref _ringFallbacks);
         return range;
+    }
+
+    /// <summary>
+    /// Fills a host span with the guest bytes the CPU sees now. A partially mapped range
+    /// still binds: the readable prefix is what the guest shader would have seen, and the
+    /// rest reads as zero.
+    /// </summary>
+    public void ReadForStaging(ulong gpuVa, Span<byte> span)
+    {
+        if (_memory.TryRead(gpuVa, span))
+        {
+            return;
+        }
+
+        span.Clear();
+        for (var offset = 0; offset < span.Length; offset += 4096)
+        {
+            var chunk = Math.Min(4096, span.Length - offset);
+            if (!_memory.TryRead(gpuVa + (ulong)offset, span.Slice(offset, chunk)))
+            {
+                break;
+            }
+        }
     }
 
     /// <summary>A second ring copy of bytes already staged in the ring; invalid when the range is not a ring range.</summary>

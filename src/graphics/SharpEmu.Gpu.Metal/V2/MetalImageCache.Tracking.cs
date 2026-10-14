@@ -223,15 +223,17 @@ internal sealed partial class MetalImageCache
             return false;
         }
 
+        // A cached staged copy over the page is stale from here; the store may land once its watch is gone.
+        var stagedHit = StagedRanges?.OnCpuWrite(address, size) ?? false;
         var mayOwn = _pageOwners.MayHaveOwners(address, size);
         if (!mayOwn && Volatile.Read(ref _metadataWatchCount) == 0)
         {
-            return false;
+            return stagedHit;
         }
 
         using var held = _lock.Hold();
         var metadataHit = OnMetadataCpuWriteLocked(address, size);
-        return (mayOwn && InvalidateAliases(address, size)) | metadataHit;
+        return (mayOwn && InvalidateAliases(address, size)) | metadataHit | stagedHit;
     }
 
     // A managed write of exactly these bytes. Unlike a fault it names the bytes it
@@ -243,16 +245,22 @@ internal sealed partial class MetalImageCache
             return false;
         }
 
+        var stagedHit = false;
+        if (StagedRanges is { } staged && staged.MayCover(address, size))
+        {
+            stagedHit = staged.OnPreciseCpuWrite(address, size, _guestMemory.IsBacked(address, size));
+        }
+
         var mayOwn = _pageOwners.MayHaveOwners(address, size);
         if (!mayOwn && Volatile.Read(ref _metadataWatchCount) == 0)
         {
-            return false;
+            return stagedHit;
         }
 
         var backed = mayOwn && _guestMemory.IsBacked(address, size);
         using var held = _lock.Hold();
         var metadataHit = OnMetadataCpuWriteLocked(address, size);
-        return (mayOwn && InvalidatePreciseWrite(address, size, backed)) | metadataHit;
+        return (mayOwn && InvalidatePreciseWrite(address, size, backed)) | metadataHit | stagedHit;
     }
 
     /// <summary>The host wrote exactly <c>[address, address + size)</c> of guest memory.</summary>
@@ -263,6 +271,7 @@ internal sealed partial class MetalImageCache
             return;
         }
 
+        StagedRanges?.OnHostWrite(address, size);
         var backed = _guestMemory.IsBacked(address, size);
         using var held = _lock.Hold();
         InvalidatePreciseWrite(address, size, backed);
@@ -334,6 +343,7 @@ internal sealed partial class MetalImageCache
             return;
         }
 
+        StagedRanges?.OnUnmap(address, size);
         using var held = _lock.Hold();
         var end = address + size;
         var stale = new List<ulong>();
@@ -371,6 +381,7 @@ internal sealed partial class MetalImageCache
     /// </summary>
     public void StopWatching()
     {
+        StagedRanges?.StopWatching();
         using var held = _lock.Hold();
         _watchingStopped = true;
         foreach (var (watchBegin, watchSize) in _metadataWatches)

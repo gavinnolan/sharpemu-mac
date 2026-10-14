@@ -138,6 +138,12 @@ internal sealed partial class MetalRenderHost :
         _guestMemory.AttachToQueue(queue);
         _transfer = new MetalImageTransfer(device);
         _imageCache = new MetalImageCache(this, _transfer, _guestMemory, pages, backing);
+        if (MetalStagedRangeCache.Enabled)
+        {
+            _stagedRanges = new MetalStagedRangeCache(
+                new MetalStagedRangeBackend(_guestMemory, pages), MetalStagedRangeCache.ConfiguredBudgetBytes);
+            _imageCache.StagedRanges = _stagedRanges;
+        }
         _completions = new MetalCompletionQueue(_sharedEvent);
     }
 
@@ -737,6 +743,7 @@ internal sealed partial class MetalRenderHost :
     public void NoteGuestMemoryWrite(ulong address, ulong size, MetalGpuWriteOrigin origin)
     {
         _stagedStorageCopies?.Forget(address, size);
+        _stagedRanges?.OnGpuWrite(address, size, origin);
         if (_guard is not null && size != 0)
         {
             // A fill, copy or writeback has just been encoded, so the last transfer label
@@ -816,6 +823,7 @@ internal sealed partial class MetalRenderHost :
         WriteGuestPattern(address, size, value);
         _imageCache.InvalidateMemory(address, size);
         _stagedStorageCopies?.Forget(address, size);
+        _stagedRanges?.OnHostWrite(address, size);
         Interlocked.Increment(ref _hostFills);
         return true;
     }
@@ -959,6 +967,7 @@ internal sealed partial class MetalRenderHost :
         {
             CopyGuestBytesOnHost(destination, source, size);
             _stagedStorageCopies?.Forget(destination, size);
+            _stagedRanges?.OnHostWrite(destination, size);
             return;
         }
 
@@ -969,6 +978,7 @@ internal sealed partial class MetalRenderHost :
             CopyGuestBytesOnHost(destination, source, size);
             _imageCache.InvalidateMemory(destination, size);
             _stagedStorageCopies?.Forget(destination, size);
+            _stagedRanges?.OnHostWrite(destination, size);
             Interlocked.Increment(ref _hostCopies);
             return;
         }
@@ -1274,6 +1284,20 @@ internal sealed partial class MetalRenderHost :
 
     private ulong _previousTransientCommitSerial;
 
+    private string StagedRangeCounters()
+    {
+        if (_stagedRanges is not { } cache)
+        {
+            return string.Empty;
+        }
+
+        var c = cache.TakeCounters();
+        return $" staged_hits={c.Hits} staged_misses={c.Misses} staged_bytes={c.Bytes} " +
+            $"staged_invalid_fault={c.Fault} staged_invalid_precise={c.Precise} staged_invalid_host={c.Host} " +
+            $"staged_invalid_gpu={c.Gpu} staged_invalid_unmap={c.Unmap} staged_evictions={c.Evictions} " +
+            $"staged_cache_mb={cache.CacheBytes / (1024 * 1024)}";
+    }
+
     /// <summary>Commits the transient budget asked for so rings and slabs could return.</summary>
     public long TakeTransientCommits() => Interlocked.Exchange(ref _transientCommits, 0);
 
@@ -1333,7 +1357,18 @@ internal sealed partial class MetalRenderHost :
         // A buffer binding sees guest memory, so any image that owns these bytes
         // publishes them first; a written binding also invalidates those images.
         FlushGpuWrites(address, size, MetalWritebackCause.BufferBinding);
-        var range = _guestMemory.Resolve(address, size);
+        MetalGuestRange range = default;
+        if (!isWritten && MetalStagedRangeCache.Eligible(size) && _stagedRanges is not null &&
+            !_guestMemory.TryResolveInPlace(address, size, out _))
+        {
+            range = BindStagedRange(address, size, written: false);
+        }
+
+        if (!range.IsValid)
+        {
+            range = _guestMemory.Resolve(address, size);
+        }
+
         if (!range.IsValid)
         {
             return NullBuffer;
@@ -1539,7 +1574,7 @@ internal sealed partial class MetalRenderHost :
             $"write_ranges={_gpuWrites.Count} write_records={_gpuWrites.Recorded} " +
             $"write_folds={_gpuWrites.Folds} handler_wakeups={_completions.HandlerWakeups} " +
             $"rings={_guestMemory.RingCount} rings_freed={_guestMemory.RingsReleased} " +
-            $"ring_mb={_guestMemory.RingFallbackBytes / (1024 * 1024)}");
+            $"ring_mb={_guestMemory.RingFallbackBytes / (1024 * 1024)}{StagedRangeCounters()}");
         // On a tile-based GPU the attachments are the bandwidth: a pass loads every
         // one it does not clear and stores every one it keeps, so this says what the
         // passes cost in memory traffic and which splits are paying for it. Printed
@@ -1685,6 +1720,7 @@ internal sealed partial class MetalRenderHost :
         DisposePipelines();
         (_transfer as IDisposable)?.Dispose();
         _imageCache.Dispose();
+        _stagedRanges?.Dispose();
         _guestMemory.Dispose();
         if (_sharedEvent != 0)
         {
