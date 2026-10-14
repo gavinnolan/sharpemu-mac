@@ -64,12 +64,21 @@ public static partial class AgcExports
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         var eventType = (uint)(ctx[CpuRegister.Rsi] & 0xFF);
         var eventAddress = ctx[CpuRegister.Rdx];
-        if (commandBufferAddress == 0 || eventType > 0x3F || eventAddress != 0)
+        // PIXEL_PIPE_STAT_CONTROL (0x38) and PIXEL_PIPE_STAT_DUMP (0x39) carry an address:
+        // an occlusion query is a pair of dumps into its result block. Refusing them left
+        // the block as the guest cleared it, so every queried primitive read as occluded.
+        var hasAddress = (eventType & ~1u) == 0x38;
+        if (commandBufferAddress == 0 || eventType > 0x3F || (eventAddress != 0 && !hasAddress))
         {
             return ReturnPointer(ctx, 0);
         }
 
-        if (!TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(2, ItEventWrite, 0), eventType))
+        var emitted = hasAddress
+            ? TryEmitCommandDwords(
+                ctx, commandBufferAddress, out var commandAddress, Pm4(4, ItEventWrite, 0),
+                eventType | 0x100u, (uint)eventAddress & ~7u, (uint)(eventAddress >> 32))
+            : TryEmitCommandDwords(ctx, commandBufferAddress, out commandAddress, Pm4(2, ItEventWrite, 0), eventType);
+        if (!emitted)
         {
             return ReturnPointer(ctx, 0);
         }
