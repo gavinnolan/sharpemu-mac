@@ -315,6 +315,8 @@ public sealed class SelfLoader : ISelfLoader
             out var initializerFunctions);
         var procParamAddress = ResolveProcParamAddress(programHeaders, imageBase);
 
+        ApplyUnrealBackBufferDefault(virtualMemory, programHeaders, imageBase);
+
         if (virtualMemory is PhysicalVirtualMemory patchableMemory)
         {
             _ = GuestRedZonePatcher.Patch(
@@ -544,6 +546,24 @@ public sealed class SelfLoader : ISelfLoader
                 sourceOffset,
                 fileData,
                 header.Flags);
+        }
+    }
+
+    /// <summary>Sizes an Unreal title's compiled back-buffer default to the display the host
+    /// advertises through sceVideoOut; see <see cref="UnrealBackBufferPatch"/>.</summary>
+    private static void ApplyUnrealBackBufferDefault(
+        IVirtualMemory virtualMemory,
+        IReadOnlyList<ProgramHeader> programHeaders,
+        ulong imageBase)
+    {
+        var (width, height) = SharpEmu.Libs.VideoOut.HostVideoHost.CurrentOptions.GuestDisplaySize;
+        try
+        {
+            UnrealBackBufferPatch.Apply(virtualMemory, programHeaders, imageBase, width, height);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] Unreal back-buffer patch failed: {exception.Message}");
         }
     }
 
