@@ -277,8 +277,16 @@ internal sealed partial class MetalRenderHost
     // entry's per-index-type states rather than always its first.
     private nint _boundRenderState;
 
+    // The viewport and scissor last sent on the encoder, and whether they went to every
+    // viewport slot. Unknown until the first draw of an encoder sends them.
+    private bool _boundViewportKnown;
+    private bool _boundViewportAllSlots;
+    private MtlViewport _boundViewport;
+    private MtlScissorRect _boundScissor;
+
     private void ForgetEncoderState()
     {
+        _boundViewportKnown = false;
         _boundGraphicsPipeline = null;
         _boundRenderState = 0;
         _boundDepthStencilState = 0;
@@ -1159,7 +1167,22 @@ internal sealed partial class MetalRenderHost
             Width = Math.Max(scissorWidth, 1),
             Height = Math.Max(scissorHeight, 1),
         };
-        if (_boundGraphicsPipeline is not { WritesViewportIndex: true })
+        var allSlots = _boundGraphicsPipeline is { WritesViewportIndex: true };
+        if (_boundViewportKnown && _boundViewportAllSlots == allSlots &&
+            _boundViewport.OriginX == viewport.OriginX && _boundViewport.OriginY == viewport.OriginY &&
+            _boundViewport.Width == viewport.Width && _boundViewport.Height == viewport.Height &&
+            _boundViewport.ZNear == viewport.ZNear && _boundViewport.ZFar == viewport.ZFar &&
+            _boundScissor.X == scissorRect.X && _boundScissor.Y == scissorRect.Y &&
+            _boundScissor.Width == scissorRect.Width && _boundScissor.Height == scissorRect.Height)
+        {
+            return;
+        }
+
+        _boundViewportKnown = true;
+        _boundViewportAllSlots = allSlots;
+        _boundViewport = viewport;
+        _boundScissor = scissorRect;
+        if (!allSlots)
         {
             MetalNative.SendVoidViewport(_renderEncoder, SelSetViewport, viewport);
             MetalNative.SendVoidScissor(_renderEncoder, SelSetScissorRect, scissorRect);
