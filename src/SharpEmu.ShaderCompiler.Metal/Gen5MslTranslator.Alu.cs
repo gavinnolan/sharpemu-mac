@@ -651,9 +651,18 @@ public static partial class Gen5MslTranslator
                 var sourceIndex = Temp(
                     "uint",
                     $"({source.Value}u + {sourceOffset}) & {VectorRegisterFileCount - 1}u");
-                value = Temp("uint", _options.BoundedRelativeMoves
-                    ? $"{DynamicVectorRead}({sourceIndex})"
-                    : $"v[{sourceIndex}]");
+                if (_options.BoundedRelativeMoves)
+                {
+                    // A statement rather than an expression: the resolved read is a
+                    // switch on the register number (see Gen5MslTranslator.Registers).
+                    value = $"t{_nextTemp++}";
+                    Line($"uint {value};");
+                    Line($"{DynamicVectorRead}({value}, {sourceIndex});");
+                }
+                else
+                {
+                    value = Temp("uint", $"v[{sourceIndex}]");
+                }
             }
 
             var destination = instruction.Destinations[0].Value;

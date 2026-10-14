@@ -94,10 +94,10 @@ public static partial class Gen5MslTranslator
             /// guest reads undefined data, so any value answers it. That is what makes
             /// the expansion possible: only the registers this program uses have to be
             /// reachable, and for the Octopath vertex shader that is v0..v31 rather than
-            /// all 256. A read becomes a select tree over them and a write becomes one
-            /// masked assignment each, which is more instructions at the four relative
-            /// moves and in exchange keeps the whole register file in hardware registers
-            /// instead of thread-private memory.</summary>
+            /// all 256. A read becomes a switch over them and a write becomes one masked
+            /// assignment each, which is more instructions at the relative moves and in
+            /// exchange keeps the whole register file in hardware registers instead of
+            /// thread-private memory.</summary>
             private string ExpandDynamicVectorAccess(string text)
             {
                 if (!text.Contains(DynamicVectorRead, StringComparison.Ordinal) &&
@@ -130,7 +130,7 @@ public static partial class Gen5MslTranslator
 
                     result.Append(text, cursor, at - cursor);
                     result.Append(isRead
-                        ? ExpandRead(arguments[0])
+                        ? ExpandRead(arguments[0], arguments[1])
                         : ExpandWrite(arguments[0], arguments[1]));
                     cursor = end;
                 }
@@ -139,30 +139,35 @@ public static partial class Gen5MslTranslator
                 return result.ToString();
             }
 
-            private string ExpandRead(string index)
+            /// <summary>Assigns the register <paramref name="index"/> names to
+            /// <paramref name="target"/>. The number comes from M0, an SGPR, so every lane
+            /// of a wave agrees on it and the switch is a uniform branch: a few compares
+            /// whatever the program's register count, where a select chain paid a compare
+            /// and a move per register at every access.</summary>
+            private string ExpandRead(string target, string index)
             {
                 if (VectorArray)
                 {
-                    return $"v[{index}]";
+                    return $"{target} = v[{index}];";
                 }
 
                 if (Vectors.Count == 0)
                 {
-                    return "0u";
+                    return $"{target} = 0u;";
                 }
 
                 // The lowest register is the fallback arm: an index outside the set is a
                 // register the program never writes, so its value is undefined anyway.
-                var expression = $"v{Vectors.Min}";
+                var statements = new StringBuilder($"switch ({index}) {{");
                 foreach (var register in Vectors)
                 {
                     if (register != Vectors.Min)
                     {
-                        expression = $"({index} == {register}u ? v{register} : {expression})";
+                        statements.Append($" case {register}u: {target} = v{register}; break;");
                     }
                 }
 
-                return expression;
+                return statements.Append($" default: {target} = v{Vectors.Min}; break; }}").ToString();
             }
 
             private string ExpandWrite(string index, string value)
@@ -227,16 +232,13 @@ public static partial class Gen5MslTranslator
             }
         }
 
-        /// <summary>Marks a register read whose number is only known at run time. Resolved
-        /// by <see cref="RegisterPlan.Rewrite"/> once the register set is known.</summary>
+        /// <summary>Marks a register read whose number is only known at run time, as the
+        /// statement "SHARPEMU_VREAD(target, number);". Resolved by
+        /// <see cref="RegisterPlan.Rewrite"/> once the register set is known.</summary>
         private const string DynamicVectorRead = "SHARPEMU_VREAD";
 
         /// <summary>Marks the matching write; takes the register number and the value.</summary>
         private const string DynamicVectorWrite = "SHARPEMU_VWRITE";
-
-        /// <summary>How many registers a resolved run-time access may choose among before
-        /// keeping the file as an array is the better trade.</summary>
-        private const int MaxResolvedVectorRegisters = 64;
 
         /// <summary>One s[...] or v[...] occurrence. <see cref="Index"/> is -1 when the
         /// subscript is not a decimal literal, which is how dynamic indexing shows up.</summary>
@@ -338,20 +340,19 @@ public static partial class Gen5MslTranslator
                 }
             }
 
-            // Resolving a run-time register number costs one comparison per register the
-            // program touches, at each access. That is a good trade against the whole
-            // file living in thread-private memory — v0..v31 against 256 slots for the
-            // shader this was written for — but it stops being one if a program touches
-            // most of the file, so past the limit the array stays.
+            // A run-time read is resolved however many registers the program touches: it
+            // is a uniform switch over them, a few compares, against the whole file living
+            // in thread-private memory. (It was a select chain, a compare per register, and
+            // past 64 registers the array stayed — which put all 124 registers of Silent
+            // Hill's 4096-point FFT in memory for the 8 reads at its very end.)
             //
-            // A run-time *write* keeps the array regardless. Resolving a read over the
+            // A run-time *write* keeps the array. Resolving a read over the
             // program's own registers is sound because a register it never writes holds
             // undefined data, so any answer will do; a write breaks that, since the
             // register it lands on is one the program does mean to write and may read
             // back through the same number later. Only a write whose register the offset
             // analysis pinned down is resolved, and that one never reaches here.
-            if (markedVectorAccess &&
-                (markedVectorWrite || vectors.Count > MaxResolvedVectorRegisters))
+            if (markedVectorWrite)
             {
                 dynamicVector = true;
             }

@@ -942,8 +942,9 @@ public sealed class MslTranslationTests
         Assert.Contains("(12u + ", shader.Source, StringComparison.Ordinal);
         Assert.Contains("s124", shader.Source, StringComparison.Ordinal);
         Assert.Contains(") & 255u", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("== 12u ? v12", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("== 13u ? v13", shader.Source, StringComparison.Ordinal);
+        Assert.Matches(@"case 12u: t\d+ = v12; break;", shader.Source);
+        Assert.Matches(@"case 13u: t\d+ = v13; break;", shader.Source);
+        Assert.Matches(@"default: t\d+ = v\d+; break; }", shader.Source);
         Assert.DoesNotContain("uint v[256]", shader.Source, StringComparison.Ordinal);
     }
 
