@@ -1251,8 +1251,24 @@ internal sealed partial class MetalRenderHost :
         }
 
         Interlocked.Increment(ref _transientCommits);
-        FlushCommandBuffer(PassEndCause.Transfer);
+        var committed = FlushCommandBuffer(PassEndCause.Transfer);
+        // A commit hands the memory back only once the GPU has run the buffer, and
+        // nothing else stopped the worker from recording the next budget meanwhile. In
+        // Silent Hill's first level the GPU ran seconds behind while 4K surfaces were
+        // reloaded on every use: 81 budget commits in under eight seconds, one completion,
+        // and the staging pool went from 0.2 to 6.5 GB, past any memory limit. So at most
+        // two budgets are in flight: before recording a third, the worker waits for the
+        // GPU to finish the commit before this one, which keeps the GPU fed with the one
+        // just committed.
+        var previous = _previousTransientCommitSerial;
+        _previousTransientCommitSerial = committed;
+        if (previous != 0 && CompletedSerial < previous)
+        {
+            WaitForCommittedSerial(previous, MetalWaitReason.Other);
+        }
     }
+
+    private ulong _previousTransientCommitSerial;
 
     /// <summary>Commits the transient budget asked for so rings and slabs could return.</summary>
     public long TakeTransientCommits() => Interlocked.Exchange(ref _transientCommits, 0);
