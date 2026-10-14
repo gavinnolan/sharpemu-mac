@@ -657,11 +657,11 @@ internal sealed class MetalGuestMemory : IDisposable
         }
 
         var range = Allocate(size, RingAlignment, out var span);
-        span.Clear();
         if (!_memory.TryRead(gpuVa, span))
         {
             // A partially mapped range still binds: the readable prefix is what the
             // guest shader would have seen, and the rest reads as zero.
+            span.Clear();
             for (var offset = 0UL; offset < size; offset += 4096)
             {
                 var chunk = (int)Math.Min(4096, size - offset);
