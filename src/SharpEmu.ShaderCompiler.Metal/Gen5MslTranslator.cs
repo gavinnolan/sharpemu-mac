@@ -756,10 +756,22 @@ public static partial class Gen5MslTranslator
 
             var body = new StringBuilder();
             var structured = false;
-            if (_stage == Gen5MslStage.Mesh)
+            var meshBody = string.Empty;
+            if (_stage == Gen5MslStage.Mesh &&
+                _options.StructuredControlFlow && !ProgramHasBarrier() &&
+                TryBuildStructuredBody(blocks, out meshBody))
             {
-                // The mesh stage keeps the dispatcher: S_BARRIER parks a wave between
-                // blocks, which needs a resumable pc (see Gen5MslTranslator.Mesh.cs).
+                // A mesh program without S_BARRIER has nothing to rendezvous over, so it
+                // nests like any other stage instead of keeping every guest register live
+                // across a dispatcher loop.
+                structured = true;
+                body.Append(meshBody);
+            }
+            else if (_stage == Gen5MslStage.Mesh)
+            {
+                // With S_BARRIER the mesh stage keeps the dispatcher: the barrier parks a
+                // wave between blocks, which needs a resumable pc (see
+                // Gen5MslTranslator.Mesh.cs).
                 EmitMeshDispatcher(body, BuildDispatcherSwitchBody(blocks, baseIndent: 3));
             }
             else if (_options.StructuredControlFlow &&
@@ -1100,6 +1112,19 @@ public static partial class Gen5MslTranslator
             }
 
             return _ldsBarriersBefore;
+        }
+
+        private bool ProgramHasBarrier()
+        {
+            foreach (var instruction in _request.Program.Instructions)
+            {
+                if (instruction.Opcode == "SBarrier")
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private bool TryEmitBlockBodyCore(
