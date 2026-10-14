@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE.DsTrace;
 using SharpEmu.Libs.Gpu.GpuCommands.Packets;
 
 namespace SharpEmu.Libs.Gpu.GpuCommands;
@@ -59,6 +60,11 @@ public sealed partial class GpuCommandInterpreter
 
         if (!satisfied)
         {
+            if (DsTrace.Gpu)
+            {
+                DsNoteWaitOperands(reference, mask, compareFunction, value);
+            }
+
             SuspendOn(CommandWaitCondition.Memory(address, is64Bit ? sizeof(ulong) : (ulong)sizeof(uint)));
         }
     }

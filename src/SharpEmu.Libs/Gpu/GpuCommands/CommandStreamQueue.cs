@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE.DsTrace;
 using SharpEmu.Libs.VideoOut;
 
 namespace SharpEmu.Libs.Gpu.GpuCommands;
@@ -68,6 +69,15 @@ public sealed class CommandStreamQueue
     private Exception? _preparationFailure;
 
     private readonly int _boundariesInFlight;
+
+    // DSTRACE §4.7: the submission whose slice the calling (worker) thread runs, for MCOMMIT.
+    [ThreadStatic] public static ulong DsCurrentSubmissionId;
+
+    // DSTRACE §4.7 WIDLE: what made the worker wait, captured by WaitForWork under the gate
+    // it already holds. Written and read only by the thread that calls WaitForWork.
+    public bool DsIdleHadPending { get; private set; }
+
+    public BlockedSnapshot DsIdleSnapshot { get; private set; }
 
     public CommandStreamQueue(ICommandStreamHost host) : this(host, DefaultBoundariesInFlight)
     {
@@ -315,6 +325,12 @@ public sealed class CommandStreamQueue
         if (submission.Kind is not (CommandSubmissionKind.FlipPreparation or CommandSubmissionKind.FrameBoundary))
             SubmissionFlowProfile.Record(SubmissionFlowProfile.EventKind.Enqueued, submission.QueueId,
                 submission.SubmissionId, submission.Address, submission.DwordCount, _submissionCount);
+        if (DsTrace.Gpu && DsTrace.Armed)
+        {
+            DsTrace.Emit(DsEv.QENQ, (ulong)submission.QueueId, submission.SubmissionId,
+                (ulong)submission.Kind, submission.DwordCount);
+        }
+
         Monitor.PulseAll(_gate);
     }
 
@@ -370,9 +386,21 @@ public sealed class CommandStreamQueue
 
             _pendingBoundaries++;
             EnqueueLocked(new CommandSubmission(CommandSubmissionKind.FrameBoundary, 0, 0, 0, 0, null));
+            var dsSuspend = DsTrace.Gpu && DsTrace.Armed;
+            var dsPending = _pendingBoundaries;
+            var dsStarted = dsSuspend ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
             while (_outcome == IdleOutcome.Completed && _pendingBoundaries > _boundariesInFlight)
             {
                 Monitor.Wait(_gate);
+            }
+
+            if (dsSuspend)
+            {
+                // DSTRACE §4.6 SUSP: how long the guest's frame boundary blocked on the
+                // in-flight boundaries, and how many were pending (this one included).
+                DsTrace.Emit(DsEv.SUSP,
+                    (ulong)DsTrace.TicksToNs(System.Diagnostics.Stopwatch.GetTimestamp() - dsStarted),
+                    (ulong)dsPending);
             }
 
             return _outcome;
@@ -407,6 +435,12 @@ public sealed class CommandStreamQueue
     {
         lock (_gate)
         {
+            if (DsTrace.Gpu && DsTrace.Armed)
+            {
+                DsIdleHadPending = _submissionCount != 0 || _controlBarriers.Count != 0;
+                DsIdleSnapshot = DsIdleHadPending ? SnapshotBlockedLocked() : default;
+            }
+
             if (HasRunnableWorkLocked() || _stopping)
             {
                 return HasRunnableWorkLocked();
@@ -504,7 +538,8 @@ public sealed class CommandStreamQueue
         lock (_gate)
         {
             _pendingLabels[address] = (value, size, tick);
-            WakeMatchingLocked(wait => wait.Kind == CommandWaitKind.Unknown || wait.TouchedBy(address, (ulong)size));
+            WakeMatchingLocked(wait => wait.Kind == CommandWaitKind.Unknown || wait.TouchedBy(address, (ulong)size),
+                DsWakeSource.PendingLabel);
         }
     }
 
@@ -562,7 +597,7 @@ public sealed class CommandStreamQueue
             }
 
             WakeMatchingLocked(wait => wait.Kind is CommandWaitKind.GuestMemory or
-                CommandWaitKind.EngineCounter or CommandWaitKind.Unknown);
+                CommandWaitKind.EngineCounter or CommandWaitKind.Unknown, DsWakeSource.GpuTick);
         }
     }
 
@@ -575,12 +610,29 @@ public sealed class CommandStreamQueue
     {
         lock (_gate)
         {
+            var ds = DsTrace.Gpu && DsTrace.Armed;
+            var dsWoken = 0UL;
+            var dsOldest = 0L;
             foreach (var queue in _queues)
             {
                 if (queue.First is { } head)
                 {
+                    if (ds && head.Value.Blocked)
+                    {
+                        dsWoken++;
+                        if (dsOldest == 0 || head.Value.BlockedSinceTicks < dsOldest)
+                        {
+                            dsOldest = head.Value.BlockedSinceTicks;
+                        }
+                    }
+
                     head.Value.Blocked = false;
                 }
+            }
+
+            if (ds && dsWoken != 0)
+            {
+                DsEmitWake(DsWakeSource.RetryBlocked, dsWoken, dsOldest);
             }
 
             BlockedRetries++;
@@ -619,18 +671,45 @@ public sealed class CommandStreamQueue
     /// <summary>Heads kept runnable because their wake arrived while they still ran.</summary>
     public ulong WakesRacedWithSlice { get; private set; }
 
+    // DSTRACE §4.7 CPW sources: which wake reached the blocked heads.
+    private enum DsWakeSource : ulong
+    {
+        GpuTick = 1,
+        RetryBlocked = 2,
+        GuestMemoryWritten = 3,
+        SliceCompleted = 4,
+        Pipeline = 5,
+        FlipSlot = 6,
+        PendingLabel = 7,
+    }
+
+    private static void DsEmitWake(DsWakeSource source, ulong woken, long oldestBlockedSince)
+    {
+        var oldest = oldestBlockedSince == 0
+            ? 0UL
+            : (ulong)DsTrace.TicksToNs(System.Diagnostics.Stopwatch.GetTimestamp() - oldestBlockedSince);
+        DsTrace.Emit(DsEv.CPW, (ulong)source, woken, oldest);
+    }
+
     // Caller holds the gate. Wakes the heads a condition predicate selects.
-    private void WakeMatchingLocked(Func<CommandWaitCondition, bool> matches)
+    private void WakeMatchingLocked(Func<CommandWaitCondition, bool> matches, DsWakeSource dsSource)
     {
         _wakeGeneration++;
         var woke = false;
         var wokeCount = 0L;
         var skippedCount = 0L;
+        var ds = DsTrace.Gpu && DsTrace.Armed;
+        var dsOldest = 0L;
         foreach (var queue in _queues)
         {
             if (queue.First is not { } head || !head.Value.Blocked)
             {
                 continue;
+            }
+
+            if (ds && (dsOldest == 0 || head.Value.BlockedSinceTicks < dsOldest))
+            {
+                dsOldest = head.Value.BlockedSinceTicks;
             }
 
             if (matches(head.Value.Wait))
@@ -650,6 +729,11 @@ public sealed class CommandStreamQueue
         if (PacketProfile.Enabled)
         {
             PacketProfile.RecordWakes(wokeCount, skippedCount);
+        }
+
+        if (ds && wokeCount + skippedCount != 0)
+        {
+            DsEmitWake(dsSource, (ulong)wokeCount, dsOldest);
         }
 
         if (woke)
@@ -673,7 +757,8 @@ public sealed class CommandStreamQueue
 
         lock (_gate)
         {
-            WakeMatchingLocked(wait => wait.Kind == CommandWaitKind.Unknown || wait.TouchedBy(address, size));
+            WakeMatchingLocked(wait => wait.Kind == CommandWaitKind.Unknown || wait.TouchedBy(address, size),
+                DsWakeSource.GuestMemoryWritten);
         }
     }
 
@@ -685,7 +770,8 @@ public sealed class CommandStreamQueue
     {
         lock (_gate)
         {
-            WakeMatchingLocked(wait => wait.Kind is CommandWaitKind.Pipeline or CommandWaitKind.Unknown);
+            WakeMatchingLocked(wait => wait.Kind is CommandWaitKind.Pipeline or CommandWaitKind.Unknown,
+                DsWakeSource.Pipeline);
         }
     }
 
@@ -695,7 +781,8 @@ public sealed class CommandStreamQueue
         lock (_gate)
         {
             WakeMatchingLocked(wait =>
-                wait.Kind is CommandWaitKind.FlipSlot or CommandWaitKind.FlipDone or CommandWaitKind.Unknown);
+                wait.Kind is CommandWaitKind.FlipSlot or CommandWaitKind.FlipDone or CommandWaitKind.Unknown,
+                DsWakeSource.FlipSlot);
         }
     }
 
@@ -705,6 +792,10 @@ public sealed class CommandStreamQueue
         CommandSubmission? submission = null;
         ControlBarrier? control = null;
         var sliceWakeGeneration = 0UL;
+        // DSTRACE §4.7 SLICE: entry and exit of a slice that ran a submission.
+        var dsSlice = DsTrace.Gpu && DsTrace.Armed;
+        var dsStarted = dsSlice ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
+        var dsCpuStarted = dsSlice ? DsTrace.SelfCpuNs() : 0UL;
         lock (_gate)
         {
             if (_processing)
@@ -778,6 +869,13 @@ public sealed class CommandStreamQueue
             return SliceResult.Completed;
         }
 
+        var dsPacketsStarted = 0UL;
+        if (dsSlice)
+        {
+            DsCurrentSubmissionId = submission!.SubmissionId;
+            dsPacketsStarted = _interpreters[submission.QueueId]?.DsPacketSerial ?? 0;
+        }
+
         bool complete;
         IGuestSubmissionPrefixCompletion? prefixCompletion = null;
         ICommandSubmissionCompletionHost? completionHost;
@@ -819,12 +917,12 @@ public sealed class CommandStreamQueue
             throw;
         }
 
+        SliceResult result;
         lock (_gate)
         {
             submission!.Preparation?.Resolve(complete ? CommandSubmissionPreparation.State.PreparedPrefix : CommandSubmissionPreparation.State.DeferredDependency,
                 completion: complete ? prefixCompletion : null);
             _activePreparation = null;
-            SliceResult result;
             if (!complete)
             {
                 // A wake that arrived while this slice ran was delivered to a head that was
@@ -870,14 +968,44 @@ public sealed class CommandStreamQueue
                 // has already been reported through NotifyGuestMemoryWritten. Waking
                 // every head here instead made each one re-run a slice, re-read its
                 // label and suspend again.
-                WakeMatchingLocked(wait => wait.Kind is not CommandWaitKind.GuestMemory);
+                WakeMatchingLocked(wait => wait.Kind is not CommandWaitKind.GuestMemory, DsWakeSource.SliceCompleted);
                 result = SliceResult.Completed;
             }
 
             _processing = false;
             Monitor.PulseAll(_gate);
-            return result;
         }
+
+        if (dsSlice)
+        {
+            DsEmitSlice(submission!, result, dsStarted, dsCpuStarted, dsPacketsStarted);
+        }
+
+        return result;
+    }
+
+    private void DsEmitSlice(CommandSubmission submission, SliceResult result, long started, ulong cpuStarted, ulong packetsStarted)
+    {
+        DsCurrentSubmissionId = 0;
+        var packets = _interpreters[submission.QueueId]?.DsPacketSerial ?? 0;
+        // outcome: 0 done, 1 suspended after progress, 2 blocked without progress; the wait kind in bits 8+.
+        ulong outcome = result switch
+        {
+            SliceResult.Completed => 0,
+            SliceResult.Progressed => 1,
+            _ => 2,
+        };
+        var wait = result == SliceResult.Completed ? default : submission.Wait;
+        DsTrace.Emit(
+            DsEv.SLICE,
+            (ulong)started,
+            (ulong)DsTrace.TicksToNs(System.Diagnostics.Stopwatch.GetTimestamp() - started),
+            (ulong)submission.QueueId,
+            submission.SubmissionId,
+            packets - packetsStarted,
+            outcome | ((ulong)wait.Kind << 8),
+            wait.Address,
+            DsTrace.SelfCpuNs() - cpuStarted);
     }
 
     private bool RunSlice(CommandSubmission submission)
@@ -1089,30 +1217,35 @@ public sealed class CommandStreamQueue
     {
         lock (_gate)
         {
-            var count = 0;
-            var oldestTicks = 0L;
-            var sampleAddress = 0UL;
-            var sampleQueue = -1;
-            var now = System.Diagnostics.Stopwatch.GetTimestamp();
-            for (var queueId = 0; queueId < QueueCount; queueId++)
-            {
-                if (_queues[queueId].First is not { } head || !head.Value.Blocked)
-                {
-                    continue;
-                }
+            return SnapshotBlockedLocked();
+        }
+    }
 
-                count++;
-                var age = now - head.Value.BlockedSinceTicks;
-                if (sampleQueue < 0 || age > oldestTicks)
-                {
-                    oldestTicks = age;
-                    sampleAddress = head.Value.BlockedPacketAddress;
-                    sampleQueue = queueId;
-                }
+    private BlockedSnapshot SnapshotBlockedLocked()
+    {
+        var count = 0;
+        var oldestTicks = 0L;
+        var sampleAddress = 0UL;
+        var sampleQueue = -1;
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        for (var queueId = 0; queueId < QueueCount; queueId++)
+        {
+            if (_queues[queueId].First is not { } head || !head.Value.Blocked)
+            {
+                continue;
             }
 
-            return new BlockedSnapshot(count, oldestTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency, sampleAddress, sampleQueue);
+            count++;
+            var age = now - head.Value.BlockedSinceTicks;
+            if (sampleQueue < 0 || age > oldestTicks)
+            {
+                oldestTicks = age;
+                sampleAddress = head.Value.BlockedPacketAddress;
+                sampleQueue = queueId;
+            }
         }
+
+        return new BlockedSnapshot(count, oldestTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency, sampleAddress, sampleQueue);
     }
 
     public IdleOutcome Outcome

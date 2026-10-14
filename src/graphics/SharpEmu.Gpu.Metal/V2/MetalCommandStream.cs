@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.HLE.DsTrace;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands;
@@ -172,6 +173,13 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         var contextId = write.ContextId;
         var requestId = write.FlipRequestId;
         var encoded = TryEncodeEndOfPipeLabel(in write);
+        if (DsTrace.Gpu && DsTrace.Armed)
+        {
+            // DSTRACE §4.7 LENC. deferred: 0 copy encoded at the packet, 1 copy deferred to
+            // the next encoder boundary, 2 not encoded (published by the interpreter or a completion).
+            DsTrace.Emit(DsEv.LENC, encoded ? _dsLabelSerial : _submissionSerial, write.Destination, write.Value,
+                encoded ? _dsLabelDeferred : 2UL, (ulong)write.Kind);
+        }
         if (EndOfPipeTrace && !encoded)
         {
             Console.Error.WriteLine(
@@ -296,6 +304,10 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             Interlocked.Increment(ref _deferredLabelWrites);
             NoteRecordedWork();
             serial = SubmissionSerial;
+            if (DsTrace.Gpu)
+            {
+                _dsLabelDeferred = 1;
+            }
         }
         else
         {
@@ -307,6 +319,15 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             // — from running inline ahead of the bytes.
             context.ProfileEncoded($"eop label bytes={bytes}");
             serial = context.SubmissionSerial;
+            if (DsTrace.Gpu)
+            {
+                _dsLabelDeferred = 0;
+            }
+        }
+
+        if (DsTrace.Gpu)
+        {
+            _dsLabelSerial = serial;
         }
 
         // A command processor polling this label suspends until something says the bytes
@@ -317,7 +338,15 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         if (_labelWakeSerial != serial)
         {
             _labelWakeSerial = serial;
-            _completions.Enqueue(serial, () => _commandStream?.NotifyCompletedGpuTick(serial));
+            _completions.Enqueue(serial, () =>
+            {
+                if (DsTrace.Gpu)
+                {
+                    DsNoteLabelsLanded(serial);
+                }
+
+                _commandStream?.NotifyCompletedGpuTick(serial);
+            });
         }
 
         NoteGuestMemoryWrite(write.Destination, (ulong)bytes, MetalGpuWriteOrigin.EndOfPipeLabel);
@@ -444,6 +473,37 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     private ulong _pendingLabelWrites;
     private ulong _labelWakeSerial;
+
+    // DSTRACE §4.7 LENC: how the label just recorded was encoded, and into which serial.
+    private ulong _dsLabelDeferred;
+    private ulong _dsLabelSerial;
+
+    // DSTRACE §4.7 LLAND: the highest serial the host has been told completed, from either the
+    // completion thread (label wake) or the worker (completion poll). One record per advance:
+    // a label recorded into serial s has landed at the first LLAND whose serial is >= s.
+    private long _dsLandedSerial;
+
+    private void DsNoteLabelsLanded(ulong serial)
+    {
+        if (!DsTrace.Armed)
+        {
+            return;
+        }
+
+        var landed = (long)serial;
+        var previous = Volatile.Read(ref _dsLandedSerial);
+        while (landed > previous)
+        {
+            var seen = Interlocked.CompareExchange(ref _dsLandedSerial, landed, previous);
+            if (seen == previous)
+            {
+                DsTrace.Emit(DsEv.LLAND, serial);
+                return;
+            }
+
+            previous = seen;
+        }
+    }
     private long _gpuTimedLabels;
     private long _labelsWithoutWindow;
 
@@ -949,6 +1009,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// </summary>
     internal void NotifyGpuCompleted(ulong completedSerial)
     {
+        if (DsTrace.Gpu)
+        {
+            DsNoteLabelsLanded(completedSerial);
+        }
+
         if (_commandStream is { } stream)
         {
             stream.NotifyCompletedGpuTick(completedSerial);

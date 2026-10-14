@@ -342,8 +342,15 @@ internal static partial class MetalV2Presenter
                     host.PollGpuCompletions();
                     host.KeepQueueWarmIfIdle();
                     var idleStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+                    var dsIdle = DsTrace.Gpu && DsTrace.Armed;
+                    var dsIdleCpu = dsIdle ? DsTrace.SelfCpuNs() : 0UL;
                     _ = host.CommandStream.WaitForWork(CommandStreamQueue.AllBlockedRetryMilliseconds);
-                    host.NoteIdle(System.Diagnostics.Stopwatch.GetTimestamp() - idleStarted);
+                    var idleEnded = System.Diagnostics.Stopwatch.GetTimestamp();
+                    host.NoteIdle(idleEnded - idleStarted);
+                    if (dsIdle)
+                    {
+                        DsEmitIdle(host.CommandStream, idleStarted, idleEnded, dsIdleCpu);
+                    }
                 }
             }
         }
@@ -356,6 +363,24 @@ internal static partial class MetalV2Presenter
         {
             Shutdown(host);
         }
+    }
+
+    // DSTRACE §4.7 WIDLE: one worker park. reason 0 = nothing pending (NoWork), 1 = every
+    // pending head blocked (AllBlocked); WaitForWork captured both under its own gate.
+    private static void DsEmitIdle(CommandStreamQueue stream, long started, long ended, ulong cpuStarted)
+    {
+        var allBlocked = stream.DsIdleHadPending;
+        var snapshot = allBlocked ? stream.DsIdleSnapshot : default;
+        DsTrace.EmitAt(
+            ended,
+            DsEv.WIDLE,
+            (ulong)started,
+            (ulong)DsTrace.TicksToNs(ended - started),
+            allBlocked ? 1UL : 0UL,
+            (ulong)snapshot.Outstanding,
+            snapshot.SampleWaitAddress,
+            (ulong)(snapshot.OldestAgeMilliseconds * 1000.0),
+            DsTrace.SelfCpuNs() - cpuStarted);
     }
 
     // The worker owns the teardown: the page watches have to come off before the
@@ -717,6 +742,11 @@ internal static partial class MetalV2Presenter
         _presentHeight = frame.Height;
         _presentIsHdr = frame.IsHdr;
         Interlocked.Increment(ref _presentedGuestFrames);
+        if (DsTrace.Gpu && DsTrace.Armed)
+        {
+            DsTrace.Emit(DsEv.PRESENT, frame.RequestId);
+        }
+
         PerfOverlay.RecordGuestPresent();
         if (frame.RequestId != 0)
         {

@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
+using SharpEmu.HLE.DsTrace;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.VideoOut;
 
@@ -33,6 +34,9 @@ public sealed partial class GpuCommandInterpreter
     private PacketCursorStack? _execution;
     private bool _chainRequested;
     private ulong _packetSerial;
+
+    // DSTRACE §4.7 SLICE: packets run so far, read by the queue around a slice.
+    internal ulong DsPacketSerial => _packetSerial;
     private ulong _lastWriteAddress;
     private ulong _lastWriteValue;
     private int _lastWriteLength;
@@ -302,6 +306,47 @@ public sealed partial class GpuCommandInterpreter
         var execution = RequireExecution();
         execution.Suspended = true;
         execution.SuspendCondition = condition;
+        if (DsTrace.Gpu)
+        {
+            DsEmitSuspend(in condition);
+        }
+    }
+
+    // DSTRACE §4.7 CPS: the compare operands of the memory wait about to suspend. Only the
+    // queue's own (worker) thread runs this interpreter, so plain fields suffice.
+    private bool _dsHasWaitOperands;
+    private ulong _dsWaitReference;
+    private ulong _dsWaitMask;
+    private uint _dsWaitFunction;
+    private ulong _dsWaitCurrent;
+
+    private void DsNoteWaitOperands(ulong reference, ulong mask, uint function, ulong current)
+    {
+        _dsWaitReference = reference;
+        _dsWaitMask = mask;
+        _dsWaitFunction = function;
+        _dsWaitCurrent = current;
+        _dsHasWaitOperands = true;
+    }
+
+    private void DsEmitSuspend(in CommandWaitCondition condition)
+    {
+        var hasOperands = _dsHasWaitOperands;
+        _dsHasWaitOperands = false;
+        if (!DsTrace.Armed)
+        {
+            return;
+        }
+
+        DsTrace.Emit(
+            DsEv.CPS,
+            (ulong)QueueId,
+            (ulong)condition.Kind,
+            condition.Address,
+            hasOperands ? _dsWaitReference : 0,
+            hasOperands ? _dsWaitMask : 0,
+            hasOperands ? _dsWaitFunction : 0,
+            hasOperands ? _dsWaitCurrent : 0);
     }
 
     // A paired wait must still observe this queue's immediate label store when the CPU

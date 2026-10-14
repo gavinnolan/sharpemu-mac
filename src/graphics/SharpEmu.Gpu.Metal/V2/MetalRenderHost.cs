@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.HLE.DsTrace;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
@@ -403,6 +404,11 @@ internal sealed partial class MetalRenderHost :
         _slotTrap?.OnCommit(serial);
         PassProfileCommit(serial, cause == PassEndCause.Present);
         MetalNative.SendVoid(_commandBuffer, SelCommit);
+        if (DsTrace.Gpu && DsTrace.Armed)
+        {
+            DsTrace.Emit(DsEv.MCOMMIT, serial, (ulong)cause, _pendingLabelWrites,
+                SharpEmu.Libs.Gpu.GpuCommands.CommandStreamQueue.DsCurrentSubmissionId);
+        }
         if (_pendingLabelWrites != 0 && ScheduleLabelSubmissions &&
             System.Diagnostics.Stopwatch.GetTimestamp() - _lastCommitTimestamp > QuietQueueTicks)
         {
@@ -499,6 +505,11 @@ internal sealed partial class MetalRenderHost :
                 _inFlightSerials[(_inFlightHead + MaxInFlightSubmissions - 1) % MaxInFlightSubmissions],
                 PassProfileEnabled,
                 0);
+            if (DsTrace.Gpu && DsTrace.Armed)
+            {
+                DsKeepLate(oldest, _inFlightSerials[(_inFlightHead + MaxInFlightSubmissions - 1) % MaxInFlightSubmissions]);
+            }
+
             MetalNative.SendVoid(oldest, SelRelease);
         }
 
@@ -537,6 +548,11 @@ internal sealed partial class MetalRenderHost :
 
     private void SampleSubmission(nint buffer, ulong serial)
     {
+        if (DsTrace.Gpu && _dsLateCount != 0)
+        {
+            DsRecheckLate();
+        }
+
         var status = MetalV2Native.SendValue(buffer, MetalNative.Selector("status"));
         if (PassProfileEnabled && status != CommandBufferStatusCompleted && status != CommandBufferStatusError)
         {
@@ -561,6 +577,11 @@ internal sealed partial class MetalRenderHost :
         {
             _unsampledSubmissions++;
             PassProfileResolve(serial, false, 0);
+            if (DsTrace.Gpu && DsTrace.Armed)
+            {
+                DsKeepLate(buffer, serial);
+            }
+
             return;
         }
 
@@ -579,6 +600,11 @@ internal sealed partial class MetalRenderHost :
 
         var kernelStart = MetalNative.SendDouble(buffer, SelKernelStartTime);
         var kernelEnd = MetalNative.SendDouble(buffer, SelKernelEndTime);
+        if (DsTrace.Gpu && DsTrace.Armed)
+        {
+            DsEmitGpuTimes(serial, kernelStart, kernelEnd, gpuStart, gpuEnd, late: 0);
+        }
+
         if (kernelEnd > kernelStart)
         {
             _kernelSeconds += kernelEnd - kernelStart;
@@ -593,8 +619,104 @@ internal sealed partial class MetalRenderHost :
     private double _kernelSeconds;
     private double _scheduleGapSeconds;
 
+    // DSTRACE §4.7 MGPU: submissions that had not completed when sampled. Each is retained
+    // here and re-checked at every later sample until it completes, then emitted with
+    // late=1 and released. Bounded: past the cap a submission is emitted as late=2
+    // (never sampled, no times) and not retained. Worker thread only, like the ring above.
+    private const int DsLateCapacity = 128;
+    private nint[]? _dsLateBuffers;
+    private ulong[]? _dsLateSerials;
+    private int _dsLateCount;
+    private long _dsLateOverflows;
+
+    private void DsKeepLate(nint buffer, ulong serial)
+    {
+        _dsLateBuffers ??= new nint[DsLateCapacity];
+        _dsLateSerials ??= new ulong[DsLateCapacity];
+        if (_dsLateCount == DsLateCapacity)
+        {
+            if (_dsLateOverflows++ == 0)
+            {
+                Console.Error.WriteLine(
+                    $"[DSTRACE][WARN] MGPU late list full ({DsLateCapacity}); further unfinished submissions are emitted as late=2.");
+            }
+
+            DsTrace.Emit(DsEv.MGPU, serial, 0, 0, 0, 0, 2);
+            return;
+        }
+
+        MetalNative.SendVoid(buffer, SelRetain);
+        _dsLateBuffers[_dsLateCount] = buffer;
+        _dsLateSerials[_dsLateCount] = serial;
+        _dsLateCount++;
+    }
+
+    private void DsRecheckLate()
+    {
+        var buffers = _dsLateBuffers!;
+        var serials = _dsLateSerials!;
+        for (var index = _dsLateCount - 1; index >= 0; index--)
+        {
+            var buffer = buffers[index];
+            var status = MetalV2Native.SendValue(buffer, MetalNative.Selector("status"));
+            if (status != CommandBufferStatusCompleted && status != CommandBufferStatusError)
+            {
+                continue;
+            }
+
+            if (status == CommandBufferStatusCompleted)
+            {
+                DsEmitGpuTimes(
+                    serials[index],
+                    MetalNative.SendDouble(buffer, SelKernelStartTime),
+                    MetalNative.SendDouble(buffer, SelKernelEndTime),
+                    MetalNative.SendDouble(buffer, SelGpuStartTime),
+                    MetalNative.SendDouble(buffer, SelGpuEndTime),
+                    late: 1);
+            }
+            else
+            {
+                DsTrace.Emit(DsEv.MGPU, serials[index], 0, 0, 0, 0, 2);
+            }
+
+            MetalNative.SendVoid(buffer, SelRelease);
+            _dsLateCount--;
+            buffers[index] = buffers[_dsLateCount];
+            serials[index] = serials[_dsLateCount];
+            buffers[_dsLateCount] = 0;
+        }
+    }
+
+    private void DsReleaseLate()
+    {
+        for (var index = 0; index < _dsLateCount; index++)
+        {
+            MetalNative.SendVoid(_dsLateBuffers![index], SelRelease);
+            _dsLateBuffers[index] = 0;
+        }
+
+        _dsLateCount = 0;
+        if (_dsLateOverflows != 0)
+        {
+            Console.Error.WriteLine($"[DSTRACE] MGPU late list overflowed {_dsLateOverflows} times.");
+        }
+    }
+
+    // Metal reports these in seconds on the host media clock; the record carries ns.
+    private static void DsEmitGpuTimes(
+        ulong serial, double kernelStart, double kernelEnd, double gpuStart, double gpuEnd, ulong late)
+    {
+        static ulong Ns(double seconds) => seconds > 0 ? (ulong)(seconds * 1e9) : 0;
+        DsTrace.Emit(DsEv.MGPU, serial, Ns(kernelStart), Ns(kernelEnd), Ns(gpuStart), Ns(gpuEnd), late);
+    }
+
     private void ReleaseInFlightSubmissions()
     {
+        if (DsTrace.Gpu)
+        {
+            DsReleaseLate();
+        }
+
         while (_inFlightCount > 0)
         {
             var buffer = _inFlightBuffers[_inFlightHead];
@@ -655,6 +777,15 @@ internal sealed partial class MetalRenderHost :
             SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandGpuWait);
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var profile = _completions.WaitFor(serial);
+        if (DsTrace.Gpu && DsTrace.Armed)
+        {
+            // DSTRACE §4.7 RRW: a partial wait for one committed submission. The read
+            // address is known only for ReadRange (WaitForGuestBytes recorded it).
+            DsTrace.Emit(DsEv.RRW, serial, _previousSerial, CompletedSerial,
+                (ulong)DsTrace.TicksToNs(System.Diagnostics.Stopwatch.GetTimestamp() - started),
+                (ulong)reason, reason == MetalWaitReason.ReadRange ? _lastReadAddress : 0);
+        }
+
         ReportWait(serial, started, started, waited: 0, in profile, reason, partial: true);
         _guestMemory.NoteCompleted(serial);
         _gpuWrites.Retire(CompletedSerial);
