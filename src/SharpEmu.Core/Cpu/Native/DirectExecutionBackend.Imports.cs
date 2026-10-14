@@ -13,6 +13,7 @@ using System.Threading;
 using SharpEmu.Core.Cpu.Debugging;
 using SharpEmu.Core.Cpu;
 using SharpEmu.HLE;
+using SharpEmu.HLE.DsTrace;
 using SharpEmu.Libs.Kernel;
 
 using SharpEmu.Core.Cpu.Native.Platform;
@@ -51,6 +52,11 @@ public sealed partial class DirectExecutionBackend
 				return 18446744071562199042uL;
 			}
 
+			if (DsTrace.Hle && DsTrace.Armed)
+			{
+				return DispatchImportWithDsTrace(directExecutionBackend, importIndex, argPackPtr);
+			}
+
 			if (_perfHleHistogram)
 			{
 				return DispatchImportWithProfile(directExecutionBackend, importIndex, argPackPtr);
@@ -80,6 +86,100 @@ public sealed partial class DirectExecutionBackend
 			Console.Error.WriteLine(
 				$"[LOADER][ERROR] ImportDispatchGatewayManaged exception: {ex.GetType().Name}: {ex.Message}");
 			return 18446744071562199298uL;
+		}
+	}
+
+	// DSTRACE §4.2: times the unchanged gateway body (PERF_HLE branch, ImportProfile
+	// branch or the plain dispatch) and records HLEA / HLE / CPUPT. Only reached while
+	// SHARPEMU_DSTRACE's hle group is armed.
+	private static unsafe ulong DispatchImportWithDsTrace(DirectExecutionBackend backend, int importIndex, nint argPackPtr)
+	{
+		var entries = backend._importEntries;
+		if (DsHle.Count != entries.Length)
+		{
+			backend.RegisterDsTraceImportNames();
+		}
+
+		var data = DsTrace.ThreadData;
+		var previousImport = DsTrace.CurrentImport;
+		var previousRa1 = DsTrace.CurrentRa1;
+		var rdi = *(ulong*)argPackPtr;
+		var rsi = *(ulong*)(argPackPtr + 8);
+		var rdx = *(ulong*)(argPackPtr + 16);
+		var rbp = *(ulong*)(argPackPtr + 56);
+		var ra1 = *(ulong*)(argPackPtr + 96);
+		var tracedIndex = (uint)importIndex < (uint)entries.Length ? importIndex : -1;
+		DsTrace.CurrentImport = tracedIndex;
+		DsTrace.CurrentRa1 = ra1;
+		DsTrace.LastOutcome = 0;
+		var allowListed = DsHle.IsAllowed(tracedIndex);
+		var sampleCpu = allowListed || DsHle.ShouldSampleCpu(data);
+		var cpu0 = sampleCpu ? DsTrace.SelfCpuNs() : 0UL;
+		var t0 = Stopwatch.GetTimestamp();
+		ulong result = 0;
+		try
+		{
+			if (_perfHleHistogram)
+			{
+				result = DispatchImportWithProfile(backend, importIndex, argPackPtr);
+			}
+			else if (ImportProfile.Enabled)
+			{
+				var profiled = ImportProfile.Begin();
+				try
+				{
+					result = backend.DispatchImport(importIndex, argPackPtr);
+					backend.ClearActiveImportIndex();
+				}
+				finally
+				{
+					ImportProfile.End(importIndex, profiled);
+				}
+			}
+			else
+			{
+				result = backend.DispatchImport(importIndex, argPackPtr);
+				backend.ClearActiveImportIndex();
+			}
+
+			return result;
+		}
+		finally
+		{
+			var t1 = Stopwatch.GetTimestamp();
+			var cpu1 = sampleCpu ? DsTrace.SelfCpuNs() : 0UL;
+			DsHle.Record(data, tracedIndex, t0, t1, allowListed, sampleCpu, cpu0, cpu1, rdi, rsi, rdx, ra1, rbp, result);
+			DsTrace.CurrentImport = previousImport;
+			DsTrace.CurrentRa1 = previousRa1;
+		}
+	}
+
+	private void RegisterDsTraceImportNames()
+	{
+		var entries = _importEntries;
+		var names = new string?[entries.Length];
+		for (var i = 0; i < entries.Length; i++)
+		{
+			names[i] = entries[i].Export?.Name ?? entries[i].Nid;
+		}
+		DsHle.SetImportNames(names);
+	}
+
+	// DSTRACE: a blocking import consumed the thread's block (outcome 1, BRA).
+	private static void NoteDsTraceBlockConsumed(in ImportStubEntry importStubEntry, ulong returnRip, CpuContext cpuContext, nint argPackPtr)
+	{
+		if (DsTrace.Hle)
+		{
+			DsTrace.LastOutcome = 1;
+		}
+		if (DsTrace.Sched && DsTrace.Armed)
+		{
+			DsSched.BlockingReturn(
+				GuestThreadExecution.CurrentGuestThreadHandle,
+				DsTrace.Intern(importStubEntry.Export?.Name ?? importStubEntry.Nid),
+				returnRip,
+				cpuContext[CpuRegister.Rbp],
+				(ulong)argPackPtr + 96);
 		}
 	}
 
@@ -759,6 +859,11 @@ public sealed partial class DirectExecutionBackend
 				value2);
 			if (GuestThreadExecution.TryConsumeCurrentContextTransfer(out var transferTarget))
 			{
+				if (DsTrace.Hle)
+				{
+					DsTrace.LastOutcome = 2;
+				}
+				var dsPrepStarted = DsTrace.Fiber ? Stopwatch.GetTimestamp() : 0;
 				if (!TryPrepareGuestContextTransfer(
 						transferTarget,
 						out var transferFrame,
@@ -769,6 +874,10 @@ public sealed partial class DirectExecutionBackend
 					ActiveForcedGuestExit = true;
 					cpuContext[CpuRegister.Rax] = 18446744071562199298uL;
 					return cpuContext[CpuRegister.Rax];
+				}
+				if (DsTrace.Fiber)
+				{
+					DsFiber.OnTransferPrepared(cpuContext, dsPrepStarted);
 				}
 
 				*(ulong*)(argPackPtr + 96) = unchecked((ulong)transferStub);
@@ -789,6 +898,10 @@ public sealed partial class DirectExecutionBackend
 			}
 			if (GuestThreadExecution.TryConsumeCurrentEntryExit(out var exitValue, out var exitReason))
 			{
+				if (DsTrace.Hle)
+				{
+					DsTrace.LastOutcome = 3;
+				}
 				if (TryCompleteGuestEntryToHostStub(argPackPtr, num, num7, importStubEntry.Nid, exitReason, exitValue))
 				{
 					cpuContext[CpuRegister.Rax] = exitValue;
@@ -799,13 +912,18 @@ public sealed partial class DirectExecutionBackend
 					cpuContext[CpuRegister.Rax] = 18446744071562199298uL;
 				}
 			}
-			if (GuestThreadExecution.TryConsumeCurrentThreadBlock(
+			var consumedThreadBlock = GuestThreadExecution.TryConsumeCurrentThreadBlock(
 					out var blockReason,
 					out var blockContinuation,
 					out var hasBlockContinuation,
 					out var blockWakeKey,
 					out var blockWaiter,
-					out var blockDeadlineTimestamp) &&
+					out var blockDeadlineTimestamp);
+			if (consumedThreadBlock && (DsTrace.Hle || DsTrace.Sched))
+			{
+				NoteDsTraceBlockConsumed(in importStubEntry, num7, cpuContext, argPackPtr);
+			}
+			if (consumedThreadBlock &&
 				TryYieldGuestThreadToHostStub(argPackPtr, num, num7, importStubEntry.Nid, blockReason))
 			{
 				if (hasBlockContinuation)
@@ -1623,6 +1741,10 @@ public sealed partial class DirectExecutionBackend
 				out var blockWakeKey,
 				out var blockWaiter,
 				out var blockDeadlineTimestamp);
+		if (consumedThreadBlock && (DsTrace.Hle || DsTrace.Sched))
+		{
+			NoteDsTraceBlockConsumed(in importStubEntry, returnRip, cpuContext, argPackPtr);
+		}
 		if (consumedThreadBlock &&
 			TryYieldGuestThreadToHostStub(argPackPtr, dispatchIndex, returnRip, importStubEntry.Nid, blockReason))
 		{

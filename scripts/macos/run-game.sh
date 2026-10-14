@@ -159,6 +159,7 @@ shot() {
   cd "$APP_DIR" || exit 1
   for e in "$@"; do export "${e?}"; done
   export SHARPEMU_INPUT_FILE="$KEYS"
+  export SHARPEMU_RUN_OUT="$OUT"
   exec ./SharpEmu ${SHARPEMU_ARGS:-} "$EBOOT"
 ) > "$OUT/game.log" 2>&1 &
 GPID=$!

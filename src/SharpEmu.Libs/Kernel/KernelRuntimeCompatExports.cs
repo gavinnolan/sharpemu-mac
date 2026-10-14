@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.HLE.DsTrace;
 using SharpEmu.Libs.Fiber;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -95,15 +96,27 @@ public static class KernelRuntimeCompatExports
     public static int KernelUsleep(CpuContext ctx)
     {
         var micros = ctx[CpuRegister.Rdi];
+        var dsUsleep = DsTrace.Sched && DsTrace.Armed;
+        var dsEnter = dsUsleep ? Stopwatch.GetTimestamp() : 0;
         TraceUsleepSpin(ctx, micros);
         if (micros == 0)
         {
             ctx[CpuRegister.Rax] = 0;
+            if (dsUsleep)
+            {
+                DsSched.Usleep(ctx, 0, dsEnter, 0, 0);
+            }
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
+        var dsPump = dsUsleep ? Stopwatch.GetTimestamp() : 0;
         GuestThreadExecution.Scheduler?.Pump(ctx, "sceKernelUsleep");
+        if (dsUsleep)
+        {
+            dsPump = Stopwatch.GetTimestamp() - dsPump;
+        }
 
+        var dsBranch = 2;
         if (micros < 1000)
         {
             // Guest worker pools use usleep(1) as a polling backoff. Do not turn
@@ -111,10 +124,12 @@ public static class KernelRuntimeCompatExports
             if ((++_shortUsleepCount & 255) == 0)
             {
                 Thread.Sleep(0);
+                dsBranch = 1;
             }
             else
             {
                 Thread.Yield();
+                dsBranch = 0;
             }
         }
         else
@@ -127,6 +142,10 @@ public static class KernelRuntimeCompatExports
         }
 
         ctx[CpuRegister.Rax] = 0;
+        if (dsUsleep)
+        {
+            DsSched.Usleep(ctx, micros, dsEnter, dsPump, dsBranch);
+        }
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 

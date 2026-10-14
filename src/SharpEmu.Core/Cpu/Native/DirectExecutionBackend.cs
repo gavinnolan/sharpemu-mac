@@ -16,6 +16,7 @@ using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
 using SharpEmu.Core.Cpu.Native.Platform;
 using SharpEmu.HLE.Host;
+using SharpEmu.HLE.DsTrace;
 using SharpEmu.Libs.Diagnostics;
 
 namespace SharpEmu.Core.Cpu.Native;
@@ -818,6 +819,15 @@ public sealed unsafe partial class DirectExecutionBackend :
 					$"override={_guestThreadQosOverride ?? "none"} applied={applied?.ToString() ?? "n/a"} " +
 					$"now=0x{SharpEmu.HLE.Host.HostThreadQualityOfService.GetCurrentThreadClassForDiagnostics():X2}");
 			}
+			if (DsTrace.On)
+			{
+				var dsName = _thread.Name ?? string.Empty;
+				if (dsName.StartsWith("SharpEmu-", StringComparison.Ordinal))
+				{
+					dsName = dsName["SharpEmu-".Length..];
+				}
+				DsTrace.RegisterThread(1, guestThreadHandle, dsName, applied is null ? 2 : applied.Value ? 1 : 0);
+			}
 			var previousGuestThreadHandle = GuestThreadExecution.EnterGuestThread(guestThreadHandle);
 			try
 			{
@@ -1534,6 +1544,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 		Console.Error.WriteLine($"[LOADER][INFO] {Volatile.Read(ref _hostShutdownReason)}");
 		// Process exit can bypass disposal; finish the retained trace before returning to the caller.
 		WriteGuestFlowTraces();
+		DsTrace.Shutdown();
 	}
 
 	private bool SetupImportStubs(IReadOnlyDictionary<ulong, string> importStubs)
@@ -2507,8 +2518,29 @@ public sealed unsafe partial class DirectExecutionBackend :
 			return false;
 		}
 
+		// DSTRACE §7 in-run A/B (SHARPEMU_DSTRACE_AB_RIPCACHE): during ON windows a target
+		// inside a committed executable page is accepted through the lock-free page cache.
+		if (DsTraceAb.Enabled && DsTraceAb.RipCacheActive && IsExecutableAddress(target.Rip))
+		{
+			if (DsTrace.Fiber)
+			{
+				DsFiber.NoteProbePath(3);
+			}
+			error = null;
+			return true;
+		}
+
 		Span<byte> ripProbe = stackalloc byte[1];
-		if (!memory.TryRead(target.Rip, ripProbe))
+		if (DsTrace.Fiber)
+		{
+			DsFiber.BeginRipProbe();
+		}
+		var ripReadable = memory.TryRead(target.Rip, ripProbe);
+		if (DsTrace.Fiber)
+		{
+			DsFiber.EndRipProbe(ripReadable);
+		}
+		if (!ripReadable)
 		{
 			error =
 				$"guest context transfer target rip=0x{target.Rip:X16} is not mapped guest memory " +
@@ -4000,13 +4032,23 @@ public sealed unsafe partial class DirectExecutionBackend :
 	{
 		_ = callerContext;
 		var runSynchronously = string.Equals(reason, "entry_return", StringComparison.Ordinal);
+		var dsPump = DsTrace.Sched && DsTrace.Armed;
+		var dsWakeExpiredStarted = dsPump ? Stopwatch.GetTimestamp() : 0;
 		WakeExpiredBlockedGuestThreads();
+		if (dsPump)
+		{
+			DsSched.PumpCall(Stopwatch.GetTimestamp() - dsWakeExpiredStarted);
+		}
 		if (Volatile.Read(ref _readyGuestThreadCount) == 0)
 		{
 			return;
 		}
 		if (Interlocked.CompareExchange(ref _guestThreadPumpDepth, 1, 0) != 0)
 		{
+			if (dsPump)
+			{
+				DsSched.PumpCasLost();
+			}
 			return;
 		}
 		try
@@ -4022,6 +4064,10 @@ public sealed unsafe partial class DirectExecutionBackend :
 				{
 					return;
 				}
+				if (dsPump)
+				{
+					DsSched.PumpClaimed();
+				}
 
 				if (runSynchronously)
 				{
@@ -4030,6 +4076,10 @@ public sealed unsafe partial class DirectExecutionBackend :
 				}
 
 				ScheduleGuestThreadExecution(thread, reason);
+			}
+			if (dsPump && Volatile.Read(ref _readyGuestThreadCount) > 0)
+			{
+				DsSched.PumpCapHit();
 			}
 		}
 		finally
@@ -4046,13 +4096,27 @@ public sealed unsafe partial class DirectExecutionBackend :
 		}
 
 		var wakeCount = 0;
+		var dsWake = DsTrace.Sched && DsTrace.Armed;
+		var dsWakeEnter = dsWake ? Stopwatch.GetTimestamp() : 0;
+		var dsWakeGate = 0L;
+		var dsWakeScanned = 0;
+		var dsWakeFirst = 0UL;
+		var dsWakePumped = false;
 		using (LockGate("WakeBlockedThreads"))
 		{
+			if (dsWake)
+			{
+				dsWakeGate = Stopwatch.GetTimestamp();
+			}
 			foreach (var thread in _guestThreads.Values)
 			{
 				if (wakeCount >= maxCount)
 				{
 					break;
+				}
+				if (dsWake)
+				{
+					dsWakeScanned++;
 				}
 
 				if (thread.State != GuestThreadRunState.Blocked ||
@@ -4071,6 +4135,10 @@ public sealed unsafe partial class DirectExecutionBackend :
 				thread.BlockReason = null;
 				thread.BlockDeadlineTimestamp = 0;
 				EnqueueReadyGuestThreadLocked(thread, GuestThreadExecution.IsGuestThread ? "signal" : "host_signal");
+				if (dsWake && wakeCount == 0)
+				{
+					dsWakeFirst = thread.ThreadHandle;
+				}
 				wakeCount++;
 			}
 		}
@@ -4086,7 +4154,16 @@ public sealed unsafe partial class DirectExecutionBackend :
 			if (_cpuContext is { } wakeContext)
 			{
 				Pump(wakeContext, "wake");
+				if (dsWake)
+				{
+					dsWakePumped = true;
+				}
 			}
+		}
+
+		if (dsWake)
+		{
+			DsSched.Wake(dsWakeEnter, dsWakeGate, wakeKey, dsWakeScanned, wakeCount, dsWakeFirst, dsWakePumped);
 		}
 
 		return wakeCount;
@@ -7471,10 +7548,12 @@ public sealed unsafe partial class DirectExecutionBackend :
 		{
 			GuestSessionLeaked = true;
 			WriteGuestFlowTraces();
+			DsTrace.Shutdown();
 			return;
 		}
 
 		WriteGuestFlowTraces();
+		DsTrace.Shutdown();
 		ClearGuestThreads();
 		if (ReferenceEquals(_faultRecoveryBackend, this))
 		{

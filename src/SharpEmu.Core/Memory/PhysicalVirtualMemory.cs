@@ -6,6 +6,7 @@ using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using SharpEmu.Core.Loader;
 using SharpEmu.HLE;
+using SharpEmu.HLE.DsTrace;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.HLE.GuestMemory;
 using SharpEmu.HLE.Host;
@@ -1768,7 +1769,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             return false;
         }
 
-        using (GpuMemoryAccessProfile.MeasureAddressSpaceProtectionWait()) _gate.EnterReadLock();
+        long dsProtectLock;
+        using (GpuMemoryAccessProfile.MeasureAddressSpaceProtectionWait()) dsProtectLock = DsLock.EnterRead(_gate, 5);
         try
         {
             var access = ResolveProtection(protection);
@@ -1834,7 +1836,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
         finally
         {
-            _gate.ExitReadLock();
+            DsLock.ExitRead(_gate, 5, dsProtectLock);
         }
     }
 
@@ -2167,14 +2169,19 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         // Backed guest memory is the shared backing itself, and the backing's view table
         // is readable without a lock; only other memory needs _gate to find its region.
         // Descriptor evaluation alone reads guest words ~40 at a time per draw here.
-        if (!destination.IsEmpty && _backedSpace is { } backed && !_disposed &&
-            backed.TryReadSingleView(virtualAddress, destination))
+        if (!destination.IsEmpty && _backedSpace is { } backed && !_disposed)
         {
-            return true;
+            if (backed.TryReadSingleView(virtualAddress, destination))
+            {
+                DsLock.Count(9, true);
+                return true;
+            }
+
+            DsLock.Count(9, false);
         }
 
         var requiresExclusiveAccess = false;
-        _gate.EnterReadLock();
+        var dsReadLock = DsLock.EnterRead(_gate, 1);
         try
         {
             var region = FindRegion(virtualAddress, (ulong)destination.Length);
@@ -2221,7 +2228,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
         finally
         {
-            _gate.ExitReadLock();
+            DsLock.ExitRead(_gate, 1, dsReadLock);
         }
 
         if (!requiresExclusiveAccess)
@@ -2229,14 +2236,14 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             return false;
         }
 
-        _gate.EnterWriteLock();
+        var dsWriteLock = DsLock.EnterWrite(_gate, 2);
         try
         {
             return TryReadExclusive(virtualAddress, destination);
         }
         finally
         {
-            _gate.ExitWriteLock();
+            DsLock.ExitWrite(_gate, 2, dsWriteLock);
         }
     }
 
@@ -2429,18 +2436,23 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         GuestImageWriteTracker.NotifyManagedWrite(virtualAddress, (ulong)source.Length);
         GuestGpuMemoryHook.MarkCpuWrite(virtualAddress, (ulong)source.Length);
 
-        if (!source.IsEmpty && _backedSpace is { } backed && !_disposed &&
-            backed.TryWriteSingleView(virtualAddress, source))
+        if (!source.IsEmpty && _backedSpace is { } backed && !_disposed)
         {
-            NotifyGuestWriteWatch(virtualAddress, source);
-            return true;
+            if (backed.TryWriteSingleView(virtualAddress, source))
+            {
+                DsLock.Count(10, true);
+                NotifyGuestWriteWatch(virtualAddress, source);
+                return true;
+            }
+
+            DsLock.Count(10, false);
         }
 
         var requiresExclusiveAccess = false;
         OrdinaryBackingWriteReservation? publicationBusy = null;
         GuestSpaceOwner? originalSpace = null;
         OriginalBackedWriteRegion originalRegion = default;
-        _gate.EnterReadLock();
+        var dsReadLock = DsLock.EnterRead(_gate, 3);
         try
         {
             var region = FindRegion(virtualAddress, (ulong)source.Length);
@@ -2504,7 +2516,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
         finally
         {
-            _gate.ExitReadLock();
+            DsLock.ExitRead(_gate, 3, dsReadLock);
         }
 
         if (publicationBusy is not null)
@@ -2517,7 +2529,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             return false;
         }
 
-        _gate.EnterWriteLock();
+        var dsWriteLock = DsLock.EnterWrite(_gate, 4);
         try
         {
             var written = TryWriteExclusive(virtualAddress, source, out var exclusiveReason);
@@ -2526,7 +2538,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
         finally
         {
-            _gate.ExitWriteLock();
+            DsLock.ExitWrite(_gate, 4, dsWriteLock);
         }
     }
 
@@ -3177,7 +3189,10 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
         for (var pageAddress = startPage; pageAddress < endPage; pageAddress += PageSize)
         {
-            if (!_hostMemory.Protect(pageAddress, PageSize, temporaryProtection, out var oldProtection))
+            var dsProtect = DsLock.ProtectBegin();
+            var protectedForRead = _hostMemory.Protect(pageAddress, PageSize, temporaryProtection, out var oldProtection);
+            DsLock.ProtectEnd(dsProtect);
+            if (!protectedForRead)
             {
                 RestorePageProtections(touchedPages);
                 touchedPages.Clear();
@@ -3194,7 +3209,9 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     {
         foreach (var (pageAddress, protection) in touchedPages)
         {
+            var dsProtect = DsLock.ProtectBegin();
             _hostMemory.ProtectRaw(pageAddress, PageSize, protection, out _);
+            DsLock.ProtectEnd(dsProtect);
         }
     }
 

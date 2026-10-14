@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE.DsTrace;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Scheduling;
 
@@ -363,8 +364,12 @@ internal sealed class MetalCompletionQueue : IDisposable
     {
         // A completion carries a flip and an interrupt the guest is waiting on, so
         // the thread is a frame-deadline thread like the worker and the presenter.
-        _ = SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(
+        var qosApplied = SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(
             SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
+        if (DsTrace.On)
+        {
+            DsTrace.RegisterThread(3, 0, Thread.CurrentThread.Name ?? "MetalCompletion", qosApplied ? 1 : 0);
+        }
         while (true)
         {
             ulong target;

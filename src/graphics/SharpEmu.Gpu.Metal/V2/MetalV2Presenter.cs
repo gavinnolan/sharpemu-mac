@@ -3,6 +3,7 @@
 
 using System.Runtime.Versioning;
 using SharpEmu.HLE;
+using SharpEmu.HLE.DsTrace;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.GpuCommands;
@@ -323,7 +324,11 @@ internal static partial class MetalV2Presenter
     private static void RunWorker()
     {
         var host = _host!;
-        _ = SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
+        var qosApplied = SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
+        if (DsTrace.On)
+        {
+            DsTrace.RegisterThread(2, 0, Thread.CurrentThread.Name ?? "MetalV2Worker", qosApplied ? 1 : 0);
+        }
         _relay!.BindCurrentThread();
         try
         {
@@ -609,8 +614,12 @@ internal static partial class MetalV2Presenter
     // presentation, so a frame promoted a host tick late costs the guest a refresh.
     private static void RunFlipPacer()
     {
-        _ = SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(
+        var qosApplied = SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(
             SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
+        if (DsTrace.On)
+        {
+            DsTrace.RegisterThread(4, 0, Thread.CurrentThread.Name ?? "FlipPacer", qosApplied ? 1 : 0);
+        }
         while (Volatile.Read(ref _host) is { } host)
         {
             var wakeAt = long.MaxValue;

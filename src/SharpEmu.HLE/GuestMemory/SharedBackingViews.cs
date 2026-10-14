@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Runtime.InteropServices;
+using SharpEmu.HLE.DsTrace;
 using SharpEmu.HLE.Host;
 
 namespace SharpEmu.HLE.GuestMemory;
@@ -275,7 +276,8 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
 
     private bool ClearCore(ulong offset, ulong size)
     {
-        lock (_lock)
+        var dsLock = DsLock.EnterMonitor(_lock, 7);
+        try
         {
             if (!TryEnterAliasAccess()) return false;
             try
@@ -290,6 +292,7 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
             }
             finally { ExitAliasAccess(); }
         }
+        finally { DsLock.ExitMonitor(_lock, 7, dsLock); }
     }
 
     public bool TryWriteBacking(ulong address, ReadOnlySpan<byte> data)
@@ -412,7 +415,8 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
             }
         }
 
-        lock (_lock)
+        var dsLock = DsLock.EnterMonitor(_lock, 6);
+        try
         {
             if (!TryEnterAliasAccess()) return false;
             try
@@ -443,6 +447,7 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
             }
             finally { ExitAliasAccess(); }
         }
+        finally { DsLock.ExitMonitor(_lock, 6, dsLock); }
     }
 
     // Each destination chunk keeps its original copy/overlap semantics and
