@@ -42,7 +42,7 @@ internal sealed partial class MetalRenderHost
     /// and charges its GPU execution time to the bound pipeline's shaders. Called at the
     /// end of every encode path; a no-op unless the profiling switch is set.
     /// </summary>
-    private void ProfileWork(MetalPipelineEntry entry, string kind, string shape)
+    private void ProfileWork(MetalPipelineEntry entry, string kind, WorkShape shape)
     {
         // Remembered even when the profiler is off: it costs two field writes and it is
         // what names the shaders in a slow command buffer's SLOW-WAIT line.
@@ -52,12 +52,59 @@ internal sealed partial class MetalRenderHost
         {
             PassProfileNoteWork(entry.Profile, kind);
         }
-        if (kind.StartsWith("draw", StringComparison.Ordinal))
+        if (DumpTargetsEnabled && kind.StartsWith("draw", StringComparison.Ordinal))
         {
             NoteDrawState(kind, shape);
         }
 
         ProfileCommandBuffer(kind, entry.Profile ?? "stage=?", shape);
+    }
+
+    // What a draw or dispatch looked like, formatted only when a profiler or the target dump
+    // asks for it: the counts are kept raw so a draw that nobody reads builds no string.
+    private readonly struct WorkShape
+    {
+        private enum Form : byte { Text, Vertices, Indices, Groups, Threads }
+
+        private readonly Form _form;
+        private readonly string? _text;
+        private readonly uint _first;
+        private readonly uint _second;
+        private readonly uint _third;
+        private readonly MtlSize _threads;
+
+        private WorkShape(Form form, string? text, uint first, uint second, uint third, MtlSize threads)
+        {
+            _form = form;
+            _text = text;
+            _first = first;
+            _second = second;
+            _third = third;
+            _threads = threads;
+        }
+
+        public static implicit operator WorkShape(string text) => new(Form.Text, text, 0, 0, 0, default);
+
+        public static WorkShape Vertices(uint vertices, uint instances) =>
+            new(Form.Vertices, null, vertices, instances, 0, default);
+
+        public static WorkShape Indices(uint indices, uint instances) =>
+            new(Form.Indices, null, indices, instances, 0, default);
+
+        public static WorkShape Groups(uint x, uint y, uint z, MtlSize threads) =>
+            new(Form.Groups, null, x, y, z, threads);
+
+        public static WorkShape Threads(MtlSize threads) => new(Form.Threads, null, 0, 0, 0, threads);
+
+        public override string ToString() => _form switch
+        {
+            Form.Vertices => $"vertices={_first} instances={_second}",
+            Form.Indices => $"indices={_first} instances={_second}",
+            Form.Groups => $"groups={_first}x{_second}x{_third} " +
+                $"threadgroup={_threads.Width}x{_threads.Height}x{_threads.Depth}",
+            Form.Threads => $"threadgroup={_threads.Width}x{_threads.Height}x{_threads.Depth}",
+            _ => _text ?? string.Empty,
+        };
     }
 
     private string _lastWorkKind = string.Empty;
@@ -89,7 +136,7 @@ internal sealed partial class MetalRenderHost
     /// to name which one wrote a guest byte.</summary>
     internal string LastTransferDescription => _lastTransferLabel ?? "none";
 
-    private void ProfileCommandBuffer(string kind, string label, string shape)
+    private void ProfileCommandBuffer(string kind, string label, WorkShape shape)
     {
         if (!MetalShaderProfile.Enabled)
         {
@@ -116,7 +163,8 @@ internal sealed partial class MetalRenderHost
         // this buffer holds one draw, so waiting on the buffer itself costs nothing.
         MetalNative.SendVoid(buffer, SelWaitUntilCompleted);
         var key = $"{kind} {label}";
-        var detail = transfers == 0 ? shape : $"{shape} transfers={transfers}";
+        var shapeText = shape.ToString();
+        var detail = transfers == 0 ? shapeText : $"{shapeText} transfers={transfers}";
         var status = MetalV2Native.SendValue(buffer, SelCommandBufferStatus);
         if (status != CommandBufferStatusCompleted)
         {

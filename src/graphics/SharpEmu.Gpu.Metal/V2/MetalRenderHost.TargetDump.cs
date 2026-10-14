@@ -126,7 +126,7 @@ internal sealed partial class MetalRenderHost
     }
 
     /// <summary>Reports what the draw just recorded rasterises with.</summary>
-    private void NoteDrawState(string kind, string shape)
+    private void NoteDrawState(string kind, WorkShape shape)
     {
         if (!DumpTargetsEnabled || !_dumpThisFlip || _drawStateLines >= _maxDrawStateLines)
         {
@@ -183,7 +183,7 @@ internal sealed partial class MetalRenderHost
             depth.DepthClear ? BitConverter.UInt32BitsToSingle(depth.ClearWord0) : float.NaN,
             state.StencilTestEnabled, state.ColorWriteEnableMask, state.ColorWriteCount,
             entry?.Profile ?? "-",
-            kind, shape, entry?.PrimitiveType, _vertexBufferCount, masks));
+            kind, shape.ToString(), entry?.PrimitiveType, _vertexBufferCount, masks));
         Console.Error.WriteLine($"[METAL-V2][DRAW]   #{_drawStateLines} {streams}");
         if (entry?.VertexLayout is { Length: > 0 } layout)
         {

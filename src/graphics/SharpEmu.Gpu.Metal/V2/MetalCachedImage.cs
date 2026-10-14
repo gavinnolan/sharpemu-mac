@@ -65,6 +65,7 @@ internal struct MetalImageUses
 internal sealed class MetalCachedImage : IDisposable
 {
     private static readonly nint SelRelease = MetalNative.Selector("release");
+    private static readonly nint SelGpuResourceId = MetalNative.Selector("gpuResourceID");
     private static readonly nint SelNewTextureView =
         MetalNative.Selector("newTextureViewWithPixelFormat:textureType:levels:slices:");
     private static readonly nint SelNewSwizzledTextureView =
@@ -77,7 +78,9 @@ internal sealed class MetalCachedImage : IDisposable
     // guest swizzle was honoured, the common whole-image view returned the
     // texture without ever touching the list.
     private readonly object _viewGate = new();
-    private readonly List<(ImageViewDescription Description, nint Texture)> _views = new();
+    private readonly List<(ImageViewDescription Description, nint Texture, ulong ResourceId)> _views = new();
+    private nint _textureIdHandle;
+    private ulong _textureId;
     private bool _cpuDirty;
     private bool _gpuModified;
     private bool _disposed;
@@ -496,8 +499,25 @@ internal sealed class MetalCachedImage : IDisposable
         _ => identity,
     });
 
-    public nint GetOrCreateView(in ImageViewDescription requested)
+    public nint GetOrCreateView(in ImageViewDescription requested) => GetOrCreateView(requested, out _);
+
+    // The gpuResourceID of the backing texture; it is fixed for a given MTLTexture, so it is
+    // asked once per handle rather than once per bind.
+    private ulong TextureResourceId()
     {
+        if (_textureIdHandle != Texture)
+        {
+            _textureId = MetalNative.SendGpuResourceId(Texture, SelGpuResourceId);
+            _textureIdHandle = Texture;
+        }
+
+        return _textureId;
+    }
+
+    /// <summary>The view for a request, with its cached gpuResourceID.</summary>
+    public nint GetOrCreateView(in ImageViewDescription requested, out ulong resourceId)
+    {
+        resourceId = 0;
         if (Texture == 0)
         {
             throw GpuFatal.Fatal(
@@ -535,6 +555,7 @@ internal sealed class MetalCachedImage : IDisposable
                     $"layers={requested.BaseLayer}+{requested.LayerCount} usage={requested.Usage}.");
             }
 
+            resourceId = TextureResourceId();
             return Texture;
         }
 
@@ -542,6 +563,7 @@ internal sealed class MetalCachedImage : IDisposable
             requested.BaseLayer == 0 && requested.LayerCount >= Shape.ArrayLength;
         if (wholeImage && identitySwizzle && viewFormat == Shape.PixelFormat && viewType == Shape.TextureType)
         {
+            resourceId = TextureResourceId();
             return Texture;
         }
 
@@ -551,6 +573,7 @@ internal sealed class MetalCachedImage : IDisposable
             {
                 if (_views[index].Description.Equals(requested))
                 {
+                    resourceId = _views[index].ResourceId;
                     return _views[index].Texture;
                 }
             }
@@ -569,6 +592,7 @@ internal sealed class MetalCachedImage : IDisposable
                 $"format={Shape.PixelFormat}->{viewFormat} type={Shape.TextureType}->{viewType} " +
                 $"usage=0x{Shape.Usage:X} levels={requested.BaseLevel}+{requested.LevelCount} " +
                 $"layers={requested.BaseLayer}+{requested.LayerCount}.");
+            resourceId = TextureResourceId();
             return Texture;
         }
 
@@ -597,6 +621,7 @@ internal sealed class MetalCachedImage : IDisposable
                 $"view:{Shape.PixelFormat}->{viewFormat}:{Shape.TextureType}->{viewType}",
                 $"A texture view was refused; binding the image instead: format={Shape.PixelFormat}->{viewFormat} " +
                 $"type={Shape.TextureType}->{viewType} levels={requested.BaseLevel}+{levelCount} layers={baseLayer}+{layerCount}.");
+            resourceId = TextureResourceId();
             return Texture;
         }
 
@@ -609,11 +634,13 @@ internal sealed class MetalCachedImage : IDisposable
                 if (_views[index].Description.Equals(requested))
                 {
                     MetalNative.SendVoid(view, SelRelease);
+                    resourceId = _views[index].ResourceId;
                     return _views[index].Texture;
                 }
             }
 
-            _views.Add((requested, view));
+            resourceId = MetalNative.SendGpuResourceId(view, SelGpuResourceId);
+            _views.Add((requested, view, resourceId));
         }
 
         return view;
@@ -637,7 +664,7 @@ internal sealed class MetalCachedImage : IDisposable
     {
         lock (_viewGate)
         {
-            foreach (var (_, view) in _views)
+            foreach (var (_, view, _) in _views)
             {
                 MetalNative.SendVoid(view, SelRelease);
             }

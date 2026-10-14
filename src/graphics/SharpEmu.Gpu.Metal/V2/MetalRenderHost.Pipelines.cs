@@ -1005,7 +1005,7 @@ internal sealed partial class MetalRenderHost
         _modules.Clear();
         foreach (var sampler in _samplers.Values)
         {
-            MetalNative.SendVoid(sampler, SelRelease);
+            MetalNative.SendVoid(sampler.Handle, SelRelease);
         }
 
         _samplers.Clear();

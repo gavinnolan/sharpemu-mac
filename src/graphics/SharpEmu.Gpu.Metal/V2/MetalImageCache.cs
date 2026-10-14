@@ -423,7 +423,11 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     }
 
     /// <summary>The texture a shader binds for one image request.</summary>
-    public nint AcquireTextureView(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
+    public nint AcquireTextureView(ResourceSlotIdentifier imageIdentifier, in ImageRequest request) =>
+        AcquireTextureView(imageIdentifier, in request, out _);
+
+    /// <summary>The texture a shader binds for one image request, with its cached gpuResourceID.</summary>
+    public nint AcquireTextureView(ResourceSlotIdentifier imageIdentifier, in ImageRequest request, out ulong resourceId)
     {
         using var held = _lock.Hold();
         var image = _slots[imageIdentifier];
@@ -458,7 +462,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         MaterializeSampledDccClear(imageIdentifier, image, in request);
-        return image.GetOrCreateView(request.View);
+        return image.GetOrCreateView(request.View, out resourceId);
     }
 
     /// <summary>

@@ -277,8 +277,16 @@ internal sealed partial class MetalRenderHost
     // entry's per-index-type states rather than always its first.
     private nint _boundRenderState;
 
+    // The viewport and scissor last sent on the encoder, and whether they went to every
+    // viewport slot. Unknown until the first draw of an encoder sends them.
+    private bool _boundViewportKnown;
+    private bool _boundViewportAllSlots;
+    private MtlViewport _boundViewport;
+    private MtlScissorRect _boundScissor;
+
     private void ForgetEncoderState()
     {
+        _boundViewportKnown = false;
         _boundGraphicsPipeline = null;
         _boundRenderState = 0;
         _boundDepthStencilState = 0;
@@ -1159,7 +1167,22 @@ internal sealed partial class MetalRenderHost
             Width = Math.Max(scissorWidth, 1),
             Height = Math.Max(scissorHeight, 1),
         };
-        if (_boundGraphicsPipeline is not { WritesViewportIndex: true })
+        var allSlots = _boundGraphicsPipeline is { WritesViewportIndex: true };
+        if (_boundViewportKnown && _boundViewportAllSlots == allSlots &&
+            _boundViewport.OriginX == viewport.OriginX && _boundViewport.OriginY == viewport.OriginY &&
+            _boundViewport.Width == viewport.Width && _boundViewport.Height == viewport.Height &&
+            _boundViewport.ZNear == viewport.ZNear && _boundViewport.ZFar == viewport.ZFar &&
+            _boundScissor.X == scissorRect.X && _boundScissor.Y == scissorRect.Y &&
+            _boundScissor.Width == scissorRect.Width && _boundScissor.Height == scissorRect.Height)
+        {
+            return;
+        }
+
+        _boundViewportKnown = true;
+        _boundViewportAllSlots = allSlots;
+        _boundViewport = viewport;
+        _boundScissor = scissorRect;
+        if (!allSlots)
         {
             MetalNative.SendVoidViewport(_renderEncoder, SelSetViewport, viewport);
             MetalNative.SendVoidScissor(_renderEncoder, SelSetScissorRect, scissorRect);
@@ -1195,7 +1218,7 @@ internal sealed partial class MetalRenderHost
             DrawMesh(mesh, vertexCount, instanceCount, indexed: false, firstIndexOrVertex: firstVertex,
                 baseVertex: 0, firstInstance: firstInstance);
             CountDraw(started);
-            ProfileWork(entry, "draw-mesh", $"vertices={vertexCount} instances={instanceCount}");
+            ProfileWork(entry, "draw-mesh", WorkShape.Vertices(vertexCount, instanceCount));
             return;
         }
 
@@ -1203,7 +1226,7 @@ internal sealed partial class MetalRenderHost
         {
             DrawRectangles(entry, vertexCount, instanceCount, firstInstance, indexed: false, firstVertex, 0, 0);
             CountDraw(started);
-            ProfileWork(entry, "draw-rectangles", $"vertices={vertexCount} instances={instanceCount}");
+            ProfileWork(entry, "draw-rectangles", WorkShape.Vertices(vertexCount, instanceCount));
             return;
         }
 
@@ -1216,7 +1239,7 @@ internal sealed partial class MetalRenderHost
             Math.Max(instanceCount, 1),
             firstInstance);
         CountDraw(started);
-        ProfileWork(entry, "draw", $"vertices={vertexCount} instances={instanceCount}");
+        ProfileWork(entry, "draw", WorkShape.Vertices(vertexCount, instanceCount));
     }
 
     void IRenderHost.DrawIndexed(uint indexCount, uint instanceCount, uint firstIndex, int vertexOffset, uint firstInstance)
@@ -1234,7 +1257,7 @@ internal sealed partial class MetalRenderHost
             DrawMesh(mesh, indexCount, instanceCount, indexed: true, firstIndexOrVertex: firstIndex,
                 baseVertex: vertexOffset, firstInstance: firstInstance);
             CountDraw(started);
-            ProfileWork(entry, "draw-indexed-mesh", $"indices={indexCount} instances={instanceCount}");
+            ProfileWork(entry, "draw-indexed-mesh", WorkShape.Indices(indexCount, instanceCount));
             return;
         }
 
@@ -1242,7 +1265,7 @@ internal sealed partial class MetalRenderHost
         {
             DrawRectangles(entry, indexCount, instanceCount, firstInstance, indexed: true, 0, firstIndex, vertexOffset);
             CountDraw(started);
-            ProfileWork(entry, "draw-indexed-rectangles", $"indices={indexCount} instances={instanceCount}");
+            ProfileWork(entry, "draw-indexed-rectangles", WorkShape.Indices(indexCount, instanceCount));
             return;
         }
 
@@ -1259,7 +1282,7 @@ internal sealed partial class MetalRenderHost
             vertexOffset,
             firstInstance);
         CountDraw(started);
-        ProfileWork(entry, "draw-indexed", $"indices={indexCount} instances={instanceCount}");
+        ProfileWork(entry, "draw-indexed", WorkShape.Indices(indexCount, instanceCount));
     }
 
     void IRenderHost.DrawIndexedIndirect(BufferBinding arguments)
@@ -1323,9 +1346,7 @@ internal sealed partial class MetalRenderHost
         ProfileWork(
             entry,
             "dispatch",
-            $"groups={groupsX}x{groupsY}x{groupsZ} " +
-            $"threadgroup={entry.ThreadsPerThreadgroup.Width}x{entry.ThreadsPerThreadgroup.Height}x" +
-            $"{entry.ThreadsPerThreadgroup.Depth}");
+            WorkShape.Groups(groupsX, groupsY, groupsZ, entry.ThreadsPerThreadgroup));
     }
 
     public bool TryDispatchIndirect(ulong argumentsAddress)
@@ -1352,8 +1373,7 @@ internal sealed partial class MetalRenderHost
         ProfileWork(
             entry,
             "dispatch-indirect",
-            $"threadgroup={entry.ThreadsPerThreadgroup.Width}x{entry.ThreadsPerThreadgroup.Height}x" +
-            $"{entry.ThreadsPerThreadgroup.Depth}");
+            WorkShape.Threads(entry.ThreadsPerThreadgroup));
         return true;
     }
 
