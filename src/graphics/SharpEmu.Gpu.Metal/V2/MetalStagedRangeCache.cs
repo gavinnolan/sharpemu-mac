@@ -46,8 +46,92 @@ internal sealed class MetalStagedRangeCache
     internal static readonly bool Enabled =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_STAGED_CACHE") != "0";
 
-    internal static readonly bool Verify =
-        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_STAGED_CACHE_VERIFY") == "1";
+    public enum VerifyKind
+    {
+        Off,
+        Full,
+        Sample,
+    }
+
+    // SHARPEMU_METAL_V2_STAGED_CACHE_VERIFY=1 compares every hit whole; =sample compares
+    // a slice of one hit in SampleEvery of each entry.
+    internal static readonly VerifyKind VerifyMode =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_STAGED_CACHE_VERIFY") switch
+        {
+            "1" => VerifyKind.Full,
+            "sample" => VerifyKind.Sample,
+            _ => VerifyKind.Off,
+        };
+
+    public const uint SampleEvery = 64;
+    public const int SampleEdgeBytes = 64 * 1024;
+    public const int SamplePageBytes = 4096;
+    public const int SamplePages = 4;
+
+    public delegate void FreshReader(ulong offset, Span<byte> destination);
+
+    /// <summary>
+    /// The first offset at which the cached bytes differ from what <paramref name="read"/>
+    /// returns now, or -1. A sample is the first and last 64 KB and four pseudo-random
+    /// 4 KB pages chosen by <paramref name="seed"/>; otherwise the whole range.
+    /// </summary>
+    public static long FirstMismatch(ReadOnlySpan<byte> cached, FreshReader read, bool sample, uint seed)
+    {
+        var size = cached.Length;
+        if (!sample || size <= 2 * SampleEdgeBytes + SamplePages * SamplePageBytes)
+        {
+            return Compare(cached, read, 0, size);
+        }
+
+        var best = long.MaxValue;
+        var first = Compare(cached, read, 0, SampleEdgeBytes);
+        if (first >= 0)
+        {
+            best = first;
+        }
+
+        var state = seed * 2654435761u + 0x9E3779B9u;
+        for (var page = 0; page < SamplePages; page++)
+        {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            var slots = (uint)((size - SamplePageBytes) / SamplePageBytes + 1);
+            var found = Compare(cached, read, (int)(state % slots) * SamplePageBytes, SamplePageBytes);
+            if (found >= 0 && found < best)
+            {
+                best = found;
+            }
+        }
+
+        var last = Compare(cached, read, size - SampleEdgeBytes, SampleEdgeBytes);
+        if (last >= 0 && last < best)
+        {
+            best = last;
+        }
+
+        return best == long.MaxValue ? -1 : best;
+    }
+
+    private static long Compare(ReadOnlySpan<byte> cached, FreshReader read, int offset, int length)
+    {
+        var fresh = new byte[length];
+        read((ulong)offset, fresh);
+        var difference = cached.Slice(offset, length).CommonPrefixLength(fresh);
+        return difference == length ? -1 : offset + difference;
+    }
+
+    private long _verifyChecks;
+    private long _verifyMismatches;
+
+    public void NoteVerify(bool mismatch)
+    {
+        Interlocked.Increment(ref _verifyChecks);
+        if (mismatch)
+        {
+            Interlocked.Increment(ref _verifyMismatches);
+        }
+    }
 
     internal static ulong ConfiguredBudgetBytes =>
         ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_STAGED_CACHE_MB"), out var megabytes) &&
@@ -92,6 +176,8 @@ internal sealed class MetalStagedRangeCache
         public ulong WatchEnd;
 
         // The shader may have stored into the copy, so guest memory is behind it.
+        public uint HitCount;
+
         public bool Dirty;
 
         // The work that stores into it has been recorded. A copy bound for the draw being
@@ -156,6 +242,22 @@ internal sealed class MetalStagedRangeCache
 
     public int EntryCount => Volatile.Read(ref _entryCount);
 
+    /// <summary>Entries now, those with a live page watch, and those holding stores not yet written back.</summary>
+    public (int Entries, int Watched, int Dirty) Gauges()
+    {
+        lock (_gate)
+        {
+            int watched = 0, dirty = 0;
+            foreach (var entry in _entries.Values)
+            {
+                watched += entry.WatchEnd != 0 ? 1 : 0;
+                dirty += entry.Dirty ? 1 : 0;
+            }
+
+            return (_entries.Count, watched, dirty);
+        }
+    }
+
     public int FreeBufferCount
     {
         get
@@ -193,8 +295,8 @@ internal sealed class MetalStagedRangeCache
     public static bool Eligible(ulong size) => size >= MinBytes && size <= MaxBytes;
 
     /// <summary>Counters for the periodic line; the per-window ones restart.</summary>
-    public (long Hits, long Misses, long Bytes, long Fault, long Precise, long Host, long Gpu, long Unmap, long Evictions)
-        TakeCounters() =>
+    public (long Hits, long Misses, long Bytes, long Fault, long Precise, long Host, long Gpu, long Unmap, long Evictions,
+        long VerifyChecks, long VerifyMismatches) TakeCounters() =>
         (Interlocked.Exchange(ref _hits, 0), Interlocked.Exchange(ref _misses, 0),
             Interlocked.Exchange(ref _stagedBytes, 0),
             Interlocked.Exchange(ref _invalidations[(int)Reason.Fault], 0),
@@ -202,7 +304,8 @@ internal sealed class MetalStagedRangeCache
             Interlocked.Exchange(ref _invalidations[(int)Reason.Host], 0),
             Interlocked.Exchange(ref _invalidations[(int)Reason.Gpu], 0),
             Interlocked.Exchange(ref _invalidations[(int)Reason.Unmap], 0),
-            Interlocked.Exchange(ref _evictions, 0));
+            Interlocked.Exchange(ref _evictions, 0),
+            Interlocked.Exchange(ref _verifyChecks, 0), Interlocked.Exchange(ref _verifyMismatches, 0));
 
     /// <summary>
     /// The entry a binding of the range uses, from the worker. True when it is current and

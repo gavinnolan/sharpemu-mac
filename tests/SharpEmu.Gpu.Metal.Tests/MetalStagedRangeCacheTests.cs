@@ -195,6 +195,71 @@ public sealed class MetalStagedRangeCacheTests
     }
 
     [Fact]
+    public void EveryLiveEntryHoldsExactlyOneWatchAndAFaultOnADirtyOneReleasesItWithoutStalingIt()
+    {
+        var backend = new FakeBackend();
+        var cache = Cache(backend);
+        cache.Acquire(Range, Size, written: false, 1, 0, out _);
+        cache.Acquire(Range + 8 * Mib, Size, written: true, 1, 0, out var dirty);
+        dirty!.Dirty = true;
+        Assert.Equal((2, 2, 1), cache.Gauges());
+        Assert.Equal(2, backend.Watches.Count);
+
+        // The store has to be able to land, so the watch goes; the stores keep the entry.
+        Assert.True(cache.OnCpuWrite(Range + 8 * Mib, 8));
+        Assert.Equal((2, 1, 1), cache.Gauges());
+        Assert.Equal(0, dirty.Stale);
+        Assert.Single(backend.Watches);
+    }
+
+    private static long Sampled(byte[] cached, byte[] guest, bool sample, uint seed) =>
+        MetalStagedRangeCache.FirstMismatch(
+            cached, (offset, destination) => guest.AsSpan((int)offset, destination.Length).CopyTo(destination),
+            sample, seed);
+
+    [Fact]
+    public void ASampleSeesAChangeInEitherEdgeAndReportsTheFirstOffset()
+    {
+        var cached = new byte[2 * Mib];
+        Assert.Equal(-1, Sampled(cached, (byte[])cached.Clone(), sample: true, seed: 1));
+
+        var firstEdge = (byte[])cached.Clone();
+        firstEdge[100] = 1;
+        Assert.Equal(100, Sampled(cached, firstEdge, sample: true, seed: 1));
+
+        var lastEdge = (byte[])cached.Clone();
+        lastEdge[^5] = 1;
+        lastEdge[^1000] = 1;
+        Assert.Equal(cached.Length - 1000, Sampled(cached, lastEdge, sample: true, seed: 1));
+    }
+
+    [Fact]
+    public void ASampleOfAMiddleChangeFindsItOnlyWhenAChosenPageHoldsIt()
+    {
+        var cached = new byte[2 * Mib];
+        var found = 0;
+        for (uint seed = 1; seed <= 64; seed++)
+        {
+            var guest = (byte[])cached.Clone();
+            guest[Mib] = 1;
+            var offset = Sampled(cached, guest, sample: true, seed);
+            Assert.True(offset == -1 || offset == (long)Mib);
+            found += offset >= 0 ? 1 : 0;
+        }
+
+        // Four 4 KB pages of 512 slots: some seeds hit, most do not.
+        Assert.InRange(found, 0, 32);
+        Assert.Equal(Mib, (ulong)Sampled(cached, MiddleChanged(cached), sample: false, seed: 1));
+    }
+
+    private static byte[] MiddleChanged(byte[] cached)
+    {
+        var guest = (byte[])cached.Clone();
+        guest[Mib] = 1;
+        return guest;
+    }
+
+    [Fact]
     public void AReadOnlyEntryIsRestagedBeforeAWrittenBindingUsesIt()
     {
         var cache = Cache(new FakeBackend());

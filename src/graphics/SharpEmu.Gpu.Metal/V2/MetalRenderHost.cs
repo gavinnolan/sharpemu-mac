@@ -1321,10 +1321,13 @@ internal sealed partial class MetalRenderHost :
         }
 
         var c = cache.TakeCounters();
+        var g = cache.Gauges();
         return $" staged_hits={c.Hits} staged_misses={c.Misses} staged_bytes={c.Bytes} " +
             $"staged_invalid_fault={c.Fault} staged_invalid_precise={c.Precise} staged_invalid_host={c.Host} " +
             $"staged_invalid_gpu={c.Gpu} staged_invalid_unmap={c.Unmap} staged_evictions={c.Evictions} " +
-            $"staged_cache_mb={cache.CacheBytes / (1024 * 1024)}";
+            $"staged_cache_mb={cache.CacheBytes / (1024 * 1024)} staged_entries={g.Entries} staged_watched={g.Watched} " +
+            $"staged_dirty={g.Dirty} " +
+            $"staged_verify_checks={c.VerifyChecks} staged_verify_mismatches={c.VerifyMismatches}";
     }
 
     /// <summary>Commits the transient budget asked for so rings and slabs could return.</summary>
