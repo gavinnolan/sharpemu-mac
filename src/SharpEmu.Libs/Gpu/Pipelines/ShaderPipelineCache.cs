@@ -28,6 +28,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private readonly IShaderPipelineHost _host;
     private readonly ShaderHeaderRegistry _registry;
     private readonly ShaderProgramCache _programs;
+    private readonly VertexTableMetadataCache _vertexTables = new();
     private readonly Dictionary<GraphicsPipelineKey, PipelineHandle> _graphicsPipelines = new();
     private readonly Dictionary<ComputePipelineKey, PipelineHandle> _computePipelines = new();
     private readonly object _gate = new();
@@ -335,7 +336,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             PositionYDown = context.Clip.ClipDisable || context.ScreenViewport.Viewports[0].YScale > 0f,
         };
         return VertexInputResolver.ResolveVertexInputs(_context, source.Registered, source.UserData,
-            shaderInterface.VertexOutputControl, clipSpace);
+            shaderInterface.VertexOutputControl, clipSpace, _vertexTables, source.Hash);
     }
 
     // The interpolated attributes a pixel program reads, ascending. A program never changes, and this
