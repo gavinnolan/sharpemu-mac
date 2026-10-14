@@ -222,8 +222,12 @@ internal static class MetalShaderPrewarm
 
         var directory = SharpEmuPaths.UserPath(
             "pipeline_cache", SanitizeTitleId(VideoOutBackendServices.GetApplicationTitleId()), "metal-v2");
+        // Loaded before the gate lets the game go, so every module the game creates
+        // finds the graphics libraries queued; they compile once the computes are done.
+        MetalLibraryPrewarm.Open(directory, device);
         if (ShaderPrewarmList.Open(directory) is not { } list)
         {
+            MetalLibraryPrewarm.Begin();
             return false;
         }
 
@@ -236,6 +240,7 @@ internal static class MetalShaderPrewarm
         {
             list.WriteStamp(stamp);
             _finished = true;
+            MetalLibraryPrewarm.Begin();
             return false;
         }
 
@@ -446,6 +451,7 @@ internal static class MetalShaderPrewarm
         list.ClearProgress();
         _finished = true;
         Gate.SetRunning(false);
+        MetalLibraryPrewarm.Begin();
         Console.Error.WriteLine(
             $"[LOADER][INFO] Shader prewarm done: compiled={Volatile.Read(ref _compiled)} " +
             $"failed={Volatile.Read(ref _failed)} ms={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} " +
@@ -480,6 +486,7 @@ internal static class MetalShaderPrewarm
     {
         _stopping = true;
         Gate.Cancel();
+        MetalLibraryPrewarm.Stop();
         foreach (var thread in Volatile.Read(ref _threads))
         {
             if (thread != Thread.CurrentThread)

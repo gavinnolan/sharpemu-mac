@@ -96,8 +96,10 @@ internal sealed partial class MetalRenderHost
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         // The MSL front end runs here, and the driver's back end runs when a pipeline
         // state is made from the function. They are separate costs with separate
-        // caches, so they are counted separately.
-        var library = CompileLibrary(metal.Shader.Source, hash, metal.Shader.UsesPerVertexInputs);
+        // caches, so they are counted separately. A graphics library the library prewarm
+        // already compiled is taken from it instead.
+        var library = CompileLibrary(
+            metal.Shader.Source, hash, metal.Shader.UsesPerVertexInputs, prewarmable: stage != ShaderStage.Compute);
         Interlocked.Add(ref _libraryTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
         var function = MetalNative.Send(
             library, MetalNative.Selector("newFunctionWithName:"), MetalNative.NsString(metal.Shader.EntryPoint));
@@ -140,7 +142,8 @@ internal sealed partial class MetalRenderHost
                 return module.RectangleFunction;
             }
 
-            var library = CompileLibrary(Gen5MslRectangleList.BuildSource(module.Shader), module.Hash, usesPerVertexInputs: false);
+            var library = CompileLibrary(
+                Gen5MslRectangleList.BuildSource(module.Shader), module.Hash, usesPerVertexInputs: false, prewarmable: true);
             var function = MetalNative.Send(
                 library, MetalNative.Selector("newFunctionWithName:"), MetalNative.NsString(Gen5MslRectangleList.EntryPoint));
             if (function == 0)
@@ -156,12 +159,26 @@ internal sealed partial class MetalRenderHost
         }
     }
 
-    private nint CompileLibrary(string source, ulong hash, bool usesPerVertexInputs)
+    // Computes are left to the compute prewarm, which compiles them before the game runs.
+    private nint CompileLibrary(string source, ulong hash, bool usesPerVertexInputs, bool prewarmable)
     {
+        var listed = prewarmable && MetalLibraryPrewarm.Active;
+        var key = listed ? MetalLibraryPrewarm.Key(source, usesPerVertexInputs) : 0;
+        if (listed && MetalLibraryPrewarm.TryTake(key, out var prewarmed))
+        {
+            MetalLibraryPrewarm.NoteTaken(key);
+            return prewarmed;
+        }
+
         var library = TryCompileLibrary(_device, source, usesPerVertexInputs, out var error);
         if (library == 0)
         {
             throw Fatal($"An MSL library failed to compile: hash=0x{hash:X16} {error}");
+        }
+
+        if (listed)
+        {
+            MetalLibraryPrewarm.NoteCompiled(key, source, usesPerVertexInputs);
         }
 
         return library;
