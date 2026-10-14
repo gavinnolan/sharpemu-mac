@@ -202,12 +202,12 @@ public sealed class MetalStagedRangeCacheTests
         cache.Acquire(Range, Size, written: false, 1, 0, out _);
         cache.Acquire(Range + 8 * Mib, Size, written: true, 1, 0, out var dirty);
         dirty!.Dirty = true;
-        Assert.Equal((2, 2, 1), cache.Gauges());
+        Assert.Equal((2, 2, 1, 0, 0), cache.Gauges());
         Assert.Equal(2, backend.Watches.Count);
 
         // The store has to be able to land, so the watch goes; the stores keep the entry.
         Assert.True(cache.OnCpuWrite(Range + 8 * Mib, 8));
-        Assert.Equal((2, 1, 1), cache.Gauges());
+        Assert.Equal((2, 1, 1, 0, 0), cache.Gauges());
         Assert.Equal(0, dirty.Stale);
         Assert.Single(backend.Watches);
     }
@@ -257,6 +257,28 @@ public sealed class MetalStagedRangeCacheTests
         var guest = (byte[])cached.Clone();
         guest[Mib] = 1;
         return guest;
+    }
+
+    [Fact]
+    public void EntriesLeftStaleAreUnwatchedAndCountedAsStaleNeverAsCurrentWithoutAWatch()
+    {
+        var backend = new FakeBackend();
+        var cache = Cache(backend);
+        for (ulong index = 0; index < 5; index++)
+        {
+            cache.Acquire(Range + index * 8 * Mib, Size, written: false, 1, 0, out _);
+        }
+
+        // Three are written over and never bound again, as a loading screen's data is.
+        cache.OnHostWrite(Range, 8);
+        cache.OnCpuWrite(Range + 8 * Mib, 8);
+        cache.OnGpuWrite(Range + 16 * Mib, 8, MetalGpuWriteOrigin.Fill);
+        Assert.Equal((5, 2, 0, 3, 0), cache.Gauges());
+        Assert.Equal(2, backend.Watches.Count);
+
+        // Binding one again re-arms it; the others stay stale until they are bound.
+        Assert.False(cache.Acquire(Range, Size, written: false, 2, 1, out _));
+        Assert.Equal((5, 3, 0, 2, 0), cache.Gauges());
     }
 
     [Fact]

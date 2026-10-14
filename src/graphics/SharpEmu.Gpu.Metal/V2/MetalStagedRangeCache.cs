@@ -242,19 +242,26 @@ internal sealed class MetalStagedRangeCache
 
     public int EntryCount => Volatile.Read(ref _entryCount);
 
-    /// <summary>Entries now, those with a live page watch, and those holding stores not yet written back.</summary>
-    public (int Entries, int Watched, int Dirty) Gauges()
+    /// <summary>
+    /// Entries now, those with a live page watch, those holding stores not yet written back,
+    /// those marked stale (unwatched, waiting for the next bind to stage them again), and
+    /// those that would be used as they stand yet have no watch - which must always be zero.
+    /// </summary>
+    public (int Entries, int Watched, int Dirty, int Stale, int UnwatchedCurrent) Gauges()
     {
         lock (_gate)
         {
-            int watched = 0, dirty = 0;
+            int watched = 0, dirty = 0, stale = 0, unwatched = 0;
             foreach (var entry in _entries.Values)
             {
+                var isStale = Volatile.Read(ref entry.Stale) != 0;
                 watched += entry.WatchEnd != 0 ? 1 : 0;
                 dirty += entry.Dirty ? 1 : 0;
+                stale += isStale ? 1 : 0;
+                unwatched += !isStale && !entry.Dirty && !entry.StaleOnClean && entry.WatchEnd == 0 ? 1 : 0;
             }
 
-            return (_entries.Count, watched, dirty);
+            return (_entries.Count, watched, dirty, stale, unwatched);
         }
     }
 
