@@ -16,6 +16,9 @@ public sealed class PvmMappedCopyNativeTests(ITestOutputHelper output)
     [InlineData("unrelated-canonical")]
     [InlineData("aba-close")]
     [InlineData("unsupported-wrapper")]
+    [InlineData("single-view-write-unlocked")]
+    [InlineData("single-view-write-publication-busy")]
+    [InlineData("single-view-miss-keeps-read-watch")]
     public async Task ActualPvmAndTrackedForwarding(string scenario)
     {
         Assert.True(OperatingSystem.IsMacOS());

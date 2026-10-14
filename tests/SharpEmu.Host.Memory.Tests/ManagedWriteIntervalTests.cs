@@ -231,4 +231,26 @@ public sealed unsafe class ManagedWriteIntervalTests
         var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
         Assert.True(allSucceeded); Assert.Equal(0, allocated); Assert.Equal(0, Count(ledger, "active"));
     }
+
+    [Fact]
+    public void WarmedEnrolledSingleViewFastPathWriteCompletesOneIntervalAndDoesNotAllocate()
+    {
+        using var state = new State(); var ledger = state.Enroll(); byte[] bytes = [2, 4, 6, 8];
+        // An enrolled backing no longer declines the lock-free path; each write is one
+        // admitted operation with exactly one completed byte interval.
+        var begun = Count(ledger, "begun");
+        Assert.True(state.Views.TryWriteSingleView(State.Address + 16, bytes));
+        Assert.Equal(begun + 1, Count(ledger, "begun")); Assert.Equal(0, Count(ledger, "aborted"));
+        Assert.Equal(bytes, state.Bytes().AsSpan(16, bytes.Length).ToArray());
+        // A view-crossing write is refused with no byte interval (the PVM worker
+        // scenario single-view-miss-keeps-read-watch guards the whole-backing invalidation).
+        Assert.False(state.Views.TryWriteSingleView(State.Address + State.Page - 2, bytes));
+        Assert.Equal(begun + 1, Count(ledger, "begun")); Assert.Equal(0, Count(ledger, "aborted"));
+        for (var i = 0; i < 10000; i++) Assert.True(state.Views.TryWriteSingleView(State.Address, bytes));
+        var before = GC.GetAllocatedBytesForCurrentThread(); var allSucceeded = true;
+        for (var i = 0; i < 10000; i++) allSucceeded &= state.Views.TryWriteSingleView(State.Address, bytes);
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.True(allSucceeded); Assert.Equal(0, allocated);
+        Assert.Equal(0, Count(ledger, "active")); Assert.Equal(0, Count(ledger, "aborted"));
+    }
 }
