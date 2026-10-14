@@ -71,6 +71,12 @@ public sealed class CommandStreamQueue
 
     private readonly int _boundariesInFlight;
 
+    // Printed before a fatal on the worker thread ends the process (GpuFatal.BeforeFatal):
+    // the DCB hash re-check and SHARPEMU_GPU_CLOBBER_DIAG. Null when both are off.
+    private readonly Action? _beforeFatal;
+    private CommandSubmission? _fatalSubmission;
+    private GpuCommandInterpreter? _fatalProcessor;
+
     // DSTRACE §4.7: the submission whose slice the calling (worker) thread runs, for MCOMMIT.
     [ThreadStatic] public static ulong DsCurrentSubmissionId;
 
@@ -88,6 +94,10 @@ public sealed class CommandStreamQueue
     {
         _host = host;
         _boundariesInFlight = Math.Max(0, boundariesInFlight);
+        if (GpuStreamDiagnostics.DcbHashEnabled || GpuClobberDiagnostics.Enabled)
+        {
+            _beforeFatal = ReportBeforeFatal;
+        }
         for (var index = 0; index < QueueCount; index++)
         {
             _queues[index] = new LinkedList<CommandSubmission>();
@@ -308,11 +318,49 @@ public sealed class CommandStreamQueue
         }
     }
 
-    // Exception filter: logs a rewritten DCB, then lets the fatal propagate untouched.
-    private bool VerifyOnFatal(CommandSubmission submission)
+    // Runs inside GpuFatal on the worker, before the process fails fast: an exception filter
+    // or catch above the fatal never gets to run. Logs a rewritten DCB and the clobber report.
+    private void ReportBeforeFatal()
     {
+        var submission = _fatalSubmission;
+        if (submission is null)
+        {
+            return;
+        }
+
         GpuStreamDiagnostics.Verify(_host, submission, "fatal");
-        return false;
+        if (GpuClobberDiagnostics.Enabled)
+        {
+            _fatalProcessor?.ReportClobber(submission, DescribeQueuesForClobber());
+        }
+    }
+
+    private string DescribeQueuesForClobber()
+    {
+        if (!Monitor.TryEnter(_gate, 250))
+        {
+            return "unavailable=gate-busy";
+        }
+
+        try
+        {
+            var computeSubmissions = 0;
+            var computeQueuesBusy = 0;
+            for (var queue = 1; queue < QueueCount; queue++)
+            {
+                var count = _queues[queue].Count;
+                computeSubmissions += count;
+                computeQueuesBusy += count == 0 ? 0 : 1;
+            }
+
+            return $"graphics={_queues[0].Count} compute={computeSubmissions} computeQueuesBusy={computeQueuesBusy} " +
+                $"total={_submissionCount} pendingBoundaries={_pendingBoundaries} boundariesInFlight={_boundariesInFlight} " +
+                $"frame={_doneCount} pendingLabels={_pendingLabels.Count}";
+        }
+        finally
+        {
+            Monitor.Exit(_gate);
+        }
     }
 
     private void EnqueueLocked(CommandSubmission submission)
@@ -328,6 +376,11 @@ public sealed class CommandStreamQueue
         }
 
         submission.AdmissionOrdinal = ++_admissionOrdinal;
+        if (GpuClobberDiagnostics.Enabled)
+        {
+            submission.EnqueuedTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+        }
+
         if (GpuStreamDiagnostics.DcbHashEnabled && submission.DwordCount != 0 &&
             submission.Kind is CommandSubmissionKind.Graphics or CommandSubmissionKind.Compute &&
             GpuStreamDiagnostics.TryHashGuest(_host, submission.Address, submission.DwordCount, out var submitHash))
@@ -1068,13 +1121,27 @@ public sealed class CommandStreamQueue
         }
 
         bool complete;
+        Action? previousBeforeFatal = null;
+        if (_beforeFatal is not null)
+        {
+            previousBeforeFatal = GpuFatal.BeforeFatal;
+            _fatalSubmission = submission;
+            _fatalProcessor = processor;
+            GpuFatal.BeforeFatal = _beforeFatal;
+        }
+
         try
         {
             complete = processor.Process(submission.Commands, submission.Address, submission.DwordCount) == SubmissionProgress.Complete;
         }
-        catch (GpuFatalException) when (VerifyOnFatal(submission))
+        finally
         {
-            throw;
+            if (_beforeFatal is not null)
+            {
+                GpuFatal.BeforeFatal = previousBeforeFatal;
+                _fatalSubmission = null;
+                _fatalProcessor = null;
+            }
         }
 
         if (PacketProfile.Enabled)

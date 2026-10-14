@@ -216,6 +216,11 @@ public sealed partial class GpuCommandInterpreter
             throw _host.Fatal($"The register table address is zero: bank={bank} count={count} address=0x{packet.PacketAddress:X16}.");
         }
 
+        if (GpuClobberDiagnostics.Enabled)
+        {
+            NoteClobberRegisterTable(tableAddress, count);
+        }
+
         const int entriesPerBlock = 128;
         const int entryBytes = 2 * sizeof(uint);
         if (tableAddress > ulong.MaxValue - (ulong)count * entryBytes)

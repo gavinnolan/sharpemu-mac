@@ -25,6 +25,14 @@ public static class GpuFatal
     public sealed class AbandonedWorkException(string message) : Exception(message);
 
     /// <summary>
+    /// Run once on this thread before a fatal ends the process. <see cref="OnFatal"/> fails
+    /// fast, so neither an exception filter nor a catch above the throw ever sees the fatal;
+    /// the command stream worker registers what it has to print while it runs a slice.
+    /// </summary>
+    [ThreadStatic]
+    internal static Action? BeforeFatal;
+
+    /// <summary>
     /// Reports the fatal error, then returns an exception for the caller to
     /// throw so control stops there.
     /// </summary>
@@ -37,6 +45,19 @@ public static class GpuFatal
         if (ThrowOnFatal)
         {
             throw new AbandonedWorkException(message);
+        }
+
+        if (BeforeFatal is { } beforeFatal)
+        {
+            BeforeFatal = null;
+            try
+            {
+                beforeFatal();
+            }
+            catch (Exception exception)
+            {
+                Console.Error.WriteLine($"[GPU][FATAL] The pre-fatal report failed: {exception.GetType().Name}: {exception.Message}");
+            }
         }
 
         var diagnostic = innerException is null ? message : $"{message}{Environment.NewLine}{innerException}";

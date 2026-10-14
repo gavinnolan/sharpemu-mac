@@ -113,6 +113,9 @@ public sealed class CommandSubmission
 
     internal bool DcbHashed { get; set; }
 
+    // SHARPEMU_GPU_CLOBBER_DIAG: host timestamp of the enqueue, for the age at a fatal.
+    internal long EnqueuedTicks { get; set; }
+
     // Snapshots captured at submit time; the processor never reads them.
     public object? GeometrySnapshots { get; }
 
