@@ -1476,9 +1476,11 @@ public static partial class Gen5MslTranslator
                         return;
                     }
 
-                    if (!IsWave64)
+                    if (!IsWave64 && !IsNarrowWave64)
                     {
                         // A wave32 mask is the single SGPR; the next one is not part of it.
+                        // A narrow wave64 mask is a pair whose high half has no lanes, so it
+                        // takes EmitBallotStore's zeroing instead.
                         Line($"s[{register}] = sharpemu_ballot({condition});");
                         return;
                     }

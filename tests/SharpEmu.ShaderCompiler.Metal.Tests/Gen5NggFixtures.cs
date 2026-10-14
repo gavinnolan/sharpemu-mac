@@ -204,6 +204,36 @@ internal static class Gen5NggFixtures
         return new Gen5ShaderProgram(0, instructions);
     }
 
+    /// <summary>A lane mask written to an SGPR pair whose high dword held stale data, then
+    /// counted with s_bcnt1_i32_b64: the culling templates' survivor count.</summary>
+    public static Gen5ShaderProgram Wave64MaskPairProbe()
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+
+        void Add(string opcode, Gen5ShaderEncoding encoding, Gen5Operand[] sources,
+            Gen5Operand[] destinations, Gen5InstructionControl? control = null, uint word = 0)
+        {
+            instructions.Add(new Gen5ShaderInstruction(
+                pc, encoding, opcode, [word], sources, destinations, control));
+            pc += sizeof(uint);
+        }
+
+        Add("DsWriteB32", Gen5ShaderEncoding.Ds,
+            [Vector(11), Vector(10)], [], new Gen5DataShareControl(0, 0, false));
+        Add("SMovB32", Gen5ShaderEncoding.Sop1, [Literal(0xFFFF_FFFFu)], [Scalar(1)]);
+        Add("VCmpNeU32", Gen5ShaderEncoding.Vop3, [Inline(0), Vector(8)], [Scalar(0)]);
+        Add("SBcnt1I32B64", Gen5ShaderEncoding.Sop1, [Scalar(0)], [Scalar(10)]);
+        Add("SMovB32", Gen5ShaderEncoding.Sop1, [Literal(Wave64SubgroupAllocation)], [Scalar(124)]);
+        Add("SSendmsg", Gen5ShaderEncoding.Sopp, [], [], word: SendMessageWord);
+        Add("VMovB32", Gen5ShaderEncoding.Vop1, [Scalar(10)], [Vector(21)]);
+        Add("Exp", Gen5ShaderEncoding.Exp,
+            [Vector(21), Vector(21), Vector(21), Vector(21)], [],
+            new Gen5ExportControl(Gen5NggExports.FirstPositionTarget, 0xF, false, false, false));
+        Add("SEndpgm", Gen5ShaderEncoding.Sopp, [], [], word: EndProgramWord);
+        return new Gen5ShaderProgram(0, instructions);
+    }
+
     /// <summary>The cross-lane operations whose wave64 behaviour the narrow lowering pins:
     /// v_readlane of lane 63, v_mbcnt_hi, and an all-ones write to EXEC_HI.</summary>
     public static Gen5ShaderProgram Wave64LaneProbe()
