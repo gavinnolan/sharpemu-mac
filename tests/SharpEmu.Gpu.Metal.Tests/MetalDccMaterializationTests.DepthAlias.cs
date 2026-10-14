@@ -146,6 +146,38 @@ public sealed unsafe partial class MetalDccMaterializationTests
         rig.Harness.Submit();
     }
 
+    // The hand-off copies the depth plane and nothing else, so a pass that writes only
+    // stencil leaves the alias holding what a new copy would give it: SILENT HILL's
+    // decals mark stencil with one draw and sample depth through the R32 alias with the
+    // next, and copying the 4K depth plane between every pair also split the pass twice.
+    [Fact]
+    public void AStencilOnlyPassLeavesTheR32AliasOfTheDepthPlaneCurrent()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var depthRequest = DepthAliasRequest(ImageRole.DepthTarget, stencil: true);
+        var depth = rig.Cache.FindImage(ref depthRequest);
+        rig.Cache.AcquireDepthTargetView(depth, in depthRequest);
+        var textureRequest = DepthAliasRequest(ImageRole.Texture);
+        var alias = rig.Cache.FindImage(ref textureRequest);
+        rig.Cache.AcquireTextureView(alias, in textureRequest);
+        Assert.Equal(1, rig.Cache.TakeDeviceAliasPublishes());
+
+        rig.Cache.AcquireDepthTargetView(depth, in depthRequest, writes: true, writesDepth: false);
+        Assert.True(rig.Cache.GetImage(depth).IsGpuModified);
+        Assert.False(rig.Cache.GetImage(alias).IsCpuDirty);
+        rig.Cache.AcquireTextureView(alias, in textureRequest);
+        Assert.Equal(0, rig.Cache.TakeDeviceAliasPublishes());
+        Assert.Equal(1, rig.Cache.TakeDeviceAliasReuses());
+
+        // A pass that writes depth still hands the alias the new plane.
+        rig.Cache.AcquireDepthTargetView(depth, in depthRequest);
+        rig.Cache.AcquireTextureView(alias, in textureRequest);
+        Assert.Equal(1, rig.Cache.TakeDeviceAliasPublishes());
+        Assert.Equal(0, rig.Cache.TakeDeviceAliasReuses());
+        rig.Harness.Submit();
+    }
+
     // A version names one state of one texture, so a copy from another source is never
     // mistaken for the one the alias holds.
     [Fact]

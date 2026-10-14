@@ -297,9 +297,12 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     /// then the one the GPU last wrote owns the contents. Publishing it and marking
     /// this one stale is what the old drop-and-recreate did implicitly.
     ///
+    /// <paramref name="keepsDepthPlane"/> says the write is to the stencil plane alone.
+    ///
     /// Caller holds the lock.
     /// </summary>
-    private void SynchronizeAliases(ResourceSlotIdentifier imageIdentifier, bool takesGpuOwnership)
+    private void SynchronizeAliases(
+        ResourceSlotIdentifier imageIdentifier, bool takesGpuOwnership, bool keepsDepthPlane = false)
     {
         var image = _slots[imageIdentifier];
         var address = image.Description.Data.Address;
@@ -317,6 +320,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 continue;
             }
 
+            var otherOwedGuestMemory = other.IsGpuModified;
             if (other.IsGpuModified)
             {
                 // Only the bytes the two actually share change hands. The overlap may be
@@ -360,6 +364,16 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 var (dirtyStart, dirtyEnd) = image.OverlapWithin(sharedStart, sharedSize);
                 image.MarkCpuDirty(MetalImageDirtyCause.AliasWrite, dirtyStart, dirtyEnd);
                 _aliasPublishes++;
+            }
+
+            if (takesGpuOwnership && keepsDepthPlane && !otherOwedGuestMemory &&
+                !(image.Description.HasStencil &&
+                  other.Overlaps(image.Description.Stencil.Address, image.Description.Stencil.Size)))
+            {
+                // A pass that writes only the stencil plane leaves the bytes this image
+                // shares with the other one - its depth plane - as they were, so an alias
+                // that owed guest memory nothing still agrees with both.
+                continue;
             }
 
             if (takesGpuOwnership)
@@ -554,18 +568,25 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     /// writeback - which is what made SILENT HILL retile its 4K depth plane out and back
     /// through the R32 alias it samples for every soft-particle draw.
     /// </param>
-    public nint AcquireDepthTargetView(ResourceSlotIdentifier imageIdentifier, in ImageRequest request, bool writes = true)
+    /// <param name="writesDepth">
+    /// False when what the pass writes is the stencil plane alone. The depth plane then
+    /// stays what it was, and so does every alias that holds a copy of it.
+    /// </param>
+    public nint AcquireDepthTargetView(
+        ResourceSlotIdentifier imageIdentifier, in ImageRequest request, bool writes = true, bool writesDepth = true)
     {
         using var held = _lock.Hold();
         var image = _slots[imageIdentifier];
         image.LastAccessTick = _collectionTick;
         writes |= !ReadOnlyDepthPassesEnabled;
+        writesDepth |= !ReadOnlyDepthPassesEnabled;
+        var stencilOnly = writes && !writesDepth && image.Description.HasStencil;
         if (writes)
         {
             WatchImage(imageIdentifier);
         }
 
-        SynchronizeAliases(imageIdentifier, takesGpuOwnership: writes);
+        SynchronizeAliases(imageIdentifier, takesGpuOwnership: writes, keepsDepthPlane: stencilOnly);
         RefreshFromGuest(image);
         image.Uses.DepthTarget = true;
         if (request.Description.HasMetadata)
@@ -581,7 +602,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         if (writes)
         {
-            image.MarkGpuModified();
+            image.MarkGpuModified(depthPlaneChanged: !stencilOnly);
             image.GpuWriteSerial = _owner.CurrentSerial;
         }
 

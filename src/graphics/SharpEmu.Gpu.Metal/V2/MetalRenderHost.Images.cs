@@ -79,6 +79,23 @@ internal sealed partial class MetalRenderHost
         return resolution.HasHtile && _imageCache.IsMetadataCleared(resolution.HtileAddress, layer);
     }
 
+    // Whether a draw that writes the attachment can change its depth plane, rather than
+    // only its stencil: the rules above, for the depth aspect alone. A format without a
+    // depth aspect keeps everything in what it calls its data, so it always answers yes.
+    private bool DepthPlaneWrites(in DepthAttachmentState depth, uint layer)
+    {
+        var resolution = depth.Target.Target;
+        var state = depth.Target.State;
+        if ((ViewFormatRules.DepthAspects(resolution.Format) & GpuImageAspect.DepthBit) == 0 ||
+            (state.AttachmentWriteAspects(resolution.Format) & GpuImageAspect.DepthBit) != 0 ||
+            state.DepthWriteEnabled)
+        {
+            return true;
+        }
+
+        return resolution.HasHtile && _imageCache.IsMetadataCleared(resolution.HtileAddress, layer);
+    }
+
     internal static bool WritesAttachment(in DepthStencilState state, GpuFormat format) =>
         !state.IsReadOnly(format) ||
         (state.DepthWriteEnabled && (ViewFormatRules.DepthAspects(format) & GpuImageAspect.DepthBit) != 0);
@@ -94,8 +111,9 @@ internal sealed partial class MetalRenderHost
         }
 
         var writes = DepthAttachmentWrites(in depth, request.View.BaseLayer);
+        var writesDepth = writes && DepthPlaneWrites(in depth, request.View.BaseLayer);
         var texture = _imageCache.AcquireDepthTargetView(
-            imageIdentifier, request with { Role = ImageRole.DepthTarget }, writes);
+            imageIdentifier, request with { Role = ImageRole.DepthTarget }, writes, writesDepth);
         var layer = request.View.BaseLayer;
         if (resolution.HasHtile && resolution.DepthClearEnabled)
         {
