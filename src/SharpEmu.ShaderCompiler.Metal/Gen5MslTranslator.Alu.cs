@@ -164,9 +164,23 @@ public static partial class Gen5MslTranslator
                     var mask = instruction.Sources.Count > 2
                         ? MaskBitExpression(instruction.Sources[2])
                         : "vcc";
-                    StoreVector(
-                        DestinationVector(instruction),
+                    var destination = DestinationVector(instruction);
+                    var selected = Temp(
+                        "uint",
                         $"({mask}) ? ({SignModifiedSource(instruction, 1)}) : ({SignModifiedSource(instruction, 0)})");
+                    if (instruction.Control is Gen5DppControl dpp)
+                    {
+                        selected = Temp("uint", $"({EmitDppWriteEnabled(dpp)}) ? {selected} : v[{destination}]");
+                    }
+
+                    // An SDWA select writes one byte or word of the destination and zeroes,
+                    // sign-extends or preserves the rest, like every other SDWA result.
+                    if (instruction.Control is Gen5SdwaControl { ScalarDestination: null } sdwaSelect)
+                    {
+                        selected = ApplySdwaDestination(sdwaSelect, selected, $"v[{destination}]");
+                    }
+
+                    StoreVector(destination, selected);
                     return true;
                 }
             }

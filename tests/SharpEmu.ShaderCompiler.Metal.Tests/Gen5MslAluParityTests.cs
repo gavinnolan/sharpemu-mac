@@ -192,6 +192,30 @@ public sealed class Gen5MslAluParityTests(ITestOutputHelper output)
         Assert.Equal(expected, Execute(shader));
     }
 
+    // An SDWA V_CNDMASK_B32 writes only the selected word of its destination. GTA V's
+    // upscale shader assembles packed f16 colour this way; writing the whole register put
+    // green into the red half and cleared green, so the frame came out purple.
+    [Theory]
+    [InlineData(5u, 2u, 0x40001234u)] // word 1 written, word 0 preserved
+    [InlineData(4u, 2u, 0xABCD4000u)] // word 0 written, word 1 preserved
+    [InlineData(5u, 0u, 0x40000000u)] // word 1 written, the rest zeroed
+    public void CndmaskWritesOnlyTheSdwaDestinationWord(uint destinationSelect, uint unused, uint expected)
+    {
+        // VCC is clear, so source 0's high word (0x4000) is the selected value.
+        var fixture = new Gen5ComputeFixture("VCndmaskB32", [
+            0x7E0002FF, 0x40003C00u, 0x7E0202FF, 0x00004400u, 0x7E0402FF, 0u, 0x7E0602FF, 0xABCD1234u,
+            0xE0700000, 0x80020300, 0xBF810000], 8, 16);
+        var program = Gen5ComputeFixtures.DecodeOrThrow(fixture);
+        var instructions = program.Instructions.ToList();
+        instructions.Insert(4, new Gen5ShaderInstruction(28, Gen5ShaderEncoding.Vop2, "VCndmaskB32",
+            [], [Gen5Operand.Vector(0), Gen5Operand.Vector(1)], [Gen5Operand.Vector(3)],
+            new Gen5SdwaControl(destinationSelect, unused, 5, 5, false, false, 0, 0, 0, false, null)));
+        var request = Gen5ComputeFixtures.RequestOrThrow(program with { Instructions = instructions }, ShaderStage.Compute);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        if (!RequireDevice()) return;
+        Assert.Equal(expected, Execute(shader));
+    }
+
     [Theory]
     [InlineData(0x40001234u, 1u, 0u, 0x40000000u)] // op_sel picks the high half: 2.0
     [InlineData(0x12344000u, 0u, 1u, 0xC0000000u)] // VOP3 negate: -2.0
