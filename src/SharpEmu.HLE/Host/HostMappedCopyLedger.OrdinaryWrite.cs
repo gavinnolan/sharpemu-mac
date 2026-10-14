@@ -101,33 +101,55 @@ public sealed unsafe partial class HostMappedCopyLedger
         firstRefusal = null;
         if (Monitor.IsEntered(gate)) { firstRefusal = "inherited-provider-gate"; return null; }
         if (!HostViewMemory.IsValidRange(address, size)) { firstRefusal = "invalid-original-range"; return null; }
+        lock (gate) return CaptureOrdinaryWriteIdentityLocked(backing, address, size, out firstRefusal);
+    }
+
+    /// <summary>Mapping epoch an ordinary write samples before its first admission.</summary>
+    public long OrdinaryWriteMappingEpoch => Volatile.Read(ref mappingEpoch);
+
+    // The identity a capture before the admission would have taken, taken once that
+    // admission is refused. Every mutation bumps the epoch after it, under Gate, so an
+    // epoch still equal to the pre-admission sample means each record read here is the
+    // one that sample saw. A moved epoch captures nothing: the caller starts over.
+    public OrdinaryWriteIdentity? CaptureOrdinaryWriteIdentity(HostBackingObject backing, ulong address, ulong size,
+        long mappingEpochBeforeAdmission, out bool mappingChanged)
+    {
+        mappingChanged = false;
+        if (Monitor.IsEntered(gate) || !HostViewMemory.IsValidRange(address, size)) return null;
         lock (gate)
         {
-            firstRefusal = unknownAlias ? "unknown-alias"
-                : !aliases.ContainsKey(backing) ? "backing-not-enrolled"
-                : backing.IsClosing ? "backing-closing"
-                : backing.IsDisposed ? "backing-disposed" : null;
-            if (firstRefusal is not null) return null;
-            var index = FindAtOrBelow(address);
-            if (index < 0) { firstRefusal = "original-view-missing"; return null; }
-            var first = views.Values[index];
-            if (!TryResolveOriginalWriteView(backing, first, address, size, out var firstCount, out firstRefusal)) return null;
-            if (firstCount == size) return new(this, backing, first);
-            // Allocate only after proving that the original request actually
-            // crosses the first View. Never substitute a younger record later.
-            var selected = new List<View> { first };
-            var cursor = address + firstCount; var end = address + size;
-            while (cursor < end)
-            {
-                if (selected.Count >= CpuMappedCopyObservation.MaximumSegments) { firstRefusal = "original-view-limit"; return null; }
-                index = FindAtOrBelow(cursor);
-                if (index < 0) { firstRefusal = "original-view-missing"; return null; }
-                var view = views.Values[index];
-                if (!TryResolveOriginalWriteView(backing, view, cursor, end - cursor, out var count, out firstRefusal)) return null;
-                selected.Add(view); cursor += count;
-            }
-            return new(this, backing, selected.ToArray());
+            if (mappingEpoch != mappingEpochBeforeAdmission) { mappingChanged = true; return null; }
+            return CaptureOrdinaryWriteIdentityLocked(backing, address, size, out _);
         }
+    }
+
+    private OrdinaryWriteIdentity? CaptureOrdinaryWriteIdentityLocked(HostBackingObject backing, ulong address, ulong size,
+        out string? firstRefusal)
+    {
+        firstRefusal = unknownAlias ? "unknown-alias"
+            : !aliases.ContainsKey(backing) ? "backing-not-enrolled"
+            : backing.IsClosing ? "backing-closing"
+            : backing.IsDisposed ? "backing-disposed" : null;
+        if (firstRefusal is not null) return null;
+        var index = FindAtOrBelow(address);
+        if (index < 0) { firstRefusal = "original-view-missing"; return null; }
+        var first = views.Values[index];
+        if (!TryResolveOriginalWriteView(backing, first, address, size, out var firstCount, out firstRefusal)) return null;
+        if (firstCount == size) return new(this, backing, first);
+        // Allocate only after proving that the original request actually
+        // crosses the first View. Never substitute a younger record later.
+        var selected = new List<View> { first };
+        var cursor = address + firstCount; var end = address + size;
+        while (cursor < end)
+        {
+            if (selected.Count >= CpuMappedCopyObservation.MaximumSegments) { firstRefusal = "original-view-limit"; return null; }
+            index = FindAtOrBelow(cursor);
+            if (index < 0) { firstRefusal = "original-view-missing"; return null; }
+            var view = views.Values[index];
+            if (!TryResolveOriginalWriteView(backing, view, cursor, end - cursor, out var count, out firstRefusal)) return null;
+            selected.Add(view); cursor += count;
+        }
+        return new(this, backing, selected.ToArray());
     }
 
     private static bool TryResolveOriginalWriteView(HostBackingObject backing, View view,

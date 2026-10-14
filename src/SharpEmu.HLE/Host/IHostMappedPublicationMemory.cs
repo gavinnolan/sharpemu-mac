@@ -22,6 +22,14 @@ public interface IHostMappedPublicationMemory
         return original;
     }
 
+    // A provider that versions its mapping lets an ordinary write defer the capture
+    // to the rare refused admission: the write samples this before admission and
+    // passes the sample back. Null keeps the capture before admission.
+    long? OrdinaryWriteMappingEpoch => null;
+    HostMappedCopyLedger.OrdinaryWriteIdentity? CaptureOrdinaryWriteIdentity(
+        HostBackingObject backing, ulong address, ulong size, long mappingEpochBeforeAdmission, out bool mappingChanged)
+    { mappingChanged = true; return null; }
+
     CpuMappedPublicationPreparationResult TryPrepareMappedPublicationValidation(
         HostBackingObject backing, CpuMappedCopyObservation original, out CpuMappedPublicationValidation? validation)
     { validation = null; return CpuMappedPublicationPreparationResult.Unavailable; }

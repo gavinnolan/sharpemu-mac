@@ -60,6 +60,7 @@ public sealed unsafe partial class HostMappedCopyLedger
             Volatile.Write(ref view.Incarnation, incarnation); // old captures stale before syscall
             pending.Members[pending.Count++] = new() { View = view, Incarnation = incarnation };
         }
+        NoteMappingChangedLocked();
         return true; // exhaustion loses copy availability, never invents kernel failure
     }
 
@@ -84,6 +85,7 @@ public sealed unsafe partial class HostMappedCopyLedger
             }
             for (var index = 0; index < pending.Count; index++)
                 Volatile.Write(ref pending.Members[index].View!.CopyAvailable, 1);
+            NoteMappingChangedLocked();
         }
         finally
         {

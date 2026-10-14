@@ -69,6 +69,12 @@ public sealed partial class MappedPublicationTests
         }
         public HostMappedCopyLedger.OrdinaryWriteIdentity? CaptureOrdinaryWriteIdentity(
             HostBackingObject backing, ulong address, ulong size) => Ledger.CaptureOrdinaryWriteIdentity(backing, address, size);
+        // Off: the write captures before admission, as a provider without an epoch does.
+        internal bool DefersOriginalCapture = true;
+        public long? OrdinaryWriteMappingEpoch => DefersOriginalCapture ? Ledger.OrdinaryWriteMappingEpoch : null;
+        public HostMappedCopyLedger.OrdinaryWriteIdentity? CaptureOrdinaryWriteIdentity(HostBackingObject backing,
+            ulong address, ulong size, long mappingEpochBeforeAdmission, out bool mappingChanged) =>
+            Ledger.CaptureOrdinaryWriteIdentity(backing, address, size, mappingEpochBeforeAdmission, out mappingChanged);
         public bool CanWaitForOrdinaryWriteAdmission => !Monitor.IsEntered(gate);
         public ulong PageSize => State.Page;
         public ulong Granularity => PageSize;
