@@ -20,6 +20,16 @@ internal static class MetalLinearWindowView
     private const uint MaxExtent = 16384;
 
     /// <summary>
+    /// Whether a pixel format can back a linear texture at all, so the device may be asked
+    /// its linear alignment: Metal asserts on that question for a compressed, depth, stencil
+    /// or packed-chroma format and ends the process. Only the ordinary colour formats
+    /// (MTLPixelFormat 1 through 129) qualify.
+    /// </summary>
+    public static bool SupportsLinearFormat(ulong pixelFormat) =>
+        pixelFormat is > 0 and < 130 &&
+        !MetalGuestFormats.IsDepthStencil((MtlPixelFormat)pixelFormat);
+
+    /// <summary>
     /// Whether an image can be a texture over the window bytes it sits in.
     /// <paramref name="alignment"/> is the device's minimum linear texture alignment for
     /// the pixel format; the window offset and the row pitch both have to be multiples of it.

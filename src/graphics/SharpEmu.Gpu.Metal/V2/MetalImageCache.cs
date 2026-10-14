@@ -1147,7 +1147,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return false;
         }
 
-        if (!_guestMemory.TryResolveInPlace(description.Data.Address, description.Data.Size, out var range) ||
+        if (description.IsBlock || !MetalLinearWindowView.SupportsLinearFormat(shape.PixelFormat) ||
+            !_guestMemory.TryResolveInPlace(description.Data.Address, description.Data.Size, out var range) ||
             !MetalLinearWindowView.Qualifies(
                 in description, in shape, range.Offset, LinearAlignment(shape.PixelFormat), out var bytesPerRow))
         {

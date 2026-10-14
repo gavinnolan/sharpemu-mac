@@ -46,6 +46,22 @@ public sealed class MetalLinearWindowViewTests
     private static (ImageDescription Description, MetalTextureShape Shape) R8G8(uint width, uint height) =>
         Plane(width, height, GpuFormat.R8G8Unorm, GuestPixelFormat.Bits8_8UNorm, 2, (ulong)MtlPixelFormat.Rg8Unorm);
 
+    // Metal asserts when asked the linear alignment of these, so they are refused first.
+    [Theory]
+    [InlineData((ulong)MtlPixelFormat.Bc1Rgba)]
+    [InlineData((ulong)MtlPixelFormat.Bc7RgbaUnorm)]
+    [InlineData((ulong)MtlPixelFormat.Depth32Float)]
+    [InlineData(0UL)]
+    public void AFormatWithoutLinearTexturesIsRefusedBeforeTheDeviceIsAsked(ulong format) =>
+        Assert.False(MetalLinearWindowView.SupportsLinearFormat(format));
+
+    [Fact]
+    public void AnOrdinaryColourFormatMayBeAskedItsLinearAlignment()
+    {
+        Assert.True(MetalLinearWindowView.SupportsLinearFormat((ulong)MtlPixelFormat.R8Unorm));
+        Assert.True(MetalLinearWindowView.SupportsLinearFormat((ulong)MtlPixelFormat.Rg8Unorm));
+    }
+
     [Fact]
     public void ASilentHillLumaPlaneQualifies()
     {
