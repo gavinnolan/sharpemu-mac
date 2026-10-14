@@ -1031,38 +1031,44 @@ internal sealed partial class MetalImageCache
     }
 
     /// <summary>
+    /// The image takes the DCC metadata a request names, in the lookup's own hold. True
+    /// when its slices are then to be scanned for a clear by MaterializeDccClear, with
+    /// the image's GPU write sequence as it stood before that scan. Caller holds the lock.
+    /// </summary>
+    private bool AdoptDccMetadataLocked(
+        ResourceSlotIdentifier imageIdentifier, in ImageRequest request, out long imageWriteSequence)
+    {
+        imageWriteSequence = 0;
+        if (request.Description.Metadata.Kind != MetadataKind.Dcc ||
+            _slots.TryGet(imageIdentifier) is not { } found)
+        {
+            return false;
+        }
+
+        ref readonly var description = ref request.Description;
+        var range = description.Metadata.Range;
+        // Taken before this lookup clears anything: its own clears are not draws.
+        imageWriteSequence = found.GpuWriteSequence;
+        found.Description.Metadata = description.Metadata;
+        if (range.Size == 0 || description.Resources.Levels != 1 || found.Description.Resources.Levels != 1)
+        {
+            return false;
+        }
+
+        _surfaceMetadata.Remove(range.Address);
+        return true;
+    }
+
+    /// <summary>
     /// A uniform DCC key over a whole slice means the surface is logically cleared to
     /// one color. The texture takes that color and the metadata becomes uncompressed,
     /// which is what makes the following draws and texture reads see the clear.
     /// </summary>
-    private void MaterializeDccClear(ResourceSlotIdentifier imageIdentifier, in ImageRequest request, uint metadataBaseLayer)
+    private void MaterializeDccClear(
+        ResourceSlotIdentifier imageIdentifier, in ImageRequest request, uint metadataBaseLayer, long imageWriteSequence)
     {
-        if (request.Description.Metadata.Kind != MetadataKind.Dcc)
-        {
-            return;
-        }
-
         var description = request.Description;
         var range = description.Metadata.Range;
-        long imageWriteSequence;
-        using (var held = _lock.Hold())
-        {
-            if (_slots.TryGet(imageIdentifier) is not { } found)
-            {
-                return;
-            }
-
-            // Taken before this lookup clears anything: its own clears are not draws.
-            imageWriteSequence = found.GpuWriteSequence;
-            found.Description.Metadata = description.Metadata;
-            if (range.Size == 0 || description.Resources.Levels != 1 || found.Description.Resources.Levels != 1)
-            {
-                return;
-            }
-
-            _surfaceMetadata.Remove(range.Address);
-        }
-
         var layers = description.TransferLayers;
         const ulong MetadataBlockSize = 0x1000;
         if (!ImageDescription.IsValidRange(range) || range.Address % MetadataBlockSize != 0 || layers == 0 ||
