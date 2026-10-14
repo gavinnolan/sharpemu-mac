@@ -223,6 +223,20 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void Wave64ReadFirstLaneWithEmptyExecReadsLaneZero()
+    {
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.Wave64ReadFirstLaneEmptyExec, new byte[512],
+            waveLaneCount: 64, localSizeX: 64, threadsPerThreadgroup: 64);
+
+        for (var lane = 0; lane < 64; lane++)
+        {
+            Assert.Equal(7u, ReadDword(result, lane * 8));
+        }
+    }
+
+    [Fact]
     public void Wave64ExchangesInALoopNeverReadAnOverwrittenSlot()
     {
         if (SkipWithoutMetalDevice("the execution test")) return;
