@@ -1147,13 +1147,15 @@ public sealed class MslTranslationTests
         var scalars = new uint[256];
         scalars[8] = 0x2000;
         scalars[10] = 64;
-        scalars[11] = 77u << 12;
+        // The untyped load takes the descriptor's format. 8_8 is not whole dwords, so it keeps
+        // the table form (a whole-dword literal format loads as one run, tested separately).
+        scalars[11] = (typed ? 77u : 14u) << 12;
         var shader = CompileMaterialized(new Gen5ShaderProgram(0, [load, end]), scalars[..12]);
 
         if (typed)
         {
             Assert.DoesNotContain("sharpemu_gfx10_formats[(", shader.Source, StringComparison.Ordinal);
-            Assert.Contains("sharpemu_format_layout(4u, 0u,", shader.Source, StringComparison.Ordinal);
+            Assert.Contains("sharpemu_load_words<1>(b0, ", shader.Source, StringComparison.Ordinal);
         }
         else
         {
@@ -1162,6 +1164,29 @@ public sealed class MslTranslationTests
             Assert.Contains(": true);", shader.Source, StringComparison.Ordinal);
             Assert.DoesNotContain("sharpemu_format_bytes", shader.Source, StringComparison.Ordinal);
         }
+    }
+
+    [Theory]
+    [InlineData("TBufferLoadFormatX", 1u, 22u)]
+    [InlineData("TBufferLoadFormatXy", 2u, 64u)]
+    [InlineData("TBufferLoadFormatXyzw", 4u, 77u)]
+    public void TypedLoadOfWholeDwordComponentsReadsOneRunFromOneAddress(string opcode, uint count, uint format)
+    {
+        // Unified formats 22, 64 and 77 are 32, 32_32 and 32_32_32_32.
+        var shader = CompileTypedBufferAccess(opcode, count, format);
+
+        Assert.Contains($"sharpemu_load_words<{count}>(b0, ", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("sharpemu_load_word(b0, ", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TypedLoadOfSubDwordComponentsKeepsThePerComponentPath()
+    {
+        // Format 14 is 8_8 unorm.
+        var shader = CompileTypedBufferAccess("TBufferLoadFormatXy", 2, typedFormat: 14);
+
+        Assert.DoesNotContain("sharpemu_load_words<", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_load_word(b0, ", shader.Source, StringComparison.Ordinal);
     }
 
     [Fact]

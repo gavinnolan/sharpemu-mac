@@ -351,7 +351,11 @@ public static partial class Gen5MslTranslator
                 source.AppendLine($"    device uint* b{index} = {ResourcesName}.buffers[{index}];");
             }
 
-            source.AppendLine($"    uint bias[{Math.Max(bufferCount, 1)}] = {{}};");
+            if (!_options.ElideByteBias)
+            {
+                source.AppendLine($"    uint bias[{Math.Max(bufferCount, 1)}] = {{}};");
+            }
+
             if (_hasGlobalDataShare)
             {
                 source.AppendLine($"    device uint* {GlobalDataShareName} = {ResourcesName}.global_data_share;");
@@ -376,7 +380,7 @@ public static partial class Gen5MslTranslator
                 }
             }
 
-            for (uint buffer = 0; buffer < layout.MemoryOffsetCount; buffer++)
+            for (uint buffer = 0; !_options.ElideByteBias && buffer < layout.MemoryOffsetCount; buffer++)
             {
                 source.AppendLine(
                     $"    bias[{buffer}] = ({ShaderDataDword(layout.MemoryOffsetDword + (buffer / 4))} >> {(buffer % 4) * 8}u) & 0xFFu;");

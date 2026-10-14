@@ -23,6 +23,32 @@ static inline uint sharpemu_load_word(device uint* b, uint bytes, uint addr)
     return (low >> shift) | (high << (32u - shift));
 }
 
+// Up to four consecutive dwords starting at a byte address, for a format whose components
+// are whole dwords. An aligned run that lies inside the binding is plain dword loads;
+// anything else (an odd bias, a run that crosses the end) reads each dword through
+// sharpemu_load_word, which assembles a straddled dword and reads zero past the end.
+template <int N>
+static inline uint4 sharpemu_load_words(device uint* b, uint bytes, uint addr)
+{
+    uint4 result = uint4(0u);
+    if ((addr & 3u) == 0u && addr <= bytes && (uint)(4 * N) <= bytes - addr)
+    {
+        uint index = addr >> 2;
+        for (int i = 0; i < N; i++)
+        {
+            result[i] = b[index + (uint)i];
+        }
+    }
+    else
+    {
+        for (int i = 0; i < N; i++)
+        {
+            result[i] = sharpemu_load_word(b, bytes, addr + (uint)(4 * i));
+        }
+    }
+    return result;
+}
+
 static inline uint sharpemu_load_bytes(device uint* b, uint bytes, uint addr, uint count, bool signExtend)
 {
     uint value = 0u;

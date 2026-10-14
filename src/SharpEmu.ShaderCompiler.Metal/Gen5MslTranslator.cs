@@ -772,10 +772,19 @@ public static partial class Gen5MslTranslator
                 structured = true;
                 body.Append(meshBody);
             }
+            else if (_stage == Gen5MslStage.Mesh &&
+                _options.StructuredControlFlow && ProgramHasBarrier() &&
+                TryBuildMeshBarrierBody(blocks, out meshBody, out var linearBarrierBody))
+            {
+                // Every S_BARRIER is workgroup-uniform, so it is emitted in place and the
+                // body needs no rendezvous (see Gen5MslTranslator.MeshBarrier.cs).
+                structured = !linearBarrierBody;
+                body.Append(meshBody);
+            }
             else if (_stage == Gen5MslStage.Mesh)
             {
-                // With S_BARRIER the mesh stage keeps the dispatcher: the barrier parks a
-                // wave between blocks, which needs a resumable pc (see
+                // A barrier that is not workgroup-uniform keeps the dispatcher: the barrier
+                // parks a wave between blocks, which needs a resumable pc (see
                 // Gen5MslTranslator.Mesh.cs).
                 EmitMeshDispatcher(body, BuildDispatcherSwitchBody(blocks, baseIndent: 3));
             }
@@ -876,7 +885,7 @@ public static partial class Gen5MslTranslator
                     source.AppendLine(
                         $"    if ({ResourcesName}.{Gen5MslArgumentLayout.StepReportName} != nullptr) " +
                         $"atomic_store_explicit({ResourcesName}.{Gen5MslArgumentLayout.StepReportName}, 0x40000000u | " +
-                        $"(bias[{DebugVertexWord}] << 20u) | " +
+                        $"({(_options.ElideByteBias ? "0u" : $"bias[{DebugVertexWord}]")} << 20u) | " +
                         $"({ResourcesName}.buffer_bytes[{DebugVertexWord}] & 0xFFFFFu) | " +
                         $"(b{DebugVertexWord} == nullptr ? 0x80000000u : 0u), memory_order_relaxed);");
                 }
@@ -1671,6 +1680,14 @@ public static partial class Gen5MslTranslator
             uint vectorData,
             uint componentCount)
         {
+            // A descriptor word the specialization fixed is decoded here; a format of whole
+            // dwords then loads as one run. Anything else decodes on the device below.
+            if (TryParseUIntLiteral(descriptorWord3, out var literalWord3) &&
+                TryEmitLiteralDwordFormatLoad(bindingIndex, byteAddress, literalWord3, vectorData, componentCount))
+            {
+                return;
+            }
+
             // Format and destination swizzle come from descriptor word 3, a register
             // or a specialization constant; the prelude table decodes the unified format.
             var word3 = Temp("uint", descriptorWord3);
@@ -1720,6 +1737,106 @@ public static partial class Gen5MslTranslator
             }
         }
 
+        private static bool TryParseUIntLiteral(string text, out uint value)
+        {
+            value = 0;
+            if (text.Length < 2 || text[^1] != 'u')
+            {
+                return false;
+            }
+
+            var digits = text[..^1];
+            return digits.StartsWith("0x", StringComparison.Ordinal)
+                ? uint.TryParse(digits.AsSpan(2), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out value)
+                : uint.TryParse(digits, NumberStyles.None, CultureInfo.InvariantCulture, out value);
+        }
+
+        // BUFFER_LOAD_FORMAT_* through a descriptor word 3 known at translate time, for a
+        // format whose components are whole dwords at byte offsets 0, 4, 8 and 12: the
+        // selectors are constants, so only the selected components are loaded, as one run
+        // from one address, and only they are bounds checked (the same rule the descriptor
+        // table form applies at run time). A component the format lacks reads as the
+        // missing value, W as one and the rest as zero; an out of range access reads the
+        // selector's constant.
+        private bool TryEmitLiteralDwordFormatLoad(
+            int bindingIndex,
+            string byteAddress,
+            uint word3,
+            uint vectorData,
+            uint componentCount)
+        {
+            if (!Gfx10UnifiedFormat.TryDecode((word3 >> 12) & 0x7Fu, out var dataFormat, out var numberFormat))
+            {
+                return false;
+            }
+
+            var formatComponents = Gfx10UnifiedFormat.ComponentCount(dataFormat);
+            if (formatComponents == 0 || !Gfx10UnifiedFormat.HasWholeDwordComponents(dataFormat))
+            {
+                return false;
+            }
+
+            for (uint component = 0; component < formatComponents; component++)
+            {
+                if (!Gfx10UnifiedFormat.TryGetComponentLayout(
+                        dataFormat, component, out var offset, out var bit, out var bits) ||
+                    offset != component * sizeof(uint) || bit != 0 || bits != 32)
+                {
+                    return false;
+                }
+            }
+
+            // The last selected component the format has decides the run and its bounds.
+            var run = 0;
+            for (uint destination = 0; destination < componentCount; destination++)
+            {
+                var selector = (word3 >> (int)(destination * 3)) & 7u;
+                if (selector >= 4 && selector - 4 < formatComponents)
+                {
+                    run = Math.Max(run, (int)(selector - 4) + 1);
+                }
+            }
+
+            string? words = null;
+            var inBounds = "true";
+            if (run > 0)
+            {
+                inBounds = ElementInBounds(bindingIndex, byteAddress, $"{run * sizeof(uint)}u");
+                words = Temp(
+                    "uint4",
+                    $"sharpemu_load_words<{run}>(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress})");
+            }
+
+            var one = $"sharpemu_format_one({numberFormat}u)";
+            for (uint destination = 0; destination < componentCount; destination++)
+            {
+                var selector = (word3 >> (int)(destination * 3)) & 7u;
+                var constant = selector == 1 ? one : "0u";
+                string value;
+                if (selector < 4)
+                {
+                    value = constant;
+                }
+                else if (selector - 4 >= formatComponents)
+                {
+                    value = selector == 7 ? one : "0u";
+                }
+                else
+                {
+                    value = Temp(
+                        "uint",
+                        $"sharpemu_format_convert({words}[{selector - 4}], 32u, {numberFormat}u, {dataFormat}u)");
+                }
+
+                // An access out of range reads every destination as its constant, a
+                // selected component the format lacks included.
+                var guarded = selector >= 4 && run > 0 && constant != value;
+                StoreVector(vectorData + destination, guarded ? $"{inBounds} ? {value} : {constant}" : value);
+            }
+
+            return true;
+        }
+
         // Check the required range as one access, without an overflowing end address.
         private string ElementInBounds(int bindingIndex, string byteAddress, string elementBytes)
         {
@@ -1752,9 +1869,37 @@ public static partial class Gen5MslTranslator
             var valid = Temp(
                 "bool",
                 $"(({descriptorWord3} >> 12) & 0x7Fu) != 0u && {inBounds}");
+
+            // Formats of whole dword components sit at byte offsets 0, 4, 8 and 12 of the
+            // element: the address is added once and the run is loaded by one helper, with a
+            // plain aligned read when it is aligned and inside the binding.
+            string? dwordRun = null;
+            var runCount = Math.Min(control.DwordCount, componentCount);
+            if (Gfx10UnifiedFormat.HasWholeDwordComponents(dataFormat) && runCount is >= 1 and <= 4)
+            {
+                var consecutive = true;
+                for (uint component = 0; component < runCount; component++)
+                {
+                    consecutive &= Gfx10UnifiedFormat.TryGetComponentLayout(
+                            dataFormat, component, out var componentOffset, out var componentBit, out var componentBits) &&
+                        componentOffset == component * sizeof(uint) && componentBit == 0 && componentBits == 32;
+                }
+
+                if (consecutive)
+                {
+                    dwordRun = Temp(
+                        "uint4",
+                        $"sharpemu_load_words<{runCount}>(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress})");
+                }
+            }
+
             for (uint destination = 0; destination < control.DwordCount; destination++)
             {
-                var value = destination < componentCount
+                var value = dwordRun is not null && destination < runCount
+                    ? Temp(
+                        "uint",
+                        $"sharpemu_format_convert({dwordRun}[{destination}], 32u, {numberFormat}u, {dataFormat}u)")
+                    : destination < componentCount
                     ? LoadFormatComponent(
                         bindingIndex,
                         byteAddress,
@@ -2482,7 +2627,7 @@ public static partial class Gen5MslTranslator
             $"sharpemu_load_word(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress})";
 
         private string ApplyByteBias(int bindingIndex, string byteAddress) =>
-            $"({byteAddress} + bias[{bindingIndex}])";
+            _options.ElideByteBias ? byteAddress : $"({byteAddress} + bias[{bindingIndex}])";
 
         // ---- writer helpers ----
 
@@ -2505,6 +2650,8 @@ public static partial class Gen5MslTranslator
             _writesDeviceMemory ??= _request.Program.Instructions.Any(static instruction =>
                 !instruction.Opcode.StartsWith("Ds", StringComparison.Ordinal) &&
                 !instruction.Opcode.StartsWith("Image", StringComparison.Ordinal) &&
+                // Scratch is thread-private (a thread-local array), never device memory.
+                !instruction.Opcode.StartsWith("Scratch", StringComparison.Ordinal) &&
                 (instruction.Opcode.Contains("Store", StringComparison.Ordinal) ||
                  instruction.Opcode.Contains("Atomic", StringComparison.Ordinal)));
 

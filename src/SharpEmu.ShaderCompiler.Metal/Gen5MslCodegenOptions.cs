@@ -40,6 +40,10 @@ namespace SharpEmu.ShaderCompiler.Metal;
 /// nothing reads before it is overwritten, which saves the two threadgroup barriers the
 /// cross-simdgroup exchange costs. <c>SHARPEMU_MSL_MASKBALLOT=0</c> materializes every
 /// ballot.</param>
+/// <param name="ElideByteBias">Drop the per-buffer byte bias (the packed memory-offset
+/// bytes of the shader data) from every buffer address. The Metal host never writes
+/// those bytes, so each bias is zero and the read and add are dead work.
+/// <c>SHARPEMU_MSL_BYTEBIAS=1</c> keeps them.</param>
 public sealed record Gen5MslCodegenOptions(
     bool StructuredControlFlow = true,
     bool RegisterAllocation = true,
@@ -49,7 +53,8 @@ public sealed record Gen5MslCodegenOptions(
     bool RawDwordAccess = true,
     bool UniformTablesInConstantSpace = true,
     bool DispatchThreadgroupMemory = true,
-    bool DeadMaskBallotElision = true)
+    bool DeadMaskBallotElision = true,
+    bool ElideByteBias = true)
 {
     public static Gen5MslCodegenOptions FromEnvironment { get; } = new(
         StructuredControlFlow: Environment.GetEnvironmentVariable("SHARPEMU_MSL_STRUCTURED") != "0",
@@ -62,5 +67,6 @@ public sealed record Gen5MslCodegenOptions(
             Environment.GetEnvironmentVariable("SHARPEMU_MSL_CONSTANTTABLES") != "0",
         DispatchThreadgroupMemory: Environment.GetEnvironmentVariable("SHARPEMU_MSL_LDSSIZE") != "0",
         DeadMaskBallotElision:
-            Environment.GetEnvironmentVariable("SHARPEMU_MSL_MASKBALLOT") != "0");
+            Environment.GetEnvironmentVariable("SHARPEMU_MSL_MASKBALLOT") != "0",
+        ElideByteBias: Environment.GetEnvironmentVariable("SHARPEMU_MSL_BYTEBIAS") != "1");
 }

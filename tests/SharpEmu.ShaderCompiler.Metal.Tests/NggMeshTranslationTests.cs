@@ -105,7 +105,11 @@ public sealed class NggMeshTranslationTests
     [Fact]
     public void BarrierParksTheWaveInsteadOfBarrieringInPlace()
     {
-        var shader = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.CullingTriangle());
+        var request = Gen5NggFixtures.Request(Gen5NggFixtures.CullingTriangle());
+        Assert.True(
+            Gen5MslTranslator.TryCompileProgram(
+                request, out var shader, out var error, new Gen5MslCodegenOptions(StructuredControlFlow: false)),
+            error);
 
         // S_BARRIER must end its block and park the wave; the dispatcher's loop body is
         // the only place a threadgroup_barrier may appear, because two waves of the same

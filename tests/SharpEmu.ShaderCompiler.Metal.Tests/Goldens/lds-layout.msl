@@ -223,6 +223,32 @@ static inline uint sharpemu_load_word(device uint* b, uint bytes, uint addr)
     return (low >> shift) | (high << (32u - shift));
 }
 
+// Up to four consecutive dwords starting at a byte address, for a format whose components
+// are whole dwords. An aligned run that lies inside the binding is plain dword loads;
+// anything else (an odd bias, a run that crosses the end) reads each dword through
+// sharpemu_load_word, which assembles a straddled dword and reads zero past the end.
+template <int N>
+static inline uint4 sharpemu_load_words(device uint* b, uint bytes, uint addr)
+{
+    uint4 result = uint4(0u);
+    if ((addr & 3u) == 0u && addr <= bytes && (uint)(4 * N) <= bytes - addr)
+    {
+        uint index = addr >> 2;
+        for (int i = 0; i < N; i++)
+        {
+            result[i] = b[index + (uint)i];
+        }
+    }
+    else
+    {
+        for (int i = 0; i < N; i++)
+        {
+            result[i] = sharpemu_load_word(b, bytes, addr + (uint)(4 * i));
+        }
+    }
+    return result;
+}
+
 static inline uint sharpemu_load_bytes(device uint* b, uint bytes, uint addr, uint count, bool signExtend)
 {
     uint value = 0u;
@@ -377,12 +403,10 @@ kernel void gen5_cs(
     bool scc = false;
     bool active = true;
     device uint* b0 = sharpemu_resources.buffers[0];
-    uint bias[1] = {};
     s8 = sharpemu_push_data[0];
     s9 = sharpemu_push_data[1];
     s10 = sharpemu_push_data[2];
     s11 = sharpemu_push_data[3];
-    bias[0] = (sharpemu_push_data[4] >> 0u) & 0xFFu;
     v0 = sharpemu_local_id.x;
     v1 = sharpemu_local_id.y;
     v2 = sharpemu_local_id.z;
@@ -409,7 +433,7 @@ kernel void gen5_cs(
         threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
         uint t3 = v0;
         v3 = sharpemu_lds[(((t3) >> 2) & 8191u)];
-        uint t4 = ((0x0u + 0u + 0u + (0u * 0u)) + bias[0]);
+        uint t4 = (0x0u + 0u + 0u + (0u * 0u));
         sharpemu_store_dword(b0, sharpemu_resources.buffer_bytes[0], t4 + 0u, v3);
     }
 }

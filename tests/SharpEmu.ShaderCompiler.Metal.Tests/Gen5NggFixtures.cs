@@ -138,6 +138,117 @@ internal static class Gen5NggFixtures
         return new Gen5ShaderProgram(0, instructions);
     }
 
+    private const uint BranchWord = 0xBF82_0000u;
+    private const uint BranchScc0Word = 0xBF84_0000u;
+    private const uint BranchScc1Word = 0xBF85_0000u;
+
+    private static uint Branch(uint opcodeWord, uint fromPc, uint toPc) =>
+        opcodeWord | (ushort)(short)(((int)toPc - (int)(fromPc + 4)) / 4);
+
+    private static void AppendTail(List<Gen5ShaderInstruction> instructions, ref uint pc)
+    {
+        var at = pc;
+        void Add(string opcode, Gen5ShaderEncoding encoding, Gen5Operand[] sources,
+            Gen5Operand[] destinations, Gen5InstructionControl? control = null, uint word = 0)
+        {
+            instructions.Add(new Gen5ShaderInstruction(
+                at, encoding, opcode, [word], sources, destinations, control));
+            at += sizeof(uint);
+        }
+
+        Add("VMovB32", Gen5ShaderEncoding.Vop1, [Literal(Bits(1.0f))], [Vector(21)]);
+        Add("SMovB32", Gen5ShaderEncoding.Sop1, [Literal(AllocationRequest)], [Scalar(124)]);
+        Add("SSendmsg", Gen5ShaderEncoding.Sopp, [], [], word: SendMessageWord);
+        Add("Exp", Gen5ShaderEncoding.Exp,
+            [Vector(21), Vector(21), Vector(21), Vector(21)], [],
+            new Gen5ExportControl(Gen5NggExports.FirstPositionTarget, 0xF, false, false, false));
+        Add("SEndpgm", Gen5ShaderEncoding.Sopp, [], [], word: EndProgramWord);
+        pc = at;
+    }
+
+    /// <summary>An S_BARRIER that only the threads which do not take a scalar branch reach.
+    /// No barrier built this way is workgroup-uniform.</summary>
+    public static Gen5ShaderProgram BarrierInDivergentBranch()
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        instructions.Add(new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Ds, "DsWriteB32", [0],
+            [Vector(11), Vector(10)], [], new Gen5DataShareControl(0, 0, false)));
+        pc += 4;
+        instructions.Add(new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Sopp, "SCbranchScc1",
+            [Branch(BranchScc1Word, pc, pc + 8)], [], [], null));
+        pc += 4;
+        instructions.Add(new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Sopp, "SBarrier", [0], [], [], null));
+        pc += 4;
+        AppendTail(instructions, ref pc);
+        return new Gen5ShaderProgram(0, instructions);
+    }
+
+    /// <summary>A loop whose body holds the barrier and which leaves through two different
+    /// blocks, a shape the structured assembler cannot nest.</summary>
+    public static Gen5ShaderProgram BarrierLoopWithTwoExits()
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        instructions.Add(new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Ds, "DsWriteB32", [0],
+            [Vector(11), Vector(10)], [], new Gen5DataShareControl(0, 0, false)));
+        pc += 4;
+
+        // 4: header; leaves to the exit at 20 or runs the body.
+        instructions.Add(new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Sopp, "SCbranchScc1",
+            [Branch(BranchScc1Word, pc, 20)], [], [], null));
+        pc += 4;
+
+        // 8: the barrier; 12: the back edge to the header.
+        instructions.Add(new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Sopp, "SBarrier", [0], [], [], null));
+        pc += 4;
+        instructions.Add(new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Sopp, "SCbranchScc0",
+            [Branch(BranchScc0Word, pc, 4)], [], [], null));
+        pc += 4;
+
+        // 16: the second exit jumps over the first to the tail at 24.
+        instructions.Add(new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Sopp, "SBranch",
+            [Branch(BranchWord, pc, 24)], [], [], null));
+        pc += 4;
+
+        // 20: the first exit falls into the tail.
+        instructions.Add(new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Sop1, "SMovB32", [0],
+            [Inline(0)], [Scalar(20)], null));
+        pc += 4;
+        AppendTail(instructions, ref pc);
+        return new Gen5ShaderProgram(0, instructions);
+    }
+
+    /// <summary>The same two-exit loop, then a barrier after it: the loop holds no barrier,
+    /// so every thread reaches the barrier once whatever the number of waves.</summary>
+    public static Gen5ShaderProgram BarrierAfterLoopWithTwoExits()
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        instructions.Add(new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Ds, "DsWriteB32", [0],
+            [Vector(11), Vector(10)], [], new Gen5DataShareControl(0, 0, false)));
+        pc += 4;
+        instructions.Add(new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Sopp, "SCbranchScc1",
+            [Branch(BranchScc1Word, pc, 20)], [], [], null));
+        pc += 4;
+        instructions.Add(new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Sop1, "SMovB32", [0],
+            [Inline(0)], [Scalar(20)], null));
+        pc += 4;
+        instructions.Add(new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Sopp, "SCbranchScc0",
+            [Branch(BranchScc0Word, pc, 4)], [], [], null));
+        pc += 4;
+        instructions.Add(new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Sopp, "SBranch",
+            [Branch(BranchWord, pc, 24)], [], [], null));
+        pc += 4;
+        instructions.Add(new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Sop1, "SMovB32", [0],
+            [Inline(0)], [Scalar(20)], null));
+        pc += 4;
+        instructions.Add(new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Sopp, "SBarrier", [0], [], [], null));
+        pc += 4;
+        AppendTail(instructions, ref pc);
+        return new Gen5ShaderProgram(0, instructions);
+    }
+
     /// <summary>The stage state of a wave64 primitive shader with no GS half.</summary>
     public static Gen5NggStageInfo Wave64StageInfo { get; } = StageInfo with
     {

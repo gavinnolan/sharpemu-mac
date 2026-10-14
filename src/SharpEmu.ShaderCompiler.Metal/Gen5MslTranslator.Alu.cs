@@ -285,8 +285,8 @@ public static partial class Gen5MslTranslator
                 // on the guest; the IEEE-flag reciprocal keeps the unflushed input.
                 "VRcpF32" => FloatResult(instruction, $"(1.0f / sharpemu_flush_f32_denorm({F(instruction, 0)}))"),
                 "VRcpIflagF32" => FloatResult(instruction, $"(1.0f / {F(instruction, 0)})"),
-                "VLogF32" => FloatResult(instruction, $"log2(sharpemu_flush_f32_denorm({F(instruction, 0)}))"),
-                "VExpF32" => FloatResult(instruction, $"exp2(sharpemu_flush_f32_denorm({F(instruction, 0)}))"),
+                "VLogF32" => FloatResult(instruction, $"fast::log2(sharpemu_flush_f32_denorm({F(instruction, 0)}))"),
+                "VExpF32" => FloatResult(instruction, $"fast::exp2(sharpemu_flush_f32_denorm({F(instruction, 0)}))"),
                 // GCN sin/cos take revolutions; reduce to one cycle first, then mirror
                 // the SPIR-V Tau prescale. Only sine keeps the sign of a zero input.
                 "VSinF32" => FloatResult(instruction, $"sin(sharpemu_trig_cycle_f32({F(instruction, 0)}, true) * {TauLiteral})"),
