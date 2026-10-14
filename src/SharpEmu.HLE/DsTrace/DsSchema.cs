@@ -60,6 +60,11 @@ internal static class DsSchema
         (DsEv.FSJ, "job:x counter:x value target cond_flags aff_grp q08:x q10:x q58:x q60:x ra3:x ra4:x ra5:x"),
 
         (DsEv.MXQ, "mutex:x waiter:x owner:x qlen spin_ns outcome ra1:x"),
+        // MXH: an unlock passed the mutex on to waiter `to`. FIFO handoff (SHARPEMU_MUTEX_HANDOFF=fifo):
+        // ownership was granted to `to`. Release-and-wake (default): the mutex was released and `to`,
+        // the queue head, was woken to re-contend (it may lose to a barger and stay queued).
+        // to_parked=1 when the wake went through the guest scheduler (a parked cooperative waiter);
+        // qlen_after counts queued waiters, including a woken head that is still queued.
         (DsEv.MXH, "mutex:x from:x to:x to_parked qlen_after"),
         (DsEv.MXR, "mutex:x guest:x wait_ns"),
         (DsEv.EVF, "handle:x bits:x mode path total_ns loop_iters ra1:x"),
