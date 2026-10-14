@@ -1106,22 +1106,26 @@ internal sealed partial class MetalRenderHost
     private nuint[] _encoderResidentUsage = new nuint[64];
     private nuint[] _encoderResidentStages = new nuint[64];
     private int _encoderResidentCount;
+    private readonly Dictionary<nint, int> _encoderResidentIndex = new();
     private long _residencyCallsSkipped;
 
-    private void ForgetResidentResources() => _encoderResidentCount = 0;
+    private void ForgetResidentResources()
+    {
+        if (_encoderResidentCount != 0)
+        {
+            _encoderResidentIndex.Clear();
+        }
+
+        _encoderResidentCount = 0;
+    }
 
     /// <summary>How many -useResource: calls the encoder cache skipped.</summary>
     public long TakeSkippedResidencyCalls() => Interlocked.Exchange(ref _residencyCallsSkipped, 0);
 
     private bool TryNoteResident(nint resource, nuint usage, nuint stages)
     {
-        for (var index = 0; index < _encoderResidentCount; index++)
+        if (_encoderResidentIndex.TryGetValue(resource, out var index))
         {
-            if (_encoderResidentResources[index] != resource)
-            {
-                continue;
-            }
-
             // A wider usage or a new stage has to be named again; the same one need not.
             if ((_encoderResidentUsage[index] & usage) == usage &&
                 (_encoderResidentStages[index] & stages) == stages)
@@ -1142,6 +1146,7 @@ internal sealed partial class MetalRenderHost
             Array.Resize(ref _encoderResidentStages, _encoderResidentCount * 2);
         }
 
+        _encoderResidentIndex[resource] = _encoderResidentCount;
         _encoderResidentResources[_encoderResidentCount] = resource;
         _encoderResidentUsage[_encoderResidentCount] = usage;
         _encoderResidentStages[_encoderResidentCount] = stages;
