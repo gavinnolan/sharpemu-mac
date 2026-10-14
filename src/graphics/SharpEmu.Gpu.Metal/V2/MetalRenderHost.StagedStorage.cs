@@ -9,7 +9,9 @@ internal sealed partial class MetalRenderHost
 {
     private MetalStagedStorage? _stagedStorageCopies;
 
-    private MetalStagedStorage StagedStorage => _stagedStorageCopies ??= new MetalStagedStorage(_guestMemory);
+    private MetalStagedRangeCache? _stagedRanges;
+
+    private MetalStagedStorage StagedStorage => _stagedStorageCopies ??= new MetalStagedStorage(_guestMemory, _stagedRanges);
 
     private bool _encodingStagedStores;
 
@@ -30,6 +32,15 @@ internal sealed partial class MetalRenderHost
         if (_guestMemory.TryResolveInPlace(address, size, out var window))
         {
             return window;
+        }
+
+        if (MetalStagedRangeCache.Eligible(size) && _stagedRanges is not null)
+        {
+            var cached = BindStagedRange(address, size, written);
+            if (cached.IsValid)
+            {
+                return cached;
+            }
         }
 
         var staging = _guestMemory.Stage(address, size);
@@ -70,6 +81,92 @@ internal sealed partial class MetalRenderHost
     }
 
     /// <summary>
+    /// The cached staging of a range no window covers (<see cref="MetalStagedRangeCache"/>): the
+    /// buffer a bind earlier made while nothing has written its bytes since, otherwise a
+    /// fresh fill of one no in-flight submission can read. Invalid when the cache is full.
+    /// </summary>
+    private MetalGuestRange BindStagedRange(ulong address, ulong size, bool written)
+    {
+        var cache = _stagedRanges!;
+        EnsureCommandBuffer();
+        var hit = cache.Acquire(address, size, written, _submissionSerial, CompletedSerial, out var entry);
+        if (entry is null)
+        {
+            return default;
+        }
+
+        var staged = StagedStorage;
+        if (hit)
+        {
+            if (MetalStagedRangeCache.VerifyMode != MetalStagedRangeCache.VerifyKind.Off)
+            {
+                VerifyStagedHit(cache, entry);
+            }
+
+            if (written)
+            {
+                staged.Bind(entry, written: true);
+            }
+
+            return entry.Staging;
+        }
+
+        FillStagedRange(entry, staged);
+        if (written)
+        {
+            staged.Bind(entry, written: true);
+        }
+
+        return entry.Staging;
+    }
+
+    private unsafe void FillStagedRange(MetalStagedRangeCache.Entry entry, MetalStagedStorage staged)
+    {
+        var size = entry.Size;
+        var bytes = new Span<byte>((void*)entry.StagingBuffer!.Contents, checked((int)size));
+        _guestMemory.ReadForStaging(entry.Address, bytes);
+        if (_gpuWrites.PendingSerial(entry.Address, size, CompletedSerial) != 0)
+        {
+            // The CPU staged what guest memory holds now. Bytes the GPU has yet to write
+            // there are copied in by the GPU, behind that work.
+            entry.Gathered = true;
+            var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestCopy);
+            _stagedRanges!.Touch(entry, context.SubmissionSerial);
+            staged.EncodeGather(context.CommandBuffer, entry.Address, entry.Staging, entry.Pristine);
+            context.ProfileEncoded($"stage storage bytes=0x{size:X}");
+        }
+        else if (entry.Pristine.IsValid)
+        {
+            bytes.CopyTo(new Span<byte>((void*)entry.PristineBuffer!.Contents, checked((int)size)));
+        }
+    }
+
+    // SHARPEMU_METAL_V2_STAGED_CACHE_VERIFY=1 compares a hit with what guest memory holds now;
+    // =sample does so for a slice of one hit in 64 of each entry.
+    private unsafe void VerifyStagedHit(MetalStagedRangeCache cache, MetalStagedRangeCache.Entry entry)
+    {
+        var sample = MetalStagedRangeCache.VerifyMode == MetalStagedRangeCache.VerifyKind.Sample;
+        entry.HitCount++;
+        if ((sample && entry.HitCount % MetalStagedRangeCache.SampleEvery != 0) ||
+            entry.Dirty || (entry.Gathered && entry.StagedSerial > CompletedSerial) ||
+            _gpuWrites.PendingSerial(entry.Address, entry.Size, CompletedSerial) != 0)
+        {
+            return;
+        }
+
+        var cached = new ReadOnlySpan<byte>((void*)entry.StagingBuffer!.Contents, checked((int)entry.Size));
+        var address = entry.Address;
+        var offset = MetalStagedRangeCache.FirstMismatch(
+            cached, (at, destination) => _guestMemory.ReadForStaging(address + at, destination), sample, entry.HitCount);
+        cache.NoteVerify(offset >= 0);
+        if (offset >= 0)
+        {
+            Console.Error.WriteLine(
+                $"[METAL-V2][WARN][STAGED-VERIFY] mismatch addr=0x{entry.Address:X16} size=0x{entry.Size:X} off=0x{offset:X}");
+        }
+    }
+
+    /// <summary>
     /// A binding over bytes a staged copy has recorded stores into is recorded after those
     /// stores reach guest memory: ending the open encoder writes them back.
     /// </summary>
@@ -96,7 +193,7 @@ internal sealed partial class MetalRenderHost
         _encodingStagedStores = true;
         try
         {
-            var written = staged.EncodeWritebacks(EnsureCommandBuffer());
+            var written = staged.EncodeWritebacks(EnsureCommandBuffer(), _submissionSerial);
             NoteRecordedWork();
             foreach (var (address, size) in written)
             {

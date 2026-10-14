@@ -113,6 +113,17 @@ public static partial class Gen5MslTranslator
                         return true;
                     }
 
+                    if (IsNarrowWave64)
+                    {
+                        // The guest wave has 64 lanes but only the low 32 exist here; the
+                        // upper half is architecturally inactive and reads as zero.
+                        var narrowLane = Temp("uint", $"({RawSource(instruction, 1)}) & 63u");
+                        StoreScalar(
+                            instruction.Destinations[0].Value,
+                            Temp("uint", $"{narrowLane} >= 32u ? 0u : {ShuffleLane(value, narrowLane)}"));
+                        return true;
+                    }
+
                     var lane = Temp("uint", $"({RawSource(instruction, 1)}) & 31u");
                     StoreScalar(
                         instruction.Destinations[0].Value,
@@ -132,7 +143,9 @@ public static partial class Gen5MslTranslator
                     var lane = RawSource(instruction, 1);
                     // Under wave64 sharpemu_lane is the full 0..63 index, so only the
                     // one matching lane writes; wave32 has 32 lanes.
-                    var laneMask = IsWave64 ? "63u" : "31u";
+                    // A narrow wave64 masks with 63 as well: a lane >= 32 matches no thread, so the
+                    // write is a no-op, as on a wave whose upper half is inactive.
+                    var laneMask = IsWave64 || IsNarrowWave64 ? "63u" : "31u";
                     StoreVector(
                         destination,
                         $"(sharpemu_lane == (({lane}) & {laneMask})) ? ({source}) : v[{destination}]",
@@ -1463,9 +1476,11 @@ public static partial class Gen5MslTranslator
                         return;
                     }
 
-                    if (!IsWave64)
+                    if (!IsWave64 && !IsNarrowWave64)
                     {
                         // A wave32 mask is the single SGPR; the next one is not part of it.
+                        // A narrow wave64 mask is a pair whose high half has no lanes, so it
+                        // takes EmitBallotStore's zeroing instead.
                         Line($"s[{register}] = sharpemu_ballot({condition});");
                         return;
                     }
@@ -2210,7 +2225,9 @@ public static partial class Gen5MslTranslator
                 var mask = Temp("ulong", ClampExecToLanes64(combined));
                 StoreScalar64(destination, oldExec);
                 Line($"s[{ExecLoRegister}] = (uint){mask};");
-                Line($"s[{ExecHiRegister}] = (uint)({mask} >> 32);");
+                Line(IsNarrowWave64
+                    ? $"s[{ExecHiRegister}] = 0u;"
+                    : $"s[{ExecHiRegister}] = (uint)({mask} >> 32);");
                 Line($"exec = (({mask} >> sharpemu_lane) & 1ul) != 0ul;");
                 Line($"scc = {mask} != 0ul;");
                 return true;

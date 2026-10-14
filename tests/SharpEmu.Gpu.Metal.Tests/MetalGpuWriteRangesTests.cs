@@ -171,4 +171,57 @@ public sealed class MetalGpuWriteRangesTests
             Assert.True(ranges.MayCover(0x10_0000 + (index * 0x2000), 0x1000));
         }
     }
+
+    [Fact]
+    public void LabelWritesNeverWidenTheFoldOfOrdinaryRecords()
+    {
+        var ranges = new MetalGpuWriteRanges();
+        for (ulong i = 0; i < 2000; i++)
+        {
+            ranges.Note(0x80_0000_0000UL + i * 0x40_0000, 8, serial: 1 + i, MetalGpuWriteOrigin.EndOfPipeLabel);
+            ranges.Note(0x1_0000UL + i * 0x100, 0x10, serial: 1 + i);
+        }
+
+        Assert.Equal(0UL, ranges.PendingSerial(0x80_0000_0008UL, 0x100, completed: 0));
+        Assert.Equal(0UL, ranges.PendingSerial(0x7F_0000_0000UL, 0x1000, completed: 0));
+    }
+
+    [Fact]
+    public void AReadOverlappingALabelStillReportsItsSerial()
+    {
+        var ranges = new MetalGpuWriteRanges();
+        for (ulong i = 0; i < 1500; i++)
+        {
+            ranges.Note(0x80_0000_0000UL + i * 0x1000, 4, serial: 10 + i, MetalGpuWriteOrigin.EndOfPipeLabel);
+        }
+
+        Assert.Equal(10UL + 700, ranges.PendingSerial(0x80_0000_0000UL + 700 * 0x1000 + 2, 1, completed: 0));
+        Assert.Equal(MetalGpuWriteOrigin.EndOfPipeLabel, ranges.LastMatch.Origin);
+        Assert.Equal(0UL, ranges.PendingSerial(0x80_0000_0000UL + 700 * 0x1000 + 4, 4, completed: 0));
+        Assert.Equal(0UL, ranges.PendingSerial(0x80_0000_0000UL + 700 * 0x1000 + 2, 1, completed: 10 + 700));
+        ranges.Retire(5000);
+        Assert.True(ranges.IsEmpty);
+    }
+
+    [Fact]
+    public void FoldingScatteredRecordsKeepsEveryByteCoveredWithoutSpanningUnrelatedMemory()
+    {
+        var ranges = new MetalGpuWriteRanges();
+        const int n = 3000;
+        // Two far-apart clusters of scattered 8-byte records.
+        ulong AddressOf(int i) => (i % 2 == 0 ? 0x1000_0000UL : 0x9000_0000UL) + (ulong)(i / 2) * 0x40;
+        for (var i = 0; i < n; i++)
+        {
+            ranges.Note(AddressOf(i), 8, serial: 1UL + (ulong)i);
+        }
+
+        Assert.True(ranges.Folds > 0);
+        for (var i = 0; i < n; i++)
+        {
+            Assert.True(ranges.PendingSerial(AddressOf(i), 8, completed: 0) >= 1UL + (ulong)i);
+        }
+
+        // The gap between the clusters is never reported as written.
+        Assert.Equal(0UL, ranges.PendingSerial(0x4000_0000UL, 0x1000, completed: 0));
+    }
 }

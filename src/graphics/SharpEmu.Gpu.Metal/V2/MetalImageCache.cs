@@ -93,6 +93,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     private static readonly nint SelSetSampleCount = MetalNative.Selector("setSampleCount:");
     private static readonly nint SelSetUsage = MetalNative.Selector("setUsage:");
     private static readonly nint SelSetStorageMode = MetalNative.Selector("setStorageMode:");
+    private static readonly nint SelNewBufferTexture = MetalNative.Selector("newTextureWithDescriptor:offset:bytesPerRow:");
+    private static readonly nint SelMinimumLinearAlignment =
+        MetalNative.Selector("minimumLinearTextureAlignmentForPixelFormat:");
 
     private readonly IMetalImageCacheOwner _owner;
     private readonly IMetalImageTransfer _transfer;
@@ -102,6 +105,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     private readonly RegionLock _lock = new(RegionLock.Category.ImageCache);
     private readonly MetalImageSlots _slots = new();
     private readonly MetalImagePageOwners _pageOwners = new();
+
+    /// <summary>The staged guest ranges whose page watches and invalidations share this cache's hooks.</summary>
+    public MetalStagedRangeCache? StagedRanges { get; set; }
     private readonly SortedDictionary<ulong, SurfaceMetadata> _surfaceMetadata = new();
     private readonly Dictionary<GpuFormat, ResourceSlotIdentifier> _nullImages = new();
 
@@ -117,6 +123,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     private long _evictions;
     private bool _watchingStopped;
     private bool _disposed;
+    private readonly Dictionary<ulong, ulong> _linearAlignments = new();
+    private long _linearViews;
+    private long _linearViewPromotions;
 
     public MetalImageCache(
         IMetalImageCacheOwner owner,
@@ -136,6 +145,12 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     public ulong TotalUsedMemory => _totalUsedMemory;
 
     public int ImageCount => _slots.Count;
+
+    /// <summary>Images that are live textures over the guest window.</summary>
+    public long LinearViewCount => Volatile.Read(ref _linearViews);
+
+    /// <summary>Window views that became owned textures since the last read.</summary>
+    public long TakeLinearViewPromotions() => Interlocked.Exchange(ref _linearViewPromotions, 0);
 
     public (long Images, long Uploads, long Writebacks, long Evictions) Counters =>
         (Volatile.Read(ref _createdImages), Volatile.Read(ref _uploads),
@@ -255,7 +270,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         if (!result.IsValid)
         {
-            result = InsertImage(request.Description);
+            result = InsertImage(request.Description, sampledOnly: request.Role == ImageRole.Texture);
         }
 
         var image = _slots[result];
@@ -318,6 +333,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 _slots.TryGet(otherIdentifier) is not { } other || !other.Overlaps(address, size))
             {
                 continue;
+            }
+
+            if (takesGpuOwnership && other.IsWindowLinearView)
+            {
+                // This image is about to write bytes the window view reads in place, and
+                // the write lands in a texture, not in guest memory.
+                PromoteLinearView(other);
             }
 
             var otherOwedGuestMemory = other.IsGpuModified;
@@ -408,6 +430,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         image.LastAccessTick = _collectionTick;
         if (request.Role == ImageRole.StorageImage)
         {
+            PromoteLinearView(image);
             WatchImage(imageIdentifier);
             SynchronizeAliases(imageIdentifier, takesGpuOwnership: true);
             RefreshFromGuest(image);
@@ -419,6 +442,14 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
         else
         {
+            if (image.IsWindowLinearView &&
+                (request.Role != ImageRole.Texture || !image.CanWindowViewServe(request.View)))
+            {
+                // A render target needs an owned texture, and so does a view whose format
+                // or component swizzle the window texture cannot give.
+                PromoteLinearView(image);
+            }
+
             WatchImage(imageIdentifier);
             SynchronizeAliases(imageIdentifier, takesGpuOwnership: false);
             RefreshFromGuest(image);
@@ -546,6 +577,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         using var held = _lock.Hold();
         var image = _slots[imageIdentifier];
         image.LastAccessTick = _collectionTick;
+        PromoteLinearView(image);
         WatchImage(imageIdentifier);
         SynchronizeAliases(imageIdentifier, takesGpuOwnership: true);
         RefreshFromGuest(image);
@@ -580,6 +612,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         using var held = _lock.Hold();
         var image = _slots[imageIdentifier];
         image.LastAccessTick = _collectionTick;
+        PromoteLinearView(image);
         writes |= !ReadOnlyDepthPassesEnabled;
         writesDepth |= !ReadOnlyDepthPassesEnabled;
         var stencilOnly = writes && !writesDepth && image.Description.HasStencil;
@@ -625,10 +658,26 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return;
         }
 
+        PromoteLinearView(image);
         WatchImage(imageIdentifier);
         image.MarkGpuModified();
         NoteLinearGpuWrite(image);
         image.GpuWriteSerial = _owner.CurrentSerial;
+    }
+
+    /// <summary>
+    /// A blit or resolve is about to write into this image's texture: a window view would
+    /// write the guest bytes with no record of it, so it gets an owned texture first.
+    /// </summary>
+    public void PrepareImageWrite(MetalCachedImage image)
+    {
+        if (!image.IsWindowLinearView)
+        {
+            return;
+        }
+
+        using var held = _lock.Hold();
+        PromoteLinearView(image);
     }
 
     public void RefreshImage(ResourceSlotIdentifier imageIdentifier)
@@ -757,6 +806,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     private bool TryPublishAliasOnDevice(MetalCachedImage image, MetalCachedImage other)
     {
         if (!DeviceAliasPublishEnabled || image.Texture == 0 || other.Texture == 0 ||
+            image.IsWindowLinearView || other.IsWindowLinearView ||
             image.Texture == other.Texture ||
             image.Description.Data.Address != other.Description.Data.Address ||
             image.Description.Data.Size != other.Description.Data.Size)
@@ -1041,15 +1091,23 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         return imageIdentifier;
     }
 
-    private ResourceSlotIdentifier InsertImage(in ImageDescription description)
+    private ResourceSlotIdentifier InsertImage(in ImageDescription description, bool sampledOnly = false)
     {
         var admitted = Admit(in description);
         var shape = _transfer.ShapeFor(in admitted);
-        var texture = CreateTexture(in shape, in admitted);
+        nint viewTexture = 0;
+        var windowView = sampledOnly && TryCreateLinearView(in admitted, ref shape, out viewTexture);
+        var texture = windowView ? viewTexture : CreateTexture(in shape, in admitted);
         // Stamped before the collection below runs: an image that has never been used
         // reads as the oldest one in the cache, so an over-budget collection evicted the
         // image it was making room for and the caller read a freed slot.
         var image = new MetalCachedImage(in admitted, in shape, texture) { LastAccessTick = _collectionTick };
+        if (windowView)
+        {
+            image.MarkWindowLinearView();
+            Interlocked.Increment(ref _linearViews);
+        }
+
         var imageIdentifier = _slots.Insert(image);
         if (!ImageDescription.IsEmptyRange(description.Data))
         {
@@ -1059,6 +1117,99 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         Interlocked.Increment(ref _createdImages);
         CollectIfOverBudget();
         return imageIdentifier;
+    }
+
+    // Minimum linear texture alignment of a pixel format, asked of the device once.
+    private ulong LinearAlignment(ulong pixelFormat)
+    {
+        if (!_linearAlignments.TryGetValue(pixelFormat, out var alignment))
+        {
+            alignment = (ulong)MetalV2Native.SendWithValue(_owner.Device, SelMinimumLinearAlignment, (nuint)pixelFormat);
+            _linearAlignments[pixelFormat] = alignment;
+        }
+
+        return alignment;
+    }
+
+    // A sampled-only linear image whose bytes sit in one guest window becomes a texture over
+    // those bytes. Caller holds the lock. False leaves the image to the owned-texture path.
+    private bool TryCreateLinearView(in ImageDescription description, ref MetalTextureShape shape, out nint texture)
+    {
+        texture = 0;
+        if (!MetalLinearWindowView.Enabled || _watchingStopped || description.Data.Size == 0 ||
+            description.TileMode != GuestTileMode.Linear || description.Type != GuestImageType.Color2D)
+        {
+            return false;
+        }
+
+        // An image over bytes another image also covers would need the alias bookkeeping
+        // that owned textures carry; only an image alone on its pages is worth the view.
+        if (_pageOwners.MayHaveOwners(description.Data.Address, description.Data.Size) &&
+            FindImagesInRange(description.Data.Address, description.Data.Size, pageOverlap: true).Count != 0)
+        {
+            return false;
+        }
+
+        if (description.IsBlock || !MetalLinearWindowView.SupportsLinearFormat(shape.PixelFormat) ||
+            !_guestMemory.TryResolveInPlace(description.Data.Address, description.Data.Size, out var range) ||
+            !MetalLinearWindowView.Qualifies(
+                in description, in shape, range.Offset, LinearAlignment(shape.PixelFormat), out var bytesPerRow))
+        {
+            return false;
+        }
+
+        // ShaderRead alone, plus the pixel-format view usage a view of another format needs.
+        var viewShape = shape with { Usage = (ulong)(MtlTextureUsage.ShaderRead | MtlTextureUsage.PixelFormatView) };
+        var descriptor = MetalNative.Send(
+            MetalNative.Send(MetalNative.Class("MTLTextureDescriptor"), SelAlloc), SelInit);
+        if (descriptor == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            MetalV2Native.SendVoidValue(descriptor, SelSetTextureType, (nuint)viewShape.TextureType);
+            MetalV2Native.SendVoidValue(descriptor, SelSetPixelFormat, (nuint)viewShape.PixelFormat);
+            MetalV2Native.SendVoidValue(descriptor, SelSetWidth, viewShape.Width);
+            MetalV2Native.SendVoidValue(descriptor, SelSetHeight, viewShape.Height);
+            MetalV2Native.SendVoidValue(descriptor, SelSetUsage, (nuint)viewShape.Usage);
+            // The window buffer is shared; a texture over it has to be too.
+            MetalV2Native.SendVoidValue(descriptor, SelSetStorageMode, Mtl.StorageModeShared);
+            texture = MetalV2Native.SendNewBufferTexture(
+                range.Buffer, SelNewBufferTexture, descriptor, (nuint)range.Offset, (nuint)bytesPerRow);
+        }
+        finally
+        {
+            MetalNative.SendVoid(descriptor, SelRelease);
+        }
+
+        if (texture == 0)
+        {
+            return false;
+        }
+
+        shape = viewShape;
+        return true;
+    }
+
+    /// <summary>
+    /// Gives a window view an owned texture, to be filled from guest memory like any other
+    /// image. The old texture waits for the submissions that bound it. Caller holds the lock.
+    /// </summary>
+    private void PromoteLinearView(MetalCachedImage image)
+    {
+        if (!image.IsWindowLinearView)
+        {
+            return;
+        }
+
+        var shape = _transfer.ShapeFor(image.Description);
+        var texture = CreateTexture(in shape, image.Description);
+        RetireImage(image.PromoteToOwned(texture, in shape));
+        _releaseCauses[(int)MetalImageReleaseCause.LinearViewPromoted]++;
+        Interlocked.Decrement(ref _linearViews);
+        Interlocked.Increment(ref _linearViewPromotions);
     }
 
     // An image format the transfer cannot carry would be a fatal error there, and a
@@ -1744,10 +1895,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
     private readonly long[] _uploadCauses = new long[5];
     private readonly long[] _writebackCauses = new long[7];
-    private readonly long[] _releaseCauses = new long[8];
+    private readonly long[] _releaseCauses = new long[9];
 
     private static readonly string[] _releaseCauseNames =
-        ["format", "resources", "viewtype", "same_address", "subset", "overlap", "budget", "unmapped"];
+        ["format", "resources", "viewtype", "same_address", "subset", "overlap", "budget", "unmapped", "linear_promoted"];
 
     /// <summary>The release reasons since the last read, as "name=count" pairs.</summary>
     public void AppendReleaseCauses(System.Text.StringBuilder target)

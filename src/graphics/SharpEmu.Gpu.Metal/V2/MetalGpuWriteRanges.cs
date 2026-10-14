@@ -90,19 +90,23 @@ internal sealed class MetalGpuWriteRanges
 
     private Record[] _records = new Record[64];
     private int _count;
+    // End-of-pipe labels are exact and never folded: they scatter 4-8 byte writes over
+    // the whole command area, so a bounding range would block reads of unrelated memory.
+    private Record[] _labels = new Record[64];
+    private int _labelCount;
     // A write whose destination range is not known: every read waits for it.
     private ulong _unboundedSerial;
     private ulong _retiredSerial;
     private long _recorded;
     private long _folds;
 
-    public int Count => _count;
+    public int Count => _count + _labelCount;
 
     public long Recorded => _recorded;
 
     public long Folds => _folds;
 
-    public bool IsEmpty => _count == 0 && _unboundedSerial == 0;
+    public bool IsEmpty => _count == 0 && _labelCount == 0 && _unboundedSerial == 0;
 
     /// <summary>Recorded work in <paramref name="serial"/> stores into this range.</summary>
     public void Note(
@@ -118,6 +122,12 @@ internal sealed class MetalGpuWriteRanges
 
         _recorded++;
         var end = address + size;
+        if (origin == MetalGpuWriteOrigin.EndOfPipeLabel)
+        {
+            NoteLabel(address, end, serial);
+            return;
+        }
+
         // Draws and dispatches bind the same storage range over and over inside one
         // submission, so the newest record almost always absorbs the next one.
         for (var index = _count - 1; index >= 0 && index >= _count - 8; index--)
@@ -147,6 +157,44 @@ internal sealed class MetalGpuWriteRanges
 
         _records[_count++] = new Record { Start = address, End = end, Serial = serial, Origin = origin };
         _recordsByOrigin[(int)origin]++;
+        if (address < _boundsStart)
+        {
+            _boundsStart = address;
+        }
+
+        if (end > _boundsEnd)
+        {
+            _boundsEnd = end;
+        }
+    }
+
+    private void NoteLabel(ulong address, ulong end, ulong serial)
+    {
+        _recordsByOrigin[(int)MetalGpuWriteOrigin.EndOfPipeLabel]++;
+        // The same label is rewritten by consecutive submissions; keep it exact and
+        // carry the newest serial.
+        for (var index = _labelCount - 1; index >= 0 && index >= _labelCount - 8; index--)
+        {
+            ref var candidate = ref _labels[index];
+            if (candidate.Start == address && candidate.End == end)
+            {
+                candidate.Serial = Math.Max(candidate.Serial, serial);
+                return;
+            }
+        }
+
+        if (_labelCount == _labels.Length)
+        {
+            Array.Resize(ref _labels, _labels.Length * 2);
+        }
+
+        _labels[_labelCount++] = new Record
+        {
+            Start = address,
+            End = end,
+            Serial = serial,
+            Origin = MetalGpuWriteOrigin.EndOfPipeLabel,
+        };
         if (address < _boundsStart)
         {
             _boundsStart = address;
@@ -198,7 +246,7 @@ internal sealed class MetalGpuWriteRanges
     /// </summary>
     public bool MayCover(ulong address, ulong size) =>
         _unboundedSerial != 0 ||
-        (_count != 0 && size != 0 && address < _boundsEnd && _boundsStart < address + size);
+        ((_count != 0 || _labelCount != 0) && size != 0 && address < _boundsEnd && _boundsStart < address + size);
 
     public ulong PendingSerial(ulong address, ulong size, ulong completed)
     {
@@ -222,6 +270,16 @@ internal sealed class MetalGpuWriteRanges
             {
                 pending = record.Serial;
                 LastMatch = (record.Start, record.End, record.Serial, record.Origin);
+            }
+        }
+
+        for (var index = 0; index < _labelCount; index++)
+        {
+            ref var label = ref _labels[index];
+            if (label.Serial > pending && label.End > address && label.Start < end)
+            {
+                pending = label.Serial;
+                LastMatch = (label.Start, label.End, label.Serial, label.Origin);
             }
         }
 
@@ -267,6 +325,21 @@ internal sealed class MetalGpuWriteRanges
         }
 
         _count = kept;
+        kept = 0;
+        for (var index = 0; index < _labelCount; index++)
+        {
+            ref var label = ref _labels[index];
+            if (label.Serial <= completed)
+            {
+                continue;
+            }
+
+            start = Math.Min(start, label.Start);
+            end = Math.Max(end, label.End);
+            _labels[kept++] = label;
+        }
+
+        _labelCount = kept;
         _boundsStart = start;
         _boundsEnd = end;
     }
@@ -275,6 +348,7 @@ internal sealed class MetalGpuWriteRanges
     public void Clear(ulong completed)
     {
         _count = 0;
+        _labelCount = 0;
         _unboundedSerial = 0;
         _boundsStart = ulong.MaxValue;
         _boundsEnd = 0;
@@ -284,35 +358,62 @@ internal sealed class MetalGpuWriteRanges
         }
     }
 
-    // Folds the oldest half into one record per serial. Serials only grow, so the
-    // oldest records are the ones a read is least likely to still be waiting for.
+    // Folds the oldest half of the records into at most a quarter as many, by address.
+    // Only the closest neighbours merge (smallest gaps first), so a folded record never
+    // spans unrelated memory when anything tighter is available. A merged record keeps
+    // the NEWEST serial of its parts: a read overlapping any part waits at least as long
+    // as it did before, which can only over-wait, never miss a write.
     private void FoldOldest()
     {
         _folds++;
         var half = _count / 2;
-        var start = _records[0].Start;
-        var end = _records[0].End;
-        var serial = _records[0].Serial;
+        var old = _records.AsSpan(0, half);
+        old.Sort(static (a, b) => a.Start.CompareTo(b.Start));
+
+        var target = Math.Max(1, half / 2);
+        var merges = half - target;
+        var gaps = new ulong[half - 1];
         for (var index = 1; index < half; index++)
         {
-            start = Math.Min(start, _records[index].Start);
-            end = Math.Max(end, _records[index].End);
-            serial = Math.Max(serial, _records[index].Serial);
+            // Overlapping neighbours have no gap; a record nested in an earlier, longer
+            // one is handled by the running end below.
+            gaps[index - 1] = old[index].Start > old[index - 1].End ? old[index].Start - old[index - 1].End : 0;
         }
 
-        _records[0] = new Record
+        var sorted = (ulong[])gaps.Clone();
+        Array.Sort(sorted);
+        var threshold = merges <= 0 ? 0 : sorted[Math.Min(merges, sorted.Length) - 1];
+
+        var folded = new List<Record>(target + 8) { old[0] };
+        for (var index = 1; index < half; index++)
         {
-            Start = start,
-            End = end,
-            Serial = serial,
-            Origin = _records[0].Origin,
-        };
-        var kept = 1;
-        for (var index = half; index < _count; index++)
-        {
-            _records[kept++] = _records[index];
+            var current = old[index];
+            var last = folded[^1];
+            if (current.Start <= last.End || gaps[index - 1] <= threshold)
+            {
+                if (current.Serial > last.Serial)
+                {
+                    last.Serial = current.Serial;
+                    last.Origin = current.Origin;
+                }
+
+                last.End = Math.Max(last.End, current.End);
+                folded[^1] = last;
+            }
+            else
+            {
+                folded.Add(current);
+            }
         }
 
-        _count = kept;
+        var tail = _count - half;
+        var kept = folded.Count;
+        Array.Copy(_records, half, _records, kept, tail);
+        for (var index = 0; index < kept; index++)
+        {
+            _records[index] = folded[index];
+        }
+
+        _count = kept + tail;
     }
 }

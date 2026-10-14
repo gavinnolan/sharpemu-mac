@@ -695,7 +695,12 @@ public static partial class Gen5MslTranslator
                     // A primitive shader's LDS is the real thing: its waves exchange
                     // vertex data through it. Sized from the stage's own allocation
                     // because the mesh output payload shares the threadgroup budget.
-                    source.AppendLine($"    threadgroup uint sharpemu_lds[{_meshLdsDwords}];");
+                    //
+                    // Above the device threshold the array is a slot of the shared device
+                    // pool instead; the pointer is formed once the slot is acquired.
+                    source.AppendLine(UsesDeviceLds
+                        ? "    threadgroup uint sharpemu_lds_slot;"
+                        : $"    threadgroup uint sharpemu_lds[{_meshLdsDwords}];");
                 }
                 else if (_stage == Gen5MslStage.Compute)
                 {
@@ -756,10 +761,22 @@ public static partial class Gen5MslTranslator
 
             var body = new StringBuilder();
             var structured = false;
-            if (_stage == Gen5MslStage.Mesh)
+            var meshBody = string.Empty;
+            if (_stage == Gen5MslStage.Mesh &&
+                _options.StructuredControlFlow && !ProgramHasBarrier() &&
+                TryBuildStructuredBody(blocks, out meshBody))
             {
-                // The mesh stage keeps the dispatcher: S_BARRIER parks a wave between
-                // blocks, which needs a resumable pc (see Gen5MslTranslator.Mesh.cs).
+                // A mesh program without S_BARRIER has nothing to rendezvous over, so it
+                // nests like any other stage instead of keeping every guest register live
+                // across a dispatcher loop.
+                structured = true;
+                body.Append(meshBody);
+            }
+            else if (_stage == Gen5MslStage.Mesh)
+            {
+                // With S_BARRIER the mesh stage keeps the dispatcher: the barrier parks a
+                // wave between blocks, which needs a resumable pc (see
+                // Gen5MslTranslator.Mesh.cs).
                 EmitMeshDispatcher(body, BuildDispatcherSwitchBody(blocks, baseIndent: 3));
             }
             else if (_options.StructuredControlFlow &&
@@ -1100,6 +1117,19 @@ public static partial class Gen5MslTranslator
             }
 
             return _ldsBarriersBefore;
+        }
+
+        private bool ProgramHasBarrier()
+        {
+            foreach (var instruction in _request.Program.Instructions)
+            {
+                if (instruction.Opcode == "SBarrier")
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private bool TryEmitBlockBodyCore(
@@ -1806,12 +1836,18 @@ public static partial class Gen5MslTranslator
             var wordMask = _stage switch
             {
                 Gen5MslStage.Compute => _computeLdsDwords - 1,
-                Gen5MslStage.Mesh => _meshLdsDwords - 1,
+                Gen5MslStage.Mesh => (uint)(System.Numerics.BitOperations.RoundUpToPowerOf2(_meshLdsDwords) - 1),
                 _ => PrivateLdsDwordCount - 1,
             };
-            return offsetBytes == 0
+            var index = offsetBytes == 0
                 ? $"((({address}) >> 2) & {wordMask}u)"
                 : $"(((({address}) + {offsetBytes}u) >> 2) & {wordMask}u)";
+
+            // The mesh LDS is declared at exactly the guest allocation, so the masked index
+            // can name a dword past it; clamp to the last one.
+            return _stage == Gen5MslStage.Mesh && !UsesDeviceLds && wordMask != _meshLdsDwords - 1
+                ? $"min({index}, {_meshLdsDwords - 1}u)"
+                : index;
         }
 
         private bool TryEmitDataShare(
@@ -1872,7 +1908,7 @@ public static partial class Gen5MslTranslator
                     if (IsWave64)
                     {
                         var broadcast = EmitWave64AppendAtomic(
-                            waveCount => $"atomic_fetch_{operation}_explicit((threadgroup atomic_uint*)&sharpemu_lds[{index}], {waveCount}, memory_order_relaxed)",
+                            waveCount => $"atomic_fetch_{operation}_explicit(({LdsAddressSpace} atomic_uint*)&sharpemu_lds[{index}], {waveCount}, memory_order_relaxed)",
                             inBounds);
                         StoreVector(destination, $"{inBounds} ? {broadcast} : 0u");
                         return true;
@@ -1885,7 +1921,7 @@ public static partial class Gen5MslTranslator
                     Line($"if ({ExecCondition($"{inBounds} && sharpemu_lane == {first}")})");
                     Line("{");
                     _indent++;
-                    Line($"{firstValue} = atomic_fetch_{operation}_explicit((threadgroup atomic_uint*)&sharpemu_lds[{index}], {count}, memory_order_relaxed);");
+                    Line($"{firstValue} = atomic_fetch_{operation}_explicit(({LdsAddressSpace} atomic_uint*)&sharpemu_lds[{index}], {count}, memory_order_relaxed);");
                     _indent--;
                     Line("}");
                     var result = Temp("uint", $"simd_broadcast({firstValue}, {first})");
@@ -2126,7 +2162,7 @@ public static partial class Gen5MslTranslator
                 return observed;
             }
 
-            var pointer = $"(threadgroup atomic_uint*)&{word}";
+            var pointer = $"({LdsAddressSpace} atomic_uint*)&{word}";
             var direct = name switch
             {
                 "Add" => $"atomic_fetch_add_explicit({pointer}, {first}, memory_order_relaxed)",
@@ -2136,8 +2172,8 @@ public static partial class Gen5MslTranslator
                 "Dec" => $"atomic_fetch_sub_explicit({pointer}, 1u, memory_order_relaxed)",
                 "Umin" => $"atomic_fetch_min_explicit({pointer}, {first}, memory_order_relaxed)",
                 "Umax" => $"atomic_fetch_max_explicit({pointer}, {first}, memory_order_relaxed)",
-                "Smin" => $"(uint)atomic_fetch_min_explicit((threadgroup atomic_int*)&{word}, as_type<int>({first}), memory_order_relaxed)",
-                "Smax" => $"(uint)atomic_fetch_max_explicit((threadgroup atomic_int*)&{word}, as_type<int>({first}), memory_order_relaxed)",
+                "Smin" => $"(uint)atomic_fetch_min_explicit(({LdsAddressSpace} atomic_int*)&{word}, as_type<int>({first}), memory_order_relaxed)",
+                "Smax" => $"(uint)atomic_fetch_max_explicit(({LdsAddressSpace} atomic_int*)&{word}, as_type<int>({first}), memory_order_relaxed)",
                 "And" => $"atomic_fetch_and_explicit({pointer}, {first}, memory_order_relaxed)",
                 "Or" => $"atomic_fetch_or_explicit({pointer}, {first}, memory_order_relaxed)",
                 "Xor" => $"atomic_fetch_xor_explicit({pointer}, {first}, memory_order_relaxed)",
@@ -2152,7 +2188,7 @@ public static partial class Gen5MslTranslator
             // The remaining forms have no single Metal atomic: they read, derive
             // the replacement from what they observed and swap it in, retrying
             // until the word they computed from is still the one in memory.
-            var pointerName = Temp("threadgroup atomic_uint*", pointer);
+            var pointerName = Temp($"{LdsAddressSpace} atomic_uint*", pointer);
             var expected = Temp("uint", $"atomic_load_explicit({pointerName}, memory_order_relaxed)");
             var next = name switch
             {
@@ -2479,6 +2515,7 @@ public static partial class Gen5MslTranslator
         private string ClampExecToLanes64(string expression) =>
             IsSingleLaneStage ? $"({expression}) & 1ul"
             : ClampsExecToLanes ? $"({expression}) & (ulong)sharpemu_ballot(true)"
+            : IsNarrowWave64 ? $"({expression}) & 0xFFFFFFFFul"
             : expression;
 
         // VCC (s106:s107) and EXEC (s126:s127) are architectural SGPRs: programs
@@ -2510,7 +2547,7 @@ public static partial class Gen5MslTranslator
                 case VccHiRegister:
                 case ExecHiRegister:
                 {
-                    var value = Temp("uint", register == ExecHiRegister && ClampsExecToLanes ? "0u" : expression);
+                    var value = Temp("uint", register == ExecHiRegister && (ClampsExecToLanes || IsNarrowWave64) ? "0u" : expression);
                     Line($"s[{register}] = {value};");
                     if (IsWave64)
                     {

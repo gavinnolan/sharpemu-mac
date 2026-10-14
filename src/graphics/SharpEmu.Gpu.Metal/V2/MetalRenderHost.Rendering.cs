@@ -639,6 +639,12 @@ internal sealed partial class MetalRenderHost
             {
                 _passEndTarget++;
             }
+
+            PassProfileNoteEnd(clears ? "clear" : "target");
+        }
+        else if (_computeEncoder != 0)
+        {
+            PassProfileNoteEnd("render");
         }
 
         EndRenderingBefore(in state);
@@ -740,6 +746,11 @@ internal sealed partial class MetalRenderHost
                 MetalV2Native.SendVoidValue(descriptor, SelSetRenderTargetArrayLength, state.Layers);
             }
 
+            if (PassProfileEnabled)
+            {
+                PassProfileAttachRender(descriptor);
+            }
+
             _renderEncoder = MetalNative.Send(commandBuffer, SelRenderEncoder, descriptor);
             if (_renderEncoder == 0)
             {
@@ -758,7 +769,13 @@ internal sealed partial class MetalRenderHost
         _renderingState = state;
         ForgetEncoderState();
         _renderPasses++;
+        var loadBefore = _loadBytes;
+        var storeBefore = _storeBytes;
         NoteAttachmentTraffic(in state);
+        if (PassProfileEnabled)
+        {
+            PassProfileDescribe(in state, _loadBytes - loadBefore, _storeBytes - storeBefore);
+        }
         NotePassIdentity(in state);
         if (MetalV2Diagnostics.Verbose || _renderPasses < 4096)
         {
@@ -835,6 +852,7 @@ internal sealed partial class MetalRenderHost
 
             MetalNative.SendVoid(_renderEncoder, SelEndEncoding);
             _renderEncoder = 0;
+            PassProfileClose();
         }
 
         _renderingActive = false;
@@ -886,6 +904,7 @@ internal sealed partial class MetalRenderHost
         MetalNative.SendVoid(_computeEncoder, SelEndEncoding);
         _computeEncoder = 0;
         _boundComputePipeline = 0;
+        PassProfileClose();
     }
 
     internal nint EnsureComputeEncoder()
@@ -896,6 +915,7 @@ internal sealed partial class MetalRenderHost
             if (_renderingActive)
             {
                 _passEndCompute++;
+                PassProfileNoteEnd("compute");
             }
 
             EndRendering();
@@ -912,7 +932,13 @@ internal sealed partial class MetalRenderHost
             return _computeEncoder;
         }
 
-        _computeEncoder = MetalNative.Send(EnsureCommandBuffer(), SelComputeEncoder);
+        var computeBuffer = EnsureCommandBuffer();
+        _computeEncoder = PassProfileEnabled ? PassProfileComputeEncoder(computeBuffer) : 0;
+        if (_computeEncoder == 0)
+        {
+            _computeEncoder = MetalNative.Send(computeBuffer, SelComputeEncoder);
+        }
+
         if (_computeEncoder == 0)
         {
             throw Fatal("A Metal compute command encoder could not be created.");
@@ -954,8 +980,19 @@ internal sealed partial class MetalRenderHost
         _vertexBufferCount = count;
     }
 
+    private ulong _indexGuestAddress;
+    private ulong _indexGuestSize;
+
+    public void NoteIndexSource(ulong guestAddress, ulong size)
+    {
+        _indexGuestAddress = guestAddress;
+        _indexGuestSize = size;
+    }
+
     public void BindIndexBuffer(BufferBinding binding, GpuIndexType type)
     {
+        _indexGuestAddress = 0;
+        _indexGuestSize = 0;
         _indexBuffer = (nint)binding.Handle;
         _indexOffset = binding.Offset;
         _indexType = MetalV2Formats.IndexType(type);
@@ -1453,9 +1490,16 @@ internal sealed partial class MetalRenderHost
         var primitives = count / verticesPerPrimitive;
         var maxPrimitives = Math.Max(mesh.MaxPrimitives, 1);
         var maxVertices = Math.Max(mesh.MaxVertices, 1);
-        var subgroups = Math.Max(
-            (primitives + maxPrimitives - 1) / maxPrimitives,
-            (count + maxVertices - 1) / maxVertices);
+
+        // Without a GS half every primitive owns its vertices, so a subgroup is whole
+        // primitives: the prologue maps slot -> index position from the same counts.
+        var primitivesPerSubgroup = mesh.HasGeometryHalf ? maxPrimitives : mesh.PrimitivesPerSubgroup;
+        var verticesPerSubgroup = mesh.HasGeometryHalf ? maxVertices : mesh.VerticesPerSubgroup;
+        var subgroups = mesh.HasGeometryHalf
+            ? Math.Max(
+                (primitives + maxPrimitives - 1) / maxPrimitives,
+                (count + maxVertices - 1) / maxVertices)
+            : (primitives + primitivesPerSubgroup - 1) / primitivesPerSubgroup;
 
         // A GS half assembles its input primitives from the draw's own topology, so the
         // draw splits by input primitives and the prologue learns where each subgroup's
@@ -1473,11 +1517,22 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
+        // Cached meshlets replace the whole-triangle subgroups of an indexed triangle list: a
+        // threadgroup then holds the unique vertices of up to MaxPrimitives triangles, as the
+        // geometry engine packs a subgroup, instead of three own vertices per triangle.
+        MetalMeshletCache.Meshlets meshlets = default;
+        var useMeshlets = !mesh.HasGeometryHalf && indexed &&
+            TryGetMeshlets(mesh, count, firstIndexOrVertex, out meshlets);
+        if (useMeshlets)
+        {
+            subgroups = meshlets.Count;
+        }
+
         var drawInfo = _guestMemory.Allocate(Gen5MslMeshInfo.DrawInfoByteSize, 256, out var span);
         span.Clear();
         var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(span);
-        words[0] = maxVertices;
-        words[1] = maxPrimitives;
+        words[0] = verticesPerSubgroup;
+        words[1] = primitivesPerSubgroup;
         words[2] = indexed ? count : 0;
         words[3] = indexed ? (_indexType == Mtl.IndexTypeUInt32 ? 2u : 1u) : 0u;
         words[4] = indexed ? firstIndexOrVertex : 0;
@@ -1487,6 +1542,13 @@ internal sealed partial class MetalRenderHost
         words[13] = (uint)input;
         words[14] = inputPrimitivesPerSubgroup;
         words[15] = count;
+        if (useMeshlets)
+        {
+            words[16] = meshlets.Count;
+            words[17] = meshlets.VertexBase;
+            words[18] = meshlets.PrimitiveBase;
+        }
+
         MetalNative.SendSetBuffer(
             _renderEncoder, SelSetMeshBuffer, drawInfo.Buffer, (nuint)drawInfo.Offset, (nuint)mesh.DrawInfoBufferIndex);
         // The index slot is read as a dword stream and must be bound even for an
@@ -1495,12 +1557,89 @@ internal sealed partial class MetalRenderHost
         var indexOffset = indexed && _indexBuffer != 0 ? _indexOffset : 0;
         MetalNative.SendSetBuffer(
             _renderEncoder, SelSetMeshBuffer, indexBuffer, (nuint)indexOffset, (nuint)mesh.IndexBufferIndex);
+        if (!mesh.HasGeometryHalf)
+        {
+            // Always bound, like the index slot: the null buffer when no meshlets are used.
+            MetalNative.SendSetBuffer(
+                _renderEncoder,
+                SelSetMeshBuffer,
+                useMeshlets ? meshlets.Buffer : _guestMemory.NullBuffer,
+                0,
+                Gen5MslMeshInfo.MeshletBufferIndex);
+        }
+
+        if (mesh.DeviceLds)
+        {
+            MetalNative.SendSetBuffer(
+                _renderEncoder, SelSetMeshBuffer, _guestMemory.MeshLdsPool, 0, Gen5MslMeshInfo.LdsPoolBufferIndex);
+        }
+
+        if (PassProfileEnabled)
+        {
+            PassProfileNoteGroups((ulong)subgroups * instanceCount);
+        }
+
         MetalNative.SendDrawMesh(
             _renderEncoder,
             SelDrawMeshThreadgroups,
             new MtlSize { Width = subgroups, Height = instanceCount, Depth = 1 },
             new MtlSize { Width = 1, Height = 1, Depth = 1 },
             new MtlSize { Width = Math.Max(mesh.ThreadsPerThreadgroup, 1), Height = 1, Depth = 1 });
+    }
+
+    private MetalMeshletCache? _meshletCache;
+
+    private MetalMeshletCache MeshletCache => _meshletCache ??= new MetalMeshletCache(_guestMemory, _memory);
+
+    // The cached meshlets of an indexed triangle-list draw, or false (counted by reason)
+    // when it runs as whole-triangle subgroups.
+    private bool TryGetMeshlets(Gen5MslMeshInfo mesh, uint indexCount, uint firstIndex, out MetalMeshletCache.Meshlets meshlets)
+    {
+        meshlets = default;
+        var cache = MeshletCache;
+        if (MetalMeshletCache.IsDisabled)
+        {
+            cache.NoteFallback(MetalMeshletCache.Fallback.Disabled);
+            return false;
+        }
+
+        if (_boundGraphicsPipeline?.StaticParameters?.Topology != GpuPrimitiveTopology.TriangleList ||
+            mesh.VerticesPerPrimitive != 3 || mesh.Topology != Gen5MslMeshTopology.Triangle)
+        {
+            cache.NoteFallback(MetalMeshletCache.Fallback.NotTriangleList);
+            return false;
+        }
+
+        var index32 = _indexType == Mtl.IndexTypeUInt32;
+        var elementBytes = index32 ? 4UL : 2UL;
+        var rangeBytes = (ulong)indexCount * elementBytes;
+        var rangeStart = (ulong)firstIndex * elementBytes;
+        if (_indexGuestAddress == 0 || rangeStart + rangeBytes > _indexGuestSize)
+        {
+            cache.NoteFallback(MetalMeshletCache.Fallback.NoGuestAddress);
+            return false;
+        }
+
+        var address = _indexGuestAddress + rangeStart;
+
+        // The same predicate a host-side guest write uses: bytes the GPU is still writing
+        // are not the bytes the draw will read, so they are neither hashed nor cached.
+        if (_gpuWrites.PendingSerial(address, rangeBytes, CompletedSerial) != 0 ||
+            _imageCache.HasGpuModifiedImageBytes(address, rangeBytes))
+        {
+            cache.NoteFallback(MetalMeshletCache.Fallback.GpuWrites);
+            return false;
+        }
+
+        return cache.TryGet(
+            address,
+            indexCount,
+            index32,
+            mesh.MaxVertices,
+            mesh.MaxPrimitives,
+            SubmissionSerial,
+            CompletedSerial,
+            out meshlets);
     }
 
     private static Gen5MslMeshInputTopology MeshInputTopology(GpuPrimitiveTopology? topology) => topology switch

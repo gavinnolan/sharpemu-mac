@@ -71,6 +71,11 @@ internal sealed partial class MetalImageCache
             return;
         }
 
+        if (image.IsWindowLinearView)
+        {
+            Interlocked.Decrement(ref _linearViews);
+        }
+
         if (image.IsGpuModified)
         {
             WriteBackToGuest(image, MetalWritebackCause.Release);
@@ -130,7 +135,9 @@ internal sealed partial class MetalImageCache
     private void WatchImage(ResourceSlotIdentifier imageIdentifier)
     {
         var image = _slots[imageIdentifier];
-        if (_watchingStopped || !image.Registered || ImageDescription.IsEmptyRange(image.Description.Data))
+        // A window view reads guest memory in place: a store to it needs no notice.
+        if (_watchingStopped || !image.Registered || image.IsWindowLinearView ||
+            ImageDescription.IsEmptyRange(image.Description.Data))
         {
             return;
         }
@@ -223,15 +230,18 @@ internal sealed partial class MetalImageCache
             return false;
         }
 
+        // A cached staged copy over the page is stale from here; the store may land once its watch is gone.
+        var stagedHit = StagedRanges?.OnCpuWrite(address, size) ?? false;
         var mayOwn = _pageOwners.MayHaveOwners(address, size);
-        if (!mayOwn && Volatile.Read(ref _metadataWatchCount) == 0)
+        if (!mayOwn && !MetadataWatchOverlaps(address, size))
         {
-            return false;
+            return stagedHit;
         }
 
+        CountLockedCpuWrite(mayOwn);
         using var held = _lock.Hold();
         var metadataHit = OnMetadataCpuWriteLocked(address, size);
-        return (mayOwn && InvalidateAliases(address, size)) | metadataHit;
+        return (mayOwn && InvalidateAliases(address, size)) | metadataHit | stagedHit;
     }
 
     // A managed write of exactly these bytes. Unlike a fault it names the bytes it
@@ -243,16 +253,23 @@ internal sealed partial class MetalImageCache
             return false;
         }
 
-        var mayOwn = _pageOwners.MayHaveOwners(address, size);
-        if (!mayOwn && Volatile.Read(ref _metadataWatchCount) == 0)
+        var stagedHit = false;
+        if (StagedRanges is { } staged && staged.MayCover(address, size))
         {
-            return false;
+            stagedHit = staged.OnPreciseCpuWrite(address, size, _guestMemory.IsBacked(address, size));
         }
 
+        var mayOwn = _pageOwners.MayHaveOwners(address, size);
+        if (!mayOwn && !MetadataWatchOverlaps(address, size))
+        {
+            return stagedHit;
+        }
+
+        CountLockedCpuWrite(mayOwn);
         var backed = mayOwn && _guestMemory.IsBacked(address, size);
         using var held = _lock.Hold();
         var metadataHit = OnMetadataCpuWriteLocked(address, size);
-        return (mayOwn && InvalidatePreciseWrite(address, size, backed)) | metadataHit;
+        return (mayOwn && InvalidatePreciseWrite(address, size, backed)) | metadataHit | stagedHit;
     }
 
     /// <summary>The host wrote exactly <c>[address, address + size)</c> of guest memory.</summary>
@@ -263,6 +280,7 @@ internal sealed partial class MetalImageCache
             return;
         }
 
+        StagedRanges?.OnHostWrite(address, size);
         var backed = _guestMemory.IsBacked(address, size);
         using var held = _lock.Hold();
         InvalidatePreciseWrite(address, size, backed);
@@ -334,6 +352,7 @@ internal sealed partial class MetalImageCache
             return;
         }
 
+        StagedRanges?.OnUnmap(address, size);
         using var held = _lock.Hold();
         var end = address + size;
         var stale = new List<ulong>();
@@ -371,6 +390,7 @@ internal sealed partial class MetalImageCache
     /// </summary>
     public void StopWatching()
     {
+        StagedRanges?.StopWatching();
         using var held = _lock.Hold();
         _watchingStopped = true;
         foreach (var (watchBegin, watchSize) in _metadataWatches)
@@ -379,7 +399,7 @@ internal sealed partial class MetalImageCache
         }
 
         _metadataWatches.Clear();
-        Volatile.Write(ref _metadataWatchCount, 0);
+        PublishMetadataWatchesLocked();
         var watched = new List<ResourceSlotIdentifier>();
         _slots.ForEach((imageIdentifier, image) =>
         {
@@ -459,7 +479,93 @@ internal sealed partial class MetalImageCache
     // one re-arms the claims over it and releases the watch; the next claim watches it
     // again.
     private readonly Dictionary<ulong, ulong> _metadataWatches = new();
-    private int _metadataWatchCount;
+
+    // The watched ranges as the CPU-write fast path reads them, without the lock: sorted
+    // by Begin and disjoint, because a watch that would overlap another is merged into
+    // it. Replaced whole, never edited, so a reader sees one consistent set. Republished
+    // under the lock whenever _metadataWatches changes, before a new watch reaches the
+    // page guard, so a store that faults on a metadata page always finds it here.
+    private MetadataWatchSpan[] _metadataWatchSnapshot = [];
+
+    internal readonly record struct MetadataWatchSpan(ulong Begin, ulong End);
+
+    // CPU writes that took the cache lock in this window: because an image may own the
+    // page, or because the write reached a watched metadata range.
+    private long _cpuWritesLockedForOwner;
+    private long _cpuWritesLockedForMetadata;
+
+    public (long Owner, long Metadata) TakeLockedCpuWrites() =>
+        (Interlocked.Exchange(ref _cpuWritesLockedForOwner, 0),
+         Interlocked.Exchange(ref _cpuWritesLockedForMetadata, 0));
+
+    private void CountLockedCpuWrite(bool mayOwn)
+    {
+        if (mayOwn)
+        {
+            Interlocked.Increment(ref _cpuWritesLockedForOwner);
+        }
+        else
+        {
+            Interlocked.Increment(ref _cpuWritesLockedForMetadata);
+        }
+    }
+
+    /// <summary>
+    /// Whether <c>[address, address + size)</c> meets a watched metadata range. Lock free:
+    /// it reads the published snapshot, so a CPU write that reaches no metadata need not
+    /// wait for the cache lock however many other ranges are watched.
+    /// </summary>
+    internal bool MetadataWatchOverlaps(ulong address, ulong size) =>
+        AnySpanOverlaps(Volatile.Read(ref _metadataWatchSnapshot), address, size);
+
+    /// <summary>Whether a range meets any of <paramref name="spans"/>, sorted by Begin and disjoint.</summary>
+    internal static bool AnySpanOverlaps(ReadOnlySpan<MetadataWatchSpan> spans, ulong address, ulong size)
+    {
+        if (spans.Length == 0 || size == 0)
+        {
+            return false;
+        }
+
+        // The last span that begins before the range ends. Spans are disjoint and sorted,
+        // so their ends ascend too: if that one ends at or before the range, all do.
+        var end = address + size;
+        int low = 0, high = spans.Length - 1, found = -1;
+        while (low <= high)
+        {
+            var middle = low + ((high - low) >> 1);
+            if (spans[middle].Begin < end)
+            {
+                found = middle;
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        return found >= 0 && spans[found].End > address;
+    }
+
+    /// <summary>Caller holds the lock.</summary>
+    private void PublishMetadataWatchesLocked()
+    {
+        if (_metadataWatches.Count == 0)
+        {
+            Volatile.Write(ref _metadataWatchSnapshot, []);
+            return;
+        }
+
+        var spans = new MetadataWatchSpan[_metadataWatches.Count];
+        var index = 0;
+        foreach (var (watchBegin, watchSize) in _metadataWatches)
+        {
+            spans[index++] = new MetadataWatchSpan(watchBegin, watchBegin + watchSize);
+        }
+
+        Array.Sort(spans, static (left, right) => left.Begin.CompareTo(right.Begin));
+        Volatile.Write(ref _metadataWatchSnapshot, spans);
+    }
 
     /// <summary>Materializations skipped because the clear was already applied.</summary>
     public long TakeDccRepeatsSkipped() => Interlocked.Exchange(ref _dccRepeatsSkipped, 0);
@@ -511,12 +617,6 @@ internal sealed partial class MetalImageCache
 
     /// <summary>Deferred DCC clears dropped because the image was drawn to since.</summary>
     public long TakeDccClearsDropped() => Interlocked.Exchange(ref _dccClearsDropped, 0);
-
-    private void DeferDccSlice(ResourceSlotIdentifier image, ulong address, long imageWriteSequence)
-    {
-        using var held = _lock.Hold();
-        _deferredDccSlices.TryAdd((image, address), imageWriteSequence);
-    }
 
     // The metadata settled to something that is not a clear: there is no deferred clear left.
     private void ForgetDeferredDccSlice(ResourceSlotIdentifier image, ulong address)
@@ -607,19 +707,13 @@ internal sealed partial class MetalImageCache
 
     /// <summary>
     /// The clear code a recorded fill leaves in one metadata slice whose bytes are still
-    /// being written. A slice whose bytes have settled has no further use for the record:
-    /// from then on the guest bytes are what count.
+    /// being written.
+    ///
+    /// Caller holds the lock.
     /// </summary>
-    private bool TryTakeRecordedDccFill(ulong address, ulong size, bool pending, out byte code)
+    private bool TryFindRecordedDccFillLocked(ulong address, ulong size, out byte code)
     {
         code = 0;
-        using var held = _lock.Hold();
-        if (!pending)
-        {
-            ForgetRecordedDccFillsLocked(address, size);
-            return false;
-        }
-
         foreach (var (start, fill) in _recordedDccFills)
         {
             if (address >= start && address + size <= start + fill.Size)
@@ -691,8 +785,10 @@ internal sealed partial class MetalImageCache
         }
 
         _metadataWatches[begin] = end - begin;
+        // Published before the page guard takes the watch: a store that faults on it
+        // must see the range, or the fast path would turn the fault away.
+        PublishMetadataWatchesLocked();
         _pages.AddWatch(begin, end - begin, blockReads: false);
-        Volatile.Write(ref _metadataWatchCount, _metadataWatches.Count);
     }
 
     // A CPU store reached a watched metadata range: the claims over it are forgotten
@@ -720,7 +816,11 @@ internal sealed partial class MetalImageCache
             }
         }
 
-        Volatile.Write(ref _metadataWatchCount, _metadataWatches.Count);
+        if (hit)
+        {
+            PublishMetadataWatchesLocked();
+        }
+
         return hit;
     }
 
@@ -978,32 +1078,57 @@ internal sealed partial class MetalImageCache
                 // The deferral is remembered, so a draw that lands before it settles is not
                 // wiped by applying it later.
                 var pending = _owner.HasPendingGpuWrite(address, sliceSize);
-                var recorded = TryTakeRecordedDccFill(address, sliceSize, pending, out var code);
-                if (pending && !recorded)
+                // Settled metadata says what it holds through its guest bytes; the first one
+                // is read before the lock, which the backing does not need.
+                var readable = !pending && _backing.TryReadBacking(address, firstByte);
+                byte code;
+                var recorded = false;
+                GpuClearColor clear;
+                using (var held = _lock.Hold())
                 {
-                    DeferDccSlice(imageIdentifier, address, imageWriteSequence);
-                    continue;
-                }
-
-                if (!recorded)
-                {
-                    if (!_backing.TryReadBacking(address, firstByte))
+                    if (!pending)
                     {
+                        // A slice whose bytes have settled has no further use for a recorded
+                        // fill: from then on the guest bytes are what count.
+                        ForgetRecordedDccFillsLocked(address, sliceSize);
+                        if (!readable)
+                        {
+                            continue;
+                        }
+
+                        code = firstByte[0];
+                    }
+                    else if (TryFindRecordedDccFillLocked(address, sliceSize, out code))
+                    {
+                        recorded = true;
+                    }
+                    else
+                    {
+                        _deferredDccSlices.TryAdd((imageIdentifier, address), imageWriteSequence);
                         continue;
                     }
 
-                    code = firstByte[0];
-                }
+                    if (!PackedClearValue.TryDecodeDccColor(
+                            view.Format,
+                            code * 0x01010101u,
+                            description.Metadata,
+                            allowClearToRegister: request.Role == ImageRole.ColorTarget,
+                            out clear))
+                    {
+                        _deferredDccSlices.Remove((imageIdentifier, address));
+                        continue;
+                    }
 
-                if (!PackedClearValue.TryDecodeDccColor(
-                        view.Format,
-                        code * 0x01010101u,
-                        description.Metadata,
-                        allowClearToRegister: request.Role == ImageRole.ColorTarget,
-                        out var clear))
-                {
-                    ForgetDeferredDccSlice(imageIdentifier, address);
-                    continue;
+                    // A slice already cleared with this code is settled without scanning it
+                    // again: every rewrite of the metadata removes the claim, so a claim that
+                    // stands means the bytes still hold the clear it was taken for. This is
+                    // the repeat DecideDccClear would reach after the scan, deferral and all.
+                    if (_materializedDccSlices.Contains((imageIdentifier, address, code)))
+                    {
+                        _deferredDccSlices.Remove((imageIdentifier, address));
+                        Interlocked.Increment(ref _dccRepeatsSkipped);
+                        continue;
+                    }
                 }
 
                 if (!recorded && !IsUniformSlice(address, sliceSize, code, buffer))
@@ -1085,6 +1210,7 @@ internal sealed partial class MetalImageCache
             return;
         }
 
+        PromoteLinearView(image);
         var shape = image.Shape;
         var volume = shape.TextureType == Mtl.TextureType3D;
         var layers = volume ? Math.Max(shape.Depth >> (int)range.BaseLevel, 1) : shape.ArrayLength;
@@ -1173,6 +1299,7 @@ internal sealed partial class MetalImageCache
         }
 
         var image = _slots[selected];
+        PromoteLinearView(image);
         ref readonly var description = ref image.Description;
         var range = new SubresourceRange(0, image.Shape.MipLevels, 0, image.Shape.ArrayLength);
         if (description.IsDepth)

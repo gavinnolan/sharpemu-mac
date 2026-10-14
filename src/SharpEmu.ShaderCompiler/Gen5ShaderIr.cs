@@ -180,6 +180,11 @@ public readonly record struct Gen5NggStageInfo(
     /// launch state has to assemble those from the draw's input topology, and every input
     /// primitive can emit up to this many vertices into the subgroup's output.</summary>
     public uint GeometryVerticesOut { get; init; }
+
+    /// <summary>True when the stage runs as wave64 (VGT_SHADER_STAGES_EN.GS_W32_EN clear).
+    /// A mesh program without a GS half translates such a wave as a narrow wave64: one
+    /// 32-lane Metal simdgroup whose upper 32 guest lanes are architecturally inactive.</summary>
+    public bool IsWave64 { get; init; }
 }
 
 public readonly record struct Gen5Operand(Gen5OperandKind Kind, uint Value)

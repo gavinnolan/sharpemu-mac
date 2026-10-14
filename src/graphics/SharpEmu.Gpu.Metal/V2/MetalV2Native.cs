@@ -220,6 +220,10 @@ internal static partial class MetalV2Native
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint SendWithValue(nint receiver, nint selector, nuint value);
 
+    // A selector taking one NSRange, which the ABI passes as its two words.
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial nint SendRange(nint receiver, nint selector, nuint location, nuint length);
+
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendVoidValue(nint receiver, nint selector, nuint value);
 
@@ -234,6 +238,15 @@ internal static partial class MetalV2Native
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint SendWithError(nint receiver, nint selector, nint argument, ref nint error);
+
+    // -[MTLBuffer newTextureWithDescriptor:offset:bytesPerRow:]
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial nint SendNewBufferTexture(
+        nint receiver,
+        nint selector,
+        nint descriptor,
+        nuint offset,
+        nuint bytesPerRow);
 
     // -newTextureViewWithPixelFormat:textureType:levels:slices:
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]

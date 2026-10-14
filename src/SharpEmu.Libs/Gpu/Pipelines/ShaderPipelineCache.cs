@@ -77,7 +77,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             // GE_CNTL's group sizes live in the user-config bank, which this lookup does not
             // see; they are per-draw launch state and travel in the mesh draw-info block.
             VertexGroupSize: 0,
-            PrimitiveGroupSize: 0);
+            PrimitiveGroupSize: 0)
+        {
+            IsWave64 = VgtShaderStages.IsGeometryWave64(shaderStages),
+        };
     }
 
     // s2..s7 of the merged stage: the launch state the geometry engine loads, never user data.

@@ -657,24 +657,33 @@ internal sealed class MetalGuestMemory : IDisposable
         }
 
         var range = Allocate(size, RingAlignment, out var span);
-        span.Clear();
-        if (!_memory.TryRead(gpuVa, span))
-        {
-            // A partially mapped range still binds: the readable prefix is what the
-            // guest shader would have seen, and the rest reads as zero.
-            for (var offset = 0UL; offset < size; offset += 4096)
-            {
-                var chunk = (int)Math.Min(4096, size - offset);
-                if (!_memory.TryRead(gpuVa + offset, span.Slice((int)offset, chunk)))
-                {
-                    break;
-                }
-            }
-        }
-
+        ReadForStaging(gpuVa, span);
         Interlocked.Add(ref _ringFallbackBytes, (long)size);
         Interlocked.Increment(ref _ringFallbacks);
         return range;
+    }
+
+    /// <summary>
+    /// Fills a host span with the guest bytes the CPU sees now. A partially mapped range
+    /// still binds: the readable prefix is what the guest shader would have seen, and the
+    /// rest reads as zero.
+    /// </summary>
+    public void ReadForStaging(ulong gpuVa, Span<byte> span)
+    {
+        if (_memory.TryRead(gpuVa, span))
+        {
+            return;
+        }
+
+        span.Clear();
+        for (var offset = 0; offset < span.Length; offset += 4096)
+        {
+            var chunk = Math.Min(4096, span.Length - offset);
+            if (!_memory.TryRead(gpuVa + (ulong)offset, span.Slice(offset, chunk)))
+            {
+                break;
+            }
+        }
     }
 
     /// <summary>A second ring copy of bytes already staged in the ring; invalid when the range is not a ring range.</summary>
@@ -805,6 +814,56 @@ internal sealed class MetalGuestMemory : IDisposable
     /// </summary>
     public nint CreateReportBuffer(ulong size, string label, out nint contents, out ulong gpuAddress) =>
         CreateSharedBuffer(size, label, out contents, out gpuAddress);
+
+    /// <summary>A resident shared buffer for one cached meshlet list; see
+    /// <see cref="MetalMeshletCache"/>.</summary>
+    public nint CreateMeshletBuffer(ulong size, out nint contents)
+    {
+        var buffer = CreateSharedBuffer(size, "mesh.meshlets", out contents, out _);
+        AddResident(buffer);
+        CommitResidency();
+        return buffer;
+    }
+
+    public void ReleaseMeshletBuffer(nint buffer)
+    {
+        RemoveResident(buffer);
+        MetalNative.SendVoid(buffer, MetalNative.Selector("release"));
+    }
+
+    private nint _meshLdsPool;
+    private readonly object _meshLdsPoolLock = new();
+
+    /// <summary>The device-memory LDS pool of mesh programs whose guest LDS is too large for
+    /// threadgroup memory (see <c>Gen5MslMeshInfo.DeviceLds</c>): a zeroed header of a probe
+    /// counter and one busy flag per slot, then one slot of data per resident threadgroup.
+    /// Created on first use and never reset: a threadgroup frees its slot when it ends.</summary>
+    public nint MeshLdsPool
+    {
+        get
+        {
+            lock (_meshLdsPoolLock)
+            {
+                if (_meshLdsPool == 0)
+                {
+                    var buffer = CreateSharedBuffer(
+                        SharpEmu.ShaderCompiler.Metal.Gen5MslMeshInfo.LdsPoolByteSize, "mesh.lds-pool", out var contents, out _);
+                    unsafe
+                    {
+                        new Span<byte>(
+                            (void*)contents,
+                            (int)(SharpEmu.ShaderCompiler.Metal.Gen5MslMeshInfo.LdsPoolHeaderDwords * sizeof(uint))).Clear();
+                    }
+
+                    AddResident(buffer);
+                    CommitResidency();
+                    _meshLdsPool = buffer;
+                }
+
+                return _meshLdsPool;
+            }
+        }
+    }
 
     private nint CreateSharedBuffer(ulong size, string label, out nint contents, out ulong gpuAddress)
     {
