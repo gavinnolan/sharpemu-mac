@@ -453,7 +453,7 @@ internal static class Gen5ComputeFixtures
         uint localDataShareDwords = 0, uint pushDataStartDword = 0, uint positionExportControl = 0,
         bool supportsClipDistance = true, bool enableGraphicsSubgroupOperations = true,
         ShaderClipSpaceTransform clipSpace = default, bool pixelDepthExportEnable = false,
-        ulong excludedUserDataRegisters = 0)
+        ulong excludedUserDataRegisters = 0, bool ieeeMode = false)
     {
         var plan = ShaderResourcePlan.Extract(program, stage, RequestHash, userDataBase, UserDataCount,
             excludedUserDataRegisters: excludedUserDataRegisters);
@@ -475,6 +475,7 @@ internal static class Gen5ComputeFixtures
         return new ShaderCompileRequest(plan, resources, layout)
         {
             WaveSize = waveLaneCount,
+            IeeeMode = ieeeMode,
             LocalSizeX = stage == ShaderStage.Compute ? localSizeX : 1,
             PixelOutputs = pixelOutputs ?? (stage == ShaderStage.Pixel ? [new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float)] : []),
             RequiredVertexOutputCount = requiredVertexOutputCount,
