@@ -470,8 +470,8 @@ public static partial class Gen5MslTranslator
                 "Xor" => pointer => $"atomic_fetch_xor_explicit((device atomic_uint*)({pointer}), {value}, memory_order_relaxed)",
                 "Swap" => pointer => $"atomic_exchange_explicit((device atomic_uint*)({pointer}), {value}, memory_order_relaxed)",
                 "Cmpswap" => pointer => $"sharpemu_atomic_compare_swap((device atomic_uint*)({pointer}), {comparator}, {value})",
-                "Inc" => pointer => $"sharpemu_atomic_step((device atomic_uint*)({pointer}), true)",
-                "Dec" => pointer => $"sharpemu_atomic_step((device atomic_uint*)({pointer}), false)",
+                "Inc" => pointer => $"sharpemu_atomic_step((device atomic_uint*)({pointer}), {value}, true)",
+                "Dec" => pointer => $"sharpemu_atomic_step((device atomic_uint*)({pointer}), {value}, false)",
                 "Fmin" => pointer => $"sharpemu_atomic_float_minmax((device atomic_uint*)({pointer}), {value}, false)",
                 "Fmax" => pointer => $"sharpemu_atomic_float_minmax((device atomic_uint*)({pointer}), {value}, true)",
                 // DS_MIN/MAX_F32 replace with DATA0 while DATA1 ranks below memory.
@@ -498,7 +498,8 @@ public static partial class Gen5MslTranslator
             var stride = Temp("uint", $"(({word1} >> 16u) & 0x3FFFu)");
             var records = Temp("uint", ScalarExpression(descriptorRegister + 2));
             var size = Temp("ulong", $"({stride} == 0u ? (ulong){records} : (ulong){stride} * (ulong){records})");
-            var baseAddress = $"((ulong){ScalarExpression(descriptorRegister)} | ((ulong)({word1} & 0xFFFFu) << 32))";
+            // Held in a temp: the base must not be re-read from SGPRs a later destination store may have overwritten.
+            var baseAddress = Temp("ulong", $"((ulong){ScalarExpression(descriptorRegister)} | ((ulong)({word1} & 0xFFFFu) << 32))");
             return (baseAddress, size, stride);
         }
 
@@ -722,6 +723,7 @@ public static partial class Gen5MslTranslator
             var dynamicOffset = control.DynamicOffsetRegister is { } register
                 ? Temp("uint", ScalarExpression(register))
                 : "0u";
+            (string Base, string Size, string Stride)? deviceDescriptor = null;
             string? deviceAddress = null;
             string? deviceSpan = null;
             string? deviceSpanValid = null;
@@ -783,7 +785,9 @@ public static partial class Gen5MslTranslator
                     var descriptorOffset = Temp(
                         "uint",
                         $"({dynamicOffset} + {FormatUInt(unchecked((uint)control.ImmediateOffsetBytes + ((uint)component * sizeof(uint))))})");
-                    value = DeviceDescriptorWord(instruction.Sources[0].Value, descriptorOffset);
+                    // Snapshot the V# before the first destination store: SDATA may overlap SBASE.
+                    deviceDescriptor ??= DeviceDescriptorBounds(instruction.Sources[0].Value);
+                    value = DeviceDescriptorWord(deviceDescriptor.Value, descriptorOffset);
                 }
                 else if (entry.Kind == MemoryResourceKind.ScalarBuffer)
                 {

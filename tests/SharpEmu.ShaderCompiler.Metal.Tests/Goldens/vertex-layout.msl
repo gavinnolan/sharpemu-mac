@@ -143,10 +143,12 @@ static inline void sharpemu_store_device_bytes(device const Gen5AddressRange* ra
     sharpemu_store_device_masked_word(ranges, range_count, faults, fault_words, cache, aligned + 4ul, crosses ? (masked >> carry_shift) : 0u, crosses ? (element_mask >> carry_shift) : 0u);
 }
 
-static inline uint sharpemu_atomic_step(device atomic_uint* word, bool increment)
+// BUFFER/GLOBAL/GDS ATOMIC_INC_U32 and ATOMIC_DEC_U32 wrap against DATA (RDNA2 ISA MUBUF/FLAT atomics):
+// INC stores (old >= DATA) ? 0 : old + 1, DEC stores (old == 0 || old > DATA) ? DATA : old - 1.
+static inline uint sharpemu_atomic_step(device atomic_uint* word, uint limit, bool increment)
 {
     uint observed = atomic_load_explicit(word, memory_order_relaxed);
-    while (!atomic_compare_exchange_weak_explicit(word, &observed, increment ? observed + 1u : observed - 1u, memory_order_relaxed, memory_order_relaxed))
+    while (!atomic_compare_exchange_weak_explicit(word, &observed, increment ? (observed >= limit ? 0u : observed + 1u) : ((observed == 0u || observed > limit) ? limit : observed - 1u), memory_order_relaxed, memory_order_relaxed))
     {
     }
     return observed;

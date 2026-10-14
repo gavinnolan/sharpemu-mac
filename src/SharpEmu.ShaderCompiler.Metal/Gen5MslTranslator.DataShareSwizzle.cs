@@ -68,7 +68,9 @@ public static partial class Gen5MslTranslator
             var activeLanes = Temp("uint", "sharpemu_ballot(exec)");
             var sourceActive = Temp("bool", $"(({activeLanes} >> ({sourceLane} & 31u)) & 1u) != 0u");
             var safeSourceLane = Temp("uint", $"{sourceActive} ? {sourceLane} : {lane}");
-            var value = Temp("uint", $"simd_shuffle({RawSource(instruction, 1)}, (ushort){safeSourceLane})");
+            // A wave64 runs as two 32-wide simdgroups and bpermute stays inside each half, so the
+            // shuffle takes the lane within the simdgroup; sourceLane carries the half's base (32..63).
+            var value = Temp("uint", $"simd_shuffle({RawSource(instruction, 1)}, (ushort)({safeSourceLane} & 31u))");
             StoreVector(instruction.Destinations[0].Value, $"{sourceActive} ? {value} : 0u");
             return true;
         }

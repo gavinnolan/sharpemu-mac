@@ -64,8 +64,8 @@ public sealed class Gen5MslBufferAtomicTests(ITestOutputHelper output)
     [InlineData(0x39u, 0x10003200u, Before)]            // and
     [InlineData(0x3Au, 0xFFFEBBDCu, Before)]            // or
     [InlineData(0x3Bu, 0xEFFE89DCu, Before)]            // xor
-    [InlineData(0x3Cu, 0xFEDCBA99u, Before)]            // inc
-    [InlineData(0x3Du, 0xFEDCBA97u, Before)]            // dec
+    [InlineData(0x3Cu, 0u, Before)]                     // inc: Before >= DATA wraps to 0
+    [InlineData(0x3Du, Replacement, Before)]            // dec: Before > DATA wraps to DATA
     // As floats Before is -1.47e38 and Replacement 1.28e-28.
     [InlineData(0x3Fu, Before, Before)]                 // fmin keeps the negative word
     [InlineData(0x40u, Replacement, Before)]            // fmax takes the operand
@@ -188,6 +188,31 @@ public sealed class Gen5MslBufferAtomicTests(ITestOutputHelper output)
         // untouched, while an out-of-range active returning access reads zero.
         var returned = !active || !glc ? Replacement : writes ? Before : 0u;
         BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(48), returned);
+        Assert.Equal(expected, Execute(shader, initial));
+    }
+
+    [Theory]
+    // ATOMIC_INC stores (old >= DATA) ? 0 : old + 1 and ATOMIC_DEC stores
+    // (old == 0 || old > DATA) ? DATA : old - 1; the pre-operation word is returned either way.
+    [InlineData(0x3Cu, 3u, 3u, 0u)]                     // inc at the limit wraps to 0
+    [InlineData(0x3Cu, 2u, 3u, 3u)]                     // inc below the limit steps
+    [InlineData(0x3Du, 0u, 7u, 7u)]                     // dec from 0 takes the limit
+    [InlineData(0x3Du, 9u, 7u, 7u)]                     // dec above the limit takes the limit
+    [InlineData(0x3Du, 5u, 7u, 4u)]                     // dec within the limit steps
+    public void IncAndDecWrapAgainstTheDataOperand(uint opcode, uint memory, uint data, uint expectedMemory)
+    {
+        var fixture = Fixture(true, 0, 32, 0, indexed: false, opcode);
+        // The fixture loads Replacement into v4; patch the literal to the wrap limit under test.
+        var words = fixture.Words.ToArray();
+        words[5] = data;
+        var shader = Compile(fixture with { Words = words }, 0);
+        if (!RequireDevice()) return;
+
+        var initial = SentinelBuffer(32);
+        BinaryPrimitives.WriteUInt32LittleEndian(initial.AsSpan(32), memory);
+        var expected = initial.ToArray();
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(32), expectedMemory);
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(48), memory);
         Assert.Equal(expected, Execute(shader, initial));
     }
 

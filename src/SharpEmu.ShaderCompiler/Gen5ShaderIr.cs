@@ -244,6 +244,9 @@ public sealed record Gen5ImageControl(
     bool A16,
     bool D16) : Gen5InstructionControl
 {
+    /// <summary>MIMG UNRM (word bit 12): the address is in texels rather than normalized.</summary>
+    public bool Unorm { get; init; }
+
     public uint GetAddressRegister(int component) =>
         component < AddressRegisters.Count
             ? AddressRegisters[component]

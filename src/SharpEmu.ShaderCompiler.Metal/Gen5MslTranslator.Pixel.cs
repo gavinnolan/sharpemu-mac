@@ -506,13 +506,23 @@ public static partial class Gen5MslTranslator
         // Guest cube bodies carry face-relative s/t that the SPIR-V backend biases by -1
         // before sampling; that bias is mirrored here so both backends address cube faces
         // identically. Derivatives have no coordinate origin and must not take this bias.
-        private string BuildFloatSpatial(Gen5ImageControl image, int start, MslImageClass imageClass, bool biasCube = true)
+        //
+        // fullDwords reads each component from its own 32-bit VGPR even under A16: derivatives
+        // stay f32 unless the opcode is a _G16 form, and only coordinates/lod/clamp are packed halves.
+        private string BuildFloatSpatial(
+            Gen5ImageControl image,
+            int start,
+            MslImageClass imageClass,
+            bool biasCube = true,
+            bool fullDwords = false)
         {
             var count = imageClass.SpatialComponents;
             var parts = new string[count];
             for (var component = 0; component < count; component++)
             {
-                var value = ImageFloatAddress(image, start + component);
+                var value = fullDwords
+                    ? $"as_type<float>(v[{image.GetAddressRegister(ImageAddressRegister(image, start + (component * ImageFullAddressSlots(image))))}])"
+                    : ImageFloatAddress(image, start + component);
                 parts[component] = biasCube && imageClass.Cube && component < 2 ? $"({value}) - 1.0f" : value;
             }
 
@@ -549,6 +559,24 @@ public static partial class Gen5MslTranslator
         private string BuildIntegerLayer(Gen5ImageControl image, int component, string texture) =>
             Temp("uint", ImageIntegerAddress(image, component));
 
+        // MIMG UNRM: the address is in texels of mip 0, so it is divided by that level's extent to
+        // reach the normalized coordinates the sampler expects (clamp/addressing stays the sampler's).
+        private string NormalizeUnnormalizedCoordinates(string coordinates, string texture, MslImageClass imageClass)
+        {
+            var count = imageClass.SpatialComponents;
+            if (count == 1)
+            {
+                return Temp("float", $"{coordinates} / (float){ImageExtentQuery(texture, imageClass, 0, "0u")}");
+            }
+
+            var extents = string.Join(
+                ", ",
+                Enumerable.Range(0, count).Select(component => $"(float){ImageExtentQuery(texture, imageClass, component, "0u")}"));
+            return Temp(
+                imageClass.FloatCoordinateType,
+                $"{coordinates} / {imageClass.FloatCoordinateType}({extents})");
+        }
+
         private bool TryEmitImageSample(
             Gen5ShaderInstruction instruction,
             Gen5ImageControl image,
@@ -580,7 +608,16 @@ public static partial class Gen5MslTranslator
             var hasZeroLod = opcode.Contains("Lz", StringComparison.Ordinal);
             var hasLod = !hasZeroLod && sampleFamily.Contains("SampleL", StringComparison.Ordinal);
             var hasBias = sampleFamily.Contains("SampleB", StringComparison.Ordinal);
+            // _CL forms carry a minimum-LOD clamp as the last address dword/half (after the coordinates
+            // and layer, where SAMPLE_L would carry its LOD; the two never occur together).
+            var hasClamp = sampleFamily.Contains("Cl", StringComparison.Ordinal);
             var spatialComponents = imageClass.SpatialComponents;
+            var unorm = image.Unorm;
+            if (unorm && imageClass.Cube)
+            {
+                error = $"unnormalized-coordinate cube sampling is not supported for {opcode}";
+                return false;
+            }
 
             // RDNA MIMG address operands are ordered
             // {offset}{bias}{z-compare}{derivatives}{body}; SAMPLE_L carries LOD
@@ -604,7 +641,16 @@ public static partial class Gen5MslTranslator
                 addressCursor += ImageFullAddressSlots(image);
             }
 
-            var bias = hasBias ? Temp("float", ImageFloatAddress(image, addressCursor++)) : "0.0f";
+            var bias = "0.0f";
+            if (hasBias)
+            {
+                // Under A16 the bias is a half in the low 16 bits of a full dword (LLVM
+                // packImage16bitOpsToDwords: "bias is of type half but occupies full 32-bit").
+                addressCursor = AlignFullImageAddress(image, addressCursor);
+                bias = Temp("float", ImageFloatAddress(image, addressCursor));
+                addressCursor += ImageFullAddressSlots(image);
+            }
+
             var reference = "0.0f";
             if (hasCompare)
             {
@@ -621,9 +667,13 @@ public static partial class Gen5MslTranslator
             var gradientY = string.Empty;
             if (hasGradients)
             {
-                gradientX = BuildFloatSpatial(image, addressCursor, imageClass, biasCube: false);
-                gradientY = BuildFloatSpatial(image, addressCursor + spatialComponents, imageClass, biasCube: false);
-                addressCursor += spatialComponents * 2;
+                // Full f32 dwords even under A16 (the _G16 opcodes, which pack halves, are not decoded).
+                var gradientSlots = ImageFullAddressSlots(image);
+                addressCursor = AlignFullImageAddress(image, addressCursor);
+                gradientX = BuildFloatSpatial(image, addressCursor, imageClass, biasCube: false, fullDwords: true);
+                gradientY = BuildFloatSpatial(
+                    image, addressCursor + (spatialComponents * gradientSlots), imageClass, biasCube: false, fullDwords: true);
+                addressCursor += spatialComponents * 2 * gradientSlots;
             }
 
             var coordinates = BuildFloatSpatial(image, addressCursor, imageClass);
@@ -633,20 +683,37 @@ public static partial class Gen5MslTranslator
             // Implicit-LOD and bias sampling need the derivatives a fragment quad provides,
             // so Metal only offers them in a fragment function. Outside one the level is
             // explicit, which is what the SPIR-V backend does for the same reason.
-            var explicitLod = hasGradients || hasZeroLod || hasLod || _stage != Gen5MslStage.Pixel;
-            var lod = hasZeroLod
+            // Unnormalized coordinates address mip 0 only: the level is forced to zero.
+            var useGradients = hasGradients && !unorm;
+            var explicitLod = unorm || hasGradients || hasZeroLod || hasLod || _stage != Gen5MslStage.Pixel;
+            var lod = hasZeroLod || unorm
                 ? "0.0f"
                 : hasLod
                     ? Temp("float", ImageFloatAddress(image, addressCursor + imageClass.CoordinateComponents))
                     : explicitLod
                         ? "0.0f"
                         : bias;
+            string? clamp = null;
+            if (hasClamp)
+            {
+                clamp = Temp("float", ImageFloatAddress(image, addressCursor + imageClass.CoordinateComponents));
+                if (explicitLod && !useGradients)
+                {
+                    lod = Temp("float", $"max({lod}, {clamp})");
+                }
+            }
+
+            if (unorm)
+            {
+                coordinates = NormalizeUnnormalizedCoordinates(coordinates, texture, imageClass);
+            }
+
             if (hasOffset)
             {
                 // Per-lane texel offsets fold into normalized coordinates using
                 // the selected mip extent, mirroring the SPIR-V translator
                 // (Metal sample offsets must be compile-time constants).
-                var offsetLod = explicitLod && !hasGradients ? lod : "0.0f";
+                var offsetLod = explicitLod && !useGradients ? lod : "0.0f";
                 var mipLevel = Temp("uint", $"(uint)max((int)({offsetLod}), 0)");
                 var scaled = new string[spatialComponents];
                 for (var component = 0; component < spatialComponents; component++)
@@ -665,22 +732,23 @@ public static partial class Gen5MslTranslator
             if (spatialComponents == 1)
             {
                 coordinates = Temp("float2", $"float2({coordinates}, 0.5f)");
-                if (hasGradients)
+                if (useGradients)
                 {
                     gradientX = $"float2({gradientX}, 0.0f)";
                     gradientY = $"float2({gradientY}, 0.0f)";
                 }
             }
 
+            var clampArgument = clamp is null ? string.Empty : $", metal::min_lod_clamp({clamp})";
             var samplerArguments = !imageClass.SupportsSampleLod
                 ? string.Empty
-                : hasGradients
-                    ? $", metal::{gradientType}({gradientX}, {gradientY})"
+                : useGradients
+                    ? $", metal::{gradientType}({gradientX}, {gradientY}){clampArgument}"
                     : explicitLod
                         ? $", metal::level({lod})"
                         : hasBias
-                            ? $", metal::bias({bias})"
-                            : string.Empty;
+                            ? $", metal::bias({bias}){clampArgument}"
+                            : clampArgument;
             if (imageClass.DepthCompare)
             {
                 // Native depth samplers compare each contributing texel before
@@ -726,6 +794,12 @@ public static partial class Gen5MslTranslator
             var opcode = instruction.Opcode;
             var hasOffset = opcode.EndsWith("O", StringComparison.Ordinal);
             var hasCompare = opcode.Contains("Gather4C", StringComparison.Ordinal);
+            if (image.Unorm && (opcode == "ImageGather4H" || !imageClass.SupportsGather))
+            {
+                error = $"unnormalized-coordinate {opcode} is not supported";
+                return false;
+            }
+
             if (opcode == "ImageGather4H")
             {
                 if (imageClass.Dimension is ImageDimension.Dim1D or ImageDimension.Dim1DArray)
@@ -780,6 +854,17 @@ public static partial class Gen5MslTranslator
             }
 
             var coordinates = BuildFloatSpatial(image, addressCursor, imageClass);
+            if (image.Unorm)
+            {
+                if (imageClass.Cube)
+                {
+                    error = $"unnormalized-coordinate cube gather is not supported for {opcode}";
+                    return false;
+                }
+
+                coordinates = NormalizeUnnormalizedCoordinates(coordinates, texture, imageClass);
+            }
+
             var layerArgument = imageClass.Arrayed
                 ? $", {BuildSampleLayer(image, addressCursor + imageClass.SpatialComponents, imageClass, texture)}"
                 : string.Empty;
