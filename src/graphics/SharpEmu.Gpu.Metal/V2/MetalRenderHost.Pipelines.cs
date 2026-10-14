@@ -290,6 +290,17 @@ internal sealed partial class MetalRenderHost
         // Gen5MslRectangleList); the index type of its control points is part of the
         // pipeline state, so one state is built for each kind of draw.
         var rectangleList = mesh is null && parameters.Topology == GpuPrimitiveTopology.PatchList;
+        if (mesh is not null)
+        {
+            // One line per mesh pipeline: what the launch was sized from, for reading a
+            // title's primitive shaders off its log.
+            Console.Error.WriteLine(
+                $"[METAL-V2][MESH-PIPE] vs=0x{vertexModule.Hash:X16} wave64={(mesh.Wave64 ? 1 : 0)} " +
+                $"narrow={(mesh.NarrowWave64 ? 1 : 0)} gs={(mesh.HasGeometryHalf ? 1 : 0)} " +
+                $"lds_bytes={mesh.LdsBytes} device_lds={(mesh.DeviceLds ? 1 : 0)} " +
+                $"max_v={mesh.MaxVertices} max_p={mesh.MaxPrimitives} threads={mesh.ThreadsPerThreadgroup}");
+        }
+
         if (rectangleList && description.VertexInput.BindingCount > Gen5MslRectangleList.IndexBufferIndex - VertexBufferSlotBase)
         {
             throw Fatal(

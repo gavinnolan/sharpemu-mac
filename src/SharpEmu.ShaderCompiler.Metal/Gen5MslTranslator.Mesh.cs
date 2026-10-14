@@ -118,7 +118,9 @@ public static partial class Gen5MslTranslator
             ReadsIndexBuffer: true,
             GeometryVerticesOut: ngg.GeometryVerticesOut,
             NarrowWave64: narrow,
-            DeviceLds: deviceLds);
+            DeviceLds: deviceLds,
+            Wave64: ngg.IsWave64,
+            LdsBytes: ldsDwords * sizeof(uint));
     }
 
     /// <summary>True when the program is a wave64 primitive shader without a GS half. The
