@@ -241,7 +241,9 @@ internal sealed partial class MetalImageCache
         CountLockedCpuWrite(mayOwn);
         using var held = _lock.Hold();
         var metadataHit = OnMetadataCpuWriteLocked(address, size);
-        return (mayOwn && InvalidateAliases(address, size)) | metadataHit | stagedHit;
+        var imageHit = mayOwn && InvalidateAliases(address, size);
+        CountOwnerCpuWriteOutcome(mayOwn, imageHit);
+        return imageHit | metadataHit | stagedHit;
     }
 
     // A managed write of exactly these bytes. Unlike a fault it names the bytes it
@@ -269,7 +271,9 @@ internal sealed partial class MetalImageCache
         var backed = mayOwn && _guestMemory.IsBacked(address, size);
         using var held = _lock.Hold();
         var metadataHit = OnMetadataCpuWriteLocked(address, size);
-        return (mayOwn && InvalidatePreciseWrite(address, size, backed)) | metadataHit | stagedHit;
+        var imageHit = mayOwn && InvalidatePreciseWrite(address, size, backed);
+        CountOwnerCpuWriteOutcome(mayOwn, imageHit);
+        return imageHit | metadataHit | stagedHit;
     }
 
     /// <summary>The host wrote exactly <c>[address, address + size)</c> of guest memory.</summary>
@@ -494,9 +498,34 @@ internal sealed partial class MetalImageCache
     private long _cpuWritesLockedForOwner;
     private long _cpuWritesLockedForMetadata;
 
-    public (long Owner, long Metadata) TakeLockedCpuWrites() =>
+    // Of the writes locked because an image may own the page, those that found an image
+    // over their bytes and those that found none: the second is lock traffic the owner
+    // index could have answered without the lock.
+    private long _cpuWritesOwnerFound;
+    private long _cpuWritesOwnerNone;
+
+    public (long Owner, long Metadata, long OwnerFound, long OwnerNone) TakeLockedCpuWrites() =>
         (Interlocked.Exchange(ref _cpuWritesLockedForOwner, 0),
-         Interlocked.Exchange(ref _cpuWritesLockedForMetadata, 0));
+         Interlocked.Exchange(ref _cpuWritesLockedForMetadata, 0),
+         Interlocked.Exchange(ref _cpuWritesOwnerFound, 0),
+         Interlocked.Exchange(ref _cpuWritesOwnerNone, 0));
+
+    private void CountOwnerCpuWriteOutcome(bool mayOwn, bool imageHit)
+    {
+        if (!mayOwn)
+        {
+            return;
+        }
+
+        if (imageHit)
+        {
+            Interlocked.Increment(ref _cpuWritesOwnerFound);
+        }
+        else
+        {
+            Interlocked.Increment(ref _cpuWritesOwnerNone);
+        }
+    }
 
     private void CountLockedCpuWrite(bool mayOwn)
     {
