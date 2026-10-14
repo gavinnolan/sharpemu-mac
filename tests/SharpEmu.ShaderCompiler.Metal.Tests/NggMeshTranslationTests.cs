@@ -305,17 +305,42 @@ public sealed class NggMeshTranslationTests
     }
 
     [Fact]
+    public void AProgramWithoutAGsHalfReadsCachedMeshletsWhenTheDrawAsksForThem()
+    {
+        var shader = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.CullingTriangle());
+        Assert.Contains("uint meshlet_count;", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("device const uint* sharpemu_meshlets [[buffer(4)]]", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_meshlets_on = sharpemu_draw.meshlet_count != 0u;", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_mesh_alloc[0] = min(sharpemu_ml.w & 0xFFFFu,", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_meshlets[sharpemu_draw.meshlet_vertex_base + sharpemu_ml.x + sharpemu_tg_index]", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_meshlets_on ? sharpemu_ml.z + sharpemu_tg_index", shader.Source, StringComparison.Ordinal);
+        Assert.Equal(80u, Gen5MslMeshInfo.DrawInfoByteSize);
+
+        // A GS half assembles its own input primitives and takes no meshlets.
+        var fused = Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.CullingTriangle(), Gen5NggFixtures.StageInfo with { GeometryVerticesOut = 3 });
+        Assert.DoesNotContain("sharpemu_meshlets", fused.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ALocalPrimitiveSeedsItsVerticesInTheFieldsTheGuestDecodes()
     {
         // The guest reads bfe(v0, 2, 14), v0 >> 18 and bfe(v1, 2, 14): the local vertex index
         // sits in bits 2-15 of each 16-bit field, exactly as the GS half packs it.
         var shader = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.CullingTriangle());
         Assert.Contains(
-            "v0 = ((sharpemu_mesh_prim_base << 2u) & 0xFFFFu) |", shader.Source, StringComparison.Ordinal);
+            ": (((sharpemu_mesh_prim_base << 2u) & 0xFFFFu) |", shader.Source, StringComparison.Ordinal);
         Assert.Contains(
-            "((((sharpemu_mesh_prim_base + 1u) << 2u) & 0xFFFFu) << 16u);", shader.Source, StringComparison.Ordinal);
+            "((((sharpemu_mesh_prim_base + 1u) << 2u) & 0xFFFFu) << 16u));", shader.Source, StringComparison.Ordinal);
         Assert.Contains(
-            "v1 = ((sharpemu_mesh_prim_base + 2u) << 2u) & 0xFFFFu;", shader.Source, StringComparison.Ordinal);
+            ": (((sharpemu_mesh_prim_base + 2u) << 2u) & 0xFFFFu);", shader.Source, StringComparison.Ordinal);
+
+        // A cached meshlet's triangle (three 8-bit local indices) is seeded in the same fields.
+        Assert.Contains(
+            "(((sharpemu_mesh_prim_packed & 0xFFu) << 2u) | (((sharpemu_mesh_prim_packed >> 8u) & 0xFFu) << 18u))",
+            shader.Source, StringComparison.Ordinal);
+        Assert.Contains(
+            "(((sharpemu_mesh_prim_packed >> 16u) & 0xFFu) << 2u)", shader.Source, StringComparison.Ordinal);
 
         foreach (var lane in new[] { 0u, 1u, 9u, 10u, 31u })
         {

@@ -120,6 +120,13 @@ public interface IRenderHost
 
     void BindIndexBuffer(BufferBinding binding, GpuIndexType type);
 
+    // The guest address and byte size the index buffer just bound was read from; address 0
+    // when the indices are host data (an upload or an expanded primitive-restart stream) and
+    // so name no guest range. A backend that derives per-range data from the indices uses it.
+    void NoteIndexSource(ulong guestAddress, ulong size)
+    {
+    }
+
     // Opens the preparation scope; a ring wrap inside it is refused, and disposal releases it on every path.
     IResourcePreparation BeginPreparation();
 

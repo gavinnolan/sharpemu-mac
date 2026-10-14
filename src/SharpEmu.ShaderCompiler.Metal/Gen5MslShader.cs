@@ -127,7 +127,12 @@ public sealed record Gen5MslMeshInfo(
 
     /// <summary>Byte size of the Gen5MeshDrawInfo block the host fills at
     /// <see cref="DrawInfoBufferIndex"/>; see the generated struct of the same name.</summary>
-    public const uint DrawInfoByteSize = 64;
+    public const uint DrawInfoByteSize = 80;
+
+    /// <summary>The mesh slot of the cached-meshlet buffer a program without a GS half reads
+    /// when the draw-info block's meshlet_count is not zero; bound (to the null buffer when
+    /// off) for every such draw.</summary>
+    public const uint MeshletBufferIndex = 4;
 
     /// <summary>Dword count of that block, for a host that fills it as words.</summary>
     public const uint DrawInfoDwordCount = DrawInfoByteSize / 4;

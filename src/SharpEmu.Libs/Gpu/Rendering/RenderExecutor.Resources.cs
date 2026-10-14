@@ -319,6 +319,7 @@ public sealed partial class RenderExecutor
         if (indexBuffer.Size != 0)
         {
             _host.BindIndexBuffer(indexBuffer.Binding, indexBuffer.Type);
+            _host.NoteIndexSource(indexSource.HostData is null ? indexSource.Address : 0, indexSource.Size);
         }
 
         _host.SetDynamicState(BuildDynamicState(context, in state));

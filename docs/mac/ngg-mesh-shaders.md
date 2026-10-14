@@ -166,6 +166,12 @@ position.
 | 13 | `gs_input_topology` | Fused (ES+GS) programs only: the draw's input topology, `Gen5MslMeshInputTopology` (0 triangle list, 1 triangle strip, 2 point list). |
 | 14 | `gs_input_primitives` | Fused programs only: input primitives per subgroup, `Gen5MslMeshInfo.InputPrimitivesPerSubgroup`. The host launches one subgroup per this many. |
 | 15 | `input_vertex_count` | Fused programs only: the draw's vertex or index count, which bounds the last subgroup. |
+| 16 | `meshlet_count` | Programs without a GS half: 0 runs whole-triangle subgroups; otherwise subgroup n is meshlet n of the buffer at slot 4. |
+| 17 | `meshlet_vertex_base` | Dword offset of the meshlet vertex list (raw index values; `base_vertex` is added in the shader). |
+| 18 | `meshlet_prim_base` | Dword offset of the meshlet triangle list (`i0 | i1 << 8 | i2 << 16`, local indices). |
+| 19 | reserved | Zero. |
+
+Slot 4 (`sharpemu_meshlets`, programs without a GS half, always bound) holds `meshlet_count` uint4 headers `{vertexOffset, primOffset, firstTriangle, vertexCount | primCount << 16}` followed by the two lists. Slot 5 (`sharpemu_lds_pool`) is bound only when `Gen5MslMeshInfo.DeviceLds` is set: a 16 KB zeroed header of a probe counter and 2048 busy flags, then 2048 slots of 16 KB guest LDS.
 
 The index buffer at slot 3 is read as a dword stream: a 16-bit index is the containing
 dword shifted, so one binding serves both types. For an automatic draw the lane's vertex

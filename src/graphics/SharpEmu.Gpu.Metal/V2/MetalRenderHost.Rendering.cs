@@ -980,8 +980,19 @@ internal sealed partial class MetalRenderHost
         _vertexBufferCount = count;
     }
 
+    private ulong _indexGuestAddress;
+    private ulong _indexGuestSize;
+
+    public void NoteIndexSource(ulong guestAddress, ulong size)
+    {
+        _indexGuestAddress = guestAddress;
+        _indexGuestSize = size;
+    }
+
     public void BindIndexBuffer(BufferBinding binding, GpuIndexType type)
     {
+        _indexGuestAddress = 0;
+        _indexGuestSize = 0;
         _indexBuffer = (nint)binding.Handle;
         _indexOffset = binding.Offset;
         _indexType = MetalV2Formats.IndexType(type);
@@ -1506,6 +1517,17 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
+        // Cached meshlets replace the whole-triangle subgroups of an indexed triangle list: a
+        // threadgroup then holds the unique vertices of up to MaxPrimitives triangles, as the
+        // geometry engine packs a subgroup, instead of three own vertices per triangle.
+        MetalMeshletCache.Meshlets meshlets = default;
+        var useMeshlets = !mesh.HasGeometryHalf && indexed &&
+            TryGetMeshlets(mesh, count, firstIndexOrVertex, out meshlets);
+        if (useMeshlets)
+        {
+            subgroups = meshlets.Count;
+        }
+
         var drawInfo = _guestMemory.Allocate(Gen5MslMeshInfo.DrawInfoByteSize, 256, out var span);
         span.Clear();
         var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(span);
@@ -1520,6 +1542,13 @@ internal sealed partial class MetalRenderHost
         words[13] = (uint)input;
         words[14] = inputPrimitivesPerSubgroup;
         words[15] = count;
+        if (useMeshlets)
+        {
+            words[16] = meshlets.Count;
+            words[17] = meshlets.VertexBase;
+            words[18] = meshlets.PrimitiveBase;
+        }
+
         MetalNative.SendSetBuffer(
             _renderEncoder, SelSetMeshBuffer, drawInfo.Buffer, (nuint)drawInfo.Offset, (nuint)mesh.DrawInfoBufferIndex);
         // The index slot is read as a dword stream and must be bound even for an
@@ -1528,6 +1557,17 @@ internal sealed partial class MetalRenderHost
         var indexOffset = indexed && _indexBuffer != 0 ? _indexOffset : 0;
         MetalNative.SendSetBuffer(
             _renderEncoder, SelSetMeshBuffer, indexBuffer, (nuint)indexOffset, (nuint)mesh.IndexBufferIndex);
+        if (!mesh.HasGeometryHalf)
+        {
+            // Always bound, like the index slot: the null buffer when no meshlets are used.
+            MetalNative.SendSetBuffer(
+                _renderEncoder,
+                SelSetMeshBuffer,
+                useMeshlets ? meshlets.Buffer : _guestMemory.NullBuffer,
+                0,
+                Gen5MslMeshInfo.MeshletBufferIndex);
+        }
+
         if (mesh.DeviceLds)
         {
             MetalNative.SendSetBuffer(
@@ -1545,6 +1585,61 @@ internal sealed partial class MetalRenderHost
             new MtlSize { Width = subgroups, Height = instanceCount, Depth = 1 },
             new MtlSize { Width = 1, Height = 1, Depth = 1 },
             new MtlSize { Width = Math.Max(mesh.ThreadsPerThreadgroup, 1), Height = 1, Depth = 1 });
+    }
+
+    private MetalMeshletCache? _meshletCache;
+
+    private MetalMeshletCache MeshletCache => _meshletCache ??= new MetalMeshletCache(_guestMemory, _memory);
+
+    // The cached meshlets of an indexed triangle-list draw, or false (counted by reason)
+    // when it runs as whole-triangle subgroups.
+    private bool TryGetMeshlets(Gen5MslMeshInfo mesh, uint indexCount, uint firstIndex, out MetalMeshletCache.Meshlets meshlets)
+    {
+        meshlets = default;
+        var cache = MeshletCache;
+        if (MetalMeshletCache.IsDisabled)
+        {
+            cache.NoteFallback(MetalMeshletCache.Fallback.Disabled);
+            return false;
+        }
+
+        if (_boundGraphicsPipeline?.StaticParameters?.Topology != GpuPrimitiveTopology.TriangleList ||
+            mesh.VerticesPerPrimitive != 3 || mesh.Topology != Gen5MslMeshTopology.Triangle)
+        {
+            cache.NoteFallback(MetalMeshletCache.Fallback.NotTriangleList);
+            return false;
+        }
+
+        var index32 = _indexType == Mtl.IndexTypeUInt32;
+        var elementBytes = index32 ? 4UL : 2UL;
+        var rangeBytes = (ulong)indexCount * elementBytes;
+        var rangeStart = (ulong)firstIndex * elementBytes;
+        if (_indexGuestAddress == 0 || rangeStart + rangeBytes > _indexGuestSize)
+        {
+            cache.NoteFallback(MetalMeshletCache.Fallback.NoGuestAddress);
+            return false;
+        }
+
+        var address = _indexGuestAddress + rangeStart;
+
+        // The same predicate a host-side guest write uses: bytes the GPU is still writing
+        // are not the bytes the draw will read, so they are neither hashed nor cached.
+        if (_gpuWrites.PendingSerial(address, rangeBytes, CompletedSerial) != 0 ||
+            _imageCache.HasGpuModifiedImageBytes(address, rangeBytes))
+        {
+            cache.NoteFallback(MetalMeshletCache.Fallback.GpuWrites);
+            return false;
+        }
+
+        return cache.TryGet(
+            address,
+            indexCount,
+            index32,
+            mesh.MaxVertices,
+            mesh.MaxPrimitives,
+            SubmissionSerial,
+            CompletedSerial,
+            out meshlets);
     }
 
     private static Gen5MslMeshInputTopology MeshInputTopology(GpuPrimitiveTopology? topology) => topology switch

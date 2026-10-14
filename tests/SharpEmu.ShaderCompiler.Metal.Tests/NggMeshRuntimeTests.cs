@@ -118,6 +118,85 @@ public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void CachedMeshletsDrawTheSamePixelsAsWholeTriangleSubgroups()
+    {
+        if (SkipWithoutMetalDevice("the meshlet mesh execution test")) return;
+
+        // Two triangles sharing vertices 0-2, drawn indexed. As whole-triangle subgroups each
+        // triangle owns three vertex slots; as one cached meshlet they share three vertices
+        // and name them by local index. The rasterized result has to be identical.
+        var shader = Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.Wave64Triangles(), Gen5NggFixtures.Wave64StageInfo);
+        var mesh = shader.MeshInfo!;
+        var source = shader.Source + FragmentSource;
+        if (!MetalNative.TryCompileLibrary(source, out var library, out var compileError))
+        {
+            throw new InvalidOperationException($"Metal rejected the mesh MSL: {compileError}\n{source}");
+        }
+
+        uint[] indices = [0, 1, 2, 2, 1, 0];
+        var indexBytes = new byte[indices.Length * sizeof(uint)];
+        Buffer.BlockCopy(indices, 0, indexBytes, 0, indexBytes.Length);
+
+        // One meshlet: header {vertexOffset, primOffset, firstTriangle, 3 | 2 << 16}, then the
+        // vertex list (raw index values), then one packed local triple per triangle.
+        uint[] meshlets =
+        [
+            0, 0, 0, 3 | (2u << 16),
+            0, 1, 2,
+            0 | (1u << 8) | (2u << 16),
+            2 | (1u << 8) | (0u << 16),
+        ];
+        var meshletBytes = new byte[meshlets.Length * sizeof(uint)];
+        Buffer.BlockCopy(meshlets, 0, meshletBytes, 0, meshletBytes.Length);
+
+        float[] Render(bool useMeshlets)
+        {
+            var words = new uint[Gen5MslMeshInfo.DrawInfoDwordCount];
+            words[0] = mesh.VerticesPerSubgroup;
+            words[1] = mesh.PrimitivesPerSubgroup;
+            words[2] = (uint)indices.Length;
+            words[3] = 2;
+            words[6] = 1;
+            words[15] = (uint)indices.Length;
+            if (useMeshlets)
+            {
+                words[16] = 1;
+                words[17] = 4;
+                words[18] = 7;
+            }
+
+            var drawInfo = new byte[words.Length * sizeof(uint)];
+            Buffer.BlockCopy(words, 0, drawInfo, 0, drawInfo.Length);
+            Assert.True(
+                MetalNative.TryRenderMesh(
+                    library,
+                    shader.EntryPoint,
+                    "gen5_mesh_test_fs",
+                    [
+                        (BuildArgumentBuffer(shader), 0u),
+                        (new byte[64], 1u),
+                        (drawInfo, mesh.DrawInfoBufferIndex),
+                        (indexBytes, mesh.IndexBufferIndex),
+                        (useMeshlets ? meshletBytes : new byte[16], Gen5MslMeshInfo.MeshletBufferIndex),
+                    ],
+                    threadgroups: 1,
+                    mesh.ThreadsPerThreadgroup,
+                    TargetSize,
+                    TargetSize,
+                    out var pixels,
+                    out var renderError),
+                $"the mesh draw failed: {renderError}");
+            return pixels;
+        }
+
+        var plain = Render(useMeshlets: false);
+        var cached = Render(useMeshlets: true);
+        Assert.Equal(1.0f, Green(plain, TargetSize / 2, TargetSize / 2), 3);
+        Assert.Equal(plain, cached);
+    }
+
+    [Fact]
     public void IndexedWave64PrimitiveShaderDrawsTrianglesFromEverySubgroup()
     {
         if (SkipWithoutMetalDevice("the narrow wave64 mesh execution test")) return;

@@ -62,6 +62,7 @@ public static partial class Gen5MslTranslator
     private const string MeshOutputName = "sharpemu_mesh";
     private const string MeshDrawInfoName = "sharpemu_draw";
     private const string MeshIndexBufferName = "sharpemu_indices";
+    private const string MeshletBufferName = "sharpemu_meshlets";
 
     private const uint MeshDrawInfoBufferIndex = 2;
     private const uint MeshIndexBufferIndex = 3;
@@ -249,6 +250,14 @@ public static partial class Gen5MslTranslator
             source.AppendLine("    uint gs_input_topology;");
             source.AppendLine("    uint gs_input_primitives;");
             source.AppendLine("    uint input_vertex_count;");
+
+            // Cached meshlets (see MetalMeshletCache): when meshlet_count is not zero, subgroup
+            // n is meshlet n of the buffer bound at the meshlet slot instead of a run of the
+            // draw's index stream. The vertex and primitive bases are dword offsets into it.
+            source.AppendLine("    uint meshlet_count;");
+            source.AppendLine("    uint meshlet_vertex_base;");
+            source.AppendLine("    uint meshlet_prim_base;");
+            source.AppendLine("    uint meshlet_reserved;");
             source.AppendLine("};");
             source.AppendLine();
             source.AppendLine(
@@ -296,6 +305,12 @@ public static partial class Gen5MslTranslator
             {
                 source.AppendLine(
                     $"    device atomic_uint* sharpemu_lds_pool [[buffer({Gen5MslMeshInfo.LdsPoolBufferIndex})]],");
+            }
+
+            if (!Mesh.HasGeometryHalf)
+            {
+                source.AppendLine(
+                    $"    device const uint* {MeshletBufferName} [[buffer({Gen5MslMeshInfo.MeshletBufferIndex})]],");
             }
 
             source.AppendLine("    uint sharpemu_tg_index [[thread_index_in_threadgroup]],");
@@ -347,6 +362,14 @@ public static partial class Gen5MslTranslator
                     $"{(uint)Gen5MslMeshInputTopology.TriangleList}u ? sharpemu_gs_prim_start * 3u : sharpemu_gs_prim_start;");
             }
 
+            if (!mesh.HasGeometryHalf)
+            {
+                // Whole subgroup uniform: the cached meshlet this subgroup is, or zeros.
+                source.AppendLine($"    const bool sharpemu_meshlets_on = {MeshDrawInfoName}.meshlet_count != 0u;");
+                source.AppendLine(
+                    $"    const uint4 sharpemu_ml = sharpemu_meshlets_on ? ((device const uint4*){MeshletBufferName})[sharpemu_mesh_subgroup] : uint4(0u);");
+            }
+
             source.AppendLine("    if (sharpemu_tg_index == 0u)");
             source.AppendLine("    {");
             if (mesh.HasGeometryHalf)
@@ -393,6 +416,11 @@ public static partial class Gen5MslTranslator
                 source.AppendLine(
                     $"            ? min(sharpemu_mesh_verts, sharpemu_mesh_prims * {perPrimitive}u) : sharpemu_mesh_verts;");
                 source.AppendLine("        sharpemu_mesh_alloc[1] = sharpemu_mesh_prims;");
+                source.AppendLine("        if (sharpemu_meshlets_on)");
+                source.AppendLine("        {");
+                source.AppendLine($"            sharpemu_mesh_alloc[0] = min(sharpemu_ml.w & 0xFFFFu, {mesh.MaxVertices}u);");
+                source.AppendLine($"            sharpemu_mesh_alloc[1] = min(sharpemu_ml.w >> 16u, {mesh.MaxPrimitives}u);");
+                source.AppendLine("        }");
             }
 
             if (UsesDeviceLds)
@@ -480,12 +508,29 @@ public static partial class Gen5MslTranslator
                     "    const uint sharpemu_mesh_vertex_slot = sharpemu_mesh_subgroup * " +
                     $"{MeshDrawInfoName}.vertices_per_subgroup + sharpemu_tg_index;");
                 source.AppendLine(
-                    "    const uint sharpemu_mesh_prim_slot = sharpemu_mesh_subgroup * " +
-                    $"{MeshDrawInfoName}.primitives_per_subgroup + sharpemu_tg_index;");
+                    "    const uint sharpemu_mesh_prim_slot = sharpemu_meshlets_on ? sharpemu_ml.z + sharpemu_tg_index : " +
+                    $"sharpemu_mesh_subgroup * {MeshDrawInfoName}.primitives_per_subgroup + sharpemu_tg_index;");
             }
-            source.AppendLine(
-                $"    const uint sharpemu_mesh_vertex_index = (uint)((int)sharpemu_mesh_index({MeshIndexBufferName}, " +
-                $"{MeshDrawInfoName}, sharpemu_mesh_vertex_slot) + {MeshDrawInfoName}.base_vertex);");
+            var plainVertexIndex =
+                $"(uint)((int)sharpemu_mesh_index({MeshIndexBufferName}, " +
+                $"{MeshDrawInfoName}, sharpemu_mesh_vertex_slot) + {MeshDrawInfoName}.base_vertex)";
+            if (!mesh.HasGeometryHalf)
+            {
+                // A meshlet lists its vertices' raw index values; the lane past the meshlet's
+                // vertex count has none.
+                source.AppendLine(
+                    "    const uint sharpemu_mesh_vertex_index = sharpemu_meshlets_on");
+                source.AppendLine(
+                    "        ? (sharpemu_tg_index < (sharpemu_ml.w & 0xFFFFu)");
+                source.AppendLine(
+                    $"            ? (uint)((int){MeshletBufferName}[{MeshDrawInfoName}.meshlet_vertex_base + sharpemu_ml.x + sharpemu_tg_index] + {MeshDrawInfoName}.base_vertex)");
+                source.AppendLine("            : 0u)");
+                source.AppendLine($"        : {plainVertexIndex};");
+            }
+            else
+            {
+                source.AppendLine($"    const uint sharpemu_mesh_vertex_index = {plainVertexIndex};");
+            }
             source.AppendLine(
                 $"    const uint sharpemu_mesh_instance_index = {MeshDrawInfoName}.first_instance + sharpemu_mesh_instance;");
             source.AppendLine();
@@ -566,11 +611,27 @@ public static partial class Gen5MslTranslator
                 var perPrimitive = Math.Max(mesh.VerticesPerPrimitive, 1u);
                 source.AppendLine(
                     $"    const uint sharpemu_mesh_prim_base = sharpemu_tg_index * {perPrimitive}u;");
+
+                // A meshlet's triangle is three 8-bit local vertex indices; the same 16-bit
+                // field encoding applies, so the guest decodes them identically.
                 source.AppendLine(
-                    $"    v[{Gen5NggExports.GsVertexOffset01Register}] = ((sharpemu_mesh_prim_base << 2u) & 0xFFFFu) |");
-                source.AppendLine("        ((((sharpemu_mesh_prim_base + 1u) << 2u) & 0xFFFFu) << 16u);");
+                    "    const uint sharpemu_mesh_prim_packed = sharpemu_meshlets_on && sharpemu_tg_index < (sharpemu_ml.w >> 16u)");
                 source.AppendLine(
-                    $"    v[{Gen5NggExports.GsVertexOffset23Register}] = ((sharpemu_mesh_prim_base + 2u) << 2u) & 0xFFFFu;");
+                    $"        ? {MeshletBufferName}[{MeshDrawInfoName}.meshlet_prim_base + sharpemu_ml.y + sharpemu_tg_index] : 0u;");
+                source.AppendLine(
+                    $"    v[{Gen5NggExports.GsVertexOffset01Register}] = sharpemu_meshlets_on");
+                source.AppendLine(
+                    "        ? (((sharpemu_mesh_prim_packed & 0xFFu) << 2u) | (((sharpemu_mesh_prim_packed >> 8u) & 0xFFu) << 18u))");
+                source.AppendLine(
+                    "        : (((sharpemu_mesh_prim_base << 2u) & 0xFFFFu) |");
+                source.AppendLine(
+                    "           ((((sharpemu_mesh_prim_base + 1u) << 2u) & 0xFFFFu) << 16u));");
+                source.AppendLine(
+                    $"    v[{Gen5NggExports.GsVertexOffset23Register}] = sharpemu_meshlets_on");
+                source.AppendLine(
+                    "        ? (((sharpemu_mesh_prim_packed >> 16u) & 0xFFu) << 2u)");
+                source.AppendLine(
+                    "        : (((sharpemu_mesh_prim_base + 2u) << 2u) & 0xFFFFu);");
             }
             source.AppendLine($"    v[{Gen5NggExports.GsPrimitiveIdRegister}] = sharpemu_mesh_prim_slot;");
             source.AppendLine($"    v[{Gen5NggExports.GsInvocationIdRegister}] = 0u;");
