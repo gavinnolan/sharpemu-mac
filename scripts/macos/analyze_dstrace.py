@@ -1061,23 +1061,27 @@ def build_frames(C):
         S = D.col('WIDLE')
         widle_idx = IvIdx([(r[S['start_ts']], r[S['start_ts']] + r[S['dur_ns']] / 1e9, r[S['reason']]) for r in D.L('WIDLE')])
     mgpu_by_serial = {}
-    if have['MGPU'] and 'ca_ns' in C.fits:
+    if have['MGPU'] and 'mat_ns' in C.fits:
         S = D.col('MGPU')
         ivs = []
         for r in D.L('MGPU'):
-            s = C.dom_to_s('ca_ns', r[S['gstart_ns']])
-            e = C.dom_to_s('ca_ns', r[S['gend_ns']])
+            if r[S['late']] == 2:          # never sampled, time fields are zero
+                continue
+            # MGPU times are on the host media clock (mach_absolute_time ns), i.e. the CLK mat_ns domain
+            s = C.dom_to_s('mat_ns', r[S['gstart_ns']])
+            e = C.dom_to_s('mat_ns', r[S['gend_ns']])
             ivs.append((s, e, r[S['serial']]))
             mgpu_by_serial[r[S['serial']]] = (s, e)
         mgpu_ivs = IvIdx(ivs)
         C.mgpu_by_serial = mgpu_by_serial
     elif have['MGPU']:
-        R.note('frames.csv: gpu_exec/label_land blank (MGPU present but no usable CLK ca_ns fit)')
+        R.note('frames.csv: gpu_exec/label_land blank (MGPU present but no usable CLK mat_ns fit)')
     lenc_by_addr = defaultdict(list)
     if have['LENC']:
         S = D.col('LENC')
         for r in D.L('LENC'):
-            lenc_by_addr[r[S['addr']]].append((r[0], r[S['serial']]))
+            if r[S['deferred']] != 2:      # 2 = not encoded
+                lenc_by_addr[r[S['addr']]].append((r[0], r[S['serial']]))
     hle_sub = []
     if have['HLE']:
         S = D.col('HLE')
@@ -1945,7 +1949,7 @@ def write_metal(C, path):
         for r in D.L('CPW'):
             by[r[S['source']]][0] += 1
             by[r[S['source']]][1] += r[S['woken']]
-        L.append('CPW sources (1 GpuTick,2 RetryBlocked,3 GuestMemoryWritten,4 raced rerun,5 Pipeline,6 other): ' +
+        L.append('CPW sources (1 GpuTick,2 RetryBlocked,3 GuestMemoryWritten,4 slice-complete wake,5 Pipeline,6 other,7 NotePendingLabel): ' +
                  ', '.join('%d: n=%d woken=%d' % (k, v[0], v[1]) for k, v in sorted(by.items())))
     else:
         L.append('CPW: no records')
@@ -1958,13 +1962,16 @@ def write_metal(C, path):
         S = D.col('SLICE')
         wall = sum(r[S['dur_ns']] for r in D.L('SLICE')) / 1e6
         cpu = sum(r[S['cpu_ns']] for r in D.L('SLICE')) / 1e6
-        L.append('SLICE n=%d wall=%.1f ms cpu=%.1f ms (cpu/wall %.2f)' % (len(D.L('SLICE')), wall, cpu, cpu / wall if wall else 0))
+        oc = Counter(r[S['outcome']] & 0xff for r in D.L('SLICE'))
+        L.append('SLICE n=%d wall=%.1f ms cpu=%.1f ms (cpu/wall %.2f); outcomes (0 Completed,1 Progressed,2 BlockedWithoutProgress): %s; only slices that ran a submission' % (
+            len(D.L('SLICE')), wall, cpu, cpu / wall if wall else 0, dict(sorted(oc.items()))))
     else:
         L.append('SLICE: no records')
     if D.has('MGPU'):
         S = D.col('MGPU')
-        late = sum(1 for r in D.L('MGPU') if r[S['late']])
-        L.append('MGPU n=%d sampled=%d late=%d' % (len(D.L('MGPU')), len(D.L('MGPU')) - late, late))
+        lc = Counter(r[S['late']] for r in D.L('MGPU'))
+        L.append('MGPU n=%d sampled=%d late(1)=%d never-sampled(2, excluded from GPU timing)=%d' % (
+            len(D.L('MGPU')), lc.get(0, 0), lc.get(1, 0), lc.get(2, 0)))
     else:
         L.append('MGPU: no records')
     with open(path, 'w') as f:
@@ -2587,10 +2594,11 @@ def gen_synth(dirpath):
         E(rjs + fe * 1000, 'SFC', 1, i=0, ctr=f, label0=0x100 * f, exp0=0x100 * f, lp0=0x800A0)
         E(rjs - 1_000, 'LENC', 1, serial=f, addr=0x800A0, value=0x100 * f, deferred=0, kind=1)
         edge = rjs + fe * 1000
-        E(edge, 'MGPU', 200, serial=f, kstart_ns=1, kend_ns=2, gstart_ns=7_000_000_000_000 + (edge - 11_000) * 1000,
-          gend_ns=7_000_000_000_000 + (edge - 1_000) * 1000, late=0)
-        E(edge, 'MGPU', 200, serial=100 + f, kstart_ns=1, kend_ns=2, gstart_ns=7_000_000_000_000 + (edge - 6_000) * 1000,
-          gend_ns=7_000_000_000_000 + (edge + 9_000) * 1000, late=1)
+        E(edge, 'MGPU', 200, serial=f, kstart_ns=1, kend_ns=2, gstart_ns=(edge - 11_000) * 1000 + 999,
+          gend_ns=(edge - 1_000) * 1000 + 999, late=0)
+        E(edge, 'MGPU', 200, serial=100 + f, kstart_ns=1, kend_ns=2, gstart_ns=(edge - 6_000) * 1000 + 999,
+          gend_ns=(edge + 9_000) * 1000 + 999, late=1)
+        E(edge, 'MGPU', 200, serial=200 + f, kstart_ns=0, kend_ns=0, gstart_ns=0, gend_ns=0, late=2)
         E(edge + 500, 'LLAND', 200, serial=f)
         E(a + 70_000, 'MCOMMIT', 200, serial=f, cause=1, pending_labels=2, submission_id=f * 10)
         # RenderJob park / resume
