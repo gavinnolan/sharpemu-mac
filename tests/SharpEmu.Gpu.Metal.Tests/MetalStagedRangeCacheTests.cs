@@ -195,6 +195,24 @@ public sealed class MetalStagedRangeCacheTests
     }
 
     [Fact]
+    public void EveryLiveEntryHoldsExactlyOneWatchAndAFaultOnADirtyOneReleasesItWithoutStalingIt()
+    {
+        var backend = new FakeBackend();
+        var cache = Cache(backend);
+        cache.Acquire(Range, Size, written: false, 1, 0, out _);
+        cache.Acquire(Range + 8 * Mib, Size, written: true, 1, 0, out var dirty);
+        dirty!.Dirty = true;
+        Assert.Equal((2, 2, 1), cache.Gauges());
+        Assert.Equal(2, backend.Watches.Count);
+
+        // The store has to be able to land, so the watch goes; the stores keep the entry.
+        Assert.True(cache.OnCpuWrite(Range + 8 * Mib, 8));
+        Assert.Equal((2, 1, 1), cache.Gauges());
+        Assert.Equal(0, dirty.Stale);
+        Assert.Single(backend.Watches);
+    }
+
+    [Fact]
     public void AReadOnlyEntryIsRestagedBeforeAWrittenBindingUsesIt()
     {
         var cache = Cache(new FakeBackend());
