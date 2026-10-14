@@ -13,10 +13,9 @@ public sealed class MslSampleHelperCollisionTests(ITestOutputHelper output)
     [InlineData("ImageSampleL", 9u, "level")]
     [InlineData("ImageSampleD", 9u, "gradient2d")]
     [InlineData("ImageSampleD", 10u, "gradient3d")]
-    public void ProductionSampleModifiersUseMetalNamespaceDespiteActualBufferBiasLocal(string opcode, uint type, string helper)
+    public void ProductionSampleModifiersUseMetalNamespaceDespiteAHelperNamedLocal(string opcode, uint type, string helper)
     {
         var shader = Gen5ImageFixtures.CompileOrThrow(opcode, type, stage: ShaderStage.Pixel);
-        Assert.Contains("uint bias[", shader.Source); // The actual emitted collision.
         Assert.Contains("metal::" + helper + "(", shader.Source);
         Assert.DoesNotContain(", " + helper + "(", shader.Source);
     }
@@ -29,11 +28,11 @@ public sealed class MslSampleHelperCollisionTests(ITestOutputHelper output)
     public void ActualTranslatedFragmentSamplingCompilesWithCollidingLocalHelperNames(string opcode, uint type)
     {
         var shader = Gen5ImageFixtures.CompileOrThrow(opcode, type, stage: ShaderStage.Pixel);
-        Assert.Contains("uint bias[", shader.Source);
-        // Bias is a real production local. Add the other same-scope names to
-        // qualify namespace lookup independently of future emitter naming.
-        var source = shader.Source.Replace("    uint bias[",
-            "    uint level[1] = {}; uint gradient2d[1] = {}; uint gradient3d[1] = {};\n    uint bias[", StringComparison.Ordinal);
+        // The translator no longer declares a bias local (the Metal host has no byte
+        // offsets), so add every sample-modifier name as a same-scope local to qualify
+        // namespace lookup independently of emitter naming.
+        var source = shader.Source.Replace("    Gen5PsOut sharpemu_out = {};\n",
+            "    Gen5PsOut sharpemu_out = {};\n    uint bias[1] = {}; uint level[1] = {}; uint gradient2d[1] = {}; uint gradient3d[1] = {};\n", StringComparison.Ordinal);
         Assert.NotEqual(shader.Source, source);
         if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") != "1")
         {
@@ -46,7 +45,7 @@ public sealed class MslSampleHelperCollisionTests(ITestOutputHelper output)
         {
             Assert.True(MetalNative.TryCompileLibrary(source, out library, out var error), error + "\n" + source);
             Assert.NotEqual((nint)0, library);
-            output.WriteLine($"Actual runtime Metal fragment compiler accepted translated {opcode} type={type}, production bias array and adversarial local level/gradient names; qualified sample modifiers.");
+            output.WriteLine($"Actual runtime Metal fragment compiler accepted translated {opcode} type={type}, adversarial local bias, level and gradient level/gradient names; qualified sample modifiers.");
         }
         finally { if (library != 0) MetalNative.ReleaseCollisionLibrary(library); }
     }

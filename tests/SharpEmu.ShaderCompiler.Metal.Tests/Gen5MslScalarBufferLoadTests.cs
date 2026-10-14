@@ -37,8 +37,9 @@ public sealed class Gen5MslScalarBufferLoadTests
     {
         var source = Compile(destination: 12, dynamicOffsetRegister: 20);
         Assert.Matches(@"uint t\d+ = s20;", source);
-        Assert.Contains("+ 0u) + bias[0])", source, StringComparison.Ordinal);
-        Assert.Contains("+ 4u) + bias[0])", source, StringComparison.Ordinal);
+        Assert.Contains("+ 0u)", source, StringComparison.Ordinal);
+        Assert.Contains("+ 4u)", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("bias[", source, StringComparison.Ordinal);
     }
 
     private static string Compile(uint destination, uint dynamicOffsetRegister)
