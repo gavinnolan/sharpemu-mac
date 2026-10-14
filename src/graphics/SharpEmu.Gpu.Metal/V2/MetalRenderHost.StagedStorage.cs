@@ -98,9 +98,9 @@ internal sealed partial class MetalRenderHost
         var staged = StagedStorage;
         if (hit)
         {
-            if (MetalStagedRangeCache.Verify)
+            if (MetalStagedRangeCache.VerifyMode != MetalStagedRangeCache.VerifyKind.Off)
             {
-                VerifyStagedHit(entry);
+                VerifyStagedHit(cache, entry);
             }
 
             if (written)
@@ -141,22 +141,28 @@ internal sealed partial class MetalRenderHost
         }
     }
 
-    // SHARPEMU_METAL_V2_STAGED_CACHE_VERIFY=1: a hit is compared with what guest memory holds now.
-    private unsafe void VerifyStagedHit(MetalStagedRangeCache.Entry entry)
+    // SHARPEMU_METAL_V2_STAGED_CACHE_VERIFY=1 compares a hit with what guest memory holds now;
+    // =sample does so for a slice of one hit in 64 of each entry.
+    private unsafe void VerifyStagedHit(MetalStagedRangeCache cache, MetalStagedRangeCache.Entry entry)
     {
-        if (entry.Dirty || (entry.Gathered && entry.StagedSerial > CompletedSerial) ||
+        var sample = MetalStagedRangeCache.VerifyMode == MetalStagedRangeCache.VerifyKind.Sample;
+        entry.HitCount++;
+        if ((sample && entry.HitCount % MetalStagedRangeCache.SampleEvery != 0) ||
+            entry.Dirty || (entry.Gathered && entry.StagedSerial > CompletedSerial) ||
             _gpuWrites.PendingSerial(entry.Address, entry.Size, CompletedSerial) != 0)
         {
             return;
         }
 
-        var fresh = new byte[checked((int)entry.Size)];
-        _guestMemory.ReadForStaging(entry.Address, fresh);
-        var cached = new ReadOnlySpan<byte>((void*)entry.StagingBuffer!.Contents, fresh.Length);
-        if (!cached.SequenceEqual(fresh))
+        var cached = new ReadOnlySpan<byte>((void*)entry.StagingBuffer!.Contents, checked((int)entry.Size));
+        var address = entry.Address;
+        var offset = MetalStagedRangeCache.FirstMismatch(
+            cached, (at, destination) => _guestMemory.ReadForStaging(address + at, destination), sample, entry.HitCount);
+        cache.NoteVerify(offset >= 0);
+        if (offset >= 0)
         {
             Console.Error.WriteLine(
-                $"[METAL-V2][WARN][STAGED-VERIFY] mismatch addr=0x{entry.Address:X16} size=0x{entry.Size:X}");
+                $"[METAL-V2][WARN][STAGED-VERIFY] mismatch addr=0x{entry.Address:X16} size=0x{entry.Size:X} off=0x{offset:X}");
         }
     }
 

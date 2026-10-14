@@ -212,6 +212,53 @@ public sealed class MetalStagedRangeCacheTests
         Assert.Single(backend.Watches);
     }
 
+    private static long Sampled(byte[] cached, byte[] guest, bool sample, uint seed) =>
+        MetalStagedRangeCache.FirstMismatch(
+            cached, (offset, destination) => guest.AsSpan((int)offset, destination.Length).CopyTo(destination),
+            sample, seed);
+
+    [Fact]
+    public void ASampleSeesAChangeInEitherEdgeAndReportsTheFirstOffset()
+    {
+        var cached = new byte[2 * Mib];
+        Assert.Equal(-1, Sampled(cached, (byte[])cached.Clone(), sample: true, seed: 1));
+
+        var firstEdge = (byte[])cached.Clone();
+        firstEdge[100] = 1;
+        Assert.Equal(100, Sampled(cached, firstEdge, sample: true, seed: 1));
+
+        var lastEdge = (byte[])cached.Clone();
+        lastEdge[^5] = 1;
+        lastEdge[^1000] = 1;
+        Assert.Equal(cached.Length - 1000, Sampled(cached, lastEdge, sample: true, seed: 1));
+    }
+
+    [Fact]
+    public void ASampleOfAMiddleChangeFindsItOnlyWhenAChosenPageHoldsIt()
+    {
+        var cached = new byte[2 * Mib];
+        var found = 0;
+        for (uint seed = 1; seed <= 64; seed++)
+        {
+            var guest = (byte[])cached.Clone();
+            guest[Mib] = 1;
+            var offset = Sampled(cached, guest, sample: true, seed);
+            Assert.True(offset == -1 || offset == (long)Mib);
+            found += offset >= 0 ? 1 : 0;
+        }
+
+        // Four 4 KB pages of 512 slots: some seeds hit, most do not.
+        Assert.InRange(found, 0, 32);
+        Assert.Equal(Mib, (ulong)Sampled(cached, MiddleChanged(cached), sample: false, seed: 1));
+    }
+
+    private static byte[] MiddleChanged(byte[] cached)
+    {
+        var guest = (byte[])cached.Clone();
+        guest[Mib] = 1;
+        return guest;
+    }
+
     [Fact]
     public void AReadOnlyEntryIsRestagedBeforeAWrittenBindingUsesIt()
     {
