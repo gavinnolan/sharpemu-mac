@@ -50,6 +50,7 @@ internal sealed partial class MetalRenderHost
         public long LoadBytes;
         public long StoreBytes;
         public int Draws;
+        public ulong Groups;
         public Dictionary<string, int>? Shaders;
         public string End = string.Empty;
         public List<string>? After;
@@ -349,6 +350,15 @@ internal sealed partial class MetalRenderHost
         record.Shaders[key] = record.Shaders.TryGetValue(key, out var count) ? count + 1 : 1;
     }
 
+    /// <summary>Mesh threadgroups one draw launched, the work a mesh-bound pass scales with.</summary>
+    private void PassProfileNoteGroups(ulong groups)
+    {
+        if (_ppOpen is not null)
+        {
+            _ppOpen.Groups += groups;
+        }
+    }
+
     /// <summary>Why the open encoder ended, when something outside the draw stream ended it.</summary>
     private void PassProfileNoteEnd(string cause)
     {
@@ -504,7 +514,7 @@ internal sealed partial class MetalRenderHost
             lines.Append(string.Create(
                 culture,
                 $"[METAL-V2][PASS-PROF] f={submission.Frame} s={serial} i={record.Index} k={record.Kind} " +
-                $"us={microseconds:F0} gap_us={gap:F0} {stages}draws={record.Draws} " +
+                $"us={microseconds:F0} gap_us={gap:F0} {stages}draws={record.Draws} tg={record.Groups} " +
                 $"ld_mb={record.LoadBytes / 1048576.0:F1} st_mb={record.StoreBytes / 1048576.0:F1} " +
                 $"end={(record.End.Length == 0 ? "?" : record.End)} a=[{record.Shape}] sh=[{shaders}] " +
                 $"after=[{after}] n_after={record.After?.Count ?? 0}")).Append('\n');
