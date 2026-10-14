@@ -175,6 +175,7 @@ internal sealed class MetalMeshletCache
         public required uint Count;
         public required uint VertexBase;
         public required uint PrimitiveBase;
+        public ulong ValidatedSerial;
         public ulong LastUsedSerial;
         public ulong LastUsedTick;
     }
@@ -195,6 +196,7 @@ internal sealed class MetalMeshletCache
     private long _buildTicks;
     private long _hashTicks;
     private long _builds;
+    private long _validationsSkipped;
 
     public MetalMeshletCache(MetalGuestMemory guestMemory, ICpuMemory memory)
     {
@@ -225,6 +227,19 @@ internal sealed class MetalMeshletCache
         var rangeBytes = indexCount * elementBytes;
         var key = new Key(rangeAddress, indexCount, index32, maxVertices, maxPrimitives);
 
+        // An entry already validated under this submission is not hashed again: the guest
+        // does not rewrite an index range between the draws one command buffer records, and
+        // hashing the bytes on every use was the cost that mattered (tens of milliseconds a
+        // frame on the worker). Ranges the GPU writes never get here.
+        if (_entries.TryGetValue(key, out var validated) && validated.ValidatedSerial == submissionSerial)
+        {
+            Touch(validated, submissionSerial);
+            meshlets = new Meshlets(validated.Buffer, validated.Count, validated.VertexBase, validated.PrimitiveBase);
+            _draws++;
+            _validationsSkipped++;
+            return true;
+        }
+
         var hashStarted = System.Diagnostics.Stopwatch.GetTimestamp();
         if (!TryHash(rangeAddress, rangeBytes, out var hash))
         {
@@ -238,6 +253,7 @@ internal sealed class MetalMeshletCache
         {
             if (entry.Hash == hash)
             {
+                entry.ValidatedSerial = submissionSerial;
                 Touch(entry, submissionSerial);
                 meshlets = new Meshlets(entry.Buffer, entry.Count, entry.VertexBase, entry.PrimitiveBase);
                 _draws++;
@@ -292,6 +308,7 @@ internal sealed class MetalMeshletCache
             Count = built.MeshletCount,
             VertexBase = built.VertexBase,
             PrimitiveBase = built.PrimitiveBase,
+            ValidatedSerial = submissionSerial,
         };
         _entries[key] = entry;
         _bytes += size;
@@ -390,12 +407,13 @@ internal sealed class MetalMeshletCache
         var culture = System.Globalization.CultureInfo.InvariantCulture;
         var frequency = (double)System.Diagnostics.Stopwatch.Frequency;
         var text =
-            $"meshlet_draws={_draws} meshlet_builds={_builds} meshlet_mb={_bytes / (1024 * 1024)} " +
+            $"meshlet_draws={_draws} meshlet_validations_skipped={_validationsSkipped} meshlet_builds={_builds} meshlet_mb={_bytes / (1024 * 1024)} " +
             $"meshlet_build_ms={(_buildTicks * 1000.0 / frequency).ToString("F1", culture)} " +
             $"meshlet_hash_ms={(_hashTicks * 1000.0 / frequency).ToString("F1", culture)} " +
             $"meshlet_fallbacks={string.Join('/', _fallbacks)}";
         _draws = 0;
         _builds = 0;
+        _validationsSkipped = 0;
         _buildTicks = 0;
         _hashTicks = 0;
         Array.Clear(_fallbacks);
