@@ -164,6 +164,9 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     public void RecordEndOfPipe(in EndOfPipeWrite write)
     {
         _endOfPipeRecords++;
+        // Recorded ahead of the label, so its bytes land before the guest is told the
+        // work is done.
+        _imageCache.PublishLinearGpuWrites();
         var label = write;
         var eventId = write.EventId;
         var contextId = write.ContextId;

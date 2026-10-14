@@ -413,6 +413,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             RefreshFromGuest(image);
             image.Uses.Storage = true;
             image.MarkGpuModified();
+            NoteLinearGpuWrite(image);
             image.GpuWriteSerial = _owner.CurrentSerial;
             image.NoteUse(image.GpuWriteSerial);
         }
@@ -556,6 +557,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         image.MarkGpuModified();
+        NoteLinearGpuWrite(image);
         image.GpuWriteSerial = _owner.CurrentSerial;
         image.NoteUse(image.GpuWriteSerial);
         return image.GetOrCreateView(request.View);
@@ -603,6 +605,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         if (writes)
         {
             image.MarkGpuModified(depthPlaneChanged: !stencilOnly);
+            NoteLinearGpuWrite(image);
             image.GpuWriteSerial = _owner.CurrentSerial;
         }
 
@@ -624,6 +627,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         WatchImage(imageIdentifier);
         image.MarkGpuModified();
+        NoteLinearGpuWrite(image);
         image.GpuWriteSerial = _owner.CurrentSerial;
     }
 
@@ -1683,6 +1687,42 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         $"extent={description.Extent.Width}x{description.Extent.Height}x{description.Extent.Depth} " +
         $"levels={description.Resources.Levels} layers={description.TransferLayers} " +
         $"tile={description.TileMode} samples={description.Samples} bytes=0x{description.Data.Size:X}";
+
+    // Linear images the GPU wrote since the last end-of-pipe write. Linear is the layout a
+    // guest CPU reads in place - a readback staging surface - so these are the GPU writes
+    // the guest can read without asking the GPU for them.
+    private readonly HashSet<MetalCachedImage> _unpublishedLinearWrites = new();
+
+    private void NoteLinearGpuWrite(MetalCachedImage image)
+    {
+        if (image.Description.TileMode == GuestTileMode.Linear)
+        {
+            _unpublishedLinearWrites.Add(image);
+        }
+    }
+
+    /// <summary>
+    /// Writes back every linear image the GPU wrote since the last call. An end-of-pipe
+    /// write tells the guest that the work before it is done, and a CPU that then reads a
+    /// linear surface that work wrote reads guest memory, which a cached texture reaches
+    /// only through a writeback. SILENT HILL: The Short Message reads its exposure this
+    /// way; without it the pre-exposure stays 1 and the title backdrop renders black.
+    /// </summary>
+    public void PublishLinearGpuWrites()
+    {
+        using var held = _lock.Hold();
+        if (_unpublishedLinearWrites.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var image in _unpublishedLinearWrites)
+        {
+            WriteBackToGuest(image, MetalWritebackCause.HostRead);
+        }
+
+        _unpublishedLinearWrites.Clear();
+    }
 
     /// <summary>Writes every GPU-modified image back, then lets the CPU read guest memory.</summary>
     public void FlushAllGpuWrites()

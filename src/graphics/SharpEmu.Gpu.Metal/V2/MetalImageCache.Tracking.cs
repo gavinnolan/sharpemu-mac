@@ -1132,6 +1132,7 @@ internal sealed partial class MetalImageCache
         _owner.ClearTextureColor(texture, image.Shape.PixelFormat, in clearRange, width, height, in clear);
         image.RefreshComplete();
         image.MarkGpuModified();
+        NoteLinearGpuWrite(image);
         image.GpuWriteSerial = _owner.CurrentSerial;
     }
 
@@ -1212,6 +1213,7 @@ internal sealed partial class MetalImageCache
 
         image.RefreshComplete();
         image.MarkGpuModified();
+        NoteLinearGpuWrite(image);
         image.GpuWriteSerial = _owner.CurrentSerial;
         return true;
     }
