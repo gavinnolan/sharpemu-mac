@@ -100,31 +100,48 @@ internal sealed class MetalCachedImage : IDisposable
     /// </summary>
     public long ContentVersion { get; private set; }
 
-    public void NoteContentChanged() => ContentVersion = Interlocked.Increment(ref _contentCounter);
+    public void NoteContentChanged()
+    {
+        ContentVersion = Interlocked.Increment(ref _contentCounter);
+        DepthPlaneVersion = ContentVersion;
+    }
+
+    /// <summary>
+    /// The version of the depth plane alone: every change moves it with
+    /// <see cref="ContentVersion"/> except a GPU write that can only reach the stencil plane.
+    /// </summary>
+    public long DepthPlaneVersion { get; private set; }
+
+    // Only the stencil plane is about to change; what the depth plane holds stays as it is.
+    private void NoteStencilChanged() => ContentVersion = Interlocked.Increment(ref _contentCounter);
 
     // What the last device publication into this image copied: the source texture and
-    // its version, and this image's own version once the copy landed. While all three
-    // still hold, this texture already holds what a new copy would put there.
+    // the version of its depth plane, and this image's own version once the copy landed.
+    // While all three still hold, this texture already holds what a new copy would put
+    // there. The device publication copies a depth plane into a colour alias and nothing
+    // else (MetalImageTransfer.TryEncodeTextureToTexture), so the source's stencil plane
+    // is no part of what the alias holds.
     private nint _publishedSourceTexture;
     private long _publishedSourceVersion;
     private long _publishedOwnVersion;
 
-    /// <summary>Records that this image now holds a device copy of the source as it is.</summary>
+    /// <summary>Records that this image now holds a device copy of the source's depth plane as it is.</summary>
     public void NotePublishedFrom(MetalCachedImage source)
     {
         _publishedSourceTexture = source.Texture;
-        _publishedSourceVersion = source.ContentVersion;
+        _publishedSourceVersion = source.DepthPlaneVersion;
         _publishedOwnVersion = ContentVersion;
     }
 
     /// <summary>
     /// True when the last device publication into this image was from this source, and
-    /// neither texture has changed since: a copy now would rewrite the same texels.
+    /// neither this texture nor the source's depth plane has changed since: a copy now
+    /// would rewrite the same texels.
     /// </summary>
     public bool StillHoldsPublicationFrom(MetalCachedImage source) =>
         !_cpuDirty && Texture != 0 && source.Texture != 0 &&
         _publishedSourceTexture == source.Texture &&
-        _publishedSourceVersion == source.ContentVersion &&
+        _publishedSourceVersion == source.DepthPlaneVersion &&
         _publishedOwnVersion == ContentVersion;
 
     public ImageDescription Description;
@@ -263,9 +280,20 @@ internal sealed class MetalCachedImage : IDisposable
         }
     }
 
-    public void MarkGpuModified()
+    /// <param name="depthPlaneChanged">
+    /// False for a depth-stencil target the GPU writes only the stencil of.
+    /// </param>
+    public void MarkGpuModified(bool depthPlaneChanged = true)
     {
-        NoteContentChanged();
+        if (depthPlaneChanged)
+        {
+            NoteContentChanged();
+        }
+        else
+        {
+            NoteStencilChanged();
+        }
+
         _gpuModified = true;
         _cpuDirty = false;
         DirtyStart = 0;
