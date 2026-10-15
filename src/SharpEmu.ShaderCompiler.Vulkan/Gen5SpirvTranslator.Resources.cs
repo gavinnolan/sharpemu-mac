@@ -44,7 +44,7 @@ public static partial class Gen5SpirvTranslator
                 request.PixelOutputs.Any(output => output.HostLocation != 0 || output.Kind != Gen5PixelOutputKind.Float) ||
                 !request.PixelOutputs.Select(output => output.BlendSourceIndex).Order().SequenceEqual(new uint[] { 0, 1 })))
             {
-                error = "dual-source pixel outputs require indices zero and one at host location zero";
+                error = "dual-source pixel outputs need one target and its second source, at host location zero with indices zero and one";
                 return false;
             }
             if (request.PixelOutputs.Count > 8 || request.PixelOutputs.Any(output => output.GuestSlot > 7))
@@ -55,7 +55,7 @@ public static partial class Gen5SpirvTranslator
 
             // A dual-source second output shares location 0 with index 1; every other output
             // has index 0 and its own location.
-            var targets = request.PixelOutputs.Count(output => output.Index == 0);
+            var targets = request.PixelOutputs.Count(output => output.BlendSourceIndex == 0);
             if (request.PixelOutputs.Select(output => output.GuestSlot).Distinct().Count() != request.PixelOutputs.Count ||
                 request.PixelOutputs.Select(output => (output.HostLocation, output.BlendSourceIndex)).Distinct().Count() != request.PixelOutputs.Count)
             {
@@ -63,8 +63,8 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
-            if (request.PixelOutputs.Any(output => output.HostLocation >= targets || output.Index > 1 ||
-                    (output.Index == 1 && (output.HostLocation != 0 || targets != 1))))
+            if (request.PixelOutputs.Any(output => output.HostLocation >= targets || output.BlendSourceIndex > 1 ||
+                    (output.BlendSourceIndex == 1 && (output.HostLocation != 0 || targets != 1))))
             {
                 error = "pixel output host locations must be dense in the 0..N-1 range, with a second source only at location 0 of one target";
                 return false;

@@ -135,6 +135,8 @@ public readonly record struct Gen5PixelOutputBinding(
 
     private readonly uint? _exportTarget;
 
+    // The fragment output index: 1 is the second source of dual-source blending (the MRT1
+    // export), which shares host location 0 with the first and is not a render target.
     public uint BlendSourceIndex { get; init; }
     // The blend reads source alpha but the component mapping moves the shader's alpha out of
     // the host alpha channel: the program also writes that alpha to the dual-source output
@@ -149,10 +151,6 @@ public readonly record struct Gen5PixelOutputBinding(
         get => _exportTarget ?? GuestSlot;
         init => _exportTarget = value;
     }
-
-    // The fragment output index: 1 is the second source of dual-source blending, which
-    // shares its location with the first and is not a render target.
-    public uint Index { get; init; }
 }
 
 public readonly record struct Gen5ComputeSystemRegisters(

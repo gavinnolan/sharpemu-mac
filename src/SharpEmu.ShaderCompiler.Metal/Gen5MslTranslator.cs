@@ -59,7 +59,7 @@ public static partial class Gen5MslTranslator
             outputs.Any(output => output.HostLocation != 0 || output.Kind != Gen5PixelOutputKind.Float) ||
             !outputs.Select(output => output.BlendSourceIndex).Order().SequenceEqual(new uint[] { 0, 1 })))
         {
-            error = "dual-source pixel outputs require indices zero and one at host location zero";
+            error = "dual-source pixel outputs need one target and its second source, at host location zero with indices zero and one";
             return false;
         }
         if (outputs.Count > 8)
