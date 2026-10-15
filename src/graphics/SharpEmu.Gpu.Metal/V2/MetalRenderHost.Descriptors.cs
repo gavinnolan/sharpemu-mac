@@ -142,6 +142,12 @@ internal sealed partial class MetalRenderHost
         else
         {
             CommitIfTransientOverBudget();
+            // Not inside a render pass: ending one stores and reloads every attachment,
+            // and the pass reaches a boundary of its own soon enough.
+            if (_renderEncoder == 0)
+            {
+                CommitCoalescedIfOverdue();
+            }
         }
 
         _ = EnsureCommandBuffer();

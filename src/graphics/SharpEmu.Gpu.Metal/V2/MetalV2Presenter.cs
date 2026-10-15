@@ -339,6 +339,9 @@ internal static partial class MetalV2Presenter
                 host.ReportCounters();
                 if (!host.CommandStream.HasUnblockedPending && !_relay.HasPendingCommands)
                 {
+                    // A buffer a coalesced Stream flush left open goes out before the park:
+                    // nothing else would commit it until the guest submits again.
+                    host.CommitCoalescedFlush();
                     host.PollGpuCompletions();
                     host.KeepQueueWarmIfIdle();
                     var idleStarted = System.Diagnostics.Stopwatch.GetTimestamp();
