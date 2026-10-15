@@ -983,6 +983,20 @@ internal sealed partial class MetalRenderHost
         return true;
     }
 
+    private Func<ulong, bool>? _dataWritePending;
+
+    // A data-only table word the GPU may still be writing: the shader is re-planned to load
+    // it on the device (DeviceDataLoads). Asked without waiting. A pending store with no
+    // evaluated range covers every address, so it names no word in particular and teaches
+    // nothing; only a recorded range that reaches this dword does.
+    public Func<ulong, bool>? DataWritePending =>
+        MetalV2Diagnostics.DataLoadsOnDevice ? _dataWritePending ??= IsDataWordPending : null;
+
+    private bool IsDataWordPending(ulong address) =>
+        _gpuWrites.MayCover(address, sizeof(uint)) &&
+        _gpuWrites.PendingSerial(address, sizeof(uint), CompletedSerial) != 0 &&
+        _gpuWrites.LastMatch.Origin != MetalGpuWriteOrigin.Unbounded;
+
     // Resource tables are read straight from the backing, so a WRITE_DATA that patched one
     // and has yet to land would otherwise be read as the table it replaced.
     private void ApplyPendingCommandProcessorBytes(ulong address, Span<byte> destination)

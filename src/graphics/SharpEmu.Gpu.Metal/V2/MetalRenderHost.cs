@@ -900,7 +900,10 @@ internal sealed partial class MetalRenderHost :
             $"gpu_exec_ms={(gpuEnd - gpuStart) * 1000.0:F2} gpu_end_age_ms={(now - gpuEnd) * 1000.0:F1} " +
             $"gpu_start_age_ms={(now - gpuStart) * 1000.0:F1} " +
             $"kernel_ms={(kernelEnd - kernelStart) * 1000.0:F2} " +
-            $"kernel_end_age_ms={(now - kernelEnd) * 1000.0:F1} last={LastWorkDescription}");
+            $"kernel_end_age_ms={(now - kernelEnd) * 1000.0:F1} last={LastWorkDescription}" +
+            (MetalV2Diagnostics.WaitTrace
+                ? $" reader=0x{SharpEmu.ShaderCompiler.Resources.MaterializingShader.Hash:X16}"
+                : string.Empty));
     }
 
     /// <summary>Counts the time the worker spent with nothing runnable.</summary>
@@ -1942,6 +1945,8 @@ internal sealed partial class MetalRenderHost :
             .Append(" keep_warm=").Append(Interlocked.Exchange(ref _keepWarmSubmissions, 0))
             .Append(" residency_skipped=").Append(TakeSkippedResidencyCalls())
             .Append(" device_address_writes=").Append(DeviceAddressWrites)
+            .Append(" data_slots_device=").Append(SharpEmu.ShaderCompiler.Resources.DeviceDataLoads.LearnedSlots)
+            .Append(" data_replans=").Append(SharpEmu.ShaderCompiler.Resources.DeviceDataLoads.Replans)
             .Append(" resident=").Append(_guestMemory.ResidentBuffers.Length)
             .Append(" windows_touched=").Append(System.Numerics.BitOperations.PopCount(_guestMemory.TouchedWindows));
         Console.Error.WriteLine($"[METAL-V2][WAITS]{reasons}");

@@ -378,6 +378,34 @@ public sealed class RuntimeValueEvaluator
 
     internal ResourceRuntimeInputs Inputs => _inputs;
 
+    // Before a data-only slot is read: when the GPU may still be writing its dword, the
+    // shader learns it as a device load. This read still waits, the next plan does not.
+    private void LearnPendingDataSlot(int slot, int[] memoryIndices)
+    {
+        var value = _plan.TableReads[slot].Value;
+        if (value.MemoryIndex >= _plan.Memory.Count || value.Operands.Length < 2)
+        {
+            return;
+        }
+
+        var handle = value.Operands[0];
+        if (handle.Operands.Length < 2 ||
+            !EvaluateWide(handle.Operands[0], out var low) ||
+            !EvaluateWide(handle.Operands[1], out var high) ||
+            !Operand(value, 1, out var offset))
+        {
+            return;
+        }
+
+        var baseAddress = ((high << 32) | (uint)low) & AddressMask;
+        if (ResolveRawAddress(value.Kind, baseAddress, high, 0, (int)_plan.Memory[value.MemoryIndex].Offset, (uint)offset,
+                out var address) == RawAddress.Read &&
+            _inputs.DataWritePending!(address))
+        {
+            DeviceDataLoads.Learn(_plan.Hash, memoryIndices);
+        }
+    }
+
     private static bool AddSignedAddress(ulong baseAddress, long offset, out ulong result)
     {
         result = 0;
@@ -507,6 +535,12 @@ public sealed class RuntimeValueEvaluator
                     var read = plan.TableReads[index];
                     var clean = read.FlatOffset < cleanFlatSlots.Count && cleanFlatSlots[(int)read.FlatOffset] != 0;
                     var selected = clean ? cleanEvaluator : evaluator;
+                    if (!clean && inputs.DataWritePending is not null &&
+                        plan.DeviceDataSlots.TryGetValue((int)read.FlatOffset, out var memoryIndices))
+                    {
+                        evaluator.LearnPendingDataSlot((int)read.FlatOffset, memoryIndices);
+                    }
+
                     if (read.FlatOffset >= plan.TableReads.Count || !selected.EvaluateTableRead(index, out var word))
                     {
                         return false;

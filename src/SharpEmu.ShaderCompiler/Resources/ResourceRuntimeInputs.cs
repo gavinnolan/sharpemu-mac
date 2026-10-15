@@ -26,6 +26,11 @@ public sealed class ResourceRuntimeInputs
 
     public bool ReadsClean { get; init; }
 
+    // Whether recorded GPU work may still write the dword at this address, asked without
+    // waiting. A data-only table word found pending is learned as a device load
+    // (DeviceDataLoads); null leaves every data word flattened.
+    public Func<ulong, bool>? DataWritePending { get; init; }
+
     public ResourceRuntimeInputs WithReader(GuestWordReader? reader) => new()
     {
         UserData = UserData,
@@ -36,6 +41,7 @@ public sealed class ResourceRuntimeInputs
         TablePhase = TablePhase,
         ReadResidentMemory = ReadResidentMemory,
         ReadsClean = ReadsClean || ReferenceEquals(reader, ReadCleanMemory),
+        DataWritePending = DataWritePending,
     };
 }
 
