@@ -3,6 +3,7 @@
 
 using System.Runtime.InteropServices;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.VideoOut;
@@ -212,32 +213,54 @@ internal sealed class ShaderProgramCache
             return program;
         }
 
-        var recording = _host.ShaderPrewarm is not null ? new RecordingCpuMemory(_context.Memory) : null;
+        var recording = _host.ShaderPrewarm is not null || ShaderCorpus.Enabled ? new RecordingCpuMemory(_context.Memory) : null;
         var context = recording is null ? _context : new CpuContext(recording, _context.TargetGeneration);
         if (!Gen5ShaderTranslator.TryDecodeProgram(context, source.Address, out program, out var error))
         {
+            if (recording is not null && ShaderCorpus.Enabled)
+            {
+                ShaderCorpus.RecordDecodeFailure(source, CaptureCode(source, recording), error, CorpusHostFlags(null));
+            }
+
             throw GpuFatal.Fatal($"The shader program cannot be decoded: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} error={error}.");
         }
 
         _decoded.Add(key, program);
         if (recording is not null)
         {
-            _codeCaptures[key] = new ShaderCodeCapture
-            {
-                Hash = source.Hash,
-                CodeSize = source.CodeSize,
-                Address = source.Address,
-                Generation = _context.TargetGeneration,
-                Fused = Gen5ShaderTranslator.TryGetFusedProgramParts(
-                    _context, source.Address, out var entryHeader, out var continuation, out var continuationHeader)
-                    ? new FusedCodeParts(entryHeader, continuation, continuationHeader)
-                    : null,
-                Ranges = recording.TakeRanges(),
-            };
+            _codeCaptures[key] = CaptureCode(source, recording);
         }
 
         return program;
     }
+
+    private ShaderCodeCapture CaptureCode(ShaderSource source, RecordingCpuMemory recording) =>
+        new()
+        {
+            Hash = source.Hash,
+            CodeSize = source.CodeSize,
+            Address = source.Address,
+            Generation = _context.TargetGeneration,
+            Fused = Gen5ShaderTranslator.TryGetFusedProgramParts(
+                _context, source.Address, out var entryHeader, out var continuation, out var continuationHeader)
+                ? new FusedCodeParts(entryHeader, continuation, continuationHeader)
+                : null,
+            Ranges = recording.TakeRanges(),
+        };
+
+    // The host answers the request builder reads, kept with a corpus record so a replay builds the same request.
+    private ShaderCorpusHostFlags CorpusHostFlags(StageCompileOptions? options) => new()
+    {
+        GraphicsSubgroupOperations = _host.GraphicsSubgroupOperationsEnabled,
+        SharedInt64Atomics = _host.SharedInt64AtomicsEnabled,
+        SignedZeroInfNanPreserve = _host.ShaderSignedZeroInfNanPreserveFloat32Supported,
+        ClipDistance = _host.ClipDistanceEnabled,
+        PerVertexPixelInputs = _host.PerVertexPixelInputsSupported,
+        MipStatisticsSubgroupReduction = _host.MipStatisticsSubgroupReduction,
+        ExecGuardElision = _host.ExecGuardElisionEnabled,
+        ComputeWave64SubgroupNative = _host.ComputeWave64SubgroupNative,
+        ComputeRunsOn32LaneSubgroups = options?.ComputeInfo is { } compute && _host.ComputeRunsOn32LaneSubgroups(compute),
+    };
 
     // What the code bytes held when they failed, and any command-processor write into
     // them: code that is not code yet was read before whatever moves it into place.
@@ -481,6 +504,11 @@ internal sealed class ShaderProgramCache
     private ProgramSourceEntry CreateEntry(ShaderSource source, StageCompileOptions options)
     {
         var program = Decode(source);
+        if (ShaderCorpus.Enabled && _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var corpusCode))
+        {
+            ShaderCorpus.RecordPlan(source, options, corpusCode, CorpusHostFlags(options));
+        }
+
         var dumpPlanning = CompiledShaderDump.ShouldWrite(source.Address, source.Hash);
         if (dumpPlanning) ShaderPlanningDump.WriteInput(source, program);
         EmbeddedVertexFetchPlan? fetch = null;
@@ -653,6 +681,11 @@ internal sealed class ShaderProgramCache
         ProgramKey key,
         bool sourceWasCached)
     {
+        if (ShaderCorpus.Enabled && _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var corpusCode))
+        {
+            ShaderCorpus.RecordCompile(source, options, corpusCode, CorpusHostFlags(options), specialization, pushDataCursor);
+        }
+
         var program = entry.Program;
         var plan = entry.Plan;
         SpecializedResourceInfo resources;
@@ -840,6 +873,83 @@ internal sealed class ShaderProgramCache
             LocalSizeY = Math.Max(info.ThreadsY, 1),
             LocalSizeZ = Math.Max(info.ThreadsZ, 1),
         };
+
+    // Rebuilds the compile request of a corpus record through the same plan, layout and request builders
+    // a live draw uses, over the recorded code bytes instead of guest memory.
+    internal static bool TryBuildCorpusRequest(ShaderCorpusRecord record, out ShaderCompileRequest? request, out string error)
+    {
+        request = null;
+        error = string.Empty;
+        var previousThrowOnFatal = GpuFatal.ThrowOnFatal;
+        GpuFatal.ThrowOnFatal = true;
+        try
+        {
+            var context = record.Code.CreateContext();
+            if (record.Options is not { } options)
+            {
+                return Gen5ShaderTranslator.TryDecodeProgram(context, record.Code.Address, out _, out error);
+            }
+
+            var cache = new ShaderProgramCache(context, null!, new CorpusReplayHost(record.Host));
+            var source = record.CreateSource();
+            var entry = cache.CreateEntry(source, options);
+            if (record.Specialization is not { } specialization)
+            {
+                return true;
+            }
+
+            var resources = ResourceMaterializer.ApplyTo(entry.Plan, specialization);
+            var layout = AllocateLayout(entry.Program, entry.Plan, resources, source.UserDataBase, (uint)source.UserData.Length,
+                record.PushDataCursor, source.Stage == ShaderStage.Compute && options.ComputeInfo!.DispatchThreadDimensions);
+            request = cache.BuildRequest(source, options, entry, resources, layout);
+            return true;
+        }
+        catch (Exception exception) when (exception is ShaderProgramRejectedException or GpuFatal.AbandonedWorkException or ResourcePlanException)
+        {
+            error = exception.Message;
+            return false;
+        }
+        finally
+        {
+            GpuFatal.ThrowOnFatal = previousThrowOnFatal;
+        }
+    }
+
+    // Answers the host queries a request is built from with what the capturing host answered.
+    private sealed class CorpusReplayHost(ShaderCorpusHostFlags flags) : IShaderPipelineHost
+    {
+        public uint MaxPushDescriptors => 0;
+        public bool ComputeWave64Supported => false;
+        public bool ComputeWave64SubgroupNative => flags.ComputeWave64SubgroupNative;
+        public bool ComputeRunsOn32LaneSubgroups(ComputeInputInfo input) => flags.ComputeRunsOn32LaneSubgroups;
+        public bool MipStatisticsSubgroupReduction => flags.MipStatisticsSubgroupReduction;
+        public bool GraphicsSubgroupOperationsEnabled => flags.GraphicsSubgroupOperations;
+        public bool SharedInt64AtomicsEnabled => flags.SharedInt64Atomics;
+        public bool ShaderSignedZeroInfNanPreserveFloat32Supported => flags.SignedZeroInfNanPreserve;
+        public bool ExecGuardElisionEnabled => flags.ExecGuardElision;
+        public bool PerVertexPixelInputsSupported => flags.PerVertexPixelInputs;
+        public bool ClipDistanceEnabled => flags.ClipDistance;
+        public RenderHostLimits Limits => default;
+        public GpuSampleCount NoAttachmentSampleCounts => default;
+
+        public bool TryResolveColorOutput(uint dataFormat, uint numberType, uint componentSwap, out Gen5PixelOutputKind outputKind, out Gen5ColorComponentMapping componentMapping) =>
+            throw new NotSupportedException();
+
+        public bool TryReadGuestWord(ulong address, out uint word) =>
+            throw new NotSupportedException();
+
+        public bool TryReadCleanGuestWord(ulong address, out uint word) =>
+            throw new NotSupportedException();
+
+        public ulong CreateShaderModule(IGuestCompiledShader shader, ShaderStage stage, ulong hash, ulong programId) =>
+            throw new NotSupportedException();
+
+        public PipelineHandle CreateGraphicsPipeline(GraphicsPipelineDescription description) =>
+            throw new NotSupportedException();
+
+        public PipelineHandle CreateComputePipeline(ComputePipelineDescription description) =>
+            throw new NotSupportedException();
+    }
 
     internal static bool TryCompilePrewarm(ComputePrewarmRecord record, ShaderCodeCapture code, IGuestGpuBackend compiler,
         bool sharedInt64Atomics, bool execGuardElision, bool signedZeroInfNanPreserve, out IGuestCompiledShader? compiled,

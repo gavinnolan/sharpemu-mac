@@ -569,7 +569,7 @@ public sealed class ShaderPrewarmList : IDisposable
         return (uint)XxHash3.HashToUInt64(Encoding.UTF8.GetBytes(builder.ToString()));
     }
 
-    private static byte[] SerializeCode(ShaderCodeCapture code)
+    internal static byte[] SerializeCode(ShaderCodeCapture code)
     {
         using var stream = new MemoryStream();
         using var writer = new BinaryWriter(stream);
@@ -597,7 +597,7 @@ public sealed class ShaderPrewarmList : IDisposable
         return stream.ToArray();
     }
 
-    private static ShaderCodeCapture DeserializeCode(byte[] payload)
+    internal static ShaderCodeCapture DeserializeCode(byte[] payload)
     {
         using var reader = new BinaryReader(new MemoryStream(payload));
         var hash = reader.ReadUInt64();
