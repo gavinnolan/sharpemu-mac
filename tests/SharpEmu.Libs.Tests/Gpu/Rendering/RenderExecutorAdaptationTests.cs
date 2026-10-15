@@ -320,20 +320,38 @@ public sealed class RenderExecutorAdaptationTests : IDisposable
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void TargetlessDrawWithImagesAndDeviceAddresses_IsNeverRetained(bool vertexUsesDeviceAddresses)
+    public void TargetlessDrawWithImagesAndDeviceAddressWrites_IsNeverRetained(bool vertexWritesDeviceAddresses)
     {
         _host.RetainTargetlessDraws = true;
         _pipelines.Graphics = Programs(
-            vertexStage: Stage(Program(ShaderStageKind.Vertex, usesDeviceAddresses: vertexUsesDeviceAddresses)),
+            vertexStage: Stage(Program(ShaderStageKind.Vertex,
+                usesDeviceAddresses: vertexWritesDeviceAddresses, writesDeviceAddresses: vertexWritesDeviceAddresses)),
             pixelStage: Stage(Program(ShaderStageKind.Pixel,
                 images: [new ImageResourceInfo(ImageResourceClass.Sampled, false)],
-                usesDeviceAddresses: !vertexUsesDeviceAddresses)));
+                usesDeviceAddresses: !vertexWritesDeviceAddresses, writesDeviceAddresses: !vertexWritesDeviceAddresses)));
 
         _executor.DrawAuto(1, TargetlessBanks(), Auto(3));
 
         Assert.Empty(_host.RetainedDraws);
         Assert.DoesNotContain(_host.Calls, call => call.StartsWith("retain_targetless", StringComparison.Ordinal));
         Assert.Contains(_host.Calls, call => call.StartsWith("draw 3", StringComparison.Ordinal));
+    }
+
+    // Reading through the device-address page table writes nothing, so the draw can wait.
+    [Fact]
+    public void TargetlessDrawWithImagesThatOnlyReadsDeviceAddresses_IsRetained()
+    {
+        _host.RetainTargetlessDraws = true;
+        _pipelines.Graphics = Programs(
+            vertexStage: Stage(Program(ShaderStageKind.Vertex, usesDeviceAddresses: true)),
+            pixelStage: Stage(Program(ShaderStageKind.Pixel,
+                images: [new ImageResourceInfo(ImageResourceClass.Sampled, false)],
+                usesDeviceAddresses: true)));
+
+        _executor.DrawIndexed(9, TargetlessBanks(), Indexed(6));
+
+        Assert.Contains("retain_targetless 9", _host.Calls);
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("draw", StringComparison.Ordinal));
     }
 
     [Fact]

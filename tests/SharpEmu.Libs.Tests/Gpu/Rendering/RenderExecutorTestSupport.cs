@@ -599,7 +599,7 @@ internal static class RenderExecutorFixtures
         return banks;
     }
 
-    public static ShaderProgramInfo Program(ShaderStageKind stage, BufferResourceInfo[]? buffers = null, ImageResourceInfo[]? images = null, uint userDataBase = 0, bool usesDeviceAddresses = false, bool exclusiveOr = false, int vertexOffsetScalar = ShaderProgramInfo.NoScalarRegister, int instanceOffsetScalar = ShaderProgramInfo.NoScalarRegister, uint parameterExportMask = 1) =>
+    public static ShaderProgramInfo Program(ShaderStageKind stage, BufferResourceInfo[]? buffers = null, ImageResourceInfo[]? images = null, uint userDataBase = 0, bool usesDeviceAddresses = false, bool writesDeviceAddresses = false, bool exclusiveOr = false, int vertexOffsetScalar = ShaderProgramInfo.NoScalarRegister, int instanceOffsetScalar = ShaderProgramInfo.NoScalarRegister, uint parameterExportMask = 1) =>
         new()
         {
             Stage = stage,
@@ -609,6 +609,7 @@ internal static class RenderExecutorFixtures
             Buffers = buffers ?? [],
             Images = images ?? [],
             UsesDeviceAddresses = usesDeviceAddresses,
+            WritesDeviceAddresses = writesDeviceAddresses,
             HasBitwiseExclusiveOr = exclusiveOr,
             VertexOffsetScalarRegister = vertexOffsetScalar,
             InstanceOffsetScalarRegister = instanceOffsetScalar,

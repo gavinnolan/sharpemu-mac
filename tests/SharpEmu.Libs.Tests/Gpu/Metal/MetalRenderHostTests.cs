@@ -118,6 +118,7 @@ public sealed partial class MetalRenderHostTests : IDisposable
             UserDataBase = 0,
             UserDataCount = (uint)(userDataRegisters?.Count ?? 0),
             UsesDeviceAddresses = info.UsesDeviceAddresses,
+            WritesDeviceAddresses = info.WritesDeviceAddresses,
             Buffers = info.Buffers.Select(buffer => new BufferResourceInfo(buffer.Read, buffer.Written, buffer.Atomic, buffer.Formatted, buffer.Scalar, buffer.MaxByteExtent, buffer.PackedStride)).ToArray(),
             Images = info.Images.Select(image => new ImageResourceInfo(image.ResourceClass == ImageResourceClass.Storage ? Libs.Gpu.Rendering.ImageResourceClass.Storage : Libs.Gpu.Rendering.ImageResourceClass.Sampled, image.Written)).ToArray(),
             SamplerCount = info.Samplers.Count,
