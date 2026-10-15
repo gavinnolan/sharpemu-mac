@@ -471,7 +471,8 @@ internal static class Gen5ComputeFixtures
         uint localDataShareDwords = 0, uint pushDataStartDword = 0, uint positionExportControl = 0,
         bool supportsClipDistance = true, bool enableGraphicsSubgroupOperations = true,
         ShaderClipSpaceTransform clipSpace = default, bool pixelDepthExportEnable = false,
-        ulong excludedUserDataRegisters = 0, bool ieeeMode = false)
+        ulong excludedUserDataRegisters = 0, bool ieeeMode = false, Gen5ColorExportFormat? pixelDepthExportFormat = null,
+        bool pixelStencilExportEnable = false, bool pixelSampleMaskExportEnable = false)
     {
         var plan = ShaderResourcePlan.Extract(program, stage, RequestHash, userDataBase, UserDataCount,
             excludedUserDataRegisters: excludedUserDataRegisters);
@@ -505,6 +506,9 @@ internal static class Gen5ComputeFixtures
             EnableGraphicsSubgroupOperations = enableGraphicsSubgroupOperations,
             ClipSpace = clipSpace,
             PixelDepthExportEnable = pixelDepthExportEnable,
+            PixelDepthExportFormat = pixelDepthExportFormat,
+            PixelStencilExportEnable = pixelStencilExportEnable,
+            PixelSampleMaskExportEnable = pixelSampleMaskExportEnable,
         };
     }
 

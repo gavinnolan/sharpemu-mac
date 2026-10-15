@@ -156,14 +156,20 @@ public static partial class Gen5MslTranslator
             _usesPixelValidMask =
                 _stage == Gen5MslStage.Pixel &&
                 request.Program.Instructions.Any(static instruction => instruction.Control is Gen5ExportControl { ValidMask: true });
-            // MRTZ carries depth in its first 32-bit component; 16-bit (compressed) Z
-            // formats pack only stencil and the sample mask.
-            _pixelDepthExport =
-                _stage == Gen5MslStage.Pixel &&
-                request.PixelDepthExportEnable &&
-                request.Program.Instructions.Any(static instruction =>
-                    instruction.Control is Gen5ExportControl { Target: MrtzExportTarget, Compressed: false } export &&
-                    (export.EnableMask & 1u) != 0);
+            // SPI_SHADER_Z_FORMAT says which MRTZ channels carry depth, stencil and the
+            // sample mask; DB_SHADER_CONTROL says which of them the DB takes.
+            _mrtzFormat = request.PixelDepthExportFormat;
+            var mrtzExports = _stage == Gen5MslStage.Pixel
+                ? request.Program.Instructions
+                    .Where(static instruction => instruction.Control is Gen5ExportControl { Target: MrtzExportTarget })
+                    .ToArray()
+                : [];
+            _pixelDepthExport = request.PixelDepthExportEnable &&
+                mrtzExports.Any(instruction => MrtzDepth(instruction) is not null);
+            _pixelStencilExport = request.PixelStencilExportEnable &&
+                mrtzExports.Any(instruction => MrtzStencil(instruction) is not null);
+            _pixelSampleMaskExport = request.PixelSampleMaskExportEnable &&
+                mrtzExports.Any(instruction => MrtzSampleMask(instruction) is not null);
             _localSizeX = Math.Max(request.LocalSizeX, 1);
             _localSizeY = Math.Max(request.LocalSizeY, 1);
             _localSizeZ = Math.Max(request.LocalSizeZ, 1);

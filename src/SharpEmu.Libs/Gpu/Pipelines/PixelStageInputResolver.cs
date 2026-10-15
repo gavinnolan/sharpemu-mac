@@ -64,7 +64,8 @@ public static class PixelStageInputResolver
         ReadOnlySpan<byte> targetOutputModes,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         uint inputCount,
-        bool depthAspectBound)
+        bool depthAspectBound,
+        bool stencilAspectBound = false)
     {
         var activeInputs = shaderInterface.PixelInputEnable & shaderInterface.PixelInputAddress;
         var customMask = 0u;
@@ -124,8 +125,15 @@ public static class PixelStageInputResolver
             // Without a depth aspect the DB drops the exported depth, and Metal rejects a
             // fragment function that writes depth into a pipeline without one.
             DepthExportEnable = control.DepthExportEnable && depthAspectBound,
+            // Likewise Metal rejects a stencil-writing fragment function without a stencil
+            // attachment.
+            StencilExportEnable = control.StencilExportEnable && stencilAspectBound,
             SampleMaskExportEnable = control.MaskExportEnable,
-            EarlyDepth = control.DepthExportOrder == 1 && !control.KillEnable && !control.DepthExportEnable && !control.MaskExportEnable,
+            DepthExportFormat = shaderInterface.DepthExportFormat is var zFormat and > 0 and <= 9
+                ? (SharpEmu.ShaderCompiler.Gen5ColorExportFormat)zFormat
+                : null,
+            EarlyDepth = control.DepthExportOrder == 1 && !control.KillEnable && !control.DepthExportEnable &&
+                !control.StencilExportEnable && !control.MaskExportEnable,
             ExecuteOnNoop = control.ExecuteOnNoop,
         };
     }

@@ -102,6 +102,8 @@ public static class StageStaticKey
         key.Add(Bit(info.KillEnable));
         key.Add(Bit(info.DepthExportEnable));
         key.Add(Bit(info.SampleMaskExportEnable));
+        key.Add(Bit(info.StencilExportEnable));
+        key.Add(info.DepthExportFormat is { } depthFormat ? (uint)depthFormat : uint.MaxValue);
         key.Add(Bit(info.EarlyDepth));
         foreach (var mode in info.TargetOutputModes)
         {

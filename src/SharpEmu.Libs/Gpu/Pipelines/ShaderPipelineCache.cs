@@ -173,12 +173,13 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
         bool depthBound,
-        bool depthAspectBound)
+        bool depthAspectBound,
+        bool stencilAspectBound = false)
     {
         lock (_resolveGate)
         {
             return GetGraphicsProgramsCore(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive, depthBound,
-                depthAspectBound);
+                depthAspectBound, stencilAspectBound);
         }
     }
 
@@ -190,7 +191,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
         bool depthBound,
-        bool depthAspectBound)
+        bool depthAspectBound,
+        bool stencilAspectBound)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
         var vertexSource = PrepareSource(
@@ -230,7 +232,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             pixelOutputs = ResolveBoundTargets(context, targetExportMapping, depthBound ? pixelProgram.PixelColorExportMasks : null,
                 outputModes, outputMappings);
             pixelInfo = PixelStageInputResolver.Resolve(_context, pixelSource.Registered, shaderInterface, outputModes, outputMappings, inputCount,
-                depthAspectBound);
+                depthAspectBound, stencilAspectBound);
             // SPI_PS_INPUT_CNTL can map an input to any parameter export, beyond the input count;
             // the vertex program must declare every location the pixel program reads.
             attributeCount = Math.Max(attributeCount, ReadVertexOutputCount(pixelProgram, pixelInfo));

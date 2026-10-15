@@ -175,7 +175,10 @@ public sealed class PixelInputInfo
     public bool NoPerspective { get; init; }
     public bool KillEnable { get; init; }
     public bool DepthExportEnable { get; init; }
+    public bool StencilExportEnable { get; init; }
     public bool SampleMaskExportEnable { get; init; }
+    // SPI_SHADER_Z_FORMAT; null when the registers name no format.
+    public SharpEmu.ShaderCompiler.Gen5ColorExportFormat? DepthExportFormat { get; init; }
     public bool SampleShading { get; init; }
     public bool EarlyDepth { get; init; }
     public bool ExecuteOnNoop { get; init; }

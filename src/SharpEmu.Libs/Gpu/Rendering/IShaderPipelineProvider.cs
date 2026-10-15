@@ -81,7 +81,8 @@ public interface IShaderPipelineProvider
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
         bool depthBound,
-        bool depthAspectBound);
+        bool depthAspectBound,
+        bool stencilAspectBound = false);
 
     PipelineHandle CreateGraphicsPipeline(
         ReadOnlySpan<ColorTargetState> colors,

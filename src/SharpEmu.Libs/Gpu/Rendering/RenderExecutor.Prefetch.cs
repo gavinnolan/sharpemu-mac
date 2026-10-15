@@ -23,6 +23,7 @@ public struct GraphicsProgramInputs : IEquatable<GraphicsProgramInputs>
     public bool PixelActive;
     public bool DepthBound;
     public bool DepthAspectBound;
+    public bool StencilAspectBound;
 
     public static GraphicsProgramInputs Create()
     {
@@ -33,6 +34,7 @@ public struct GraphicsProgramInputs : IEquatable<GraphicsProgramInputs>
 
     public readonly bool Equals(GraphicsProgramInputs other) =>
         PixelActive == other.PixelActive && DepthBound == other.DepthBound && DepthAspectBound == other.DepthAspectBound &&
+        StencilAspectBound == other.StencilAspectBound &&
         ((ReadOnlySpan<ColorComponentMap>)Mapping).SequenceEqual(other.Mapping);
 
     public override readonly bool Equals(object? obj) => obj is GraphicsProgramInputs other && Equals(other);
@@ -48,6 +50,7 @@ public struct GraphicsProgramInputs : IEquatable<GraphicsProgramInputs>
         hash.Add(PixelActive);
         hash.Add(DepthBound);
         hash.Add(DepthAspectBound);
+        hash.Add(StencilAspectBound);
         return hash.ToHashCode();
     }
 }
@@ -101,6 +104,9 @@ public sealed partial class RenderExecutor
         inputs.DepthBound = depth is not null;
         inputs.DepthAspectBound = depth is { } target &&
             (ViewFormatRules.FullAspects(target.Target.Format) & GpuImageAspect.DepthBit) != 0;
+        // The aspect the attachment binds (RenderExecutor.AcquireAttachments).
+        inputs.StencilAspectBound = depth is { } stencilTarget &&
+            (ViewFormatRules.DepthAspects(stencilTarget.Target.Format) & GpuImageAspect.StencilBit) != 0;
         inputs.PixelActive = HasActivePixelShader(banks);
         return inputs;
     }
@@ -117,6 +123,7 @@ public sealed partial class RenderExecutor
             inputs.Mapping,
             inputs.PixelActive,
             inputs.DepthBound,
-            inputs.DepthAspectBound);
+            inputs.DepthAspectBound,
+            inputs.StencilAspectBound);
     }
 }

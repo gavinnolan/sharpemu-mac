@@ -163,7 +163,7 @@ public sealed partial class MetalRenderHostTests : IDisposable
         private ShaderProgram _pixelProgram;
         private ShaderProgram _computeProgram;
 
-        public GraphicsPrograms GetGraphicsPrograms(VertexStageRegisters vertex, PixelStageRegisters pixel, ShaderInterfaceRegisters shaderInterface, ContextRegisters context, ReadOnlySpan<ColorComponentMap> targetExportMapping, bool pixelActive, bool depthBound, bool depthAspectBound)
+        public GraphicsPrograms GetGraphicsPrograms(VertexStageRegisters vertex, PixelStageRegisters pixel, ShaderInterfaceRegisters shaderInterface, ContextRegisters context, ReadOnlySpan<ColorComponentMap> targetExportMapping, bool pixelActive, bool depthBound, bool depthAspectBound, bool stencilAspectBound = false)
         {
             if (!_vertexProgram.IsValid)
             {

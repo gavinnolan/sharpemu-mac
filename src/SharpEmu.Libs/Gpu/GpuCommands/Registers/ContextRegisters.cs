@@ -255,6 +255,7 @@ public struct DepthShaderControlRegisters
     public byte DepthExportOrder;
     public bool KillEnable;
     public bool DepthExportEnable;
+    public bool StencilExportEnable;
     public bool MaskExportEnable;
     public bool DualExportEnable;
     public bool ExecuteOnNoop;
@@ -262,11 +263,12 @@ public struct DepthShaderControlRegisters
 
     public static DepthShaderControlRegisters Decode(uint value) => new()
     {
-        RemainingBits = value & 0xFFFF_908Eu,
+        RemainingBits = value & 0xFFFF_908Cu,
         ConservativeDepthExport = (byte)RegisterField.Get(value, 13, 0x3),
         DepthExportOrder = (byte)RegisterField.Get(value, 4, 0x3),
         KillEnable = RegisterField.Bit(value, 6),
         DepthExportEnable = RegisterField.Bit(value, 0),
+        StencilExportEnable = RegisterField.Bit(value, 1),
         MaskExportEnable = RegisterField.Bit(value, 8),
         DualExportEnable = RegisterField.Bit(value, 9),
         ExecuteOnNoop = RegisterField.Bit(value, 10),

@@ -199,6 +199,9 @@ public static partial class Gen5MslTranslator
         private HashSet<uint>? _entryMaskExports;
         private bool _validMaskFromExec;
         private readonly bool _pixelDepthExport;
+        private readonly bool _pixelStencilExport;
+        private readonly bool _pixelSampleMaskExport;
+        private readonly Gen5ColorExportFormat? _mrtzFormat;
 
         // A translator-side probe, off unless someone is hunting a draw that covers
         // nothing; see the vertex epilogue.
@@ -659,6 +662,16 @@ public static partial class Gen5MslTranslator
                     source.AppendLine("    float sharpemu_depth [[depth(any)]];");
                 }
 
+                if (_pixelStencilExport)
+                {
+                    source.AppendLine("    uint sharpemu_stencil [[stencil]];");
+                }
+
+                if (_pixelSampleMaskExport)
+                {
+                    source.AppendLine("    uint sharpemu_coverage [[sample_mask]];");
+                }
+
                 source.AppendLine("};");
                 source.AppendLine();
                 source.AppendLine($"fragment Gen5PsOut {EntryPointName}(");
@@ -877,6 +890,12 @@ public static partial class Gen5MslTranslator
                 {
                     // Lanes that never export MRTZ under EXEC keep the rasterized depth.
                     source.AppendLine("    sharpemu_out.sharpemu_depth = sharpemu_in.sharpemu_frag_coord.z;");
+                }
+
+                if (_pixelSampleMaskExport)
+                {
+                    // Lanes that never export MRTZ keep their whole coverage.
+                    source.AppendLine("    sharpemu_out.sharpemu_coverage = 0xFFFFFFFFu;");
                 }
             }
             else if (_stage == Gen5MslStage.Vertex)

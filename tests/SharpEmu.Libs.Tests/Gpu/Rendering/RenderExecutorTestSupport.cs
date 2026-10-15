@@ -521,7 +521,8 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
         bool depthBound,
-        bool depthAspectBound)
+        bool depthAspectBound,
+        bool stencilAspectBound = false)
     {
         Calls.Add($"get_graphics_programs pixelActive={pixelActive}");
         ExportMappings.Add(targetExportMapping.ToArray());

@@ -711,7 +711,7 @@ public sealed partial class RenderExecutor
     {
         var control = shaderInterface.DepthShaderControl;
         // The export format describes data; it does not enable shader execution.
-        return control.KillEnable || control.DepthExportEnable ||
+        return control.KillEnable || control.DepthExportEnable || control.StencilExportEnable ||
                control.MaskExportEnable || control.DualExportEnable || control.ExecuteOnNoop;
     }
 
@@ -841,6 +841,8 @@ public sealed partial class RenderExecutor
         inputs.DepthBound = state.Depth.HasTarget;
         inputs.DepthAspectBound = state.Depth.HasTarget &&
             (ViewFormatRules.FullAspects(state.Depth.Target.Target.Format) & GpuImageAspect.DepthBit) != 0;
+        inputs.StencilAspectBound = state.Depth.HasTarget &&
+            (ViewFormatRules.DepthAspects(state.Depth.Target.Target.Format) & GpuImageAspect.StencilBit) != 0;
         if (Prefetch is { } prefetch && prefetch.TryTakeGraphics(banks, in inputs, out var prefetched))
         {
             state.Programs = prefetched;

@@ -44,5 +44,34 @@ public sealed class PixelDepthExportResolverTests : IDisposable
         Assert.Equal(expected, info.DepthExportEnable);
     }
 
+    // STENCIL_TEST_VAL_EXPORT_ENABLE (bit 1) needs a bound stencil aspect the same way, and
+    // SPI_SHADER_Z_FORMAT reaches the program when the registers name one.
+    [Theory]
+    [InlineData(0x2u, true, 7u, true, SharpEmu.ShaderCompiler.Gen5ColorExportFormat.Uint16Abgr)]
+    [InlineData(0x2u, false, 2u, false, SharpEmu.ShaderCompiler.Gen5ColorExportFormat.GR32)]
+    [InlineData(0x0u, true, 0u, false, null)]
+    public void StencilExportFollowsTheBoundStencilAspect(
+        uint control, bool stencilAspectBound, uint zFormat, bool expected, SharpEmu.ShaderCompiler.Gen5ColorExportFormat? format)
+    {
+        var shaderInterface = new ShaderInterfaceRegisters
+        {
+            DepthShaderControl = DepthShaderControlRegisters.Decode(control),
+            DepthExportFormat = zFormat,
+        };
+        var info = PixelStageInputResolver.Resolve(
+            new CpuContext(_memory, Generation.Gen5),
+            new RegisteredShader(MemoryBase, MemoryBase, 16, 0, 0, 0, 0, 0, 0),
+            shaderInterface,
+            new byte[PixelInputInfo.TargetCount],
+            new ColorComponentMap[PixelInputInfo.TargetCount],
+            inputCount: 0,
+            depthAspectBound: true,
+            stencilAspectBound);
+
+        Assert.Equal(expected, info.StencilExportEnable);
+        Assert.Equal(format, info.DepthExportFormat);
+        Assert.False(info.EarlyDepth && control != 0);
+    }
+
     public void Dispose() => _fatal.Dispose();
 }

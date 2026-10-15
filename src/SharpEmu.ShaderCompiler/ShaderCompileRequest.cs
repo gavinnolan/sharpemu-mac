@@ -196,6 +196,18 @@ public sealed class ShaderCompileRequest
     // DB_SHADER_CONTROL.Z_EXPORT_ENABLE with a depth aspect bound: the MRTZ export's
     // first component replaces the fragment depth.
     public bool PixelDepthExportEnable { get; init; }
+
+    // SPI_SHADER_Z_FORMAT: where the MRTZ export carries depth, stencil and the sample mask.
+    // Null when the registers name no format; the export's own layout (COMPR or not) decides.
+    public Gen5ColorExportFormat? PixelDepthExportFormat { get; init; }
+
+    // DB_SHADER_CONTROL.STENCIL_TEST_VAL_EXPORT_ENABLE with a stencil aspect bound: the MRTZ
+    // export replaces the stencil reference value.
+    public bool PixelStencilExportEnable { get; init; }
+
+    // DB_SHADER_CONTROL.MASK_EXPORT_ENABLE: the MRTZ export's sample mask is ANDed with the
+    // fragment's coverage.
+    public bool PixelSampleMaskExportEnable { get; init; }
     public uint PixelInputEnable { get; init; }
     public uint PixelCustomInterpolationMask { get; init; }
 

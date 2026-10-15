@@ -1101,10 +1101,22 @@ public static partial class Gen5MslTranslator
 
             if (export.Target == MrtzExportTarget)
             {
-                if (_pixelDepthExport && !export.Compressed && (export.EnableMask & 1u) != 0)
+                if (_pixelDepthExport && MrtzDepth(instruction) is { } depthValue)
                 {
                     const string depth = "sharpemu_out.sharpemu_depth";
-                    Line($"{depth} = {ExecSelect($"as_type<float>(v[{instruction.Sources[0].Value}])", depth)};");
+                    Line($"{depth} = {ExecSelect(depthValue, depth)};");
+                }
+
+                if (_pixelStencilExport && MrtzStencil(instruction) is { } stencilValue)
+                {
+                    const string stencil = "sharpemu_out.sharpemu_stencil";
+                    Line($"{stencil} = {ExecSelect(stencilValue, stencil)};");
+                }
+
+                if (_pixelSampleMaskExport && MrtzSampleMask(instruction) is { } maskValue)
+                {
+                    const string coverage = "sharpemu_out.sharpemu_coverage";
+                    Line($"{coverage} = {ExecSelect(maskValue, coverage)};");
                 }
 
                 return true;
@@ -1197,6 +1209,65 @@ public static partial class Gen5MslTranslator
             // fragments are discarded in the epilogue.
             Line($"{field} = {ExecSelect($"vec<{componentType}, 4>({values[0]}, {values[1]}, {values[2]}, {values[3]})", field)};");
             return true;
+        }
+
+        // The MRTZ layout: SPI_SHADER_Z_FORMAT, or the export's own when the registers name
+        // none or the format disagrees with COMPR.
+        private Gen5ColorExportFormat MrtzFormat(Gen5ExportControl export) =>
+            _mrtzFormat is { } format &&
+            (format == Gen5ColorExportFormat.Zero || export.Compressed == IsHalfExportFormat(format))
+                ? format
+                : export.Compressed ? Gen5ColorExportFormat.Uint16Abgr : Gen5ColorExportFormat.Abgr32;
+
+        // Mesa's ac_get_spi_shader_z_format and its MRTZ export: the 32-bit formats carry depth
+        // in X, stencil in Y and the sample mask in Z; UINT16_ABGR (compressed, no depth)
+        // carries stencil in X[23:16] and the sample mask in Y[15:0].
+        private string? MrtzDepth(Gen5ShaderInstruction instruction) =>
+            instruction.Control is Gen5ExportControl export && (export.EnableMask & 1u) != 0 &&
+            MrtzFormat(export) is Gen5ColorExportFormat.R32 or Gen5ColorExportFormat.GR32 or
+                Gen5ColorExportFormat.AR32 or Gen5ColorExportFormat.Abgr32
+                ? $"as_type<float>(v[{instruction.Sources[0].Value}])"
+                : null;
+
+        // The stencil reference is the low 8 bits, the width of every stencil attachment.
+        private string? MrtzStencil(Gen5ShaderInstruction instruction)
+        {
+            if (instruction.Control is not Gen5ExportControl export)
+            {
+                return null;
+            }
+
+            var format = MrtzFormat(export);
+            if (IsHalfExportFormat(format))
+            {
+                return (export.EnableMask & 0x3u) != 0
+                    ? $"((v[{instruction.Sources[0].Value}] >> 16) & 0xFFu)"
+                    : null;
+            }
+
+            return format is Gen5ColorExportFormat.GR32 or Gen5ColorExportFormat.Abgr32 && (export.EnableMask & 0x2u) != 0
+                ? $"(v[{instruction.Sources[1].Value}] & 0xFFu)"
+                : null;
+        }
+
+        private string? MrtzSampleMask(Gen5ShaderInstruction instruction)
+        {
+            if (instruction.Control is not Gen5ExportControl export)
+            {
+                return null;
+            }
+
+            var format = MrtzFormat(export);
+            if (IsHalfExportFormat(format))
+            {
+                return (export.EnableMask & 0xCu) != 0
+                    ? $"(v[{instruction.Sources[1].Value}] & 0xFFFFu)"
+                    : null;
+            }
+
+            return format == Gen5ColorExportFormat.Abgr32 && (export.EnableMask & 0x4u) != 0
+                ? $"v[{instruction.Sources[2].Value}]"
+                : null;
         }
 
         private static bool IsHalfExportFormat(Gen5ColorExportFormat format) =>
