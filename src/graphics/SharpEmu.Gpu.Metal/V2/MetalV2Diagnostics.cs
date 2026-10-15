@@ -68,6 +68,29 @@ internal static class MetalV2Diagnostics
     public static readonly bool FoldClearsIntoPasses =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_FOLD_CLEARS"), "0", StringComparison.Ordinal);
 
+    // SHARPEMU_METAL_V2_FLUSH_COALESCE=0 commits the command buffer at the end of every
+    // guest submission that made progress, as it did before. Each commit leaves the GPU
+    // idle until the next buffer is scheduled; on Demon's Souls' title screen ~17 commits
+    // a frame were made only because a submission ended. The three limits below bound
+    // how long a coalesced buffer stays open (submissions, encoders, microseconds).
+    public static readonly bool CoalesceFlushes =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_FLUSH_COALESCE"), "0", StringComparison.Ordinal);
+
+    public static readonly int CoalesceMaxSubmissions =
+        PositiveInt("SHARPEMU_METAL_V2_FLUSH_COALESCE_SUBMISSIONS", 8);
+
+    public static readonly int CoalesceMaxEncoders =
+        PositiveInt("SHARPEMU_METAL_V2_FLUSH_COALESCE_ENCODERS", 64);
+
+    public static readonly int CoalesceMaxMicroseconds =
+        PositiveInt("SHARPEMU_METAL_V2_FLUSH_COALESCE_US", 2000);
+
+    private static int PositiveInt(string name, int fallback) =>
+        int.TryParse(Environment.GetEnvironmentVariable(name), System.Globalization.NumberStyles.Integer,
+            System.Globalization.CultureInfo.InvariantCulture, out var value) && value > 0
+            ? value
+            : fallback;
+
     public static void WarnOnce(string key, string message)
     {
         if (_reported.TryAdd(key, 0))

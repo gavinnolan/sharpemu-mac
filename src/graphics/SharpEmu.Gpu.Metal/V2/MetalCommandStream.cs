@@ -55,6 +55,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     public void BeginSubmission(int queueId, ulong submissionId, object? geometrySnapshots)
     {
         _submissionsStarted++;
+        CommitCoalescedIfOverdue();
         _ = EnsureCommandBuffer();
         _translation!.BeginSubmission(queueId, submissionId, geometrySnapshots, CommandStream.GetInterpreter(queueId));
     }
@@ -62,7 +63,105 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     void ICommandStreamHost.Flush()
     {
         _frameBoundaries++;
+        FlushStream();
+    }
+
+    // A frame boundary is the guest's own suspend point: what the frame recorded goes
+    // out now, whatever the coalescing limits say. It is at most one commit a frame.
+    void ICommandStreamHost.FlushFrame()
+    {
+        _frameBoundaries++;
         FlushCommandBuffer(MetalFlushCause.Stream);
+    }
+
+    // ---- command-buffer coalescing (SHARPEMU_METAL_V2_FLUSH_COALESCE) ----
+    //
+    // The stream asks for a flush at the end of every guest submission that made progress.
+    // Committing there costs the GPU an idle gap per submission (commit-to-schedule latency
+    // plus however long the worker takes to record the next buffer), so a Stream flush only
+    // marks the buffer as wanting a commit and the commit happens at the first of:
+    //  - the stream has nothing else runnable (the worker is about to park anyway);
+    //  - the buffer holds enough work (submissions or encoders over the limit);
+    //  - the first deferred submission is older than the time limit, checked at every
+    //    submission start and at draw/dispatch preparations outside a render pass as well,
+    //    so a label a guest spins on is never held for long while the worker keeps recording;
+    //  - any other commit cause (present, budget, host wait, completion, poll, labels),
+    //    which commits the same buffer and clears the request.
+
+    // When the first deferred Stream flush of the open buffer happened; 0 when none is owed.
+    private long _commitWantedSince;
+    private int _coalescedSubmissions;
+    private long _deferredStreamFlushes;
+
+    private static readonly long CoalesceMaxTicks =
+        MetalV2Diagnostics.CoalesceMaxMicroseconds * System.Diagnostics.Stopwatch.Frequency / 1_000_000L;
+
+    /// <summary>Stream flushes that left the buffer open instead of committing it.</summary>
+    public long TakeDeferredStreamFlushes() => Interlocked.Exchange(ref _deferredStreamFlushes, 0);
+
+    /// <summary>
+    /// Whether a Stream flush commits now. Pure, so the policy is testable without a device.
+    /// </summary>
+    internal static bool ShouldCommitStreamFlush(
+        bool coalesce,
+        bool streamIdle,
+        int submissions,
+        int encoders,
+        long wantedTicks,
+        int maxSubmissions,
+        int maxEncoders,
+        long maxTicks) =>
+        !coalesce || streamIdle || submissions >= maxSubmissions || encoders >= maxEncoders ||
+        wantedTicks >= maxTicks;
+
+    private void FlushStream()
+    {
+        if (_commandBuffer == 0)
+        {
+            // Nothing is open, so there is nothing to commit or to owe.
+            return;
+        }
+
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (_commitWantedSince == 0)
+        {
+            _commitWantedSince = now;
+        }
+
+        _coalescedSubmissions++;
+        var coalesce = MetalV2Diagnostics.CoalesceFlushes;
+        // Read only when the cheaper limits leave the decision open: it takes the queue lock.
+        var commit = ShouldCommitStreamFlush(
+            coalesce, streamIdle: false, _coalescedSubmissions, _encodersInBuffer, now - _commitWantedSince,
+            MetalV2Diagnostics.CoalesceMaxSubmissions, MetalV2Diagnostics.CoalesceMaxEncoders, CoalesceMaxTicks) ||
+            !(_commandStream?.HasUnblockedPending ?? false);
+        if (commit)
+        {
+            FlushCommandBuffer(MetalFlushCause.Stream);
+            return;
+        }
+
+        Interlocked.Increment(ref _deferredStreamFlushes);
+    }
+
+    /// <summary>Commits the buffer a deferred Stream flush left open, if one is owed.</summary>
+    internal void CommitCoalescedFlush()
+    {
+        if (_commitWantedSince != 0)
+        {
+            FlushCommandBuffer(MetalFlushCause.Stream);
+        }
+    }
+
+    // The time limit, checked where the worker is between packets and outside a resource
+    // preparation: a submission start and a draw or dispatch about to prepare.
+    private void CommitCoalescedIfOverdue()
+    {
+        if (_commitWantedSince != 0 &&
+            System.Diagnostics.Stopwatch.GetTimestamp() - _commitWantedSince >= CoalesceMaxTicks)
+        {
+            FlushCommandBuffer(MetalFlushCause.Stream);
+        }
     }
 
     void ICommandStreamHost.FlushAndWait() => FlushAndWaitForGpu(MetalWaitReason.CommandProcessor);
@@ -1264,16 +1363,19 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             switch (result)
             {
                 case SliceResult.NoWork:
+                    CommitCoalescedFlush();
                     FlushPendingLabelWrites();
                     return;
                 case SliceResult.AllBlocked:
                     RetryBlockedIfDue();
+                    CommitCoalescedFlush();
                     FlushPendingLabelWrites();
                     return;
                 case SliceResult.BlockedWithoutProgress:
                     if (!stream.HasUnblockedPending)
                     {
                         RetryBlockedIfDue();
+                        CommitCoalescedFlush();
                         FlushPendingLabelWrites();
                         return;
                     }
@@ -1288,7 +1390,9 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         // The batch can also end with its slice budget spent, and the worker then parks
         // without coming back through the cases above. A label left in an uncommitted
         // command buffer at that point is one the GPU never writes and the guest waits
-        // for: Quake's engine gave up and called abort.
+        // for: Quake's engine gave up and called abort. A deferred Stream flush is held
+        // only while more work is runnable; the worker commits it before it parks.
+        CommitCoalescedIfOverdue();
         FlushPendingLabelWrites();
     }
 
