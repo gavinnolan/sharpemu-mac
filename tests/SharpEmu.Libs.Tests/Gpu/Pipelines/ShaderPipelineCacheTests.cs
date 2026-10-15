@@ -8,6 +8,7 @@ using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Tests.Gpu.Rendering;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
+using SharpEmu.ShaderCompiler;
 using Silk.NET.Vulkan;
 using Xunit;
 using static SharpEmu.Libs.Tests.Gpu.Rendering.RenderExecutorFixtures;
@@ -38,6 +39,40 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         StageStaticKey.Build(new ComputeInputInfo(), ordinary);
         StageStaticKey.Build(new ComputeInputInfo { IeeeMode = true }, ieee);
         Assert.False(ordinary.SequenceEqual(ieee));
+    }
+
+    [Theory]
+    [InlineData(0x00u, null, null)]
+    [InlineData(0x34u, Gen5ColorExportFormat.Fp16Abgr, Gen5ColorExportFormat.AR32)]
+    [InlineData(0x90u, Gen5ColorExportFormat.Zero, Gen5ColorExportFormat.Abgr32)]
+    public void ColorExportFormatsReachTheirBindings(uint columnFormat, Gen5ColorExportFormat? first, Gen5ColorExportFormat? second)
+    {
+        var guest = new PipelineTestGuest();
+        var vertexAddress = PipelineTestGuest.MemoryBase + 0x1000;
+        var pixelAddress = PipelineTestGuest.MemoryBase + 0x2000;
+        guest.RegisterProgram(vertexAddress, PipelineTestGuest.MemoryBase + 0x8000, PipelineTestGuest.EndProgram,
+            userDataAddress: PipelineTestGuest.MemoryBase + 0x9000);
+        guest.RegisterProgram(pixelAddress, PipelineTestGuest.MemoryBase + 0x8100, PipelineTestGuest.EndProgram);
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+        var banks = Banks();
+        banks.Shader.Vertex.ExportAddress = vertexAddress;
+        banks.Shader.Pixel.Address = pixelAddress;
+        // SPI_SHADER_COL_FORMAT: one nibble an export. The dual-source second binding takes
+        // export 1's format.
+        for (var index = 0; index < banks.Context.ShaderInterface.TargetOutputModes.Length; index++)
+        {
+            banks.Context.ShaderInterface.TargetOutputModes[index] = (byte)((columnFormat >> (index * 4)) & 0xF);
+        }
+
+        banks.Context.BlendControls[0] = new BlendRegisters { Enable = true, ColorDestinationFactor = 15 };
+        var mappings = Enumerable.Repeat(ColorComponentMap.Identity, 8).ToArray();
+        Assert.True(cache.GetGraphicsPrograms(banks.Shader.Vertex, banks.Shader.Pixel, banks.Context.ShaderInterface,
+            banks.Context, mappings, pixelActive: true, depthBound: false, depthAspectBound: false).Available);
+        var outputs = guest.Compiler.Requests.Last(request =>
+            request.Stage == SharpEmu.ShaderCompiler.Resources.ShaderStage.Pixel).PixelOutputs;
+        Assert.Equal(2, outputs.Count);
+        Assert.Equal(first, outputs[0].ExportFormat);
+        Assert.Equal(second, outputs[1].ExportFormat);
     }
 
     [Theory]

@@ -446,6 +446,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             outputs.Add(new Gen5PixelOutputBinding(slot, location++, kind, mapping)
             {
                 ExportTarget = exportTarget >= 0 ? (uint)exportTarget : ContextRegisters.ColorTargetCount + slot,
+                ExportFormat = ExportFormatOf(context.ShaderInterface, exportTarget),
             });
         }
 
@@ -458,11 +459,39 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             }
 
             // The second export feeds target zero's blend unit, not another attachment.
-            outputs[0] = outputs[0] with { ExportTarget = 0 };
-            outputs.Add(outputs[0] with { GuestSlot = 1, ExportTarget = 1, BlendSourceIndex = 1 });
+            outputs[0] = outputs[0] with { ExportTarget = 0, ExportFormat = ExportFormatOf(context.ShaderInterface, 0) };
+            outputs.Add(outputs[0] with
+            {
+                GuestSlot = 1,
+                ExportTarget = 1,
+                BlendSourceIndex = 1,
+                ExportFormat = ExportFormatOf(context.ShaderInterface, 1),
+            });
         }
 
         return outputs.ToArray();
+    }
+
+    // SPI_SHADER_COL_FORMAT of one export. With no format written for any export, the
+    // routing pairs exports and slots by number (PixelExportRouting) and the translator reads
+    // each export by its own layout.
+    private static Gen5ColorExportFormat? ExportFormatOf(ShaderInterfaceRegisters registers, int exportTarget)
+    {
+        if (exportTarget < 0 || exportTarget >= registers.TargetOutputModes.Length)
+        {
+            return null;
+        }
+
+        foreach (var mode in registers.TargetOutputModes)
+        {
+            if ((mode & 0xF) != 0)
+            {
+                var format = registers.TargetOutputModes[exportTarget] & 0xFu;
+                return format <= (uint)Gen5ColorExportFormat.Abgr32 ? (Gen5ColorExportFormat)format : null;
+            }
+        }
+
+        return null;
     }
 
     private static bool HasGuestSlotZero(List<Gen5PixelOutputBinding> outputs)

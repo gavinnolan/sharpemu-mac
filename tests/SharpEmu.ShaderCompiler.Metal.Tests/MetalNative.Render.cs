@@ -15,6 +15,9 @@ internal static partial class MetalNative
     // MTLPixelFormatRGBA32Uint: an integer target stores exported register bits unchanged.
     public const nuint Rgba32UintPixelFormat = 123;
 
+    // MTLPixelFormatRGBA32Sint.
+    public const nuint Rgba32SintPixelFormat = 124;
+
     // MTLPixelFormatRGBA32Float.
     public const nuint Rgba32FloatPixelFormat = ColorPixelFormat;
 
@@ -65,7 +68,8 @@ internal static partial class MetalNative
         uint height,
         nuint pixelFormat,
         out uint[] texels,
-        out string error)
+        out string error,
+        (nuint Source, nuint Destination)? blendFactors = null)
     {
         texels = [];
         error = string.Empty;
@@ -82,6 +86,16 @@ internal static partial class MetalNative
         SendVoid(descriptor, Selector("setFragmentFunction:"), fragmentFunction);
         var attachment = SendIndexed(Send(descriptor, Selector("colorAttachments")), Selector("objectAtIndexedSubscript:"), 0);
         SendInteger(attachment, Selector("setPixelFormat:"), pixelFormat);
+        if (blendFactors is { } blend)
+        {
+            // One MTLBlendFactor pair for color and alpha, with the add operation.
+            SendVoidBool(attachment, Selector("setBlendingEnabled:"), true);
+            SendInteger(attachment, Selector("setSourceRGBBlendFactor:"), blend.Source);
+            SendInteger(attachment, Selector("setDestinationRGBBlendFactor:"), blend.Destination);
+            SendInteger(attachment, Selector("setSourceAlphaBlendFactor:"), blend.Source);
+            SendInteger(attachment, Selector("setDestinationAlphaBlendFactor:"), blend.Destination);
+        }
+
         nint nsError = 0;
         var pipeline = Send(Device.Value, Selector("newRenderPipelineStateWithDescriptor:error:"), descriptor, ref nsError);
         if (pipeline == 0)

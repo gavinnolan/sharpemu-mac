@@ -1132,10 +1132,27 @@ public static partial class Gen5MslTranslator
                 Gen5PixelOutputKind.Sint => "int",
                 _ => "float",
             };
+            var format = ColorExportFormat(binding.Value, export);
+            if (format == Gen5ColorExportFormat.Zero)
+            {
+                // SPI_SHADER_ZERO: the export carries nothing to the target.
+                return true;
+            }
+
             var values = new string[4];
             for (var component = 0; component < 4; component++)
             {
-                if ((export.EnableMask & (1u << component)) == 0)
+                var source = ColorExportSource(format, component);
+                if (source < 0)
+                {
+                    // A channel the format does not carry: green and blue are 0, alpha 1.
+                    values[component] = component == 3
+                        ? binding.Value.Kind == Gen5PixelOutputKind.Float ? "1.0f" : $"{componentType}(1)"
+                        : $"{componentType}(0)";
+                    continue;
+                }
+
+                if ((export.EnableMask & (1u << source)) == 0)
                 {
                     var outputComponent = (uint)component;
                     if (!binding.Value.ComponentMapping.IsIdentity)
@@ -1154,26 +1171,14 @@ public static partial class Gen5MslTranslator
                     continue;
                 }
 
-                if (export.Compressed)
-                {
-                    var packed = $"v[{instruction.Sources[component >> 1].Value}]";
-                    var half = $"(float)as_type<half2>({packed})[{component & 1}]";
-                    values[component] = binding.Value.Kind switch
+                values[component] = IsHalfExportFormat(format)
+                    ? HalfExportValue(format, binding.Value.Kind, $"v[{instruction.Sources[source >> 1].Value}]", source & 1)
+                    : binding.Value.Kind switch
                     {
-                        Gen5PixelOutputKind.Uint => $"uint(as_type<ushort2>({packed})[{component & 1}])",
-                        Gen5PixelOutputKind.Sint => $"int(as_type<short2>({packed})[{component & 1}])",
-                        _ => half,
+                        Gen5PixelOutputKind.Uint => $"v[{instruction.Sources[source].Value}]",
+                        Gen5PixelOutputKind.Sint => $"as_type<int>(v[{instruction.Sources[source].Value}])",
+                        _ => $"as_type<float>(v[{instruction.Sources[source].Value}])",
                     };
-                    continue;
-                }
-
-                var raw = $"v[{instruction.Sources[component].Value}]";
-                values[component] = binding.Value.Kind switch
-                {
-                    Gen5PixelOutputKind.Uint => raw,
-                    Gen5PixelOutputKind.Sint => $"as_type<int>({raw})",
-                    _ => $"as_type<float>({raw})",
-                };
             }
 
             if (binding.Value.ComponentMapping != Gen5ColorComponentMapping.Identity)
@@ -1192,6 +1197,61 @@ public static partial class Gen5MslTranslator
             // fragments are discarded in the epilogue.
             Line($"{field} = {ExecSelect($"vec<{componentType}, 4>({values[0]}, {values[1]}, {values[2]}, {values[3]})", field)};");
             return true;
+        }
+
+        private static bool IsHalfExportFormat(Gen5ColorExportFormat format) =>
+            format is >= Gen5ColorExportFormat.Fp16Abgr and <= Gen5ColorExportFormat.Sint16Abgr;
+
+        // SPI_SHADER_COL_FORMAT for the binding's export. Without a format from the registers,
+        // or when it disagrees with COMPR, the export's own layout decides: four 32-bit
+        // channels, or two 16-bit channels a VGPR read as the target's kind.
+        private static Gen5ColorExportFormat ColorExportFormat(Gen5PixelOutputBinding binding, Gen5ExportControl export)
+        {
+            if (binding.ExportFormat is { } format &&
+                (format == Gen5ColorExportFormat.Zero || export.Compressed == IsHalfExportFormat(format)))
+            {
+                return format;
+            }
+
+            return !export.Compressed
+                ? Gen5ColorExportFormat.Abgr32
+                : binding.Kind switch
+                {
+                    Gen5PixelOutputKind.Uint => Gen5ColorExportFormat.Uint16Abgr,
+                    Gen5PixelOutputKind.Sint => Gen5ColorExportFormat.Sint16Abgr,
+                    _ => Gen5ColorExportFormat.Fp16Abgr,
+                };
+        }
+
+        // The export channel (EN bit) that carries an RGBA channel, or -1. A 16-bit format packs
+        // channel c into VGPR c / 2, half c % 2. GFX10 32_AR puts alpha in channel 1, as Mesa's
+        // emit_ps_color_export, ACO and LLPC write it (before GFX10 it was channel 3).
+        private static int ColorExportSource(Gen5ColorExportFormat format, int component) => format switch
+        {
+            Gen5ColorExportFormat.R32 => component == 0 ? 0 : -1,
+            Gen5ColorExportFormat.GR32 => component < 2 ? component : -1,
+            Gen5ColorExportFormat.AR32 => component switch { 0 => 0, 3 => 1, _ => -1 },
+            _ => component,
+        };
+
+        // One 16-bit channel of a compressed export, converted to the target's kind: the CB
+        // reads FP16 as half, UNORM16/SNORM16 as normalized, UINT16/SINT16 as integers.
+        private static string HalfExportValue(Gen5ColorExportFormat format, Gen5PixelOutputKind kind, string packed, int half)
+        {
+            var unsigned = $"as_type<ushort2>({packed})[{half}]";
+            var signed = $"as_type<short2>({packed})[{half}]";
+            return (format, kind) switch
+            {
+                (Gen5ColorExportFormat.Sint16Abgr, Gen5PixelOutputKind.Float) => $"float({signed})",
+                (Gen5ColorExportFormat.Sint16Abgr, Gen5PixelOutputKind.Uint) => $"uint(int({signed}))",
+                (_, Gen5PixelOutputKind.Uint) => $"uint({unsigned})",
+                (Gen5ColorExportFormat.Uint16Abgr, Gen5PixelOutputKind.Sint) => $"int({unsigned})",
+                (_, Gen5PixelOutputKind.Sint) => $"int({signed})",
+                (Gen5ColorExportFormat.Unorm16Abgr, _) => $"(float({unsigned}) * (1.0f / 65535.0f))",
+                (Gen5ColorExportFormat.Snorm16Abgr, _) => $"max(float({signed}) * (1.0f / 32767.0f), -1.0f)",
+                (Gen5ColorExportFormat.Uint16Abgr, _) => $"float({unsigned})",
+                _ => $"(float)as_type<half2>({packed})[{half}]",
+            };
         }
 
         private bool TryEmitVertexExport(

@@ -119,6 +119,22 @@ public readonly record struct Gen5ColorComponentMapping
     }
 }
 
+// SPI_SHADER_COL_FORMAT (and SPI_SHADER_Z_FORMAT): how the export's VGPRs carry the target's
+// channels. The 16-bit formats come from compressed (COMPR) exports, two channels a VGPR.
+public enum Gen5ColorExportFormat
+{
+    Zero = 0,
+    R32 = 1,
+    GR32 = 2,
+    AR32 = 3,
+    Fp16Abgr = 4,
+    Unorm16Abgr = 5,
+    Snorm16Abgr = 6,
+    Uint16Abgr = 7,
+    Sint16Abgr = 8,
+    Abgr32 = 9,
+}
+
 public readonly record struct Gen5PixelOutputBinding(
     uint GuestSlot,
     uint HostLocation,
@@ -142,6 +158,10 @@ public readonly record struct Gen5PixelOutputBinding(
     // the host alpha channel: the program also writes that alpha to the dual-source output
     // (Location 0, Index 1) so the pipeline can blend with SRC1_ALPHA.
     public bool DualSourceAlpha { get; init; }
+
+    // SPI_SHADER_COL_FORMAT of the export target; null when the registers name no format, and
+    // then the export's own layout (COMPR or not) decides.
+    public Gen5ColorExportFormat? ExportFormat { get; init; }
 
     // The EXP MRT target that feeds this slot. It differs from the slot when the pixel
     // program skips targets, because the hardware packs color exports into the slots
