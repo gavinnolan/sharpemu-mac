@@ -1794,7 +1794,8 @@ public static partial class Gen5MslTranslator
             if (!IsWave64)
             {
                 Line($"s[{loRegister}] = sharpemu_ballot({condition});");
-                if (hiRegister < ScalarRegisterFileCount)
+                if (hiRegister < ScalarRegisterFileCount &&
+                    !(loRegister == VccLoRegister && VccIsLowHalfOnly))
                 {
                     Line($"s[{hiRegister}] = 0u;");
                 }

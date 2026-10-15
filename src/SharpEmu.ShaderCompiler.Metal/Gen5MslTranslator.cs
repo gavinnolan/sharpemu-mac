@@ -258,6 +258,21 @@ public static partial class Gen5MslTranslator
             _waveLaneCount == 64 && _stage == Gen5MslStage.Compute &&
             (ulong)_localSizeX * _localSizeY * _localSizeZ == 64;
 
+        /// <summary>A wave32 compute program: VCC is VCC_LO alone, so a mask write (V_CMP,
+        /// a carry-out) leaves s107 untouched and VCCZ reads s106 only. In wave32, VCC_HI is
+        /// an ordinary SGPR the compiler allocates: GTA V's BVH rotation pass parks
+        /// `s_movk_i32 s107, 0x204` before a V_CMP to VCC and reads it after (and keeps a
+        /// saved EXEC there), and zeroing it there broke the tree it rotates. Only
+        /// compute knows its guest wave size (the dispatch initiator's wave32 bit); the
+        /// graphics stages request wave32 for any guest wave, whose high VCC half has no
+        /// lanes and stays clear.</summary>
+        private bool VccIsLowHalfOnly => _stage == Gen5MslStage.Compute && _waveLaneCount == 32;
+
+        /// <summary>The VCCZ status bit: the whole pair, or VCC_LO alone in wave32.</summary>
+        private string VccZeroCondition => VccIsLowHalfOnly
+            ? $"s[{VccLoRegister}] == 0u"
+            : $"(s[{VccLoRegister}] | s[{VccHiRegister}]) == 0u";
+
         /// <summary>True for the stages whose Metal threads map one-to-one onto guest wave
         /// lanes, so ballots, shuffles and lane indices are real: compute dispatches, NGG
         /// primitive shaders emitted as mesh functions, and pixel shaders when the host
@@ -1346,9 +1361,12 @@ public static partial class Gen5MslTranslator
                 "SCbranchScc0" => "!scc",
                 "SCbranchScc1" => "scc",
                 // VCCZ/EXECZ test the full architectural register pair, which
-                // also covers programs that parked plain data in VCC.
-                "SCbranchVccz" => $"(s[{VccLoRegister}] | s[{VccHiRegister}]) == 0u",
-                "SCbranchVccnz" => $"(s[{VccLoRegister}] | s[{VccHiRegister}]) != 0u",
+                // also covers programs that parked plain data in VCC; a wave32
+                // compute program's VCC is VCC_LO alone (see VccIsLowHalfOnly).
+                "SCbranchVccz" => VccZeroCondition,
+                "SCbranchVccnz" => VccIsLowHalfOnly
+                    ? $"s[{VccLoRegister}] != 0u"
+                    : $"(s[{VccLoRegister}] | s[{VccHiRegister}]) != 0u",
                 "SCbranchExecz" => IsSingleLaneStage ? "!exec" : $"(s[{ExecLoRegister}] | s[{ExecHiRegister}]) == 0u",
                 "SCbranchExecnz" => IsSingleLaneStage ? "exec" : $"(s[{ExecLoRegister}] | s[{ExecHiRegister}]) != 0u",
                 // The emulator does not expose a shader debug session.
@@ -3546,7 +3564,7 @@ public static partial class Gen5MslTranslator
                     // 251/252/253 read the VCCZ/EXECZ/SCC status bits as data.
                     if (operand.Value == 251)
                     {
-                        return $"((s[{VccLoRegister}] | s[{VccHiRegister}]) == 0u ? 1u : 0u)";
+                        return $"({VccZeroCondition} ? 1u : 0u)";
                     }
 
                     if (operand.Value == 252)
