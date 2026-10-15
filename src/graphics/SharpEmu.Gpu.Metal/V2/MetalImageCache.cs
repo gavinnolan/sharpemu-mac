@@ -318,14 +318,29 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     private long _aliasesKept;
     private long _aliasPublishes;
     private long _aliasNarrowWrites;
+    private long _aliasReadsSkipped;
 
     /// <summary>
     /// How often an alias was kept instead of dropped, resynchronized, and handed over to a
     /// write over just the bytes the two share.
     /// </summary>
-    public (long Kept, long Published, long Narrow) AliasCounters =>
+    public (long Kept, long Published, long Narrow, long ReadsSkipped) AliasCounters =>
         (Interlocked.Exchange(ref _aliasesKept, 0), Interlocked.Exchange(ref _aliasPublishes, 0),
-         Interlocked.Exchange(ref _aliasNarrowWrites, 0));
+         Interlocked.Exchange(ref _aliasNarrowWrites, 0), Interlocked.Exchange(ref _aliasReadsSkipped, 0));
+
+    // SHARPEMU_METAL_V2_ALIAS_SKIP_MISMATCH=0 publishes every GPU-written alias a read
+    // overlaps, whatever its layout.
+    private static readonly bool AliasReadSkipMismatchEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ALIAS_SKIP_MISMATCH") != "0";
+
+    // Whether bytes laid out for one image read back as anything but noise through the
+    // other: the same tile mode, element size and row stride, so a texel of one is a
+    // texel of the other. A depth-tiled shadow array over a render-target-tiled 720p
+    // transient, or a 4 byte surface over an 8 byte one, shares addresses and nothing
+    // else; on the console such a read returns scrambled bytes too.
+    private static bool SameTexelLayout(in ImageDescription a, in ImageDescription b) =>
+        a.TileMode == b.TileMode && a.BytesPerBlock == b.BytesPerBlock &&
+        (ulong)a.Pitch * a.BytesPerBlock == (ulong)b.Pitch * b.BytesPerBlock;
 
     /// <summary>
     /// Makes this image the one that agrees with guest memory, against every other
@@ -401,6 +416,21 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                         other.MarkCpuDirty(MetalImageDirtyCause.AliasWrite);
                     }
 
+                    continue;
+                }
+
+                if (!takesGpuOwnership && AliasReadSkipMismatchEnabled &&
+                    !SameTexelLayout(in image.Description, in other.Description))
+                {
+                    // A read through a layout the written bytes do not fit gets noise on the
+                    // console and would get noise here, after a retile of the other image
+                    // out and this one back in. Demon's Souls binds a shadow array over the
+                    // memory its 720p post-process transients reuse and never samples it in
+                    // scenes without shadow casters: three such round trips a frame at the
+                    // title. The texture keeps what it last held; the other stays
+                    // GPU-modified, so a reader whose layout does fit is still served.
+                    _aliasReadsSkipped++;
+                    NoteAliasPublication("read-skip-layout", image, other, otherOwedGuestMemory, otherStart, otherEnd);
                     continue;
                 }
 

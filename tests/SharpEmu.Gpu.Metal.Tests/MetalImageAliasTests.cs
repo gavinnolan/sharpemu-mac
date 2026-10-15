@@ -292,6 +292,40 @@ public sealed unsafe class MetalImageAliasTests(ITestOutputHelper output)
         Assert.Equal((long)(LargeSize - SmallSize), partial.UploadBytes);
     }
 
+    // A read through an alias whose rows do not line up with the GPU-written image's
+    // (here a narrower pitch over the same bytes) is served nothing: the image is not
+    // retiled out to guest memory and stays GPU-modified, and the reader is not marked
+    // stale over the run. A reader whose layout does fit still gets the run published.
+    [Fact]
+    public void AReadThroughAMismatchedLayoutSkipsTheHandover()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var (image, _, stale) = GpuWrittenLarge(rig);
+        _ = rig.Cache.AliasCounters;
+
+        var narrow = rig.Cache.GetImage(rig.Acquire(Rig.Request(ImageAddress, SmallSide, SmallSide, ImageRole.Texture)));
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+
+        Assert.Equal(stale, rig.ReadGuest(ImageAddress, LargeSize));
+        Assert.True(image.IsGpuModified);
+        Assert.False(narrow.IsCpuDirty);
+        var counters = rig.Cache.AliasCounters;
+        Assert.Equal(1, counters.ReadsSkipped);
+        Assert.Equal(0, counters.Published);
+
+        rig.Acquire(Rig.Request(ImageAddress + 0x2000, LargeSide, AliasRows, ImageRole.Texture));
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+
+        var guest = rig.ReadGuest(ImageAddress, LargeSize);
+        Assert.NotEqual(stale.AsSpan(0x2000, (int)SmallSize).ToArray(), guest.AsSpan(0x2000, (int)SmallSize).ToArray());
+        counters = rig.Cache.AliasCounters;
+        Assert.Equal(0, counters.ReadsSkipped);
+        Assert.Equal(1, counters.Published);
+    }
+
     // A write through a small alias inside a GPU-written image publishes only the run the
     // two share and leaves the large image GPU-modified for the rest: stale over the run
     // alone, with the rest of guest memory untouched by the handover.
