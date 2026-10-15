@@ -132,13 +132,17 @@ public sealed partial class GpuCommandInterpreter
 
     internal uint AcquireMemoryPacket(in PacketContext packet, ReadOnlySpan<uint> payload)
     {
+        // An acquire invalidates caches so later work sees earlier stores; that work may read
+        // what a fragment shader stored in a pass the executor left open.
         if (packet.Header == PacketHeader.Make(8, PacketOpcode.Nop, PacketCustomCode.AcquireMemory))
         {
+            _host.ReleaseShaderWrites();
             return 7;
         }
 
         if (packet.Header == PacketHeader.Make(7, PacketOpcode.AcquireMemory))
         {
+            _host.ReleaseShaderWrites();
             return 6;
         }
 

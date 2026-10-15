@@ -1948,6 +1948,10 @@ internal sealed partial class MetalRenderHost
 
     public bool OrdersVertexWritesInsidePass => true;
 
+    public bool DefersFragmentWritePassEnd => MetalV2Diagnostics.DeferFragmentWritePassEnd;
+
+    public long RenderPassSerial => _renderPassSerial;
+
     public void ShaderWriteHazardBarrier() => RecordMemoryBarrier();
 
     public void ShaderAccessBarrier() => RecordMemoryBarrier();

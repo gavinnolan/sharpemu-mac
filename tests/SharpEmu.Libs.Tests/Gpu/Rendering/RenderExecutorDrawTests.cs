@@ -1061,6 +1061,88 @@ public sealed class RenderExecutorDrawTests : IDisposable
         AssertOrder("draw_indexed 3 1 0 0 0", "end_rendering", $"write_barrier {GpuPipelineStage.FragmentShaderBit}", "reset_bindings");
     }
 
+    // A host that orders vertex stores in the pass and defers the pass end of fragment stores.
+    private void DrawWithPixelStores(bool vertexWrites = false)
+    {
+        _host.OrdersVertexWritesInsidePass = true;
+        _host.DefersFragmentWritePassEnd = true;
+        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        var descriptor = BufferDescriptor(VertexBase, 4, 16);
+        _pipelines.Graphics = Programs(
+            vertexStage: vertexWrites ? Stage(Program(ShaderStageKind.Vertex, buffers: [written]), buffers: [descriptor]) : Stage(Program(ShaderStageKind.Vertex)),
+            pixelStage: Stage(Program(ShaderStageKind.Pixel, usesDeviceAddresses: true, writesDeviceAddresses: true)));
+        _executor.DrawIndexed(1, Banks(), Indexed(3));
+        _pipelines.Graphics = Programs(vertexStage: Stage(Program(ShaderStageKind.Vertex)), pixelStage: Stage(Program(ShaderStageKind.Pixel)));
+    }
+
+    private const string FragmentBarrier = $"write_barrier {nameof(GpuPipelineStage.FragmentShaderBit)}";
+
+    [Fact]
+    public void PixelStores_KeepThePassOpenWhenTheHostDefersItsEnd()
+    {
+        DrawWithPixelStores();
+        _executor.DrawIndexed(1, Banks(), Indexed(3));
+
+        var draw = _host.Calls.IndexOf("draw_indexed 3 1 0 0 0");
+        Assert.True(draw >= 0);
+        Assert.DoesNotContain(_host.Calls, call => call == "end_rendering" || call.StartsWith("write_barrier", StringComparison.Ordinal));
+        Assert.Equal(2, _host.Calls.Count(call => call == "draw_indexed 3 1 0 0 0"));
+    }
+
+    [Fact]
+    public void PixelStores_WithVertexStoresBarrierOnlyTheVertexStageInsideThePass()
+    {
+        DrawWithPixelStores(vertexWrites: true);
+
+        Assert.Contains($"write_barrier {GpuPipelineStage.VertexShaderBit}", _host.Calls);
+        Assert.DoesNotContain(_host.Calls, call => call == "end_rendering" || call == FragmentBarrier);
+    }
+
+    [Fact]
+    public void DeferredPixelStores_EndThePassBeforeTheNextDispatch()
+    {
+        DrawWithPixelStores();
+        _host.Calls.Clear();
+        _executor.Dispatch(1, Banks(), 1, 1, 1, 0x41);
+
+        AssertOrder("end_rendering", FragmentBarrier, "end_rendering", "preparation_begin", "dispatch 1 1 1");
+    }
+
+    [Fact]
+    public void DeferredPixelStores_EndThePassWhenTheGuestReleasesShaderWritesOnce()
+    {
+        DrawWithPixelStores();
+        _host.Calls.Clear();
+        _executor.ReleaseShaderWrites();
+        Assert.Equal(["end_rendering", FragmentBarrier], _host.Calls);
+
+        _host.Calls.Clear();
+        _executor.ReleaseShaderWrites();
+        Assert.Empty(_host.Calls);
+    }
+
+    [Fact]
+    public void DeferredPixelStores_EndThePassBeforeAnIndirectDraw()
+    {
+        DrawWithPixelStores();
+        _host.Calls.Clear();
+        var arguments = Indexed(40, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments };
+        _executor.DrawIndexed(7, Banks(), arguments);
+
+        AssertOrder("end_rendering", FragmentBarrier, "obtain 100600000 14 written=False", "begin_rendering", "draw_indexed_indirect");
+    }
+
+    [Fact]
+    public void DeferredPixelStores_NeedNothingOnceTheHostEndedTheirPass()
+    {
+        DrawWithPixelStores();
+        _host.RenderPassSerial++;
+        _host.Calls.Clear();
+        _executor.ReleaseShaderWrites();
+
+        Assert.Empty(_host.Calls);
+    }
+
     [Fact]
     public void ShaderBufferWrites_WithoutAnAddressOrFootprintNeedNoBarrier()
     {

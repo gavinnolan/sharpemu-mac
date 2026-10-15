@@ -240,6 +240,12 @@ public sealed partial class RenderExecutor
         bool setAutoDebug)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawResourcePreparation);
+        if (emission.IndirectArgumentsAddress != 0)
+        {
+            // The GPU reads the arguments, which a deferred fragment store may have written.
+            ReleaseFragmentWrites();
+        }
+
         var context = banks.Context;
         var vertexInput = state.Programs.VertexInput;
         var pixelInput = state.Programs.PixelInput;
@@ -384,6 +390,17 @@ public sealed partial class RenderExecutor
         if (state.PixelActive && DrawWritesMemory(pixelInput.Stage))
         {
             writeStages |= GpuPipelineStage.FragmentShaderBit;
+        }
+
+        if ((writeStages & GpuPipelineStage.FragmentShaderBit) != 0 && _host.DefersFragmentWritePassEnd &&
+            ((writeStages & GpuPipelineStage.VertexShaderBit) == 0 || _host.OrdersVertexWritesInsidePass))
+        {
+            // Fragment stores cannot be made visible mid-pass on a tile-based GPU, but nothing
+            // in this pass reads them before the guest says so; the pass end and the barrier
+            // wait for the first consumer (ReleaseFragmentWrites).
+            writeStages &= ~GpuPipelineStage.FragmentShaderBit;
+            _fragmentWritesPending = true;
+            _fragmentWritesPass = _host.RenderPassSerial;
         }
 
         if (writeStages != GpuPipelineStage.None)

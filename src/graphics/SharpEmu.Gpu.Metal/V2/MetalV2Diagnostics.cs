@@ -68,6 +68,14 @@ internal static class MetalV2Diagnostics
     public static readonly bool TransferInEncoder =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_TRANSFER_IN_ENCODER"), "0", StringComparison.Ordinal);
 
+    // SHARPEMU_METAL_V2_DEFER_FRAGMENT_WRITE_PASS_END=0 ends the render pass after every draw
+    // whose fragment stage stores to memory, as it did before. Nothing in the same pass reads
+    // those stores until the guest flushes or acquires, so the pass now stays open until a
+    // dispatch, an indirect draw or such a guest sync packet; ending it per draw reloaded and
+    // stored the whole depth target 36 times a frame in Demon's Souls.
+    public static readonly bool DeferFragmentWritePassEnd =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEFER_FRAGMENT_WRITE_PASS_END"), "0", StringComparison.Ordinal);
+
     // SHARPEMU_METAL_V2_KERNEL_FILLS=0 runs a title's own compute memset or memcpy over the
     // exact bytes of a cached image as the dispatch it is, with the writeback before it
     // and the upload after it, instead of as a clear or texture copy of the image

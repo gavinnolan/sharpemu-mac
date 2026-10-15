@@ -313,6 +313,22 @@ public sealed class GpuCommandInterpreterLabelTests
         Assert.Equal(new[] { "barrier" }, runner.Host.Calls);
     }
 
+    [Theory]
+    [InlineData(0x10u, 0u, 1)]
+    [InlineData(0x16u, 0u, 1)]
+    [InlineData(0x07u, 0u, 0)]
+    [InlineData(0x0Fu, 0u, 0)]
+    [InlineData(0x31u, 0u, 0)]
+    [InlineData(0x2Au, 0u, 0)]
+    public void EventWrite_OnlyPixelStoreFlushesReleaseShaderWrites(uint eventType, uint eventIndex, int releases)
+    {
+        var runner = new StreamRunner();
+
+        runner.Run(StreamRunner.Packet(PacketOpcode.EventWrite, eventType | (eventIndex << 8)));
+
+        Assert.Equal(releases, runner.Host.ShaderWriteReleases);
+    }
+
     [Fact]
     public void EventWrite_IgnoredTypesUnknownTypesAndOcclusionDump()
     {
@@ -395,12 +411,13 @@ public sealed class GpuCommandInterpreterLabelTests
     }
 
     [Fact]
-    public void AcquireMemory_IsANoOp()
+    public void AcquireMemory_OnlyReleasesShaderWrites()
     {
         var runner = new StreamRunner();
 
         runner.Run(StreamRunner.CustomPacket(Nop, PacketCustomCode.AcquireMemory, 0, 0, 0, 0, 0, 0, 0), StreamRunner.Packet(PacketOpcode.AcquireMemory, 0, 0, 0, 0, 0, 0));
 
         Assert.Empty(runner.Host.Calls);
+        Assert.Equal(2, runner.Host.ShaderWriteReleases);
     }
 }

@@ -313,10 +313,25 @@ internal sealed class RecordingRenderHost : IRenderHost
     public void BeginRendering(in RenderingState state)
     {
         BegunRenderings.Add(state);
+        _renderingOpen = true;
         Calls.Add($"begin_rendering {state.Width}x{state.Height}x{state.Layers} colors={state.ColorAttachmentCount} samples={state.Samples}");
     }
 
-    public void EndRendering() => Calls.Add("end_rendering");
+    private bool _renderingOpen;
+
+    public void EndRendering()
+    {
+        Calls.Add("end_rendering");
+        if (_renderingOpen)
+        {
+            _renderingOpen = false;
+            RenderPassSerial++;
+        }
+    }
+
+    public bool DefersFragmentWritePassEnd { get; set; }
+
+    public long RenderPassSerial { get; set; }
 
     public void BindPipeline(GpuBindPoint bindPoint, in PipelineHandle pipeline) => Calls.Add($"bind_pipeline {bindPoint} {pipeline.Pipeline:X}");
 

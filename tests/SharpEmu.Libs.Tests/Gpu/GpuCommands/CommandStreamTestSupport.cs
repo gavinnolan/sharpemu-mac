@@ -114,6 +114,11 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandS
 
     public void EmitGlobalBarrier() => Calls.Add("barrier");
 
+    // Counted rather than recorded in Calls: every barrier-emitting packet also releases.
+    public int ShaderWriteReleases { get; private set; }
+
+    public void ReleaseShaderWrites() => ShaderWriteReleases++;
+
     public void FillBuffer(ulong address, ulong size, uint value, bool isGds)
     {
         Calls.Add($"fill {address:X} {size:X} {value:X8} gds={isGds}");
