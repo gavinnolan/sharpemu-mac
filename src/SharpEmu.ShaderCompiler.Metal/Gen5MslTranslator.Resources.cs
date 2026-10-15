@@ -519,9 +519,26 @@ public static partial class Gen5MslTranslator
                 $"sharpemu_load_device_dword({DeviceArguments}, {address}) : 0u)");
         }
 
-        // A raw dword or subword-store buffer access whose V# lives in scalar registers: no
-        // host binding exists, so the access runs over the device-address page table, bounded
-        // by the descriptor. Out-of-range reads are zero and out-of-range stores are dropped.
+        // A formatted load from a V# held in scalar registers: the element's bytes are read
+        // through the device-address page table at an offset from the descriptor's base, and
+        // a component whose bytes reach past the descriptor's size is out of range. A read
+        // runs only when it is in range, so it never touches the guest bytes that follow.
+        private FormatMemory DeviceFormatMemory((string Base, string Size, string Stride) descriptor) => new(
+            (byteOffset, bytes) => Temp(
+                "bool",
+                $"(ulong){bytes} <= {descriptor.Size} && (ulong){byteOffset} <= {descriptor.Size} - (ulong){bytes}"),
+            (byteOffset, bytes, inBounds) => Temp(
+                "uint",
+                $"({bytes} != 0u && {inBounds}) ? sharpemu_load_device_unaligned({DeviceArguments}, " +
+                $"({descriptor.Base} + (ulong){byteOffset}) & {FormatULong(DeviceAddressPaging.AddressMask)}, {bytes}) : 0u"),
+            LoadWords: null,
+            ZeroInvalidFormat: true);
+
+        // A raw dword, subword-store or formatted-load buffer access whose V# lives in scalar
+        // registers: no host binding exists, so the access runs over the device-address page
+        // table, bounded by the descriptor. Out-of-range reads are zero and out-of-range
+        // stores are dropped. A formatted load decodes the format and destination swizzle of
+        // the descriptor's word 3 on the device, a typed one converts with its own format.
         private bool TryEmitDeviceDescriptorBufferMemory(
             Gen5ShaderInstruction instruction,
             Gen5BufferMemoryControl control,
@@ -529,8 +546,10 @@ public static partial class Gen5MslTranslator
         {
             error = string.Empty;
             var opcode = instruction.Opcode;
-            if (control.Typed || opcode.StartsWith("TBuffer", StringComparison.Ordinal) ||
-                opcode.Contains("Format", StringComparison.Ordinal))
+            var isFormatLoad = IsFormatBufferLoad(opcode);
+            if (!isFormatLoad &&
+                (control.Typed || opcode.StartsWith("TBuffer", StringComparison.Ordinal) ||
+                 opcode.Contains("Format", StringComparison.Ordinal)))
             {
                 error = $"device buffer descriptor does not support the formatted access {opcode}";
                 return false;
@@ -544,7 +563,7 @@ public static partial class Gen5MslTranslator
 
             var isStore = opcode.StartsWith("BufferStore", StringComparison.Ordinal);
             var isSubwordStore = TryGetSubdwordStoreInfo(opcode, out var storeBytes, out var sourceShift);
-            if (!isSubwordStore &&
+            if (!isSubwordStore && !isFormatLoad &&
                 !opcode.StartsWith("BufferLoadDword", StringComparison.Ordinal) &&
                 !opcode.StartsWith("BufferStoreDword", StringComparison.Ordinal))
             {
@@ -575,6 +594,27 @@ public static partial class Gen5MslTranslator
             var byteOffset = Temp(
                 "uint",
                 $"(0x{unchecked((uint)control.OffsetBytes):X}u + {scalarOffset} + {vectorOffset} + ({vectorIndex} * {descriptor.Stride}))");
+
+            if (isFormatLoad)
+            {
+                // Word 3 carries the unified format and dst_sel, the same layout the bound
+                // path's specialized word takes; it is read before any destination is written.
+                var memory = DeviceFormatMemory(descriptor);
+                var word3 = Temp("uint", ScalarExpression(instruction.Sources[1].Value + 3));
+                if (!control.Typed)
+                {
+                    EmitDecodedBufferFormatLoad(memory, byteOffset, word3, control.VectorData, control.DwordCount);
+                    return true;
+                }
+
+                if (TryEmitTypedBufferFormatLoad(memory, byteOffset, control, word3))
+                {
+                    return true;
+                }
+
+                error = $"device buffer descriptor does not support the typed format {control.TypedFormat} of {opcode}";
+                return false;
+            }
 
             if (!isStore)
             {

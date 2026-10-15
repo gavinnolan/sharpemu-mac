@@ -1666,7 +1666,7 @@ public static partial class Gen5MslTranslator
                     return true;
                 }
 
-                if (TryEmitTypedBufferFormatLoad(bindingIndex, address, control, descriptorWord3))
+                if (TryEmitTypedBufferFormatLoad(BindingFormatMemory(bindingIndex), address, control, descriptorWord3))
                 {
                     return true;
                 }
@@ -1698,12 +1698,31 @@ public static partial class Gen5MslTranslator
                 return;
             }
 
+            EmitDecodedBufferFormatLoad(
+                BindingFormatMemory(bindingIndex),
+                byteAddress,
+                descriptorWord3,
+                vectorData,
+                componentCount);
+        }
+
+        // BUFFER_LOAD_FORMAT_* with the format decoded on the device: the bound path and a
+        // V# held in scalar registers (read through the device-address page table) share it.
+        private void EmitDecodedBufferFormatLoad(
+            FormatMemory memory,
+            string byteAddress,
+            string descriptorWord3,
+            uint vectorData,
+            uint componentCount)
+        {
             // Format and destination swizzle come from descriptor word 3, a register
             // or a specialization constant; the prelude table decodes the unified format.
             var word3 = Temp("uint", descriptorWord3);
             var entry = Temp("uint", $"sharpemu_gfx10_formats[({word3} >> 12) & 0x7Fu]");
             var dataFormat = Temp("uint", $"{entry} & 0xFFu");
             var numberFormat = Temp("uint", $"({entry} >> 8) & 0xFFu");
+            // A format the table cannot decode reads every destination as zero there.
+            var valid = memory.ZeroInvalidFormat ? Temp("bool", $"{dataFormat} != 0u") : null;
             var canonical = new string[4];
             var componentBounds = new string[4];
             for (var component = 0; component < 4; component++)
@@ -1712,7 +1731,7 @@ public static partial class Gen5MslTranslator
                     ? $"sharpemu_format_one({numberFormat})"
                     : "0u";
                 canonical[component] = LoadFormatComponent(
-                    bindingIndex,
+                    memory,
                     byteAddress,
                     dataFormat,
                     numberFormat,
@@ -1737,13 +1756,12 @@ public static partial class Gen5MslTranslator
             {
                 var selector = selectors[destination];
                 var constant = Temp("uint", $"{selector} == 1u ? sharpemu_format_one({numberFormat}) : 0u");
-                StoreVector(
-                    vectorData + destination,
-                    $"!{inBounds} ? {constant} : " +
+                var value = $"!{inBounds} ? {constant} : " +
                     $"{selector} == 4u ? {canonical[0]} : " +
                     $"{selector} == 5u ? {canonical[1]} : " +
                     $"{selector} == 6u ? {canonical[2]} : " +
-                    $"{selector} == 7u ? {canonical[3]} : {constant}");
+                    $"{selector} == 7u ? {canonical[3]} : {constant}";
+                StoreVector(vectorData + destination, valid is null ? value : $"{valid} ? ({value}) : 0u");
             }
         }
 
@@ -1857,7 +1875,7 @@ public static partial class Gen5MslTranslator
         // Component i of a typed load comes from memory component i; components the
         // format does not have read as zero. An unbound descriptor reads as zero.
         private bool TryEmitTypedBufferFormatLoad(
-            int bindingIndex,
+            FormatMemory memory,
             string byteAddress,
             Gen5BufferMemoryControl control,
             string descriptorWord3)
@@ -1875,7 +1893,7 @@ public static partial class Gen5MslTranslator
 
             // All transferred components must be bound and inside the binding.
             var accessBytes = Gfx10UnifiedFormat.GetAccessByteSize(dataFormat, control.DwordCount);
-            var inBounds = ElementInBounds(bindingIndex, byteAddress, $"{accessBytes}u");
+            var inBounds = memory.ElementInBounds(byteAddress, $"{accessBytes}u");
             var valid = Temp(
                 "bool",
                 $"(({descriptorWord3} >> 12) & 0x7Fu) != 0u && {inBounds}");
@@ -1885,7 +1903,8 @@ public static partial class Gen5MslTranslator
             // plain aligned read when it is aligned and inside the binding.
             string? dwordRun = null;
             var runCount = Math.Min(control.DwordCount, componentCount);
-            if (Gfx10UnifiedFormat.HasWholeDwordComponents(dataFormat) && runCount is >= 1 and <= 4)
+            if (memory.LoadWords is not null &&
+                Gfx10UnifiedFormat.HasWholeDwordComponents(dataFormat) && runCount is >= 1 and <= 4)
             {
                 var consecutive = true;
                 for (uint component = 0; component < runCount; component++)
@@ -1897,9 +1916,7 @@ public static partial class Gen5MslTranslator
 
                 if (consecutive)
                 {
-                    dwordRun = Temp(
-                        "uint4",
-                        $"sharpemu_load_words<{runCount}>(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress})");
+                    dwordRun = Temp("uint4", memory.LoadWords(runCount, byteAddress));
                 }
             }
 
@@ -1911,7 +1928,7 @@ public static partial class Gen5MslTranslator
                         $"sharpemu_format_convert({dwordRun}[{destination}], 32u, {numberFormat}u, {dataFormat}u)")
                     : destination < componentCount
                     ? LoadFormatComponent(
-                        bindingIndex,
+                        memory,
                         byteAddress,
                         $"{dataFormat}u",
                         $"{numberFormat}u",
@@ -1996,8 +2013,25 @@ public static partial class Gen5MslTranslator
             return true;
         }
 
+        // Where a formatted load reads its element's bytes: a host binding, or a V# held in
+        // scalar registers and read through the device-address page table. The bounds check
+        // takes (address, bytes); the word load takes (address, bytes, in bounds) and reads
+        // the unaligned word holding those bytes; LoadWords, when present, loads a run of
+        // whole dwords. ZeroInvalidFormat reads a format the table cannot decode as zero.
+        private readonly record struct FormatMemory(
+            Func<string, string, string> ElementInBounds,
+            Func<string, string, string, string> LoadWord,
+            Func<uint, string, string>? LoadWords,
+            bool ZeroInvalidFormat);
+
+        private FormatMemory BindingFormatMemory(int bindingIndex) => new(
+            (address, bytes) => ElementInBounds(bindingIndex, address, bytes),
+            (address, _, _) => LoadWord(bindingIndex, address),
+            (count, address) => $"sharpemu_load_words<{count}>(b{bindingIndex}, {BufferBytes(bindingIndex)}, {address})",
+            ZeroInvalidFormat: false);
+
         private string LoadFormatComponent(
-            int bindingIndex,
+            FormatMemory memory,
             string byteAddress,
             string dataFormat,
             string numberFormat,
@@ -2010,11 +2044,11 @@ public static partial class Gen5MslTranslator
             var bitCount = Temp("uint", "0u");
             Line($"sharpemu_format_layout({dataFormat}, {component}u, {byteOffset}, {bitOffset}, {bitCount});");
             var componentBytes = Temp("uint", $"({bitOffset} + {bitCount} + 7u) >> 3u");
-            var rangeInBounds = ElementInBounds(bindingIndex, $"({byteAddress} + {byteOffset})", componentBytes);
+            var rangeInBounds = memory.ElementInBounds($"({byteAddress} + {byteOffset})", componentBytes);
             componentInBounds = Temp("bool", $"{bitCount} == 0u || {rangeInBounds}");
             var packed = Temp(
                 "uint",
-                LoadWord(bindingIndex, $"({byteAddress} + {byteOffset})"));
+                memory.LoadWord($"({byteAddress} + {byteOffset})", componentBytes, rangeInBounds));
             var raw = Temp(
                 "uint",
                 $"{bitCount} == 0u ? 0u : extract_bits({packed}, {bitOffset}, {bitCount})");

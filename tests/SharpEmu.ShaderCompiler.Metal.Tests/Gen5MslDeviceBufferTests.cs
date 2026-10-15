@@ -87,6 +87,64 @@ public sealed class Gen5MslDeviceBufferTests
     }
 
     [Fact]
+    public void AFormattedBufferLoadThroughADeviceDescriptorDecodesItsWord3OnTheDevice()
+    {
+        // GTA V's compute shader 0xF1D19431555095C0 aborted with "device buffer descriptor
+        // does not support the formatted access BufferLoadFormatXyz".
+        var source = Compile(
+            ReadFirstLane(0, 12, 0),
+            MoveScalar(4, 13, 0),
+            MoveScalar(8, 14, 16),
+            MoveScalar(12, 15, 0),
+            ScalarBufferLoad(16, resourceRegister: 12, destination: 8, count: 4),
+            BufferAccess(24, "BufferLoadFormatXyz", resourceRegister: 8, dwords: 3),
+            End(32));
+
+        // Format and dst_sel come from the V#'s own word 3 in s11, decoded by the prelude
+        // table, and each component's bytes are read through the page table.
+        Assert.Matches(@"uint t\d+ = s11;", source);
+        Assert.Contains("sharpemu_gfx10_formats[(", source, StringComparison.Ordinal);
+        Assert.Equal(4, CountOccurrences(source, "sharpemu_load_device_unaligned(sharpemu_ranges"));
+    }
+
+    [Theory]
+    [InlineData("TBufferLoadFormatX", 1u, 22u)]
+    [InlineData("TBufferLoadFormatXyzw", 4u, 56u)]
+    [InlineData("TBufferLoadFormatXyzw", 4u, 77u)]
+    public void ATypedBufferLoadThroughADeviceDescriptorConvertsWithItsOwnFormat(string opcode, uint dwords, uint format)
+    {
+        var source = Compile(
+            ReadFirstLane(0, 12, 0),
+            MoveScalar(4, 13, 0),
+            MoveScalar(8, 14, 16),
+            MoveScalar(12, 15, 0),
+            ScalarBufferLoad(16, resourceRegister: 12, destination: 8, count: 4),
+            BufferAccess(24, opcode, resourceRegister: 8, dwords: dwords, typedFormat: format),
+            End(32));
+
+        Assert.Contains("sharpemu_format_convert(", source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_load_device_unaligned(sharpemu_ranges", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AFormattedBufferStoreThroughADeviceDescriptorIsRejectedExplicitly()
+    {
+        var program = new Gen5ShaderProgram(0x2000, [
+            ReadFirstLane(0, 12, 0),
+            MoveScalar(4, 13, 0),
+            MoveScalar(8, 14, 16),
+            MoveScalar(12, 15, 0),
+            ScalarBufferLoad(16, resourceRegister: 12, destination: 8, count: 4),
+            BufferAccess(24, "BufferStoreFormatXyzw", resourceRegister: 8, dwords: 4),
+            End(32),
+        ]);
+        var request = Gen5ComputeFixtures.RequestOrThrow(program, ShaderStage.Compute, localSizeX: 1);
+
+        Assert.False(Gen5MslTranslator.TryCompileProgram(request, out _, out var error));
+        Assert.Contains("formatted access BufferStoreFormatXyzw", error, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ABufferLoadPastTheBindingBudgetCompiles()
     {
         var instructions = new List<Gen5ShaderInstruction>();
@@ -176,23 +234,37 @@ public sealed class Gen5MslDeviceBufferTests
             [.. Enumerable.Range((int)destination, (int)count).Select(index => Gen5Operand.Scalar((uint)index))],
             new Gen5ScalarMemoryControl(count, 0, null));
 
+    // s_buffer_load_dwordxN through the descriptor at resourceRegister. A V# it reads
+    // through a device-only descriptor has no host binding either.
+    private static Gen5ShaderInstruction ScalarBufferLoad(uint pc, uint resourceRegister, uint destination, uint count) =>
+        new(
+            pc,
+            Gen5ShaderEncoding.Smem,
+            $"SBufferLoadDwordx{count}",
+            [0u, 0u],
+            [Gen5Operand.Scalar(resourceRegister), Gen5Operand.Source(NullOperand)],
+            [.. Enumerable.Range((int)destination, (int)count).Select(index => Gen5Operand.Scalar((uint)index))],
+            new Gen5ScalarMemoryControl(count, 0, null));
+
     private static Gen5ShaderInstruction BufferLoad(uint pc, uint resourceRegister, uint dwords) =>
         BufferAccess(pc, dwords == 1 ? "BufferLoadDword" : $"BufferLoadDwordx{dwords}", resourceRegister, dwords);
 
-    private static Gen5ShaderInstruction BufferAccess(uint pc, string opcode, uint resourceRegister, uint dwords)
+    private static Gen5ShaderInstruction BufferAccess(uint pc, string opcode, uint resourceRegister, uint dwords, uint? typedFormat = null)
     {
         const uint vectorData = 4;
         var isStore = opcode.Contains("Store", StringComparison.Ordinal) || opcode.Contains("Atomic", StringComparison.Ordinal);
         var data = Enumerable.Range((int)vectorData, (int)dwords).Select(index => Gen5Operand.Vector((uint)index)).ToArray();
         return new Gen5ShaderInstruction(
             pc,
-            Gen5ShaderEncoding.Mubuf,
+            typedFormat is null ? Gen5ShaderEncoding.Mubuf : Gen5ShaderEncoding.Mtbuf,
             opcode,
             [0u, 0u],
             isStore
                 ? [Gen5Operand.Vector(0), Gen5Operand.Scalar(resourceRegister), Gen5Operand.Source(NullOperand), .. data]
                 : [Gen5Operand.Vector(0), Gen5Operand.Scalar(resourceRegister), Gen5Operand.Source(NullOperand)],
             isStore ? [] : data,
-            new Gen5BufferMemoryControl(dwords, 0, vectorData, resourceRegister, 0, false, false, Glc: false, Slc: false));
+            new Gen5BufferMemoryControl(
+                dwords, 0, vectorData, resourceRegister, 0, false, false, Glc: false, Slc: false,
+                Typed: typedFormat is not null, TypedFormat: typedFormat ?? 0));
     }
 }
