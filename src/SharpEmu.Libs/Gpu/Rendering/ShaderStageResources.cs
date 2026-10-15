@@ -52,6 +52,10 @@ public class ShaderProgramInfo
     public int InstanceOffsetScalarRegister { get; init; } = NoScalarRegister;
     public bool UsesDeviceAddresses { get; init; }
 
+    // A store or an atomic through the device-address page table: the draw writes memory
+    // no host-side range bounds, unlike a program that only reads through it.
+    public bool WritesDeviceAddresses { get; init; }
+
     // The dword every invocation stores when the whole program is 'index, v_mov constant, one
     // buffer store, end' (AGC's constant fill kernels); null for any other program.
     public uint? ConstantStoreValue { get; init; }

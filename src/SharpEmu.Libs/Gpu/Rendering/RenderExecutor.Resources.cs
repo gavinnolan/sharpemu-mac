@@ -159,10 +159,12 @@ public sealed partial class RenderExecutor
     }
 
     // A written buffer resource with an address and a footprint needs a barrier after the stage.
-    // Device-address accesses are not split into reads and writes, so they count as stores.
+    // Only a store or an atomic through the device-address page table counts: a program that
+    // merely reads through it writes nothing, and ending the pass after it would store and
+    // reload every attachment on a tile-based GPU for no reason.
     private bool DrawWritesMemory(ShaderStageResources stage) =>
         stage.Program is { } program &&
-        (program.UsesDeviceAddresses || WritesStorageImage(program) || HasBufferWrites(stage));
+        (program.WritesDeviceAddresses || WritesStorageImage(program) || HasBufferWrites(stage));
 
     private bool HasBufferWrites(ShaderStageResources stage)
     {

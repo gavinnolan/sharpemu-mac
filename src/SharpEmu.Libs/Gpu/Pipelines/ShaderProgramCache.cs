@@ -993,6 +993,7 @@ internal sealed class ShaderProgramCache
             VertexOffsetScalarRegister = entry.EmbeddedFetch?.VertexOffsetScalarRegister ?? ShaderProgramInfo.NoScalarRegister,
             InstanceOffsetScalarRegister = entry.EmbeddedFetch?.InstanceOffsetScalarRegister ?? ShaderProgramInfo.NoScalarRegister,
             UsesDeviceAddresses = info.UsesDeviceAddresses,
+            WritesDeviceAddresses = info.WritesDeviceAddresses,
             ConstantStoreValue = FindConstantStoreValue(entry.Program),
             HasBitwiseExclusiveOr = entry.HasBitwiseExclusiveOr,
             ConstantFill = entry.ConstantFill,
