@@ -52,6 +52,14 @@ internal static class MetalV2Diagnostics
     public static readonly bool DeferLabelWrites =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEFER_LABELS"), "0", StringComparison.Ordinal);
 
+    // SHARPEMU_METAL_V2_DEFER_COMPUTE_COPIES=0 makes an end-of-pipe label or a
+    // command-processor write recorded while a compute encoder is open end that encoder to
+    // be copied, as it did before. Games put a label or a WRITE_DATA after nearly every
+    // dispatch, and ending the encoder for each one split a frame into a hundred compute
+    // encoders whose boundaries cost more GPU time than the dispatches they held.
+    public static readonly bool DeferComputeCopies =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEFER_COMPUTE_COPIES"), "0", StringComparison.Ordinal);
+
     // SHARPEMU_METAL_V2_FOLD_CLEARS=0 encodes every clear as its own render pass the
     // moment it is asked for, the way it did before a clear could become the load action
     // of the pass that follows it. A fast-clear that is materialised and then rendered

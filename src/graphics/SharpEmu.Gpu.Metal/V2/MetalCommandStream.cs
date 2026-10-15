@@ -332,10 +332,24 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     /// <summary>
     /// Encodes a copy into guest memory where the stream has reached, the way a label's bytes
-    /// are: at once between encoders, or at the next encoder boundary while a render pass is
-    /// open. Either way it lands after every write recorded before it and before every one
-    /// recorded after it. Returns the submission that carries it.
+    /// are: at once between encoders, or at the next encoder boundary while a render pass or
+    /// a compute encoder is open. Either way it lands after every write recorded before it
+    /// and before every one recorded after it. Returns the submission that carries it.
     /// </summary>
+    /// <remarks>
+    /// A deferred copy lands after every draw or dispatch recorded into the same encoder
+    /// after it, not only the ones before it. A store the command processor makes and a
+    /// later draw or dispatch then reads on the GPU - a WRITE_DATA into a buffer a shader
+    /// reads, a DMA fill that resets a counter the next dispatch increments - is read before
+    /// the bytes land, and a shader store to those bytes is overwritten by them. The
+    /// render-pass deferral has always accepted this for draws: nothing checks the copy's
+    /// destination against what the pass binds. A compute encoder follows the same policy,
+    /// because the encoder split it avoids is the frame's largest GPU cost. What reads the
+    /// bytes at parse time is not affected (MetalPendingWriteOverlay), nor is an image made
+    /// from them: the write invalidates it, and the upload that replaces it is a transfer,
+    /// which ends the encoder and lands the copies first. If a title shows the hazard,
+    /// SHARPEMU_METAL_V2_DEFER_COMPUTE_COPIES=0 ends the compute encoder for every copy again.
+    /// </remarks>
     private ulong EncodeOrderedCopy(
         in DeferredLabelCopy copy,
         ulong guestAddress,
@@ -345,14 +359,17 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         string profile)
     {
         ulong serial;
-        if (MetalV2Diagnostics.DeferLabelWrites && _renderEncoder != 0)
+        if ((MetalV2Diagnostics.DeferLabelWrites && _renderEncoder != 0) ||
+            (DefersCopiesInCompute && _computeEncoder != 0))
         {
             // Four bytes are not worth a framebuffer. Ending the open pass to copy them
             // stores and reloads every attachment, which at 3840x2160 is tens of
             // megabytes for a label the guest polls, so the copy waits for the next
             // boundary between encoders instead — one the frame reaches anyway. It then
             // lands after more work than the packet named, and a label that lands late
-            // still only ever says that the work before it has finished.
+            // still only ever says that the work before it has finished. A compute
+            // encoder is held open the same way: ending it per copy split each frame
+            // into ~114 encoders, and the gaps between them outcost the dispatches.
             _deferredLabelCopies.Add(copy);
             Interlocked.Increment(ref _deferredLabelWrites);
             NoteRecordedWork();
@@ -512,6 +529,14 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     private const int MaxOverlayEntriesBeforeRetire = 256;
 
     internal bool RenderEncoderOpen => _renderEncoder != 0;
+
+    internal bool ComputeEncoderOpen => _computeEncoder != 0;
+
+    /// <summary>
+    /// Whether a copy recorded while a compute encoder is open waits for its end instead of
+    /// ending it (SHARPEMU_METAL_V2_DEFER_COMPUTE_COPIES).
+    /// </summary>
+    internal bool DefersCopiesInCompute { get; set; } = MetalV2Diagnostics.DeferComputeCopies;
 
     internal int DeferredLabelCopyCount => _deferredLabelCopies.Count;
 

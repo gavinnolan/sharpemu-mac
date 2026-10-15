@@ -127,6 +127,90 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         Assert.False(rig.Host.DefersCommandProcessorWrites);
     }
 
+    /// <summary>
+    /// A label or a command-processor write recorded inside an open compute encoder waits for
+    /// the encoder's end instead of ending it, and lands there: after what was recorded before
+    /// the encoder and before what is recorded after it.
+    /// </summary>
+    [Fact]
+    public void ACopyInsideAnOpenComputeEncoderLandsAtItsEndInOrder()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        Assert.True(host.DefersCopiesInCompute);
+        const ulong filled = GuestBase + 0x10000;
+
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write64, 1, WindowedLabel, 1));
+        host.RecordCommandProcessorWrite(LaterLabel, BitConverter.GetBytes(0x11UL), "WRITE_DATA");
+        Assert.Equal(0, host.DeferredLabelCopyCount);
+        _ = host.TakeDeferredLabelWrites();
+
+        _ = host.EnsureComputeEncoder();
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write64, 1, WindowedLabel, 2));
+        host.RecordCommandProcessorWrite(LaterLabel, BitConverter.GetBytes(0x55UL), "WRITE_DATA");
+        Assert.True(host.ComputeEncoderOpen);
+        Assert.Equal(2, host.DeferredLabelCopyCount);
+        Assert.Equal(2L, host.TakeDeferredLabelWrites());
+
+        // A transfer too large to stage ends the encoder; the copies are encoded at that boundary.
+        host.FillBufferInOrder(filled, 0x2000, 0x77);
+        Assert.False(host.ComputeEncoderOpen);
+        Assert.Equal(0, host.DeferredLabelCopyCount);
+
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write64, 1, WindowedLabel, 3));
+        Assert.Equal(0, host.DeferredLabelCopyCount);
+
+        host.FlushCommandBuffer();
+        WaitForGpu(host, host.LastWorkSerial);
+        WaitForCompletions(host);
+        Assert.Equal(3UL, rig.Backing.Read64(WindowedLabel));
+        Assert.Equal(0x55UL, rig.Backing.Read64(LaterLabel));
+        Assert.Equal(0x77u, rig.Backing.Read32(filled));
+    }
+
+    [Fact]
+    public void TheComputeCopyOptOutEndsTheComputeEncoderForTheCopy()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        host.DefersCopiesInCompute = false;
+
+        _ = host.EnsureComputeEncoder();
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write64, 1, WindowedLabel, 2));
+        Assert.False(host.ComputeEncoderOpen);
+        Assert.Equal(0, host.DeferredLabelCopyCount);
+        Assert.Equal(0L, host.TakeDeferredLabelWrites());
+
+        host.FlushCommandBuffer();
+        WaitForGpu(host, host.LastWorkSerial);
+        WaitForCompletions(host);
+        Assert.Equal(2UL, rig.Backing.Read64(WindowedLabel));
+    }
+
+    [Fact]
+    public void AFlushWithAnOpenComputeEncoderEncodesTheWaitingCopiesBeforeCommitting()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+
+        _ = host.EnsureComputeEncoder();
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write64, 1, WindowedLabel, 2));
+        host.RecordCommandProcessorWrite(LaterLabel, BitConverter.GetBytes(0x55UL), "WRITE_DATA");
+        Assert.Equal(2, host.DeferredLabelCopyCount);
+
+        var serial = host.FlushCommandBuffer();
+        Assert.False(host.ComputeEncoderOpen);
+        Assert.Equal(0, host.DeferredLabelCopyCount);
+
+        WaitForGpu(host, serial);
+        WaitForCompletions(host);
+        Assert.Equal(2UL, rig.Backing.Read64(WindowedLabel));
+        Assert.Equal(0x55UL, rig.Backing.Read64(LaterLabel));
+    }
+
     private ((ulong WhileHeld, ulong AfterDrain) Owed, (ulong WhileHeld, ulong AfterDrain) Later, long Ordered)
         RecordOwedThenLater(bool orderedEndOfPipe, Action<MetalRenderHost>? later = null)
     {
