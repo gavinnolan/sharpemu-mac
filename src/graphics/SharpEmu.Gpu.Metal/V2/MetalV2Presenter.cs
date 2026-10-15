@@ -33,6 +33,17 @@ internal static partial class MetalV2Presenter
     private static MetalRenderHost? _host;
     private static MetalGpuWorkerRelay? _relay;
     private static Thread? _worker;
+    private static SharpEmu.HLE.Host.HostQosThread? _workerQos;
+    // CoreCLR passes explicit scheduling parameters to every thread it creates, and Darwin
+    // then refuses pthread_set_qos_class_self_np on it (EPERM): the UserInteractive request
+    // at the top of RunWorker never applied, and the worker ran at base priority 26 next
+    // to a title's spinning job threads. A thread created natively with the class in its
+    // attributes is the one route that works. SHARPEMU_METAL_V2_WORKER_QOS_THREAD=0 keeps
+    // the managed thread.
+    private static readonly bool WorkerQosThreadEnabled =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WORKER_QOS_THREAD"), "0", StringComparison.Ordinal);
+    private const int WorkerStackBytes = 16 * 1024 * 1024;
+    private const int PacerStackBytes = 4 * 1024 * 1024;
     private static Thread? _windowThread;
     private static IMetalHostWindow? _hostWindow;
     private static HostVideoOptions _videoOptions = HostVideoOptions.Default;
@@ -155,17 +166,47 @@ internal static partial class MetalV2Presenter
                 // for the worker to stop touching the range.
                 memory.AttachStores(null, host.ImageCache);
                 memory.AttachGpuQueue(_relay, null);
-                _worker = new Thread(RunWorker)
+                var qosErrno = -1;
+                _workerQos = WorkerQosThreadEnabled
+                    ? SharpEmu.HLE.Host.HostQosThread.TryStart("SharpEmu Metal v2 GPU worker",
+                        SharpEmu.HLE.Host.HostThreadQos.UserInteractive, WorkerStackBytes, RunWorker, out qosErrno)
+                    : null;
+                if (_workerQos is null)
                 {
-                    IsBackground = true,
-                    Name = "SharpEmu Metal v2 GPU worker",
-                };
-                _worker.Start();
-                new Thread(RunFlipPacer)
+                    if (WorkerQosThreadEnabled)
+                    {
+                        Console.Error.WriteLine(
+                            $"[METAL-V2][WARN] GPU worker: native QoS thread create failed (errno={qosErrno}); using a managed thread.");
+                    }
+                    _worker = new Thread(RunWorker)
+                    {
+                        IsBackground = true,
+                        Name = "SharpEmu Metal v2 GPU worker",
+                    };
+                    _worker.Start();
+                }
+                else
                 {
-                    IsBackground = true,
-                    Name = "SharpEmu Metal v2 flip pacer",
-                }.Start();
+                    Console.Error.WriteLine("[METAL-V2][INFO] GPU worker runs on a native UserInteractive thread.");
+                }
+                // The pacer's wake latency is a refresh for the guest: same native
+                // UserInteractive thread as the worker, same managed fallback.
+                var pacerErrno = -1;
+                if (!WorkerQosThreadEnabled ||
+                    SharpEmu.HLE.Host.HostQosThread.TryStart("SharpEmu Metal v2 flip pacer",
+                        SharpEmu.HLE.Host.HostThreadQos.UserInteractive, PacerStackBytes, RunFlipPacer, out pacerErrno) is null)
+                {
+                    if (WorkerQosThreadEnabled)
+                    {
+                        Console.Error.WriteLine(
+                            $"[METAL-V2][WARN] flip pacer: native QoS thread create failed (errno={pacerErrno}); using a managed thread.");
+                    }
+                    new Thread(RunFlipPacer)
+                    {
+                        IsBackground = true,
+                        Name = "SharpEmu Metal v2 flip pacer",
+                    }.Start();
+                }
                 Console.Error.WriteLine("[METAL-V2][INFO] GPU worker started.");
                 return host;
             }
@@ -297,15 +338,26 @@ internal static partial class MetalV2Presenter
     public static void StopWorker()
     {
         Thread? worker;
+        SharpEmu.HLE.Host.HostQosThread? workerQos;
         lock (_gate)
         {
             worker = _worker;
             _worker = null;
+            workerQos = _workerQos;
+            _workerQos = null;
         }
 
         Volatile.Write(ref _closeRequested, true);
         MetalShaderPrewarm.Stop();
         _host?.CommandStream.Wake();
+        if (workerQos is not null)
+        {
+            if (!workerQos.IsCurrentThread && !workerQos.Join(2000))
+            {
+                Console.Error.WriteLine("[METAL-V2][WARN] The GPU worker did not stop within two seconds.");
+            }
+            return;
+        }
         if (worker is null || worker == Thread.CurrentThread)
         {
             return;
