@@ -496,9 +496,37 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
         source.CopyTo(payload);
         var copy = new DeferredLabelCopy(staging.Buffer, staging.Offset, destination.Buffer, destination.Offset, source.Length);
-        _ = EncodeOrderedCopy(in copy, address, GpuClobberDiagnostics.Enabled ? "landed:" + kind : null,
+        var serial = EncodeOrderedCopy(in copy, address, GpuClobberDiagnostics.Enabled ? "landed:" + kind : null,
             FirstValue(source), MetalGpuWriteOrigin.Copy, $"cp write {kind} bytes={size}");
+
+        // Parse-time readers see the bytes as written until they land (MetalPendingWriteOverlay).
+        if (_cpOverlay.Count >= MaxOverlayEntriesBeforeRetire)
+        {
+            _cpOverlay.Retire(CompletedSerial);
+        }
+
+        _cpOverlay.Add(address, source, serial);
         return true;
+    }
+
+    private const int MaxOverlayEntriesBeforeRetire = 256;
+
+    internal bool RenderEncoderOpen => _renderEncoder != 0;
+
+    internal int DeferredLabelCopyCount => _deferredLabelCopies.Count;
+
+    // The bytes of command-processor writes encoded but not landed, by address.
+    private readonly MetalPendingWriteOverlay _cpOverlay = new();
+
+    /// <summary>
+    /// A host write made at parse time (the interpreter's own stores on a queue that writes
+    /// as parsed) is newer than any command-processor bytes still owed there.
+    /// </summary>
+    public bool TryWriteGuest(ulong address, ReadOnlySpan<byte> source, string kind = "WRITE_BYTES")
+    {
+        _ = kind;
+        _cpOverlay.Forget(address, (ulong)source.Length);
+        return _memory.TryWrite(address, source);
     }
 
     private static ulong FirstValue(ReadOnlySpan<byte> bytes) => bytes.Length switch

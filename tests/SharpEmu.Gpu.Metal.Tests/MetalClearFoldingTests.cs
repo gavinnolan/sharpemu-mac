@@ -20,7 +20,7 @@ namespace SharpEmu.Gpu.Metal.Tests;
 /// dispatch binding it, a CPU read of its guest bytes - makes it land first; anything
 /// else leaves it waiting. Device work is behind the exclusive device gate.
 /// </summary>
-public sealed unsafe class MetalClearFoldingTests(ITestOutputHelper output)
+public sealed unsafe partial class MetalClearFoldingTests(ITestOutputHelper output)
 {
     private const ulong GuestBase = 0x2_0000_0000;
     private const ulong TargetAddress = GuestBase + 0x4000;
@@ -292,6 +292,20 @@ public sealed unsafe class MetalClearFoldingTests(ITestOutputHelper output)
                 view, GpuImageLayout.ColorAttachmentOptimal, GpuFormat.R8G8B8A8Unorm,
                 0, 0, 0, 0, false, false, false, false, false);
             return state;
+        }
+
+        public uint ReadBacking32(ulong address)
+        {
+            Span<byte> bytes = stackalloc byte[sizeof(uint)];
+            Assert.True(_backing.TryReadBacking(address, bytes));
+            return System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+        }
+
+        public void WriteBacking32(ulong address, uint value)
+        {
+            Span<byte> bytes = stackalloc byte[sizeof(uint)];
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
+            Assert.True(_backing.TryWriteBacking(address, bytes));
         }
 
         public byte[] Read(ulong address)

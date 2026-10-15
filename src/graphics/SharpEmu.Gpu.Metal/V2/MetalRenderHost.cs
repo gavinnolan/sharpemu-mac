@@ -763,6 +763,7 @@ internal sealed partial class MetalRenderHost :
         ReportWait(serial, started, committedAt, waited, in profile, reason, partial: false);
         _guestMemory.NoteCompleted(serial);
         _gpuWrites.Clear(serial);
+        _cpOverlay.Retire(serial);
     }
 
     /// <summary>
@@ -773,6 +774,16 @@ internal sealed partial class MetalRenderHost :
     /// </summary>
     private void WaitForCommittedSerial(ulong serial, MetalWaitReason reason)
     {
+        if (serial > _previousSerial)
+        {
+            // Nothing has committed this serial, so nothing will ever signal it: waiting
+            // would park the worker on work only the worker can submit. Commit it first.
+            MetalV2Diagnostics.WarnOnce("wait-uncommitted",
+                $"A wait targeted a submission that was not committed yet; committing it first: serial={serial} " +
+                $"committed={_previousSerial} recording={_submissionSerial} reason={reason}.");
+            FlushCommandBuffer();
+        }
+
         using var waitProfile = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
             SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandGpuWait);
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -788,7 +799,9 @@ internal sealed partial class MetalRenderHost :
 
         ReportWait(serial, started, started, waited: 0, in profile, reason, partial: true);
         _guestMemory.NoteCompleted(serial);
-        _gpuWrites.Retire(CompletedSerial);
+        var completed = CompletedSerial;
+        _gpuWrites.Retire(completed);
+        _cpOverlay.Retire(completed);
         Interlocked.Increment(ref _partialWaits);
     }
 
@@ -902,6 +915,9 @@ internal sealed partial class MetalRenderHost :
     /// <summary>Recorded work stores into this guest range.</summary>
     public void NoteGuestMemoryWrite(ulong address, ulong size, MetalGpuWriteOrigin origin)
     {
+        // Recorded after any pending command-processor bytes there, so it is what a read
+        // of them has to see from now on, whenever it lands.
+        _cpOverlay.Forget(address, size);
         _stagedStorageCopies?.Forget(address, size);
         _stagedRanges?.OnGpuWrite(address, size, origin);
         if (_guard is not null && size != 0)
@@ -918,6 +934,7 @@ internal sealed partial class MetalRenderHost :
         if (ConservativeReads)
         {
             _gpuWrites.NoteUnbounded(SubmissionSerial);
+            _cpOverlay.Clear();
             return;
         }
 
@@ -929,7 +946,11 @@ internal sealed partial class MetalRenderHost :
     /// paths that genuinely cannot name their range use this: it makes every later
     /// read of any address wait for the submission.
     /// </summary>
-    public void NoteUnboundedGuestMemoryWrite() => _gpuWrites.NoteUnbounded(SubmissionSerial);
+    public void NoteUnboundedGuestMemoryWrite()
+    {
+        _gpuWrites.NoteUnbounded(SubmissionSerial);
+        _cpOverlay.Clear();
+    }
 
     void IMetalImageCacheOwner.WaitForGpu() => FlushAndWaitForGpu(MetalWaitReason.ImageCache);
 
@@ -981,6 +1002,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         WriteGuestPattern(address, size, value);
+        _cpOverlay.Forget(address, size);
         _imageCache.InvalidateMemory(address, size);
         _stagedStorageCopies?.Forget(address, size);
         _stagedRanges?.OnHostWrite(address, size);
@@ -1195,6 +1217,7 @@ internal sealed partial class MetalRenderHost :
 
     private void CopyGuestBytesOnHost(ulong destination, ulong source, ulong size)
     {
+        _cpOverlay.Forget(destination, size);
         if (_guard is null)
         {
             CopyGuestBytesOnHostCore(destination, source, size);
@@ -1266,6 +1289,54 @@ internal sealed partial class MetalRenderHost :
             return true;
         }
 
+        if (_cpOverlay.Count != 0)
+        {
+            // Bytes a command-processor write still owes are read as written, the way the
+            // command processor reads its own writes: no wait for the GPU, which for a
+            // write still waiting for the open pass to end would be a wait on itself.
+            switch (OverlayCoverage(address, (ulong)destination.Length))
+            {
+                case MetalOverlayCoverage.Full:
+                    _cpOverlay.Apply(address, destination);
+                    Interlocked.Increment(ref _overlayReads);
+                    return true;
+                case MetalOverlayCoverage.Partial:
+                    if (!TryReadGuestCore(address, destination))
+                    {
+                        return false;
+                    }
+
+                    _cpOverlay.Apply(address, destination);
+                    Interlocked.Increment(ref _overlayReads);
+                    return true;
+            }
+        }
+
+        return TryReadGuestCore(address, destination);
+    }
+
+    private long _overlayReads;
+    private Func<ulong>? _completedSerialReader;
+
+    /// <summary>Parse-time reads answered from pending command-processor bytes.</summary>
+    public long TakeOverlayReads() => Interlocked.Exchange(ref _overlayReads, 0);
+
+    // How much of a range pending command-processor bytes answer for. An image the GPU has
+    // drawn into since owns its bytes, and only its writeback can say what they are.
+    private MetalOverlayCoverage OverlayCoverage(ulong address, ulong size)
+    {
+        var coverage = _cpOverlay.Coverage(address, size, _completedSerialReader ??= () => CompletedSerial);
+        if (coverage == MetalOverlayCoverage.Full &&
+            _imageCache.MayOwn(address, size) && _imageCache.HasGpuModifiedImageBytes(address, size))
+        {
+            return MetalOverlayCoverage.Partial;
+        }
+
+        return coverage;
+    }
+
+    private bool TryReadGuestCore(ulong address, Span<byte> destination)
+    {
         // Guest memory is the GPU's memory, so a read only has to wait for work that
         // may still be writing these bytes: an image that owns them, or a recorded
         // store into them. Without that test every command-memory read would stall.
@@ -1401,6 +1472,14 @@ internal sealed partial class MetalRenderHost :
             return TryReadGuest(address, destination);
         }
 
+        if (_cpOverlay.Count != 0 && OverlayCoverage(address, (ulong)destination.Length) == MetalOverlayCoverage.Full)
+        {
+            // The poll reads bytes this host has yet to land as written: nothing to commit.
+            _cpOverlay.Apply(address, destination);
+            Interlocked.Increment(ref _overlayReads);
+            return true;
+        }
+
         if (PollTrace)
         {
             var read = _memory.TryRead(address, destination);
@@ -1433,7 +1512,14 @@ internal sealed partial class MetalRenderHost :
             FlushCommandBuffer();
         }
 
-        return _memory.TryRead(address, destination);
+        if (!_memory.TryRead(address, destination))
+        {
+            return false;
+        }
+
+        // Part of the range may still be owed by a command-processor write.
+        ApplyPendingCommandProcessorBytes(address, destination);
+        return true;
     }
 
     private long _pollFlushes;
@@ -1787,6 +1873,8 @@ internal sealed partial class MetalRenderHost :
             .Append(" ordered_labels=").Append(TakeOrderedHostLabels())
             .Append(" gpu_cp_writes=").Append(cpWrites.GpuTimed)
             .Append(" host_cp_writes=").Append(cpWrites.Host)
+            .Append(" cp_overlay_reads=").Append(TakeOverlayReads())
+            .Append(" cp_overlay=").Append(_cpOverlay.Count)
             .Append(" poll_flushes=").Append(TakePollFlushes())
             .Append(" transient_commits=").Append(TakeTransientCommits())
             .Append(" scheduled_labels=").Append(TakeScheduledLabelSubmissions())
