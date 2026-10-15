@@ -146,7 +146,7 @@ internal static partial class MetalV2Presenter
                     throw GpuFatal.Fatal("Metal v2 requires the guest GPU memory manager with backed virtual memory.");
                 }
 
-                _relay = new MetalGpuWorkerRelay(Wake);
+                _relay = new MetalGpuWorkerRelay(Wake, TryEnqueueControlBarrier);
                 var host = new MetalRenderHost(_device, _queue, guest, backing, memory.Pages, _relay);
                 host.InitializeCommandStream(new FlipTarget());
                 _host = host;
@@ -320,6 +320,13 @@ internal static partial class MetalV2Presenter
     private static void Wake() => _host?.CommandStream.Wake();
 
     // ---- the GPU worker ----
+
+    // An ordered video-out change (a buffer unregister) must land behind the command
+    // streams the queue already accepted: one of them may still carry a flip to the
+    // slot, and reserving that flip after the unregister is a fatal InvalidIndex.
+    // The relay alone only orders work before the next slice, not behind the queue.
+    private static bool TryEnqueueControlBarrier(Action work, Action cancel) =>
+        _host is { } host && host.CommandStream.TryEnqueueControlBarrier(work, cancel);
 
     private static void RunWorker()
     {
