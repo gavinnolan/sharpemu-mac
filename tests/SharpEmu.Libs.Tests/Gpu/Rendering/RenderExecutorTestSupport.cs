@@ -428,6 +428,8 @@ internal sealed class RecordingRenderHost : IRenderHost
         return HostCopyAccepted;
     }
 
+    public void NoteKernelFillFallback(string reason) => Calls.Add($"kernel_fill_fallback {reason}");
+
     public Exception Fatal(string message) => new RenderExecutorFatalException(message);
 }
 

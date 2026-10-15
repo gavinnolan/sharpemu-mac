@@ -562,7 +562,8 @@ public sealed partial class RenderExecutor
 
         var address = destination.Address + (ulong)start * sizeof(uint);
         var size = (end - start) * sizeof(uint);
-        var consumed = _host.TryFillDccMetadata(address, size, value);
+        // A fill that is not DCC metadata may be a whole image the host can clear instead.
+        var consumed = _host.TryFillDccMetadata(address, size, value) || _host.TryClearImageFromKernelFill(address, size, value);
         if (RenderTrace.Enabled && RenderTrace.MetadataClear())
         {
             RenderTrace.Write($"Bounded fill: shader=0x{program.Hash:X16} address=0x{address:X16} size=0x{size:X} value=0x{value:X8} consumed={consumed}");
@@ -583,6 +584,7 @@ public sealed partial class RenderExecutor
             input.ThreadIdCount < 1 || input.ThreadsX != ImageClearWaveSize || input.ThreadsY != 1 || input.ThreadsZ != 1 ||
             groupsX == 0 || groupsY != 1 || groupsZ != 1)
         {
+            _host.NoteKernelFillFallback("copy-shape");
             return RefuseBoundedFill(program, $"copy shape dispatch={groupsX}x{groupsY}x{groupsZ} local={input.ThreadsX}x{input.ThreadsY}x{input.ThreadsZ}");
         }
 
@@ -594,37 +596,53 @@ public sealed partial class RenderExecutor
             if (!TryResolveFillWord(copy.Source[word], userData, out sourceWords[word]) ||
                 !TryResolveFillWord(copy.Destination[word], userData, out destinationWords[word]))
             {
+                _host.NoteKernelFillFallback("copy-unreadable");
                 return RefuseBoundedFill(program, $"copy descriptor word {word} unreadable");
             }
         }
 
         if (!TryResolveFillWord(copy.Count, userData, out var count) || !TryResolveFillWord(copy.Modulus, userData, out var modulus))
         {
+            _host.NoteKernelFillFallback("copy-unreadable");
             return RefuseBoundedFill(program, "copy range unreadable");
+        }
+
+        // A masked index repeats with the period mask + 1 only when the mask is a run of low bits.
+        var period = !copy.MaskIndex ? modulus
+            : (modulus & (modulus + 1)) == 0 ? (ulong)modulus + 1
+            : 0;
+        if (period == 0)
+        {
+            _host.NoteKernelFillFallback(copy.MaskIndex ? "copy-mask" : "copy-descriptor");
+            return RefuseBoundedFill(program, $"copy index {(copy.MaskIndex ? "mask" : "modulus")}=0x{modulus:X}");
         }
 
         var source = BufferDescriptorWords.From(sourceWords);
         var destination = BufferDescriptorWords.From(destinationWords);
-        if (!IsPlainWordBuffer(source) || !IsPlainWordBuffer(destination) || source.Format != destination.Format ||
-            modulus == 0 || modulus > source.RecordCount)
-        {
-            return RefuseBoundedFill(program,
-                $"copy src=0x{source.Address:X}/{source.Format}/{source.Stride}/{source.OutOfBounds} dst=0x{destination.Address:X}/{destination.Format}/{destination.Stride}/{destination.OutOfBounds} " +
-                $"modulus={modulus} records={source.RecordCount}");
-        }
-
         var threads = (dispatchInitiator & DispatchInitiatorUseThreadDimensions) != 0 ? groupsX : (ulong)groupsX * input.ThreadsX;
         var words = Math.Min(Math.Min((ulong)count, threads), destination.RecordCount);
+        // A modulus is the source length as the title gave it; a masked index reads no
+        // further than the threads that run.
+        var sourceLength = copy.MaskIndex ? Math.Min(period, Math.Max(words, 1)) : period;
+        if (!IsPlainWordBuffer(source) || !IsPlainWordBuffer(destination) || source.Format != destination.Format ||
+            sourceLength > source.RecordCount)
+        {
+            _host.NoteKernelFillFallback("copy-descriptor");
+            return RefuseBoundedFill(program,
+                $"copy src=0x{source.Address:X}/{source.Format}/{source.Stride}/{source.OutOfBounds} dst=0x{destination.Address:X}/{destination.Format}/{destination.Stride}/{destination.OutOfBounds} " +
+                $"period={period} records={source.RecordCount}");
+        }
+
         if (words == 0)
         {
             return false;
         }
 
-        var consumed = _host.TryCopyWordsOnHost(destination.Address, source.Address, modulus, words);
+        var consumed = _host.TryCopyWordsOnHost(destination.Address, source.Address, sourceLength, words);
         if (RenderTrace.Enabled)
         {
             RenderTrace.Write(
-                $"Bounded copy: shader=0x{program.Hash:X16} src=0x{source.Address:X16} dst=0x{destination.Address:X16} words={words} modulus={modulus} consumed={consumed}");
+                $"Bounded copy: shader=0x{program.Hash:X16} src=0x{source.Address:X16} dst=0x{destination.Address:X16} words={words} period={period} consumed={consumed}");
         }
 
         return consumed || RefuseBoundedFill(program, $"copy refused by the host dst=0x{destination.Address:X} words={words} modulus={modulus}");

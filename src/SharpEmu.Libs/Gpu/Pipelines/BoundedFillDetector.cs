@@ -26,12 +26,18 @@ public sealed record BoundedFill(
     FillWord[]? Pattern = null,
     FillWord? PatternLength = null);
 
+/// <summary>
+/// A dispatch that stores <c>dst[i] = src[f(i)]</c> for every global thread index <c>i</c>
+/// below <see cref="Count"/>: <c>f(i) = i % Modulus</c>, or <c>i &amp; Modulus</c> when
+/// <see cref="MaskIndex"/> is set (the word then holds the mask).
+/// </summary>
 public sealed record BoundedCopy(
     uint GroupScalarRegister,
     FillWord Count,
     FillWord Modulus,
     FillWord[] Source,
-    FillWord[] Destination);
+    FillWord[] Destination,
+    bool MaskIndex = false);
 
 public static class BoundedFillDetector
 {
@@ -44,7 +50,9 @@ public static class BoundedFillDetector
         "BufferLoadFormatX", "BufferStoreFormatX", "SEndpgm",
     ];
 
-    public static BoundedCopy? DetectCopy(Gen5ShaderProgram program)
+    public static BoundedCopy? DetectCopy(Gen5ShaderProgram program) => DetectModuloCopy(program) ?? DetectMaskedCopy(program);
+
+    private static BoundedCopy? DetectModuloCopy(Gen5ShaderProgram program)
     {
         var instructions = program.Instructions
             .Where(instruction => instruction.Opcode is not ("SWaitcnt" or "STtraceData" or "SInstPrefetch") &&
@@ -124,13 +132,134 @@ public static class BoundedFillDetector
             [.. Enumerable.Range(0, 4).Select(word => User(storeControl.ScalarResource + (uint)word))]);
     }
 
+    // A copy whose source index is the global thread index ANDed with a scalar: Demon's Souls
+    // copies and fills render-target memory with it (0xDC18751CB6791EF9). The match follows
+    // the data rather than an opcode list, and proves the kernel's only memory side effect
+    // is one store, at the global thread index, of the one value loaded at the masked
+    // index, under an exec mask of index < count that branches straight to the end.
+    private static BoundedCopy? DetectMaskedCopy(Gen5ShaderProgram program)
+    {
+        var instructions = program.Instructions;
+        if (instructions.Count == 0 || instructions[^1].Opcode != "SEndpgm")
+        {
+            return null;
+        }
+
+        var scalars = new Dictionary<uint, FillWord?>();
+        var vectors = new Dictionary<uint, VectorValue>();
+        uint? group = null;
+        FillWord? count = null;
+        FillWord? mask = null;
+        FillWord[]? source = null;
+        string? loadOpcode = null;
+        BoundedCopy? copy = null;
+        var endPc = instructions[^1].Pc;
+        for (var index = 0; index < instructions.Count - 1; index++)
+        {
+            var instruction = instructions[index];
+            switch (instruction.Opcode)
+            {
+                case "SWaitcnt" or "STtraceData" or "SInstPrefetch":
+                    break;
+                case "SMovB32" when instruction.Destinations is [{ Kind: Gen5OperandKind.ScalarRegister, Value: MarkerRegister }]:
+                    break;
+                case "VLshlAddU32":
+                    if (group is not null ||
+                        instruction.Destinations is not [{ Kind: Gen5OperandKind.VectorRegister } shifted] ||
+                        instruction.Sources is not [{ Kind: Gen5OperandKind.ScalarRegister } groupRegister,
+                            { Kind: Gen5OperandKind.EncodedConstant, Value: Shift64 }, { Kind: Gen5OperandKind.VectorRegister, Value: ThreadIndexRegister }] ||
+                        scalars.ContainsKey(groupRegister.Value) || vectors.ContainsKey(ThreadIndexRegister))
+                    {
+                        return null;
+                    }
+
+                    group = groupRegister.Value;
+                    vectors[shifted.Value] = new VectorValue(VectorKind.GlobalIndex);
+                    break;
+                case "SBufferLoadDword" or "SLoadDword" or "SLoadDwordx2" or "SLoadDwordx4":
+                    if (!TryLoad(instruction, scalars))
+                    {
+                        return null;
+                    }
+
+                    break;
+                case "VCmpxGtU32":
+                    // The exec mask must be index < count before anything touches memory,
+                    // and its empty case must skip to the end.
+                    if (count is not null || source is not null ||
+                        instruction.Sources is not [{ Kind: Gen5OperandKind.ScalarRegister } limit, { Kind: Gen5OperandKind.VectorRegister } compared] ||
+                        !vectors.TryGetValue(compared.Value, out var comparedValue) || comparedValue.Kind != VectorKind.GlobalIndex ||
+                        ReadScalar(scalars, limit.Value) is not { } limitWord ||
+                        index + 1 >= instructions.Count || instructions[index + 1].Opcode != "SCbranchExecz")
+                    {
+                        return null;
+                    }
+
+                    var branch = instructions[index + 1];
+                    if (branch.Pc + sizeof(uint) + (uint)((short)(branch.Words[0] & 0xFFFF) * sizeof(uint)) != endPc)
+                    {
+                        return null;
+                    }
+
+                    count = limitWord;
+                    index++;
+                    break;
+                case "VAndB32":
+                    if (mask is not null ||
+                        instruction.Destinations is not [{ Kind: Gen5OperandKind.VectorRegister } masked] ||
+                        instruction.Sources is not [{ Kind: Gen5OperandKind.ScalarRegister } maskRegister, { Kind: Gen5OperandKind.VectorRegister } maskedIndex] ||
+                        !vectors.TryGetValue(maskedIndex.Value, out var maskedValue) || maskedValue.Kind != VectorKind.GlobalIndex ||
+                        ReadScalar(scalars, maskRegister.Value) is not { } maskWord)
+                    {
+                        return null;
+                    }
+
+                    mask = maskWord;
+                    vectors[masked.Value] = new VectorValue(VectorKind.MaskedIndex, Word: maskWord);
+                    break;
+                case "BufferLoadFormatX" or "BufferLoadDword":
+                    if (source is not null || count is null ||
+                        instruction.Control is not Gen5BufferMemoryControl { DwordCount: 1, OffsetBytes: 0, IndexEnabled: true, OffsetEnabled: false, Typed: false } load ||
+                        instruction.Sources is not [_, _, { Kind: Gen5OperandKind.EncodedConstant, Value: ZeroConstant }] ||
+                        !vectors.TryGetValue(load.VectorAddress, out var loadAddress) || loadAddress.Kind != VectorKind.MaskedIndex ||
+                        !TryReadDescriptor(scalars, load.ScalarResource, out var loadResource))
+                    {
+                        return null;
+                    }
+
+                    source = loadResource;
+                    loadOpcode = instruction.Opcode;
+                    vectors[load.VectorData] = new VectorValue(VectorKind.Loaded);
+                    break;
+                case "BufferStoreFormatX" or "BufferStoreDword":
+                    if (copy is not null || source is null || count is not { } limitCount || group is not { } groupValue || mask is not { } maskValue ||
+                        instruction.Opcode != (loadOpcode == "BufferLoadFormatX" ? "BufferStoreFormatX" : "BufferStoreDword") ||
+                        instruction.Control is not Gen5BufferMemoryControl { DwordCount: 1, OffsetBytes: 0, IndexEnabled: true, OffsetEnabled: false, Typed: false } store ||
+                        instruction.Sources is not [_, _, { Kind: Gen5OperandKind.EncodedConstant, Value: ZeroConstant }] ||
+                        !vectors.TryGetValue(store.VectorAddress, out var storeAddress) || storeAddress.Kind != VectorKind.GlobalIndex ||
+                        !vectors.TryGetValue(store.VectorData, out var data) || data.Kind != VectorKind.Loaded ||
+                        !TryReadDescriptor(scalars, store.ScalarResource, out var destination))
+                    {
+                        return null;
+                    }
+
+                    copy = new BoundedCopy(groupValue, limitCount, maskValue, source, destination, MaskIndex: true);
+                    break;
+                default:
+                    return null;
+            }
+        }
+
+        return copy;
+    }
+
     private const uint Shift64 = 134;
     private const uint ZeroConstant = 128;
     private const uint NullScalar = 125;
     private const uint MarkerRegister = 124;
     private const uint ThreadIndexRegister = 0;
 
-    private enum VectorKind { GlobalIndex, OffsetIndex, Constant, Word }
+    private enum VectorKind { GlobalIndex, OffsetIndex, Constant, Word, MaskedIndex, Loaded }
 
     private readonly record struct VectorValue(VectorKind Kind, uint Constant = 0, FillWord Word = default);
 

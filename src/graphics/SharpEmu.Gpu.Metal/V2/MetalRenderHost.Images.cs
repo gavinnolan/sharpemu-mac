@@ -320,17 +320,6 @@ internal sealed partial class MetalRenderHost
         return true;
     }
 
-    // Guest memory is the GPU's memory, so a word copy has no host-side shortcut:
-    // the GPU copy in CopyGuestMemory already lands where the guest reads it.
-    public bool TryCopyWordsOnHost(ulong destination, ulong source, ulong sourceWords, ulong words)
-    {
-        _ = destination;
-        _ = source;
-        _ = sourceWords;
-        _ = words;
-        return false;
-    }
-
     public void PrepareMemoryWritingDraw()
     {
         // A store-only draw needs no special setup on Metal: the open render pass

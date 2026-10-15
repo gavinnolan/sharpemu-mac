@@ -1967,7 +1967,8 @@ internal sealed partial class MetalRenderHost :
             // or the write reached watched DCC metadata. Of the owner ones, those that found
             // an image over their bytes and those that found none.
             $"cpu_write_locked={lockedCpuWrites.Owner}/{lockedCpuWrites.Metadata} " +
-            $"cpu_write_owner_found={lockedCpuWrites.OwnerFound}/{lockedCpuWrites.OwnerNone}{StagedRangeCounters()}");
+            $"cpu_write_owner_found={lockedCpuWrites.OwnerFound}/{lockedCpuWrites.OwnerNone}{StagedRangeCounters()}" +
+            TakeKernelFillCounters());
         // On a tile-based GPU the attachments are the bandwidth: a pass loads every
         // one it does not clear and stores every one it keeps, so this says what the
         // passes cost in memory traffic and which splits are paying for it. Printed

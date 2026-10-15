@@ -456,7 +456,7 @@ public sealed class RenderExecutorComputeTests : IDisposable
 
     private const ulong CopySource = RecordingRenderHost.MemoryBase + 0x71_0000;
 
-    private void ConfigureBoundedCopy(uint count, uint modulus, uint sourceRecords, uint destinationRecords, uint sourceFormat = Format32UInt)
+    private void ConfigureBoundedCopy(uint count, uint modulus, uint sourceRecords, uint destinationRecords, uint sourceFormat = Format32UInt, bool mask = false)
     {
         static SharpEmu.Libs.Gpu.Pipelines.FillWord User(uint register) =>
             new(SharpEmu.Libs.Gpu.Pipelines.FillWordSource.UserData, register, 0, 0);
@@ -466,7 +466,8 @@ public sealed class RenderExecutorComputeTests : IDisposable
             new SharpEmu.Libs.Gpu.Pipelines.FillWord(SharpEmu.Libs.Gpu.Pipelines.FillWordSource.BufferResource, 8, 0, 0),
             new SharpEmu.Libs.Gpu.Pipelines.FillWord(SharpEmu.Libs.Gpu.Pipelines.FillWordSource.BufferResource, 8, 0, 4),
             [User(0), User(1), User(2), User(3)],
-            [User(4), User(5), User(6), User(7)]);
+            [User(4), User(5), User(6), User(7)],
+            mask);
         var program = new ShaderProgramInfo { Stage = ShaderStageKind.Compute, Hash = 0xF333, BoundedCopy = copy };
         var source = BufferDescriptor(CopySource, 4, sourceRecords, format: sourceFormat);
         var destination = BufferDescriptor(MetadataAddress, 4, destinationRecords, format: Format32UInt);
@@ -517,6 +518,30 @@ public sealed class RenderExecutorComputeTests : IDisposable
         _executor.Dispatch(1, Banks(), 1, 1, 1, 0x41);
 
         Assert.DoesNotContain(_host.Calls, call => call.StartsWith("host_copy", StringComparison.Ordinal));
+        AssertDispatched(1, 1, 1);
+    }
+
+    [Theory]
+    [InlineData(0u, 1u)]
+    [InlineData(3u, 4u)]
+    [InlineData(0xFFFFFFFFu, 64u)]
+    public void MaskedCopy_RepeatsWithThePeriodOfItsLowBitMask(uint mask, uint sourceWords)
+    {
+        ConfigureBoundedCopy(count: 0x40, modulus: mask, sourceRecords: 0x40, destinationRecords: 0x40, mask: true);
+        _executor.Dispatch(1, Banks(), 1, 1, 1, 0x41);
+
+        Assert.Contains($"host_copy {MetadataAddress:X} {CopySource:X} {sourceWords} 64", _host.Calls);
+        AssertNotDispatched();
+    }
+
+    [Fact]
+    public void MaskedCopyWithAMaskThatIsNotLowBits_IsDispatched()
+    {
+        ConfigureBoundedCopy(count: 0x40, modulus: 0x5, sourceRecords: 0x40, destinationRecords: 0x40, mask: true);
+        _executor.Dispatch(1, Banks(), 1, 1, 1, 0x41);
+
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("host_copy", StringComparison.Ordinal));
+        Assert.Contains("kernel_fill_fallback copy-mask", _host.Calls);
         AssertDispatched(1, 1, 1);
     }
 
