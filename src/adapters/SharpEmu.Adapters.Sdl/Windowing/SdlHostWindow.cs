@@ -36,7 +36,7 @@ public sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
     private SDL_Window* _window;
     private nint _metalView;
     private SDL_Gamepad* _gamepad;
-    private readonly Pad.TouchContactIds _touchIds = new();
+    private readonly TouchContactIds _touchIds = new();
     private HostGamepadType _gamepadType;
     private byte _leftTriggerRumble;
     private byte _rightTriggerRumble;
