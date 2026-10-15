@@ -7,7 +7,7 @@ using Xunit;
 namespace SharpEmu.Libs.Tests.Gpu.GpuCommands;
 
 /// <summary>
-/// On a host that defers end-of-pipe labels, the graphics queue's command-processor stores
+/// On a host that defers end-of-pipe labels, the command-processor stores of every queue
 /// are handed to the host to land in record order with them instead of being written as
 /// parsed (SHARPEMU_METAL_V2_CP_WRITES=parse restores the latter).
 /// </summary>
@@ -104,10 +104,26 @@ public sealed class CommandProcessorWriteOrderTests
         Assert.True(fill.Deferred);
     }
 
+    // GTA V's culling queue writes each mesh's descriptor table with WRITE_DATA into memory
+    // an earlier dispatch of the same queue stores into. Written as parsed, the table was in
+    // place before that dispatch ran, and its stores then landed over the descriptors.
     [Fact]
-    public void ComputeQueuesStillWriteAsTheyParse()
+    public void ComputeQueuesRecordTheirWritesInOrderToo()
     {
         var runner = OrderedRunner(queueId: 1);
+        Assert.Equal(SubmissionProgress.Complete, runner.Run(WriteData(Data + 0x80, 0x44), DmaData(2, 0x55, Data + 0x90, 4)));
+
+        Assert.Equal(0u, runner.Host.ReadDword(Data + 0x80));
+        Assert.Equal(0u, runner.Host.ReadDword(Data + 0x90));
+        var write = Assert.Single(runner.Host.CommandProcessorWrites);
+        Assert.Equal(new byte[] { 0x44, 0, 0, 0 }, write.Bytes);
+        Assert.Contains($"fill_in_order {Data + 0x90:X} 4 00000055", runner.Host.Calls);
+    }
+
+    [Fact]
+    public void TheParseOptOutLeavesComputeQueueWritesToTheParser()
+    {
+        var runner = OrderedRunner(queueId: 1, ordered: false);
         Assert.Equal(SubmissionProgress.Complete, runner.Run(WriteData(Data + 0x80, 0x44), DmaData(2, 0x55, Data + 0x90, 4)));
 
         Assert.Equal(0x44u, runner.Host.ReadDword(Data + 0x80));

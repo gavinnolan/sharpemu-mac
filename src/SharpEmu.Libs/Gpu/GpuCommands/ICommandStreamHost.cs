@@ -178,8 +178,8 @@ public interface ICommandStreamHost
     ulong PendingLabelTick => 0;
 
     /// <summary>
-    /// Whether the graphics queue's command-processor memory writes (WRITE_DATA, DMA_DATA
-    /// fills and copies, COPY_DATA immediates) are handed to this host to land in record
+    /// Whether the command-processor memory writes (WRITE_DATA, DMA_DATA fills and copies,
+    /// the graphics queue's COPY_DATA immediates) are handed to this host to land in record
     /// order with its deferred end-of-pipe labels, instead of being written as parsed.
     /// </summary>
     /// <remarks>

@@ -356,9 +356,10 @@ public sealed class CommandStreamQueueTests
         Assert.Equal(SliceResult.Completed, queue.ProcessOne());
         Assert.Empty(host.PollCommits);
 
-        // Compute queues keep writing as they parse.
-        Assert.Equal(3u, host.ReadDword(signal + 0x10));
+        // The compute queue's store is recorded in order too.
+        Assert.Equal(0u, host.ReadDword(signal + 0x10));
         Assert.Equal(0u, host.ReadDword(signal + 8));
+        Assert.Contains($"cp_write WRITE_DATA {signal + 0x10:X} 4", host.Calls);
     }
 
     [Fact]

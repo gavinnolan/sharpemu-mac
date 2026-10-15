@@ -461,15 +461,17 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// <remarks>
     /// A deferred copy lands after every draw or dispatch recorded into the same encoder
     /// after it, not only the ones before it. A store the command processor makes and a
-    /// later draw or dispatch then reads on the GPU - a WRITE_DATA into a buffer a shader
-    /// reads, a DMA fill that resets a counter the next dispatch increments - is read before
-    /// the bytes land, and a shader store to those bytes is overwritten by them. The
-    /// render-pass deferral has always accepted this for draws: nothing checks the copy's
-    /// destination against what the pass binds. A compute encoder follows the same policy,
-    /// because the encoder split it avoids is the frame's largest GPU cost. What reads the
+    /// later draw then reads on the GPU - a WRITE_DATA into a buffer a shader reads - is
+    /// read before the bytes land, and a shader store to those bytes is overwritten by them.
+    /// The render-pass deferral has always accepted this for draws: nothing checks the
+    /// copy's destination against what the pass binds. A compute encoder stays open over
+    /// copies too, because the encoder split it avoids is the frame's largest GPU cost, but
+    /// a dispatch that binds a copy's bytes ends it first (OrderAfterDeferredCopies): a
+    /// compute queue writes a table and dispatches over it at once, and GTA V's bounds
+    /// pass atomically updates the bytes its WRITE_DATA has just initialised. What reads the
     /// bytes at parse time is not affected (MetalPendingWriteOverlay), nor is an image made
     /// from them: the write invalidates it, and the upload that replaces it is a transfer,
-    /// which ends the encoder and lands the copies first. If a title shows the hazard,
+    /// which ends the encoder and lands the copies first.
     /// SHARPEMU_METAL_V2_DEFER_COMPUTE_COPIES=0 ends the compute encoder for every copy again.
     /// </remarks>
     private ulong EncodeOrderedCopy(
@@ -726,11 +728,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         }
     }
 
-    /// <summary>Whether the graphics queue's command-processor writes are recorded here.</summary>
+    /// <summary>Whether the queues' command-processor writes are recorded here.</summary>
     public bool DefersCommandProcessorWrites => DefersEndOfPipeLabels && !CommandProcessorWritesAtParse;
 
     // SHARPEMU_METAL_V2_CP_WRITES=parse writes WRITE_DATA, DMA fills and copies and COPY_DATA
-    // immediates into guest memory as the graphics queue parses them, as before. They then
+    // immediates into guest memory as the queues parse them, as before. They then
     // reach the guest ahead of every label still owed, which is what let Demon's Souls
     // recycle command memory a late label then landed in.
     internal bool CommandProcessorWritesAtParse { get; set; } = CommandProcessorWritesAtParseDefault;
@@ -840,6 +842,21 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// A dispatch about to bind these guest bytes runs after the command-processor writes
+    /// recorded before it: one still waiting for the open compute encoder to end would land
+    /// after the dispatch instead, so the encoder ends here and the copies are encoded at
+    /// that boundary. Draws need nothing here; beginning a pass ends the compute encoder.
+    /// </summary>
+    internal void OrderAfterDeferredCopies(ulong address, ulong size)
+    {
+        if (_computeEncoder != 0 && _deferredLabelCopies.Count != 0 &&
+            (size == ulong.MaxValue || DeferredLabelCopiesTouch(address, size)))
+        {
+            EndEncoders(PassEndCause.Other);
+        }
     }
 
     private void EncodeDeferredLabelCopies()

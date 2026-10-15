@@ -172,6 +172,36 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         Assert.Equal(0x77u, rig.Backing.Read32(filled));
     }
 
+    // A copy waiting for the open compute encoder to end lands after every dispatch recorded
+    // into it. A dispatch binding its bytes - GTA V's bounds pass over the table its
+    // WRITE_DATA has just initialised - ends the encoder first so the copy lands before it;
+    // a dispatch over other bytes leaves the encoder open.
+    [Fact]
+    public void ADispatchBindingBytesACopyStillOwesEndsTheComputeEncoderFirst()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        Assert.True(host.DefersCopiesInCompute);
+
+        _ = host.EnsureComputeEncoder();
+        host.RecordCommandProcessorWrite(LaterLabel, BitConverter.GetBytes(0x55UL), "WRITE_DATA");
+        Assert.Equal(1, host.DeferredLabelCopyCount);
+
+        host.OrderAfterDeferredCopies(LaterLabel + 0x100, 0x40);
+        Assert.True(host.ComputeEncoderOpen);
+        Assert.Equal(1, host.DeferredLabelCopyCount);
+
+        host.OrderAfterDeferredCopies(LaterLabel + 4, 0x40);
+        Assert.False(host.ComputeEncoderOpen);
+        Assert.Equal(0, host.DeferredLabelCopyCount);
+
+        host.FlushCommandBuffer();
+        WaitForGpu(host, host.LastWorkSerial);
+        WaitForCompletions(host);
+        Assert.Equal(0x55UL, rig.Backing.Read64(LaterLabel));
+    }
+
     [Fact]
     public void TheComputeCopyOptOutEndsTheComputeEncoderForTheCopy()
     {

@@ -22,6 +22,7 @@ internal sealed partial class MetalRenderHost
     /// </summary>
     private MetalGuestRange ResolveStorageBuffer(ulong address, ulong size, bool written)
     {
+        OrderAfterDeferredCopies(address, size);
         var staged = StagedStorage;
         if (staged.TryShare(address, size, written, out var shared))
         {

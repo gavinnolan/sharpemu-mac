@@ -500,7 +500,9 @@ internal sealed partial class MetalRenderHost
         {
             if (!range.Planned)
             {
-                // Nothing evaluated this handle, so the store's destination is unknown.
+                // Nothing evaluated this handle, so the store's destination is unknown, and
+                // so is what it reads: every copy still owed lands first.
+                OrderAfterDeferredCopies(0, ulong.MaxValue);
                 unplanned |= range.Written;
                 continue;
             }
@@ -513,6 +515,7 @@ internal sealed partial class MetalRenderHost
             }
 
             var size = ClampMappedSize(range.Base, range.Size);
+            OrderAfterDeferredCopies(range.Base, size);
             OrderAfterStagedStores(range.Base, size);
             FlushGpuWrites(range.Base, size, MetalWritebackCause.StorageDescriptor);
             if (!range.Written)

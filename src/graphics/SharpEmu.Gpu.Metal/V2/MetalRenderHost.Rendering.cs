@@ -1625,6 +1625,8 @@ internal sealed partial class MetalRenderHost
             return false;
         }
 
+        // The GPU reads the group counts where the dispatch sits in the stream.
+        OrderAfterDeferredCopies(argumentsAddress, 3 * sizeof(uint));
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var encoder = EnsureComputeEncoder();
         var entry = _pendingComputePipeline ??

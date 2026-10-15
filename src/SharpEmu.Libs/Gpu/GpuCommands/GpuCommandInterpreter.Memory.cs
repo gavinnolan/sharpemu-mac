@@ -43,17 +43,20 @@ public sealed partial class GpuCommandInterpreter
 
     /// <summary>
     /// Whether this queue's command-processor writes land in record order with its deferred
-    /// labels rather than as parsed. Only the graphics queue: compute queues keep writing at
-    /// parse time, which nothing has shown to matter there.
+    /// labels and the work recorded before them, rather than as parsed. Every queue: a compute
+    /// queue's write made at parse time reached guest memory while dispatches recorded ahead
+    /// of it were still running, and GTA V's culling queue rewrites a descriptor table with
+    /// WRITE_DATA in memory an earlier dispatch of the same queue stores vertices into. The
+    /// stores then landed over the table, and the next dispatch read floats as its V#.
     /// </summary>
-    private bool DefersCommandProcessorWrites => !IsComputeQueue && _host.DefersCommandProcessorWrites;
+    private bool DefersCommandProcessorWrites => _host.DefersCommandProcessorWrites;
 
     // Pending values noted for waits are capped: a wait polls a fence, not a table.
     private const int MaxNotedPendingBytes = 64;
 
     /// <summary>
-    /// A command-processor store. On a host that defers labels the graphics queue hands it to
-    /// the host to land in record order: written as parsed, it reached the guest ahead of
+    /// A command-processor store. On a host that defers labels the queue hands it to the host
+    /// to land in record order: written as parsed, it reached the guest ahead of
     /// labels recorded before it, and Demon's Souls recycled command memory on such a write
     /// while a label into that memory was still owed (a WAIT_REG_MEM between them is met at
     /// parse by the pending label, so the parser runs on past it). This queue's own waits see
