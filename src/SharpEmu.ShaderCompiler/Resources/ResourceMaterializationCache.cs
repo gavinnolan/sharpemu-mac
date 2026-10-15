@@ -1064,6 +1064,7 @@ public sealed class ResourceMaterializationCache
                     ReadCleanMemory = recorder.Wrap(inputs.ReadCleanMemory, clean: true),
                     ReadResidentMemory = recorder.WrapResident(inputs.ReadResidentMemory),
                     ReadsClean = inputs.ReadsClean,
+                DataWritePending = inputs.DataWritePending,
                     ComputeState = inputs.ComputeState,
                     TablePhase = recorder.TablePhase,
                 };
@@ -1195,6 +1196,7 @@ public sealed class ResourceMaterializationCache
                 ReadCleanMemory = recorder.Wrap(inputs.ReadCleanMemory, clean: true),
                 ReadResidentMemory = recorder.WrapResident(inputs.ReadResidentMemory),
                 ReadsClean = inputs.ReadsClean,
+                DataWritePending = inputs.DataWritePending,
                 ComputeState = inputs.ComputeState,
             };
             var cachedTable = cached.Snapshot.FlattenedResourceTable;
@@ -1725,6 +1727,7 @@ public sealed class ResourceMaterializationCache
                     ReadCleanMemory = recorder.Wrap(inputs.ReadCleanMemory, clean: true),
                     ReadResidentMemory = recorder.WrapResident(inputs.ReadResidentMemory),
                     ReadsClean = inputs.ReadsClean,
+                DataWritePending = inputs.DataWritePending,
                     ComputeState = inputs.ComputeState,
                 };
                 var cachedTable = entry.Snapshot.FlattenedResourceTable;

@@ -65,6 +65,20 @@ internal static class MetalV2Diagnostics
     // of the pass that follows it. A fast-clear that is materialised and then rendered
     // into costs a 4K store and a 4K load for a result the load action gives away, which
     // is what the switch exists to be able to measure.
+    // SHARPEMU_METAL_V2_DATA_LOADS_DEVICE=0 keeps every data-only scalar load flattened into
+    // the host-evaluated table, as before. Otherwise a load whose dword the GPU is still
+    // writing when the draw is bound (a constant table copied on the GPU) makes that shader
+    // be planned again with the load read on the device, instead of the host waiting for the
+    // writer's submission on every bind.
+    public static readonly bool DataLoadsOnDevice =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DATA_LOADS_DEVICE"), "0", StringComparison.Ordinal);
+
+    // SHARPEMU_METAL_V2_WAIT_TRACE=1 (or SHARPEMU_METAL_V2_EOP_TRACE=1) names, on each
+    // SLOW-WAIT line, the shader whose resources were being materialized when the host waited.
+    public static readonly bool WaitTrace =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WAIT_TRACE"), "1", StringComparison.Ordinal) ||
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_EOP_TRACE"), "1", StringComparison.Ordinal);
+
     public static readonly bool FoldClearsIntoPasses =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_FOLD_CLEARS"), "0", StringComparison.Ordinal);
 

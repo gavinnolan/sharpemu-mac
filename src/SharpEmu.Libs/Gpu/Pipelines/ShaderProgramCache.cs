@@ -146,6 +146,11 @@ internal sealed class ProgramSourceEntry
     public EmbeddedVertexFetchPlan? EmbeddedFetch { get; init; }
     public ShaderVertexInput[] VertexInputs { get; init; } = [];
     public List<ProgramPermutation> Permutations { get; } = new(8);
+
+    // How many device data loads the plan was extracted with, and the registry generation
+    // last seen to agree with it (DeviceDataLoads).
+    public int DeviceDataLoadCount { get; init; }
+    public int DeviceDataGeneration { get; set; }
 }
 
 // Programs keyed by identity and static state; each draw materializes its resources and reuses
@@ -189,7 +194,10 @@ internal sealed class ShaderProgramCache
         _readCleanGuestWord = host.TryReadCleanGuestWord;
         _readResidentGuestBytes = host.TryReadResidentGuestBytes;
         _prefetchResidentGuestBytes = PrefetchEnabled ? _readResidentGuestBytes : null;
+        _dataWritePending = host.DataWritePending;
     }
+
+    private readonly Func<ulong, bool>? _dataWritePending;
 
     public int ProgramCount => _programs.Count;
 
@@ -308,6 +316,7 @@ internal sealed class ShaderProgramCache
             ReadMemory = _readGuestWord,
             ReadCleanMemory = _readCleanGuestWord,
             ReadResidentMemory = _prefetchResidentGuestBytes,
+            DataWritePending = _dataWritePending,
             ComputeState = source.Stage == ShaderStage.Compute && options.ComputeInfo is { } computeState
                 ? new ComputeSelectorState(computeState.WaveSize, Math.Max(computeState.ThreadsX, 1),
                     Math.Max(computeState.ThreadsY, 1), Math.Max(computeState.ThreadsZ, 1), computeState.DispatchThreadDimensions,
@@ -321,6 +330,35 @@ internal sealed class ShaderProgramCache
             _programs.Add(key, entry);
             ShaderCacheCounters.CountProgram();
         }
+        else if (_dataWritePending is not null && entry.DeviceDataGeneration != DeviceDataLoads.Generation)
+        {
+            // An earlier bind learned that the GPU writes data words this plan flattened: the
+            // program is planned again with them left to the device, and compiles fresh
+            // permutations under new ids. Recorded work keeps the pipelines it already holds.
+            var generation = DeviceDataLoads.Generation;
+            if (DeviceDataLoads.CountFor(source.Hash) != entry.DeviceDataLoadCount)
+            {
+                ProgramSourceEntry? replanned = null;
+                try
+                {
+                    replanned = CreateEntry(source, options);
+                }
+                catch (ShaderProgramRejectedException)
+                {
+                    // The flattened plan stays; it only costs the wait it always did.
+                }
+
+                if (replanned is not null)
+                {
+                    entry = replanned;
+                    key = BuildProgramKey(source);
+                    _programs[key] = entry;
+                    DeviceDataLoads.CountReplan();
+                }
+            }
+
+            entry.DeviceDataGeneration = generation;
+        }
 
         // Both are assigned by the materialization that follows; a failed one throws.
         ResourceSnapshot snapshot = null!;
@@ -332,6 +370,7 @@ internal sealed class ShaderProgramCache
             Diagnostics.GpuReadTrace.CurrentStage = source.Label;
         }
 
+        MaterializingShader.Hash = source.Hash;
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ResourceMaterialization))
         {
             // Failure capture needs the full walk, so a dump run bypasses the cache.
@@ -348,6 +387,8 @@ internal sealed class ShaderProgramCache
                 throw GpuFatal.Fatal(message);
             }
         }
+
+        MaterializingShader.Hash = 0;
 
         // A cached materialization is shared with draws that differ in user-data words its
         // plan never reads, so the words the binding layout hands the shader come from here.
@@ -448,6 +489,8 @@ internal sealed class ShaderProgramCache
         }
 
         ShaderResourcePlan plan;
+        var deviceDataLoads = DeviceDataLoads.CountFor(source.Hash);
+        var deviceDataGeneration = DeviceDataLoads.Generation;
         try
         {
             plan = ShaderResourcePlan.Extract(program, source.Stage, source.Hash, source.UserDataBase, (uint)source.UserData.Length,
@@ -472,6 +515,8 @@ internal sealed class ShaderProgramCache
         return new ProgramSourceEntry
         {
             Plan = plan,
+            DeviceDataLoadCount = deviceDataLoads,
+            DeviceDataGeneration = deviceDataGeneration,
             Program = program,
             HasBitwiseExclusiveOr = exclusiveOr,
             ConstantFill = source.Stage == ShaderStage.Compute ? ConstantFillDetector.Detect(program) : null,

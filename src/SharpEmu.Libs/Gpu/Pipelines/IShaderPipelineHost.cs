@@ -77,6 +77,11 @@ public interface IShaderPipelineHost
     // the resource cache then re-materializes instead of trusting a stale copy.
     bool TryReadResidentGuestBytes(ulong address, Span<byte> destination, bool clean) => false;
 
+    // Whether recorded GPU work may still write this dword, answered without waiting. A
+    // host that returns a delegate lets a shader whose data-only table words the GPU writes
+    // be re-planned to load them on the device (DeviceDataLoads); null keeps them flattened.
+    Func<ulong, bool>? DataWritePending => null;
+
     // Creates the host module of one compiled permutation and returns its handle.
     ulong CreateShaderModule(IGuestCompiledShader shader, ShaderStage stage, ulong hash, ulong programId);
 

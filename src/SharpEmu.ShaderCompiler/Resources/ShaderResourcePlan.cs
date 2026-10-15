@@ -104,6 +104,7 @@ public sealed class ShaderResourcePlan
         }
 
         plan.TableReads = reads.Reads.Select(read => new ResourceTableRead(RewriteRead(read.Value), read.FlatOffset)).ToList();
+        plan.DataSlotStart = reads.DataSlotStart;
         plan.FlattenedSlotByMemoryIndex = reads.FlattenedSlotByMemoryIndex;
         plan.DynamicReads = reads.DynamicReads.Select(RewriteRead).ToList();
         plan.Accesses = new MemoryAccessBinding?[graph.Accesses.Length];
@@ -198,7 +199,91 @@ public sealed class ShaderResourcePlan
         }
 
         plan.WrittenRangeSlotByHandle = writtenSlots;
+        plan.DeviceDataSlots = plan.FindDeviceDataSlots();
         return plan;
+    }
+
+    // The first flattened slot no descriptor depends on (ResourceTableReadPlanner's data reads).
+    public int DataSlotStart { get; private set; }
+
+    // Data slots whose value only the shader consumes, each with the memory records that
+    // read it: a host may leave them to the device (DeviceDataLoads) without changing
+    // anything it evaluates itself.
+    public IReadOnlyDictionary<int, int[]> DeviceDataSlots { get; private set; } = new Dictionary<int, int[]>();
+
+    private Dictionary<int, int[]> FindDeviceDataSlots()
+    {
+        var result = new Dictionary<int, int[]>();
+        if (DataSlotStart >= TableReads.Count)
+        {
+            return result;
+        }
+
+        // Everything the host evaluates, apart from each data read itself.
+        var pending = new Stack<ScalarValue>();
+        void Push(ScalarValue? value)
+        {
+            if (value is not null) pending.Push(value);
+        }
+
+        foreach (var source in DescriptorSources)
+            foreach (var dword in source.Dwords) Push(dword);
+        foreach (var read in TableReads)
+            foreach (var operand in read.Value.Operands) Push(operand);
+        foreach (var range in DeviceAddressRanges)
+        {
+            Push(range.BaseLow);
+            Push(range.BaseHigh);
+        }
+
+        foreach (var branch in ResourceBranches) Push(branch.Condition);
+        foreach (var read in DynamicReads) Push(read);
+        foreach (var image in IndirectImages) Push(image.Key);
+        foreach (var access in Accesses)
+        {
+            if (access is null) continue;
+            Push(access.Handle);
+            Push(access.SamplerHandle);
+            Push(access.Offset);
+            Push(access.Active);
+            if (access.Read is { } read)
+                foreach (var operand in read.Operands) Push(operand);
+        }
+
+        var referenced = new HashSet<long>();
+        var visited = new HashSet<ScalarValue>(ReferenceEqualityComparer.Instance);
+        while (pending.TryPop(out var value))
+        {
+            if (value.IsConstant || !visited.Add(value)) continue;
+            if (value.Kind == ScalarValueKind.ResourceTableWord)
+            {
+                referenced.Add((long)value.Payload);
+                continue;
+            }
+
+            foreach (var operand in value.Operands) Push(operand);
+        }
+
+        var memoryBySlot = new Dictionary<int, List<int>>();
+        foreach (var (memoryIndex, slot) in FlattenedSlotByMemoryIndex)
+        {
+            if (!memoryBySlot.TryGetValue((int)slot, out var indices)) memoryBySlot[(int)slot] = indices = [];
+            indices.Add(memoryIndex);
+        }
+
+        for (var slot = DataSlotStart; slot < TableReads.Count; slot++)
+        {
+            if (referenced.Contains(slot) || TableReads[slot].Value.Kind != ScalarValueKind.ScalarAddressWord ||
+                (slot < CleanFlatSlots.Count && CleanFlatSlots[slot] != 0) || !memoryBySlot.TryGetValue(slot, out var indices))
+            {
+                continue;
+            }
+
+            indices.Sort();
+            result[slot] = [.. indices];
+        }
+
+        return result;
     }
 
     public const int WrittenRangeDwordCount = 3;
