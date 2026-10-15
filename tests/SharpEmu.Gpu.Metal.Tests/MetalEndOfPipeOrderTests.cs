@@ -7,7 +7,9 @@ using SharpEmu.Gpu.Metal.V2;
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.HLE.Host;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands;
+using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
 using Xunit;
 using Xunit.Abstractions;
@@ -188,6 +190,80 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         WaitForGpu(host, host.LastWorkSerial);
         WaitForCompletions(host);
         Assert.Equal(2UL, rig.Backing.Read64(WindowedLabel));
+    }
+
+    // A tiled image upload and writeback the one-pass tiler encodes are dispatches alone, so
+    // they are recorded into the open compute encoder instead of ending it, and land the same
+    // bytes as the same round trip in encoders of their own.
+    [Fact]
+    public void AKernelOnlyImageTransferIsEncodedIntoTheOpenComputeEncoder()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        using var harness = new MetalTransferHarness(Device.Value);
+        var host = rig.Host;
+        Assert.True(host.TransfersShareCompute);
+
+        const uint width = 192;
+        const uint height = 96;
+        var format = ImageDescription.RenderTargetTransferFormat(4);
+        var size = TileGeometry.TextureTotalSize(format, width, height, 1, 1, GuestTileMode.RenderTarget, volume: false).Size;
+        var description = ImageDescription.Create();
+        description.Data = new GuestSpan(GuestBase + 0x40000, size);
+        description.GuestFormat = GuestPixelFormat.Bits8_8_8_8UNorm;
+        description.PixelFormat = GpuFormat.R8G8B8A8Unorm;
+        description.Type = GuestImageType.Color2D;
+        description.Extent = new GpuExtent3D(width, height, 1);
+        description.Resources = new SubresourceCount(1, 1);
+        description.Pitch = TileGeometry.TexturePitch(format, width, GuestTileMode.RenderTarget);
+        description.BytesPerBlock = 4;
+        description.TileMode = GuestTileMode.RenderTarget;
+        var range = new SubresourceRange(0, 1, 0, 1);
+        var guest = new byte[size];
+        for (var index = 0; index < guest.Length; index++)
+        {
+            guest[index] = (byte)(index * 7 + 3);
+        }
+
+        var source = harness.Buffer(guest);
+        var texture = harness.Texture(harness.Transfer.ShapeFor(description));
+
+        // The same round trip in encoders of its own is the reference.
+        var expected = harness.Buffer(size);
+        harness.Begin();
+        harness.Transfer.EncodeGuestToTexture(harness, description, range,
+            new MetalGuestRange(source, 0, size, 0), default, texture, 0, size);
+        harness.Transfer.EncodeTextureToGuest(harness, description, range, texture,
+            new MetalGuestRange(expected, 0, size, 0), default, 0, size);
+        harness.Submit();
+
+        var shared = new MetalImageTransfer(Device.Value);
+        try
+        {
+            var actual = harness.Buffer(size);
+            var inEncoder = host.TransfersInEncoder;
+            _ = host.EnsureComputeEncoder();
+            var upload = ((IMetalImageCacheOwner)host).BeginTransfer(MetalTransferCause.Upload, texture);
+            Assert.True(host.ComputeEncoderOpen);
+            shared.EncodeGuestToTexture(upload, description, range,
+                new MetalGuestRange(source, 0, size, 0), default, texture, 0, size);
+            var writeback = ((IMetalImageCacheOwner)host).BeginTransfer(MetalTransferCause.Writeback, texture);
+            shared.EncodeTextureToGuest(writeback, description, range, texture,
+                new MetalGuestRange(actual, 0, size, 0), default, 0, size);
+            Assert.True(host.ComputeEncoderOpen);
+            Assert.Equal(inEncoder + 2, host.TransfersInEncoder);
+            Assert.Equal(0u, shared.Tiler.StagingBufferCount);
+
+            var serial = host.FlushCommandBuffer();
+            WaitForGpu(host, serial);
+            var landed = harness.Read(actual, 0, size);
+            Assert.Contains(landed, value => value != 0);
+            Assert.Equal(harness.Read(expected, 0, size), landed);
+        }
+        finally
+        {
+            shared.Dispose();
+        }
     }
 
     [Fact]

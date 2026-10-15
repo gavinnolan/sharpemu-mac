@@ -14,7 +14,8 @@ internal readonly record struct MetalGuestRange(nint Buffer, ulong Offset, ulong
 
 // The command buffer currently being recorded and the completion serials of the queue.
 // Resources a transfer allocates for this command buffer may be reused once
-// CompletedSerial >= SubmissionSerial. Callers end any open encoder before passing it.
+// CompletedSerial >= SubmissionSerial. Callers end any open encoder before passing it,
+// except one they leave to be shared (TryShareComputeEncoder).
 internal interface IMetalSubmissionContext
 {
     nint Device { get; }
@@ -34,6 +35,31 @@ internal interface IMetalSubmissionContext
     void ProfileEncoded(string label)
     {
         _ = label;
+    }
+
+    // The compute encoder a transfer made of compute dispatches alone may record them into
+    // instead of opening one of its own, or zero. The host leaves its open compute encoder
+    // to an image upload or writeback (SHARPEMU_METAL_V2_TRANSFER_IN_ENCODER) and hands it
+    // over only when nothing that lands at that encoder's end - a deferred command-processor
+    // write, a staged store - touches guest bytes [guestAddress, guestAddress + size); the
+    // dispatches are fenced from the encoder's own by memory barriers. The caller records
+    // its dispatches and then calls EndSharedCompute, never endEncoding.
+    nint TryShareComputeEncoder(ulong guestAddress, ulong size)
+    {
+        _ = guestAddress;
+        _ = size;
+        return 0;
+    }
+
+    // The transfer has recorded its dispatches into the shared compute encoder.
+    void EndSharedCompute()
+    {
+    }
+
+    // Ends the encoder this transfer was allowed to share, as a transfer: called before the
+    // transfer opens an encoder of its own, since a command buffer has one open at a time.
+    void ReleaseSharedEncoder()
+    {
     }
 }
 

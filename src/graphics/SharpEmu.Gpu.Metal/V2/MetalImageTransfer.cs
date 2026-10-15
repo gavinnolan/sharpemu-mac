@@ -364,7 +364,7 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
             return;
         }
 
-        if (TryEncodeTextureTiles(context, plan, texture,
+        if (TryEncodeTextureTiles(context, plan, texture, description.Data.Address + guestBase,
                 new MetalBufferSpan(source.Buffer, source.Offset, TiledCapacity(source)), MetalTileDirection.Detile))
         {
             return;
@@ -424,7 +424,7 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
             return;
         }
 
-        if (TryEncodeTextureTiles(context, plan, texture,
+        if (TryEncodeTextureTiles(context, plan, texture, description.Data.Address + guestBase,
                 new MetalBufferSpan(destination.Buffer, destination.Offset, pieceSize), MetalTileDirection.Tile))
         {
             return;
@@ -531,7 +531,8 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
     // the staged path does qualifies - whole-element texels of a plain 2D or 2D-array
     // texture, no mip tail, no channel swap - and the staged path keeps the rest.
     private bool TryEncodeTextureTiles(
-        IMetalSubmissionContext context, TransferPlan plan, nint texture, MetalBufferSpan guest, MetalTileDirection direction)
+        IMetalSubmissionContext context, TransferPlan plan, nint texture, ulong guestAddress, MetalBufferSpan guest,
+        MetalTileDirection direction)
     {
         if (!TextureTilerEnabled || !plan.Tiled || plan.Swap || plan.Volume || plan.TexelWidth != 1 ||
             plan.TexelHeight != 1 || _tiles.Count == 0 || guest.Offset % 4 != 0)
@@ -582,9 +583,19 @@ internal sealed class MetalImageTransfer : IMetalImageTransfer, IDisposable
 
         try
         {
-            var compute = _tiler.BeginCompute(context);
+            // Nothing but dispatches: the open compute encoder takes them when the host
+            // leaves it to this transfer, which saves the encoder boundary.
+            var shared = context.TryShareComputeEncoder(guestAddress, guest.Size);
+            var compute = shared != 0 ? shared : _tiler.BeginCompute(context);
             _tiler.EncodeTextureBlockCopies(compute, guest, view, _tiles, direction);
-            MetalTiler.EndEncoding(compute);
+            if (shared != 0)
+            {
+                context.EndSharedCompute();
+            }
+            else
+            {
+                MetalTiler.EndEncoding(compute);
+            }
         }
         finally
         {

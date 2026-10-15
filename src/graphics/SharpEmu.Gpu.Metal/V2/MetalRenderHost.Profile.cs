@@ -125,7 +125,13 @@ internal sealed partial class MetalRenderHost
         // Remembered unconditionally, like _lastWorkLabel: it is what names the producer
         // in a write-guard violation and in a slow command buffer's report.
         _lastTransferLabel = label;
-        PassProfileNoteBetween(label);
+        if (!_transferInSharedEncoder)
+        {
+            // A transfer recorded into the open compute encoder was counted as work of that
+            // pass (EndSharedCompute); only one in encoders of its own sits between passes.
+            PassProfileNoteBetween(label);
+        }
+
         _slotTrap?.NoteBinding($"transfer {label}", 0, 0, 0, 0, 0);
         ProfileCommandBuffer("transfer", label, string.Empty);
     }

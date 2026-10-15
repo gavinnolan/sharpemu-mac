@@ -60,6 +60,14 @@ internal static class MetalV2Diagnostics
     public static readonly bool DeferComputeCopies =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEFER_COMPUTE_COPIES"), "0", StringComparison.Ordinal);
 
+    // SHARPEMU_METAL_V2_TRANSFER_IN_ENCODER=0 makes an image upload or writeback recorded
+    // while a compute encoder is open end that encoder, as it did before. A transfer the
+    // one-pass tiler encodes is nothing but compute dispatches, so it is recorded into the
+    // open compute encoder instead; the encoder boundary it saves was a GPU idle gap of
+    // 0.5-4 ms per transfer at the Demon's Souls title screen.
+    public static readonly bool TransferInEncoder =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_TRANSFER_IN_ENCODER"), "0", StringComparison.Ordinal);
+
     // SHARPEMU_METAL_V2_KERNEL_FILLS=0 runs a title's own compute memset or memcpy over the
     // exact bytes of a cached image as the dispatch it is, with the writeback before it
     // and the upload after it, instead of as a clear or texture copy of the image

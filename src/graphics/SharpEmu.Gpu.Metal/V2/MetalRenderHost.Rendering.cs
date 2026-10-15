@@ -1123,6 +1123,7 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
+        _transferSharesCompute = false;
         MetalNative.SendVoid(_computeEncoder, SelEndEncoding);
         _computeEncoder = 0;
         _boundComputePipeline = 0;
@@ -2291,6 +2292,26 @@ internal sealed partial class MetalRenderHost
         }
 
         MaterializePendingClearsOf(new ReadOnlySpan<nint>(_usedResources, 0, _usedResourceCount));
+    }
+
+    // Whether a clear still waiting for its pass is of this texture or what it views.
+    private bool PendingClearTouches(nint texture)
+    {
+        if (_pendingClears.Count == 0)
+        {
+            return false;
+        }
+
+        var root = RootTexture(texture);
+        foreach (ref readonly var pending in System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_pendingClears))
+        {
+            if (pending.Root == root)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // The texture a view was made from, or the texture itself.

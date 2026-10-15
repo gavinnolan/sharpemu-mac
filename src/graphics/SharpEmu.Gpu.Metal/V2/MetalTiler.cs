@@ -298,6 +298,7 @@ internal sealed unsafe class MetalTiler : IDisposable
 
     public nint BeginCompute(IMetalSubmissionContext context)
     {
+        context.ReleaseSharedEncoder();
         var encoder = MetalNative.Send(context.CommandBuffer, SelComputeEncoder);
         if (encoder == 0)
         {
@@ -309,6 +310,7 @@ internal sealed unsafe class MetalTiler : IDisposable
 
     public nint BeginBlit(IMetalSubmissionContext context)
     {
+        context.ReleaseSharedEncoder();
         var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
         if (encoder == 0)
         {

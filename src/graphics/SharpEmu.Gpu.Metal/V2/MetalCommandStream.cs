@@ -429,7 +429,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         value[..bytes].CopyTo(payload);
 
         var copy = new DeferredLabelCopy(
-            staging.Buffer, staging.Offset, destination.Buffer, destination.Offset, bytes);
+            staging.Buffer, staging.Offset, destination.Buffer, destination.Offset, bytes, write.Destination);
         var serial = EncodeOrderedCopy(in copy, write.Destination,
             GpuClobberDiagnostics.Enabled ? GpuClobberDiagnostics.LandedKind(write.Kind) : null,
             bytes == sizeof(uint) ? (uint)write.Value : write.Value,
@@ -641,7 +641,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         }
 
         source.CopyTo(payload);
-        var copy = new DeferredLabelCopy(staging.Buffer, staging.Offset, destination.Buffer, destination.Offset, source.Length);
+        var copy = new DeferredLabelCopy(
+            staging.Buffer, staging.Offset, destination.Buffer, destination.Offset, source.Length, address);
         var serial = EncodeOrderedCopy(in copy, address, GpuClobberDiagnostics.Enabled ? "landed:" + kind : null,
             FirstValue(source), MetalGpuWriteOrigin.Copy, $"cp write {kind} bytes={size}");
 
@@ -783,7 +784,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         ulong StagingOffset,
         nint DestinationBuffer,
         ulong DestinationOffset,
-        int Bytes);
+        int Bytes,
+        ulong GuestAddress);
 
     private readonly List<DeferredLabelCopy> _deferredLabelCopies = [];
     private bool _encodingDeferredLabels;
@@ -825,6 +827,21 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// before the next one is created, so the bytes land after the work the labels report
     /// and before whatever follows them.
     /// </summary>
+    // Whether a copy waiting for the end of the open encoder lands in these guest bytes.
+    private bool DeferredLabelCopiesTouch(ulong address, ulong size)
+    {
+        foreach (ref readonly var copy in
+            System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deferredLabelCopies))
+        {
+            if (copy.GuestAddress < address + size && address < copy.GuestAddress + (ulong)copy.Bytes)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private void EncodeDeferredLabelCopies()
     {
         if (_deferredLabelCopies.Count == 0 || _encodingDeferredLabels)

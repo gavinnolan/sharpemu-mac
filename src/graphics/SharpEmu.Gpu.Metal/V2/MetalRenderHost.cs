@@ -296,6 +296,21 @@ internal sealed partial class MetalRenderHost :
 
         _ = EnsureCommandBuffer();
         NoteRecordedWork();
+        _transferInSharedEncoder = false;
+        if (TransfersShareCompute && _computeEncoder != 0 && texture != 0 && otherTexture == 0 &&
+            cause is (MetalTransferCause.Upload or MetalTransferCause.Writeback) && !PendingClearTouches(texture))
+        {
+            // The open compute encoder stays open: a transfer the tiler encodes as nothing
+            // but dispatches records them into it (TryShareComputeEncoder), and one that
+            // needs an encoder of its own ends it first (ReleaseSharedEncoder), as a
+            // transfer, exactly where this used to. A clear of the texture still waiting
+            // would have to land first, which takes a pass, so that case ends it here.
+            _transferSharesCompute = true;
+            _sharingTransferCause = cause;
+            NoteProfileTransfer();
+            return this;
+        }
+
         EndEncoders(PassEndCause.Transfer);
         _encodersInBuffer++;
         // A transfer that reads or writes a texture has to see the clears that were
@@ -323,6 +338,84 @@ internal sealed partial class MetalRenderHost :
 
         NoteProfileTransfer();
         return this;
+    }
+
+    /// <summary>
+    /// Whether an image upload or writeback recorded while a compute encoder is open may
+    /// record its tiler dispatches into that encoder (SHARPEMU_METAL_V2_TRANSFER_IN_ENCODER).
+    /// </summary>
+    internal bool TransfersShareCompute { get; set; } = MetalV2Diagnostics.TransferInEncoder;
+
+    // The transfer begun last left the open compute encoder to be shared, and has not
+    // ended it yet.
+    private bool _transferSharesCompute;
+    private MetalTransferCause _sharingTransferCause;
+
+    // The transfer begun last recorded its dispatches into the shared encoder and did not
+    // open one of its own afterwards: it belongs to that pass, not between passes.
+    private bool _transferInSharedEncoder;
+
+    // Transfers recorded into an open compute encoder instead of ending it.
+    private long _transfersInEncoder;
+
+    internal long TransfersInEncoder => Interlocked.Read(ref _transfersInEncoder);
+
+    nint IMetalSubmissionContext.TryShareComputeEncoder(ulong guestAddress, ulong size)
+    {
+        if (!_transferSharesCompute || _computeEncoder == 0)
+        {
+            return 0;
+        }
+
+        // What lands when the encoder ends - a deferred command-processor write, a staged
+        // store written back - lands after everything recorded into it. A transfer over
+        // those bytes has to see them land first (an upload) or land after them (a
+        // writeback), so it gets an encoder of its own after the boundary instead.
+        if (DeferredLabelCopiesTouch(guestAddress, size) ||
+            (_stagedStorageCopies is { Count: > 0 } staged && staged.HasRecordedStoresOver(guestAddress, size)))
+        {
+            ((IMetalSubmissionContext)this).ReleaseSharedEncoder();
+            return 0;
+        }
+
+        // A serial compute encoder already runs its dispatches in order; the barrier says
+        // so for the guest windows and textures whichever way they are tracked.
+        MetalV2Native.SendMemoryBarrierScope(
+            _computeEncoder, SelComputeMemoryBarrier, Mtl.BarrierScopeBuffers | Mtl.BarrierScopeTextures);
+        _transferInSharedEncoder = true;
+        return _computeEncoder;
+    }
+
+    void IMetalSubmissionContext.EndSharedCompute()
+    {
+        if (_computeEncoder == 0)
+        {
+            return;
+        }
+
+        MetalV2Native.SendMemoryBarrierScope(
+            _computeEncoder, SelComputeMemoryBarrier, Mtl.BarrierScopeBuffers | Mtl.BarrierScopeTextures);
+        // The tiler bound its own pipeline; the next dispatch binds the guest's again.
+        // Its buffers are bound per dispatch already (ApplyStageBindings).
+        _boundComputePipeline = 0;
+        Interlocked.Increment(ref _transfersInEncoder);
+        if (PassProfileEnabled)
+        {
+            PassProfileNoteWork(_sharingTransferCause.ToString(), "transfer");
+        }
+    }
+
+    void IMetalSubmissionContext.ReleaseSharedEncoder()
+    {
+        if (!_transferSharesCompute)
+        {
+            return;
+        }
+
+        _transferSharesCompute = false;
+        _transferInSharedEncoder = false;
+        EndEncoders(PassEndCause.Transfer);
+        _encodersInBuffer++;
     }
 
     // The newest submission that has GPU work in it. An end-of-pipe completion only
@@ -364,6 +457,7 @@ internal sealed partial class MetalRenderHost :
     /// <summary>Ends whatever encoder is open; the next record opens the one it needs.</summary>
     private void EndEncoders(PassEndCause cause)
     {
+        _transferSharesCompute = false;
         if (_renderEncoder != 0)
         {
             PassProfileNoteEnd(cause == PassEndCause.Transfer ? _ppTransferCause : cause.ToString().ToLowerInvariant());
