@@ -162,6 +162,12 @@ public interface IRenderHost
     // The next draw stores to buffers or storage images; called before its BeginRendering.
     void PrepareMemoryWritingDraw() { }
 
+    // The first host draw call the next BeginRendering is for, so a host can choose its
+    // render pass's load actions from what that draw covers: its pipeline and, for a direct
+    // non-indexed draw, the vertices it draws. vertexCount is zero when the draw is indexed
+    // or indirect and its vertices are not known here.
+    void NoteUpcomingDraw(in PipelineHandle pipeline, uint vertexCount, uint firstVertex) { }
+
     void BindPipeline(GpuBindPoint bindPoint, in PipelineHandle pipeline);
 
     void Draw(uint vertexCount, uint instanceCount, uint firstVertex, uint firstInstance);

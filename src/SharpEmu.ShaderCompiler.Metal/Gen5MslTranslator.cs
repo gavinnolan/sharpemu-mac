@@ -193,6 +193,11 @@ public static partial class Gen5MslTranslator
         private readonly uint _waveLaneCount;
         private readonly IReadOnlyList<Gen5PixelOutputBinding> _pixelOutputBindings;
         private readonly bool _usesPixelValidMask;
+
+        // The EXP.VM instructions whose EXEC is the restored entry EXEC (see
+        // Gen5MslTranslator.EntryExec.cs), and whether any other one published EXEC.
+        private HashSet<uint>? _entryMaskExports;
+        private bool _validMaskFromExec;
         private readonly bool _pixelDepthExport;
 
         // A translator-side probe, off unless someone is hunting a draw that covers
@@ -419,6 +424,11 @@ public static partial class Gen5MslTranslator
                     WritesViewportIndex: _writesViewportIndex)
                 {
                     UsesPerVertexInputs = UsesPerVertexPixelInputs,
+                    ConstantPositions = _stage == Gen5MslStage.Vertex && !DebugVertexPosition
+                        ? EvaluateConstantPositions(_request.Program.Instructions, _request.ClipSpace)
+                        : null,
+                    CannotDiscard = _stage == Gen5MslStage.Pixel && _usesPixelValidMask && !_validMaskFromExec,
+                    ColorOutputMask = _stage == Gen5MslStage.Pixel ? ColorOutputLocations(_pixelOutputBindings) : 0,
                 };
                 return true;
             }
@@ -2867,6 +2877,20 @@ public static partial class Gen5MslTranslator
             uint StartPc,
             int StartIndex,
             int EndIndex);
+
+        private static uint ColorOutputLocations(IReadOnlyList<Gen5PixelOutputBinding> bindings)
+        {
+            var mask = 0u;
+            foreach (var binding in bindings)
+            {
+                if (binding.BlendSourceIndex == 0 && binding.HostLocation < 32)
+                {
+                    mask |= 1u << (int)binding.HostLocation;
+                }
+            }
+
+            return mask;
+        }
 
         private static IReadOnlyList<ShaderBlock> BuildBasicBlocks(
             IReadOnlyList<Gen5ShaderInstruction> instructions,

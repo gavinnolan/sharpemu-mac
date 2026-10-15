@@ -160,4 +160,20 @@ public sealed record Gen5MslShader(
 
     /// <summary>The source declares per-vertex pixel inputs; see <see cref="PerVertexInputsLanguageVersion"/>.</summary>
     public bool UsesPerVertexInputs { get; init; }
+
+    /// <summary>The vertex indices <see cref="ConstantPositions"/> covers, from zero.</summary>
+    public const int ConstantPositionVertexCount = 6;
+
+    /// <summary>A vertex program whose clip position depends on nothing but the vertex
+    /// index: the host clip-space position (x, y, z, w) of vertex indices 0 to
+    /// <see cref="ConstantPositionVertexCount"/> - 1, four floats each. Null otherwise.</summary>
+    public float[]? ConstantPositions { get; init; }
+
+    /// <summary>A pixel program that provably never discards a fragment: every fragment
+    /// it runs for writes its colour outputs.</summary>
+    public bool CannotDiscard { get; init; }
+
+    /// <summary>The [[color(n)]] attachments a pixel program returns a value for, one bit
+    /// per n.</summary>
+    public uint ColorOutputMask { get; init; }
 }
