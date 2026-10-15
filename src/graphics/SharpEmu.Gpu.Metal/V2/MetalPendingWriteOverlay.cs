@@ -26,6 +26,7 @@ internal sealed class MetalPendingWriteOverlay
     private readonly Queue<Entry> _order = new();
     private ulong _sequence;
     private int _count;
+    private long _version;
 
     private sealed class Entry
     {
@@ -42,6 +43,12 @@ internal sealed class MetalPendingWriteOverlay
     /// <summary>Entries not yet dropped. Zero is the fast path every read checks first.</summary>
     public int Count => Volatile.Read(ref _count);
 
+    /// <summary>
+    /// Changes on every add, forget and clear (a forget stands for a newer write over the
+    /// range); retiring landed entries leaves it alone.
+    /// </summary>
+    public long Version => Volatile.Read(ref _version);
+
     /// <summary>Records the bytes a write recorded into <paramref name="serial"/> will land.</summary>
     public void Add(ulong address, ReadOnlySpan<byte> bytes, ulong serial)
     {
@@ -52,6 +59,7 @@ internal sealed class MetalPendingWriteOverlay
 
         lock (_gate)
         {
+            Interlocked.Increment(ref _version);
             var entry = new Entry { Address = address, Bytes = bytes.ToArray(), Serial = serial, Sequence = ++_sequence };
             for (var page = address >> PageShift; page <= (entry.End - 1) >> PageShift; page++)
             {
@@ -83,6 +91,7 @@ internal sealed class MetalPendingWriteOverlay
     /// <summary>A later write covers this range: no pending entry speaks for it any more.</summary>
     public void Forget(ulong address, ulong size)
     {
+        Interlocked.Increment(ref _version);
         if (size == 0 || Count == 0)
         {
             return;
@@ -109,6 +118,7 @@ internal sealed class MetalPendingWriteOverlay
     /// <summary>Drops everything: some write of unknown extent was recorded.</summary>
     public void Clear()
     {
+        Interlocked.Increment(ref _version);
         lock (_gate)
         {
             while (_order.Count != 0)

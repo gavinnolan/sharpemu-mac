@@ -114,6 +114,12 @@ internal sealed class MetalGpuWriteRanges
     public bool IsEmpty => _count == 0 && _labelCount == 0 && _unboundedSerial == 0;
 
     /// <summary>
+    /// Changes whenever a write is recorded or the records are cleared; retiring completed
+    /// records leaves it alone, since that only ever makes a read wait for less.
+    /// </summary>
+    public ulong Version { get; private set; }
+
+    /// <summary>
     /// Recorded work in <paramref name="serial"/> stores into this range. Returns the
     /// write's sequence (see <see cref="LatestSequence"/>), or zero when nothing was recorded.
     /// </summary>
@@ -129,6 +135,7 @@ internal sealed class MetalGpuWriteRanges
         }
 
         _recorded++;
+        Version++;
         var sequence = ++_sequence;
         var end = address + size;
         if (origin == MetalGpuWriteOrigin.EndOfPipeLabel)
@@ -235,6 +242,7 @@ internal sealed class MetalGpuWriteRanges
     /// </summary>
     public void NoteUnbounded(ulong serial)
     {
+        Version++;
         if (serial != 0 && serial > _retiredSerial && serial >= _unboundedSerial)
         {
             _unboundedSequence = ++_sequence;
@@ -403,6 +411,7 @@ internal sealed class MetalGpuWriteRanges
     /// <summary>Everything recorded has completed.</summary>
     public void Clear(ulong completed)
     {
+        Version++;
         _count = 0;
         _labelCount = 0;
         _unboundedSerial = 0;
