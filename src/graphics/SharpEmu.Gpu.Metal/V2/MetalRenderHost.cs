@@ -297,6 +297,7 @@ internal sealed partial class MetalRenderHost :
         _ = EnsureCommandBuffer();
         NoteRecordedWork();
         EndEncoders(PassEndCause.Transfer);
+        _encodersInBuffer++;
         // A transfer that reads or writes a texture has to see the clears that were
         // asked for before it - but only the clears of that texture: any other one keeps
         // waiting for the pass that can absorb it as its load action. A transfer that
@@ -375,10 +376,12 @@ internal sealed partial class MetalRenderHost :
             }
 
             EndRendering();
+            _encodersInBuffer++;
         }
 
         if (_computeEncoder != 0)
         {
+            _encodersInBuffer++;
             PassProfileNoteEnd(cause == PassEndCause.Transfer ? _ppTransferCause : cause.ToString().ToLowerInvariant());
             MetalNative.SendVoid(_computeEncoder, SelEndEncoding);
             _computeEncoder = 0;
@@ -410,6 +413,10 @@ internal sealed partial class MetalRenderHost :
     // idle until the next one is committed, so the count per cause is the first thing
     // that says which commits a frame could do without.
     private readonly long[] _flushCauses = new long[(int)MetalFlushCause.Other + 1];
+
+    // Render, compute and transfer encoders recorded into the open command buffer; one of
+    // the limits on how long a coalesced Stream flush keeps it open.
+    private int _encodersInBuffer;
 
     private ulong FlushCommandBuffer(PassEndCause cause, MetalFlushCause why)
     {
@@ -486,6 +493,10 @@ internal sealed partial class MetalRenderHost :
         _previousSerial = serial;
         _commandBuffer = 0;
         _recordedCommands = 0;
+        // Whatever cause committed it, a deferred Stream flush is now satisfied.
+        _encodersInBuffer = 0;
+        _commitWantedSince = 0;
+        _coalescedSubmissions = 0;
         // Every label this submission carried is now on its way to the guest window.
         _pendingLabelWrites = 0;
         Interlocked.Increment(ref _flushes);
@@ -1846,7 +1857,7 @@ internal sealed partial class MetalRenderHost :
             (SharpEmu.Libs.Gpu.GpuCommands.GpuStreamDiagnostics.DcbHashEnabled
                 ? $"dcbhash_checks={SharpEmu.Libs.Gpu.GpuCommands.GpuStreamDiagnostics.HashChecks} dcbhash_mismatches={SharpEmu.Libs.Gpu.GpuCommands.GpuStreamDiagnostics.HashMismatches} "
                 : string.Empty) +
-            $"draws={draws} passes={passes} flushes={flushes} flush_by=[{flushBy}] " +
+            $"draws={draws} passes={passes} flushes={flushes} flush_by=[{flushBy}] flush_deferred={TakeDeferredStreamFlushes()} " +
             $"draw_ms={(drawTicks * 1000.0 / frequency).ToString("F1", culture)} " +
             $"gpu_busy_ms={gpuBusyMs.ToString("F1", culture)} " +
             $"gpu_n={gpuBusySamples} gpu_unsampled={unsampled} " +
