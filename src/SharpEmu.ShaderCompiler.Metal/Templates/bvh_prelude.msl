@@ -7,8 +7,10 @@
 // triangle_return_mode [120]. A node pointer holds the node type in bits 2:0 and the node's
 // 64-byte index above them (Mesa radv_nir_rt_common.c build_node_to_addr). Types 0 and 1
 // are the two triangles of a GPURT TriangleNode, 4 a float16 box node, 5 a float32 box
-// node (two 64-byte units); every other type, and a node past size, returns four
-// 0xFFFFFFFF dwords ("User defined node. HW returns -1", GPURT IntersectCommon.hlsl).
+// node (two 64-byte units), 6 the PS5's shared-exponent box node (below); every other
+// type, and a node past size, returns four 0xFFFFFFFF dwords ("User defined node. HW
+// returns -1", GPURT IntersectCommon.hlsl). GPURT's RTIP1.1 makes type 6 a user instance
+// node; the PS5 does not.
 //
 // Every helper turns floating-point contraction off: a fused multiply-add rounds once
 // where the hardware's separate multiply and add round twice.
@@ -88,26 +90,18 @@ static inline float2 sharpemu_bvh_slab(float3 origin, float3 inv_dir, float3 box
 // GPURT IntersectNodeBvh4: a child is hit when its clipped entry is at most its exit
 // grown by box_grow_value 2^-24 steps, otherwise it returns 0xFFFFFFFF. With sorting on,
 // the hardware's five-compare network orders the children by entry time and sinks the
-// invalid ones. Box nodes: four child pointers, then per child min.xyz and max.xyz as
-// floats, or as halves packed low half first (GPURT BoxNode1_0, UncompressBBoxFromUint3).
-static inline uint4 sharpemu_bvh_box(thread const uint* node, bool fp16, uint grow, bool sort, float extent, float3 origin, float3 inv_dir)
+// invalid ones. The bounds are child-major min.xyz, max.xyz; child holds the four child
+// pointers going in and the result coming out.
+static inline uint4 sharpemu_bvh_box_test(thread uint* child, thread const float* bound, uint grow, bool sort, float extent, float3 origin, float3 inv_dir)
 {
 #pragma METAL fp contract(off)
     float factor = 1.0f + float(grow) * 0x1p-24f;
-    uint child[4];
     float key[4];
     for (uint index = 0u; index < 4u; index++)
     {
-        float bound[6];
-        for (uint component = 0u; component < 6u; component++)
-        {
-            uint slot = index * 6u + component;
-            bound[component] = fp16
-                ? sharpemu_bvh_half((node[4u + (slot >> 1)] >> ((slot & 1u) * 16u)) & 0xFFFFu)
-                : as_type<float>(node[4u + slot]);
-        }
-        float2 span = sharpemu_bvh_slab(origin, inv_dir, float3(bound[0], bound[1], bound[2]), float3(bound[3], bound[4], bound[5]), extent);
-        child[index] = span.x <= span.y * factor ? node[index] : 0xFFFFFFFFu;
+        thread const float* box = bound + index * 6u;
+        float2 span = sharpemu_bvh_slab(origin, inv_dir, float3(box[0], box[1], box[2]), float3(box[3], box[4], box[5]), extent);
+        child[index] = span.x <= span.y * factor ? child[index] : 0xFFFFFFFFu;
         key[index] = span.x;
     }
     if (sort)
@@ -129,6 +123,93 @@ static inline uint4 sharpemu_bvh_box(thread const uint* node, bool fp16, uint gr
         }
     }
     return uint4(child[0], child[1], child[2], child[3]);
+}
+
+// Box nodes: four child pointers, then per child min.xyz and max.xyz as floats, or as
+// halves packed low half first (GPURT BoxNode1_0, UncompressBBoxFromUint3).
+static inline uint4 sharpemu_bvh_box(thread const uint* node, bool fp16, uint grow, bool sort, float extent, float3 origin, float3 inv_dir)
+{
+    uint child[4] = { node[0], node[1], node[2], node[3] };
+    float bound[24];
+    for (uint slot = 0u; slot < 24u; slot++)
+    {
+        bound[slot] = fp16
+            ? sharpemu_bvh_half((node[4u + (slot >> 1)] >> ((slot & 1u) * 16u)) & 0xFFFFu)
+            : as_type<float>(node[4u + slot]);
+    }
+    return sharpemu_bvh_box_test(child, bound, grow, sort, extent, origin, inv_dir);
+}
+
+// The PS5's type-6 box node: 64 bytes read as one little-endian 512-bit stream (bit i is
+// bit i % 32 of dword i / 32). Bits 28:0 child base in 64-byte units; per child c a 3-bit
+// type at 29 + 3c and a 2-bit field at 41 + 2c (3: empty); 8-bit biased exponents per axis
+// at 56, 64, 72, shared by all children's minima and maxima; then per child, per bound
+// (min.xyz, max.xyz) an 18-bit sign-magnitude value at 80 + 18 (6c + k) whose magnitude
+// bit 16 weighs 2^(exponent - 127). Child pointers are implicit: the running base, then
+// advanced by the child's type (2: four units; 3, 5, 6: two; others one), empty children
+// included. The layout is the Kyty project's reading of a PS5 game's own BVH build and
+// decode kernels, not a hardware measurement.
+static inline uint sharpemu_bvh_bits(thread const uint* node, uint first, uint count)
+{
+    uint word = first >> 5;
+    ulong window = (ulong)node[word];
+    if (word < 15u)
+    {
+        window |= (ulong)node[word + 1u] << 32;
+    }
+    return (uint)(window >> (first & 31u)) & ((1u << count) - 1u);
+}
+
+// One bound as float bits, renormalized from the axis' fixed-point grid and rounded
+// outward (minima toward -inf, maxima toward +inf) by filling the bits shifted in. An
+// exponent too small to renormalize leaves a denormal; a filled exponent of 255 stays
+// unfilled. A zero magnitude rounded outward becomes the largest mantissa 17 binades down.
+// Apple GPUs flush binary32 denormals in arithmetic, so a denormal bound enters the slab
+// test as zero when the origin's coordinate is zero too.
+static inline float sharpemu_bvh_shared_bound(uint field, uint exponent, bool minimum)
+{
+    uint sign = (field >> 17) & 1u;
+    uint magnitude = field & 0x1FFFFu;
+    bool away = minimum ? sign != 0u : sign == 0u;
+    uint biased = 0u;
+    uint mantissa = 0u;
+    if (magnitude != 0u)
+    {
+        uint top = 31u - clz(magnitude);
+        uint down = min(16u - top, exponent);
+        biased = exponent - down;
+        // At most 23: the magnitude's top bit lands on bit 23 or below.
+        uint shift = 7u + down;
+        uint fill = away && biased != 255u ? (1u << shift) - 1u : 0u;
+        mantissa = ((magnitude << shift) | fill) & 0x7FFFFFu;
+    }
+    else if (away)
+    {
+        biased = exponent > 17u ? exponent - 17u : 0u;
+        mantissa = 0x7FFFFFu;
+    }
+    return as_type<float>((sign << 31) | (biased << 23) | mantissa);
+}
+
+static inline uint4 sharpemu_bvh_box_shared(thread const uint* node, uint grow, bool sort, float extent, float3 origin, float3 inv_dir)
+{
+    uint child[4];
+    float bound[24];
+    uint running = node[0] & 0x1FFFFFFFu;
+    for (uint index = 0u; index < 4u; index++)
+    {
+        uint type = sharpemu_bvh_bits(node, 29u + 3u * index, 3u);
+        bool empty = sharpemu_bvh_bits(node, 41u + 2u * index, 2u) == 3u;
+        child[index] = empty ? 0xFFFFFFFFu : (running << 3) | type;
+        running += type == 2u ? 4u : (type == 3u || type == 5u || type == 6u) ? 2u : 1u;
+        for (uint component = 0u; component < 6u; component++)
+        {
+            uint exponent = sharpemu_bvh_bits(node, 56u + 8u * (component % 3u), 8u);
+            uint field = sharpemu_bvh_bits(node, 80u + 18u * (index * 6u + component), 18u);
+            bound[index * 6u + component] = sharpemu_bvh_shared_bound(field, exponent, component < 3u);
+        }
+    }
+    return sharpemu_bvh_box_test(child, bound, grow, sort, extent, origin, inv_dir);
 }
 
 // Mesa radv_build_intersect_edge and radv_build_intersect_vertex: which of the triangles
@@ -279,6 +360,12 @@ static inline uint4 sharpemu_bvh_intersect_ray(device const Gen5AddressRange* ra
         uint node[28];
         sharpemu_bvh_fetch(ranges, range_count, faults, fault_words, cache, base + (index << 6), 28u, node);
         return sharpemu_bvh_box(node, false, grow, sort, extent, origin, inv_dir);
+    }
+    if (type == 6u && index <= last)
+    {
+        uint node[16];
+        sharpemu_bvh_fetch(ranges, range_count, faults, fault_words, cache, base + (index << 6), 16u, node);
+        return sharpemu_bvh_box_shared(node, grow, sort, extent, origin, inv_dir);
     }
     return uint4(0xFFFFFFFFu);
 }
