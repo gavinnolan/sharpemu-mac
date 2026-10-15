@@ -24,7 +24,24 @@ internal sealed class MetalGuestMemory : IDisposable
     // Four 4 GiB windows cover the 16 GiB of direct memory; the flexible tail adds a
     // fifth. maxBufferLength caps a single window at about 13.6 GB on this hardware.
     private const ulong PreferredWindowBytes = 4UL * 1024 * 1024 * 1024;
-    private const int MaxWindows = 16;
+    private const int MaxWindows = 64;
+
+    // Every encoder names the windows it touches with useResource, and the driver holds
+    // the named bytes resident (wired) while the command buffer runs. A 4 GiB window
+    // touched for one binding therefore pins everything the guest ever wrote under it:
+    // Demon's Souls in-game named 3-4 windows per submission, which wired 14 GB of a
+    // 24 GB machine and pushed everything else into swap. SHARPEMU_METAL_V2_WINDOW_MB
+    // (256..4096) shrinks the windows so a touched window pins only its own stretch; a
+    // binding larger than a window minus the seam then straddles and takes the ring.
+    private static ulong ResolvePreferredWindowBytes()
+    {
+        var configured = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WINDOW_MB");
+        if (ulong.TryParse(configured, out var megabytes) && megabytes >= 256 && megabytes <= 4096)
+        {
+            return megabytes * 1024 * 1024;
+        }
+        return PreferredWindowBytes;
+    }
     private const ulong MaxUploadBytes = 64UL * 1024 * 1024;
 
     /// <summary>
@@ -132,7 +149,7 @@ internal sealed class MetalGuestMemory : IDisposable
     private bool _disposed;
 
     public MetalGuestMemory(nint device, IGuestBackedSpace backing, ICpuMemory memory)
-        : this(device, backing, memory, PreferredWindowBytes, SeamOverlapBytes, budgetOverride: 0)
+        : this(device, backing, memory, ResolvePreferredWindowBytes(), SeamOverlapBytes, budgetOverride: 0)
     {
     }
 
