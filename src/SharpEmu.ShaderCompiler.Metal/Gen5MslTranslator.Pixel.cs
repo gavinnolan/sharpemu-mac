@@ -1465,7 +1465,7 @@ public static partial class Gen5MslTranslator
                 }
 
                 if (instruction.Opcode != "VInterpMovF32" ||
-                    (instruction.Words[0] & 0xFFu) != ProvokingVertexParameter)
+                    control.Parameter != ProvokingVertexParameter)
                 {
                     return false;
                 }

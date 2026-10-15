@@ -241,7 +241,7 @@ public static partial class Gen5MslTranslator
             string result;
             if (instruction.Opcode == "VInterpMovF32")
             {
-                var mode = instruction.Words[0] & 0xFFu;
+                var mode = interpolation.Parameter;
                 if (mode >= 3)
                 {
                     error = "reserved interpolation parameter selector";

@@ -331,7 +331,18 @@ public sealed record Gen5ExportControl(
 
 public sealed record Gen5InterpolationControl(
     uint Attribute,
-    uint Channel) : Gen5InstructionControl;
+    uint Channel) : Gen5InstructionControl
+{
+    // V_INTERP_MOV's parameter: 0 is P10, 1 P20 and 2 P0 (the VINTRP vsrc field, VOP3 src1).
+    public uint Parameter { get; init; }
+
+    // The f16 forms' HIGH bit (VOP3 src0[8]): the attribute's upper 16 bits.
+    public bool High { get; init; }
+
+    // The VOP3 encoding's modifiers (abs/neg on the I/J and S2 operands, clamp, omod);
+    // null for VINTRP.
+    public Gen5Vop3Control? Modifiers { get; init; }
+}
 
 public sealed record Gen5Vop3Control(
     uint AbsoluteMask,

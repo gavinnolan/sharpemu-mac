@@ -1345,6 +1345,13 @@ public static partial class Gen5ShaderTranslator
         var src2 = (extra >> 18) & 0x1FF;
         sizeDwords = src0 == 0xFF || src1 == 0xFF || src2 == 0xFF ? 3u : 2u;
         error = string.Empty;
+        if (!isVop3B && Vop3InterpolationName(opcode) is { } interpolation)
+        {
+            // src0 names the attribute, not an operand, so it never selects a literal.
+            sizeDwords = 2;
+            name = interpolation;
+            return true;
+        }
         if (!isVop3B && opcode < 0x100 && VopcOpcodeName(opcode) is { Length: > 0 } compare)
         {
             name = compare;
@@ -2275,6 +2282,18 @@ public static partial class Gen5ShaderTranslator
         return FinishDecode(name, $"unknown-vintrp op=0x{opcode:X1}", out error);
     }
 
+    // VOP3-encoded interpolation: the f32 forms of VINTRP and the f16 forms only VOP3 has.
+    private static string? Vop3InterpolationName(uint opcode) => opcode switch
+    {
+        0x200 => "VInterpP1F32",
+        0x201 => "VInterpP2F32",
+        0x202 => "VInterpMovF32",
+        0x342 => "VInterpP1llF16",
+        0x343 => "VInterpP1lvF16",
+        0x35A => "VInterpP2F16",
+        _ => null,
+    };
+
     private static bool FinishDecode(string name, string decodeError, out string error)
     {
         error = string.Empty;
@@ -2910,6 +2929,32 @@ public static partial class Gen5ShaderTranslator
                     Gen5Operand.Source((extra >> 18) & 0x1FF, literal),
                 ];
                 destinations = [Gen5Operand.Vector(word & 0xFF)];
+                if (Vop3InterpolationName((word >> 16) & 0x3FF) is not null)
+                {
+                    // src0 is attr [5:0], chan [7:6] and HIGH [8]; src1 the I/J VGPR (or
+                    // V_INTERP_MOV's parameter); src2 the f16 forms' S2.
+                    var parameter = (extra >> 9) & 0x1FF;
+                    sources = opcode switch
+                    {
+                        "VInterpMovF32" => [],
+                        "VInterpP1lvF16" or "VInterpP2F16" => [sources[1], sources[2]],
+                        _ => [sources[1]],
+                    };
+                    control = new Gen5InterpolationControl(extra & 0x3F, (extra >> 6) & 0x3)
+                    {
+                        Parameter = opcode == "VInterpMovF32" ? parameter : 0,
+                        High = ((extra >> 8) & 1) != 0,
+                        Modifiers = new Gen5Vop3Control(
+                            (word >> 8) & 0x7,
+                            (extra >> 29) & 0x7,
+                            (extra >> 27) & 0x3,
+                            ((word >> 15) & 1) != 0,
+                            (word >> 11) & 0xF,
+                            null),
+                    };
+                    break;
+                }
+
                 if (opcode == "VReadlaneB32")
                 {
                     // V_READLANE uses the VOP3A vdst byte even though the
@@ -3102,7 +3147,10 @@ public static partial class Gen5ShaderTranslator
                 destinations = [Gen5Operand.Vector((word >> 18) & 0xFF)];
                 control = new Gen5InterpolationControl(
                     (word >> 10) & 0x3F,
-                    (word >> 8) & 0x3);
+                    (word >> 8) & 0x3)
+                {
+                    Parameter = opcode == "VInterpMovF32" ? word & 0xFF : 0,
+                };
                 break;
             case Gen5ShaderEncoding.Flat:
             {

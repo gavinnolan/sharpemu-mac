@@ -137,7 +137,7 @@ public sealed class Gen5InterpolationParameterTests
         // location the vertex program never writes.
         Gen5ShaderInstruction Move(uint pc, uint attribute, uint destination) =>
             new(pc, Gen5ShaderEncoding.Vintrp, "VInterpMovF32",
-                [1], [Gen5Operand.Vector(1)], [Gen5Operand.Vector(destination)], new Gen5InterpolationControl(attribute, 0));
+                [1], [Gen5Operand.Vector(1)], [Gen5Operand.Vector(destination)], new Gen5InterpolationControl(attribute, 0) { Parameter = 1 });
         var program = ResourceTestProgram.Program(Move(0, 1, 4), Move(4, 2, 5), ResourceTestProgram.EndProgram(8));
         var (plan, resources, layout) = ResourceTestProgram.Prepare(program, ShaderStage.Pixel, userDataCount: 0);
         var request = new ShaderCompileRequest(plan, resources, layout)
@@ -166,7 +166,7 @@ public sealed class Gen5InterpolationParameterTests
         // Slot 1 is read per vertex, slot 2 interpolates the same VS parameter: one per-vertex
         // input serves both, and slot 2 is rebuilt from the vertices with the barycentrics.
         var move = new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Vintrp, "VInterpMovF32",
-            [1], [Gen5Operand.Vector(1)], [Gen5Operand.Vector(4)], new Gen5InterpolationControl(1, 0));
+            [1], [Gen5Operand.Vector(1)], [Gen5Operand.Vector(4)], new Gen5InterpolationControl(1, 0) { Parameter = 1 });
         var smooth = new Gen5ShaderInstruction(4, Gen5ShaderEncoding.Vintrp, "VInterpP2F32",
             [0], [Gen5Operand.Vector(1)], [Gen5Operand.Vector(5)], new Gen5InterpolationControl(2, 0));
         var program = ResourceTestProgram.Program(move, smooth, ResourceTestProgram.EndProgram(8));
@@ -259,7 +259,7 @@ public sealed class Gen5InterpolationParameterTests
         uint inputCntl = 0x401, bool supportsPerVertex = true)
     {
         var interpolation = new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Vintrp, opcode,
-            [selector], [Gen5Operand.Vector(selector)], [Gen5Operand.Vector(4)], new Gen5InterpolationControl(1, 2));
+            [selector], [Gen5Operand.Vector(selector)], [Gen5Operand.Vector(4)], new Gen5InterpolationControl(1, 2) { Parameter = selector });
         var program = ResourceTestProgram.Program(interpolation, ResourceTestProgram.EndProgram(4));
         var (plan, resources, layout) = ResourceTestProgram.Prepare(program, ShaderStage.Pixel, userDataCount: 0);
         return new ShaderCompileRequest(plan, resources, layout)
