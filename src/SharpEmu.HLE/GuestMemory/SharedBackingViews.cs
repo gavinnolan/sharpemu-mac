@@ -565,6 +565,68 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
         }
     }
 
+    // TryWriteSingleView with the bytes produced in place by fill instead of copied from a
+    // source span: same alias pin, ordinary operation admission and per-chunk interval
+    // (overlapping read watches are invalidated before fill runs), and false with fill
+    // never called for anything that path would refuse. If fill throws, the bytes it wrote
+    // stay and both the interval and the operation end as failed, which conservatively
+    // invalidates the backing's read watches.
+    public bool TryFillSingleView<TState>(ulong address, int length, TState state, GuestSpanFill<TState> fill, out int filled)
+    {
+        filled = 0;
+        if (length <= 0 || (!SingleViewWriteFastPath && _backing?.ManagedWrites is not null))
+        {
+            return false;
+        }
+
+        if (!TryAccessSingleView(address, (ulong)length, out var target))
+        {
+            return false;
+        }
+
+        try
+        {
+            var interval = _backing?.BeginManagedWriteOperation() ?? default;
+            if (!HostManagedWriteIntervals.AllowsBytes(interval))
+            {
+                return false;
+            }
+
+            var succeeded = false;
+            try
+            {
+                filled = FillCanonicalAlias(target, length, state, fill);
+                succeeded = true;
+                return true;
+            }
+            finally
+            {
+                HostBackingObject.EndManagedWrite(interval, succeeded);
+            }
+        }
+        finally
+        {
+            ExitAliasAccess();
+        }
+    }
+
+    private int FillCanonicalAlias<TState>(ulong destination, int length, TState state, GuestSpanFill<TState> fill)
+    {
+        var interval = _backing!.BeginManagedWrite(destination - AliasBase, (ulong)length);
+        var succeeded = false;
+        if (!HostManagedWriteIntervals.AllowsBytes(interval)) throw new InvalidOperationException("Participating write lost admission.");
+        try
+        {
+            _beforeCanonicalAliasCopyForControl?.Invoke(destination, length);
+            var produced = fill(state, new Span<byte>((void*)destination, length));
+            if ((uint)produced > (uint)length)
+                throw new InvalidOperationException($"In-place fill reported {produced} bytes for a {length}-byte range.");
+            succeeded = true;
+            return produced;
+        }
+        finally { HostBackingObject.EndManagedWrite(interval, succeeded); }
+    }
+
     public bool TryReadBacking(ulong address, Span<byte> data)
     {
         if (TryAccessSingleView(address, (ulong)data.Length, out var source))

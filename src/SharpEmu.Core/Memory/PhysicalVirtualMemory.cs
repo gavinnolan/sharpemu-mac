@@ -2422,6 +2422,35 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
     }
 
+    // In-place counterpart of TryWriteCore's lock-free single-view path: fill writes the
+    // canonical alias of a backed range directly. The alias is not the guest-visible
+    // mapping, so guest page guards cannot fault the fill (exactly as for the memcpy
+    // there). Anything else - a range without a single view, a refused admission, or an
+    // armed GuestWriteWatch, whose check needs the written bytes after the alias pin is
+    // gone - declines so the caller stages through TryWrite.
+    public bool TryFillInPlace<TState>(ulong virtualAddress, int length, TState state, GuestSpanFill<TState> fill, out int filled)
+    {
+        filled = 0;
+        if (length <= 0 || GuestWriteWatch.Armed || _disposed || _backedSpace is not { } backed ||
+            !backed.TryResolveAlias(virtualAddress, (ulong)length, out _))
+        {
+            return false;
+        }
+
+        // TryWriteCore's pre-visit, issued only once the range has a single view so a
+        // declined fill seldom repeats it in the caller's TryWrite.
+        GuestImageWriteTracker.NotifyManagedWrite(virtualAddress, (ulong)length);
+        GuestGpuMemoryHook.MarkCpuWrite(virtualAddress, (ulong)length);
+        if (!backed.TryFillSingleView(virtualAddress, length, state, fill, out filled))
+        {
+            return false;
+        }
+
+        // NotifyGuestWriteWatch minus the check that declined above.
+        GuestImageWriteTracker.TraceManagedDirtyCompletion(virtualAddress, (ulong)filled);
+        return true;
+    }
+
     private bool TryWriteCore(ulong virtualAddress, ReadOnlySpan<byte> source,
         out OrdinaryWriteFailure failure, out GuestSpaceOwner? diagnosticSpace)
     {
