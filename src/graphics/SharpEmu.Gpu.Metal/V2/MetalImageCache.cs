@@ -317,10 +317,15 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
     private long _aliasesKept;
     private long _aliasPublishes;
+    private long _aliasNarrowWrites;
 
-    /// <summary>How often an alias was kept instead of dropped, and resynchronized.</summary>
-    public (long Kept, long Published) AliasCounters =>
-        (Interlocked.Exchange(ref _aliasesKept, 0), Interlocked.Exchange(ref _aliasPublishes, 0));
+    /// <summary>
+    /// How often an alias was kept instead of dropped, resynchronized, and handed over to a
+    /// write over just the bytes the two share.
+    /// </summary>
+    public (long Kept, long Published, long Narrow) AliasCounters =>
+        (Interlocked.Exchange(ref _aliasesKept, 0), Interlocked.Exchange(ref _aliasPublishes, 0),
+         Interlocked.Exchange(ref _aliasNarrowWrites, 0));
 
     /// <summary>
     /// Makes this image the one that agrees with guest memory, against every other
@@ -368,6 +373,22 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 // 19 MiB target used to cost a full retile of one and a full detile of
                 // the other, every time the pair was used.
                 ReportAliasPair(image, other);
+                var sharedStart = Math.Max(image.Description.Data.Address, other.Description.Data.Address);
+                var sharedEnd = Math.Min(
+                    image.Description.Data.Address + image.Description.Data.Size,
+                    other.Description.Data.Address + other.Description.Data.Size);
+                var sharedSize = sharedEnd > sharedStart ? sharedEnd - sharedStart : 0;
+                var (otherStart, otherEnd) = other.OverlapWithin(sharedStart, sharedSize);
+                if (other.IsCpuDirty && otherEnd > otherStart &&
+                    otherStart >= other.DirtyStart && otherEnd <= other.DirtyEnd)
+                {
+                    // The other image already gave these bytes up to a write through an
+                    // alias and owns only the rest: its texture is stale here, so it has
+                    // nothing to publish, and the image that wrote them since - this one,
+                    // or one this loop publishes on its own turn - is what holds them.
+                    continue;
+                }
+
                 if (TryPublishAliasOnDevice(image, other))
                 {
                     _aliasPublishes++;
@@ -382,11 +403,19 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     continue;
                 }
 
-                var sharedStart = Math.Max(image.Description.Data.Address, other.Description.Data.Address);
-                var sharedEnd = Math.Min(
-                    image.Description.Data.Address + image.Description.Data.Size,
-                    other.Description.Data.Address + other.Description.Data.Size);
-                var sharedSize = sharedEnd > sharedStart ? sharedEnd - sharedStart : 0;
+                var (dirtyStart, dirtyEnd) = image.OverlapWithin(sharedStart, sharedSize);
+                if (takesGpuOwnership && TryHandOverAliasRun(other, otherStart, otherEnd))
+                {
+                    // The other image keeps GPU ownership of everything but the shared
+                    // run, so it is neither written back whole nor reloaded whole: a small
+                    // transient placed inside a 4K target costs its own bytes, not the
+                    // target's 64 MiB, on every use of the pair.
+                    MarkAliasRunDirty(image, dirtyStart, dirtyEnd);
+                    _aliasPublishes++;
+                    _aliasNarrowWrites++;
+                    continue;
+                }
+
                 if (takesGpuOwnership)
                 {
                     // The other image gives up GPU ownership below, and nothing writes back
@@ -400,8 +429,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     PublishAliasRange(other, sharedStart, sharedSize);
                 }
 
-                var (dirtyStart, dirtyEnd) = image.OverlapWithin(sharedStart, sharedSize);
-                image.MarkCpuDirty(MetalImageDirtyCause.AliasWrite, dirtyStart, dirtyEnd);
+                MarkAliasRunDirty(image, dirtyStart, dirtyEnd);
                 _aliasPublishes++;
             }
 
@@ -437,6 +465,52 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 }
             }
         }
+    }
+
+    // A write through an alias takes over the run a GPU-written image shares with it and
+    // leaves that image GPU-modified for the rest: the run is published, so guest memory
+    // holds the image's bytes there until the write through the alias lands, and the
+    // image is marked stale over the run alone, so its next use reloads just that run.
+    // False - and the caller writes the image back whole, as before - unless that reload
+    // is certain to be a narrow one: an image dirty over the run while it stays
+    // GPU-modified must never be refreshed whole, since that would replace bytes only its
+    // texture holds. A run already stale on the image is refused for the same reason
+    // when it lies outside the stale interval, which one interval cannot hold apart.
+    private bool TryHandOverAliasRun(MetalCachedImage other, ulong start, ulong end)
+    {
+        if (!SubRangeTransfersEnabled || end <= start || other.Description.HasStencil ||
+            end - start > other.Description.Data.Size / 2 ||
+            (other.IsCpuDirty && (start < other.DirtyStart || end > other.DirtyEnd)))
+        {
+            return false;
+        }
+
+        if (!other.IsPublished(start, end) &&
+            !TryWriteBackRun(other, start, end, MetalWritebackCause.ImageOverlap))
+        {
+            return false;
+        }
+
+        other.MarkCpuDirty(MetalImageDirtyCause.AliasWrite, start, end);
+        return true;
+    }
+
+    // Marks the run an image shares with a GPU-written alias stale. An image that is
+    // itself GPU-modified may already be stale over a run another alias took from it,
+    // and one interval cannot hold two runs with bytes only its texture holds between
+    // them - a refresh of the merged interval would replace those bytes with the guest's.
+    // The run it holds is refreshed first instead. That is safe here: an alias still
+    // owing those bytes overlaps this image too, so this same loop publishes it and marks
+    // the run stale again.
+    private void MarkAliasRunDirty(MetalCachedImage image, ulong start, ulong end)
+    {
+        if (image.IsGpuModified && image.IsCpuDirty && end > start &&
+            (start > image.DirtyEnd || end < image.DirtyStart))
+        {
+            RefreshFromGuest(image);
+        }
+
+        image.MarkCpuDirty(MetalImageDirtyCause.AliasWrite, start, end);
     }
 
     /// <summary>The texture a shader binds for one image request.</summary>
@@ -828,7 +902,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     {
         if (!DeviceAliasPublishEnabled || image.Texture == 0 || other.Texture == 0 ||
             image.IsWindowLinearView || other.IsWindowLinearView ||
-            image.Texture == other.Texture ||
+            image.Texture == other.Texture || other.IsCpuDirty ||
             image.Description.Data.Address != other.Description.Data.Address ||
             image.Description.Data.Size != other.Description.Data.Size)
         {
@@ -919,6 +993,11 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         if (!TryCoveringRun(in description, start, end, out var aligned, out var alignedEnd))
         {
             return false;
+        }
+
+        if (image.IsCpuDirty && aligned < image.DirtyEnd && alignedEnd > image.DirtyStart)
+        {
+            RefreshBeforeWriteback(image);
         }
 
         var destination = _guestMemory.ResolveWritable(
@@ -1330,6 +1409,20 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return;
         }
 
+        if (image.IsGpuModified)
+        {
+            // Stale over a run an alias took while the texture still owns the rest: a
+            // whole upload would replace bytes guest memory was never given. The run
+            // stays stale rather than costing them.
+            MetalV2Diagnostics.InfoOnce(
+                $"alias-run-refresh:{description.PixelFormat}:{description.Extent.Width}x{description.Extent.Height}",
+                "A GPU-written image stale over an alias run could not reload just that run, so it keeps " +
+                $"its texture there: {description.PixelFormat} {description.Extent.Width}x{description.Extent.Height} " +
+                $"0x{description.Data.Address:X16}+0x{description.Data.Size:X} " +
+                $"dirty=0x{image.DirtyStart:X}..0x{image.DirtyEnd:X}.");
+            return;
+        }
+
         var context = _owner.BeginTransfer(MetalTransferCause.Upload, image.Texture);
         var whole = description.Data.Size <= MaxTransferPieceBytes
             ? _guestMemory.Resolve(description.Data.Address, description.Data.Size)
@@ -1522,6 +1615,23 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         return moved;
     }
 
+    // A GPU-written image stale over a run an alias took from it holds old bytes there,
+    // and a writeback that carries them would overwrite whatever the alias has published
+    // since. The run is reloaded from guest memory first, so the writeback puts back
+    // what guest memory already holds. It stays stale afterwards: the alias may not have
+    // published yet, and when it does this image has to reload the run again.
+    private void RefreshBeforeWriteback(MetalCachedImage image)
+    {
+        if (!image.IsCpuDirty)
+        {
+            return;
+        }
+
+        var (cause, start, end) = (image.DirtyCause, image.DirtyStart, image.DirtyEnd);
+        RefreshFromGuest(image);
+        image.MarkCpuDirty(cause, start, end);
+    }
+
     // Retiles a GPU-written image back into guest memory; afterwards guest memory and
     // the texture agree, so the image stays cached and clean.
     private void WriteBackToGuest(MetalCachedImage image, MetalWritebackCause cause)
@@ -1532,6 +1642,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return;
         }
 
+        RefreshBeforeWriteback(image);
         ref readonly var description = ref image.Description;
         var destination = description.Data.Size <= MaxTransferPieceBytes
             ? _guestMemory.ResolveWritable(description.Data.Address, description.Data.Size)

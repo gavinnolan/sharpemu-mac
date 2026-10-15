@@ -34,6 +34,9 @@ public sealed unsafe class MetalImageAliasTests(ITestOutputHelper output)
     private const uint SmallSide = 32;
     private const ulong SmallSize = SmallSide * SmallSide * 4;
 
+    // The rows of a 64-wide RGBA8 alias that make the same 4 KiB.
+    private const uint AliasRows = (uint)(SmallSize / (LargeSide * 4));
+
     private sealed class AddressSpace : IGuestAddressSpace
     {
         public ulong ProtectionPageSize => 4096;
@@ -159,21 +162,24 @@ public sealed unsafe class MetalImageAliasTests(ITestOutputHelper output)
         }
 
         // A linear RGBA8 square, which every byte offset of is its own row-aligned run.
-        public static ImageRequest Request(ulong address, uint side, ImageRole role)
+        public static ImageRequest Request(ulong address, uint side, ImageRole role) =>
+            Request(address, side, side, role);
+
+        public static ImageRequest Request(ulong address, uint width, uint height, ImageRole role)
         {
-            var size = (ulong)side * side * 4;
+            var size = (ulong)width * height * 4;
             var description = ImageDescription.Create();
             description.Data = new GuestSpan(address, size);
             description.PixelFormat = GpuFormat.R8G8B8A8Unorm;
             description.GuestFormat = GuestPixelFormat.Bits8_8_8_8UNorm;
             description.Type = GuestImageType.Color2D;
-            description.Extent = new GpuExtent3D(side, side, 1);
+            description.Extent = new GpuExtent3D(width, height, 1);
             description.Resources = new SubresourceCount(1, 1);
-            description.Pitch = side;
+            description.Pitch = width;
             description.BytesPerBlock = 4;
             description.Samples = 1;
             description.TileMode = GuestTileMode.Linear;
-            description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = size, Pitch = side, Height = side };
+            description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = size, Pitch = width, Height = height };
             var view = ImageViewDescription.Default with
             {
                 Format = GpuFormat.R8G8B8A8Unorm,
@@ -273,34 +279,148 @@ public sealed unsafe class MetalImageAliasTests(ITestOutputHelper output)
         Assert.Equal((long)(LargeSize - SmallSize), partial.UploadBytes);
     }
 
-    // A GPU-written alias hands its whole texture to guest memory before it gives up
-    // ownership, not just the run it shares: the rest of it lives in the texture only, and
-    // the refresh that follows would otherwise replace it with the guest bytes it never
-    // published. Once guest memory holds all of it, only the shared run goes stale.
+    // A write through a small alias inside a GPU-written image publishes only the run the
+    // two share and leaves the large image GPU-modified for the rest: stale over the run
+    // alone, with the rest of guest memory untouched by the handover.
     [Fact]
-    public void AGpuWrittenAliasIsWrittenBackWholeBeforeItGivesUpOwnership()
+    public void AWriteThroughASmallAliasPublishesOnlyTheSharedRun()
     {
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
-        var written = MetalTileOracle.Pattern((int)LargeSize, 0x5A);
-        rig.WriteGuest(ImageAddress, written);
-        var large = rig.Acquire(ImageAddress, LargeSide, ImageRole.ColorTarget);
-        var image = rig.Cache.GetImage(large);
-        Assert.True(image.IsGpuModified);
+        var (image, written, stale) = GpuWrittenLarge(rig);
+        _ = rig.Cache.AliasCounters;
+
+        rig.Acquire(Rig.Request(ImageAddress + 0x2000, LargeSide, AliasRows, ImageRole.ColorTarget));
         rig.Harness.Submit();
         rig.Harness.Begin();
-        // What the GPU "wrote" is what the texture holds; guest memory holds something else.
-        rig.WriteGuest(ImageAddress, MetalTileOracle.Pattern((int)LargeSize, 0xC3));
 
-        rig.Acquire(ImageAddress + 0x2000, SmallSide, ImageRole.ColorTarget);
+        var guest = rig.ReadGuest(ImageAddress, LargeSize);
+        Assert.Equal(written.AsSpan(0x2000, (int)SmallSize).ToArray(), guest.AsSpan(0x2000, (int)SmallSize).ToArray());
+        Assert.Equal(stale.AsSpan(0, 0x2000).ToArray(), guest.AsSpan(0, 0x2000).ToArray());
+        Assert.Equal(
+            stale.AsSpan(0x2000 + (int)SmallSize).ToArray(), guest.AsSpan(0x2000 + (int)SmallSize).ToArray());
+        Assert.True(image.IsGpuModified);
+        Assert.True(image.IsCpuDirty);
+        Assert.Equal(0x2000UL, image.DirtyStart);
+        Assert.Equal(0x2000UL + SmallSize, image.DirtyEnd);
+        Assert.Equal(1, rig.Cache.AliasCounters.Narrow);
+    }
+
+    // The large image's next use reloads only the run the alias took, and picks up what
+    // the alias wrote there while its own bytes elsewhere survive.
+    [Fact]
+    public void TheLargeImageReloadsOnlyTheRunTheAliasTook()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var (image, written, _) = GpuWrittenLarge(rig);
+        var drawn = DrawSmallAlias(rig, 0x2000);
+        _ = rig.Cache.TakePartialTransfers();
+
+        rig.Acquire(ImageAddress, LargeSide, ImageRole.Texture);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+
+        Assert.False(image.IsCpuDirty);
+        Assert.True(image.IsGpuModified);
+        var partial = rig.Cache.TakePartialTransfers();
+        Assert.Equal(1, partial.Uploads);
+        Assert.Equal((long)(LargeSize - SmallSize), partial.UploadBytes);
+
+        rig.Cache.FlushGpuWrites(ImageAddress, LargeSize, MetalWritebackCause.HostRead);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        var expected = (byte[])written.Clone();
+        drawn.CopyTo(expected, 0x2000);
+        Assert.Equal(expected, rig.ReadGuest(ImageAddress, LargeSize));
+    }
+
+    // A whole writeback of an image stale over a run reloads the run first, so the bytes
+    // an alias published there are not overwritten by the ones the texture held before.
+    [Fact]
+    public void AWholeWritebackOfAnImageStaleOverARunKeepsTheGuestBytesThere()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var (image, written, _) = GpuWrittenLarge(rig);
+        DrawSmallAlias(rig, 0x2000);
+        // What the alias publishes over the run, straight into guest memory.
+        var published = MetalTileOracle.Pattern((int)SmallSize, 0x99);
+        rig.WriteGuest(ImageAddress + 0x2000, published);
+
+        // A host read of the large image's first bytes only, which the alias does not reach.
+        rig.Cache.FlushGpuWrites(ImageAddress, 0x1000, MetalWritebackCause.HostRead);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+
+        var expected = (byte[])written.Clone();
+        published.CopyTo(expected, 0x2000);
+        Assert.Equal(expected, rig.ReadGuest(ImageAddress, LargeSize));
+        Assert.False(image.IsGpuModified);
+        Assert.True(image.IsCpuDirty);
+        Assert.Equal(0x2000UL, image.DirtyStart);
+        Assert.Equal(0x2000UL + SmallSize, image.DirtyEnd);
+    }
+
+    // A run past half of the GPU-written image cannot be handed over narrowly - its reload
+    // would be a whole one - so the image is written back whole and gives up ownership,
+    // as before.
+    [Fact]
+    public void AnAliasRunPastHalfTheImageIsWrittenBackWhole()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var (image, written, _) = GpuWrittenLarge(rig);
+        const uint rows = 36;
+        const ulong offset = 0x1000;
+        const ulong size = LargeSide * rows * 4;
+        Assert.True(size > LargeSize / 2);
+        _ = rig.Cache.AliasCounters;
+
+        rig.Acquire(Rig.Request(ImageAddress + offset, LargeSide, rows, ImageRole.ColorTarget));
         rig.Harness.Submit();
         rig.Harness.Begin();
 
         Assert.Equal(written, rig.ReadGuest(ImageAddress, LargeSize));
         Assert.False(image.IsGpuModified);
         Assert.True(image.IsCpuDirty);
-        Assert.Equal(0x2000UL, image.DirtyStart);
-        Assert.Equal(0x2000UL + SmallSize, image.DirtyEnd);
+        Assert.Equal(offset, image.DirtyStart);
+        Assert.Equal(offset + size, image.DirtyEnd);
+        Assert.Equal(0, rig.Cache.AliasCounters.Narrow);
+    }
+
+    // The large image as a target over known bytes, with guest memory then rewritten so a
+    // writeback of the texture is told apart from bytes that were never published.
+    private static (MetalCachedImage Image, byte[] Written, byte[] Stale) GpuWrittenLarge(Rig rig)
+    {
+        var written = MetalTileOracle.Pattern((int)LargeSize, 0x5A);
+        rig.WriteGuest(ImageAddress, written);
+        var image = rig.Cache.GetImage(rig.Acquire(ImageAddress, LargeSide, ImageRole.ColorTarget));
+        Assert.True(image.IsGpuModified);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        // What the GPU "wrote" is what the texture holds; guest memory holds something else.
+        var stale = MetalTileOracle.Pattern((int)LargeSize, 0xC3);
+        rig.WriteGuest(ImageAddress, stale);
+        return (image, written, stale);
+    }
+
+    // The small alias as a target at an offset into the large image, with its texture then
+    // given bytes of its own, as a draw into it would. Its rows are the large image's, so
+    // its bytes are a run of whole rows of it.
+    private static byte[] DrawSmallAlias(Rig rig, ulong offset)
+    {
+        var small = rig.Cache.GetImage(
+            rig.Acquire(Rig.Request(ImageAddress + offset, LargeSide, AliasRows, ImageRole.ColorTarget)));
+        Assert.True(small.IsGpuModified);
+        var drawn = MetalTileOracle.Pattern((int)SmallSize, 0x77);
+        var description = small.Description;
+        rig.Harness.Transfer.EncodeGuestToTexture(
+            rig.Harness, description, new SubresourceRange(0, 1, 0, 1),
+            new MetalGuestRange(rig.Harness.Buffer(drawn), 0, SmallSize, 0), default, small.Texture, 0, SmallSize);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        return drawn;
     }
 
     // A tiled target whose guest bytes are two spans, split at a macro tile row, is
