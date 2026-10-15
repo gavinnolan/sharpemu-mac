@@ -290,7 +290,7 @@ internal sealed partial class MetalRenderHost
             var clears = attachment.IsClear || (index < MaxColorAttachments && _overrideClear[index]);
             builder.Append(index == 0 ? string.Empty : ",")
                 .Append(attachment.Format)
-                .Append(':').Append(clears ? 'C' : 'L')
+                .Append(':').Append(clears ? 'C' : index < MaxColorAttachments && _elidedLoads[index] ? 'D' : 'L')
                 .Append(':').Append(((ulong)attachment.View.Handle & 0xFFFFF).ToString("X5", CultureInfo.InvariantCulture));
         }
 

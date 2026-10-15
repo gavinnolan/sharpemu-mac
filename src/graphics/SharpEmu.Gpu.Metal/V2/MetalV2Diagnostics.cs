@@ -73,6 +73,12 @@ internal static class MetalV2Diagnostics
     // idle until the next buffer is scheduled; on Demon's Souls' title screen ~17 commits
     // a frame were made only because a submission ended. The three limits below bound
     // how long a coalesced buffer stays open (submissions, encoders, microseconds).
+    // SHARPEMU_METAL_V2_ELIDE_LOADS=0 loads every colour attachment a pass does not clear,
+    // as before. Otherwise a pass begun for a draw that provably overwrites every pixel of
+    // an attachment does not read it into tile memory first (MetalPassLoads).
+    public static readonly bool ElideLoads =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ELIDE_LOADS"), "0", StringComparison.Ordinal);
+
     public static readonly bool CoalesceFlushes =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_FLUSH_COALESCE"), "0", StringComparison.Ordinal);
 

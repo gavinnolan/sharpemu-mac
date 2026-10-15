@@ -1083,7 +1083,18 @@ public static partial class Gen5MslTranslator
             // update only fragment validity, and the final VM export wins.
             if (export.ValidMask && _usesPixelValidMask)
             {
-                Line("pixel_valid_mask_active = exec;");
+                // EXEC put back to the entry mask is every live fragment of the wave, this
+                // lane included; saying so lets the end-of-program discard fold away.
+                _entryMaskExports ??= FindEntryMaskExports(_request.Program.Instructions);
+                if (_entryMaskExports.Contains(instruction.Pc))
+                {
+                    Line("pixel_valid_mask_active = true;");
+                }
+                else
+                {
+                    Line("pixel_valid_mask_active = exec;");
+                    _validMaskFromExec = true;
+                }
             }
 
             if (export.Target == MrtzExportTarget)

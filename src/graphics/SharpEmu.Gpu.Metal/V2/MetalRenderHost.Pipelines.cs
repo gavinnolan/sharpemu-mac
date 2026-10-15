@@ -48,6 +48,12 @@ internal sealed partial class MetalRenderHost
         // fills every viewport slot rather than only the first.
         public bool WritesViewportIndex;
 
+        // What a pass begun for a draw of this pipeline needs to skip a colour load
+        // (MetalPassLoads): the clip positions the vertex program makes from the vertex
+        // index alone, and the colour attachments every fragment overwrites whole.
+        public float[]? ConstantPositions;
+        public uint OverwriteMask;
+
         // The shader hashes behind this pipeline, formatted once for the per-draw GPU
         // profiler; null unless SHARPEMU_METAL_V2_PROFILE_SHADERS=1.
         public string? Profile;
@@ -327,6 +333,8 @@ internal sealed partial class MetalRenderHost
             RectangleStates = rectangleStates,
             RectangleVertexStrides = rectangleList ? RectangleVertexStrides(description.VertexInput) : null,
             WritesViewportIndex = vertexModule.Shader.WritesViewportIndex,
+            ConstantPositions = mesh is null ? vertexModule.Shader.ConstantPositions : null,
+            OverwriteMask = OverwriteMaskOf(description, pixelModule),
             Profile = ProfileLabelFor(vertexModule, pixelModule, mesh),
             VertexHash = vertexModule.Hash,
             VertexLayout = vertexLayout,
@@ -338,6 +346,31 @@ internal sealed partial class MetalRenderHost
             value.Rendering.DepthFormat != GpuFormat.Undefined
                 ? MetalV2Formats.PixelFormat(value.Rendering.DepthFormat)
                 : MtlFormat.Invalid;
+    }
+
+    /// <summary>The colour attachments every fragment of the pipeline writes whole: the
+    /// pixel program returns a value for it and cannot discard, blending is off (as the
+    /// pipeline state below decides it) and the write mask has every channel. One sample.</summary>
+    private static uint OverwriteMaskOf(GraphicsPipelineDescription description, MetalShaderModule? pixelModule)
+    {
+        var parameters = description.StaticParameters;
+        var count = (int)Math.Min(description.Rendering.ColorCount, 32u);
+        Span<bool> blends = stackalloc bool[count];
+        Span<nint> writeMasks = stackalloc nint[count];
+        for (var index = 0; index < count; index++)
+        {
+            var format = MetalV2Formats.PixelFormat(description.Rendering.ColorFormats[index]);
+            // The same test the pipeline state below uses to turn blending on.
+            blends[index] = parameters.GetBlendEnable(index) && !parameters.GetBlendBypass(index) && !IsIntegerFormat(format);
+            writeMasks[index] = MetalV2Formats.ColorWriteMask(parameters.GetColorMask(index));
+        }
+
+        return MetalPassLoads.OverwriteMask(
+            pixelModule is not null && pixelModule.Shader.CannotDiscard,
+            pixelModule?.Shader.ColorOutputMask ?? 0,
+            parameters.Samples,
+            blends,
+            writeMasks);
     }
 
     private nint CreateRenderPipelineState(

@@ -199,6 +199,11 @@ internal sealed partial class MetalRenderHost
             {
                 _clearedBytes += bytes;
             }
+            else if (index < MaxColorAttachments && _elidedLoads[index])
+            {
+                _loadsElided++;
+                _loadElidedBytes += bytes;
+            }
             else
             {
                 _loadBytes += bytes;
@@ -622,12 +627,114 @@ internal sealed partial class MetalRenderHost
                 _depthAttachmentHeight);
     }
 
+    // The draw the next BeginRendering is for (IRenderHost.NoteUpcomingDraw), taken by
+    // that BeginRendering whether or not it opens a pass, so it never outlives its draw.
+    private MetalPipelineEntry? _upcomingPipeline;
+    private uint _upcomingVertexCount;
+    private uint _upcomingFirstVertex;
+
+    // The colour attachments of the pass being opened whose load became DontCare, and the
+    // attachments and bytes that saved since the last report.
+    private readonly bool[] _elidedLoads = new bool[MaxColorAttachments];
+    private long _loadsElided;
+    private long _loadElidedBytes;
+
+    public void NoteUpcomingDraw(in PipelineHandle pipeline, uint vertexCount, uint firstVertex)
+    {
+        _upcomingPipeline = _pipelineEntries.TryGetValue(pipeline.Pipeline, out var entry) && entry.Graphics
+            ? entry
+            : null;
+        _upcomingVertexCount = vertexCount;
+        _upcomingFirstVertex = firstVertex;
+    }
+
+    internal (long Attachments, long Bytes) TakeElidedLoads() =>
+        (Interlocked.Exchange(ref _loadsElided, 0), Interlocked.Exchange(ref _loadElidedBytes, 0));
+
+    /// <summary>
+    /// Decides, for a pass about to be opened, which colour attachments its first draw
+    /// overwrites whole (MetalPassLoads), so their load can be DontCare. Every attachment
+    /// and the depth attachment has to be exactly the render area: a load action speaks
+    /// for the whole subresource, and a smaller attachment would shrink the area Metal
+    /// renders.
+    /// </summary>
+    private void ChooseElidedLoads(
+        in RenderingState state,
+        MetalPipelineEntry? entry,
+        uint vertexCount,
+        uint firstVertex)
+    {
+        Array.Clear(_elidedLoads);
+        if (!MetalV2Diagnostics.ElideLoads || entry is null || entry.ConstantPositions is null ||
+            entry.OverwriteMask == 0 || entry.Mesh is not null || entry.CullsEverything || vertexCount == 0)
+        {
+            return;
+        }
+
+        for (var index = 0; index < state.ColorAttachmentCount; index++)
+        {
+            if (state.ColorAttachments[index].View.Handle == 0 || index >= _attachmentCount ||
+                _attachmentWidths[index] != state.Width || _attachmentHeights[index] != state.Height)
+            {
+                return;
+            }
+        }
+
+        ref readonly var depthStencil = ref state.DepthStencilAttachment;
+        var depthAttached = depthStencil.View.Handle != 0 && (depthStencil.HasDepth || depthStencil.HasStencil);
+        if (depthAttached && (_depthAttachmentWidth != state.Width || _depthAttachmentHeight != state.Height))
+        {
+            return;
+        }
+
+        var rejects =
+            (depthAttached && depthStencil.HasDepth && _dynamicState.DepthTestEnabled &&
+                _dynamicState.DepthCompare != GpuCompareOp.Always) ||
+            (depthAttached && depthStencil.HasStencil && _dynamicState.StencilTestEnabled);
+        var viewport = HostViewport(in _dynamicState);
+        var scissor = _dynamicState.Scissor;
+        var draw = new MetalPassLoads.Draw(
+            entry.ConstantPositions,
+            entry.PrimitiveType,
+            entry.RectangleStates is not null,
+            vertexCount,
+            firstVertex,
+            entry.CullMode == Mtl.CullModeNone,
+            entry.DepthClipMode == Mtl.DepthClipModeClamp,
+            entry.OverwriteMask,
+            new MetalPassLoads.Viewport(viewport.OriginX, viewport.OriginY, viewport.Width, viewport.Height),
+            scissor.Left,
+            scissor.Top,
+            scissor.Right,
+            scissor.Bottom,
+            rejects,
+            state.Samples,
+            state.Layers,
+            state.Width,
+            state.Height);
+        for (var index = 0; index < state.ColorAttachmentCount && index < MaxColorAttachments; index++)
+        {
+            if (state.ColorAttachments[index].IsClear || _overrideClear[index])
+            {
+                continue;
+            }
+
+            _elidedLoads[index] = MetalPassLoads.OverwritesAttachment(
+                in draw, index, _attachmentWidths[index], _attachmentHeights[index]);
+        }
+    }
+
     public void BeginRendering(in RenderingState state)
     {
         // Before anything else, because this runs ahead of every draw and is therefore
         // the last moment at which a waiting clear is still invisible. Whatever this
         // pass cannot perform itself is encoded below, where no encoder is open.
         var foldedClear = FoldPendingClearsInto(in state);
+        var upcoming = _upcomingPipeline;
+        var upcomingVertexCount = _upcomingVertexCount;
+        var upcomingFirstVertex = _upcomingFirstVertex;
+        _upcomingPipeline = null;
+        _upcomingVertexCount = 0;
         var launch = _requestedLaunch;
         _requestedLaunch = null;
         var continues = !foldedClear && _pendingClears.Count == 0 && CanContinuePass(in state);
@@ -676,6 +783,7 @@ internal sealed partial class MetalRenderHost
             EncodeIndirectLaunches(pending);
         }
 
+        ChooseElidedLoads(in state, upcoming, upcomingVertexCount, upcomingFirstVertex);
         var commandBuffer = EnsureCommandBuffer();
         var descriptor = MetalNative.Send(
             MetalNative.Send(MetalNative.Class("MTLRenderPassDescriptor"), MetalNative.Selector("alloc")),
@@ -698,8 +806,11 @@ internal sealed partial class MetalRenderHost
                 MetalV2Native.SendVoidValue(
                     slot, SelSetDepthPlane, index < _attachmentCount ? _attachmentDepthPlanes[index] : 0);
                 var clears = attachment.IsClear || (index < MaxColorAttachments && _overrideClear[index]);
+                var elided = !clears && index < MaxColorAttachments && _elidedLoads[index];
                 MetalV2Native.SendVoidValue(
-                    slot, SelSetLoadAction, clears ? Mtl.LoadActionClear : Mtl.LoadActionLoad);
+                    slot,
+                    SelSetLoadAction,
+                    clears ? Mtl.LoadActionClear : elided ? Mtl.LoadActionDontCare : Mtl.LoadActionLoad);
                 MetalV2Native.SendVoidValue(slot, SelSetStoreAction, PendingStoreAction);
                 if (clears)
                 {
@@ -1145,30 +1256,35 @@ internal sealed partial class MetalRenderHost
         ApplyStageBindings(graphics: true);
     }
 
-    private void ApplyViewportAndScissor()
+    // Guests program a negative viewport height to get y-up rendering out of
+    // Vulkan's y-down NDC. Metal's NDC is already y-up and rejects a negative
+    // height, so the same on-screen mapping is the flipped positive rect.
+    private static MtlViewport HostViewport(in DynamicDrawState state)
     {
-        var width = Math.Max(_renderingState.Width, 1u);
-        var height = Math.Max(_renderingState.Height, 1u);
-        // Guests program a negative viewport height to get y-up rendering out of
-        // Vulkan's y-down NDC. Metal's NDC is already y-up and rejects a negative
-        // height, so the same on-screen mapping is the flipped positive rect.
-        var originY = (double)_dynamicState.ViewportY;
-        var viewportHeight = (double)_dynamicState.ViewportHeight;
+        var originY = (double)state.ViewportY;
+        var viewportHeight = (double)state.ViewportHeight;
         if (viewportHeight < 0)
         {
             originY += viewportHeight;
             viewportHeight = -viewportHeight;
         }
 
-        var viewport = new MtlViewport
+        return new MtlViewport
         {
-            OriginX = _dynamicState.ViewportX,
+            OriginX = state.ViewportX,
             OriginY = originY,
-            Width = Math.Max(_dynamicState.ViewportWidth, 0),
+            Width = Math.Max(state.ViewportWidth, 0),
             Height = viewportHeight,
-            ZNear = Math.Clamp(_dynamicState.ViewportMinDepth, 0f, 1f),
-            ZFar = Math.Clamp(_dynamicState.ViewportMaxDepth, 0f, 1f),
+            ZNear = Math.Clamp(state.ViewportMinDepth, 0f, 1f),
+            ZFar = Math.Clamp(state.ViewportMaxDepth, 0f, 1f),
         };
+    }
+
+    private void ApplyViewportAndScissor()
+    {
+        var width = Math.Max(_renderingState.Width, 1u);
+        var height = Math.Max(_renderingState.Height, 1u);
+        var viewport = HostViewport(in _dynamicState);
         var scissor = _dynamicState.Scissor;
         var left = (uint)Math.Clamp(scissor.Left, 0, (int)width);
         var top = (uint)Math.Clamp(scissor.Top, 0, (int)height);

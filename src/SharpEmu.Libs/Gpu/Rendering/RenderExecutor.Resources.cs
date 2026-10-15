@@ -342,6 +342,8 @@ public sealed partial class RenderExecutor
                 in pipeline, emission.IndirectArgumentsAddress, indirectArguments, emission.Indexed, emission.IndirectIndexLimit);
         }
 
+        var (upcomingCount, upcomingFirst) = UpcomingVertices(banks.UserConfig, in draw, in emission);
+        _host.NoteUpcomingDraw(in pipeline, upcomingCount, upcomingFirst);
         _host.BeginRendering(in state.Rendering);
         _host.BindPipeline(GpuBindPoint.Graphics, in pipeline);
         if (setAutoDebug)
@@ -395,6 +397,23 @@ public sealed partial class RenderExecutor
     }
 
     private const ulong IndexedIndirectArgumentsSize = 20;
+
+    // The vertices of the first host draw call EmitDraw makes; a zero count for an indexed or
+    // indirect draw, whose vertices are not known before it runs.
+    private static (uint Count, uint First) UpcomingVertices(
+        UserConfigRegisters userConfig, in DrawCall draw, in DrawEmission emission)
+    {
+        if (emission.Indexed || emission.IndirectArgumentsAddress != 0)
+        {
+            return (0, 0);
+        }
+
+        return (GuestPrimitiveType)userConfig.PrimitiveType switch
+        {
+            GuestPrimitiveType.RectangleListLegacy or GuestPrimitiveType.QuadListLegacy => (4, emission.FirstVertex),
+            _ => (draw.Count, emission.FirstVertex),
+        };
+    }
 
     private void EmitDraw(UserConfigRegisters userConfig, VertexInputInfo vertexInput, in DrawCall draw, in DrawEmission emission)
     {
