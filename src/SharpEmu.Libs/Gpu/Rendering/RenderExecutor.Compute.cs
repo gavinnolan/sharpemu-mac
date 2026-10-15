@@ -143,6 +143,7 @@ public sealed partial class RenderExecutor
             }
         }
 
+        ReleaseFragmentWrites();
         _host.EndRendering();
         using (_host.BeginPreparation())
         {

@@ -142,6 +142,11 @@ public interface ICommandStreamHost
 
     void EmitGlobalBarrier();
 
+    // The guest waited for or invalidated earlier shader stores (a pixel-shader partial flush,
+    // a cache flush, an acquire), so a consumer of them can follow. A host whose executor keeps
+    // the render pass open after a fragment-stage store ends that pass here.
+    void ReleaseShaderWrites() { }
+
     void FillBuffer(ulong address, ulong size, uint value, bool isGds);
 
     void CopyBuffer(ulong destination, ulong source, ulong size, bool destinationIsGds, bool sourceIsGds);

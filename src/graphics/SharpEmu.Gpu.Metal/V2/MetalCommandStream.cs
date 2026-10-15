@@ -1530,6 +1530,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     public void OnQueueReset(int queueId) => _translation!.QueueReset(queueId);
 
+    public void ReleaseShaderWrites() => _translation?.ReleaseShaderWrites();
+
     /// <summary>
     /// Runs interpreter slices until nothing is runnable or the budget ends; blocked
     /// heads retry on the shared interval, exactly as the Vulkan worker does.

@@ -559,6 +559,14 @@ public static partial class AgcExports
         }
 
 
+        // Runs where the draws run: a host that defers fragment-write pass ends interprets its
+        // stream on the render thread, so no deferred work can be ahead of this.
+        public void ReleaseShaderWrites()
+        {
+            System.Diagnostics.Debug.Assert(!Producing, "Shader writes are released on the thread that records the draws.");
+            _executor?.ReleaseShaderWrites();
+        }
+
         public void Dispatch(ulong submitId, uint endX, uint endY, uint endZ, uint dispatchInitiator, ulong indirectArgumentsAddress = 0)
         {
             var state = RequireCurrent();

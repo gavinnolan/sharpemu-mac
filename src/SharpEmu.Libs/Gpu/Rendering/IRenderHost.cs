@@ -226,6 +226,16 @@ public interface IRenderHost
     // writes always end it: a tile-based GPU cannot make them visible mid-pass.
     bool OrdersVertexWritesInsidePass => false;
 
+    // True when a draw whose fragment stage stores to memory may leave the render pass open:
+    // the executor then ends the pass and issues the fragment barrier only when a consumer of
+    // the stores can appear (a dispatch, an indirect draw, or the guest's own cache flush or
+    // acquire), instead of after every such draw.
+    bool DefersFragmentWritePassEnd => false;
+
+    // Advances whenever an open render pass ends, whoever ends it. A host that defers fragment
+    // write pass ends reports it, so the executor knows whether the pass that stored is still open.
+    long RenderPassSerial => 0;
+
     void ShaderWriteHazardBarrier();
 
     void ShaderAccessBarrier();

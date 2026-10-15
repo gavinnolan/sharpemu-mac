@@ -351,6 +351,7 @@ public sealed partial class GpuCommandInterpreter
             if (eopEventType != 0x28 || gcrControl != 0)
             {
                 _host.EmitGlobalBarrier();
+                _host.ReleaseShaderWrites();
             }
 
             TriggerReleaseInterrupt(interruptSelector, interruptContextId);
@@ -360,6 +361,7 @@ public sealed partial class GpuCommandInterpreter
         if (ReleaseMemGcrNeedsBarrier(eopEventType, gcrControl))
         {
             _host.EmitGlobalBarrier();
+            _host.ReleaseShaderWrites();
         }
 
         var cacheAction = ReleaseMemCacheActionFromGcr(gcrControl);
@@ -419,6 +421,12 @@ public sealed partial class GpuCommandInterpreter
         }
     }
 
+    // The events that wait for pixel-shader stores to land: PS_PARTIAL_FLUSH waits for the
+    // pixel stage to go idle and CACHE_FLUSH_AND_INV_EVENT flushes every cache after it. The
+    // compute and vertex partial flushes and the CB/DB-only flushes do not order shader stores.
+    private const uint PsPartialFlushEvent = 0x10;
+    private const uint CacheFlushAndInvalidateEvent = 0x16;
+
     internal void RaiseEvent(uint eventType, uint eventIndex, ulong eventAddress)
     {
         var validCacheEventIndex = eventIndex is 0 or 7;
@@ -428,6 +436,11 @@ public sealed partial class GpuCommandInterpreter
             case 0x0F:
             case 0x10:
                 _host.EmitGlobalBarrier();
+                if (eventType == PsPartialFlushEvent)
+                {
+                    _host.ReleaseShaderWrites();
+                }
+
                 break;
             case 0x16:
             case 0x31:
@@ -440,6 +453,11 @@ public sealed partial class GpuCommandInterpreter
                 }
 
                 _host.EmitGlobalBarrier();
+                if (eventType == CacheFlushAndInvalidateEvent)
+                {
+                    _host.ReleaseShaderWrites();
+                }
+
                 break;
             case 0x0D:
             case 0x0E:

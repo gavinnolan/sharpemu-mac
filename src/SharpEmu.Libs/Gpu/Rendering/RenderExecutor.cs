@@ -80,6 +80,37 @@ public sealed partial class RenderExecutor
 
     private readonly Dictionary<ulong, bool> _pixelStoreDecisions = new();
 
+    // A draw stored to memory from its fragment stage and, because the host defers it, the
+    // render pass it drew in (_fragmentWritesPass, the host's pass serial) was left open.
+    private bool _fragmentWritesPending;
+    private long _fragmentWritesPass;
+
+    /// <summary>
+    /// A consumer of earlier shader stores can follow: the guest flushed or invalidated its
+    /// caches. Ends the render pass that holds deferred fragment-stage stores, if any.
+    /// </summary>
+    public void ReleaseShaderWrites() => ReleaseFragmentWrites();
+
+    // Ends the pass a deferred fragment store was made in and records the barrier the storing
+    // draw would have recorded. A pass the host has ended since needs neither: the encoder
+    // boundary orders its stores, and a barrier now would land in whatever pass is open.
+    private void ReleaseFragmentWrites()
+    {
+        if (!_fragmentWritesPending)
+        {
+            return;
+        }
+
+        _fragmentWritesPending = false;
+        if (_host.RenderPassSerial != _fragmentWritesPass)
+        {
+            return;
+        }
+
+        _host.EndRendering();
+        _host.ShaderWriteBarrier(GpuPipelineStage.FragmentShaderBit);
+    }
+
     private struct DrawState
     {
         public ColorTargetStates Colors;
