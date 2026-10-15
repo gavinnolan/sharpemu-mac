@@ -101,6 +101,14 @@ internal sealed partial class MetalRenderHost
 
     private int _drawStateLines;
 
+    // SHARPEMU_METAL_V2_DUMP_DRAWS_MATCH=<text>: report only draws whose pipeline profile
+    // ("vs=0x... ps=0x...") contains the text, so the budget reaches a pass at the end of
+    // the frame instead of being spent on the shadow maps at its start.
+    private static readonly string? _drawStateMatch =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DUMP_DRAWS_MATCH") is { Length: > 0 } match
+            ? match
+            : null;
+
     // One sampled input per draw fills the budget long before the passes that matter
     // end; SHARPEMU_METAL_V2_DUMP_INPUTS=0 spends it all on the targets instead.
     private static readonly bool _dumpInputs =
@@ -129,6 +137,12 @@ internal sealed partial class MetalRenderHost
     private void NoteDrawState(string kind, WorkShape shape)
     {
         if (!DumpTargetsEnabled || !_dumpThisFlip || _drawStateLines >= _maxDrawStateLines)
+        {
+            return;
+        }
+
+        if (_drawStateMatch is not null &&
+            !(_boundGraphicsPipeline?.Profile?.Contains(_drawStateMatch, StringComparison.OrdinalIgnoreCase) ?? false))
         {
             return;
         }
@@ -185,6 +199,32 @@ internal sealed partial class MetalRenderHost
             entry?.Profile ?? "-",
             kind, shape.ToString(), entry?.PrimitiveType, _vertexBufferCount, masks));
         Console.Error.WriteLine($"[METAL-V2][DRAW]   #{_drawStateLines} {streams}");
+        // What the pixel stage samples, by guest address: a composite that shows stale
+        // or unrelated pictures read the wrong surface, which only the addresses tell.
+        var fragment = _stageBindings[StageFragment];
+        var images = new System.Text.StringBuilder();
+        for (var index = 0; index < fragment.ImageCount && index < fragment.Textures.Length; index++)
+        {
+            var texture = fragment.Textures[index];
+            images.Append(" t").Append(index).Append('=');
+            if (_imageCache.TryGetImage(fragment.Images[index], out var image))
+            {
+                ref readonly var d = ref image.Description;
+                images.Append(CultureInfo.InvariantCulture, $"{d.PixelFormat}/{d.TileMode}/{d.Extent.Width}x{d.Extent.Height}@{d.Data.Address:X}+{d.Data.Size:X}");
+            }
+            else
+            {
+                images.Append("uncached");
+            }
+
+            if (texture != 0)
+            {
+                images.Append(CultureInfo.InvariantCulture,
+                    $"[host {MetalV2Native.SendValue(texture, SelWidth)}x{MetalV2Native.SendValue(texture, SelHeight)} 0x{texture:X}]");
+            }
+        }
+
+        Console.Error.WriteLine($"[METAL-V2][DRAW]   #{_drawStateLines} ps_images={fragment.ImageCount}{images}");
         if (entry?.VertexLayout is { Length: > 0 } layout)
         {
             Console.Error.WriteLine($"[METAL-V2][DRAW]   #{_drawStateLines} layout{layout}");
@@ -205,7 +245,172 @@ internal sealed partial class MetalRenderHost
         var shaders = _passLastProfile is null
             ? string.Empty
             : "-" + _passLastProfile.Replace("stage=", string.Empty).Replace(" ", "-").Replace("=0x", "");
-        _pendingDumps.Add((texture, $"{label}-draws{_passDrawCount}{shaders}"));
+        var full = $"{label}-draws{_passDrawCount}{shaders}";
+        if (TrySnapshotTexture(texture, full))
+        {
+            return;
+        }
+
+        _pendingDumps.Add((texture, full));
+    }
+
+    // SHARPEMU_METAL_V2_DUMP_SNAPSHOT=1: copy a target the moment the pass (or compute
+    // encoder) that wrote it ends, rather than reading it back at the flip. Without it
+    // every dump of a texture shows the frame's last state of that texture, so a target
+    // written by five passes reads the same five times and the pass that broke it is
+    // invisible. Each copy is held in its own readback buffer until the flip drains
+    // them, so a sampled frame costs its targets' size in memory: keep DUMP_EVERY high.
+    private static readonly bool _dumpSnapshots = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DUMP_SNAPSHOT"), "1", StringComparison.Ordinal);
+
+    private const long MaxSnapshotBytes = 3L << 30;
+
+    private readonly List<(nint Buffer, nint Contents, uint Width, uint Height, ulong Format, nint Texture, string Label)>
+        _snapshots = new();
+
+    private readonly List<(nint Texture, string Label)> _computeStorageNoted = new();
+    private long _snapshotBytes;
+    private int _snapshotSerial;
+
+    /// <summary>
+    /// Copies <paramref name="texture"/> into a readback buffer on the command buffer
+    /// being recorded. Only between encoders: a blit cannot open while another encoder
+    /// is recording. Returns false when the caller should fall back to a flip-time dump.
+    /// </summary>
+    private readonly Dictionary<nint, string> _targetDescriptions = new();
+
+    /// <summary>
+    /// Under snapshots, remembers which guest surface an attachment view is, so a
+    /// snapshot can name it: two passes whose targets are different textures over the
+    /// same guest bytes are an alias the cache has to keep coherent.
+    /// </summary>
+    private void NoteTargetDescription(
+        nint texture, in ImageDescription description, uint layer, uint level, string extra = "")
+    {
+        if (!_dumpSnapshots || !_dumpThisFlip || texture == 0)
+        {
+            return;
+        }
+
+        _targetDescriptions[texture] = string.Create(CultureInfo.InvariantCulture,
+            $"{description.PixelFormat}-{description.TileMode}-{description.Extent.Width}x{description.Extent.Height}" +
+            $"-L{level}A{layer}-at{description.Data.Address:X}+{description.Data.Size:X}{extra}");
+    }
+
+    private bool TrySnapshotTexture(nint texture, string label)
+    {
+        if (_dumpSnapshots && _targetDescriptions.TryGetValue(texture, out var described))
+        {
+            label = $"{label}-{described}";
+        }
+
+        if (!_dumpSnapshots || _renderEncoder != 0 || _computeEncoder != 0)
+        {
+            return false;
+        }
+
+        var width = (uint)MetalV2Native.SendValue(texture, SelWidth);
+        var height = (uint)MetalV2Native.SendValue(texture, SelHeight);
+        var pixelFormat = MetalV2Native.SendValue(texture, SelPixelFormat);
+        if (width == 0 || height == 0 ||
+            _targetDumps + _snapshots.Count >= _maxTargetDumps ||
+            !TryDescribeDumpFormat(pixelFormat, out var sourceBytes, out _))
+        {
+            return true;
+        }
+
+        var rowBytes = (ulong)sourceBytes * width;
+        var total = rowBytes * height;
+        if (_snapshotBytes + (long)total > MaxSnapshotBytes)
+        {
+            MetalV2Diagnostics.WarnOnce(
+                "dump-snapshot-budget",
+                "Target snapshots stopped for this frame: the readback budget is spent.");
+            return true;
+        }
+
+        var readback = _guestMemory.CreateReportBuffer(total, "SharpEmu TargetSnapshot", out var contents, out _);
+        var blit = MetalNative.Send(EnsureCommandBuffer(), SelBlitEncoder);
+        if (blit == 0)
+        {
+            MetalNative.SendVoid(readback, MetalNative.Selector("release"));
+            return true;
+        }
+
+        MetalNative.SendCopyTextureToBufferOptions(
+            blit, SelDumpCopyTextureToBuffer, texture, 0, 0, default,
+            new MtlSize { Width = width, Height = height, Depth = 1 },
+            readback, 0, (nuint)rowBytes, (nuint)total,
+            (nuint)(pixelFormat == MtlFormat.Depth32FloatStencil8
+                ? MtlBlitOption.DepthFromDepthStencil
+                : MtlBlitOption.None));
+        MetalNative.SendVoid(blit, SelEndEncoding);
+        _snapshots.Add((readback, contents, width, height, pixelFormat, texture,
+            $"s{_snapshotSerial++:D4}-{label}"));
+        _snapshotBytes += (long)total;
+        return true;
+    }
+
+    /// <summary>
+    /// The compute encoder just ended: copy every storage image its dispatches wrote,
+    /// labelled with the last pipeline and grid, so the per-encoder state is on record.
+    /// </summary>
+    private void SnapshotComputeStorage()
+    {
+        if (_computeStorageNoted.Count == 0)
+        {
+            return;
+        }
+
+        var noted = _computeStorageNoted.ToArray();
+        _computeStorageNoted.Clear();
+        var seen = new HashSet<nint>();
+        foreach (var (texture, label) in noted)
+        {
+            if (seen.Add(texture))
+            {
+                TrySnapshotTexture(texture, label);
+            }
+        }
+    }
+
+    /// <summary>Writes the snapshots the GPU has finished copying.</summary>
+    private void DrainSnapshots()
+    {
+        if (_snapshots.Count == 0)
+        {
+            return;
+        }
+
+        EndEncoders(PassEndCause.Other);
+        FlushAndWaitForGpu();
+        var snapshots = _snapshots.ToArray();
+        _snapshots.Clear();
+        _snapshotBytes = 0;
+        foreach (var (buffer, contents, width, height, format, texture, label) in snapshots)
+        {
+            try
+            {
+                if (TryDescribeDumpFormat(format, out var sourceBytes, out var convert))
+                {
+                    var source = DumpSpan(contents, (int)((ulong)sourceBytes * width * height));
+                    var rgba = new byte[(int)(4UL * width * height)];
+                    convert(source, rgba);
+                    _dumpsByTexture.TryGetValue(texture, out var seen);
+                    _dumpsByTexture[texture] = seen + 1;
+                    _targetDumps++;
+                    WriteDumpPng(rgba, width, height, label, seen, texture);
+                }
+            }
+            catch (Exception exception)
+            {
+                MetalV2Diagnostics.WarnOnce("dump-snapshot-failed", $"A target snapshot could not be written: {exception.Message}");
+            }
+            finally
+            {
+                MetalNative.SendVoid(buffer, MetalNative.Selector("release"));
+            }
+        }
     }
 
     /// <summary>
@@ -217,9 +422,21 @@ internal sealed partial class MetalRenderHost
     private void NotePendingInputDump(
         nint texture, SharpEmu.Libs.Gpu.Buffers.ResourceSlotIdentifier identifier, int index, ImageRole role)
     {
-        if (!DumpTargetsEnabled || !_dumpThisFlip || !_dumpInputs || texture == 0 ||
-            !_imageCache.TryGetImage(identifier, out var image))
+        if (!DumpTargetsEnabled || !_dumpThisFlip || !_dumpInputs || texture == 0)
         {
+            return;
+        }
+
+        if (!_imageCache.TryGetImage(identifier, out var image))
+        {
+            if (_dumpSnapshots)
+            {
+                Console.Error.WriteLine(
+                    $"[METAL-V2][DUMP] input in{index}-uncached-{identifier} tex=0x{texture:X} " +
+                    $"{MetalV2Native.SendValue(texture, SelWidth)}x{MetalV2Native.SendValue(texture, SelHeight)} " +
+                    $"fmt={MetalV2Native.SendValue(texture, SelPixelFormat)} seq={_snapshotSerial}");
+            }
+
             return;
         }
 
@@ -231,6 +448,21 @@ internal sealed partial class MetalRenderHost
             $"-L{description.Resources.Levels}A{description.Resources.Layers}" +
             $"-bpb{description.BytesPerBlock}-pitch{description.Pitch}-bytes{description.Data.Size:X}" +
             $"-at{description.Data.Address:X}";
+        if (_dumpSnapshots && role == ImageRole.StorageImage && _computeEncoder != 0)
+        {
+            var pipeline = _pendingComputePipeline?.Id ?? 0;
+            _computeStorageNoted.Add((texture, $"cs{pipeline:X16}-{label}"));
+            return;
+        }
+
+        if (_dumpSnapshots)
+        {
+            // Inputs are described in the log only; their pixels at the flip would be
+            // the misleading end-of-frame state this mode exists to avoid.
+            Console.Error.WriteLine($"[METAL-V2][DUMP] input {label} tex=0x{texture:X} seq={_snapshotSerial}");
+            return;
+        }
+
         NotePendingDump(texture, label);
     }
 
@@ -245,6 +477,7 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
+        DrainSnapshots();
         var flip = _dumpFlipIndex++;
         _dumpThisFlip = flip >= _dumpAfterFlips && DumpWindowOpen &&
             (flip - _dumpAfterFlips) % _dumpEveryFlips == 0;
@@ -496,6 +729,41 @@ internal sealed partial class MetalRenderHost
                         target[o] = level;
                         target[o + 1] = level;
                         target[o + 2] = level;
+                        target[o + 3] = 255;
+                    }
+                };
+                return true;
+            // A packed G-buffer word: its four bytes as RGB plus the top byte as a level,
+            // opaque, so "never written" (all zero) stays distinguishable from content.
+            case MtlFormat.R32Uint:
+                sourceBytes = 4;
+                convert = static (source, target) =>
+                {
+                    for (int i = 0; i + 3 < source.Length; i += 4)
+                    {
+                        target[i] = source[i];
+                        target[i + 1] = source[i + 1];
+                        target[i + 2] = source[i + 2];
+                        target[i + 3] = 255;
+                    }
+                };
+                return true;
+            // Two half floats (velocity, normals): |x| and |y| scaled so motion of a few
+            // pixels is visible; blue stays empty.
+            case MtlFormat.Rg16Float:
+                sourceBytes = 4;
+                convert = static (source, target) =>
+                {
+                    for (int i = 0, o = 0; i + 3 < source.Length; i += 4, o += 4)
+                    {
+                        for (var c = 0; c < 2; c++)
+                        {
+                            var v = (float)BitConverter.UInt16BitsToHalf(
+                                BinaryPrimitives.ReadUInt16LittleEndian(source[(i + (c * 2))..]));
+                            target[o + c] = (byte)Math.Clamp(MathF.Abs(v) * 255f, 0f, 255f);
+                        }
+
+                        target[o + 2] = 0;
                         target[o + 3] = 255;
                     }
                 };

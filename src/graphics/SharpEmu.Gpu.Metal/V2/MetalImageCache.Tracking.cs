@@ -620,8 +620,12 @@ internal sealed partial class MetalImageCache
     {
         if (_materializedDccSlices.Count != 0)
         {
-            _materializedDccSlices.RemoveWhere(
+            var removed = _materializedDccSlices.RemoveWhere(
                 entry => entry.Address >= address && entry.Address - address < size);
+            if (DccTraceActive && removed != 0 && DccTraceCovers(address, size) && Interlocked.Increment(ref _dccTraceLines) <= DccTraceMax)
+            {
+                Console.Error.WriteLine($"[METAL-V2][DCC] re-arm range=0x{address:X}+0x{size:X} claims={removed}");
+            }
         }
 
         // A new clear of the metadata starts a new deferral: what was drawn before it is
@@ -987,7 +991,43 @@ internal sealed partial class MetalImageCache
             }
         }
 
+        foreach (var (start, metadataSize) in _adoptedDccMetadata)
+        {
+            if (address < start + metadataSize && start < address + size)
+            {
+                return true;
+            }
+        }
+
         return false;
+    }
+
+    // The DCC metadata ranges images took with their size, by address. Adoption takes such
+    // metadata out of _surfaceMetadata — its slices are read for a clear instead — so this
+    // is what still knows the range is metadata when the guest fills it again. Entries
+    // outlive their images: a stale one only lets a later fill of those bytes run on the
+    // host with its code recorded, which writes the same bytes a dispatch would.
+    private readonly Dictionary<ulong, ulong> _adoptedDccMetadata = new();
+
+    /// <summary>
+    /// A fill of known DCC metadata that runs on the host, by the CPU or a blit. Its code
+    /// is what the metadata holds once the fill lands, so a lookup that meets the bytes
+    /// still in flight takes the clear from here instead of deferring it — a deferred
+    /// clear is dropped once the target is drawn, which left Demon's Souls' UI layer
+    /// holding whatever the overlapping HDR target had put in its memory.
+    /// </summary>
+    public void RecordDccFill(ulong address, ulong size, uint fillValue)
+    {
+        if (!IsValidRange(address, size))
+        {
+            return;
+        }
+
+        var code = (byte)fillValue;
+        var clearCode = fillValue == code * 0x01010101u && code is 0x00 or 0x20 or 0x40 or 0x80 or 0xc0;
+        using var held = _lock.Hold();
+        ReArmMaterializedDccLocked(address, size);
+        RecordDccFillLocked(address, size, code, clearCode);
     }
 
     public bool TryAbsorbDccFill(ulong address, ulong size, uint fillValue)
@@ -1070,6 +1110,8 @@ internal sealed partial class MetalImageCache
         }
 
         _surfaceMetadata.Remove(range.Address);
+        _adoptedDccMetadata[range.Address] = Math.Max(
+            range.Size, _adoptedDccMetadata.TryGetValue(range.Address, out var adopted) ? adopted : 0);
         return true;
     }
 
@@ -1134,6 +1176,7 @@ internal sealed partial class MetalImageCache
                         ForgetRecordedDccFillsLocked(address, sliceSize);
                         if (!readable)
                         {
+                            TraceDcc(imageIdentifier, in request, address, sliceSize, "unreadable");
                             continue;
                         }
 
@@ -1146,6 +1189,7 @@ internal sealed partial class MetalImageCache
                     else
                     {
                         _deferredDccSlices.TryAdd((imageIdentifier, address), imageWriteSequence);
+                        TraceDcc(imageIdentifier, in request, address, sliceSize, "pending-deferred");
                         continue;
                     }
 
@@ -1157,6 +1201,7 @@ internal sealed partial class MetalImageCache
                             out clear))
                     {
                         _deferredDccSlices.Remove((imageIdentifier, address));
+                        TraceDcc(imageIdentifier, in request, address, sliceSize, $"not-a-clear code=0x{code:X2} recorded={recorded}");
                         continue;
                     }
 
@@ -1168,12 +1213,19 @@ internal sealed partial class MetalImageCache
                     {
                         _deferredDccSlices.Remove((imageIdentifier, address));
                         Interlocked.Increment(ref _dccRepeatsSkipped);
+                        TraceDcc(imageIdentifier, in request, address, sliceSize, $"claimed-repeat code=0x{code:X2} recorded={recorded}");
                         continue;
                     }
                 }
 
                 if (!recorded && !IsUniformSlice(address, sliceSize, code, buffer))
                 {
+                    if (DccTraceEnabled)
+                    {
+                        TraceDcc(imageIdentifier, in request, address, sliceSize,
+                            $"not-uniform code=0x{code:X2} {DescribeDccSlice(address, sliceSize, code)}");
+                    }
+
                     ForgetDeferredDccSlice(imageIdentifier, address);
                     continue;
                 }
@@ -1184,6 +1236,7 @@ internal sealed partial class MetalImageCache
                 // what has been done; a rewrite of the metadata re-arms it, so a surface
                 // the game clears every frame keeps working.
                 var decision = DecideDccClear(imageIdentifier, address, sliceSize, code, imageWriteSequence);
+                TraceDcc(imageIdentifier, in request, address, sliceSize, $"decision={decision} code=0x{code:X2} recorded={recorded}");
                 if (decision == DccClearDecision.Repeat)
                 {
                     Interlocked.Increment(ref _dccRepeatsSkipped);

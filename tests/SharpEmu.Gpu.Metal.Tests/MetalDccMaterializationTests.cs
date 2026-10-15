@@ -522,5 +522,36 @@ public sealed unsafe partial class MetalDccMaterializationTests(ITestOutputHelpe
         return true;
     }
 
+    // Demon's Souls clears its UI layer's DCC metadata every frame with a bounded fill.
+    // The image took that metadata with its size, which takes it out of the metadata the
+    // cache registers, and the fill then ran as a dispatch: every lookup met the bytes in
+    // flight and the clear was deferred until the layer was drawn, then dropped. The fill
+    // runs on the host instead, with its code recorded for the lookups that follow it.
+    [Fact]
+    public void MaterializeDcc_HostFillOfAdoptedMetadataClearsWhileInFlight()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.Lookup(ImageRole.ColorTarget);
+        Assert.True(rig.Cache.OverlapsDccMetadata(MetadataAddress, SliceSize));
+
+        for (var frame = 1; frame <= 2; frame++)
+        {
+            rig.Cache.RecordDccFill(MetadataAddress, SliceSize, 0);
+            // The fill's own blit, still on the GPU.
+            rig.Cache.InvalidateMemoryFromGpu(MetadataAddress, SliceSize);
+            rig.Owner.Pending = true;
+
+            var target = rig.Lookup(ImageRole.ColorTarget);
+            Assert.Equal(frame, rig.Owner.Clears);
+            rig.Cache.MarkGpuWritten(target);
+            rig.Lookup(ImageRole.ColorTarget);
+            rig.Lookup();
+            Assert.Equal(frame, rig.Owner.Clears);
+        }
+
+        Assert.Equal(0, rig.Cache.TakeDccClearsDropped());
+    }
+
     private static readonly Lazy<nint> Device = new(MetalNative.MTLCreateSystemDefaultDevice);
 }

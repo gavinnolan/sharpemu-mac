@@ -921,6 +921,14 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return;
         }
 
+        if (DccTraceActive && DccTraceAddress != 0 && DccTraceAddress >= address && DccTraceAddress - address < size &&
+            Interlocked.Increment(ref _dccTraceLines) <= DccTraceMax)
+        {
+            Console.Error.WriteLine(
+                $"[METAL-V2][DCC] gpu-write range=0x{address:X}+0x{size:X} claims={_materializedDccSlices.Count} " +
+                $"deferred={_deferredDccSlices.Count} fills={_recordedDccFills.Count}");
+        }
+
         // A GPU write into DCC metadata is the guest asking for, or replacing, a clear.
         if (_materializedDccSlices.Count != 0 || _deferredDccSlices.Count != 0 || _recordedDccFills.Count != 0)
         {

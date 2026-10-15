@@ -481,6 +481,7 @@ internal sealed partial class MetalRenderHost :
             _computeEncoder = 0;
             _boundComputePipeline = 0;
             PassProfileClose();
+            SnapshotComputeStorage();
         }
 
         EncodeStagedStores();

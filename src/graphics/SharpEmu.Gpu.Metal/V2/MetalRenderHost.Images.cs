@@ -43,6 +43,12 @@ internal sealed partial class MetalRenderHost
         var texture = _imageCache.AcquireColorTargetView(
             imageIdentifier, request with { Role = ImageRole.ColorTarget }, deferRefresh: true);
         var image = _imageCache.GetImage(imageIdentifier);
+        if (_dumpSnapshots)
+        {
+            NoteTargetDescription(texture, in image.Description, request.View.BaseLayer, request.View.BaseLevel,
+                $"-meta{request.Description.Metadata.Kind}@{request.Description.Metadata.Range.Address:X}" +
+                $"+{request.Description.Metadata.Range.Size:X}-mclr{(metadataClear ? 1 : 0)}");
+        }
         RecordAttachmentSubresource(
             request.View, image.Shape, image.Description.IsVolume, color: true,
             image.Description.BytesPerBlock, image.Texture);
@@ -129,6 +135,10 @@ internal sealed partial class MetalRenderHost
         }
 
         var image = _imageCache.GetImage(imageIdentifier);
+        if (_dumpSnapshots)
+        {
+            NoteTargetDescription(texture, in image.Description, request.View.BaseLayer, request.View.BaseLevel);
+        }
         RecordAttachmentSubresource(
             request.View, image.Shape, image.Description.IsVolume, color: false,
             image.Description.BytesPerBlock, image.Texture);
@@ -318,6 +328,7 @@ internal sealed partial class MetalRenderHost
             return false;
         }
 
+        _imageCache.RecordDccFill(address, size, fillValue);
         FillGuestMemory(address, size, fillValue);
         return true;
     }
