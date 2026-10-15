@@ -470,6 +470,36 @@ public sealed unsafe class MetalImageAliasTests(ITestOutputHelper output)
         return drawn;
     }
 
+    // A resolve or a depth copy marks its destination written before it copies one
+    // subresource into it. The guest bytes the image still owed reach the texture first:
+    // dropping them left the rest of the image as the texture held it before - a cube
+    // whose faces were resolved one at a time kept uninitialised faces for good - and the
+    // next writeback put those stale texels over the guest bytes they had replaced.
+    [Fact]
+    public void MarkingAnImageWrittenUploadsTheGuestBytesItStillOwes()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.WriteGuest(ImageAddress, MetalTileOracle.Pattern((int)LargeSize, 0x21));
+        var large = rig.Acquire(ImageAddress, LargeSide, ImageRole.Texture);
+        var image = rig.Cache.GetImage(large);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        var current = MetalTileOracle.Pattern((int)LargeSize, 0x7B);
+        rig.WriteGuest(ImageAddress, current);
+        rig.Cache.InvalidateMemory(ImageAddress, LargeSize);
+        Assert.True(image.IsCpuDirty);
+
+        rig.Cache.MarkGpuWritten(large);
+        Assert.False(image.IsCpuDirty);
+        Assert.True(image.IsGpuModified);
+        rig.Cache.FlushGpuWrites(ImageAddress, LargeSize, MetalWritebackCause.HostRead);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+
+        Assert.Equal(current, rig.ReadGuest(ImageAddress, LargeSize));
+    }
+
     // A tiled target whose guest bytes are two spans, split at a macro tile row, is
     // written back a span at a time, and the span past the split carries its own rows:
     // the whole of guest memory reads back what the texture holds.
