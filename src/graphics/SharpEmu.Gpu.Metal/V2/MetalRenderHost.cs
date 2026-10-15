@@ -912,6 +912,7 @@ internal sealed partial class MetalRenderHost :
         _gpuWrites.Clear(serial);
         RetirePendingCopies(serial);
         _cpOverlay.Retire(serial);
+        InvalidateWordLines();
     }
 
     /// <summary>
@@ -951,6 +952,7 @@ internal sealed partial class MetalRenderHost :
         _gpuWrites.Retire(completed);
         RetirePendingCopies(completed);
         _cpOverlay.Retire(completed);
+        InvalidateWordLines();
         Interlocked.Increment(ref _partialWaits);
     }
 
@@ -2048,6 +2050,7 @@ internal sealed partial class MetalRenderHost :
             .Append(" host_cp_writes=").Append(cpWrites.Host)
             .Append(" cp_overlay_reads=").Append(TakeOverlayReads())
             .Append(" cp_overlay=").Append(_cpOverlay.Count)
+            .Append(TakeWordLineCounters())
             .Append(" poll_flushes=").Append(TakePollFlushes())
             .Append(" transient_commits=").Append(TakeTransientCommits())
             .Append(" scheduled_labels=").Append(TakeScheduledLabelSubmissions())

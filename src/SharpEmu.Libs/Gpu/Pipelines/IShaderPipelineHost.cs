@@ -64,6 +64,13 @@ public interface IShaderPipelineHost
     // Reads one guest dword the CPU may see; a range the GPU wrote is downloaded first.
     bool TryReadGuestWord(ulong address, out uint word);
 
+    // Bracket one resource materialization's TryReadGuestWord calls on the calling thread.
+    // Inside, a host may answer a word from guest bytes it read and checked once, when that
+    // is the answer a word read would give; outside, every word is read afresh.
+    void BeginGuestWordReads() { }
+
+    void EndGuestWordReads() { }
+
     // Waits for recorded GPU work still writing these bytes, before shader code is hashed
     // and decoded out of guest memory: a title that moves its shader code into place with
     // a DMA copy otherwise has the decoder read whatever the bytes held before the copy.

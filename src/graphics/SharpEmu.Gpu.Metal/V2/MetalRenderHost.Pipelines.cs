@@ -936,6 +936,12 @@ internal sealed partial class MetalRenderHost
 
     public bool TryReadGuestWord(ulong address, out uint word)
     {
+        _wordReads++;
+        if (_wordLineThread == Environment.CurrentManagedThreadId && TryReadWordFromLine(address, out word))
+        {
+            return true;
+        }
+
         Span<byte> bytes = stackalloc byte[sizeof(uint)];
         if (!TryReadGuest(address, bytes))
         {
