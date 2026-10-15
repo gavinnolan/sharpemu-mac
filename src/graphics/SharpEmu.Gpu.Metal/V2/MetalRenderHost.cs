@@ -345,6 +345,21 @@ internal sealed partial class MetalRenderHost :
         Other,
     }
 
+    /// <summary>Why a command buffer was committed (the flush_by field of the PERF line).</summary>
+    internal enum MetalFlushCause : byte
+    {
+        Stream,          // the command stream asked, once per guest submission that made progress
+        Labels,          // the worker parked with label bytes owed to a polling guest
+        Completion,      // an end-of-pipe completion needed its submission committed
+        Present,         // a flip
+        Budget,          // 2048 recorded commands
+        WaitGpu,         // a host wait for the GPU
+        WaitUncommitted, // a wait targeted the submission being recorded
+        Poll,            // a guest poll with a pending write
+        Transient,       // transient staging over budget
+        Other,
+    }
+
     /// <summary>Ends whatever encoder is open; the next record opens the one it needs.</summary>
     private void EndEncoders(PassEndCause cause)
     {
@@ -376,15 +391,34 @@ internal sealed partial class MetalRenderHost :
     }
 
     /// <summary>Signals the shared event, commits, and opens no new command buffer.</summary>
-    public ulong FlushCommandBuffer() => FlushCommandBuffer(PassEndCause.Flush);
+    public ulong FlushCommandBuffer() => FlushCommandBuffer(PassEndCause.Flush, MetalFlushCause.Other);
 
-    private ulong FlushCommandBuffer(PassEndCause cause)
+    /// <summary>Commits the command buffer being recorded, naming why for the PERF line.</summary>
+    public ulong FlushCommandBuffer(MetalFlushCause why) => FlushCommandBuffer(PassEndCause.Flush, why);
+
+    private ulong FlushCommandBuffer(PassEndCause cause) =>
+        FlushCommandBuffer(
+            cause,
+            cause switch
+            {
+                PassEndCause.Present => MetalFlushCause.Present,
+                PassEndCause.Transfer => MetalFlushCause.Transient,
+                _ => MetalFlushCause.Other,
+            });
+
+    // Why command buffers were committed. A commit drains the GPU pipeline and leaves it
+    // idle until the next one is committed, so the count per cause is the first thing
+    // that says which commits a frame could do without.
+    private readonly long[] _flushCauses = new long[(int)MetalFlushCause.Other + 1];
+
+    private ulong FlushCommandBuffer(PassEndCause cause, MetalFlushCause why)
     {
         if (_commandBuffer == 0)
         {
             return _nextSerial;
         }
 
+        _flushCauses[(int)why]++;
         EndEncoders(cause);
         MaterializePendingClears();
         _stagedStorageCopies?.EndSubmission();
@@ -750,7 +784,7 @@ internal sealed partial class MetalRenderHost :
         using var waitProfile = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
             SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandGpuWait);
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
-        var serial = FlushCommandBuffer();
+        var serial = FlushCommandBuffer(MetalFlushCause.WaitGpu);
         var waited = _previousCommandBuffer;
         var committedAt = System.Diagnostics.Stopwatch.GetTimestamp();
         if (waited != 0 && WaitOnCommandBuffer)
@@ -786,7 +820,7 @@ internal sealed partial class MetalRenderHost :
             MetalV2Diagnostics.WarnOnce("wait-uncommitted",
                 $"A wait targeted a submission that was not committed yet; committing it first: serial={serial} " +
                 $"committed={_previousSerial} recording={_submissionSerial} reason={reason}.");
-            FlushCommandBuffer();
+            FlushCommandBuffer(MetalFlushCause.WaitUncommitted);
         }
 
         using var waitProfile = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
@@ -1514,7 +1548,7 @@ internal sealed partial class MetalRenderHost :
             // worker's next park was measured slower, because the park follows immediately
             // anyway and the extra scheduler turn only adds latency to the wake.
             Interlocked.Increment(ref _pollFlushes);
-            FlushCommandBuffer();
+            FlushCommandBuffer(MetalFlushCause.Poll);
         }
 
         if (!_memory.TryRead(address, destination))
@@ -1776,6 +1810,8 @@ internal sealed partial class MetalRenderHost :
         var draws = Interlocked.Exchange(ref _drawCount, 0);
         var drawTicks = Interlocked.Exchange(ref _drawTicks, 0);
         var flushes = Interlocked.Exchange(ref _flushes, 0);
+        var flushBy = string.Join(' ', Enum.GetValues<MetalFlushCause>()
+            .Select(why => $"{why.ToString().ToLowerInvariant()}={Interlocked.Exchange(ref _flushCauses[(int)why], 0)}"));
         var passes = Interlocked.Exchange(ref _renderPasses, 0);
         var gpuBusyMs = _gpuBusySeconds * 1000.0;
         var gpuBusySamples = _gpuBusySamples;
@@ -1810,7 +1846,7 @@ internal sealed partial class MetalRenderHost :
             (SharpEmu.Libs.Gpu.GpuCommands.GpuStreamDiagnostics.DcbHashEnabled
                 ? $"dcbhash_checks={SharpEmu.Libs.Gpu.GpuCommands.GpuStreamDiagnostics.HashChecks} dcbhash_mismatches={SharpEmu.Libs.Gpu.GpuCommands.GpuStreamDiagnostics.HashMismatches} "
                 : string.Empty) +
-            $"draws={draws} passes={passes} flushes={flushes} " +
+            $"draws={draws} passes={passes} flushes={flushes} flush_by=[{flushBy}] " +
             $"draw_ms={(drawTicks * 1000.0 / frequency).ToString("F1", culture)} " +
             $"gpu_busy_ms={gpuBusyMs.ToString("F1", culture)} " +
             $"gpu_n={gpuBusySamples} gpu_unsampled={unsampled} " +

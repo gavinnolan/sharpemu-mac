@@ -62,7 +62,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     void ICommandStreamHost.Flush()
     {
         _frameBoundaries++;
-        FlushCommandBuffer();
+        FlushCommandBuffer(MetalFlushCause.Stream);
     }
 
     void ICommandStreamHost.FlushAndWait() => FlushAndWaitForGpu(MetalWaitReason.CommandProcessor);
@@ -618,7 +618,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             return;
         }
 
-        FlushCommandBuffer();
+        FlushCommandBuffer(MetalFlushCause.Labels);
     }
 
     // A label copy waiting for a boundary between encoders. Its staging allocation lives
@@ -914,7 +914,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
         var serial = SubmissionSerial;
         Enqueue(serial);
-        FlushCommandBuffer();
+        FlushCommandBuffer(MetalFlushCause.Completion);
         return;
 
         void Enqueue(ulong on) => _completions.Enqueue(on, () =>

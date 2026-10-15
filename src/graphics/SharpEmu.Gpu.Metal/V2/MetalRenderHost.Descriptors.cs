@@ -137,7 +137,7 @@ internal sealed partial class MetalRenderHost
         // a draw's uploads borrowed return before the next draw borrows more.
         if (_recordedCommands >= 2048)
         {
-            FlushCommandBuffer();
+            FlushCommandBuffer(MetalFlushCause.Budget);
         }
         else
         {
