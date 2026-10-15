@@ -309,19 +309,14 @@ public sealed class MemoryAccessTable
     private static MemoryAccessInfo FromImage(Gen5ShaderInstruction instruction, Gen5ImageControl control)
     {
         var opcode = instruction.Opcode;
-        var atomic = opcode.StartsWith("ImageAtomic", StringComparison.Ordinal);
-        var store = opcode.StartsWith("ImageStore", StringComparison.Ordinal);
-        var sampled = opcode.StartsWith("ImageSample", StringComparison.Ordinal) ||
-            opcode.StartsWith("ImageGather", StringComparison.Ordinal) ||
-            opcode == "ImageGetLod";
-        var compare = (opcode.StartsWith("ImageSampleC", StringComparison.Ordinal) && !opcode.StartsWith("ImageSampleCd", StringComparison.Ordinal)) ||
-            opcode.StartsWith("ImageGather4C", StringComparison.Ordinal);
-        var mimgOpcode = instruction.Words.Count != 0
-            ? ((instruction.Words[0] >> 18) & 0x7F) | ((instruction.Words[0] & 1) << 7)
-            : 0u;
-        var adjust = mimgOpcode is
-            0xA0 or 0xA1 or 0xA5 or 0xA6 or 0xA8 or 0xA9 or 0xAD or 0xAE or
-            0xB0 or 0xB1 or 0xB5 or 0xB6 or 0xB8 or 0xB9 or 0xBD or 0xBE;
+        var flags = Gen5ImageOpcodes.FlagsOf(opcode);
+        var atomic = (flags & Gen5ImageOp.Atomic) != 0;
+        var store = (flags & Gen5ImageOp.Store) != 0;
+        var sampled = Gen5ImageOpcodes.UsesSampler(opcode);
+        // SAMPLE_CL and SAMPLE_CD are not comparisons: only the opcode table's
+        // z-compare operand makes a depth-reference access.
+        var compare = (flags & Gen5ImageOp.Compare) != 0;
+        var adjust = (flags & Gen5ImageOp.Adjust) != 0;
         return new MemoryAccessInfo
         {
             Pc = instruction.Pc,
@@ -335,7 +330,7 @@ public sealed class MemoryAccessTable
             ImageSampleFlags =
                 (compare ? ImageSampleFlags.Compare : ImageSampleFlags.None) |
                 (adjust ? ImageSampleFlags.Adjust : ImageSampleFlags.None),
-            ImageHasMip = opcode is "ImageLoadMip" or "ImageStoreMip",
+            ImageHasMip = (flags & Gen5ImageOp.Mip) != 0,
             ImageR128 = instruction.Words.Count != 0 && ((instruction.Words[0] >> 15) & 1) != 0,
             Glc = control.Glc,
             Slc = control.Slc,

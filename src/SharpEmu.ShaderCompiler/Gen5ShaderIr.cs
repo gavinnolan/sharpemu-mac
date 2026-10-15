@@ -273,6 +273,18 @@ public sealed record Gen5ImageControl(
     /// <summary>MIMG UNRM (word bit 12): the address is in texels rather than normalized.</summary>
     public bool Unorm { get; init; }
 
+    /// <summary>MIMG DLC (word bit 7): a cache policy, no effect on the result.</summary>
+    public bool Dlc { get; init; }
+
+    /// <summary>MIMG R128 (word bit 15): the T# is four dwords rather than eight.</summary>
+    public bool R128 { get; init; }
+
+    /// <summary>MIMG TFE (word bit 16): a PRT fault-status dword follows the data.</summary>
+    public bool Tfe { get; init; }
+
+    /// <summary>MIMG LWE (word bit 17): an LOD-warning status dword follows the data.</summary>
+    public bool Lwe { get; init; }
+
     public uint GetAddressRegister(int component) =>
         component < AddressRegisters.Count
             ? AddressRegisters[component]

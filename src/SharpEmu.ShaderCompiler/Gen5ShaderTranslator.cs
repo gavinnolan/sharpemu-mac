@@ -2142,127 +2142,17 @@ public static partial class Gen5ShaderTranslator
 
     private static bool DecodeMimg(uint word, out string name, out uint sizeDwords, out string error)
     {
-        // RDNA2 MIMG OP[7] is bit 0 while OP[6:0] occupies bits 24:18.
-        // Ignoring bit 0 aliases 0xE6/0xE7 BVH operations to 0x66/0x67.
+        // RDNA2 MIMG OP[7] is bit 0 while OP[6:0] occupies bits 24:18. Ignoring bit 0
+        // aliases the 0x80+ opcodes (MSAA_LOAD, the _G16 and BVH forms) to 0x00-0x7F.
         var opcode = ((word >> 18) & 0x7F) | ((word & 1) << 7);
         sizeDwords = 2 + ((word >> 1) & 0x3);
-        error = string.Empty;
-        // Bit 0 (OPM) holds opcode bit 7.
-        var fullOpcode = opcode | ((word & 1) << 7);
-        if (fullOpcode is 0xE6 or 0xE7)
-        {
-            name = fullOpcode == 0xE6 ? "ImageBvhIntersectRay" : "ImageBvh64IntersectRay";
-            return true;
-        }
+        name = Gen5ImageOpcodes.NameOf(opcode) ?? string.Empty;
 
-        name = opcode switch
-        {
-            0x00 => "ImageLoad",
-            0x01 => "ImageLoadMip",
-            0x08 => "ImageStore",
-            0x09 => "ImageStoreMip",
-            0x0E => "ImageGetResinfo",
-            0x0F => "ImageAtomicSwap",
-            0x10 => "ImageAtomicCmpswap",
-            0x11 => "ImageAtomicAdd",
-            0x12 => "ImageAtomicSub",
-            0x14 => "ImageAtomicSmin",
-            0x15 => "ImageAtomicUmin",
-            0x16 => "ImageAtomicSmax",
-            0x17 => "ImageAtomicUmax",
-            0x18 => "ImageAtomicAnd",
-            0x19 => "ImageAtomicOr",
-            0x1A => "ImageAtomicXor",
-            0x1B => "ImageAtomicInc",
-            0x1C => "ImageAtomicDec",
-            // The float image atomics close the gfx10 atomic block. No
-            // backend emits them yet, so they still fail - but naming them
-            // lets the decoder finish the program, which is what makes the
-            // shader's bindings and global-memory usage visible in the trace.
-            0x1D => "ImageAtomicFcmpswap",
-            0x1E => "ImageAtomicFmin",
-            0x1F => "ImageAtomicFmax",
-            0x20 => "ImageSample",
-            0x21 => "ImageSampleCl",
-            0x22 => "ImageSampleD",
-            0x23 => "ImageSampleDCl",
-            0x24 => "ImageSampleL",
-            0x25 => "ImageSampleB",
-            0x26 => "ImageSampleBCl",
-            0x27 => "ImageSampleLz",
-            0x28 => "ImageSampleC",
-            0x29 => "ImageSampleCCl",
-            0x2A => "ImageSampleCD",
-            0x2B => "ImageSampleCDCl",
-            0x2C => "ImageSampleCL",
-            0x2D => "ImageSampleCB",
-            0x2E => "ImageSampleCBCl",
-            0x2F => "ImageSampleCLz",
-            0x30 => "ImageSampleO",
-            0x31 => "ImageSampleClO",
-            0x32 => "ImageSampleDO",
-            0x33 => "ImageSampleDClO",
-            0x34 => "ImageSampleLO",
-            0x35 => "ImageSampleBO",
-            0x36 => "ImageSampleBClO",
-            0x37 => "ImageSampleLzO",
-            0x38 => "ImageSampleCO",
-            0x39 => "ImageSampleCClO",
-            0x3A => "ImageSampleCDO",
-            0x3B => "ImageSampleCDClO",
-            0x3C => "ImageSampleCLO",
-            0x3D => "ImageSampleCBO",
-            0x3E => "ImageSampleCBClO",
-            0x3F => "ImageSampleCLzO",
-            0x40 => "ImageGather4",
-            0x47 => "ImageGather4Lz",
-            0x48 => "ImageGather4C",
-            0x4E => "ImageGather4CBCl",
-            0x4F => "ImageGather4CLz",
-            0x57 => "ImageGather4LzO",
-            0x58 => "ImageGather4CO",
-            0x5F => "ImageGather4CLzO",
-            0x60 => "ImageGetLod",
-            0x61 => "ImageGather4H",
-            0x68 => "ImageSampleCd",
-            0x69 => "ImageSampleCdCl",
-            0x6A => "ImageSampleCCd",
-            0x6B => "ImageSampleCCdCl",
-            0x6C => "ImageSampleCdO",
-            0x6D => "ImageSampleCdClO",
-            0x6E => "ImageSampleCCdO",
-            0x6F => "ImageSampleCCdClO",
-            0xA0 => "ImageSampleA",
-            0xA1 => "ImageSampleClA",
-            0xA5 => "ImageSampleBA",
-            0xA6 => "ImageSampleBClA",
-            0xA8 => "ImageSampleCA",
-            0xA9 => "ImageSampleCClA",
-            0xAD => "ImageSampleCBA",
-            0xAE => "ImageSampleCBClA",
-            0xB0 => "ImageSampleAO",
-            0xB1 => "ImageSampleClAO",
-            0xB5 => "ImageSampleBAO",
-            0xB6 => "ImageSampleBClAO",
-            0xB8 => "ImageSampleCAO",
-            0xB9 => "ImageSampleCClAO",
-            0xBD => "ImageSampleCBAO",
-            0xBE => "ImageSampleCBClAO",
-            0xE6 => "ImageBvhIntersectRay",
-            0xE7 => "ImageBvh64IntersectRay",
-            _ => string.Empty,
-        };
-
-        if (name.Length != 0 && (word & ((1u << 16) | (1u << 17))) != 0)
-        {
-            // GFX10 MIMG TFE [16] and LWE [17] append a status dword after the fetched VGPRs
-            // (SIInstrFormats.td MIMGe_gfx10); that write is not implemented, so refuse the shader.
-            var feature = (word & (1u << 16)) != 0 ? "tfe" : "lwe";
-            error = $"unsupported-mimg-{feature} op=0x{opcode:X2} word=0x{word:X8}";
-            name = string.Empty;
-            return false;
-        }
-
+        // TFE [16] and LWE [17] are accepted: the status dword they add after the data is
+        // written only when a fetch is NACKed (an unmapped PRT page) or, for LWE, when the
+        // LOD falls below the T#'s MIN_LOD_WARN (RDNA2 ISA Table 41). Guest texture memory
+        // is always resident here, so the status VGPR keeps its value; LLVM's AddMemOpInit
+        // zeroes that dword before every TFE/LWE instruction for the same reason.
         return FinishDecode(name, $"unknown-mimg op=0x{opcode:X2}", out error);
     }
 
@@ -3438,7 +3328,13 @@ public static partial class Gen5ShaderTranslator
                     ((extra >> 30) & 1) != 0,
                     ((extra >> 31) & 1) != 0)
                 {
+                    // gfx10 MIMG word 0 (SIInstrFormats.td MIMGe_gfx10): DLC [7], UNRM [12],
+                    // R128 [15], TFE [16], LWE [17].
                     Unorm = ((word >> 12) & 1) != 0,
+                    Dlc = ((word >> 7) & 1) != 0,
+                    R128 = ((word >> 15) & 1) != 0,
+                    Tfe = ((word >> 16) & 1) != 0,
+                    Lwe = ((word >> 17) & 1) != 0,
                 };
                 break;
             }

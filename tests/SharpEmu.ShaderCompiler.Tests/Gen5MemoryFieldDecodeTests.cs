@@ -118,13 +118,16 @@ public sealed class Gen5MemoryFieldDecodeTests
     }
 
     [Theory]
-    [InlineData(16, "unsupported-mimg-tfe")]
-    [InlineData(17, "unsupported-mimg-lwe")]
-    public void Mimg_TfeAndLwe_AreRefused(int bit, string expected)
+    [InlineData(16)]
+    [InlineData(17)]
+    public void Mimg_TfeAndLwe_Decode(int bit)
     {
-        // image_sample_lz v[4:7], v0, s[8:15], s[0:3] dmask:0xF dim:2D, plus tfe or lwe.
+        // image_sample_lz v[4:8], v0, s[8:15], s[0:3] dmask:0xF dim:2D, plus tfe or lwe: the
+        // status dword is only written on a PRT NACK or an LOD warning, so both decode.
         var word0 = 0xF000_0000u | (0x27u << 18) | (1u << bit) | (0xFu << 8) | (1u << 3);
-        Assert.Contains(expected, DecodeError(word0, 0x0002_0400u));
+        var image = Assert.IsType<Gen5ImageControl>(DecodeFirst(word0, 0x0002_0400u).Control);
+        Assert.Equal(bit == 16, image.Tfe);
+        Assert.Equal(bit == 17, image.Lwe);
     }
 
     [Fact]

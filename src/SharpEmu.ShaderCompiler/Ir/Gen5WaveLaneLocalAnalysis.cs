@@ -467,9 +467,8 @@ public static class Gen5WaveLaneLocalAnalysis
                     widths[^1] = UsesSampler(opcode) ? 4 : 0;
                     if (!opcode.StartsWith("ImageStore", StringComparison.Ordinal))
                     {
-                        var channels = opcode.StartsWith("ImageGather", StringComparison.Ordinal)
-                            ? 4
-                            : Math.Max(BitOperations.PopCount(image.Dmask), 1);
+                        // The data dwords plus the TFE/LWE status dword after them.
+                        var channels = (int)Math.Max(Gen5ImageOpcodes.ResultDwords(opcode, image.Dmask, false), 1u);
                         writtenStart = (int)image.VectorData;
                         writtenCount = channels + 1;
                     }
