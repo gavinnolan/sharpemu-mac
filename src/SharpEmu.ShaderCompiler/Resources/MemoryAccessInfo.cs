@@ -186,7 +186,7 @@ public sealed class MemoryAccessTable
                     table.Add(FromImage(instruction, image));
                     break;
                 case Gen5DataShareControl share:
-                    if (instruction.Opcode is "DsSwizzleB32" or "DsBpermuteB32")
+                    if (instruction.Opcode is "DsSwizzleB32" or "DsBpermuteB32" or "DsPermuteB32" or "DsNop")
                     {
                         break;
                     }

@@ -134,6 +134,120 @@ public sealed class Gen5MemoryFieldDecodeTests
         Assert.Equal("ImageSampleLz", DecodeFirst(word0, 0x0002_0400u).Opcode);
     }
 
+    [Theory]
+    // D16 X/XY pack into one register, XYZ/XYZW into two; the Hi form uses one register's high half.
+    [InlineData(0x80u, "BufferLoadFormatD16X", 1u)]
+    [InlineData(0x81u, "BufferLoadFormatD16Xy", 1u)]
+    [InlineData(0x82u, "BufferLoadFormatD16Xyz", 2u)]
+    [InlineData(0x83u, "BufferLoadFormatD16Xyzw", 2u)]
+    [InlineData(0x26u, "BufferLoadFormatD16HiX", 1u)]
+    [InlineData(0x27u, "BufferStoreFormatD16HiX", 1u)]
+    [InlineData(0x86u, "BufferStoreFormatD16Xyz", 2u)]
+    public void MubufFormatD16_TransfersPackedRegisters(uint opcode, string expected, uint registers)
+    {
+        var instruction = DecodeFirst(Mubuf(opcode, offset: 0), MubufWord1());
+
+        Assert.Equal(expected, instruction.Opcode);
+        Assert.Equal(registers, Assert.IsType<Gen5BufferMemoryControl>(instruction.Control).DwordCount);
+    }
+
+    [Theory]
+    [InlineData(0x24u, "SMemtime")]
+    [InlineData(0x25u, "SMemrealtime")]
+    public void SmemCounter_WritesTheSdataPair(uint opcode, string expected)
+    {
+        // s_memtime s[4:5]
+        var instruction = DecodeFirst(Smem(opcode, sdata: 4, sbase: 0), 0u);
+
+        Assert.Equal(expected, instruction.Opcode);
+        Assert.Empty(instruction.Sources);
+        Assert.Equal([Gen5Operand.Scalar(4), Gen5Operand.Scalar(5)], instruction.Destinations);
+    }
+
+    [Theory]
+    [InlineData(0x1Fu, "SGl1Inv")]
+    [InlineData(0x20u, "SDcacheInv")]
+    [InlineData(0x21u, "SDcacheWb")]
+    public void SmemCacheMaintenance_DecodesWithoutRegisters(uint opcode, string expected)
+    {
+        var instruction = DecodeFirst(Smem(opcode, sdata: 0, sbase: 0), 0u);
+
+        Assert.Equal(expected, instruction.Opcode);
+        Assert.Empty(instruction.Sources);
+        Assert.Empty(instruction.Destinations);
+    }
+
+    [Fact]
+    public void Ds_Op1E_IsWriteB8()
+    {
+        // The word GTA V's compute shader 0x5B10BEC40C2E4C27 stopped on: ds_write_b8 v1, v2.
+        var instruction = DecodeFirst(0xD8780200u, 0x0000_0201u);
+
+        Assert.Equal("DsWriteB8", instruction.Opcode);
+        Assert.Equal([Gen5Operand.Vector(1), Gen5Operand.Vector(2)], instruction.Sources);
+        Assert.Empty(instruction.Destinations);
+        Assert.Equal(2u, Assert.IsType<Gen5DataShareControl>(instruction.Control).Offset1);
+    }
+
+    [Theory]
+    // opcode, name, sources (address + data), destinations
+    [InlineData(0x02u, "DsRsubU32", 2, 0)]
+    [InlineData(0x0Cu, "DsMskorB32", 3, 0)]
+    [InlineData(0x11u, "DsCmpstF32", 3, 0)]
+    [InlineData(0x12u, "DsMinF32", 3, 0)]
+    [InlineData(0x15u, "DsAddF32", 2, 0)]
+    [InlineData(0x1Fu, "DsWriteB16", 2, 0)]
+    [InlineData(0x2Eu, "DsWrxchg2RtnB32", 3, 2)]
+    [InlineData(0x34u, "DsWrapRtnB32", 3, 1)]
+    [InlineData(0x3Au, "DsReadU8", 1, 1)]
+    [InlineData(0x3Bu, "DsReadI16", 1, 1)]
+    [InlineData(0x3Cu, "DsReadU16", 1, 1)]
+    [InlineData(0x40u, "DsAddU64", 3, 0)]
+    [InlineData(0x50u, "DsCmpstB64", 5, 0)]
+    [InlineData(0x55u, "DsAddRtnF32", 2, 1)]
+    [InlineData(0x60u, "DsAddRtnU64", 3, 2)]
+    [InlineData(0x6Eu, "DsWrxchg2RtnB64", 5, 4)]
+    [InlineData(0x78u, "DsRead2St64B64", 1, 4)]
+    [InlineData(0xA0u, "DsWriteB8D16Hi", 2, 0)]
+    [InlineData(0xA1u, "DsWriteB16D16Hi", 2, 0)]
+    [InlineData(0xA3u, "DsReadU8D16Hi", 2, 1)]
+    [InlineData(0xA6u, "DsReadU16D16", 2, 1)]
+    [InlineData(0xB2u, "DsPermuteB32", 2, 1)]
+    public void Ds_Gfx10Opcode_DecodesItsOperands(uint opcode, string expected, int sources, int destinations)
+    {
+        // ds_* v8, v1, v2, v4 (address, data0, data1, vdst)
+        var instruction = DecodeFirst(0xD800_0000u | opcode << 18, 0x0804_0201u);
+
+        Assert.Equal(expected, instruction.Opcode);
+        Assert.Equal(sources, instruction.Sources.Count);
+        Assert.Equal(destinations, instruction.Destinations.Count);
+        Assert.Equal(Gen5Operand.Vector(1), instruction.Sources[0]);
+    }
+
+    [Theory]
+    // opcode, name, memory dwords, data registers read
+    [InlineData(0x30u, "GlobalAtomicSwap", 1u, 1)]
+    [InlineData(0x31u, "GlobalAtomicCmpswap", 1u, 2)]
+    [InlineData(0x3Bu, "GlobalAtomicXor", 1u, 1)]
+    [InlineData(0x40u, "GlobalAtomicFmax", 1u, 1)]
+    [InlineData(0x52u, "GlobalAtomicAddX2", 2u, 2)]
+    [InlineData(0x51u, "GlobalAtomicCmpswapX2", 2u, 4)]
+    [InlineData(0x58u, "GlobalAtomicUmaxX2", 2u, 2)]
+    public void GlobalAtomic_DecodesWidthAndData(uint opcode, string expected, uint dwords, int dataRegisters)
+    {
+        // global_atomic_* v[2:3], v[4:...], off
+        var instruction = DecodeFirst(Flat(segment: 2, opcode, offset: 0), (0x7Fu << 16) | (4u << 8) | 2u);
+
+        Assert.Equal(expected, instruction.Opcode);
+        Assert.Equal(dwords, Assert.IsType<Gen5GlobalMemoryControl>(instruction.Control).DwordCount);
+        Assert.Equal(dataRegisters, instruction.Sources.Count(source =>
+            source.Kind == Gen5OperandKind.VectorRegister && source.Value >= 4));
+    }
+
+    // SMEM word 0: sbase[5:0] (pairs), sdata[12:6], glc[16], op[25:18], encoding 0x3D.
+    private static uint Smem(uint opcode, uint sdata, uint sbase) =>
+        0xF400_0000u | (opcode << 18) | (sdata << 6) | sbase;
+
     // FLAT word 0: offset[11:0], dlc[12], seg[15:14], glc[16], slc[17], op[24:18], encoding 0x37.
     private static uint Flat(uint segment, uint opcode, int offset, bool dlc = false) =>
         0xDC00_0000u | (opcode << 18) | (segment << 14) | (dlc ? 1u << 12 : 0) | ((uint)offset & 0xFFF);
