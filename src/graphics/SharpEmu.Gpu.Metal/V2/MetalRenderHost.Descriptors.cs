@@ -166,6 +166,9 @@ internal sealed partial class MetalRenderHost
 
     private void EndPreparation()
     {
+        // A draw that acquired its attachments and then never began its pass leaves no
+        // upload waiting past its own preparation.
+        _imageCache.DrainDeferredRefreshes();
         // The draw or dispatch is recorded, so the stores it makes into staged copies
         // can be written back at the next encoder boundary.
         _stagedStorageCopies?.Arm();
@@ -175,6 +178,7 @@ internal sealed partial class MetalRenderHost
 
     public void ResetBindings()
     {
+        _imageCache.DrainDeferredRefreshes();
         _pendingGraphicsPipeline = null;
         _pendingComputePipeline = null;
         _vertexBufferCount = 0;

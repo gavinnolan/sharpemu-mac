@@ -63,6 +63,8 @@ internal sealed partial class MetalImageCache
             return;
         }
 
+        ForgetDeferredRefreshesLocked(image);
+
         if (image.IsWindowLinearView)
         {
             Interlocked.Decrement(ref _linearViews);

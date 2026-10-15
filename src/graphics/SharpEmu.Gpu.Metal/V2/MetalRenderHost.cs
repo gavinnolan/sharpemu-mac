@@ -420,6 +420,8 @@ internal sealed partial class MetalRenderHost :
 
     private ulong FlushCommandBuffer(PassEndCause cause, MetalFlushCause why)
     {
+        // An upload left for a pass is made before the buffer it belongs in is committed.
+        _imageCache.DrainDeferredRefreshes();
         if (_commandBuffer == 0)
         {
             return _nextSerial;
@@ -1853,10 +1855,13 @@ internal sealed partial class MetalRenderHost :
         var culture = System.Globalization.CultureInfo.InvariantCulture;
         var frequency = System.Diagnostics.Stopwatch.Frequency;
         var (loadsElided, loadElidedBytes) = TakeElidedLoads();
+        var (refreshesSkipped, refreshSkippedBytes) = _imageCache.TakeSkippedRefreshes();
         Console.Error.WriteLine(
             $"[METAL-V2][PERF] seconds={seconds.ToString("F2", culture)} submissions={_submissionsStarted} " +
             // Colour loads a full-screen first draw made dead (MetalPassLoads).
             $"load_elided={loadsElided} load_elided_mb={(loadElidedBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
+            // Uploads of CPU-written targets a pass cleared or overwrote whole (DeferredRefresh).
+            $"refresh_skipped={refreshesSkipped} refresh_skipped_mb={(refreshSkippedBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
             // Slices are what the queue actually ran: a submission that suspends is
             // re-queued and re-run, so slices far above guest submissions is retry churn,
             // not the guest sending more work.
