@@ -1705,6 +1705,7 @@ public static partial class Gen5ShaderTranslator
         out string error)
     {
         var opcode = (word >> 18) & 0xFF;
+        var gds = ((word >> 17) & 1) != 0;
         sizeDwords = 2;
         error = string.Empty;
         name = opcode switch
@@ -1731,6 +1732,14 @@ public static partial class Gen5ShaderTranslator
             0x13 => "DsMaxF32",
             0x14 => "DsNop",
             0x15 => "DsAddF32",
+            // Global wave sync (GDS only): DATA0 of INIT, SEMA_BR and BARRIER is encoded in
+            // the ADDR field, as LLVM's DS_GWS_1D does for gfx10.
+            0x18 when gds => "DsGwsSemaReleaseAll",
+            0x19 when gds => "DsGwsInit",
+            0x1A when gds => "DsGwsSemaV",
+            0x1B when gds => "DsGwsSemaBr",
+            0x1C when gds => "DsGwsSemaP",
+            0x1D when gds => "DsGwsBarrier",
             0x1E => "DsWriteB8",
             0x1F => "DsWriteB16",
             0x20 => "DsAddRtnU32",
@@ -1764,6 +1773,8 @@ public static partial class Gen5ShaderTranslator
             0x3C => "DsReadU16",
             0x3D => "DsConsume",
             0x3E => "DsAppend",
+            // GDS only; the value to add is in the ADDR field (llvm.amdgcn.ds.ordered.add).
+            0x3F when gds => "DsOrderedCount",
             // gfx10 groups the 64-bit LDS atomics at 0x40..0x53, the returning forms at
             // 0x60..0x73. They are named so the translator can say which one it cannot
             // run; it takes only the forms whose halves can run as 32-bit atomics.
@@ -1811,6 +1822,7 @@ public static partial class Gen5ShaderTranslator
             0x76 => "DsReadB64",
             0x77 => "DsRead2B64",
             0x78 => "DsRead2St64B64",
+            0x7E => "DsCondxchg32RtnB64",
             0xA0 => "DsWriteB8D16Hi",
             0xA1 => "DsWriteB16D16Hi",
             0xA2 => "DsReadU8D16",
@@ -1884,6 +1896,14 @@ public static partial class Gen5ShaderTranslator
         };
         sizeDwords = (extra >> 24) == 0xFF ? 3u : 2u;
         error = string.Empty;
+        if (((extra >> 23) & 1) != 0 && name.StartsWith("TBufferStore", StringComparison.Ordinal))
+        {
+            // TFE writes a load's status dword; a store has none to write.
+            name = string.Empty;
+            error = $"unsupported-mtbuf-tfe op=0x{opcode:X2} word=0x{word:X8} extra=0x{extra:X8}";
+            return false;
+        }
+
         return true;
     }
 
@@ -1936,6 +1956,8 @@ public static partial class Gen5ShaderTranslator
             0x31 => "BufferAtomicCmpswap",
             0x32 => "BufferAtomicAdd",
             0x33 => "BufferAtomicSub",
+            // gfx10.3: memory = memory >= data ? memory - data : 0 (a subtract clamped at zero).
+            0x34 => "BufferAtomicCsub",
             0x35 => "BufferAtomicSmin",
             0x36 => "BufferAtomicUmin",
             0x37 => "BufferAtomicSmax",
@@ -1945,6 +1967,8 @@ public static partial class Gen5ShaderTranslator
             0x3B => "BufferAtomicXor",
             0x3C => "BufferAtomicInc",
             0x3D => "BufferAtomicDec",
+            // gfx10 op 0x3E is BUFFER_ATOMIC_FCMPSWAP; BUFFER_WBINVL1 only exists on gfx6/7/8/9.
+            0x3E => "BufferAtomicFcmpswap",
             0x3F => "BufferAtomicFmin",
             0x40 => "BufferAtomicFmax",
             // GFX9 buffer atomic encodings used by the guest shaders.
@@ -1959,8 +1983,27 @@ public static partial class Gen5ShaderTranslator
             0x4A => "BufferAtomicOr",
             0x4B => "BufferAtomicXor",
             0x4C => "BufferAtomicInc",
+            // The 64-bit atomics (BUFInstructions.td MUBUF_Real_Atomics_gfx10): the 32-bit
+            // opcode + 0x20, with no X2 form of CSUB (0x54).
             0x50 => "BufferAtomicSwapX2",
+            0x51 => "BufferAtomicCmpswapX2",
+            0x52 => "BufferAtomicAddX2",
+            0x53 => "BufferAtomicSubX2",
+            0x55 => "BufferAtomicSminX2",
+            0x56 => "BufferAtomicUminX2",
+            0x57 => "BufferAtomicSmaxX2",
+            0x58 => "BufferAtomicUmaxX2",
+            0x59 => "BufferAtomicAndX2",
             0x5A => "BufferAtomicOrX2",
+            0x5B => "BufferAtomicXorX2",
+            0x5C => "BufferAtomicIncX2",
+            0x5D => "BufferAtomicDecX2",
+            0x5E => "BufferAtomicFcmpswapX2",
+            0x5F => "BufferAtomicFminX2",
+            0x60 => "BufferAtomicFmaxX2",
+            // Cache invalidations: the host's memory is already coherent at these levels.
+            0x71 => "BufferGl0Inv",
+            0x72 => "BufferGl1Inv",
             0x80 => "BufferLoadFormatD16X",
             0x81 => "BufferLoadFormatD16Xy",
             0x82 => "BufferLoadFormatD16Xyz",
@@ -1973,21 +2016,27 @@ public static partial class Gen5ShaderTranslator
         };
         sizeDwords = (extra >> 24) == 0xFF ? 3u : 2u;
         error = string.Empty;
-        if (opcode == 0x3E)
+
+        // TFE (extra bit 23) appends a status VGPR after a load's data; LDS (word bit 16)
+        // returns a load's data to LDS instead (RDNA2 ISA 8.1.9: only
+        // BUFFER_LOAD_{UBYTE,SBYTE,USHORT,SSHORT,DWORD,FORMAT_X}, and never with TFE). TFE
+        // on a store or an atomic has no status to write and LLVM rejects it; both are
+        // refused rather than guessed at.
+        var tfe = ((extra >> 23) & 1) != 0;
+        var lds = ((word >> 16) & 1) != 0;
+        var isLoad = name.StartsWith("BufferLoad", StringComparison.Ordinal);
+        if (lds && (tfe || name is not ("BufferLoadUbyte" or "BufferLoadSbyte" or "BufferLoadUshort" or
+            "BufferLoadSshort" or "BufferLoadDword" or "BufferLoadFormatX")))
         {
-            // gfx10 op 0x3E is BUFFER_ATOMIC_FCMPSWAP; BUFFER_WBINVL1 only exists on gfx6/7/8/9.
             name = string.Empty;
-            error = $"unsupported-mubuf buffer_atomic_fcmpswap op=0x3E word=0x{word:X8}";
+            error = $"unsupported-mubuf-lds op=0x{opcode:X2} word=0x{word:X8} extra=0x{extra:X8}";
             return false;
         }
 
-        // TFE (extra bit 23) appends a status VGPR and LDS (word bit 16) redirects the
-        // result to LDS; neither is implemented, so refuse the shader rather than miscompile.
-        if (((extra >> 23) & 1) != 0 || ((word >> 16) & 1) != 0)
+        if (tfe && !isLoad)
         {
-            var feature = ((extra >> 23) & 1) != 0 ? "tfe" : "lds";
             name = string.Empty;
-            error = $"unsupported-mubuf-{feature} op=0x{opcode:X2} word=0x{word:X8} extra=0x{extra:X8}";
+            error = $"unsupported-mubuf-tfe op=0x{opcode:X2} word=0x{word:X8} extra=0x{extra:X8}";
             return false;
         }
 
@@ -2023,6 +2072,9 @@ public static partial class Gen5ShaderTranslator
             0x0D => "LoadDwordx2",
             0x0E => "LoadDwordx4",
             0x0F => "LoadDwordx3",
+            // gfx10.3 GLOBAL only: SADDR + offset + lane * 4, no VADDR.
+            0x16 when segment == 0x2 => "LoadDwordAddtid",
+            0x17 when segment == 0x2 => "StoreDwordAddtid",
             0x18 => "StoreByte",
             0x19 => "StoreByteD16Hi",
             0x1A => "StoreShort",
@@ -2043,6 +2095,8 @@ public static partial class Gen5ShaderTranslator
             0x31 => "AtomicCmpswap",
             0x32 => "AtomicAdd",
             0x33 => "AtomicSub",
+            // gfx10.3 GLOBAL only: a subtract clamped at zero.
+            0x34 when segment == 0x2 => "AtomicCsub",
             0x35 => "AtomicSmin",
             0x36 => "AtomicUmin",
             0x37 => "AtomicSmax",
@@ -2052,6 +2106,7 @@ public static partial class Gen5ShaderTranslator
             0x3B => "AtomicXor",
             0x3C => "AtomicInc",
             0x3D => "AtomicDec",
+            0x3E => "AtomicFcmpswap",
             0x3F => "AtomicFmin",
             0x40 => "AtomicFmax",
             0x50 => "AtomicSwapX2",
@@ -2067,6 +2122,7 @@ public static partial class Gen5ShaderTranslator
             0x5B => "AtomicXorX2",
             0x5C => "AtomicIncX2",
             0x5D => "AtomicDecX2",
+            0x5E => "AtomicFcmpswapX2",
             0x5F => "AtomicFminX2",
             0x60 => "AtomicFmaxX2",
             _ => string.Empty,
@@ -2634,7 +2690,8 @@ public static partial class Gen5ShaderTranslator
                     count,
                     offset,
                     dynamicOffsetRegister,
-                    ((word >> 16) & 1) != 0);
+                    ((word >> 16) & 1) != 0,
+                    ((word >> 14) & 1) != 0);
                 break;
             }
             case Gen5ShaderEncoding.Vop1:
@@ -2916,6 +2973,18 @@ public static partial class Gen5ShaderTranslator
                 sources = opcode switch
                 {
                     "DsAppend" or "DsConsume" or "DsReadAddtidB32" => [Gen5Operand.Scalar(124)],
+                    // GWS resources are offset0[5:0] + M0[21:16]; DATA0, where an op takes
+                    // one, sits in the ADDR field. DS_ORDERED_COUNT adds its ADDR-field VGPR
+                    // and reads the ordered wave id from M0.
+                    "DsGwsSemaReleaseAll" or "DsGwsSemaV" or "DsGwsSemaP" => [Gen5Operand.Scalar(124)],
+                    "DsGwsInit" or "DsGwsSemaBr" or "DsGwsBarrier" or "DsOrderedCount" =>
+                        [Gen5Operand.Vector(vectorAddress), Gen5Operand.Scalar(124)],
+                    // DS_CONDXCHG32_RTN_B64: two conditional dword exchanges from DATA0[0:1].
+                    "DsCondxchg32RtnB64" => [
+                        Gen5Operand.Vector(vectorAddress),
+                        Gen5Operand.Vector(vectorData0),
+                        Gen5Operand.Vector(vectorData0 + 1),
+                    ],
                     "DsWriteAddtidB32" => [Gen5Operand.Scalar(124), Gen5Operand.Vector(vectorData0)],
                     "DsWriteB32" or "DsWriteB8" or "DsWriteB16" or
                     "DsWriteB8D16Hi" or "DsWriteB16D16Hi" => [
@@ -2994,8 +3063,12 @@ public static partial class Gen5ShaderTranslator
                 };
                 destinations = opcode switch
                 {
-                    "DsAppend" or "DsConsume" => [
+                    "DsAppend" or "DsConsume" or "DsOrderedCount" => [
                         Gen5Operand.Vector(vectorDestination),
+                    ],
+                    "DsCondxchg32RtnB64" => [
+                        Gen5Operand.Vector(vectorDestination),
+                        Gen5Operand.Vector(vectorDestination + 1),
                     ],
                     "DsReadB32" or "DsReadI8" or "DsReadU8" or "DsReadI16" or "DsReadU16" or
                     "DsReadU8D16" or "DsReadU8D16Hi" or "DsReadI8D16" or "DsReadI8D16Hi" or
@@ -3076,7 +3149,9 @@ public static partial class Gen5ShaderTranslator
                     "GlobalStoreByteD16Hi" or
                     "GlobalStoreShort" or
                     "GlobalStoreShortD16Hi" or
-                    "GlobalStoreDword" => 1u,
+                    "GlobalStoreDword" or
+                    "GlobalLoadDwordAddtid" or
+                    "GlobalStoreDwordAddtid" => 1u,
                     // An atomic's count is the width of the memory it operates on.
                     _ when memoryOpcode.StartsWith("GlobalAtomic", StringComparison.Ordinal) =>
                         memoryOpcode.EndsWith("X2", StringComparison.Ordinal) ? 2u : 1u,
@@ -3104,14 +3179,22 @@ public static partial class Gen5ShaderTranslator
                         Gen5Operand.Vector(vectorAddress),
                         Gen5Operand.Scalar(scalarAddress),
                     ];
+                var addThreadId = memoryOpcode is "GlobalLoadDwordAddtid" or "GlobalStoreDwordAddtid";
+                if (addThreadId)
+                {
+                    // The address is SADDR + offset + lane * 4; there is no VADDR to read.
+                    sources = [Gen5Operand.Scalar(scalarAddress)];
+                }
+
                 var isLoad = memoryOpcode.StartsWith("GlobalLoad", StringComparison.Ordinal);
                 var isStore = memoryOpcode.StartsWith("GlobalStore", StringComparison.Ordinal);
                 var isAtomic = memoryOpcode.StartsWith("GlobalAtomic", StringComparison.Ordinal);
                 var globallyCoherent = ((word >> 16) & 1) != 0;
                 if (isStore || isAtomic)
                 {
-                    // CMPSWAP reads the comparator from the registers after the new value.
-                    var sourceCount = memoryOpcode.StartsWith("GlobalAtomicCmpswap", StringComparison.Ordinal)
+                    // CMPSWAP and FCMPSWAP read the comparator from the registers after the new value.
+                    var sourceCount = memoryOpcode.StartsWith("GlobalAtomicCmpswap", StringComparison.Ordinal) ||
+                        memoryOpcode.StartsWith("GlobalAtomicFcmpswap", StringComparison.Ordinal)
                         ? dwordCount * 2
                         : dwordCount;
                     sources = [.. sources, .. Enumerable
@@ -3139,7 +3222,9 @@ public static partial class Gen5ShaderTranslator
                     FlatOffset(word, usesFlatAddress),
                     globallyCoherent,
                     ((word >> 17) & 1) != 0,
-                    usesFlatAddress);
+                    usesFlatAddress,
+                    Dlc: ((word >> 12) & 1) != 0,
+                    AddThreadId: addThreadId);
                 break;
             }
             case Gen5ShaderEncoding.Mubuf:
@@ -3186,20 +3271,34 @@ public static partial class Gen5ShaderTranslator
                     "BufferStoreDwordx2" => 2u,
                     "BufferStoreDwordx3" => 3u,
                     "BufferStoreDwordx4" => 4u,
-                    "BufferAtomicCmpswap" or "BufferAtomicSwapX2" or "BufferAtomicOrX2" => 2u,
-                    _ when opcode.StartsWith("BufferAtomic", StringComparison.Ordinal) => 1u,
+                    // An atomic's count is its data registers: CMPSWAP's new value and
+                    // comparator, two per operand for the X2 forms.
+                    "BufferAtomicCmpswap" or "BufferAtomicFcmpswap" => 2u,
+                    "BufferAtomicCmpswapX2" or "BufferAtomicFcmpswapX2" => 4u,
+                    _ when opcode.StartsWith("BufferAtomic", StringComparison.Ordinal) =>
+                        opcode.EndsWith("X2", StringComparison.Ordinal) ? 2u : 1u,
                     _ => 0u,
                 };
+                var tfe = ((extra >> 23) & 1) != 0;
+                var lds = ((word >> 16) & 1) != 0;
                 sources =
                 [
                     Gen5Operand.Vector(vectorAddress),
                     Gen5Operand.Scalar(scalarResource),
                     Gen5Operand.Source(scalarOffset, literal),
                 ];
-                destinations = Enumerable
-                    .Range((int)vectorData, checked((int)dwordCount))
-                    .Select(index => Gen5Operand.Vector((uint)index))
-                    .ToArray();
+                if (lds)
+                {
+                    // A load to LDS writes at M0[15:0] + offset + lane * 4 and no VGPR.
+                    sources = [.. sources, Gen5Operand.Scalar(124)];
+                }
+
+                destinations = lds
+                    ? []
+                    : Enumerable
+                        .Range((int)vectorData, checked((int)(dwordCount + (tfe ? 1u : 0u))))
+                        .Select(index => Gen5Operand.Vector((uint)index))
+                        .ToArray();
                 control = new Gen5BufferMemoryControl(
                     dwordCount,
                     vectorAddress,
@@ -3209,7 +3308,10 @@ public static partial class Gen5ShaderTranslator
                     ((word >> 13) & 1) != 0,
                     ((word >> 12) & 1) != 0,
                     ((word >> 14) & 1) != 0,
-                    ((extra >> 22) & 1) != 0);
+                    ((extra >> 22) & 1) != 0,
+                    Dlc: ((word >> 15) & 1) != 0,
+                    Tfe: tfe,
+                    Lds: lds);
                 break;
             }
             case Gen5ShaderEncoding.Mtbuf:
@@ -3231,6 +3333,7 @@ public static partial class Gen5ShaderTranslator
                     "TBufferStoreFormatD16Xyz" or "TBufferStoreFormatD16Xyzw" => 2u,
                     _ => 0u,
                 };
+                var typedTfe = ((extra >> 23) & 1) != 0;
                 sources =
                 [
                     Gen5Operand.Vector(vectorAddress),
@@ -3238,7 +3341,7 @@ public static partial class Gen5ShaderTranslator
                     Gen5Operand.Source(scalarOffset, literal),
                 ];
                 destinations = Enumerable
-                    .Range((int)vectorData, checked((int)dwordCount))
+                    .Range((int)vectorData, checked((int)(dwordCount + (typedTfe ? 1u : 0u))))
                     .Select(index => Gen5Operand.Vector((uint)index))
                     .ToArray();
                 control = new Gen5BufferMemoryControl(
@@ -3252,7 +3355,9 @@ public static partial class Gen5ShaderTranslator
                     ((word >> 14) & 1) != 0,
                     ((extra >> 22) & 1) != 0,
                     Typed: true,
-                    TypedFormat: (word >> 19) & 0x7F);
+                    TypedFormat: (word >> 19) & 0x7F,
+                    Dlc: ((word >> 15) & 1) != 0,
+                    Tfe: typedTfe);
                 break;
             }
             case Gen5ShaderEncoding.Mimg:

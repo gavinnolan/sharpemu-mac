@@ -3012,6 +3012,13 @@ public static partial class Gen5SpirvTranslator
                 return true;
             }
 
+            if (control.Tfe || control.Lds)
+            {
+                // The decoder accepts these for the Metal backend; this one does not model them.
+                error = $"unsupported buffer {(control.Tfe ? "TFE" : "LDS")} access {instruction.Opcode}";
+                return false;
+            }
+
             if (instruction.Opcode.Contains("FormatD16", StringComparison.Ordinal))
             {
                 error = $"unsupported buffer opcode {instruction.Opcode}";

@@ -1685,6 +1685,12 @@ public static partial class Gen5MslTranslator
                 return true;
             }
 
+            if (control.Tfe || control.Lds)
+            {
+                error = $"unsupported buffer {(control.Tfe ? "TFE" : "LDS")} access {instruction.Opcode}";
+                return false;
+            }
+
             if (FormatComponentCount(instruction.Opcode, control, out var formatD16) == 0 && formatD16.Enabled)
             {
                 error = $"unsupported buffer opcode {instruction.Opcode}";

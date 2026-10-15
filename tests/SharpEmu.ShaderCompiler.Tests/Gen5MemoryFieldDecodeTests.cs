@@ -100,21 +100,26 @@ public sealed class Gen5MemoryFieldDecodeTests
     }
 
     [Fact]
-    public void Mubuf_Op3E_IsRefusedAsFloatCompareSwap()
+    public void Mubuf_Op3E_IsFloatCompareSwap()
     {
-        Assert.Contains("fcmpswap", DecodeError(Mubuf(opcode: 0x3E, offset: 0), MubufWord1()));
+        // gfx10 op 0x3E is BUFFER_ATOMIC_FCMPSWAP; BUFFER_WBINVL1 only exists on gfx6/7/8/9.
+        Assert.Equal("BufferAtomicFcmpswap", DecodeFirst(Mubuf(opcode: 0x3E, offset: 0), MubufWord1()).Opcode);
     }
 
     [Fact]
-    public void Mubuf_Tfe_IsRefused()
+    public void Mubuf_Tfe_OnALoad_AddsTheStatusRegister()
     {
-        Assert.Contains("unsupported-mubuf-tfe", DecodeError(Mubuf(opcode: 0x0C, offset: 0), MubufWord1(tfe: true)));
+        var instruction = DecodeFirst(Mubuf(opcode: 0x0C, offset: 0), MubufWord1(tfe: true));
+        Assert.True(Assert.IsType<Gen5BufferMemoryControl>(instruction.Control).Tfe);
+        Assert.Equal([Gen5Operand.Vector(4), Gen5Operand.Vector(5)], instruction.Destinations);
     }
 
     [Fact]
-    public void Mubuf_Lds_IsRefused()
+    public void Mubuf_Lds_OnADwordLoad_WritesNoRegister()
     {
-        Assert.Contains("unsupported-mubuf-lds", DecodeError(Mubuf(opcode: 0x0C, offset: 0, lds: true), MubufWord1()));
+        var instruction = DecodeFirst(Mubuf(opcode: 0x0C, offset: 0, lds: true), MubufWord1());
+        Assert.True(Assert.IsType<Gen5BufferMemoryControl>(instruction.Control).Lds);
+        Assert.Empty(instruction.Destinations);
     }
 
     [Theory]

@@ -306,6 +306,8 @@ public sealed record Gen5RayIntersectControl(
             : VectorAddress + (uint)component;
 }
 
+// Dlc (FLAT word 0 bit 12) only steers the GL1 cache policy. AddThreadId marks
+// GLOBAL_LOAD/STORE_DWORD_ADDTID, whose address is SADDR + offset + lane * 4 with no VADDR.
 public sealed record Gen5GlobalMemoryControl(
     uint DwordCount,
     uint VectorAddress,
@@ -317,10 +319,14 @@ public sealed record Gen5GlobalMemoryControl(
     bool Slc,
     bool UsesFlatAddress = false,
     uint? DynamicOffsetRegister = null,
-    bool SourceIsScalar = false) : Gen5InstructionControl;
+    bool SourceIsScalar = false,
+    bool Dlc = false,
+    bool AddThreadId = false) : Gen5InstructionControl;
 
 // A typed access carries the unified format from the instruction; a formatted
-// untyped access reads the descriptor format when it executes.
+// untyped access reads the descriptor format when it executes. Dlc only steers the GL1
+// cache policy. Tfe (a load's texel-fault enable) writes a status dword to the VGPR after
+// the data; Lds (MUBUF word 0 bit 16) returns a load's data to LDS at M0 instead of VGPRs.
 public sealed record Gen5BufferMemoryControl(
     uint DwordCount,
     uint VectorAddress,
@@ -332,7 +338,10 @@ public sealed record Gen5BufferMemoryControl(
     bool Glc,
     bool Slc,
     bool Typed = false,
-    uint TypedFormat = 0) : Gen5InstructionControl;
+    uint TypedFormat = 0,
+    bool Dlc = false,
+    bool Tfe = false,
+    bool Lds = false) : Gen5InstructionControl;
 
 public sealed record Gen5ExportControl(
     uint Target,
@@ -402,12 +411,13 @@ public sealed record Gen5Dpp8Control(
     bool FetchInactive) : Gen5InstructionControl;
 
 // Glc is the SMEM GLC bit (gfx10 word 0 bit 16): the load misses the scalar cache and
-// reads the device-coherent value.
+// reads the device-coherent value. Dlc (word 0 bit 14) only steers the GL1 cache policy.
 public sealed record Gen5ScalarMemoryControl(
     uint DestinationCount,
     int ImmediateOffsetBytes,
     uint? DynamicOffsetRegister,
-    bool Glc = false) : Gen5InstructionControl;
+    bool Glc = false,
+    bool Dlc = false) : Gen5InstructionControl;
 
 public sealed record Gen5DataShareControl(
     uint Offset0,

@@ -1701,7 +1701,7 @@ public sealed partial class ScalarValueGraph
                         AddressHandleOf(global, state),
                         null,
                         null,
-                        global.UsesFlatAddress ? null : state.ReadVector(global.VectorAddress),
+                        global.UsesFlatAddress || global.AddThreadId ? null : state.ReadVector(global.VectorAddress),
                         state.Exec),
                     _ => null,
                 };

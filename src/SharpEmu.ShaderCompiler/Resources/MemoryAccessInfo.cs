@@ -250,7 +250,11 @@ public sealed class MemoryAccessTable
             Kind = MemoryResourceKind.Buffer,
             Access = access,
             Offset = unchecked((uint)control.OffsetBytes),
-            DataDwords = Math.Max(control.DwordCount, 1u),
+            // An atomic's DwordCount counts its data registers (CMPSWAP's comparator too);
+            // the memory it reaches is one dword, or a pair for the X2 forms.
+            DataDwords = access == MemoryAccess.Atomic
+                ? (opcode.EndsWith("X2", StringComparison.Ordinal) ? 2u : 1u)
+                : Math.Max(control.DwordCount, 1u),
             DataBits = bits,
             ComponentCount = Math.Max(control.DwordCount, 1u),
             DataFormat = dataFormat,
@@ -285,7 +289,8 @@ public sealed class MemoryAccessTable
                     : MemoryResourceKind.Global,
             Access = access,
             Offset = unchecked((uint)control.OffsetBytes),
-            DataDwords = Math.Max(control.DwordCount, 1u),
+            // GLOBAL_*_DWORD_ADDTID reaches one dword per lane past SADDR + offset.
+            DataDwords = control.AddThreadId ? 64u : Math.Max(control.DwordCount, 1u),
             DataBits = bits,
             ComponentCount = Math.Max(control.DwordCount, 1u),
             DataSigned = signed,
@@ -369,7 +374,9 @@ public sealed class MemoryAccessTable
     }
 
     private static MemoryAccess DataShareAccess(string opcode) =>
-        Gen5ShaderTranslator.IsDataShareAtomic(opcode) ? MemoryAccess.Atomic
+        Gen5ShaderTranslator.IsDataShareAtomic(opcode) ||
+        opcode is "DsCondxchg32RtnB64" or "DsOrderedCount" ||
+        opcode.StartsWith("DsGws", StringComparison.Ordinal) ? MemoryAccess.Atomic
         : opcode.StartsWith("DsWrite", StringComparison.Ordinal) ? MemoryAccess.Write
         : MemoryAccess.Read;
 }
