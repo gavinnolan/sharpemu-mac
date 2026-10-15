@@ -116,6 +116,14 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     private ulong _totalUsedMemory;
     private ulong _memoryBudgetBytes;
     private ulong _collectionTick;
+    // Collection ticks at which the current and the previous presented frame began:
+    // an image used in either is part of the working set and is never evicted for
+    // budget, whatever its tick age. Ticks advance per completed submission, and a
+    // 4K frame spans hundreds of them, so a tick-age rule alone evicts images the same
+    // frame is still about to use and the cache thrashes (Demon's Souls at 3 GB:
+    // 64 MB targets written back and re-uploaded every frame, 0.5 fps).
+    private ulong _frameStartTick;
+    private ulong _previousFrameStartTick;
     private uint _queryEpoch;
     private long _createdImages;
     private long _uploads;
@@ -159,9 +167,16 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     private static ulong ResolveMemoryBudget()
     {
         var configured = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_IMAGE_BUDGET_MB");
-        return ulong.TryParse(configured, out var megabytes) && megabytes >= 256
-            ? megabytes * MiB
-            : 3072 * MiB;
+        if (ulong.TryParse(configured, out var megabytes) && megabytes >= 256)
+        {
+            return megabytes * MiB;
+        }
+
+        // A quarter of physical memory, between 3 GB and 8 GB: a 4K title's working set
+        // (Demon's Souls: ~3.3 GB at character creation) must fit, and unified memory
+        // also holds the guest's own copy of every image.
+        var physical = (ulong)Math.Max(0L, GC.GetGCMemoryInfo().TotalAvailableMemoryBytes);
+        return Math.Clamp(physical / 4, 3072 * MiB, 8192 * MiB);
     }
 
     private static bool IsValidRange(ulong address, ulong size) =>

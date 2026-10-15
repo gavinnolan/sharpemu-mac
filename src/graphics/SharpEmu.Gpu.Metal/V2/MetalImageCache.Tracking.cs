@@ -410,6 +410,14 @@ internal sealed partial class MetalImageCache
         }
     }
 
+    /// <summary>Marks a presented frame: images used since the previous mark stay resident.</summary>
+    public void MarkFrame()
+    {
+        using var held = _lock.Hold();
+        _previousFrameStartTick = _frameStartTick;
+        _frameStartTick = _collectionTick;
+    }
+
     /// <summary>Advances the collection tick and evicts stale images over the budget.</summary>
     public void Collect()
     {
@@ -420,7 +428,9 @@ internal sealed partial class MetalImageCache
     }
 
     // Eviction under memory pressure: the least recently used clean images go first,
-    // and a GPU-modified image is written back before its texture is dropped.
+    // and a GPU-modified image is written back before its texture is dropped. Images
+    // used by the current or the previous frame are the working set and stay: when
+    // that alone is over the budget the cache runs over rather than thrashing.
     private void CollectIfOverBudget()
     {
         if (_totalUsedMemory <= _memoryBudgetBytes)
@@ -431,7 +441,9 @@ internal sealed partial class MetalImageCache
         var candidates = new List<(ulong Tick, ResourceSlotIdentifier Image)>();
         _slots.ForEach((imageIdentifier, image) =>
         {
-            if (image.Registered && _collectionTick - Math.Min(_collectionTick, image.LastAccessTick) > TicksBeforeRemoval)
+            if (image.Registered
+                && image.LastAccessTick < _previousFrameStartTick
+                && _collectionTick - Math.Min(_collectionTick, image.LastAccessTick) > TicksBeforeRemoval)
             {
                 candidates.Add((image.LastAccessTick, imageIdentifier));
             }

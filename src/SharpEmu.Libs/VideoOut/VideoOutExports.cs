@@ -454,10 +454,20 @@ public static partial class VideoOutExports
             return OrbisVideoOutErrorInvalidHandle;
         }
 
+        bool changed;
         lock (_stateGate)
         {
+            changed = port.FlipRate != rate;
             port.FlipRate = rate;
         }
+
+        if (changed)
+        {
+            // The flip rate is the title's frame-rate target (0 = every vblank, 1 = every
+            // second, 2 = every third): a 30 fps mode and a 60 fps mode differ here.
+            Console.Error.WriteLine($"[VIDEOOUT][INFO] flip rate set: handle={handle} rate={rate} target_fps={port.RefreshRate / (rate + 1)}");
+        }
+
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 

@@ -403,6 +403,11 @@ internal sealed partial class MetalRenderHost :
 
         _slotTrap?.OnCommit(serial);
         PassProfileCommit(serial, cause == PassEndCause.Present);
+        if (cause == PassEndCause.Present)
+        {
+            _imageCache.MarkFrame();
+        }
+
         MetalNative.SendVoid(_commandBuffer, SelCommit);
         if (DsTrace.Gpu && DsTrace.Armed)
         {
