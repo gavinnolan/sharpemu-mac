@@ -179,6 +179,7 @@ internal sealed partial class MetalRenderHost
     public void ResetBindings()
     {
         _imageCache.DrainDeferredRefreshes();
+        DisarmPendingCopy();
         _pendingGraphicsPipeline = null;
         _pendingComputePipeline = null;
         _vertexBufferCount = 0;

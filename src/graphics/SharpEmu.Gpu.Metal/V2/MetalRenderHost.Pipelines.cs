@@ -661,7 +661,12 @@ internal sealed partial class MetalRenderHost
 
     public bool SupportsPipelineSuspend => !SynchronousPipelines;
 
-    public void NotePipelineNotReady() => _pipelineNotReady = true;
+    public void NotePipelineNotReady()
+    {
+        _pipelineNotReady = true;
+        // The dispatch runs again when the pipeline is ready, and asks for its copy again.
+        DisarmPendingCopy();
+    }
 
     private bool _pipelineNotReady;
 
