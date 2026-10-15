@@ -165,7 +165,8 @@ public sealed partial class GpuCommandInterpreter
         PendingLabelRecorded?.Invoke(destination, (int)byteCount, value);
         _lastWriteLength = 0;
         _host.RecordEndOfPipe(new EndOfPipeWrite(
-            is64Bit ? EndOfPipeWriteKind.ClockWrite : EndOfPipeWriteKind.Write32, SubmitId, destination, value));
+            is64Bit ? EndOfPipeWriteKind.ClockWrite : EndOfPipeWriteKind.Write32, SubmitId, destination, value,
+            ReferenceClock: true));
     }
 
     // Selectors 0 and 3 are memory, 1 is GDS, 2 is immediate data (source) or nowhere (destination).

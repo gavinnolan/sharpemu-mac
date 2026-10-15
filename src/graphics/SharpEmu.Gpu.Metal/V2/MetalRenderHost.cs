@@ -1904,6 +1904,7 @@ internal sealed partial class MetalRenderHost :
 
         var labels = TakeLabelCounters();
         var cpWrites = TakeCommandProcessorWriteCounters();
+        var clocks = TakeClockLabelCounters();
         reasons.Append(" host_fills=").Append(Interlocked.Exchange(ref _hostFills, 0))
             .Append(" gpu_fills=").Append(Interlocked.Exchange(ref _gpuFills, 0))
             .Append(" cleared_fills=").Append(Interlocked.Exchange(ref _absorbedFills, 0))
@@ -1912,6 +1913,8 @@ internal sealed partial class MetalRenderHost :
             .Append(" gpu_labels=").Append(labels.GpuTimed)
             .Append(" host_labels=").Append(labels.WithoutWindow)
             .Append(" ordered_labels=").Append(TakeOrderedHostLabels())
+            .Append(" clock_labels=").Append(clocks.Completion)
+            .Append(" clock_forced=").Append(clocks.Forced)
             .Append(" gpu_cp_writes=").Append(cpWrites.GpuTimed)
             .Append(" host_cp_writes=").Append(cpWrites.Host)
             .Append(" cp_overlay_reads=").Append(TakeOverlayReads())

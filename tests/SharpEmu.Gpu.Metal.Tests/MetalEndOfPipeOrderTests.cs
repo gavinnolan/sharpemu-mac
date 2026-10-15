@@ -8,6 +8,7 @@ using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Gpu.GpuCommands;
+using SharpEmu.Libs.Gpu.Scheduling;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -209,6 +210,85 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         WaitForCompletions(host);
         Assert.Equal(2UL, rig.Backing.Read64(WindowedLabel));
         Assert.Equal(0x55UL, rig.Backing.Read64(LaterLabel));
+    }
+
+    [Theory]
+    [InlineData(null, "Completion")]
+    [InlineData("", "Completion")]
+    [InlineData("completion", "Completion")]
+    [InlineData("deferred", "Deferred")]
+    [InlineData("parse", "Parse")]
+    public void TheClockSamplingModeComesFromTheEnvironmentValue(string? value, string expected) =>
+        Assert.Equal(expected, MetalRenderHost.ParseClockSampling(value).ToString());
+
+    /// <summary>
+    /// A clock label is the time the work before it finished, so it is sampled by that work's
+    /// completion and not as parsed - Demon's Souls sizes its dynamic resolution from the gap
+    /// between two of them. A label recorded after it must not become visible first.
+    /// </summary>
+    [Fact]
+    public void AClockLabelCarriesItsCompletionTimeAndALaterLabelWaitsBehindIt()
+    {
+        if (!RequireDevice()) return;
+        var (parsed, gpuDone, clock, later, counters) = RecordClockThenLater(EndOfPipeClockSampling.Completion);
+
+        Assert.Equal(0UL, clock.WhileHeld);
+        Assert.Equal(0UL, later.WhileHeld);
+        Assert.True(clock.AfterDrain >= gpuDone,
+            $"The clock 0x{clock.AfterDrain:X} predates the GPU finishing the work before it (0x{gpuDone:X}).");
+        Assert.True(clock.AfterDrain > parsed);
+        Assert.Equal(2UL, later.AfterDrain);
+        Assert.Equal((1L, 1L), counters);
+    }
+
+    [Fact]
+    public void TheDeferredClockLandsInOrderWithItsParseTimeValue()
+    {
+        if (!RequireDevice()) return;
+        var (parsed, _, clock, later, counters) = RecordClockThenLater(EndOfPipeClockSampling.Deferred);
+
+        // The GPU copied both as it reached them: no completion, the value as parsed.
+        Assert.Equal(parsed, clock.WhileHeld);
+        Assert.Equal(2UL, later.WhileHeld);
+        Assert.Equal(parsed, clock.AfterDrain);
+        Assert.Equal((0L, 0L), counters);
+    }
+
+    private (ulong Parsed, ulong GpuDone, (ulong WhileHeld, ulong AfterDrain) Clock,
+        (ulong WhileHeld, ulong AfterDrain) Later, (long Completion, long Forced) Counters)
+        RecordClockThenLater(EndOfPipeClockSampling sampling)
+    {
+        const ulong clockLabel = GuestBase + 0x4000;
+        using var hold = new ManualResetEventSlim(false);
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        host.ClockSampling = sampling;
+        try
+        {
+            // GPU work in the submission, held on the completion thread so the gap between the
+            // GPU finishing and the host publishing is as wide as a slow frame makes it.
+            host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write32, 1, WindowedLabel, 0xA0));
+            host.Completions.Enqueue(host.SubmissionSerial, () => hold.Wait(TimeSpan.FromSeconds(10)));
+
+            var parsed = GpuReferenceClock.Read();
+            host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.ClockWrite, 1, clockLabel, parsed, ReferenceClock: true));
+            host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write64, 1, LaterLabel, 2));
+
+            host.FlushCommandBuffer();
+            WaitForGpu(host, host.LastWorkSerial);
+            var gpuDone = GpuReferenceClock.Read();
+            var clockWhileHeld = rig.Backing.Read64(clockLabel);
+            var laterWhileHeld = rig.Backing.Read64(LaterLabel);
+
+            hold.Set();
+            WaitForCompletions(host);
+            return (parsed, gpuDone, (clockWhileHeld, rig.Backing.Read64(clockLabel)),
+                (laterWhileHeld, rig.Backing.Read64(LaterLabel)), host.TakeClockLabelCounters());
+        }
+        finally
+        {
+            hold.Set();
+        }
     }
 
     private ((ulong WhileHeld, ulong AfterDrain) Owed, (ulong WhileHeld, ulong AfterDrain) Later, long Ordered)

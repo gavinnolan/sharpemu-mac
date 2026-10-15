@@ -65,6 +65,9 @@ public enum EndOfPipeWriteKind
 
 // A completion the host records on the current command buffer. The label itself is
 // already in guest memory unless the host explicitly defers end-of-pipe labels.
+// ReferenceClock marks a payload that is the GPU reference clock sampled as the packet was
+// parsed (an end-of-pipe timestamp or a COPY_DATA of the clock, whatever its kind), so a
+// host that publishes the label later may sample the clock again when the work finished.
 public readonly record struct EndOfPipeWrite(
     EndOfPipeWriteKind Kind,
     ulong SubmitId,
@@ -78,7 +81,8 @@ public readonly record struct EndOfPipeWrite(
     int FlipIndex = 0,
     int FlipMode = 0,
     long FlipArgument = 0,
-    ulong FlipRequestId = 0);
+    ulong FlipRequestId = 0,
+    bool ReferenceClock = false);
 
 // Everything a packet handler needs from the renderer, the caches, the scheduler and video out.
 public interface ICommandStreamHost

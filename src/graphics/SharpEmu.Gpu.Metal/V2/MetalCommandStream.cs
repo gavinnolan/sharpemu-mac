@@ -184,7 +184,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         {
             Console.Error.WriteLine(
                 $"[METAL-V2][EOP] host kind={write.Kind} address=0x{write.Destination:X16} value=0x{write.Value:X16} " +
-                $"deferred={DefersEndOfPipeLabel(write.Kind)} event={write.EventId} flip={write.FlipRequestId}");
+                $"deferred={DefersEndOfPipeLabel(write.Kind)} event={write.EventId} flip={write.FlipRequestId}" +
+                ClockSamplingTrace(in write));
         }
 
         // A label the GPU could not write is owed until its completion publishes it, and
@@ -192,7 +193,18 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         var owed = !encoded && EndOfPipeLabelBytes(write.Kind) != 0 && DefersEndOfPipeLabel(write.Kind);
         if (owed)
         {
+            // A clock owed here is sampled again by its completion (ClockSampling).
+            label = write with { ReferenceClock = SamplesClockAtCompletion(in write) };
+            if (label.ReferenceClock)
+            {
+                Interlocked.Increment(ref _owedClockLabels);
+            }
+
             Interlocked.Increment(ref _owedHostLabels);
+        }
+        else
+        {
+            label = write with { ReferenceClock = false };
         }
 
         switch (write.Kind)
@@ -280,12 +292,20 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             return false;
         }
 
+        if (SamplesClockAtCompletion(in write))
+        {
+            // The GPU would copy the clock as it was parsed; only the completion of the work
+            // before it knows when that work finished (ClockSampling).
+            return false;
+        }
+
         if (!MayEncodeLabelOnGpu(OrderedEndOfPipe, Volatile.Read(ref _owedHostLabels)))
         {
             // An older label is still owed by a completion. Written by the GPU now, this one
             // would land first, and a guest that reuses memory on the newer signal then has
             // the older label land in it. Its completion is queued behind the owed one's.
             Interlocked.Increment(ref _orderedHostLabels);
+            CountClockForcedLabel();
             return false;
         }
 
@@ -321,7 +341,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             var queued = System.Diagnostics.Stopwatch.GetTimestamp();
             Console.Error.WriteLine(
                 $"[METAL-V2][EOP] encode kind={kind} address=0x{address:X16} bytes={bytes} " +
-                $"value=0x{labelValue:X16} serial={serial}");
+                $"value=0x{labelValue:X16} serial={serial}" + ClockSamplingTrace(in write));
             _completions.Enqueue(serial, () => Console.Error.WriteLine(
                 $"[METAL-V2][EOP] landed address=0x{address:X16} serial={serial} waited_ms=" +
                 ((System.Diagnostics.Stopwatch.GetTimestamp() - queued) * 1000.0 / System.Diagnostics.Stopwatch.Frequency)
@@ -491,8 +511,14 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     private bool TryEncodeCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind)
     {
-        if (!GpuTimedLabels || !MayEncodeLabelOnGpu(OrderedEndOfPipe, Volatile.Read(ref _owedHostLabels)))
+        if (!GpuTimedLabels)
         {
+            return false;
+        }
+
+        if (!MayEncodeLabelOnGpu(OrderedEndOfPipe, Volatile.Read(ref _owedHostLabels)))
+        {
+            CountClockForcedLabel();
             return false;
         }
 
@@ -805,14 +831,49 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     {
         try
         {
-            PublishEndOfPipeLabel(in label);
+            if (label.ReferenceClock)
+            {
+                PublishClockAtCompletion(in label);
+            }
+            else
+            {
+                PublishEndOfPipeLabel(in label);
+            }
         }
         finally
         {
             if (owed)
             {
+                if (label.ReferenceClock)
+                {
+                    Interlocked.Decrement(ref _owedClockLabels);
+                }
+
                 Interlocked.Decrement(ref _owedHostLabels);
             }
+        }
+    }
+
+    /// <summary>
+    /// Publishes a clock label with the reference clock as it is now, from the completion
+    /// of the work recorded before it.
+    /// </summary>
+    /// <remarks>
+    /// The completion runs once the GPU signalled that submission, so the value is at least
+    /// the time that work finished, plus the time the host took to notice. Completions run
+    /// one at a time in submission order, so clocks published here never go backwards.
+    /// </remarks>
+    private void PublishClockAtCompletion(in EndOfPipeWrite label)
+    {
+        var sampled = label with { Value = GpuReferenceClock.Read() };
+        PublishEndOfPipeLabel(in sampled);
+        Interlocked.Increment(ref _clockCompletionLabels);
+        if (EndOfPipeTrace)
+        {
+            Console.Error.WriteLine(
+                $"[METAL-V2][EOP] clock kind={label.Kind} address=0x{label.Destination:X16} " +
+                $"value=0x{sampled.Value:X16} parsed=0x{label.Value:X16} " +
+                $"late_us={(long)(sampled.Value - label.Value) / 100} sampling=completion");
         }
     }
 
@@ -877,14 +938,73 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// SHARPEMU_METAL_V2_EOP_CLOCKS=parse opts back into publishing clocks as parsed.
     /// </remarks>
     public bool DefersEndOfPipeLabel(EndOfPipeWriteKind kind) =>
-        DefersLabelKind(kind, DefersEndOfPipeLabels, PublishClocksWhenParsed);
+        DefersLabelKind(kind, DefersEndOfPipeLabels, ClockSampling == EndOfPipeClockSampling.Parse);
 
     internal static bool DefersLabelKind(EndOfPipeWriteKind kind, bool defersLabels, bool publishClocksWhenParsed) =>
         defersLabels &&
         (!publishClocksWhenParsed || kind is not (EndOfPipeWriteKind.ClockWrite or EndOfPipeWriteKind.ClockWriteBack));
 
-    private static readonly bool PublishClocksWhenParsed =
-        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_EOP_CLOCKS") == "parse";
+    /// <summary>
+    /// When a clock label's value is sampled: SHARPEMU_METAL_V2_EOP_CLOCKS=completion (the
+    /// default), =deferred or =parse.
+    /// </summary>
+    /// <remarks>
+    /// An end-of-pipe timestamp is the time the work before it finished. The interpreter
+    /// samples the clock as it parses the packet, which on this host is well before the GPU
+    /// runs that work, so a frame bracketed by two such stamps measures how long the stream
+    /// took to parse rather than to render. Demon's Souls feeds them to its dynamic
+    /// resolution: it saw a GPU frame far below the real ~38 ms and stayed at 3840x2160.
+    /// Completion leaves the label to the completion of the work before it, which samples
+    /// the clock again. That costs what any host-published label costs: a command buffer
+    /// flush unless the work already went out, the wait for the host to notice, and every
+    /// later label and command-processor write sent through completions while the clock is
+    /// owed, so a guest that sees a later fence never reads an older clock.
+    /// Deferred lands the parse-time value in order with the labels, as the GPU reaches it;
+    /// parse writes it as parsed. Both are kept to A/B against completion.
+    /// </remarks>
+    internal EndOfPipeClockSampling ClockSampling { get; set; } = ClockSamplingDefault;
+
+    internal static EndOfPipeClockSampling ParseClockSampling(string? value) => value switch
+    {
+        "parse" => EndOfPipeClockSampling.Parse,
+        "deferred" => EndOfPipeClockSampling.Deferred,
+        _ => EndOfPipeClockSampling.Completion,
+    };
+
+    private static readonly EndOfPipeClockSampling ClockSamplingDefault =
+        ParseClockSampling(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_EOP_CLOCKS"));
+
+    internal static bool IsClockLabel(in EndOfPipeWrite write) =>
+        write.ReferenceClock || write.Kind is EndOfPipeWriteKind.ClockWrite or EndOfPipeWriteKind.ClockWriteBack;
+
+    private bool SamplesClockAtCompletion(in EndOfPipeWrite write) =>
+        ClockSampling == EndOfPipeClockSampling.Completion && IsClockLabel(in write) &&
+        EndOfPipeLabelBytes(write.Kind) != 0 && DefersEndOfPipeLabel(write.Kind);
+
+    private string ClockSamplingTrace(in EndOfPipeWrite write) => IsClockLabel(in write)
+        ? " sampling=" + (SamplesClockAtCompletion(in write) ? "completion"
+            : DefersEndOfPipeLabel(write.Kind) ? "deferred" : "parse")
+        : string.Empty;
+
+    // Clock labels a completion owes; nonzero means a label refused the GPU is held behind one.
+    private long _owedClockLabels;
+    private long _clockCompletionLabels;
+    private long _clockForcedLabels;
+
+    private void CountClockForcedLabel()
+    {
+        if (Volatile.Read(ref _owedClockLabels) != 0)
+        {
+            Interlocked.Increment(ref _clockForcedLabels);
+        }
+    }
+
+    /// <summary>
+    /// Clock labels sampled and written at completion, and labels or command-processor
+    /// writes sent through completions because a clock was owed.
+    /// </summary>
+    public (long Completion, long Forced) TakeClockLabelCounters() =>
+        (Interlocked.Exchange(ref _clockCompletionLabels, 0), Interlocked.Exchange(ref _clockForcedLabels, 0));
 
     // SHARPEMU_METAL_V2_EOP_TRACE=1 names every label: what it is, where it goes, which
     // submission carries it and how long that submission took to land. A title that gives
@@ -1341,4 +1461,17 @@ internal interface IMetalFlipTarget
     // The texture is presented once the submission serial completes; the presenter
     // retains it until the frame it belongs to has been shown.
     void PublishGuestFrame(nint texture, uint width, uint height, ulong requestId, ulong serial, bool isHdr);
+}
+
+/// <summary>When a clock label's value is sampled (see MetalRenderHost.ClockSampling).</summary>
+internal enum EndOfPipeClockSampling
+{
+    /// <summary>Sampled by the completion of the work before it, and published there.</summary>
+    Completion,
+
+    /// <summary>Sampled as parsed and landed in order with the labels, as the GPU reaches it.</summary>
+    Deferred,
+
+    /// <summary>Sampled and written as parsed.</summary>
+    Parse,
 }

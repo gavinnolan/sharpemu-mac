@@ -265,7 +265,7 @@ public sealed partial class GpuCommandInterpreter
         var kind = withInterrupt
             ? (withWriteBack ? EndOfPipeWriteKind.InterruptWriteBack64 : EndOfPipeWriteKind.Interrupt64)
             : (withWriteBack ? EndOfPipeWriteKind.ClockWriteBack : EndOfPipeWriteKind.ClockWrite);
-        _host.RecordEndOfPipe(new EndOfPipeWrite(kind, SubmitId, destination, clock, eventId, contextId));
+        _host.RecordEndOfPipe(new EndOfPipeWrite(kind, SubmitId, destination, clock, eventId, contextId, ReferenceClock: true));
     }
 
     // GDS contents are only valid after the GPU finished, so this variant waits first.
