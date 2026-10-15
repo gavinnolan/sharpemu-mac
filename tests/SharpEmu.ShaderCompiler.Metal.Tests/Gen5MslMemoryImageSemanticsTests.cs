@@ -114,6 +114,45 @@ public sealed class Gen5MslMemoryImageSemanticsTests(ITestOutputHelper output)
         }
     }
 
+    // ---- S_MEMTIME / S_MEMREALTIME and SMEM cache maintenance ----
+
+    [Theory]
+    [InlineData(0x24u)] // s_memtime
+    [InlineData(0x25u)] // s_memrealtime
+    public void ShaderClockReadsAreNonZeroAndAdvanceAcrossACacheInvalidate(uint opcode)
+    {
+        // MSL has no shader clock, so the 64-bit counter advances on every read: a later
+        // read is larger, never the hardcoded zero a missing clock would leave.
+        var fixture = new Gen5ComputeFixture($"smem-clock-{opcode:X2}",
+        [
+            0xF4000000u | opcode << 18 | 4u << 6, 0u, // s_memtime s[4:5]
+            0xF4800000u, 0u,                          // s_dcache_inv
+            0xF47C0000u, 0u,                          // s_gl1_inv
+            0xF4000000u | opcode << 18 | 6u << 6, 0u, // s_memtime s[6:7]
+            0xBF8C0000,                               // s_waitcnt 0
+            0x7E060204,                               // v_mov_b32 v3, s4
+            0x7E080206,                               // v_mov_b32 v4, s6
+            0x7E0A0207,                               // v_mov_b32 v5, s7
+            0xE0700000, 0x80020300,                   // buffer_store_dword v3, off, s[8:11], 0
+            0xE0700004, 0x80020400,                   // buffer_store_dword v4, off, s[8:11], 0 offset:4
+            0xE0700008, 0x80020500,                   // buffer_store_dword v5, off, s[8:11], 0 offset:8
+            SEndpgm,
+        ], 8, 16);
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture);
+        Assert.Contains("sharpemu_shader_clock", shader.Source);
+        if (!RequireDevice()) return;
+
+        Assert.True(MetalNative.TryCompileLibrary(shader.Source, out var library, out var compileError),
+            $"{compileError}\n{shader.Source}");
+        Assert.True(MetalNative.TryExecuteWithArgumentBuffer(library, shader.EntryPoint, new byte[16],
+            new byte[PushData.ByteSize], shader.ArgumentLayout!, 1, out var result, out var runError), runError);
+        var first = BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(0));
+        var second = BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(4));
+        Assert.NotEqual(0u, first);
+        Assert.True(second > first, $"{second} <= {first}");
+        Assert.Equal(0u, BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(8)));
+    }
+
     // ---- image sampling: LOD clamp, A16, UNRM ----
 
     [Fact]

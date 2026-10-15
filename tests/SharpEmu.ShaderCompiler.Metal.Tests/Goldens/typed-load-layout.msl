@@ -180,6 +180,28 @@ static inline uint sharpemu_format_encode(uint value, uint bits, uint nfmt, uint
     }
 }
 
+// A D16 formatted load narrows a converted component to 16 bits: UINT and SINT keep the
+// low 16 bits, every other number format converts to a float and narrows it to a half.
+static inline uint sharpemu_format_d16(uint value, uint nfmt)
+{
+    return (nfmt == 4u || nfmt == 5u) ? (value & 0xFFFFu) : (uint)as_type<ushort>((half)as_type<float>(value));
+}
+
+// A D16 formatted store widens its 16-bit half back to the value the format encodes from:
+// UINT zero extends, SINT sign extends and every other number format widens a half.
+static inline uint sharpemu_format_d16_expand(uint value, uint nfmt)
+{
+    if (nfmt == 4u)
+    {
+        return value & 0xFFFFu;
+    }
+    if (nfmt == 5u)
+    {
+        return (uint)extract_bits(as_type<int>(value), 0u, 16u);
+    }
+    return as_type<uint>((float)as_type<half>((ushort)(value & 0xFFFFu)));
+}
+
 struct Gen5AddressRange
 {
     ulong first_page;
@@ -606,8 +628,8 @@ kernel void gen5_cs(
         bool t3 = ((0x38FACu >> 12) & 0x7Fu) != 0u && t2;
         uint4 t4 = sharpemu_load_words<2>(b0, sharpemu_resources.buffer_bytes[0], t1);
         uint t5 = sharpemu_format_convert(t4[0], 32u, 7u, 11u);
-        v2 = t3 ? t5 : 0u;
         uint t6 = sharpemu_format_convert(t4[1], 32u, 7u, 11u);
+        v2 = t3 ? t5 : 0u;
         v3 = t3 ? t6 : 0u;
         uint t7 = (0x10u + 0u + 0u + (0u * 0u));
         sharpemu_store_dword(b0, sharpemu_resources.buffer_bytes[0], t7 + 0u, v2);

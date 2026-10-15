@@ -239,6 +239,7 @@ public static partial class Gen5MslTranslator
         private bool _usesLds;
         private uint _scratchDwordCount;
         private bool _usesFormatLoads;
+        private bool _usesShaderClock;
         private bool _usesWaveScratch;
 
         /// <summary>True when this stage emulates a 64-lane guest wave across two
@@ -309,7 +310,7 @@ public static partial class Gen5MslTranslator
                 foreach (var instruction in _request.Program.Instructions)
                 {
                     _usesLds |= instruction.Control is Gen5DataShareControl { Gds: false } &&
-                        instruction.Opcode is not ("DsSwizzleB32" or "DsBpermuteB32");
+                        instruction.Opcode is not ("DsSwizzleB32" or "DsBpermuteB32" or "DsPermuteB32" or "DsNop");
                     if (instruction.Opcode.StartsWith("Scratch", StringComparison.Ordinal))
                     {
                         _scratchDwordCount = Math.Max(_request.ScratchDwords, 1u);
@@ -317,6 +318,7 @@ public static partial class Gen5MslTranslator
 
                     _usesFormatLoads |= IsFormatBufferLoad(instruction.Opcode) ||
                         IsFormatBufferStore(instruction.Opcode);
+                    _usesShaderClock |= instruction.Opcode is "SMemtime" or "SMemrealtime";
                     if (instruction.Control is Gen5InterpolationControl interpolationControl)
                     {
                         _pixelAttributes.Add(interpolationControl.Attribute);
@@ -1394,6 +1396,20 @@ public static partial class Gen5MslTranslator
                 // No shader trap handler is installed, so S_TRAP has no effect.
                 case "STrap":
                     return true;
+                // S_GL1_INV and S_DCACHE_INV drop the GL1 and scalar data caches so later loads
+                // see memory written since. Metal gives a shader no such cache to drop: every
+                // scalar load here reads its host binding or device memory when it runs, the
+                // coherence BUFFER_WBINVL1 already relies on. S_DCACHE_WB has nothing to write
+                // back, as no scalar store is emitted, and S_ATC_PROBE* only warm a cache.
+                case "SGl1Inv":
+                case "SDcacheInv":
+                case "SDcacheWb":
+                case "SAtcProbe":
+                case "SAtcProbeBuffer":
+                    return true;
+                case "SMemtime":
+                case "SMemrealtime":
+                    return TryEmitShaderClock(instruction, out error);
                 // S_SETREG_B32 simm16 = hwreg id[5:0], offset[10:6], size-1[15:11]. The translator
                 // honours MODE only through the launch-time IeeeMode / DX10_CLAMP state (ALU output
                 // modifiers), so a write to MODE bits 8..9 would silently desync from it and is refused.
@@ -1510,6 +1526,31 @@ public static partial class Gen5MslTranslator
             }
         }
 
+        private const string ShaderClockName = "sharpemu_shader_clock";
+
+        // S_MEMTIME / S_MEMREALTIME write a 64-bit counter to the SDATA pair. A Metal shader
+        // has no clock to read: MSL declares none, and the AGX compiler fails the pipeline
+        // on llvm.readcyclecounter (__builtin_readcyclecounter; checked on an M4, macOS 27).
+        // The stand-in is the invocation's own tick counter, advanced by one on every read of
+        // either instruction: a read returns more than every earlier read in the invocation,
+        // so a delta between two reads is positive and a wait for the counter to pass a mark
+        // ends. It counts reads, not time, and is not comparable between invocations or with
+        // the 100 MHz reference clock the command processor's timestamps report. Every lane
+        // of a wave runs the same scalar instructions, so the value is wave-uniform.
+        private bool TryEmitShaderClock(Gen5ShaderInstruction instruction, out string error)
+        {
+            error = string.Empty;
+            if (instruction.Destinations is not [{ Kind: Gen5OperandKind.ScalarRegister } low, _])
+            {
+                error = $"{instruction.Opcode} has no scalar register pair destination";
+                return false;
+            }
+
+            Line($"{ShaderClockName} += 1ul;");
+            StoreScalar64(low.Value, ShaderClockName);
+            return true;
+        }
+
         private bool TryEmitGlobalMemory(
             Gen5ShaderInstruction instruction,
             Gen5GlobalMemoryControl control,
@@ -1534,7 +1575,7 @@ public static partial class Gen5MslTranslator
                 return true;
             }
 
-            if (instruction.Opcode.Contains("FormatD16", StringComparison.Ordinal))
+            if (FormatComponentCount(instruction.Opcode, control, out var formatD16) == 0 && formatD16.Enabled)
             {
                 error = $"unsupported buffer opcode {instruction.Opcode}";
                 return false;
@@ -1627,15 +1668,15 @@ public static partial class Gen5MslTranslator
                 ApplyByteBias(
                     bindingIndex,
                     $"(0x{unchecked((uint)control.OffsetBytes):X}u + {scalarOffset} + {vectorOffset} + ({vectorIndex} * {stride}))"));
-            if (instruction.Opcode is "BufferStoreFormatX" or "BufferStoreFormatXy" or
-                "BufferStoreFormatXyz" or "BufferStoreFormatXyzw")
+            var components = FormatComponentCount(instruction.Opcode, control, out var d16);
+            if (instruction.Opcode.StartsWith("BufferStoreFormat", StringComparison.Ordinal))
             {
                 if (descriptorFormat == 0)
                 {
                     return true;
                 }
 
-                if (!TryEmitBufferFormatStore(bindingIndex, address, control, descriptorWord3, descriptorFormat))
+                if (!TryEmitBufferFormatStore(bindingIndex, address, control, descriptorWord3, descriptorFormat, components, d16))
                 {
                     error = $"unsupported buffer store format {descriptorFormat}";
                     return false;
@@ -1646,7 +1687,7 @@ public static partial class Gen5MslTranslator
 
             if (control.Typed &&
                 instruction.Opcode.StartsWith("TBufferStore", StringComparison.Ordinal) &&
-                TryEmitBufferFormatStore(bindingIndex, address, control, descriptorWord3, control.TypedFormat))
+                TryEmitBufferFormatStore(bindingIndex, address, control, descriptorWord3, control.TypedFormat, components, d16))
             {
                 return true;
             }
@@ -1662,14 +1703,23 @@ public static partial class Gen5MslTranslator
                         address,
                         descriptorWord3,
                         control.VectorData,
-                        control.DwordCount);
+                        components,
+                        d16);
                     return true;
                 }
 
-                if (TryEmitTypedBufferFormatLoad(BindingFormatMemory(bindingIndex), address, control, descriptorWord3))
+                if (TryEmitTypedBufferFormatLoad(BindingFormatMemory(bindingIndex), address, control, descriptorWord3, components, d16))
                 {
                     return true;
                 }
+            }
+
+            // A D16 access packs halves, so the raw dword path below cannot stand in for a
+            // typed format that does not decode.
+            if (d16.Enabled)
+            {
+                error = $"unsupported typed format {control.TypedFormat} for {instruction.Opcode}";
+                return false;
             }
 
             return TryEmitResolvedMemoryAccess(
@@ -1688,11 +1738,14 @@ public static partial class Gen5MslTranslator
             string byteAddress,
             string descriptorWord3,
             uint vectorData,
-            uint componentCount)
+            uint componentCount,
+            FormatD16 d16)
         {
             // A descriptor word the specialization fixed is decoded here; a format of whole
-            // dwords then loads as one run. Anything else decodes on the device below.
-            if (TryParseUIntLiteral(descriptorWord3, out var literalWord3) &&
+            // dwords then loads as one run. Anything else, and every D16 load, decodes on the
+            // device below.
+            if (!d16.Enabled &&
+                TryParseUIntLiteral(descriptorWord3, out var literalWord3) &&
                 TryEmitLiteralDwordFormatLoad(bindingIndex, byteAddress, literalWord3, vectorData, componentCount))
             {
                 return;
@@ -1703,7 +1756,95 @@ public static partial class Gen5MslTranslator
                 byteAddress,
                 descriptorWord3,
                 vectorData,
-                componentCount);
+                componentCount,
+                d16);
+        }
+
+        // The D16 forms of the formatted accesses (BUFFER/TBUFFER_LOAD/STORE_FORMAT_D16_*,
+        // RDNA2 ISA 12.9/12.14): each component travels as a 16-bit half, two to a register
+        // with X in the low half, so XYZ and XYZW take two registers. The Hi form moves its one
+        // component through the high half of its register.
+        private readonly record struct FormatD16(bool Enabled, bool High);
+
+        // How many components a formatted access transfers: one per register, or for a D16
+        // form the count its suffix names. Zero for a D16 suffix that is not known.
+        private static uint FormatComponentCount(string opcode, Gen5BufferMemoryControl control, out FormatD16 d16)
+        {
+            const string Marker = "FormatD16";
+            var at = opcode.IndexOf(Marker, StringComparison.Ordinal);
+            if (at < 0)
+            {
+                d16 = default;
+                return control.DwordCount;
+            }
+
+            var suffix = opcode[(at + Marker.Length)..];
+            var high = suffix.StartsWith("Hi", StringComparison.Ordinal);
+            d16 = new FormatD16(true, high);
+            return (high ? suffix[2..] : suffix) switch
+            {
+                "X" => 1u,
+                "Xy" when !high => 2u,
+                "Xyz" when !high => 3u,
+                "Xyzw" when !high => 4u,
+                _ => 0u,
+            };
+        }
+
+        // The converted components of a formatted load into their registers. A D16 load
+        // narrows each with sharpemu_format_d16 and packs the halves; a register it fills only
+        // half of (D16_X, the Z of D16_XYZ, D16_HI_X) keeps its other half, as the hardware's
+        // D16 loads preserve the bits they do not write.
+        private void StoreFormatLoadComponents(uint vectorData, IReadOnlyList<string> values, FormatD16 d16, string numberFormat)
+        {
+            if (!d16.Enabled)
+            {
+                for (var component = 0; component < values.Count; component++)
+                {
+                    StoreVector(vectorData + (uint)component, values[component]);
+                }
+
+                return;
+            }
+
+            var halves = new string[values.Count];
+            for (var component = 0; component < values.Count; component++)
+            {
+                halves[component] = Temp("uint", $"sharpemu_format_d16({values[component]}, {numberFormat})");
+            }
+
+            if (d16.High)
+            {
+                StoreVector(vectorData, $"(v[{vectorData}] & 0x0000FFFFu) | ({halves[0]} << 16)");
+                return;
+            }
+
+            for (var component = 0; component < halves.Length; component += 2)
+            {
+                var register = vectorData + (uint)(component / 2);
+                StoreVector(
+                    register,
+                    component + 1 < halves.Length
+                        ? $"{halves[component]} | ({halves[component + 1]} << 16)"
+                        : $"(v[{register}] & 0xFFFF0000u) | {halves[component]}");
+            }
+        }
+
+        // The register value a formatted store transfers for one component: the register, or
+        // for a D16 store its half widened back to the 32-bit value the number format encodes
+        // from (sharpemu_format_d16_expand).
+        private string FormatStoreComponent(uint vectorData, uint component, FormatD16 d16, string numberFormat)
+        {
+            if (!d16.Enabled)
+            {
+                return $"v[{vectorData + component}]";
+            }
+
+            var register = vectorData + (component / 2);
+            var half = d16.High || (component & 1) != 0
+                ? $"(v[{register}] >> 16u)"
+                : $"(v[{register}] & 0xFFFFu)";
+            return Temp("uint", $"sharpemu_format_d16_expand({half}, {numberFormat})");
         }
 
         // BUFFER_LOAD_FORMAT_* with the format decoded on the device: the bound path and a
@@ -1713,7 +1854,8 @@ public static partial class Gen5MslTranslator
             string byteAddress,
             string descriptorWord3,
             uint vectorData,
-            uint componentCount)
+            uint componentCount,
+            FormatD16 d16)
         {
             // Format and destination swizzle come from descriptor word 3, a register
             // or a specialization constant; the prelude table decodes the unified format.
@@ -1752,6 +1894,7 @@ public static partial class Gen5MslTranslator
                     $"{selector} == 7u ? {componentBounds[3]} : true);");
             }
 
+            var values = new string[componentCount];
             for (uint destination = 0; destination < componentCount; destination++)
             {
                 var selector = selectors[destination];
@@ -1761,8 +1904,10 @@ public static partial class Gen5MslTranslator
                     $"{selector} == 5u ? {canonical[1]} : " +
                     $"{selector} == 6u ? {canonical[2]} : " +
                     $"{selector} == 7u ? {canonical[3]} : {constant}";
-                StoreVector(vectorData + destination, valid is null ? value : $"{valid} ? ({value}) : 0u");
+                values[destination] = valid is null ? value : $"{valid} ? ({value}) : 0u";
             }
+
+            StoreFormatLoadComponents(vectorData, values, d16, numberFormat);
         }
 
         private static bool TryParseUIntLiteral(string text, out uint value)
@@ -1878,7 +2023,9 @@ public static partial class Gen5MslTranslator
             FormatMemory memory,
             string byteAddress,
             Gen5BufferMemoryControl control,
-            string descriptorWord3)
+            string descriptorWord3,
+            uint transferred,
+            FormatD16 d16)
         {
             if (!Gfx10UnifiedFormat.TryDecode(control.TypedFormat, out var dataFormat, out var numberFormat))
             {
@@ -1892,7 +2039,7 @@ public static partial class Gen5MslTranslator
             }
 
             // All transferred components must be bound and inside the binding.
-            var accessBytes = Gfx10UnifiedFormat.GetAccessByteSize(dataFormat, control.DwordCount);
+            var accessBytes = Gfx10UnifiedFormat.GetAccessByteSize(dataFormat, transferred);
             var inBounds = memory.ElementInBounds(byteAddress, $"{accessBytes}u");
             var valid = Temp(
                 "bool",
@@ -1902,7 +2049,7 @@ public static partial class Gen5MslTranslator
             // element: the address is added once and the run is loaded by one helper, with a
             // plain aligned read when it is aligned and inside the binding.
             string? dwordRun = null;
-            var runCount = Math.Min(control.DwordCount, componentCount);
+            var runCount = Math.Min(transferred, componentCount);
             if (memory.LoadWords is not null &&
                 Gfx10UnifiedFormat.HasWholeDwordComponents(dataFormat) && runCount is >= 1 and <= 4)
             {
@@ -1920,7 +2067,8 @@ public static partial class Gen5MslTranslator
                 }
             }
 
-            for (uint destination = 0; destination < control.DwordCount; destination++)
+            var values = new string[transferred];
+            for (uint destination = 0; destination < transferred; destination++)
             {
                 var value = dwordRun is not null && destination < runCount
                     ? Temp(
@@ -1936,9 +2084,10 @@ public static partial class Gen5MslTranslator
                         "0u",
                         out _)
                     : "0u";
-                StoreVector(control.VectorData + destination, $"{valid} ? {value} : 0u");
+                values[destination] = $"{valid} ? {value} : 0u";
             }
 
+            StoreFormatLoadComponents(control.VectorData, values, d16, $"{numberFormat}u");
             return true;
         }
 
@@ -1949,14 +2098,16 @@ public static partial class Gen5MslTranslator
             string byteAddress,
             Gen5BufferMemoryControl control,
             string descriptorWord3,
-            uint unifiedFormat)
+            uint unifiedFormat,
+            uint transferred,
+            FormatD16 d16)
         {
             if (!Gfx10UnifiedFormat.TryDecode(unifiedFormat, out var dataFormat, out var numberFormat))
             {
                 return false;
             }
 
-            var componentCount = Math.Min(control.DwordCount, Gfx10UnifiedFormat.ComponentCount(dataFormat));
+            var componentCount = Math.Min(transferred, Gfx10UnifiedFormat.ComponentCount(dataFormat));
             if (componentCount == 0)
             {
                 return false;
@@ -1972,7 +2123,8 @@ public static partial class Gen5MslTranslator
             _indent++;
             if (Gfx10UnifiedFormat.HasWholeDwordComponents(dataFormat))
             {
-                // Dword components are dword aligned and keep their register bits.
+                // Dword components are dword aligned and keep their register bits (a D16
+                // store's widened half).
                 for (uint component = 0; component < componentCount; component++)
                 {
                     Gfx10UnifiedFormat.TryGetComponentLayout(dataFormat, component, out var byteOffset, out _, out _);
@@ -1980,7 +2132,7 @@ public static partial class Gen5MslTranslator
                     Line(StoreDwordStatement(
                         bindingIndex,
                         address,
-                        $"v[{control.VectorData + component}]"));
+                        FormatStoreComponent(control.VectorData, component, d16, $"{numberFormat}u")));
                 }
             }
             else
@@ -1994,7 +2146,7 @@ public static partial class Gen5MslTranslator
                     Gfx10UnifiedFormat.TryGetComponentLayout(dataFormat, component, out var byteOffset, out var bitOffset, out var bitCount);
                     var encoded = Temp(
                         "uint",
-                        $"sharpemu_format_encode(v[{control.VectorData + component}], {bitCount}u, {numberFormat}u, {dataFormat}u)");
+                        $"sharpemu_format_encode({FormatStoreComponent(control.VectorData, component, d16, $"{numberFormat}u")}, {bitCount}u, {numberFormat}u, {dataFormat}u)");
                     var dword = (int)(byteOffset / 4);
                     var bit = ((byteOffset & 3) * 8) + bitOffset;
                     var placed = bit == 0 ? encoded : $"({encoded} << {bit}u)";
@@ -2101,6 +2253,25 @@ public static partial class Gen5MslTranslator
                     return TryEmitDataShareSwizzle(instruction, control, out error);
                 case "DsBpermuteB32":
                     return TryEmitDataShareBpermute(instruction, control, out error);
+                case "DsPermuteB32":
+                    return TryEmitDataSharePermute(instruction, control, out error);
+                case "DsNop":
+                    return true;
+                case "DsWriteB8":
+                case "DsWriteB16":
+                case "DsWriteB8D16Hi":
+                case "DsWriteB16D16Hi":
+                    return TryEmitDataShareSubwordWrite(instruction, control, out error);
+                case "DsReadU8":
+                case "DsReadI16":
+                case "DsReadU16":
+                case "DsReadU8D16":
+                case "DsReadU8D16Hi":
+                case "DsReadI8D16":
+                case "DsReadI8D16Hi":
+                case "DsReadU16D16":
+                case "DsReadU16D16Hi":
+                    return TryEmitDataShareSubwordRead(instruction, control, out error);
                 case "DsAppend":
                 case "DsConsume":
                 {
@@ -2259,6 +2430,7 @@ public static partial class Gen5MslTranslator
                     return true;
                 }
                 case "DsRead2B64":
+                case "DsRead2St64B64":
                     return TryEmitDataShareReadPair64(instruction, control, out error);
                 case "DsRead2B32":
                 case "DsRead2St64B32":
@@ -2295,6 +2467,114 @@ public static partial class Gen5MslTranslator
         private static uint EffectiveDsPairOffsetBytes(uint offset, bool st64) =>
             offset * (st64 ? 256u : sizeof(uint));
 
+        // DS_WRITE_B8/B16 and their D16_HI forms (which store DATA0 bits [23:16] or
+        // [31:16]): the byte or short merges into the LDS word it lands in, and a short at
+        // byte 3 of a word spills its high byte into the next. Threadgroup LDS merges with a
+        // compare-and-swap, so a lane writing a neighbouring byte of the same word at the
+        // same time is not lost; the private array of a graphics stage merges in place.
+        private bool TryEmitDataShareSubwordWrite(
+            Gen5ShaderInstruction instruction,
+            Gen5DataShareControl control,
+            out string error)
+        {
+            error = string.Empty;
+            if (instruction.Sources.Count < 2)
+            {
+                error = $"missing LDS operands for {instruction.Opcode}";
+                return false;
+            }
+
+            var bytes = instruction.Opcode.StartsWith("DsWriteB8", StringComparison.Ordinal) ? 1u : 2u;
+            var mask = bytes == 1 ? 0xFFu : 0xFFFFu;
+            var sourceShift = instruction.Opcode.EndsWith("D16Hi", StringComparison.Ordinal) ? 16 : 0;
+            var address = Temp("uint", RawSource(instruction, 0));
+            var byteAddress = Temp("uint", $"{address} + {control.SingleOffsetBytes}u");
+            var data = RawSource(instruction, 1);
+            var value = Temp("uint", sourceShift == 0 ? $"{data} & 0x{mask:X}u" : $"({data} >> {sourceShift}u) & 0x{mask:X}u");
+            var shift = Temp("uint", $"({byteAddress} & 3u) << 3u");
+            BeginExecGuard();
+            EmitLdsMaskedWrite(LdsIndex(byteAddress, 0), $"{value} << {shift}", $"0x{mask:X}u << {shift}");
+            if (bytes == 2)
+            {
+                var spills = Temp("bool", $"{shift} == 24u");
+                EmitLdsMaskedWrite(
+                    LdsIndex(byteAddress, sizeof(uint)),
+                    $"{spills} ? ({value} >> 8u) : 0u",
+                    $"{spills} ? 0xFFu : 0u");
+            }
+
+            EndExecGuard();
+            return true;
+        }
+
+        // Merges the masked bits of one LDS word; a zero mask leaves the word alone.
+        private void EmitLdsMaskedWrite(string index, string value, string mask)
+        {
+            var wordIndex = Temp("uint", index);
+            var bits = Temp("uint", value);
+            var keep = Temp("uint", mask);
+            if (!HasSharedLds)
+            {
+                Line($"sharpemu_lds[{wordIndex}] = (sharpemu_lds[{wordIndex}] & ~{keep}) | ({bits} & {keep});");
+                return;
+            }
+
+            Line($"if ({keep} != 0u)");
+            Line("{");
+            _indent++;
+            var pointer = Temp($"{LdsAddressSpace} atomic_uint*", $"({LdsAddressSpace} atomic_uint*)&sharpemu_lds[{wordIndex}]");
+            var expected = Temp("uint", $"atomic_load_explicit({pointer}, memory_order_relaxed)");
+            Line($"while (!atomic_compare_exchange_weak_explicit({pointer}, &{expected}, ({expected} & ~{keep}) | ({bits} & {keep}), memory_order_relaxed, memory_order_relaxed))");
+            Line("{");
+            Line("}");
+            _indent--;
+            Line("}");
+        }
+
+        // DS_READ_U8/I8/U16/I16 and the D16 forms: the byte or short at the address, read
+        // from the word it lands in (a short at byte 3 takes its high byte from the next
+        // word), zero or sign extended. The D16 forms extend to 16 bits and write the low
+        // (or, for _HI, the high) half of the destination, keeping the other half.
+        private bool TryEmitDataShareSubwordRead(
+            Gen5ShaderInstruction instruction,
+            Gen5DataShareControl control,
+            out string error)
+        {
+            error = string.Empty;
+            if (instruction.Sources.Count < 1 || instruction.Destinations.Count < 1)
+            {
+                error = $"missing LDS operands for {instruction.Opcode}";
+                return false;
+            }
+
+            var opcode = instruction.Opcode;
+            var bits = opcode.Contains("16", StringComparison.Ordinal) &&
+                !opcode.StartsWith("DsReadU8", StringComparison.Ordinal) &&
+                !opcode.StartsWith("DsReadI8", StringComparison.Ordinal) ? 16u : 8u;
+            var signExtend = opcode.StartsWith("DsReadI", StringComparison.Ordinal);
+            var d16 = opcode.Contains("D16", StringComparison.Ordinal);
+            var d16High = opcode.EndsWith("D16Hi", StringComparison.Ordinal);
+            var address = Temp("uint", RawSource(instruction, 0));
+            var byteAddress = Temp("uint", $"{address} + {control.SingleOffsetBytes}u");
+            var shift = Temp("uint", $"({byteAddress} & 3u) << 3u");
+            var low = Temp("uint", $"sharpemu_lds[{LdsIndex(byteAddress, 0)}]");
+            var raw = bits == 8
+                ? Temp("uint", $"({low} >> {shift}) & 0xFFu")
+                : Temp(
+                    "uint",
+                    $"(uint)(((ulong){low} | ((ulong)sharpemu_lds[{LdsIndex(byteAddress, sizeof(uint))}] << 32)) >> {shift}) & 0xFFFFu");
+            var extended = signExtend
+                ? Temp("uint", $"(uint)extract_bits(as_type<int>({raw}), 0u, {bits}u)")
+                : raw;
+            var destination = instruction.Destinations[0].Value;
+            StoreVector(
+                destination,
+                !d16 ? extended
+                : d16High ? $"(v[{destination}] & 0x0000FFFFu) | (({extended} & 0xFFFFu) << 16)"
+                : $"(v[{destination}] & 0xFFFF0000u) | ({extended} & 0xFFFFu)");
+            return true;
+        }
+
         // LDS atomics. Compute and mesh stages back LDS with real threadgroup
         // memory, so each guest atomic becomes a threadgroup atomic over the same
         // word. Graphics stages model one logical lane over a private LDS array
@@ -2313,15 +2593,19 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
-            if (opcode is "DsAddU64" or "DsOrB64")
+            if (Gen5ShaderTranslator.IsDataShareAtomic64(opcode))
             {
-                return TryEmitDataSharePairAtomic(instruction, control, out error);
+                return TryEmitDataShareAtomic64(instruction, control, out error);
             }
 
-            // DS_MSKOR and DS_MIN/MAX_F32 take a second data register; DS_CMPST
+            if (opcode is "DsWrxchg2RtnB32" or "DsWrxchg2St64RtnB32")
+            {
+                return TryEmitDataShareExchangePair(instruction, control, out error);
+            }
+
+            // DS_MSKOR, DS_WRAP and DS_MIN/MAX_F32 take a second data register; DS_CMPST
             // reverses the buffer order and reads DATA0 as the comparator.
-            var takesThreeSources = opcode is "DsMskorB32" or "DsMinF32" or "DsMaxF32" or
-                "DsCmpstB32" or "DsCmpstRtnB32";
+            var takesThreeSources = Gen5ShaderTranslator.IsDataShareTwoOperandAtomic(opcode);
             if (instruction.Sources.Count < (takesThreeSources ? 3 : 2))
             {
                 error = $"missing LDS operands for {opcode}";
@@ -2330,9 +2614,13 @@ public static partial class Gen5MslTranslator
 
             var name = opcode switch
             {
-                "DsMskorB32" => "Mskor",
-                "DsMinF32" => "Fmin",
-                "DsMaxF32" => "Fmax",
+                "DsMskorB32" or "DsMskorRtnB32" => "Mskor",
+                "DsMinF32" or "DsMinRtnF32" => "Fmin",
+                "DsMaxF32" or "DsMaxRtnF32" => "Fmax",
+                "DsRsubU32" or "DsRsubRtnU32" => "Rsub",
+                "DsAddF32" or "DsAddRtnF32" => "Fadd",
+                "DsCmpstF32" or "DsCmpstRtnF32" => "Fcmpswap",
+                "DsWrapRtnB32" => "Wrap",
                 _ => DataShareAtomicName(opcode),
             };
             if (name.Length == 0)
@@ -2382,7 +2670,8 @@ public static partial class Gen5MslTranslator
                     "Cmpswap" => $"{observed} == {first} ? {second} : {observed}",
                     "Mskor" => $"({observed} & ~{first}) | {second}",
                     "Fmin" => $"as_type<float>({second}) < as_type<float>({observed}) ? {first} : {observed}",
-                    _ => $"as_type<float>({observed}) > as_type<float>({second}) ? {first} : {observed}",
+                    "Fmax" => $"as_type<float>({observed}) > as_type<float>({second}) ? {first} : {observed}",
+                    _ => DataShareCompareExchangeValue(name, observed, first, second),
                 };
                 Line($"{word} = {replacement};");
                 return observed;
@@ -2425,7 +2714,8 @@ public static partial class Gen5MslTranslator
                 // why both forms read DATA0 as the replacement and DATA1 as the
                 // compare operand instead of being symmetric.
                 "Fmin" => $"as_type<float>({second}) < as_type<float>({expected}) ? {first} : {expected}",
-                _ => $"as_type<float>({expected}) > as_type<float>({second}) ? {first} : {expected}",
+                "Fmax" => $"as_type<float>({expected}) > as_type<float>({second}) ? {first} : {expected}",
+                _ => DataShareCompareExchangeValue(name, expected, first, second),
             };
             Line($"while (!atomic_compare_exchange_weak_explicit({pointerName}, &{expected}, {next}, memory_order_relaxed, memory_order_relaxed))");
             Line("{");
@@ -2433,40 +2723,203 @@ public static partial class Gen5MslTranslator
             return expected;
         }
 
-        // ds_add_u64 / ds_or_b64 over the uint LDS array: a dword pair, not one
-        // 64-bit atomic. OR is bitwise-independent so the halves are free of each
-        // other; ADD folds each lane's own carry out of the low dword into the
-        // high one, so the high dword still counts every wrap however the lanes
-        // interleave. The pair is not atomic against concurrent 64-bit use.
-        private bool TryEmitDataSharePairAtomic(
+        // The replacement value of the LDS atomics that only a compare-and-swap loop (or the
+        // private array's plain read-modify-write) expresses, from the observed word.
+        private static string DataShareCompareExchangeValue(string name, string observed, string first, string second) => name switch
+        {
+            // DS_RSUB: memory = DATA0 - memory.
+            "Rsub" => $"{first} - {observed}",
+            // DS_ADD_F32: an IEEE single-precision add.
+            "Fadd" => $"as_type<uint>(as_type<float>({observed}) + as_type<float>({first}))",
+            // DS_CMPST_F32 compares as floats (so -0 matches +0 and NaN matches nothing),
+            // with DS_CMPST's DATA0 comparator and DATA1 new value.
+            "Fcmpswap" => $"as_type<float>({observed}) == as_type<float>({first}) ? {second} : {observed}",
+            // DS_WRAP_RTN_B32: memory >= DATA0 ? memory - DATA0 : memory + DATA1.
+            _ => $"{observed} >= {first} ? {observed} - {first} : {observed} + {second}",
+        };
+
+        // DS_WRXCHG2(ST64)_RTN_B32: two independent exchanges, DATA0 at OFFSET0 and DATA1 at
+        // OFFSET1 (dword units, 64 dwords for ST64), each returning its pre-exchange word.
+        private bool TryEmitDataShareExchangePair(
             Gen5ShaderInstruction instruction,
             Gen5DataShareControl control,
             out string error)
         {
             error = string.Empty;
-            if (instruction.Sources.Count < 3)
+            if (instruction.Sources.Count < 3 || instruction.Destinations.Count < 2)
             {
-                error = "missing LDS 64-bit atomic source";
+                error = $"missing LDS operands for {instruction.Opcode}";
+                return false;
+            }
+
+            var st64 = instruction.Opcode == "DsWrxchg2St64RtnB32";
+            var address = Temp("uint", RawSource(instruction, 0));
+            var firstIndex = Temp("uint", LdsIndex(address, EffectiveDsPairOffsetBytes(control.Offset0, st64)));
+            var secondIndex = Temp("uint", LdsIndex(address, EffectiveDsPairOffsetBytes(control.Offset1, st64)));
+            var first = Temp("uint", RawSource(instruction, 1));
+            var second = Temp("uint", RawSource(instruction, 2));
+            BeginExecGuard();
+            var firstOriginal = EmitDataShareAtomicWord("Swap", firstIndex, first, "0u");
+            var secondOriginal = EmitDataShareAtomicWord("Swap", secondIndex, second, "0u");
+            Line($"v[{instruction.Destinations[0].Value}] = {firstOriginal};");
+            Line($"v[{instruction.Destinations[1].Value}] = {secondOriginal};");
+            EndExecGuard();
+            return true;
+        }
+
+        // The 64-bit LDS atomics, over a pair of words in the uint LDS array.
+        //
+        // Graphics stages give each invocation its own LDS array (one logical lane), so a
+        // plain 64-bit read-modify-write is the atomic and every integer form runs exactly.
+        //
+        // Compute and mesh LDS is threadgroup memory, whose Metal atomics are 32-bit only:
+        // there is no 64-bit threadgroup atomic and no 64-bit compare-and-swap to loop on.
+        // The no-return ADD/SUB/AND/OR/XOR run as a 32-bit atomic per half - OR/AND/XOR are
+        // bitwise independent, ADD/SUB fold each lane's own carry or borrow out of the low
+        // word into the high one - so memory ends at the value the 64-bit atomics would leave
+        // however the lanes interleave. Every other form, and every returning one (whose
+        // returned pair would not be one snapshot), needs a 64-bit read-modify-write and is
+        // refused. The F64 forms are refused everywhere: Metal has no double.
+        private bool TryEmitDataShareAtomic64(
+            Gen5ShaderInstruction instruction,
+            Gen5DataShareControl control,
+            out string error)
+        {
+            error = string.Empty;
+            var opcode = instruction.Opcode;
+            var returns = opcode.Contains("Rtn", StringComparison.Ordinal);
+            var operation = opcode.Replace("Rtn", string.Empty, StringComparison.Ordinal) switch
+            {
+                "DsAddU64" => "Add",
+                "DsSubU64" => "Sub",
+                "DsRsubU64" => "Rsub",
+                "DsIncU64" => "Inc",
+                "DsDecU64" => "Dec",
+                "DsMinI64" => "MinI",
+                "DsMaxI64" => "MaxI",
+                "DsMinU64" => "MinU",
+                "DsMaxU64" => "MaxU",
+                "DsAndB64" => "And",
+                "DsOrB64" => "Or",
+                "DsXorB64" => "Xor",
+                "DsMskorB64" => "Mskor",
+                "DsWrxchgB64" => "Wrxchg",
+                "DsWrxchg2B64" or "DsWrxchg2St64B64" => "Wrxchg2",
+                "DsCmpstB64" => "Cmpst",
+                _ => string.Empty,
+            };
+            var twoOperands = Gen5ShaderTranslator.IsDataShareTwoOperandAtomic(opcode);
+            if (instruction.Sources.Count < (twoOperands ? 5 : 3) || (returns && instruction.Destinations.Count < 2))
+            {
+                error = $"missing LDS operands for {opcode}";
+                return false;
+            }
+
+            if (opcode.EndsWith("F64", StringComparison.Ordinal))
+            {
+                error = $"unsupported LDS opcode {opcode}: Metal has no double-precision atomic";
                 return false;
             }
 
             var address = Temp("uint", RawSource(instruction, 0));
-            var lowIndex = Temp("uint", LdsIndex(address, control.SingleOffsetBytes));
-            var highIndex = Temp("uint", LdsIndex(address, control.SingleOffsetBytes + sizeof(uint)));
-            var low = Temp("uint", RawSource(instruction, 1));
-            var high = Temp("uint", RawSource(instruction, 2));
-            BeginExecGuard();
-            if (instruction.Opcode == "DsOrB64")
+            var data0 = Temp("ulong", $"(ulong){RawSource(instruction, 1)} | ((ulong){RawSource(instruction, 2)} << 32)");
+            var data1 = twoOperands
+                ? Temp("ulong", $"(ulong){RawSource(instruction, 3)} | ((ulong){RawSource(instruction, 4)} << 32)")
+                : "0ul";
+            if (HasSharedLds)
             {
-                EmitDataShareAtomicWord("Or", lowIndex, low, "0u");
-                EmitDataShareAtomicWord("Or", highIndex, high, "0u");
+                var splits = !returns && operation is "Add" or "Sub" or "And" or "Or" or "Xor";
+                if (!splits)
+                {
+                    error = $"unsupported LDS opcode {opcode}: Metal threadgroup atomics are 32-bit, " +
+                        "and this 64-bit operation cannot run as one atomic per half";
+                    return false;
+                }
+
+                var lowIndex = Temp("uint", LdsIndex(address, control.SingleOffsetBytes));
+                var highIndex = Temp("uint", LdsIndex(address, control.SingleOffsetBytes + sizeof(uint)));
+                var low = Temp("uint", $"(uint){data0}");
+                var high = Temp("uint", $"(uint)({data0} >> 32)");
+                BeginExecGuard();
+                switch (operation)
+                {
+                    case "Add":
+                    {
+                        var originalLow = EmitDataShareAtomicWord("Add", lowIndex, low, "0u");
+                        var carry = Temp("uint", $"({originalLow} + {low}) < {originalLow} ? 1u : 0u");
+                        EmitDataShareAtomicWord("Add", highIndex, Temp("uint", $"{high} + {carry}"), "0u");
+                        break;
+                    }
+                    case "Sub":
+                    {
+                        var originalLow = EmitDataShareAtomicWord("Sub", lowIndex, low, "0u");
+                        var borrow = Temp("uint", $"{originalLow} < {low} ? 1u : 0u");
+                        EmitDataShareAtomicWord("Sub", highIndex, Temp("uint", $"{high} + {borrow}"), "0u");
+                        break;
+                    }
+                    default:
+                        EmitDataShareAtomicWord(operation, lowIndex, low, "0u");
+                        EmitDataShareAtomicWord(operation, highIndex, high, "0u");
+                        break;
+                }
+
+                EndExecGuard();
+                return true;
             }
-            else
+
+            // One logical lane over a private array: read the pair, compute, write it back.
+            var st64 = opcode == "DsWrxchg2St64RtnB64";
+            var pairs = operation.StartsWith("Wrxchg2", StringComparison.Ordinal)
+                ? new[] { (Offset: control.Offset0 * (st64 ? 512u : 8u), Value: data0), (Offset: control.Offset1 * (st64 ? 512u : 8u), Value: data1) }
+                : new[] { (Offset: control.SingleOffsetBytes, Value: data0) };
+            var originals = new List<string>();
+            BeginExecGuard();
+            foreach (var (offset, value) in pairs)
             {
-                var originalLow = EmitDataShareAtomicWord("Add", lowIndex, low, "0u");
-                var carry = Temp("uint", $"({originalLow} + {low}) < {originalLow} ? 1u : 0u");
-                var highWithCarry = Temp("uint", $"{high} + {carry}");
-                EmitDataShareAtomicWord("Add", highIndex, highWithCarry, "0u");
+                var lowIndex = Temp("uint", LdsIndex(address, offset));
+                var highIndex = Temp("uint", LdsIndex(address, offset + sizeof(uint)));
+                var observed = Temp("ulong", $"(ulong)sharpemu_lds[{lowIndex}] | ((ulong)sharpemu_lds[{highIndex}] << 32)");
+                string? replacement = operation switch
+                {
+                    "Add" => $"{observed} + {value}",
+                    "Sub" => $"{observed} - {value}",
+                    "Rsub" => $"{value} - {observed}",
+                    "Inc" => $"{observed} >= {value} ? 0ul : {observed} + 1ul",
+                    "Dec" => $"({observed} == 0ul || {observed} > {value}) ? {value} : {observed} - 1ul",
+                    "MinI" => $"as_type<ulong>(min(as_type<long>({observed}), as_type<long>({value})))",
+                    "MaxI" => $"as_type<ulong>(max(as_type<long>({observed}), as_type<long>({value})))",
+                    "MinU" => $"min({observed}, {value})",
+                    "MaxU" => $"max({observed}, {value})",
+                    "And" => $"{observed} & {value}",
+                    "Or" => $"{observed} | {value}",
+                    "Xor" => $"{observed} ^ {value}",
+                    // DS_MSKOR: DATA0 is the mask cleared, DATA1 the bits set.
+                    "Mskor" => $"({observed} & ~{value}) | {data1}",
+                    "Wrxchg" or "Wrxchg2" => value,
+                    // DS_CMPST: DATA0 is the comparator, DATA1 the new value.
+                    "Cmpst" => $"{observed} == {value} ? {data1} : {observed}",
+                    _ => null,
+                };
+                if (replacement is null)
+                {
+                    EndExecGuard();
+                    error = $"unsupported LDS opcode {opcode}";
+                    return false;
+                }
+
+                var next = Temp("ulong", replacement);
+                Line($"sharpemu_lds[{lowIndex}] = (uint){next};");
+                Line($"sharpemu_lds[{highIndex}] = (uint)({next} >> 32);");
+                originals.Add(observed);
+            }
+
+            if (returns)
+            {
+                for (var pair = 0; pair < originals.Count; pair++)
+                {
+                    Line($"v[{instruction.Destinations[2 * pair].Value}] = (uint){originals[pair]};");
+                    Line($"v[{instruction.Destinations[(2 * pair) + 1].Value}] = (uint)({originals[pair]} >> 32);");
+                }
             }
 
             EndExecGuard();

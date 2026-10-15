@@ -546,7 +546,8 @@ public static partial class Gen5MslTranslator
             string descriptorWord3,
             string unifiedFormat,
             uint vectorData,
-            uint componentCount)
+            uint componentCount,
+            FormatD16 d16)
         {
             var entry = Temp("uint", $"sharpemu_gfx10_formats[{unifiedFormat}]");
             var dataFormat = Temp("uint", $"{entry} & 0xFFu");
@@ -587,7 +588,7 @@ public static partial class Gen5MslTranslator
                 var bitMask = Temp("uint", $"{bits} >= 32u ? 0xFFFFFFFFu : (1u << {bits}) - 1u");
                 var encoded = Temp(
                     "uint",
-                    $"sharpemu_format_encode(v[{vectorData + component}], {bits}, {numberFormat}, {dataFormat}) & {bitMask}");
+                    $"sharpemu_format_encode({FormatStoreComponent(vectorData, component, d16, numberFormat)}, {bits}, {numberFormat}, {dataFormat}) & {bitMask}");
                 var crosses = Temp("bool", $"{shift} + {bits} > 32u");
                 Line($"sharpemu_store_device_masked_word({DeviceArguments}, {aligned}, {encoded} << {shift}, {bitMask} << {shift});");
                 Line(
@@ -620,7 +621,8 @@ public static partial class Gen5MslTranslator
             var isStore = opcode.StartsWith("BufferStore", StringComparison.Ordinal) ||
                 opcode.StartsWith("TBufferStore", StringComparison.Ordinal);
             var isSubwordStore = TryGetSubdwordStoreInfo(opcode, out var storeBytes, out var sourceShift);
-            var isSubwordLoad = TryGetSubdwordLoadInfo(opcode, out var loadBytes, out var signExtend, out var d16, out var d16High);
+            var isSubwordLoad = TryGetSubdwordLoadInfo(opcode, out var loadBytes, out var signExtend, out var subwordD16, out var d16High);
+            var components = FormatComponentCount(opcode, control, out var d16);
             if (!isSubwordStore && !isSubwordLoad && !isFormatLoad && !isFormatStore && !isAtomic &&
                 !opcode.StartsWith("BufferLoadDword", StringComparison.Ordinal) &&
                 !opcode.StartsWith("BufferStoreDword", StringComparison.Ordinal))
@@ -671,11 +673,11 @@ public static partial class Gen5MslTranslator
                 var word3 = Temp("uint", ScalarExpression(instruction.Sources[1].Value + 3));
                 if (!control.Typed)
                 {
-                    EmitDecodedBufferFormatLoad(memory, byteOffset, word3, control.VectorData, control.DwordCount);
+                    EmitDecodedBufferFormatLoad(memory, byteOffset, word3, control.VectorData, components, d16);
                     return true;
                 }
 
-                if (TryEmitTypedBufferFormatLoad(memory, byteOffset, control, word3))
+                if (TryEmitTypedBufferFormatLoad(memory, byteOffset, control, word3, components, d16))
                 {
                     return true;
                 }
@@ -685,6 +687,15 @@ public static partial class Gen5MslTranslator
             }
 
             var mask = DeviceAddressPaging.AddressMask;
+            if (isFormatStore && d16.Enabled && control.Typed &&
+                !(Gfx10UnifiedFormat.TryDecode(control.TypedFormat, out var d16DataFormat, out _) &&
+                  Gfx10UnifiedFormat.ComponentCount(d16DataFormat) != 0))
+            {
+                // A D16 store packs halves; no raw dword store stands in for its format.
+                error = $"unsupported typed format {control.TypedFormat} for {opcode}";
+                return false;
+            }
+
             // A typed store whose format does not decode is a raw dword store, as on the bound path.
             if (isFormatStore &&
                 (!control.Typed ||
@@ -698,7 +709,8 @@ public static partial class Gen5MslTranslator
                     word3,
                     control.Typed ? $"{control.TypedFormat}u" : $"(({word3} >> 12) & 0x7Fu)",
                     control.VectorData,
-                    control.DwordCount);
+                    components,
+                    d16);
                 return true;
             }
 
@@ -764,7 +776,7 @@ public static partial class Gen5MslTranslator
                     $"{inRange} ? (sharpemu_load_device_unaligned({DeviceArguments}, {address}, {loadBytes}u) & {FormatUInt(loadBytes == 1 ? 0xFFu : 0xFFFFu)}) : 0u",
                     loadBytes,
                     signExtend,
-                    d16,
+                    subwordD16,
                     d16High);
                 return true;
             }
@@ -828,11 +840,9 @@ public static partial class Gen5MslTranslator
                 // reinterpreting an arbitrary device address with a guessed format.
                 if (instruction.Opcode.StartsWith("BufferLoadFormat", StringComparison.Ordinal))
                 {
-                    for (uint index = 0; index < control.DwordCount; index++)
-                    {
-                        StoreVector(control.VectorData + index, "0u");
-                    }
-
+                    // A D16 load writes zero halves and keeps the halves it does not write.
+                    var components = FormatComponentCount(instruction.Opcode, control, out var d16);
+                    StoreFormatLoadComponents(control.VectorData, Enumerable.Repeat("0u", (int)components).ToArray(), d16, "4u");
                     return true;
                 }
 
@@ -1089,6 +1099,12 @@ public static partial class Gen5MslTranslator
             var accessBytes = Math.Max((entry.DataBits + 7) / 8, 1u) * Math.Max(entry.DataDwords, 1u);
             var allowed = writes ? IsWrittenAccessAllowed(memoryIndex, address, accessBytes) : "true";
 
+            if (memoryOpcode.StartsWith("GlobalAtomic", StringComparison.Ordinal) &&
+                memoryOpcode.EndsWith("X2", StringComparison.Ordinal))
+            {
+                return TryEmitGlobalAtomic64(instruction, control, memoryOpcode["GlobalAtomic".Length..^2], address, allowed, out error);
+            }
+
             if (memoryOpcode.StartsWith("GlobalAtomic", StringComparison.Ordinal))
             {
                 if (!TryGetAtomicExpression(
@@ -1174,6 +1190,92 @@ public static partial class Gen5MslTranslator
                     $"sharpemu_load_device_dword({DeviceArguments}, {componentAddress})");
             }
 
+            return true;
+        }
+
+        // GLOBAL_ATOMIC_*_X2: a 64-bit atomic on the qword at the address. Metal's only 64-bit
+        // atomics are atomic_max_explicit / atomic_min_explicit on a device atomic_ulong (MSL
+        // 2.4, Apple8 and later), and they return nothing: there is no 64-bit exchange,
+        // compare-exchange or fetch operation to build a compare-and-swap loop from. So:
+        // - UMIN/UMAX without GLC are that native 64-bit atomic.
+        // - ADD/SUB/AND/OR/XOR without GLC run as a 32-bit atomic on each half. Each lane's
+        //   operation reaches memory whole (ADD/SUB fold the carry or borrow out of the low
+        //   half into the high one), so memory ends at the value the 64-bit atomics would
+        //   leave however the lanes interleave - the split the LDS 64-bit atomics use.
+        // - Every GLC form (its returned pair would not be one snapshot), SWAP, CMPSWAP,
+        //   SMIN/SMAX, INC/DEC and FMIN/FMAX need a 64-bit read-modify-write Metal cannot
+        //   express, and are refused.
+        // The hardware requires a naturally aligned qword; one that is not, or that the page
+        // table does not map in one piece, is not performed, like the bound path's unaligned
+        // atomics.
+        private bool TryEmitGlobalAtomic64(
+            Gen5ShaderInstruction instruction,
+            Gen5GlobalMemoryControl control,
+            string atomic,
+            string address,
+            string allowed,
+            out string error)
+        {
+            error = string.Empty;
+            var native = atomic is "Umin" or "Umax" && !control.Glc;
+            var split = atomic is "Add" or "Sub" or "And" or "Or" or "Xor" && !control.Glc;
+            if (!native && !split)
+            {
+                error = $"unsupported global opcode {instruction.Opcode}{(control.Glc ? " with GLC" : string.Empty)}: " +
+                    "Metal has no 64-bit atomic that performs it";
+                return false;
+            }
+
+            // Both source halves are read before any destination register is written.
+            var low = Temp("uint", $"v[{control.SourceVectorRegister}]");
+            var high = Temp("uint", $"v[{control.SourceVectorRegister + 1}]");
+            Line($"if ({ExecCondition(allowed)})");
+            Line("{");
+            _indent++;
+            var valid = Temp("bool", "false");
+            var pointer = Temp("device uint*", $"sharpemu_resolve_device_span({DeviceArguments}, {address}, 8u, {valid})");
+            Line($"if ({valid} && ({address} & 7ul) == 0ul)");
+            Line("{");
+            _indent++;
+            if (native)
+            {
+                var function = atomic == "Umax" ? "atomic_max_explicit" : "atomic_min_explicit";
+                Line($"{function}((device atomic_ulong*)({pointer}), (ulong){low} | ((ulong){high} << 32), memory_order_relaxed);");
+            }
+            else
+            {
+                var lowWord = $"(device atomic_uint*)({pointer})";
+                var highWord = $"(device atomic_uint*)({pointer} + 1)";
+                switch (atomic)
+                {
+                    case "Add":
+                    {
+                        var originalLow = Temp("uint", $"atomic_fetch_add_explicit({lowWord}, {low}, memory_order_relaxed)");
+                        var carry = Temp("uint", $"({originalLow} + {low}) < {originalLow} ? 1u : 0u");
+                        Line($"atomic_fetch_add_explicit({highWord}, {high} + {carry}, memory_order_relaxed);");
+                        break;
+                    }
+                    case "Sub":
+                    {
+                        var originalLow = Temp("uint", $"atomic_fetch_sub_explicit({lowWord}, {low}, memory_order_relaxed)");
+                        var borrow = Temp("uint", $"{originalLow} < {low} ? 1u : 0u");
+                        Line($"atomic_fetch_sub_explicit({highWord}, {high} + {borrow}, memory_order_relaxed);");
+                        break;
+                    }
+                    default:
+                    {
+                        var function = $"atomic_fetch_{atomic.ToLowerInvariant()}_explicit";
+                        Line($"{function}({lowWord}, {low}, memory_order_relaxed);");
+                        Line($"{function}({highWord}, {high}, memory_order_relaxed);");
+                        break;
+                    }
+                }
+            }
+
+            _indent--;
+            Line("}");
+            _indent--;
+            Line("}");
             return true;
         }
 
@@ -1815,7 +1917,8 @@ public static partial class Gen5MslTranslator
             for (var component = 0; component < values.Length; component++)
             {
                 var pairOffset = component < 2 ? control.Offset0 : control.Offset1;
-                var byteOffset = pairOffset * sizeof(ulong) + (uint)(component % 2) * sizeof(uint);
+                var stride = instruction.Opcode == "DsRead2St64B64" ? 512u : sizeof(ulong);
+                var byteOffset = pairOffset * stride + (uint)(component % 2) * sizeof(uint);
                 values[component] = Temp("uint", control.Gds
                     ? LoadGlobalDataShareWord(GlobalDataShareIndex(address, byteOffset))
                     : $"sharpemu_lds[{LdsIndex(address, byteOffset)}]");

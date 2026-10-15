@@ -260,6 +260,51 @@ public sealed class Gen5MslDeviceBufferTests
         Assert.Equal(2 * (int)dwords, CountOccurrences(source, "sharpemu_store_device_masked_word(sharpemu_ranges"));
     }
 
+    [Theory]
+    // opcode, registers, components, typed format (null = the V#'s word 3)
+    [InlineData("BufferLoadFormatD16X", 1u, 1, null)]
+    [InlineData("BufferLoadFormatD16Xy", 1u, 2, null)]
+    [InlineData("BufferLoadFormatD16Xyz", 2u, 3, null)]
+    [InlineData("BufferLoadFormatD16Xyzw", 2u, 4, null)]
+    [InlineData("BufferLoadFormatD16HiX", 1u, 1, null)]
+    [InlineData("TBufferLoadFormatD16Xyzw", 2u, 4, 56u)]
+    public void AD16FormattedLoadThroughADeviceDescriptorPacksHalves(string opcode, uint registers, int components, uint? format)
+    {
+        var source = Compile(
+            ReadFirstLane(0, 12, 0),
+            MoveScalar(4, 13, 0),
+            MoveScalar(8, 14, 16),
+            MoveScalar(12, 15, 0),
+            ScalarBufferLoad(16, resourceRegister: 12, destination: 8, count: 4),
+            BufferAccess(24, opcode, resourceRegister: 8, dwords: registers, typedFormat: format),
+            End(32));
+
+        // The V#'s dst_sel picks among the four decoded channels; each transferred component
+        // narrows to 16 bits and lands in its register half.
+        Assert.Equal(4, CountOccurrences(source, "sharpemu_load_device_unaligned(sharpemu_ranges"));
+        Assert.Equal(components, CountOccurrences(source, "= sharpemu_format_d16("));
+    }
+
+    [Theory]
+    [InlineData("BufferStoreFormatD16X", 1u, 1, null)]
+    [InlineData("BufferStoreFormatD16Xyzw", 2u, 4, null)]
+    [InlineData("BufferStoreFormatD16HiX", 1u, 1, null)]
+    [InlineData("TBufferStoreFormatD16Xy", 1u, 2, 56u)]
+    public void AD16FormattedStoreThroughADeviceDescriptorWidensEachHalf(string opcode, uint registers, int components, uint? format)
+    {
+        var source = Compile(
+            ReadFirstLane(0, 12, 0),
+            MoveScalar(4, 13, 0),
+            MoveScalar(8, 14, 16),
+            MoveScalar(12, 15, 0),
+            ScalarBufferLoad(16, resourceRegister: 12, destination: 8, count: 4),
+            BufferAccess(24, opcode, resourceRegister: 8, dwords: registers, typedFormat: format),
+            End(32));
+
+        Assert.Equal(components, CountOccurrences(source, "sharpemu_format_d16_expand((v"));
+        Assert.Equal(2 * components, CountOccurrences(source, "sharpemu_store_device_masked_word(sharpemu_ranges"));
+    }
+
     [Fact]
     public void ABufferLoadPastTheBindingBudgetCompiles()
     {

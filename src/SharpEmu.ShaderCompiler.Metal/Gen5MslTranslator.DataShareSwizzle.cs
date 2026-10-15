@@ -74,5 +74,45 @@ public static partial class Gen5MslTranslator
             StoreVector(instruction.Destinations[0].Value, $"{sourceActive} ? {value} : 0u");
             return true;
         }
+
+        // DS_PERMUTE_B32, the forward permute: every active lane sends DATA0 to the lane its
+        // address names ((ADDR + offset) / 4), and each active lane returns what it was sent,
+        // zero when no lane sent it anything; when several lanes send to one lane the highest
+        // wins. No LDS is touched. Like the backward form it stays inside each 32-lane half
+        // of a wave64. Each lane gathers by walking the 32 senders of its simdgroup.
+        private bool TryEmitDataSharePermute(Gen5ShaderInstruction instruction,
+            Gen5DataShareControl control, out string error)
+        {
+            error = string.Empty;
+            if (instruction.Sources.Count != 2 || instruction.Destinations.Count != 1)
+            {
+                error = "invalid data-share permute operands";
+                return false;
+            }
+            if (IsSingleLaneStage)
+            {
+                error = "data-share permute requires subgroup lane access";
+                return false;
+            }
+
+            var lane = Temp("uint", "sharpemu_lane & 31u");
+            var target = Temp("uint", $"(({RawSource(instruction, 0)} + {control.SingleOffsetBytes}u) >> 2u) & 31u");
+            var data = Temp("uint", RawSource(instruction, 1));
+            var activeLanes = Temp("uint", "sharpemu_ballot(exec)");
+            var received = Temp("uint", "0u");
+            Line("for (ushort sharpemu_sender = 0; sharpemu_sender < 32; sharpemu_sender++)");
+            Line("{");
+            _indent++;
+            var senderTarget = Temp("uint", $"simd_shuffle({target}, sharpemu_sender)");
+            var senderData = Temp("uint", $"simd_shuffle({data}, sharpemu_sender)");
+            Line($"if ((({activeLanes} >> sharpemu_sender) & 1u) != 0u && {senderTarget} == {lane})");
+            Line("{");
+            Line($"    {received} = {senderData};");
+            Line("}");
+            _indent--;
+            Line("}");
+            StoreVector(instruction.Destinations[0].Value, received);
+            return true;
+        }
     }
 }

@@ -49,6 +49,69 @@ public sealed class GlobalMemoryRegisterTests
     }
 
     [Theory]
+    [InlineData(0x30u, true, "atomic_exchange_explicit(")]
+    [InlineData(0x33u, false, "atomic_fetch_sub_explicit(")]
+    [InlineData(0x35u, true, "atomic_fetch_min_explicit((device atomic_int*)")]
+    [InlineData(0x36u, false, "atomic_fetch_min_explicit((device atomic_uint*)")]
+    [InlineData(0x37u, false, "atomic_fetch_max_explicit((device atomic_int*)")]
+    [InlineData(0x39u, false, "atomic_fetch_and_explicit(")]
+    [InlineData(0x3Au, true, "atomic_fetch_or_explicit(")]
+    [InlineData(0x3Bu, false, "atomic_fetch_xor_explicit(")]
+    [InlineData(0x31u, true, "sharpemu_atomic_compare_swap(")]
+    [InlineData(0x3Cu, true, "sharpemu_atomic_step(")]
+    [InlineData(0x3Du, false, "sharpemu_atomic_step(")]
+    [InlineData(0x3Fu, true, "sharpemu_atomic_float_minmax(")]
+    [InlineData(0x40u, false, "sharpemu_atomic_float_minmax(")]
+    public void Atomics32_UseTheMatchingDeviceAtomic(uint opcode, bool returnsValue, string operation)
+    {
+        var source = CompileOnDevice(opcode, returnsValue);
+        Assert.Contains(operation, source);
+        Assert.Equal(returnsValue, Regex.IsMatch(source, @"(?m)^\s*(if \(exec\) \{ )?v8 = "));
+    }
+
+    [Theory]
+    // The unsigned 64-bit min/max are native device atomic_ulong operations (Apple8+).
+    [InlineData(0x58u, "atomic_max_explicit((device atomic_ulong*)")]
+    [InlineData(0x56u, "atomic_min_explicit((device atomic_ulong*)")]
+    public void Atomics64_UnsignedMinMaxUseANativeUlongAtomic(uint opcode, string operation)
+    {
+        var source = CompileOnDevice(opcode, returnsValue: false);
+        Assert.Contains(operation, source);
+        // v[3:4] is the 64-bit operand, low dword first.
+        Assert.Matches(@"\(ulong\)t\d+ \| \(\(ulong\)t\d+ << 32\)", source);
+        Assert.DoesNotMatch(@"(?m)^\s*(if \(exec\) \{ )?v[89] = ", source);
+    }
+
+    [Theory]
+    // Bitwise forms apply per dword; add/sub fold the low dword's carry or borrow into the high one.
+    [InlineData(0x52u, "atomic_fetch_add_explicit(")]
+    [InlineData(0x53u, "atomic_fetch_sub_explicit(")]
+    [InlineData(0x5Au, "atomic_fetch_or_explicit(")]
+    public void Atomics64_NonReturningSplitFormsTouchBothDwords(uint opcode, string operation)
+    {
+        var source = CompileOnDevice(opcode, returnsValue: false);
+        Assert.Equal(2, Regex.Matches(source, Regex.Escape(operation) + @"\(device atomic_uint\*\)\(t\d+( \+ 1)?\)").Count);
+        Assert.Matches(Regex.Escape(operation) + @"\(device atomic_uint\*\)\(t\d+ \+ 1\)", source);
+    }
+
+    [Theory]
+    // A returned 64-bit value cannot be a snapshot of two 32-bit atomics, and Metal has no
+    // 64-bit exchange, compare-exchange, signed min/max or wrapping step: refused, not split.
+    [InlineData(0x52u, true, "GlobalAtomicAddX2")]
+    [InlineData(0x58u, true, "GlobalAtomicUmaxX2")]
+    [InlineData(0x50u, false, "GlobalAtomicSwapX2")]
+    [InlineData(0x51u, false, "GlobalAtomicCmpswapX2")]
+    [InlineData(0x55u, false, "GlobalAtomicSminX2")]
+    [InlineData(0x5Cu, false, "GlobalAtomicIncX2")]
+    [InlineData(0x60u, false, "GlobalAtomicFmaxX2")]
+    public void Atomics64_InexpressibleFormsAreRefused(uint opcode, bool returnsValue, string name)
+    {
+        var fixture = new Gen5ComputeFixture("global-atomic64", [Word(opcode, returnsValue), 0x0810_0309, 0xBF81_0000], 16, 64);
+        Assert.False(Gen5MslTranslator.TryCompileProgram(Gen5ComputeFixtures.CreateComputeRequest(fixture), out _, out var error));
+        Assert.Contains(name, error);
+    }
+
+    [Theory]
     [InlineData(32u, false)]
     [InlineData(33u, true)]
     [InlineData(34u, false)]
@@ -76,10 +139,21 @@ public sealed class GlobalMemoryRegisterTests
     public void AddressRangeSearchSteps_CoverTheMaximumCount()
         => Assert.True((1UL << (int)Gen5MslTranslator.AddressRangeSearchSteps) > Gen5MslTranslator.MaxAddressRangeCount);
 
+    private static uint Word(uint opcode, bool returnsValue) =>
+        0xDC00_8000u | (opcode << 18) | (returnsValue ? 1u << 16 : 0);
+
     private static string Compile(uint opcode, bool returnsValue = false)
     {
-        var word = 0xDC00_8000u | (opcode << 18) | (returnsValue ? 1u << 16 : 0);
-        var fixture = new Gen5ComputeFixture("global-registers", [word, 0x0810_0309, 0xBF81_0000], 16, 64);
+        var fixture = new Gen5ComputeFixture("global-registers", [Word(opcode, returnsValue), 0x0810_0309, 0xBF81_0000], 16, 64);
         return Gen5ComputeFixtures.CompileRequestOrThrow(fixture).Source;
+    }
+
+    // Where a device exists, the emitted source must also be valid Metal.
+    private static string CompileOnDevice(uint opcode, bool returnsValue)
+    {
+        var source = Compile(opcode, returnsValue);
+        if (MetalNative.IsAvailable)
+            Assert.True(MetalNative.TryCompileLibrary(source, out _, out var error), error);
+        return source;
     }
 }

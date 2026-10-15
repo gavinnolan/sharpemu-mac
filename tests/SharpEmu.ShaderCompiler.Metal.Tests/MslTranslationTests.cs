@@ -1242,6 +1242,51 @@ public sealed class MslTranslationTests
         Assert.DoesNotContain("sharpemu_store_bytes(b", shader.Source, StringComparison.Ordinal);
     }
 
+    [Theory]
+    // opcode, registers, components, typed format (8_8_8_8 unorm) or the descriptor's (32_32_32_32 float)
+    [InlineData("TBufferLoadFormatD16Xyzw", 2u, 4, true)]
+    [InlineData("TBufferLoadFormatD16Xyz", 2u, 3, true)]
+    [InlineData("BufferLoadFormatD16Xy", 1u, 2, false)]
+    [InlineData("BufferLoadFormatD16HiX", 1u, 1, false)]
+    public void D16FormattedLoadPacksTwoHalvesPerRegister(string opcode, uint registers, int components, bool typed)
+    {
+        var shader = CompileTypedBufferAccess(opcode, registers, typedFormat: 56, typed: typed);
+
+        Assert.Equal(components, CountOccurrences(shader.Source, "= sharpemu_format_d16("));
+        // D16 never takes the whole-dword run: a 32-bit channel still narrows to a half.
+        Assert.DoesNotContain("sharpemu_load_words<", shader.Source, StringComparison.Ordinal);
+        if (opcode.EndsWith("HiX", StringComparison.Ordinal))
+            Assert.Contains("v4 = (v4 & 0x0000FFFFu) | (", shader.Source, StringComparison.Ordinal);
+        if (components == 3)
+            Assert.Contains("v5 = (v5 & 0xFFFF0000u) | ", shader.Source, StringComparison.Ordinal);
+        if (MetalNative.IsAvailable)
+            Assert.True(MetalNative.TryCompileLibrary(shader.Source, out _, out var error), error);
+    }
+
+    [Fact]
+    public void D16FormattedStoreWidensEachHalfBeforeEncoding()
+    {
+        // Format 14 is 8_8 unorm; X is v4's low half and Y its high half.
+        var shader = CompileTypedBufferAccess("TBufferStoreFormatD16Xy", dwordCount: 1, typedFormat: 14);
+
+        Assert.Contains("sharpemu_format_d16_expand((v4 & 0xFFFFu), 0u)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_format_d16_expand((v4 >> 16u), 0u)", shader.Source, StringComparison.Ordinal);
+        if (MetalNative.IsAvailable)
+            Assert.True(MetalNative.TryCompileLibrary(shader.Source, out _, out var error), error);
+    }
+
+    private static int CountOccurrences(string text, string value)
+    {
+        var count = 0;
+        for (var index = text.IndexOf(value, StringComparison.Ordinal); index >= 0;
+             index = text.IndexOf(value, index + value.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
+    }
+
     private static Gen5MslShader CompileTypedBufferAccess(string opcode, uint dwordCount, uint typedFormat,
         bool typed = true, uint descriptorFormat = 77)
     {
