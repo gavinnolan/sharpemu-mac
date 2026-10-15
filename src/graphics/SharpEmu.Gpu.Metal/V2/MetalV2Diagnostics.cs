@@ -133,9 +133,11 @@ internal static class MetalV2Diagnostics
             ? value
             : fallback;
 
+    // ConcurrentDictionary.TryAdd takes the bucket lock even when the key exists, and
+    // the hot bind paths ask every time; the lock-free lookup answers the repeats.
     public static void WarnOnce(string key, string message)
     {
-        if (_reported.TryAdd(key, 0))
+        if (!_reported.ContainsKey(key) && _reported.TryAdd(key, 0))
         {
             Console.Error.WriteLine($"[METAL-V2][WARN] {message}");
         }
@@ -143,7 +145,7 @@ internal static class MetalV2Diagnostics
 
     public static void InfoOnce(string key, string message)
     {
-        if (_reported.TryAdd(key, 0))
+        if (!_reported.ContainsKey(key) && _reported.TryAdd(key, 0))
         {
             Console.Error.WriteLine($"[METAL-V2][INFO] {message}");
         }
