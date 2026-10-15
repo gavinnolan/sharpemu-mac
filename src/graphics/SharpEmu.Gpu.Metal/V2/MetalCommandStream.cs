@@ -290,10 +290,12 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         // A label the GPU could not write is owed until its completion publishes it, and
         // while one is owed every later label waits behind it (see OrderedEndOfPipe).
         var owed = !encoded && EndOfPipeLabelBytes(write.Kind) != 0 && DefersEndOfPipeLabel(write.Kind);
+        var lazy = false;
         if (owed)
         {
             // A clock owed here is sampled again by its completion (ClockSampling).
             label = write with { ReferenceClock = SamplesClockAtCompletion(in write) };
+            lazy = RidesNextCommit(label.ReferenceClock);
             if (label.ReferenceClock)
             {
                 Interlocked.Increment(ref _owedClockLabels);
@@ -345,7 +347,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 // every window has to be published by a completion, which costs a flush.
                 if (!encoded)
                 {
-                    QueueCompletion(() => PublishHostLabel(in label, owed));
+                    QueueCompletion(() => PublishHostLabel(in label, owed),
+                        lazy ? (label.Destination, EndOfPipeLabelBytes(label.Kind)) : null);
                 }
 
                 break;
@@ -584,6 +587,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         Interlocked.Increment(ref _hostCommandProcessorWrites);
         var bytes = source.ToArray();
         var landedKind = GpuClobberDiagnostics.Enabled ? "landed:" + kind : null;
+        var lazy = RidesNextCommit(clock: false);
         Interlocked.Increment(ref _owedHostLabels);
         QueueCompletion(() =>
         {
@@ -605,7 +609,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             {
                 Interlocked.Decrement(ref _owedHostLabels);
             }
-        });
+        }, lazy ? (address, bytes.Length) : null);
     }
 
     private bool TryEncodeCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind)
@@ -1065,6 +1069,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     internal static EndOfPipeClockSampling ParseClockSampling(string? value) => value switch
     {
+        "completion-strict" => EndOfPipeClockSampling.CompletionStrict,
         "parse" => EndOfPipeClockSampling.Parse,
         "deferred" => EndOfPipeClockSampling.Deferred,
         _ => EndOfPipeClockSampling.Completion,
@@ -1077,13 +1082,50 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         write.ReferenceClock || write.Kind is EndOfPipeWriteKind.ClockWrite or EndOfPipeWriteKind.ClockWriteBack;
 
     private bool SamplesClockAtCompletion(in EndOfPipeWrite write) =>
-        ClockSampling == EndOfPipeClockSampling.Completion && IsClockLabel(in write) &&
+        ClockSampling is EndOfPipeClockSampling.Completion or EndOfPipeClockSampling.CompletionStrict &&
+        IsClockLabel(in write) &&
         EndOfPipeLabelBytes(write.Kind) != 0 && DefersEndOfPipeLabel(write.Kind);
 
     private string ClockSamplingTrace(in EndOfPipeWrite write) => IsClockLabel(in write)
         ? " sampling=" + (SamplesClockAtCompletion(in write) ? "completion"
             : DefersEndOfPipeLabel(write.Kind) ? "deferred" : "parse")
         : string.Empty;
+
+    /// <summary>
+    /// Whether a host label's completion may wait for the next commit instead of forcing one.
+    /// </summary>
+    /// <remarks>
+    /// In completion mode a clock never commits the buffer: its completion rides the next
+    /// commit that carries the work before it, and its value is when the GPU finished that
+    /// whole submission. That can overstate the work by the rest of the buffer, but the
+    /// frame's first and last stamps move the same way, so the gap between them still
+    /// tracks the GPU frame. A label held behind an owed clock cannot land before the clock
+    /// does, so committing for it buys nothing either. Commits still come from the frame
+    /// flush, coalescing limits, the worker parking, and a wait packet polling the bytes.
+    /// </remarks>
+    private bool RidesNextCommit(bool clock) =>
+        ClockSampling == EndOfPipeClockSampling.Completion &&
+        (clock || Volatile.Read(ref _owedClockLabels) != 0);
+
+    // Host labels in the open buffer whose completions wait for its commit; cleared by it.
+    private readonly List<(ulong Address, int Bytes)> _lazyLabelRanges = [];
+    private long _lazyLabelCompletions;
+
+    /// <summary>Host label completions that rode the next commit instead of forcing one.</summary>
+    public long TakeLazyLabelCompletions() => Interlocked.Exchange(ref _lazyLabelCompletions, 0);
+
+    private bool CoversLazyLabel(ulong address, ulong size)
+    {
+        foreach (var (start, bytes) in _lazyLabelRanges)
+        {
+            if (address < start + (ulong)bytes && start < address + size)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     // Clock labels a completion owes; nonzero means a label refused the GPU is held behind one.
     private long _owedClockLabels;
@@ -1134,7 +1176,12 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// <summary>End-of-pipe completions that ran without a GPU round trip.</summary>
     public long TakeInlineCompletions() => Interlocked.Exchange(ref _inlineCompletionCount, 0);
 
-    private void QueueCompletion(Action work)
+    /// <param name="lazyLabel">
+    /// A label whose completion may ride the next commit instead of forcing one (see
+    /// <see cref="RidesNextCommit"/>): the worker commits it when it parks, and a wait
+    /// packet polling these bytes commits it through the Poll cause.
+    /// </param>
+    private void QueueCompletion(Action work, (ulong Address, int Bytes)? lazyLabel = null)
     {
         if (InlineCompletions && LastWorkSerial <= CompletedSerial && _completions.PendingCount == 0)
         {
@@ -1158,6 +1205,15 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
         var serial = SubmissionSerial;
         Enqueue(serial);
+        if (lazyLabel is { } open && pending == serial)
+        {
+            // The work before it is in the open buffer, which some commit takes out anyway.
+            _lazyLabelRanges.Add(open);
+            _pendingLabelWrites++;
+            Interlocked.Increment(ref _lazyLabelCompletions);
+            return;
+        }
+
         FlushCommandBuffer(MetalFlushCause.Completion);
         return;
 
@@ -1570,8 +1626,14 @@ internal interface IMetalFlipTarget
 /// <summary>When a clock label's value is sampled (see MetalRenderHost.ClockSampling).</summary>
 internal enum EndOfPipeClockSampling
 {
-    /// <summary>Sampled by the completion of the work before it, and published there.</summary>
+    /// <summary>
+    /// Sampled by the completion of the work before it and published there, riding the next
+    /// commit that carries that work.
+    /// </summary>
     Completion,
+
+    /// <summary>As Completion, but the clock commits the buffer it is in at once.</summary>
+    CompletionStrict,
 
     /// <summary>Sampled as parsed and landed in order with the labels, as the GPU reaches it.</summary>
     Deferred,

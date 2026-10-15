@@ -499,6 +499,7 @@ internal sealed partial class MetalRenderHost :
         _coalescedSubmissions = 0;
         // Every label this submission carried is now on its way to the guest window.
         _pendingLabelWrites = 0;
+        _lazyLabelRanges.Clear();
         Interlocked.Increment(ref _flushes);
         _completions.Publish(serial);
         return serial;
@@ -1551,8 +1552,9 @@ internal sealed partial class MetalRenderHost :
         }
 
         if (commitPendingWrite && _commandBuffer != 0 &&
-            _gpuWrites.MayCover(address, size) &&
-            _gpuWrites.PendingSerial(address, size, CompletedSerial) >= _submissionSerial)
+            ((_gpuWrites.MayCover(address, size) &&
+              _gpuWrites.PendingSerial(address, size, CompletedSerial) >= _submissionSerial) ||
+             (_lazyLabelRanges.Count != 0 && CoversLazyLabel(address, size))))
         {
             // The write is still in the buffer being recorded: commit it, do not wait. The
             // commit is per poll, which is the cost of this design — deferring it to the
@@ -1926,6 +1928,7 @@ internal sealed partial class MetalRenderHost :
             .Append(" ordered_labels=").Append(TakeOrderedHostLabels())
             .Append(" clock_labels=").Append(clocks.Completion)
             .Append(" clock_forced=").Append(clocks.Forced)
+            .Append(" lazy_labels=").Append(TakeLazyLabelCompletions())
             .Append(" gpu_cp_writes=").Append(cpWrites.GpuTimed)
             .Append(" host_cp_writes=").Append(cpWrites.Host)
             .Append(" cp_overlay_reads=").Append(TakeOverlayReads())

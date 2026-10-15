@@ -216,6 +216,7 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
     [InlineData(null, "Completion")]
     [InlineData("", "Completion")]
     [InlineData("completion", "Completion")]
+    [InlineData("completion-strict", "CompletionStrict")]
     [InlineData("deferred", "Deferred")]
     [InlineData("parse", "Parse")]
     public void TheClockSamplingModeComesFromTheEnvironmentValue(string? value, string expected) =>
@@ -226,12 +227,18 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
     /// completion and not as parsed - Demon's Souls sizes its dynamic resolution from the gap
     /// between two of them. A label recorded after it must not become visible first.
     /// </summary>
-    [Fact]
-    public void AClockLabelCarriesItsCompletionTimeAndALaterLabelWaitsBehindIt()
+    [Theory]
+    [InlineData("Completion")]
+    [InlineData("CompletionStrict")]
+    public void AClockLabelCarriesItsCompletionTimeAndALaterLabelWaitsBehindIt(string mode)
     {
         if (!RequireDevice()) return;
-        var (parsed, gpuDone, clock, later, counters) = RecordClockThenLater(EndOfPipeClockSampling.Completion);
+        var sampling = Enum.Parse<EndOfPipeClockSampling>(mode);
+        var (parsed, gpuDone, clock, later, counters, committed) = RecordClockThenLater(sampling);
 
+        // The lazy default commits nothing for the clock or the label behind it; strict
+        // commits the buffer at the clock.
+        Assert.Equal(sampling == EndOfPipeClockSampling.CompletionStrict, committed);
         Assert.Equal(0UL, clock.WhileHeld);
         Assert.Equal(0UL, later.WhileHeld);
         Assert.True(clock.AfterDrain >= gpuDone,
@@ -245,7 +252,7 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
     public void TheDeferredClockLandsInOrderWithItsParseTimeValue()
     {
         if (!RequireDevice()) return;
-        var (parsed, _, clock, later, counters) = RecordClockThenLater(EndOfPipeClockSampling.Deferred);
+        var (parsed, _, clock, later, counters, _) = RecordClockThenLater(EndOfPipeClockSampling.Deferred);
 
         // The GPU copied both as it reached them: no completion, the value as parsed.
         Assert.Equal(parsed, clock.WhileHeld);
@@ -254,8 +261,37 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         Assert.Equal((0L, 0L), counters);
     }
 
+    /// <summary>
+    /// A clock that rides the next commit is still committed by a wait packet polling it, so
+    /// a queue waiting on the stamp never waits for the worker to park.
+    /// </summary>
+    [Fact]
+    public void AWaitPacketPollingALazyClockCommitsItsBuffer()
+    {
+        if (!RequireDevice()) return;
+        const ulong clockLabel = GuestBase + 0x4000;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        host.ClockSampling = EndOfPipeClockSampling.Completion;
+
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write32, 1, WindowedLabel, 0xA0));
+        var open = host.SubmissionSerial;
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.ClockWrite, 1, clockLabel, 1, ReferenceClock: true));
+        Assert.Equal(open, host.SubmissionSerial);
+
+        Span<byte> polled = stackalloc byte[sizeof(ulong)];
+        Assert.True(host.TryReadGuestWaitOperand(clockLabel, polled, commitPendingWrite: false));
+        Assert.Equal(open, host.SubmissionSerial);
+        Assert.True(host.TryReadGuestWaitOperand(clockLabel, polled, commitPendingWrite: true));
+        Assert.NotEqual(open, host.SubmissionSerial);
+
+        WaitForGpu(host, open);
+        WaitForCompletions(host);
+        Assert.True(rig.Backing.Read64(clockLabel) > 1);
+    }
+
     private (ulong Parsed, ulong GpuDone, (ulong WhileHeld, ulong AfterDrain) Clock,
-        (ulong WhileHeld, ulong AfterDrain) Later, (long Completion, long Forced) Counters)
+        (ulong WhileHeld, ulong AfterDrain) Later, (long Completion, long Forced) Counters, bool Committed)
         RecordClockThenLater(EndOfPipeClockSampling sampling)
     {
         const ulong clockLabel = GuestBase + 0x4000;
@@ -271,8 +307,10 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
             host.Completions.Enqueue(host.SubmissionSerial, () => hold.Wait(TimeSpan.FromSeconds(10)));
 
             var parsed = GpuReferenceClock.Read();
+            var open = host.SubmissionSerial;
             host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.ClockWrite, 1, clockLabel, parsed, ReferenceClock: true));
             host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write64, 1, LaterLabel, 2));
+            var committed = host.SubmissionSerial != open;
 
             host.FlushCommandBuffer();
             WaitForGpu(host, host.LastWorkSerial);
@@ -283,7 +321,7 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
             hold.Set();
             WaitForCompletions(host);
             return (parsed, gpuDone, (clockWhileHeld, rig.Backing.Read64(clockLabel)),
-                (laterWhileHeld, rig.Backing.Read64(LaterLabel)), host.TakeClockLabelCounters());
+                (laterWhileHeld, rig.Backing.Read64(LaterLabel)), host.TakeClockLabelCounters(), committed);
         }
         finally
         {
