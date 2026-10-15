@@ -213,8 +213,8 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
     }
 
     [Theory]
-    [InlineData(null, "Completion")]
-    [InlineData("", "Completion")]
+    [InlineData(null, "Deferred")]
+    [InlineData("", "Deferred")]
     [InlineData("completion", "Completion")]
     [InlineData("completion-strict", "CompletionStrict")]
     [InlineData("deferred", "Deferred")]

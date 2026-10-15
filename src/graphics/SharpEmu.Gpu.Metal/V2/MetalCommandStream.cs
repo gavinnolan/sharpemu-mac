@@ -1048,8 +1048,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         (!publishClocksWhenParsed || kind is not (EndOfPipeWriteKind.ClockWrite or EndOfPipeWriteKind.ClockWriteBack));
 
     /// <summary>
-    /// When a clock label's value is sampled: SHARPEMU_METAL_V2_EOP_CLOCKS=completion (the
-    /// default), =deferred or =parse.
+    /// When a clock label's value is sampled: SHARPEMU_METAL_V2_EOP_CLOCKS=deferred (the
+    /// default), =completion, =completion-strict or =parse.
     /// </summary>
     /// <remarks>
     /// An end-of-pipe timestamp is the time the work before it finished. The interpreter
@@ -1063,16 +1063,21 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// later label and command-processor write sent through completions while the clock is
     /// owed, so a guest that sees a later fence never reads an older clock.
     /// Deferred lands the parse-time value in order with the labels, as the GPU reaches it;
-    /// parse writes it as parsed. Both are kept to A/B against completion.
+    /// parse writes it as parsed. Measured on Demon's Souls (2026-10-15, runs
+    /// goal-phase-9-clock-*): completion did not change the game's render resolution in
+    /// the cinematic, title or character creation (the scene stays 2560x1440 and character
+    /// creation 3840x2160 in both modes) while the worker's host waits doubled (host_wait_ms
+    /// 1380 vs 730 per 2 s) and the title lost ~20% frame rate, so deferred is the default
+    /// until gameplay shows the scaler reacting to completion-time stamps.
     /// </remarks>
     internal EndOfPipeClockSampling ClockSampling { get; set; } = ClockSamplingDefault;
 
     internal static EndOfPipeClockSampling ParseClockSampling(string? value) => value switch
     {
+        "completion" => EndOfPipeClockSampling.Completion,
         "completion-strict" => EndOfPipeClockSampling.CompletionStrict,
         "parse" => EndOfPipeClockSampling.Parse,
-        "deferred" => EndOfPipeClockSampling.Deferred,
-        _ => EndOfPipeClockSampling.Completion,
+        _ => EndOfPipeClockSampling.Deferred,
     };
 
     private static readonly EndOfPipeClockSampling ClockSamplingDefault =
