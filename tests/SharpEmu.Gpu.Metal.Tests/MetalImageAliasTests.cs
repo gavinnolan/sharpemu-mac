@@ -206,6 +206,19 @@ public sealed unsafe class MetalImageAliasTests(ITestOutputHelper output)
             return new ImageRequest(description, request.View, ImageRole.ColorTarget);
         }
 
+        // A linear RGBA8 array of square layers, each a whole 2D surface of its own bytes.
+        public static ImageRequest ArrayRequest(ulong address, uint side, uint layers, ImageRole role)
+        {
+            var request = Request(address, side, role);
+            var description = request.Description;
+            var size = (ulong)side * side * 4 * layers;
+            description.Data = new GuestSpan(address, size);
+            description.Resources = new SubresourceCount(1, layers);
+            description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = size, Pitch = side, Height = side };
+            var view = request.View with { Type = GpuImageViewType.Type2DArray, LayerCount = layers };
+            return new ImageRequest(description, view, role);
+        }
+
         public ResourceSlotIdentifier Acquire(ulong address, uint side, ImageRole role) =>
             Acquire(Request(address, side, role));
 
@@ -673,6 +686,63 @@ public sealed unsafe class MetalImageAliasTests(ITestOutputHelper output)
 
         Assert.Equal(0, rig.Cache.LinearViewCount);
         Assert.Equal(0, rig.Cache.ImageCount);
+    }
+
+    // A 2D surface over one layer of a cached array binds as a view of that layer, at the
+    // array's own base address too, rather than keeping a second texture over the same
+    // bytes: the two would take ownership from each other, a whole writeback and upload,
+    // every time the title switched between them.
+    [Theory]
+    [InlineData(0u)]
+    [InlineData(2u)]
+    public void ALayerOfACachedArrayBindsAsAViewOfIt(uint layer)
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var array = rig.Acquire(Rig.ArrayRequest(ImageAddress, LargeSide, 4, ImageRole.Texture));
+        _ = rig.Cache.AliasCounters;
+
+        var request = Rig.Request(ImageAddress + layer * LargeSize, LargeSide, ImageRole.ColorTarget);
+        var identifier = rig.Cache.FindImage(ref request);
+        rig.Cache.AcquireColorTargetView(identifier, request);
+
+        Assert.Equal(array, identifier);
+        Assert.Equal(layer, request.View.BaseLayer);
+        Assert.Equal(1, rig.Cache.ImageCount);
+        Assert.Equal(0, rig.Cache.AliasCounters.Kept);
+    }
+
+    // The array requested over a GPU-written 2D surface of its first layer replaces it: the
+    // surface goes back to guest memory and the array, uploaded from there, serves it as a
+    // view from then on, instead of the pair being kept as aliases of each other.
+    [Fact]
+    public void AnArrayOverACachedFirstLayerReplacesIt()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var written = MetalTileOracle.Pattern((int)LargeSize, 0x3B);
+        rig.WriteGuest(ImageAddress, written);
+        var surface = rig.Acquire(ImageAddress, LargeSide, ImageRole.ColorTarget);
+        Assert.True(rig.Cache.GetImage(surface).IsGpuModified);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        rig.WriteGuest(ImageAddress, MetalTileOracle.Pattern((int)LargeSize, 0xA4));
+        _ = rig.Cache.AliasCounters;
+
+        var array = rig.Acquire(Rig.ArrayRequest(ImageAddress, LargeSide, 4, ImageRole.Texture));
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+
+        Assert.NotEqual(surface, array);
+        Assert.False(rig.Cache.TryGetImage(surface, out _));
+        Assert.Equal(1, rig.Cache.ImageCount);
+        Assert.Equal(0, rig.Cache.AliasCounters.Kept);
+        Assert.Equal(written, rig.ReadGuest(ImageAddress, LargeSize));
+
+        var request = Rig.Request(ImageAddress, LargeSide, ImageRole.ColorTarget);
+        Assert.Equal(array, rig.Cache.FindImage(ref request));
+        Assert.Equal(0u, request.View.BaseLayer);
+        Assert.Equal(1, rig.Cache.ImageCount);
     }
 
     private bool RequireDevice()
