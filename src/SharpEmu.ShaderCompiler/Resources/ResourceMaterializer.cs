@@ -868,6 +868,9 @@ public static class ResourceMaterializer
             {
                 if (result.Descriptors.Count >= ShaderResourceInfo.MaxIndirectImageCandidates)
                 {
+                    var distinct = probed.Select(words => string.Join(',', words)).Distinct().Count() + (nullFirst ? 1 : 0);
+                    SpecializationFailed($"indirect image table of {probed.Count} entries holds about {distinct} distinct descriptors, " +
+                        $"more than the {ShaderResourceInfo.MaxIndirectImageCandidates} candidates an access selects among");
                     failure = ResourceMaterializationFailure.ImageCapacityExceeded;
                     return false;
                 }
