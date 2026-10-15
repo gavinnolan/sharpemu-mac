@@ -522,20 +522,31 @@ public sealed partial class RenderExecutor
             return RefuseBoundedFill(program, "value unreadable");
         }
 
+        // A pattern of differing words (an RGBA16F clear colour is two) can only be an image
+        // clear; DCC metadata takes one repeated word.
+        Span<uint> patternWords = stackalloc uint[8];
+        var patternLength = 1;
+        var uniform = true;
+        patternWords[0] = value;
         if (fill.PatternLength is { } lengthWord)
         {
-            if (fill.Pattern is not { } pattern || !TryResolveFillWord(lengthWord, userData, out var length) || length == 0 || length > pattern.Length)
+            if (fill.Pattern is not { } pattern || !TryResolveFillWord(lengthWord, userData, out var length) || length == 0 ||
+                length > pattern.Length || length > patternWords.Length)
             {
                 return RefuseBoundedFill(program, "pattern length");
             }
 
             for (var word = 1; word < length; word++)
             {
-                if (!TryResolveFillWord(pattern[word], userData, out var repeated) || repeated != value)
+                if (!TryResolveFillWord(pattern[word], userData, out patternWords[word]))
                 {
-                    return RefuseBoundedFill(program, $"pattern length={length} varies");
+                    return RefuseBoundedFill(program, $"pattern word {word} unreadable");
                 }
+
+                uniform &= patternWords[word] == value;
             }
+
+            patternLength = (int)length;
         }
 
         if (destination.Stride != sizeof(uint) || destination.SwizzleEnabled || destination.AddThreadId || destination.OutOfBounds != 0 ||
@@ -562,8 +573,15 @@ public sealed partial class RenderExecutor
 
         var address = destination.Address + (ulong)start * sizeof(uint);
         var size = (end - start) * sizeof(uint);
-        // A fill that is not DCC metadata may be a whole image the host can clear instead.
-        var consumed = _host.TryFillDccMetadata(address, size, value) || _host.TryClearImageFromKernelFill(address, size, value);
+        // A fill that is not DCC metadata may be a whole image the host can clear instead. The
+        // pattern repeats from the thread index, so it starts at the first byte only from zero.
+        if (!uniform && start != 0)
+        {
+            return RefuseBoundedFill(program, $"pattern length={patternLength} varies from start={start}");
+        }
+
+        var consumed = (uniform && _host.TryFillDccMetadata(address, size, value)) ||
+                       _host.TryClearImageFromKernelFill(address, size, patternWords[..patternLength]);
         if (RenderTrace.Enabled && RenderTrace.MetadataClear())
         {
             RenderTrace.Write($"Bounded fill: shader=0x{program.Hash:X16} address=0x{address:X16} size=0x{size:X} value=0x{value:X8} consumed={consumed}");

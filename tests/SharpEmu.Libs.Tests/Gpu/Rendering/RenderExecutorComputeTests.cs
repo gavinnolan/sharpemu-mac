@@ -598,6 +598,30 @@ public sealed class RenderExecutorComputeTests : IDisposable
     }
 
     [Fact]
+    public void AVaryingPatternFill_IsOfferedToTheHostAsAnImageClear()
+    {
+        _host.RegisteredDcc.Add(MetadataAddress);
+        _host.KernelFillAccepted = true;
+        ConfigurePatternFill(count: 0x400, length: 2, pattern: [0x3C003C00, 0x3C000000, 0, 0]);
+        _executor.Dispatch(1, Banks(), 0x400, 1, 1, 0x61);
+
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("fill_dcc", StringComparison.Ordinal));
+        Assert.Contains($"kernel_fill {MetadataAddress:X} 1000 3C003C00,3C000000", _host.Calls);
+        AssertNotDispatched();
+    }
+
+    [Fact]
+    public void ABoundedFillOutsideDccMetadata_IsOfferedToTheHostAsAnImageClear()
+    {
+        _host.KernelFillAccepted = true;
+        ConfigureBoundedFill(start: 0x10, count: 0x300, records: 0x400);
+        _executor.Dispatch(1, Banks(), 16, 1, 1, 0x41);
+
+        Assert.Contains($"kernel_fill {MetadataAddress + 0x40:X} C00 00000000", _host.Calls);
+        AssertNotDispatched();
+    }
+
+    [Fact]
     public void BoundedFillOutsideDccMetadata_RunsTheDispatch()
     {
         ConfigureBoundedFill(start: 0x10, count: 0x300, records: 0x400);
