@@ -797,12 +797,15 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             WatchImage(imageIdentifier);
         }
 
+        var stencil = request.Description.HasStencil
+            ? ImageStencilPlane(in image.Description, in request.Description)
+            : default;
         SynchronizeAliases(imageIdentifier, takesGpuOwnership: writes, keepsDepthPlane: stencilOnly);
         // Only a target the pass writes can be one it clears. The refresh reads the
         // stencil plane from where the image has it, so a request that moves the plane
         // refreshes now, before the description changes.
         var defer = deferRefresh && writes && CanDeferRefresh(image) &&
-            (!request.Description.HasStencil || request.Description.Stencil == image.Description.Stencil);
+            (!request.Description.HasStencil || stencil == image.Description.Stencil);
         if (!defer)
         {
             RefreshFromGuest(image);
@@ -817,7 +820,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         if (request.Description.HasStencil)
         {
-            image.Description.Stencil = request.Description.Stencil;
+            image.Description.Stencil = stencil;
         }
 
         if (defer)
@@ -837,6 +840,41 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         image.NoteUse(writes ? image.GpuWriteSerial : _owner.CurrentSerial);
         return image.GetOrCreateView(request.View);
+    }
+
+    // The stencil plane of a depth image, from a depth target request that binds some of
+    // its layers. DB_STENCIL_*_BASE always names slice 0 and DB_DEPTH_VIEW only picks the
+    // slices a pass writes, so a request for slices 0..SLICE_MAX carries SLICE_MAX + 1
+    // stencil slices: one padded 64 KiB-block S8 surface each, laid end to end from the
+    // base. The image keeps the plane for every one of its layers - a cube bound one face
+    // at a time still owns six stencil slices.
+    internal static GuestSpan ImageStencilPlane(in ImageDescription image, in ImageDescription request)
+    {
+        var imageLayers = image.Resources.Layers;
+        var requestLayers = request.Resources.Layers;
+        var imageSlice = imageLayers == 0 ? 0 : image.Data.Size / imageLayers;
+        if (imageLayers == 0 || requestLayers == 0 || requestLayers > imageLayers ||
+            image.Data.Size % imageLayers != 0 || request.Stencil.Size % requestLayers != 0 ||
+            request.Data.Address < image.Data.Address || imageSlice == 0 ||
+            (request.Data.Address - image.Data.Address) % imageSlice != 0)
+        {
+            throw GpuFatal.Fatal(
+                $"A stencil request does not bind layers of its depth image: " +
+                $"image=0x{image.Data.Address:X16}+0x{image.Data.Size:X} layers={imageLayers} " +
+                $"request=0x{request.Data.Address:X16}+0x{request.Data.Size:X} layers={requestLayers} " +
+                $"stencil=0x{request.Stencil.Address:X16}+0x{request.Stencil.Size:X}.");
+        }
+
+        var firstLayer = (request.Data.Address - image.Data.Address) / imageSlice;
+        var stencilSlice = request.Stencil.Size / requestLayers;
+        if (firstLayer + requestLayers > imageLayers || request.Stencil.Address < stencilSlice * firstLayer)
+        {
+            throw GpuFatal.Fatal(
+                $"A stencil request reaches past its depth image: firstLayer={firstLayer} layers={requestLayers} " +
+                $"imageLayers={imageLayers} stencil=0x{request.Stencil.Address:X16}+0x{request.Stencil.Size:X}.");
+        }
+
+        return new GuestSpan(request.Stencil.Address - (stencilSlice * firstLayer), stencilSlice * imageLayers);
     }
 
     // SHARPEMU_METAL_V2_READONLY_DEPTH=0 treats every depth attachment as written again.
