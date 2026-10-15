@@ -20,6 +20,16 @@ public static class AvPlayerExports
 {
     private const int InvalidParameters = unchecked((int)0x806A0001);
     private const int OperationFailed = unchecked((int)0x806A0002);
+    private const int NotSupported = unchecked((int)0x806A0004);
+    // SCE_AVPLAYER_TRICK_SPEED_NORMAL: 100 = 1x. The other trick speeds
+    // (fast forward 400..3200, rewind -400..-3200) are not implemented by the
+    // host decoder path, so sceAvPlayerSetTrickSpeed reports NOT_SUPPORTED for them.
+    private const int TrickSpeedNormal = 100;
+    // SceAvPlayerStartInfoEx { size_t thisSize; uint64_t startTimeMs; }
+    private const int StartInfoExStartTimeOffset = 8;
+    // The player exposes stream 0 (video) and, when the source has audio, stream 1.
+    private const uint VideoStreamId = 0;
+    private const uint AudioStreamId = 1;
     private const int WarningJumpComplete = unchecked((int)0x806A00A3);
     private const int DefaultFrameBufferCount = 2;
     private const int MinimumFrameBufferCount = 2;
@@ -441,6 +451,11 @@ public static class AvPlayerExports
         public uint TransferCharacteristics { get; set; }
         public ulong DurationMilliseconds { get; set; }
         public bool HasAudio { get; set; }
+        // sceAvPlayerEnableStream / DisableStream selection; both streams start enabled,
+        // as the SDK enables the first video and audio stream of a new source.
+        public bool VideoStreamEnabled { get; set; } = true;
+        public bool AudioStreamEnabled { get; set; } = true;
+        public int TrickSpeed { get; set; } = TrickSpeedNormal;
         public uint AvSyncMode { get; set; } = AvSyncModeDefault;
         public bool IsGen5 { get; init; }
         public bool Started { get; set; }
@@ -736,7 +751,29 @@ public static class AvPlayerExports
         ExportName = "sceAvPlayerStart",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceAvPlayer")]
-    public static int AvPlayerStart(CpuContext ctx)
+    public static int AvPlayerStart(CpuContext ctx) => StartPlayer(ctx, startTimeMilliseconds: null);
+
+    [SysAbiExport(
+        Nid = "NxSdL9t-KXk",
+        ExportName = "sceAvPlayerStartEx",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAvPlayer")]
+    public static int AvPlayerStartEx(CpuContext ctx)
+    {
+        // SceAvPlayerStartInfoEx is optional: without it StartEx is Start from the
+        // beginning of the source.
+        var startInfoAddress = ctx[CpuRegister.Rsi];
+        ulong startTimeMilliseconds = 0;
+        if (startInfoAddress != 0 &&
+            !ctx.TryReadUInt64(startInfoAddress + StartInfoExStartTimeOffset, out startTimeMilliseconds))
+        {
+            return SetReturn(ctx, InvalidParameters);
+        }
+
+        return StartPlayer(ctx, startTimeMilliseconds);
+    }
+
+    private static int StartPlayer(CpuContext ctx, ulong? startTimeMilliseconds)
     {
         PlayerState player;
         lock (StateGate)
@@ -746,6 +783,18 @@ public static class AvPlayerExports
                 return SetReturn(ctx, InvalidParameters);
             }
             player = foundPlayer;
+
+            if (startTimeMilliseconds is { } requestedStart)
+            {
+                var clampedStart = Math.Min(requestedStart, player.DurationMilliseconds);
+                if (clampedStart != player.StartTimeMilliseconds || player.Started)
+                {
+                    // A new start position restarts the decoders, which seek to
+                    // StartTimeMilliseconds when they open.
+                    player.ResetPlayback();
+                    player.StartTimeMilliseconds = clampedStart;
+                }
+            }
 
             player.Started = true;
             player.Stopped = false;
@@ -922,8 +971,126 @@ public static class AvPlayerExports
         TraceOnce(
             $"enable_stream_{ctx[CpuRegister.Rsi]}",
             $"enable_stream index={ctx[CpuRegister.Rsi]}");
-        return ValidatePlayer(ctx);
+        return SetStreamEnabled(ctx, enabled: true);
     }
+
+    [SysAbiExport(
+        Nid = "BOVKAzRmuTQ",
+        ExportName = "sceAvPlayerDisableStream",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAvPlayer")]
+    public static int AvPlayerDisableStream(CpuContext ctx)
+    {
+        TraceOnce(
+            $"disable_stream_{ctx[CpuRegister.Rsi]}",
+            $"disable_stream index={ctx[CpuRegister.Rsi]}");
+        return SetStreamEnabled(ctx, enabled: false);
+    }
+
+    /// <summary>
+    /// Stream selection is fixed once playback starts: enabling or disabling a
+    /// stream of a started player, or naming a stream the source does not have,
+    /// fails with OPERATION_FAILED. A disabled stream delivers no frames.
+    /// </summary>
+    private static int SetStreamEnabled(CpuContext ctx, bool enabled)
+    {
+        var streamId = unchecked((uint)ctx[CpuRegister.Rsi]);
+        lock (StateGate)
+        {
+            if (!Players.TryGetValue(ctx[CpuRegister.Rdi], out var player) ||
+                player.SourcePath is null)
+            {
+                return SetReturn(ctx, InvalidParameters);
+            }
+
+            if (player.Started || streamId >= GetStreamCount(player))
+            {
+                return SetReturn(ctx, OperationFailed);
+            }
+
+            if (streamId == VideoStreamId)
+            {
+                player.VideoStreamEnabled = enabled;
+            }
+            else
+            {
+                player.AudioStreamEnabled = enabled;
+            }
+
+            return SetReturn(ctx, 0);
+        }
+    }
+
+    [SysAbiExport(
+        Nid = "buMCiJftcfw",
+        ExportName = "sceAvPlayerChangeStream",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAvPlayer")]
+    public static int AvPlayerChangeStream(CpuContext ctx)
+    {
+        var oldStreamId = unchecked((uint)ctx[CpuRegister.Rsi]);
+        var newStreamId = unchecked((uint)ctx[CpuRegister.Rdx]);
+        lock (StateGate)
+        {
+            if (!Players.TryGetValue(ctx[CpuRegister.Rdi], out var player) ||
+                player.SourcePath is null)
+            {
+                return SetReturn(ctx, InvalidParameters);
+            }
+
+            // The old stream must be the active stream of its type and the new one
+            // must be a stream of the same type. The host source exposes one stream
+            // per type, so the only valid change is to the stream already active.
+            var streamCount = GetStreamCount(player);
+            if (oldStreamId >= streamCount || newStreamId >= streamCount ||
+                oldStreamId != newStreamId ||
+                !IsStreamEnabled(player, oldStreamId))
+            {
+                return SetReturn(ctx, OperationFailed);
+            }
+
+            return SetReturn(ctx, 0);
+        }
+    }
+
+    [SysAbiExport(
+        Nid = "av8Z++94rs0",
+        ExportName = "sceAvPlayerSetTrickSpeed",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAvPlayer")]
+    public static int AvPlayerSetTrickSpeed(CpuContext ctx)
+    {
+        var trickSpeed = unchecked((int)ctx[CpuRegister.Rsi]);
+        lock (StateGate)
+        {
+            if (!Players.TryGetValue(ctx[CpuRegister.Rdi], out var player) ||
+                player.SourcePath is null ||
+                trickSpeed == 0)
+            {
+                return SetReturn(ctx, InvalidParameters);
+            }
+
+            if (player.Stopped || player.EndOfStream)
+            {
+                return SetReturn(ctx, OperationFailed);
+            }
+
+            // Deviation: only 1x playback is implemented. Fast forward and rewind
+            // report NOT_SUPPORTED and leave the current speed in place.
+            if (trickSpeed != TrickSpeedNormal)
+            {
+                return SetReturn(ctx, NotSupported);
+            }
+
+            player.TrickSpeed = trickSpeed;
+            return SetReturn(ctx, 0);
+        }
+    }
+
+    private static uint GetStreamCount(PlayerState player) => player.HasAudio ? 2u : 1u;
+
+    private static bool IsStreamEnabled(PlayerState player, uint streamId) =>
+        streamId == VideoStreamId ? player.VideoStreamEnabled : player.AudioStreamEnabled;
 
     [SysAbiExport(
         Nid = "k-q+xOxdc3E",
@@ -1092,7 +1259,8 @@ public static class AvPlayerExports
             var found = Players.TryGetValue(ctx[CpuRegister.Rdi], out var player);
             if (!found || infoAddress == 0 || !player!.Started || player.Paused ||
                 player.EndOfStream || player.SourcePath is null ||
-                !player.HasAudio || !EnsureAudioDecoder(player))
+                !player.HasAudio || !player.AudioStreamEnabled ||
+                !EnsureAudioDecoder(player))
             {
                 TraceOnce(
                     "audio_data_refused",
@@ -1209,7 +1377,10 @@ public static class AvPlayerExports
         ulong fileSizeCallback = 0,
         bool hasAudio = false,
         double framesPerSecond = 30.0,
-        bool isGen5 = true)
+        bool isGen5 = true,
+        string? sourcePath = null,
+        bool started = false,
+        bool stopped = false)
     {
         PlayerState? previous;
         lock (StateGate)
@@ -1232,10 +1403,27 @@ public static class AvPlayerExports
                 FileCloseCallback = fileCloseCallback,
                 FileReadOffsetCallback = fileReadOffsetCallback,
                 FileSizeCallback = fileSizeCallback,
+                SourcePath = sourcePath,
+                Started = started,
+                Stopped = stopped,
             };
         }
 
         previous?.Dispose();
+    }
+
+    internal static (bool VideoEnabled, bool AudioEnabled, int TrickSpeed, ulong StartTimeMilliseconds)
+        GetStreamControlStateForTest(ulong handle)
+    {
+        lock (StateGate)
+        {
+            var player = Players[handle];
+            return (
+                player.VideoStreamEnabled,
+                player.AudioStreamEnabled,
+                player.TrickSpeed,
+                player.StartTimeMilliseconds);
+        }
     }
 
     internal static bool AllocateGuestVideoBuffersForTest(
@@ -1670,7 +1858,7 @@ public static class AvPlayerExports
         {
             if (!Players.TryGetValue(ctx[CpuRegister.Rdi], out var player) ||
                 infoAddress == 0 || !player.Started || player.EndOfStream ||
-                player.SourcePath is null)
+                player.SourcePath is null || !player.VideoStreamEnabled)
             {
                 return SetReturn(ctx, 0);
             }
