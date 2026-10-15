@@ -1032,6 +1032,36 @@ public sealed class RenderExecutorDrawTests : IDisposable
     }
 
     [Fact]
+    public void VertexOnlyBufferWrites_KeepThePassOpenWhenTheHostOrdersThemInside()
+    {
+        _host.OrdersVertexWritesInsidePass = true;
+        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        var descriptor = BufferDescriptor(VertexBase, 4, 16);
+        _pipelines.Graphics = Programs(
+            vertexStage: Stage(Program(ShaderStageKind.Vertex, buffers: [written]), buffers: [descriptor]),
+            pixelStage: Stage(Program(ShaderStageKind.Pixel)));
+        _executor.DrawIndexed(1, Banks(), Indexed(3));
+
+        AssertOrder("draw_indexed 3 1 0 0 0", $"write_barrier {GpuPipelineStage.VertexShaderBit}", "reset_bindings");
+        var draw = _host.Calls.IndexOf("draw_indexed 3 1 0 0 0");
+        Assert.DoesNotContain(_host.Calls.Skip(draw), call => call == "end_rendering");
+    }
+
+    [Fact]
+    public void PixelBufferWrites_StillEndThePassWhenTheHostOrdersVertexWritesInside()
+    {
+        _host.OrdersVertexWritesInsidePass = true;
+        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        var descriptor = BufferDescriptor(VertexBase, 4, 16);
+        _pipelines.Graphics = Programs(
+            vertexStage: Stage(Program(ShaderStageKind.Vertex)),
+            pixelStage: Stage(Program(ShaderStageKind.Pixel, buffers: [written]), buffers: [descriptor]));
+        _executor.DrawIndexed(1, Banks(), Indexed(3));
+
+        AssertOrder("draw_indexed 3 1 0 0 0", "end_rendering", $"write_barrier {GpuPipelineStage.FragmentShaderBit}", "reset_bindings");
+    }
+
+    [Fact]
     public void ShaderBufferWrites_WithoutAnAddressOrFootprintNeedNoBarrier()
     {
         var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);

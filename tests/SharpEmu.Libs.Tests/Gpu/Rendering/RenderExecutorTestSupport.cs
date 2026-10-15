@@ -363,6 +363,8 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public bool RetainTargetlessDraws { get; set; }
 
+    public bool OrdersVertexWritesInsidePass { get; set; }
+
     public List<(RegisterBanks Banks, GraphicsPrograms Programs, TargetlessDrawArguments Arguments)> RetainedDraws { get; } = new();
 
     public void ClearColorTargets(ReadOnlySpan<ColorTargetState> targets, SolidColorClear clear) =>

@@ -221,6 +221,11 @@ public interface IRenderHost
     // Orders the buffer writes of the given shader stages before every later access.
     void ShaderWriteBarrier(GpuPipelineStage sourceStages);
 
+    // True when ShaderWriteBarrier orders vertex-stage buffer writes inside the open render
+    // pass, so a draw whose vertex shader writes buffers need not end the pass. Fragment-stage
+    // writes always end it: a tile-based GPU cannot make them visible mid-pass.
+    bool OrdersVertexWritesInsidePass => false;
+
     void ShaderWriteHazardBarrier();
 
     void ShaderAccessBarrier();

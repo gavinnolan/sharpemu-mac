@@ -1928,15 +1928,32 @@ internal sealed partial class MetalRenderHost
     // recorded where the storage buffers and images were bound.
     public void ShaderWriteBarrier(GpuPipelineStage sourceStages)
     {
-        _ = sourceStages;
-        RecordMemoryBarrier();
+        // Inside a pass the barrier names the stages that stored: a vertex-only
+        // barrier is the form Apple GPUs order mid-pass, and it is the only one the
+        // executor leaves the pass open for.
+        nuint after = 0;
+        if ((sourceStages & GpuPipelineStage.VertexShaderBit) != 0)
+        {
+            after |= Mtl.RenderStageVertex;
+        }
+
+        if ((sourceStages & GpuPipelineStage.FragmentShaderBit) != 0)
+        {
+            after |= Mtl.RenderStageFragment;
+        }
+
+        RecordMemoryBarrier(after == 0 ? Mtl.RenderStageVertex | Mtl.RenderStageFragment : after);
     }
+
+    public bool OrdersVertexWritesInsidePass => true;
 
     public void ShaderWriteHazardBarrier() => RecordMemoryBarrier();
 
     public void ShaderAccessBarrier() => RecordMemoryBarrier();
 
-    private void RecordMemoryBarrier()
+    private void RecordMemoryBarrier() => RecordMemoryBarrier(Mtl.RenderStageVertex | Mtl.RenderStageFragment);
+
+    private void RecordMemoryBarrier(nuint afterStages)
     {
         const nuint scope = Mtl.BarrierScopeBuffers | Mtl.BarrierScopeTextures | Mtl.BarrierScopeRenderTargets;
         if (_renderEncoder != 0)
@@ -1945,7 +1962,7 @@ internal sealed partial class MetalRenderHost
                 _renderEncoder,
                 SelRenderMemoryBarrier,
                 scope,
-                Mtl.RenderStageVertex | Mtl.RenderStageFragment,
+                afterStages,
                 Mtl.RenderStageVertex | Mtl.RenderStageFragment);
             return;
         }

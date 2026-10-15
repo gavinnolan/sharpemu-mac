@@ -388,7 +388,13 @@ public sealed partial class RenderExecutor
 
         if (writeStages != GpuPipelineStage.None)
         {
-            _host.EndRendering();
+            // Vertex-stage stores can be ordered inside the pass by a host that supports it;
+            // ending the pass would store and reload every attachment for each such draw.
+            if ((writeStages & GpuPipelineStage.FragmentShaderBit) != 0 || !_host.OrdersVertexWritesInsidePass)
+            {
+                _host.EndRendering();
+            }
+
             _host.ShaderWriteBarrier(writeStages);
         }
 
