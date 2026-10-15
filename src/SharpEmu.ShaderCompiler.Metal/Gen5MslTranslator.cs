@@ -1435,13 +1435,62 @@ public static partial class Gen5MslTranslator
                 // no per-instruction rounding and denorm flushing is fixed), and the other registers
                 // (TRAPSTS, HW_ID, ...) do not affect results, so those writes stay no-ops.
                 case "SSetregB32":
+                case "SSetregImm32B32":
                     if (instruction.Sources.Count > 1 && SetregTouchesIeeeOrClamp(instruction.Sources[1].Value))
                     {
-                        error = "s_setreg_b32 writes MODE.IEEE/DX10_CLAMP, which is fixed at launch and not supported";
+                        error = $"{(instruction.Opcode == "SSetregB32" ? "s_setreg_b32" : "s_setreg_imm32_b32")} " +
+                            "writes MODE.IEEE/DX10_CLAMP, which is fixed at launch and not supported";
                         return false;
                     }
 
                     return true;
+                case "SGetregB32":
+                    return TryEmitGetreg(instruction, out error);
+                // S_ROUND_MODE sets MODE.FP_ROUND. Metal rounds every result to nearest even, so
+                // only the immediate that selects that for all precisions can be honoured.
+                case "SRoundMode":
+                    if ((instruction.Words[0] & 0xFFFFu) != 0)
+                    {
+                        error = $"s_round_mode 0x{instruction.Words[0] & 0xFFFFu:X}: only round-to-nearest-even (0) is supported";
+                        return false;
+                    }
+
+                    return true;
+                // Denormals are always preserved, as for an S_SETREG_B32 of MODE.FP_DENORM.
+                case "SDenormMode":
+                // Wave scheduling, power and debug hints with no effect on results: S_WAKEUP and
+                // S_SLEEP pace waves, S_SETKILL and S_INCPERFLEVEL/S_DECPERFLEVEL drive the
+                // debugger and performance counters, S_ICACHE_INV drops the instruction cache,
+                // S_WAIT_IDLE waits for outstanding work like S_WAITCNT, S_TTRACEDATA_IMM writes
+                // the thread trace, S_VERSION is a code-object marker and V_PIPEFLUSH /
+                // V_CLREXCP flush the VALU pipe and clear the (unobservable) exception state.
+                case "SWakeup":
+                case "SSetkill":
+                case "SSleep":
+                case "SIcacheInv":
+                case "SIncperflevel":
+                case "SDecperflevel":
+                case "SWaitIdle":
+                case "STtracedataImm":
+                case "SVersion":
+                case "VPipeflush":
+                case "VClrexcp":
+                    return true;
+                // Debugger halts and context-switch / trap-handler returns: there is no host
+                // agent to resume a halted wave or a saved context to return to.
+                case "SSethalt":
+                case "SSendmsghalt":
+                case "SEndpgmSaved":
+                case "SRfeB64":
+                    error = $"{instruction.Opcode} halts the wave or returns from a trap handler, which has no host equivalent";
+                    return false;
+                // A call to a PC-relative subroutine and the subvector loops re-enter code with a
+                // saved PC or a halved EXEC; the block builder does not follow either.
+                case "SCallB64":
+                case "SSubvectorLoopBegin":
+                case "SSubvectorLoopEnd":
+                    error = $"{instruction.Opcode} is subroutine/subvector control flow the translator does not follow";
+                    return false;
                 case "SNop":
                 case "SWaitcnt":
                 // A dependency-counter wait: the emitted MSL has no hardware

@@ -903,12 +903,12 @@ public sealed class MslTranslationTests
     [Fact]
     public void UnsupportedOpcodeFailsLoudlyWithPc()
     {
-        // v_cubeid_f32 is real but outside the phase-1 ALU set: the translator
-        // must name the opcode and pc instead of emitting wrong code.
+        // s_sethalt is real but has no host equivalent: the translator must
+        // name the opcode and pc instead of emitting wrong code.
         var fixture = new Gen5ComputeFixture(
             "unsupported",
             [
-                0xD5C40000, 0x04060501, // v_cubeid_f32 v0, v1, v2, v3
+                0xBF8D0001,             // s_sethalt 1
                 0xBF810000,             // s_endpgm
             ],
             StoreScalarResourceBase: 0,

@@ -135,6 +135,10 @@ public static partial class Gen5MslTranslator
                 case "VMovrelsdB32":
                 case "VMovrelsd2B32":
                     return TryEmitMoveRelative(instruction, out error);
+                case "VSwapB32":
+                    return TryEmitSwap(instruction, out error);
+                case "VSwaprelB32":
+                    return TryEmitSwapRelative(instruction, out error);
                 case "VWritelaneB32":
                 {
                     // vdst[lane(src1)] = src0; a writelane lands regardless of EXEC.
@@ -197,7 +201,8 @@ public static partial class Gen5MslTranslator
             if (intClamp)
             {
                 if (instruction.Opcode is "VMulU32U24" or "VMulI32I24" or "VMadU32U24" or "VMadI32I24" or
-                    "VSadU32" or "VMadU64U32")
+                    "VSadU32" or "VMadU64U32" or "VMadI64I32" or
+                    "VMsadU8" or "VQsadPkU16U8" or "VMqsadPkU16U8" or "VMqsadU32U8")
                 {
                     error = $"{instruction.Opcode}: clamped integer results are not supported";
                     return false;
@@ -257,6 +262,11 @@ public static partial class Gen5MslTranslator
                     $"fma({F16(instruction, 0)}, {F16(instruction, 1)}, {F16(instruction, 2)})"),
                 "VFmacF32" or "VMacF32" =>
                     FloatResult(instruction, $"fma({F(instruction, 0)}, {F(instruction, 1)}, as_type<float>(v[{destination}]))"),
+                // DX9 legacy multiplies: a zero operand makes the product +0 (see EmitLegacyMultiply).
+                // V_MULLIT_F32's ISA text only adds "specific INF, NaN, overflow rules" that it
+                // does not spell out; it is the legacy multiply here.
+                "VMulLegacyF32" or "VMullitF32" => EmitLegacyMultiply(instruction, null),
+                "VMadLegacyF32" => EmitLegacyMultiply(instruction, F(instruction, 2)),
                 "VPkFmacF16" => EmitPackedF16Fmac(instruction, destination),
                 "VDot2cF32F16" => EmitDot2cF32F16(instruction, destination),
                 "VFloorF32" => FloatResult(instruction, $"floor({F(instruction, 0)})"),
@@ -293,6 +303,16 @@ public static partial class Gen5MslTranslator
                 "VCosF32" => FloatResult(instruction, $"cos(sharpemu_trig_cycle_f32({F(instruction, 0)}, false) * {TauLiteral})"),
                 "VLdexpF32" =>
                     FloatResult(instruction, $"ldexp({F(instruction, 0)}, as_type<int>({RawSource(instruction, 1)}))"),
+                // D.f16 = S0.f16 * 2^S1.i16. Past +-100 the f16 result is already 0 or infinity, so
+                // the exponent is clamped there and the f32 scaling stays exact.
+                "VLdexpF16" => Float16Result(
+                    instruction,
+                    destination,
+                    $"({F16(instruction, 0)} * as_type<float>((uint)(clamp(as_type<int>({Int16Source(instruction, 1, signed: true)}), -100, 100) + 127) << 23))"),
+                "VFrexpMantF32" => EmitFrexpF32(instruction, mantissa: true),
+                "VFrexpExpI32F32" => EmitFrexpF32(instruction, mantissa: false),
+                "VFrexpMantF16" => EmitFrexpF16(instruction, destination, mantissa: true),
+                "VFrexpExpI16F16" => EmitFrexpF16(instruction, destination, mantissa: false),
                 "VMax3F16" => Float16Result(instruction, destination,
                     $"fmax(fmax({F16(instruction, 0)}, {F16(instruction, 1)}), {F16(instruction, 2)})"),
                 "VMed3F16" => Float16Result(instruction, destination,
@@ -311,6 +331,22 @@ public static partial class Gen5MslTranslator
                 "VCvtU16F16" =>
                     $"(uint)clamp(trunc(isnan({F16(instruction, 0)}) ? 0.0f : {F16(instruction, 0)}), 0.0f, 65535.0f)",
                 "VCvtI32F32" => SaturatedFloatToInt(Temp("float", F(instruction, 0))),
+                // u16/i16 -> f16 rounds to nearest even (65520 and up become +inf, as IEEE does).
+                "VCvtF16U16" => Float16Result(instruction, destination, $"(float)({Int16Source(instruction, 0, signed: false)})"),
+                "VCvtF16I16" => Float16Result(
+                    instruction,
+                    destination,
+                    $"(float)as_type<int>({Int16Source(instruction, 0, signed: true)})"),
+                "VCvtI16F16" => EmitCvtI16F16(instruction, destination),
+                "VCvtNormI16F16" => Int16Result(
+                    instruction,
+                    destination,
+                    NormalizeHalfBits(ReadMinimumHalfBits(instruction, 0), signed: true)),
+                "VCvtNormU16F16" => Int16Result(
+                    instruction,
+                    destination,
+                    NormalizeHalfBits(ReadMinimumHalfBits(instruction, 0), signed: false)),
+                "VSatPkU8I16" => EmitSaturatePackU8(instruction),
                 // RPI is floor(x + 0.5) (round to nearest, ties up); FLR is floor(x).
                 "VCvtRpiI32F32" => SaturatedFloatToInt(Temp("float", $"floor({F(instruction, 0)} + 0.5f)")),
                 "VCvtFlrI32F32" => SaturatedFloatToInt(Temp("float", $"floor({F(instruction, 0)})")),
@@ -319,8 +355,10 @@ public static partial class Gen5MslTranslator
                 "VCvtF32Ubyte2" => FloatResult(instruction, $"(float)((({RawSource(instruction, 0)}) >> 16) & 0xFFu)"),
                 "VCvtF32Ubyte3" => FloatResult(instruction, $"(float)((({RawSource(instruction, 0)}) >> 24) & 0xFFu)"),
                 // Clamp and omod apply to the f32 result before it is rounded to f16.
-                "VCvtF16F32" =>
-                    $"((uint)as_type<ushort>(half({ApplyFloatOutputModifiers(instruction, F(instruction, 0))})))",
+                // The VOP3 form's op_sel[3] puts the half into the high half, keeping the low one.
+                "VCvtF16F32" => instruction.Control is Gen5Vop3Control { OperandSelect: >= 8 }
+                    ? $"((v[{destination}] & 0x0000FFFFu) | ((uint)as_type<ushort>(half({ApplyFloatOutputModifiers(instruction, F(instruction, 0))})) << 16))"
+                    : $"((uint)as_type<ushort>(half({ApplyFloatOutputModifiers(instruction, F(instruction, 0))})))",
                 // The source is a half: an SDWA or VOP3 negate flips its sign bit 15, not
                 // bit 31 of the register, and VOP3 op_sel can pick the high half.
                 "VCvtF32F16" => FloatResult(instruction, F16(instruction, 0)),
@@ -369,6 +407,14 @@ public static partial class Gen5MslTranslator
                     $"mulhi(({RawSource(instruction, 0)}) & 0xFFFFFFu, ({RawSource(instruction, 1)}) & 0xFFFFFFu)",
                 "VMulHiI32" =>
                     AsUInt($"mulhi(as_type<int>({RawSource(instruction, 0)}), as_type<int>({RawSource(instruction, 1)}))"),
+                "VMulHiI32I24" => EmitSignedMultiplyHigh24(instruction),
+                "VDot4cI32I8" => EmitDot4cI32I8(instruction, destination),
+                "VLerpU8" => EmitLerpU8(instruction),
+                "VMsadU8" => EmitMsadU8(instruction),
+                "VPermB32" => EmitPermB32(instruction),
+                "VMulLoU16" or "VMadU16" or "VMadI16" or "VMadI32I16" or
+                    "VMin3I16" or "VMin3U16" or "VMax3I16" or "VMax3U16" or "VMed3I16" or "VMed3U16" =>
+                    EmitInt16Vop3(instruction, destination, intClamp),
                 "VMadU32U24" =>
                     $"(((({RawSource(instruction, 0)}) & 0xFFFFFFu) * (({RawSource(instruction, 1)}) & 0xFFFFFFu)) + ({RawSource(instruction, 2)}))",
                 // The multiplicands are the op_sel-selected halves; the addend is whole.
@@ -543,6 +589,93 @@ public static partial class Gen5MslTranslator
                         expression = $"(uint){wide}";
                         break;
                     }
+                    case "VMadI64I32":
+                        expression = EmitMadI64I32(instruction, destination);
+                        break;
+                    case "VAshrrevI64":
+                        expression = EmitArithmeticShiftRev64(instruction, destination);
+                        break;
+                    case "VQsadPkU16U8":
+                    case "VMqsadPkU16U8":
+                    case "VMqsadU32U8":
+                        return TryEmitQuadSad(instruction, destination, out error);
+                    case "VPackB32F16":
+                        if (!TryEmitPackB32F16(instruction, out expression, out error))
+                        {
+                            return false;
+                        }
+
+                        break;
+                    case "VCvtPknormI16F16":
+                    case "VCvtPknormU16F16":
+                        if (!TryEmitPackNormF16(instruction, instruction.Opcode == "VCvtPknormI16F16", out expression, out error))
+                        {
+                            return false;
+                        }
+
+                        break;
+                    case "VFmacF16":
+                    case "VMacLegacyF32":
+                    {
+                        // The accumulator is the destination itself (its low f16 half for FMAC_F16).
+                        // A VOP3 form that selects, negates or takes the absolute value of it, or
+                        // writes the high half, has no plain reading and is refused.
+                        if (instruction.Control is Gen5Vop3Control tied &&
+                            (((tied.AbsoluteMask | tied.NegateMask) & 4) != 0 || (tied.OperandSelect & 0xC) != 0))
+                        {
+                            error = $"{instruction.Opcode}: modifiers or op_sel on the accumulator are not supported";
+                            return false;
+                        }
+
+                        expression = instruction.Opcode == "VFmacF16"
+                            // A half fma rounds once; a float fma then a narrowing could round twice.
+                            ? Float16Result(
+                                instruction,
+                                destination,
+                                $"(float)fma(half({F16(instruction, 0)}), half({F16(instruction, 1)}), as_type<half>((ushort)(v[{destination}] & 0xFFFFu)))")
+                            : EmitLegacyMultiply(instruction, $"as_type<float>(v[{destination}])");
+                        break;
+                    }
+                    case "VPkMadI16":
+                    case "VPkMulLoU16":
+                    case "VPkLshlrevB16":
+                    case "VPkLshrrevB16":
+                    case "VPkAshrrevI16":
+                    case "VPkMaxI16":
+                    case "VPkMinI16":
+                    case "VPkMadU16":
+                    case "VPkAddU16":
+                    case "VPkSubU16":
+                    case "VPkMaxU16":
+                    case "VPkMinU16":
+                    case "VDot2F32F16":
+                    case "VDot2I32I16":
+                    case "VDot2U32U16":
+                    case "VDot4I32I8":
+                    case "VDot4U32U8":
+                    case "VDot8I32I4":
+                    case "VDot8U32U4":
+                    {
+                        if (instruction.Control is not Gen5Vop3pControl packedInteger)
+                        {
+                            error = $"missing vop3p control for {instruction.Opcode}";
+                            return false;
+                        }
+
+                        if (instruction.Opcode.StartsWith("VDot", StringComparison.Ordinal))
+                        {
+                            if (!TryEmitDot(instruction, packedInteger, out expression, out error))
+                            {
+                                return false;
+                            }
+                        }
+                        else if (!TryEmitPackedInt16(instruction, packedInteger, out expression, out error))
+                        {
+                            return false;
+                        }
+
+                        break;
+                    }
                     case "VPkAddF16":
                     case "VPkMulF16":
                     case "VPkMinF16":
@@ -704,7 +837,9 @@ public static partial class Gen5MslTranslator
         {
             error = string.Empty;
             var opcode = instruction.Opcode;
-            if (instruction.Control is not null ||
+            // The VOP3 (e64) encoding is accepted without modifiers: a relative move is untyped.
+            if (instruction.Control is not (null or
+                    Gen5Vop3Control { AbsoluteMask: 0, NegateMask: 0, OutputModifier: 0, Clamp: false, OperandSelect: 0 }) ||
                 instruction.Sources.Count == 0 ||
                 instruction.Destinations.Count == 0 ||
                 instruction.Destinations[0].Kind != Gen5OperandKind.VectorRegister)
@@ -1374,6 +1509,10 @@ public static partial class Gen5MslTranslator
             {
                 condition = EmitCompareClass(instruction);
             }
+            else if (opcode is "VCmpClassF16" or "VCmpxClassF16")
+            {
+                condition = EmitCompareClassF16(instruction);
+            }
             else if (opcode is
                      "VCmpTruF32" or "VCmpxTruF32" or
                      "VCmpTruF16" or "VCmpxTruF16" or
@@ -1813,6 +1952,8 @@ public static partial class Gen5MslTranslator
                 var value = instruction.Opcode switch
                 {
                     "SMovkI32" => FormatUInt(immediate),
+                    // S_CMOVK_I32: if SCC, D = signext(SIMM16); SCC is left alone.
+                    "SCmovkI32" => $"(scc ? {FormatUInt(immediate)} : {current})",
                     "SAddkI32" => $"({current} + {FormatUInt(immediate)})",
                     "SMulkI32" => $"({current} * {FormatUInt(immediate)})",
                     _ => string.Empty,
@@ -1861,6 +2002,57 @@ public static partial class Gen5MslTranslator
                 if (wide) StoreScalar(destination + 1, "0u");
                 Line($"scc = {result} != 0u;");
                 return true;
+            }
+
+            switch (instruction.Opcode)
+            {
+                case "SMovrelsB32":
+                case "SMovrelsB64":
+                case "SMovreldB32":
+                case "SMovreldB64":
+                case "SMovrelsd2B32":
+                    return TryEmitScalarMoveRelative(instruction, out error);
+                case "SAndn1WrexecB32":
+                case "SAndn1WrexecB64":
+                case "SAndn2WrexecB32":
+                case "SAndn2WrexecB64":
+                    EmitWriteExec(instruction, destination);
+                    return true;
+                case "SBcnt0I32B64":
+                {
+                    var wide = Temp("ulong", RawSource64(instruction, 0));
+                    var zeros = Temp("uint", $"(uint)popcount(~{wide})");
+                    StoreScalar(destination, zeros);
+                    Line($"scc = {zeros} != 0u;");
+                    return true;
+                }
+                case "SFF0I32B64":
+                {
+                    var wide = Temp("ulong", RawSource64(instruction, 0));
+                    StoreScalar(
+                        destination,
+                        Temp("uint", $"{wide} == 0xFFFFFFFFFFFFFFFFul ? 0xFFFFFFFFu : (uint)ctz(~{wide})"));
+                    return true;
+                }
+                case "SFlbitI32I64":
+                {
+                    // The first bit below the sign that differs from it; -1 for 0 and -1.
+                    var wide = Temp("ulong", RawSource64(instruction, 0));
+                    var magnitude = Temp("ulong", $"(as_type<long>({wide}) < 0l) ? ~{wide} : {wide}");
+                    var high = Temp("uint", $"(uint)({magnitude} >> 32)");
+                    var low = Temp("uint", $"(uint){magnitude}");
+                    StoreScalar(
+                        destination,
+                        Temp("uint", $"{high} != 0u ? (uint)clz({high}) : ({low} != 0u ? 32u + (uint)clz({low}) : 0xFFFFFFFFu)"));
+                    return true;
+                }
+                case "SBrevB64":
+                {
+                    var wide = Temp("ulong", RawSource64(instruction, 0));
+                    StoreScalar(destination, Temp("uint", $"reverse_bits((uint)({wide} >> 32))"));
+                    StoreScalar(destination + 1, Temp("uint", $"reverse_bits((uint){wide})"));
+                    return true;
+                }
             }
 
             if (instruction.Opcode == "SBcnt1I32B64")
@@ -1994,12 +2186,29 @@ public static partial class Gen5MslTranslator
                     return true;
                 }
                 case "SBcnt1I32B32":
+                case "SBcnt0I32B32":
                 {
-                    var result = Temp("uint", $"popcount({left})");
+                    var result = Temp("uint", instruction.Opcode == "SBcnt1I32B32" ? $"popcount({left})" : $"popcount(~{left})");
                     StoreScalar(destination, result);
                     Line($"scc = {result} != 0u;");
                     return true;
                 }
+                case "SFF0I32B32":
+                    StoreScalar(destination, Temp("uint", $"{left} == 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint)ctz(~{left})"));
+                    return true;
+                case "SFlbitI32":
+                {
+                    // The first bit below the sign that differs from it; -1 for 0 and -1.
+                    var magnitude = Temp("uint", $"(({left} & 0x80000000u) != 0u) ? ~{left} : {left}");
+                    StoreScalar(destination, Temp("uint", $"{magnitude} == 0u ? 0xFFFFFFFFu : (uint)clz({magnitude})"));
+                    return true;
+                }
+                case "SSextI32I8":
+                    StoreScalar(destination, Temp("uint", AsUInt($"(as_type<int>({left} << 24u) >> 24)")));
+                    return true;
+                case "SSextI32I16":
+                    StoreScalar(destination, Temp("uint", AsUInt($"(as_type<int>({left} << 16u) >> 16)")));
+                    return true;
                 case "SFF1I32B32":
                 case "SFlbitI32B32":
                 {
@@ -2076,6 +2285,11 @@ public static partial class Gen5MslTranslator
                 case "SMulI32":
                     resultExpression = $"({left} * {right})";
                     sccStatement = string.Empty;
+                    break;
+                // D = |S0 - S1| of the wrapped 32-bit difference; SCC = D != 0.
+                case "SAbsdiffI32":
+                    resultExpression = $"(as_type<int>({left} - {right}) < 0 ? {right} - {left} : {left} - {right})";
+                    sccStatement = "NONZERO";
                     break;
                 case "SMulHiU32":
                     resultExpression = $"mulhi({left}, {right})";

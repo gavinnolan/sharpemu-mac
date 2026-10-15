@@ -186,13 +186,118 @@ static inline ulong sharpemu_f64_mul(ulong a, ulong b)
     return sharpemu_f64_round_pack(sign, exponent, significand);
 }
 
-// a * b + c with a single rounding.
-static inline ulong sharpemu_f64_fma(ulong a, ulong b, ulong c)
+// The F32 rounding of a value held like round_pack's input: a significand with its
+// leading one at bit 62 and an F64-biased exponent one less than the result's. One
+// rounding to nearest-even into F32, its denormals included.
+static inline uint sharpemu_f64_round_pack_f32(uint sign, int exponent, ulong wide)
+{
+    uint significand = (uint)sharpemu_f64_shift_right_jam(wide, 32);
+    exponent -= 0x380;
+    uint roundBits = significand & 0x7Fu;
+    if ((uint)exponent >= 0xFDu)
+    {
+        if (exponent < 0)
+        {
+            int distance = -exponent;
+            significand = distance < 31
+                ? (significand >> distance) | ((significand << (32 - distance)) != 0u ? 1u : 0u)
+                : (significand != 0u ? 1u : 0u);
+            exponent = 0;
+            roundBits = significand & 0x7Fu;
+        }
+        else if (exponent > 0xFD || significand + 0x40u >= 0x80000000u)
+        {
+            return (sign << 31) | 0x7F800000u;
+        }
+    }
+    significand = (significand + 0x40u) >> 7;
+    if (roundBits == 0x40u)
+    {
+        significand &= ~1u;
+    }
+    if (significand == 0u)
+    {
+        exponent = 0;
+    }
+    return (sign << 31) + ((uint)exponent << 23) + significand;
+}
+
+// Narrows to an F32 bit pattern, rounding to nearest-even into the F32 denormal range.
+static inline uint sharpemu_f64_to_f32(ulong a)
+{
+    uint sign = (uint)(a >> 63);
+    int exponent = (int)((a >> 52) & 0x7FFul);
+    ulong fraction = a & sharpemu_f64_fraction;
+    if (exponent == 0x7FF)
+    {
+        return fraction != 0ul
+            ? (sign << 31) | 0x7FC00000u | (uint)(fraction >> 29)
+            : (sign << 31) | 0x7F800000u;
+    }
+    if (exponent == 0)
+    {
+        // Zero, or an F64 denormal: far below half the least F32 denormal.
+        return sign << 31;
+    }
+    return sharpemu_f64_round_pack_f32(sign, exponent - 1, (fraction | sharpemu_f64_hidden) << 10);
+}
+
+// Widens an F32 bit pattern exactly; a NaN keeps its payload and is quieted.
+static inline ulong sharpemu_f64_from_f32(uint a)
+{
+    uint sign = a >> 31;
+    int exponent = (int)((a >> 23) & 0xFFu);
+    ulong fraction = (ulong)(a & 0x007FFFFFu);
+    if (exponent == 0xFF)
+    {
+        return fraction != 0ul
+            ? ((ulong)sign << 63) | 0x7FF8000000000000ul | (fraction << 29)
+            : sharpemu_f64_pack(sign, 0x7FF, 0ul);
+    }
+    if (exponent == 0)
+    {
+        if (fraction == 0ul)
+        {
+            return (ulong)sign << 63;
+        }
+        int shift = (int)clz((uint)fraction) - 8;
+        fraction = (fraction << shift) & 0x007FFFFFul;
+        exponent = 1 - shift;
+    }
+    return sharpemu_f64_pack(sign, exponent + 0x380, fraction << 29);
+}
+
+// a * 2^n, rounded to nearest-even once (V_LDEXP_F64).
+static inline ulong sharpemu_f64_ldexp(ulong a, int n)
+{
+    if (sharpemu_f64_is_nan(a))
+    {
+        return sharpemu_f64_quiet(a);
+    }
+    uint sign = (uint)(a >> 63);
+    int exponent = (int)((a >> 52) & 0x7FFul);
+    ulong significand = a & sharpemu_f64_fraction;
+    if (exponent == 0x7FF || (exponent == 0 && significand == 0ul))
+    {
+        return a;
+    }
+    if (exponent == 0)
+    {
+        sharpemu_f64_normalize(exponent, significand);
+    }
+    significand |= sharpemu_f64_hidden;
+    return sharpemu_f64_round_pack(sign, exponent + clamp(n, -4096, 4096) - 1, significand << 10);
+}
+
+// 2^scale * (a * b + c) with a single rounding: to F64, or to F32 (in the low dword)
+// when `narrow`, whose operands are then exact widenings of F32 values.
+static inline ulong sharpemu_f64_fma_core(ulong a, ulong b, ulong c, int scale, bool narrow)
 {
     if (sharpemu_f64_is_nan(a) || sharpemu_f64_is_nan(b) || sharpemu_f64_is_nan(c))
     {
-        return sharpemu_f64_quiet(
+        ulong nan = sharpemu_f64_quiet(
             sharpemu_f64_is_nan(a) ? a : (sharpemu_f64_is_nan(b) ? b : c));
+        return narrow ? (ulong)sharpemu_f64_to_f32(nan) : nan;
     }
     uint sign = (uint)((a ^ b) >> 63);
     uint signC = (uint)(c >> 63);
@@ -209,18 +314,17 @@ static inline ulong sharpemu_f64_fma(ulong a, ulong b, ulong c)
     {
         if (zeroA || zeroB || (exponentC == 0x7FF && signC != sign))
         {
-            return sharpemu_f64_default_nan;
+            return narrow ? 0x7FC00000ul : sharpemu_f64_default_nan;
         }
-        return sharpemu_f64_pack(sign, 0x7FF, 0ul);
+        ulong infinity = sharpemu_f64_pack(sign, 0x7FF, 0ul);
+        return narrow ? (ulong)sharpemu_f64_to_f32(infinity) : infinity;
     }
-    if (exponentC == 0x7FF)
+    if (exponentC == 0x7FF || zeroA || zeroB)
     {
-        return c;
-    }
-    if (zeroA || zeroB)
-    {
-        // An exact zero product: c, except that opposite zeros sum to +0.
-        return zeroC && signC != sign ? 0ul : c;
+        // An infinite addend, or an exact zero product: c, except that opposite
+        // zeros sum to +0. Scaling c is exact for a narrowed operand.
+        ulong sum = exponentC != 0x7FF && zeroC && signC != sign ? 0ul : sharpemu_f64_ldexp(c, scale);
+        return narrow ? (ulong)sharpemu_f64_to_f32(sum) : sum;
     }
     if (exponentA == 0)
     {
@@ -247,7 +351,10 @@ static inline ulong sharpemu_f64_fma(ulong a, ulong b, ulong c)
     {
         exponent--;
         sharpemu_f64_shift_left128(productHigh, productLow, 1);
-        return sharpemu_f64_round_pack(sign, exponent, productHigh | (productLow != 0ul ? 1ul : 0ul));
+        ulong product = productHigh | (productLow != 0ul ? 1ul : 0ul);
+        return narrow
+            ? (ulong)sharpemu_f64_round_pack_f32(sign, exponent + scale, product)
+            : sharpemu_f64_round_pack(sign, exponent + scale, product);
     }
     if (exponentC == 0)
     {
@@ -295,7 +402,16 @@ static inline ulong sharpemu_f64_fma(ulong a, ulong b, ulong c)
     int leading = high != 0ul ? sharpemu_f64_clz(high) : 64 + sharpemu_f64_clz(low);
     int shift = leading - 1;
     sharpemu_f64_shift_left128(high, low, shift);
-    return sharpemu_f64_round_pack(sign, exponent - shift, high | (low != 0ul ? 1ul : 0ul));
+    ulong sum = high | (low != 0ul ? 1ul : 0ul);
+    return narrow
+        ? (ulong)sharpemu_f64_round_pack_f32(sign, exponent - shift + scale, sum)
+        : sharpemu_f64_round_pack(sign, exponent - shift + scale, sum);
+}
+
+// a * b + c with a single rounding.
+static inline ulong sharpemu_f64_fma(ulong a, ulong b, ulong c)
+{
+    return sharpemu_f64_fma_core(a, b, c, 0, false);
 }
 
 static inline ulong sharpemu_f64_div(ulong a, ulong b)
@@ -435,54 +551,6 @@ static inline ulong sharpemu_f64_from_i32(int value)
         : sharpemu_f64_from_u32((uint)value, 0u);
 }
 
-// Narrows to an F32 bit pattern, rounding to nearest-even into the F32 denormal range.
-static inline uint sharpemu_f64_to_f32(ulong a)
-{
-    uint sign = (uint)(a >> 63);
-    int exponent = (int)((a >> 52) & 0x7FFul);
-    ulong fraction = a & sharpemu_f64_fraction;
-    if (exponent == 0x7FF)
-    {
-        return fraction != 0ul
-            ? (sign << 31) | 0x7FC00000u | (uint)(fraction >> 29)
-            : (sign << 31) | 0x7F800000u;
-    }
-    uint significand = (uint)sharpemu_f64_shift_right_jam(fraction, 22);
-    if (exponent == 0 && significand == 0u)
-    {
-        return sign << 31;
-    }
-    significand |= 0x40000000u;
-    exponent -= 0x381;
-    uint roundBits = significand & 0x7Fu;
-    if ((uint)exponent >= 0xFDu)
-    {
-        if (exponent < 0)
-        {
-            int distance = -exponent;
-            significand = distance < 31
-                ? (significand >> distance) | ((significand << (32 - distance)) != 0u ? 1u : 0u)
-                : 1u;
-            exponent = 0;
-            roundBits = significand & 0x7Fu;
-        }
-        else if (exponent > 0xFD || significand + 0x40u >= 0x80000000u)
-        {
-            return (sign << 31) | 0x7F800000u;
-        }
-    }
-    significand = (significand + 0x40u) >> 7;
-    if (roundBits == 0x40u)
-    {
-        significand &= ~1u;
-    }
-    if (significand == 0u)
-    {
-        exponent = 0;
-    }
-    return (sign << 31) + ((uint)exponent << 23) + significand;
-}
-
 // The VOP3 clamp bit: [0, 1], with NaN and every negative (zero included) to +0.
 static inline ulong sharpemu_f64_clamp01(ulong a)
 {
@@ -491,4 +559,591 @@ static inline ulong sharpemu_f64_clamp01(ulong a)
         return 0ul;
     }
     return a > 0x3FF0000000000000ul ? 0x3FF0000000000000ul : a;
+}
+
+// a + b with a single rounding: SoftFloat 3's addMags and subMags.
+static inline ulong sharpemu_f64_add(ulong a, ulong b)
+{
+    if (sharpemu_f64_is_nan(a) || sharpemu_f64_is_nan(b))
+    {
+        return sharpemu_f64_quiet(sharpemu_f64_is_nan(a) ? a : b);
+    }
+    uint sign = (uint)(a >> 63);
+    int exponentA = (int)((a >> 52) & 0x7FFul);
+    int exponentB = (int)((b >> 52) & 0x7FFul);
+    ulong significandA = a & sharpemu_f64_fraction;
+    ulong significandB = b & sharpemu_f64_fraction;
+    int difference = exponentA - exponentB;
+    int exponent;
+    if (sign == (uint)(b >> 63))
+    {
+        if (difference == 0)
+        {
+            if (exponentA == 0)
+            {
+                // Two denormals (or zeros): the sum carries into the exponent by itself.
+                return a + significandB;
+            }
+            if (exponentA == 0x7FF)
+            {
+                return a;
+            }
+            return sharpemu_f64_round_pack(
+                sign, exponentA, (0x0020000000000000ul + significandA + significandB) << 9);
+        }
+        significandA <<= 9;
+        significandB <<= 9;
+        if (difference < 0)
+        {
+            if (exponentB == 0x7FF)
+            {
+                return sharpemu_f64_pack(sign, 0x7FF, 0ul);
+            }
+            exponent = exponentB;
+            significandA = exponentA != 0 ? significandA + 0x2000000000000000ul : significandA << 1;
+            significandA = sharpemu_f64_shift_right_jam(significandA, -difference);
+        }
+        else
+        {
+            if (exponentA == 0x7FF)
+            {
+                return a;
+            }
+            exponent = exponentA;
+            significandB = exponentB != 0 ? significandB + 0x2000000000000000ul : significandB << 1;
+            significandB = sharpemu_f64_shift_right_jam(significandB, difference);
+        }
+        ulong sum = 0x2000000000000000ul + significandA + significandB;
+        if (sum < 0x4000000000000000ul)
+        {
+            exponent--;
+            sum <<= 1;
+        }
+        return sharpemu_f64_round_pack(sign, exponent, sum);
+    }
+
+    if (difference == 0)
+    {
+        if (exponentA == 0x7FF)
+        {
+            return sharpemu_f64_default_nan;
+        }
+        long exact = (long)significandA - (long)significandB;
+        if (exact == 0)
+        {
+            return 0ul;
+        }
+        exponent = exponentA != 0 ? exponentA - 1 : 0;
+        if (exact < 0)
+        {
+            sign ^= 1u;
+            exact = -exact;
+        }
+        int shift = sharpemu_f64_clz((ulong)exact) - 11;
+        int packed = exponent - shift;
+        if (packed < 0)
+        {
+            shift = exponent;
+            packed = 0;
+        }
+        return sharpemu_f64_pack(sign, packed, (ulong)exact << shift);
+    }
+    significandA <<= 10;
+    significandB <<= 10;
+    ulong remainder;
+    if (difference < 0)
+    {
+        sign ^= 1u;
+        if (exponentB == 0x7FF)
+        {
+            return sharpemu_f64_pack(sign, 0x7FF, 0ul);
+        }
+        significandA += exponentA != 0 ? 0x4000000000000000ul : significandA;
+        significandA = sharpemu_f64_shift_right_jam(significandA, -difference);
+        exponent = exponentB;
+        remainder = (significandB | 0x4000000000000000ul) - significandA;
+    }
+    else
+    {
+        if (exponentA == 0x7FF)
+        {
+            return a;
+        }
+        significandB += exponentB != 0 ? 0x4000000000000000ul : significandB;
+        significandB = sharpemu_f64_shift_right_jam(significandB, difference);
+        exponent = exponentA;
+        remainder = (significandA | 0x4000000000000000ul) - significandB;
+    }
+    int shift = sharpemu_f64_clz(remainder) - 1;
+    exponent -= 1 + shift;
+    if (shift >= 10 && (uint)exponent < 0x7FDu)
+    {
+        return sharpemu_f64_pack(sign, remainder != 0ul ? exponent : 0, remainder << (shift - 10));
+    }
+    return sharpemu_f64_round_pack(sign, exponent, remainder << shift);
+}
+
+static inline bool sharpemu_f64_is_signaling(ulong a)
+{
+    return sharpemu_f64_is_nan(a) && (a & 0x0008000000000000ul) == 0ul;
+}
+
+// a < b over non-NaN values with -0 below +0.
+static inline bool sharpemu_f64_below(ulong a, ulong b)
+{
+    uint signA = (uint)(a >> 63);
+    if (signA != (uint)(b >> 63))
+    {
+        return signA != 0u;
+    }
+    return signA != 0u ? a > b : a < b;
+}
+
+// V_MIN_F64 / V_MAX_F64: in IEEE mode a signaling NaN wins, quieted; otherwise a NaN
+// yields the other operand, and -0 orders below +0.
+static inline ulong sharpemu_f64_min(ulong a, ulong b, bool ieee)
+{
+    if (ieee && sharpemu_f64_is_signaling(a))
+    {
+        return sharpemu_f64_quiet(a);
+    }
+    if (ieee && sharpemu_f64_is_signaling(b))
+    {
+        return sharpemu_f64_quiet(b);
+    }
+    if (sharpemu_f64_is_nan(a))
+    {
+        return b;
+    }
+    if (sharpemu_f64_is_nan(b))
+    {
+        return a;
+    }
+    return sharpemu_f64_below(a, b) ? a : b;
+}
+
+static inline ulong sharpemu_f64_max(ulong a, ulong b, bool ieee)
+{
+    if (ieee && sharpemu_f64_is_signaling(a))
+    {
+        return sharpemu_f64_quiet(a);
+    }
+    if (ieee && sharpemu_f64_is_signaling(b))
+    {
+        return sharpemu_f64_quiet(b);
+    }
+    if (sharpemu_f64_is_nan(a))
+    {
+        return b;
+    }
+    if (sharpemu_f64_is_nan(b))
+    {
+        return a;
+    }
+    return sharpemu_f64_below(a, b) ? b : a;
+}
+
+// IEEE comparisons: unordered with a NaN, and +0 equal to -0.
+static inline bool sharpemu_f64_unordered(ulong a, ulong b)
+{
+    return sharpemu_f64_is_nan(a) || sharpemu_f64_is_nan(b);
+}
+
+static inline bool sharpemu_f64_eq(ulong a, ulong b)
+{
+    return !sharpemu_f64_unordered(a, b) && (a == b || ((a | b) << 1) == 0ul);
+}
+
+static inline bool sharpemu_f64_lt(ulong a, ulong b)
+{
+    return !sharpemu_f64_unordered(a, b) && ((a | b) << 1) != 0ul && sharpemu_f64_below(a, b);
+}
+
+// V_CMP_CLASS_F64: bit 0 sNaN, 1 qNaN, 2 -inf, 3 -normal, 4 -denormal, 5 -0,
+// 6 +0, 7 +denormal, 8 +normal, 9 +inf.
+static inline bool sharpemu_f64_class(ulong a, uint mask)
+{
+    bool negative = (a >> 63) != 0ul;
+    uint exponent = (uint)((a >> 52) & 0x7FFul);
+    ulong fraction = a & sharpemu_f64_fraction;
+    uint bit;
+    if (exponent == 0x7FFu)
+    {
+        bit = fraction == 0ul ? (negative ? 2u : 9u) : ((fraction & 0x0008000000000000ul) != 0ul ? 1u : 0u);
+    }
+    else if (exponent == 0u)
+    {
+        bit = fraction == 0ul ? (negative ? 5u : 6u) : (negative ? 4u : 7u);
+    }
+    else
+    {
+        bit = negative ? 3u : 8u;
+    }
+    return ((mask >> bit) & 1u) != 0u;
+}
+
+// Rounds to an integral value bit-exactly: 0 toward zero, 1 down, 2 up, 3 to
+// nearest-even. A NaN is quieted; infinities, zeros and integers pass through.
+static inline ulong sharpemu_f64_round_integral(ulong a, uint mode)
+{
+    if (sharpemu_f64_is_nan(a))
+    {
+        return sharpemu_f64_quiet(a);
+    }
+    int exponent = (int)((a >> 52) & 0x7FFul);
+    if (exponent >= 0x433 || (a << 1) == 0ul)
+    {
+        return a;
+    }
+    ulong sign = a & 0x8000000000000000ul;
+    if (exponent < 0x3FF)
+    {
+        switch (mode)
+        {
+            case 1u: return sign != 0ul ? 0xBFF0000000000000ul : 0ul;
+            case 2u: return sign != 0ul ? sign : 0x3FF0000000000000ul;
+            case 3u: return exponent == 0x3FE && (a & sharpemu_f64_fraction) != 0ul ? sign | 0x3FF0000000000000ul : sign;
+            default: return sign;
+        }
+    }
+    int fractionBits = 0x433 - exponent;
+    ulong unit = 1ul << fractionBits;
+    ulong rest = a & (unit - 1ul);
+    if (rest == 0ul)
+    {
+        return a;
+    }
+    ulong truncated = a - rest;
+    bool away;
+    switch (mode)
+    {
+        case 1u: away = sign != 0ul; break;
+        case 2u: away = sign == 0ul; break;
+        case 3u: away = rest > (unit >> 1) || (rest == (unit >> 1) && (truncated & unit) != 0ul); break;
+        default: away = false; break;
+    }
+    // A carry out of the significand bumps the exponent, which is the right answer.
+    return away ? truncated + unit : truncated;
+}
+
+// V_FRACT_F64: x - floor(x), held below 1.0; an infinity gives NaN.
+static inline ulong sharpemu_f64_fract(ulong a)
+{
+    ulong value = sharpemu_f64_add(a, sharpemu_f64_round_integral(a, 1u) ^ 0x8000000000000000ul);
+    return !sharpemu_f64_is_nan(value) && value > 0x3FEFFFFFFFFFFFFFul && (value >> 63) == 0ul
+        ? 0x3FEFFFFFFFFFFFFFul
+        : value;
+}
+
+// V_FREXP_MANT_F64 and V_FREXP_EXP_I32_F64, denormals normalized like C frexp; an
+// infinity or NaN keeps its bits for the significand and has exponent 0.
+static inline ulong sharpemu_f64_frexp_mant(ulong a)
+{
+    int exponent = (int)((a >> 52) & 0x7FFul);
+    ulong fraction = a & sharpemu_f64_fraction;
+    if (exponent == 0x7FF || (exponent == 0 && fraction == 0ul))
+    {
+        return a;
+    }
+    if (exponent == 0)
+    {
+        sharpemu_f64_normalize(exponent, fraction);
+    }
+    return (a & 0x8000000000000000ul) | 0x3FE0000000000000ul | (fraction & sharpemu_f64_fraction);
+}
+
+static inline int sharpemu_f64_frexp_exp(ulong a)
+{
+    int exponent = (int)((a >> 52) & 0x7FFul);
+    ulong fraction = a & sharpemu_f64_fraction;
+    if (exponent == 0x7FF || (exponent == 0 && fraction == 0ul))
+    {
+        return 0;
+    }
+    if (exponent == 0)
+    {
+        sharpemu_f64_normalize(exponent, fraction);
+    }
+    return exponent - 1022;
+}
+
+// V_CVT_I32_F64 / V_CVT_U32_F64: truncated, saturated, NaN to 0.
+static inline uint sharpemu_f64_to_i32(ulong a)
+{
+    if (sharpemu_f64_is_nan(a))
+    {
+        return 0u;
+    }
+    bool negative = (a >> 63) != 0ul;
+    int exponent = (int)((a >> 52) & 0x7FFul);
+    if (exponent < 0x3FF)
+    {
+        return 0u;
+    }
+    if (exponent >= 0x3FF + 31)
+    {
+        return negative ? 0x80000000u : 0x7FFFFFFFu;
+    }
+    uint magnitude = (uint)(((a & sharpemu_f64_fraction) | sharpemu_f64_hidden) >> (52 - (exponent - 0x3FF)));
+    return negative ? 0u - magnitude : magnitude;
+}
+
+static inline uint sharpemu_f64_to_u32(ulong a)
+{
+    int exponent = (int)((a >> 52) & 0x7FFul);
+    if (sharpemu_f64_is_nan(a) || (a >> 63) != 0ul || exponent < 0x3FF)
+    {
+        return 0u;
+    }
+    if (exponent >= 0x3FF + 32)
+    {
+        return 0xFFFFFFFFu;
+    }
+    return (uint)(((a & sharpemu_f64_fraction) | sharpemu_f64_hidden) >> (52 - (exponent - 0x3FF)));
+}
+
+// ---- division: V_DIV_SCALE, V_DIV_FMAS, V_DIV_FIXUP ----
+//
+// The compiler divides n / d as: scale d and n (V_DIV_SCALE, which also sets VCC),
+// refine a reciprocal with FMAs, form the scaled quotient, unscale it in the last FMA
+// (V_DIV_FMAS, which reads VCC) and patch the special cases (V_DIV_FIXUP). The ISA
+// document's pseudocode for the first two does not agree with itself: DIV_SCALE
+// scales by 2^+-128 (F64) / 2^+-64 (F32) while DIV_FMAS unscales by a fixed 2^64 /
+// 2^32, and its "1/d denormal and n/d denormal" case scales a d above 2^1022 up by
+// 2^128, which overflows. These helpers keep the document's cases and constants for
+// DIV_SCALE but scale that one case's d down instead, and DIV_FMAS undoes whichever
+// scaling VCC reports: a scaled quotient that was pushed up out of the denormal range
+// is small (|q| < 2), one pulled down from the overflow range is not, so the last FMA
+// scales by 2^-K or 2^+K accordingly, with its one rounding. The sequence then gives
+// the correctly rounded quotient, denormal results included.
+
+// |n / d| < 2^limit for finite nonzero n and d, decided exactly from the exponents
+// and significands.
+static inline bool sharpemu_f64_quotient_below(ulong n, ulong d, int limit)
+{
+    int exponentN = (int)((n >> 52) & 0x7FFul);
+    int exponentD = (int)((d >> 52) & 0x7FFul);
+    ulong significandN = n & sharpemu_f64_fraction;
+    ulong significandD = d & sharpemu_f64_fraction;
+    if (exponentN == 0)
+    {
+        sharpemu_f64_normalize(exponentN, significandN);
+    }
+    if (exponentD == 0)
+    {
+        sharpemu_f64_normalize(exponentD, significandD);
+    }
+    int difference = exponentN - exponentD;
+    return difference < limit ||
+        (difference == limit && (significandN & sharpemu_f64_fraction) < (significandD & sharpemu_f64_fraction));
+}
+
+// V_DIV_SCALE_F64: s0 is d or n, the operand this instance scales.
+static inline ulong sharpemu_f64_div_scale(ulong s0, ulong d, ulong n, thread bool& vcc)
+{
+    vcc = false;
+    ulong magnitudeD = d & 0x7FFFFFFFFFFFFFFFul;
+    ulong magnitudeN = n & 0x7FFFFFFFFFFFFFFFul;
+    if (magnitudeD >= 0x7FF0000000000000ul || magnitudeN >= 0x7FF0000000000000ul)
+    {
+        // Infinities and NaNs are V_DIV_FIXUP's to answer.
+        return sharpemu_f64_is_nan(s0) ? sharpemu_f64_quiet(s0) : s0;
+    }
+    if (magnitudeD == 0ul || magnitudeN == 0ul)
+    {
+        return sharpemu_f64_default_nan;
+    }
+    int exponentN = (int)(magnitudeN >> 52);
+    int exponentD = (int)(magnitudeD >> 52);
+    if (exponentN - exponentD >= 768)
+    {
+        vcc = true;
+        return s0 == d ? sharpemu_f64_ldexp(s0, 128) : s0;
+    }
+    if (exponentD == 0)
+    {
+        return sharpemu_f64_ldexp(s0, 128);
+    }
+    bool reciprocalDenormal = magnitudeD > 0x7FD0000000000000ul;
+    bool quotientDenormal = sharpemu_f64_quotient_below(n, d, -1022);
+    if (reciprocalDenormal && quotientDenormal)
+    {
+        vcc = true;
+        return s0 == d ? sharpemu_f64_ldexp(s0, -128) : s0;
+    }
+    if (reciprocalDenormal)
+    {
+        return sharpemu_f64_ldexp(s0, -128);
+    }
+    if (quotientDenormal)
+    {
+        vcc = true;
+        return s0 == n ? sharpemu_f64_ldexp(s0, 128) : s0;
+    }
+    return exponentN <= 53 ? sharpemu_f64_ldexp(s0, 128) : s0;
+}
+
+// V_DIV_FMAS_F64: a * b + c, unscaled when VCC is set, rounded once.
+static inline ulong sharpemu_f64_div_fmas(ulong a, ulong b, ulong c, bool vcc)
+{
+    int scale = !vcc ? 0 : (((c >> 52) & 0x7FFul) > 0x3FFul ? 128 : -128);
+    return sharpemu_f64_fma_core(a, b, c, scale, false);
+}
+
+static inline uint sharpemu_f32_ldexp(uint a, int n)
+{
+    return sharpemu_f64_to_f32(sharpemu_f64_ldexp(sharpemu_f64_from_f32(a), n));
+}
+
+// V_DIV_SCALE_F32, as the F64 form with 2^+-64.
+static inline uint sharpemu_f32_div_scale(uint s0, uint d, uint n, thread bool& vcc)
+{
+    vcc = false;
+    uint magnitudeD = d & 0x7FFFFFFFu;
+    uint magnitudeN = n & 0x7FFFFFFFu;
+    if (magnitudeD >= 0x7F800000u || magnitudeN >= 0x7F800000u)
+    {
+        return (s0 & 0x7FFFFFFFu) > 0x7F800000u ? s0 | 0x00400000u : s0;
+    }
+    if (magnitudeD == 0u || magnitudeN == 0u)
+    {
+        return 0x7FC00000u;
+    }
+    int exponentN = (int)(magnitudeN >> 23);
+    int exponentD = (int)(magnitudeD >> 23);
+    if (exponentN - exponentD >= 96)
+    {
+        vcc = true;
+        return s0 == d ? sharpemu_f32_ldexp(s0, 64) : s0;
+    }
+    if (exponentD == 0)
+    {
+        return sharpemu_f32_ldexp(s0, 64);
+    }
+    bool reciprocalDenormal = magnitudeD > 0x7E800000u;
+    bool quotientDenormal = sharpemu_f64_quotient_below(
+        sharpemu_f64_from_f32(n), sharpemu_f64_from_f32(d), -126);
+    if (reciprocalDenormal && quotientDenormal)
+    {
+        vcc = true;
+        return s0 == d ? sharpemu_f32_ldexp(s0, -64) : s0;
+    }
+    if (reciprocalDenormal)
+    {
+        return sharpemu_f32_ldexp(s0, -64);
+    }
+    if (quotientDenormal)
+    {
+        vcc = true;
+        return s0 == n ? sharpemu_f32_ldexp(s0, 64) : s0;
+    }
+    return exponentN <= 23 ? sharpemu_f32_ldexp(s0, 64) : s0;
+}
+
+// V_DIV_FMAS_F32: one fused multiply-add and unscale, rounded once to F32.
+static inline uint sharpemu_f32_div_fmas(uint a, uint b, uint c, bool vcc)
+{
+    int scale = !vcc ? 0 : (((c >> 23) & 0xFFu) > 0x7Fu ? 64 : -64);
+    return (uint)sharpemu_f64_fma_core(
+        sharpemu_f64_from_f32(a), sharpemu_f64_from_f32(b), sharpemu_f64_from_f32(c), scale, true);
+}
+
+// V_DIV_FIXUP_F64/F32/F16 over raw bits of `width`: q the quotient, d the denominator,
+// n the numerator. Past the NaN, zero and infinity cases, a biased-exponent difference
+// below `underflow` is a quotient under half the least denormal: a signed zero. The
+// document's overflow case tests "exponent(d) == max", which the infinity cases have
+// already taken; it is read here as the mirror of the underflow test, a difference
+// above `overflow`, where the quotient is at least 2^(max exponent + 1) and the scaled
+// refinement itself overflows into NaN: a signed infinity. 0 disables both (F16).
+static inline ulong sharpemu_div_fixup(
+    ulong q, ulong d, ulong n, uint width, uint fractionBits, int underflow, int overflow)
+{
+    ulong signBit = 1ul << (width - 1u);
+    ulong magnitude = signBit - 1ul;
+    ulong infinity = magnitude & ~((1ul << fractionBits) - 1ul);
+    ulong quietBit = 1ul << (fractionBits - 1u);
+    ulong sign = (d ^ n) & signBit;
+    ulong magnitudeD = d & magnitude;
+    ulong magnitudeN = n & magnitude;
+    if (magnitudeN > infinity)
+    {
+        return n | quietBit;
+    }
+    if (magnitudeD > infinity)
+    {
+        return d | quietBit;
+    }
+    if ((magnitudeD == 0ul && magnitudeN == 0ul) || (magnitudeD == infinity && magnitudeN == infinity))
+    {
+        return signBit | infinity | quietBit;
+    }
+    if (magnitudeD == 0ul || magnitudeN == infinity)
+    {
+        return sign | infinity;
+    }
+    if (magnitudeD == infinity || magnitudeN == 0ul)
+    {
+        return sign;
+    }
+    int difference = (int)(magnitudeN >> fractionBits) - (int)(magnitudeD >> fractionBits);
+    if (underflow != 0 && difference < underflow)
+    {
+        return sign;
+    }
+    if (overflow != 0 && difference > overflow)
+    {
+        return sign | infinity;
+    }
+    return sign | (q & magnitude);
+}
+
+// ---- V_TRIG_PREOP_F64 ----
+
+// 2/pi as fraction bits, the table LLVM folds the instruction with; a segment that
+// reaches past it reads as 0, as on the hardware.
+constant uint sharpemu_f64_two_over_pi[37] =
+{
+    0xa2f9836eu, 0x4e441529u, 0xfc2757d1u, 0xf534ddc0u, 0xdb629599u, 0x3c439041u,
+    0xfe5163abu, 0xdebbc561u, 0xb7246e3au, 0x424dd2e0u, 0x06492eeau, 0x09d1921cu,
+    0xfe1deb1cu, 0xb129a73eu, 0xe88235f5u, 0x2ebb4484u, 0xe99c7026u, 0xb45f7e41u,
+    0x3991d639u, 0x835339f4u, 0x9c845f8bu, 0xbdf9283bu, 0x1ff897ffu, 0xde05980fu,
+    0xef2f118bu, 0x5a0a6d1fu, 0x6d367ecfu, 0x27cb09b7u, 0x4f463f66u, 0x9e5fea2du,
+    0x7527bac7u, 0xebe5f17bu, 0x3d0739f7u, 0x8a5292eau, 0x6bfb5fb1u, 0x1f8d5d08u,
+    0x56033046u,
+};
+
+// The 53 bits of 2/pi that range-reduce a, segment S1[4:0]: shift = 53 * segment
+// (plus the exponent's excess over 1077), result = bits [shift, shift + 53) as an
+// integer scaled by 2^(-53 - shift) (+128 for exponents >= 1968). The sign of a is
+// ignored, and the scaling rounds toward zero as the document says.
+static inline ulong sharpemu_f64_trig_preop(ulong a, uint segment)
+{
+    uint exponent = (uint)((a >> 52) & 0x7FFul);
+    uint shift = (segment & 31u) * 53u + (exponent > 1077u ? exponent - 1077u : 0u);
+    uint index = shift >> 5;
+    if (index + 2u >= 37u)
+    {
+        return 0ul;
+    }
+    uint bitShift = shift & 31u;
+    ulong high = ((ulong)sharpemu_f64_two_over_pi[index] << 32) | sharpemu_f64_two_over_pi[index + 1u];
+    ulong low = (ulong)sharpemu_f64_two_over_pi[index + 2u] << 32;
+    if (bitShift != 0u)
+    {
+        high = (high << bitShift) | (low >> (64u - bitShift));
+    }
+    ulong value = high >> 11;
+    if (value == 0ul)
+    {
+        return 0ul;
+    }
+    int scale = -53 - (int)shift + (exponent >= 1968u ? 128 : 0);
+    int leading = 63 - sharpemu_f64_clz(value);
+    int biased = leading + scale + 1023;
+    if (biased >= 1)
+    {
+        return sharpemu_f64_pack(0u, biased - 1, value << (52 - leading));
+    }
+    int denormalShift = scale + 1074;
+    return denormalShift >= 0 ? value << denormalShift : (denormalShift > -64 ? value >> -denormalShift : 0ul);
 }
