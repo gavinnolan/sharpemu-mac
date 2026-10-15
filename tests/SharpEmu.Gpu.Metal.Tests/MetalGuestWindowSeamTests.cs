@@ -163,6 +163,48 @@ public sealed unsafe class MetalGuestWindowSeamTests(ITestOutputHelper output)
         Assert.Equal(0UL, memory.RingFallbacks);
     }
 
+    // A range too large to stage whose start one window covers binds that prefix in
+    // place: the window's bytes are what the GPU writes and reads, and nothing goes
+    // through the ring. The upload cap is the seam here so a range inside the backing
+    // can exceed it.
+    [Fact]
+    public void AnOversizedRangeBindsTheWindowPrefixInPlace()
+    {
+        if (!RequireDevice())
+        {
+            return;
+        }
+
+        using var backing = new Backing();
+        using var harness = new MetalTransferHarness(Device.Value);
+        using var memory = new MetalGuestMemory(
+            Device.Value, backing, new BackingMemory(backing), WindowBytes, SeamBytes, Budget, maxUploadBytes: SeamBytes);
+
+        // Starts half-way into the first window and runs past its end into bytes only
+        // the second window holds.
+        var address = GuestBase + (WindowBytes / 2);
+        var size = WindowBytes - (WindowBytes / 4);
+        var covered = WindowBytes / 2;
+
+        harness.Begin();
+        var prefix = memory.Resolve(address, size);
+        Assert.True(prefix.IsValid);
+        Assert.Equal(covered, prefix.Size);
+        Assert.Equal(1UL, memory.OversizedInPlace);
+        Assert.Equal(0UL, memory.RingFallbacks);
+        var write = MetalNative.Send(harness.CommandBuffer, SelBlit);
+        Fill(write, prefix, 0xCD);
+        MetalNative.SendVoid(write, SelEnd);
+        harness.Submit();
+
+        var bytes = new byte[covered];
+        Assert.True(backing.TryReadBacking(address, bytes));
+        Assert.All(bytes, value => Assert.Equal((byte)0xCD, value));
+        var beyond = new byte[16];
+        Assert.True(backing.TryReadBacking(address + covered, beyond));
+        Assert.All(beyond, value => Assert.Equal((byte)0, value));
+    }
+
     private static void Fill(nint encoder, in MetalGuestRange range, byte value)
     {
         Assert.True(range.IsValid);

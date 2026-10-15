@@ -23,20 +23,26 @@ internal sealed class MetalGuestMemory : IDisposable
 {
     // Four 4 GiB windows cover the 16 GiB of direct memory; the flexible tail adds a
     // fifth. maxBufferLength caps a single window at about 13.6 GB on this hardware.
+    //
+    // Every encoder names the windows it touches with useResource, and the driver holds
+    // the named bytes resident (wired) while the command buffer runs - the whole window,
+    // pages the guest never touched included. A 4 GiB window touched for one binding
+    // therefore pins everything under it: Demon's Souls names 3-4 of the five windows
+    // per submission (its device-address programs reach every mapped span), which wires
+    // 14-18 GB of a 24 GB machine and pushes everything else into swap (0.3 fps
+    // in-game). SHARPEMU_METAL_V2_WINDOW_MB (512..4096) shrinks the windows so a touched
+    // window pins only its own stretch; a binding larger than a window minus the seam
+    // then straddles and binds the window prefix in place. 1 GiB windows ran that
+    // title's gameplay 8x faster on the 24 GB machine, but its mapped spans then split
+    // into more device-address runs than the table holds (4096) during longer play, so
+    // the default stays 4 GiB until the table can take them.
     private const ulong PreferredWindowBytes = 4UL * 1024 * 1024 * 1024;
     private const int MaxWindows = 64;
 
-    // Every encoder names the windows it touches with useResource, and the driver holds
-    // the named bytes resident (wired) while the command buffer runs. A 4 GiB window
-    // touched for one binding therefore pins everything the guest ever wrote under it:
-    // Demon's Souls in-game named 3-4 windows per submission, which wired 14 GB of a
-    // 24 GB machine and pushed everything else into swap. SHARPEMU_METAL_V2_WINDOW_MB
-    // (256..4096) shrinks the windows so a touched window pins only its own stretch; a
-    // binding larger than a window minus the seam then straddles and takes the ring.
     private static ulong ResolvePreferredWindowBytes()
     {
         var configured = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WINDOW_MB");
-        if (ulong.TryParse(configured, out var megabytes) && megabytes >= 256 && megabytes <= 4096)
+        if (ulong.TryParse(configured, out var megabytes) && megabytes >= 512 && megabytes <= 4096)
         {
             return megabytes * 1024 * 1024;
         }
@@ -136,6 +142,10 @@ internal sealed class MetalGuestMemory : IDisposable
     private readonly int _windowCount;
     private readonly ulong _aliasBase;
     private readonly ulong _aliasSize;
+
+    // The largest range the ring stages whole; a bigger one binds a prefix instead.
+    private readonly ulong _maxUploadBytes;
+    private long _oversizedInPlace;
     private readonly List<RingBuffer> _rings = new();
     private readonly nint _residencySet;
     private readonly nint _gdsBuffer;
@@ -160,9 +170,11 @@ internal sealed class MetalGuestMemory : IDisposable
         ICpuMemory memory,
         ulong preferredWindowBytes,
         ulong seamBytes,
-        ulong budgetOverride)
+        ulong budgetOverride,
+        ulong maxUploadBytes = MaxUploadBytes)
     {
         _device = device;
+        _maxUploadBytes = maxUploadBytes;
         _backing = backing;
         _memory = memory;
         var (aliasBase, aliasSize) = backing.BackingAliasRange;
@@ -344,6 +356,9 @@ internal sealed class MetalGuestMemory : IDisposable
 
     public ulong RingFallbacks => (ulong)Volatile.Read(ref _ringFallbacks);
 
+    /// <summary>How many ranges too large to stage bound a window prefix in place instead.</summary>
+    public ulong OversizedInPlace => (ulong)Volatile.Read(ref _oversizedInPlace);
+
     // Shared memory the upload rings hold now, for the periodic counters line.
     public ulong RingBytes => (ulong)Volatile.Read(ref _ringBytes);
 
@@ -496,15 +511,17 @@ internal sealed class MetalGuestMemory : IDisposable
     /// a binary search, which is how an image too scattered to map in one piece is cut
     /// into the pieces that do map.
     /// </summary>
-    public MetalGuestRange ResolveWritablePrefix(ulong gpuVa, ulong size)
+    public MetalGuestRange ResolveWritablePrefix(ulong gpuVa, ulong size) =>
+        ResolveWritablePrefix(gpuVa, size, warn: true);
+
+    private MetalGuestRange ResolveWritablePrefix(ulong gpuVa, ulong size, bool warn)
     {
         if (size == 0)
         {
             return default;
         }
 
-        var whole = ResolveWritable(gpuVa, size);
-        if (whole.IsValid)
+        if (TryResolveWindow(gpuVa, size, out var whole, warn))
         {
             return whole;
         }
@@ -515,8 +532,7 @@ internal sealed class MetalGuestMemory : IDisposable
         while (high - low > 1)
         {
             var probe = low + ((high - low) / 2);
-            var resolved = ResolveWritable(gpuVa, probe);
-            if (resolved.IsValid)
+            if (TryResolveWindow(gpuVa, probe, out var resolved, warn))
             {
                 found = resolved;
                 low = probe;
@@ -601,7 +617,7 @@ internal sealed class MetalGuestMemory : IDisposable
             $"alias_contiguous={contiguous} start_alias=0x{startAlias:X16} end_alias=0x{endAlias:X16}.");
     }
 
-    private bool TryResolveWindow(ulong gpuVa, ulong size, out MetalGuestRange resolved)
+    private bool TryResolveWindow(ulong gpuVa, ulong size, out MetalGuestRange resolved, bool warn = true)
     {
         resolved = default;
         if (size == 0 || gpuVa == 0 || size > ulong.MaxValue - gpuVa)
@@ -615,7 +631,11 @@ internal sealed class MetalGuestMemory : IDisposable
         if (!_backing.TryResolveBackingAliasSpan(gpuVa, size, out var alias) ||
             alias < _aliasBase || alias - _aliasBase >= _aliasSize)
         {
-            ReportUnresolved(gpuVa, size);
+            if (warn)
+            {
+                ReportUnresolved(gpuVa, size);
+            }
+
             return false;
         }
 
@@ -624,6 +644,11 @@ internal sealed class MetalGuestMemory : IDisposable
         var offset = alias - window.AliasBase;
         if (alias < window.AliasBase || offset >= window.Size || size > window.Size - offset)
         {
+            if (!warn)
+            {
+                return false;
+            }
+
             MetalV2Diagnostics.WarnOnce(
                 $"window-straddle:{size:X}",
                 $"A backed guest range straddles the window edge, so no single window covers it: " +
@@ -657,20 +682,66 @@ internal sealed class MetalGuestMemory : IDisposable
         return true;
     }
 
+    /// <summary>
+    /// The prefix of a contiguous backed range that the window holding its first byte
+    /// covers, for a range that straddles the window's end. False when the range is not
+    /// one backed span, which the binary search in <see cref="ResolveWritablePrefix"/> handles.
+    /// </summary>
+    private bool TryResolveWindowPrefix(ulong gpuVa, ulong size, out MetalGuestRange resolved)
+    {
+        resolved = default;
+        if (!_backing.TryResolveBackingAliasSpan(gpuVa, size, out var alias) ||
+            alias < _aliasBase || alias - _aliasBase >= _aliasSize)
+        {
+            return false;
+        }
+
+        var index = (int)Math.Min((alias - _aliasBase) / _windowStride, (ulong)(_windowCount - 1));
+        ref readonly var window = ref _windows[index];
+        if (alias < window.AliasBase || alias - window.AliasBase >= window.Size)
+        {
+            return false;
+        }
+
+        var covered = Math.Min(size, window.Size - (alias - window.AliasBase));
+        return TryResolveWindow(gpuVa, covered, out resolved, warn: false);
+    }
+
     /// <summary>Copies guest bytes into the ring; used for ranges no window covers.</summary>
     private MetalGuestRange Upload(ulong gpuVa, ulong size)
     {
-        if (size > MaxUploadBytes)
+        if (size > _maxUploadBytes)
         {
             // A range this large that no window covers is not data a draw reads whole;
-            // bind its prefix rather than staging gigabytes per submission. It may well
-            // be backed and merely cross a window edge, so the warning says which.
+            // bind its prefix rather than staging gigabytes per submission. When one
+            // window holds at least a ring's worth of its start, that prefix binds in
+            // place: it stays live with the GPU writes still in flight and a shader's
+            // stores through it reach guest memory, neither of which a staged copy of
+            // the first bytes can do. Demon's Souls binds its whole heap (1.5-4 GB) this
+            // way, and with windows smaller than the heap every such binding came here.
+            if (!TryResolveWindowPrefix(gpuVa, size, out var prefix))
+            {
+                prefix = ResolveWritablePrefix(gpuVa, size, warn: false);
+            }
+
+            if (prefix.IsValid && prefix.Size >= _maxUploadBytes)
+            {
+                Interlocked.Increment(ref _oversizedInPlace);
+                MetalV2Diagnostics.WarnOnce(
+                    $"oversized-in-place:{size:X}",
+                    $"A guest range no single window covers is too large to stage; binding its first " +
+                    $"0x{prefix.Size:X} bytes in place: address=0x{gpuVa:X16} size=0x{size:X} " +
+                    $"({DescribeResolve(gpuVa, size)}).");
+                return prefix;
+            }
+
+            // It may well be backed and merely cross a window edge, so the warning says which.
             MetalV2Diagnostics.WarnOnce(
                 "oversized-upload",
                 $"A guest range no single window covers is too large to stage; binding its first " +
-                $"0x{MaxUploadBytes:X} bytes: address=0x{gpuVa:X16} size=0x{size:X} " +
+                $"0x{_maxUploadBytes:X} bytes: address=0x{gpuVa:X16} size=0x{size:X} " +
                 $"({DescribeResolve(gpuVa, size)}).");
-            size = MaxUploadBytes;
+            size = _maxUploadBytes;
         }
 
         var range = Allocate(size, RingAlignment, out var span);

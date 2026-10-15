@@ -1315,7 +1315,9 @@ internal sealed partial class MetalRenderHost :
 
         var target = _guestMemory.ResolveWritable(destination, size);
         var origin = _guestMemory.Resolve(source, size);
-        if (!target.IsValid || !origin.IsValid)
+        // A source too large to stage resolves to a prefix, which a blit of the whole
+        // size would overrun.
+        if (!target.IsValid || !origin.IsValid || origin.Size < size)
         {
             if (!allowHost)
             {
@@ -2144,7 +2146,8 @@ internal sealed partial class MetalRenderHost :
             $"event_wake_ms={eventWakeMs.ToString("F1", culture)} " +
             $"slices={CommandStream.SlicesRun} blocked={blocked.Outstanding} " +
             $"blocked_wait=0x{blocked.SampleWaitAddress:X16} " +
-            $"ring_fallbacks={_guestMemory.RingFallbacks} ring_mb={_guestMemory.RingFallbackBytes / (1024 * 1024)}");
+            $"ring_fallbacks={_guestMemory.RingFallbacks} ring_mb={_guestMemory.RingFallbackBytes / (1024 * 1024)} " +
+            $"oversized_in_place={_guestMemory.OversizedInPlace}");
     }
 
     private string ReleaseCauses()

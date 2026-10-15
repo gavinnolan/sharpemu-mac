@@ -992,7 +992,26 @@ internal sealed partial class MetalRenderHost
         _guestMemory.ClearTouchedWindows();
         _guestMemory.MarkWindowsTouched(touchedBefore | _deviceAddressWindows);
         _deviceAddressEntries.Sort(static (left, right) => left.FirstPage.CompareTo(right.FirstPage));
+        // The windows the table names are what every device-address submission asks the
+        // driver to keep resident, which it does by wiring them whole; say when that set
+        // changes so a wired-memory jump can be read against it.
+        if (_deviceAddressWindows != _deviceAddressWindowsLogged)
+        {
+            _deviceAddressWindowsLogged = _deviceAddressWindows;
+            var spanBytes = 0UL;
+            foreach (var (_, pageCount, _) in _deviceAddressEntries)
+            {
+                spanBytes += pageCount << DeviceAddressPaging.PageBits;
+            }
+
+            Console.Error.WriteLine(
+                $"[METAL-V2][INFO] device-address table: spans={spanCount} entries={_deviceAddressEntries.Count} " +
+                $"span_mb={spanBytes / (1024 * 1024)} windows=0x{_deviceAddressWindows:X} " +
+                $"window_count={System.Numerics.BitOperations.PopCount(_deviceAddressWindows)}");
+        }
     }
+
+    private ulong _deviceAddressWindowsLogged;
 
     private ulong UploadDwords(ReadOnlySpan<uint> words)
     {
