@@ -428,6 +428,14 @@ internal sealed class RecordingRenderHost : IRenderHost
         return HostCopyAccepted;
     }
 
+    public bool KernelFillAccepted { get; set; }
+
+    public bool TryClearImageFromKernelFill(ulong address, ulong size, ReadOnlySpan<uint> pattern)
+    {
+        Calls.Add($"kernel_fill {address:X} {size:X} {string.Join(',', pattern.ToArray().Select(word => word.ToString("X8")))}");
+        return KernelFillAccepted;
+    }
+
     public void NoteKernelFillFallback(string reason) => Calls.Add($"kernel_fill_fallback {reason}");
 
     public Exception Fatal(string message) => new RenderExecutorFatalException(message);

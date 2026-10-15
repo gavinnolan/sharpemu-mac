@@ -31,17 +31,27 @@ internal sealed partial class MetalRenderHost
         }
     }
 
-    /// <summary>A kernel fill of one repeating dword, as an image clear.</summary>
-    public bool TryClearImageFromKernelFill(ulong address, ulong size, uint value)
+    /// <summary>A kernel fill of repeating dwords, as an image clear.</summary>
+    public bool TryClearImageFromKernelFill(ulong address, ulong size, ReadOnlySpan<uint> pattern)
     {
         if (!MetalV2Diagnostics.KernelFills)
         {
             return false;
         }
 
-        Span<byte> pattern = stackalloc byte[sizeof(uint)];
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(pattern, value);
-        return TryInterceptKernelFill(address, size, pattern);
+        if (pattern.IsEmpty || pattern.Length * sizeof(uint) > MetalKernelFill.MaxPatternBytes)
+        {
+            NoteKernelFillFallback("pattern-size");
+            return false;
+        }
+
+        Span<byte> bytes = stackalloc byte[pattern.Length * sizeof(uint)];
+        for (var word = 0; word < pattern.Length; word++)
+        {
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes[(word * sizeof(uint))..], pattern[word]);
+        }
+
+        return TryInterceptKernelFill(address, size, bytes);
     }
 
     /// <summary>
