@@ -42,6 +42,10 @@ public enum GuestDisplayResolution
 
     /// <summary>3840x2160.</summary>
     Uhd,
+
+    /// <summary>1280x720: for titles whose compiled render sizes follow the display (see
+    /// TitleDisplayPatches), a way to cut their pixel work below 1080p.</summary>
+    Hd720,
 }
 
 public enum PerformanceOverlayCorner
@@ -98,6 +102,7 @@ public sealed record HostVideoOptions
     {
         GuestDisplayResolution.Uhd => (3840u, 2160u),
         GuestDisplayResolution.Qhd => (2560u, 1440u),
+        GuestDisplayResolution.Hd720 => (1280u, 720u),
         _ => (1920u, 1080u),
     };
 

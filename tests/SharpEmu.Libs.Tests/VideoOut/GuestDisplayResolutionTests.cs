@@ -25,6 +25,7 @@ public sealed class GuestDisplayResolutionTests
     }
 
     [Theory]
+    [InlineData(GuestDisplayResolution.Hd720, 1280u, 720u, 1)]
     [InlineData(GuestDisplayResolution.Hd, 1920u, 1080u, 1)]
     [InlineData(GuestDisplayResolution.Qhd, 2560u, 1440u, 1)]
     [InlineData(GuestDisplayResolution.Uhd, 3840u, 2160u, 2)]

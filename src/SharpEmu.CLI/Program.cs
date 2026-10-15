@@ -1515,12 +1515,13 @@ internal static partial class Program
         return Enum.IsDefined(mode);
     }
 
-    /// <summary>The display the guest is told about: 1080p, 1440p or 2160p. Four-K is the
+    /// <summary>The display the guest is told about: 720p, 1080p, 1440p or 2160p. Four-K is the
     /// one a title can spend four times the pixel work on, so it is opt-in.</summary>
     private static bool TryParseDisplayResolution(string value, out GuestDisplayResolution resolution)
     {
         resolution = value.Trim().ToLowerInvariant() switch
         {
+            "720p" or "720" or "hd720" or "1280x720" => GuestDisplayResolution.Hd720,
             "1080p" or "1080" or "fhd" or "hd" or "1920x1080" => GuestDisplayResolution.Hd,
             "1440p" or "1440" or "qhd" or "2560x1440" => GuestDisplayResolution.Qhd,
             "2160p" or "2160" or "4k" or "uhd" or "3840x2160" => GuestDisplayResolution.Uhd,
