@@ -75,6 +75,12 @@ public static class GuestGpu
     {
         get
         {
+            // Every guest GPU export reads this; once the backend exists the read is a
+            // volatile load instead of a trip through the gate every call.
+            if (Volatile.Read(ref _instance) is { } ready)
+            {
+                return ready;
+            }
             lock (Gate)
             {
                 if (_instance is { } existing)
@@ -86,7 +92,7 @@ public static class GuestGpu
                 var created = HeadlessCommandStreamFactory is { } streams
                     ? new HeadlessCommandStreamBackend(streams, factory)
                     : factory();
-                _instance = created;
+                Volatile.Write(ref _instance, created);
                 return created;
             }
         }
