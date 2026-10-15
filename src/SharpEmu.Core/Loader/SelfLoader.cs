@@ -321,6 +321,7 @@ public sealed class SelfLoader : ISelfLoader
         if (clearVirtualMemory)
         {
             GuestBytePatcher.ApplyFromEnvironment(virtualMemory, programHeaders, imageBase);
+            ApplyTitleDisplayPatch(virtualMemory, programHeaders, imageBase, applicationInfo.TitleId);
         }
 
         if (virtualMemory is PhysicalVirtualMemory patchableMemory)
@@ -570,6 +571,25 @@ public sealed class SelfLoader : ISelfLoader
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {
             Console.Error.WriteLine($"[LOADER][WARN] Unreal back-buffer patch failed: {exception.Message}");
+        }
+    }
+
+    /// <summary>Rewrites a title's compiled display sizes to the display the host advertises
+    /// through sceVideoOut; see <see cref="TitleDisplayPatches"/>.</summary>
+    private static void ApplyTitleDisplayPatch(
+        IVirtualMemory virtualMemory,
+        IReadOnlyList<ProgramHeader> programHeaders,
+        ulong imageBase,
+        string? titleId)
+    {
+        var (width, height) = SharpEmu.Libs.VideoOut.HostVideoHost.CurrentOptions.GuestDisplaySize;
+        try
+        {
+            TitleDisplayPatches.Apply(virtualMemory, programHeaders, imageBase, titleId, width, height);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] title display size patch failed: {exception.Message}");
         }
     }
 
