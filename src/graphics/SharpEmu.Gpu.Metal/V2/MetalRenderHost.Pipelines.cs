@@ -923,6 +923,7 @@ internal sealed partial class MetalRenderHost
             return false;
         }
 
+        ApplyPendingCommandProcessorBytes(address, bytes);
         word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
         return true;
     }
@@ -940,7 +941,26 @@ internal sealed partial class MetalRenderHost
         }
 
         _ = clean;
-        return _backing.TryReadBacking(address, destination);
+        if (!_backing.TryReadBacking(address, destination))
+        {
+            return false;
+        }
+
+        ApplyPendingCommandProcessorBytes(address, destination);
+        return true;
+    }
+
+    // Resource tables are read straight from the backing, so a WRITE_DATA that patched one
+    // and has yet to land would otherwise be read as the table it replaced.
+    private void ApplyPendingCommandProcessorBytes(ulong address, Span<byte> destination)
+    {
+        if (_cpOverlay.Count != 0 &&
+            _cpOverlay.Coverage(address, (ulong)destination.Length, _completedSerialReader ??= () => CompletedSerial) !=
+            MetalOverlayCoverage.None)
+        {
+            _cpOverlay.Apply(address, destination);
+            Interlocked.Increment(ref _overlayReads);
+        }
     }
 
     private void DisposePipelines()
