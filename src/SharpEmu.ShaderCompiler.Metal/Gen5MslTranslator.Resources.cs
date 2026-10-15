@@ -542,7 +542,7 @@ public static partial class Gen5MslTranslator
         // format, a format the table cannot decode, or an element past the descriptor's size.
         private void EmitDeviceFormatStore(
             (string Base, string Size, string Stride) descriptor,
-            string byteOffset,
+            BufferAddress byteOffset,
             string descriptorWord3,
             string unifiedFormat,
             uint vectorData,
@@ -552,36 +552,43 @@ public static partial class Gen5MslTranslator
             var entry = Temp("uint", $"sharpemu_gfx10_formats[{unifiedFormat}]");
             var dataFormat = Temp("uint", $"{entry} & 0xFFu");
             var numberFormat = Temp("uint", $"({entry} >> 8) & 0xFFu");
-            var layouts = new (string ByteOffset, string BitOffset, string Bits)[componentCount];
+            var layouts = new (string ByteOffset, string BitOffset, string Bits, string Offset)[componentCount];
             var elementBytes = "0u";
+            // Each component is checked at its own placed offset (its dword lands apart from
+            // the others' in a swizzled V#); the element is stored only when all are in range.
+            var componentsInBounds = new List<string>();
             for (uint component = 0; component < componentCount; component++)
             {
                 var componentByteOffset = Temp("uint", "0u");
                 var bitOffset = Temp("uint", "0u");
                 var bits = Temp("uint", "0u");
                 Line($"sharpemu_format_layout({dataFormat}, {component}u, {componentByteOffset}, {bitOffset}, {bits});");
-                layouts[component] = (componentByteOffset, bitOffset, bits);
+                var offset = byteOffset.At(componentByteOffset);
+                var componentBytes = Temp("uint", $"({bitOffset} + {bits} + 7u) >> 3u");
+                componentsInBounds.Add(
+                    $"({bits} == 0u || ((ulong){componentBytes} <= {descriptor.Size} && (ulong){offset} <= {descriptor.Size} - (ulong){componentBytes}))");
+                layouts[component] = (componentByteOffset, bitOffset, bits, offset);
                 elementBytes = Temp(
                     "uint",
-                    $"max({elementBytes}, {bits} == 0u ? 0u : {componentByteOffset} + (({bitOffset} + {bits} + 7u) >> 3u))");
+                    $"max({elementBytes}, {bits} == 0u ? 0u : {componentByteOffset} + {componentBytes})");
             }
 
             var allowed = Temp(
                 "bool",
                 $"(({descriptorWord3} >> 12) & 0x7Fu) != 0u && {dataFormat} != 0u && {elementBytes} != 0u && " +
-                $"(ulong){elementBytes} <= {descriptor.Size} && (ulong){byteOffset} <= {descriptor.Size} - (ulong){elementBytes}");
+                string.Join(" && ", componentsInBounds));
             Line($"if ({ExecCondition(allowed)})");
             Line("{");
             _indent++;
             var mask = FormatULong(DeviceAddressPaging.AddressMask);
             for (uint component = 0; component < componentCount; component++)
             {
-                var (componentByteOffset, bitOffset, bits) = layouts[component];
+                var (_, bitOffset, bits, offset) = layouts[component];
                 Line($"if ({bits} != 0u)");
                 Line("{");
                 _indent++;
                 // The component's bits merge into the one or two dwords they touch.
-                var address = Temp("ulong", $"({descriptor.Base} + (ulong){byteOffset} + (ulong){componentByteOffset}) & {mask}");
+                var address = Temp("ulong", $"({descriptor.Base} + (ulong){offset}) & {mask}");
                 var position = Temp("uint", $"(uint)({address} & 3ul) * 8u + {bitOffset}");
                 var aligned = Temp("ulong", $"({address} & ~3ul) + (ulong)({position} >> 5u) * 4ul");
                 var shift = Temp("uint", $"{position} & 31u");
@@ -657,13 +664,32 @@ public static partial class Gen5MslTranslator
             var scalarOffset = instruction.Sources.Count > 2
                 ? SourceExpression(instruction.Sources[2], instruction)
                 : "0u";
-            var vectorIndex = control.IndexEnabled ? $"v[{control.VectorAddress}]" : "0u";
             var vectorOffset = control.OffsetEnabled
                 ? $"v[{control.VectorAddress + (control.IndexEnabled ? 1u : 0u)}]"
                 : "0u";
-            var byteOffset = Temp(
-                "uint",
-                $"(0x{unchecked((uint)control.OffsetBytes):X}u + {scalarOffset} + {vectorOffset} + ({vectorIndex} * {descriptor.Stride}))");
+
+            // SWIZZLE_ENABLE (word 1 bit 31), INDEX_STRIDE (word 3 bits 21-22, 8 << n indices)
+            // and ADD_TID_ENABLE (word 3 bit 23) are read from the V# when the access runs
+            // (RDNA2 ISA Table 37). As on the bound path, a V# swizzles only with a nonzero
+            // stride; a swizzled one counts num_records in records of stride bytes (Table 33),
+            // so its reach is the swizzled footprint rather than stride * records.
+            var resource = instruction.Sources[1].Value;
+            var word1 = Temp("uint", ScalarExpression(resource + 1));
+            var descriptorWord3 = Temp("uint", ScalarExpression(resource + 3));
+            var swizzled = Temp("bool", $"({word1} >> 31u) != 0u && {descriptor.Stride} != 0u");
+            var indexStride = Temp("uint", $"{swizzled} ? (8u << (({descriptorWord3} >> 21u) & 3u)) : 0u");
+            var records = Temp("uint", ScalarExpression(resource + 2));
+            descriptor = descriptor with
+            {
+                Size = Temp("ulong", $"{swizzled} ? sharpemu_swizzled_footprint({records}, {descriptor.Stride}, {indexStride}) : {descriptor.Size}"),
+            };
+            var byteOffset = PlacedBufferAddress(
+                scalarOffset,
+                BufferIndex(control, $"((({descriptorWord3} >> 23u) & 1u) != 0u)"),
+                $"(0x{unchecked((uint)control.OffsetBytes):X}u + {vectorOffset})",
+                descriptor.Stride,
+                indexStride,
+                placed => placed);
 
             if (isFormatLoad)
             {
@@ -718,12 +744,19 @@ public static partial class Gen5MslTranslator
             {
                 // Each dword runs as a device atomic on the word the page table maps it to.
                 // An access past the descriptor, unaligned or unmapped is not performed and
-                // returns zero, the bound path's out-of-range result.
-                var width = atomicWords * sizeof(uint);
-                var address = Temp("ulong", $"({descriptor.Base} + (ulong){byteOffset}) & {FormatULong(mask)}");
-                var inRange = Temp(
-                    "bool",
-                    $"{width}ul <= {descriptor.Size} && (ulong){byteOffset} <= {descriptor.Size} - {width}ul && ({address} & 3ul) == 0ul");
+                // returns zero, the bound path's out-of-range result. Each word is placed,
+                // checked and aligned at its own offset.
+                var wordAddresses = new string[atomicWords];
+                var wordsInRange = new string[atomicWords];
+                for (uint word = 0; word < atomicWords; word++)
+                {
+                    var wordOffset = byteOffset.At(word * sizeof(uint));
+                    wordAddresses[word] = Temp("ulong", $"({descriptor.Base} + (ulong){wordOffset}) & {FormatULong(mask)}");
+                    wordsInRange[word] =
+                        $"4ul <= {descriptor.Size} && (ulong){wordOffset} <= {descriptor.Size} - 4ul && ({wordAddresses[word]} & 3ul) == 0ul";
+                }
+
+                var inRange = Temp("bool", string.Join(" && ", wordsInRange));
                 var originals = new string[atomicWords];
                 for (uint word = 0; word < atomicWords; word++)
                 {
@@ -743,8 +776,7 @@ public static partial class Gen5MslTranslator
                         $"v[{control.VectorData + 1}]",
                         out var build);
                     var valid = Temp("bool", "false");
-                    var wordAddress = word == 0 ? address : $"{address} + {word * sizeof(uint)}ul";
-                    var pointer = Temp("device uint*", $"sharpemu_resolve_device_address({DeviceArguments}, {wordAddress}, {valid})");
+                    var pointer = Temp("device uint*", $"sharpemu_resolve_device_address({DeviceArguments}, {wordAddresses[word]}, {valid})");
                     Line($"if ({valid})");
                     Line("{");
                     _indent++;
@@ -769,8 +801,9 @@ public static partial class Gen5MslTranslator
 
             if (isSubwordLoad)
             {
-                var inRange = Temp("bool", $"((ulong){byteOffset} + {loadBytes - 1}ul) < {descriptor.Size}");
-                var address = Temp("ulong", $"({descriptor.Base} + (ulong){byteOffset}) & {FormatULong(mask)}");
+                var subwordOffset = byteOffset.At(0);
+                var inRange = Temp("bool", $"((ulong){subwordOffset} + {loadBytes - 1}ul) < {descriptor.Size}");
+                var address = Temp("ulong", $"({descriptor.Base} + (ulong){subwordOffset}) & {FormatULong(mask)}");
                 StoreSubdwordLoad(
                     control.VectorData,
                     $"{inRange} ? (sharpemu_load_device_unaligned({DeviceArguments}, {address}, {loadBytes}u) & {FormatUInt(loadBytes == 1 ? 0xFFu : 0xFFFFu)}) : 0u",
@@ -785,8 +818,7 @@ public static partial class Gen5MslTranslator
             {
                 for (uint index = 0; index < control.DwordCount; index++)
                 {
-                    var componentOffset = index == 0 ? byteOffset : Temp("uint", $"{byteOffset} + {index * sizeof(uint)}u");
-                    StoreVector(control.VectorData + index, DeviceDescriptorWord(descriptor, componentOffset));
+                    StoreVector(control.VectorData + index, DeviceDescriptorWord(descriptor, byteOffset.At(index * sizeof(uint))));
                 }
 
                 return true;
@@ -794,8 +826,9 @@ public static partial class Gen5MslTranslator
 
             if (isSubwordStore)
             {
-                var inRange = Temp("bool", $"((ulong){byteOffset} + {storeBytes - 1}ul) < {descriptor.Size}");
-                var address = Temp("ulong", $"({descriptor.Base} + (ulong){byteOffset}) & {FormatULong(mask)}");
+                var subwordOffset = byteOffset.At(0);
+                var inRange = Temp("bool", $"((ulong){subwordOffset} + {storeBytes - 1}ul) < {descriptor.Size}");
+                var address = Temp("ulong", $"({descriptor.Base} + (ulong){subwordOffset}) & {FormatULong(mask)}");
                 var source = sourceShift == 0
                     ? $"v[{control.VectorData}]"
                     : $"(v[{control.VectorData}] >> {sourceShift})";
@@ -810,7 +843,7 @@ public static partial class Gen5MslTranslator
 
             for (uint index = 0; index < control.DwordCount; index++)
             {
-                var componentOffset = index == 0 ? byteOffset : Temp("uint", $"{byteOffset} + {index * sizeof(uint)}u");
+                var componentOffset = byteOffset.At(index * sizeof(uint));
                 var inRange = Temp("bool", $"((ulong){componentOffset} + 3ul) < {descriptor.Size}");
                 var address = Temp("ulong", $"({descriptor.Base} + (ulong){componentOffset}) & {FormatULong(mask & ~3ul)}");
                 Line($"if ({ExecCondition(inRange)})");

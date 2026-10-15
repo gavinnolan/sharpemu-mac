@@ -239,6 +239,7 @@ public static partial class Gen5MslTranslator
         private bool _usesLds;
         private uint _scratchDwordCount;
         private bool _usesFormatLoads;
+        private bool _usesBufferOffset;
         private bool _usesShaderClock;
         private bool _usesWaveScratch;
 
@@ -535,6 +536,11 @@ public static partial class Gen5MslTranslator
             }
 
             EmitPrelude(source);
+            if (_usesBufferOffset)
+            {
+                source.Append(MslTemplates.Render("buffer_offset_prelude"));
+            }
+
             EmitFloat64PreludeIfUsed(source);
             source.AppendLine();
 
@@ -1640,34 +1646,53 @@ public static partial class Gen5MslTranslator
 
             // The dense buffer, its stride and its format come from the specialization.
             var specialized = buffers[bindingIndex];
-            // PackedStride bit 14 is V# SWIZZLE_ENABLE and bit 20 is ADD_TID_ENABLE (RDNA2 ISA Table 33,
-            // "Swizzled Buffer Addressing"). Both change the address formula (lane term, index_stride
-            // interleave) and the bounds rule; the linear math below implements neither, so translating
-            // them would silently address the wrong bytes.
-            if ((specialized.PackedStride & ((1u << 14) | (1u << 20))) != 0)
+            // PackedStride holds the V#'s stride (bits 0-13), SWIZZLE_ENABLE (bit 14),
+            // INDEX_STRIDE (bits 16-17) and ADD_TID_ENABLE (bit 20); the materializer keeps
+            // the swizzle only for a nonzero stride.
+            var packedStride = specialized.PackedStride;
+            var addThreadId = (packedStride & (1u << 20)) != 0;
+            if (addThreadId && !HasRealWaveLanes)
             {
-                error = $"buffer {instruction.Opcode} uses a swizzled or add_tid V# (packed stride 0x{specialized.PackedStride:X}), which is not supported";
+                // ADD_TID_ENABLE adds the lane in the wave to the index; a stage that models
+                // one lane has no lane id to add.
+                error = $"buffer {instruction.Opcode} adds the thread id (packed stride 0x{packedStride:X}) in a stage without wave lanes";
                 return false;
             }
 
-            var stride = FormatUInt(specialized.PackedStride & 0x3FFF);
+            var stride = FormatUInt(packedStride & 0x3FFF);
             var descriptorFormat = specialized.DescriptorFormat;
             var descriptorWord3 = FormatUInt((specialized.DescriptorFormat << 12) | (specialized.DescriptorSwizzle & 0xFFF));
 
             var scalarOffset = instruction.Sources.Count > 2
                 ? SourceExpression(instruction.Sources[2], instruction)
                 : "0u";
-            var vectorIndex = control.IndexEnabled
-                ? $"v[{control.VectorAddress}]"
-                : "0u";
+            var vectorIndex = BufferIndex(control, addThreadId ? "true" : null);
             var vectorOffset = control.OffsetEnabled
                 ? $"v[{control.VectorAddress + (control.IndexEnabled ? 1u : 0u)}]"
                 : "0u";
-            var address = Temp(
-                "uint",
-                ApplyByteBias(
-                    bindingIndex,
-                    $"(0x{unchecked((uint)control.OffsetBytes):X}u + {scalarOffset} + {vectorOffset} + ({vectorIndex} * {stride}))"));
+            BufferAddress address;
+            if ((packedStride & (1u << 14)) != 0)
+            {
+                var indexStride = 8u << (int)((packedStride >> 16) & 3);
+                address = PlacedBufferAddress(
+                    scalarOffset,
+                    vectorIndex,
+                    $"(0x{unchecked((uint)control.OffsetBytes):X}u + {vectorOffset})",
+                    stride,
+                    FormatUInt(indexStride),
+                    placed => ApplyByteBias(bindingIndex, placed));
+            }
+            else
+            {
+                address = new BufferAddress(
+                    Temp(
+                        "uint",
+                        ApplyByteBias(
+                            bindingIndex,
+                            $"(0x{unchecked((uint)control.OffsetBytes):X}u + {scalarOffset} + {vectorOffset} + ({vectorIndex} * {stride}))")),
+                    null);
+            }
+
             var components = FormatComponentCount(instruction.Opcode, control, out var d16);
             if (instruction.Opcode.StartsWith("BufferStoreFormat", StringComparison.Ordinal))
             {
@@ -1733,9 +1758,87 @@ public static partial class Gen5MslTranslator
                 out error);
         }
 
+        // Where the bytes of one buffer access land. A linear access is one byte address
+        // (Base) that its bytes follow contiguously. A placed one - a swizzled V#, or a V#
+        // held in scalar registers, whose words decide at run time - has no such address:
+        // each dword is placed on its own from its unswizzled byte offset (RDNA2 ISA 8.1.5,
+        // the swizzle element is one dword on gfx10), so Place maps a byte distance into
+        // the access to the address of that dword.
+        private readonly record struct BufferAddress(string Base, Func<string, string>? Place)
+        {
+            public bool Contiguous => Place is null;
+
+            public string At(uint bytes) =>
+                Place is not null ? Place($"{bytes}u") : bytes == 0 ? Base : $"({Base} + {bytes}u)";
+
+            public string At(string bytes) =>
+                Place is not null ? Place(bytes) : $"({Base} + {bytes})";
+        }
+
+        // The index of a MUBUF/MTBUF access: the VGPR index when IDXEN is set, plus the lane
+        // in the wave (thread_id[5:0]) when the V# sets ADD_TID_ENABLE (RDNA2 ISA 8.1.5).
+        // addThreadId is null for a V# without it, "true" for one known to set it, or a
+        // run-time condition.
+        private static string BufferIndex(Gen5BufferMemoryControl control, string? addThreadId)
+        {
+            var vectorIndex = control.IndexEnabled ? $"v[{control.VectorAddress}]" : "0u";
+            return addThreadId switch
+            {
+                null => vectorIndex,
+                "true" => control.IndexEnabled ? $"({vectorIndex} + sharpemu_lane)" : "sharpemu_lane",
+                _ => $"({vectorIndex} + ({addThreadId} ? sharpemu_lane : 0u))",
+            };
+        }
+
+        // The one placement of a buffer access's dwords that the bound and the scalar
+        // register V# paths share. The index, the unswizzled offset (VGPR offset plus
+        // instruction offset) and the SGPR offset are taken now, before a load writes a
+        // destination that may alias them; each dword then lands at
+        // soffset + sharpemu_buffer_offset(index, offset + distance), the SGPR offset added
+        // outside the swizzle. A zero index stride places linearly; finish adds what the
+        // path adds after (a binding's byte bias).
+        private BufferAddress PlacedBufferAddress(
+            string scalarOffset,
+            string index,
+            string offset,
+            string stride,
+            string indexStride,
+            Func<string, string> finish)
+        {
+            _usesBufferOffset = true;
+            var scalar = Temp("uint", scalarOffset);
+            var placedIndex = Temp("uint", index);
+            var placedOffset = Temp("uint", offset);
+            return new BufferAddress(
+                placedOffset,
+                distance => Temp(
+                    "uint",
+                    finish($"({scalar} + sharpemu_buffer_offset({placedIndex}, {placedOffset} + {distance}, {stride}, {indexStride}))")));
+        }
+
+        // Whether all bytes of an access are in range: one check over a linear access; for
+        // a placed one each dword is checked at its own address, the access in range only
+        // when all are (formatted accesses and atomics are all or nothing, RDNA2 ISA 8.1.5
+        // Table 35 notes).
+        private string AccessInBounds(FormatMemory memory, BufferAddress address, uint bytes)
+        {
+            if (address.Contiguous)
+            {
+                return memory.ElementInBounds(address.Base, $"{bytes}u");
+            }
+
+            var parts = new List<string>();
+            for (uint distance = 0; distance < bytes; distance += sizeof(uint))
+            {
+                parts.Add(memory.ElementInBounds(address.At(distance), $"{Math.Min(sizeof(uint), bytes - distance)}u"));
+            }
+
+            return parts.Count == 1 ? parts[0] : Temp("bool", string.Join(" && ", parts));
+        }
+
         private void EmitBufferFormatLoad(
             int bindingIndex,
-            string byteAddress,
+            BufferAddress byteAddress,
             string descriptorWord3,
             uint vectorData,
             uint componentCount,
@@ -1743,10 +1846,11 @@ public static partial class Gen5MslTranslator
         {
             // A descriptor word the specialization fixed is decoded here; a format of whole
             // dwords then loads as one run. Anything else, and every D16 load, decodes on the
-            // device below.
+            // device below. A placed access has no run: its dwords are not contiguous.
             if (!d16.Enabled &&
+                byteAddress.Contiguous &&
                 TryParseUIntLiteral(descriptorWord3, out var literalWord3) &&
-                TryEmitLiteralDwordFormatLoad(bindingIndex, byteAddress, literalWord3, vectorData, componentCount))
+                TryEmitLiteralDwordFormatLoad(bindingIndex, byteAddress.Base, literalWord3, vectorData, componentCount))
             {
                 return;
             }
@@ -1851,7 +1955,7 @@ public static partial class Gen5MslTranslator
         // V# held in scalar registers (read through the device-address page table) share it.
         private void EmitDecodedBufferFormatLoad(
             FormatMemory memory,
-            string byteAddress,
+            BufferAddress byteAddress,
             string descriptorWord3,
             uint vectorData,
             uint componentCount,
@@ -2021,7 +2125,7 @@ public static partial class Gen5MslTranslator
         // format does not have read as zero. An unbound descriptor reads as zero.
         private bool TryEmitTypedBufferFormatLoad(
             FormatMemory memory,
-            string byteAddress,
+            BufferAddress byteAddress,
             Gen5BufferMemoryControl control,
             string descriptorWord3,
             uint transferred,
@@ -2040,17 +2144,18 @@ public static partial class Gen5MslTranslator
 
             // All transferred components must be bound and inside the binding.
             var accessBytes = Gfx10UnifiedFormat.GetAccessByteSize(dataFormat, transferred);
-            var inBounds = memory.ElementInBounds(byteAddress, $"{accessBytes}u");
+            var inBounds = AccessInBounds(memory, byteAddress, accessBytes);
             var valid = Temp(
                 "bool",
                 $"(({descriptorWord3} >> 12) & 0x7Fu) != 0u && {inBounds}");
 
             // Formats of whole dword components sit at byte offsets 0, 4, 8 and 12 of the
             // element: the address is added once and the run is loaded by one helper, with a
-            // plain aligned read when it is aligned and inside the binding.
+            // plain aligned read when it is aligned and inside the binding. A placed access
+            // has no run: each dword lands on its own.
             string? dwordRun = null;
             var runCount = Math.Min(transferred, componentCount);
-            if (memory.LoadWords is not null &&
+            if (memory.LoadWords is not null && byteAddress.Contiguous &&
                 Gfx10UnifiedFormat.HasWholeDwordComponents(dataFormat) && runCount is >= 1 and <= 4)
             {
                 var consecutive = true;
@@ -2063,7 +2168,7 @@ public static partial class Gen5MslTranslator
 
                 if (consecutive)
                 {
-                    dwordRun = Temp("uint4", memory.LoadWords(runCount, byteAddress));
+                    dwordRun = Temp("uint4", memory.LoadWords(runCount, byteAddress.Base));
                 }
             }
 
@@ -2095,7 +2200,7 @@ public static partial class Gen5MslTranslator
         // the bits at the component's offset; all transferred components are stored or dropped.
         private bool TryEmitBufferFormatStore(
             int bindingIndex,
-            string byteAddress,
+            BufferAddress byteAddress,
             Gen5BufferMemoryControl control,
             string descriptorWord3,
             uint unifiedFormat,
@@ -2114,7 +2219,7 @@ public static partial class Gen5MslTranslator
             }
 
             var elementBytes = Gfx10UnifiedFormat.GetAccessByteSize(dataFormat, componentCount);
-            var inBounds = ElementInBounds(bindingIndex, byteAddress, $"{elementBytes}u");
+            var inBounds = AccessInBounds(BindingFormatMemory(bindingIndex), byteAddress, elementBytes);
             var allowed = Temp(
                 "bool",
                 $"(({descriptorWord3} >> 12) & 0x7Fu) != 0u && {inBounds}");
@@ -2128,10 +2233,9 @@ public static partial class Gen5MslTranslator
                 for (uint component = 0; component < componentCount; component++)
                 {
                     Gfx10UnifiedFormat.TryGetComponentLayout(dataFormat, component, out var byteOffset, out _, out _);
-                    var address = byteOffset == 0 ? byteAddress : $"({byteAddress} + {byteOffset}u)";
                     Line(StoreDwordStatement(
                         bindingIndex,
-                        address,
+                        byteAddress.At(byteOffset),
                         FormatStoreComponent(control.VectorData, component, d16, $"{numberFormat}u")));
                 }
             }
@@ -2154,10 +2258,23 @@ public static partial class Gen5MslTranslator
                     masks[dword] |= ((1u << (int)bitCount) - 1) << (int)bit;
                 }
 
-                Line(
-                    $"sharpemu_store_element(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress}, {dwordCount}u, " +
-                    $"uint4({values[0]}, {values[1]}, {values[2]}, {values[3]}), " +
-                    $"uint4(0x{masks[0]:X}u, 0x{masks[1]:X}u, 0x{masks[2]:X}u, 0x{masks[3]:X}u));");
+                if (byteAddress.Contiguous)
+                {
+                    Line(
+                        $"sharpemu_store_element(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress.Base}, {dwordCount}u, " +
+                        $"uint4({values[0]}, {values[1]}, {values[2]}, {values[3]}), " +
+                        $"uint4(0x{masks[0]:X}u, 0x{masks[1]:X}u, 0x{masks[2]:X}u, 0x{masks[3]:X}u));");
+                }
+                else
+                {
+                    // A placed element's dwords land apart: each merges at its own address.
+                    for (uint dword = 0; dword < dwordCount; dword++)
+                    {
+                        Line(
+                            $"sharpemu_store_element(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress.At(dword * sizeof(uint))}, 1u, " +
+                            $"uint4({values[dword]}, 0u, 0u, 0u), uint4(0x{masks[dword]:X}u, 0u, 0u, 0u));");
+                    }
+                }
             }
 
             _indent--;
@@ -2184,7 +2301,7 @@ public static partial class Gen5MslTranslator
 
         private string LoadFormatComponent(
             FormatMemory memory,
-            string byteAddress,
+            BufferAddress byteAddress,
             string dataFormat,
             string numberFormat,
             int component,
@@ -2196,11 +2313,12 @@ public static partial class Gen5MslTranslator
             var bitCount = Temp("uint", "0u");
             Line($"sharpemu_format_layout({dataFormat}, {component}u, {byteOffset}, {bitOffset}, {bitCount});");
             var componentBytes = Temp("uint", $"({bitOffset} + {bitCount} + 7u) >> 3u");
-            var rangeInBounds = memory.ElementInBounds($"({byteAddress} + {byteOffset})", componentBytes);
+            var componentAddress = byteAddress.At(byteOffset);
+            var rangeInBounds = memory.ElementInBounds(componentAddress, componentBytes);
             componentInBounds = Temp("bool", $"{bitCount} == 0u || {rangeInBounds}");
             var packed = Temp(
                 "uint",
-                memory.LoadWord($"({byteAddress} + {byteOffset})", componentBytes, rangeInBounds));
+                memory.LoadWord(componentAddress, componentBytes, rangeInBounds));
             var raw = Temp(
                 "uint",
                 $"{bitCount} == 0u ? 0u : extract_bits({packed}, {bitOffset}, {bitCount})");
@@ -2929,7 +3047,7 @@ public static partial class Gen5MslTranslator
         private bool TryEmitResolvedMemoryAccess(
             string opcode,
             int bindingIndex,
-            string byteAddress,
+            BufferAddress byteAddress,
             uint sourceVectorRegister,
             uint destinationVectorRegister,
             uint dwordCount,
@@ -2964,7 +3082,18 @@ public static partial class Gen5MslTranslator
                 BeginExecGuard();
                 var bytes = BufferBytes(bindingIndex);
                 var width = words * sizeof(uint);
-                Line($"if ({width}u <= {bytes} && {byteAddress} <= {bytes} - {width}u && ({byteAddress} & 3u) == 0u)");
+                // A placed access's words land apart; each is checked and aligned at its own address.
+                var wordAddresses = new string[words];
+                for (uint word = 0; word < words; word++)
+                {
+                    wordAddresses[word] = byteAddress.Contiguous ? byteAddress.Base : byteAddress.At(word * sizeof(uint));
+                }
+
+                Line(byteAddress.Contiguous
+                    ? $"if ({width}u <= {bytes} && {byteAddress.Base} <= {bytes} - {width}u && ({byteAddress.Base} & 3u) == 0u)"
+                    : "if (" + string.Join(
+                        " && ",
+                        wordAddresses.Select(address => $"4u <= {bytes} && {address} <= {bytes} - 4u && ({address} & 3u) == 0u")) + ")");
                 Line("{");
                 _indent++;
                 for (uint word = 0; word < words; word++)
@@ -2976,7 +3105,9 @@ public static partial class Gen5MslTranslator
                         out var build);
                     var original = Temp(
                         "uint",
-                        build($"b{bindingIndex} + ({byteAddress} >> 2) + {word}u"));
+                        build(byteAddress.Contiguous
+                            ? $"b{bindingIndex} + ({byteAddress.Base} >> 2) + {word}u"
+                            : $"b{bindingIndex} + ({wordAddresses[word]} >> 2)"));
                     if (glc)
                     {
                         Line($"v[{destinationVectorRegister + word}] = {original};");
@@ -3007,7 +3138,7 @@ public static partial class Gen5MslTranslator
                     var source = sourceShift == 0
                         ? $"v[{sourceVectorRegister}]"
                         : $"(v[{sourceVectorRegister}] >> {sourceShift})";
-                    Line($"sharpemu_store_bytes(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress}, {source}, {storeBytes}u);");
+                    Line($"sharpemu_store_bytes(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress.At(0)}, {source}, {storeBytes}u);");
                 }
                 else
                 {
@@ -3015,7 +3146,7 @@ public static partial class Gen5MslTranslator
                     {
                         Line(StoreDwordStatement(
                             bindingIndex,
-                            $"{byteAddress} + {index * 4}u",
+                            byteAddress.Contiguous ? $"{byteAddress.Base} + {index * 4}u" : byteAddress.At(index * 4),
                             $"v[{sourceVectorRegister + index}]"));
                     }
                 }
@@ -3028,7 +3159,7 @@ public static partial class Gen5MslTranslator
             {
                 var loaded = Temp(
                     "uint",
-                    $"sharpemu_load_bytes(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress}, {loadBytes}u, {(signExtend ? "true" : "false")})");
+                    $"sharpemu_load_bytes(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress.At(0)}, {loadBytes}u, {(signExtend ? "true" : "false")})");
                 if (!d16)
                 {
                     StoreVector(destinationVectorRegister, loaded);
@@ -3052,7 +3183,7 @@ public static partial class Gen5MslTranslator
                 {
                     StoreVector(
                         destinationVectorRegister + index,
-                        LoadDword(bindingIndex, $"({byteAddress} + {index * 4}u)"));
+                        LoadDword(bindingIndex, byteAddress.Contiguous ? $"({byteAddress.Base} + {index * 4}u)" : byteAddress.At(index * 4)));
                 }
 
                 return true;

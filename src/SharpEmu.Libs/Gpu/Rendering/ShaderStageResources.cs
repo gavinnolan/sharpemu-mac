@@ -248,10 +248,31 @@ public readonly record struct BufferDescriptorWords(uint Word0, uint Word1, uint
     }
 
     // The byte footprint the records cover; null when it overflows.
+    //
+    // A swizzled V# (SWIZZLE_ENABLE with a nonzero stride, the rule the shader translators
+    // apply too) counts num_records in records of stride bytes but does not lay them out
+    // one after another: index_stride records share each row of dwords, one dword of each
+    // in turn (RDNA2 ISA 8.1.5, a four-byte element on gfx10). Its footprint runs to one
+    // past the last byte of record records - 1 at offset stride - 1, which is
+    // sharpemu_swizzled_footprint in the Metal translator's buffer_offset_prelude.msl.
     public ulong? Footprint()
     {
         ulong records = RecordCount;
         ulong stride = Stride;
+        if (SwizzleEnabled && stride != 0)
+        {
+            if (records == 0)
+            {
+                return 0;
+            }
+
+            // records < 2^32, stride < 2^14 and index_stride <= 64: no overflow.
+            var indexStride = 8ul << (int)IndexStride;
+            var last = records - 1;
+            var end = stride - 1;
+            return (((last / indexStride) * stride) + (end & ~3ul)) * indexStride + ((last % indexStride) * 4) + (end & 3) + 1;
+        }
+
         if (stride != 0 && records > ulong.MaxValue / stride)
         {
             return null;

@@ -71,26 +71,225 @@ public sealed class Gen5MslMemoryImageSemanticsTests(ITestOutputHelper output)
 
     // ---- buffer swizzle / add_tid ----
 
-    [Theory]
-    [InlineData(false, false, true)]
-    [InlineData(true, false, false)]  // V# word1 SWIZZLE_ENABLE
-    [InlineData(false, true, false)]  // V# word3 ADD_TID_ENABLE
-    public void SwizzledOrAddTidBuffersFailTranslationInsteadOfAddressingLinearly(bool swizzle, bool addTid, bool accepted)
+    // MUBUF addressing (RDNA2 ISA 8.1.5): index = vindex + (ADD_TID_ENABLE ? lane : 0) and
+    // offset = voffset + inst_offset, with the SGPR offset added outside. A swizzled V#
+    // places each dword on its own; on gfx10 the element is one dword.
+    private static uint ReferenceBufferAddress(uint soffset, uint index, uint offset, uint stride, uint indexStride) =>
+        indexStride == 0
+            ? soffset + offset + (index * stride)
+            : soffset + ((((index / indexStride) * stride) + (offset & ~3u)) * indexStride) + ((index % indexStride) * 4) + (offset & 3);
+
+    private const uint SwizzleStride = 32;
+    private const uint SwizzleSoffset = 16;     // the MUBUF soffset field's inline constant 16
+    private const uint SwizzleVectorOffset = 8;
+    private const uint SwizzleInstOffset = 4;
+    private const int SwizzleBufferBytes = 4096;
+
+    // The V# in s[8:11]: stride 32, 64 records, SWIZZLE_ENABLE in word 1 bit 31, INDEX_STRIDE
+    // in word 3 bits 21-22 and ADD_TID_ENABLE in word 3 bit 23.
+    private static uint[] SwizzleUserData(bool swizzle, uint indexStrideCode, bool addTid)
     {
-        // buffer_load_dword v4, v1, s[8:11], 0 offen
-        var fixture = new Gen5ComputeFixture("swizzled-load", [0xE0303000, 0x80020401, SEndpgm], 8, 64);
         var userData = new uint[16];
         userData[8] = 0x200000;
-        userData[9] = (16u << 16) | (swizzle ? 1u << 31 : 0u);
+        userData[9] = (SwizzleStride << 16) | (swizzle ? 1u << 31 : 0u);
         userData[10] = 64;
-        userData[11] = DescriptorConstants.IdentityDestinationSelect | (addTid ? 1u << 23 : 0u);
+        userData[11] = DescriptorConstants.IdentityDestinationSelect | (indexStrideCode << 21) | (addTid ? 1u << 23 : 0u);
+        // A linear V# in s[12:15] (stride 12) for the load test's write-back.
+        userData[12] = 0x200000;
+        userData[13] = 12u << 16;
+        userData[14] = 64;
+        userData[15] = DescriptorConstants.IdentityDestinationSelect;
+        return userData;
+    }
+
+    private static uint ExpectedIndex(uint lane, bool addTid) => lane + 3 + (addTid ? lane : 0);
+
+    private static uint IndexStrideOf(bool swizzle, uint indexStrideCode) => swizzle ? 8u << (int)indexStrideCode : 0u;
+
+    private static Gen5MslShader CompileSwizzle(string name, uint[] words, bool swizzle, uint indexStrideCode, bool addTid)
+    {
+        var fixture = new Gen5ComputeFixture(name, words, 8, SwizzleBufferBytes);
         var request = Gen5ComputeFixtures.RequestOrThrow(Gen5ComputeFixtures.DecodeOrThrow(fixture), ShaderStage.Compute,
-            runtimeInputs: new ResourceRuntimeInputs { UserData = userData });
-        var compiled = Gen5MslTranslator.TryCompileProgram(request, out _, out var error);
-        Assert.Equal(accepted, compiled);
-        if (!accepted)
+            runtimeInputs: new ResourceRuntimeInputs { UserData = SwizzleUserData(swizzle, indexStrideCode, addTid) });
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        return shader!;
+    }
+
+    // Each of 32 lanes stores four dwords through buffer_store_dwordx4 idxen offen with
+    // index lane + 3 and offset 8 + 4: every dword must land where the ISA formula puts
+    // it, and nothing else may change.
+    [Theory]
+    [InlineData(true, 0u, false)]
+    [InlineData(true, 1u, true)]
+    [InlineData(true, 3u, true)]
+    [InlineData(true, 2u, false)]
+    [InlineData(false, 0u, true)]   // ADD_TID_ENABLE on a linear V#
+    public void ASwizzledBufferStorePlacesEachDwordAtItsIsaAddress(bool swizzle, uint indexStrideCode, bool addTid)
+    {
+        var shader = CompileSwizzle(
+            "swizzled-store",
+            [
+                0xD7650000, 0x000100C1, // v_mbcnt_lo_u32_b32 v0, -1, 0      -> v0 = lane
+                0x4A040083,             // v_add_nc_u32 v2, 3, v0           -> vindex = lane + 3
+                0x7E060288,             // v_mov_b32 v3, 8                  -> voffset
+                0x380800FF, 0xA0000000, // v_or_b32 v4, 0xA0000000, v0
+                0x380A00FF, 0xB0000000, // v_or_b32 v5, 0xB0000000, v0
+                0x380C00FF, 0xC0000000, // v_or_b32 v6, 0xC0000000, v0
+                0x380E00FF, 0xD0000000, // v_or_b32 v7, 0xD0000000, v0
+                0xE0783004, 0x90020402, // buffer_store_dwordx4 v[4:7], v[2:3], s[8:11], 16 idxen offen offset:4
+                SEndpgm,
+            ],
+            swizzle, indexStrideCode, addTid);
+        Assert.Equal(swizzle, shader.Source.Contains("sharpemu_buffer_offset(", StringComparison.Ordinal));
+        if (!RequireDevice()) return;
+
+        Assert.True(MetalNative.TryCompileLibrary(shader.Source, out var library, out var compileError), compileError);
+        Assert.True(MetalNative.TryExecuteWithArgumentBuffer(library, shader.EntryPoint, new byte[SwizzleBufferBytes],
+            new byte[PushData.ByteSize], shader.ArgumentLayout!, 32, out var result, out var runError), runError);
+
+        var expected = new byte[SwizzleBufferBytes];
+        for (uint lane = 0; lane < 32; lane++)
         {
-            Assert.Contains("swizzled or add_tid", error);
+            for (uint dword = 0; dword < 4; dword++)
+            {
+                var address = ReferenceBufferAddress(
+                    SwizzleSoffset,
+                    ExpectedIndex(lane, addTid),
+                    SwizzleVectorOffset + SwizzleInstOffset + (dword * 4),
+                    SwizzleStride,
+                    IndexStrideOf(swizzle, indexStrideCode));
+                BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan((int)address), (0xA0000000u + (dword * 0x10000000u)) | lane);
+            }
+        }
+
+        Assert.Equal(expected, result);
+    }
+
+    // Each lane loads three dwords through buffer_load_dwordx3 from the same placement and
+    // writes them back linearly through a second V#: each must be the dword at its ISA address.
+    [Theory]
+    [InlineData(true, 1u, true)]
+    [InlineData(true, 0u, false)]
+    [InlineData(false, 0u, true)]
+    public void ASwizzledBufferLoadReadsEachDwordFromItsIsaAddress(bool swizzle, uint indexStrideCode, bool addTid)
+    {
+        const uint writeBack = 0x800;
+        var shader = CompileSwizzle(
+            "swizzled-load",
+            [
+                0xD7650000, 0x000100C1, // v_mbcnt_lo_u32_b32 v0, -1, 0
+                0x4A040083,             // v_add_nc_u32 v2, 3, v0
+                0x7E060288,             // v_mov_b32 v3, 8
+                0xBE9003FF, writeBack,  // s_mov_b32 s16, 0x800
+                0xE03C3004, 0x90020402, // buffer_load_dwordx3 v[4:6], v[2:3], s[8:11], 16 idxen offen offset:4
+                0xE07C2000, 0x10030400, // buffer_store_dwordx3 v[4:6], v0, s[12:15], s16 idxen
+                SEndpgm,
+            ],
+            swizzle, indexStrideCode, addTid);
+        if (!RequireDevice()) return;
+
+        var initial = new byte[SwizzleBufferBytes];
+        for (var word = 0; word < writeBack / 4; word++)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(initial.AsSpan(word * 4), (uint)word * 0x01010101u ^ 0x5A000000u);
+        }
+
+        Assert.True(MetalNative.TryCompileLibrary(shader.Source, out var library, out var compileError), compileError);
+        Assert.True(MetalNative.TryExecuteWithArgumentBuffer(library, shader.EntryPoint, initial,
+            new byte[PushData.ByteSize], shader.ArgumentLayout!, 32, out var result, out var runError), runError);
+
+        for (uint lane = 0; lane < 32; lane++)
+        {
+            for (uint dword = 0; dword < 3; dword++)
+            {
+                var address = ReferenceBufferAddress(
+                    SwizzleSoffset,
+                    ExpectedIndex(lane, addTid),
+                    SwizzleVectorOffset + SwizzleInstOffset + (dword * 4),
+                    SwizzleStride,
+                    IndexStrideOf(swizzle, indexStrideCode));
+                Assert.Equal(
+                    BinaryPrimitives.ReadUInt32LittleEndian(initial.AsSpan((int)address)),
+                    BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan((int)(writeBack + (lane * 12) + (dword * 4)))));
+            }
+        }
+    }
+
+    // ADD_TID_ENABLE adds the lane in the wave; a stage that models a single lane has none
+    // to add, so the access fails translation instead of addressing lane 0 for every lane.
+    [Fact]
+    public void AnAddTidBufferInAStageWithoutWaveLanesFailsTranslation()
+    {
+        var request = Gen5ComputeFixtures.RequestOrThrow(
+            Gen5ComputeFixtures.DecodeOrThrow(new Gen5ComputeFixture("add-tid-vertex", [0xE0303000, 0x80020401, SEndpgm], 8, 64)),
+            ShaderStage.Vertex,
+            runtimeInputs: new ResourceRuntimeInputs { UserData = SwizzleUserData(false, 0, addTid: true) });
+        Assert.False(Gen5MslTranslator.TryCompileProgram(request, out _, out var error));
+        Assert.Contains("adds the thread id", error);
+    }
+
+    // The placement and footprint helpers every swizzled access goes through, run on the
+    // device against the ISA formula: odd offsets (offset_lsb), each index stride, a zero
+    // (linear) index stride, and indices that cross index_stride groups. The footprint is
+    // one past the furthest byte an in-range access (index < records, offset < stride)
+    // reaches, found by brute force here.
+    [Fact]
+    public void TheBufferOffsetHelpersMatchTheIsaFormula()
+    {
+        var shader = CompileSwizzle(
+            "swizzled-helpers",
+            [0xE0303000, 0x80020401, SEndpgm], // buffer_load_dword v4, v1, s[8:11], 0 offen
+            swizzle: true, indexStrideCode: 0, addTid: false);
+        Assert.Contains("sharpemu_swizzled_footprint(", shader.Source, StringComparison.Ordinal);
+        if (!RequireDevice()) return;
+
+        // index, offset, stride, index stride, records
+        uint[][] cases =
+        [
+            [0, 0, 32, 8, 1], [7, 4, 32, 8, 8], [8, 4, 32, 8, 9], [9, 13, 32, 16, 10], [37, 30, 48, 32, 37],
+            [100, 0, 0x3F90, 8, 101], [63, 0x3F8C, 0x3F90, 64, 64], [65, 7, 16, 64, 66], [3, 21, 24, 16, 3],
+            [12345, 4, 12, 0, 0], [5, 3, 0, 8, 5], [200, 60, 64, 32, 250],
+        ];
+        const string kernel = @"
+kernel void buffer_offset_test(device uint* b [[buffer(0)]], uint t [[thread_position_in_threadgroup]])
+{
+    uint i = t * 8u;
+    b[i + 5u] = sharpemu_buffer_offset(b[i], b[i + 1u], b[i + 2u], b[i + 3u]);
+    ulong footprint = b[i + 3u] == 0u ? 0ul : sharpemu_swizzled_footprint(b[i + 4u], b[i + 2u], b[i + 3u]);
+    b[i + 6u] = (uint)footprint;
+    b[i + 7u] = (uint)(footprint >> 32);
+}
+";
+        Assert.True(MetalNative.TryCompileLibrary(shader.Source + kernel, out var library, out var compileError), compileError);
+        var contents = new byte[cases.Length * 32];
+        for (var index = 0; index < cases.Length; index++)
+        {
+            for (var field = 0; field < 5; field++)
+            {
+                BinaryPrimitives.WriteUInt32LittleEndian(contents.AsSpan((index * 32) + (field * 4)), cases[index][field]);
+            }
+        }
+
+        Assert.True(MetalNative.TryExecuteOnBuffer(library, "buffer_offset_test", contents, (uint)cases.Length, out var result, out var error), error);
+        for (var index = 0; index < cases.Length; index++)
+        {
+            var (vindex, offset, stride, indexStride, records) = (cases[index][0], cases[index][1], cases[index][2], cases[index][3], cases[index][4]);
+            var row = result.AsSpan(index * 32);
+            Assert.Equal(ReferenceBufferAddress(0, vindex, offset, stride, indexStride), BinaryPrimitives.ReadUInt32LittleEndian(row[20..]));
+
+            ulong footprint = 0;
+            if (indexStride != 0 && stride != 0)
+            {
+                for (uint record = 0; record < records; record++)
+                {
+                    for (uint at = 0; at < stride; at++)
+                    {
+                        footprint = Math.Max(footprint, (ulong)ReferenceBufferAddress(0, record, at, stride, indexStride) + 1);
+                    }
+                }
+            }
+
+            Assert.Equal(footprint, BinaryPrimitives.ReadUInt64LittleEndian(row[24..]));
         }
     }
 

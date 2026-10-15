@@ -70,6 +70,27 @@ public sealed class Gen5MslDeviceBufferTests
         Assert.Equal(2, CountOccurrences(source, "sharpemu_store_device_dword(sharpemu_ranges"));
     }
 
+    // A V# held in scalar registers decides swizzling when the access runs: SWIZZLE_ENABLE
+    // (word 1 bit 31), INDEX_STRIDE (word 3 bits 21-22) and ADD_TID_ENABLE (word 3 bit 23)
+    // are decoded from its words, every dword is placed through the helper the bound path
+    // uses, and a swizzled V#'s reach is its swizzled footprint.
+    [Fact]
+    public void ABufferAccessThroughADeviceDescriptorPlacesEachDwordFromTheRuntimeSwizzleFields()
+    {
+        var source = Compile(
+            ReadFirstLane(0, 4, 0),
+            MoveScalar(4, 5, 0),
+            ScalarLoad(8, baseRegister: 4, destination: 8, count: 4),
+            BufferAccess(16, "BufferStoreDwordx4", resourceRegister: 8, dwords: 4),
+            End(24));
+
+        Assert.Equal(4, CountOccurrences(source, " + sharpemu_buffer_offset("));
+        Assert.Contains("sharpemu_swizzled_footprint(", source, StringComparison.Ordinal);
+        Assert.Matches(@"bool t\d+ = \(t\d+ >> 31u\) != 0u && t\d+ != 0u;", source);
+        Assert.Matches(@"uint t\d+ = t\d+ \? \(8u << \(\(t\d+ >> 21u\) & 3u\)\) : 0u;", source);
+        Assert.Matches(@"\(\(\(t\d+ >> 23u\) & 1u\) != 0u\) \? sharpemu_lane : 0u", source);
+    }
+
     [Theory]
     [InlineData("BufferAtomicAdd", 1u, false, "atomic_fetch_add_explicit(")]
     [InlineData("BufferAtomicAdd", 1u, true, "atomic_fetch_add_explicit(")]

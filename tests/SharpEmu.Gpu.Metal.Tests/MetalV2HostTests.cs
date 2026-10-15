@@ -250,6 +250,38 @@ public sealed class MetalV2HostTests
         Assert.Equal(MtlVertexFormat.Float3, MetalV2Formats.VertexFormat(unknown, 3));
     }
 
+    // The v2 host binds a storage buffer's Footprint. A swizzled V# (RDNA2 ISA 8.1.5) puts
+    // index_stride records side by side one dword at a time, so its reach is the furthest
+    // byte an in-range access (index < records, offset < stride) can touch, found here by
+    // brute force over the ISA formula, not stride * records.
+    [Theory]
+    [InlineData(32u, 64u, 1u)]
+    [InlineData(32u, 5u, 0u)]
+    [InlineData(48u, 37u, 2u)]
+    [InlineData(16u, 65u, 3u)]
+    [InlineData(0x3F90u, 9u, 0u)]
+    [InlineData(24u, 1u, 1u)]
+    public void ASwizzledStorageBufferBindsItsSwizzledFootprint(uint stride, uint records, uint indexStrideCode)
+    {
+        var descriptor = new BufferDescriptorWords(0x1000, (stride << 16) | (1u << 31), records, indexStrideCode << 21);
+        var indexStride = 8ul << (int)indexStrideCode;
+        ulong reach = 0;
+        for (ulong index = 0; index < records; index++)
+        {
+            for (ulong offset = 0; offset < stride; offset++)
+            {
+                var placed = (((index / indexStride) * stride) + (offset & ~3ul)) * indexStride + ((index % indexStride) * 4) + (offset & 3);
+                reach = Math.Max(reach, placed + 1);
+            }
+        }
+
+        Assert.Equal(reach, descriptor.Footprint());
+
+        // Without SWIZZLE_ENABLE, or with a zero stride, the records stay linear.
+        Assert.Equal((ulong)stride * records, (descriptor with { Word1 = stride << 16 }).Footprint());
+        Assert.Equal((ulong)records, (descriptor with { Word1 = 1u << 31 }).Footprint());
+    }
+
     [Fact]
     public void TextureTypeFollowsTheGuestImageShape()
     {
