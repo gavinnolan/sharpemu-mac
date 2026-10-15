@@ -1756,18 +1756,19 @@ public static partial class KernelMemoryCompatExports
     // dereference it - the null-pointer access violation seen when Unity's
     // IL2CPP file layer probes an absent il2cpp.usym. fd-based calls pass
     // notFoundErrno=Ebadf; path-based calls leave the Enoent default.
+    //
+    // The errno is the one the SCE code encodes (0x80020000 | errno), through
+    // the shared KernelErrno adapter. The only remap is ENOENT for fd-based
+    // calls whose core still reports a missing fd as NOT_FOUND.
     private static int PosixFailure(CpuContext ctx, int orbisResult, int notFoundErrno = Enoent)
     {
-        var errno = orbisResult switch
+        var errno = OrbisErrno.ToErrno(orbisResult, notFoundErrno);
+        if (errno == Enoent)
         {
-            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT => Einval,
-            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT => Efault,
-            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED => Eacces,
-            _ => notFoundErrno,
-        };
-        KernelRuntimeCompatExports.TrySetErrno(ctx, errno);
-        ctx[CpuRegister.Rax] = ulong.MaxValue;
-        return -1;
+            errno = notFoundErrno;
+        }
+
+        return KernelErrno.Posix(ctx, errno);
     }
 
     [SysAbiExport(
@@ -2327,7 +2328,13 @@ public static partial class KernelMemoryCompatExports
         ExportName = "unlink",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PosixUnlink(CpuContext ctx) => KernelUnlink(ctx);
+    public static int PosixUnlink(CpuContext ctx)
+    {
+        var result = KernelUnlink(ctx);
+        return result == (int)OrbisGen2Result.ORBIS_GEN2_OK
+            ? 0
+            : PosixFailure(ctx, result);
+    }
 
     [SysAbiExport(
         Nid = "1-LFLmRFxxM",
