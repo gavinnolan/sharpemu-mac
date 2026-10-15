@@ -194,7 +194,8 @@ internal static partial class MetalNative
         out uint stepCapHits,
         out string error,
         nint texture = 0,
-        nint sampler = 0)
+        nint sampler = 0,
+        uint threadgroupCount = 1)
     {
         result = [];
         stepCapHits = 0;
@@ -214,6 +215,15 @@ internal static partial class MetalNative
         }
 
         var stepReportAddress = SendULong(stepReport, Selector("gpuAddress"));
+        // The zeroed pair-lock table the v2 host binds for every program.
+        var pairLocks = SharedBuffer(new byte[Gen5MslArgumentLayout.PairLockSlots * sizeof(uint)]);
+        if (pairLocks == 0)
+        {
+            error = "failed to create the pair-lock table";
+            return false;
+        }
+
+        var pairLocksAddress = SendULong(pairLocks, Selector("gpuAddress"));
         var arguments = new byte[Math.Max(layout.ByteSize, 8)];
         foreach (var field in layout.Fields)
         {
@@ -237,6 +247,9 @@ internal static partial class MetalNative
                         break;
                     case MslArgumentFieldKind.StepReport:
                         BitConverter.TryWriteBytes(arguments.AsSpan((int)field.ByteOffset), stepReportAddress);
+                        break;
+                    case MslArgumentFieldKind.PairLocks:
+                        BitConverter.TryWriteBytes(arguments.AsSpan((int)field.ByteOffset), pairLocksAddress);
                         break;
                     case MslArgumentFieldKind.Pointer:
                         // A read-only table the host fills before the encode: the user
@@ -266,13 +279,14 @@ internal static partial class MetalNative
                 entryPoint,
                 [(argumentBuffer, (nuint)Gen5MslArgumentLayout.ResourcesBufferIndex), (pushBuffer, (nuint)Gen5MslArgumentLayout.PushDataBufferIndex)],
                 texture == 0
-                    ? [buffer, stepReport, SharedTable.Value]
-                    : [buffer, stepReport, texture, SharedTable.Value],
+                    ? [buffer, stepReport, pairLocks, SharedTable.Value]
+                    : [buffer, stepReport, pairLocks, texture, SharedTable.Value],
                 threadsPerThreadgroup,
                 buffer,
                 bufferContents.Length,
                 out result,
-                out error))
+                out error,
+                threadgroupCount))
         {
             return false;
         }
@@ -457,7 +471,8 @@ internal static partial class MetalNative
         nint resultBuffer,
         int resultLength,
         out byte[] result,
-        out string error)
+        out string error,
+        uint threadgroupCount = 1)
     {
         result = [];
         error = string.Empty;
@@ -501,9 +516,9 @@ internal static partial class MetalNative
             SendUseResource(encoder, Selector("useResource:usage:"), resident, ReadWriteUsage);
         }
 
-        var oneGroup = new MtlSize { Width = 1, Height = 1, Depth = 1 };
+        var groups = new MtlSize { Width = threadgroupCount, Height = 1, Depth = 1 };
         var threads = new MtlSize { Width = threadsPerThreadgroup, Height = 1, Depth = 1 };
-        SendDispatch(encoder, Selector("dispatchThreadgroups:threadsPerThreadgroup:"), oneGroup, threads);
+        SendDispatch(encoder, Selector("dispatchThreadgroups:threadsPerThreadgroup:"), groups, threads);
         SendVoid(encoder, Selector("endEncoding"));
         SendVoid(commandBuffer, Selector("commit"));
         SendVoid(commandBuffer, Selector("waitUntilCompleted"));

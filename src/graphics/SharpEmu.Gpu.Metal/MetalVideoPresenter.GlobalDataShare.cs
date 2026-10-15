@@ -81,6 +81,26 @@ internal static partial class MetalVideoPresenter
         }
     }
 
+    private static nint _pairLockTable;
+
+    // The pair-lock table every program shares (Templates/pair_atomic_prelude.msl), zeroed
+    // once and never reset: a lock is even again whenever no access holds it.
+    private static nint EnsurePairLockTable(nint device)
+    {
+        if (_pairLockTable == 0)
+        {
+            const int bytes = SharpEmu.ShaderCompiler.Metal.Gen5MslArgumentLayout.PairLockSlots * sizeof(uint);
+            _pairLockTable = MetalNative.SendNewBuffer(
+                device, MetalNative.Selector("newBufferWithLength:options:"), (nuint)bytes, StorageModeShared);
+            unsafe
+            {
+                new Span<byte>((void*)MetalNative.Send(_pairLockTable, MetalNative.Selector("contents")), bytes).Clear();
+            }
+        }
+
+        return _pairLockTable;
+    }
+
     private static nint EnsureGlobalDataShareBuffer(nint device)
     {
         if (_globalDataShareBuffer == 0)

@@ -20,6 +20,12 @@ public enum MslArgumentFieldKind
     // submission completes, so a shader that hits the cap says so instead of only
     // looking slow.
     StepReport,
+    // The sequence-lock table that makes a guest dword pair (a qword atomic, a GLC
+    // LOAD_DWORDX2) one atomic access (Templates/pair_atomic_prelude.msl). Metal-only and
+    // not a guest descriptor: the host binds one zeroed table shared by every program, so
+    // two programs touching the same pair take the same lock. A program declares the
+    // field only when it takes a lock; the others leave the trailing bytes unread.
+    PairLocks,
 }
 
 // One field of the stage argument buffer: its binding kind, id range and byte range.
@@ -40,6 +46,11 @@ public sealed class Gen5MslArgumentLayout
     public const int PushDataBufferIndex = 1;
     public const string StructName = "Gen5StageResources";
     public const string StepReportName = "step_report";
+    public const string PairLocksName = "pair_locks";
+
+    /// <summary>The 32-bit sequence words in the pair-lock table; the shader picks one by
+    /// bits 3..13 of a pair's address (sharpemu_pair_lock_slots).</summary>
+    public const int PairLockSlots = 2048;
     private const uint ResourceBytes = 8;
     private const uint WordBytes = 4;
 
@@ -99,8 +110,9 @@ public sealed class Gen5MslArgumentLayout
             }
         }
 
-        // Always last, so adding it never moves a descriptor field.
+        // Always last, so adding them never moves a descriptor field.
         Add(DescriptorBindingKind.Buffers, MslArgumentFieldKind.StepReport, StepReportName, 1, ResourceBytes);
+        Add(DescriptorBindingKind.Buffers, MslArgumentFieldKind.PairLocks, PairLocksName, 1, ResourceBytes);
 
         return new Gen5MslArgumentLayout(fields, Align(offset, ResourceBytes));
 

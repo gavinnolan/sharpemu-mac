@@ -789,6 +789,11 @@ internal sealed partial class MetalRenderHost
                     BinaryPrimitives.WriteUInt64LittleEndian(
                         span, StepReportAddress(stage.Program.Hash, StepReportStageName(stageIndex)));
                     break;
+                case MslArgumentFieldKind.PairLocks:
+                    // One table for every program, resident with the windows, so two programs
+                    // reaching the same guest qword take the same lock.
+                    BinaryPrimitives.WriteUInt64LittleEndian(span, _guestMemory.PairLockTableGpuAddress);
+                    break;
                 default:
                     BinaryPrimitives.WriteUInt32LittleEndian(span, WordFieldValue(stage, field.Kind));
                     break;

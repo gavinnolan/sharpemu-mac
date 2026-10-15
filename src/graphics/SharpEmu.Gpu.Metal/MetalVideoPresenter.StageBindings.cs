@@ -222,6 +222,11 @@ internal static partial class MetalVideoPresenter
                         // The step-cap report is a v2 diagnostic; the cleared span leaves a
                         // null pointer, which the dispatcher's report call checks for.
                         break;
+                    case MslArgumentFieldKind.PairLocks:
+                        var pairLocks = EnsurePairLockTable(device);
+                        used.Add(pairLocks);
+                        BinaryPrimitives.WriteUInt64LittleEndian(span, MetalNative.SendGpuAddress(pairLocks, selGpuAddress));
+                        break;
                     default:
                         BinaryPrimitives.WriteUInt32LittleEndian(span, WordFieldValue(field.Kind, bindings));
                         break;

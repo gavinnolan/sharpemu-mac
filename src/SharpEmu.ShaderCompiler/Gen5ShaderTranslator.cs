@@ -2458,7 +2458,8 @@ public static partial class Gen5ShaderTranslator
                 control = new Gen5ScalarMemoryControl(
                     count,
                     offset,
-                    dynamicOffsetRegister);
+                    dynamicOffsetRegister,
+                    ((word >> 16) & 1) != 0);
                 break;
             }
             case Gen5ShaderEncoding.Vop1:

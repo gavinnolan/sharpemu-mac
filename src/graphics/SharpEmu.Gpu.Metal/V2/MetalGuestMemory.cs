@@ -227,6 +227,17 @@ internal sealed class MetalGuestMemory : IDisposable
 
             SetLabel(buffer, $"guest.window[{index}]");
             _windows[index] = new Window(buffer, pointer, size, MetalNative.SendGpuAddress(buffer, SelGpuAddress));
+            // A guest qword's pair lock is picked by bits 3..13 of its GPU address
+            // (pair_atomic_prelude.msl), which names the same lock through every window only
+            // while each window keeps the host mapping's offset within a 16 KB page.
+            if (((_windows[index].GpuAddress - pointer) & (PairLockPageBytes - 1)) != 0)
+            {
+                MetalV2Diagnostics.WarnOnce(
+                    "pair-lock-window-alignment",
+                    "A guest memory window's GPU address is not 16 KB congruent with its host pointer, so a qword " +
+                    "reached through two overlapping windows takes two different pair locks: " +
+                    $"window={index} pointer=0x{pointer:X16} gpu=0x{_windows[index].GpuAddress:X16}.");
+            }
             if (_residencySet != 0)
             {
                 AddResident(buffer);
@@ -919,6 +930,41 @@ internal sealed class MetalGuestMemory : IDisposable
         MetalNative.SendVoid(buffer, MetalNative.Selector("release"));
     }
 
+    private const ulong PairLockPageBytes = 0x4000;
+    private nint _pairLockTable;
+    private ulong _pairLockTableGpuAddress;
+    private readonly object _pairLockTableLock = new();
+
+    /// <summary>The GPU address of the pair-lock table every program shares (the
+    /// <c>pair_locks</c> argument field, Templates/pair_atomic_prelude.msl): one zeroed
+    /// sequence word per slot, resident like the windows. Created on first use and never
+    /// reset; a lock is even again whenever no access holds it.</summary>
+    public ulong PairLockTableGpuAddress
+    {
+        get
+        {
+            lock (_pairLockTableLock)
+            {
+                if (_pairLockTable == 0)
+                {
+                    const int bytes = SharpEmu.ShaderCompiler.Metal.Gen5MslArgumentLayout.PairLockSlots * sizeof(uint);
+                    var buffer = CreateSharedBuffer(bytes, "guest.pair-locks", out var contents, out var gpuAddress);
+                    unsafe
+                    {
+                        new Span<byte>((void*)contents, bytes).Clear();
+                    }
+
+                    AddResident(buffer);
+                    CommitResidency();
+                    _pairLockTableGpuAddress = gpuAddress;
+                    _pairLockTable = buffer;
+                }
+
+                return _pairLockTableGpuAddress;
+            }
+        }
+    }
+
     private nint _meshLdsPool;
     private readonly object _meshLdsPoolLock = new();
 
@@ -1195,6 +1241,11 @@ internal sealed class MetalGuestMemory : IDisposable
         if (_nullBuffer != 0)
         {
             MetalNative.SendVoid(_nullBuffer, SelRelease);
+        }
+
+        if (_pairLockTable != 0)
+        {
+            MetalNative.SendVoid(_pairLockTable, SelRelease);
         }
 
         if (_residencySet != 0)

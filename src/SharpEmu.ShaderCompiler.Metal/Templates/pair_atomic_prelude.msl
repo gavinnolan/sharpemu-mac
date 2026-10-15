@@ -1,0 +1,126 @@
+// 64-bit (dword pair) atomicity. A guest qword atomic (BUFFER/GLOBAL_ATOMIC_*_X2) and a
+// GLC BUFFER/GLOBAL_LOAD_DWORDX2 are each single-copy atomic on the hardware, so a
+// reader never sees one half of a pair from before a write and the other half from
+// after it. Metal has no 64-bit atomic load, store, exchange or compare-exchange (MSL 3.2
+// and 4.0 offer only atomic_max/min_explicit on a device atomic_ulong, with no result),
+// so the pair is run as two 32-bit atomics under a sequence lock.
+//
+// The lock is one 32-bit sequence word per slot of a table the host binds for every
+// program (pair_locks): even while no writer is inside, odd while one is.
+//   writer: CAS the word from even s to s + 1, fence, run each dword's 32-bit atomic,
+//           fence, store s + 2.
+//   reader: load s1, fence, load both dwords, fence, load s2; keep the pair only if
+//           s1 is even and s1 == s2, otherwise read again.
+// The fences are seq_cst device-scope fences, at least the acquire/release fences the
+// fence-based seqlock needs (Boehm, "Can seqlocks get along with programming language
+// memory models?", MSPC 2012), so a reader that keeps a pair saw no writer's stores in
+// part: had it read any dword a writer stored, the fence pair would order that writer's
+// s + 1 before its s2, and s1 == s2 even rules that out. Writers exclude each other
+// through the CAS. Every dword access is itself a device atomic, so a 32-bit atomic that
+// does not take the lock still reaches memory whole.
+//
+// A slot is chosen by bits 3..13 of the pair's GPU address. Guest memory windows are
+// 16 KB aligned aliases of one host mapping, so the same guest qword seen through two
+// overlapping windows still picks the same slot; distinct pairs that share a slot only
+// serialize. A lane takes and releases the lock inside one branch of one loop trip
+// (sharpemu_pair_try_lock), never across a reconvergence point, so lanes of one
+// SIMD-group that contend for a slot cannot deadlock each other.
+//
+// A lock still odd after 2^20 tries can only be one a killed command buffer left behind;
+// the access then goes ahead unlocked and counts as a step cap for the program, so it
+// shows as [METAL-V2][STEP-CAP] rather than hanging the queue.
+constant uint sharpemu_pair_lock_slots = 2048u;
+constant uint sharpemu_pair_lock_tries = 1u << 20;
+
+static inline device atomic_uint* sharpemu_pair_lock(device atomic_uint* locks, device uint* pair)
+{
+    return locks + ((uint)(reinterpret_cast<ulong>(pair) >> 3) & (sharpemu_pair_lock_slots - 1u));
+}
+
+// One try at the lock. True when the caller now runs its critical section: it owns the
+// lock (seq holds the even value it took), or it gave up (seq is odd, see above).
+static inline bool sharpemu_pair_try_lock(device atomic_uint* lock, thread uint& seq, thread uint& tries, device atomic_uint* report)
+{
+    uint observed = atomic_load_explicit(lock, memory_order_relaxed);
+    if ((observed & 1u) == 0u &&
+        atomic_compare_exchange_weak_explicit(lock, &observed, observed + 1u, memory_order_relaxed, memory_order_relaxed))
+    {
+        seq = observed;
+        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
+        return true;
+    }
+    if (++tries >= sharpemu_pair_lock_tries)
+    {
+        sharpemu_note_step_cap(report);
+        seq = 1u;
+        return true;
+    }
+    return false;
+}
+
+static inline void sharpemu_pair_unlock(device atomic_uint* lock, uint seq)
+{
+    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
+    if ((seq & 1u) == 0u)
+    {
+        atomic_store_explicit(lock, seq + 2u, memory_order_relaxed);
+    }
+}
+
+// Both dwords of a pair as one snapshot (a GLC LOAD_DWORDX2), read coherently. The
+// dwords are normally adjacent; a swizzled V# can place them apart, and the lock is then
+// still the one the first dword's address picks.
+static inline uint2 sharpemu_pair_load(device atomic_uint* lock, device uint* first, device uint* second, device atomic_uint* report)
+{
+    for (uint tries = 0u; ; tries++)
+    {
+        uint before = atomic_load_explicit(lock, memory_order_relaxed);
+        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
+        uint2 value = uint2(
+            atomic_load_explicit((device atomic_uint*)first, memory_order_relaxed),
+            atomic_load_explicit((device atomic_uint*)second, memory_order_relaxed));
+        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
+        uint after = atomic_load_explicit(lock, memory_order_relaxed);
+        if ((before & 1u) == 0u && before == after)
+        {
+            return value;
+        }
+        if (tries >= sharpemu_pair_lock_tries)
+        {
+            sharpemu_note_step_cap(report);
+            return value;
+        }
+    }
+}
+
+// A GLC LOAD_DWORDX2 from a bound buffer: each dword at its own byte address, out of range
+// reading zero as sharpemu_load_dword_coherent does. Only a pair wholly in range is one
+// snapshot; a dword past the end has no value to tear.
+static inline uint2 sharpemu_load_pair_coherent(device uint* b, uint bytes, uint first, uint second, device atomic_uint* locks, device atomic_uint* report)
+{
+    uint low = first >> 2;
+    uint high = second >> 2;
+    uint words = bytes >> 2;
+    if (low < words && high < words)
+    {
+        return sharpemu_pair_load(sharpemu_pair_lock(locks, b + low), b + low, b + high, report);
+    }
+    return uint2(sharpemu_load_dword_coherent(b, bytes, first), sharpemu_load_dword_coherent(b, bytes, second));
+}
+
+// The device-address form: each dword is read only when the access keeps it in range
+// (first_in_range / second_in_range) and the page table maps it, zero otherwise.
+static inline uint2 sharpemu_load_device_pair_coherent(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, thread Gen5RangeCache& cache, ulong first, bool first_in_range, ulong second, bool second_in_range, device atomic_uint* locks, device atomic_uint* report)
+{
+    bool first_valid = false;
+    bool second_valid = false;
+    device uint* first_word = first_in_range ? sharpemu_resolve_device_address(ranges, range_count, faults, fault_words, cache, first, first_valid) : nullptr;
+    device uint* second_word = second_in_range ? sharpemu_resolve_device_address(ranges, range_count, faults, fault_words, cache, second, second_valid) : nullptr;
+    if (first_valid && second_valid)
+    {
+        return sharpemu_pair_load(sharpemu_pair_lock(locks, first_word), first_word, second_word, report);
+    }
+    return uint2(
+        first_valid ? atomic_load_explicit((device atomic_uint*)first_word, memory_order_relaxed) : 0u,
+        second_valid ? atomic_load_explicit((device atomic_uint*)second_word, memory_order_relaxed) : 0u);
+}

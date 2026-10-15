@@ -17,16 +17,21 @@ public sealed class MslDepthCompareFieldTests(ITestOutputHelper output)
         {
             Descriptors = kinds.Select(static kind => new DescriptorBinding(kind, [0])).ToArray(),
         });
-        // Every layout also carries the trailing step-report pointer, which is not a
-        // guest descriptor and must never move an image field's id or byte offset.
-        Assert.Equal(kinds.Length + 1, layout.Fields.Count);
-        Assert.Equal(kinds.Length + 1, layout.Fields.Select(static field => field.Name).Distinct().Count());
-        Assert.Equal((uint)(kinds.Length + 1) * 8, layout.ByteSize);
-        var report = layout.Fields[^1];
+        // Every layout also carries the trailing step-report and pair-lock pointers, which
+        // are not guest descriptors and must never move an image field's id or byte offset.
+        Assert.Equal(kinds.Length + 2, layout.Fields.Count);
+        Assert.Equal(kinds.Length + 2, layout.Fields.Select(static field => field.Name).Distinct().Count());
+        Assert.Equal((uint)(kinds.Length + 2) * 8, layout.ByteSize);
+        var report = layout.Fields[^2];
         Assert.Equal(MslArgumentFieldKind.StepReport, report.FieldKind);
         Assert.Equal(Gen5MslArgumentLayout.StepReportName, report.Name);
         Assert.Equal((uint)kinds.Length, report.FirstId);
         Assert.Equal((uint)kinds.Length * 8, report.ByteOffset);
+        var pairLocks = layout.Fields[^1];
+        Assert.Equal(MslArgumentFieldKind.PairLocks, pairLocks.FieldKind);
+        Assert.Equal(Gen5MslArgumentLayout.PairLocksName, pairLocks.Name);
+        Assert.Equal((uint)kinds.Length + 1, pairLocks.FirstId);
+        Assert.Equal((uint)(kinds.Length + 1) * 8, pairLocks.ByteOffset);
         for (var index = 0; index < kinds.Length; index++)
         {
             var field = layout.Fields[index];

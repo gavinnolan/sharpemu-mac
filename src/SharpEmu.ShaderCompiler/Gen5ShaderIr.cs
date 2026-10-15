@@ -360,10 +360,13 @@ public sealed record Gen5Dpp8Control(
     uint LaneSelectors,
     bool FetchInactive) : Gen5InstructionControl;
 
+// Glc is the SMEM GLC bit (gfx10 word 0 bit 16): the load misses the scalar cache and
+// reads the device-coherent value.
 public sealed record Gen5ScalarMemoryControl(
     uint DestinationCount,
     int ImmediateOffsetBytes,
-    uint? DynamicOffsetRegister) : Gen5InstructionControl;
+    uint? DynamicOffsetRegister,
+    bool Glc = false) : Gen5InstructionControl;
 
 public sealed record Gen5DataShareControl(
     uint Offset0,

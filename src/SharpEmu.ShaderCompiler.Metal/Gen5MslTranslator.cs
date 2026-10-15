@@ -241,6 +241,7 @@ public static partial class Gen5MslTranslator
         private bool _usesFormatLoads;
         private bool _usesBufferOffset;
         private bool _usesCoherentLoads;
+        private bool _usesPairLocks;
         private bool _usesShaderClock;
         private bool _usesWaveScratch;
 
@@ -542,9 +543,14 @@ public static partial class Gen5MslTranslator
                 source.Append(MslTemplates.Render("buffer_offset_prelude"));
             }
 
-            if (_usesCoherentLoads)
+            if (_usesCoherentLoads || _usesPairLocks)
             {
                 source.Append(MslTemplates.Render("coherent_load_prelude"));
+            }
+
+            if (_usesPairLocks)
+            {
+                source.Append(MslTemplates.Render("pair_atomic_prelude"));
             }
 
             EmitFloat64PreludeIfUsed(source);
@@ -1735,11 +1741,12 @@ public static partial class Gen5MslTranslator
                         descriptorWord3,
                         control.VectorData,
                         components,
-                        d16);
+                        d16,
+                        control.Glc);
                     return true;
                 }
 
-                if (TryEmitTypedBufferFormatLoad(BindingFormatMemory(bindingIndex), address, control, descriptorWord3, components, d16))
+                if (TryEmitTypedBufferFormatLoad(BindingFormatMemory(bindingIndex, control.Glc), address, control, descriptorWord3, components, d16))
                 {
                     return true;
                 }
@@ -1848,7 +1855,8 @@ public static partial class Gen5MslTranslator
             string descriptorWord3,
             uint vectorData,
             uint componentCount,
-            FormatD16 d16)
+            FormatD16 d16,
+            bool glc)
         {
             // A descriptor word the specialization fixed is decoded here; a format of whole
             // dwords then loads as one run. Anything else, and every D16 load, decodes on the
@@ -1856,13 +1864,13 @@ public static partial class Gen5MslTranslator
             if (!d16.Enabled &&
                 byteAddress.Contiguous &&
                 TryParseUIntLiteral(descriptorWord3, out var literalWord3) &&
-                TryEmitLiteralDwordFormatLoad(bindingIndex, byteAddress.Base, literalWord3, vectorData, componentCount))
+                TryEmitLiteralDwordFormatLoad(bindingIndex, byteAddress.Base, literalWord3, vectorData, componentCount, glc))
             {
                 return;
             }
 
             EmitDecodedBufferFormatLoad(
-                BindingFormatMemory(bindingIndex),
+                BindingFormatMemory(bindingIndex, glc),
                 byteAddress,
                 descriptorWord3,
                 vectorData,
@@ -2046,7 +2054,8 @@ public static partial class Gen5MslTranslator
             string byteAddress,
             uint word3,
             uint vectorData,
-            uint componentCount)
+            uint componentCount,
+            bool glc)
         {
             if (!Gfx10UnifiedFormat.TryDecode((word3 >> 12) & 0x7Fu, out var dataFormat, out var numberFormat))
             {
@@ -2085,9 +2094,10 @@ public static partial class Gen5MslTranslator
             if (run > 0)
             {
                 inBounds = ElementInBounds(bindingIndex, byteAddress, $"{run * sizeof(uint)}u");
+                _usesCoherentLoads |= glc;
                 words = Temp(
                     "uint4",
-                    $"sharpemu_load_words<{run}>(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress})");
+                    $"sharpemu_load_words{(glc ? "_coherent" : string.Empty)}<{run}>(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress})");
             }
 
             var one = $"sharpemu_format_one({numberFormat}u)";
@@ -2299,11 +2309,18 @@ public static partial class Gen5MslTranslator
             Func<uint, string, string>? LoadWords,
             bool ZeroInvalidFormat);
 
-        private FormatMemory BindingFormatMemory(int bindingIndex) => new(
-            (address, bytes) => ElementInBounds(bindingIndex, address, bytes),
-            (address, _, _) => LoadWord(bindingIndex, address),
-            (count, address) => $"sharpemu_load_words<{count}>(b{bindingIndex}, {BufferBytes(bindingIndex)}, {address})",
-            ZeroInvalidFormat: false);
+        // A GLC load reads its words through the coherent helpers (coherent_load_prelude).
+        private FormatMemory BindingFormatMemory(int bindingIndex, bool glc = false)
+        {
+            _usesCoherentLoads |= glc;
+            return new(
+                (address, bytes) => ElementInBounds(bindingIndex, address, bytes),
+                (address, _, _) => glc
+                    ? $"sharpemu_load_word_coherent(b{bindingIndex}, {BufferBytes(bindingIndex)}, {address})"
+                    : LoadWord(bindingIndex, address),
+                (count, address) => $"sharpemu_load_words{(glc ? "_coherent" : string.Empty)}<{count}>(b{bindingIndex}, {BufferBytes(bindingIndex)}, {address})",
+                ZeroInvalidFormat: false);
+        }
 
         private string LoadFormatComponent(
             FormatMemory memory,
@@ -3102,21 +3119,44 @@ public static partial class Gen5MslTranslator
                         wordAddresses.Select(address => $"4u <= {bytes} && {address} <= {bytes} - 4u && ({address} & 3u) == 0u")) + ")");
                 Line("{");
                 _indent++;
-                for (uint word = 0; word < words; word++)
+                string WordPointer(uint word) => byteAddress.Contiguous
+                    ? $"b{bindingIndex} + ({byteAddress.Base} >> 2) + {word}u"
+                    : $"b{bindingIndex} + ({wordAddresses[word]} >> 2)";
+                string Operate(uint word, string pointer)
                 {
                     TryGetAtomicExpression(
                         atomic,
                         $"v[{sourceVectorRegister + word}]",
                         $"v[{sourceVectorRegister + 1}]",
                         out var build);
-                    var original = Temp(
-                        "uint",
-                        build(byteAddress.Contiguous
-                            ? $"b{bindingIndex} + ({byteAddress.Base} >> 2) + {word}u"
-                            : $"b{bindingIndex} + ({wordAddresses[word]} >> 2)"));
+                    return build(pointer);
+                }
+
+                if (words == 2)
+                {
+                    // Both dwords change under the pair's lock, so the qword atomic is one
+                    // access to a GLC LOAD_DWORDX2 (see EmitPairLocked). Every source register
+                    // is read before a destination, which shares VDATA, is written.
+                    var originals = new[] { Temp("uint", "0u"), Temp("uint", "0u") };
+                    var first = Temp("device uint*", WordPointer(0));
+                    var second = Temp("device uint*", WordPointer(1));
+                    EmitPairLocked(first, () =>
+                    {
+                        Line($"{originals[0]} = {Operate(0, first)};");
+                        Line($"{originals[1]} = {Operate(1, second)};");
+                    });
                     if (glc)
                     {
-                        Line($"v[{destinationVectorRegister + word}] = {original};");
+                        Line($"v[{destinationVectorRegister}] = {originals[0]};");
+                        Line($"v[{destinationVectorRegister + 1}] = {originals[1]};");
+                    }
+                }
+                else
+                {
+                    var original = Temp("uint", Operate(0, WordPointer(0)));
+                    if (glc)
+                    {
+                        Line($"v[{destinationVectorRegister}] = {original};");
                     }
                 }
 
@@ -3163,9 +3203,10 @@ public static partial class Gen5MslTranslator
 
             if (TryGetSubdwordLoadInfo(opcode, out var loadBytes, out var signExtend, out var d16, out var d16High))
             {
+                _usesCoherentLoads |= glc;
                 var loaded = Temp(
                     "uint",
-                    $"sharpemu_load_bytes(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress.At(0)}, {loadBytes}u, {(signExtend ? "true" : "false")})");
+                    $"sharpemu_load_bytes{(glc ? "_coherent" : string.Empty)}(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress.At(0)}, {loadBytes}u, {(signExtend ? "true" : "false")})");
                 if (!d16)
                 {
                     StoreVector(destinationVectorRegister, loaded);
@@ -3186,9 +3227,20 @@ public static partial class Gen5MslTranslator
                 opcode.StartsWith("TBufferLoad", StringComparison.Ordinal))
             {
                 _usesCoherentLoads |= glc;
+                string DwordAddress(uint index) =>
+                    byteAddress.Contiguous ? $"({byteAddress.Base} + {index * 4}u)" : byteAddress.At(index * 4);
+                if (glc && dwordCount == 2)
+                {
+                    // A GLC LOAD_DWORDX2 is one snapshot of the pair (see EmitPairLocked).
+                    StorePairLoad(
+                        destinationVectorRegister,
+                        $"sharpemu_load_pair_coherent(b{bindingIndex}, {BufferBytes(bindingIndex)}, {DwordAddress(0)}, {DwordAddress(1)}, {PairLockArguments})");
+                    return true;
+                }
+
                 for (uint index = 0; index < dwordCount; index++)
                 {
-                    var address = byteAddress.Contiguous ? $"({byteAddress.Base} + {index * 4}u)" : byteAddress.At(index * 4);
+                    var address = DwordAddress(index);
                     StoreVector(
                         destinationVectorRegister + index,
                         glc

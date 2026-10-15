@@ -84,6 +84,15 @@ public sealed class MslArgumentBufferDeclarationTests
         Assert.Equal(layout.Fields, shader.ArgumentLayout!.Fields);
         foreach (var field in layout.Fields)
         {
+            // The pair-lock table is declared only by a program that takes a pair lock; the
+            // host binds it for every program, so the field's id and offset never move.
+            if (field.FieldKind == MslArgumentFieldKind.PairLocks)
+            {
+                Assert.Equal(shader.Source.Contains("sharpemu_pair_lock(", StringComparison.Ordinal),
+                    shader.Source.Contains($" {field.Name} [[id({field.FirstId})]];", StringComparison.Ordinal));
+                continue;
+            }
+
             Assert.Contains($" {field.Name} [[id({field.FirstId})]];", shader.Source);
         }
 

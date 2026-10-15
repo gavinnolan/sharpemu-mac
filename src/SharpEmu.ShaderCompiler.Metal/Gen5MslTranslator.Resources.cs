@@ -291,6 +291,13 @@ public static partial class Gen5MslTranslator
             source.AppendLine("{");
             foreach (var field in layout.Fields)
             {
+                // The trailing pair-lock pointer is declared only by a program that takes a
+                // lock, so every other program's source stays as it was.
+                if (field.FieldKind == MslArgumentFieldKind.PairLocks && !_usesPairLocks)
+                {
+                    continue;
+                }
+
                 var declaration = field.FieldKind switch
                 {
                     MslArgumentFieldKind.BufferPointers => $"array<device uint*, {field.Count}> {field.Name}",
@@ -298,7 +305,7 @@ public static partial class Gen5MslTranslator
                     MslArgumentFieldKind.Textures => $"array<{_imageClasses[field.Kind].TextureType}, {field.Count}> {field.Name}",
                     MslArgumentFieldKind.Samplers => $"array<sampler, {field.Count}> {field.Name}",
                     MslArgumentFieldKind.Pointer => $"{PointerType(field.Kind)} {field.Name}",
-                    MslArgumentFieldKind.StepReport => $"device atomic_uint* {field.Name}",
+                    MslArgumentFieldKind.StepReport or MslArgumentFieldKind.PairLocks => $"device atomic_uint* {field.Name}",
                     _ => $"uint {field.Name}",
                 };
                 source.AppendLine($"    {declaration} [[id({field.FirstId})]];");
@@ -507,32 +514,42 @@ public static partial class Gen5MslTranslator
             return (baseAddress, size, stride);
         }
 
-        // The byte offset may differ per lane; a read past the descriptor's size is zero.
-        private string DeviceDescriptorWord((string Base, string Size, string Stride) descriptor, string byteOffset)
+        // The byte offset may differ per lane; a read past the descriptor's size is zero. A
+        // GLC read takes the device-coherent value (coherent_load_prelude).
+        private string DeviceDescriptorWord((string Base, string Size, string Stride) descriptor, string byteOffset, bool glc = false)
         {
-            var address = Temp(
-                "ulong",
-                $"({descriptor.Base} + (ulong){byteOffset}) & {FormatULong(DeviceAddressPaging.AddressMask & ~3ul)}");
+            var address = DeviceDescriptorWordAddress(descriptor, byteOffset);
+            _usesCoherentLoads |= glc;
             return Temp(
                 "uint",
-                $"(((ulong){byteOffset} + 3ul) < {descriptor.Size} ? " +
-                $"sharpemu_load_device_dword({DeviceArguments}, {address}) : 0u)");
+                $"({DeviceDescriptorWordInRange(descriptor, byteOffset)} ? " +
+                $"sharpemu_load_device_dword{(glc ? "_coherent" : string.Empty)}({DeviceArguments}, {address}) : 0u)");
         }
+
+        private string DeviceDescriptorWordAddress((string Base, string Size, string Stride) descriptor, string byteOffset) =>
+            Temp("ulong", $"({descriptor.Base} + (ulong){byteOffset}) & {FormatULong(DeviceAddressPaging.AddressMask & ~3ul)}");
+
+        private static string DeviceDescriptorWordInRange((string Base, string Size, string Stride) descriptor, string byteOffset) =>
+            $"((ulong){byteOffset} + 3ul) < {descriptor.Size}";
 
         // A formatted load from a V# held in scalar registers: the element's bytes are read
         // through the device-address page table at an offset from the descriptor's base, and
         // a component whose bytes reach past the descriptor's size is out of range. A read
         // runs only when it is in range, so it never touches the guest bytes that follow.
-        private FormatMemory DeviceFormatMemory((string Base, string Size, string Stride) descriptor) => new(
-            (byteOffset, bytes) => Temp(
-                "bool",
-                $"(ulong){bytes} <= {descriptor.Size} && (ulong){byteOffset} <= {descriptor.Size} - (ulong){bytes}"),
-            (byteOffset, bytes, inBounds) => Temp(
-                "uint",
-                $"({bytes} != 0u && {inBounds}) ? sharpemu_load_device_unaligned({DeviceArguments}, " +
-                $"({descriptor.Base} + (ulong){byteOffset}) & {FormatULong(DeviceAddressPaging.AddressMask)}, {bytes}) : 0u"),
-            LoadWords: null,
-            ZeroInvalidFormat: true);
+        private FormatMemory DeviceFormatMemory((string Base, string Size, string Stride) descriptor, bool glc = false)
+        {
+            _usesCoherentLoads |= glc;
+            return new(
+                (byteOffset, bytes) => Temp(
+                    "bool",
+                    $"(ulong){bytes} <= {descriptor.Size} && (ulong){byteOffset} <= {descriptor.Size} - (ulong){bytes}"),
+                (byteOffset, bytes, inBounds) => Temp(
+                    "uint",
+                    $"({bytes} != 0u && {inBounds}) ? sharpemu_load_device_unaligned{(glc ? "_coherent" : string.Empty)}({DeviceArguments}, " +
+                    $"({descriptor.Base} + (ulong){byteOffset}) & {FormatULong(DeviceAddressPaging.AddressMask)}, {bytes}) : 0u"),
+                LoadWords: null,
+                ZeroInvalidFormat: true);
+        }
 
         // A formatted or typed store through a V# held in scalar registers. The unified
         // format (word 3's, or a typed store's own) is decoded on the device by the prelude
@@ -695,7 +712,7 @@ public static partial class Gen5MslTranslator
             {
                 // Word 3 carries the unified format and dst_sel, the same layout the bound
                 // path's specialized word takes; it is read before any destination is written.
-                var memory = DeviceFormatMemory(descriptor);
+                var memory = DeviceFormatMemory(descriptor, control.Glc);
                 var word3 = Temp("uint", ScalarExpression(instruction.Sources[1].Value + 3));
                 if (!control.Typed)
                 {
@@ -766,7 +783,15 @@ public static partial class Gen5MslTranslator
                 Line($"if ({ExecCondition(inRange)})");
                 Line("{");
                 _indent++;
+                var valids = new string[atomicWords];
+                var pointers = new string[atomicWords];
                 for (uint word = 0; word < atomicWords; word++)
+                {
+                    valids[word] = Temp("bool", "false");
+                    pointers[word] = Temp("device uint*", $"sharpemu_resolve_device_address({DeviceArguments}, {wordAddresses[word]}, {valids[word]})");
+                }
+
+                void Operate(uint word)
                 {
                     // MUBUF CMPSWAP reads the new value from VDATA and the comparator from
                     // the register after it (RDNA2 sections 8.1/12.14).
@@ -775,14 +800,34 @@ public static partial class Gen5MslTranslator
                         $"v[{control.VectorData + word}]",
                         $"v[{control.VectorData + 1}]",
                         out var build);
-                    var valid = Temp("bool", "false");
-                    var pointer = Temp("device uint*", $"sharpemu_resolve_device_address({DeviceArguments}, {wordAddresses[word]}, {valid})");
-                    Line($"if ({valid})");
+                    Line($"if ({valids[word]})");
                     Line("{");
                     _indent++;
-                    Line($"{originals[word]} = {build(pointer)};");
+                    Line($"{originals[word]} = {build(pointers[word])};");
                     _indent--;
                     Line("}");
+                }
+
+                if (atomicWords == 2)
+                {
+                    // Both dwords change under the pair's lock (see EmitPairLocked). The access
+                    // is in range, so a dword is only skipped where the page table maps none;
+                    // the lock is then the one the mapped dword picks.
+                    var lockWord = Temp("device uint*", $"{valids[0]} ? {pointers[0]} : {pointers[1]}");
+                    Line($"if ({valids[0]} || {valids[1]})");
+                    Line("{");
+                    _indent++;
+                    EmitPairLocked(lockWord, () =>
+                    {
+                        Operate(0);
+                        Operate(1);
+                    });
+                    _indent--;
+                    Line("}");
+                }
+                else
+                {
+                    Operate(0);
                 }
 
                 _indent--;
@@ -804,9 +849,10 @@ public static partial class Gen5MslTranslator
                 var subwordOffset = byteOffset.At(0);
                 var inRange = Temp("bool", $"((ulong){subwordOffset} + {loadBytes - 1}ul) < {descriptor.Size}");
                 var address = Temp("ulong", $"({descriptor.Base} + (ulong){subwordOffset}) & {FormatULong(mask)}");
+                _usesCoherentLoads |= control.Glc;
                 StoreSubdwordLoad(
                     control.VectorData,
-                    $"{inRange} ? (sharpemu_load_device_unaligned({DeviceArguments}, {address}, {loadBytes}u) & {FormatUInt(loadBytes == 1 ? 0xFFu : 0xFFFFu)}) : 0u",
+                    $"{inRange} ? (sharpemu_load_device_unaligned{(control.Glc ? "_coherent" : string.Empty)}({DeviceArguments}, {address}, {loadBytes}u) & {FormatUInt(loadBytes == 1 ? 0xFFu : 0xFFFFu)}) : 0u",
                     loadBytes,
                     signExtend,
                     subwordD16,
@@ -816,9 +862,23 @@ public static partial class Gen5MslTranslator
 
             if (!isStore)
             {
+                if (control.Glc && control.DwordCount == 2)
+                {
+                    // A GLC LOAD_DWORDX2 is one snapshot of the pair (see EmitPairLocked).
+                    var firstOffset = byteOffset.At(0);
+                    var secondOffset = byteOffset.At(sizeof(uint));
+                    var first = DeviceDescriptorWordAddress(descriptor, firstOffset);
+                    var second = DeviceDescriptorWordAddress(descriptor, secondOffset);
+                    StorePairLoad(
+                        control.VectorData,
+                        $"sharpemu_load_device_pair_coherent({DeviceArguments}, {first}, {DeviceDescriptorWordInRange(descriptor, firstOffset)}, " +
+                        $"{second}, {DeviceDescriptorWordInRange(descriptor, secondOffset)}, {PairLockArguments})");
+                    return true;
+                }
+
                 for (uint index = 0; index < control.DwordCount; index++)
                 {
-                    StoreVector(control.VectorData + index, DeviceDescriptorWord(descriptor, byteOffset.At(index * sizeof(uint))));
+                    StoreVector(control.VectorData + index, DeviceDescriptorWord(descriptor, byteOffset.At(index * sizeof(uint)), control.Glc));
                 }
 
                 return true;
@@ -1027,14 +1087,21 @@ public static partial class Gen5MslTranslator
                         $"({dynamicOffset} + {FormatUInt(unchecked((uint)control.ImmediateOffsetBytes + ((uint)component * sizeof(uint))))})");
                     // Snapshot the V# before the first destination store: SDATA may overlap SBASE.
                     deviceDescriptor ??= DeviceDescriptorBounds(instruction.Sources[0].Value);
-                    value = DeviceDescriptorWord(deviceDescriptor.Value, descriptorOffset);
+                    value = DeviceDescriptorWord(deviceDescriptor.Value, descriptorOffset, control.Glc);
                 }
                 else if (entry.Kind == MemoryResourceKind.ScalarBuffer)
                 {
                     var bindingIndex = (int)entry.Resource;
                     var byteOffset = unchecked((uint)control.ImmediateOffsetBytes + ((uint)component * sizeof(uint)));
                     var address = Temp("uint", ApplyByteBias(bindingIndex, $"({dynamicOffset} + {FormatUInt(byteOffset)})"));
-                    value = Temp("uint", LoadDword(bindingIndex, address));
+                    // A GLC scalar load misses the scalar cache (gfx10 SMEM GLC) and reads
+                    // the device-coherent value, as a GLC vector load does.
+                    _usesCoherentLoads |= control.Glc;
+                    value = Temp(
+                        "uint",
+                        control.Glc
+                            ? $"sharpemu_load_dword_coherent(b{bindingIndex}, {BufferBytes(bindingIndex)}, {address})"
+                            : LoadDword(bindingIndex, address));
                 }
                 else
                 {
@@ -1059,7 +1126,8 @@ public static partial class Gen5MslTranslator
                     }
 
                     var componentAddress = component == 0 ? deviceAddress : $"({deviceAddress} + {component * sizeof(uint)}ul)";
-                    var componentLoad = $"sharpemu_load_device_dword({DeviceArguments}, {componentAddress})";
+                    _usesCoherentLoads |= control.Glc;
+                    var componentLoad = $"sharpemu_load_device_dword{(control.Glc ? "_coherent" : string.Empty)}({DeviceArguments}, {componentAddress})";
                     if (instruction.Destinations.Count > 1)
                     {
                         // Every dword of an S_LOAD_DWORDXn is one page-table walk if
@@ -1073,7 +1141,10 @@ public static partial class Gen5MslTranslator
                                 $"sharpemu_resolve_device_span({DeviceArguments}, {deviceAddress}, {instruction.Destinations.Count * sizeof(uint)}u, {deviceSpanValid})");
                         }
 
-                        value = Temp("uint", $"{deviceSpanValid} ? {deviceSpan}[{component}] : {componentLoad}");
+                        var spanWord = control.Glc
+                            ? $"atomic_load_explicit((device atomic_uint*)({deviceSpan} + {component}), memory_order_relaxed)"
+                            : $"{deviceSpan}[{component}]";
+                        value = Temp("uint", $"{deviceSpanValid} ? {spanWord} : {componentLoad}");
                     }
                     else
                     {
@@ -1196,11 +1267,15 @@ public static partial class Gen5MslTranslator
                 return true;
             }
 
+            // GLC reads the device-coherent value (coherent_load_prelude), and a GLC
+            // LOAD_DWORDX2 reads its pair as one snapshot (see EmitPairLocked).
+            _usesCoherentLoads |= control.Glc;
+            var coherent = control.Glc ? "_coherent" : string.Empty;
             if (TryGetSubdwordLoadInfo(memoryOpcode, out var loadBytes, out var signExtend, out var d16, out var d16High))
             {
                 StoreSubdwordLoad(
                     control.DestinationVectorRegister,
-                    $"sharpemu_load_device_unaligned({DeviceArguments}, {address}, {loadBytes}u) & {FormatUInt(loadBytes == 1 ? 0xFFu : 0xFFFFu)}",
+                    $"sharpemu_load_device_unaligned{coherent}({DeviceArguments}, {address}, {loadBytes}u) & {FormatUInt(loadBytes == 1 ? 0xFFu : 0xFFFFu)}",
                     loadBytes,
                     signExtend,
                     d16,
@@ -1215,12 +1290,20 @@ public static partial class Gen5MslTranslator
             }
 
             var aligned = Temp("ulong", $"{address} & ~3ul");
+            if (control.Glc && control.DwordCount == 2)
+            {
+                StorePairLoad(
+                    control.DestinationVectorRegister,
+                    $"sharpemu_load_device_pair_coherent({DeviceArguments}, {aligned}, true, {aligned} + 4ul, true, {PairLockArguments})");
+                return true;
+            }
+
             for (uint index = 0; index < control.DwordCount; index++)
             {
                 var componentAddress = index == 0 ? aligned : $"{aligned} + {index * sizeof(uint)}ul";
                 StoreVector(
                     control.DestinationVectorRegister + index,
-                    $"sharpemu_load_device_dword({DeviceArguments}, {componentAddress})");
+                    $"sharpemu_load_device_dword{coherent}({DeviceArguments}, {componentAddress})");
             }
 
             return true;
@@ -1238,6 +1321,8 @@ public static partial class Gen5MslTranslator
         // - Every GLC form (its returned pair would not be one snapshot), SWAP, CMPSWAP,
         //   SMIN/SMAX, INC/DEC and FMIN/FMAX need a 64-bit read-modify-write Metal cannot
         //   express, and are refused.
+        // Both forms run under the pair's sequence lock (EmitPairLocked), which is what makes
+        // the qword one access to a GLC LOAD_DWORDX2 reading it.
         // The hardware requires a naturally aligned qword; one that is not, or that the page
         // table does not map in one piece, is not performed, like the bound path's unaligned
         // atomics.
@@ -1270,13 +1355,18 @@ public static partial class Gen5MslTranslator
             Line($"if ({valid} && ({address} & 7ul) == 0ul)");
             Line("{");
             _indent++;
-            if (native)
+            // The qword changes under its pair lock, so a GLC LOAD_DWORDX2 sees it whole
+            // (see EmitPairLocked): the split halves land together, and a native 64-bit
+            // min/max cannot land between a locked reader's two dword loads.
+            EmitPairLocked(pointer, () =>
             {
-                var function = atomic == "Umax" ? "atomic_max_explicit" : "atomic_min_explicit";
-                Line($"{function}((device atomic_ulong*)({pointer}), (ulong){low} | ((ulong){high} << 32), memory_order_relaxed);");
-            }
-            else
-            {
+                if (native)
+                {
+                    var function = atomic == "Umax" ? "atomic_max_explicit" : "atomic_min_explicit";
+                    Line($"{function}((device atomic_ulong*)({pointer}), (ulong){low} | ((ulong){high} << 32), memory_order_relaxed);");
+                    return;
+                }
+
                 var lowWord = $"(device atomic_uint*)({pointer})";
                 var highWord = $"(device atomic_uint*)({pointer} + 1)";
                 switch (atomic)
@@ -1303,7 +1393,7 @@ public static partial class Gen5MslTranslator
                         break;
                     }
                 }
-            }
+            });
 
             _indent--;
             Line("}");
@@ -1401,6 +1491,18 @@ public static partial class Gen5MslTranslator
             void Global()
             {
                 var aligned = Temp("ulong", $"{address} & ~3ul");
+                if (!store && control.Glc && control.DwordCount == 2)
+                {
+                    // A GLC LOAD_DWORDX2 is one snapshot of the pair (see EmitPairLocked).
+                    StorePairLoad(
+                        control.DestinationVectorRegister,
+                        $"sharpemu_load_device_pair_coherent({DeviceArguments}, {aligned}, true, {aligned} + 4ul, true, {PairLockArguments})",
+                        guardWithExec: false);
+                    return;
+                }
+
+                // A GLC load reads the device-coherent value (coherent_load_prelude).
+                _usesCoherentLoads |= !store && control.Glc;
                 for (uint index = 0; index < control.DwordCount; index++)
                 {
                     var dwordAddress = index == 0 ? aligned : $"{aligned} + {index * sizeof(uint)}ul";
@@ -1412,7 +1514,7 @@ public static partial class Gen5MslTranslator
                     {
                         StoreVector(
                             control.DestinationVectorRegister + index,
-                            $"sharpemu_load_device_dword({DeviceArguments}, {dwordAddress})",
+                            $"sharpemu_load_device_dword{(control.Glc ? "_coherent" : string.Empty)}({DeviceArguments}, {dwordAddress})",
                             guardWithExec: false);
                     }
                 }
