@@ -39,7 +39,9 @@ internal sealed partial class MetalRenderHost
 
         var metadataClear = _imageCache.TryConsumeDccAttachmentClear(
             in request, in target.Resolution, out var clearValue);
-        var texture = _imageCache.AcquireColorTargetView(imageIdentifier, request with { Role = ImageRole.ColorTarget });
+        // BeginRendering, or a clear's drain, decides the upload of a CPU-written target.
+        var texture = _imageCache.AcquireColorTargetView(
+            imageIdentifier, request with { Role = ImageRole.ColorTarget }, deferRefresh: true);
         var image = _imageCache.GetImage(imageIdentifier);
         RecordAttachmentSubresource(
             request.View, image.Shape, image.Description.IsVolume, color: true,
@@ -113,7 +115,7 @@ internal sealed partial class MetalRenderHost
         var writes = DepthAttachmentWrites(in depth, request.View.BaseLayer);
         var writesDepth = writes && DepthPlaneWrites(in depth, request.View.BaseLayer);
         var texture = _imageCache.AcquireDepthTargetView(
-            imageIdentifier, request with { Role = ImageRole.DepthTarget }, writes, writesDepth);
+            imageIdentifier, request with { Role = ImageRole.DepthTarget }, writes, writesDepth, deferRefresh: true);
         var layer = request.View.BaseLayer;
         if (resolution.HasHtile && resolution.DepthClearEnabled)
         {

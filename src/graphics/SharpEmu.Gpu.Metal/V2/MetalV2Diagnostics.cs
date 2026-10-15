@@ -100,6 +100,14 @@ internal static class MetalV2Diagnostics
     public static readonly bool ElideLoads =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ELIDE_LOADS"), "0", StringComparison.Ordinal);
 
+    // SHARPEMU_METAL_V2_SKIP_OVERWRITTEN_REFRESH=0 uploads a CPU-dirty render target when it
+    // is acquired, as before. Otherwise the upload waits for the pass to begin and is
+    // dropped when that pass clears the whole image or its first draw overwrites it
+    // (MetalImageCache.DeferredRefresh). The switch turns off the wait and the drop together.
+    public static readonly bool SkipOverwrittenRefresh =
+        !string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_SKIP_OVERWRITTEN_REFRESH"), "0", StringComparison.Ordinal);
+
     public static readonly bool CoalesceFlushes =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_FLUSH_COALESCE"), "0", StringComparison.Ordinal);
 

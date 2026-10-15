@@ -724,11 +724,82 @@ internal sealed partial class MetalRenderHost
         }
     }
 
+    /// <summary>
+    /// Decides, for the pass about to begin, the upload of every attachment whose acquire
+    /// left it waiting (MetalImageCache.DeferredRefresh): dropped when the pass writes all
+    /// of the attachment before reading any of it - a clear load action or an elided
+    /// load - and made now otherwise. Runs after the previous pass ended and before this
+    /// one's encoder exists, so an upload made here lands between the two. As for an
+    /// elided load, every attachment has to be exactly the render area, so a load action
+    /// speaks for the whole subresource.
+    /// </summary>
+    private void ResolveDeferredRefreshes(in RenderingState state)
+    {
+        if (!_imageCache.HasDeferredRefreshes)
+        {
+            return;
+        }
+
+        var exact = true;
+        for (var index = 0; index < state.ColorAttachmentCount && exact; index++)
+        {
+            exact = index < _attachmentCount && index < MaxColorAttachments &&
+                _attachmentWidths[index] == state.Width && _attachmentHeights[index] == state.Height;
+        }
+
+        ref readonly var depthStencil = ref state.DepthStencilAttachment;
+        var depthAttached = depthStencil.View.Handle != 0 && (depthStencil.HasDepth || depthStencil.HasStencil);
+        exact &= !depthAttached ||
+            (_depthAttachmentWidth == state.Width && _depthAttachmentHeight == state.Height);
+        for (var index = 0; index < state.ColorAttachmentCount; index++)
+        {
+            ref readonly var attachment = ref state.ColorAttachments[index];
+            var overwritten = exact && index < MaxColorAttachments &&
+                (attachment.IsClear || _overrideClear[index] || _elidedLoads[index]);
+            _imageCache.ResolveDeferredRefresh((nint)attachment.View.Handle, overwritten);
+        }
+
+        if (depthAttached)
+        {
+            _imageCache.ResolveDeferredRefresh(
+                (nint)depthStencil.View.Handle,
+                exact && depthStencil.HasDepth && depthStencil.DepthClear,
+                stencilOverwritten: depthStencil.HasStencil && depthStencil.StencilClear);
+        }
+
+        // Whatever this pass does not name - a target the draw dropped - is uploaded as
+        // its acquire would have.
+        _imageCache.DrainDeferredRefreshes();
+    }
+
     public void BeginRendering(in RenderingState state)
     {
         // Before anything else, because this runs ahead of every draw and is therefore
         // the last moment at which a waiting clear is still invisible. Whatever this
         // pass cannot perform itself is encoded below, where no encoder is open.
+        if (_pendingClears.Count != 0 && _imageCache.HasDeferredRefreshes)
+        {
+            // A clear that waited from before an attachment's acquire lands before that
+            // attachment's upload, which is where the acquire used to make it - not as
+            // this pass's load action over the upload. Clears are queued only after every
+            // waiting upload is made (ClearAttachmentTexture), so a waiting clear is older.
+            const int MaxRoots = 16;
+            if (_pendingClears.Count > MaxRoots)
+            {
+                _imageCache.DrainDeferredRefreshes();
+            }
+            else
+            {
+                Span<nint> roots = stackalloc nint[_pendingClears.Count];
+                for (var index = 0; index < roots.Length; index++)
+                {
+                    roots[index] = _pendingClears[index].Root;
+                }
+
+                _imageCache.DrainDeferredRefreshesOf(roots);
+            }
+        }
+
         var foldedClear = FoldPendingClearsInto(in state);
         var upcoming = _upcomingPipeline;
         var upcomingVertexCount = _upcomingVertexCount;
@@ -737,7 +808,10 @@ internal sealed partial class MetalRenderHost
         _upcomingVertexCount = 0;
         var launch = _requestedLaunch;
         _requestedLaunch = null;
-        var continues = !foldedClear && _pendingClears.Count == 0 && CanContinuePass(in state);
+        // An attachment still waiting for its upload was not the open pass's target when
+        // that pass began, so the pass cannot be continued: it is resolved below instead.
+        var continues = !foldedClear && _pendingClears.Count == 0 && !_imageCache.HasDeferredRefreshes &&
+            CanContinuePass(in state);
         if (continues && (launch is not { } requested || TryTakePreparedLaunch(requested)))
         {
             return;
@@ -784,6 +858,7 @@ internal sealed partial class MetalRenderHost
         }
 
         ChooseElidedLoads(in state, upcoming, upcomingVertexCount, upcomingFirstVertex);
+        ResolveDeferredRefreshes(in state);
         var commandBuffer = EnsureCommandBuffer();
         var descriptor = MetalNative.Send(
             MetalNative.Send(MetalNative.Class("MTLRenderPassDescriptor"), MetalNative.Selector("alloc")),
@@ -1960,6 +2035,8 @@ internal sealed partial class MetalRenderHost
                 in color);
         }
 
+        // No pass follows to decide a target this clear acquired and skipped.
+        _imageCache.DrainDeferredRefreshes();
         _recordedCommands++;
     }
 
@@ -1986,6 +2063,7 @@ internal sealed partial class MetalRenderHost
         bool clearDepth,
         bool clearStencil)
     {
+        _imageCache.DrainDeferredRefreshes();
         _clearPasses++;
         _clearDepthPasses++;
         _clearPixels += (long)Math.Max(width, 1) * Math.Max(height, 1) * Math.Max(range.LayerCount, 1);
@@ -2040,6 +2118,9 @@ internal sealed partial class MetalRenderHost
         uint height,
         in GpuClearColor color)
     {
+        // An attachment acquired before this clear was asked for is uploaded before it,
+        // as its acquire used to, and never over it.
+        _imageCache.DrainDeferredRefreshes();
         if (texture == 0)
         {
             return;

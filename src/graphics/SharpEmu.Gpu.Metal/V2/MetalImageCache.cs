@@ -571,6 +571,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     public nint AcquireTextureView(ResourceSlotIdentifier imageIdentifier, in ImageRequest request, out ulong resourceId)
     {
         using var held = _lock.Hold();
+        // An attachment waiting for its pass is not marked written yet; anything bound
+        // now must see it the way the acquire left it before the wait existed.
+        DrainDeferredRefreshesLocked();
         var image = _slots[imageIdentifier];
         image.LastAccessTick = _collectionTick;
         if (request.Role == ImageRole.StorageImage)
@@ -717,20 +720,42 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     /// <summary>How many sampled surfaces had a pending DCC clear materialized.</summary>
     public long TakeSampledDccClears() => Interlocked.Exchange(ref _sampledDccClears, 0);
 
-    public nint AcquireColorTargetView(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
+    /// <param name="deferRefresh">
+    /// The caller begins a pass on the view before anything else uses the image, or drains
+    /// the wait (MetalImageCache.DeferredRefresh): the upload of a CPU-dirty image is left
+    /// to that pass.
+    /// </param>
+    public nint AcquireColorTargetView(
+        ResourceSlotIdentifier imageIdentifier, in ImageRequest request, bool deferRefresh = false)
     {
         using var held = _lock.Hold();
         var image = _slots[imageIdentifier];
+        DrainOverlappingDeferredRefreshesLocked(image);
         image.LastAccessTick = _collectionTick;
         PromoteLinearView(image);
         WatchImage(imageIdentifier);
         SynchronizeAliases(imageIdentifier, takesGpuOwnership: true);
-        RefreshFromGuest(image);
+        // The pass about to begin may clear or overwrite all of it; BeginRendering decides
+        // whether the upload is worth making (MetalImageCache.DeferredRefresh).
+        var defer = deferRefresh && CanDeferRefresh(image);
+        if (!defer)
+        {
+            RefreshFromGuest(image);
+        }
+
         image.Uses.RenderTarget = true;
         if (request.Description.Metadata.Kind == MetadataKind.Dcc && request.Description.Metadata.Range.Size == 0)
         {
             image.Description.Metadata = request.Description.Metadata;
             RegisterDccMetadata(request.Description);
+        }
+
+        if (defer)
+        {
+            image.NoteUse(_owner.CurrentSerial);
+            var deferredView = image.GetOrCreateView(request.View);
+            DeferRefreshLocked(deferredView, image, depth: false, stencilOnly: false);
+            return deferredView;
         }
 
         image.MarkGpuModified();
@@ -751,11 +776,17 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     /// False when what the pass writes is the stencil plane alone. The depth plane then
     /// stays what it was, and so does every alias that holds a copy of it.
     /// </param>
+    /// <param name="deferRefresh">As for <see cref="AcquireColorTargetView"/>.</param>
     public nint AcquireDepthTargetView(
-        ResourceSlotIdentifier imageIdentifier, in ImageRequest request, bool writes = true, bool writesDepth = true)
+        ResourceSlotIdentifier imageIdentifier,
+        in ImageRequest request,
+        bool writes = true,
+        bool writesDepth = true,
+        bool deferRefresh = false)
     {
         using var held = _lock.Hold();
         var image = _slots[imageIdentifier];
+        DrainOverlappingDeferredRefreshesLocked(image);
         image.LastAccessTick = _collectionTick;
         PromoteLinearView(image);
         writes |= !ReadOnlyDepthPassesEnabled;
@@ -767,7 +798,16 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         SynchronizeAliases(imageIdentifier, takesGpuOwnership: writes, keepsDepthPlane: stencilOnly);
-        RefreshFromGuest(image);
+        // Only a target the pass writes can be one it clears. The refresh reads the
+        // stencil plane from where the image has it, so a request that moves the plane
+        // refreshes now, before the description changes.
+        var defer = deferRefresh && writes && CanDeferRefresh(image) &&
+            (!request.Description.HasStencil || request.Description.Stencil == image.Description.Stencil);
+        if (!defer)
+        {
+            RefreshFromGuest(image);
+        }
+
         image.Uses.DepthTarget = true;
         if (request.Description.HasMetadata)
         {
@@ -778,6 +818,14 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         if (request.Description.HasStencil)
         {
             image.Description.Stencil = request.Description.Stencil;
+        }
+
+        if (defer)
+        {
+            image.NoteUse(_owner.CurrentSerial);
+            var deferredView = image.GetOrCreateView(request.View);
+            DeferRefreshLocked(deferredView, image, depth: true, stencilOnly);
+            return deferredView;
         }
 
         if (writes)
@@ -828,6 +876,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     public void RefreshImage(ResourceSlotIdentifier imageIdentifier)
     {
         using var held = _lock.Hold();
+        DrainDeferredRefreshesLocked();
         if (_slots.TryGet(imageIdentifier) is { } image)
         {
             WatchImage(imageIdentifier);
