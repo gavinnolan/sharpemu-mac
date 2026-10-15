@@ -168,6 +168,23 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandS
         Calls.Add($"eop {write.Kind}");
     }
 
+    // A host that lands the graphics queue's command-processor writes in order with its labels.
+    public bool DefersCommandProcessorWrites { get; set; }
+
+    public List<(string Kind, ulong Address, byte[] Bytes)> CommandProcessorWrites { get; } = new();
+
+    public void RecordCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind)
+    {
+        CommandProcessorWrites.Add((kind, address, source.ToArray()));
+        Calls.Add($"cp_write {kind} {address:X} {source.Length}");
+    }
+
+    public void FillBufferInOrder(ulong address, ulong size, uint value) =>
+        Calls.Add($"fill_in_order {address:X} {size:X} {value:X8}");
+
+    public void CopyBufferInOrder(ulong destination, ulong source, ulong size) =>
+        Calls.Add($"copy_in_order {destination:X} {source:X} {size:X}");
+
     public void TriggerInterrupt(int eventId, uint contextId) => Calls.Add($"interrupt {eventId} {contextId}");
 
     public bool HasFlipSlot() => FlipSlot;

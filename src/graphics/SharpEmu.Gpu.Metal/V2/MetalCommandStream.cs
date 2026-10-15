@@ -308,6 +308,42 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
         var copy = new DeferredLabelCopy(
             staging.Buffer, staging.Offset, destination.Buffer, destination.Offset, bytes);
+        var serial = EncodeOrderedCopy(in copy, write.Destination,
+            GpuClobberDiagnostics.Enabled ? GpuClobberDiagnostics.LandedKind(write.Kind) : null,
+            bytes == sizeof(uint) ? (uint)write.Value : write.Value,
+            MetalGpuWriteOrigin.EndOfPipeLabel, $"eop label bytes={bytes}");
+        Interlocked.Increment(ref _gpuTimedLabels);
+        if (EndOfPipeTrace)
+        {
+            var address = write.Destination;
+            var kind = write.Kind;
+            var labelValue = write.Value;
+            var queued = System.Diagnostics.Stopwatch.GetTimestamp();
+            Console.Error.WriteLine(
+                $"[METAL-V2][EOP] encode kind={kind} address=0x{address:X16} bytes={bytes} " +
+                $"value=0x{labelValue:X16} serial={serial}");
+            _completions.Enqueue(serial, () => Console.Error.WriteLine(
+                $"[METAL-V2][EOP] landed address=0x{address:X16} serial={serial} waited_ms=" +
+                ((System.Diagnostics.Stopwatch.GetTimestamp() - queued) * 1000.0 / System.Diagnostics.Stopwatch.Frequency)
+                    .ToString("F1", System.Globalization.CultureInfo.InvariantCulture)));
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Encodes a copy into guest memory where the stream has reached, the way a label's bytes
+    /// are: at once between encoders, or at the next encoder boundary while a render pass is
+    /// open. Either way it lands after every write recorded before it and before every one
+    /// recorded after it. Returns the submission that carries it.
+    /// </summary>
+    private ulong EncodeOrderedCopy(
+        in DeferredLabelCopy copy,
+        ulong guestAddress,
+        string? landedKind,
+        ulong landedValue,
+        MetalGpuWriteOrigin origin,
+        string profile)
+    {
         ulong serial;
         if (MetalV2Diagnostics.DeferLabelWrites && _renderEncoder != 0)
         {
@@ -334,7 +370,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             // Beginning the transfer marked this submission as carrying GPU work, which is
             // what keeps a completion queued behind it — the interrupt of this same packet
             // — from running inline ahead of the bytes.
-            context.ProfileEncoded($"eop label bytes={bytes}");
+            context.ProfileEncoded(profile);
             serial = context.SubmissionSerial;
             if (DsTrace.Gpu)
             {
@@ -347,7 +383,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             _dsLabelSerial = serial;
         }
 
-        // A command processor polling this label suspends until something says the bytes
+        // A command processor polling these bytes suspends until something says they
         // changed, and the only thing that knows is the completion of this submission. The
         // worker reports completions when it next flushes, which is never while every head
         // is suspended, so one wake per submission is queued here: it costs no flush, and
@@ -366,35 +402,165 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             });
         }
 
-        if (GpuClobberDiagnostics.Enabled)
+        if (landedKind is not null)
         {
             // SHARPEMU_GPU_CLOBBER_DIAG: the bytes are in guest memory once this serial completes.
-            var landedAddress = write.Destination;
-            var landedValue = bytes == sizeof(uint) ? (uint)write.Value : write.Value;
-            var landedKind = GpuClobberDiagnostics.LandedKind(write.Kind);
+            var bytes = copy.Bytes;
             _completions.Enqueue(serial, () => CommandProcessorWriteHistory.Record(
-                -1, landedAddress, bytes, landedValue, landedKind, deferred: true));
+                -1, guestAddress, bytes, landedValue, landedKind, deferred: true));
         }
 
-        NoteGuestMemoryWrite(write.Destination, (ulong)bytes, MetalGpuWriteOrigin.EndOfPipeLabel);
-        _pendingLabelWrites++;
-        Interlocked.Increment(ref _gpuTimedLabels);
-        if (EndOfPipeTrace)
+        if (origin != MetalGpuWriteOrigin.EndOfPipeLabel)
         {
-            var address = write.Destination;
-            var kind = write.Kind;
-            var labelValue = write.Value;
-            var queued = System.Diagnostics.Stopwatch.GetTimestamp();
-            Console.Error.WriteLine(
-                $"[METAL-V2][EOP] encode kind={kind} address=0x{address:X16} bytes={bytes} " +
-                $"value=0x{labelValue:X16} serial={serial}");
-            _completions.Enqueue(serial, () => Console.Error.WriteLine(
-                $"[METAL-V2][EOP] landed address=0x{address:X16} serial={serial} waited_ms=" +
-                ((System.Diagnostics.Stopwatch.GetTimestamp() - queued) * 1000.0 / System.Diagnostics.Stopwatch.Frequency)
-                    .ToString("F1", System.Globalization.CultureInfo.InvariantCulture)));
+            // A command-processor store can land in bytes an image was made from; a label
+            // never has, and checking for one per label is not free.
+            _imageCache.InvalidateMemoryFromGpu(guestAddress, (ulong)copy.Bytes);
         }
+
+        NoteGuestMemoryWrite(guestAddress, (ulong)copy.Bytes, origin);
+        _pendingLabelWrites++;
+        return serial;
+    }
+
+    /// <summary>
+    /// Writes command-processor bytes so they land in record order with the deferred labels:
+    /// copied by the GPU where the stream has reached, or - when the GPU cannot write them,
+    /// or a label is still owed by a completion - published by a completion behind it.
+    /// </summary>
+    public void RecordCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind)
+    {
+        if (source.IsEmpty)
+        {
+            return;
+        }
+
+        if (address == 0 || (ulong)source.Length > ulong.MaxValue - address)
+        {
+            throw Fatal($"A command-processor write has an invalid range: address=0x{address:X16} bytes={source.Length}.");
+        }
+
+        if (TryEncodeCommandProcessorWrite(address, source, kind))
+        {
+            Interlocked.Increment(ref _gpuTimedCommandProcessorWrites);
+            return;
+        }
+
+        Interlocked.Increment(ref _hostCommandProcessorWrites);
+        var bytes = source.ToArray();
+        var landedKind = GpuClobberDiagnostics.Enabled ? "landed:" + kind : null;
+        Interlocked.Increment(ref _owedHostLabels);
+        QueueCompletion(() =>
+        {
+            try
+            {
+                if (!_memory.TryWrite(address, bytes))
+                {
+                    throw Fatal(
+                        $"A command-processor write cannot be written to guest memory: address=0x{address:X16} bytes={bytes.Length}.");
+                }
+
+                _imageCache.InvalidateMemory(address, (ulong)bytes.Length);
+                if (landedKind is not null)
+                {
+                    CommandProcessorWriteHistory.Record(-1, address, bytes.Length, FirstValue(bytes), landedKind, deferred: true);
+                }
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _owedHostLabels);
+            }
+        });
+    }
+
+    private bool TryEncodeCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind)
+    {
+        if (!GpuTimedLabels || !MayEncodeLabelOnGpu(OrderedEndOfPipe, Volatile.Read(ref _owedHostLabels)))
+        {
+            return false;
+        }
+
+        var size = (ulong)source.Length;
+        var destination = _guestMemory.ResolveWritable(address, size);
+        if (!destination.IsValid)
+        {
+            MetalV2Diagnostics.WarnOnce("cp-write-without-window",
+                $"A command-processor write has no window, so a completion publishes it: address=0x{address:X16} bytes={size} kind={kind}.");
+            return false;
+        }
+
+        var staging = _guestMemory.Allocate(size, sizeof(ulong), out var payload);
+        if (!staging.IsValid)
+        {
+            return false;
+        }
+
+        source.CopyTo(payload);
+        var copy = new DeferredLabelCopy(staging.Buffer, staging.Offset, destination.Buffer, destination.Offset, source.Length);
+        _ = EncodeOrderedCopy(in copy, address, GpuClobberDiagnostics.Enabled ? "landed:" + kind : null,
+            FirstValue(source), MetalGpuWriteOrigin.Copy, $"cp write {kind} bytes={size}");
         return true;
     }
+
+    private static ulong FirstValue(ReadOnlySpan<byte> bytes) => bytes.Length switch
+    {
+        >= sizeof(ulong) when bytes.Length != sizeof(uint) => System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(bytes),
+        >= sizeof(uint) => System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes),
+        _ => 0,
+    };
+
+    // A fill this small is a fence reset or a slot clear, and is staged and copied like a
+    // label so it neither ends the open pass nor lands out of order. A larger one is a GPU
+    // fill, which ends the pass but is still recorded where the stream has reached; the
+    // host fast path, which writes as parsed, is what the ordered path leaves out.
+    private const ulong MaxStagedCommandProcessorFillBytes = 4096;
+
+    /// <summary>A DMA fill of guest memory that lands in record order with the labels.</summary>
+    public void FillBufferInOrder(ulong address, ulong size, uint value)
+    {
+        if (size == 0)
+        {
+            return;
+        }
+
+        if (size <= MaxStagedCommandProcessorFillBytes && size % sizeof(uint) == 0)
+        {
+            Span<uint> pattern = stackalloc uint[(int)(MaxStagedCommandProcessorFillBytes / sizeof(uint))];
+            pattern = pattern[..(int)(size / sizeof(uint))];
+            pattern.Fill(value);
+            RecordCommandProcessorWrite(address, System.Runtime.InteropServices.MemoryMarshal.AsBytes(pattern), "DMA_FILL");
+            return;
+        }
+
+        FillGuestMemory(address, size, value, allowHost: false);
+    }
+
+    /// <summary>A DMA copy between guest ranges that lands in record order with the labels.</summary>
+    public void CopyBufferInOrder(ulong destination, ulong source, ulong size)
+    {
+        if (size != 0)
+        {
+            CopyGuestMemory(destination, source, size, allowHost: false);
+        }
+    }
+
+    /// <summary>Whether the graphics queue's command-processor writes are recorded here.</summary>
+    public bool DefersCommandProcessorWrites => DefersEndOfPipeLabels && !CommandProcessorWritesAtParse;
+
+    // SHARPEMU_METAL_V2_CP_WRITES=parse writes WRITE_DATA, DMA fills and copies and COPY_DATA
+    // immediates into guest memory as the graphics queue parses them, as before. They then
+    // reach the guest ahead of every label still owed, which is what let Demon's Souls
+    // recycle command memory a late label then landed in.
+    internal bool CommandProcessorWritesAtParse { get; set; } = CommandProcessorWritesAtParseDefault;
+
+    private static readonly bool CommandProcessorWritesAtParseDefault =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_CP_WRITES") == "parse";
+
+    private long _gpuTimedCommandProcessorWrites;
+    private long _hostCommandProcessorWrites;
+
+    /// <summary>Command-processor writes the GPU made in order, and ones a completion made.</summary>
+    public (long GpuTimed, long Host) TakeCommandProcessorWriteCounters() =>
+        (Interlocked.Exchange(ref _gpuTimedCommandProcessorWrites, 0), Interlocked.Exchange(ref _hostCommandProcessorWrites, 0));
 
     private static int EndOfPipeLabelBytes(EndOfPipeWriteKind kind) => kind switch
     {

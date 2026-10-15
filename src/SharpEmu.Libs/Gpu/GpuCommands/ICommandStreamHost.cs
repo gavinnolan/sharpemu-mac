@@ -168,6 +168,35 @@ public interface ICommandStreamHost
     /// </summary>
     ulong PendingLabelTick => 0;
 
+    /// <summary>
+    /// Whether the graphics queue's command-processor memory writes (WRITE_DATA, DMA_DATA
+    /// fills and copies, COPY_DATA immediates) are handed to this host to land in record
+    /// order with its deferred end-of-pipe labels, instead of being written as parsed.
+    /// </summary>
+    /// <remarks>
+    /// A host that defers labels runs the parser far ahead of the GPU. A write made at parse
+    /// time then reaches the guest before labels recorded ahead of it, which on the hardware
+    /// it never does once a wait between them has stalled the command processor; a guest
+    /// that recycles memory on such a write (Demon's Souls) has the late label land in it.
+    /// </remarks>
+    bool DefersCommandProcessorWrites => false;
+
+    /// <summary>Writes command-processor bytes in record order with deferred labels.</summary>
+    void RecordCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind)
+    {
+        if (!TryWriteGuest(address, source, kind))
+        {
+            throw Fatal($"The command stream cannot write guest memory: address=0x{address:X16} size={source.Length}.");
+        }
+    }
+
+    /// <summary>A DMA fill of guest memory that lands in record order with deferred labels.</summary>
+    void FillBufferInOrder(ulong address, ulong size, uint value) => FillBuffer(address, size, value, isGds: false);
+
+    /// <summary>A DMA copy between guest ranges that lands in record order with deferred labels.</summary>
+    void CopyBufferInOrder(ulong destination, ulong source, ulong size) =>
+        CopyBuffer(destination, source, size, destinationIsGds: false, sourceIsGds: false);
+
     // Delivers the interrupt now, without waiting for the GPU.
     void TriggerInterrupt(int eventId, uint contextId);
 

@@ -320,6 +320,47 @@ public sealed class CommandStreamQueueTests
         Assert.Equal(7u, host.ReadDword(Label + 8));
     }
 
+    /// <summary>
+    /// Demon's Souls' drain shape: a label, a wait on it, then a store the guest recycles
+    /// command memory on. The wait is met at parse by the recorded label, and the store used
+    /// to be written then too, long before the GPU wrote the label - which then landed in
+    /// memory the guest had already reused. On a host that lands command-processor writes in
+    /// order the store is recorded behind the label instead, and a wait on it is still met.
+    /// </summary>
+    [Fact]
+    public void AStoreAfterAWaitOnARecordedLabelIsRecordedBehindTheLabel()
+    {
+        var (host, queue) = NewQueue();
+        host.DefersEndOfPipeLabels = true;
+        host.DefersCommandProcessorWrites = true;
+        host.PendingLabelTick = 5;
+        var signal = Label + 0x10;
+        host.WriteDword(Label, 0);
+        host.WriteDword(signal, 0);
+        Enqueue(host, queue, Graphics, 1, ReleaseMemoryInterrupt(Label, 1), WaitEqual(Label, 1), WriteLabel(signal, 0x5A17));
+
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Equal(0u, host.ReadDword(Label));
+        Assert.Equal(0u, host.ReadDword(signal));
+        var label = host.Calls.FindIndex(call => call.StartsWith("eop ", StringComparison.Ordinal));
+        var store = host.Calls.IndexOf($"cp_write WRITE_DATA {signal:X} 4");
+        Assert.True(label >= 0 && store > label, string.Join(", ", host.Calls));
+        Assert.Empty(host.PollCommits);
+        var entry = Assert.Single(CommandProcessorWriteHistory.Find(signal, sizeof(uint)), e => e.Kind == "WRITE_DATA" && e.Value == 0x5A17);
+        Assert.True(entry.Deferred);
+
+        // Waits on the store, this queue's and another's, read it as written.
+        Enqueue(host, queue, Graphics, 2, WaitEqual(signal, 0x5A17), WriteLabel(signal + 8, 9));
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        EnqueueCompute(host, queue, 0x20, Compute, 3, WaitEqual(signal, 0x5A17), WriteLabel(signal + 0x10, 3));
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Empty(host.PollCommits);
+
+        // Compute queues keep writing as they parse.
+        Assert.Equal(3u, host.ReadDword(signal + 0x10));
+        Assert.Equal(0u, host.ReadDword(signal + 8));
+    }
+
     [Fact]
     public void MemoryWaitWakesOnlyForAWriteThatTouchesItsOwnBytes()
     {
