@@ -73,8 +73,62 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         Assert.Equal(2UL, laterLanded.AfterDrain);
     }
 
+    [Fact]
+    public void ACommandProcessorWriteWaitsBehindAnOwed32BitLabel()
+    {
+        if (!RequireDevice()) return;
+        var (owedLanded, laterLanded, _) = RecordOwedThenLater(orderedEndOfPipe: true,
+            later: host => host.RecordCommandProcessorWrite(LaterLabel, BitConverter.GetBytes(2UL), "WRITE_DATA"));
+
+        Assert.Equal(0UL, owedLanded.WhileHeld);
+        Assert.Equal(0UL, laterLanded.WhileHeld);
+        Assert.Equal(1UL, owedLanded.AfterDrain);
+        Assert.Equal(2UL, laterLanded.AfterDrain);
+    }
+
+    /// <summary>
+    /// A WRITE_DATA or DMA fill recorded after a label is copied by the GPU behind it, not
+    /// written as parsed: until the GPU reaches it the guest sees neither, so it can never
+    /// see the store ahead of the label.
+    /// </summary>
+    [Fact]
+    public void CommandProcessorWritesLandWithTheLabelBeforeThemAndNotAtParse()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        Assert.True(host.DefersCommandProcessorWrites);
+        const ulong filled = GuestBase + 0x3000;
+
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write32, 1, WindowedLabel, 1));
+        host.RecordCommandProcessorWrite(LaterLabel, BitConverter.GetBytes(0x55UL), "WRITE_DATA");
+        host.FillBufferInOrder(filled, sizeof(uint), 0x77);
+
+        Assert.Equal(0u, rig.Backing.Read32(WindowedLabel));
+        Assert.Equal(0UL, rig.Backing.Read64(LaterLabel));
+        Assert.Equal(0u, rig.Backing.Read32(filled));
+        Assert.Equal((2L, 0L), host.TakeCommandProcessorWriteCounters());
+
+        host.FlushCommandBuffer();
+        WaitForGpu(host, host.LastWorkSerial);
+        WaitForCompletions(host);
+        Assert.Equal(1u, rig.Backing.Read32(WindowedLabel));
+        Assert.Equal(0x55UL, rig.Backing.Read64(LaterLabel));
+        Assert.Equal(0x77u, rig.Backing.Read32(filled));
+    }
+
+    [Fact]
+    public void TheCommandProcessorWriteOptOutLeavesThemToTheParser()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        Assert.True(rig.Host.DefersCommandProcessorWrites);
+        rig.Host.CommandProcessorWritesAtParse = true;
+        Assert.False(rig.Host.DefersCommandProcessorWrites);
+    }
+
     private ((ulong WhileHeld, ulong AfterDrain) Owed, (ulong WhileHeld, ulong AfterDrain) Later, long Ordered)
-        RecordOwedThenLater(bool orderedEndOfPipe)
+        RecordOwedThenLater(bool orderedEndOfPipe, Action<MetalRenderHost>? later = null)
     {
         using var hold = new ManualResetEventSlim(false);
         using var rig = new Rig(Device.Value);
@@ -88,7 +142,15 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
             host.Completions.Enqueue(held, () => hold.Wait(TimeSpan.FromSeconds(10)));
 
             host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write32, 1, UnwindowedLabel, 1));
-            host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write64, 1, LaterLabel, 2));
+            if (later is null)
+            {
+                host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write64, 1, LaterLabel, 2));
+            }
+            else
+            {
+                later(host);
+            }
+
             host.FlushCommandBuffer();
             WaitForGpu(host, host.LastWorkSerial);
 

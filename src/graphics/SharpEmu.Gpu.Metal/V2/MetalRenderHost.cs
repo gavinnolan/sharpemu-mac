@@ -994,14 +994,18 @@ internal sealed partial class MetalRenderHost :
     private long _hostCopies;
 
     /// <summary>Fills a guest range with a repeating dword through its window.</summary>
-    public void FillGuestMemory(ulong address, ulong size, uint value)
+    /// <remarks>
+    /// <paramref name="allowHost"/> false leaves out the host fast path, which writes the
+    /// bytes as parsed: a command-processor fill has to land in record order with labels.
+    /// </remarks>
+    public void FillGuestMemory(ulong address, ulong size, uint value, bool allowHost = true)
     {
         if (size == 0)
         {
             return;
         }
 
-        if (TryFillGuestMemoryOnHost(address, size, value))
+        if (allowHost && TryFillGuestMemoryOnHost(address, size, value))
         {
             return;
         }
@@ -1021,6 +1025,12 @@ internal sealed partial class MetalRenderHost :
         {
             // Not backed: the managed path writes it, which is what a non-backed range
             // means on this backend (device-local allocations are all backed).
+            if (!allowHost)
+            {
+                MetalV2Diagnostics.WarnOnce("cp-fill-without-window",
+                    $"A command-processor fill has no window and is written as parsed: address=0x{address:X16} size=0x{size:X}.");
+            }
+
             WriteGuestPattern(address, size, value);
             return;
         }
@@ -1114,7 +1124,11 @@ internal sealed partial class MetalRenderHost :
     }
 
     /// <summary>Copies guest bytes on the GPU through the windows.</summary>
-    public void CopyGuestMemory(ulong destination, ulong source, ulong size)
+    /// <remarks>
+    /// <paramref name="allowHost"/> false leaves out the host fast path, which copies the
+    /// bytes as parsed: a command-processor copy has to land in record order with labels.
+    /// </remarks>
+    public void CopyGuestMemory(ulong destination, ulong source, ulong size, bool allowHost = true)
     {
         if (size == 0)
         {
@@ -1125,6 +1139,13 @@ internal sealed partial class MetalRenderHost :
         var origin = _guestMemory.Resolve(source, size);
         if (!target.IsValid || !origin.IsValid)
         {
+            if (!allowHost)
+            {
+                MetalV2Diagnostics.WarnOnce("cp-copy-without-window",
+                    $"A command-processor copy has no window and is copied as parsed: destination=0x{destination:X16} " +
+                    $"source=0x{source:X16} size=0x{size:X}.");
+            }
+
             CopyGuestBytesOnHost(destination, source, size);
             _stagedStorageCopies?.Forget(destination, size);
             _stagedRanges?.OnHostWrite(destination, size);
@@ -1133,7 +1154,7 @@ internal sealed partial class MetalRenderHost :
 
         // A packet-sized copy the host can do itself costs nothing and records no GPU
         // write, so the poll that usually follows it does not wait for a submission.
-        if (CanWriteGuestOnHost(destination, size))
+        if (allowHost && CanWriteGuestOnHost(destination, size))
         {
             CopyGuestBytesOnHost(destination, source, size);
             _imageCache.InvalidateMemory(destination, size);
@@ -1755,6 +1776,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         var labels = TakeLabelCounters();
+        var cpWrites = TakeCommandProcessorWriteCounters();
         reasons.Append(" host_fills=").Append(Interlocked.Exchange(ref _hostFills, 0))
             .Append(" gpu_fills=").Append(Interlocked.Exchange(ref _gpuFills, 0))
             .Append(" cleared_fills=").Append(Interlocked.Exchange(ref _absorbedFills, 0))
@@ -1763,6 +1785,8 @@ internal sealed partial class MetalRenderHost :
             .Append(" gpu_labels=").Append(labels.GpuTimed)
             .Append(" host_labels=").Append(labels.WithoutWindow)
             .Append(" ordered_labels=").Append(TakeOrderedHostLabels())
+            .Append(" gpu_cp_writes=").Append(cpWrites.GpuTimed)
+            .Append(" host_cp_writes=").Append(cpWrites.Host)
             .Append(" poll_flushes=").Append(TakePollFlushes())
             .Append(" transient_commits=").Append(TakeTransientCommits())
             .Append(" scheduled_labels=").Append(TakeScheduledLabelSubmissions())

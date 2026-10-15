@@ -34,11 +34,91 @@ public sealed partial class GpuCommandInterpreter
 
         if (writeOneAddress)
         {
-            WriteDword(destination, source[^1], "WRITE_DATA");
+            WriteCommandProcessorBytes(destination, MemoryMarshal.AsBytes(source[^1..]), "WRITE_DATA");
             return;
         }
 
-        WriteBytes(destination, MemoryMarshal.AsBytes(source), "WRITE_DATA");
+        WriteCommandProcessorBytes(destination, MemoryMarshal.AsBytes(source), "WRITE_DATA");
+    }
+
+    /// <summary>
+    /// Whether this queue's command-processor writes land in record order with its deferred
+    /// labels rather than as parsed. Only the graphics queue: compute queues keep writing at
+    /// parse time, which nothing has shown to matter there.
+    /// </summary>
+    private bool DefersCommandProcessorWrites => !IsComputeQueue && _host.DefersCommandProcessorWrites;
+
+    // Pending values noted for waits are capped: a wait polls a fence, not a table.
+    private const int MaxNotedPendingBytes = 64;
+
+    /// <summary>
+    /// A command-processor store. On a host that defers labels the graphics queue hands it to
+    /// the host to land in record order: written as parsed, it reached the guest ahead of
+    /// labels recorded before it, and Demon's Souls recycled command memory on such a write
+    /// while a label into that memory was still owed (a WAIT_REG_MEM between them is met at
+    /// parse by the pending label, so the parser runs on past it). This queue's own waits see
+    /// the value through the pending lookup and the own-write check; every other read of the
+    /// bytes is a read of a recorded GPU write, which the host waits for.
+    /// SHARPEMU_METAL_V2_CP_WRITES=parse writes them as parsed again.
+    /// </summary>
+    internal void WriteCommandProcessorBytes(ulong destination, ReadOnlySpan<byte> source, string kind)
+    {
+        if (!DefersCommandProcessorWrites)
+        {
+            WriteBytes(destination, source, kind);
+            return;
+        }
+
+        var first = source.Length >= sizeof(ulong)
+            ? BinaryPrimitives.ReadUInt64LittleEndian(source)
+            : source.Length >= sizeof(uint) ? BinaryPrimitives.ReadUInt32LittleEndian(source) : 0UL;
+        CommandProcessorWriteHistory.Record(QueueId, destination, source.Length,
+            source.Length == sizeof(uint) ? (uint)first : first, kind, deferred: true);
+        NotePendingBytes(destination, source);
+        _host.RecordCommandProcessorWrite(destination, source, kind);
+
+        _lastWriteLength = 0;
+        if (source.Length is sizeof(uint) or sizeof(ulong))
+        {
+            _lastWriteAddress = destination;
+            _lastWriteValue = source.Length == sizeof(uint) ? (uint)first : first;
+            _lastWriteLength = source.Length;
+            _lastWritePacket = _packetSerial;
+        }
+    }
+
+    private void WriteCommandProcessorDword(ulong destination, uint value, string kind)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(uint)];
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
+        WriteCommandProcessorBytes(destination, bytes, kind);
+    }
+
+    private void WriteCommandProcessorQword(ulong destination, ulong value, string kind)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(ulong)];
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes, value);
+        WriteCommandProcessorBytes(destination, bytes, kind);
+    }
+
+    // Tells the queue what the bytes will hold once they land, so a wait on them - this
+    // queue's or another's - reads them as written, as it does a deferred label.
+    private void NotePendingBytes(ulong destination, ReadOnlySpan<byte> bytes)
+    {
+        if (PendingLabelRecorded is not { } note)
+        {
+            return;
+        }
+
+        var length = Math.Min(bytes.Length, MaxNotedPendingBytes);
+        var unit = bytes.Length % sizeof(ulong) == 0 ? sizeof(ulong) : sizeof(uint);
+        for (var offset = 0; offset + unit <= length; offset += unit)
+        {
+            var value = unit == sizeof(ulong)
+                ? BinaryPrimitives.ReadUInt64LittleEndian(bytes[offset..])
+                : BinaryPrimitives.ReadUInt32LittleEndian(bytes[offset..]);
+            note(destination + (ulong)offset, unit, value);
+        }
     }
 
     internal void WriteReferenceClock(ulong destination, uint byteCount)
@@ -141,6 +221,22 @@ public sealed partial class GpuCommandInterpreter
 
         if (sourceSelect == 2)
         {
+            if (!destinationIsGds && DefersCommandProcessorWrites)
+            {
+                var fill = (uint)sourceOrImmediate;
+                CommandProcessorWriteHistory.Record(QueueId, destination, (int)Math.Min(byteCount, int.MaxValue),
+                    fill, "DMA_FILL", deferred: true);
+                if (byteCount <= MaxNotedPendingBytes && byteCount % sizeof(uint) == 0)
+                {
+                    Span<uint> pattern = stackalloc uint[MaxNotedPendingBytes / sizeof(uint)];
+                    pattern.Fill(fill);
+                    NotePendingBytes(destination, MemoryMarshal.AsBytes(pattern)[..(int)byteCount]);
+                }
+
+                _host.FillBufferInOrder(destination, byteCount, fill);
+                return;
+            }
+
             if (!destinationIsGds)
             {
                 CommandProcessorWriteHistory.Record(QueueId, destination, (int)Math.Min(byteCount, int.MaxValue),
@@ -165,6 +261,7 @@ public sealed partial class GpuCommandInterpreter
             throw _host.Fatal($"A GDS-to-GDS DMA copy is not supported: destination=0x{destination:X16} source=0x{sourceOrImmediate:X16} size={byteCount}.");
         }
 
+        var deferredCopy = !destinationIsGds && !sourceIsGds && DefersCommandProcessorWrites;
         if (!destinationIsGds)
         {
             // The value is the source's, read now for the record only: a copy may land later.
@@ -179,7 +276,22 @@ public sealed partial class GpuCommandInterpreter
             }
 
             CommandProcessorWriteHistory.Record(QueueId, destination, (int)Math.Min(byteCount, int.MaxValue),
-                copied, $"DMA_COPY from=0x{sourceOrImmediate:X}", deferred: false);
+                copied, $"DMA_COPY from=0x{sourceOrImmediate:X}", deferred: deferredCopy);
+        }
+
+        if (deferredCopy)
+        {
+            // A copy of a value a wait could also read as pending - a label or another
+            // deferred store - is pending at its destination too. Anything else is read by
+            // the GPU when it gets there, and a wait on it waits for that.
+            if (byteCount is sizeof(uint) or sizeof(ulong) && PendingLabelLookup is { } lookup &&
+                lookup(sourceOrImmediate, byteCount == sizeof(ulong), out var pendingValue))
+            {
+                PendingLabelRecorded?.Invoke(destination, (int)byteCount, pendingValue);
+            }
+
+            _host.CopyBufferInOrder(destination, sourceOrImmediate, byteCount);
+            return;
         }
 
         _host.CopyBuffer(destination, sourceOrImmediate, byteCount, destinationIsGds, sourceIsGds);
@@ -317,7 +429,7 @@ public sealed partial class GpuCommandInterpreter
         if (dmaSource == 2 && byteCount == 8)
         {
             // An 8-byte immediate is a plain label store, not a 32-bit fill.
-            WriteQword(destination, source);
+            WriteCommandProcessorQword(destination, source, "COPY_DATA_IMM");
             return 5;
         }
 
@@ -378,11 +490,11 @@ public sealed partial class GpuCommandInterpreter
         var data = usePfp ? AtomicReturnPfpData : AtomicReturnMeData;
         if (byteCount == 8)
         {
-            WriteQword(destination, data);
+            WriteCommandProcessorQword(destination, data, "COPY_DATA_ATOMIC");
         }
         else
         {
-            WriteDword(destination, (uint)data);
+            WriteCommandProcessorDword(destination, (uint)data, "COPY_DATA_ATOMIC");
         }
     }
 
