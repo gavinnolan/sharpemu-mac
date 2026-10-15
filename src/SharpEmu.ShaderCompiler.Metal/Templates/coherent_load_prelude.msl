@@ -1,0 +1,14 @@
+// A GLC raw dword load (RDNA2 ISA 8.1.10: GLC on a load forces a miss in the per-CU
+// caches, so the read comes from the device-coherent level). A plain Metal load can be
+// served from one GPU core's cache, which does not see another core's stores before the
+// kernel ends, so a workgroup polling a word another workgroup publishes (a decoupled
+// look-back scan's flags) re-reads the stale copy until the step cap kills it. A relaxed
+// device atomic load is the coherent read. Out of range reads zero, like
+// sharpemu_load_dword.
+static inline uint sharpemu_load_dword_coherent(device uint* b, uint bytes, uint addr)
+{
+    uint index = addr >> 2;
+    return index < (bytes >> 2)
+        ? atomic_load_explicit((device atomic_uint*)(b + index), memory_order_relaxed)
+        : 0u;
+}

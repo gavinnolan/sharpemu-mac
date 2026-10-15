@@ -240,6 +240,7 @@ public static partial class Gen5MslTranslator
         private uint _scratchDwordCount;
         private bool _usesFormatLoads;
         private bool _usesBufferOffset;
+        private bool _usesCoherentLoads;
         private bool _usesShaderClock;
         private bool _usesWaveScratch;
 
@@ -539,6 +540,11 @@ public static partial class Gen5MslTranslator
             if (_usesBufferOffset)
             {
                 source.Append(MslTemplates.Render("buffer_offset_prelude"));
+            }
+
+            if (_usesCoherentLoads)
+            {
+                source.Append(MslTemplates.Render("coherent_load_prelude"));
             }
 
             EmitFloat64PreludeIfUsed(source);
@@ -3179,11 +3185,15 @@ public static partial class Gen5MslTranslator
                 opcode.StartsWith("BufferLoad", StringComparison.Ordinal) ||
                 opcode.StartsWith("TBufferLoad", StringComparison.Ordinal))
             {
+                _usesCoherentLoads |= glc;
                 for (uint index = 0; index < dwordCount; index++)
                 {
+                    var address = byteAddress.Contiguous ? $"({byteAddress.Base} + {index * 4}u)" : byteAddress.At(index * 4);
                     StoreVector(
                         destinationVectorRegister + index,
-                        LoadDword(bindingIndex, byteAddress.Contiguous ? $"({byteAddress.Base} + {index * 4}u)" : byteAddress.At(index * 4)));
+                        glc
+                            ? $"sharpemu_load_dword_coherent(b{bindingIndex}, {BufferBytes(bindingIndex)}, {address})"
+                            : LoadDword(bindingIndex, address));
                 }
 
                 return true;

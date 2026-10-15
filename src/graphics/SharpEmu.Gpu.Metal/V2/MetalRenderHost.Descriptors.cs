@@ -440,6 +440,17 @@ internal sealed partial class MetalRenderHost
                 continue;
             }
 
+            if (requested > ulong.MaxValue - descriptor.Address || !_memory.CanRead(descriptor.Address, 1))
+            {
+                var resource = info.Buffers[index];
+                throw Fatal(
+                    $"The buffer range starts in unmapped memory: address=0x{descriptor.Address:X16} size=0x{requested:X16} " +
+                    $"stage={stage.Program.Stage} hash=0x{stage.Program.Hash:X16} shader=0x{stage.StageResources.ShaderBase:X16} " +
+                    $"buffer={index} source={resource.Source} pc=0x{resource.FirstUsePc:X} written={resource.Written} " +
+                    $"descriptor=[{string.Join(',', words.ToArray().Select(word => $"{word:X8}"))}] " +
+                    $"user_data=[{string.Join(',', snapshot.UserData.ToArray().Select(word => $"{word:X8}"))}].");
+            }
+
             var size = ClampMappedSize(descriptor.Address, requested);
             var written = info.Buffers[index].Written;
             FlushGpuWrites(descriptor.Address, size, MetalWritebackCause.StorageDescriptor);
