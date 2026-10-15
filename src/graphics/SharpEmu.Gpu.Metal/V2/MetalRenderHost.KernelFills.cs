@@ -63,6 +63,19 @@ internal sealed partial class MetalRenderHost
     /// </summary>
     public bool TryCopyWordsOnHost(ulong destination, ulong source, ulong sourceWords, ulong words)
     {
+        if (TryCopyWordsOnHostCore(destination, source, sourceWords, words))
+        {
+            return true;
+        }
+
+        // Refused: the copy runs as the dispatch it is, and a read of its destination
+        // before that submission completes can be answered from its source.
+        ArmPendingCopy(destination, source, sourceWords, words);
+        return false;
+    }
+
+    private bool TryCopyWordsOnHostCore(ulong destination, ulong source, ulong sourceWords, ulong words)
+    {
         if (!MetalV2Diagnostics.KernelFills)
         {
             return false;

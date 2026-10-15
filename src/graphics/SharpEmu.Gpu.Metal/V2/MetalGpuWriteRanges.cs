@@ -85,6 +85,9 @@ internal sealed class MetalGpuWriteRanges
         public ulong Start;
         public ulong End;
         public ulong Serial;
+        // The order of the newest write the record covers, among every write recorded
+        // here: which of two overlapping writes in one submission lands last.
+        public ulong Sequence;
         public MetalGpuWriteOrigin Origin;
     }
 
@@ -96,7 +99,9 @@ internal sealed class MetalGpuWriteRanges
     private int _labelCount;
     // A write whose destination range is not known: every read waits for it.
     private ulong _unboundedSerial;
+    private ulong _unboundedSequence;
     private ulong _retiredSerial;
+    private ulong _sequence;
     private long _recorded;
     private long _folds;
 
@@ -108,8 +113,11 @@ internal sealed class MetalGpuWriteRanges
 
     public bool IsEmpty => _count == 0 && _labelCount == 0 && _unboundedSerial == 0;
 
-    /// <summary>Recorded work in <paramref name="serial"/> stores into this range.</summary>
-    public void Note(
+    /// <summary>
+    /// Recorded work in <paramref name="serial"/> stores into this range. Returns the
+    /// write's sequence (see <see cref="LatestSequence"/>), or zero when nothing was recorded.
+    /// </summary>
+    public ulong Note(
         ulong address,
         ulong size,
         ulong serial,
@@ -117,15 +125,16 @@ internal sealed class MetalGpuWriteRanges
     {
         if (size == 0 || serial == 0 || serial <= _retiredSerial || address > ulong.MaxValue - size)
         {
-            return;
+            return 0;
         }
 
         _recorded++;
+        var sequence = ++_sequence;
         var end = address + size;
         if (origin == MetalGpuWriteOrigin.EndOfPipeLabel)
         {
-            NoteLabel(address, end, serial);
-            return;
+            NoteLabel(address, end, serial, sequence);
+            return sequence;
         }
 
         // Draws and dispatches bind the same storage range over and over inside one
@@ -140,7 +149,8 @@ internal sealed class MetalGpuWriteRanges
 
             candidate.Start = Math.Min(candidate.Start, address);
             candidate.End = Math.Max(candidate.End, end);
-            return;
+            candidate.Sequence = sequence;
+            return sequence;
         }
 
         if (_count == _records.Length)
@@ -155,7 +165,7 @@ internal sealed class MetalGpuWriteRanges
             }
         }
 
-        _records[_count++] = new Record { Start = address, End = end, Serial = serial, Origin = origin };
+        _records[_count++] = new Record { Start = address, End = end, Serial = serial, Sequence = sequence, Origin = origin };
         _recordsByOrigin[(int)origin]++;
         if (address < _boundsStart)
         {
@@ -166,9 +176,11 @@ internal sealed class MetalGpuWriteRanges
         {
             _boundsEnd = end;
         }
+
+        return sequence;
     }
 
-    private void NoteLabel(ulong address, ulong end, ulong serial)
+    private void NoteLabel(ulong address, ulong end, ulong serial, ulong sequence)
     {
         _recordsByOrigin[(int)MetalGpuWriteOrigin.EndOfPipeLabel]++;
         // The same label is rewritten by consecutive submissions; keep it exact and
@@ -179,6 +191,7 @@ internal sealed class MetalGpuWriteRanges
             if (candidate.Start == address && candidate.End == end)
             {
                 candidate.Serial = Math.Max(candidate.Serial, serial);
+                candidate.Sequence = sequence;
                 return;
             }
         }
@@ -193,6 +206,7 @@ internal sealed class MetalGpuWriteRanges
             Start = address,
             End = end,
             Serial = serial,
+            Sequence = sequence,
             Origin = MetalGpuWriteOrigin.EndOfPipeLabel,
         };
         if (address < _boundsStart)
@@ -221,6 +235,11 @@ internal sealed class MetalGpuWriteRanges
     /// </summary>
     public void NoteUnbounded(ulong serial)
     {
+        if (serial != 0 && serial > _retiredSerial && serial >= _unboundedSerial)
+        {
+            _unboundedSequence = ++_sequence;
+        }
+
         if (serial > _unboundedSerial)
         {
             _unboundedSerial = serial;
@@ -284,6 +303,43 @@ internal sealed class MetalGpuWriteRanges
         }
 
         return pending;
+    }
+
+    /// <summary>
+    /// The sequence of the newest recorded write overlapping this range, or zero when no
+    /// live record does. Every write gets a larger sequence than the ones recorded before
+    /// it, and a merged or folded record carries the largest of its parts, so a write is
+    /// the last to land over a range only when its sequence is this value. Call after
+    /// <see cref="PendingSerial"/>, which retires what has completed.
+    /// </summary>
+    public ulong LatestSequence(ulong address, ulong size)
+    {
+        if (size == 0 || address > ulong.MaxValue - size)
+        {
+            return 0;
+        }
+
+        var end = address + size;
+        var latest = _unboundedSerial != 0 ? _unboundedSequence : 0;
+        for (var index = 0; index < _count; index++)
+        {
+            ref var record = ref _records[index];
+            if (record.Sequence > latest && record.End > address && record.Start < end)
+            {
+                latest = record.Sequence;
+            }
+        }
+
+        for (var index = 0; index < _labelCount; index++)
+        {
+            ref var label = ref _labels[index];
+            if (label.Sequence > latest && label.End > address && label.Start < end)
+            {
+                latest = label.Sequence;
+            }
+        }
+
+        return latest;
     }
 
     /// <summary>Drops every record the GPU has finished.</summary>
@@ -396,6 +452,8 @@ internal sealed class MetalGpuWriteRanges
                     last.Serial = current.Serial;
                     last.Origin = current.Origin;
                 }
+
+                last.Sequence = Math.Max(last.Sequence, current.Sequence);
 
                 last.End = Math.Max(last.End, current.End);
                 folded[^1] = last;

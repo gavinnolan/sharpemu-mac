@@ -87,6 +87,39 @@ public sealed class MetalGpuWriteRangesTests
     }
 
     [Fact]
+    public void TheLatestSequenceOverARangeIsItsNewestWriteAndFoldingKeepsTheMax()
+    {
+        var ranges = new MetalGpuWriteRanges();
+        var first = ranges.Note(0x1_0000, 0x1000, serial: 5);
+        var second = ranges.Note(0x1_0800, 0x1000, serial: 6);
+        Assert.True(second > first);
+        Assert.Equal(second, ranges.LatestSequence(0x1_0800, 4));
+        Assert.Equal(first, ranges.LatestSequence(0x1_0000, 4));
+        Assert.Equal(0UL, ranges.LatestSequence(0x9_0000, 4));
+
+        // A write that merges into an earlier record of its submission carries its own,
+        // newer sequence over the whole record.
+        var merged = ranges.Note(0x1_0400, 0x10, serial: 5);
+        Assert.Equal(merged, ranges.LatestSequence(0x1_0000, 4));
+
+        // Folded records keep the largest sequence of their parts.
+        var folding = new MetalGpuWriteRanges();
+        var newest = 0UL;
+        for (var index = 0UL; index < 4096; index++)
+        {
+            newest = Math.Max(newest, folding.Note(0x10_0000 + (index * 0x2000), 0x1000, serial: index + 1));
+        }
+
+        Assert.True(folding.Folds > 0);
+        Assert.Equal(newest, folding.LatestSequence(0x10_0000, 0x2000UL * 4096));
+        for (var index = 0UL; index < 4096; index += 97)
+        {
+            var address = 0x10_0000 + (index * 0x2000);
+            Assert.True(folding.LatestSequence(address, 4) >= index + 1);
+        }
+    }
+
+    [Fact]
     public void EveryWriteOriginHasAReportName()
     {
         Assert.Equal(MetalGpuWriteOrigins.Count, MetalGpuWriteOrigins.Names.Length);

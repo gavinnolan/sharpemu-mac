@@ -814,6 +814,7 @@ internal sealed partial class MetalRenderHost :
         ReportWait(serial, started, committedAt, waited, in profile, reason, partial: false);
         _guestMemory.NoteCompleted(serial);
         _gpuWrites.Clear(serial);
+        RetirePendingCopies(serial);
         _cpOverlay.Retire(serial);
     }
 
@@ -852,6 +853,7 @@ internal sealed partial class MetalRenderHost :
         _guestMemory.NoteCompleted(serial);
         var completed = CompletedSerial;
         _gpuWrites.Retire(completed);
+        RetirePendingCopies(completed);
         _cpOverlay.Retire(completed);
         Interlocked.Increment(ref _partialWaits);
     }
@@ -992,7 +994,9 @@ internal sealed partial class MetalRenderHost :
             return;
         }
 
-        _gpuWrites.Note(address, size, SubmissionSerial, origin);
+        var serial = SubmissionSerial;
+        var sequence = _gpuWrites.Note(address, size, serial, origin);
+        NotePendingCopyDestination(address, size, origin, serial, sequence);
     }
 
     /// <summary>
@@ -1402,6 +1406,11 @@ internal sealed partial class MetalRenderHost :
         if (!_gpuWrites.MayCover(address, size) && !_imageCache.MayOwn(address, size))
         {
             return _memory.TryRead(address, destination);
+        }
+
+        if (TryReadThroughPendingCopy(address, destination))
+        {
+            return true;
         }
 
         WaitForGuestBytes(address, size);
@@ -1928,6 +1937,7 @@ internal sealed partial class MetalRenderHost :
             .Append(" gpu_fills=").Append(Interlocked.Exchange(ref _gpuFills, 0))
             .Append(" cleared_fills=").Append(Interlocked.Exchange(ref _absorbedFills, 0))
             .Append(" host_copies=").Append(Interlocked.Exchange(ref _hostCopies, 0))
+            .Append(TakeCopyReadCounters())
             .Append(" inline_eop=").Append(TakeInlineCompletions())
             .Append(" gpu_labels=").Append(labels.GpuTimed)
             .Append(" host_labels=").Append(labels.WithoutWindow)
@@ -1950,6 +1960,7 @@ internal sealed partial class MetalRenderHost :
             .Append(" resident=").Append(_guestMemory.ResidentBuffers.Length)
             .Append(" windows_touched=").Append(System.Numerics.BitOperations.PopCount(_guestMemory.TouchedWindows));
         Console.Error.WriteLine($"[METAL-V2][WAITS]{reasons}");
+        WriteCopyReadTraces();
         var causes = _imageCache.TakeTransferCauses();
         var subRange = _imageCache.TakePartialTransfers();
         var aliases = _imageCache.AliasCounters;
