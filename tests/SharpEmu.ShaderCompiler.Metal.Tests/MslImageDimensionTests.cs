@@ -18,7 +18,7 @@ public sealed class MslImageDimensionTests(ITestOutputHelper output)
     [Theory]
     [InlineData("ImageBvhIntersectRay")]
     [InlineData("ImageBvh64IntersectRay")]
-    public void UnimplementedBvhIntersectionIsReportedRatherThanReturningAFalseMiss(string opcode)
+    public void ABvhIntersectionWithAnImageControlIsRefusedRatherThanSampled(string opcode)
     {
         Assert.False(Gen5ImageFixtures.TryCompile(opcode, Gen5ImageFixtures.ImageType2D, out _, out var error));
         Assert.Contains("BVH", error);

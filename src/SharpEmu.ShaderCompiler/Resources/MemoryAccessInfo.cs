@@ -185,6 +185,9 @@ public sealed class MemoryAccessTable
                 case Gen5ImageControl image:
                     table.Add(FromImage(instruction, image));
                     break;
+                case Gen5RayIntersectControl:
+                    table.Add(FromRayIntersect(instruction));
+                    break;
                 case Gen5DataShareControl share:
                     if (instruction.Opcode is "DsSwizzleB32" or "DsBpermuteB32" or "DsPermuteB32" or "DsNop")
                     {
@@ -290,24 +293,22 @@ public sealed class MemoryAccessTable
         };
     }
 
+    // A BVH T# is not an image descriptor: the backend reads the nodes through device
+    // addresses, so nothing is materialized here. The decoder gives the BVH opcodes a
+    // Gen5RayIntersectControl, never a Gen5ImageControl.
+    private static MemoryAccessInfo FromRayIntersect(Gen5ShaderInstruction instruction) => new()
+    {
+        Pc = instruction.Pc,
+        Opcode = instruction.Opcode,
+        Kind = MemoryResourceKind.None,
+        Access = MemoryAccess.None,
+        DataDwords = 4,
+        ComponentCount = 4,
+    };
+
     private static MemoryAccessInfo FromImage(Gen5ShaderInstruction instruction, Gen5ImageControl control)
     {
         var opcode = instruction.Opcode;
-        if (opcode is "ImageBvhIntersectRay" or "ImageBvh64IntersectRay")
-        {
-            // A BVH T# is not an image descriptor: the backend reads the nodes
-            // through device addresses, so nothing is materialized here.
-            return new MemoryAccessInfo
-            {
-                Pc = instruction.Pc,
-                Opcode = opcode,
-                Kind = MemoryResourceKind.None,
-                Access = MemoryAccess.None,
-                DataDwords = 4,
-                ComponentCount = 4,
-            };
-        }
-
         var atomic = opcode.StartsWith("ImageAtomic", StringComparison.Ordinal);
         var store = opcode.StartsWith("ImageStore", StringComparison.Ordinal);
         var sampled = opcode.StartsWith("ImageSample", StringComparison.Ordinal) ||

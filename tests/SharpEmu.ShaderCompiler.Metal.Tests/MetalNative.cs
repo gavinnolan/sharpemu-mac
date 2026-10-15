@@ -195,7 +195,8 @@ internal static partial class MetalNative
         out string error,
         nint texture = 0,
         nint sampler = 0,
-        uint threadgroupCount = 1)
+        uint threadgroupCount = 1,
+        IReadOnlyList<DeviceTable>? tables = null)
     {
         result = [];
         stepCapHits = 0;
@@ -254,13 +255,16 @@ internal static partial class MetalNative
                     case MslArgumentFieldKind.Pointer:
                         // A read-only table the host fills before the encode: the user
                         // data words, the flattened resource table, the address ranges.
-                        // Zero-filled here, which is what an untouched one holds.
+                        // Zero-filled here, which is what an untouched one holds, unless
+                        // the caller supplies the binding's table.
                         BitConverter.TryWriteBytes(
-                            arguments.AsSpan((int)field.ByteOffset), SharedTableAddress());
+                            arguments.AsSpan((int)field.ByteOffset),
+                            FindTable(tables, field.Kind) is { } table ? SendULong(table.Buffer, Selector("gpuAddress")) : SharedTableAddress());
                         break;
                     case MslArgumentFieldKind.Word:
                         BitConverter.TryWriteBytes(
-                            arguments.AsSpan((int)field.ByteOffset), SharedTableDwords);
+                            arguments.AsSpan((int)field.ByteOffset),
+                            FindTable(tables, field.Kind) is { } counted ? counted.Count : SharedTableDwords);
                         break;
                 }
             }
@@ -278,9 +282,11 @@ internal static partial class MetalNative
                 library,
                 entryPoint,
                 [(argumentBuffer, (nuint)Gen5MslArgumentLayout.ResourcesBufferIndex), (pushBuffer, (nuint)Gen5MslArgumentLayout.PushDataBufferIndex)],
-                texture == 0
-                    ? [buffer, stepReport, pairLocks, SharedTable.Value]
-                    : [buffer, stepReport, pairLocks, texture, SharedTable.Value],
+                [
+                    buffer, stepReport, pairLocks, SharedTable.Value,
+                    .. texture == 0 ? Array.Empty<nint>() : [texture],
+                    .. (tables ?? []).SelectMany(static table => (nint[])[table.Buffer, .. table.Residents]),
+                ],
                 threadsPerThreadgroup,
                 buffer,
                 bufferContents.Length,

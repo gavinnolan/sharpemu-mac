@@ -13,6 +13,7 @@
     <Compile Include="../SharpEmu.ShaderCompiler.Metal.Tests/Gen5ComputeFixtures.cs" Link="Fixtures/Gen5ComputeFixtures.cs" />
     <Compile Include="../SharpEmu.ShaderCompiler.Metal.Tests/FakeGuestMemory.cs" Link="Fixtures/FakeGuestMemory.cs" />
     <Compile Include="../SharpEmu.ShaderCompiler.Metal.Tests/MetalNative.cs" Link="Fixtures/MetalNative.cs" />
+    <Compile Include="../SharpEmu.ShaderCompiler.Metal.Tests/MetalNative.DeviceMemory.cs" Link="Fixtures/MetalNative.DeviceMemory.cs" />
     <ProjectReference Include="../../src/graphics/SharpEmu.Gpu.Metal/SharpEmu.Gpu.Metal.csproj" />
     <!-- Fresh device workers need the same plain host-memory startup as the
          application before tracker Configure/Query; no guest CPU/UI is created. -->

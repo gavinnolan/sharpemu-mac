@@ -537,6 +537,10 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             case Gen5BufferMemoryControl buffer:
                 Use(buffer.ScalarResource, 4);
                 break;
+            case Gen5RayIntersectControl ray:
+                // The 128-bit BVH T# (RDNA2 ISA 8.2.10: R128 = 1).
+                Use(ray.ScalarResource, 4);
+                break;
         }
 
         // A record that lists every written register defines each once; a single listed

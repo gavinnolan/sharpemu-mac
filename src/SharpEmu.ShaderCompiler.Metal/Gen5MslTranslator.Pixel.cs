@@ -27,7 +27,9 @@ public static partial class Gen5MslTranslator
             error = string.Empty;
             if (instruction.Opcode is "ImageBvhIntersectRay" or "ImageBvh64IntersectRay")
             {
-                error = $"{instruction.Opcode}: Metal has no guest BVH descriptor/intersection implementation";
+                // The decoder gives the BVH opcodes a Gen5RayIntersectControl
+                // (TryEmitRayIntersect); with an image control the operands are not the ray's.
+                error = $"{instruction.Opcode}: a BVH intersection needs its ray-intersect control, not an image control";
                 return false;
             }
 

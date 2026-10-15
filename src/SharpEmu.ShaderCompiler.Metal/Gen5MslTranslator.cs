@@ -554,6 +554,7 @@ public static partial class Gen5MslTranslator
             }
 
             EmitFloat64PreludeIfUsed(source);
+            EmitBvhPreludeIfUsed(source);
             source.AppendLine();
 
             if (_stage == Gen5MslStage.Mesh)
@@ -1534,6 +1535,11 @@ public static partial class Gen5MslTranslator
             if (instruction.Control is Gen5ImageControl imageControl)
             {
                 return TryEmitImage(instruction, imageControl, out error);
+            }
+
+            if (instruction.Control is Gen5RayIntersectControl rayIntersect)
+            {
+                return TryEmitRayIntersect(instruction, rayIntersect, out error);
             }
 
             if (instruction.Control is Gen5ExportControl exportControl)
