@@ -1010,36 +1010,24 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var cachedBlock = cachedInfo.BytesPerBlock * cachedInfo.Samples;
         var requestedExtent = requested.BlockExtent;
         var cachedExtent = cachedInfo.BlockExtent;
-        if (requested.Data.Address == cachedInfo.Data.Address &&
+        var sameSurface = requested.Data.Address == cachedInfo.Data.Address &&
             requestedExtent.Width == cachedExtent.Width && requestedExtent.Height == cachedExtent.Height &&
-            requestedBlock == cachedBlock)
+            requestedBlock == cachedBlock;
+
+        // Same surface, reinterpreted: a compatible format binds through a view.
+        if (sameSurface && !exactFormat && requested.Data.Size == cachedInfo.Data.Size &&
+            requested.Resources == cachedInfo.Resources && requested.TileMode == cachedInfo.TileMode &&
+            requested.Type == cachedInfo.Type && requested.IsBlock == cachedInfo.IsBlock &&
+            ViewFormatRules.AreCompatible(cachedInfo.PixelFormat, requested.PixelFormat))
         {
-            // Same surface, reinterpreted: a compatible format binds through a view.
-            if (!exactFormat && requested.Data.Size == cachedInfo.Data.Size &&
-                requested.Resources == cachedInfo.Resources && requested.TileMode == cachedInfo.TileMode &&
-                requested.Type == cachedInfo.Type && requested.IsBlock == cachedInfo.IsBlock &&
-                ViewFormatRules.AreCompatible(cachedInfo.PixelFormat, requested.PixelFormat))
-            {
-                return new OverlapResolution(mergedImageIdentifier.IsValid ? mergedImageIdentifier : cachedImageIdentifier);
-            }
-
-            // Anything else at the same address needs its own texture. A surface the
-            // title is still using both ways keeps both, because dropping one of a
-            // pair it alternates between every frame recreates a texture and uploads
-            // it again each time: Silent Hill's 3840x2160 depth buffer, written as
-            // D32S8 and then sampled as R32F, paid three transfers of it per frame.
-            // Aliases stay coherent through SynchronizeAliases on acquisition.
-            if (!safeToDelete)
-            {
-                _aliasesKept++;
-                return new OverlapResolution(mergedImageIdentifier);
-            }
-
-            ReportRelease(MetalImageReleaseCause.SameAddressReplaced, cachedInfo, requested, default);
-            ReleaseImage(cachedImageIdentifier, MetalImageReleaseCause.SameAddressReplaced);
-            return new OverlapResolution(mergedImageIdentifier);
+            return new OverlapResolution(mergedImageIdentifier.IsValid ? mergedImageIdentifier : cachedImageIdentifier);
         }
 
+        // One layer or mip of the cached image binds as a view of it, at its base address
+        // too: layer 0 of an array is the address the array starts at. Kept as an alias
+        // instead, Demon's Souls' 3840x2160 four-layer R32Uint G-buffer and the 2D target
+        // of its first layer took ownership from each other on every draw - a whole
+        // writeback and upload of both and a broken render pass, 19 times a frame.
         var requestedMip = requested.FindMatchingMipLevel(cachedInfo);
         if (requestedMip >= 0)
         {
@@ -1056,6 +1044,25 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         {
             ReportRelease(MetalImageReleaseCause.SubsetOfLarger, cachedInfo, requested, default);
             ReleaseImage(cachedImageIdentifier, MetalImageReleaseCause.SubsetOfLarger);
+            return new OverlapResolution(mergedImageIdentifier);
+        }
+
+        if (sameSurface)
+        {
+            // Anything else at the same address needs its own texture. A surface the
+            // title is still using both ways keeps both, because dropping one of a
+            // pair it alternates between every frame recreates a texture and uploads
+            // it again each time: Silent Hill's 3840x2160 depth buffer, written as
+            // D32S8 and then sampled as R32F, paid three transfers of it per frame.
+            // Aliases stay coherent through SynchronizeAliases on acquisition.
+            if (!safeToDelete)
+            {
+                _aliasesKept++;
+                return new OverlapResolution(mergedImageIdentifier);
+            }
+
+            ReportRelease(MetalImageReleaseCause.SameAddressReplaced, cachedInfo, requested, default);
+            ReleaseImage(cachedImageIdentifier, MetalImageReleaseCause.SameAddressReplaced);
             return new OverlapResolution(mergedImageIdentifier);
         }
 
