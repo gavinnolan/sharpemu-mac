@@ -31,6 +31,25 @@ internal sealed class SndPreviewPlayer
     private byte[]? _cachedWav;
 
     /// <summary>
+    /// Playback gain in [0, 1]. winmm has no per-sound gain, so this sets the
+    /// process's wave-out volume, which PlaySound plays through.
+    /// </summary>
+    public double Volume
+    {
+        set
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                return;
+            }
+
+            var level = double.IsFinite(value) ? Math.Clamp(value, 0.0, 1.0) : 1.0;
+            var channel = (uint)Math.Round(level * 0xFFFF);
+            _ = waveOutSetVolume(0, channel | (channel << 16));
+        }
+    }
+
+    /// <summary>
     /// Keeps the music silent while set, even across <see cref="Play"/> and
     /// <see cref="Resume"/>; the track stays ready so clearing it and
     /// resuming restarts the music.
@@ -339,4 +358,7 @@ internal sealed class SndPreviewPlayer
     [DllImport("winmm.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool PlaySound(nint sound, nint module, uint flags);
+
+    [DllImport("winmm.dll")]
+    private static extern uint waveOutSetVolume(nint waveOut, uint volume);
 }

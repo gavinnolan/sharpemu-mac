@@ -201,6 +201,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         ShaderSource? pixelSource = null;
         PixelInputInfo? pixelInfo = null;
         Gen5PixelOutputBinding[] pixelOutputs = [];
+        var dropUnwritten = false;
         var attributeCount = 0u;
         if (pixelActive)
         {
@@ -317,6 +318,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             PixelInput = pixelInfo ?? new PixelInputInfo(),
             SolidClear = solidClear,
             DisableBlending = disableBlending,
+            DropUnwrittenColorTargets = dropUnwritten,
             PositionStream = FindPositionStream(vertexInfo),
         };
     }

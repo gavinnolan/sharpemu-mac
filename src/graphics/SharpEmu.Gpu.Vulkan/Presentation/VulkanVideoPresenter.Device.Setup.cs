@@ -830,6 +830,13 @@ internal static unsafe partial class VulkanVideoPresenter
                     "translated shaders using storage buffers in vertex/fragment stages may fail.");
             }
 
+            if (!supportedFeatures.DualSrcBlend)
+            {
+                Console.Error.WriteLine(
+                    "[LOADER][WARN] GPU does not support dualSrcBlend " +
+                    "blends that read SRC1 factors fall back to a single source.");
+            }
+
             if (!supportedFeatures.ShaderImageGatherExtended)
             {
                 Console.Error.WriteLine(

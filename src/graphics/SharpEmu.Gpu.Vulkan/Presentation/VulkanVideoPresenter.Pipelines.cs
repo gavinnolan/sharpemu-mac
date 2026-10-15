@@ -122,6 +122,7 @@ internal static unsafe partial class VulkanVideoPresenter
         bool IShaderPipelineHost.ExecGuardElisionEnabled => _physicalDeviceVendorId != NvidiaVendorId;
         bool IShaderPipelineHost.PerVertexPixelInputsSupported => _supportsPerVertexPixelInputs;
         bool IShaderPipelineHost.ClipDistanceEnabled => _supportsShaderClipDistance;
+        bool IShaderPipelineHost.SupportsDualSourceBlend => _supportsDualSourceBlend;
 
         RenderHostLimits IShaderPipelineHost.Limits => _renderHostLimits;
 

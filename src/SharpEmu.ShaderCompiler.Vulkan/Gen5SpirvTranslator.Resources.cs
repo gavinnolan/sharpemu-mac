@@ -53,6 +53,9 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
+            // A dual-source second output shares location 0 with index 1; every other output
+            // has index 0 and its own location.
+            var targets = request.PixelOutputs.Count(output => output.Index == 0);
             if (request.PixelOutputs.Select(output => output.GuestSlot).Distinct().Count() != request.PixelOutputs.Count ||
                 request.PixelOutputs.Select(output => (output.HostLocation, output.BlendSourceIndex)).Distinct().Count() != request.PixelOutputs.Count)
             {
@@ -60,9 +63,10 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
-            if (request.PixelOutputs.Any(output => output.HostLocation >= request.PixelOutputs.Count))
+            if (request.PixelOutputs.Any(output => output.HostLocation >= targets || output.Index > 1 ||
+                    (output.Index == 1 && (output.HostLocation != 0 || targets != 1))))
             {
-                error = "pixel output host locations must be dense in the 0..N-1 range";
+                error = "pixel output host locations must be dense in the 0..N-1 range, with a second source only at location 0 of one target";
                 return false;
             }
         }
