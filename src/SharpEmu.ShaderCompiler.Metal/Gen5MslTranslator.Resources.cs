@@ -534,11 +534,79 @@ public static partial class Gen5MslTranslator
             LoadWords: null,
             ZeroInvalidFormat: true);
 
-        // A raw dword, subword-store or formatted-load buffer access whose V# lives in scalar
-        // registers: no host binding exists, so the access runs over the device-address page
-        // table, bounded by the descriptor. Out-of-range reads are zero and out-of-range
-        // stores are dropped. A formatted load decodes the format and destination swizzle of
-        // the descriptor's word 3 on the device, a typed one converts with its own format.
+        // A formatted or typed store through a V# held in scalar registers. The unified
+        // format (word 3's, or a typed store's own) is decoded on the device by the prelude
+        // table; each transferred component the format has is encoded with the bound path's
+        // sharpemu_format_encode and its bits merged into device memory. As on the bound
+        // path, all components are stored or the element is dropped: a zero descriptor
+        // format, a format the table cannot decode, or an element past the descriptor's size.
+        private void EmitDeviceFormatStore(
+            (string Base, string Size, string Stride) descriptor,
+            string byteOffset,
+            string descriptorWord3,
+            string unifiedFormat,
+            uint vectorData,
+            uint componentCount)
+        {
+            var entry = Temp("uint", $"sharpemu_gfx10_formats[{unifiedFormat}]");
+            var dataFormat = Temp("uint", $"{entry} & 0xFFu");
+            var numberFormat = Temp("uint", $"({entry} >> 8) & 0xFFu");
+            var layouts = new (string ByteOffset, string BitOffset, string Bits)[componentCount];
+            var elementBytes = "0u";
+            for (uint component = 0; component < componentCount; component++)
+            {
+                var componentByteOffset = Temp("uint", "0u");
+                var bitOffset = Temp("uint", "0u");
+                var bits = Temp("uint", "0u");
+                Line($"sharpemu_format_layout({dataFormat}, {component}u, {componentByteOffset}, {bitOffset}, {bits});");
+                layouts[component] = (componentByteOffset, bitOffset, bits);
+                elementBytes = Temp(
+                    "uint",
+                    $"max({elementBytes}, {bits} == 0u ? 0u : {componentByteOffset} + (({bitOffset} + {bits} + 7u) >> 3u))");
+            }
+
+            var allowed = Temp(
+                "bool",
+                $"(({descriptorWord3} >> 12) & 0x7Fu) != 0u && {dataFormat} != 0u && {elementBytes} != 0u && " +
+                $"(ulong){elementBytes} <= {descriptor.Size} && (ulong){byteOffset} <= {descriptor.Size} - (ulong){elementBytes}");
+            Line($"if ({ExecCondition(allowed)})");
+            Line("{");
+            _indent++;
+            var mask = FormatULong(DeviceAddressPaging.AddressMask);
+            for (uint component = 0; component < componentCount; component++)
+            {
+                var (componentByteOffset, bitOffset, bits) = layouts[component];
+                Line($"if ({bits} != 0u)");
+                Line("{");
+                _indent++;
+                // The component's bits merge into the one or two dwords they touch.
+                var address = Temp("ulong", $"({descriptor.Base} + (ulong){byteOffset} + (ulong){componentByteOffset}) & {mask}");
+                var position = Temp("uint", $"(uint)({address} & 3ul) * 8u + {bitOffset}");
+                var aligned = Temp("ulong", $"({address} & ~3ul) + (ulong)({position} >> 5u) * 4ul");
+                var shift = Temp("uint", $"{position} & 31u");
+                var bitMask = Temp("uint", $"{bits} >= 32u ? 0xFFFFFFFFu : (1u << {bits}) - 1u");
+                var encoded = Temp(
+                    "uint",
+                    $"sharpemu_format_encode(v[{vectorData + component}], {bits}, {numberFormat}, {dataFormat}) & {bitMask}");
+                var crosses = Temp("bool", $"{shift} + {bits} > 32u");
+                Line($"sharpemu_store_device_masked_word({DeviceArguments}, {aligned}, {encoded} << {shift}, {bitMask} << {shift});");
+                Line(
+                    $"sharpemu_store_device_masked_word({DeviceArguments}, {aligned} + 4ul, " +
+                    $"{crosses} ? ({encoded} >> (32u - {shift})) : 0u, {crosses} ? ({bitMask} >> (32u - {shift})) : 0u);");
+                _indent--;
+                Line("}");
+            }
+
+            _indent--;
+            Line("}");
+        }
+
+        // A buffer access whose V# lives in scalar registers: no host binding exists, so the
+        // access runs over the device-address page table, bounded by the descriptor, with
+        // the bound path's opcode set. Out-of-range reads are zero and out-of-range stores
+        // are dropped. A formatted load or store decodes the format (and a load the
+        // destination swizzle) of the descriptor's word 3 on the device; a typed one
+        // converts with its own format. Atomics run on the backing memory's words.
         private bool TryEmitDeviceDescriptorBufferMemory(
             Gen5ShaderInstruction instruction,
             Gen5BufferMemoryControl control,
@@ -547,25 +615,25 @@ public static partial class Gen5MslTranslator
             error = string.Empty;
             var opcode = instruction.Opcode;
             var isFormatLoad = IsFormatBufferLoad(opcode);
-            if (!isFormatLoad &&
-                (control.Typed || opcode.StartsWith("TBuffer", StringComparison.Ordinal) ||
-                 opcode.Contains("Format", StringComparison.Ordinal)))
-            {
-                error = $"device buffer descriptor does not support the formatted access {opcode}";
-                return false;
-            }
-
-            if (opcode.StartsWith("BufferAtomic", StringComparison.Ordinal))
-            {
-                error = $"device buffer descriptor does not support the atomic access {opcode}";
-                return false;
-            }
-
-            var isStore = opcode.StartsWith("BufferStore", StringComparison.Ordinal);
+            var isFormatStore = IsFormatBufferStore(opcode);
+            var isAtomic = opcode.StartsWith("BufferAtomic", StringComparison.Ordinal);
+            var isStore = opcode.StartsWith("BufferStore", StringComparison.Ordinal) ||
+                opcode.StartsWith("TBufferStore", StringComparison.Ordinal);
             var isSubwordStore = TryGetSubdwordStoreInfo(opcode, out var storeBytes, out var sourceShift);
-            if (!isSubwordStore && !isFormatLoad &&
+            var isSubwordLoad = TryGetSubdwordLoadInfo(opcode, out var loadBytes, out var signExtend, out var d16, out var d16High);
+            if (!isSubwordStore && !isSubwordLoad && !isFormatLoad && !isFormatStore && !isAtomic &&
                 !opcode.StartsWith("BufferLoadDword", StringComparison.Ordinal) &&
                 !opcode.StartsWith("BufferStoreDword", StringComparison.Ordinal))
+            {
+                error = $"unsupported device buffer descriptor opcode {opcode}";
+                return false;
+            }
+
+            // The X2 forms run the operation over a dword pair, as the bound path does.
+            var atomic = isAtomic ? opcode["BufferAtomic".Length..] : string.Empty;
+            var atomicWords = atomic.EndsWith("X2", StringComparison.Ordinal) ? 2u : 1u;
+            atomic = atomicWords == 2 ? atomic[..^2] : atomic;
+            if (isAtomic && !TryGetAtomicExpression(atomic, "0u", "0u", out _))
             {
                 error = $"unsupported device buffer descriptor opcode {opcode}";
                 return false;
@@ -616,6 +684,91 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
+            var mask = DeviceAddressPaging.AddressMask;
+            // A typed store whose format does not decode is a raw dword store, as on the bound path.
+            if (isFormatStore &&
+                (!control.Typed ||
+                 (Gfx10UnifiedFormat.TryDecode(control.TypedFormat, out var typedDataFormat, out _) &&
+                  Gfx10UnifiedFormat.ComponentCount(typedDataFormat) != 0)))
+            {
+                var word3 = Temp("uint", ScalarExpression(instruction.Sources[1].Value + 3));
+                EmitDeviceFormatStore(
+                    descriptor,
+                    byteOffset,
+                    word3,
+                    control.Typed ? $"{control.TypedFormat}u" : $"(({word3} >> 12) & 0x7Fu)",
+                    control.VectorData,
+                    control.DwordCount);
+                return true;
+            }
+
+            if (isAtomic)
+            {
+                // Each dword runs as a device atomic on the word the page table maps it to.
+                // An access past the descriptor, unaligned or unmapped is not performed and
+                // returns zero, the bound path's out-of-range result.
+                var width = atomicWords * sizeof(uint);
+                var address = Temp("ulong", $"({descriptor.Base} + (ulong){byteOffset}) & {FormatULong(mask)}");
+                var inRange = Temp(
+                    "bool",
+                    $"{width}ul <= {descriptor.Size} && (ulong){byteOffset} <= {descriptor.Size} - {width}ul && ({address} & 3ul) == 0ul");
+                var originals = new string[atomicWords];
+                for (uint word = 0; word < atomicWords; word++)
+                {
+                    originals[word] = Temp("uint", "0u");
+                }
+
+                Line($"if ({ExecCondition(inRange)})");
+                Line("{");
+                _indent++;
+                for (uint word = 0; word < atomicWords; word++)
+                {
+                    // MUBUF CMPSWAP reads the new value from VDATA and the comparator from
+                    // the register after it (RDNA2 sections 8.1/12.14).
+                    TryGetAtomicExpression(
+                        atomic,
+                        $"v[{control.VectorData + word}]",
+                        $"v[{control.VectorData + 1}]",
+                        out var build);
+                    var valid = Temp("bool", "false");
+                    var wordAddress = word == 0 ? address : $"{address} + {word * sizeof(uint)}ul";
+                    var pointer = Temp("device uint*", $"sharpemu_resolve_device_address({DeviceArguments}, {wordAddress}, {valid})");
+                    Line($"if ({valid})");
+                    Line("{");
+                    _indent++;
+                    Line($"{originals[word]} = {build(pointer)};");
+                    _indent--;
+                    Line("}");
+                }
+
+                _indent--;
+                Line("}");
+                if (control.Glc)
+                {
+                    // GLC returns the pre-operation words in VDATA.
+                    for (uint word = 0; word < atomicWords; word++)
+                    {
+                        StoreVector(control.VectorData + word, originals[word]);
+                    }
+                }
+
+                return true;
+            }
+
+            if (isSubwordLoad)
+            {
+                var inRange = Temp("bool", $"((ulong){byteOffset} + {loadBytes - 1}ul) < {descriptor.Size}");
+                var address = Temp("ulong", $"({descriptor.Base} + (ulong){byteOffset}) & {FormatULong(mask)}");
+                StoreSubdwordLoad(
+                    control.VectorData,
+                    $"{inRange} ? (sharpemu_load_device_unaligned({DeviceArguments}, {address}, {loadBytes}u) & {FormatUInt(loadBytes == 1 ? 0xFFu : 0xFFFFu)}) : 0u",
+                    loadBytes,
+                    signExtend,
+                    d16,
+                    d16High);
+                return true;
+            }
+
             if (!isStore)
             {
                 for (uint index = 0; index < control.DwordCount; index++)
@@ -627,7 +780,6 @@ public static partial class Gen5MslTranslator
                 return true;
             }
 
-            var mask = DeviceAddressPaging.AddressMask;
             if (isSubwordStore)
             {
                 var inRange = Temp("bool", $"((ulong){byteOffset} + {storeBytes - 1}ul) < {descriptor.Size}");
@@ -684,8 +836,9 @@ public static partial class Gen5MslTranslator
                     return true;
                 }
 
-                error = $"runtime buffer descriptor has no candidate table for {instruction.Opcode}";
-                return false;
+                // Any other access reads the V# its scalar registers hold when it runs and goes
+                // through the device-address page table, which the tracker bound for it.
+                return TryEmitDeviceDescriptorBufferMemory(instruction, control, out error);
             }
 
             if (table.CandidateCount == 0)
@@ -996,26 +1149,13 @@ public static partial class Gen5MslTranslator
 
             if (TryGetSubdwordLoadInfo(memoryOpcode, out var loadBytes, out var signExtend, out var d16, out var d16High))
             {
-                var loaded = Temp(
-                    "uint",
-                    $"sharpemu_load_device_unaligned({DeviceArguments}, {address}, {loadBytes}u) & {FormatUInt(loadBytes == 1 ? 0xFFu : 0xFFFFu)}");
-                if (signExtend)
-                {
-                    loaded = Temp("uint", $"(uint)extract_bits(as_type<int>({loaded}), 0u, {loadBytes * 8}u)");
-                }
-
-                var destination = control.DestinationVectorRegister;
-                if (!d16)
-                {
-                    StoreVector(destination, loaded);
-                    return true;
-                }
-
-                StoreVector(
-                    destination,
-                    d16High
-                        ? $"(v[{destination}] & 0x0000FFFFu) | (({loaded} & 0xFFFFu) << 16)"
-                        : $"(v[{destination}] & 0xFFFF0000u) | ({loaded} & 0xFFFFu)");
+                StoreSubdwordLoad(
+                    control.DestinationVectorRegister,
+                    $"sharpemu_load_device_unaligned({DeviceArguments}, {address}, {loadBytes}u) & {FormatUInt(loadBytes == 1 ? 0xFFu : 0xFFFFu)}",
+                    loadBytes,
+                    signExtend,
+                    d16,
+                    d16High);
                 return true;
             }
 
@@ -1035,6 +1175,29 @@ public static partial class Gen5MslTranslator
             }
 
             return true;
+        }
+
+        // A zero-extended byte or short read from device memory into its destination: sign
+        // extended for the Sbyte/Sshort forms, merged into one half of the register for D16.
+        private void StoreSubdwordLoad(uint destination, string zeroExtended, uint loadBytes, bool signExtend, bool d16, bool d16High)
+        {
+            var loaded = Temp("uint", zeroExtended);
+            if (signExtend)
+            {
+                loaded = Temp("uint", $"(uint)extract_bits(as_type<int>({loaded}), 0u, {loadBytes * 8}u)");
+            }
+
+            if (!d16)
+            {
+                StoreVector(destination, loaded);
+                return;
+            }
+
+            StoreVector(
+                destination,
+                d16High
+                    ? $"(v[{destination}] & 0x0000FFFFu) | (({loaded} & 0xFFFFu) << 16)"
+                    : $"(v[{destination}] & 0xFFFF0000u) | ({loaded} & 0xFFFFu)");
         }
 
         // Routes each lane of an aperture-derived FLAT access like the hardware: LDS

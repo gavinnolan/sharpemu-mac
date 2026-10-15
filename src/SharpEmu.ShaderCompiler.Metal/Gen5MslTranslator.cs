@@ -316,7 +316,7 @@ public static partial class Gen5MslTranslator
                     }
 
                     _usesFormatLoads |= IsFormatBufferLoad(instruction.Opcode) ||
-                        instruction.Opcode.StartsWith("TBufferStoreFormat", StringComparison.Ordinal);
+                        IsFormatBufferStore(instruction.Opcode);
                     if (instruction.Control is Gen5InterpolationControl interpolationControl)
                     {
                         _pixelAttributes.Add(interpolationControl.Attribute);
@@ -2642,6 +2642,11 @@ public static partial class Gen5MslTranslator
         private static bool IsFormatBufferLoad(string opcode) =>
             opcode.StartsWith("BufferLoadFormat", StringComparison.Ordinal) ||
             opcode.StartsWith("TBufferLoadFormat", StringComparison.Ordinal);
+
+        // BUFFER_STORE_FORMAT_* and TBUFFER_STORE_FORMAT_* encode through the format prelude.
+        private static bool IsFormatBufferStore(string opcode) =>
+            opcode.StartsWith("BufferStoreFormat", StringComparison.Ordinal) ||
+            opcode.StartsWith("TBufferStoreFormat", StringComparison.Ordinal);
 
         private string BufferBytes(int bindingIndex) =>
             $"{ResourcesName}.buffer_bytes[{bindingIndex}]";

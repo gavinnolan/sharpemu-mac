@@ -70,20 +70,110 @@ public sealed class Gen5MslDeviceBufferTests
         Assert.Equal(2, CountOccurrences(source, "sharpemu_store_device_dword(sharpemu_ranges"));
     }
 
-    [Fact]
-    public void ABufferAtomicThroughADeviceDescriptorIsRejectedExplicitly()
+    [Theory]
+    [InlineData("BufferAtomicAdd", 1u, false, "atomic_fetch_add_explicit(")]
+    [InlineData("BufferAtomicAdd", 1u, true, "atomic_fetch_add_explicit(")]
+    [InlineData("BufferAtomicSub", 1u, true, "atomic_fetch_sub_explicit(")]
+    [InlineData("BufferAtomicSmin", 1u, false, "atomic_fetch_min_explicit((device atomic_int*)")]
+    [InlineData("BufferAtomicUmax", 1u, true, "atomic_fetch_max_explicit((device atomic_uint*)")]
+    [InlineData("BufferAtomicAnd", 1u, false, "atomic_fetch_and_explicit(")]
+    [InlineData("BufferAtomicXor", 1u, false, "atomic_fetch_xor_explicit(")]
+    [InlineData("BufferAtomicSwap", 1u, true, "atomic_exchange_explicit(")]
+    [InlineData("BufferAtomicCmpswap", 2u, true, "sharpemu_atomic_compare_swap(")]
+    [InlineData("BufferAtomicInc", 1u, true, "sharpemu_atomic_step(")]
+    [InlineData("BufferAtomicDec", 1u, false, "sharpemu_atomic_step(")]
+    [InlineData("BufferAtomicFmin", 1u, true, "sharpemu_atomic_float_minmax(")]
+    [InlineData("BufferAtomicFmax", 1u, false, "sharpemu_atomic_float_minmax(")]
+    [InlineData("BufferAtomicSwapX2", 2u, true, "atomic_exchange_explicit(")]
+    [InlineData("BufferAtomicOrX2", 2u, false, "atomic_fetch_or_explicit(")]
+    public void ABufferAtomicThroughADeviceDescriptorRunsOnTheMappedWord(string opcode, uint dwords, bool glc, string operation)
     {
-        var program = new Gen5ShaderProgram(0x2000, [
+        Gen5ShaderInstruction[] Program(params Gen5ShaderInstruction[] access) => [
+            ReadFirstLane(0, 12, 0),
+            MoveScalar(4, 13, 0),
+            MoveScalar(8, 14, 16),
+            MoveScalar(12, 15, 0),
+            ScalarBufferLoad(16, resourceRegister: 12, destination: 8, count: 4),
+            .. access,
+            End(32),
+        ];
+        var source = Compile(Program(BufferAccess(24, opcode, resourceRegister: 8, dwords: dwords, glc: glc)));
+        var baseline = Compile(Program());
+
+        // One page-table resolve per dword the operation touches: the X2 forms touch two.
+        const string resolve = "sharpemu_resolve_device_address(sharpemu_ranges";
+        var words = opcode.EndsWith("X2", StringComparison.Ordinal) ? 2 : 1;
+        Assert.Equal(CountOccurrences(baseline, resolve) + words, CountOccurrences(source, resolve));
+        Assert.Contains(operation, source, StringComparison.Ordinal);
+        Assert.Contains("& 3ul) == 0ul", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ABufferAtomicThroughARuntimeDescriptorWithoutACandidateTableRunsOnTheDevice()
+    {
+        // A V# read by s_load whose candidates cannot be enumerated used to abort with
+        // "runtime buffer descriptor has no candidate table"; its SGPRs hold the V#.
+        var source = Compile(
             ReadFirstLane(0, 4, 0),
             MoveScalar(4, 5, 0),
             ScalarLoad(8, baseRegister: 4, destination: 8, count: 4),
-            BufferAccess(16, "BufferAtomicAdd", resourceRegister: 8, dwords: 1),
-            End(24),
-        ]);
-        var request = Gen5ComputeFixtures.RequestOrThrow(program, ShaderStage.Compute, localSizeX: 1);
+            BufferAccess(16, "BufferAtomicAdd", resourceRegister: 8, dwords: 1, glc: true),
+            End(24));
 
-        Assert.False(Gen5MslTranslator.TryCompileProgram(request, out _, out var error));
-        Assert.Contains("BufferAtomicAdd", error, StringComparison.Ordinal);
+        Assert.Contains("atomic_fetch_add_explicit(", source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_resolve_device_address(sharpemu_ranges", source, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("BufferLoadUbyte", false, "")]
+    [InlineData("BufferLoadSbyte", true, "")]
+    [InlineData("BufferLoadUshort", false, "")]
+    [InlineData("BufferLoadSshort", true, "")]
+    [InlineData("BufferLoadUbyteD16", false, "& 0xFFFF0000u) |")]
+    [InlineData("BufferLoadUbyteD16Hi", false, "& 0x0000FFFFu) |")]
+    [InlineData("BufferLoadSbyteD16", true, "& 0xFFFF0000u) |")]
+    [InlineData("BufferLoadSbyteD16Hi", true, "& 0x0000FFFFu) |")]
+    [InlineData("BufferLoadShortD16", false, "& 0xFFFF0000u) |")]
+    [InlineData("BufferLoadShortD16Hi", false, "& 0x0000FFFFu) |")]
+    public void ASubdwordBufferLoadThroughADeviceDescriptorExtendsAndMergesLikeTheBoundPath(string opcode, bool signed, string merge)
+    {
+        // GTA V's compute shader 0x4481C2A89BEA7646 aborted with "unsupported device
+        // buffer descriptor opcode BufferLoadUshort".
+        var source = Compile(
+            ReadFirstLane(0, 4, 0),
+            MoveScalar(4, 5, 0),
+            ScalarLoad(8, baseRegister: 4, destination: 8, count: 4),
+            BufferAccess(16, opcode, resourceRegister: 8, dwords: 1),
+            End(24));
+
+        Assert.Contains("sharpemu_load_device_unaligned(sharpemu_ranges", source, StringComparison.Ordinal);
+        Assert.Equal(signed, source.Contains("extract_bits(as_type<int>(", StringComparison.Ordinal));
+        if (merge.Length != 0)
+        {
+            Assert.Contains(merge, source, StringComparison.Ordinal);
+        }
+    }
+
+    [Theory]
+    [InlineData("BufferLoadDwordx3", 3u, "sharpemu_load_device_dword(sharpemu_ranges")]
+    [InlineData("BufferStoreDwordx3", 3u, "sharpemu_store_device_dword(sharpemu_ranges")]
+    [InlineData("BufferStoreDwordx4", 4u, "sharpemu_store_device_dword(sharpemu_ranges")]
+    [InlineData("BufferStoreByte", 1u, "sharpemu_store_device_bytes(sharpemu_ranges")]
+    [InlineData("BufferStoreShortD16Hi", 1u, "sharpemu_store_device_bytes(sharpemu_ranges")]
+    public void ARawBufferAccessThroughADeviceDescriptorTouchesEachDword(string opcode, uint dwords, string call)
+    {
+        Gen5ShaderInstruction[] Program(params Gen5ShaderInstruction[] access) => [
+            ReadFirstLane(0, 4, 0),
+            MoveScalar(4, 5, 0),
+            ScalarLoad(8, baseRegister: 4, destination: 8, count: 4),
+            .. access,
+            End(24),
+        ];
+        var source = Compile(Program(BufferAccess(16, opcode, resourceRegister: 8, dwords: dwords)));
+        var baseline = Compile(Program());
+
+        var expected = call.Contains("bytes", StringComparison.Ordinal) ? 1 : (int)dwords;
+        Assert.Equal(CountOccurrences(baseline, call) + expected, CountOccurrences(source, call));
     }
 
     [Fact]
@@ -126,22 +216,48 @@ public sealed class Gen5MslDeviceBufferTests
         Assert.Contains("sharpemu_load_device_unaligned(sharpemu_ranges", source, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void AFormattedBufferStoreThroughADeviceDescriptorIsRejectedExplicitly()
+    [Theory]
+    [InlineData("BufferStoreFormatX", 1u)]
+    [InlineData("BufferStoreFormatXy", 2u)]
+    [InlineData("BufferStoreFormatXyzw", 4u)]
+    public void AFormattedBufferStoreThroughADeviceDescriptorEncodesWithItsWord3Format(string opcode, uint dwords)
     {
-        var program = new Gen5ShaderProgram(0x2000, [
+        var source = Compile(
             ReadFirstLane(0, 12, 0),
             MoveScalar(4, 13, 0),
             MoveScalar(8, 14, 16),
             MoveScalar(12, 15, 0),
             ScalarBufferLoad(16, resourceRegister: 12, destination: 8, count: 4),
-            BufferAccess(24, "BufferStoreFormatXyzw", resourceRegister: 8, dwords: 4),
-            End(32),
-        ]);
-        var request = Gen5ComputeFixtures.RequestOrThrow(program, ShaderStage.Compute, localSizeX: 1);
+            BufferAccess(24, opcode, resourceRegister: 8, dwords: dwords),
+            End(32));
 
-        Assert.False(Gen5MslTranslator.TryCompileProgram(request, out _, out var error));
-        Assert.Contains("formatted access BufferStoreFormatXyzw", error, StringComparison.Ordinal);
+        // The format comes from the V#'s word 3 in s11; each transferred component is
+        // encoded and merged into device memory through the page table.
+        Assert.Matches(@"uint t\d+ = s11;", source);
+        Assert.Contains("sharpemu_gfx10_formats[((", source, StringComparison.Ordinal);
+        Assert.Equal((int)dwords, CountOccurrences(source, "sharpemu_format_encode(v"));
+        // Each component merges into the one or two dwords its bits touch.
+        Assert.Equal(2 * (int)dwords, CountOccurrences(source, "sharpemu_store_device_masked_word(sharpemu_ranges"));
+    }
+
+    [Theory]
+    [InlineData("TBufferStoreFormatX", 1u, 22u)]
+    [InlineData("TBufferStoreFormatXy", 2u, 56u)]
+    [InlineData("TBufferStoreFormatXyzw", 4u, 56u)]
+    [InlineData("TBufferStoreFormatXyzw", 4u, 77u)]
+    public void ATypedBufferStoreThroughADeviceDescriptorEncodesWithItsOwnFormat(string opcode, uint dwords, uint format)
+    {
+        var source = Compile(
+            ReadFirstLane(0, 12, 0),
+            MoveScalar(4, 13, 0),
+            MoveScalar(8, 14, 16),
+            MoveScalar(12, 15, 0),
+            ScalarBufferLoad(16, resourceRegister: 12, destination: 8, count: 4),
+            BufferAccess(24, opcode, resourceRegister: 8, dwords: dwords, typedFormat: format),
+            End(32));
+
+        Assert.Contains($"sharpemu_gfx10_formats[{format}u]", source, StringComparison.Ordinal);
+        Assert.Equal(2 * (int)dwords, CountOccurrences(source, "sharpemu_store_device_masked_word(sharpemu_ranges"));
     }
 
     [Fact]
@@ -249,11 +365,13 @@ public sealed class Gen5MslDeviceBufferTests
     private static Gen5ShaderInstruction BufferLoad(uint pc, uint resourceRegister, uint dwords) =>
         BufferAccess(pc, dwords == 1 ? "BufferLoadDword" : $"BufferLoadDwordx{dwords}", resourceRegister, dwords);
 
-    private static Gen5ShaderInstruction BufferAccess(uint pc, string opcode, uint resourceRegister, uint dwords, uint? typedFormat = null)
+    private static Gen5ShaderInstruction BufferAccess(uint pc, string opcode, uint resourceRegister, uint dwords, uint? typedFormat = null, bool glc = false)
     {
         const uint vectorData = 4;
         var isStore = opcode.Contains("Store", StringComparison.Ordinal) || opcode.Contains("Atomic", StringComparison.Ordinal);
         var data = Enumerable.Range((int)vectorData, (int)dwords).Select(index => Gen5Operand.Vector((uint)index)).ToArray();
+        // A returning (GLC) atomic writes its pre-operation value back over VDATA.
+        var returned = glc && opcode.Contains("Atomic", StringComparison.Ordinal);
         return new Gen5ShaderInstruction(
             pc,
             typedFormat is null ? Gen5ShaderEncoding.Mubuf : Gen5ShaderEncoding.Mtbuf,
@@ -262,9 +380,9 @@ public sealed class Gen5MslDeviceBufferTests
             isStore
                 ? [Gen5Operand.Vector(0), Gen5Operand.Scalar(resourceRegister), Gen5Operand.Source(NullOperand), .. data]
                 : [Gen5Operand.Vector(0), Gen5Operand.Scalar(resourceRegister), Gen5Operand.Source(NullOperand)],
-            isStore ? [] : data,
+            isStore ? (returned ? data : []) : data,
             new Gen5BufferMemoryControl(
-                dwords, 0, vectorData, resourceRegister, 0, false, false, Glc: false, Slc: false,
+                dwords, 0, vectorData, resourceRegister, 0, false, false, Glc: glc, Slc: false,
                 Typed: typedFormat is not null, TypedFormat: typedFormat ?? 0));
     }
 }
