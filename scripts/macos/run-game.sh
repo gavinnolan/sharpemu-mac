@@ -103,8 +103,27 @@ PY
 # Machine-wide single-game lock; stale owners are cleared.
 mkdir -p "$(dirname "$SHARPEMU_GAME_LOCK")"
 LOCK_HELD=0
+# Waiters queue first come, first served: a run started back to back with the last one would
+# otherwise win the lock every time against one already polling. A ticket is named
+# <epoch>-<pid>; tickets of exited waiters are dropped.
+LOCK_QUEUE="$SHARPEMU_GAME_LOCK.queue"
+mkdir -p "$LOCK_QUEUE"
+LOCK_TICKET="$LOCK_QUEUE/$(date +%s)-$$"
+touch "$LOCK_TICKET"
+lock_turn() {
+  local ticket pid
+  for ticket in $(/bin/ls "$LOCK_QUEUE" 2>/dev/null | sort); do
+    pid="${ticket##*-}"
+    if ! ps -p "$pid" >/dev/null 2>&1; then rm -f "$LOCK_QUEUE/$ticket"; continue; fi
+    [[ "$LOCK_QUEUE/$ticket" == "$LOCK_TICKET" ]]
+    return
+  done
+  return 0
+}
 while :; do
-  if mkdir "$SHARPEMU_GAME_LOCK" 2>/dev/null; then echo $$ > "$SHARPEMU_GAME_LOCK/pid"; LOCK_HELD=1; break; fi
+  if lock_turn && mkdir "$SHARPEMU_GAME_LOCK" 2>/dev/null; then
+    echo $$ > "$SHARPEMU_GAME_LOCK/pid"; LOCK_HELD=1; rm -f "$LOCK_TICKET"; break
+  fi
   owner="$(cat "$SHARPEMU_GAME_LOCK/pid" 2>/dev/null || true)"
   if [[ -n "$owner" ]] && ! ps -p "$owner" >/dev/null 2>&1; then rm -rf "$SHARPEMU_GAME_LOCK"; continue; fi
   echo "waiting for game lock held by ${owner:-unknown}" >&2
