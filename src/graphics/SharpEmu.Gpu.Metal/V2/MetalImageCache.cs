@@ -815,6 +815,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         if (request.Description.HasMetadata)
         {
             image.Description.Metadata = request.Description.Metadata;
+            image.Description.Metadata.Range = ImageHtileRange(in image.Description, in request.Description);
             RegisterHtileMetadata(request.Description);
         }
 
@@ -848,33 +849,45 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // stencil slices: one padded 64 KiB-block S8 surface each, laid end to end from the
     // base. The image keeps the plane for every one of its layers - a cube bound one face
     // at a time still owns six stencil slices.
-    internal static GuestSpan ImageStencilPlane(in ImageDescription image, in ImageDescription request)
+    internal static GuestSpan ImageStencilPlane(in ImageDescription image, in ImageDescription request) =>
+        ImageLayerPlane(in image, in request, request.Stencil, "stencil");
+
+    // The HTILE range of a depth image, the same way: DB_HTILE_DATA_BASE also names slice 0,
+    // so a request for slices 0..SLICE_MAX carries SLICE_MAX + 1 HTILE slices, and the
+    // image keeps the HTILE of every one of its layers.
+    internal static GuestSpan ImageHtileRange(in ImageDescription image, in ImageDescription request) =>
+        ImageLayerPlane(in image, in request, request.Metadata.Range, "HTILE");
+
+    // A plane the request carries one slice per bound layer of, over every image layer:
+    // the request's per-slice stride, rebased to the image's slice 0.
+    private static GuestSpan ImageLayerPlane(
+        in ImageDescription image, in ImageDescription request, GuestSpan plane, string name)
     {
         var imageLayers = image.Resources.Layers;
         var requestLayers = request.Resources.Layers;
         var imageSlice = imageLayers == 0 ? 0 : image.Data.Size / imageLayers;
         if (imageLayers == 0 || requestLayers == 0 || requestLayers > imageLayers ||
-            image.Data.Size % imageLayers != 0 || request.Stencil.Size % requestLayers != 0 ||
+            image.Data.Size % imageLayers != 0 || plane.Size % requestLayers != 0 ||
             request.Data.Address < image.Data.Address || imageSlice == 0 ||
             (request.Data.Address - image.Data.Address) % imageSlice != 0)
         {
             throw GpuFatal.Fatal(
-                $"A stencil request does not bind layers of its depth image: " +
+                $"A {name} request does not bind layers of its depth image: " +
                 $"image=0x{image.Data.Address:X16}+0x{image.Data.Size:X} layers={imageLayers} " +
                 $"request=0x{request.Data.Address:X16}+0x{request.Data.Size:X} layers={requestLayers} " +
-                $"stencil=0x{request.Stencil.Address:X16}+0x{request.Stencil.Size:X}.");
+                $"{name}=0x{plane.Address:X16}+0x{plane.Size:X}.");
         }
 
         var firstLayer = (request.Data.Address - image.Data.Address) / imageSlice;
-        var stencilSlice = request.Stencil.Size / requestLayers;
-        if (firstLayer + requestLayers > imageLayers || request.Stencil.Address < stencilSlice * firstLayer)
+        var planeSlice = plane.Size / requestLayers;
+        if (firstLayer + requestLayers > imageLayers || plane.Address < planeSlice * firstLayer)
         {
             throw GpuFatal.Fatal(
-                $"A stencil request reaches past its depth image: firstLayer={firstLayer} layers={requestLayers} " +
-                $"imageLayers={imageLayers} stencil=0x{request.Stencil.Address:X16}+0x{request.Stencil.Size:X}.");
+                $"A {name} request reaches past its depth image: firstLayer={firstLayer} layers={requestLayers} " +
+                $"imageLayers={imageLayers} {name}=0x{plane.Address:X16}+0x{plane.Size:X}.");
         }
 
-        return new GuestSpan(request.Stencil.Address - (stencilSlice * firstLayer), stencilSlice * imageLayers);
+        return new GuestSpan(plane.Address - (planeSlice * firstLayer), planeSlice * imageLayers);
     }
 
     // SHARPEMU_METAL_V2_READONLY_DEPTH=0 treats every depth attachment as written again.
