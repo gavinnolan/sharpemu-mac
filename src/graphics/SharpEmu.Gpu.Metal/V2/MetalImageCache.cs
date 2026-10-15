@@ -666,6 +666,12 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         PromoteLinearView(image);
         WatchImage(imageIdentifier);
+        // A resolve or a depth copy writes one subresource, and taking GPU ownership
+        // drops whatever the image still owes from guest memory and its aliases. Take
+        // both first, as a colour target does, or every subresource the write leaves
+        // alone keeps whatever the texture held before.
+        SynchronizeAliases(imageIdentifier, takesGpuOwnership: true);
+        RefreshFromGuest(image);
         image.MarkGpuModified();
         NoteLinearGpuWrite(image);
         image.GpuWriteSerial = _owner.CurrentSerial;
