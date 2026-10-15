@@ -392,6 +392,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 if (TryPublishAliasOnDevice(image, other))
                 {
                     _aliasPublishes++;
+                    NoteAliasPublication("on-device", image, other, otherOwedGuestMemory, otherStart, otherEnd);
                     // A device copy leaves the source GPU-modified, so a write through this
                     // image still has to take ownership from it, or both would publish.
                     if (takesGpuOwnership)
@@ -404,7 +405,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 }
 
                 var (dirtyStart, dirtyEnd) = image.OverlapWithin(sharedStart, sharedSize);
-                if (takesGpuOwnership && TryHandOverAliasRun(other, otherStart, otherEnd))
+                var declined = MetalAliasFallbackReason.None;
+                if (takesGpuOwnership && TryHandOverAliasRun(other, otherStart, otherEnd, out declined))
                 {
                     // The other image keeps GPU ownership of everything but the shared
                     // run, so it is neither written back whole nor reloaded whole: a small
@@ -413,6 +415,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     MarkAliasRunDirty(image, dirtyStart, dirtyEnd);
                     _aliasPublishes++;
                     _aliasNarrowWrites++;
+                    NoteAliasPublication("narrow-write", image, other, otherOwedGuestMemory, otherStart, otherEnd);
                     continue;
                 }
 
@@ -422,11 +425,21 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     // an image that does not own it: a run published on its own would leave
                     // the rest of the other image in its texture only, for the refresh that
                     // follows to replace with the stale guest bytes.
+                    NoteAliasFallback(write: true, declined, image, other, otherOwedGuestMemory, otherStart, otherEnd);
                     WriteBackToGuest(other, MetalWritebackCause.ImageOverlap);
+                    NoteAliasPublication("whole-write", image, other, otherOwedGuestMemory, otherStart, otherEnd);
                 }
                 else
                 {
-                    PublishAliasRange(other, sharedStart, sharedSize);
+                    var whole = PublishAliasRange(other, sharedStart, sharedSize);
+                    if (whole != MetalAliasFallbackReason.None)
+                    {
+                        NoteAliasFallback(write: false, whole, image, other, otherOwedGuestMemory, otherStart, otherEnd);
+                    }
+
+                    NoteAliasPublication(
+                        whole == MetalAliasFallbackReason.None ? "read-run" : "whole-read",
+                        image, other, otherOwedGuestMemory, otherStart, otherEnd);
                 }
 
                 MarkAliasRunDirty(image, dirtyStart, dirtyEnd);
@@ -476,17 +489,24 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // GPU-modified must never be refreshed whole, since that would replace bytes only its
     // texture holds. A run already stale on the image is refused for the same reason
     // when it lies outside the stale interval, which one interval cannot hold apart.
-    private bool TryHandOverAliasRun(MetalCachedImage other, ulong start, ulong end)
+    private bool TryHandOverAliasRun(
+        MetalCachedImage other, ulong start, ulong end, out MetalAliasFallbackReason declined)
     {
-        if (!SubRangeTransfersEnabled || end <= start || other.Description.HasStencil ||
-            end - start > other.Description.Data.Size / 2 ||
-            (other.IsCpuDirty && (start < other.DirtyStart || end > other.DirtyEnd)))
+        declined = !SubRangeTransfersEnabled ? MetalAliasFallbackReason.SubRangeDisabled
+            : end <= start ? MetalAliasFallbackReason.EmptyRun
+            : other.Description.HasStencil ? MetalAliasFallbackReason.Stencil
+            : start == 0 && end >= other.Description.Data.Size ? MetalAliasFallbackReason.RunIsWholeOther
+            : end - start > other.Description.Data.Size / 2 ? MetalAliasFallbackReason.RunPastHalf
+            : other.IsCpuDirty && (start < other.DirtyStart || end > other.DirtyEnd)
+                ? MetalAliasFallbackReason.OtherDirtyOutsideRun
+            : MetalAliasFallbackReason.None;
+        if (declined != MetalAliasFallbackReason.None)
         {
             return false;
         }
 
         if (!other.IsPublished(start, end) &&
-            !TryWriteBackRun(other, start, end, MetalWritebackCause.ImageOverlap))
+            !TryWriteBackRun(other, start, end, MetalWritebackCause.ImageOverlap, out declined))
         {
             return false;
         }
@@ -959,39 +979,52 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // authoritative for the rest of it. The image stays GPU-modified, so what is left is
     // still published when something asks for it; the published run is what stops the
     // same bytes being written again on every use of the pair.
-    private void PublishAliasRange(MetalCachedImage other, ulong address, ulong size)
+    //
+    // Returns why the image was written back whole instead, or None.
+    private MetalAliasFallbackReason PublishAliasRange(MetalCachedImage other, ulong address, ulong size)
     {
         var (start, end) = other.OverlapWithin(address, size);
         if (!SubRangeTransfersEnabled || end <= start || other.Description.HasStencil)
         {
             WriteBackToGuest(other, MetalWritebackCause.ImageOverlap);
-            return;
+            return !SubRangeTransfersEnabled ? MetalAliasFallbackReason.SubRangeDisabled
+                : end <= start ? MetalAliasFallbackReason.EmptyRun
+                : MetalAliasFallbackReason.Stencil;
         }
 
         if (other.IsPublished(start, end))
         {
-            return;
+            return MetalAliasFallbackReason.None;
         }
 
-        if (!TryWriteBackRun(other, start, end, MetalWritebackCause.ImageOverlap))
+        if (!TryWriteBackRun(other, start, end, MetalWritebackCause.ImageOverlap, out var failure))
         {
             WriteBackToGuest(other, MetalWritebackCause.ImageOverlap);
+            return start == 0 && end >= other.Description.Data.Size
+                ? MetalAliasFallbackReason.RunIsWholeOther
+                : failure;
         }
+
+        return MetalAliasFallbackReason.None;
     }
 
     // Retiles one run of a GPU-written image into guest memory. Unlike a whole writeback
     // this leaves the image GPU-modified: the texture still owns every byte outside the
     // run, and saying otherwise would lose them the next time anything read the image.
-    private bool TryWriteBackRun(MetalCachedImage image, ulong start, ulong end, MetalWritebackCause cause)
+    private bool TryWriteBackRun(
+        MetalCachedImage image, ulong start, ulong end, MetalWritebackCause cause,
+        out MetalAliasFallbackReason failure)
     {
         ref readonly var description = ref image.Description;
         if (image.Texture == 0 || ImageDescription.IsEmptyRange(description.Data))
         {
+            failure = MetalAliasFallbackReason.NoTexture;
             return false;
         }
 
         if (!TryCoveringRun(in description, start, end, out var aligned, out var alignedEnd))
         {
+            failure = MetalAliasFallbackReason.CoveringRunRefused;
             return false;
         }
 
@@ -1004,6 +1037,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             description.Data.Address + aligned, alignedEnd - aligned);
         if (!destination.IsValid || destination.Size < alignedEnd - aligned)
         {
+            failure = MetalAliasFallbackReason.RunUnmapped;
             return false;
         }
 
@@ -1018,6 +1052,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         _partialWritebacks++;
         _partialWritebackBytesSaved += (long)(description.Data.Size - (alignedEnd - aligned));
         Interlocked.Increment(ref _writebacks);
+        failure = MetalAliasFallbackReason.None;
         return true;
     }
 

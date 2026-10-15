@@ -1936,6 +1936,7 @@ internal sealed partial class MetalRenderHost :
             $"wb_read={causes.HostRead} wb_copy={causes.GuestCopy} wb_overlap={causes.Overlap} " +
             $"wb_release={causes.Release} wb_drain={causes.Drain}{ReleaseCauses()} " +
             $"alias_kept={aliases.Kept} alias_published={aliases.Published} alias_narrow={aliases.Narrow} " +
+            $"alias_fallback={_imageCache.TakeAliasFallbacks()} " +
             $"linear_views={_imageCache.LinearViewCount} linear_view_promotions={_imageCache.TakeLinearViewPromotions()} " +
             $"alias_on_device={_imageCache.TakeDeviceAliasPublishes()} " +
             $"alias_reused={_imageCache.TakeDeviceAliasReuses()} untested_depth_writes={TakeUntestedDepthWrites()} " +
