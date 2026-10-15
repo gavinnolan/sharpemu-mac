@@ -243,5 +243,12 @@ public interface IRenderHost
 
     bool TryCopyWordsOnHost(ulong destination, ulong source, ulong sourceWords, ulong words);
 
+    // A compute fill of one repeating dword over [address, address + size) that a host may do
+    // as an image clear instead; false leaves the dispatch to run.
+    bool TryClearImageFromKernelFill(ulong address, ulong size, uint value) => false;
+
+    // A recognized fill or copy kernel was left to run as a dispatch, and why (a short key).
+    void NoteKernelFillFallback(string reason) { }
+
     Exception Fatal(string message);
 }

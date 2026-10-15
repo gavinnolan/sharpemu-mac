@@ -60,6 +60,13 @@ internal static class MetalV2Diagnostics
     public static readonly bool DeferComputeCopies =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEFER_COMPUTE_COPIES"), "0", StringComparison.Ordinal);
 
+    // SHARPEMU_METAL_V2_KERNEL_FILLS=0 runs a title's own compute memset or memcpy over the
+    // exact bytes of a cached image as the dispatch it is, with the writeback before it
+    // and the upload after it, instead of as a clear or texture copy of the image
+    // (MetalImageCache.KernelFills).
+    public static readonly bool KernelFills =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_KERNEL_FILLS"), "0", StringComparison.Ordinal);
+
     // SHARPEMU_METAL_V2_FOLD_CLEARS=0 encodes every clear as its own render pass the
     // moment it is asked for, the way it did before a clear could become the load action
     // of the pass that follows it. A fast-clear that is materialised and then rendered
