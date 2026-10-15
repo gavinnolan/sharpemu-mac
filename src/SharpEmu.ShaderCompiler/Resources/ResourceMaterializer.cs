@@ -204,7 +204,8 @@ public static class ResourceMaterializer
                         return false;
                     if (!MaterializeDenseIndirectImage(indirect, denseSources[0], image, image.R128, inputs, out var denseTable, out failure))
                         return false;
-                    snapshot.Images[imageIndex] = denseTable.Descriptors[(int)denseTable.Candidates[0]].Dwords;
+                    // The first descriptor is the root: the first probed entry, or the null one a V# table leads with.
+                    snapshot.Images[imageIndex] = denseTable.Descriptors[0].Dwords;
                     if (denseTable.Descriptors.Count > 1)
                     {
                         denseTable.Resource = (uint)imageIndex;
@@ -695,6 +696,8 @@ public static class ResourceMaterializer
     {
         failure = ResourceMaterializationFailure.Other;
         result = new IndirectImageTable();
+        if (heap.DwordCount == 4)
+            return MaterializeBufferHeapImage(indirect, heap, r128, inputs, out result, out failure);
         if (heap.DwordCount != 2 || indirect.KeyBound == 0 || indirect.KeyBound > MaxIndirectImageProbes || inputs.ReadCleanMemory is null)
             return false;
 
@@ -723,6 +726,59 @@ public static class ResourceMaterializer
                 .Select(index => unchecked(indirect.DynamicOffsetBase + ((uint)index << 5))),
             out result,
             out failure);
+    }
+
+    // A descriptor table a V# describes. The scalar buffer load that reads an entry is range
+    // checked against the V#'s size (stride * records, or records bytes without a stride), and a
+    // dword past it reads zero. The entries the V# reaches are the candidates, and the null
+    // descriptor leads them, answering every key past the table as the hardware does.
+    private static bool MaterializeBufferHeapImage(
+        IndirectImageSelector indirect,
+        DescriptorWords heap,
+        bool r128,
+        ResourceRuntimeInputs inputs,
+        out IndirectImageTable result,
+        out ResourceMaterializationFailure failure)
+    {
+        failure = ResourceMaterializationFailure.Other;
+        result = new IndirectImageTable();
+        if (inputs.ReadCleanMemory is null)
+            return false;
+
+        var words = heap.Dwords;
+        var baseAddress = (((ulong)(words[1] & 0xFFFFu) << 32) | words[0]) & AddressMask;
+        var stride = (words[1] >> 16) & 0x3FFFu;
+        var size = stride == 0 ? words[2] : (ulong)stride * words[2];
+        var entries = size > indirect.TableOffset ? (size - indirect.TableOffset + 31) >> 5 : 0;
+        if (indirect.KeyBound != 0)
+            entries = Math.Min(entries, indirect.KeyBound);
+        if (entries > MaxIndirectImageProbes)
+        {
+            SpecializationFailed($"image descriptor table at 0x{baseAddress:X} holds {entries} entries, more than the {MaxIndirectImageProbes} the host enumerates");
+            failure = ResourceMaterializationFailure.ImageCapacityExceeded;
+            return false;
+        }
+
+        var probed = new List<uint[]>((int)entries);
+        var offsets = new List<uint>((int)entries);
+        for (ulong key = 0; key < entries; key++)
+        {
+            var candidate = new uint[8];
+            var entry = indirect.TableOffset + (key << 5);
+            for (uint dword = 0; dword < candidate.Length; dword++)
+            {
+                var offset = entry + dword * sizeof(uint);
+                if (offset + sizeof(uint) <= size && !TryReadCleanWord(baseAddress, offset, inputs, out candidate[dword]))
+                    return false;
+            }
+
+            if (!UsableImageCandidate(candidate, r128))
+                Array.Clear(candidate);
+            probed.Add(candidate);
+            offsets.Add(unchecked(indirect.DynamicOffsetBase + ((uint)key << 5)));
+        }
+
+        return FinishIndirectImage(probed, offsets, out result, out failure, nullFirst: true);
     }
 
     private static bool MaterializeWaveIndexedImage(
@@ -795,11 +851,15 @@ public static class ResourceMaterializer
         IReadOnlyList<uint[]> probed,
         IEnumerable<uint> keys,
         out IndirectImageTable result,
-        out ResourceMaterializationFailure failure)
+        out ResourceMaterializationFailure failure,
+        bool nullFirst = false)
     {
         failure = ResourceMaterializationFailure.Other;
         result = new IndirectImageTable();
         result.Keys.AddRange(keys);
+        // The emitted search maps a key it does not find to candidate 0.
+        if (nullFirst)
+            result.Descriptors.Add(DescriptorWords.Empty(8));
         foreach (var candidate in probed)
         {
             var words = new DescriptorWords(candidate);

@@ -569,4 +569,100 @@ public sealed class DirectImageTableTests
         Assert.Same(original, snapshot);
         Assert.Same(originalSpecialization, specialization);
     }
+
+    // GTA V's ray-traced compute pass (0x9FBCE50E7D68468F) samples one texture per lane through a
+    // waterfall loop: the lane's index is read first-lane, scaled by the T# size and used as the
+    // dynamic offset of an S_BUFFER_LOAD_DWORDX8 through a V# that describes the descriptor table.
+    // The index comes from vector memory, so only the V#'s record count bounds the table.
+    internal static Gen5ShaderProgram CreateBufferHeapWaterfallProgram() => Program(
+        ScalarLoad(0, 0, 8, 4, immediateOffset: 0x10),
+        ScalarLoad(8, 0, 16, 4, immediateOffset: 0x20),
+        BufferAccess(16, "BufferLoadDword", 16, vectorData: 2),
+        Vop2(24, "VLshrrevB32", 11, Operand(4), Gen5Operand.Vector(2)),
+        MoveScalar(28, 24, 0), MoveScalar(32, 25, 0xFFF000), MoveScalar(36, 26, 0x6500000), MoveScalar(40, 27, 0),
+        Sop1(44, "SMovB64", 6, Gen5Operand.Scalar(126)),
+        MoveVector(48, 19, 1),
+        ReadFirstLane(52, 106, 11),
+        Sop1(56, "SMovB64", 20, Gen5Operand.Scalar(126)),
+        Vopc(60, "VCmpxEqU32", Gen5Operand.Scalar(106), 11),
+        Sop2(64, "SLshlB32", 106, Gen5Operand.Scalar(106), Operand(5)),
+        MoveVector(68, 19, 0),
+        ScalarBufferLoad(72, 8, 12, 8, dynamicOffsetRegister: 106),
+        Image(80, "ImageSampleL", 12, samplerRegister: 24, vectorAddress: 0),
+        Sop1(88, "SMovB64", 126, Gen5Operand.Scalar(20)),
+        Vopc(92, "VCmpxNeU32", Operand(0), 19),
+        Branch(96, "SCbranchExecnz", -12),
+        Sop1(100, "SMovB64", 126, Gen5Operand.Scalar(6)),
+        EndProgram(104));
+
+    // The descriptor table holds `records` bytes at 0x2000: entry 3 repeats entry 0, and a read
+    // past the V#'s reach fails, so the host must not probe beyond it.
+    private static GuestWordReader BufferHeapMemory(uint records) => (ulong address, out uint word) =>
+    {
+        word = 0;
+        switch (address)
+        {
+            case 0x1010: word = 0x2000; return true;
+            case 0x1014: return true;
+            case 0x1018: word = records; return true;
+            case 0x101C: return true;
+            case 0x1020: word = 0x4000; return true;
+            case 0x1024: return true;
+            case 0x1028: word = 256; return true;
+            case 0x102C: return true;
+        }
+
+        if (address < 0x2000 || address + 4 > 0x2000ul + records)
+            return false;
+        var relative = address - 0x2000;
+        var entry = relative / 32 % 3;
+        word = (relative % 32 / 4) switch
+        {
+            0 => 0x3000u + (uint)entry * 0x100u,
+            1 => 20u << 20,
+            3 => 0xFACu | (9u << 28),
+            _ => 0,
+        };
+        return true;
+    };
+
+    [Fact]
+    public void BufferHeapWaterfallSelectsEveryDescriptorTheTableHolds()
+    {
+        var program = CreateBufferHeapWaterfallProgram();
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 2);
+        var selector = plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage!;
+        Assert.True(selector.Dense, "dense");
+        Assert.Equal(4u, plan.DescriptorSources[(int)selector.HeapSource].DwordCount);
+        Assert.Equal(0u, selector.KeyBound);
+        Assert.True(Assert.Single(plan.IndirectImages).KeyIsAddressOffset, "address-offset key");
+
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        var memory = BufferHeapMemory(4 * 32);
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readMemory: memory, readCleanMemory: memory),
+            ref snapshot, ref specialization, out var failure), $"materialize {failure}");
+        // A key past the table reads a null descriptor, as the range-checked load returns zeros.
+        Assert.Equal(4, snapshot.Images.Length);
+        Assert.Single(snapshot.Images, image => image.All(word => word == 0));
+
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        var layout = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(program, 0, 2),
+            false, ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
+        var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 64, ThreadCountX = 64 };
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError), metalError);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var spirvError), spirvError);
+    }
+
+    [Fact]
+    public void BufferHeapWithoutRecordsSelectsOnlyTheNullDescriptor()
+    {
+        var plan = ShaderResourcePlan.Extract(CreateBufferHeapWaterfallProgram(), ShaderStage.Compute, Hash, 0, 2);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        var memory = BufferHeapMemory(0);
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readMemory: memory, readCleanMemory: memory),
+            ref snapshot, ref specialization, out var failure), $"materialize {failure}");
+        Assert.All(snapshot.Images, image => Assert.All(image, word => Assert.Equal(0u, word)));
+    }
 }
