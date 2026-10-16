@@ -11,6 +11,7 @@ public sealed class PadExportsTests : IDisposable
 {
     private const ulong Base = 0x1_0000_0000;
     private const int InvalidHandle = unchecked((int)0x80920003);
+    private const int InvalidArgument = unchecked((int)0x80920001);
 
     private readonly FakeCpuMemory _memory = new(Base, 0x1000);
     private readonly CpuContext _ctx;
@@ -141,15 +142,126 @@ public sealed class PadExportsTests : IDisposable
         const ulong cookieAddress = informationAddress + 0x30;
         const ulong cookie = 0xC0DEC0DECAFEBA00UL;
 
+        Assert.True(_memory.TryWrite(informationAddress, Enumerable.Repeat((byte)0xEE, 0x30).ToArray()));
         Assert.True(_memory.TryWrite(cookieAddress, BitConverter.GetBytes(cookie)));
-        _ctx[CpuRegister.Rdi] = 1;
+        _ctx[CpuRegister.Rdi] = 0;
         _ctx[CpuRegister.Rsi] = informationAddress;
 
         Assert.Equal(0, PadExports.PadGetExtControllerInformation(_ctx));
 
+        var information = new byte[0x30];
+        Assert.True(_memory.TryRead(informationAddress, information));
+        Assert.Equal(44.86f, BitConverter.ToSingle(information, 0));
+        Assert.Equal(1920, BitConverter.ToUInt16(information, 4));
+        Assert.Equal(943, BitConverter.ToUInt16(information, 6));
+        Assert.Equal(1, information[0x0C]);
+        Assert.All(information[0x1C..0x2C], value => Assert.Equal(0, value));
+        Assert.All(information[0x2C..], value => Assert.Equal(0xEE, value));
+
         Span<byte> guard = stackalloc byte[8];
         Assert.True(_memory.TryRead(cookieAddress, guard));
         Assert.Equal(cookie, BitConverter.ToUInt64(guard));
+    }
+
+    [Fact]
+    public void GetExtControllerInformation_ValidatesHandleAndPointer()
+    {
+        _ctx[CpuRegister.Rdi] = 2;
+        _ctx[CpuRegister.Rsi] = Base + 0x100;
+        Assert.Equal(InvalidHandle, PadExports.PadGetExtControllerInformation(_ctx));
+        _ctx[CpuRegister.Rdi] = 0;
+        _ctx[CpuRegister.Rsi] = 0;
+        Assert.Equal(InvalidArgument, PadExports.PadGetExtControllerInformation(_ctx));
+    }
+
+    [Fact]
+    public void NullOutputsReturnPadInvalidArgument()
+    {
+        _ctx[CpuRegister.Rdi] = 0;
+        _ctx[CpuRegister.Rsi] = 0;
+        _ctx[CpuRegister.Rdx] = 1;
+        Assert.Equal(InvalidArgument, PadExports.PadGetControllerInformation(_ctx));
+        Assert.Equal(InvalidArgument, PadExports.PadDeviceClassGetExtendedInformation(_ctx));
+        Assert.Equal(InvalidArgument, PadExports.PadReadState(_ctx));
+        Assert.Equal(InvalidArgument, PadExports.PadRead(_ctx));
+        Assert.Equal(InvalidArgument, PadExports.PadReadExt(_ctx));
+        Assert.Equal(InvalidArgument, PadExports.PadGetTriggerEffectState(_ctx));
+        Assert.Equal(InvalidArgument, PadExports.PadSetTriggerEffect(_ctx));
+        Assert.Equal(InvalidArgument, PadExports.PadSetVibration(_ctx));
+        Assert.Equal(InvalidArgument, PadExports.PadSetLightBar(_ctx));
+        Assert.Equal(InvalidArgument, PadExports.PadIsRemoteController(_ctx));
+
+        _ctx[CpuRegister.Rsi] = Base + 0x100;
+        _ctx[CpuRegister.Rdx] = 0;
+        Assert.Equal(InvalidArgument, PadExports.PadRead(_ctx));
+        Assert.Equal(InvalidArgument, PadExports.PadReadExt(_ctx));
+        _ctx[CpuRegister.Rdx] = 65;
+        Assert.Equal(InvalidArgument, PadExports.PadReadExt(_ctx));
+    }
+
+    [Fact]
+    public void IsRemoteController_WritesFalse()
+    {
+        const ulong address = Base + 0x100;
+        Assert.True(_memory.TryWrite(address, new byte[] { 0xEE, 0xEE }));
+        _ctx[CpuRegister.Rdi] = 0;
+        _ctx[CpuRegister.Rsi] = address;
+
+        Assert.Equal(0, PadExports.PadIsRemoteController(_ctx));
+        var value = new byte[2];
+        Assert.True(_memory.TryRead(address, value));
+        Assert.Equal(new byte[] { 0, 0xEE }, value);
+
+        _ctx[CpuRegister.Rdi] = 2;
+        Assert.Equal(InvalidHandle, PadExports.PadIsRemoteController(_ctx));
+    }
+
+    [Theory]
+    [InlineData(0x04, 0u, 0u)]
+    [InlineData(0x01, 7u, 0u)]
+    [InlineData(0x02, 0u, 7u)]
+    public void SetTriggerEffect_RejectsUnknownMasksAndModes(byte mask, uint leftMode, uint rightMode)
+    {
+        const ulong address = Base + 0x100;
+        var parameter = new byte[120];
+        parameter[0] = mask;
+        BitConverter.GetBytes(leftMode).CopyTo(parameter, 8);
+        BitConverter.GetBytes(rightMode).CopyTo(parameter, 64);
+        Assert.True(_memory.TryWrite(address, parameter));
+        _ctx[CpuRegister.Rdi] = 0;
+        _ctx[CpuRegister.Rsi] = address;
+
+        Assert.Equal(InvalidArgument, PadExports.PadSetTriggerEffect(_ctx));
+    }
+
+    [Fact]
+    public void SetVibrationMode_RequiresInit()
+    {
+        _ctx[CpuRegister.Rdi] = 0;
+        _ctx[CpuRegister.Rsi] = 1;
+        Assert.Equal(unchecked((int)0x80920005), PadExports.PadSetVibrationMode(_ctx));
+    }
+
+    [Theory]
+    [InlineData(0, 0)]
+    [InlineData(2, InvalidHandle)]
+    [InlineData(-1, InvalidHandle)]
+    public void HandleOnlySetters_ValidateHandle(int handle, int expected)
+    {
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)handle);
+        _ctx[CpuRegister.Rsi] = 1;
+        Assert.Equal(expected, PadExports.PadSetAngularVelocityBiasCorrectionState(_ctx));
+        Assert.Equal(expected, PadExports.PadSetLightBarBaseBrightness(_ctx));
+    }
+
+    [Fact]
+    public void ProcessWideSwitches_AreAccepted()
+    {
+        _ctx[CpuRegister.Rdi] = 1;
+        _ctx[CpuRegister.Rax] = ulong.MaxValue;
+        Assert.Equal(0, PadExports.PadSetParticularMode(_ctx));
+        Assert.Equal(0, PadExports.PadSetProcessPrivilege(_ctx));
+        Assert.Equal(0UL, _ctx[CpuRegister.Rax]);
     }
 
     [Theory]
