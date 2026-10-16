@@ -149,22 +149,9 @@ static inline uint sharpemu_atomic_step(device atomic_uint* word, uint limit, bo
     return observed;
 }
 
-// The conditional float replace behind DS_MIN/MAX_F32 and the FMIN/FMAX buffer
-// atomics: the word becomes "value" while "compare" ranks below it. A failed
-// swap re-reads memory, so the ranking is decided against the word that is
-// actually there. Returns the value observed.
-static inline uint sharpemu_atomic_float_replace(device atomic_uint* word, uint value, uint compare)
-{
-    uint observed = atomic_load_explicit(word, memory_order_relaxed);
-    while (as_type<float>(compare) < as_type<float>(observed) &&
-           !atomic_compare_exchange_weak_explicit(word, &observed, value, memory_order_relaxed, memory_order_relaxed))
-    {
-    }
-    return observed;
-}
-
-// BUFFER_ATOMIC_FMIN/FMAX: a real float minimum or maximum of the word
-// and the operand, which is not the DS conditional replace above.
+// BUFFER/GLOBAL_ATOMIC_FMIN/FMAX and the GDS DS_MIN/MAX_F32: a float minimum or
+// maximum of the word and the operand. A failed swap re-reads memory, so the
+// comparison is decided against the word that is actually there.
 static inline uint sharpemu_atomic_float_minmax(device atomic_uint* word, uint value, bool maxValue)
 {
     uint observed = atomic_load_explicit(word, memory_order_relaxed);

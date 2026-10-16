@@ -2700,6 +2700,48 @@ public static partial class Gen5MslTranslator
                 }
                 case "DsMskorB32":
                     return TryEmitDataShareAtomic(instruction, control, out error);
+                case "DsCondxchg32RtnB64":
+                {
+                    // Two conditional exchanges, one per dword of the qword (the GFX9 ISA's
+                    // DS_CONDXCHG32_RTN_B64; RDNA2 only lists it): a DATA dword with bit 31
+                    // set stores its bits 30:0, and both pre-operation dwords are returned.
+                    // Each dword is its own atomic, so in a program without LDS qword locks a
+                    // concurrent writer can land between them; with them both run under the
+                    // one lock of their qword.
+                    if (instruction.Sources.Count < 3 || instruction.Destinations.Count < 2)
+                    {
+                        error = $"missing LDS operands for {instruction.Opcode}";
+                        return false;
+                    }
+
+                    var address = Temp("uint", RawSource(instruction, 0));
+                    var lowIndex = Temp("uint", LdsIndex(address, control.SingleOffsetBytes));
+                    var highIndex = Temp("uint", LdsIndex(address, control.SingleOffsetBytes + sizeof(uint)));
+                    var low = Temp("uint", RawSource(instruction, 1));
+                    var high = Temp("uint", RawSource(instruction, 2));
+                    var originalLow = Temp("uint", "0u");
+                    var originalHigh = Temp("uint", "0u");
+                    BeginExecGuard();
+                    void Exchange()
+                    {
+                        Line($"{originalLow} = {EmitDataShareAtomicWord("Condxchg", lowIndex, low, "0u")};");
+                        Line($"{originalHigh} = {EmitDataShareAtomicWord("Condxchg", highIndex, high, "0u")};");
+                    }
+
+                    if (UsesLdsQwordLocks)
+                    {
+                        EmitLdsLocked(lowIndex, Exchange);
+                    }
+                    else
+                    {
+                        Exchange();
+                    }
+
+                    Line($"v[{instruction.Destinations[0].Value}] = {originalLow};");
+                    Line($"v[{instruction.Destinations[1].Value}] = {originalHigh};");
+                    EndExecGuard();
+                    return true;
+                }
                 default:
                     if (Gen5ShaderTranslator.IsDataShareAtomic(instruction.Opcode))
                     {
@@ -2881,7 +2923,7 @@ public static partial class Gen5MslTranslator
             var first = Temp("uint", RawSource(instruction, 1));
             var second = takesThreeSources ? Temp("uint", RawSource(instruction, 2)) : "0u";
             BeginExecGuard();
-            var original = EmitDataShareAtomicWord(name, index, first, second);
+            var original = EmitLockedDataShareAtomicWord(name, index, first, second);
             if (instruction.Destinations.Count > 0)
             {
                 Line($"v[{instruction.Destinations[0].Value}] = {original};");
@@ -2889,6 +2931,20 @@ public static partial class Gen5MslTranslator
 
             EndExecGuard();
             return true;
+        }
+
+        // EmitDataShareAtomicWord inside the lock of the word's qword when the program
+        // locks its shared LDS (UsesLdsQwordLocks).
+        private string EmitLockedDataShareAtomicWord(string name, string index, string first, string second)
+        {
+            if (!UsesLdsQwordLocks)
+            {
+                return EmitDataShareAtomicWord(name, index, first, second);
+            }
+
+            var original = Temp("uint", "0u");
+            EmitLdsLocked(index, () => Line($"{original} = {EmitDataShareAtomicWord(name, index, first, second)};"));
+            return original;
         }
 
         // Emits the atomic over one LDS word and names the pre-operation value.
@@ -2916,8 +2972,8 @@ public static partial class Gen5MslTranslator
                     "Swap" => first,
                     "Cmpswap" => $"{observed} == {first} ? {second} : {observed}",
                     "Mskor" => $"({observed} & ~{first}) | {second}",
-                    "Fmin" => $"as_type<float>({second}) < as_type<float>({observed}) ? {first} : {observed}",
-                    "Fmax" => $"as_type<float>({observed}) > as_type<float>({second}) ? {first} : {observed}",
+                    "Fmin" => DataShareFloatMinMax(false, observed, first),
+                    "Fmax" => DataShareFloatMinMax(true, observed, first),
                     _ => DataShareCompareExchangeValue(name, observed, first, second),
                 };
                 Line($"{word} = {replacement};");
@@ -2956,12 +3012,10 @@ public static partial class Gen5MslTranslator
                 "Inc" => $"{expected} >= {first} ? 0u : {expected} + 1u",
                 "Dec" => $"({expected} == 0u || {expected} > {first}) ? {first} : {expected} - 1u",
                 "Mskor" => $"({expected} & ~{first}) | {second}",
-                // GFX10's DS_MIN_F32 replaces memory when DATA1 < memory and
-                // DS_MAX_F32 when memory > DATA1 -- the same predicate, which is
-                // why both forms read DATA0 as the replacement and DATA1 as the
-                // compare operand instead of being symmetric.
-                "Fmin" => $"as_type<float>({second}) < as_type<float>({expected}) ? {first} : {expected}",
-                "Fmax" => $"as_type<float>({expected}) > as_type<float>({second}) ? {first} : {expected}",
+                // DS_MIN/MAX_F32 keep the smaller/larger of DATA0 and memory; see
+                // DataShareFloatMinMax for why DATA1 is not the compare operand.
+                "Fmin" => DataShareFloatMinMax(false, expected, first),
+                "Fmax" => DataShareFloatMinMax(true, expected, first),
                 _ => DataShareCompareExchangeValue(name, expected, first, second),
             };
             Line($"while (!atomic_compare_exchange_weak_explicit({pointerName}, &{expected}, {next}, memory_order_relaxed, memory_order_relaxed))");
@@ -2969,6 +3023,16 @@ public static partial class Gen5MslTranslator
             Line("}");
             return expected;
         }
+
+        // DS_MIN/MAX_F32 (and the F64 forms): memory becomes DATA0 when DATA0 orders below
+        // (above) it, a NaN on either side keeping memory as BUFFER_ATOMIC_FMIN/FMAX do.
+        // The ISA's pseudo-code names a separate compare operand (DATA2), but LLVM encodes
+        // these with DATA0 alone (DATA1 is v0 or garbage), radeonsi and RADV lower float
+        // atomicMin/Max to them, and the PS5 emulators used as references model a plain
+        // min/max of DATA0; so DATA0 is the operand, and DATA1 is read but unused.
+        private static string DataShareFloatMinMax(bool max, string observed, string value) => max
+            ? $"as_type<float>({value}) > as_type<float>({observed}) ? {value} : {observed}"
+            : $"as_type<float>({value}) < as_type<float>({observed}) ? {value} : {observed}";
 
         // The replacement value of the LDS atomics that only a compare-and-swap loop (or the
         // private array's plain read-modify-write) expresses, from the observed word.
@@ -2981,6 +3045,8 @@ public static partial class Gen5MslTranslator
             // DS_CMPST_F32 compares as floats (so -0 matches +0 and NaN matches nothing),
             // with DS_CMPST's DATA0 comparator and DATA1 new value.
             "Fcmpswap" => $"as_type<float>({observed}) == as_type<float>({first}) ? {second} : {observed}",
+            // DS_CONDXCHG32_RTN_B64, per dword: DATA with bit 31 set writes its bits 30:0.
+            "Condxchg" => $"({first} & 0x80000000u) != 0u ? ({first} & 0x7FFFFFFFu) : {observed}",
             // DS_WRAP_RTN_B32: memory >= DATA0 ? memory - DATA0 : memory + DATA1.
             _ => $"{observed} >= {first} ? {observed} - {first} : {observed} + {second}",
         };
@@ -3006,8 +3072,8 @@ public static partial class Gen5MslTranslator
             var first = Temp("uint", RawSource(instruction, 1));
             var second = Temp("uint", RawSource(instruction, 2));
             BeginExecGuard();
-            var firstOriginal = EmitDataShareAtomicWord("Swap", firstIndex, first, "0u");
-            var secondOriginal = EmitDataShareAtomicWord("Swap", secondIndex, second, "0u");
+            var firstOriginal = EmitLockedDataShareAtomicWord("Swap", firstIndex, first, "0u");
+            var secondOriginal = EmitLockedDataShareAtomicWord("Swap", secondIndex, second, "0u");
             Line($"v[{instruction.Destinations[0].Value}] = {firstOriginal};");
             Line($"v[{instruction.Destinations[1].Value}] = {secondOriginal};");
             EndExecGuard();
@@ -3017,16 +3083,17 @@ public static partial class Gen5MslTranslator
         // The 64-bit LDS atomics, over a pair of words in the uint LDS array.
         //
         // Graphics stages give each invocation its own LDS array (one logical lane), so a
-        // plain 64-bit read-modify-write is the atomic and every integer form runs exactly.
+        // plain 64-bit read-modify-write is the atomic and every form runs exactly.
         //
-        // Compute and mesh LDS is threadgroup memory, whose Metal atomics are 32-bit only:
-        // there is no 64-bit threadgroup atomic and no 64-bit compare-and-swap to loop on.
-        // The no-return ADD/SUB/AND/OR/XOR run as a 32-bit atomic per half - OR/AND/XOR are
-        // bitwise independent, ADD/SUB fold each lane's own carry or borrow out of the low
-        // word into the high one - so memory ends at the value the 64-bit atomics would leave
-        // however the lanes interleave. Every other form, and every returning one (whose
-        // returned pair would not be one snapshot), needs a 64-bit read-modify-write and is
-        // refused. The F64 forms are refused everywhere: Metal has no double.
+        // Compute and mesh LDS is threadgroup memory (or, for a large mesh allocation, a
+        // device pool slot), whose Metal atomics are 32-bit only. A program whose 64-bit
+        // LDS atomics are all non-returning ADD/SUB/AND/OR/XOR runs each as a 32-bit atomic
+        // per half - OR/AND/XOR are bitwise independent, ADD/SUB fold each lane's own carry
+        // or borrow out of the low word into the high one - so memory ends at the value the
+        // 64-bit atomics would leave however the lanes interleave. Any other 64-bit form
+        // makes the program take the LDS qword locks (UsesLdsQwordLocks, EmitLdsLocked):
+        // every LDS atomic of it, 32- or 64-bit, then runs inside the lock of the qword it
+        // touches, the 64-bit ones as one load, compute and store of both words.
         private bool TryEmitDataShareAtomic64(
             Gen5ShaderInstruction instruction,
             Gen5DataShareControl control,
@@ -3035,54 +3102,29 @@ public static partial class Gen5MslTranslator
             error = string.Empty;
             var opcode = instruction.Opcode;
             var returns = opcode.Contains("Rtn", StringComparison.Ordinal);
-            var operation = opcode.Replace("Rtn", string.Empty, StringComparison.Ordinal) switch
-            {
-                "DsAddU64" => "Add",
-                "DsSubU64" => "Sub",
-                "DsRsubU64" => "Rsub",
-                "DsIncU64" => "Inc",
-                "DsDecU64" => "Dec",
-                "DsMinI64" => "MinI",
-                "DsMaxI64" => "MaxI",
-                "DsMinU64" => "MinU",
-                "DsMaxU64" => "MaxU",
-                "DsAndB64" => "And",
-                "DsOrB64" => "Or",
-                "DsXorB64" => "Xor",
-                "DsMskorB64" => "Mskor",
-                "DsWrxchgB64" => "Wrxchg",
-                "DsWrxchg2B64" or "DsWrxchg2St64B64" => "Wrxchg2",
-                "DsCmpstB64" => "Cmpst",
-                _ => string.Empty,
-            };
+            var operation = DataShareQwordOperation(opcode);
             var twoOperands = Gen5ShaderTranslator.IsDataShareTwoOperandAtomic(opcode);
-            if (instruction.Sources.Count < (twoOperands ? 5 : 3) || (returns && instruction.Destinations.Count < 2))
+            if (operation.Length == 0)
+            {
+                error = $"unsupported LDS opcode {opcode}";
+                return false;
+            }
+
+            if (instruction.Sources.Count < (twoOperands ? 5 : 3) || (returns && instruction.Destinations.Count < (operation == "Wrxchg2" ? 4 : 2)))
             {
                 error = $"missing LDS operands for {opcode}";
                 return false;
             }
 
-            if (opcode.EndsWith("F64", StringComparison.Ordinal))
-            {
-                error = $"unsupported LDS opcode {opcode}: Metal has no double-precision atomic";
-                return false;
-            }
-
+            _usesFloat64Atomics |= operation is "CmpstF" or "MinF" or "MaxF";
             var address = Temp("uint", RawSource(instruction, 0));
             var data0 = Temp("ulong", $"(ulong){RawSource(instruction, 1)} | ((ulong){RawSource(instruction, 2)} << 32)");
             var data1 = twoOperands
                 ? Temp("ulong", $"(ulong){RawSource(instruction, 3)} | ((ulong){RawSource(instruction, 4)} << 32)")
                 : "0ul";
-            if (HasSharedLds)
+            if (HasSharedLds && !UsesLdsQwordLocks)
             {
-                var splits = !returns && operation is "Add" or "Sub" or "And" or "Or" or "Xor";
-                if (!splits)
-                {
-                    error = $"unsupported LDS opcode {opcode}: Metal threadgroup atomics are 32-bit, " +
-                        "and this 64-bit operation cannot run as one atomic per half";
-                    return false;
-                }
-
+                // Only the splittable forms reach here (see UsesLdsQwordLocks).
                 var lowIndex = Temp("uint", LdsIndex(address, control.SingleOffsetBytes));
                 var highIndex = Temp("uint", LdsIndex(address, control.SingleOffsetBytes + sizeof(uint)));
                 var low = Temp("uint", $"(uint){data0}");
@@ -3114,9 +3156,10 @@ public static partial class Gen5MslTranslator
                 return true;
             }
 
-            // One logical lane over a private array: read the pair, compute, write it back.
+            // Read the pair, compute, write it back: in place for the private array, inside
+            // the qword's lock with 32-bit atomic loads and stores for shared LDS.
             var st64 = opcode == "DsWrxchg2St64RtnB64";
-            var pairs = operation.StartsWith("Wrxchg2", StringComparison.Ordinal)
+            var pairs = operation == "Wrxchg2"
                 ? new[] { (Offset: control.Offset0 * (st64 ? 512u : 8u), Value: data0), (Offset: control.Offset1 * (st64 ? 512u : 8u), Value: data1) }
                 : new[] { (Offset: control.SingleOffsetBytes, Value: data0) };
             var originals = new List<string>();
@@ -3125,38 +3168,36 @@ public static partial class Gen5MslTranslator
             {
                 var lowIndex = Temp("uint", LdsIndex(address, offset));
                 var highIndex = Temp("uint", LdsIndex(address, offset + sizeof(uint)));
-                var observed = Temp("ulong", $"(ulong)sharpemu_lds[{lowIndex}] | ((ulong)sharpemu_lds[{highIndex}] << 32)");
-                string? replacement = operation switch
+                var observed = Temp("ulong", "0ul");
+                void ReadModifyWrite()
                 {
-                    "Add" => $"{observed} + {value}",
-                    "Sub" => $"{observed} - {value}",
-                    "Rsub" => $"{value} - {observed}",
-                    "Inc" => $"{observed} >= {value} ? 0ul : {observed} + 1ul",
-                    "Dec" => $"({observed} == 0ul || {observed} > {value}) ? {value} : {observed} - 1ul",
-                    "MinI" => $"as_type<ulong>(min(as_type<long>({observed}), as_type<long>({value})))",
-                    "MaxI" => $"as_type<ulong>(max(as_type<long>({observed}), as_type<long>({value})))",
-                    "MinU" => $"min({observed}, {value})",
-                    "MaxU" => $"max({observed}, {value})",
-                    "And" => $"{observed} & {value}",
-                    "Or" => $"{observed} | {value}",
-                    "Xor" => $"{observed} ^ {value}",
-                    // DS_MSKOR: DATA0 is the mask cleared, DATA1 the bits set.
-                    "Mskor" => $"({observed} & ~{value}) | {data1}",
-                    "Wrxchg" or "Wrxchg2" => value,
-                    // DS_CMPST: DATA0 is the comparator, DATA1 the new value.
-                    "Cmpst" => $"{observed} == {value} ? {data1} : {observed}",
-                    _ => null,
-                };
-                if (replacement is null)
-                {
-                    EndExecGuard();
-                    error = $"unsupported LDS opcode {opcode}";
-                    return false;
+                    var next = Temp("ulong", DataShareQwordResult(operation, observed, value, data1));
+                    if (HasSharedLds)
+                    {
+                        Line(LdsWordStore(lowIndex, $"(uint){next}"));
+                        Line(LdsWordStore(highIndex, $"(uint)({next} >> 32)"));
+                    }
+                    else
+                    {
+                        Line($"sharpemu_lds[{lowIndex}] = (uint){next};");
+                        Line($"sharpemu_lds[{highIndex}] = (uint)({next} >> 32);");
+                    }
                 }
 
-                var next = Temp("ulong", replacement);
-                Line($"sharpemu_lds[{lowIndex}] = (uint){next};");
-                Line($"sharpemu_lds[{highIndex}] = (uint)({next} >> 32);");
+                if (HasSharedLds)
+                {
+                    EmitLdsLocked(lowIndex, () =>
+                    {
+                        Line($"{observed} = (ulong){LdsWordLoad(lowIndex)} | ((ulong){LdsWordLoad(highIndex)} << 32);");
+                        ReadModifyWrite();
+                    });
+                }
+                else
+                {
+                    Line($"{observed} = (ulong)sharpemu_lds[{lowIndex}] | ((ulong)sharpemu_lds[{highIndex}] << 32);");
+                    ReadModifyWrite();
+                }
+
                 originals.Add(observed);
             }
 
@@ -3172,6 +3213,84 @@ public static partial class Gen5MslTranslator
             EndExecGuard();
             return true;
         }
+
+        private static string DataShareQwordOperation(string opcode) =>
+            opcode.Replace("Rtn", string.Empty, StringComparison.Ordinal) switch
+            {
+                "DsAddU64" => "Add",
+                "DsSubU64" => "Sub",
+                "DsRsubU64" => "Rsub",
+                "DsIncU64" => "Inc",
+                "DsDecU64" => "Dec",
+                "DsMinI64" => "MinI",
+                "DsMaxI64" => "MaxI",
+                "DsMinU64" => "MinU",
+                "DsMaxU64" => "MaxU",
+                "DsAndB64" => "And",
+                "DsOrB64" => "Or",
+                "DsXorB64" => "Xor",
+                "DsMskorB64" => "Mskor",
+                "DsWrxchgB64" => "Wrxchg",
+                "DsWrxchg2B64" or "DsWrxchg2St64B64" => "Wrxchg2",
+                "DsCmpstB64" => "Cmpst",
+                "DsCmpstF64" => "CmpstF",
+                "DsMinF64" => "MinF",
+                "DsMaxF64" => "MaxF",
+                _ => string.Empty,
+            };
+
+        // The qword a 64-bit DS atomic leaves (RDNA2 ISA 12.13) from the one it observed;
+        // "value" is DATA0, "data1" DATA1 for the two-operand forms.
+        private static string DataShareQwordResult(string operation, string observed, string value, string data1) => operation switch
+        {
+            "Add" => $"{observed} + {value}",
+            "Sub" => $"{observed} - {value}",
+            "Rsub" => $"{value} - {observed}",
+            "Inc" => $"{observed} >= {value} ? 0ul : {observed} + 1ul",
+            "Dec" => $"({observed} == 0ul || {observed} > {value}) ? {value} : {observed} - 1ul",
+            "MinI" => $"as_type<ulong>(min(as_type<long>({observed}), as_type<long>({value})))",
+            "MaxI" => $"as_type<ulong>(max(as_type<long>({observed}), as_type<long>({value})))",
+            "MinU" => $"min({observed}, {value})",
+            "MaxU" => $"max({observed}, {value})",
+            "And" => $"{observed} & {value}",
+            "Or" => $"{observed} | {value}",
+            "Xor" => $"{observed} ^ {value}",
+            // DS_MSKOR: DATA0 is the mask cleared, DATA1 the bits set.
+            "Mskor" => $"({observed} & ~{value}) | {data1}",
+            "Wrxchg" or "Wrxchg2" => value,
+            // DS_CMPST: DATA0 is the comparator, DATA1 the new value; the F64 form compares
+            // as doubles (a NaN equals nothing, -0 equals +0).
+            "Cmpst" => $"{observed} == {value} ? {data1} : {observed}",
+            "CmpstF" => $"sharpemu_f64_eq({observed}, {value}) ? {data1} : {observed}",
+            // DS_MIN/MAX_F64 keep the smaller/larger of DATA0 and memory (see
+            // DataShareFloatMinMax for why DATA0 and not DATA1).
+            "MinF" => $"sharpemu_f64_lt({value}, {observed}) ? {value} : {observed}",
+            "MaxF" => $"sharpemu_f64_lt({observed}, {value}) ? {value} : {observed}",
+            _ => throw new ArgumentOutOfRangeException(nameof(operation), operation, "not a 64-bit DS atomic"),
+        };
+
+        private string LdsWordLoad(string index) =>
+            $"atomic_load_explicit(({LdsAddressSpace} atomic_uint*)&sharpemu_lds[{index}], memory_order_relaxed)";
+
+        private string LdsWordStore(string index, string value) =>
+            $"atomic_store_explicit(({LdsAddressSpace} atomic_uint*)&sharpemu_lds[{index}], {value}, memory_order_relaxed);";
+
+        /// <summary>
+        /// True when this program's shared LDS needs the qword locks: it has a 64-bit LDS
+        /// atomic that is not a non-returning ADD/SUB/AND/OR/XOR (those split exactly, see
+        /// TryEmitDataShareAtomic64). Then every LDS atomic of the program takes the lock of
+        /// the qword it touches, so a 32-bit atomic on one half never lands between a locked
+        /// 64-bit read and write. Plain DS_READ/DS_WRITE do not lock: a 64-bit read may see
+        /// one half from before a concurrent 64-bit atomic and one from after.
+        /// </summary>
+        private bool UsesLdsQwordLocks =>
+            _usesLdsQwordLocks ??= HasSharedLds && _request.Program.Instructions.Any(instruction =>
+                instruction.Control is Gen5DataShareControl { Gds: false } &&
+                Gen5ShaderTranslator.IsDataShareAtomic64(instruction.Opcode) &&
+                (instruction.Opcode.Contains("Rtn", StringComparison.Ordinal) ||
+                 DataShareQwordOperation(instruction.Opcode) is not ("Add" or "Sub" or "And" or "Or" or "Xor")));
+
+        private bool? _usesLdsQwordLocks;
 
         private bool TryEmitResolvedMemoryAccess(
             string opcode,

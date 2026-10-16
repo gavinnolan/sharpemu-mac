@@ -223,7 +223,7 @@ internal static partial class MetalNative
 
         var stepReportAddress = SendULong(stepReport, Selector("gpuAddress"));
         // The zeroed pair-lock table the v2 host binds for every program.
-        var pairLocks = SharedBuffer(new byte[Gen5MslArgumentLayout.PairLockSlots * sizeof(uint)]);
+        var pairLocks = SharedBuffer(new byte[Gen5MslArgumentLayout.PairLockTableWords * sizeof(uint)]);
         if (pairLocks == 0)
         {
             error = "failed to create the pair-lock table";

@@ -89,7 +89,7 @@ internal static partial class MetalVideoPresenter
     {
         if (_pairLockTable == 0)
         {
-            const int bytes = SharpEmu.ShaderCompiler.Metal.Gen5MslArgumentLayout.PairLockSlots * sizeof(uint);
+            const int bytes = SharpEmu.ShaderCompiler.Metal.Gen5MslArgumentLayout.PairLockTableWords * sizeof(uint);
             _pairLockTable = MetalNative.SendNewBuffer(
                 device, MetalNative.Selector("newBufferWithLength:options:"), (nuint)bytes, StorageModeShared);
             unsafe

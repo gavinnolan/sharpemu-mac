@@ -59,10 +59,13 @@ public sealed class Gen5MslDataShareAtomicTests(ITestOutputHelper output)
     [InlineData("DsOrB32", 0x0Au, Initial, Operand, Compare, Sentinel, 0x00001235u)]
     [InlineData("DsXorB32", 0x0Bu, Initial, Operand, Compare, Sentinel, 0x00001225u)]
     [InlineData("DsCmpstB32-hit", 0x10u, Initial, Initial, Compare, Sentinel, Compare)]
-    // DS_MIN/MAX_F32 replace memory with DATA0 when DATA1 compares below it.
+    // DS_MIN/MAX_F32 keep the smaller/larger of DATA0 and memory; DATA1 is not compared
+    // (see Gen5MslTranslator.DataShareFloatMinMax), so it cannot change the outcome.
     [InlineData("DsMinF32-replace", 0x12u, 0x40000000u, 0x3F800000u, 0x3F000000u, Sentinel, 0x3F800000u)]
-    [InlineData("DsMinF32-keep", 0x12u, 0x40000000u, 0x3F800000u, 0x40800000u, Sentinel, 0x40000000u)]
-    [InlineData("DsMaxF32-replace", 0x13u, 0x40000000u, 0x3F800000u, 0x3F000000u, Sentinel, 0x3F800000u)]
+    [InlineData("DsMinF32-data1-ignored", 0x12u, 0x40000000u, 0x3F800000u, 0x40800000u, Sentinel, 0x3F800000u)]
+    [InlineData("DsMinF32-keep", 0x12u, 0x3F000000u, 0x3F800000u, 0x3E800000u, Sentinel, 0x3F000000u)]
+    [InlineData("DsMaxF32-replace", 0x13u, 0x3F000000u, 0x3F800000u, 0x40800000u, Sentinel, 0x3F800000u)]
+    [InlineData("DsMaxF32-data1-ignored", 0x13u, 0x40000000u, 0x3F800000u, 0x3F000000u, Sentinel, 0x40000000u)]
     [InlineData("DsMaxF32-keep", 0x13u, 0x40000000u, 0x3F800000u, 0x40800000u, Sentinel, 0x40000000u)]
     [InlineData("DsMinRtnF32-replace", 0x32u, 0x40000000u, 0x3F800000u, 0x3F000000u, 0x40000000u, 0x3F800000u)]
     [InlineData("DsMaxRtnF32-keep", 0x33u, 0x40000000u, 0x3F800000u, 0x40800000u, 0x40000000u, 0x40000000u)]
@@ -219,18 +222,18 @@ public sealed class Gen5MslDataShareAtomicTests(ITestOutputHelper output)
     }
 
     [Theory]
-    // 64-bit LDS atomics a pair of 32-bit threadgroup atomics cannot make exact are refused
-    // in compute, not split: a returned pair or an ordered compare needs one 64-bit snapshot.
+    // 64-bit LDS atomics a pair of 32-bit threadgroup atomics cannot make exact run under
+    // the LDS qword locks (Gen5MslDataShareQwordTests runs them on the device).
     [InlineData(0x47u, "DsMinU64")]
     [InlineData(0x50u, "DsCmpstB64")]
     [InlineData(0x60u, "DsAddRtnU64")]
     [InlineData(0x6Du, "DsWrxchgRtnB64")]
     [InlineData(0x52u, "DsMinF64")]
-    public void InexpressibleSharedLds64BitAtomicsAreRefused(uint opcode, string name)
+    public void Unsplittable64BitSharedLdsAtomicsTakeTheQwordLock(uint opcode, string name)
     {
-        var fixture = PairFixture(name, opcode, 0, 0, 0, 0);
-        Assert.False(Gen5MslTranslator.TryCompileProgram(Gen5ComputeFixtures.CreateComputeRequest(fixture), out _, out var error));
-        Assert.Contains(name, error);
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(PairFixture(name, opcode, 0, 0, 0, 0));
+        Assert.Contains("sharpemu_lds_try_lock(", shader.Source);
+        Assert.Equal(name == "DsMinF64", shader.Source.Contains("sharpemu_f64_lt(", StringComparison.Ordinal));
     }
 
     [Fact]

@@ -947,7 +947,7 @@ internal sealed class MetalGuestMemory : IDisposable
             {
                 if (_pairLockTable == 0)
                 {
-                    const int bytes = SharpEmu.ShaderCompiler.Metal.Gen5MslArgumentLayout.PairLockSlots * sizeof(uint);
+                    const int bytes = SharpEmu.ShaderCompiler.Metal.Gen5MslArgumentLayout.PairLockTableWords * sizeof(uint);
                     var buffer = CreateSharedBuffer(bytes, "guest.pair-locks", out var contents, out var gpuAddress);
                     unsafe
                     {

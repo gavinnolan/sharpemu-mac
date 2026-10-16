@@ -540,8 +540,6 @@ public static partial class Gen5MslTranslator
                 "Dec" => pointer => $"sharpemu_atomic_step((device atomic_uint*)({pointer}), {value}, false)",
                 "Fmin" => pointer => $"sharpemu_atomic_float_minmax((device atomic_uint*)({pointer}), {value}, false)",
                 "Fmax" => pointer => $"sharpemu_atomic_float_minmax((device atomic_uint*)({pointer}), {value}, true)",
-                // DS_MIN/MAX_F32 replace with DATA0 while DATA1 ranks below memory.
-                "Freplace" => pointer => $"sharpemu_atomic_float_replace((device atomic_uint*)({pointer}), {value}, {comparator})",
                 _ => null,
             };
             build = candidate!;
@@ -2064,6 +2062,15 @@ public static partial class Gen5MslTranslator
                 case "DsAppend":
                 case "DsConsume":
                     return TryEmitGlobalDataShareCounter(instruction, control, out error);
+                case "DsOrderedCount":
+                    return TryEmitOrderedCount(instruction, control, out error);
+                case "DsGwsInit":
+                case "DsGwsSemaV":
+                case "DsGwsSemaBr":
+                case "DsGwsSemaP":
+                case "DsGwsSemaReleaseAll":
+                case "DsGwsBarrier":
+                    return TryEmitGlobalWaveSync(instruction, control, out error);
                 case "DsWriteB32":
                 {
                     var index = Temp("uint", GlobalDataShareIndex(RawSource(instruction, 0), control.SingleOffsetBytes));
@@ -2235,14 +2242,14 @@ public static partial class Gen5MslTranslator
             error = string.Empty;
             var name = instruction.Opcode switch
             {
-                "DsMinF32" or "DsMaxF32" => "Freplace",
+                // A min/max of DATA0 and memory, as on the LDS path (DataShareFloatMinMax).
+                "DsMinF32" or "DsMinRtnF32" => "Fmin",
+                "DsMaxF32" or "DsMaxRtnF32" => "Fmax",
                 _ => DataShareAtomicName(instruction.Opcode),
             };
-            // DS_CMPST reads DATA0 as the comparator and DATA1 as the new value;
-            // the conditional float replaces read DATA0 as the replacement value
-            // and DATA1 as the operand compared against memory.
+            // DS_CMPST reads DATA0 as the comparator and DATA1 as the new value.
             var valueIndex = name == "Cmpswap" ? 2 : 1;
-            var comparatorIndex = name == "Freplace" ? 2 : 1;
+            var comparatorIndex = 1;
             var value = instruction.Sources.Count > valueIndex ? RawSource(instruction, valueIndex) : "0u";
             var comparator = instruction.Sources.Count > comparatorIndex ? RawSource(instruction, comparatorIndex) : "0u";
             if (name.Length == 0 || !TryGetAtomicExpression(name, value, comparator, out var build))
@@ -2263,6 +2270,109 @@ public static partial class Gen5MslTranslator
 
             _indent--;
             Line("}");
+            return true;
+        }
+
+        // Evaluates `operation` once per guest wave, in its first active lane (whose own
+        // registers it reads), and returns the result broadcast to the wave. A wave with
+        // no active lane does nothing. The rest of the wave waits for the leader: a wave32
+        // is one SIMD-group, and a wave64's halves meet at the wave-exchange barrier.
+        private string EmitWaveLeaderOperation(string operation)
+        {
+            if (IsWave64)
+            {
+                return EmitWave64AppendAtomic(_ => operation, "true");
+            }
+
+            var mask = Temp("uint", "sharpemu_ballot(exec)");
+            var first = Temp("uint", $"{mask} == 0u ? 0u : (uint)ctz({mask})");
+            var value = Temp("uint", "0u");
+            Line($"if ({ExecCondition($"sharpemu_lane == {first}")}) {{ {value} = {operation}; }}");
+            return Temp("uint", $"simd_broadcast({value}, {first})");
+        }
+
+        // DS_ORDERED_COUNT (RDNA2 ISA 12.13; LLVM's llvm.amdgcn.ds.ordered.add/swap lowering):
+        // the ADDR-field VGPR of the wave's first active lane is the value, OFFSET0 bits 7:2
+        // the GDS dword (the ordered counter's index), OFFSET1 bit 0 wave_release, bit 1
+        // wave_done, bits 3:2 the shader type, bit 4 swap instead of add and bits 7:6 the
+        // dword count less one. The wave adds (or swaps in) the value once and every active
+        // lane receives the counter's previous value.
+        //
+        // The hardware also orders the waves: a wave's add waits until every wave launched
+        // before it (by the dispatch order M0 identifies) has issued its own with
+        // wave_release, so each wave's range follows its predecessors'. The host has no
+        // launch-order walker and Metal no launch order to give one, so here the waves add
+        // in the order they reach the counter: every wave still gets a disjoint range, the
+        // ranges still tile [start, start + total) and the total is the same - what an
+        // ordered append's compaction needs - but the ranges may be permuted across waves,
+        // so output a guest orders by wave may come out in another order. wave_release and
+        // wave_done have nothing to release, so they are ignored.
+        private bool TryEmitOrderedCount(Gen5ShaderInstruction instruction, Gen5DataShareControl control, out string error)
+        {
+            error = string.Empty;
+            if (instruction.Sources.Count < 1 || instruction.Destinations.Count < 1)
+            {
+                error = $"missing {instruction.Opcode} operand";
+                return false;
+            }
+
+            if (((control.Offset1 >> 6) & 3) != 0)
+            {
+                error = $"{instruction.Opcode} over {((control.Offset1 >> 6) & 3) + 1} dwords is not implemented";
+                return false;
+            }
+
+            if (!HasRealWaveLanes)
+            {
+                error = $"{instruction.Opcode} needs wave lanes";
+                return false;
+            }
+
+            var swap = ((control.Offset1 >> 4) & 1) != 0;
+            var index = Temp("uint", $"{(control.Offset0 >> 2) & 0x3F}u");
+            var word = $"(device atomic_uint*)({GlobalDataShareName} + {index})";
+            var operation = swap ? "atomic_exchange_explicit" : "atomic_fetch_add_explicit";
+            var result = EmitWaveLeaderOperation(
+                $"({index} < {GlobalDataShareWordsName} ? {operation}({word}, {RawSource(instruction, 0)}, memory_order_relaxed) : 0u)");
+            StoreVector(instruction.Destinations[0].Value, result);
+            return true;
+        }
+
+        // DS_GWS_* (see the GWS section of Templates/pair_atomic_prelude.msl): once per wave,
+        // on resource M0[21:16] + OFFSET0[5:0], with the first active lane's ADDR-field VGPR
+        // as DATA for INIT, SEMA_BR and BARRIER.
+        private bool TryEmitGlobalWaveSync(Gen5ShaderInstruction instruction, Gen5DataShareControl control, out string error)
+        {
+            error = string.Empty;
+            var takesData = instruction.Opcode is "DsGwsInit" or "DsGwsSemaBr" or "DsGwsBarrier";
+            if (instruction.Sources.Count < (takesData ? 2 : 1))
+            {
+                error = $"missing {instruction.Opcode} operand";
+                return false;
+            }
+
+            if (!HasRealWaveLanes)
+            {
+                error = $"{instruction.Opcode} needs wave lanes";
+                return false;
+            }
+
+            _usesPairLocks = true;
+            var m0 = Temp("uint", RawSource(instruction, instruction.Sources.Count - 1));
+            var resource = Temp(
+                "device atomic_uint*",
+                $"sharpemu_gws_resource({PairLocksExpression}, {m0}, {control.Offset0 & 0x3F}u)");
+            var data = takesData ? RawSource(instruction, 0) : "0u";
+            var call = instruction.Opcode switch
+            {
+                "DsGwsInit" => $"sharpemu_gws_init({resource}, {data})",
+                "DsGwsSemaV" => $"sharpemu_gws_sema_release({resource}, 1u)",
+                "DsGwsSemaBr" => $"sharpemu_gws_sema_release({resource}, {data})",
+                "DsGwsSemaP" => $"sharpemu_gws_sema_p({resource}, {PairStepReportExpression})",
+                "DsGwsSemaReleaseAll" => $"sharpemu_gws_sema_release_all({resource})",
+                _ => $"sharpemu_gws_barrier({resource}, {data}, {PairStepReportExpression})",
+            };
+            EmitWaveLeaderOperation(call);
             return true;
         }
 

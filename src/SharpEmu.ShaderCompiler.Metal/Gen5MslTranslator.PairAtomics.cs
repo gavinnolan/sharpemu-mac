@@ -37,6 +37,35 @@ public static partial class Gen5MslTranslator
             Line("}");
         }
 
+        /// <summary>A body that runs inside the lock of the shared-LDS qword holding the
+        /// dword at <paramref name="wordIndex"/> (Templates/pair_atomic_prelude.msl,
+        /// sharpemu_lds_try_lock). Taken and released inside one branch of one loop trip,
+        /// like <see cref="EmitPairLocked"/>, so lanes of one SIMD-group contending for it
+        /// cannot deadlock each other.</summary>
+        private void EmitLdsLocked(string wordIndex, Action body)
+        {
+            _usesPairLocks = true;
+            var lockWord = Temp(
+                "device atomic_uint*",
+                $"sharpemu_lds_pair_lock({PairLocksExpression}, sharpemu_group_id, ({wordIndex}) >> 1u)");
+            var sequence = Temp("uint", "0u");
+            var tries = Temp("uint", "0u");
+            var done = Temp("bool", "false");
+            Line($"while (!{done})");
+            Line("{");
+            _indent++;
+            Line($"if (sharpemu_lds_try_lock({lockWord}, {sequence}, {tries}, {PairStepReportExpression}))");
+            Line("{");
+            _indent++;
+            body();
+            Line($"sharpemu_lds_unlock({lockWord}, {sequence});");
+            Line($"{done} = true;");
+            _indent--;
+            Line("}");
+            _indent--;
+            Line("}");
+        }
+
         /// <summary>A GLC LOAD_DWORDX2 read as one snapshot (see <see cref="EmitPairLocked"/>)
         /// into two destination registers. The helper call is the whole read, so it runs
         /// only for lanes EXEC has set unless the caller already guards on it.</summary>

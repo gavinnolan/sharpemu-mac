@@ -59,6 +59,13 @@ public sealed class Gen5MslArgumentLayout
     /// <summary>The 32-bit sequence words in the pair-lock table; the shader picks one by
     /// bits 3..13 of a pair's address (sharpemu_pair_lock_slots).</summary>
     public const int PairLockSlots = 2048;
+
+    /// <summary>The words after the lock slots holding the state of the 64 GWS resources,
+    /// four each (sharpemu_gws_resource).</summary>
+    public const int GwsResourceWords = 64 * 4;
+
+    /// <summary>The whole table the host allocates zeroed for the pair_locks field.</summary>
+    public const int PairLockTableWords = PairLockSlots + GwsResourceWords;
     private const uint ResourceBytes = 8;
     private const uint WordBytes = 4;
 

@@ -67,6 +67,46 @@ static inline void sharpemu_pair_unlock(device atomic_uint* lock, uint seq)
     }
 }
 
+// Shared-LDS qword locks. Metal's threadgroup atomics are 32-bit, so a 64-bit LDS atomic
+// that is not two independent 32-bit ones (a returning form, min/max, compare-store,
+// exchange, inc/dec, the F64 forms) is a load, compute and store of both words, made
+// atomic by a lock. The locks are slots of the same device table: a slot is picked by the
+// qword's LDS index mixed with the threadgroup's position, so the same LDS index of
+// different threadgroups (distinct memory) mostly picks different slots; a collision only
+// serializes. Nothing needs initializing (the table is even when no one holds a slot),
+// and no threadgroup memory is spent on it.
+//   lock:   the pair lock's CAS from even s to s + 1 (sharpemu_pair_try_lock, with its
+//           device fence), then a seq_cst fence over threadgroup and device memory;
+//   unlock: the same fence, then s + 2.
+// Every access to the qword inside the critical section is a 32-bit atomic load or store,
+// and every LDS atomic of a program that locks runs inside the lock of the qword it
+// touches, so the fences order each holder's accesses after the previous holder's (the
+// CAS reads the previous unlock store) and no locked read-modify-write interleaves with
+// another LDS atomic on the same qword. A lock is held across no reconvergence point, and
+// one lane never holds two, so contending lanes of one SIMD-group cannot deadlock. The
+// 2^20-try give-up of sharpemu_pair_try_lock applies (a step cap, never a hang).
+static inline device atomic_uint* sharpemu_lds_pair_lock(device atomic_uint* locks, uint3 group, uint qword)
+{
+    uint key = qword + (group.x + group.y * 7919u + group.z * 104729u) * 613u;
+    return locks + (key & (sharpemu_pair_lock_slots - 1u));
+}
+
+static inline bool sharpemu_lds_try_lock(device atomic_uint* lock, thread uint& seq, thread uint& tries, device atomic_uint* report)
+{
+    if (!sharpemu_pair_try_lock(lock, seq, tries, report))
+    {
+        return false;
+    }
+    atomic_thread_fence(mem_flags::mem_threadgroup | mem_flags::mem_device, memory_order_seq_cst, thread_scope_threadgroup);
+    return true;
+}
+
+static inline void sharpemu_lds_unlock(device atomic_uint* lock, uint seq)
+{
+    atomic_thread_fence(mem_flags::mem_threadgroup | mem_flags::mem_device, memory_order_seq_cst, thread_scope_threadgroup);
+    sharpemu_pair_unlock(lock, seq);
+}
+
 // Both dwords of a pair as one snapshot (a GLC LOAD_DWORDX2), read coherently. The
 // dwords are normally adjacent; a swizzled V# can place them apart, and the lock is then
 // still the one the first dword's address picks.
@@ -123,4 +163,105 @@ static inline uint2 sharpemu_load_device_pair_coherent(device const Gen5AddressR
     return uint2(
         first_valid ? atomic_load_explicit((device atomic_uint*)first_word, memory_order_relaxed) : 0u,
         second_valid ? atomic_load_explicit((device atomic_uint*)second_word, memory_order_relaxed) : 0u);
+}
+
+// Global wave sync (DS_GWS_*, RDNA2 ISA 12.13). The 64 GWS resources live after the lock
+// slots, four words each; word 0 is the resource's state. A semaphore counts in all of it;
+// a barrier keeps its flag in bit 31 and the waves still to arrive in bits 30:0, so one
+// compare-and-swap moves both. Word 1 counts SEMA_RELEASE_ALLs. Each call is made once
+// per guest wave, by its first active lane, which the rest of the wave waits for.
+//
+// On hardware the GWS queues waves in the order they arrive and wakes them as counts
+// allow. Here a wave spins on the word instead, and Metal gives no forward-progress
+// guarantee between threadgroups: a wave waiting for one that is not yet resident would
+// spin forever, so after 2^20 tries it gives up, counts a step cap and goes on (as the
+// pair lock does). Within what is resident the counts behave as the ISA describes.
+static inline device atomic_uint* sharpemu_gws_resource(device atomic_uint* locks, uint m0, uint offset0)
+{
+    return locks + sharpemu_pair_lock_slots + ((((m0 >> 16u) + offset0) & 63u) * 4u);
+}
+
+// DS_GWS_INIT: the state becomes DATA (a barrier's count, flag clear).
+static inline uint sharpemu_gws_init(device atomic_uint* resource, uint value)
+{
+    atomic_store_explicit(resource, value & 0x7FFFFFFFu, memory_order_relaxed);
+    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
+    return 0u;
+}
+
+// DS_GWS_SEMA_V (count 1) and DS_GWS_SEMA_BR (count DATA): release that many waits.
+static inline uint sharpemu_gws_sema_release(device atomic_uint* resource, uint count)
+{
+    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
+    atomic_fetch_add_explicit(resource, count, memory_order_relaxed);
+    return 0u;
+}
+
+// DS_GWS_SEMA_RELEASE_ALL: every wave waiting in SEMA_P now returns without taking a count.
+static inline uint sharpemu_gws_sema_release_all(device atomic_uint* resource)
+{
+    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
+    atomic_fetch_add_explicit(resource + 1, 1u, memory_order_relaxed);
+    return 0u;
+}
+
+// DS_GWS_SEMA_P: wait until the count is positive and take one, or until a RELEASE_ALL
+// that comes after the wait began.
+static inline uint sharpemu_gws_sema_p(device atomic_uint* resource, device atomic_uint* report)
+{
+    uint releases = atomic_load_explicit(resource + 1, memory_order_relaxed);
+    for (uint tries = 0u; ; tries++)
+    {
+        uint count = atomic_load_explicit(resource, memory_order_relaxed);
+        if ((int)count > 0 &&
+            atomic_compare_exchange_weak_explicit(resource, &count, count - 1u, memory_order_relaxed, memory_order_relaxed))
+        {
+            break;
+        }
+        if (atomic_load_explicit(resource + 1, memory_order_relaxed) != releases)
+        {
+            break;
+        }
+        if (tries >= sharpemu_pair_lock_tries)
+        {
+            sharpemu_note_step_cap(report);
+            break;
+        }
+    }
+    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
+    return 0u;
+}
+
+// DS_GWS_BARRIER: a wave arriving at a count of zero is the last one; it flips the flag,
+// which releases the waves that arrived before it, and stores DATA as the number still to
+// arrive at the next barrier. Any other wave takes one from the count and waits for the
+// flag to change.
+static inline uint sharpemu_gws_barrier(device atomic_uint* resource, uint value, device atomic_uint* report)
+{
+    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
+    uint state = atomic_load_explicit(resource, memory_order_relaxed);
+    for (;;)
+    {
+        uint flag = state & 0x80000000u;
+        uint next = (state & 0x7FFFFFFFu) == 0u
+            ? ((flag ^ 0x80000000u) | (value & 0x7FFFFFFFu))
+            : state - 1u;
+        if (atomic_compare_exchange_weak_explicit(resource, &state, next, memory_order_relaxed, memory_order_relaxed))
+        {
+            if ((state & 0x7FFFFFFFu) == 0u)
+            {
+                return 0u;
+            }
+            for (uint tries = 0u; (atomic_load_explicit(resource, memory_order_relaxed) & 0x80000000u) == flag; tries++)
+            {
+                if (tries >= sharpemu_pair_lock_tries)
+                {
+                    sharpemu_note_step_cap(report);
+                    break;
+                }
+            }
+            atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
+            return 0u;
+        }
+    }
 }

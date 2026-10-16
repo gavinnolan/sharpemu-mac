@@ -41,6 +41,11 @@ internal static partial class MetalNative
             faults);
     }
 
+    /// <summary>A shared buffer holding <paramref name="contents"/> bound for one table kind
+    /// (the global data share, say) with <paramref name="count"/> in its word field.</summary>
+    public static DeviceTable CreateTable(DescriptorBindingKind kind, byte[] contents, uint count) =>
+        new(kind, SharedBuffer(contents), count, []);
+
     public static uint[] ReadWords(nint buffer, int count)
     {
         var contents = Send(buffer, Selector("contents"));
