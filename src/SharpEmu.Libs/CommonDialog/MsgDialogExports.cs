@@ -3,10 +3,17 @@
 
 using SharpEmu.HLE;
 using System.Buffers.Binary;
-using System.Threading;
 
 namespace SharpEmu.Libs.CommonDialog;
 
+/// <summary>
+/// libSceMsgDialog. There is no host popup, so the dialog is simulated:
+/// NONE -> INITIALIZED (Initialize) -> RUNNING (Open) -> FINISHED -> NONE (Terminate).
+/// User-message and system-message dialogs with at least one button finish on their own after
+/// <see cref="PollsUntilAutoFinish"/> status polls, answering with a configurable default
+/// button (<see cref="DefaultButtonEnvironmentVariable"/>). Progress-bar dialogs and
+/// button-less user-message dialogs stay RUNNING until sceMsgDialogClose.
+/// </summary>
 public static class MsgDialogExports
 {
     private const int StatusNone = 0;
@@ -15,18 +22,109 @@ public static class MsgDialogExports
     private const int StatusFinished = 3;
 
     private const int ErrorOk = 0;
-    private const int ErrorNotInitialized = unchecked((int)0x80B80003);
-    private const int ErrorNotFinished = unchecked((int)0x80B80005);
-    private const int ErrorBusy = unchecked((int)0x80B80007);
-    private const int ErrorNotRunning = unchecked((int)0x80B8000B);
-    private const int ErrorArgNull = unchecked((int)0x80B8000D);
+    private const int ErrorNotSystemInitialized = CommonDialogState.ErrorNotSystemInitialized;
+    private const int ErrorNotInitialized = CommonDialogState.ErrorNotInitialized;
+    private const int ErrorNotFinished = CommonDialogState.ErrorNotFinished;
+    private const int ErrorBusy = CommonDialogState.ErrorBusy;
+    private const int ErrorParamInvalid = CommonDialogState.ErrorParamInvalid;
+    private const int ErrorNotRunning = CommonDialogState.ErrorNotRunning;
+    private const int ErrorArgNull = CommonDialogState.ErrorArgNull;
 
-    // Result buffer layout follows the common dialog convention: mode at +0x00,
-    // result at +0x04, buttonId at +0x08. The affirmative button (OK/YES) is 1.
-    private const int ResultSize = 0x20;
-    private const int ButtonIdAffirmative = 1;
+    // SceMsgDialogMode.
+    internal const int ModeUserMsg = 1;
+    internal const int ModeProgressBar = 2;
+    internal const int ModeSystemMsg = 3;
 
+    // SceMsgDialogButtonType (values 0-4 as defined by both references).
+    internal const int ButtonTypeOk = 0;
+    internal const int ButtonTypeYesNo = 1;
+    internal const int ButtonTypeNone = 2;
+    internal const int ButtonTypeOkCancel = 3;
+    internal const int ButtonTypeYesNoFocusNo = 4;
+
+    // SceMsgDialogButtonId: INVALID = 0, OK/YES/BUTTON1 = 1, NO/BUTTON2 = 2.
+    internal const int ButtonIdInvalid = 0;
+    internal const int ButtonIdFirst = 1;
+    internal const int ButtonIdSecond = 2;
+
+    // SceMsgDialogResult { int32 mode @0; int32 result @4; int32 buttonId @8; uint8 reserved[32] }.
+    // result: SCE_COMMON_DIALOG_RESULT_OK = 0.
+    internal const int ResultSize = 0x2C;
+
+    // SceMsgDialogParam: base SceCommonDialogBaseParam (0x30 bytes), then size_t size @0x30,
+    // int mode @0x38, userMsgParam* @0x40, progBarParam* @0x48, sysMsgParam* @0x50.
+    private const int ParamModeOffset = 0x38;
+    private const int ParamUserMsgOffset = 0x40;
+    private const int ParamHeadSize = 0x58;
+
+    // Percentage bar range accepted by ProgressBarSetValue/Inc, and the only valid target
+    // (SCE_MSG_DIALOG_PROGRESSBAR_TARGET_BAR_DEFAULT).
+    private const uint ProgressMax = 100;
+    private const int ProgressTargetBarDefault = 0;
+
+    /// <summary>Status polls (GetStatus/UpdateStatus) after Open before an answerable dialog finishes.</summary>
+    internal const int PollsUntilAutoFinish = 2;
+
+    /// <summary>
+    /// Selects which button an auto-finishing two-button dialog answers with. "1", "first",
+    /// "ok", "yes" (default) pick the first/affirmative button; "2", "second", "no",
+    /// "cancel" pick the second.
+    /// </summary>
+    internal const string DefaultButtonEnvironmentVariable = "SHARPEMU_MSGDIALOG_DEFAULT_BUTTON";
+
+    private static readonly object Gate = new();
     private static int _status;
+    private static int _mode = ModeUserMsg;
+    private static int _buttonId = ButtonIdInvalid;
+    private static bool _autoFinish;
+    private static int _pollsLeft;
+    private static bool _usedMarked;
+    private static uint _progress;
+
+    /// <summary>Current progress-bar percentage (0-100) of the open dialog.</summary>
+    internal static uint ProgressValue
+    {
+        get
+        {
+            lock (Gate)
+            {
+                return _progress;
+            }
+        }
+    }
+
+    internal static void ResetForTests()
+    {
+        lock (Gate)
+        {
+            ReleaseUsedLocked();
+            _status = StatusNone;
+            _mode = ModeUserMsg;
+            _buttonId = ButtonIdInvalid;
+            _autoFinish = false;
+            _pollsLeft = 0;
+            _progress = 0;
+        }
+    }
+
+    /// <summary>
+    /// Button an auto-finishing dialog of <paramref name="buttonType"/> answers with. The first
+    /// (affirmative) button is the default regardless of the initially focused one.
+    /// </summary>
+    internal static int ResolveDefaultButtonId(string? setting, int buttonType)
+    {
+        var twoButtons = buttonType is ButtonTypeYesNo or ButtonTypeOkCancel or ButtonTypeYesNoFocusNo;
+        if (!twoButtons || string.IsNullOrWhiteSpace(setting))
+        {
+            return ButtonIdFirst;
+        }
+
+        return setting.Trim().ToLowerInvariant() switch
+        {
+            "2" or "second" or "no" or "cancel" => ButtonIdSecond,
+            _ => ButtonIdFirst,
+        };
+    }
 
     [SysAbiExport(
         Nid = "lDqxaY1UbEo",
@@ -35,10 +133,28 @@ public static class MsgDialogExports
         LibraryName = "libSceMsgDialog")]
     public static int MsgDialogInitialize(CpuContext ctx)
     {
-        // Treat repeated initialization as success. The dialog service is process-global in
-        // this HLE implementation and has no per-call resources to recreate. Only promote
-        // from NONE so re-initializing mid-flow cannot clobber a running/finished dialog.
-        Interlocked.CompareExchange(ref _status, StatusInitialized, StatusNone);
+        // sceCommonDialogInitialize must have succeeded first.
+        if (!CommonDialogState.IsInitialized)
+        {
+            return ctx.SetReturn(ErrorNotSystemInitialized);
+        }
+
+        lock (Gate)
+        {
+            // Re-initializing while a dialog is open would clobber it: report BUSY (neither
+            // reference defines a more specific code). Repeating Initialize while idle or
+            // after a finished dialog stays a success, as in both references.
+            if (_status == StatusRunning)
+            {
+                return ctx.SetReturn(ErrorBusy);
+            }
+
+            if (_status == StatusNone)
+            {
+                _status = StatusInitialized;
+            }
+        }
+
         return ctx.SetReturn(ErrorOk);
     }
 
@@ -49,9 +165,17 @@ public static class MsgDialogExports
         LibraryName = "libSceMsgDialog")]
     public static int MsgDialogTerminate(CpuContext ctx)
     {
-        if (Interlocked.Exchange(ref _status, StatusNone) == StatusNone)
+        lock (Gate)
         {
-            return ctx.SetReturn(ErrorNotInitialized);
+            if (_status == StatusNone)
+            {
+                return ctx.SetReturn(ErrorNotInitialized);
+            }
+
+            // Terminating a running dialog tears it down (both references allow it).
+            ReleaseUsedLocked();
+            _status = StatusNone;
+            _progress = 0;
         }
 
         return ctx.SetReturn(ErrorOk);
@@ -70,23 +194,85 @@ public static class MsgDialogExports
             return ctx.SetReturn(ErrorArgNull);
         }
 
-        var status = Volatile.Read(ref _status);
-        if (status == StatusNone)
+        lock (Gate)
         {
-            return ctx.SetReturn(ErrorNotInitialized);
+            if (_status == StatusNone)
+            {
+                return ctx.SetReturn(ErrorNotInitialized);
+            }
+
+            if (_status == StatusRunning)
+            {
+                return ctx.SetReturn(ErrorBusy);
+            }
+
+            var mode = ModeUserMsg;
+            var buttonType = ButtonTypeOk;
+            Span<byte> head = stackalloc byte[ParamHeadSize];
+            if (ctx.Memory.TryRead(paramAddress, head))
+            {
+                mode = BinaryPrimitives.ReadInt32LittleEndian(head[ParamModeOffset..]);
+                if (mode is < ModeUserMsg or > ModeSystemMsg)
+                {
+                    return ctx.SetReturn(ErrorParamInvalid);
+                }
+
+                if (mode == ModeUserMsg)
+                {
+                    buttonType = ReadButtonType(ctx, BinaryPrimitives.ReadUInt64LittleEndian(head[ParamUserMsgOffset..]));
+                }
+            }
+
+            LogDialogMessage(ctx, paramAddress);
+
+            _mode = mode;
+            _progress = 0;
+            _buttonId = ButtonIdInvalid;
+            _pollsLeft = PollsUntilAutoFinish;
+            // Progress bars and button-less dialogs are ended by the title (Close).
+            _autoFinish = mode != ModeProgressBar && !(mode == ModeUserMsg && buttonType == ButtonTypeNone);
+            if (_autoFinish)
+            {
+                _buttonId = mode == ModeUserMsg
+                    ? ResolveDefaultButtonId(Environment.GetEnvironmentVariable(DefaultButtonEnvironmentVariable), buttonType)
+                    : ButtonIdFirst;
+            }
+
+            _status = StatusRunning;
+            if (!_usedMarked)
+            {
+                _usedMarked = true;
+                CommonDialogState.MarkUsed(true);
+            }
         }
 
-        if (status == StatusRunning)
-        {
-            return ctx.SetReturn(ErrorBusy);
-        }
-
-        LogDialogMessage(ctx, paramAddress);
-
-        // There is no host popup to actually show. Enter RUNNING so close/cancel paths see
-        // a live dialog; the guest's next status poll auto-dismisses it (see PollStatus).
-        Interlocked.Exchange(ref _status, StatusRunning);
         return ctx.SetReturn(ErrorOk);
+    }
+
+    // SceMsgDialogUserMessageParam { int buttonType @0; const char* msg @8; ... }.
+    private static int ReadButtonType(CpuContext ctx, ulong userMsgAddress)
+    {
+        Span<byte> field = stackalloc byte[4];
+        return userMsgAddress != 0 && ctx.Memory.TryRead(userMsgAddress, field)
+            ? BinaryPrimitives.ReadInt32LittleEndian(field)
+            : ButtonTypeOk;
+    }
+
+    // Callers hold Gate.
+    private static void ReleaseUsedLocked()
+    {
+        if (_usedMarked)
+        {
+            _usedMarked = false;
+            CommonDialogState.MarkUsed(false);
+        }
+    }
+
+    // Callers hold Gate.
+    private static void FinishLocked()
+    {
+        _status = StatusFinished;
+        ReleaseUsedLocked();
     }
 
     // Best-effort extraction of the dialog text so fatal-error popups are visible in the
@@ -153,6 +339,7 @@ public static class MsgDialogExports
         return System.Text.Encoding.ASCII.GetString(candidate).Replace("\n", "\\n").Replace("\r", "\\r");
     }
 
+
     [SysAbiExport(
         Nid = "CWVW78Qc3fI",
         ExportName = "sceMsgDialogGetStatus",
@@ -167,14 +354,21 @@ public static class MsgDialogExports
         LibraryName = "libSceMsgDialog")]
     public static int MsgDialogUpdateStatus(CpuContext ctx) => ctx.SetReturn(PollStatus());
 
-    // With no host UI the dialog cannot wait for user input: the first status poll after
-    // Open observes the dialog as already dismissed. Advancing on both UpdateStatus and
-    // GetStatus keeps every guest polling pattern free of infinite RUNNING loops, while
-    // an Open -> Close sequence with no poll in between still exercises the close path.
+    // With no host UI nobody can answer, so an answerable dialog is dismissed by itself on its
+    // second poll (the first poll after Open still reports RUNNING). Advancing on both
+    // UpdateStatus and GetStatus keeps every guest polling pattern free of infinite RUNNING
+    // loops. Progress-bar and button-less dialogs only finish through sceMsgDialogClose.
     private static int PollStatus()
     {
-        Interlocked.CompareExchange(ref _status, StatusFinished, StatusRunning);
-        return Volatile.Read(ref _status);
+        lock (Gate)
+        {
+            if (_status == StatusRunning && _autoFinish && --_pollsLeft <= 0)
+            {
+                FinishLocked();
+            }
+
+            return _status;
+        }
     }
 
     [SysAbiExport(
@@ -190,17 +384,22 @@ public static class MsgDialogExports
             return ctx.SetReturn(ErrorArgNull);
         }
 
-        if (Volatile.Read(ref _status) != StatusFinished)
-        {
-            return ctx.SetReturn(ErrorNotFinished);
-        }
-
-        // Report the affirmative button so yes/no prompts take the confirming branch;
-        // buttonId 0 is the "invalid" sentinel and games may treat it as an error.
         Span<byte> result = stackalloc byte[ResultSize];
         result.Clear();
-        BinaryPrimitives.WriteInt32LittleEndian(result[0x04..], 0);
-        BinaryPrimitives.WriteInt32LittleEndian(result[0x08..], ButtonIdAffirmative);
+        lock (Gate)
+        {
+            if (_status != StatusFinished)
+            {
+                return ctx.SetReturn(ErrorNotFinished);
+            }
+
+            // Echo the opened mode and the button that ended the dialog. A dialog ended by
+            // sceMsgDialogClose before any answer reports BUTTON_ID_INVALID (inferred; neither
+            // reference documents it). The result code is always OK: no user can cancel.
+            BinaryPrimitives.WriteInt32LittleEndian(result, _mode);
+            BinaryPrimitives.WriteInt32LittleEndian(result[0x04..], 0);
+            BinaryPrimitives.WriteInt32LittleEndian(result[0x08..], _buttonId);
+        }
 
         if (!ctx.Memory.TryWrite(resultAddress, result))
         {
@@ -217,44 +416,121 @@ public static class MsgDialogExports
         LibraryName = "libSceMsgDialog")]
     public static int MsgDialogClose(CpuContext ctx)
     {
-        if (Interlocked.CompareExchange(ref _status, StatusFinished, StatusRunning) != StatusRunning)
+        lock (Gate)
         {
-            return ctx.SetReturn(ErrorNotRunning);
+            if (_status == StatusNone)
+            {
+                return ctx.SetReturn(ErrorNotInitialized);
+            }
+
+            if (_status != StatusRunning)
+            {
+                return ctx.SetReturn(ErrorNotRunning);
+            }
+
+            FinishLocked();
         }
 
         return ctx.SetReturn(ErrorOk);
     }
 
+    // int sceMsgDialogProgressBarSetValue(SceMsgDialogProgressBarTarget target, uint32_t rate).
     [SysAbiExport(
         Nid = "wTpfglkmv34",
         ExportName = "sceMsgDialogProgressBarSetValue",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceMsgDialog")]
-    public static int MsgDialogProgressBarSetValue(CpuContext ctx) => ProgressBarNoOp(ctx);
+    public static int MsgDialogProgressBarSetValue(CpuContext ctx)
+    {
+        var target = unchecked((int)ctx[CpuRegister.Rdi]);
+        var rate = unchecked((uint)ctx[CpuRegister.Rsi]);
+        lock (Gate)
+        {
+            var state = CheckProgressStateLocked();
+            if (state != ErrorOk)
+            {
+                return ctx.SetReturn(state);
+            }
 
+            if (target != ProgressTargetBarDefault || rate > ProgressMax)
+            {
+                return ctx.SetReturn(ErrorParamInvalid);
+            }
+
+            _progress = rate;
+        }
+
+        return ctx.SetReturn(ErrorOk);
+    }
+
+    // int sceMsgDialogProgressBarInc(SceMsgDialogProgressBarTarget target, uint32_t delta).
+    // The bar saturates at 100.
     [SysAbiExport(
         Nid = "Gc5k1qcK4fs",
         ExportName = "sceMsgDialogProgressBarInc",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceMsgDialog")]
-    public static int MsgDialogProgressBarInc(CpuContext ctx) => ProgressBarNoOp(ctx);
+    public static int MsgDialogProgressBarInc(CpuContext ctx)
+    {
+        var target = unchecked((int)ctx[CpuRegister.Rdi]);
+        var delta = unchecked((uint)ctx[CpuRegister.Rsi]);
+        lock (Gate)
+        {
+            var state = CheckProgressStateLocked();
+            if (state != ErrorOk)
+            {
+                return ctx.SetReturn(state);
+            }
 
+            if (target != ProgressTargetBarDefault || delta > ProgressMax)
+            {
+                return ctx.SetReturn(ErrorParamInvalid);
+            }
+
+            _progress = Math.Min(ProgressMax, _progress + delta);
+        }
+
+        return ctx.SetReturn(ErrorOk);
+    }
+
+    // int sceMsgDialogProgressBarSetMsg(SceMsgDialogProgressBarTarget target, const char *msg).
+    // There is no visible bar, so the text is only validated.
     [SysAbiExport(
         Nid = "6H-71OdrpXM",
         ExportName = "sceMsgDialogProgressBarSetMsg",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceMsgDialog")]
-    public static int MsgDialogProgressBarSetMsg(CpuContext ctx) => ProgressBarNoOp(ctx);
-
-    // There is no visible bar to update. Accept the call whenever the service is alive so
-    // save/install loops that report progress do not abort on an unexpected error.
-    private static int ProgressBarNoOp(CpuContext ctx)
+    public static int MsgDialogProgressBarSetMsg(CpuContext ctx)
     {
-        if (Volatile.Read(ref _status) == StatusNone)
+        var target = unchecked((int)ctx[CpuRegister.Rdi]);
+        var msgAddress = ctx[CpuRegister.Rsi];
+        lock (Gate)
         {
-            return ctx.SetReturn(ErrorNotInitialized);
+            var state = CheckProgressStateLocked();
+            if (state != ErrorOk)
+            {
+                return ctx.SetReturn(state);
+            }
+
+            if (msgAddress == 0)
+            {
+                return ctx.SetReturn(ErrorArgNull);
+            }
+
+            if (target != ProgressTargetBarDefault)
+            {
+                return ctx.SetReturn(ErrorParamInvalid);
+            }
         }
 
         return ctx.SetReturn(ErrorOk);
     }
+
+    // Progress-bar calls need a live dialog. Callers hold Gate.
+    private static int CheckProgressStateLocked() => _status switch
+    {
+        StatusNone => ErrorNotInitialized,
+        StatusRunning => ErrorOk,
+        _ => ErrorNotRunning,
+    };
 }

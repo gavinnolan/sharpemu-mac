@@ -1,15 +1,12 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using System.Threading;
 using SharpEmu.HLE;
 
 namespace SharpEmu.Libs.CommonDialog;
 
 public static class CommonDialogExports
 {
-    private static int _initialized;
-
     [SysAbiExport(
         Nid = "uoUpLGNkygk",
         ExportName = "sceCommonDialogInitialize",
@@ -17,14 +14,14 @@ public static class CommonDialogExports
         LibraryName = "libSceCommonDialog")]
     public static int CommonDialogInitialize(CpuContext ctx)
     {
-        // Games can initialize the common-dialog service defensively from more than one
-        // subsystem. Keeping this HLE initialization idempotent avoids turning an error
-        // reporting path into a second, unrelated failure.
-        Interlocked.Exchange(ref _initialized, 1);
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        // A second call returns SCE_COMMON_DIALOG_ERROR_ALREADY_SYSTEM_INITIALIZED (0x80B80002)
+        // as anyps5 does; kyty defines no common-dialog error codes.
+        return ctx.SetReturn(CommonDialogState.TryInitialize()
+            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
+            : CommonDialogState.ErrorAlreadySystemInitialized);
     }
 
+    // bool sceCommonDialogIsUsed(void): true while any dialog is RUNNING.
     [SysAbiExport(
         Nid = "BQ3tey0JmQM",
         ExportName = "sceCommonDialogIsUsed",
@@ -32,7 +29,7 @@ public static class CommonDialogExports
         LibraryName = "libSceCommonDialog")]
     public static int CommonDialogIsUsed(CpuContext ctx)
     {
-        ctx[CpuRegister.Rax] = 0;
+        ctx[CpuRegister.Rax] = CommonDialogState.IsUsed ? 1UL : 0UL;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 }
