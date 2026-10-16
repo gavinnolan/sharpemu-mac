@@ -12,7 +12,7 @@ using SharpEmu.Libs.Kernel;
 
 namespace SharpEmu.Libs.Network;
 
-public static class NetExports
+public static partial class NetExports
 {
     private const int NetErrorNoEntry = unchecked((int)0x80410102);
     private const int NetErrorBadFileDescriptor = unchecked((int)0x80410109);
