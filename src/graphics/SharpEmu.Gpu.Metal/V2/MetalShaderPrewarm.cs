@@ -222,9 +222,13 @@ internal static class MetalShaderPrewarm
 
         var directory = SharpEmuPaths.UserPath(
             "pipeline_cache", SanitizeTitleId(VideoOutBackendServices.GetApplicationTitleId()), "metal-v2");
+        var compiler = GuestGpu.Current;
+        var stamp = Stamp(compiler, device);
+        // Seeded before the compute prewarm or the game plans a shader.
+        MetalDeviceDataLoadsStore.Open(directory, stamp);
         // Loaded before the gate lets the game go, so every module the game creates
         // finds the graphics libraries queued; they compile once the computes are done.
-        MetalLibraryPrewarm.Open(directory, device);
+        MetalLibraryPrewarm.Open(directory, device, stamp);
         if (ShaderPrewarmList.Open(directory) is not { } list)
         {
             MetalLibraryPrewarm.Begin();
@@ -234,8 +238,6 @@ internal static class MetalShaderPrewarm
         _prewarmedShaderIdentities = new ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
         _runtimeComputeIdentities = new ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
         Volatile.Write(ref _list, list);
-        var compiler = GuestGpu.Current;
-        var stamp = Stamp(compiler, device);
         if (list.LoadedComputeCount == 0)
         {
             list.WriteStamp(stamp);
@@ -487,6 +489,7 @@ internal static class MetalShaderPrewarm
         _stopping = true;
         Gate.Cancel();
         MetalLibraryPrewarm.Stop();
+        MetalDeviceDataLoadsStore.Stop();
         foreach (var thread in Volatile.Read(ref _threads))
         {
             if (thread != Thread.CurrentThread)

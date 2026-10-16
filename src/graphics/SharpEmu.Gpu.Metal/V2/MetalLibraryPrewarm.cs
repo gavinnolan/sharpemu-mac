@@ -28,10 +28,19 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// <see cref="MaxSessionsUnused"/> starts that used the list is dropped, which bounds the
 /// list after translator changes. SHARPEMU_SHADER_PREWARM=0 turns it off with the compute
 /// prewarm; SHARPEMU_METAL_V2_LIBRARY_PREWARM=0 turns off only this one.
+///
+/// Each translator build keeps its own list (the file name carries a hash of the compute
+/// prewarm's stamp: translators, device and OS). The list holds MSL text, and a source
+/// another translator wrote is one this build never asks for: after a translator change
+/// gave every Demon's Souls shader new MSL, one shared list kept 1106 such sources for
+/// eight more starts and compiled them all at every start, 114 s on four threads while
+/// the game booted, and none was taken (hits=0). The lists of other builds are kept, the
+/// most recently written first, up to <see cref="MaxOtherLists"/>.
 /// </summary>
 internal static class MetalLibraryPrewarm
 {
-    internal const string FileName = "msl-libraries-v1.bin";
+    internal const string FilePrefix = "msl-libraries-v1";
+    internal const int MaxOtherLists = 3;
     internal const int MaxSessionsUnused = 8;
     internal const int MaxEntries = 4096;
 
@@ -95,7 +104,7 @@ internal static class MetalLibraryPrewarm
     /// caller is the compute prewarm's start thread, which holds the game until it returns,
     /// so no module is created before the queue exists.
     /// </summary>
-    public static void Open(string directory, nint device)
+    public static void Open(string directory, nint device, string stamp)
     {
         if (Disabled)
         {
@@ -105,13 +114,15 @@ internal static class MetalLibraryPrewarm
         try
         {
             Directory.CreateDirectory(directory);
-            var path = Path.Combine(directory, FileName);
+            var path = Path.Combine(directory, FileName(stamp));
             var (entries, sessions) = Load(path, out var rewrite);
             var kept = Select(entries, sessions);
             if (rewrite || kept.Count != entries.Count)
             {
                 Rewrite(path, kept, sessions);
             }
+
+            PruneOtherLists(directory, path);
 
             var slots = new ConcurrentDictionary<ulong, Slot>();
             var order = new List<Slot>(kept.Count);
@@ -252,6 +263,36 @@ internal static class MetalLibraryPrewarm
             slot.Compressed = null;
             Volatile.Write(ref slot.State, Ready);
             slot.Done.Set();
+        }
+    }
+
+    /// <summary>The list file of one build: the prefix and a hash of its prewarm stamp.</summary>
+    internal static string FileName(string stamp) =>
+        string.Create(
+            System.Globalization.CultureInfo.InvariantCulture,
+            $"{FilePrefix}-{(uint)XxHash3.HashToUInt64(Encoding.UTF8.GetBytes(stamp)):x8}.bin");
+
+    /// <summary>
+    /// Removes the lists of other builds beyond the <see cref="MaxOtherLists"/> most
+    /// recently written, the unstamped list of older builds among them.
+    /// </summary>
+    internal static void PruneOtherLists(string directory, string current)
+    {
+        try
+        {
+            var others = new DirectoryInfo(directory)
+                .EnumerateFiles(FilePrefix + "*.bin")
+                .Where(file => !string.Equals(file.Name, Path.GetFileName(current), StringComparison.Ordinal))
+                .OrderByDescending(file => file.LastWriteTimeUtc)
+                .Skip(MaxOtherLists);
+            foreach (var file in others)
+            {
+                file.Delete();
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] Library prewarm could not remove older lists: {exception.Message}");
         }
     }
 

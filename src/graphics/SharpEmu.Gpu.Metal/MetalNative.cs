@@ -123,9 +123,51 @@ internal static partial class MetalNative
             return;
         }
 
+        ApplyShaderCacheSize();
         NativeLibrary.Load(QuartzCoreFramework);
         _frameworksLoaded = true;
     }
+
+    /// <summary>
+    /// The size SharpEmu gives macOS's per-app Metal shader cache, in bytes, unless
+    /// MTL_SHADER_CACHE_SIZE is already set: 4 GiB.
+    /// </summary>
+    /// <remarks>
+    /// The cache keeps the compiled form of every MSL library and evicts the oldest past its
+    /// size, which is about 1 GiB by default for the whole bundle, every title and every
+    /// build together. Filled to that, it dropped Demon's Souls' libraries within half an
+    /// hour of other titles running: the next start compiled the 143 prewarmed computes
+    /// cold (43 s instead of 6 s) and some 50 graphics libraries on the GPU worker at about
+    /// a second each, drawing nothing for 45 s (runs 20261016-174800-ds-base-2,
+    /// 20261016-180157-ds-fixA-1). Metal reads the variable when it first opens the cache,
+    /// so it is set before the first device; Environment.SetEnvironmentVariable would not
+    /// reach the native environment.
+    /// </remarks>
+    internal const long DefaultShaderCacheBytes = 4L << 30;
+
+    private const string ShaderCacheSizeVariable = "MTL_SHADER_CACHE_SIZE";
+
+    private static void ApplyShaderCacheSize()
+    {
+        if (getenv(ShaderCacheSizeVariable) != 0)
+        {
+            return;
+        }
+
+        var value = DefaultShaderCacheBytes.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (setenv(ShaderCacheSizeVariable, value, 0) != 0)
+        {
+            Console.Error.WriteLine(
+                $"[METAL][WARN] {ShaderCacheSizeVariable} could not be set (errno {Marshal.GetLastPInvokeError()}); " +
+                "the Metal shader cache keeps its default size.");
+        }
+    }
+
+    [LibraryImport("/usr/lib/libSystem.dylib", StringMarshalling = StringMarshalling.Utf8)]
+    private static partial nint getenv(string name);
+
+    [LibraryImport("/usr/lib/libSystem.dylib", StringMarshalling = StringMarshalling.Utf8, SetLastError = true)]
+    private static partial int setenv(string name, string value, int overwrite);
 
     [LibraryImport(MetalFramework)]
     public static partial nint MTLCreateSystemDefaultDevice();
