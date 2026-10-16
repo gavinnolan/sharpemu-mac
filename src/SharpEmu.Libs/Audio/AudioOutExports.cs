@@ -3,6 +3,8 @@
 
 using SharpEmu.HLE;
 using SharpEmu.HLE.Host;
+using SharpEmu.Libs.Kernel;
+using SharpEmu.Libs.Pad;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
@@ -18,16 +20,71 @@ public static class AudioOutExports
     // ABI: SceAudioOutPortState { u16 output; u8 channel; u8 reserved8_1[1];
     // s16 volume; u16 rerouteCounter; u64 flag; u64 reserved64[2]; }.
     private const int AudioOutPortStateSize = 0x20;
-    private const ushort AudioOutStateOutputConnectedPrimary = 1 << 0;
+    // SceAudioOutPortState.output (SCE_AUDIO_OUT_STATE_OUTPUT_*).
+    private const ushort AudioOutStateOutputConnectedPrimary = 0x01;
+    private const ushort AudioOutStateOutputConnectedPadSpeaker = 0x04;
+    private const ushort AudioOutStateOutputConnectedPersonal = 0x40;
+    private const ushort AudioOutStateOutputConnectedAux = 0x80;
 
+    // SCE_AUDIO_OUT_ERROR_* (facility 0x8026).
+    internal const int AudioOutErrorNotOpened = unchecked((int)0x80260001);
+    internal const int AudioOutErrorBusy = unchecked((int)0x80260002);
     internal const int AudioOutErrorInvalidPort = unchecked((int)0x80260003);
     internal const int AudioOutErrorInvalidPointer = unchecked((int)0x80260004);
     internal const int AudioOutErrorPortFull = unchecked((int)0x80260005);
     internal const int AudioOutErrorInvalidSize = unchecked((int)0x80260006);
+    internal const int AudioOutErrorInvalidFormat = unchecked((int)0x80260007);
+    internal const int AudioOutErrorInvalidSampleFreq = unchecked((int)0x80260008);
+    internal const int AudioOutErrorInvalidVolume = unchecked((int)0x80260009);
+    internal const int AudioOutErrorInvalidPortType = unchecked((int)0x8026000A);
+    internal const int AudioOutErrorInvalidConfType = unchecked((int)0x8026000C);
+    internal const int AudioOutErrorOutOfMemory = unchecked((int)0x8026000D);
+    internal const int AudioOutErrorAlreadyInit = unchecked((int)0x8026000E);
+    internal const int AudioOutErrorNotInit = unchecked((int)0x8026000F);
+    internal const int AudioOutErrorMemory = unchecked((int)0x80260010);
+    internal const int AudioOutErrorSystemResource = unchecked((int)0x80260011);
+    internal const int AudioOutErrorTransEvent = unchecked((int)0x80260012);
+    internal const int AudioOutErrorInvalidFlag = unchecked((int)0x80260013);
+    internal const int AudioOutErrorInvalidMixLevel = unchecked((int)0x80260014);
+    internal const int AudioOutErrorInvalidArg = unchecked((int)0x80260015);
+    internal const int AudioOutErrorInvalidParam = unchecked((int)0x80260016);
+    // sceAudioOutExConfigureOutput with a nonzero control argument (measured on
+    // firmware 12.70 by PS5-Audio-Passthrough-Research).
+    internal const int AudioOutErrorExInvalidControl = unchecked((int)0x80268009);
+
+    // SceAudioOutPortType. EX (6) is not accepted by sceAudioOutOpen; it is the
+    // internal type of the HDMI bitstream ports sceAudioOutExOpen creates.
+    internal const int PortTypeMain = 0;
+    internal const int PortTypeBgm = 1;
+    internal const int PortTypeVoice = 2;
+    internal const int PortTypePersonal = 3;
+    internal const int PortTypePadSpeaker = 4;
+    internal const int PortTypeEx = 6;
+    internal const int PortTypeVibration = 10;
+    internal const int PortTypeAudio3d = 126;
+    internal const int PortTypeAux = 127;
+
+    // Ports open at once across every type. Port handles are the slot number
+    // (1..MaxOpenPorts) and a closed slot is reused by the next open.
+    internal const int MaxOpenPorts = 32;
+    private const int UnityVolume = 32768;
+    // -9 dB, the level every pad speaker port starts at until
+    // sceAudioOutSetMixLevelPadSpk changes it.
+    internal const int DefaultPadSpeakerMixLevel = 11626;
+
+    private const uint ExOpenModeMax = 10;
+    // Bit n set: sceAudioOutExOpen accepts mode n (0-4, 9, 10).
+    private const uint ExOpenModes = 0x61F;
+    private const uint ExConfigureDefault = 0xFF;
+    private const uint ExMonitorInfoMinimumSize = 0xA0;
+    private const uint ExMonitorInfoMaximumSize = 0x10000;
+    private const int MonitorTypeHdmi = 1;
+    private const int HdmiMonitorInfoSize = 0x180;
 
     private static readonly ConcurrentDictionary<int, PortState> Ports = new();
     private static readonly ConcurrentDictionary<int, PortState> ShutdownPorts = new();
-    private static int _nextPortHandle;
+    private static readonly object PortAllocationGate = new();
+    private static int _initialized;
     private static Func<uint, IHostAudioStream?>? _streamFactoryForTests;
 
     // Diagnostic: confirm sceAudioOutOutput is actually called and whether the
@@ -65,6 +122,7 @@ public static class AudioOutExports
             PreservesGuestFormat = preservesGuestFormat;
             Backend = backend;
             BackendName = backendName;
+            MixLevel = type == PortTypePadSpeaker ? DefaultPadSpeakerMixLevel : UnityVolume;
         }
 
         public int UserId { get; }
@@ -80,8 +138,13 @@ public static class AudioOutExports
         public string BackendName { get; }
         public object SubmissionGate { get; } = new();
         public volatile float Volume = 1.0f;
+        public volatile int MixLevel;
+        // Process time (us) at which the last block carrying data was accepted.
+        public long LastOutputTime;
         public int BufferByteLength =>
             checked((int)BufferLength * Channels * BytesPerSample);
+        public bool IsHaptic => Type == PortTypeVibration;
+        public float Gain => Volume * (MixLevel / (float)UnityVolume);
 
         public void PaceSilence()
         {
@@ -124,6 +187,9 @@ public static class AudioOutExports
         public PortState Port;
         public byte[]? HostBuffer;
         public int HostBufferLength;
+        public bool HasHaptics;
+        public byte HapticLeft;
+        public byte HapticRight;
     }
 
     [SysAbiExport(
@@ -131,7 +197,8 @@ public static class AudioOutExports
         ExportName = "sceAudioOutInit",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceAudioOut")]
-    public static int AudioOutInit(CpuContext ctx) => ctx.SetReturn(0);
+    public static int AudioOutInit(CpuContext ctx) =>
+        ctx.SetReturn(Interlocked.Exchange(ref _initialized, 1) == 0 ? 0 : AudioOutErrorAlreadyInit);
 
     [SysAbiExport(
         Nid = "ekNvsT22rsY",
@@ -140,55 +207,122 @@ public static class AudioOutExports
         LibraryName = "libSceAudioOut")]
     public static int AudioOutOpen(CpuContext ctx)
     {
+        // ABI: int32_t sceAudioOutOpen(SceUserServiceUserId userId, int32_t type,
+        // int32_t index, uint32_t len, uint32_t freq, uint32_t param).
+        // userId is not checked against the port type: titles open MAIN and
+        // VIBRATION ports with the system user and with a logged-in user alike.
         var userId = unchecked((int)ctx[CpuRegister.Rdi]);
         var type = unchecked((int)ctx[CpuRegister.Rsi]);
+        var index = unchecked((int)ctx[CpuRegister.Rdx]);
         var bufferLength = unchecked((uint)ctx[CpuRegister.Rcx]);
         var frequency = unchecked((uint)ctx[CpuRegister.R8]);
-        var format = unchecked((int)ctx[CpuRegister.R9]);
-        if (bufferLength == 0 || frequency == 0 ||
-            !TryGetFormat(format, out var channels, out var bytesPerSample, out var isFloat))
+        var param = unchecked((uint)ctx[CpuRegister.R9]);
+        if (Volatile.Read(ref _initialized) == 0)
         {
-            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(AudioOutErrorNotInit);
+        }
+
+        if (!IsOpenablePortType(type))
+        {
+            return ctx.SetReturn(AudioOutErrorInvalidPortType);
+        }
+
+        if (bufferLength == 0)
+        {
+            return ctx.SetReturn(AudioOutErrorInvalidSize);
+        }
+
+        if (frequency == 0)
+        {
+            return ctx.SetReturn(AudioOutErrorInvalidSampleFreq);
+        }
+
+        // Only device index 0 exists for every port type on this host.
+        if (index != 0)
+        {
+            return ctx.SetReturn(AudioOutErrorInvalidParam);
+        }
+
+        var format = unchecked((int)param);
+        if (!TryGetFormat(format, out var channels, out var bytesPerSample, out var isFloat))
+        {
+            return ctx.SetReturn(AudioOutErrorInvalidFormat);
+        }
+
+        return ctx.SetReturn(OpenPort(
+            userId,
+            type,
+            bufferLength,
+            frequency,
+            format,
+            channels,
+            bytesPerSample,
+            isFloat));
+    }
+
+    private static int OpenPort(
+        int userId,
+        int type,
+        uint bufferLength,
+        uint frequency,
+        int format,
+        int channels,
+        int bytesPerSample,
+        bool isFloat)
+    {
+        if (Ports.Count >= MaxOpenPorts)
+        {
+            return AudioOutErrorPortFull;
         }
 
         IHostAudioStream? backend = null;
         var preservesGuestFormat = false;
         string backendName;
-        try
+        if (type is PortTypeVibration or PortTypeEx)
         {
-            var streamFactory = Volatile.Read(ref _streamFactoryForTests);
-            if (streamFactory is not null)
+            // A vibration port's waveform drives the pad actuators (PadHaptics)
+            // and an Ex port carries IEC 61937 bitstream bursts the host has no
+            // HDMI output for; neither may reach the speakers, so both are paced
+            // at their own rate without a host stream.
+            backendName = type == PortTypeVibration ? "pad-haptics" : "none";
+        }
+        else
+        {
+            try
             {
-                backend = streamFactory(frequency);
-                backendName = "test";
-            }
-            else
-            {
-                var audio = HostPlatform.Current.Audio;
-                if (audio is IHostPcmAudioOutput pcmAudio)
+                var streamFactory = Volatile.Read(ref _streamFactoryForTests);
+                if (streamFactory is not null)
                 {
-                    backend = pcmAudio.OpenPcmStream(
-                        frequency,
-                        channels,
-                        isFloat ? HostPcmFormat.Float32 : HostPcmFormat.Signed16);
-                    preservesGuestFormat = true;
+                    backend = streamFactory(frequency);
+                    backendName = "test";
                 }
                 else
                 {
-                    backend = audio.OpenStereoPcm16Stream(frequency);
+                    var audio = HostPlatform.Current.Audio;
+                    if (audio is IHostPcmAudioOutput pcmAudio)
+                    {
+                        backend = pcmAudio.OpenPcmStream(
+                            frequency,
+                            channels,
+                            isFloat ? HostPcmFormat.Float32 : HostPcmFormat.Signed16);
+                        preservesGuestFormat = true;
+                    }
+                    else
+                    {
+                        backend = audio.OpenStereoPcm16Stream(frequency);
+                    }
+                    backendName = audio.BackendName;
                 }
-                backendName = audio.BackendName;
+            }
+            catch (Exception exception)
+            {
+                backendName = "silent";
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] AudioOut host backend unavailable: {exception.Message}");
             }
         }
-        catch (Exception exception)
-        {
-            backendName = "silent";
-            Console.Error.WriteLine(
-                $"[LOADER][WARN] AudioOut host backend unavailable: {exception.Message}");
-        }
 
-        var handle = Interlocked.Increment(ref _nextPortHandle);
-        Ports[handle] = new PortState(
+        var port = new PortState(
             userId,
             type,
             bufferLength,
@@ -200,12 +334,36 @@ public static class AudioOutExports
             preservesGuestFormat,
             backend,
             backendName);
+        var handle = 0;
+        lock (PortAllocationGate)
+        {
+            for (var candidate = 1; candidate <= MaxOpenPorts; candidate++)
+            {
+                if (!Ports.ContainsKey(candidate))
+                {
+                    handle = candidate;
+                    Ports[candidate] = port;
+                    break;
+                }
+            }
+        }
+
+        if (handle == 0)
+        {
+            port.Dispose();
+            return AudioOutErrorPortFull;
+        }
+
         Console.Error.WriteLine(
-            $"[LOADER][INFO] AudioOut port {handle}: {frequency} Hz, " +
+            $"[LOADER][INFO] AudioOut port {handle}: type {type}, {frequency} Hz, " +
             $"{channels} ch, {(isFloat ? "float32" : "s16")}, " +
             $"{bufferLength} frames, backend={backendName}");
-        return ctx.SetReturn(handle);
+        return handle;
     }
+
+    private static bool IsOpenablePortType(int type) =>
+        type is >= PortTypeMain and <= PortTypePadSpeaker or
+            PortTypeVibration or PortTypeAudio3d or PortTypeAux;
 
     [SysAbiExport(
         Nid = "s1--uE9mBFw",
@@ -215,13 +373,29 @@ public static class AudioOutExports
     public static int AudioOutClose(CpuContext ctx)
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
-        if (!Ports.TryRemove(handle, out var port))
+        return ctx.SetReturn(ClosePort(handle, exPort: false));
+    }
+
+    private static int ClosePort(int handle, bool exPort)
+    {
+        PortState? port;
+        lock (PortAllocationGate)
         {
-            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            if (!Ports.TryGetValue(handle, out port) ||
+                (port.Type == PortTypeEx) != exPort ||
+                !Ports.TryRemove(handle, out port))
+            {
+                return AudioOutErrorInvalidPort;
+            }
         }
 
         port.Dispose();
-        return ctx.SetReturn(0);
+        if (port.IsHaptic)
+        {
+            PadHaptics.ReleaseAudioHaptics();
+        }
+
+        return 0;
     }
 
     [SysAbiExport(
@@ -233,27 +407,61 @@ public static class AudioOutExports
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
         var stateAddress = ctx[CpuRegister.Rsi];
-        if (stateAddress == 0 || !Ports.TryGetValue(handle, out var port))
+        if (stateAddress == 0)
         {
-            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(AudioOutErrorInvalidPointer);
+        }
+
+        if (!Ports.TryGetValue(handle, out var port))
+        {
+            return ctx.SetReturn(AudioOutErrorInvalidPort);
         }
 
         // ABI: int32_t sceAudioOutGetPortState(int32_t handle,
         // SceAudioOutPortState *state) — rsi is the only out pointer and the write
         // is exactly sizeof(SceAudioOutPortState):
-        //   +0x00 u16 output          = STATE_OUTPUT_CONNECTED_PRIMARY
-        //   +0x02 u8  channel         = SceAudioOutStateChannel
+        //   +0x00 u16 output          = SCE_AUDIO_OUT_STATE_OUTPUT_* the port plays on
+        //   +0x02 u8  channel         = SceAudioOutStateChannel of that output
         //   +0x03 u8  reserved8_1[1]
-        //   +0x04 s16 volume          = -1 (invalid outside PADSPK)
+        //   +0x04 s16 volume          = 127 on a pad output, -1 (invalid) elsewhere
         //   +0x06 u16 rerouteCounter  = 0 (the host mixer never reroutes)
         //   +0x08 u64 flag            = SCE_AUDIO_OUT_STATE_FLAG_NONE
         //   +0x10 u64 reserved64[2]
+        // MAIN/BGM/AUDIO3D (and Ex) play on the primary output, which is the
+        // host's stereo device; VOICE/PERSONAL on the personal output (mono);
+        // PADSPK and VIBRATION on the pad (mono); AUX on the aux output, which
+        // has no channels.
+        ushort output;
+        byte channel;
+        short volume = -1;
+        switch (port.Type)
+        {
+            case PortTypeVoice:
+            case PortTypePersonal:
+                output = AudioOutStateOutputConnectedPersonal;
+                channel = 1;
+                break;
+            case PortTypePadSpeaker:
+            case PortTypeVibration:
+                output = AudioOutStateOutputConnectedPadSpeaker;
+                channel = 1;
+                volume = 127;
+                break;
+            case PortTypeAux:
+                output = AudioOutStateOutputConnectedAux;
+                channel = 0;
+                break;
+            default:
+                output = AudioOutStateOutputConnectedPrimary;
+                channel = (byte)Math.Min(port.Channels, 2);
+                break;
+        }
+
         Span<byte> state = stackalloc byte[AudioOutPortStateSize];
         state.Clear();
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(
-            state, AudioOutStateOutputConnectedPrimary);
-        state[2] = (byte)Math.Clamp(port.Channels, 0, 8);
-        System.Buffers.Binary.BinaryPrimitives.WriteInt16LittleEndian(state[4..], -1);
+        BinaryPrimitives.WriteUInt16LittleEndian(state, output);
+        state[2] = channel;
+        BinaryPrimitives.WriteInt16LittleEndian(state[4..], volume);
         if (!ctx.Memory.TryWrite(stateAddress, state))
         {
             return ctx.SetReturn(AudioOutErrorInvalidPointer);
@@ -309,68 +517,14 @@ public static class AudioOutExports
         LibraryName = "libSceAudioOut")]
     public static int AudioOutOutput(CpuContext ctx)
     {
-        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
-        var sourceAddress = ctx[CpuRegister.Rsi];
-        if (Volatile.Read(ref _shutdown))
-        {
-            return ctx.SetReturn(PaceShutdownPort(handle));
-        }
-
-        if (!Ports.TryGetValue(handle, out var port))
-        {
-            // Host shutdown disposes the ports while guest audio threads are
-            // still draining their last buffers; report success so the guest
-            // winds down without a per-buffer error (and its WARN log flood).
-            return ctx.SetReturn(_shutdown
-                ? 0
-                : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
-        }
-
-        if (sourceAddress == 0)
-        {
-            return ctx.SetReturn(0);
-        }
-
-        var buffer = ArrayPool<byte>.Shared.Rent(port.BufferByteLength);
-        try
-        {
-            var source = buffer.AsSpan(0, port.BufferByteLength);
-            if (!ctx.Memory.TryRead(sourceAddress, source))
-            {
-                return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
-            }
-
-            TraceOutput(handle, port, source);
-
-            if (port.Backend is null)
-            {
-                port.PaceSilence();
-                return ctx.SetReturn(0);
-            }
-
-            var outputLength = port.PreservesGuestFormat
-                ? port.BufferByteLength
-                : checked((int)port.BufferLength * AudioPcmConversion.OutputFrameSize);
-            var output = ArrayPool<byte>.Shared.Rent(outputLength);
-            try
-            {
-                ConvertForHost(port, source, output.AsSpan(0, outputLength));
-                if (!port.Backend.Submit(output.AsSpan(0, outputLength)))
-                {
-                    port.PaceSilence();
-                }
-            }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(output);
-            }
-
-            return ctx.SetReturn(0);
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(buffer);
-        }
+        // ABI: int32_t sceAudioOutOutput(int32_t handle, const void *ptr).
+        // Returns the port's frame count, like sceAudioOutOutputs. A null ptr
+        // queues nothing and only waits out the port's block time.
+        Span<OutputDescriptor> descriptor =
+        [
+            new OutputDescriptor(unchecked((int)ctx[CpuRegister.Rdi]), ctx[CpuRegister.Rsi]),
+        ];
+        return ctx.SetReturn(SubmitOutputs(ctx, descriptor));
     }
 
     private static int SubmitOutputs(CpuContext ctx, ReadOnlySpan<OutputDescriptor> descriptors)
@@ -476,6 +630,26 @@ public static class AudioOutExports
 
                     TraceOutput(output.Handle, output.Port, source);
 
+                    if (output.Port.IsHaptic)
+                    {
+                        // Haptic waveform: reduced to actuator intensities for the
+                        // pad, never converted for (or submitted to) the speakers.
+                        (output.HapticLeft, output.HapticRight) = PadHaptics.IntensityFromPcm(
+                            source,
+                            checked((int)output.Port.BufferLength),
+                            output.Port.Channels,
+                            output.Port.BytesPerSample,
+                            output.Port.IsFloat,
+                            output.Port.Gain);
+                        output.HasHaptics = true;
+                        continue;
+                    }
+
+                    if (output.Port.Backend is null)
+                    {
+                        continue;
+                    }
+
                     output.HostBufferLength = output.Port.PreservesGuestFormat
                         ? output.Port.BufferByteLength
                         : checked((int)output.Port.BufferLength * AudioPcmConversion.OutputFrameSize);
@@ -508,7 +682,24 @@ public static class AudioOutExports
             // A batch is one guest scheduling point. When one or more ports have
             // no usable backend, pace once using the longest affected buffer rather
             // than sleeping once per port.
+            for (var i = 0; i < resolved.Length; i++)
+            {
+                if (resolved[i].HasHaptics)
+                {
+                    PadHaptics.SubmitAudioHaptics(resolved[i].HapticLeft, resolved[i].HapticRight);
+                }
+            }
+
             pacingPort?.PaceSilence();
+            var acceptedAt = unchecked((long)KernelRuntimeCompatExports.ReadProcessTimeMicroseconds());
+            for (var i = 0; i < resolved.Length; i++)
+            {
+                if (resolved[i].SourceAddress != 0)
+                {
+                    Volatile.Write(ref resolved[i].Port.LastOutputTime, acceptedAt);
+                }
+            }
+
             return checked((int)resolved[0].Port.BufferLength);
         }
         finally
@@ -576,7 +767,7 @@ public static class AudioOutExports
     {
         if (port.PreservesGuestFormat)
         {
-            AudioPcmConversion.CopyWithVolume(source, destination, port.IsFloat, port.Volume);
+            AudioPcmConversion.CopyWithVolume(source, destination, port.IsFloat, port.Gain);
             return;
         }
 
@@ -587,7 +778,7 @@ public static class AudioOutExports
             port.Channels,
             port.BytesPerSample,
             port.IsFloat,
-            port.Volume);
+            port.Gain);
     }
 
     private static void TraceOutput(int handle, PortState port, ReadOnlySpan<byte> source)
@@ -613,44 +804,285 @@ public static class AudioOutExports
         LibraryName = "libSceAudioOut")]
     public static int AudioOutSetVolume(CpuContext ctx)
     {
+        // ABI: int32_t sceAudioOutSetVolume(int32_t handle, int32_t flag, int32_t *vol).
+        // vol[n] is read for every channel bit n set in flag (n < the port's
+        // channel count); 32768 (SCE_AUDIO_VOLUME_0DB) is unity.
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
         var channelFlags = unchecked((uint)ctx[CpuRegister.Rsi]);
         var volumeArrayAddress = ctx[CpuRegister.Rdx];
+        if (volumeArrayAddress == 0)
+        {
+            return ctx.SetReturn(AudioOutErrorInvalidPointer);
+        }
+
         if (!Ports.TryGetValue(handle, out var port))
         {
-            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(AudioOutErrorInvalidPort);
         }
 
-        const int unityVolume = 32768;
         var maxVolume = 0;
         var found = false;
-        if (volumeArrayAddress != 0)
+        Span<byte> raw = stackalloc byte[sizeof(int)];
+        for (var channel = 0; channel < port.Channels; channel++)
         {
-            Span<byte> raw = stackalloc byte[sizeof(int)];
-            for (var channel = 0; channel < 8; channel++)
+            if ((channelFlags & (1u << channel)) == 0)
             {
-                if ((channelFlags & (1u << channel)) == 0)
-                {
-                    continue;
-                }
-
-                if (!ctx.Memory.TryRead(volumeArrayAddress + (ulong)(channel * sizeof(int)), raw))
-                {
-                    return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
-                }
-
-                var value = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(raw);
-                maxVolume = Math.Max(maxVolume, value);
-                found = true;
+                continue;
             }
+
+            if (!ctx.Memory.TryRead(volumeArrayAddress + (ulong)(channel * sizeof(int)), raw))
+            {
+                return ctx.SetReturn(AudioOutErrorInvalidPointer);
+            }
+
+            maxVolume = Math.Max(maxVolume, BinaryPrimitives.ReadInt32LittleEndian(raw));
+            found = true;
         }
 
+        // The host stream takes one gain per port, so the loudest selected
+        // channel sets it.
         if (found)
         {
-            port.Volume = Math.Clamp(maxVolume / (float)unityVolume, 0f, 1f);
+            port.Volume = Math.Clamp(maxVolume / (float)UnityVolume, 0f, 1f);
         }
 
         return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "wVwPU50pS1c",
+        ExportName = "sceAudioOutSetMixLevelPadSpk",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAudioOut")]
+    public static int AudioOutSetMixLevelPadSpk(CpuContext ctx)
+    {
+        // ABI: int32_t sceAudioOutSetMixLevelPadSpk(int32_t handle, int32_t mixLevel).
+        // A linear gain on a PADSPK port's output, 0..32768 (0 dB); ports start
+        // at DefaultPadSpeakerMixLevel (-9 dB).
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        var mixLevel = unchecked((int)ctx[CpuRegister.Rsi]);
+        if (!Ports.TryGetValue(handle, out var port))
+        {
+            return ctx.SetReturn(AudioOutErrorInvalidPort);
+        }
+
+        if (port.Type != PortTypePadSpeaker)
+        {
+            return ctx.SetReturn(AudioOutErrorInvalidPortType);
+        }
+
+        if (mixLevel is < 0 or > UnityVolume)
+        {
+            return ctx.SetReturn(AudioOutErrorInvalidMixLevel);
+        }
+
+        port.MixLevel = mixLevel;
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "Ptlts326pds",
+        ExportName = "sceAudioOutGetLastOutputTime",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAudioOut")]
+    public static int AudioOutGetLastOutputTime(CpuContext ctx)
+    {
+        // ABI: int32_t sceAudioOutGetLastOutputTime(int32_t handle, uint64_t *outputTime).
+        // The process time (us, sceKernelGetProcessTime) at which Output(s)
+        // accepted the port's last block carrying data; 0 before the first one.
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        var outputTimeAddress = ctx[CpuRegister.Rsi];
+        if (outputTimeAddress == 0)
+        {
+            return ctx.SetReturn(AudioOutErrorInvalidPointer);
+        }
+
+        if (!Ports.TryGetValue(handle, out var port))
+        {
+            return ctx.SetReturn(AudioOutErrorInvalidPort);
+        }
+
+        Span<byte> value = stackalloc byte[sizeof(ulong)];
+        BinaryPrimitives.WriteUInt64LittleEndian(value, unchecked((ulong)Volatile.Read(ref port.LastOutputTime)));
+        return ctx.SetReturn(ctx.Memory.TryWrite(outputTimeAddress, value) ? 0 : AudioOutErrorInvalidPointer);
+    }
+
+    [SysAbiExport(
+        Nid = "6X6dp+07h4U",
+        ExportName = "sceAudioOutExOpen",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAudioOut")]
+    public static int AudioOutExOpen(CpuContext ctx)
+    {
+        // ABI: int32_t sceAudioOutExOpen(SceUserServiceUserId userId, uint32_t mode).
+        // Opens an HDMI bitstream port (internal type 6): S16 stereo, 256
+        // frames at 48 kHz for modes 0-2 and 9, 1024 frames at 192 kHz for
+        // modes 3, 4 and 10. The host has no HDMI bitstream output, so the port
+        // is paced at its own rate and its IEC 61937 bursts are dropped.
+        var userId = unchecked((int)ctx[CpuRegister.Rdi]);
+        var mode = unchecked((uint)ctx[CpuRegister.Rsi]);
+        if (Volatile.Read(ref _initialized) == 0)
+        {
+            return ctx.SetReturn(AudioOutErrorNotInit);
+        }
+
+        if (mode > ExOpenModeMax || ((ExOpenModes >> (int)mode) & 1) == 0)
+        {
+            return ctx.SetReturn(AudioOutErrorInvalidArg);
+        }
+
+        var highRate = mode is 3 or 4 or 10;
+        return ctx.SetReturn(OpenPort(
+            userId,
+            PortTypeEx,
+            highRate ? 1024u : 256u,
+            highRate ? 192000u : 48000u,
+            format: 1,
+            channels: 2,
+            bytesPerSample: 2,
+            isFloat: false));
+    }
+
+    [SysAbiExport(
+        Nid = "0TfjSulCV2A",
+        ExportName = "sceAudioOutExClose",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAudioOut")]
+    public static int AudioOutExClose(CpuContext ctx) =>
+        ctx.SetReturn(ClosePort(unchecked((int)ctx[CpuRegister.Rdi]), exPort: true));
+
+    [SysAbiExport(
+        Nid = "VcE+gXSwFXI",
+        ExportName = "sceAudioOutExConfigureOutput",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAudioOut")]
+    public static int AudioOutExConfigureOutput(CpuContext ctx)
+    {
+        // ABI: int32_t sceAudioOutExConfigureOutput(int32_t control, uint64_t flags,
+        // uint32_t mode, uint32_t target, uint64_t option). Modes 0-10 or 0xFF
+        // (default), targets 1-3 or 0xFF. There is no HDMI output to switch on
+        // this host, so a valid request changes nothing. Nonzero flags/option
+        // have no known meaning and are refused as invalid parameters.
+        var control = unchecked((int)ctx[CpuRegister.Rdi]);
+        var flags = ctx[CpuRegister.Rsi];
+        var mode = unchecked((uint)ctx[CpuRegister.Rdx]);
+        var target = unchecked((uint)ctx[CpuRegister.Rcx]);
+        var option = ctx[CpuRegister.R8];
+        if (control != 0)
+        {
+            return ctx.SetReturn(AudioOutErrorExInvalidControl);
+        }
+
+        if (flags != 0 || option != 0 ||
+            (mode > ExOpenModeMax && mode != ExConfigureDefault) ||
+            (target is < 1 or > 3 && target != ExConfigureDefault))
+        {
+            return ctx.SetReturn(AudioOutErrorInvalidParam);
+        }
+
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "PhnNN0UEV6Y",
+        ExportName = "sceAudioOutExGetMonitorInfo",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAudioOut")]
+    public static int AudioOutExGetMonitorInfo(CpuContext ctx)
+    {
+        // ABI: int32_t sceAudioOutExGetMonitorInfo(int32_t type, int32_t index,
+        // void *info, uint32_t size). The descriptor count is a u32 at +0x98 and
+        // 8-byte descriptors start at +0xA0. The host sink is PCM-only with no
+        // EDID, so the whole buffer is zeroed: a sink without audio descriptors.
+        var type = unchecked((int)ctx[CpuRegister.Rdi]);
+        var index = unchecked((int)ctx[CpuRegister.Rsi]);
+        var infoAddress = ctx[CpuRegister.Rdx];
+        var size = unchecked((uint)ctx[CpuRegister.Rcx]);
+        if (type != 0 || index != 0)
+        {
+            return ctx.SetReturn(AudioOutErrorInvalidParam);
+        }
+
+        if (size is < ExMonitorInfoMinimumSize or > ExMonitorInfoMaximumSize)
+        {
+            return ctx.SetReturn(AudioOutErrorInvalidSize);
+        }
+
+        if (infoAddress == 0)
+        {
+            return ctx.SetReturn(AudioOutErrorInvalidPointer);
+        }
+
+        return ctx.SetReturn(ctx.Memory.TryWrite(infoAddress, new byte[size]) ? 0 : AudioOutErrorInvalidPointer);
+    }
+
+    [SysAbiExport(
+        Nid = "Tf9-yOJwF-A",
+        ExportName = "sceAudioOutSysGetHdmiMonitorInfo",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAudioOut")]
+    public static int AudioOutSysGetHdmiMonitorInfo(CpuContext ctx)
+    {
+        // ABI: int32_t sceAudioOutSysGetHdmiMonitorInfo(int32_t type, void *info,
+        // uint32_t size), size 0x180: monitor name at +0x0B (13 bytes), descriptor
+        // count u32 at +0x94, 8-byte descriptors from +0x98. The host sink has no
+        // EDID, so it is reported as an HDMI sink without name or descriptors.
+        var type = unchecked((int)ctx[CpuRegister.Rdi]);
+        var infoAddress = ctx[CpuRegister.Rsi];
+        var size = unchecked((uint)ctx[CpuRegister.Rdx]);
+        if (type != MonitorTypeHdmi)
+        {
+            return ctx.SetReturn(AudioOutErrorInvalidParam);
+        }
+
+        if (size != HdmiMonitorInfoSize)
+        {
+            return ctx.SetReturn(AudioOutErrorInvalidSize);
+        }
+
+        if (infoAddress == 0)
+        {
+            return ctx.SetReturn(AudioOutErrorInvalidPointer);
+        }
+
+        return ctx.SetReturn(ctx.Memory.TryWrite(infoAddress, new byte[HdmiMonitorInfoSize]) ? 0 : AudioOutErrorInvalidPointer);
+    }
+
+    [SysAbiExport(
+        Nid = "MGkAS4ncQ90",
+        ExportName = "sceAudioOutSysOpen",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAudioOut")]
+    public static int AudioOutSysOpen(CpuContext ctx)
+    {
+        // System ports exist only to carry HDMI bitstream passthrough, which this
+        // host cannot output (audio leaves as PCM through the host mixer), so no
+        // system port type can be opened. Callers fall back to sceAudioOutOpen.
+        return ctx.SetReturn(AudioOutErrorInvalidPortType);
+    }
+
+    [SysAbiExport(
+        Nid = "pKY2S4K-6Mg",
+        ExportName = "sceAudioOutSysClose",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAudioOut")]
+    public static int AudioOutSysClose(CpuContext ctx)
+    {
+        // sceAudioOutSysOpen never opens a port, so no handle is a system port.
+        return ctx.SetReturn(AudioOutErrorInvalidPort);
+    }
+
+    [SysAbiExport(
+        Nid = "cx2dYFbzIAg",
+        ExportName = "sceAudioOutDeviceIdOpen",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAudioOut")]
+    public static int AudioOutDeviceIdOpen(CpuContext ctx)
+    {
+        // Opens a port on a specific audio device id. The host exposes no
+        // addressable device ids (one PCM mixer output), so no id is valid;
+        // callers fall back to sceAudioOutOpen.
+        return ctx.SetReturn(AudioOutErrorInvalidParam);
     }
 
     // Peak normalized amplitude [0,1] of an interleaved PCM buffer, used only by
@@ -712,7 +1144,7 @@ public static class AudioOutExports
         }
 
         ShutdownPorts.Clear();
-        _nextPortHandle = 0;
+        Volatile.Write(ref _initialized, 0);
         _outputCount = 0;
         Volatile.Write(ref _shutdown, false);
         Volatile.Write(ref _streamFactoryForTests, null);
