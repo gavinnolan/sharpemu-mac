@@ -4,6 +4,7 @@
 using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Kernel;
+using SharpEmu.Libs.Threading;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Kernel;
@@ -284,7 +285,8 @@ public sealed class KernelSyncOnAddressCompatExportsTests
                 out _,
                 out var waiter,
                 out var deadline));
-            Assert.True(deadline > 0);
+            Assert.Equal(0, deadline);
+            Assert.True(Assert.IsAssignableFrom<GuestWaiter>(waiter).DeadlineTimestamp > 0);
             stagedWaiter = Assert.IsAssignableFrom<IGuestThreadBlockWaiter>(waiter);
         });
 
@@ -335,7 +337,9 @@ public sealed class KernelSyncOnAddressCompatExportsTests
                 out var deadline));
             Assert.Equal("sceKernelSyncOnAddressWait32", reason);
             Assert.True(hasContinuation);
-            Assert.Equal(timeoutAddress == 0, deadline == 0);
+            // Deadlines are armed on the waiter (timer service), not handed to the scheduler.
+            Assert.Equal(0, deadline);
+            Assert.Equal(timeoutAddress == 0, Assert.IsAssignableFrom<GuestWaiter>(waiter).DeadlineTimestamp == 0);
             stagedWaiter = Assert.IsAssignableFrom<IGuestThreadBlockWaiter>(waiter);
         });
 
