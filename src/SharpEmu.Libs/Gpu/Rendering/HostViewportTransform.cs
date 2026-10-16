@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
+using SharpEmu.ShaderCompiler;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
 
@@ -72,22 +73,33 @@ public readonly record struct HostViewportTransform(
         }
 
         var depth = ResolveDepth(context);
-        clipSpace = clipSpace with { DepthNegativeOneToOne = !clip.DirectXClipSpace };
+        clipSpace = clipSpace with { DepthNegativeOneToOne = !clip.DirectXClipSpace, DepthPlanes = depth.Planes };
         return new HostViewportTransform(clipSpace, x, y, width, height, depth.MinDepth, depth.MaxDepth, depth.Clip);
     }
 
     /// <summary>Whether the host clips depth to its viewport range (else it clamps), as <see cref="Resolve"/> decides.</summary>
     public static bool DepthClipOf(ContextRegisters context) => ResolveDepth(context).Clip;
 
-    private readonly record struct DepthTransform(float MinDepth, float MaxDepth, bool Clip);
+    private readonly record struct DepthTransform(float MinDepth, float MaxDepth, bool Clip, ShaderDepthPlanes Planes);
 
     private static DepthTransform ResolveDepth(ContextRegisters context)
     {
         var clip = context.Clip;
         ref readonly var viewport = ref context.ScreenViewport.Viewports[0];
-        return new DepthTransform(
-            viewport.ZOffset - (clip.DirectXClipSpace ? 0f : viewport.ZScale),
-            viewport.ZScale + viewport.ZOffset,
-            clip.IsZClipEnabled);
+        var minDepth = viewport.ZOffset - (clip.DirectXClipSpace ? 0f : viewport.ZScale);
+        var maxDepth = viewport.ZScale + viewport.ZOffset;
+        var near = !clip.NearZClipDisable;
+        var far = !clip.FarZClipDisable;
+        if (near == far)
+        {
+            return new DepthTransform(minDepth, maxDepth, near, ShaderDepthPlanes.None);
+        }
+
+        // ZCLIP_NEAR_DISABLE and ZCLIP_FAR_DISABLE are independent, the host's depth clip is
+        // not: it clamps, and the program clips the plane that is still enabled.
+        var planes = far
+            ? ShaderDepthPlanes.Far
+            : clip.DirectXClipSpace ? ShaderDepthPlanes.NearAtZero : ShaderDepthPlanes.NearAtNegativeW;
+        return new DepthTransform(minDepth, maxDepth, false, planes);
     }
 }

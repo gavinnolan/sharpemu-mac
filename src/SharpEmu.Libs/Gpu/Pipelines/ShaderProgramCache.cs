@@ -810,6 +810,7 @@ internal sealed class ShaderProgramCache
                         DepthNegativeOneToOne = info.ClipSpace.DepthNegativeOneToOne,
                         PositionYDown = info.ClipSpace.PositionYDown,
                         PositionXMirror = info.ClipSpace.PositionXMirror,
+                        DepthPlanes = info.ClipSpace.DepthPlanes,
                     },
                 };
             }
