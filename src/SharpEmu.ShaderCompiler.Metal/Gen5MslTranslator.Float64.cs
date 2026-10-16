@@ -246,19 +246,30 @@ public static partial class Gen5MslTranslator
                     return false;
             }
 
-            // Output modifier, then clamp, as the SPIR-V translator applies them.
-            if (instruction.Control is Gen5Vop3Control control)
+            // Output modifier, then clamp. omod applies only outside IEEE mode with f64 output
+            // denormals flushed, and then flushes a zero or denormal result to +0; a clamped NaN
+            // gives 0 under DX10_CLAMP and passes through without it.
+            if (instruction.Control is Gen5Vop3Control)
             {
-                value = control.OutputModifier switch
+                var (outputModifier, clamp) = FloatOutputModifiers(instruction, halfOrDouble: true);
+                if (outputModifier != 0)
                 {
-                    1 => $"sharpemu_f64_mul({value}, 0x4000000000000000ul)",
-                    2 => $"sharpemu_f64_mul({value}, 0x4010000000000000ul)",
-                    3 => $"sharpemu_f64_mul({value}, 0x3FE0000000000000ul)",
-                    _ => value,
-                };
-                if (control.Clamp)
+                    var scale = outputModifier switch
+                    {
+                        1 => "0x4000000000000000ul",
+                        2 => "0x4010000000000000ul",
+                        _ => "0x3FE0000000000000ul",
+                    };
+                    var scaled = Temp("ulong", $"sharpemu_f64_mul({value}, {scale})");
+                    value = $"(({scaled} & 0x7FF0000000000000ul) == 0ul ? 0ul : {scaled})";
+                }
+
+                if (clamp)
                 {
-                    value = $"sharpemu_f64_clamp01({value})";
+                    var clamped = Temp("ulong", value);
+                    value = _request.Dx10Clamp
+                        ? $"sharpemu_f64_clamp01({clamped})"
+                        : $"(sharpemu_f64_is_nan({clamped}) ? {clamped} : sharpemu_f64_clamp01({clamped}))";
                 }
             }
 

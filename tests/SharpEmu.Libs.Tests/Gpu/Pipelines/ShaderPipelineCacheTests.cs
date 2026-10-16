@@ -41,6 +41,29 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         Assert.False(ordinary.SequenceEqual(ieee));
     }
 
+    [Fact]
+    public void FloatModeAndDx10ClampChangeEveryStageKey()
+    {
+        var ordinary = new List<uint>();
+        var mode = new List<uint>();
+        var clamp = new List<uint>();
+        StageStaticKey.Build(new VertexInputInfo(), 0, ordinary);
+        StageStaticKey.Build(new VertexInputInfo { FloatMode = 0xF0 }, 0, mode);
+        StageStaticKey.Build(new VertexInputInfo { Dx10Clamp = false }, 0, clamp);
+        Assert.False(ordinary.SequenceEqual(mode));
+        Assert.False(ordinary.SequenceEqual(clamp));
+        StageStaticKey.Build(new PixelInputInfo(), ordinary);
+        StageStaticKey.Build(new PixelInputInfo { FloatMode = 0xF0 }, mode);
+        StageStaticKey.Build(new PixelInputInfo { Dx10Clamp = false }, clamp);
+        Assert.False(ordinary.SequenceEqual(mode));
+        Assert.False(ordinary.SequenceEqual(clamp));
+        StageStaticKey.Build(new ComputeInputInfo(), ordinary);
+        StageStaticKey.Build(new ComputeInputInfo { FloatMode = 0xF0 }, mode);
+        StageStaticKey.Build(new ComputeInputInfo { Dx10Clamp = false }, clamp);
+        Assert.False(ordinary.SequenceEqual(mode));
+        Assert.False(ordinary.SequenceEqual(clamp));
+    }
+
     [Theory]
     [InlineData(0x00u, null, null)]
     [InlineData(0x34u, Gen5ColorExportFormat.Fp16Abgr, Gen5ColorExportFormat.AR32)]

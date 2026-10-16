@@ -200,6 +200,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             probeWrittenRegisters: true, VertexUserDataBase, ref _vertexUserData);
         var vertexInfo = PrepareVertexInput(vertexSource, shaderInterface, context);
         vertexInfo.IeeeMode = vertex.GeometryResource1.IeeeMode;
+        vertexInfo.FloatMode = vertex.GeometryResource1.FloatMode;
+        vertexInfo.Dx10Clamp = vertex.GeometryResource1.Dx10Clamp;
         ShaderSource? pixelSource = null;
         PixelInputInfo? pixelInfo = null;
         Gen5PixelOutputBinding[] pixelOutputs = [];
@@ -237,6 +239,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             // the vertex program must declare every location the pixel program reads.
             attributeCount = Math.Max(attributeCount, ReadVertexOutputCount(pixelProgram, pixelInfo));
             pixelInfo.IeeeMode = pixel.Resource1.IeeeMode;
+            pixelInfo.FloatMode = pixel.Resource1.FloatMode;
+            pixelInfo.Dx10Clamp = pixel.Resource1.Dx10Clamp;
         }
 
         var primitiveShader = PrimitiveShaderStageInfo(vertex, shaderInterface, context.ShaderStages);

@@ -146,6 +146,8 @@ public sealed class VertexInputInfo
     public int FetchAttributeRegister { get; init; }
     public int FetchBufferRegister { get; init; }
     public bool IeeeMode { get; set; }
+    public uint FloatMode { get; set; } = SharpEmu.ShaderCompiler.ShaderCompileRequest.DefaultFloatMode;
+    public bool Dx10Clamp { get; set; } = true;
     public uint ScratchDwords { get; init; }
     public uint PositionExportControl { get; init; }
     public ClipSpaceTransform ClipSpace { get; init; }
@@ -166,6 +168,8 @@ public sealed class PixelInputInfo
     public byte[] TargetOutputModes { get; init; } = new byte[TargetCount];
     public ColorComponentMap[] TargetExportMappings { get; init; } = new ColorComponentMap[TargetCount];
     public bool IeeeMode { get; set; }
+    public uint FloatMode { get; set; } = SharpEmu.ShaderCompiler.ShaderCompileRequest.DefaultFloatMode;
+    public bool Dx10Clamp { get; set; } = true;
     public uint ScratchDwords { get; init; }
     public bool PositionX { get; init; }
     public bool PositionY { get; init; }
@@ -206,6 +210,8 @@ public sealed class ComputeInputInfo
     public uint WaveSize { get; init; } = 64;
     public uint LocalDataShareDwords { get; init; }
     public bool IeeeMode { get; set; }
+    public uint FloatMode { get; set; } = SharpEmu.ShaderCompiler.ShaderCompileRequest.DefaultFloatMode;
+    public bool Dx10Clamp { get; set; } = true;
     public uint ScratchDwords { get; init; }
     public bool NeedsLocalDataShareBarriers { get; init; }
     public int WorkgroupRegister { get; init; }

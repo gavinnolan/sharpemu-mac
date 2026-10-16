@@ -1171,7 +1171,9 @@ public static partial class Gen5MslTranslator
         {
             var bounded = Temp("float", value);
             var lowerBounded = Temp("float", $"({bounded} > 0.0f) ? {bounded} : 0.0f");
-            return $"(({lowerBounded} < 1.0f) ? {lowerBounded} : 1.0f)";
+            var clamped = $"(({lowerBounded} < 1.0f) ? {lowerBounded} : 1.0f)";
+            // Without DX10_CLAMP a NaN passes through the clamp.
+            return _request.Dx10Clamp ? clamped : $"(isnan({bounded}) ? {bounded} : {clamped})";
         }
 
         // V_PK_ADD/SUB_I16 operate on the op_sel-selected halves of src0 and src1
@@ -2834,8 +2836,10 @@ public static partial class Gen5MslTranslator
             };
 
         /// <summary>The output modifier and clamp of a VOP3 or SDWA float result. Output
-        /// modifiers are ignored when MODE.IEEE is set (RDNA2 ISA 6.2.2).</summary>
-        private (uint OutputModifier, bool Clamp) FloatOutputModifiers(Gen5ShaderInstruction instruction)
+        /// modifiers are ignored when MODE.IEEE is set or when FLOAT_MODE keeps output
+        /// denormals of the result's precision (RDNA2 ISA 6.2.2): bit 5 for f32, bit 7 for
+        /// f16 and f64.</summary>
+        private (uint OutputModifier, bool Clamp) FloatOutputModifiers(Gen5ShaderInstruction instruction, bool halfOrDouble = false)
         {
             var (outputModifier, clamp) = instruction.Control switch
             {
@@ -2843,21 +2847,42 @@ public static partial class Gen5MslTranslator
                 Gen5SdwaControl control => (control.OutputModifier, control.Clamp),
                 _ => (0u, false),
             };
-            return (_request.IeeeMode ? 0u : outputModifier, clamp);
+            return (OutputModifierApplies(halfOrDouble) ? outputModifier : 0u, clamp);
         }
 
-        /// <summary>Scales a float result by omod, then saturates it to [0, 1] for clamp.</summary>
-        private string ApplyFloatOutputModifiers(Gen5ShaderInstruction instruction, string expression)
+        private bool OutputModifierApplies(bool halfOrDouble) =>
+            !_request.IeeeMode && (_request.FloatMode & (halfOrDouble ? 0x80u : 0x20u)) == 0;
+
+        /// <summary>Scales a float result by omod, which flushes a zero or denormal result to
+        /// +0, then saturates it to [0, 1] for clamp (a NaN gives 0 under DX10_CLAMP and
+        /// passes through without it).</summary>
+        private string ApplyFloatOutputModifiers(Gen5ShaderInstruction instruction, string expression, bool half = false)
         {
-            var (outputModifier, clamp) = FloatOutputModifiers(instruction);
-            expression = outputModifier switch
+            var (outputModifier, clamp) = FloatOutputModifiers(instruction, half);
+            if (outputModifier != 0)
             {
-                1 => $"(({expression}) * 2.0f)",
-                2 => $"(({expression}) * 4.0f)",
-                3 => $"(({expression}) * 0.5f)",
-                _ => expression,
-            };
-            return clamp ? $"clamp({expression}, 0.0f, 1.0f)" : expression;
+                var scale = outputModifier switch { 1 => "2.0f", 2 => "4.0f", _ => "0.5f" };
+                var scaled = Temp("float", $"({expression}) * {scale}");
+                // For f16 the zero test runs after rounding to half, so a result that rounds
+                // to an f16 denormal is flushed as well.
+                var zero = half
+                    ? $"(as_type<ushort>(half({scaled})) & 0x7C00u) == 0u"
+                    : $"{scaled} == 0.0f";
+                expression = Temp("float", $"({zero}) ? 0.0f : {scaled}");
+            }
+
+            return clamp ? ClampFloatToUnitInterval(expression) : expression;
+        }
+
+        private string ClampFloatToUnitInterval(string expression)
+        {
+            if (_request.Dx10Clamp)
+            {
+                return $"clamp({expression}, 0.0f, 1.0f)";
+            }
+
+            var value = Temp("float", expression);
+            return $"(isnan({value}) ? {value} : clamp({value}, 0.0f, 1.0f))";
         }
 
         /// <summary>64-bit source: SGPR/VGPR pair, sign-extended inline, or zero-extended 32-bit.</summary>
@@ -3089,15 +3114,20 @@ public static partial class Gen5MslTranslator
                 _ => $"sharpemu_med3_f16({Bits(0)}, {Bits(1)}, {Bits(2)}, {ieee})",
             });
             var control = instruction.Control as Gen5Vop3Control;
-            var (modifier, clamp) = FloatOutputModifiers(instruction);
+            var (modifier, clamp) = FloatOutputModifiers(instruction, halfOrDouble: true);
             if (modifier != 0)
             {
+                // omod flushes a zero or denormal result to +0.
                 var scale = modifier == 1 ? "2.0f" : modifier == 2 ? "4.0f" : "0.5f";
-                bits = Temp("uint", $"(({bits} & 0x7FFFu) > 0x7C00u ? {bits} : " +
-                    $"(uint)as_type<ushort>(half((float)as_type<half>((ushort){bits}) * {scale})))");
+                var scaled = Temp("uint", $"(uint)as_type<ushort>(half((float)as_type<half>((ushort){bits}) * {scale}))");
+                bits = Temp("uint", $"(({bits} & 0x7FFFu) > 0x7C00u ? {bits} : ({scaled} & 0x7C00u) == 0u ? 0u : {scaled})");
             }
             if (clamp)
-                bits = Temp("uint", $"((({bits} & 0x8000u) != 0u || ({bits} & 0x7FFFu) > 0x7C00u) ? 0u : min({bits}, 0x3C00u))");
+            {
+                // A NaN clamps to 0 under DX10_CLAMP and passes through without it.
+                var nan = _request.Dx10Clamp ? "0u" : bits;
+                bits = Temp("uint", $"(({bits} & 0x7FFFu) > 0x7C00u ? {nan} : ({bits} & 0x8000u) != 0u ? 0u : min({bits}, 0x3C00u))");
+            }
             return ((control?.OperandSelect ?? 0) & 8) != 0
                 ? $"((v[{destination}] & 0x0000FFFFu) | ({bits} << 16))"
                 : $"((v[{destination}] & 0xFFFF0000u) | {bits})";
@@ -3110,7 +3140,7 @@ public static partial class Gen5MslTranslator
             string expression)
         {
             var control = instruction.Control as Gen5Vop3Control;
-            expression = ApplyFloatOutputModifiers(instruction, expression);
+            expression = ApplyFloatOutputModifiers(instruction, expression, half: true);
 
             var packed = $"(uint)as_type<ushort>(half({expression}))";
             return ((control?.OperandSelect ?? 0) & 8) != 0

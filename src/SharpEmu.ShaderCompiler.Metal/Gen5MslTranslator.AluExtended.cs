@@ -109,16 +109,16 @@ public static partial class Gen5MslTranslator
             var result = Temp(
                 "uint",
                 $"{special} ? {bits} : (({bits} & 0x8000u) | (14u << 10) | {normalized})");
-            return HasFloatOutputModifiers(instruction)
+            return HasFloatOutputModifiers(instruction, half: true)
                 ? Float16Result(instruction, destination, $"(float)as_type<half>((ushort){result})")
                 : Int16Result(instruction, destination, result);
         }
 
         /// <summary>Whether omod or clamp would change a float result (omod only counts outside
         /// IEEE mode). Bit-exact paths skip the float round trip when neither applies.</summary>
-        private bool HasFloatOutputModifiers(Gen5ShaderInstruction instruction)
+        private bool HasFloatOutputModifiers(Gen5ShaderInstruction instruction, bool half = false)
         {
-            var (outputModifier, clamp) = FloatOutputModifiers(instruction);
+            var (outputModifier, clamp) = FloatOutputModifiers(instruction, half);
             return outputModifier != 0 || clamp;
         }
 

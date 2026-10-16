@@ -88,8 +88,6 @@ public sealed class Gen5MslFloat64Tests(ITestOutputHelper output)
         Case("fma single rounding", Vop3(0x14C, 6, 256, 258, 260),
             1.0 + Math.Pow(2, -30), 1.0 - Math.Pow(2, -30), -1.0,
             Math.FusedMultiplyAdd(1.0 + Math.Pow(2, -30), 1.0 - Math.Pow(2, -30), -1.0)),
-        Case("mul omod x2", Vop3(0x165, 6, 256, 258, 0, omod: 1), 0.3, 1.0, 0.0, 0.6),
-        Case("mul omod x0.5", Vop3(0x165, 6, 256, 258, 0, omod: 3), 3.0, 5.0, 0.0, 7.5),
         Case("mul clamp", Vop3(0x165, 6, 256, 258, 0, clamp: true), 0.75, 2.0, 0.0, 1.0),
         Case("mul clamp negative", Vop3(0x165, 6, 256, 258, 0, clamp: true), -0.75, 2.0, 0.0, 0.0),
         Case("mul clamp NaN", Vop3(0x165, 6, 256, 258, 0, clamp: true), double.NaN, 2.0, 0.0, 0.0),
@@ -169,6 +167,31 @@ public sealed class Gen5MslFloat64Tests(ITestOutputHelper output)
             "cmpx_gt masks", (uint[])[Vopc(0x34), 0x7E0C0281, 0xBEFE03C1], 1.0, 2.0, 0.0, Sentinel, Sentinel,
         },
     };
+
+    // omod scales an f64 result only while FLOAT_MODE flushes f16/f64 output denormals
+    // (bit 7 clear); 0x40 keeps input denormals and flushes output ones.
+    public static IEnumerable<object[]> OutputModifierCases => new List<object[]>
+    {
+        Case("mul omod x2", Vop3(0x165, 6, 256, 258, 0, omod: 1), 0.3, 1.0, 0.0, 0.6),
+        Case("mul omod x0.5", Vop3(0x165, 6, 256, 258, 0, omod: 3), 3.0, 5.0, 0.0, 7.5),
+    };
+
+    [Theory]
+    [MemberData(nameof(OutputModifierCases))]
+    public void OutputModifierScalesWhenFloat64OutputDenormalsFlush(string name, uint[] op, double a, double b, double c,
+        uint expectedLow, uint expectedHigh)
+    {
+        var shader = CompileTranslated(op, a, b, c, store: 6, floatMode: 0x40);
+        if (!DeviceGateOpen())
+        {
+            return;
+        }
+
+        var result = Execute(shader);
+        output.WriteLine($"{name}: 0x{result.High:X8}{result.Low:X8}");
+        Assert.Equal(expectedHigh, result.High);
+        Assert.Equal(expectedLow, result.Low);
+    }
 
     // v_cmp(x)_*_f64 vcc, v[0:1], v[2:3]
     private static uint Vopc(uint opcode) => 0x7C000000 | (opcode << 17) | (2u << 9) | 256u;
@@ -1148,7 +1171,8 @@ public sealed class Gen5MslFloat64Tests(ITestOutputHelper output)
 
     // v[0:1], v[2:3], v[4:5] hold a, b and c and v[6:7] a sentinel; the op runs;
     // v[store] and v[store+1] land at bytes 0 and 4.
-    private static Gen5MslShader CompileTranslated(uint[] op, double a, double b, double c, uint store)
+    private static Gen5MslShader CompileTranslated(uint[] op, double a, double b, double c, uint store,
+        uint floatMode = ShaderCompileRequest.DefaultFloatMode)
     {
         var words = new List<uint>();
         uint register = 0;
@@ -1166,7 +1190,7 @@ public sealed class Gen5MslFloat64Tests(ITestOutputHelper output)
         words.AddRange([0xE0700004, 0x80020000 | ((store + 1) << 8)]);
         words.Add(0xBF810000);
         return Gen5ComputeFixtures.CompileRequestOrThrow(
-            new Gen5ComputeFixture("f64", [.. words], StoreScalarResourceBase: 8, StoreBackingBytes: 16));
+            new Gen5ComputeFixture("f64", [.. words], StoreScalarResourceBase: 8, StoreBackingBytes: 16), floatMode: floatMode);
     }
 
     private static (uint Low, uint High) Execute(Gen5MslShader shader)

@@ -37,6 +37,8 @@ public sealed class ShaderPrewarmListTests : IDisposable
         var guest = new PipelineTestGuest(request =>
         {
             Assert.Equal(ieeeMode, request.IeeeMode);
+            Assert.Equal(FloatModeFor(ieeeMode), request.FloatMode);
+            Assert.Equal(!ieeeMode, request.Dx10Clamp);
             return Compile(request);
         });
         guest.Host.ShaderPrewarm = list;
@@ -45,10 +47,15 @@ public sealed class ShaderPrewarmListTests : IDisposable
         var cursor = 0u;
         var options = PipelineTestGuest.ComputeOptions(threadsX: 64);
         options.ComputeInfo!.IeeeMode = ieeeMode;
+        options.ComputeInfo.FloatMode = FloatModeFor(ieeeMode);
+        options.ComputeInfo.Dx10Clamp = !ieeeMode;
         guest.Programs.GetOrCompile(
             guest.Source(CodeAddress, ShaderStage.Compute, userData), options, ref cursor, out _);
         return (guest.Host, Assert.Single(guest.Compiler.Shaders).Spirv);
     }
+
+    // The IEEE case also records a non-default FLOAT_MODE and a clear DX10_CLAMP.
+    private static uint FloatModeFor(bool ieeeMode) => ieeeMode ? 0x30u : ShaderCompileRequest.DefaultFloatMode;
 
     private ShaderPrewarmList Open() => ShaderPrewarmList.Open(_directory) ?? throw new InvalidOperationException("The list did not open.");
 
@@ -67,9 +74,13 @@ public sealed class ShaderPrewarmListTests : IDisposable
         using var reloaded = Open();
         var (record, code) = Assert.Single(reloaded.LoadedComputes());
         Assert.Equal(ieeeMode, record.Info.IeeeMode);
+        Assert.Equal(FloatModeFor(ieeeMode), record.Info.FloatMode);
+        Assert.Equal(!ieeeMode, record.Info.Dx10Clamp);
         var compiler = new FakeShaderCompiler(request =>
         {
             Assert.Equal(ieeeMode, request.IeeeMode);
+            Assert.Equal(FloatModeFor(ieeeMode), request.FloatMode);
+            Assert.Equal(!ieeeMode, request.Dx10Clamp);
             return Compile(request);
         });
         Assert.True(

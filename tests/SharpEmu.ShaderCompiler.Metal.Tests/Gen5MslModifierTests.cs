@@ -134,7 +134,8 @@ public sealed class Gen5MslModifierTests(ITestOutputHelper output)
 
     // ---- float modifiers ----
 
-    // An SDWA f16 result honours clamp and omod before the half is placed in dst_sel.
+    // An SDWA f16 result honours clamp and omod before the half is placed in dst_sel. omod
+    // needs f16 output denormals flushed (FLOAT_MODE bit 7 clear).
     [Theory]
     [InlineData("VMulF16", 0x4000u, 0x4200u, 0u, true, 0xABCD3C00u)]  // 2.0 * 3.0 clamped to 1.0
     [InlineData("VMulF16", 0x4000u, 0x4200u, 2u, false, 0xABCD4E00u)] // 2.0 * 3.0 * 4 = 24.0
@@ -148,7 +149,7 @@ public sealed class Gen5MslModifierTests(ITestOutputHelper output)
             new Gen5ShaderInstruction(0x1000, Gen5ShaderEncoding.Vop2, opcode, [],
                 [Gen5Operand.Vector(1), Gen5Operand.Vector(2)], [Gen5Operand.Vector(6)],
                 new Gen5SdwaControl(4, 2, 4, 4, false, false, 0, 0, omod, clamp, null)),
-            resultRegister: 6);
+            resultRegister: 6, floatMode: 0x00);
         if (result is null) return;
         Assert.All(result, value => Assert.Equal(expected, value));
     }
@@ -166,7 +167,7 @@ public sealed class Gen5MslModifierTests(ITestOutputHelper output)
             new Gen5ShaderInstruction(0x1000, Gen5ShaderEncoding.Vop3, "VCvtF16F32", [],
                 [Gen5Operand.Vector(1)], [Gen5Operand.Vector(6)],
                 new Gen5Vop3Control(0, 0, omod, clamp, 0, null)),
-            resultRegister: 6);
+            resultRegister: 6, floatMode: 0x00); // omod on an f16 result needs f16 output denormals flushed
         if (result is null) return;
         Assert.All(result, value => Assert.Equal(expected, value));
     }
@@ -255,8 +256,9 @@ public sealed class Gen5MslModifierTests(ITestOutputHelper output)
         uint resultRegister,
         uint lanes = 32,
         uint waveLaneCount = 32,
-        bool ieeeMode = false) =>
-        RunLanes(setup, [instruction], resultRegister, lanes, waveLaneCount, ieeeMode);
+        bool ieeeMode = false,
+        uint floatMode = ShaderCompileRequest.DefaultFloatMode) =>
+        RunLanes(setup, [instruction], resultRegister, lanes, waveLaneCount, ieeeMode, floatMode);
 
     private uint[]? RunLanes(
         uint[] setup,
@@ -264,7 +266,8 @@ public sealed class Gen5MslModifierTests(ITestOutputHelper output)
         uint resultRegister,
         uint lanes = 32,
         uint waveLaneCount = 32,
-        bool ieeeMode = false)
+        bool ieeeMode = false,
+        uint floatMode = ShaderCompileRequest.DefaultFloatMode)
     {
         // v4 = lane * 4 is the store offset; the prologue runs before it so a setup that
         // overwrites v0 (the lane id) keeps its offset.
@@ -287,7 +290,7 @@ public sealed class Gen5MslModifierTests(ITestOutputHelper output)
         userData[11] = DescriptorConstants.IdentityDestinationSelect;
         var request = Gen5ComputeFixtures.RequestOrThrow(
             program with { Instructions = list }, ShaderStage.Compute, waveLaneCount, lanes,
-            runtimeInputs: new ResourceRuntimeInputs { UserData = userData }, ieeeMode: ieeeMode);
+            runtimeInputs: new ResourceRuntimeInputs { UserData = userData }, ieeeMode: ieeeMode, floatMode: floatMode);
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
         if (!RequireDevice()) return null;
 

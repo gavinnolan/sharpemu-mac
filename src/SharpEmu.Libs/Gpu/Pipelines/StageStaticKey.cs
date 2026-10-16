@@ -35,6 +35,8 @@ public static class StageStaticKey
         key.Add((uint)info.FetchBufferRegister);
         key.Add((uint)info.Attributes.Length);
         key.Add(Bit(info.IeeeMode));
+        key.Add(info.FloatMode);
+        key.Add(Bit(info.Dx10Clamp));
         key.Add(info.ScratchDwords);
         key.Add(info.PositionExportControl);
         key.Add(Bit(info.ClipSpace.Enabled));
@@ -88,6 +90,8 @@ public static class StageStaticKey
     {
         key.Clear();
         key.Add(Bit(info.IeeeMode));
+        key.Add(info.FloatMode);
+        key.Add(Bit(info.Dx10Clamp));
         key.Add(info.ScratchDwords);
         key.Add(info.InputCount);
         key.Add(info.SystemInputBase);
@@ -137,6 +141,8 @@ public static class StageStaticKey
         key.Add((uint)info.ThreadIdCount);
         key.Add(info.LocalDataShareDwords);
         key.Add(Bit(info.IeeeMode));
+        key.Add(info.FloatMode);
+        key.Add(Bit(info.Dx10Clamp));
         key.Add(info.ScratchDwords);
         key.Add(Bit(info.NeedsLocalDataShareBarriers));
         key.Add(Bit(info.DispatchThreadDimensions));

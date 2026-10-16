@@ -652,6 +652,8 @@ public sealed class ShaderPrewarmList : IDisposable
         writer.Write(info.LocalDataShareDwords);
         writer.Write(info.ScratchDwords);
         writer.Write(info.IeeeMode);
+        writer.Write(info.FloatMode);
+        writer.Write(info.Dx10Clamp);
         writer.Write(info.NeedsLocalDataShareBarriers);
         writer.Write(info.WorkgroupRegister);
 
@@ -728,6 +730,8 @@ public sealed class ShaderPrewarmList : IDisposable
             LocalDataShareDwords = reader.ReadUInt32(),
             ScratchDwords = reader.ReadUInt32(),
             IeeeMode = reader.ReadBoolean(),
+            FloatMode = reader.ReadUInt32(),
+            Dx10Clamp = reader.ReadBoolean(),
             NeedsLocalDataShareBarriers = reader.ReadBoolean(),
             WorkgroupRegister = reader.ReadInt32(),
         };

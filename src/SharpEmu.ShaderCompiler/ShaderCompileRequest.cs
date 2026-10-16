@@ -178,6 +178,13 @@ public sealed class ShaderCompileRequest
     public bool HostComputeSubgroup32 { get; init; }
     public bool EnableExecGuardElision { get; init; } = true;
     public bool IeeeMode { get; init; }
+    // RSRC1 FLOAT_MODE: bits 1:0 f32 round, 3:2 f16/f64 round, 5:4 f32 denormals, 7:6 f16/f64
+    // denormals (per field, bit 0 keeps input denormals and bit 1 output ones). 0xC0, the mode
+    // titles run with, flushes f32 denormals and keeps f16/f64 ones.
+    public uint FloatMode { get; init; } = DefaultFloatMode;
+    // RSRC1 DX10_CLAMP: a clamped NaN becomes 0 when set and stays NaN when clear.
+    public bool Dx10Clamp { get; init; } = true;
+    public const uint DefaultFloatMode = 0xC0;
     public uint ScratchDwords { get; init; }
     public bool EnableGraphicsSubgroupOperations { get; init; } = true;
 

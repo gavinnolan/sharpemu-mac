@@ -161,6 +161,70 @@ public sealed class Gen5MslFloatSemanticsTests(ITestOutputHelper output)
         Assert.Equal(expected, Execute(shader));
     }
 
+    // omod applies only outside IEEE mode and while FLOAT_MODE flushes output denormals of
+    // the result's precision (bit 5 for f32, bit 7 for f16/f64); it flushes -0 to +0.
+    [Theory]
+    [InlineData("VMulF32", 0x3FC00000u, 0x3F800000u, 0xC0u, 0x40400000u)] // 1.5 * 1, omod *2 = 3
+    [InlineData("VMulF32", 0x3FC00000u, 0x3F800000u, 0xF0u, 0x3FC00000u)] // f32 output denormals kept
+    [InlineData("VMulF32", 0xBF800000u, 0x00000000u, 0xC0u, 0x00000000u)] // -1 * 0, omod: +0
+    [InlineData("VMulF16", 0x00003E00u, 0x00003C00u, 0xC0u, 0xABCD3E00u)] // f16 output denormals kept
+    [InlineData("VMulF16", 0x00003E00u, 0x00003C00u, 0x00u, 0xABCD4200u)] // 1.5h * 1h, omod *2 = 3h
+    [InlineData("VMulF16", 0x0000BC00u, 0x00000000u, 0x00u, 0xABCD0000u)] // -1h * 0h, omod: +0
+    public void OutputModifierFollowsFloatMode(string opcode, uint a, uint b, uint floatMode, uint expected)
+    {
+        var shader = Compile([Vop3(opcode, [Gen5Operand.Vector(0), Gen5Operand.Vector(1)],
+            new Gen5Vop3Control(0, 0, 1, false, 0, null))], a, b, 0u, 0xABCD5678u, floatMode: floatMode);
+        if (!RequireDevice()) return;
+        Assert.Equal(expected, Execute(shader));
+    }
+
+    [Theory]
+    [InlineData(false, 0x40u, 0x40080000u)] // 1.5 * 1.0, omod *2 = 3.0
+    [InlineData(true, 0x40u, 0x3FF80000u)]  // IEEE mode ignores omod
+    [InlineData(false, 0xC0u, 0x3FF80000u)] // f64 output denormals kept
+    public void Float64OutputModifierFollowsIeeeAndFloatMode(bool ieee, uint floatMode, uint expectedHigh)
+    {
+        var shader = Compile([
+            new Gen5ShaderInstruction(28, Gen5ShaderEncoding.Vop3, "VMulF64", [], [Gen5Operand.Vector(0), Gen5Operand.Vector(2)],
+                [Gen5Operand.Vector(4)], new Gen5Vop3Control(0, 0, 1, false, 0, null)),
+            new Gen5ShaderInstruction(36, Gen5ShaderEncoding.Vop1, "VMovB32", [], [Gen5Operand.Vector(5)], [Gen5Operand.Vector(3)], null),
+        ], 0u, 0x3FF80000u, 0u, 0x3FF00000u, ieee, floatMode);
+        if (!RequireDevice()) return;
+        Assert.Equal(expectedHigh, Execute(shader));
+    }
+
+    // A clamped NaN is 0 under DX10_CLAMP and stays NaN without it.
+    [Theory]
+    [InlineData("VAddF32", 0x7FC00000u, 0x3F800000u, true, 0x00000000u)]
+    [InlineData("VAddF32", 0x7FC00000u, 0x3F800000u, false, 0x7FC00000u)]
+    [InlineData("VAddF16", 0x00007E00u, 0x00003C00u, true, 0xABCD0000u)]
+    [InlineData("VAddF16", 0x00007E00u, 0x00003C00u, false, 0xABCD7E00u)]
+    [InlineData("VMaxF32", 0x7FC00000u, 0x7FC00000u, true, 0x00000000u)]
+    [InlineData("VMaxF32", 0x7FC00000u, 0x7FC00000u, false, 0x7FC00000u)]
+    [InlineData("VMaxF16", 0x00007E00u, 0x00007E00u, true, 0xABCD0000u)]
+    [InlineData("VMaxF16", 0x00007E00u, 0x00007E00u, false, 0xABCD7E00u)]
+    public void ClampOfNanFollowsDx10Clamp(string opcode, uint a, uint b, bool dx10Clamp, uint expected)
+    {
+        var shader = Compile([Vop3(opcode, [Gen5Operand.Vector(0), Gen5Operand.Vector(1)],
+            new Gen5Vop3Control(0, 0, 0, true, 0, null))], a, b, 0u, 0xABCD5678u, dx10Clamp: dx10Clamp);
+        if (!RequireDevice()) return;
+        Assert.Equal(expected, Execute(shader));
+    }
+
+    [Theory]
+    [InlineData(true, 0x00000000u)]
+    [InlineData(false, 0x7FF80000u)]
+    public void Float64ClampOfNanFollowsDx10Clamp(bool dx10Clamp, uint expectedHigh)
+    {
+        var shader = Compile([
+            new Gen5ShaderInstruction(28, Gen5ShaderEncoding.Vop3, "VAddF64", [], [Gen5Operand.Vector(0), Gen5Operand.Vector(2)],
+                [Gen5Operand.Vector(4)], new Gen5Vop3Control(0, 0, 0, true, 0, null)),
+            new Gen5ShaderInstruction(36, Gen5ShaderEncoding.Vop1, "VMovB32", [], [Gen5Operand.Vector(5)], [Gen5Operand.Vector(3)], null),
+        ], 0u, 0x7FF80000u, 0u, 0x3FF00000u, dx10Clamp: dx10Clamp);
+        if (!RequireDevice()) return;
+        Assert.Equal(expectedHigh, Execute(shader));
+    }
+
     // v3 = VCC ? 1 : 0
     private static Gen5ShaderInstruction CndmaskVcc() =>
         new(28, Gen5ShaderEncoding.Vop2, "VCndmaskB32", [], [Gen5Operand.Source(128), Gen5Operand.Source(129)], [Gen5Operand.Vector(3)], null);
@@ -193,15 +257,16 @@ public sealed class Gen5MslFloatSemanticsTests(ITestOutputHelper output)
     }
 
     private static Gen5MslShader Compile(Gen5ShaderInstruction[] inserted, uint a, uint b, uint c = 0, uint old = 0,
-        bool ieee = false)
+        bool ieee = false, uint floatMode = ShaderCompileRequest.DefaultFloatMode, bool dx10Clamp = true)
     {
-        Assert.True(TryCompile(inserted, a, b, c, old, out var shader, out var error, ieee), error);
+        Assert.True(TryCompile(inserted, a, b, c, old, out var shader, out var error, ieee, floatMode, dx10Clamp), error);
         return shader!;
     }
 
     // v0 = a, v1 = b, v2 = c, v3 = old; the inserted instructions run before v3 is stored.
     private static bool TryCompile(Gen5ShaderInstruction[] inserted, uint a, uint b, uint c, uint old,
-        out Gen5MslShader? shader, out string error, bool ieee = false)
+        out Gen5MslShader? shader, out string error, bool ieee = false,
+        uint floatMode = ShaderCompileRequest.DefaultFloatMode, bool dx10Clamp = true)
     {
         var fixture = new Gen5ComputeFixture("float-semantics", [
             0x7E0002FF, a, 0x7E0202FF, b, 0x7E0402FF, c, 0x7E0602FF, old,
@@ -209,7 +274,8 @@ public sealed class Gen5MslFloatSemanticsTests(ITestOutputHelper output)
         var program = Gen5ComputeFixtures.DecodeOrThrow(fixture);
         var instructions = program.Instructions.ToList();
         instructions.InsertRange(4, inserted);
-        var request = Gen5ComputeFixtures.RequestOrThrow(program with { Instructions = instructions }, ShaderStage.Compute, ieeeMode: ieee);
+        var request = Gen5ComputeFixtures.RequestOrThrow(program with { Instructions = instructions }, ShaderStage.Compute, ieeeMode: ieee,
+            floatMode: floatMode, dx10Clamp: dx10Clamp);
         var compiled = Gen5MslTranslator.TryCompileProgram(request, out var result, out error);
         shader = compiled ? result : null;
         return compiled;
