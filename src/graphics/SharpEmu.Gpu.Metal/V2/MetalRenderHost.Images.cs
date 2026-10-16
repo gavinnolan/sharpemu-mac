@@ -222,18 +222,94 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        // A multisample resolve of equal-format images is a blit of sample zero here;
-        // the dedicated resolve pass belongs with the real tiler work.
-        CopyTextureSubresource(
-            sourceImage,
-            destinationImage,
-            new SubresourceRange(sourceMip, 1, sourceLayer, 1),
-            new SubresourceRange(destinationMip, 1, destinationLayer, 1),
-            new GpuExtent3D(
-                Math.Max(destinationImage.Shape.Width >> (int)destinationMip, 1),
-                Math.Max(destinationImage.Shape.Height >> (int)destinationMip, 1),
-                1));
+        if (sourceImage.Shape.SampleCount <= 1)
+        {
+            // One sample per pixel: the resolve is a copy.
+            CopyTextureSubresource(
+                sourceImage,
+                destinationImage,
+                new SubresourceRange(sourceMip, 1, sourceLayer, 1),
+                new SubresourceRange(destinationMip, 1, destinationLayer, 1),
+                new GpuExtent3D(
+                    Math.Max(destinationImage.Shape.Width >> (int)destinationMip, 1),
+                    Math.Max(destinationImage.Shape.Height >> (int)destinationMip, 1),
+                    1));
+            return;
+        }
+
+        EncodeResolvePass(sourceImage, sourceMip, sourceLayer, destinationImage, destinationMip, destinationLayer);
     }
+
+    // The CB resolve (CB_COLOR_CONTROL MODE = RESOLVE) averages the samples of each pixel:
+    // a pass with no draws whose attachment stores and resolves into the destination.
+    // Integer formats take sample 0 on the GPU, which a Metal resolve cannot express.
+    private void EncodeResolvePass(
+        MetalCachedImage source,
+        uint sourceMip,
+        uint sourceLayer,
+        MetalCachedImage destination,
+        uint destinationMip,
+        uint destinationLayer)
+    {
+        if (source.Shape.PixelFormat != destination.Shape.PixelFormat || IsIntegerFormat(source.Shape.PixelFormat))
+        {
+            throw Fatal(
+                $"A multisample resolve between these formats is not supported: source={source.Shape.PixelFormat} " +
+                $"destination={destination.Shape.PixelFormat} samples={source.Shape.SampleCount}.");
+        }
+
+        var width = Math.Max(source.Shape.Width >> (int)sourceMip, 1);
+        var height = Math.Max(source.Shape.Height >> (int)sourceMip, 1);
+        if (width != Math.Max(destination.Shape.Width >> (int)destinationMip, 1) ||
+            height != Math.Max(destination.Shape.Height >> (int)destinationMip, 1))
+        {
+            throw Fatal(
+                $"A multisample resolve between subresources of different sizes is not supported: source={width}x{height} " +
+                $"destination={destination.Shape.Width >> (int)destinationMip}x{destination.Shape.Height >> (int)destinationMip}.");
+        }
+
+        _imageCache.PrepareImageWrite(destination);
+        var context = ((IMetalImageCacheOwner)this).BeginTransfer(
+            MetalTransferCause.ImageCopy, source.Texture, destination.Texture);
+        destination.NoteContentChanged();
+        var descriptor = MetalNative.Send(
+            MetalNative.Send(MetalNative.Class("MTLRenderPassDescriptor"), MetalNative.Selector("alloc")),
+            MetalNative.Selector("init"));
+        try
+        {
+            var colors = MetalNative.Send(descriptor, SelColorAttachments);
+            var attachment = MetalNative.SendAtIndex(colors, SelObjectAtIndex, 0);
+            MetalNative.SendVoid(attachment, SelSetTexture, source.Texture);
+            MetalV2Native.SendVoidValue(attachment, SelSetLevel, sourceMip);
+            MetalV2Native.SendVoidValue(attachment, SelSetSlice, sourceLayer);
+            MetalV2Native.SendVoidValue(attachment, SelSetLoadAction, Mtl.LoadActionLoad);
+            MetalV2Native.SendVoidValue(attachment, SelSetStoreAction, Mtl.StoreActionStoreAndMultisampleResolve);
+            MetalNative.SendVoid(attachment, SelSetResolveTexture, destination.Texture);
+            MetalV2Native.SendVoidValue(attachment, SelSetResolveLevel, destinationMip);
+            var volume = (ulong)MetalNative.Send(destination.Texture, SelTextureType) == Mtl.TextureType3D;
+            MetalV2Native.SendVoidValue(attachment, volume ? SelSetResolveDepthPlane : SelSetResolveSlice, destinationLayer);
+            MetalV2Native.SendVoidValue(descriptor, SelSetRenderTargetWidth, width);
+            MetalV2Native.SendVoidValue(descriptor, SelSetRenderTargetHeight, height);
+            var encoder = MetalNative.Send(context.CommandBuffer, SelRenderEncoder, descriptor);
+            if (encoder == 0)
+            {
+                throw Fatal($"A Metal multisample resolve pass could not be encoded: {width}x{height} samples={source.Shape.SampleCount}.");
+            }
+
+            MetalNative.SendVoid(encoder, SelEndEncoding);
+        }
+        finally
+        {
+            MetalNative.SendVoid(descriptor, SelRelease);
+        }
+
+        context.ProfileEncoded($"image-resolve {width}x{height} samples={source.Shape.SampleCount}");
+    }
+
+    private static readonly nint SelSetResolveTexture = MetalNative.Selector("setResolveTexture:");
+    private static readonly nint SelSetResolveLevel = MetalNative.Selector("setResolveLevel:");
+    private static readonly nint SelSetResolveSlice = MetalNative.Selector("setResolveSlice:");
+    private static readonly nint SelSetResolveDepthPlane = MetalNative.Selector("setResolveDepthPlane:");
 
     public void CopyDepthStencilImage(
         ResourceSlotIdentifier source,

@@ -44,6 +44,7 @@ internal static class Mtl
     public const nuint LoadActionClear = 2;
     public const nuint StoreActionDontCare = 0;
     public const nuint StoreActionStore = 1;
+    public const nuint StoreActionStoreAndMultisampleResolve = 3;
 
     // A descriptor that asks for Unknown promises to name the real action on the
     // encoder before encoding ends, which is how a store can be discarded once the

@@ -1006,7 +1006,11 @@ public sealed class OutputMergerSceneTests(ITestOutputHelper output) : SceneTest
             }
         }
 
-        errors.Insert(0, $"{edges.Count} of 16 edge pixels are not a 1..3 of 4 sample mix; first: {string.Join(" | ", edges.Take(4))}");
+        if (edges.Count != 0)
+        {
+            errors.Insert(0, $"{edges.Count} of 16 edge pixels are not a 1..3 of 4 sample mix; first: {string.Join(" | ", edges.Take(4))}");
+        }
+
         AssertClean(errors.Take(12).ToList());
     }
 
