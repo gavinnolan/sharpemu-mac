@@ -1672,34 +1672,37 @@ public static partial class Gen5MslTranslator
             return true;
         }
 
+        /// <summary>V_CMP_CLASS_F32 on the f32 bits after abs/neg. A signalling NaN (quiet bit
+        /// 22 clear) is class bit 0 and a quiet NaN bit 1. Float compares are not used: the
+        /// host flushes f32 denormals in them, so a denormal read as a zero (bits 5/6) instead
+        /// of a subnormal (bits 4/7).</summary>
         private string EmitCompareClass(Gen5ShaderInstruction instruction)
         {
-            var source = Temp("float", F(instruction, 0));
+            var bits = Temp("uint", AsUInt(F(instruction, 0)));
             var mask = Temp("uint", RawSource(instruction, 1));
-            // The class and the sign both describe the value after abs/neg.
-            var negative = Temp("bool", $"(as_type<uint>({source}) & 0x80000000u) != 0u");
-            var nan = Temp("bool", $"isnan({source})");
-            var infinite = Temp("bool", $"isinf({source})");
-            var zero = Temp("bool", $"{source} == 0.0f");
-            var subnormal = Temp(
-                "bool",
-                $"fabs({source}) > 0.0f && fabs({source}) < as_type<float>(0x00800000u)");
-            var normal = Temp(
-                "bool",
-                $"!({nan} || {infinite} || {zero} || {subnormal})");
+            var exponent = Temp("uint", $"{bits} & 0x7F800000u");
+            var fraction = Temp("uint", $"{bits} & 0x7FFFFFu");
+            var negative = Temp("bool", $"({bits} & 0x80000000u) != 0u");
+            var nan = Temp("bool", $"{exponent} == 0x7F800000u && {fraction} != 0u");
+            var infinite = Temp("bool", $"{exponent} == 0x7F800000u && {fraction} == 0u");
+            var zero = Temp("bool", $"{exponent} == 0u && {fraction} == 0u");
+            var subnormal = Temp("bool", $"{exponent} == 0u && {fraction} != 0u");
+            var normal = Temp("bool", $"{exponent} != 0u && {exponent} != 0x7F800000u");
+            string Bit(int index) => $"(({mask} >> {index}u) & 1u) != 0u";
             // Class bits: 0 sNaN, 1 qNaN, 2 -inf, 3 -normal, 4 -subnormal,
             // 5 -zero, 6 +zero, 7 +subnormal, 8 +normal, 9 +inf.
             return Temp(
                 "bool",
-                $"((({mask} & 3u) != 0u) && {nan}) || " +
-                $"((({mask} >> 2) & 1u) != 0u && {infinite} && {negative}) || " +
-                $"((({mask} >> 3) & 1u) != 0u && {normal} && {negative}) || " +
-                $"((({mask} >> 4) & 1u) != 0u && {subnormal} && {negative}) || " +
-                $"((({mask} >> 5) & 1u) != 0u && {zero} && {negative}) || " +
-                $"((({mask} >> 6) & 1u) != 0u && {zero} && !{negative}) || " +
-                $"((({mask} >> 7) & 1u) != 0u && {subnormal} && !{negative}) || " +
-                $"((({mask} >> 8) & 1u) != 0u && {normal} && !{negative}) || " +
-                $"((({mask} >> 9) & 1u) != 0u && {infinite} && !{negative})");
+                $"({Bit(0)} && {nan} && ({fraction} & 0x400000u) == 0u) || " +
+                $"({Bit(1)} && {nan} && ({fraction} & 0x400000u) != 0u) || " +
+                $"({Bit(2)} && {infinite} && {negative}) || " +
+                $"({Bit(3)} && {normal} && {negative}) || " +
+                $"({Bit(4)} && {subnormal} && {negative}) || " +
+                $"({Bit(5)} && {zero} && {negative}) || " +
+                $"({Bit(6)} && {zero} && !{negative}) || " +
+                $"({Bit(7)} && {subnormal} && !{negative}) || " +
+                $"({Bit(8)} && {normal} && !{negative}) || " +
+                $"({Bit(9)} && {infinite} && !{negative})");
         }
 
         /// <summary>The register a V_CMP writes its mask to: the VOP3 encoding names it in

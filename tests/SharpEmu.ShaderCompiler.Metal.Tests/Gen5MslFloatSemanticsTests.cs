@@ -53,6 +53,32 @@ public sealed class Gen5MslFloatSemanticsTests(ITestOutputHelper output)
         Assert.Equal(0x3F800000u, Execute(shader));
     }
 
+    // V_CMP_CLASS_F32 tells a signalling NaN (bit 0) from a quiet one (bit 1) and reports an
+    // f32 denormal as a subnormal (bits 4/7) although the host flushes it in float compares.
+    [Theory]
+    [InlineData(0x7F800001u, 0x001u, 1u)]
+    [InlineData(0x7F800001u, 0x002u, 0u)]
+    [InlineData(0x7FC00000u, 0x002u, 1u)]
+    [InlineData(0x7FC00000u, 0x001u, 0u)]
+    [InlineData(0x00400000u, 0x080u, 1u)]
+    [InlineData(0x00400000u, 0x040u, 0u)]
+    [InlineData(0x80000001u, 0x010u, 1u)]
+    [InlineData(0x80000001u, 0x020u, 0u)]
+    [InlineData(0x80000000u, 0x020u, 1u)]
+    public void CompareClassF32ReadsTheBits(uint value, uint mask, uint expected)
+    {
+        var shader = Compile([
+            new Gen5ShaderInstruction(28, Gen5ShaderEncoding.Vopc, "VCmpClassF32", [], [Gen5Operand.Vector(0), Gen5Operand.Vector(1)], [], null),
+            CndmaskVcc(),
+        ], value, mask);
+        if (!RequireDevice()) return;
+        Assert.Equal(expected, Execute(shader));
+    }
+
+    // v3 = VCC ? 1 : 0
+    private static Gen5ShaderInstruction CndmaskVcc() =>
+        new(28, Gen5ShaderEncoding.Vop2, "VCndmaskB32", [], [Gen5Operand.Source(128), Gen5Operand.Source(129)], [Gen5Operand.Vector(3)], null);
+
     private static Gen5ShaderInstruction Vop3(string opcode, Gen5Operand[] sources, Gen5InstructionControl? control = null) =>
         new(28, Gen5ShaderEncoding.Vop3, opcode, [], sources, [Gen5Operand.Vector(3)], control ?? new Gen5Vop3Control(0, 0, 0, false, 0, null));
 
