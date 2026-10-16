@@ -115,6 +115,36 @@ public sealed class Gen5MslFloatSemanticsTests(ITestOutputHelper output)
         Assert.Equal(expected, Execute(shader));
     }
 
+    // (1 + 2^-23)^2 - (1 + 2^-22) is 2^-46 exactly: a fused multiply-add keeps it, a rounded
+    // product loses it. V_MAD/MAC (and the legacy forms on gfx10.1) round the product.
+    [Theory]
+    [InlineData("VFmaF32", Gen5ShaderEncoding.Vop3, 0x28800000u)]
+    [InlineData("VMadF32", Gen5ShaderEncoding.Vop3, 0u)]
+    [InlineData("VMadLegacyF32", Gen5ShaderEncoding.Vop3, 0u)]
+    [InlineData("VMacF32", Gen5ShaderEncoding.Vop2, 0u)]
+    [InlineData("VFmacF32", Gen5ShaderEncoding.Vop2, 0x28800000u)]
+    [InlineData("VMacLegacyF32", Gen5ShaderEncoding.Vop2, 0u)]
+    public void MadFormsRoundTheProductBeforeTheAdd(string opcode, Gen5ShaderEncoding encoding, uint expected)
+    {
+        const uint Factor = 0x3F800001u, Addend = 0xBF800002u;
+        var instruction = encoding == Gen5ShaderEncoding.Vop3
+            ? Vop3(opcode, V012)
+            : new Gen5ShaderInstruction(28, encoding, opcode, [], [Gen5Operand.Vector(0), Gen5Operand.Vector(1)], [Gen5Operand.Vector(3)], null);
+        var shader = Compile([instruction], Factor, Factor, Addend, Addend);
+        if (!RequireDevice()) return;
+        Assert.Equal(expected, Execute(shader));
+    }
+
+    // V_MAD_LEGACY_F32 flushes its denormal sources, so a denormal factor takes the DX9 zero
+    // rule: denormal * inf + -0 is +0, not the NaN of 0 * inf.
+    [Fact]
+    public void MadLegacyTreatsADenormalFactorAsZero()
+    {
+        var shader = Compile([Vop3("VMadLegacyF32", V012)], 0x00000001u, 0x7F800000u, 0x80000000u);
+        if (!RequireDevice()) return;
+        Assert.Equal(0u, Execute(shader));
+    }
+
     // v3 = VCC ? 1 : 0
     private static Gen5ShaderInstruction CndmaskVcc() =>
         new(28, Gen5ShaderEncoding.Vop2, "VCndmaskB32", [], [Gen5Operand.Source(128), Gen5Operand.Source(129)], [Gen5Operand.Vector(3)], null);

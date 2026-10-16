@@ -20,24 +20,39 @@ public static partial class Gen5MslTranslator
         /// <summary>
         /// V_MUL_LEGACY_F32 / V_MAC_LEGACY_F32 / V_MAD_LEGACY_F32: "0.0 times anything produces
         /// 0.0" — even infinity or NaN — and the product is then +0. The test is on the
-        /// operand after its abs/neg, by bits, so -0 counts and denormals (preserved, see
-        /// S_GETREG MODE) do not. The MAC/MAD forms are one fused multiply-add like V_MAD_F32
-        /// here, with the zero product added to the addend (+0 + -0 = +0).
+        /// operand after its abs/neg, by bits, so -0 counts. On gfx10.1 (the PS5's gfx1013) the
+        /// MAC/MAD forms are not fused: the product is rounded before the add (gfx10.3 replaced
+        /// them with V_FMAC/FMA_LEGACY_F32), and they flush their denormal sources in every
+        /// FLOAT_MODE, so a denormal factor takes the zero rule too. The zero product is then
+        /// added to the addend (+0 + -0 = +0).
         /// </summary>
         private string EmitLegacyMultiply(Gen5ShaderInstruction instruction, string? addend)
         {
             var left = Temp("float", F(instruction, 0));
             var right = Temp("float", F(instruction, 1));
+            var zeroMask = addend is null ? "0x7FFFFFFFu" : "0x7F800000u";
             var zero = Temp(
                 "bool",
-                $"(as_type<uint>({left}) & 0x7FFFFFFFu) == 0u || (as_type<uint>({right}) & 0x7FFFFFFFu) == 0u");
+                $"(as_type<uint>({left}) & {zeroMask}) == 0u || (as_type<uint>({right}) & {zeroMask}) == 0u");
             if (addend is null)
             {
                 return FloatResult(instruction, $"({zero} ? 0.0f : ({left} * {right}))");
             }
 
             var c = Temp("float", addend);
-            return FloatResult(instruction, $"({zero} ? (0.0f + {c}) : fma({left}, {right}, {c}))");
+            // Its own statement: Metal contracts a * b + c written as one expression into an fma.
+            var product = Temp("float", $"{zero} ? 0.0f : ({left} * {right})");
+            return FloatResult(instruction, $"({product} + {c})");
+        }
+
+        /// <summary>V_MAD_F32 / V_MADMK_F32 / V_MADAK_F32 / V_MAC_F32: the product is rounded
+        /// to f32 before the add. The product is its own statement because Metal contracts
+        /// a * b + c written as one expression into a single-rounding fma.</summary>
+        private string EmitUnfusedMultiplyAdd(Gen5ShaderInstruction instruction, string addend)
+        {
+            var product = Temp("float", $"{F(instruction, 0)} * {F(instruction, 1)}");
+            var c = Temp("float", addend);
+            return FloatResult(instruction, $"({product} + {c})");
         }
 
         // ---- frexp ----

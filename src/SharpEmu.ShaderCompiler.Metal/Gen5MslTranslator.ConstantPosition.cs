@@ -440,10 +440,16 @@ public static partial class Gen5MslTranslator
                 "VSubF32" => Arithmetic(Source(0), Source(1), static (a, b) => Bits(AsFloat(a) - AsFloat(b))),
                 "VSubrevF32" => Arithmetic(Source(0), Source(1), static (a, b) => Bits(AsFloat(b) - AsFloat(a))),
                 "VMulF32" => Arithmetic(Source(0), Source(1), static (a, b) => Bits(AsFloat(a) * AsFloat(b))),
-                "VFmaF32" or "VMadF32" or "VMadAkF32" or "VMadMkF32" or "VFmaAkF32" or "VFmaMkF32" =>
-                    Fma(Source(0), Source(1), Source(2)),
-                "VFmacF32" or "VMacF32" when instruction.Destinations is [{ Kind: Gen5OperandKind.VectorRegister } target, ..] =>
+                "VFmaF32" or "VFmaAkF32" or "VFmaMkF32" => Fma(Source(0), Source(1), Source(2)),
+                // V_MAD_F32 and V_MAC_F32 round the product before the add.
+                "VMadF32" or "VMadAkF32" or "VMadMkF32" =>
+                    Arithmetic(Arithmetic(Source(0), Source(1), static (a, b) => Bits(AsFloat(a) * AsFloat(b))), Source(2),
+                        static (p, c) => Bits(AsFloat(p) + AsFloat(c))),
+                "VFmacF32" when instruction.Destinations is [{ Kind: Gen5OperandKind.VectorRegister } target, ..] =>
                     Fma(Source(0), Source(1), ReadVector(vectors, target)),
+                "VMacF32" when instruction.Destinations is [{ Kind: Gen5OperandKind.VectorRegister } target, ..] =>
+                    Arithmetic(Arithmetic(Source(0), Source(1), static (a, b) => Bits(AsFloat(a) * AsFloat(b))),
+                        ReadVector(vectors, target), static (p, c) => Bits(AsFloat(p) + AsFloat(c))),
                 "VCvtF32I32" => Arithmetic(Source(0), KnownBits.Of(0), static (a, _) => Bits((float)unchecked((int)a))),
                 "VCvtF32U32" => Arithmetic(Source(0), KnownBits.Of(0), static (a, _) => Bits((float)a)),
                 "VAddU32" or "VAddI32" => Arithmetic(Source(0), Source(1), static (a, b) => a + b),

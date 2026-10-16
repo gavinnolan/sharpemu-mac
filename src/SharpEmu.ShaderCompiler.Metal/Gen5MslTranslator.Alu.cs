@@ -246,16 +246,19 @@ public static partial class Gen5MslTranslator
                     $"{F16(instruction, 0)} * {F16(instruction, 1)}"),
                 "VMinF32" or "VMaxF32" or "VMin3F32" or "VMax3F32" or "VMed3F32" => MinMaxF32Result(instruction),
                 "VMinF16" or "VMaxF16" or "VMin3F16" or "VMax3F16" or "VMed3F16" => MinMaxF16Result(instruction, destination),
-                // The decoder normalizes mk/ak literal placement, so every MAD/FMA
-                // form is fma(src0, src1, src2) exactly like the SPIR-V translator.
-                "VFmaF32" or "VMadF32" or "VMadAkF32" or "VMadMkF32" or "VFmaAkF32" or "VFmaMkF32" =>
+                // The decoder normalizes mk/ak literal placement, so every MAD/FMA form reads
+                // (src0, src1, src2). The FMA forms round once; V_MAD_F32, V_MADMK/MADAK_F32
+                // and V_MAC_F32 (gfx10.1) round the product before the add.
+                "VFmaF32" or "VFmaAkF32" or "VFmaMkF32" =>
                     FloatResult(instruction, $"fma({F(instruction, 0)}, {F(instruction, 1)}, {F(instruction, 2)})"),
+                "VMadF32" or "VMadAkF32" or "VMadMkF32" => EmitUnfusedMultiplyAdd(instruction, F(instruction, 2)),
                 "VFmaF16" or "VFmaMkF16" or "VFmaAkF16" => Float16Result(
                     instruction,
                     destination,
                     $"fma({F16(instruction, 0)}, {F16(instruction, 1)}, {F16(instruction, 2)})"),
-                "VFmacF32" or "VMacF32" =>
+                "VFmacF32" =>
                     FloatResult(instruction, $"fma({F(instruction, 0)}, {F(instruction, 1)}, as_type<float>(v[{destination}]))"),
+                "VMacF32" => EmitUnfusedMultiplyAdd(instruction, $"as_type<float>(v[{destination}])"),
                 // DX9 legacy multiplies: a zero operand makes the product +0 (see EmitLegacyMultiply).
                 // V_MULLIT_F32's ISA text only adds "specific INF, NaN, overflow rules" that it
                 // does not spell out; it is the legacy multiply here.
