@@ -12,6 +12,13 @@ public sealed partial class RenderExecutor
     private const uint MaxViewportDimension = 16384;
 
     // A guest bias for a fixed-point depth format scales by the host depth bits.
+    //
+    // A fixed-point guest depth (a Z24 surface the host keeps as D32 float) has a constant unit
+    // of 2^NEG_NUM_DB_BITS, while the host's float unit is 2^(exponent(max z) - 23). The two are
+    // equal for primitives whose depth lies in [0.5, 1) once the factor is scaled to 2^-24 units;
+    // deeper below 0.5 the host offset is smaller by 2^(-1 - exponent). This is a documented
+    // deviation: the host has no constant-unit bias on a float attachment, and refusing would
+    // stop every title whose Z24 targets land on D32 float.
     public static float DepthBiasConstantFactor(float guestFactor, in PolygonOffsetRegisters offset, GpuFormat hostDepthFormat)
     {
         if (offset.DepthIsFloat)
@@ -23,10 +30,13 @@ public sealed partial class RenderExecutor
         {
             GpuFormat.D16Unorm or GpuFormat.D16UnormS8Uint => 16,
             GpuFormat.D24UnormS8Uint => 24,
-            _ => 0,
+            _ => FloatHostUnitBits,
         };
-        return hostDepthBits == 0 ? guestFactor : MathF.ScaleB(guestFactor, hostDepthBits + offset.NegativeDepthBits);
+        return MathF.ScaleB(guestFactor, hostDepthBits + offset.NegativeDepthBits);
     }
+
+    // The float host unit that equals a 24-bit fixed-point one: 2^(exponent - 23) for z in [0.5, 1).
+    private const int FloatHostUnitBits = 24;
 
     // The dynamic state of a draw from the context bank and the resolved targets.
     private DynamicDrawState BuildDynamicState(ContextRegisters context, in DrawState state)

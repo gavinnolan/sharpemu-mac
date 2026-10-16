@@ -165,7 +165,8 @@ public sealed class RenderExecutorStateTests : IDisposable
 
     [Theory]
     [InlineData(true, -23, GpuFormat.D16Unorm, 1f)]
-    [InlineData(false, -23, GpuFormat.D32Sfloat, 1f)]
+    [InlineData(false, -23, GpuFormat.D32Sfloat, 2f)]
+    [InlineData(false, -24, GpuFormat.D32Sfloat, 1f)]
     [InlineData(false, -23, GpuFormat.D16Unorm, 1f / 128f)]
     [InlineData(false, -23, GpuFormat.D24UnormS8Uint, 2f)]
     [InlineData(false, -16, GpuFormat.D16UnormS8Uint, 1f)]

@@ -360,10 +360,29 @@ public sealed class DepthSceneTests(ITestOutputHelper output) : SceneTestBase(ou
         Assert.Equal(0.5f, biased);
     }
 
-    [Fact]
-    public void ConstantBiasOnAFixedPointViewOfAFloatTargetUsesTwoToTheMinusTwentyFour()
+    [Theory]
+    [InlineData(0.75f, -24)]
+    [InlineData(0.5f, -24)]
+    [InlineData(0.75f, -16)]
+    public void ConstantBiasOnAFixedPointViewOfAFloatTargetIsInFixedPointUnitsAboveOneHalf(float z, int negativeBits)
     {
-        // POLY_OFFSET_DB_IS_FLOAT_FMT = 0, NEG_NUM_DB_BITS = -24 (the Vulkan FORCE_UNORM representation): r = 2^-24 flat.
+        // POLY_OFFSET_DB_IS_FLOAT_FMT = 0 on a D32F target (a Z24 surface the host keeps as float):
+        // r = 2^NEG_NUM_DB_BITS flat. The host's float unit matches it for depths in [0.5, 1).
+        using var rig = CreateRig();
+        if (rig is null) return;
+        var biased = BiasedDepth(rig, 3, SceneDraws.Quad(z, 1, 1, 1), s =>
+        {
+            BiasRegisters(s, FrontOffsetEnable, 100, 100);
+            s.Context[Cx.PaSuPolyOffsetDbFmtCntl] = unchecked((uint)negativeBits) & 0xFF;
+        });
+        Assert.Equal(z + (100 * MathF.ScaleB(1f, negativeBits)), biased, 1e-6f);
+    }
+
+    [Fact]
+    public void ConstantFixedPointBiasOnAFloatTargetBelowOneHalfIsTheDocumentedFloatUnit()
+    {
+        // Documented deviation (RenderExecutor.DepthBiasConstantFactor): hardware would add
+        // 1000 * 2^-24 at any depth; the host's float bias unit at z = 0.25 is 2^-25.
         using var rig = CreateRig();
         if (rig is null) return;
         const float z = 0.25f;
@@ -372,7 +391,7 @@ public sealed class DepthSceneTests(ITestOutputHelper output) : SceneTestBase(ou
             BiasRegisters(s, FrontOffsetEnable, 1000, 1000);
             s.Context[Cx.PaSuPolyOffsetDbFmtCntl] = unchecked((uint)-24) & 0xFF;
         });
-        Assert.Equal(z + (1000 * MathF.ScaleB(1f, -24)), biased, 1e-6f);
+        Assert.Equal(z + (1000 * MathF.ScaleB(1f, -25)), biased, 1e-7f);
     }
 
     [Theory]
