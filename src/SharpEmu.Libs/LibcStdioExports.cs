@@ -40,6 +40,11 @@ public static class LibcStdioExports
     }
 
     private static readonly ConcurrentDictionary<ulong, StdioFile> _fileHandles = new();
+
+    // A stream HLE does not own is a libc FILE: the HLE _Stderr object
+    // (HleDataSymbols) goes to the host's stderr, anything else to stdout.
+    private static TextWriter HostConsoleFor(ulong handle) =>
+        handle != 0 && handle == HleDataSymbols.StandardStreamAddress(2) ? Console.Error : Console.Out;
     private static readonly ConcurrentDictionary<ulong, int> _fileBufferingModes = new();
 
     private static readonly bool _traceStdio =
@@ -806,7 +811,7 @@ public static class LibcStdioExports
         {
             // Unknown streams are the bundled libc's real stdout/stderr FILE objects;
             // mirror the fputs HLE and forward them to the host console.
-            Console.Out.Write((char)character);
+            HostConsoleFor(handle).Write((char)character);
         }
 
         ctx[CpuRegister.Rax] = character;
@@ -880,7 +885,7 @@ public static class LibcStdioExports
                         return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
                     }
 
-                    Console.Out.Write(System.Text.Encoding.UTF8.GetString(buffer, 0, request));
+                    HostConsoleFor(handle).Write(System.Text.Encoding.UTF8.GetString(buffer, 0, request));
                     totalWritten += (ulong)request;
                 }
             }
@@ -1016,7 +1021,7 @@ public static class LibcStdioExports
         }
         else
         {
-            Console.Out.Write(rendered);
+            HostConsoleFor(handle).Write(rendered);
         }
 
         ctx[CpuRegister.Rax] = (ulong)payload.Length;

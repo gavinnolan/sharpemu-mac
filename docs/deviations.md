@@ -113,3 +113,8 @@ Each entry: **Name** — observable effect · chosen behaviour · pinning test.
   few known names is preloaded. Load and unload are reference-counted.
   Unloading or querying a module that is not loaded gives UNLOADED
   (0x805A1001).
+- **HLE libc data** — when no loaded libc module defines them, `environ`
+  points to an empty `{ NULL }` vector, and `__stdinp`/`__stdoutp`/`__stderrp`
+  point to opaque zeroed FILE objects that are also exported as
+  `_Stdin`/`_Stdout`/`_Stderr`. HLE stdio writes to `_Stderr` reach the
+  host's stderr, and to any other FILE it does not own reach stdout.
