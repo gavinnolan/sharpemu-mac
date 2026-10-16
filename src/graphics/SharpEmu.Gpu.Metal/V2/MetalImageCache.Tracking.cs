@@ -486,6 +486,7 @@ internal sealed partial class MetalImageCache
     // cleared once.
     private readonly HashSet<(ResourceSlotIdentifier Image, ulong Address, byte Code)> _materializedDccSlices = new();
     private long _dccRepeatsSkipped;
+    private long _dccSlicesCoalesced;
 
     // Page-watched metadata ranges, 4 KiB aligned, address to size. A CPU store into
     // one re-arms the claims over it and releases the watch; the next claim watches it
@@ -606,6 +607,9 @@ internal sealed partial class MetalImageCache
 
     /// <summary>Materializations skipped because the clear was already applied.</summary>
     public long TakeDccRepeatsSkipped() => Interlocked.Exchange(ref _dccRepeatsSkipped, 0);
+
+    /// <summary>DCC slice clears that rode along in another slice's pass since the last call.</summary>
+    public long TakeDccSlicesCoalesced() => Interlocked.Exchange(ref _dccSlicesCoalesced, 0);
 
     private bool TryClaimMaterializedDccLocked(ResourceSlotIdentifier image, ulong address, ulong size, byte code)
     {
@@ -1152,6 +1156,11 @@ internal sealed partial class MetalImageCache
         var sliceSize = range.Size / layers;
         var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(
             checked((int)Math.Min(sliceSize, 64 * 1024)));
+        // Adjacent slices that take the same clear are cleared together, as one pass over
+        // all of their layers or depth planes. A volume the game clears whole through its
+        // metadata is otherwise one pass per plane: UE4's 64-plane translucency volumes are
+        // hundreds of passes a frame, each costing far more than its pixels.
+        var run = default(DccClearRun);
         try
         {
             Span<byte> firstByte = stackalloc byte[1];
@@ -1251,25 +1260,59 @@ internal sealed partial class MetalImageCache
                     continue;
                 }
 
-                using (var held = _lock.Hold())
+                if (run.Count != 0 && !run.Extends(imageFirst + slice, in clear))
                 {
-                    if (_slots.TryGet(imageIdentifier) is null)
-                    {
-                        return;
-                    }
-
-                    ClearImageRange(
-                        imageIdentifier,
-                        view.Format,
-                        new SubresourceRange(view.BaseLevel, view.LevelCount, imageFirst + slice, 1),
-                        in clear);
+                    ClearDccRun(imageIdentifier, in view, in run);
+                    run = default;
                 }
+
+                if (run.Count == 0)
+                {
+                    run = new DccClearRun(imageFirst + slice, 0, clear);
+                }
+
+                run.Count++;
+            }
+
+            if (run.Count != 0)
+            {
+                ClearDccRun(imageIdentifier, in view, in run);
             }
         }
         finally
         {
             System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
         }
+    }
+
+    // Consecutive slices of one image that a DCC scan decided to clear to one colour.
+    private struct DccClearRun(uint first, uint count, GpuClearColor clear)
+    {
+        public readonly uint First = first;
+        public uint Count = count;
+        public readonly GpuClearColor Clear = clear;
+
+        // The colour is compared by its bits: the decoded value is what the pass loads.
+        public readonly bool Extends(uint slice, in GpuClearColor clear) =>
+            slice == First + Count &&
+            clear.Uint32_0 == Clear.Uint32_0 && clear.Uint32_1 == Clear.Uint32_1 &&
+            clear.Uint32_2 == Clear.Uint32_2 && clear.Uint32_3 == Clear.Uint32_3;
+    }
+
+    private void ClearDccRun(ResourceSlotIdentifier imageIdentifier, in ImageViewDescription view, in DccClearRun run)
+    {
+        using var held = _lock.Hold();
+        if (_slots.TryGet(imageIdentifier) is null)
+        {
+            return;
+        }
+
+        Interlocked.Add(ref _dccSlicesCoalesced, run.Count - 1);
+        ClearImageRange(
+            imageIdentifier,
+            view.Format,
+            new SubresourceRange(view.BaseLevel, view.LevelCount, run.First, run.Count),
+            in run.Clear);
     }
 
     private bool IsUniformSlice(ulong address, ulong size, byte code, byte[] buffer)
@@ -1332,20 +1375,21 @@ internal sealed partial class MetalImageCache
         if (!volume && PackedClearValue.SupportsDccFixedColor(viewFormat) &&
             MetalV2Formats.PixelFormat(viewFormat) != shape.PixelFormat)
         {
+            var layerCount = Math.Max(range.LayerCount, 1);
             var view = image.GetOrCreateView(new ImageViewDescription(
                 viewFormat,
-                GpuImageViewType.Type2D,
+                layerCount == 1 ? GpuImageViewType.Type2D : GpuImageViewType.Type2DArray,
                 GpuImageAspect.ColorBit,
                 range.BaseLevel,
                 1,
                 range.BaseLayer,
-                1,
+                layerCount,
                 default,
                 GpuImageUsage.ColorAttachmentBit));
             if (view != image.Texture)
             {
                 texture = view;
-                clearRange = new SubresourceRange(0, 1, 0, 1);
+                clearRange = new SubresourceRange(0, 1, 0, layerCount);
             }
         }
 

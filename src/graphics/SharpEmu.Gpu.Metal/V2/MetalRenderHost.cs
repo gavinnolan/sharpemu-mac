@@ -2058,6 +2058,7 @@ internal sealed partial class MetalRenderHost :
             $"ring_mb={_guestMemory.RingBytes / (1024 * 1024)} " +
             $"sampled_dcc_clears={_imageCache.TakeSampledDccClears()} " +
             $"dcc_repeats_skipped={_imageCache.TakeDccRepeatsSkipped()} " +
+            $"dcc_slices_coalesced={_imageCache.TakeDccSlicesCoalesced()} " +
             $"dcc_clears_dropped={_imageCache.TakeDccClearsDropped()} " +
             // Shaders whose control flow the structured emitter could express, against
             // the ones that fell back to the PC dispatcher: a dispatcher shader keeps the
