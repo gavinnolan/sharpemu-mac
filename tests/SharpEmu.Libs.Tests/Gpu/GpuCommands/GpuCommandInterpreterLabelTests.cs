@@ -382,12 +382,16 @@ public sealed class GpuCommandInterpreterLabelTests
         Assert.Contains("event type is unknown", runner.RunExpectingFatal(StreamRunner.Packet(PacketOpcode.EventWrite, 0x3F)).Message);
 
         runner.Run(StreamRunner.Packet(PacketOpcode.EventWrite, 0x39 | (1u << 8), StreamRunner.Low(Label), StreamRunner.High(Label)));
-        Assert.Equal(1UL << 63, runner.Host.ReadQword(Label));
-        Assert.Equal(1UL << 63, runner.Host.ReadQword(Label + 15 * 16));
+        // The count is shared by every command processor, so only its order is fixed.
+        var first = runner.Host.ReadQword(Label);
+        Assert.NotEqual(0UL, first & (1UL << 63));
+        Assert.Equal(first, runner.Host.ReadQword(Label + 15 * 16));
         Assert.Equal(0UL, runner.Host.ReadQword(Label + 8));
 
         runner.Run(StreamRunner.Packet(PacketOpcode.EventWrite, 0x39 | (1u << 8), StreamRunner.Low(Label), StreamRunner.High(Label)));
-        Assert.Equal((1UL << 63) | 1, runner.Host.ReadQword(Label));
+        var second = runner.Host.ReadQword(Label);
+        Assert.NotEqual(0UL, second & (1UL << 63));
+        Assert.True(second > first);
     }
 
     [Fact]

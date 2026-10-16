@@ -195,7 +195,9 @@ public sealed partial class GpuCommandInterpreter
 
     public bool ConstantEngineComplete { get; set; }
 
-    public ulong SyntheticOcclusionCounter { get; private set; }
+    // One count for every command processor: a query's begin and end dumps may run on different
+    // queues, and the end must still read later than the begin or the pair counts no samples.
+    private static long _syntheticOcclusionCounter;
 
     public ulong AtomicReturnMeData { get; private set; }
 

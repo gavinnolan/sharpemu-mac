@@ -459,13 +459,12 @@ public sealed partial class GpuCommandInterpreter
 
                 // Publish visible occlusion results for each depth block.
                 const ulong readyBit = 1UL << 63;
-                var result = readyBit | SyntheticOcclusionCounter;
+                var result = readyBit | ((ulong)Interlocked.Increment(ref _syntheticOcclusionCounter) & (readyBit - 1));
                 for (var depthBlock = 0u; depthBlock < 16u; depthBlock++)
                 {
                     WriteQword(eventAddress + ((ulong)depthBlock * 2 * sizeof(ulong)), result);
                 }
 
-                SyntheticOcclusionCounter = (SyntheticOcclusionCounter + 1) & (readyBit - 1);
                 break;
             }
 
