@@ -792,13 +792,13 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             var exportTarget = PixelExportRouting.ExportForSlot(context.ShaderInterface, color.Slot);
             var exported = pixelStage is not null &&
                 (exportTarget >= 0 && ((pixelStage.PixelColorExportMasks >> (exportTarget * 4)) & 0xFu) != 0);
-            var colorMask = exported ? color.Resolution.ExportMapping.ApplyMask(context.RenderTargetMaskForSlot(color.Slot)) : 0;
+            var colorMask = exported ? color.Resolution.ExportMapping.ApplyMask(context.ColorWriteMaskForSlot(color.Slot)) : 0;
             parameters.SetColorMask(index, colorMask);
             if (RenderTrace.Enabled && RenderTrace.Pipeline())
             {
                 RenderTrace.Write(
                     $"PipelineCache output slot={color.Slot} export={exportTarget} " +
-                    $"guestMask=0x{context.RenderTargetMaskForSlot(color.Slot):X} " +
+                    $"guestMask=0x{context.ColorWriteMaskForSlot(color.Slot):X} " +
                     $"exported={(exported ? 1 : 0)} shaderMask=0x{pixelStage?.PixelColorExportMasks ?? 0:X8} " +
                     $"mapping=0x{color.Resolution.ExportMapping.Packed:X2} hostMask=0x{colorMask:X} format={(int)format}");
             }

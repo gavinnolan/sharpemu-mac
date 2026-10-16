@@ -410,6 +410,10 @@ public sealed class ContextRegisters
 
     public uint RenderTargetMaskForSlot(uint slot) => (RenderTargetMask >> (int)(slot * 4)) & 0xFu;
 
+    // The channels the CB writes to the slot: CB_TARGET_MASK and CB_SHADER_MASK nibbles combined.
+    public uint ColorWriteMaskForSlot(uint slot) =>
+        RenderTargetMaskForSlot(slot) & (ShaderInterface.ColorShaderMask >> (int)(slot * 4)) & 0xFu;
+
     public ContextRegisters Copy()
     {
         var copy = (ContextRegisters)MemberwiseClone();
