@@ -2646,6 +2646,8 @@ public static partial class Gen5MslTranslator
                     var width = Temp("ulong", $"(ulong)(({RawSource(instruction, 0)}) & 63u)");
                     var offset = Temp("ulong", $"(ulong)(({RawSource(instruction, 1)}) & 63u)");
                     value = $"((((1ul << {width}) - 1ul)) << {offset})";
+                    // S_BFM_B64 has no SCC result (ISA 12.1), like S_BFM_B32.
+                    setsScc = false;
                     break;
                 }
                 case "SBfeU64" or "SBfeI64":
