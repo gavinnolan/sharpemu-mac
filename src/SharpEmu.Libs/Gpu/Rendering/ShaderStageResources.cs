@@ -134,6 +134,10 @@ public readonly record struct ClipSpaceTransform(
     // The host viewport maps +y down the target: the clip-disabled viewport always, else a
     // positive guest y scale. A host whose clip space is y-up negates the position's y then.
     public bool PositionYDown { get; init; }
+
+    // A negative guest x scale: the host viewport keeps a positive width and the program
+    // negates the position's x.
+    public bool PositionXMirror { get; init; }
 }
 
 public sealed class VertexInputInfo

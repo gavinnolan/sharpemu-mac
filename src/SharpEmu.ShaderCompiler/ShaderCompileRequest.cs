@@ -61,6 +61,13 @@ public readonly record struct ShaderClipSpaceTransform(
     // The host viewport maps +y down the target, as Vulkan's NDC does. A host whose clip
     // space is y-up and which cannot set a negative viewport height negates y instead.
     public bool PositionYDown { get; init; }
+
+    // The guest viewport is mirrored in x (a negative x scale) and the host viewport, which
+    // takes no negative width, is not: the program negates x.
+    public bool PositionXMirror { get; init; }
+
+    // Conventions only the program can apply: no Vulkan pipeline state carries them.
+    public bool HasProgramOnlyConventions => PositionXMirror;
 }
 
 // One bounded runtime V# table as the emitter sees it: a contiguous run of native buffer

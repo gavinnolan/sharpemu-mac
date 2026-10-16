@@ -18,7 +18,6 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 {
     private const uint VertexUserDataBase = 8;
     private const uint MaxPixelInputs = 32;
-    private const uint MaxViewportDimension = 16384;
 
     // The geometry stage programs its LDS allocation in 128-dword granules, like compute.
     private const uint LocalDataShareGranuleDwords = 128;
@@ -335,30 +334,16 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private VertexInputInfo PrepareVertexInput(ShaderSource source, ShaderInterfaceRegisters shaderInterface, ContextRegisters context)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VertexInputResolution);
-        var clipSpace = default(ClipSpaceTransform);
-        if (context.Clip.ClipDisable)
-        {
-            ref readonly var viewport = ref context.ScreenViewport.Viewports[0];
-            var limits = _host.Limits;
-            clipSpace = new ClipSpaceTransform(
-                true,
-                viewport.XScale,
-                viewport.YScale,
-                viewport.XOffset,
-                viewport.YOffset,
-                Math.Min(limits.MaxViewportWidth, MaxViewportDimension) * 0.5f,
-                Math.Min(limits.MaxViewportHeight, MaxViewportDimension) * 0.5f);
-        }
-
-        // The host viewport the draw state builds: the clip-disabled one is y-down, any
-        // other follows the sign of the guest's y scale.
-        clipSpace = clipSpace with
-        {
-            DepthNegativeOneToOne = !context.Clip.DirectXClipSpace,
-            PositionYDown = context.Clip.ClipDisable || context.ScreenViewport.Viewports[0].YScale > 0f,
-        };
+        // The program's half of the viewport transform the draw state sets the rest of.
+        var clipSpace = HostViewport(context).ClipSpace;
         return VertexInputResolver.ResolveVertexInputs(_context, source.Registered, source.UserData,
             shaderInterface.VertexOutputControl, clipSpace, _vertexTables, source.Hash);
+    }
+
+    private HostViewportTransform HostViewport(ContextRegisters context)
+    {
+        var limits = _host.Limits;
+        return HostViewportTransform.Resolve(context, limits.MaxViewportWidth, limits.MaxViewportHeight);
     }
 
     // The interpolated attributes a pixel program reads, ascending. A program never changes, and this
@@ -831,7 +816,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var rectangleList = topology == GpuPrimitiveTopology.PatchList;
         var mode = context.RasterMode;
         parameters.NegativeOneToOne = !context.Clip.DirectXClipSpace;
-        parameters.DepthClipEnable = context.Clip.IsZClipEnabled;
+        parameters.DepthClipEnable = HostViewportTransform.DepthClipOf(context);
         parameters.Topology = topology;
         parameters.PrimitiveRestartEnable = primitiveRestartEnabled;
         parameters.Samples = samples;
