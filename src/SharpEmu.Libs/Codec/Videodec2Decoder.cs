@@ -342,6 +342,25 @@ internal sealed unsafe class Videodec2Decoder : IDisposable
         }
     }
 
+    /// <summary>
+    /// Signals end of stream to FFmpeg so the pictures it still buffers for
+    /// reordering can be collected with <see cref="FlushOutput"/>. <see cref="Reset"/>
+    /// makes the session usable again.
+    /// </summary>
+    public bool SendEndOfStream()
+    {
+        lock (_gate)
+        {
+            if (_disposed)
+            {
+                return false;
+            }
+
+            var result = ffmpeg.avcodec_send_packet(_codecContext, null);
+            return result >= 0 || result == ffmpeg.AVERROR_EOF;
+        }
+    }
+
     public void Reset()
     {
         lock (_gate)
