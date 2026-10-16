@@ -492,7 +492,7 @@ internal sealed class ShaderProgramCache
                     _staticState.Add(output.GuestSlot);
                     _staticState.Add(output.HostLocation);
                     _staticState.Add(output.ExportTarget);
-                    _staticState.Add(output.BlendSourceIndex);
+                    _staticState.Add(output.BlendSourceIndex | (output.ClampToUnit ? 0x100u : 0u));
                     _staticState.Add(output.ExportFormat is { } format ? (uint)format : uint.MaxValue);
                 }
                 break;

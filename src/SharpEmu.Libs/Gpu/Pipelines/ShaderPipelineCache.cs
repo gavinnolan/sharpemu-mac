@@ -435,6 +435,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             {
                 ExportTarget = exportTarget >= 0 ? (uint)exportTarget : ContextRegisters.ColorTargetCount + slot,
                 ExportFormat = ExportFormatOf(context.ShaderInterface, exportTarget),
+                ClampToUnit = ClampsFloatOutput(context, slot),
             });
         }
 
@@ -458,6 +459,28 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         return outputs.ToArray();
+    }
+
+    // CB_COLOR_INFO.BLEND_CLAMP on a FLOAT target clamps the colour to [0, 1]; normalized
+    // targets clamp by their encoding. Without blending the program saturates its output.
+    // With blending the CB clamps the blend inputs and the blend result, which the host's
+    // fixed-function blend cannot do, so that combination is refused.
+    private static bool ClampsFloatOutput(ContextRegisters context, uint slot)
+    {
+        const uint BlendClamp = 1u << 15, BlendBypass = 1u << 16, NumberTypeFloat = 7;
+        ref readonly var words = ref context.ColorTargets[slot];
+        if ((words.Info & BlendClamp) == 0 || (uint)words.NumberType != NumberTypeFloat)
+        {
+            return false;
+        }
+
+        if (context.BlendControls[slot].Enable && (words.Info & BlendBypass) == 0)
+        {
+            throw GpuFatal.Fatal(
+                $"BLEND_CLAMP on a blended float color target is not supported: slot={slot} layout={(uint)words.Layout}.");
+        }
+
+        return true;
     }
 
     // SPI_SHADER_COL_FORMAT of one export. With no format written for any export, the

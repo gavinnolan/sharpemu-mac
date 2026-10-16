@@ -844,7 +844,13 @@ public static partial class Gen5MslTranslator
 
             // A lane removed from EXEC keeps the previous output value; killed
             // fragments are discarded in the epilogue.
-            Line($"{field} = {ExecSelect($"vec<{componentType}, 4>({values[0]}, {values[1]}, {values[2]}, {values[3]})", field)};");
+            var value = $"vec<{componentType}, 4>({values[0]}, {values[1]}, {values[2]}, {values[3]})";
+            if (binding.Value.ClampToUnit && binding.Value.Kind == Gen5PixelOutputKind.Float)
+            {
+                value = $"saturate({value})";
+            }
+
+            Line($"{field} = {ExecSelect(value, field)};");
             return true;
         }
 
