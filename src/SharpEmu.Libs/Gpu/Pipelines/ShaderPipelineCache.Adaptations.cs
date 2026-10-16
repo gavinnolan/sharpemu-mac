@@ -8,7 +8,7 @@ using SharpEmu.ShaderCompiler;
 
 namespace SharpEmu.Libs.Gpu.Pipelines;
 
-// The draw and dispatch recognisers kept beside the ported cache: fills and one copy kernel.
+// The dispatch recogniser kept beside the ported cache: one copy kernel.
 internal sealed partial class ShaderPipelineCache
 {
     // A float32x3 vertex position stream.
@@ -16,47 +16,6 @@ internal sealed partial class ShaderPipelineCache
     private const uint PositionNumberFormat = 7;
     private const int WorkGroupRegisterOfCopyKernel = 12;
     private const uint MaxCopyKernelSourceBytes = 16 * 1024 * 1024;
-
-    private static readonly bool _premultipliedFillClearEnabled =
-        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_FILL_CLEAR"), "1", StringComparison.Ordinal);
-
-    // An untextured transparent fill through premultiplied blending overwrites its targets.
-    private static bool IsTransparentPremultipliedFill(
-        ContextRegisters context,
-        Gen5PixelOutputBinding[] outputs,
-        VertexInputInfo vertexInfo,
-        ShaderStageResources vertexStage,
-        ShaderStageResources pixelStage)
-    {
-        var vertexResources = vertexStage.Program?.Resources?.Info;
-        var pixelResources = pixelStage.Program?.Resources?.Info;
-        var pixelUserData = pixelStage.Resources.UserData;
-        if (!_premultipliedFillClearEnabled || vertexResources is null || pixelResources is null ||
-            vertexResources.Images.Count != 0 || pixelResources.Images.Count != 0 ||
-            vertexInfo.Attributes.Length != 0 || pixelUserData.Length < 4 || outputs.Length == 0)
-        {
-            return false;
-        }
-
-        foreach (var output in outputs)
-        {
-            var blend = context.BlendControls[output.GuestSlot];
-            if (!blend.Enable || blend.ColorSourceFactor != 1 || blend.ColorDestinationFactor != 5 || blend.ColorFunction != 0)
-            {
-                return false;
-            }
-        }
-
-        for (var index = 0; index < 4; index++)
-        {
-            if ((pixelUserData[index] & 0x7FFF_FFFFu) != 0)
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
 
     // Replaces only the exact masked-copy kernel shape; its writes land in command order over the guest range.
     private bool TrySubmitMaskedDwordCopyKernel(

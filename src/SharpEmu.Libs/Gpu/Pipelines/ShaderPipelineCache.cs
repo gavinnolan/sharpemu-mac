@@ -300,19 +300,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             pixelInfo.Stage = pixelStage;
         }
 
-        var disableBlending = false;
-        if (pixelInfo is not null)
-        {
-            disableBlending = IsTransparentPremultipliedFill(context, pixelOutputs, vertexInfo, vertexStage, pixelStage);
-        }
-
         return new GraphicsPrograms
         {
             Vertex = vertexProgram,
             Pixel = pixelProgramHandle,
             VertexInput = vertexInfo,
             PixelInput = pixelInfo ?? new PixelInputInfo(),
-            DisableBlending = disableBlending,
             DropUnwrittenColorTargets = dropUnwritten,
             PositionStream = FindPositionStream(vertexInfo),
         };
