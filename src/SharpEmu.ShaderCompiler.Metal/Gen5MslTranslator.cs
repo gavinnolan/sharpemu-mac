@@ -8,9 +8,40 @@ using SharpEmu.ShaderCompiler.Resources;
 
 namespace SharpEmu.ShaderCompiler.Metal;
 
+/// <summary>The optional helper blocks a translated module carries ahead of its entry point.</summary>
+[Flags]
+internal enum Gen5MslPreludes
+{
+    None = 0,
+    FormatLoads = 1 << 0,
+    RealWaveLanes = 1 << 1,
+    BufferOffset = 1 << 2,
+    CoherentLoads = 1 << 3,
+    PairLocks = 1 << 4,
+    Float64 = 1 << 5,
+    Bvh = 1 << 6,
+    All = (1 << 7) - 1,
+}
+
 // Compiles shader requests into Metal source with argument-buffer bindings.
 public static partial class Gen5MslTranslator
 {
+    /// <summary>
+    /// Every helper block a module with <paramref name="preludes"/> carries, in emission
+    /// order, without the per-request resource struct (no prelude refers to it).
+    /// </summary>
+    internal static string RenderModulePreludes(Gen5MslPreludes preludes)
+    {
+        var source = new StringBuilder();
+        source.AppendLine("#include <metal_stdlib>");
+        source.AppendLine();
+        source.AppendLine("using namespace metal;");
+        source.AppendLine();
+        CompilationContext.AppendLeadingPreludes(source, preludes);
+        CompilationContext.AppendTrailingPreludes(source, preludes);
+        return source.ToString();
+    }
+
     private const uint ScalarRegisterFileCount = 128;
     private const uint VectorRegisterFileCount = 256;
     // The most LDS a dispatch can ask for, which is also Metal's threadgroup-memory
@@ -555,35 +586,13 @@ public static partial class Gen5MslTranslator
             // Uniforms: dispatch bounds plus per-buffer byte lengths. Metal has
             // no OpArrayLength equivalent, so buffer extents travel with the
             // dispatch instead of being queried in-shader.
-            if (_usesFormatLoads)
-            {
-                EmitFormatLoadPrelude(source);
-            }
+            var preludes = ModulePreludes();
+            AppendLeadingPreludes(source, preludes);
 
-            {
-                // A request binds one argument buffer per stage; its lengths replace the uniforms.
-                EmitResourcePrelude(source);
-                EmitResourceStruct(source);
-            }
+            // A request binds one argument buffer per stage; its lengths replace the uniforms.
+            EmitResourceStruct(source);
 
-            EmitPrelude(source);
-            if (_usesBufferOffset)
-            {
-                source.Append(MslTemplates.Render("buffer_offset_prelude"));
-            }
-
-            if (_usesCoherentLoads || _usesPairLocks)
-            {
-                source.Append(MslTemplates.Render("coherent_load_prelude"));
-            }
-
-            if (_usesPairLocks)
-            {
-                source.Append(MslTemplates.Render("pair_atomic_prelude"));
-            }
-
-            EmitFloat64PreludeIfUsed(source);
-            EmitBvhPreludeIfUsed(source);
+            AppendTrailingPreludes(source, preludes);
             source.AppendLine();
 
             if (_stage == Gen5MslStage.Mesh)
@@ -1000,12 +1009,93 @@ public static partial class Gen5MslTranslator
         // keeps the EXEC guard elision's "EXEC starts full" premise true. Helper
         // threads' stores and atomics have no effect and their outputs are
         // dropped, so only a guest ballot of the entry mask can tell.
-        private void EmitPrelude(StringBuilder source) =>
+        private Gen5MslPreludes ModulePreludes()
+        {
+            var preludes = Gen5MslPreludes.None;
+            if (_usesFormatLoads)
+            {
+                preludes |= Gen5MslPreludes.FormatLoads;
+            }
+
+            if (HasRealWaveLanes)
+            {
+                preludes |= Gen5MslPreludes.RealWaveLanes;
+            }
+
+            if (_usesBufferOffset)
+            {
+                preludes |= Gen5MslPreludes.BufferOffset;
+            }
+
+            if (_usesCoherentLoads)
+            {
+                preludes |= Gen5MslPreludes.CoherentLoads;
+            }
+
+            if (_usesPairLocks)
+            {
+                preludes |= Gen5MslPreludes.PairLocks;
+            }
+
+            if (UsesFloat64Prelude())
+            {
+                preludes |= Gen5MslPreludes.Float64;
+            }
+
+            if (UsesBvhPrelude())
+            {
+                preludes |= Gen5MslPreludes.Bvh;
+            }
+
+            return preludes;
+        }
+
+        // The helpers ahead of the resource struct: the unified-format decoder and the
+        // device-address page table.
+        internal static void AppendLeadingPreludes(StringBuilder source, Gen5MslPreludes preludes)
+        {
+            if ((preludes & Gen5MslPreludes.FormatLoads) != 0)
+            {
+                EmitFormatLoadPrelude(source);
+            }
+
+            EmitResourcePrelude(source);
+        }
+
+        // The helpers after the resource struct. A pair lock reads through the coherent
+        // helpers, so it always carries coherent_load_prelude.
+        internal static void AppendTrailingPreludes(StringBuilder source, Gen5MslPreludes preludes)
+        {
             source.Append(MslTemplates.Render(
                 "prelude",
-                ("ballot_return", HasRealWaveLanes
+                ("ballot_return", (preludes & Gen5MslPreludes.RealWaveLanes) != 0
                     ? "(uint)(uint64_t)simd_ballot(value)"
                     : "value ? 1u : 0u")));
+            if ((preludes & Gen5MslPreludes.BufferOffset) != 0)
+            {
+                source.Append(MslTemplates.Render("buffer_offset_prelude"));
+            }
+
+            if ((preludes & (Gen5MslPreludes.CoherentLoads | Gen5MslPreludes.PairLocks)) != 0)
+            {
+                source.Append(MslTemplates.Render("coherent_load_prelude"));
+            }
+
+            if ((preludes & Gen5MslPreludes.PairLocks) != 0)
+            {
+                source.Append(MslTemplates.Render("pair_atomic_prelude"));
+            }
+
+            if ((preludes & Gen5MslPreludes.Float64) != 0)
+            {
+                source.Append(MslTemplates.Render("float64_prelude"));
+            }
+
+            if ((preludes & Gen5MslPreludes.Bvh) != 0)
+            {
+                source.Append(MslTemplates.Render("bvh_prelude"));
+            }
+        }
 
         // The GFX10 unified-format table is baked from the same authoritative
         // decoder descriptor evaluation uses (dataFormat | numberFormat << 8);

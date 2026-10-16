@@ -13,13 +13,8 @@ public static partial class Gen5MslTranslator
         // IMAGE_BVH_INTERSECT_RAY / IMAGE_BVH64_INTERSECT_RAY and their A16 forms run the
         // node test of Templates/bvh_prelude.msl against the guest BVH through the
         // device-address page table, which only shaders using them carry.
-        private void EmitBvhPreludeIfUsed(StringBuilder source)
-        {
-            if (_request.Program.Instructions.Any(static instruction => instruction.Control is Gen5RayIntersectControl))
-            {
-                source.Append(MslTemplates.Render("bvh_prelude"));
-            }
-        }
+        private bool UsesBvhPrelude() =>
+            _request.Program.Instructions.Any(static instruction => instruction.Control is Gen5RayIntersectControl);
 
         // VADDR (RDNA2 ISA Table 48): node_pointer (two dwords for BVH64), ray_extent,
         // ray_origin.xyz, then ray_dir.xyz and ray_inv_dir.xyz as floats, or with A16 as six

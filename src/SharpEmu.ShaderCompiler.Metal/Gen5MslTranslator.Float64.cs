@@ -28,22 +28,22 @@ public static partial class Gen5MslTranslator
         private static bool IsFloat64Compare(string opcode) =>
             opcode.StartsWith("VCmp", StringComparison.Ordinal) && opcode.EndsWith("F64", StringComparison.Ordinal);
 
-        private void EmitFloat64PreludeIfUsed(StringBuilder source)
+        private bool UsesFloat64Prelude()
         {
             if (_usesFloat64Atomics)
             {
-                source.Append(MslTemplates.Render("float64_prelude"));
-                return;
+                return true;
             }
 
             foreach (var instruction in _request.Program.Instructions)
             {
                 if (IsFloat64Opcode(instruction.Opcode))
                 {
-                    source.Append(MslTemplates.Render("float64_prelude"));
-                    return;
+                    return true;
                 }
             }
+
+            return false;
         }
 
         private bool TryEmitFloat64(Gen5ShaderInstruction instruction, out string error)

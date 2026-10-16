@@ -286,7 +286,7 @@ public static partial class Gen5MslTranslator
                 binding.Resources);
         }
 
-        private void EmitResourcePrelude(StringBuilder source) =>
+        private static void EmitResourcePrelude(StringBuilder source) =>
             source.Append(MslTemplates.Render(
                 "resource_prelude",
                 ("address_mask", FormatULong(DeviceAddressPaging.AddressMask)),
