@@ -236,6 +236,7 @@ public static partial class VideoOutExports
                 port.FlipProcessTime = KernelRuntimeCompatExports.ReadProcessTimeMicroseconds();
                 port.FlipProcessTimeCounter = KernelRuntimeCompatExports.ReadProcessTimeCounter();
                 port.FlipArg = request.FlipArg;
+                ReleaseBufferLabelLocked(port, port.CurrentBuffer);
                 port.CurrentBuffer = request.BufferIndex;
                 port.FlipPendingCount = Math.Max(0, port.FlipPendingCount - 1);
                 if (request.GpuQueued)

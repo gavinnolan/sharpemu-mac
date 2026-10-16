@@ -1864,6 +1864,7 @@ public static partial class VideoOutExports
                 slot.AddressLeft = addresses[i];
                 slot.AddressRight = 0;
             }
+            ResetBufferLabelsLocked(port, startIndex, addresses.Length);
 
             TraceVideoOut(
                 $"videoout.register_buffers handle={port.Handle} group={groupIndex} start={startIndex} count={addresses.Length} " +
