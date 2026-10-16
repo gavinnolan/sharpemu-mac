@@ -81,8 +81,24 @@ public readonly record struct ShaderClipSpaceTransform(
     // clips with clip distances computed from the exported position.
     public ShaderDepthPlanes DepthPlanes { get; init; }
 
+    // The exported x and y (PA_CL_VTE_CNTL.VTX_XY_FMT), or z (VTX_Z_FMT), are already
+    // divided by w; the exported w is 1 / w (VTX_W0_FMT clear). The host divides by w and
+    // interpolates with it, so the program multiplies the divided ones back and takes the
+    // reciprocal of the reciprocal.
+    public bool XyPreDivided { get; init; }
+    public bool ZPreDivided { get; init; }
+    public bool WReciprocal { get; init; }
+
+    // The program puts the guest's depth on the host's viewport range itself:
+    // z' = z * DepthScale + w * DepthOffset after the above. It replaces
+    // DepthNegativeOneToOne, which is the remap's (0.5, 0.5) case.
+    public bool DepthRemap { get; init; }
+    public float DepthScale { get; init; }
+    public float DepthOffset { get; init; }
+
     // Conventions only the program can apply: no Vulkan pipeline state carries them.
-    public bool HasProgramOnlyConventions => PositionXMirror || DepthPlanes != ShaderDepthPlanes.None;
+    public bool HasProgramOnlyConventions =>
+        PositionXMirror || DepthPlanes != ShaderDepthPlanes.None || XyPreDivided || ZPreDivided || WReciprocal || DepthRemap;
 }
 
 // One bounded runtime V# table as the emitter sees it: a contiguous run of native buffer

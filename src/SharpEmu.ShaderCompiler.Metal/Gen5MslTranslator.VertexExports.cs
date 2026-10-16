@@ -265,7 +265,11 @@ public static partial class Gen5MslTranslator
             _request.ClipSpace.Enabled ||
             _request.ClipSpace.PositionYDown ||
             _request.ClipSpace.PositionXMirror ||
-            _request.ClipSpace.DepthNegativeOneToOne;
+            _request.ClipSpace.DepthNegativeOneToOne ||
+            _request.ClipSpace.XyPreDivided ||
+            _request.ClipSpace.ZPreDivided ||
+            _request.ClipSpace.WReciprocal ||
+            _request.ClipSpace.DepthRemap;
 
         /// <summary>The exported POS0 <paramref name="position"/> in Metal's clip space, held in
         /// a temporary when anything changes, after the fixed-function plane distances are
@@ -304,10 +308,32 @@ public static partial class Gen5MslTranslator
         /// viewport width, so a mirrored guest x scale negates x. Metal's clip volume is z in
         /// [0, w] with no negative-one-to-one control, so a guest [-w, w] depth becomes
         /// (z + w) / 2, which the viewport's near and far then map exactly as Vulkan maps z.
+        /// PA_CL_VTE_CNTL's formats come first; a depth the host viewport cannot map (a
+        /// disabled z scale or offset, or a depth clamp narrower than the transform) is
+        /// remapped onto the host's viewport range instead.
         /// </summary>
         private IEnumerable<string> HostClipSpaceStatements(string position)
         {
             var clip = _request.ClipSpace;
+
+            // PA_CL_VTE_CNTL's formats: the host divides by w and interpolates with 1 / w, so
+            // a reciprocal w is inverted and coordinates already divided are multiplied back.
+            if (clip.WReciprocal)
+            {
+                yield return $"{position}.w = 1.0f / {position}.w;";
+            }
+
+            if (clip.XyPreDivided)
+            {
+                yield return $"{position}.x = {position}.x * {position}.w;";
+                yield return $"{position}.y = {position}.y * {position}.w;";
+            }
+
+            if (clip.ZPreDivided)
+            {
+                yield return $"{position}.z = {position}.z * {position}.w;";
+            }
+
             if (clip.Enabled)
             {
                 // Window x = x / w * scale + offset, so x' / w = window / half - 1 keeps w
@@ -330,7 +356,12 @@ public static partial class Gen5MslTranslator
                 yield return $"{position}.y = -{position}.y;";
             }
 
-            if (clip.DepthNegativeOneToOne)
+            if (clip.DepthRemap)
+            {
+                yield return
+                    $"{position}.z = {position}.z * {FloatBits(clip.DepthScale)} + {position}.w * {FloatBits(clip.DepthOffset)};";
+            }
+            else if (clip.DepthNegativeOneToOne)
             {
                 yield return $"{position}.z = ({position}.z + {position}.w) * 0.5f;";
             }

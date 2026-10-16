@@ -66,6 +66,22 @@ public static partial class Gen5MslTranslator
                 var y = position[1];
                 var z = position[2];
                 var w = position[3];
+                if (clip.WReciprocal)
+                {
+                    w = 1.0f / w;
+                }
+
+                if (clip.XyPreDivided)
+                {
+                    x *= w;
+                    y *= w;
+                }
+
+                if (clip.ZPreDivided)
+                {
+                    z *= w;
+                }
+
                 if (clip.Enabled)
                 {
                     x = ((x * clip.ScaleX) + (clip.OffsetX * w)) / clip.HalfExtentX - w;
@@ -82,7 +98,11 @@ public static partial class Gen5MslTranslator
                     y = -y;
                 }
 
-                if (clip.DepthNegativeOneToOne)
+                if (clip.DepthRemap)
+                {
+                    z = (z * clip.DepthScale) + (w * clip.DepthOffset);
+                }
+                else if (clip.DepthNegativeOneToOne)
                 {
                     z = (z + w) * 0.5f;
                 }
