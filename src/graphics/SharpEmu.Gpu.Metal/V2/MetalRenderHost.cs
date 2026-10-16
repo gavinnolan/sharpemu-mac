@@ -1687,6 +1687,66 @@ internal sealed partial class MetalRenderHost :
         return true;
     }
 
+    /// <summary>
+    /// A command-processor operand (a predicate, a COND_EXEC or COND_WRITE compare, a
+    /// branch compare, an index-attributes record) that recorded work still owes: the work
+    /// is committed and a wake is queued for its completion, and the interpreter parks the
+    /// submission on the bytes instead of this thread waiting for the GPU.
+    /// </summary>
+    /// <remarks>
+    /// Bytes an image owns are not answered here: their writeback is a read-back the
+    /// ordinary read path performs, and it is the only path that knows how.
+    /// </remarks>
+    public bool CommitPendingOperandWrite(ulong address, ulong size)
+    {
+        if (size == 0 || !PollWithoutWaiting)
+        {
+            return false;
+        }
+
+        if (_cpOverlay.Count != 0 && OverlayCoverage(address, size) == MetalOverlayCoverage.Full)
+        {
+            return false;
+        }
+
+        if (_imageCache.MayOwn(address, size) && _imageCache.HasGpuModifiedImageBytes(address, size))
+        {
+            return false;
+        }
+
+        var serial = _gpuWrites.MayCover(address, size) ? _gpuWrites.PendingSerial(address, size, CompletedSerial) : 0;
+        var lazy = _lazyLabelRanges.Count != 0 && CoversLazyLabel(address, size);
+        if (serial == 0 && !lazy)
+        {
+            return false;
+        }
+
+        // A lazy label rides the buffer being recorded, so it lands with that serial.
+        var wake = lazy ? Math.Max(serial, _submissionSerial) : serial;
+        if (_commandBuffer != 0 && wake >= _submissionSerial)
+        {
+            Interlocked.Increment(ref _pollFlushes);
+            FlushCommandBuffer(MetalFlushCause.Poll);
+        }
+
+        QueueOperandWake(wake);
+        return true;
+    }
+
+    // The completion that lands an operand is the only thing that knows it has; the worker
+    // reports completions when it next flushes, which is never while every head is parked.
+    private void QueueOperandWake(ulong serial)
+    {
+        if (serial == 0 || _operandWakeSerial >= serial)
+        {
+            return;
+        }
+
+        _operandWakeSerial = serial;
+        _completions.Enqueue(serial, () => _commandStream?.NotifyCompletedGpuTick(serial));
+    }
+
+    private ulong _operandWakeSerial;
     private long _pollFlushes;
     private long _scheduledLabelSubmissions;
     private long _transientCommits;

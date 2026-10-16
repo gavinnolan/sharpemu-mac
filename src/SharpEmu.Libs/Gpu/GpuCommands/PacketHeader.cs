@@ -48,6 +48,7 @@ public static class PacketOpcode
     public const uint DrawIndexAuto = 0x2D;
     public const uint NumInstances = 0x2F;
     public const uint DrawIndexMultiAuto = 0x30;
+    public const uint IndirectBufferConstant = 0x33;
     public const uint DrawIndexOffset2 = 0x35;
     public const uint WriteData = 0x37;
     public const uint DrawIndexIndirectMulti = 0x38;
@@ -57,6 +58,7 @@ public static class PacketOpcode
     public const uint IndirectBuffer = 0x3F;
     public const uint CopyData = 0x40;
     public const uint PfpSyncMe = 0x42;
+    public const uint SurfaceSync = 0x43;
     public const uint ConditionalWrite = 0x45;
     public const uint EventWrite = 0x46;
     public const uint EventWriteEndOfPipe = 0x47;
@@ -78,6 +80,7 @@ public static class PacketOpcode
     public const uint WaitOnCeCounter = 0x86;
     public const uint WaitOnDeCounterDiff = 0x88;
     public const uint GetLodStats = 0x8E;
+    public const uint IndexAttributesIndirect = 0x91;
     public const uint WaitRegisterMemory64 = 0x93;
     public const uint SetContextRegisterIndirect = 0x9F;
 }

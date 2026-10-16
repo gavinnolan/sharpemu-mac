@@ -677,6 +677,52 @@ public sealed partial class GpuCommandInterpreter
         return is64Bit ? BinaryPrimitives.ReadUInt64LittleEndian(bytes) : BinaryPrimitives.ReadUInt32LittleEndian(bytes);
     }
 
+    /// <summary>
+    /// Reads an operand earlier work on this queue may still be writing, or suspends the
+    /// submission at this packet while that work finishes.
+    /// </summary>
+    /// <remarks>
+    /// The command processor reads such an operand after the work ahead of it retires, and
+    /// stalls in the meantime. Stalling the worker until the GPU drains holds every other
+    /// queue behind this one, so the host commits the owing work and the submission parks on
+    /// the bytes instead; the packet runs again, from its start, once they land. A host that
+    /// cannot tell reads the bytes as they are now.
+    /// </remarks>
+    internal bool TryReadOperandOrSuspend(ulong address, Span<byte> destination)
+    {
+        // A label this queue recorded ahead of the packet is what the operand holds once the
+        // work before it retires, which is when the command processor would read it.
+        if (destination.Length is sizeof(uint) or sizeof(ulong) && PendingLabelLookup is { } pending &&
+            pending(address, destination.Length == sizeof(ulong), out var labelValue))
+        {
+            if (destination.Length == sizeof(ulong))
+            {
+                BinaryPrimitives.WriteUInt64LittleEndian(destination, labelValue);
+            }
+            else
+            {
+                BinaryPrimitives.WriteUInt32LittleEndian(destination, (uint)labelValue);
+            }
+
+            return true;
+        }
+
+        if (_host.CommitPendingOperandWrite(address, (ulong)destination.Length))
+        {
+            Interlocked.Increment(ref _operandSuspends);
+            SuspendOn(CommandWaitCondition.Memory(address, (ulong)destination.Length));
+            return false;
+        }
+
+        ReadBytes(address, destination);
+        return true;
+    }
+
+    private static long _operandSuspends;
+
+    /// <summary>Packets since startup that parked on an operand earlier work still owed instead of draining the GPU.</summary>
+    public static long OperandSuspends => Interlocked.Read(ref _operandSuspends);
+
     internal void ReadBytes(ulong address, Span<byte> destination)
     {
         RenderPhaseProfile.RecordCommandRead(RenderPhaseProfile.CommandReadKind.Other, destination.Length);

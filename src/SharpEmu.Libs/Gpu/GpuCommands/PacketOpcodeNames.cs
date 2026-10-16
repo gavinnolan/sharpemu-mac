@@ -31,6 +31,9 @@ public static class PacketOpcodeNames
         names[PacketOpcode.IndexBase] = "INDEX_BASE";
         names[PacketOpcode.DrawIndex2] = "DRAW_INDEX_2";
         names[PacketOpcode.ContextControl] = "CONTEXT_CONTROL";
+        names[PacketOpcode.IndirectBufferConstant] = "INDIRECT_BUFFER_CNST";
+        names[PacketOpcode.SurfaceSync] = "SURFACE_SYNC";
+        names[PacketOpcode.IndexAttributesIndirect] = "INDEX_ATTRIBUTES_INDIRECT";
         names[PacketOpcode.IndexType] = "INDEX_TYPE";
         names[PacketOpcode.DrawIndirectMulti] = "DRAW_INDIRECT_MULTI";
         names[PacketOpcode.DrawIndexAuto] = "DRAW_INDEX_AUTO";

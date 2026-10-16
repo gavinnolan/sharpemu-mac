@@ -31,6 +31,7 @@ public sealed partial class GpuCommandInterpreter
 
     private void WriteUserConfigRegister(uint offset, uint value)
     {
+        Registers.UserConfig[offset] = value;
         if (offset == RegisterBankLayout.IndexTypeRegister)
         {
             SetIndexType(value);

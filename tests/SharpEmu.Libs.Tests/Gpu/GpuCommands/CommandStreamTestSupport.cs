@@ -53,6 +53,8 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandS
     // A host that leaves end-of-pipe labels to the GPU, and the tick they land by.
     public bool DefersEndOfPipeLabels { get; set; }
 
+    public bool WritesGdsAtEndOfPipe { get; set; }
+
     public ulong PendingLabelTick { get; set; }
 
     public Func<EndOfPipeWriteKind, bool>? DefersKind { get; set; }
@@ -237,6 +239,20 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandS
     public bool HasPendingGpuWrite(ulong address, ulong size) =>
         PendingGpuWrites is not { } pending ||
         pending.Exists(range => address < range.Address + range.Size && range.Address < address + size);
+
+    /// <summary>Operand ranges recorded work still owes; a read of one commits it and parks.</summary>
+    public List<(ulong Address, ulong Size)> OwedOperandWrites { get; } = [];
+
+    public bool CommitPendingOperandWrite(ulong address, ulong size)
+    {
+        if (!OwedOperandWrites.Exists(range => address < range.Address + range.Size && range.Address < address + size))
+        {
+            return false;
+        }
+
+        Calls.Add($"commit_operand {address:X} {size}");
+        return true;
+    }
 
     public List<ulong> IndirectCpuReads { get; } = [];
 

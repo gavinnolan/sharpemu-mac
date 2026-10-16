@@ -125,10 +125,15 @@ public sealed partial class GpuCommandInterpreter
                 $"read=0x{readAddress:X16} write=0x{writeAddress:X16} address=0x{packet.PacketAddress:X16}.");
         }
 
-        // The compare consumes previous queued writes before deciding whether
-        // this packet may publish its own write. Immediate hosts are unchanged.
-        if (_host.DefersEndOfPipeLabels) _host.SynchronizeGpu();
-        var observed = ReadDword(readAddress);
+        // The compare reads what earlier work on this queue left there before this packet
+        // may publish its own write; work still owing those bytes parks the submission.
+        Span<byte> observedBytes = stackalloc byte[sizeof(uint)];
+        if (!TryReadOperandOrSuspend(readAddress, observedBytes))
+        {
+            return 8;
+        }
+
+        var observed = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(observedBytes);
         _ = WaitOperation.TryCompare(observed, reference, mask, compareFunction, out var passed);
         if (!passed)
         {
@@ -257,6 +262,19 @@ public sealed partial class GpuCommandInterpreter
         throw _host.Fatal($"The wrapped DMA packet length is not supported: length={packet.Length} address=0x{packet.PacketAddress:X16}.");
     }
 
+    // The constant engine's indirect buffer. Its packets (constant RAM loads and dumps, the
+    // CE counter) run on this one queue in submission order, which is the order the two
+    // engines' counters already enforce; the branch form is draw-engine only.
+    internal uint IndirectBufferConstantPacket(in PacketContext packet, ReadOnlySpan<uint> payload)
+    {
+        if (packet.Length != 4)
+        {
+            throw _host.Fatal($"The constant indirect-buffer packet length is not supported: length={packet.Length} address=0x{packet.PacketAddress:X16}.");
+        }
+
+        return IndirectBufferPacket(packet, payload);
+    }
+
     // Bit 20 selects a call (the parent continues) or a chain (the parent ends).
     internal uint IndirectBufferPacket(in PacketContext packet, ReadOnlySpan<uint> payload)
     {
@@ -316,7 +334,13 @@ public sealed partial class GpuCommandInterpreter
                 $"then=0x{thenBuffer:X16}/{thenDwords} else=0x{elseBuffer:X16}/{elseDwords} address=0x{packet.PacketAddress:X16}.");
         }
 
-        _ = WaitOperation.TryCompare(ReadQword(compareAddress), reference, mask, function, out var takeThen);
+        Span<byte> compareBytes = stackalloc byte[sizeof(ulong)];
+        if (!TryReadOperandOrSuspend(compareAddress, compareBytes))
+        {
+            return 13;
+        }
+
+        _ = WaitOperation.TryCompare(System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(compareBytes), reference, mask, function, out var takeThen);
         if (takeThen)
         {
             RunIndirectBuffer(thenBuffer, thenDwords);
