@@ -352,7 +352,7 @@ public static partial class Gen5MslTranslator
                 // bit 31 of the register, and VOP3 op_sel can pick the high half.
                 "VCvtF32F16" => FloatResult(instruction, F16(instruction, 0)),
                 "VCvtOffF32I4" =>
-                    AsUInt($"sharpemu_off_i4_table[({RawSource(instruction, 0)}) & 15u]"),
+                    FloatResult(instruction, $"sharpemu_off_i4_table[({RawSource(instruction, 0)}) & 15u]"),
                 "VCvtPkU8F32" =>
                     EmitCvtPkU8F32(instruction),
                 "VCvtPkrtzF16F32" =>
