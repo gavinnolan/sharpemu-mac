@@ -36,6 +36,13 @@ public sealed class Rdna2AluConformanceTests(ITestOutputHelper output)
     [MemberData(nameof(Categories))]
     public void TranslatedAluMatchesTheReferenceModel(string category)
     {
+        // SHARPEMU_CONFORMANCE_CATEGORY=a,b runs only those categories (a development aid).
+        if (Environment.GetEnvironmentVariable("SHARPEMU_CONFORMANCE_CATEGORY") is { Length: > 0 } only &&
+            !only.Split(',').Contains(category))
+        {
+            return;
+        }
+
         var execute = Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") == "1";
         if (execute) Assert.True(MetalNative.IsAvailable, "The required execution gate needs a Metal device.");
         var reports = Run(category, execute);
