@@ -841,6 +841,26 @@ public static class ResourceMaterializer
     private static uint ImageConversionFormat(uint format) =>
         GuestImageFormat.Remap(format) != format ? format : GuestImageFormat.Invalid;
 
+    // True when DST_SEL reads each of the format's components from itself (X from X, ...).
+    private static bool PackedComponentsUnswizzled(uint format, uint dstSelect)
+    {
+        if (!Gfx10UnifiedFormat.TryDecode(GuestImageFormat.Remap(format), out var dataFormat, out _))
+        {
+            return true;
+        }
+
+        var count = (int)Gfx10UnifiedFormat.ComponentCount(dataFormat);
+        for (var component = 0; component < count; component++)
+        {
+            if (((dstSelect >> (3 * component)) & 7) != 4 + (uint)component)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private static bool RequiresPointSampler(ImageNumericClass numericClass, uint conversionFormat) =>
         numericClass == ImageNumericClass.Sint || conversionFormat != GuestImageFormat.Invalid;
 
@@ -1053,6 +1073,14 @@ public static class ResourceMaterializer
             };
             var conversionFormat = ImageConversionFormat(format);
             var shaderSwizzle = storage || conversionFormat != GuestImageFormat.Invalid ? descriptor[3] & 0xFFF : image.ShaderSwizzle;
+            // A sampled view applies the T# DST_SEL, which would permute a _PCK access's raw
+            // components; storage and converted views are unswizzled.
+            if (baseImage.Packed && !storage && conversionFormat == GuestImageFormat.Invalid &&
+                !PackedComponentsUnswizzled(format, descriptor[3] & 0xFFF))
+            {
+                return Fail($"packed image descriptor {index} swizzles its format's components (DST_SEL 0x{descriptor[3] & 0xFFF:X3})");
+            }
+
             var rawSintStorage = storage && format == GuestImageFormat.Format32Sint && baseImage.Written && !baseImage.Read && !baseImage.Atomic;
             var numericClass = GuestImageFormat.SampledNumericClass(format);
             if (storage)
@@ -1070,6 +1098,12 @@ public static class ResourceMaterializer
             }
             else if (numericClass == ImageNumericClass.Unsupported)
             {
+                if (baseImage.Packed)
+                {
+                    // The nulled view would hand a _PCK access a dummy texture's bits.
+                    return Fail($"packed image descriptor {index} uses unsupported format {format}");
+                }
+
                 ReportNulledSampledFormat(format);
                 Array.Clear(descriptor);
                 images[index] = image with
@@ -1098,6 +1132,7 @@ public static class ResourceMaterializer
                     (!GuestImageFormat.HasDepthEquivalent(format) || dimension is not (ImageDimension.Dim2D or ImageDimension.Dim2DArray))
                     ? SamplerCompareFunction(info, snapshot, baseIndex)
                     : -1,
+                PackedFormat = baseImage.Packed ? format : DescriptorConstants.InvalidFormat,
             };
         }
 
@@ -1157,6 +1192,7 @@ public static class ResourceMaterializer
                         ConversionFormat = imageClass.ConversionFormat,
                         ShaderSwizzle = imageClass.ShaderSwizzle,
                         Cube = imageClass.Cube,
+                        PackedFormat = imageClass.PackedFormat,
                     };
                     images[candidate] = image;
                 }
@@ -1168,7 +1204,8 @@ public static class ResourceMaterializer
                     imageClass.Dimension is ImageDimension.Dim2D or ImageDimension.Dim2DArray;
                 if (image.NumericClass != imageClass.NumericClass || !compatibleDimensions ||
                     image.MipCount != imageClass.MipCount || image.ConversionFormat != imageClass.ConversionFormat ||
-                    image.ShaderSwizzle != imageClass.ShaderSwizzle || image.Cube != imageClass.Cube)
+                    image.ShaderSwizzle != imageClass.ShaderSwizzle || image.Cube != imageClass.Cube ||
+                    image.PackedFormat != imageClass.PackedFormat)
                 {
                     failure = ResourceMaterializationFailure.IncompatibleImageCandidates;
                     if (captureIndirectImageFailure is not null)
@@ -1426,6 +1463,7 @@ public static class ResourceMaterializer
             image.Cube = specialized.Cube;
             image.EmulatedCompareFunction = specialized.EmulatedCompareFunction;
             image.MipStatistics = specialized.MipStatistics;
+            image.PackedFormat = specialized.PackedFormat;
             if (specialized.EmulatedCompareFunction >= 0)
             {
                 // The shader compares instead; the host keeps a color view and a plain sampler.

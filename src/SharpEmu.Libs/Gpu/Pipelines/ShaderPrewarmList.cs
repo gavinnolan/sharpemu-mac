@@ -158,7 +158,7 @@ public sealed class ShaderPrewarmList : IDisposable
     public static string ProgressFileName => Stem + ".progress";
 
     private const uint Magic = 0x57504553;
-    private const uint FormatVersion = 3;
+    private const uint FormatVersion = 4;
     private const byte CodeKind = 1;
     private const byte ComputeKind = 2;
     private const int RecordHeaderBytes = sizeof(uint) + sizeof(ulong);
@@ -687,6 +687,7 @@ public sealed class ShaderPrewarmList : IDisposable
             writer.Write(image.IndirectSearchIterations);
             writer.Write(image.Cube);
             writer.Write(image.EmulatedCompareFunction);
+            writer.Write(image.PackedFormat);
         }
 
         writer.Write(specialization.BufferCandidateTables.Count);
@@ -753,7 +754,8 @@ public sealed class ShaderPrewarmList : IDisposable
                 reader.ReadUInt32(),
                 reader.ReadUInt32(),
                 reader.ReadBoolean(),
-                reader.ReadInt32()));
+                reader.ReadInt32(),
+                PackedFormat: reader.ReadUInt32()));
         }
 
         for (var count = CheckedCount(reader.ReadInt32(), payload.Length); count > 0; count--)

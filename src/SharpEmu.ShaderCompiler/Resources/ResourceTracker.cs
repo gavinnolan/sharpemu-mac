@@ -784,6 +784,7 @@ public sealed partial class ResourceTracker
         image.Read |= !write || atomic;
         image.Written |= write;
         image.Atomic |= atomic;
+        image.Packed |= memory.ImagePacked;
     }
 
     private uint AddSampler(uint source, uint pc)

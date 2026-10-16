@@ -98,6 +98,8 @@ public sealed class MemoryAccessInfo
     public bool Typed { get; init; }
     public bool Formatted { get; init; }
     public bool ImageHasMip { get; init; }
+    // A _PCK load or store: raw texel bits, which need the guest format to pack.
+    public bool ImagePacked { get; init; }
     public bool ImageR128 { get; init; }
     public bool Glc { get; init; }
     public bool Slc { get; init; }
@@ -131,7 +133,7 @@ public sealed class MemoryAccessInfo
         ImageSampleFlags == other.ImageSampleFlags && ImageDimension == other.ImageDimension &&
         ImageClass == other.ImageClass && NeedsSampler == other.NeedsSampler && AddressIsFull == other.AddressIsFull &&
         DataSigned == other.DataSigned && Typed == other.Typed && Formatted == other.Formatted &&
-        ImageHasMip == other.ImageHasMip && ImageR128 == other.ImageR128 && Glc == other.Glc && Slc == other.Slc &&
+        ImageHasMip == other.ImageHasMip && ImagePacked == other.ImagePacked && ImageR128 == other.ImageR128 && Glc == other.Glc && Slc == other.Slc &&
         IndexEnabled == other.IndexEnabled && OffsetEnabled == other.OffsetEnabled &&
         Resource == other.Resource && Sampler == other.Sampler && PlanningOnly == other.PlanningOnly &&
         DeviceDescriptor == other.DeviceDescriptor && AddressSpace == other.AddressSpace;
@@ -331,6 +333,7 @@ public sealed class MemoryAccessTable
                 (compare ? ImageSampleFlags.Compare : ImageSampleFlags.None) |
                 (adjust ? ImageSampleFlags.Adjust : ImageSampleFlags.None),
             ImageHasMip = (flags & Gen5ImageOp.Mip) != 0,
+            ImagePacked = (flags & Gen5ImageOp.Packed) != 0,
             ImageR128 = instruction.Words.Count != 0 && ((instruction.Words[0] >> 15) & 1) != 0,
             Glc = control.Glc,
             Slc = control.Slc,

@@ -514,6 +514,48 @@ internal static partial class MetalNative
         return texture;
     }
 
+    /// <summary>A single-level shared 2D texture of any pixel format, filled from raw
+    /// bytes, readable and writable by shaders.</summary>
+    public static nint CreateRawTexture(nuint pixelFormat, uint width, uint height, uint bytesPerPixel, byte[] bytes)
+    {
+        var descriptor = Send(Send(objc_getClass("MTLTextureDescriptor"), Selector("alloc")), Selector("init"));
+        SendInteger(descriptor, Selector("setPixelFormat:"), pixelFormat);
+        SendInteger(descriptor, Selector("setTextureType:"), 2);
+        SendInteger(descriptor, Selector("setWidth:"), width);
+        SendInteger(descriptor, Selector("setHeight:"), height);
+        SendInteger(descriptor, Selector("setStorageMode:"), 0);
+        SendInteger(descriptor, Selector("setUsage:"), 3);
+        var texture = Send(Device.Value, Selector("newTextureWithDescriptor:"), descriptor);
+        if (texture == 0) throw new InvalidOperationException($"Failed to create a pixel format {pixelFormat} fixture texture.");
+        unsafe
+        {
+            fixed (byte* raw = bytes)
+            {
+                SendReplace(texture, Selector("replaceRegion:mipmapLevel:slice:withBytes:bytesPerRow:bytesPerImage:"),
+                    new MtlRegion { Width = width, Height = height, Depth = 1 }, 0, 0,
+                    (nint)raw, width * bytesPerPixel, 0);
+            }
+        }
+
+        return texture;
+    }
+
+    public static byte[] ReadRawTexture(nint texture, uint width, uint height, uint bytesPerPixel)
+    {
+        var bytes = new byte[width * height * bytesPerPixel];
+        unsafe
+        {
+            fixed (byte* raw = bytes)
+            {
+                SendReadTexture(texture, Selector("getBytes:bytesPerRow:bytesPerImage:fromRegion:mipmapLevel:slice:"),
+                    (nint)raw, width * bytesPerPixel, 0,
+                    new MtlRegion { Width = width, Height = height, Depth = 1 }, 0, 0);
+            }
+        }
+
+        return bytes;
+    }
+
     public static nint CreatePointSampler()
     {
         var descriptor = Send(Send(objc_getClass("MTLSamplerDescriptor"), Selector("alloc")), Selector("init"));

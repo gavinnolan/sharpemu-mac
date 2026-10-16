@@ -28,7 +28,8 @@ public readonly record struct ImageSpecialization(
     uint IndirectSearchIterations,
     bool Cube,
     int EmulatedCompareFunction = -1,
-    bool MipStatistics = false);
+    bool MipStatistics = false,
+    uint PackedFormat = DescriptorConstants.InvalidFormat);
 
 // The module-affecting resource state of one draw. Addresses and descriptor payloads
 // stay in the snapshot, so they never create a permutation.

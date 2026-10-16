@@ -36,6 +36,7 @@ public static partial class Gen5MslTranslator
             uint dstSelect;
             string mipLevel;
             int compareFunction;
+            uint packedFormat;
             {
                 if (TryGetImageElementCases(instruction, image, out var selector, out var elements, out error))
                 {
@@ -46,8 +47,8 @@ public static partial class Gen5MslTranslator
                         Line("{");
                         _indent++;
                         var emitted =
-                            TryResolveLayoutImage(instruction, image, out texture, out samplerName, out imageClass, out dstSelect, out mipLevel, out compareFunction, out error, elements[index]) &&
-                            EmitImageOperation(instruction, image, texture, samplerName, imageClass, dstSelect, mipLevel, compareFunction, out error);
+                            TryResolveLayoutImage(instruction, image, out texture, out samplerName, out imageClass, out dstSelect, out mipLevel, out compareFunction, out packedFormat, out error, elements[index]) &&
+                            EmitImageOperation(instruction, image, texture, samplerName, imageClass, dstSelect, mipLevel, compareFunction, packedFormat, out error);
                         _indent--;
                         Line("}");
                         if (!emitted)
@@ -64,13 +65,13 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
-                if (!TryResolveLayoutImage(instruction, image, out texture, out samplerName, out imageClass, out dstSelect, out mipLevel, out compareFunction, out error))
+                if (!TryResolveLayoutImage(instruction, image, out texture, out samplerName, out imageClass, out dstSelect, out mipLevel, out compareFunction, out packedFormat, out error))
                 {
                     return false;
                 }
             }
 
-            return EmitImageOperation(instruction, image, texture, samplerName, imageClass, dstSelect, mipLevel, compareFunction, out error);
+            return EmitImageOperation(instruction, image, texture, samplerName, imageClass, dstSelect, mipLevel, compareFunction, packedFormat, out error);
         }
 
         // One image operation over a resolved texture; its results are register writes.
@@ -83,11 +84,19 @@ public static partial class Gen5MslTranslator
             uint dstSelect,
             string mipLevel,
             int compareFunction,
+            uint packedFormat,
             out string error)
         {
             error = string.Empty;
             var kind = imageClass.ComponentKind;
             var isStorage = imageClass.IsStorage;
+            var flags = Gen5ImageOpcodes.FlagsOf(instruction.Opcode);
+            var packed = (flags & Gen5ImageOp.Packed) != 0;
+            if (packed && image.D16)
+            {
+                error = $"{instruction.Opcode} moves raw texel dwords and has no D16 form";
+                return false;
+            }
             if (instruction.Opcode == "ImageGetResinfo")
             {
                 EmitImageGetResinfo(image, texture, imageClass);
@@ -105,7 +114,7 @@ public static partial class Gen5MslTranslator
                 return TryEmitImageAtomic(instruction, image, texture, imageClass, out error);
             }
 
-            if (instruction.Opcode is "ImageStore" or "ImageStoreMip")
+            if ((flags & Gen5ImageOp.Store) != 0)
             {
                 if (!isStorage)
                 {
@@ -134,17 +143,27 @@ public static partial class Gen5MslTranslator
                 }
 
                 var components = new string[4];
-                for (var component = 0; component < 4; component++)
+                if (packed)
                 {
-                    var sourceIndex = Gen5ShaderTranslator.GetImageStoreSourceIndex(
-                        dstSelect,
-                        image.Dmask,
-                        component);
-                    components[component] = sourceIndex >= 0
-                        ? ImageTexelComponent(
-                            kind,
-                            ImageStoreComponent(image, kind, (uint)sourceIndex))
-                        : kind == "float" ? "0.0f" : "0";
+                    if (!TryUnpackImageTexel(image, kind, packedFormat, out components, out error))
+                    {
+                        return false;
+                    }
+                }
+                else
+                {
+                    for (var component = 0; component < 4; component++)
+                    {
+                        var sourceIndex = Gen5ShaderTranslator.GetImageStoreSourceIndex(
+                            dstSelect,
+                            image.Dmask,
+                            component);
+                        components[component] = sourceIndex >= 0
+                            ? ImageTexelComponent(
+                                kind,
+                                ImageStoreComponent(image, kind, (uint)sourceIndex))
+                            : kind == "float" ? "0.0f" : "0";
+                    }
                 }
 
                 var coordinate = spatial.Length == 1
@@ -161,7 +180,7 @@ public static partial class Gen5MslTranslator
                 return true;
             }
 
-            if (isStorage && instruction.Opcode is not ("ImageLoad" or "ImageLoadMip"))
+            if (isStorage && (flags & Gen5ImageOp.Load) == 0)
             {
                 error = $"unsupported storage image opcode {instruction.Opcode}";
                 return false;
@@ -169,7 +188,8 @@ public static partial class Gen5MslTranslator
 
             string sampled;
             var writeAllComponents = false;
-            if (instruction.Opcode is "ImageLoad" or "ImageLoadMip")
+            var resultKind = kind;
+            if ((flags & Gen5ImageOp.Load) != 0)
             {
                 // A storage element is its own mip view; multisampled textures
                 // carry a sample operand rather than a mip level.
@@ -202,6 +222,16 @@ public static partial class Gen5MslTranslator
                 }
 
                 sampled = Temp($"vec<{kind}, 4>", $"{texture}.read({arguments})");
+                if (packed)
+                {
+                    // DMASK selects texel dwords rather than components.
+                    if (!TryPackImageTexel(sampled, kind, packedFormat, (flags & Gen5ImageOp.PackedSigned) != 0, out sampled, out error))
+                    {
+                        return false;
+                    }
+
+                    resultKind = "uint";
+                }
             }
             else if (instruction.Opcode == "ImageMsaaLoad")
             {
@@ -245,7 +275,7 @@ public static partial class Gen5MslTranslator
                 }
 
                 var value = $"{sampled}[{component}]";
-                outputValues.Add(kind == "uint" ? value : AsUInt(value));
+                outputValues.Add(resultKind == "uint" ? value : AsUInt(value));
             }
 
             if (image.D16)

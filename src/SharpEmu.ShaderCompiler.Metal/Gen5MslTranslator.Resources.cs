@@ -1724,7 +1724,7 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
-            if (imageInfo.MipMode == ImageMipMode.DynamicStorage && instruction.Opcode is "ImageLoadMip" or "ImageStoreMip")
+            if (imageInfo.MipMode == ImageMipMode.DynamicStorage && Gen5ImageOpcodes.Has(instruction.Opcode, Gen5ImageOp.Mip))
             {
                 // A mip past the last descriptor matches no case and does nothing.
                 selector = Temp("uint", ImageIntegerAddress(image, imageClass.CoordinateComponents));
@@ -1782,11 +1782,13 @@ public static partial class Gen5MslTranslator
             out uint dstSelect,
             out string mipLevel,
             out int compareFunction,
+            out uint packedFormat,
             out string error,
             (uint Resource, uint Element)? fixedElement = null)
         {
             error = string.Empty;
             compareFunction = -1;
+            packedFormat = DescriptorConstants.InvalidFormat;
             texture = string.Empty;
             samplerName = string.Empty;
             resolved = default;
@@ -1834,7 +1836,7 @@ public static partial class Gen5MslTranslator
 
             // Several descriptors (per-mip elements, indirect candidates) need the caller's constant case.
             var severalDescriptors =
-                (imageInfo.MipMode == ImageMipMode.DynamicStorage && instruction.Opcode is "ImageLoadMip" or "ImageStoreMip") ||
+                (imageInfo.MipMode == ImageMipMode.DynamicStorage && Gen5ImageOpcodes.Has(instruction.Opcode, Gen5ImageOp.Mip)) ||
                 (request.IndirectRootByMemoryIndex.ContainsKey(memoryIndex) && imageInfo.IndirectSearchIterations != 0);
             if (fixedElement is null && severalDescriptors)
             {
@@ -1845,7 +1847,7 @@ public static partial class Gen5MslTranslator
             // A sampled mip load keeps its mip operand; a storage case is already its own mip view.
             // The mip is the address component right after the coordinates, so it moves with
             // the dimension (2 for 2D, 3 for a 2D array or a volume, 1 for 1D).
-            if (!imageClass.IsStorage && instruction.Opcode == "ImageLoadMip")
+            if (!imageClass.IsStorage && Gen5ImageOpcodes.Has(instruction.Opcode, Gen5ImageOp.Mip))
             {
                 mipLevel = Temp("uint", ImageIntegerAddress(image, imageClass.CoordinateComponents));
             }
@@ -1880,6 +1882,7 @@ public static partial class Gen5MslTranslator
             // A compare access of a format with no host depth view tests the texel in the
             // shader with the paired S#'s function, which the materializer recorded.
             compareFunction = imageInfo.EmulatedCompareFunction;
+            packedFormat = imageInfo.PackedFormat;
             return true;
         }
 

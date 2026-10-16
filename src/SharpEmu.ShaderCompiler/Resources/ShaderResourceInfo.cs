@@ -78,6 +78,10 @@ public sealed class ImageResource
     public int EmulatedCompareFunction { get; set; } = -1;
     public bool Cube { get; set; }
     public bool R128 { get; set; }
+    // Some access is a _PCK load or store; the materializer then records the guest
+    // format in PackedFormat so the emitter can pack and unpack the texel's raw bits.
+    public bool Packed { get; set; }
+    public uint PackedFormat { get; set; } = DescriptorConstants.InvalidFormat;
     public uint IndirectRoot { get; set; } = DescriptorConstants.NoIndex;
     public uint IndirectMappingOffset { get; set; }
     public uint IndirectSearchIterations { get; set; }
