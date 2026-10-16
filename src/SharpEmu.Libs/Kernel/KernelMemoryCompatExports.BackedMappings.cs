@@ -27,6 +27,8 @@ public static partial class KernelMemoryCompatExports
         new(GuestMemoryLayout.FlexibleOffset, GuestMemoryLayout.FlexibleBytes);
     private static IGuestBackedSpace? _backingOwner;
     private static int _prtMapWarning;
+    private static int _staleOwnerWarning;
+    private static int _registeredFreeRangeWarning;
 
     internal static bool TryReadPrtBacking(IGuestBackedSpace backing, ulong address, Span<byte> destination)
     {
@@ -98,7 +100,12 @@ public static partial class KernelMemoryCompatExports
             addressSpace is not IGuestBackedSpace space)
             return null;
         if (_backingOwner is not null && !ReferenceEquals(_backingOwner, space))
-            throw new InvalidOperationException("The previous guest address space is still active.");
+        {
+            // A guest call must not take the process down: the caller reports the failure.
+            if (Interlocked.Exchange(ref _staleOwnerWarning, 1) == 0)
+                Console.Error.WriteLine("[LOADER][WARN] A memory call used a new guest address space while the previous one is still active.");
+            return null;
+        }
         _backingOwner = space;
         return space;
     }
@@ -106,7 +113,10 @@ public static partial class KernelMemoryCompatExports
     private static bool TryDecodeMappedProtection(int value, out GuestPageProtection protection)
     {
         protection = GuestPageProtection.None;
-        if (value != 0 && (value & 0x37) == 0)
+        // CPU, GPU, AMPR and ACP bits are the whole sys/dmem.h set; AMPR/ACP-only access has
+        // no CPU or GPU view to protect. GPU-only access stays host-readable: the GPU layers
+        // read and write those pages through the host view.
+        if ((value & ~0x3FF) != 0 || (value != 0 && (value & 0x37) == 0))
             return false;
         if ((value & (OrbisProtCpuRead | OrbisProtGpuRead)) != 0)
             protection |= GuestPageProtection.Read;
@@ -117,9 +127,9 @@ public static partial class KernelMemoryCompatExports
         return true;
     }
 
+    // Alignment is zero or a power of two; callers raise it to at least one 16 KiB page.
     private static bool IsValidMapRange(ulong length, ulong alignment) =>
-        length != 0 && IsAligned(length, OrbisPageSize) &&
-        (alignment == 0 || (alignment & (alignment - 1)) == 0 || IsAligned(alignment, OrbisPageSize));
+        length != 0 && IsAligned(length, OrbisPageSize) && (alignment & (alignment - 1)) == 0;
 
     private static MappedRegion SliceMapping(MappedRegion region, ulong start, ulong end) => region with
     {
@@ -225,16 +235,23 @@ public static partial class KernelMemoryCompatExports
         return true;
     }
 
-    private static bool TryReplaceWithHole(IGuestBackedSpace space, ulong address, ulong size, bool noOverwrite)
+    // Clears [address, address + size) for a fixed mapping. NO_OVERWRITE refuses only live
+    // mappings: a reserved range is free to map into. The replaced slices come back, still
+    // owning their backing: the caller hands it back with CommitReplacedLocked once the new
+    // mapping stands, or puts the slices back with RestoreReplacedLocked when it fails.
+    private static bool TryReplaceWithHole(IGuestBackedSpace space, ulong address, ulong size, bool noOverwrite,
+        out MappedRegion[] replaced)
     {
+        replaced = [];
         var regions = GetMappingSlices(address, size);
-        if (noOverwrite && regions.Length != 0)
+        if (noOverwrite && regions.Any(region => !region.IsReserved))
             return false;
         if (MappingsCoverRange(regions, address, size) && regions.All(region => region.IsReserved))
         {
             if (!space.TryHoldRange(address, size))
                 return false;
             UnregisterFreeRange(address, size);
+            replaced = regions;
             return true;
         }
         if (!TryUnmapViews(space, regions))
@@ -245,11 +262,53 @@ public static partial class KernelMemoryCompatExports
             RestoreGpuMappings(regions);
             return false;
         }
-        foreach (var region in regions)
-            if (region.IsFlexible)
-                _flexibleBacking.Release(region.Address, region.Length);
         ReplaceMappedRegionRangeLocked(new MappedRegion(address, size, 0, false, false, 0, IsReserved: true));
+        replaced = regions;
         return true;
+    }
+
+    private static void CommitReplacedLocked(MappedRegion[] replaced)
+    {
+        foreach (var region in replaced)
+            ReleaseBackingOwnershipLocked(region);
+    }
+
+    // Unmapped pages hand their backing back to whoever lent it.
+    private static void ReleaseBackingOwnershipLocked(MappedRegion region)
+    {
+        if (region.IsReserved)
+            return;
+        if (region.IsFlexible)
+            _flexibleBacking.Release(region.Address, region.Length);
+    }
+
+    // Undoes TryReplaceWithHole after the new mapping failed: the views, GPU registration,
+    // backing ownership and table records come back as they were.
+    private static void RestoreReplacedLocked(IGuestBackedSpace space, ulong address, ulong size, MappedRegion[] replaced,
+        bool ownershipReleased = false)
+    {
+        if (replaced.Length == 0)
+        {
+            RemoveMappingLocked(address, size);
+            return;
+        }
+        if (MappingsCoverRange(replaced, address, size) && replaced.All(region => region.IsReserved))
+            return;
+        var backed = replaced.Where(region => region.IsBacked).ToArray();
+        if (ownershipReleased)
+            foreach (var region in backed)
+                ReclaimBackingOwnershipLocked(region);
+        RestoreViews(space, backed);
+        RestoreGpuMappings(replaced);
+        RemoveMappingLocked(address, size);
+        foreach (var region in replaced)
+            ReplaceMappedRegionRangeLocked(region);
+    }
+
+    private static void ReclaimBackingOwnershipLocked(MappedRegion region)
+    {
+        if (region.IsFlexible && !_flexibleBacking.TryReclaim(region.Address, region.Length, region.BackingOffset))
+            Environment.FailFast("Cannot restore flexible backing ownership.");
     }
 
     // Free and reserved ranges are never registered with the GPU, and unregistering hands the GPU
@@ -260,18 +319,41 @@ public static partial class KernelMemoryCompatExports
         if (!GuestGpuMemoryHook.OverlapsRegistered(address, size))
             return;
         if (_directMappingTransaction)
-            throw new InvalidOperationException(
-                $"A free guest range is still registered with the GPU: address=0x{address:X16} size=0x{size:X}.");
+        {
+            // RunMappingTransaction rechecks the range under the mapping lock before it runs a
+            // transaction off the GPU worker, so this is a stale registration; waiting here
+            // would deadlock, and a guest call must not throw.
+            if (Interlocked.Exchange(ref _registeredFreeRangeWarning, 1) == 0)
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] A free guest range is still registered with the GPU: address=0x{address:X16} size=0x{size:X}.");
+            return;
+        }
         GuestGpuMemoryHook.NoteUnmapped(address, size);
     }
 
     private static bool TrySelectBackingAddress(IGuestBackedSpace space, ulong requested, ulong length,
         ulong alignment, ulong flags, out ulong address, bool reuseReservation = true)
     {
+        if (!TrySelectReplacingBackingAddress(space, requested, length, alignment, flags, out address, out var replaced,
+                reuseReservation))
+            return false;
+        CommitReplacedLocked(replaced);
+        return true;
+    }
+
+    // The fixed path also reports the slices it replaced, for RestoreReplacedLocked.
+    private static bool TrySelectReplacingBackingAddress(IGuestBackedSpace space, ulong requested, ulong length,
+        ulong alignment, ulong flags, out ulong address, out MappedRegion[] replaced, bool reuseReservation = true)
+    {
         address = 0;
+        replaced = [];
         if ((flags & OrbisKernelMapFixed) != 0)
         {
-            if (!TryReplaceWithHole(space, requested, length, (flags & 0x80) != 0))
+            // The host cannot place anything in its blocked window, and nothing here may
+            // translate a guest address; fail before the request touches any state.
+            if (GuestVaHole.IsFixedRequestBlocked(requested, length))
+                return false;
+            if (!TryReplaceWithHole(space, requested, length, (flags & OrbisKernelMapNoOverwrite) != 0, out replaced))
             {
                 if (requested >= 0x10_0000_0000UL && requested < 0xFC_0000_0000UL &&
                     Interlocked.Exchange(ref _prtMapWarning, 1) == 0)
@@ -286,6 +368,7 @@ public static partial class KernelMemoryCompatExports
         var desired = requested != 0 ? requested : DefaultMapSearchBase;
         while (true)
         {
+            desired = GuestVaHole.SkipForSearch(desired, length);
             var hintedRegions = reuseReservation && desired == requested && requested != 0
                 ? GetMappingSlices(requested, length) : [];
             var reusableHint = hintedRegions.Length != 0 && requested % alignment == 0 &&
@@ -294,6 +377,11 @@ public static partial class KernelMemoryCompatExports
                 desired = FindAvailableMappingAddress(desired, length, alignment);
             if (desired == 0)
                 return false;
+            if (GuestVaHole.SkipForSearch(desired, length) != desired)
+            {
+                desired = GuestVaHole.SkipForSearch(desired, length);
+                continue;
+            }
             var held = requested == 0
                 ? space.TryHoldAvailableRange(desired, length, alignment, out address)
                 : space.TryHoldRangeAtOrAbove(desired, length, alignment, out address);
@@ -370,7 +458,15 @@ public static partial class KernelMemoryCompatExports
             _insideMappingTransaction = _directMappingTransaction = true;
             try
             {
-                return transaction();
+                // Another guest thread can map (and register with the GPU) the range between the
+                // unlocked check and the transaction. Every kernel mapping registers under this
+                // lock, so the recheck here holds until the transaction is done; when it fails
+                // the change goes through the GPU worker like any other.
+                lock (_memoryGate)
+                {
+                    if (onlyAddsOutsideGpuMemory())
+                        return transaction();
+                }
             }
             finally
             {
@@ -403,10 +499,13 @@ public static partial class KernelMemoryCompatExports
             Console.Error.WriteLine($"[LOADER][WARN] reserve_virtual pointer read failed pointer=0x{pointer:X16} size=0x{length:X}");
             return MemoryFault;
         }
-        alignment = alignment == 0 ? OrbisPageSize : alignment;
+        alignment = Math.Max(alignment, OrbisPageSize);
         if ((flags & OrbisKernelMapFixed) != 0 &&
             (requested == 0 || !IsAligned(requested, OrbisPageSize) || requested > ulong.MaxValue - length))
             return MemoryInvalidArgument;
+        // Probe the result slot first, so a fault leaves no reservation behind.
+        if (!ctx.TryWriteUInt64(pointer, requested))
+            return MemoryFault;
         lock (_memoryGate)
         {
             var space = ResolveBackingSpace(ctx);
@@ -414,10 +513,11 @@ public static partial class KernelMemoryCompatExports
             var sparseSelected = (flags & OrbisKernelMapFixed) == 0 &&
                 TrySelectSparseReservationAddress(requested, length, alignment, flags, out address);
             var selected = sparseSelected;
+            var replaced = Array.Empty<MappedRegion>();
             if (!selected && space is not null)
             {
-                selected = TrySelectBackingAddress(space, requested, length, alignment, flags,
-                    out address, reuseReservation: false);
+                selected = TrySelectReplacingBackingAddress(space, requested, length, alignment, flags,
+                    out address, out replaced, reuseReservation: false);
             }
 
             // A sparse reservation is only a guest mapping-table entry and
@@ -430,14 +530,17 @@ public static partial class KernelMemoryCompatExports
             }
             if (ShouldTraceDirectMemory())
                 Console.Error.WriteLine($"[LOADER][TRACE] reserve_virtual selected address=0x{address:X16} requested=0x{requested:X16} size=0x{length:X} sparse={sparseSelected}");
-            ReplaceMappedRegionRangeLocked(new MappedRegion(address, length, 0, false, false, 0, IsReserved: true));
-            if (ShouldTraceDirectMemory())
-                Console.Error.WriteLine($"[LOADER][TRACE] reserve_virtual address=0x{address:X} requested=0x{requested:X} size=0x{length:X} flags=0x{flags:X}");
             if (!ctx.TryWriteUInt64(pointer, address))
             {
                 Console.Error.WriteLine($"[LOADER][WARN] reserve_virtual pointer write failed pointer=0x{pointer:X16} address=0x{address:X16}");
+                if (!sparseSelected)
+                    RestoreReplacedLocked(space!, address, length, replaced);
                 return MemoryFault;
             }
+            CommitReplacedLocked(replaced);
+            ReplaceMappedRegionRangeLocked(new MappedRegion(address, length, 0, false, false, 0, IsReserved: true));
+            if (ShouldTraceDirectMemory())
+                Console.Error.WriteLine($"[LOADER][TRACE] reserve_virtual address=0x{address:X} requested=0x{requested:X} size=0x{length:X} flags=0x{flags:X}");
             return 0;
         }
     }

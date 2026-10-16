@@ -93,9 +93,12 @@ internal sealed class FlexibleBackingPool
                 space.TryMapBacked(block.Address, block.Size, block.Offset, protection, out _))
                 continue;
 
+            // A guest call must not throw. A view the host would not unmap stays a stray
+            // mapping; its backing is never handed out, so nothing else can alias it.
             for (var rollback = index - 1; rollback >= 0; rollback--)
                 if (!space.TryUnmapBacked(planned[rollback].Address, planned[rollback].Size))
-                    throw new InvalidOperationException("Cannot restore a failed flexible mapping.");
+                    Console.Error.WriteLine(
+                        $"[LOADER][WARN] Cannot undo a partial flexible mapping at 0x{planned[rollback].Address:X16}.");
             return false;
         }
 
@@ -112,6 +115,36 @@ internal sealed class FlexibleBackingPool
         Used += size;
         blocks = planned.ToArray();
         return true;
+    }
+
+    // Takes back exactly the backing a released block held, so a failed replacement can
+    // restore the mapping it removed. False when any of those bytes were handed out again.
+    public bool TryReclaim(ulong address, ulong size, ulong offset)
+    {
+        if (size == 0 || offset > ulong.MaxValue - size)
+            return false;
+        var index = FindFreeIndex(offset);
+        if (index < 0 || _free.Keys[index] + _free.Values[index] < offset + size)
+            return false;
+        var rangeStart = _free.Keys[index];
+        var rangeEnd = rangeStart + _free.Values[index];
+        _free.RemoveAt(index);
+        if (rangeStart < offset)
+            _free.Add(rangeStart, offset - rangeStart);
+        if (offset + size < rangeEnd)
+            _free.Add(offset + size, rangeEnd - offset - size);
+        _blocks.Add(new Block(address, size, offset));
+        _blocks.Sort((left, right) => left.Address.CompareTo(right.Address));
+        Used += size;
+        return true;
+    }
+
+    private int FindFreeIndex(ulong offset)
+    {
+        for (var index = _free.Count - 1; index >= 0; index--)
+            if (_free.Keys[index] <= offset)
+                return index;
+        return -1;
     }
 
     // The caller must remove the host views before it returns their backing.

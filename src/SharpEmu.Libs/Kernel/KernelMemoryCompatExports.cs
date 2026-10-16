@@ -3149,7 +3149,8 @@ public static partial class KernelMemoryCompatExports
         {
             var searchStartRaw = unchecked((long)arg0);
             var searchEndRaw = unchecked((long)arg1);
-            var alignment = arg2 == 0 ? 0x1000UL : arg2;
+            // Direct memory is handed out in 16 KiB pages, so spans are reported on that grain.
+            var alignment = Math.Max(arg2, OrbisPageSize);
             var outAddress = arg3;
             var outSize = arg4;
             if (outAddress == 0 || outSize == 0)
@@ -3268,107 +3269,16 @@ public static partial class KernelMemoryCompatExports
         ExportName = "sceKernelAllocateDirectMemory",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int KernelAllocateDirectMemory(CpuContext ctx)
-    {
-        var searchStartRaw = unchecked((long)ctx[CpuRegister.Rdi]);
-        var searchEndRaw = unchecked((long)ctx[CpuRegister.Rsi]);
-        var length = ctx[CpuRegister.Rdx];
-        var alignment = ctx[CpuRegister.Rcx];
-        var memoryType = unchecked((int)ctx[CpuRegister.R8]);
-        var outAddress = ctx[CpuRegister.R9];
-
-        if (length == 0 || outAddress == 0)
-        {
-            TraceDirectMemoryCall(
-                ctx,
-                "allocate_direct",
-                length,
-                alignment,
-                memoryType,
-                outAddress,
-                result: OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
-        }
-
-        var limit = GuestMemoryLayout.DirectBytes;
-        ulong searchStart;
-        ulong searchEnd;
-
-        if (searchEndRaw <= 0)
-        {
-            searchEnd = limit;
-        }
-        else
-        {
-            searchEnd = (ulong)searchEndRaw;
-            if (searchEnd > limit)
-            {
-                searchEnd = limit;
-            }
-        }
-
-        if (searchStartRaw < 0)
-        {
-            searchStart = 0;
-        }
-        else
-        {
-            searchStart = (ulong)searchStartRaw;
-        }
-
-        if (searchStart >= searchEnd)
-        {
-            searchStart = 0;
-        }
-
-        // PS5 direct memory is allocated in 16 KiB pages; when the guest does
-        // not care about alignment, default to that granularity rather than the
-        // host 4 KiB page so physical offsets stay on true page boundaries.
-        var align = alignment == 0 ? OrbisPageSize : alignment;
-        ulong selectedAddress;
-        lock (_memoryGate)
-        {
-            _ = ResolveBackingSpace(ctx);
-            if (!TryAllocateDirectMemoryLocked(searchStart, searchEnd, length, align, memoryType, GuestMemoryLayout.DirectBytes, out selectedAddress))
-            {
-                TraceDirectMemoryCall(
-                    ctx,
-                    "allocate_direct",
-                    length,
-                    align,
-                    memoryType,
-                    outAddress,
-                    result: OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN);
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN;
-            }
-        }
-
-        if (!ctx.TryWriteUInt64(outAddress, selectedAddress))
-        {
-            TraceDirectMemoryCall(
-                ctx,
-                "allocate_direct",
-                length,
-                align,
-                memoryType,
-                outAddress,
-                selectedAddress,
-                OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        TraceDirectMemoryCall(
+    public static int KernelAllocateDirectMemory(CpuContext ctx) =>
+        AllocateDirectMemoryCore(
             ctx,
             "allocate_direct",
-            length,
-            align,
-            memoryType,
-            outAddress,
-            selectedAddress,
-            OrbisGen2Result.ORBIS_GEN2_OK);
-
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
+            unchecked((long)ctx[CpuRegister.Rdi]),
+            unchecked((long)ctx[CpuRegister.Rsi]),
+            ctx[CpuRegister.Rdx],
+            ctx[CpuRegister.Rcx],
+            unchecked((int)ctx[CpuRegister.R8]),
+            ctx[CpuRegister.R9]);
 
     [SysAbiExport(
         Nid = "B+vc2AO2Zrc",
@@ -3377,58 +3287,57 @@ public static partial class KernelMemoryCompatExports
         LibraryName = "libKernel")]
     public static int KernelAllocateMainDirectMemory(CpuContext ctx)
     {
-        var length = ctx[CpuRegister.Rdi];
-        var alignment = ctx[CpuRegister.Rsi];
-        var memoryType = unchecked((int)ctx[CpuRegister.Rdx]);
-        var outAddress = ctx[CpuRegister.Rcx];
-        if (outAddress == 0 || length == 0)
+        ulong limit;
+        lock (_memoryGate)
+            limit = _directMemoryBudget;
+        return AllocateDirectMemoryCore(
+            ctx,
+            "allocate_main_direct",
+            0,
+            (long)limit,
+            ctx[CpuRegister.Rdi],
+            ctx[CpuRegister.Rsi],
+            unchecked((int)ctx[CpuRegister.Rdx]),
+            ctx[CpuRegister.Rcx]);
+    }
+
+    // Arguments are checked before anything is allocated, and the result slot is probed first,
+    // so every failure leaves the physical map unchanged.
+    private static int AllocateDirectMemoryCore(CpuContext ctx, string operation, long searchStart, long searchEnd,
+        ulong length, ulong alignment, int memoryType, ulong outAddress)
+    {
+        int Fail(int result, ulong selected = 0)
         {
-            TraceDirectMemoryCall(
-                ctx,
-                "allocate_main_direct",
-                length,
-                alignment,
-                memoryType,
-                outAddress,
-                result: OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            TraceDirectMemoryCall(ctx, operation, length, alignment, memoryType, outAddress, selected,
+                (OrbisGen2Result)result);
+            return result;
         }
 
-        var effectiveAlignment = alignment == 0 ? OrbisPageSize : alignment;
-        ulong aligned;
+        if (outAddress == 0 || searchStart < 0 || searchEnd <= searchStart || length == 0 ||
+            !IsAligned(length, OrbisPageSize) || (alignment != 0 && !IsAligned(alignment, OrbisPageSize)) ||
+            (alignment & (alignment - 1)) != 0 || !IsValidMemoryType(memoryType))
+            return Fail(MemoryInvalidArgument);
+        if (!ctx.TryWriteUInt64(outAddress, 0))
+            return Fail(MemoryFault);
+
+        var align = Math.Max(alignment, OrbisPageSize);
+        ulong selectedAddress;
         lock (_memoryGate)
         {
             _ = ResolveBackingSpace(ctx);
-            if (!TryAllocateDirectMemoryLocked(0, GuestMemoryLayout.DirectBytes, length,
-                    effectiveAlignment, memoryType, GuestMemoryLayout.DirectBytes, out aligned))
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN;
+            if (!TryAllocateDirectMemoryLocked((ulong)searchStart, (ulong)searchEnd, length, align, memoryType,
+                    _directMemoryBudget, out selectedAddress))
+                return Fail(MemoryTryAgain);
+            if (!ctx.TryWriteUInt64(outAddress, selectedAddress))
+            {
+                _directAllocations.ReleaseRange(selectedAddress, length);
+                return Fail(MemoryFault, selectedAddress);
+            }
         }
 
-        if (!ctx.TryWriteUInt64(outAddress, aligned))
-        {
-            TraceDirectMemoryCall(
-                ctx,
-                "allocate_main_direct",
-                length,
-                effectiveAlignment,
-                memoryType,
-                outAddress,
-                aligned,
-                OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        TraceDirectMemoryCall(
-            ctx,
-            "allocate_main_direct",
-            length,
-            effectiveAlignment,
-            memoryType,
-            outAddress,
-            aligned,
+        TraceDirectMemoryCall(ctx, operation, length, align, memoryType, outAddress, selectedAddress,
             OrbisGen2Result.ORBIS_GEN2_OK);
-
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        return 0;
     }
 
     [SysAbiExport(
@@ -3545,7 +3454,8 @@ public static partial class KernelMemoryCompatExports
         if (inOutAddressPointer == 0)
             return MemoryFault;
         if (!IsValidMapRange(length, alignment) || (long)directMemoryStart < 0 ||
-            !IsAligned(directMemoryStart, OrbisPageSize))
+            !IsAligned(directMemoryStart, OrbisPageSize) ||
+            !TryResolveMapAlignment(flags, MapDirectAllowedFlags, alignment, out alignment))
             return MemoryInvalidArgument;
         if ((protection & OrbisProtCpuExec) != 0)
             return MemoryAccessDenied;
@@ -3553,11 +3463,12 @@ public static partial class KernelMemoryCompatExports
             return MemoryInvalidArgument;
         if (!ctx.TryReadUInt64(inOutAddressPointer, out var requested))
             return MemoryFault;
-        alignment = alignment == 0 ? OrbisPageSize : alignment;
         if ((flags & OrbisKernelMapFixed) != 0 &&
-            (requested == 0 || !IsAligned(requested, OrbisPageSize) ||
-             !IsAligned(requested, alignment) || requested > ulong.MaxValue - length))
+            (requested == 0 || !IsAligned(requested, alignment) || requested > ulong.MaxValue - length))
             return MemoryInvalidArgument;
+        // The result is written before the mapping is published, so a fault leaves no mapping behind.
+        if (!ctx.TryWriteUInt64(inOutAddressPointer, requested))
+            return MemoryFault;
 
         lock (_memoryGate)
         {
@@ -3568,7 +3479,7 @@ public static partial class KernelMemoryCompatExports
                 return MemoryNoSpace;
             }
             var space = ResolveBackingSpace(ctx);
-            if (space is null || !TrySelectBackingAddress(space, requested, length, alignment, flags, out var address))
+            if (space is null || !TrySelectReplacingBackingAddress(space, requested, length, alignment, flags, out var address, out var replaced))
             {
                 if (ShouldTraceDirectMemory())
                     Console.Error.WriteLine($"[LOADER][TRACE] map_direct failed=address-selection address=0x{requested:X} size=0x{length:X} offset=0x{directMemoryStart:X} flags=0x{flags:X} backing={space is not null}");
@@ -3578,8 +3489,16 @@ public static partial class KernelMemoryCompatExports
             {
                 if (ShouldTraceDirectMemory())
                     Console.Error.WriteLine($"[LOADER][TRACE] map_direct failed=host-view reason={failure} address=0x{address:X} size=0x{length:X} offset=0x{directMemoryStart:X} protection=0x{protection:X}");
+                RestoreReplacedLocked(space, address, length, replaced);
                 return MemoryNoSpace;
             }
+            if (!ctx.TryWriteUInt64(inOutAddressPointer, address))
+            {
+                _ = space.TryUnmapBacked(address, length);
+                RestoreReplacedLocked(space, address, length, replaced);
+                return MemoryFault;
+            }
+            CommitReplacedLocked(replaced);
             // v1 maps with the type the allocation was made with.
             var type = memoryType ??
                 (TryFindDirectAllocationLocked(directMemoryStart, out var allocation) ? allocation.MemoryType : 0);
@@ -3587,14 +3506,28 @@ public static partial class KernelMemoryCompatExports
                 false, true, directMemoryStart, directMemoryStart, MemoryType: type, Name: name,
                 Traits: TraitsFromMapFlags(flags)));
             GuestGpuMemoryHook.NoteMapped(address, length, mode);
-            if (!ctx.TryWriteUInt64(inOutAddressPointer, address))
-                return MemoryFault;
             GuestWriteWatch.OnDirectMapping(address, length, protection);
             SharpEmu.HLE.GpuMemory.GuestSlotTrap.OnDirectMapping(address, length, protection);
             if (ShouldTraceDirectMemory())
                 Console.Error.WriteLine($"[LOADER][TRACE] map_direct applied address=0x{address:X} requested=0x{requested:X} size=0x{length:X} offset=0x{directMemoryStart:X} flags=0x{flags:X}");
             return 0;
         }
+    }
+
+    // FIXED, NO_OVERWRITE, DMEM_COMPAT, NO_COALESCE, ALIGNED_x and the ignored heap bit 0x8000;
+    // the direct calls also tolerate the POSIX SHARED/PRIVATE bits.
+    private const ulong MapFlexibleAllowedFlags = 0xFF408490UL;
+    private const ulong MapDirectAllowedFlags = MapFlexibleAllowedFlags | 0x3UL;
+
+    // The effective alignment is the larger of the argument, ALIGNED_x and the 16 KiB page.
+    private static bool TryResolveMapAlignment(ulong flags, ulong allowedFlags, ulong alignment, out ulong effective)
+    {
+        effective = 0;
+        var shift = (flags >> 24) & 0xFF;
+        if ((flags & ~allowedFlags) != 0 || (shift != 0 && (shift < 14 || shift > 31)))
+            return false;
+        effective = Math.Max(OrbisPageSize, Math.Max(alignment, shift == 0 ? 0 : 1UL << (int)shift));
+        return true;
     }
 
     [SysAbiExport(
@@ -3653,32 +3586,58 @@ public static partial class KernelMemoryCompatExports
         var length = ctx[CpuRegister.Rsi];
         var protection = unchecked((int)ctx[CpuRegister.Rdx]);
         var flags = ctx[CpuRegister.Rcx];
-        var shift = (flags >> 24) & 0xFF;
         if (pointer == 0 || !IsValidMapRange(length, 0) ||
-            (flags & ~0xFF408490UL) != 0 || (shift != 0 && (shift < 14 || shift > 31)) ||
+            !TryResolveMapAlignment(flags, MapFlexibleAllowedFlags, 0, out var alignment) ||
             !TryDecodeMappedProtection(protection, out var mode))
             return MemoryInvalidArgument;
         if (!ctx.TryReadUInt64(pointer, out var requested))
             return MemoryFault;
-        var alignment = shift == 0 ? OrbisPageSize : 1UL << (int)shift;
         if ((flags & OrbisKernelMapFixed) != 0 &&
             (requested == 0 || !IsAligned(requested, alignment) || requested > ulong.MaxValue - length))
             return MemoryInvalidArgument;
+        if (!ctx.TryWriteUInt64(pointer, requested))
+            return MemoryFault;
         lock (_memoryGate)
+            return MapFlexibleLocked(ctx, pointer, requested, length, protection, mode, flags, alignment, name);
+    }
+
+    // Maps flexible memory and writes the address to *pointer before publishing the mapping.
+    private static int MapFlexibleLocked(CpuContext ctx, ulong pointer, ulong requested, ulong length, int protection,
+        GuestPageProtection mode, ulong flags, ulong alignment, string? name, MappingTraits extraTraits = MappingTraits.None)
+    {
+        // A fixed request may reuse the flexible memory it replaces.
+        var replacedFlexible = (flags & OrbisKernelMapFixed) == 0 ? 0UL
+            : GetMappingSlices(requested, length).Where(region => region.IsFlexible).Aggregate(0UL, (sum, region) => sum + region.Length);
+        if (length > _flexibleBacking.Available + replacedFlexible)
+            return MemoryNoSpace;
+        var space = ResolveBackingSpace(ctx);
+        if (space is null || !TrySelectReplacingBackingAddress(space, requested, length, alignment, flags, out var address, out var replaced))
+            return MemoryNoSpace;
+        // The replaced bytes stay owned (and untouched) while the new mapping is made, so a
+        // failure can restore them intact; only a pool too full for both gives them up first.
+        var ownershipReleased = length > _flexibleBacking.Available;
+        if (ownershipReleased)
+            CommitReplacedLocked(replaced);
+        if (!_flexibleBacking.TryMap(space, address, length, mode, out var blocks))
         {
-            if (length > _flexibleBacking.Available)
-                return MemoryNoSpace;
-            var space = ResolveBackingSpace(ctx);
-            if (space is null || !TrySelectBackingAddress(space, requested, length, alignment, flags, out var address))
-                return MemoryNoSpace;
-            if (!_flexibleBacking.TryMap(space, address, length, mode, out var blocks))
-                return MemoryNoSpace;
-            foreach (var block in blocks)
-                ReplaceMappedRegionRangeLocked(new MappedRegion(block.Address, block.Size, protection,
-                    true, false, 0, block.Offset, Name: name, Traits: TraitsFromMapFlags(flags)));
-            GuestGpuMemoryHook.NoteMapped(address, length, mode);
-            return ctx.TryWriteUInt64(pointer, address) ? 0 : MemoryFault;
+            RestoreReplacedLocked(space, address, length, replaced, ownershipReleased);
+            return MemoryNoSpace;
         }
+        if (pointer != 0 && !ctx.TryWriteUInt64(pointer, address))
+        {
+            foreach (var block in blocks)
+                _ = space.TryUnmapBacked(block.Address, block.Size);
+            _flexibleBacking.Release(address, length);
+            RestoreReplacedLocked(space, address, length, replaced, ownershipReleased);
+            return MemoryFault;
+        }
+        if (!ownershipReleased)
+            CommitReplacedLocked(replaced);
+        foreach (var block in blocks)
+            ReplaceMappedRegionRangeLocked(new MappedRegion(block.Address, block.Size, protection,
+                true, false, 0, block.Offset, Name: name, Traits: TraitsFromMapFlags(flags) | extraTraits));
+        GuestGpuMemoryHook.NoteMapped(address, length, mode);
+        return 0;
     }
 
     [SysAbiExport(
@@ -3751,8 +3710,7 @@ public static partial class KernelMemoryCompatExports
                 {
                     GuestGpuMemoryHook.NoteUnmapped(region.Address, region.Length);
                 }
-                if (region.IsFlexible)
-                    _flexibleBacking.Release(region.Address, region.Length);
+                ReleaseBackingOwnershipLocked(region);
                 RemoveMappingLocked(region.Address, region.Length);
             }
             return 0;
@@ -6171,8 +6129,10 @@ public static partial class KernelMemoryCompatExports
         var processedOutAddress = ctx[CpuRegister.Rdx];
         var processedCount = 0;
         var result = (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        if (entryCount < 0 || (entriesAddress == 0 && entryCount != 0))
+            result = MemoryInvalidArgument;
 
-        for (var index = 0; index < entryCount; index++)
+        for (var index = 0; result == 0 && index < entryCount; index++)
         {
             var entryAddress = entriesAddress + (ulong)(index * OrbisKernelBatchMapEntrySize);
             if (!TryReadBatchMapEntry(ctx, entryAddress, out var entry) ||
@@ -6672,25 +6632,27 @@ public static partial class KernelMemoryCompatExports
             return true;
         }
 
+        // Read with the mapping lock held: a kernel unmap cannot run between the
+        // accessibility check and the copy, which would fault outside any catch.
         var length = (ulong)destination.Length;
         lock (_memoryGate)
         {
-            if (TryFindVirtualQueryRegionLocked(
-                    address,
-                    findNext: false,
-                    out var region) &&
+            if (TryFindVirtualQueryRegionLocked(address, findNext: false, out var region) &&
                 length <= region.Length &&
                 address >= region.Address &&
                 length <= region.Address + region.Length - address)
             {
-                return TryReadHostMemory(address, destination);
+                return !region.IsReserved && TryReadHostMemory(address, destination);
             }
-        }
 
-        // Direct execution uses guest virtual addresses as host virtual addresses.
-        // Some native mmap paths predate _mappedRegions tracking, so retain the same
-        // committed/readable-page fallback used by the libc compatibility layer.
-        return TryReadHostMemory(address, destination);
+            // Direct execution uses guest virtual addresses as host virtual addresses. Some
+            // native mmap paths predate _mappedRegions tracking, so untracked memory keeps the
+            // committed/readable-page fallback, still under the lock.
+            var slices = GetMappingSlices(address, length);
+            return (slices.Length == 0 ||
+                    (MappingsCoverRange(slices, address, length) && slices.All(slice => !slice.IsReserved))) &&
+                TryReadHostMemory(address, destination);
+        }
     }
 
     internal static bool TryReadTrackedLibcHeapGpuAlias(

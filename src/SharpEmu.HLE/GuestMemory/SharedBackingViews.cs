@@ -795,6 +795,8 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
     }
 
     private int _aliasReports;
+    private static readonly bool TraceAliasedBacking =
+        Environment.GetEnvironmentVariable("SHARPEMU_LOG_DIRECT_MEMORY") == "1";
 
     /// <summary>How many mappings were recorded over backing bytes another one still holds.</summary>
     public int AliasedBackingRecords => Volatile.Read(ref _aliasReports);
@@ -814,10 +816,11 @@ public sealed unsafe class SharedBackingViews : IDisposable, ICpuMappedCopySourc
                 continue;
             }
 
-            if (++_aliasReports <= 32)
+            // Aliasing is legal and coherent through the shared backing, so it is only traced.
+            if (++_aliasReports <= 32 && TraceAliasedBacking)
             {
                 Console.Error.WriteLine(
-                    $"[LOADER][WARN] mapping aliases live backing bytes: new=0x{address:X16}+0x{size:X}@0x{offset:X} " +
+                    $"[LOADER][TRACE] mapping aliases live backing bytes: new=0x{address:X16}+0x{size:X}@0x{offset:X} " +
                     $"existing=0x{record.Address:X16}+0x{record.Size:X}@0x{record.Offset:X}");
                 Console.Error.Flush();
             }
