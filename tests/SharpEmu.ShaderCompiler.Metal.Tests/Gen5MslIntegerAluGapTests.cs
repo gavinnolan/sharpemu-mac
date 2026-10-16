@@ -854,9 +854,11 @@ public sealed class Gen5MslIntegerAluGapTests(ITestOutputHelper output)
             Wrexec("s_andn2_wrexec_b64", 0xBE803A04, source, source & 0xFFFF0000, true);
         }
 
-        // HW_REG_MODE reads: FP_ROUND = 0 (RNE), FP_DENORM = 0xF, IEEE from the request (off).
-        cases.Add(new Case("s_getreg_b32 MODE[7:0]", [.. Base(), 0xB9003801, VFromS(8, 0)], [8], [0xF0]));
-        cases.Add(new Case("s_getreg_b32 MODE[7:4]", [.. Base(), 0xB9001901, VFromS(8, 0)], [8], [0xF]));
+        // HW_REG_MODE reads the launch state: FLOAT_MODE 0xC0 in bits 7:0, DX10_CLAMP (on) in
+        // bit 8, IEEE (off) in bit 9.
+        cases.Add(new Case("s_getreg_b32 MODE[7:0]", [.. Base(), 0xB9003801, VFromS(8, 0)], [8], [0xC0]));
+        cases.Add(new Case("s_getreg_b32 MODE[7:4]", [.. Base(), 0xB9001901, VFromS(8, 0)], [8], [0xC]));
+        cases.Add(new Case("s_getreg_b32 MODE", [.. Base(), 0xB900F801, VFromS(8, 0)], [8], [0x1C0]));
         cases.Add(new Case("s_getreg_b32 MODE[31:9]", [.. Base(), 0xB900B241, VFromS(8, 0)], [8], [0]));
         Run("smov", cases);
     }
@@ -882,6 +884,16 @@ public sealed class Gen5MslIntegerAluGapTests(ITestOutputHelper output)
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out _, out var error), error);
     }
 
+    // A launch FLOAT_MODE rounding other than to nearest even is refused, as S_ROUND_MODE is.
+    [Fact]
+    public void ANonNearestEvenLaunchRoundingIsRefused()
+    {
+        var request = Gen5ComputeFixtures.CreateComputeRequest(
+            new Gen5ComputeFixture("float-mode round", [EndProgram], 0, 0), floatMode: 0xC1);
+        Assert.False(Gen5MslTranslator.TryCompileProgram(request, out _, out var error));
+        Assert.Contains("only round-to-nearest-even (FP_ROUND 0) is supported", error, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("s_round_mode 1", new uint[] { 0xBFA40001 }, "s_round_mode 0x1: only round-to-nearest-even (0) is supported")]
     [InlineData("s_sethalt", new uint[] { 0xBF8D0001 }, "SSethalt halts the wave or returns from a trap handler")]
@@ -892,7 +904,6 @@ public sealed class Gen5MslIntegerAluGapTests(ITestOutputHelper output)
     [InlineData("s_subvector_loop_begin", new uint[] { 0xBD800000 }, "SSubvectorLoopBegin is subroutine/subvector control flow")]
     [InlineData("s_subvector_loop_end", new uint[] { 0xBE000000 }, "SSubvectorLoopEnd is subroutine/subvector control flow")]
     [InlineData("s_setreg_imm32_b32 MODE.IEEE", new uint[] { 0xBA800241, 1 }, "s_setreg_imm32_b32 writes MODE.IEEE/DX10_CLAMP")]
-    [InlineData("s_getreg_b32 MODE", new uint[] { 0xB900F801 }, "s_getreg_b32 reads MODE.DX10_CLAMP")]
     [InlineData("s_getreg_b32 TRAPSTS", new uint[] { 0xB900F803 }, "s_getreg_b32 of hardware register 3 is not supported")]
     [InlineData("v_dot4_i32_i8 op_sel", new uint[] { 0xCC164808, 0x1C0A0300 }, "VDot4I32I8: op_sel/op_sel_hi other than the default")]
     [InlineData("v_dot2_i32_i16 neg_lo", new uint[] { 0xCC144008, 0x3C0A0300 }, "VDot2I32I16: neg_lo/neg_hi on an integer dot product")]

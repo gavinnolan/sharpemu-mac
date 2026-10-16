@@ -718,10 +718,9 @@ public static partial class Gen5MslTranslator
 
         // ---- scalar ----
 
-        /// <summary>S_GETREG_B32 of HW_REG_MODE: FP_ROUND = 0 (round to nearest even, all
-        /// Metal does), FP_DENORM = 0xF (denormals preserved), IEEE from the launch state;
-        /// the exception enables and the rest read 0. DX10_CLAMP (bit 8) is not part of the
-        /// compile request, so a field covering it is refused, as is any other register.</summary>
+        /// <summary>S_GETREG_B32 of HW_REG_MODE: FP_ROUND and FP_DENORM (bits 7:0) are the
+        /// launch FLOAT_MODE, DX10_CLAMP (bit 8) and IEEE (bit 9) the launch state; the
+        /// exception enables and the rest read 0. Any other register is refused.</summary>
         private bool TryEmitGetreg(Gen5ShaderInstruction instruction, out string error)
         {
             error = string.Empty;
@@ -739,11 +738,6 @@ public static partial class Gen5MslTranslator
             }
 
             var field = (uint)((((1ul << (int)size) - 1ul) << (int)offset) & 0xFFFFFFFFul);
-            if ((field & 0x100u) != 0)
-            {
-                error = "s_getreg_b32 reads MODE.DX10_CLAMP, which the compile request does not carry";
-                return false;
-            }
 
             if (instruction.Destinations is not [{ Kind: Gen5OperandKind.ScalarRegister } destination, ..])
             {
@@ -751,7 +745,7 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
-            var mode = 0xF0u | (_request.IeeeMode ? 0x200u : 0u);
+            var mode = (_request.FloatMode & 0xFFu) | (_request.Dx10Clamp ? 0x100u : 0u) | (_request.IeeeMode ? 0x200u : 0u);
             StoreScalar(destination.Value, FormatUInt((mode & field) >> (int)offset));
             return true;
         }

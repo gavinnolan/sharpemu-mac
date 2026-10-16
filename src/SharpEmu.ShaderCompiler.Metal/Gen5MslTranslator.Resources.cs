@@ -48,6 +48,14 @@ public static partial class Gen5MslTranslator
             return false;
         }
 
+        // Metal rounds every float result to nearest even, so a launch FLOAT_MODE whose FP_ROUND
+        // fields (bits 3:0) pick another rounding cannot be honoured, as for S_ROUND_MODE.
+        if ((request.FloatMode & 0xFu) != 0)
+        {
+            error = $"FLOAT_MODE 0x{request.FloatMode:X2}: only round-to-nearest-even (FP_ROUND 0) is supported";
+            return false;
+        }
+
         if (!new CompilationContext(request, options ?? Gen5MslCodegenOptions.FromEnvironment)
                 .TryCompile(out shader, out error))
         {

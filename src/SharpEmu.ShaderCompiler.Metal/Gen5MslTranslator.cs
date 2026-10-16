@@ -1476,11 +1476,11 @@ public static partial class Gen5MslTranslator
                 case "SMemrealtime":
                     return TryEmitShaderClock(instruction, out error);
                 // S_SETREG_B32 simm16 = hwreg id[5:0], offset[10:6], size-1[15:11]. The translator
-                // honours MODE only through the launch-time IeeeMode / DX10_CLAMP state (ALU output
-                // modifiers), so a write to MODE bits 8..9 would silently desync from it and is refused.
-                // FP_ROUND / FP_DENORM (bits 0..7) are not honoured anywhere in this translator (Metal has
-                // no per-instruction rounding and denorm flushing is fixed), and the other registers
-                // (TRAPSTS, HW_ID, ...) do not affect results, so those writes stay no-ops.
+                // honours MODE only through the launch-time IEEE / DX10_CLAMP / FLOAT_MODE state, so a
+                // write to MODE bits 8..9 would silently desync from it and is refused. Writes to
+                // FP_ROUND / FP_DENORM (bits 0..7) are not tracked (Metal has no per-instruction
+                // rounding and its f32 denormal flushing is fixed), and the other registers (TRAPSTS,
+                // HW_ID, ...) do not affect results, so those writes stay no-ops.
                 case "SSetregB32":
                 case "SSetregImm32B32":
                     if (instruction.Sources.Count > 1 && SetregTouchesIeeeOrClamp(instruction.Sources[1].Value))
@@ -1503,7 +1503,8 @@ public static partial class Gen5MslTranslator
                     }
 
                     return true;
-                // Denormals are always preserved, as for an S_SETREG_B32 of MODE.FP_DENORM.
+                // Not tracked, as for an S_SETREG_B32 of MODE.FP_DENORM: Metal flushes f32 denormals
+                // and keeps f16 ones whatever the mode says.
                 case "SDenormMode":
                 // Wave scheduling, power and debug hints with no effect on results: S_WAKEUP and
                 // S_SLEEP pace waves, S_SETKILL and S_INCPERFLEVEL/S_DECPERFLEVEL drive the
