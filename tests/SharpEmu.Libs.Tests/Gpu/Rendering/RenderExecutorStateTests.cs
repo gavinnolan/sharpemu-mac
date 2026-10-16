@@ -544,7 +544,15 @@ public sealed class RenderExecutorStateTests : IDisposable
     {
         { "user vectors", banks => banks.UserConfig.GeometryEngineUserVectorEnable = new GeometryEngineUserVectorEnableRegisters { VectorRegister2 = true }, "v1=False v2=True v3=False" },
         { "line stipple", banks => banks.Context.ScanMode = new ScanModeRegisters { LineStippleEnable = true }, "Line stipple" },
-        { "clip planes", banks => banks.Context.Clip = new ClipControlRegisters { UserClipPlanes = 3 }, "planes=3" },
+        {
+            "point sprite clip planes",
+            banks =>
+            {
+                banks.Context.Clip = new ClipControlRegisters { UserClipPlanes = 3, UserClipPlaneMode = 2 };
+                banks.UserConfig.PrimitiveType = (uint)GuestPrimitiveType.PointList;
+            },
+            "planes=0x03 mode=2"
+        },
         { "copy centroid", banks => banks.Context.DepthTarget = banks.Context.DepthTarget with { RenderControl = 1u << 7 }, "renderControl=0x00000080" },
         { "copy sample", banks => banks.Context.DepthTarget = banks.Context.DepthTarget with { RenderControl = 2u << 8 }, "copySample=2" },
         { "front polygon type", banks => banks.Context.RasterMode = new RasterModeRegisters { FrontPolygonType = 1 }, "type=1" },

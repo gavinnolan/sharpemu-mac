@@ -30,12 +30,22 @@ public sealed partial class RenderExecutor
         }
 
         var clip = context.Clip;
-        if (clip.UserClipPlanes != 0 || clip.UserClipPlaneMode != 0 || clip.VertexKillAny || clip.UserClipPlaneNegateY ||
-            clip.UserClipPlaneCullOnly || clip.CullOnClippingErrorDisable || clip.ForceViewportIndexFromVertexShader)
+        if (clip.VertexKillAny || clip.CullOnClippingErrorDisable || clip.ForceViewportIndexFromVertexShader)
         {
             throw _host.Fatal(
-                $"The clip control state is not supported: planes={clip.UserClipPlanes} mode={clip.UserClipPlaneMode} killAny={clip.VertexKillAny} " +
-                $"negateY={clip.UserClipPlaneNegateY} cullOnly={clip.UserClipPlaneCullOnly} cullOnError={clip.CullOnClippingErrorDisable} viewportIndex={clip.ForceViewportIndexFromVertexShader}.");
+                $"The clip control state is not supported: killAny={clip.VertexKillAny} " +
+                $"cullOnError={clip.CullOnClippingErrorDisable} viewportIndex={clip.ForceViewportIndexFromVertexShader}.");
+        }
+
+        // User clip planes are clip distances, which cull a point by its vertex: PS_UCP_MODE
+        // 0. The other modes clip or cull the expanded sprite (PS_UCP_Y_SCALE_NEG orients it).
+        if (!clip.ClipDisable && clip.UserClipPlanes != 0 &&
+            (GuestPrimitiveType)banks.UserConfig.PrimitiveType == GuestPrimitiveType.PointList &&
+            (clip.UserClipPlaneMode != 0 || clip.UserClipPlaneNegateY))
+        {
+            throw _host.Fatal(
+                $"User clip planes on point sprites are not supported: planes=0x{clip.UserClipPlanes:X2} mode={clip.UserClipPlaneMode} " +
+                $"negateY={clip.UserClipPlaneNegateY}.");
         }
 
         var depth = context.DepthTarget;

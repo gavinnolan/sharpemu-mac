@@ -811,6 +811,8 @@ internal sealed class ShaderProgramCache
                         PositionYDown = info.ClipSpace.PositionYDown,
                         PositionXMirror = info.ClipSpace.PositionXMirror,
                         DepthPlanes = info.ClipSpace.DepthPlanes,
+                        UserClipPlanes = info.ClipSpace.UserClipPlanes,
+                        UserClipPlanesCullOnly = info.ClipSpace.UserClipPlanesCullOnly,
                         XyPreDivided = info.ClipSpace.XyPreDivided,
                         ZPreDivided = info.ClipSpace.ZPreDivided,
                         WReciprocal = info.ClipSpace.WReciprocal,

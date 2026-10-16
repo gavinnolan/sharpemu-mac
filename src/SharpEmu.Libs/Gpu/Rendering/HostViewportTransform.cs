@@ -101,8 +101,34 @@ public readonly record struct HostViewportTransform(
             DepthScale = depth.Scale,
             DepthOffset = depth.Offset,
             DepthPlanes = depth.Planes,
+            UserClipPlanes = EnabledUserClipPlanes(context),
+            UserClipPlanesCullOnly = clip.UserClipPlaneCullOnly,
         };
         return new HostViewportTransform(clipSpace, x, y, width, height, depth.MinDepth, depth.MaxDepth, depth.Clip);
+    }
+
+    // PA_CL_CLIP_CNTL.UCP_ENA_n selects the planes, in the guest's clip space; CLIP_DISABLE
+    // turns the clipper off, planes included.
+    private static float[]? EnabledUserClipPlanes(ContextRegisters context)
+    {
+        var enabled = context.Clip.ClipDisable ? 0 : context.Clip.UserClipPlanes & 0x3F;
+        if (enabled == 0)
+        {
+            return null;
+        }
+
+        var planes = new float[System.Numerics.BitOperations.PopCount((uint)enabled) * 4];
+        var next = 0;
+        for (var plane = 0; plane < ContextRegisters.UserClipPlaneCount; plane++)
+        {
+            if ((enabled & (1 << plane)) != 0)
+            {
+                Array.Copy(context.UserClipPlanes, plane * 4, planes, next, 4);
+                next += 4;
+            }
+        }
+
+        return planes;
     }
 
     /// <summary>Whether the host clips depth to its viewport range (else it clamps), as <see cref="Resolve"/> decides.</summary>

@@ -47,7 +47,7 @@ public static partial class Gen5MslTranslator
             IReadOnlyList<Gen5ShaderInstruction> instructions,
             ShaderClipSpaceTransform clip)
         {
-            if (clip.DepthPlanes != ShaderDepthPlanes.None)
+            if (clip.DepthPlanes != ShaderDepthPlanes.None || clip.UserClipPlanes is { Length: > 0 })
             {
                 // The program clips planes these positions do not describe.
                 return null;

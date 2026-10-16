@@ -372,6 +372,7 @@ public sealed class ScreenViewportRegisters
 public sealed class ContextRegisters
 {
     public const int ColorTargetCount = 8;
+    public const int UserClipPlaneCount = 6;
 
     public float LineWidth = 1f;
     public uint PrimitiveResetIndex = 0xFFFF_FFFFu;
@@ -379,6 +380,8 @@ public sealed class ContextRegisters
     public BlendColorRegisters BlendColor;
     public ColorTargetWords[] ColorTargets = new ColorTargetWords[ColorTargetCount];
     public uint[] ColorClearWord1 = new uint[ColorTargetCount];
+    // PA_CL_UCP_n_{X,Y,Z,W}, four floats per plane.
+    public float[] UserClipPlanes = new float[UserClipPlaneCount * 4];
     public uint RenderTargetMask;
 
     // DB_ALPHA_TO_MASK: bit 0 enables alpha to coverage, the offsets and OFFSET_ROUND set its dither.
@@ -425,6 +428,7 @@ public sealed class ContextRegisters
         copy.BlendControls = (BlendRegisters[])BlendControls.Clone();
         copy.ColorTargets = (ColorTargetWords[])ColorTargets.Clone();
         copy.ColorClearWord1 = (uint[])ColorClearWord1.Clone();
+        copy.UserClipPlanes = (float[])UserClipPlanes.Clone();
         copy.ScreenViewport = ScreenViewport.Copy();
         copy.SampleLocations = SampleLocations.Copy();
         copy.ShaderInterface = ShaderInterface.Copy();
