@@ -1902,8 +1902,9 @@ public static partial class Gen5MslTranslator
             var x = Temp("float", F(instruction, 0));
             var y = Temp("float", F(instruction, 1));
             var z = Temp("float", F(instruction, 2));
-            var amaxXY = Temp("float", $"fmax(fabs({x}), fabs({y}))");
-            var isZMax = Temp("bool", $"fabs({z}) >= {amaxXY}");
+            // The conditions are the ISA's pseudo-code, ordered compares included: with a NaN
+            // coordinate they are false, where fmax would skip the NaN.
+            var isZMax = Temp("bool", $"fabs({z}) >= fabs({x}) && fabs({z}) >= fabs({y})");
             var yGeX = Temp("bool", $"fabs({y}) >= fabs({x})");
             if (coordinate == CubeCoordinate.Ma)
             {
