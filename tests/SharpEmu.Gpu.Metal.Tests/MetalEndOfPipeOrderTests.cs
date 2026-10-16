@@ -477,12 +477,99 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         }
     }
 
+    /// <summary>
+    /// An end-of-pipe GDS store lands where its packet sits: the GDS words as the stream
+    /// left them, written once the work before it is done, with no GPU drain at the packet.
+    /// </summary>
+    [Theory]
+    [InlineData(WindowedLabel)]
+    [InlineData(UnwindowedLabel)]
+    public void AnEndOfPipeGdsStoreLandsWithItsSubmission(ulong destination)
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        Assert.True(host.WritesGdsAtEndOfPipe);
+        BinaryPrimitives.WriteUInt32LittleEndian(host.GuestMemory.GdsWords()[8..], 0xC0DE_0001);
+        BinaryPrimitives.WriteUInt32LittleEndian(host.GuestMemory.GdsWords()[12..], 0xC0DE_0002);
+
+        // Work ahead of it, so the store has something to wait for.
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write32, 1, LaterLabel, 1));
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.GdsWrite32, 1, destination, GdsWordOffset: 2, GdsWordCount: 2));
+        Assert.Equal(0UL, rig.Backing.Read64(destination));
+
+        host.FlushCommandBuffer();
+        WaitForGpu(host, host.LastWorkSerial);
+        WaitForCompletions(host);
+        WaitUntil(() => rig.Backing.Read64(destination) != 0);
+        Assert.Equal(0xC0DE_0001u, rig.Backing.Read32(destination));
+        Assert.Equal(0xC0DE_0002u, rig.Backing.Read32(destination + 4));
+    }
+
+    /// <summary>RELEASE_MEM data select 7: the add lands from the completion, once.</summary>
+    [Fact]
+    public void AnEndOfPipeAtomicAddLandsOnceWithItsSubmission()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        Assert.True(host.DefersEndOfPipeLabel(EndOfPipeWriteKind.AtomicAdd32));
+        Assert.True(rig.Backing.TryWrite(LaterLabel, BitConverter.GetBytes(5u)));
+
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write32, 1, WindowedLabel, 1));
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.AtomicAdd32, 1, LaterLabel, 3));
+        Assert.Equal(5u, rig.Backing.Read32(LaterLabel));
+
+        host.FlushCommandBuffer();
+        WaitForGpu(host, host.LastWorkSerial);
+        WaitForCompletions(host);
+        // The drain takes a completion off the list before it runs it.
+        WaitUntil(() => rig.Backing.Read32(LaterLabel) != 5);
+        Assert.Equal(8u, rig.Backing.Read32(LaterLabel));
+    }
+
+    /// <summary>
+    /// A command-processor operand recorded work still owes is committed and answered as
+    /// owed, so the interpreter parks instead of the worker waiting; once it lands the same
+    /// question reads it now.
+    /// </summary>
+    [Fact]
+    public void AnOwedOperandIsCommittedAndReportedUntilItLands()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+
+        Assert.False(host.CommitPendingOperandWrite(LaterLabel, sizeof(ulong)));
+
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write64, 1, WindowedLabel, 0x99));
+        var recorded = host.SubmissionSerial;
+        Assert.True(host.CommitPendingOperandWrite(WindowedLabel, sizeof(ulong)));
+        // The commit took the label out of the buffer being recorded.
+        Assert.NotEqual(recorded, host.SubmissionSerial);
+
+        WaitForGpu(host, recorded);
+        WaitForCompletions(host);
+        Assert.False(host.CommitPendingOperandWrite(WindowedLabel, sizeof(ulong)));
+        Assert.Equal(0x99UL, rig.Backing.Read64(WindowedLabel));
+    }
+
     private static void WaitForGpu(MetalRenderHost host, ulong serial)
     {
         var deadline = Environment.TickCount64 + 10_000;
         while (host.CompletedSerial < serial)
         {
             Assert.True(Environment.TickCount64 < deadline, $"The GPU did not reach serial {serial}.");
+            Thread.Sleep(1);
+        }
+    }
+
+    private static void WaitUntil(Func<bool> condition)
+    {
+        var deadline = Environment.TickCount64 + 10_000;
+        while (!condition())
+        {
+            Assert.True(Environment.TickCount64 < deadline, "The completion did not land.");
             Thread.Sleep(1);
         }
     }
