@@ -202,10 +202,6 @@ public static class GameServiceStubs
         return notFound;
     }
 
-    [SysAbiExport(Nid = "dPj4ZtRcIWk", ExportName = "sceContentSearchInit",
-        Target = Generation.Gen5, LibraryName = "libSceContentSearch")]
-    public static int ContentSearchInit(CpuContext ctx) => Ok(ctx);
-
     [SysAbiExport(Nid = "zoxb0wEChEM", ExportName = "sceContentDeleteInitialize",
         Target = Generation.Gen5, LibraryName = "libSceContentDelete")]
     public static int ContentDeleteInitialize(CpuContext ctx) => Ok(ctx);
