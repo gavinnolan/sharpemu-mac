@@ -151,15 +151,11 @@ public sealed class TextureSceneTests(ITestOutputHelper output) : SceneTestBase(
     }
 
     /// <summary>
-    /// The chain's T#. word5 MAX_MIP stays at the surface's last level (6) whatever the view's LAST_LEVEL is: the emulator derives
-    /// the chain layout from it, and the harness helper would tie it to <paramref name="lastLevel"/>.
+    /// The chain's T#. Word 5 MAX_MIP stays at the surface's last level (6) whatever the view's LAST_LEVEL is: the emulator derives
+    /// the chain layout from it.
     /// </summary>
-    private static uint[] MipTexture(ulong address, uint baseLevel = 0, uint lastLevel = 6)
-    {
-        var words = Descriptors.Texture(address, Rgba8, 64, 64, baseLevel: baseLevel, lastLevel: lastLevel);
-        words[5] = 6u << 4;
-        return words;
-    }
+    private static uint[] MipTexture(ulong address, uint baseLevel = 0, uint lastLevel = 6) =>
+        Descriptors.Texture(address, Rgba8, 64, 64, baseLevel: baseLevel, lastLevel: lastLevel, maxMip: 6);
 
     // ======================================================================
     // 1. Mip selection

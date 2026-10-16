@@ -348,10 +348,13 @@ internal static class Descriptors
         IdentitySelect | (format << 12) | (1u << 24) | (oobSelect << 28),
     ];
 
-    /// <summary>A T# over a linear or tiled image. <paramref name="type"/> 9 = 2D, 13 = 2D array, 11 = cube, 10 = 3D.</summary>
+    /// <summary>
+    /// A T# over a linear or tiled image. <paramref name="type"/> 9 = 2D, 13 = 2D array, 11 = cube, 10 = 3D. Word 5 MAX_MIP is
+    /// the resource's mip count minus one, independent of the view's LAST_LEVEL; <paramref name="maxMip"/> defaults to LAST_LEVEL.
+    /// </summary>
     public static uint[] Texture(ulong address, uint format, uint width, uint height, uint type = 9, uint tileMode = 0,
         uint baseLevel = 0, uint lastLevel = 0, uint depthOrLastLayer = 0, uint baseArray = 0, uint dstSelect = IdentitySelect,
-        uint minLodFixed = 0)
+        uint minLodFixed = 0, uint? maxMip = null)
     {
         var shifted = address >> 8;
         var lastX = width - 1;
@@ -363,7 +366,7 @@ internal static class Descriptors
             ((lastX >> 2) & 0xFFF) | (lastY << 14),
             dstSelect | (baseLevel << 12) | (lastLevel << 16) | (tileMode << 20) | (type << 28),
             depthOrLastLayer | (baseArray << 16),
-            lastLevel << 4,
+            (maxMip ?? lastLevel) << 4,
             0,
             0,
         ];
