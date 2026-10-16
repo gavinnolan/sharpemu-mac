@@ -766,15 +766,17 @@ public sealed class TextureSceneTests(ITestOutputHelper output) : SceneTestBase(
                     return (U32(v), [SrgbToLinear(c[0]), SrgbToLinear(c[1]), SrgbToLinear(c[2]), c[3]]);
                 }, 0.003f);
             case "Rgb10A2Unorm":
-                // 2_10_10_10: names list the fields from the most significant bit down, so R is the low ten bits and A the top two.
-                return Uncompressed(44, 4, r =>
+                // IMG_FORMAT 50, 2_10_10_10_UNORM (mesa gfx10-rsrc.json, RDNA2 ISA table 47; PAL X10Y10Z10W2_Unorm): names list
+                // the fields from the most significant bit down, so R is the low ten bits and A the top two. 44 is 10_10_10_2.
+                return Uncompressed(50, 4, r =>
                 {
                     var v = (uint)r.NextInt64();
                     return (U32(v), [(v & 1023) / 1023f, ((v >> 10) & 1023) / 1023f, ((v >> 20) & 1023) / 1023f, (v >> 30) / 3f]);
                 }, 0.001f);
             case "R11G11B10Float":
-                // 10_11_11 (R11G11B10F): R is bits 0..10, G bits 11..21, B bits 22..31.
-                return Uncompressed(43, 4, r =>
+                // IMG_FORMAT 36, 10_11_11_FLOAT (R11G11B10F; mesa maps PIPE_FORMAT_R11G11B10_FLOAT to it, PAL X11Y11Z10_Float):
+                // R is bits 0..10, G bits 11..21, B bits 22..31.
+                return Uncompressed(36, 4, r =>
                 {
                     var rbits = (uint)r.Next(8, 22) << 6 | (uint)r.Next(64);
                     var gbits = (uint)r.Next(8, 22) << 6 | (uint)r.Next(64);
@@ -783,8 +785,9 @@ public sealed class TextureSceneTests(ITestOutputHelper output) : SceneTestBase(
                     return (U32(v), [MiniFloat(rbits, 6), MiniFloat(gbits, 6), MiniFloat(bbits, 5), 1f]);
                 }, 1e-6f);
             case "Float11_11_10":
-                // 11_11_10: R is the low ten bits (5-bit mantissa), G bits 10..20, B bits 21..31.
-                return Uncompressed(36, 4, r =>
+                // IMG_FORMAT 43, 11_11_10_FLOAT (PAL X10Y11Z11_Float): R is the low ten bits (5-bit mantissa), G bits 10..20,
+                // B bits 21..31.
+                return Uncompressed(43, 4, r =>
                 {
                     var rbits = (uint)r.Next(8, 22) << 5 | (uint)r.Next(32);
                     var gbits = (uint)r.Next(8, 22) << 6 | (uint)r.Next(64);
@@ -1055,7 +1058,7 @@ public sealed class TextureSceneTests(ITestOutputHelper output) : SceneTestBase(
     [InlineData("Rgba8Srgb")]
     [InlineData("Rgb10A2Unorm")]
     [InlineData("R11G11B10Float")]
-    [InlineData("Float11_11_10")]
+    [InlineData("Float11_11_10", Skip = "IMG_FORMAT 43 (11_11_10_FLOAT, R in the low ten bits) has no Metal pixel format; the emulator refuses it")]
     [InlineData("Rgba16Float")]
     [InlineData("Rg16Snorm")]
     [InlineData("R32Float")]
