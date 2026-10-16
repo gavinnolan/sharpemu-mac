@@ -1535,7 +1535,7 @@ public static partial class Gen5MslTranslator
             else if (opcode is
                      "VCmpTruF32" or "VCmpxTruF32" or
                      "VCmpTruF16" or "VCmpxTruF16" or
-                     "VCmpTI32" or "VCmpTU32" or
+                     "VCmpTI32" or "VCmpTU32" or "VCmpxTI32" or "VCmpxTU32" or
                      // The 64-bit F/T forms are constant compares like their 32-bit
                      // siblings; without them TrimCompare hands "F"/"T" to the
                      // integer operator table and the opcode reads as unsupported.
@@ -1546,7 +1546,7 @@ public static partial class Gen5MslTranslator
             else if (opcode is
                      "VCmpFF32" or "VCmpxFF32" or
                      "VCmpFF16" or "VCmpxFF16" or
-                     "VCmpFI32" or "VCmpFU32" or
+                     "VCmpFI32" or "VCmpFU32" or "VCmpxFI32" or "VCmpxFU32" or
                      "VCmpFI64" or "VCmpxFI64" or "VCmpFU64" or "VCmpxFU64")
             {
                 condition = "false";
