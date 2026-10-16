@@ -254,6 +254,16 @@ public static class DepthTargetResolver
         return new StencilOperations(converted[0], converted[1], converted[2], compare);
     }
 
+    // The add and subtract operations move the stencil by the operation value; the host only
+    // steps by one, and a zero operand leaves the stencil as it is.
+    private static GpuStencilOp AddOperation(GpuStencilOp step, byte operation, byte operationValue, Func<string, Exception> fatal) =>
+        operationValue switch
+        {
+            0 => GpuStencilOp.Keep,
+            1 => step,
+            _ => throw fatal($"The stencil add/subtract operand is not supported: operation=0x{operation:X2} operationValue=0x{operationValue:X2}."),
+        };
+
     // A zero write mask makes every operation a keep; XOR maps to invert only over the written bits.
     private static GpuStencilOp ConvertOperation(byte operation, byte writeMask, byte operationValue, Func<string, Exception> fatal)
     {
@@ -273,15 +283,15 @@ public static class DepthTargetResolver
             case ReplaceWithOperationValue:
                 return (operationValue & writeMask) == 0 ? GpuStencilOp.Zero : GpuStencilOp.Replace;
             case 0x05:
-                return GpuStencilOp.IncrementAndClamp;
+                return AddOperation(GpuStencilOp.IncrementAndClamp, operation, operationValue, fatal);
             case 0x06:
-                return GpuStencilOp.DecrementAndClamp;
+                return AddOperation(GpuStencilOp.DecrementAndClamp, operation, operationValue, fatal);
             case 0x07:
                 return GpuStencilOp.Invert;
             case 0x08:
-                return GpuStencilOp.IncrementAndWrap;
+                return AddOperation(GpuStencilOp.IncrementAndWrap, operation, operationValue, fatal);
             case 0x09:
-                return GpuStencilOp.DecrementAndWrap;
+                return AddOperation(GpuStencilOp.DecrementAndWrap, operation, operationValue, fatal);
             case ExclusiveOr:
                 if ((writeMask & operationValue) == 0)
                 {

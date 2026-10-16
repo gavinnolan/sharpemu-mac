@@ -165,10 +165,14 @@ public sealed class TargetResolverTests : IClassFixture<HeadlessVulkanFixture>
 
         context.DepthTarget = context.DepthTarget with { RenderControl = 0 };
         context.StencilMask.OperationValue = 0x10;
-        context.StencilMask.OperationValueBack = 0x33;
+        context.StencilMask.OperationValueBack = 1;
         state = DepthTargetResolver.ResolveState(context, hasStencil: true, Fatal);
         Assert.Equal(GpuStencilOp.IncrementAndClamp, state.BackOperations.FailOperation);
         Assert.Equal(0xFFu, state.BackMasks.WriteMask);
+
+        // ADD_CLAMP moves the stencil by the operand; the host only steps by one.
+        context.StencilMask.OperationValueBack = 0x33;
+        Assert.Contains("add/subtract operand", Assert.Throws<InvalidOperationException>(() => DepthTargetResolver.ResolveState(context, true, Fatal)).Message);
     }
 
     [Fact]
