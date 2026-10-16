@@ -1298,6 +1298,9 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             isMain,
             isSystemModule);
         KernelModuleRegistry.RegisterModuleSymbols(handle, image.RuntimeSymbols);
+        // The kernel names a module's mappings after the module file.
+        var imageBase = image.EntryPoint >= image.ElfHeader.EntryPoint ? image.EntryPoint - image.ElfHeader.EntryPoint : 0UL;
+        GuestHostMappings.RegisterModuleSegments(_virtualMemory, image.ProgramHeaders, imageBase, Path.GetFileName(modulePath));
         Console.Error.WriteLine(
             $"[RUNTIME] Registered module handle={handle} name={Path.GetFileName(modulePath)} base=0x{baseAddress:X16} size=0x{size:X16}");
         return handle;

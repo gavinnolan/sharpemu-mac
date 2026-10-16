@@ -319,7 +319,8 @@ public static partial class KernelMemoryCompatExports
                 OrbisProtCpuReadWrite,
                 IsFlexible: false,
                 IsDirect: false,
-                DirectStart: 0));
+                DirectStart: 0,
+                Traits: MappingTraits.Host));
         }
 
         for (ulong offset = 0; offset < mappedLength;)

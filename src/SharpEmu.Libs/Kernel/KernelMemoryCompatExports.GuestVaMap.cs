@@ -11,8 +11,9 @@ namespace SharpEmu.Libs.Kernel;
 // run of identical state. A record carries its kind (reserved, direct, flexible, pooled, JIT),
 // protection, memory type and name, so splitting a record (protect, rename, partial unmap)
 // carries all of them along and removing it drops them. Queries coalesce neighbouring records
-// the way the kernel merges map entries; thread stacks are owned by the scheduler and are
-// reported from there.
+// the way the kernel merges map entries. Memory the loader and the runtime map on the guest's
+// behalf (module segments, thread stacks, TLS, runtime stubs) is registered here too, so the
+// guest can query it like the kernel's own mappings.
 public static partial class KernelMemoryCompatExports
 {
     private const int MemoryNotFound = unchecked((int)0x80020002);
@@ -43,6 +44,10 @@ public static partial class KernelMemoryCompatExports
         NoCoalesce = 0x02,
         // A view of a JIT shared-memory object; the object owns the backing.
         Jit = 0x04,
+        // Mapped by the loader or the runtime, not through a kernel memory call.
+        Host = 0x08,
+        // A thread stack (with Host).
+        Stack = 0x10,
     }
 
     private readonly record struct MappedRegion(ulong Address, ulong Length, int Protection, bool IsFlexible,
@@ -52,6 +57,8 @@ public static partial class KernelMemoryCompatExports
         public bool IsPooled => (Traits & MappingTraits.Pooled) != 0;
         public bool IsJit => (Traits & MappingTraits.Jit) != 0;
         public bool IsNoCoalesce => (Traits & MappingTraits.NoCoalesce) != 0;
+        public bool IsHost => (Traits & MappingTraits.Host) != 0;
+        public bool IsStack => (Traits & MappingTraits.Stack) != 0;
 
         // Committed to a view of the shared backing object.
         public bool IsBacked => !IsReserved && (IsDirect || IsFlexible || IsPooled || IsJit);
@@ -59,11 +66,11 @@ public static partial class KernelMemoryCompatExports
 
     private readonly record struct VirtualRange(ulong Start, ulong End, MappedRegion Region, bool IsStack);
 
-    // FreeBSD merges neighbouring map entries with one state; direct and JIT mappings keep the
-    // entry of their own map call, and NO_COALESCE opts a range out.
+    // FreeBSD merges neighbouring map entries with one state; direct, JIT and loader mappings
+    // keep the entry of their own map call, and NO_COALESCE opts a range out.
     private static bool CanCoalesce(MappedRegion left, MappedRegion right) =>
         TryAddU64(left.Address, left.Length, out var leftEnd) && leftEnd == right.Address &&
-        !left.IsDirect && !right.IsDirect && !left.IsJit && !right.IsJit &&
+        !left.IsDirect && !right.IsDirect && !left.IsJit && !right.IsJit && !left.IsHost && !right.IsHost &&
         !left.IsNoCoalesce && !right.IsNoCoalesce &&
         left.IsReserved == right.IsReserved && left.IsFlexible == right.IsFlexible &&
         left.Traits == right.Traits && left.Protection == right.Protection &&
@@ -93,65 +100,61 @@ public static partial class KernelMemoryCompatExports
             current = next;
         }
 
-        range = new VirtualRange(start, end, region with { Address = start, Length = end - start }, IsStack: false);
+        range = new VirtualRange(start, end, region with { Address = start, Length = end - start }, region.IsStack);
         return true;
     }
 
-    // Table lookup first; a scheduler-owned stack answers only where the table has nothing.
     private static bool TryResolveVirtualRange(ulong address, bool findNext, out VirtualRange range)
     {
-        bool found;
         lock (_memoryGate)
-            found = TryResolveVirtualRangeLocked(address, findNext, out range);
-        if (found && range.Start <= address)
-            return true;
-
-        if (TryFindGuestStack(address, findNext, out var stackStart, out var stackEnd) &&
-            (!found || stackStart < range.Start))
-        {
-            range = new VirtualRange(stackStart, stackEnd,
-                new MappedRegion(stackStart, stackEnd - stackStart, OrbisProtCpuReadWrite, false, false, 0),
-                IsStack: true);
-            return true;
-        }
-        return found;
+            return TryResolveVirtualRangeLocked(address, findNext, out range);
     }
 
-    // Thread stacks are mapped by the scheduler, outside the kernel table.
-    private static bool TryFindGuestStack(ulong address, bool findNext, out ulong start, out ulong end)
+    // What the loader or the runtime maps for the guest: the role decides how a query reports it.
+    public enum HostMappingKind
     {
-        start = end = 0;
-        var scheduler = GuestThreadExecution.Scheduler;
-        if (scheduler is null)
-            return false;
-        IReadOnlyList<GuestThreadSnapshot> threads;
-        try
-        {
-            threads = scheduler.SnapshotThreads();
-        }
-        catch (InvalidOperationException)
-        {
-            return false;
-        }
+        // A module segment, named after its module.
+        Module,
+        // A guest thread stack: VirtualQuery and IsStack report it as a stack.
+        Stack,
+        // A thread's TLS block.
+        ThreadLocalStorage,
+        // Runtime-owned guest memory: stubs, callback and exception stacks, HLE data.
+        Runtime,
+    }
 
-        var found = false;
-        foreach (var thread in threads)
+    // Records a range the host mapped itself. The range is widened to whole 16 KiB pages and
+    // replaces whatever the table held there; the host memory itself is not touched.
+    public static void RegisterHostMapping(ulong address, ulong length, int protection, HostMappingKind kind,
+        string? name = null)
+    {
+        if (length == 0 || address > ulong.MaxValue - length)
+            return;
+        var start = address & ~(OrbisPageSize - 1);
+        var end = AlignUp(address + length, OrbisPageSize);
+        if (end <= start)
+            return;
+        if (name is { Length: >= OrbisKernelMaximumNameLength })
+            name = name[..(OrbisKernelMaximumNameLength - 1)];
+        var traits = MappingTraits.Host | (kind == HostMappingKind.Stack ? MappingTraits.Stack : MappingTraits.None);
+        lock (_memoryGate)
+            ReplaceMappedRegionRangeLocked(new MappedRegion(start, end - start, protection, false, false, 0,
+                Name: name, Traits: traits));
+    }
+
+    // Drops the host records over a range the host released; kernel mappings there stay.
+    public static void UnregisterHostMapping(ulong address, ulong length)
+    {
+        if (length == 0 || address > ulong.MaxValue - length)
+            return;
+        var start = address & ~(OrbisPageSize - 1);
+        var end = AlignUp(address + length, OrbisPageSize);
+        lock (_memoryGate)
         {
-            if (!scheduler.TryGetGuestThreadStackBounds(thread.ThreadHandle, out var stackBase, out var stackSize) ||
-                stackSize == 0 || !TryAddU64(stackBase, stackSize, out var stackEnd))
-                continue;
-            if (address >= stackBase && address < stackEnd)
-            {
-                (start, end) = (stackBase, stackEnd);
-                return true;
-            }
-            if (findNext && stackBase > address && (!found || stackBase < start))
-            {
-                (start, end) = (stackBase, stackEnd);
-                found = true;
-            }
+            foreach (var region in GetMappingSlices(start, end - start))
+                if (region.IsHost)
+                    RemoveMappingLocked(region.Address, region.Length);
         }
-        return found;
     }
 
     private static int WriteVirtualQueryInfo(CpuContext ctx, ulong infoAddress, VirtualRange range)
@@ -249,15 +252,14 @@ public static partial class KernelMemoryCompatExports
         // A mapped non-stack address still succeeds with both bounds cleared: libc's VM allocator
         // reads them back, and stale values become invalid fixed-range reservations.
         ulong start = 0, end = 0;
-        if (!TryFindGuestStack(address, findNext: false, out start, out end))
+        if (TryResolveVirtualRange(address, findNext: false, out var range))
         {
-            bool mapped;
-            lock (_memoryGate)
-                mapped = TryFindVirtualQueryRegionLocked(address, findNext: false, out _);
-            // Loader images and host-side runtime memory are mapped without a table record.
-            if (!mapped && !IsHostRangeAccessible(address, 1, writeAccess: false))
-                return MemoryAccessDenied;
+            if (range.IsStack)
+                (start, end) = (range.Start, range.End);
         }
+        // The host heap behind libc's malloc is mapped without a table record.
+        else if (!IsHostRangeAccessible(address, 1, writeAccess: false))
+            return MemoryAccessDenied;
 
         if ((startOut != 0 && !ctx.TryWriteUInt64(startOut, start)) ||
             (endOut != 0 && !ctx.TryWriteUInt64(endOut, end)))

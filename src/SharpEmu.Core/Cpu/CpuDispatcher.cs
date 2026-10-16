@@ -8,6 +8,7 @@ using SharpEmu.Core.Cpu.Native;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Kernel;
 using SharpEmu.Logging;
 
 namespace SharpEmu.Core.Cpu;
@@ -365,6 +366,14 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
             nativeStatistics);
     }
 
+    // Maps runtime-owned guest memory and records it in the kernel's guest VA map.
+    private void MapGuestRegion(KernelMemoryCompatExports.HostMappingKind kind, ulong address, ulong size,
+        ulong fileOffset, ReadOnlySpan<byte> fileData, ProgramHeaderFlags protection)
+    {
+        _virtualMemory.Map(address, size, fileOffset, fileData, protection);
+        GuestHostMappings.Register(_virtualMemory, address, size, protection, kind);
+    }
+
     private ulong TryMapStackRegion()
     {
         const ulong stackStride = 0x0100_0000UL;
@@ -373,7 +382,8 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
             var candidateBase = StackBaseAddress - ((ulong)i * stackStride);
             try
             {
-                _virtualMemory.Map(
+                MapGuestRegion(
+                    KernelMemoryCompatExports.HostMappingKind.Stack,
                     candidateBase,
                     StackSize,
                     fileOffset: 0,
@@ -399,7 +409,8 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
             var mappedBase = candidateBase - TlsPrefixSize;
             try
             {
-                _virtualMemory.Map(
+                MapGuestRegion(
+                    KernelMemoryCompatExports.HostMappingKind.ThreadLocalStorage,
                     mappedBase,
                     TlsSize + TlsPrefixSize,
                     fileOffset: 0,
@@ -624,7 +635,8 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
             var candidateBase = BootstrapStubBaseAddress - ((ulong)i * stride);
             try
             {
-                _virtualMemory.Map(
+                MapGuestRegion(
+                    KernelMemoryCompatExports.HostMappingKind.Runtime,
                     candidateBase,
                     BootstrapRegionSize,
                     fileOffset: 0,
@@ -649,7 +661,8 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
             var candidateBase = BootstrapPayloadBaseAddress - ((ulong)i * stride);
             try
             {
-                _virtualMemory.Map(
+                MapGuestRegion(
+                    KernelMemoryCompatExports.HostMappingKind.Runtime,
                     candidateBase,
                     BootstrapRegionSize,
                     fileOffset: 0,
@@ -679,7 +692,8 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
             var candidateBase = DynlibFallbackStubBaseAddress - ((ulong)i * stride);
             try
             {
-                _virtualMemory.Map(
+                MapGuestRegion(
+                    KernelMemoryCompatExports.HostMappingKind.Runtime,
                     candidateBase,
                     BootstrapRegionSize,
                     fileOffset: 0,
@@ -707,7 +721,8 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
             var candidateBase = ReturnToHostStubBaseAddress - ((ulong)i * ReturnToHostStubStride);
             try
             {
-                _virtualMemory.Map(
+                MapGuestRegion(
+                    KernelMemoryCompatExports.HostMappingKind.Runtime,
                     candidateBase,
                     BootstrapRegionSize,
                     fileOffset: 0,

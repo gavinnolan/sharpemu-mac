@@ -562,6 +562,9 @@ public sealed class SelfLoader : ISelfLoader
                 sourceOffset,
                 fileData,
                 header.Flags);
+            // Named once the runtime registers the module.
+            GuestHostMappings.Register(virtualMemory, virtualAddress, header.MemorySize, header.Flags,
+                SharpEmu.Libs.Kernel.KernelMemoryCompatExports.HostMappingKind.Module);
         }
     }
 
@@ -1884,6 +1887,8 @@ public sealed class SelfLoader : ISelfLoader
                     fileOffset: 0,
                     mapData,
                     ProgramHeaderFlags.Read | ProgramHeaderFlags.Execute);
+                GuestHostMappings.Register(virtualMemory, candidateBase, mapSize, ProgramHeaderFlags.Read | ProgramHeaderFlags.Execute,
+                    SharpEmu.Libs.Kernel.KernelMemoryCompatExports.HostMappingKind.Runtime);
                 return candidateBase;
             }
             catch (InvalidOperationException)

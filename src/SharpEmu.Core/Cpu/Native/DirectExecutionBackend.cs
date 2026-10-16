@@ -19,6 +19,7 @@ using SharpEmu.Core.Cpu.Native.Platform;
 using SharpEmu.HLE.Host;
 using SharpEmu.HLE.DsTrace;
 using SharpEmu.Libs.Diagnostics;
+using SharpEmu.Libs.Kernel;
 
 namespace SharpEmu.Core.Cpu.Native;
 
@@ -5646,8 +5647,25 @@ public sealed unsafe partial class DirectExecutionBackend :
 			State = GuestThreadRunState.Ready,
 			Recycler = request.Recycler,
 		};
+		RegisterGuestThreadMappings(virtualMemory, stackBase, stackSize, tlsBase);
 		error = null;
 		return true;
+	}
+
+	// The kernel's guest VA map reports a live thread's stack and TLS; an exited thread's
+	// regions wait for reuse and are no longer the guest's.
+	private static void RegisterGuestThreadMappings(IVirtualMemory memory, ulong stackBase, ulong stackSize, ulong tlsBase)
+	{
+		GuestHostMappings.Register(memory, stackBase, stackSize, ProgramHeaderFlags.Read | ProgramHeaderFlags.Write,
+			KernelMemoryCompatExports.HostMappingKind.Stack);
+		GuestHostMappings.Register(memory, tlsBase - GuestThreadTlsPrefixSize, GuestThreadTlsPrefixSize + GuestThreadTlsSize,
+			ProgramHeaderFlags.Read | ProgramHeaderFlags.Write, KernelMemoryCompatExports.HostMappingKind.ThreadLocalStorage);
+	}
+
+	private static void UnregisterGuestThreadMappings(IVirtualMemory memory, ulong stackBase, ulong stackSize, ulong tlsBase)
+	{
+		GuestHostMappings.Unregister(memory, stackBase, stackSize);
+		GuestHostMappings.Unregister(memory, tlsBase - GuestThreadTlsPrefixSize, GuestThreadTlsPrefixSize + GuestThreadTlsSize);
 	}
 
 	private static bool TryGetVirtualMemory(CpuContext context, out IVirtualMemory virtualMemory)
@@ -5717,6 +5735,9 @@ public sealed unsafe partial class DirectExecutionBackend :
 					fileOffset: 0,
 					fileData: ReadOnlySpan<byte>.Empty,
 					protection: protection);
+				// Callback and exception stacks stay runtime memory; a thread stack is
+				// re-registered as a stack once its thread exists.
+				GuestHostMappings.Register(virtualMemory, candidateBase, size, protection, KernelMemoryCompatExports.HostMappingKind.Runtime);
 				mappedBase = candidateBase;
 				error = null;
 				return true;
@@ -5764,6 +5785,8 @@ public sealed unsafe partial class DirectExecutionBackend :
 					fileOffset: 0,
 					fileData: ReadOnlySpan<byte>.Empty,
 					protection: ProgramHeaderFlags.Read | ProgramHeaderFlags.Write);
+				GuestHostMappings.Register(virtualMemory, mappedBase, mappedSize, ProgramHeaderFlags.Read | ProgramHeaderFlags.Write,
+					KernelMemoryCompatExports.HostMappingKind.ThreadLocalStorage);
 				tlsBase = candidateBase;
 				error = null;
 				return true;
@@ -6137,6 +6160,8 @@ public sealed unsafe partial class DirectExecutionBackend :
 				if (thread.State == GuestThreadRunState.Exited &&
 					TryGetVirtualMemory(thread.Context, out var memory))
 				{
+					// Before the regions can be handed to a new thread, which registers them again.
+					UnregisterGuestThreadMappings(memory, thread.StackBase, thread.StackSize, thread.Context.FsBase);
 					_reusableGuestThreadRegions.Enqueue((memory, thread.StackBase, thread.StackSize, thread.Context.FsBase));
 					thread.ExecutionRunner?.RequestStop();
 				}
