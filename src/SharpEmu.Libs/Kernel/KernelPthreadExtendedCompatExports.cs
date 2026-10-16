@@ -1224,9 +1224,9 @@ public static class KernelPthreadExtendedCompatExports
             var rwlock = new PthreadRwlockState();
             _rwlockStates[rwlockAddress] = rwlock;
             _rwlockStates[syntheticHandle] = rwlock;
+            _ = KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, rwlockAddress, syntheticHandle);
         }
 
-        _ = KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, rwlockAddress, syntheticHandle);
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -2041,9 +2041,10 @@ public static class KernelPthreadExtendedCompatExports
             return false;
         }
 
+        var isHandle = (rwlockAddress & 0xFFFF_FFFF_0000_0000UL) == SyntheticRwlockHandleBase;
         lock (_stateGate)
         {
-            if (_rwlockStates.TryGetValue(rwlockAddress, out rwlock))
+            if (_rwlockStates.TryGetValue(rwlockAddress, out rwlock) && isHandle)
             {
                 resolvedAddress = rwlockAddress;
                 return true;
@@ -2052,7 +2053,49 @@ public static class KernelPthreadExtendedCompatExports
 
         if (!KernelMemoryCompatExports.TryReadUInt64Compat(ctx, rwlockAddress, out var pointedHandle))
         {
+            if (rwlock is not null)
+            {
+                resolvedAddress = rwlockAddress;
+                return true;
+            }
+
             return false;
+        }
+
+        if (rwlock is not null)
+        {
+            lock (_stateGate)
+            {
+                // The slot is the alias's generation tag (as for mutexes): it must still
+                // hold a handle. A slot pointing at another known rwlock was reassigned; a
+                // zero slot was re-initialised (PTHREAD_RWLOCK_INITIALIZER, reused memory)
+                // without a destroy, so the cached state is stale. Alias and slot are
+                // re-read under the gate: creators publish the alias and write the slot
+                // inside it, so the unlocked view above may be out of date.
+                _rwlockStates.TryGetValue(rwlockAddress, out rwlock);
+                if (!KernelMemoryCompatExports.TryReadUInt64Compat(ctx, rwlockAddress, out pointedHandle))
+                {
+                    resolvedAddress = rwlockAddress;
+                    return rwlock is not null;
+                }
+
+                if (rwlock is not null)
+                {
+                    if (pointedHandle != 0 &&
+                        (!_rwlockStates.TryGetValue(pointedHandle, out var pointedState) || ReferenceEquals(pointedState, rwlock)))
+                    {
+                        resolvedAddress = rwlockAddress;
+                        return true;
+                    }
+
+                    if (pointedHandle == 0)
+                    {
+                        _rwlockStates.Remove(rwlockAddress);
+                    }
+
+                    rwlock = null;
+                }
+            }
         }
 
         if (pointedHandle != 0)
@@ -2081,11 +2124,18 @@ public static class KernelPthreadExtendedCompatExports
         var syntheticHandle = AllocateSyntheticHandle(SyntheticRwlockHandleBase, ref _nextSyntheticRwlockHandleId);
         lock (_stateGate)
         {
+            if (_rwlockStates.TryGetValue(rwlockAddress, out rwlock))
+            {
+                // Another thread created it first.
+                resolvedAddress = rwlockAddress;
+                return true;
+            }
+
             _rwlockStates[rwlockAddress] = createdRwlock;
             _rwlockStates[syntheticHandle] = createdRwlock;
+            _ = KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, rwlockAddress, syntheticHandle);
         }
 
-        _ = KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, rwlockAddress, syntheticHandle);
         resolvedAddress = syntheticHandle;
         rwlock = createdRwlock;
         return true;

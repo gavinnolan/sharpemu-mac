@@ -945,15 +945,22 @@ public static class KernelPthreadCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        _mutexStates[mutexAddress] = state;
-        _mutexStates[handle] = state;
-
-        if (!KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, mutexAddress, handle))
+        bool written;
+        lock (_stateGate)
         {
-            _mutexStates.TryRemove(mutexAddress, out _);
-            _mutexStates.TryRemove(handle, out _);
-            FreeOpaqueObject(ctx, handle);
+            _mutexStates[mutexAddress] = state;
+            _mutexStates[handle] = state;
+            written = KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, mutexAddress, handle);
+            if (!written)
+            {
+                _mutexStates.TryRemove(mutexAddress, out _);
+                _mutexStates.TryRemove(handle, out _);
+            }
+        }
 
+        if (!written)
+        {
+            FreeOpaqueObject(ctx, handle);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
@@ -1654,6 +1661,7 @@ public static class KernelPthreadCompatExports
             return false;
         }
 
+    retry:
         var hasPointedHandle = KernelMemoryCompatExports.TryReadUInt64Compat(ctx, mutexAddress, out var pointedHandle);
 
         if (_mutexStates.TryGetValue(mutexAddress, out state))
@@ -1678,8 +1686,34 @@ public static class KernelPthreadCompatExports
                 return true;
             }
 
-            resolvedAddress = mutexAddress;
-            return true;
+            // The slot's content is the generation tag of an alias entry: an alias exists only
+            // while its slot holds the handle it was created for. A slot that reads 0 or the
+            // static initializer again was re-initialised (freed and reused memory, a new
+            // PTHREAD_MUTEX_INITIALIZER) without a destroy; the cached state belongs to the
+            // old mutex (possibly still "owned" by a thread that is gone), so drop the alias
+            // and treat the slot as the new mutex it now is. Handle keys (our own opaque
+            // objects) are not aliases and are never dropped here.
+            if (hasPointedHandle && pointedHandle is 0 or StaticAdaptiveMutexInitializer)
+            {
+                switch (TryDropStaleMutexAlias(ctx, mutexAddress, state, pointedHandle))
+                {
+                    case StaleAliasCheck.Changed:
+                        // Another thread replaced the alias or rewrote the slot meanwhile.
+                        state = null;
+                        goto retry;
+                    case StaleAliasCheck.Kept:
+                        resolvedAddress = mutexAddress;
+                        return true;
+                }
+            }
+            else
+            {
+                resolvedAddress = mutexAddress;
+                return true;
+            }
+
+            TracePthreadMutex(ctx, "stale-alias-dropped", mutexAddress, mutexAddress, state, KernelPthreadState.GetCurrentThreadHandle(), 0);
+            state = null;
         }
 
         if (!hasPointedHandle)
@@ -1712,6 +1746,40 @@ public static class KernelPthreadCompatExports
         }
 
         return CreateImplicitMutexState(ctx, mutexAddress, MutexTypeErrorCheck, out resolvedAddress, out state);
+    }
+
+    private enum StaleAliasCheck
+    {
+        Kept,
+        Dropped,
+        Changed,
+    }
+
+    /// <summary>
+    /// Removes the alias <paramref name="mutexAddress"/> → <paramref name="state"/> if, under the
+    /// state gate, it is still the alias and its slot still reads <paramref name="slotSeen"/>
+    /// (0 or the static initializer). Creators publish an alias and write its slot inside the
+    /// gate, so a reader whose unlocked view is out of date gets <see cref="StaleAliasCheck.Changed"/>
+    /// and resolves again instead of dropping a live alias or keeping a replaced one.
+    /// </summary>
+    private static StaleAliasCheck TryDropStaleMutexAlias(CpuContext ctx, ulong mutexAddress, PthreadMutexState state, ulong slotSeen)
+    {
+        lock (_stateGate)
+        {
+            if (!_mutexStates.TryGetValue(mutexAddress, out var current) || !ReferenceEquals(current, state) ||
+                !KernelMemoryCompatExports.TryReadUInt64Compat(ctx, mutexAddress, out var slot) || slot != slotSeen)
+            {
+                return StaleAliasCheck.Changed;
+            }
+
+            if (_opaqueAllocations.ContainsKey(mutexAddress))
+            {
+                return StaleAliasCheck.Kept;
+            }
+
+            _mutexStates.TryRemove(mutexAddress, out _);
+            return StaleAliasCheck.Dropped;
+        }
     }
 
     private static ulong ResolveMutexAttrHandle(CpuContext ctx, ulong attrAddress)
@@ -3048,7 +3116,7 @@ public static class KernelPthreadCompatExports
 
     private static bool CreateImplicitMutexState(CpuContext ctx, ulong mutexAddress, int type, out ulong resolvedAddress, [NotNullWhen(true)] out PthreadMutexState? state)
     {
-        var createdState = new PthreadMutexState
+        PthreadMutexState? createdState = new PthreadMutexState
         {
             Type = type,
         };
@@ -3076,23 +3144,21 @@ public static class KernelPthreadCompatExports
                 return true;
             }
 
-            if (_mutexStates.TryGetValue(handle, out state))
-            {
-                FreeOpaqueObject(ctx, handle);
-                resolvedAddress = handle;
-                return true;
-            }
-
+            // The handle was just allocated, so a state still cached under it belongs to
+            // an object whose memory was freed and handed out again: it is overwritten.
             _mutexStates[mutexAddress] = createdState;
             _mutexStates[handle] = createdState;
+            if (!KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, mutexAddress, handle))
+            {
+                _mutexStates.TryRemove(mutexAddress, out _);
+                _mutexStates.TryRemove(handle, out _);
+                createdState = null;
+            }
         }
 
-        if (!KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, mutexAddress, handle))
+        if (createdState is null)
         {
-            _mutexStates.TryRemove(mutexAddress, out _);
-            _mutexStates.TryRemove(handle, out _);
             FreeOpaqueObject(ctx, handle);
-
             resolvedAddress = 0;
             state = null;
             return false;

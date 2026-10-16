@@ -406,4 +406,22 @@ public sealed class PthreadRwlockBarrierCancelTests
         Assert.Equal(-1, KernelPthreadBarrierCancelCompatExports.SchedGetPriorityMax(NewContext(memory, 2)));
         Assert.Equal(0, KernelPthreadBarrierCancelCompatExports.KernelSleep(NewContext(memory, 0)));
     }
+
+    [Fact]
+    public void ARwlockSlotReinitialisedWithoutDestroyGetsAFreshLock()
+    {
+        var memory = NewMemory(0x7_200A_0000);
+        const ulong slot = 0x7_200A_0100;
+        var ctx = NewContext(memory, slot);
+        Assert.Equal(0, KernelPthreadExtendedCompatExports.PthreadRwlockWrlock(ctx));
+        Assert.True(ctx.TryReadUInt64(slot, out var firstHandle));
+        Assert.NotEqual(0UL, firstHandle);
+
+        Assert.True(ctx.TryWriteUInt64(slot, 0));
+        Assert.Equal(0, KernelPthreadExtendedCompatExports.PthreadRwlockWrlock(ctx));
+        Assert.True(ctx.TryReadUInt64(slot, out var secondHandle));
+        Assert.NotEqual(firstHandle, secondHandle);
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK, KernelPthreadExtendedCompatExports.PthreadRwlockWrlock(ctx));
+        Assert.Equal(0, KernelPthreadExtendedCompatExports.PthreadRwlockUnlock(ctx));
+    }
 }

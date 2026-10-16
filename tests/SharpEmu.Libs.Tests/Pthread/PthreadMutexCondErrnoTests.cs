@@ -432,4 +432,30 @@ public sealed class PthreadMutexCondErrnoTests
         Assert.Equal(producers * itemsPerProducer, consumed);
         Assert.Equal(0, queue);
     }
+
+    [Fact]
+    public void ASlotReinitialisedWithoutDestroyGetsAFreshMutex()
+    {
+        // The slot was locked through an implicit (zero-slot) mutex, then the memory was reused
+        // and zeroed without a destroy: the next lock is on a new, free mutex rather than the
+        // stale one cached under the slot's address.
+        var (ctx, _) = NewContext(0x7_100A_0000);
+        const ulong slot = 0x7_100A_0200;
+        ctx[CpuRegister.Rdi] = slot;
+        Assert.Equal(0, KernelPthreadCompatExports.PosixPthreadMutexLock(ctx));
+        Assert.True(ctx.TryReadUInt64(slot, out var firstHandle));
+        Assert.NotEqual(0UL, firstHandle);
+
+        Assert.True(ctx.TryWriteUInt64(slot, 0));
+        Assert.Equal(0, KernelPthreadCompatExports.PosixPthreadMutexLock(ctx));
+        Assert.True(ctx.TryReadUInt64(slot, out var secondHandle));
+        Assert.NotEqual(0UL, secondHandle);
+        Assert.NotEqual(firstHandle, secondHandle);
+        Assert.Equal(0, KernelPthreadCompatExports.PosixPthreadMutexUnlock(ctx));
+
+        // A slot that still holds its handle keeps resolving to the same mutex.
+        Assert.Equal(0, KernelPthreadCompatExports.PosixPthreadMutexLock(ctx));
+        Assert.Equal(EDEADLK, KernelPthreadCompatExports.PosixPthreadMutexLock(ctx));
+        Assert.Equal(0, KernelPthreadCompatExports.PosixPthreadMutexUnlock(ctx));
+    }
 }
