@@ -120,6 +120,43 @@ public static class Ps5ParamJsonReader
         return null;
     }
 
+    // kernel.flexibleMemorySize: the title's flexible memory budget in bytes.
+    public static ulong? TryReadFlexibleMemorySize(IFileSystem fs, string paramJsonPath) =>
+        fs.Exists(paramJsonPath) && fs.TryReadAllBytes(paramJsonPath, out var data)
+            ? TryReadFlexibleMemorySize(data)
+            : null;
+
+    public static ulong? TryReadFlexibleMemorySize(byte[] data)
+    {
+        if (data == null || data.Length == 0)
+            return null;
+        try
+        {
+            ReadOnlyMemory<byte> json = data;
+            if (json.Span.StartsWith("﻿"u8))
+                json = json[3..];
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object ||
+                !doc.RootElement.TryGetProperty("kernel", out var kernel) ||
+                kernel.ValueKind != JsonValueKind.Object ||
+                !kernel.TryGetProperty("flexibleMemorySize", out var size))
+                return null;
+            if (size.ValueKind == JsonValueKind.Number)
+                return size.TryGetUInt64(out var number) ? number : null;
+            if (size.ValueKind != JsonValueKind.String || size.GetString() is not { } text)
+                return null;
+            text = text.Trim();
+            var hex = text.StartsWith("0x", StringComparison.OrdinalIgnoreCase);
+            return ulong.TryParse(hex ? text[2..] : text,
+                hex ? System.Globalization.NumberStyles.HexNumber : System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var parsed) ? parsed : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
     private static string? GetString(JsonElement parent, string propertyName) =>
         parent.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString()

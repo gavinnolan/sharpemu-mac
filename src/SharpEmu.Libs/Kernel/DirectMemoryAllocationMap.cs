@@ -20,6 +20,8 @@ internal sealed class DirectMemoryAllocationMap
 
     public ulong AvailableBytes { get; private set; }
 
+    public ulong Capacity => _capacity;
+
     public void Reset()
     {
         _allocations.Clear();

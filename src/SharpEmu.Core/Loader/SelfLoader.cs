@@ -165,8 +165,9 @@ public sealed class SelfLoader : ISelfLoader
             throw new InvalidDataException("Input image is empty.");
         }
 
+        ulong? flexibleMemorySize = null;
         var applicationInfo = readParamJson
-            ? TryLoadParamJson(fs, mountRoot)
+            ? TryLoadParamJson(fs, mountRoot, out flexibleMemorySize)
             : default;
 
         if (clearVirtualMemory)
@@ -176,6 +177,9 @@ public sealed class SelfLoader : ISelfLoader
             _nextTlsModuleId = 1;
             GuestTlsTemplate.Reset();
         }
+
+        if (readParamJson)
+            SharpEmu.Libs.Kernel.KernelMemoryCompatExports.ConfigureMemoryBudget(flexibleMemorySize);
 
         var loadContext = ParseLayout(imageData);
         var elfHeader = ReadUnmanaged<ElfHeader>(imageData, loadContext.ElfOffset);
@@ -383,8 +387,10 @@ public sealed class SelfLoader : ISelfLoader
 
     private static (string? Title, string? TitleId, string? Version) TryLoadParamJson(
         IFileSystem? fs,
-        string? mountRoot)
+        string? mountRoot,
+        out ulong? flexibleMemorySize)
     {
+        flexibleMemorySize = null;
         if (fs == null)
         {
             Console.WriteLine("[LOADER] param.json not found (no filesystem provided).");
@@ -412,6 +418,7 @@ public sealed class SelfLoader : ISelfLoader
         }
 
         var applicationInfo = Ps5ParamJsonReader.TryReadPs5Param(fs, foundPath);
+        flexibleMemorySize = Ps5ParamJsonReader.TryReadFlexibleMemorySize(fs, foundPath);
         Console.WriteLine($"[LOADER] Loading param.json at {foundPath}");
         Console.WriteLine(
             $"[LOADER] Title: {applicationInfo.Title ?? "(unknown)"}, " +

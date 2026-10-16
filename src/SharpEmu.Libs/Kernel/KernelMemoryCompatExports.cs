@@ -111,7 +111,7 @@ public static partial class KernelMemoryCompatExports
     private static readonly object _ioTraceGate = new();
     private static readonly object _statCacheGate = new();
     private static readonly object _guestMountGate = new();
-    private static readonly DirectMemoryAllocationMap _directAllocations = new(GuestMemoryLayout.DirectBytes);
+    private static DirectMemoryAllocationMap _directAllocations = new(DefaultDirectMemoryBytes);
     private static readonly Dictionary<ulong, LibcHeapAllocation> _libcAllocations = new();
     // Keep mappings in address order for range and virtual-memory queries.
     private static readonly MappedRegionTable _mappedRegions = new();
@@ -3122,7 +3122,7 @@ public static partial class KernelMemoryCompatExports
         LibraryName = "libKernel")]
     public static int KernelGetDirectMemorySize(CpuContext ctx)
     {
-        ctx[CpuRegister.Rax] = GuestMemoryLayout.DirectBytes;
+        ctx[CpuRegister.Rax] = DirectMemoryBudget;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -3169,7 +3169,7 @@ public static partial class KernelMemoryCompatExports
             }
 
             var searchStart = (ulong)searchStartRaw;
-            var searchEnd = Math.Min((ulong)searchEndRaw, GuestMemoryLayout.DirectBytes);
+            var searchEnd = Math.Min((ulong)searchEndRaw, DirectMemoryBudget);
             if (searchStart >= searchEnd)
             {
                 return MemoryNoSpace;
@@ -3231,9 +3231,7 @@ public static partial class KernelMemoryCompatExports
         ulong available;
         lock (_memoryGate)
         {
-            available = _flexibleBacking.Used >= GuestMemoryLayout.FlexibleBytes
-                ? 0
-                : GuestMemoryLayout.FlexibleBytes - _flexibleBacking.Used;
+            available = _flexibleBacking.Available;
         }
 
         if (!ctx.TryWriteUInt64(outSizeAddress, available))
@@ -3258,7 +3256,7 @@ public static partial class KernelMemoryCompatExports
         }
 
         Span<byte> sizeBytes = stackalloc byte[sizeof(ulong)];
-        BinaryPrimitives.WriteUInt64LittleEndian(sizeBytes, GuestMemoryLayout.FlexibleBytes);
+        BinaryPrimitives.WriteUInt64LittleEndian(sizeBytes, FlexibleMemoryBudget);
         return ctx.Memory.TryWrite(outSizeAddress, sizeBytes)
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
             : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
@@ -3733,7 +3731,7 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        if (offset >= GuestMemoryLayout.DirectBytes)
+        if (offset >= DirectMemoryBudget)
         {
             // Real hardware returns EACCES here (0x8002000D), not ENOENT.
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DELETED;
