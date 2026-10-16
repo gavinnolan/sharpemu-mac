@@ -1899,9 +1899,10 @@ public static partial class Gen5MslTranslator
             Gen5ShaderInstruction instruction,
             CubeCoordinate coordinate)
         {
-            var x = Temp("float", F(instruction, 0));
-            var y = Temp("float", F(instruction, 1));
-            var z = Temp("float", F(instruction, 2));
+            // The coordinates are f32 operands, so a denormal is a zero of its sign.
+            var x = Temp("float", $"sharpemu_flush_f32_denorm({F(instruction, 0)})");
+            var y = Temp("float", $"sharpemu_flush_f32_denorm({F(instruction, 1)})");
+            var z = Temp("float", $"sharpemu_flush_f32_denorm({F(instruction, 2)})");
             // The conditions are the ISA's pseudo-code, ordered compares included: with a NaN
             // coordinate they are false, where fmax would skip the NaN.
             var isZMax = Temp("bool", $"fabs({z}) >= fabs({x}) && fabs({z}) >= fabs({y})");
