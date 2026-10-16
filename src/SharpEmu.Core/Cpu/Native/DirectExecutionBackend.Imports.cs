@@ -2547,54 +2547,109 @@ public sealed partial class DirectExecutionBackend
 		return num;
 	}
 
-	private OrbisGen2Result DispatchKernelDynlibDlsym()
+	/// <summary>
+	/// sceKernelDlsym(handle, symbol, void** addr): 0, EFAULT for a missing
+	/// symbol or out pointer, ESRCH when the symbol is not found. With
+	/// <paramref name="minusOneOnFailure"/> (the bootstrap bridge), failures
+	/// keep the historical rax = -1.
+	/// </summary>
+	private OrbisGen2Result DispatchKernelDynlibDlsym(bool minusOneOnFailure = false)
 	{
 		var cpuContext = ActiveCpuContext;
 		if (cpuContext == null)
 		{
 			return OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
 		}
+
+		OrbisGen2Result Fail(int errno)
+		{
+			if (minusOneOnFailure)
+			{
+				cpuContext[CpuRegister.Rax] = ulong.MaxValue;
+				return OrbisGen2Result.ORBIS_GEN2_OK;
+			}
+
+			var code = OrbisErrno.ToSceKernelError(errno);
+			cpuContext[CpuRegister.Rax] = unchecked((ulong)(long)code);
+			return (OrbisGen2Result)code;
+		}
+
 		ulong symbolNameAddress = cpuContext[CpuRegister.Rsi];
 		ulong outputAddress = cpuContext[CpuRegister.Rdx];
-		if (!TryReadAsciiZ(symbolNameAddress, 512, out var symbolName))
+		if (symbolNameAddress == 0 || outputAddress == 0 ||
+			!TryReadAsciiZ(symbolNameAddress, 512, out var symbolName))
 		{
-			cpuContext[CpuRegister.Rax] = 18446744073709551615uL;
-			return OrbisGen2Result.ORBIS_GEN2_OK;
+			return Fail(OrbisErrno.EFAULT);
 		}
 		var moduleHandle = unchecked((int)cpuContext[CpuRegister.Rdi]);
-		if (!TryResolveModuleSymbolAddress(moduleHandle, symbolName, out var resolvedAddress) &&
-			!TryResolveRuntimeSymbolAddress(symbolName, out resolvedAddress) &&
-			!TryResolveRuntimeSymbolAddress(ComputePsNid(symbolName), out resolvedAddress) &&
-			!TryResolveRuntimeSymbolAlias(symbolName, out resolvedAddress))
+		if (!TryResolveDlsymAddress(moduleHandle, symbolName, out var resolvedAddress))
 		{
 			Console.Error.WriteLine(
 				$"[LOADER][WARN] sceKernelDlsym failed: handle=0x{cpuContext[CpuRegister.Rdi]:X} symbol='{symbolName}'");
-			cpuContext[CpuRegister.Rax] = 18446744073709551615uL;
-			return OrbisGen2Result.ORBIS_GEN2_OK;
+			return Fail(OrbisErrno.ESRCH);
 		}
 		if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_DLSYM"), "1", StringComparison.Ordinal))
 		{
 			Console.Error.WriteLine(
 				$"[LOADER][TRACE] sceKernelDlsym: handle=0x{moduleHandle:X} symbol='{symbolName}' -> 0x{resolvedAddress:X16}");
 		}
-		if (outputAddress == 0L || !TryWriteUInt64Compat(outputAddress, resolvedAddress))
+		if (!TryWriteUInt64Compat(outputAddress, resolvedAddress))
 		{
-			cpuContext[CpuRegister.Rax] = 18446744073709551615uL;
-			return OrbisGen2Result.ORBIS_GEN2_OK;
+			return Fail(OrbisErrno.EFAULT);
 		}
 		cpuContext[CpuRegister.Rax] = 0uL;
 		return OrbisGen2Result.ORBIS_GEN2_OK;
 	}
 
-	private static bool TryResolveModuleSymbolAddress(int moduleHandle, string symbolName, out ulong address)
+	/// <summary>
+	/// The dlsym search. A mapped module's handle searches that module and
+	/// the modules it needs (KernelModuleRegistry.TryResolveModuleSymbolInScope);
+	/// handle 0 (the main program and everything it loaded) and handles of
+	/// HLE-backed modules, which have no symbol table, search every loaded
+	/// module. A handle nothing was registered under finds nothing.
+	/// </summary>
+	private bool TryResolveDlsymAddress(int moduleHandle, string symbolName, out ulong address)
 	{
-		if (KernelModuleRegistry.TryResolveModuleSymbol(moduleHandle, symbolName, out address))
+		address = 0;
+		var lookupNames = DlsymLookupNames(symbolName);
+		if (moduleHandle != 0 && !KernelModuleRegistry.TryGetModuleByHandle(moduleHandle, out _))
 		{
-			return true;
+			return false;
 		}
 
-		var nid = ComputePsNid(symbolName);
-		return KernelModuleRegistry.TryResolveModuleSymbol(moduleHandle, nid, out address);
+		if (moduleHandle != 0 && KernelModuleRegistry.HasModuleSymbols(moduleHandle))
+		{
+			if (KernelModuleRegistry.TryResolveModuleSymbolInScope(moduleHandle, lookupNames, out address))
+			{
+				return true;
+			}
+		}
+		else
+		{
+			foreach (var name in lookupNames)
+			{
+				if (TryResolveRuntimeSymbolAddress(name, out address))
+				{
+					return true;
+				}
+			}
+		}
+
+		// Named deviation (docs/deviations.md): Unity's runtime allocator hooks.
+		return TryResolveRuntimeSymbolAlias(symbolName, out address);
+	}
+
+	/// <summary>
+	/// The names one dlsym request may be stored under: the symbol as given,
+	/// with any "#library#module" NID suffix removed, and its NID.
+	/// </summary>
+	internal static string[] DlsymLookupNames(string symbolName)
+	{
+		var hash = symbolName.IndexOf('#');
+		var bare = hash > 0 ? symbolName[..hash] : symbolName;
+		return bare.Length == 11 && hash > 0
+			? [bare]
+			: [bare, ComputePsNid(bare)];
 	}
 
 	private static string ComputePsNid(string symbolName)
@@ -2685,7 +2740,7 @@ public sealed partial class DirectExecutionBackend
 		ulong outputAddress = cpuContext[CpuRegister.Rdx];
 		_ = TryReadAsciiZ(symbolNameAddress, 512, out var symbolName);
 
-		OrbisGen2Result result = DispatchKernelDynlibDlsym();
+		OrbisGen2Result result = DispatchKernelDynlibDlsym(minusOneOnFailure: true);
 		if (result != OrbisGen2Result.ORBIS_GEN2_OK)
 		{
 			return result;

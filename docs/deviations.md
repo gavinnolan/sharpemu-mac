@@ -96,3 +96,14 @@ Each entry: **Name** — observable effect · chosen behaviour · pinning test.
   - `memcpy` — the same mem* family; the bounds-aware HLE copy is kept.
   - `fputs` — HLE only in the default routing, where HLE stdio owns FILE
     objects. Under LLE-first the module's FILE layout is used throughout.
+- **dlsym allocator aliases** — `sceKernelDlsym` maps Unity's
+  `scriptingGetMem`/`scriptingFreeMem`/`scriptingRealloc`/`scriptingCalloc` to
+  the loaded libc's malloc/free/realloc/calloc when the normal lookup fails.
+  Unity titles depend on this (commit ce8f75411).
+- **dlsym scope** — a mapped module's handle searches that module and the
+  modules it needs, breadth-first. Handle 0 and HLE-backed handles search
+  every loaded module.
+- **Module start** — preloaded modules start in dependency order, but only
+  DT_INIT runs (no DT_PREINIT_ARRAY/DT_INIT_ARRAY/module_start arguments).
+  Fini and module_stop are not run at exit. The PS5 rtld order of DT_INIT
+  against module_start is not established.

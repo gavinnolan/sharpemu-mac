@@ -614,7 +614,13 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         IReadOnlyDictionary<ulong, string> activeImportStubs,
         IReadOnlyDictionary<string, ulong> activeRuntimeSymbols)
     {
-        for (var i = 0; i < loadedModuleImages.Count; i++)
+        // Dependencies start before the modules that need them, not in file
+        // name order. A module already started (TryBeginModuleStart) is never
+        // initialized twice.
+        var startOrder = ModuleStartOrder.Compute(
+            loadedModuleImages.Select(module => module.Path).ToArray(),
+            loadedModuleImages.Select(module => module.Image.ImportedModuleNames).ToArray());
+        foreach (var i in startOrder)
         {
             var loadedModule = loadedModuleImages[i];
             if (!loadedModule.StartAtBoot)
@@ -1301,6 +1307,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         // The kernel names a module's mappings after the module file.
         var imageBase = image.EntryPoint >= image.ElfHeader.EntryPoint ? image.EntryPoint - image.ElfHeader.EntryPoint : 0UL;
         GuestHostMappings.RegisterModuleSegments(_virtualMemory, image.ProgramHeaders, imageBase, Path.GetFileName(modulePath));
+        KernelModuleRegistry.RegisterModuleDependencies(handle, image.ImportedModuleNames);
         Console.Error.WriteLine(
             $"[RUNTIME] Registered module handle={handle} name={Path.GetFileName(modulePath)} base=0x{baseAddress:X16} size=0x{size:X16}");
         return handle;

@@ -562,6 +562,72 @@ public sealed class KernelRuntimeCompatExportsTests
         }
     }
 
+    [Fact]
+    public void ModuleRegistry_ScopedLookupWalksNeededModulesBreadthFirst()
+    {
+        KernelModuleRegistry.Reset();
+        try
+        {
+            int Register(string name, ulong symbolAddress, params string[] needed)
+            {
+                var handle = KernelModuleRegistry.RegisterModule(
+                    Path.Combine(Path.GetTempPath(), "sharpemu-dag", name),
+                    symbolAddress & ~0xFFFFUL,
+                    0x10_0000,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    isMain: false);
+                KernelModuleRegistry.RegisterModuleSymbols(
+                    handle,
+                    new Dictionary<string, ulong> { [$"own_{Path.GetFileNameWithoutExtension(name)}"] = symbolAddress, ["shared"] = symbolAddress });
+                KernelModuleRegistry.RegisterModuleDependencies(handle, needed);
+                return handle;
+            }
+
+            var leaf = Register("libLeaf.prx", 0x9000_1000);
+            var middle = Register("libMiddle.sprx", 0x9100_1000, "libLeaf");
+            var top = Register("libTop.prx", 0x9200_1000, "libMiddle", "libSceNotMapped");
+            var unrelated = Register("libOther.prx", 0x9300_1000);
+
+            // The handle itself wins over its dependencies.
+            Assert.True(KernelModuleRegistry.TryResolveModuleSymbolInScope(top, ["shared"], out var address));
+            Assert.Equal(0x9200_1000UL, address);
+            // Dependencies are reached transitively, by name with or without extension.
+            Assert.True(KernelModuleRegistry.TryResolveModuleSymbolInScope(top, ["own_libLeaf"], out address));
+            Assert.Equal(0x9000_1000UL, address);
+            // A module outside the handle's DAG is not visible.
+            Assert.False(KernelModuleRegistry.TryResolveModuleSymbolInScope(top, ["own_libOther"], out _));
+            Assert.False(KernelModuleRegistry.TryResolveModuleSymbolInScope(leaf, ["own_libMiddle"], out _));
+            Assert.True(KernelModuleRegistry.HasModuleSymbols(middle));
+            Assert.True(KernelModuleRegistry.HasModuleSymbols(unrelated));
+            Assert.False(KernelModuleRegistry.HasModuleSymbols(
+                KernelModuleRegistry.RegisterSyntheticModule("libSceHleOnly.sprx", isSystemModule: true)));
+        }
+        finally
+        {
+            KernelModuleRegistry.Reset();
+        }
+    }
+
+    [Theory]
+    [InlineData("malloc", new[] { "malloc", "gQX+4GDQjpM" })]
+    [InlineData("gQX+4GDQjpM#C#A", new[] { "gQX+4GDQjpM" })]
+    [InlineData("UnityPluginLoad", new[] { "UnityPluginLoad", null })]
+    public void Dlsym_LookupNamesStripTheNidSuffix(string symbol, string?[] expected)
+    {
+        var names = SharpEmu.Core.Cpu.Native.DirectExecutionBackend.DlsymLookupNames(symbol);
+        Assert.Equal(expected[0], names[0]);
+        if (expected.Length > 1 && expected[1] is { } nid)
+        {
+            Assert.Equal(nid, names[1]);
+        }
+
+        Assert.Equal(expected.Length, names.Length);
+    }
+
     private static int GetMinutesWest() =>
         unchecked((int)-TimeZoneInfo.Local.BaseUtcOffset.TotalMinutes);
 
