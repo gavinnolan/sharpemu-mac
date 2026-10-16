@@ -116,7 +116,7 @@ public static partial class Gen5MslTranslator
                 case "VDivFixupF32":
                     StoreVector(destination, FloatResult(instruction, AsFloat(
                         $"(uint)sharpemu_div_fixup({FlushedFloat32Bits(instruction, 0)}, {FlushedFloat32Bits(instruction, 1)}, " +
-                        $"{FlushedFloat32Bits(instruction, 2)}, 32u, 23u, -150, 128)")));
+                        $"{FlushedFloat32Bits(instruction, 2)}, 32u, 23u, -150, 0)")));
                     return true;
                 case "VDivFixupF16":
                     StoreVector(destination, Float16Result(
@@ -227,7 +227,7 @@ public static partial class Gen5MslTranslator
                             value = $"sharpemu_f64_div_fmas({first}, {second}, {third}, vcc)";
                             break;
                         case "VDivFixupF64":
-                            value = $"sharpemu_div_fixup({first}, {second}, {third}, 64u, 52u, -1075, 1024)";
+                            value = $"sharpemu_div_fixup({first}, {second}, {third}, 64u, 52u, -1075, 0)";
                             break;
                         default:
                         {

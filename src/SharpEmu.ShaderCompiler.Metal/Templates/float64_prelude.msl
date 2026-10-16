@@ -1052,9 +1052,8 @@ static inline uint sharpemu_f32_div_fmas(uint a, uint b, uint c, bool vcc)
 // n the numerator. Past the NaN, zero and infinity cases, a biased-exponent difference
 // below `underflow` is a quotient under half the least denormal: a signed zero. The
 // document's overflow case tests "exponent(d) == max", which the infinity cases have
-// already taken; it is read here as the mirror of the underflow test, a difference
-// above `overflow`, where the quotient is at least 2^(max exponent + 1) and the scaled
-// refinement itself overflows into NaN: a signed infinity. 0 disables both (F16).
+// already taken, so it never applies: every caller passes `overflow` 0, and the hardware
+// agrees (a wide upward difference gives +-abs(q)). 0 disables either test (F16).
 static inline ulong sharpemu_div_fixup(
     ulong q, ulong d, ulong n, uint width, uint fractionBits, int underflow, int overflow)
 {
