@@ -2634,13 +2634,14 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        if (KernelEventQueueCompatExports.TryCloseKqueueDescriptor(fd))
+        if (KernelEventQueueCompatExports.TryCloseKqueueDescriptor(fd) || TryCloseJitSharedMemory(fd))
         {
+            ReleaseGuestFileDescriptor(fd);
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        if (KernelSocketCompatExports.TryCloseSocketFd(fd) || TryCloseJitSharedMemory(fd))
+        if (KernelSocketCompatExports.TryCloseSocketFd(fd))
         {
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
