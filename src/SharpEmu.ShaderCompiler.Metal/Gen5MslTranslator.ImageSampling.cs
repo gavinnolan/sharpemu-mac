@@ -202,8 +202,13 @@ public static partial class Gen5MslTranslator
 
             if (imageClass.Cube || offsetOrCompare || imageClass.DepthCompare || samplerInfo!.BorderColorType == 3)
             {
-                error = $"{opcode} through a MIRROR_ONCE_BORDER sampler is not supported with a cube, an offset, a compare or a border colour table";
-                return false;
+                // Documented deviation: past the mirrored copy these read the edge texel
+                // (mirror-once-to-edge) instead of the border colour.
+                ShaderCompilerWarnings.WarnOnce(
+                    "mirror-once-border-shape",
+                    $"{opcode} through a MIRROR_ONCE_BORDER sampler with a cube, an offset, a compare or a border colour " +
+                    "table reads the edge texel past the mirrored copy instead of the border colour.");
+                return true;
             }
 
             var tests = new List<string>(3);
@@ -531,8 +536,10 @@ public static partial class Gen5MslTranslator
 
             if ((samplerInfo?.MirrorOnceBorderAxes ?? 0) != 0)
             {
-                error = $"{opcode} through a MIRROR_ONCE_BORDER sampler is not supported";
-                return false;
+                // Documented deviation: a gather past the mirrored copy reads edge texels.
+                ShaderCompilerWarnings.WarnOnce(
+                    "mirror-once-border-gather",
+                    $"{opcode} through a MIRROR_ONCE_BORDER sampler reads edge texels past the mirrored copy instead of the border colour.");
             }
 
             var offset = SampleOffsets(image, address, imageClass);

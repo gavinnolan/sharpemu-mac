@@ -1024,7 +1024,8 @@ public static class ResourceMaterializer
 
     // Each plan sampler's specialization, or an empty list when all are the default. The
     // LOD_BIAS is word 2 bits 13:0, signed 6.8. LOD_BIAS_SEC (bits 19:14) is scaled by the
-    // T#'s PERF_MOD in a way the ISA does not specify, so a sampler that sets it is refused.
+    // T#'s PERF_MOD in a way the ISA does not specify; it is left out, a documented deviation
+    // reported once, rather than stopping a title over a bias the ISA cannot pin down.
     private static bool SpecializeSamplers(ShaderResourceInfo info, MaterializedSnapshot snapshot, out List<SamplerSpecialization> samplers)
     {
         samplers = [];
@@ -1041,7 +1042,9 @@ public static class ResourceMaterializer
             var secondary = (words[2] >> 14) & 0x3F;
             if (secondary != 0)
             {
-                return Fail($"sampler descriptor {index} sets LOD_BIAS_SEC 0x{secondary:X2}, whose PERF_MOD scaling is not modelled");
+                ShaderCompilerWarnings.WarnOnce(
+                    "lod-bias-sec",
+                    $"A sampler sets LOD_BIAS_SEC 0x{secondary:X2}, whose PERF_MOD scaling is not modelled; it is ignored.");
             }
 
             const uint MirrorOnceBorder = 7;

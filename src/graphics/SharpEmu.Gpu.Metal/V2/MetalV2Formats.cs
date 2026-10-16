@@ -385,14 +385,14 @@ internal static class MetalV2Formats
 
     // Guest sampler clamp codes to MTLSamplerAddressMode. MIRROR_ONCE_BORDER (7) samples
     // mirror-once-to-edge and the shader substitutes the border past the mirrored copy; the
-    // half-border modes (4, 5) have no host form and the sampler refuses them first.
+    // half-border modes take their nearest host mode, a deviation the sampler reports.
     public static nint SamplerAddressMode(uint mode) => mode switch
     {
         0 => Mtl.SamplerAddressRepeat,
         1 => Mtl.SamplerAddressMirrorRepeat,
         2 => Mtl.SamplerAddressClampToEdge,
-        3 or 7 => Mtl.SamplerAddressMirrorClampToEdge,
-        6 => Mtl.SamplerAddressClampToBorderColor,
-        _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, "the half-border address modes have no host form"),
+        3 or 5 or 7 => Mtl.SamplerAddressMirrorClampToEdge,
+        4 or 6 => Mtl.SamplerAddressClampToBorderColor,
+        _ => Mtl.SamplerAddressClampToEdge,
     };
 }
