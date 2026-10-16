@@ -41,9 +41,7 @@ public static class GameServiceStubs
     public static int NpTrophy2CreateHandle(CpuContext ctx) => OkWithHandle(ctx, CpuRegister.Rdi);
     public static int NpTrophy2RegisterContext(CpuContext ctx) => Ok(ctx);
 
-    [SysAbiExport(Nid = "4IzqhhUQ3nk", ExportName = "sceNpTrophy2GetGameInfo",
-        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpTrophy2")]
-    public static int NpTrophy2GetGameInfo(CpuContext ctx) => Ok(ctx);
+    // sceNpTrophy2GetGameInfo lives in NpTrophy2Exports (it fills the output structures).
 
     // ---- CES: Shift-JIS <-> Unicode conversion setup (Japanese text) ----
 
