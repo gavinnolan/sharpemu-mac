@@ -30,7 +30,7 @@ public static partial class Gen5MslTranslator
         {
             var left = Temp("float", F(instruction, 0));
             var right = Temp("float", F(instruction, 1));
-            var zeroMask = addend is null ? "0x7FFFFFFFu" : "0x7F800000u";
+            const string zeroMask = "0x7F800000u";
             var zero = Temp(
                 "bool",
                 $"(as_type<uint>({left}) & {zeroMask}) == 0u || (as_type<uint>({right}) & {zeroMask}) == 0u");
