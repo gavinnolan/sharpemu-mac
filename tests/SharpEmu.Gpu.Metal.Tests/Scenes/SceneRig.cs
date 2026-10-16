@@ -111,6 +111,7 @@ internal sealed unsafe class SceneRig : IDisposable
     /// <summary>Writes the stream into guest memory, runs it on the graphics queue to completion and waits for the GPU.</summary>
     public void Submit(ScenePm4 stream) => Submit(stream.ToArray());
 
+    /// <summary>Runs <paramref name="words"/> on the graphics queue (0) or a compute queue (0x20 to 0x57).</summary>
     public void Submit(uint[] words, int queue = 0)
     {
         var address = Memory.Upload<uint>(words, 256);
