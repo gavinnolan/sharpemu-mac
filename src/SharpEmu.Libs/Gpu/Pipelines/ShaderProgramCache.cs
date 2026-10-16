@@ -811,6 +811,12 @@ internal sealed class ShaderProgramCache
                         PositionYDown = info.ClipSpace.PositionYDown,
                         PositionXMirror = info.ClipSpace.PositionXMirror,
                         DepthPlanes = info.ClipSpace.DepthPlanes,
+                        XyPreDivided = info.ClipSpace.XyPreDivided,
+                        ZPreDivided = info.ClipSpace.ZPreDivided,
+                        WReciprocal = info.ClipSpace.WReciprocal,
+                        DepthRemap = info.ClipSpace.DepthRemap,
+                        DepthScale = info.ClipSpace.DepthScale,
+                        DepthOffset = info.ClipSpace.DepthOffset,
                     },
                 };
             }
