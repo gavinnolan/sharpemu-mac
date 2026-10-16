@@ -7,7 +7,7 @@ using SharpEmu.Libs.Gpu.Buffers;
 namespace SharpEmu.Libs.Gpu.Images;
 
 // A query snapshot stays valid when a caller removes images from the owner index.
-internal struct ImageQueryResults
+public struct ImageQueryResults
 {
     private const int InlineCapacity = 16;
 

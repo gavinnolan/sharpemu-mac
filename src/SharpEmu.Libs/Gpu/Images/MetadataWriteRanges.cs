@@ -4,7 +4,7 @@
 namespace SharpEmu.Libs.Gpu.Images;
 
 // The image lock serializes writers. Readers only inspect immutable snapshots.
-internal sealed class MetadataWriteRanges
+public sealed class MetadataWriteRanges
 {
     private readonly record struct Interval(ulong First, ulong Last);
     private Interval[] _ranges = [];

@@ -1,10 +1,10 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Gpu.Vulkan;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Vulkan;
-using SharpEmu.Libs.Gpu.Vulkan;
-using SharpEmu.Libs.VideoOut;
+using SharpEmu.Gpu.Vulkan.Presentation;
 using Silk.NET.Vulkan;
 using Xunit;
 
@@ -31,10 +31,10 @@ public sealed unsafe class PresentationColorTests : IClassFixture<HeadlessVulkan
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
         using var harness = new ImageTestHarness(_vulkan);
-        var source = harness.CreateImage(CachedImageTests.Color2D(2, 2, format: sourceFormat));
-        var target = harness.CreateImage(CachedImageTests.Color2D(1, 3, format: targetFormat));
+        var source = harness.CreateImage(CachedImageTests.Color2D(2, 2, format: sourceFormat.ToNeutral()));
+        var target = harness.CreateImage(CachedImageTests.Color2D(1, 3, format: targetFormat.ToNeutral()));
         var snapshot = harness.CreateImage(CachedImageTests.Color2D(2, 2,
-            format: VulkanVideoPresenter.GetPresentationSnapshotFormat(sourceFormat)));
+            format: VulkanVideoPresenter.GetPresentationSnapshotFormat(sourceFormat).ToNeutral()));
         var sourceIsBlueFirst = sourceFormat is Format.B8G8R8A8Srgb or Format.B8G8R8A8Unorm;
         byte[] pixel = sourceIsBlueFirst ? [35, 48, 196, 255] : [196, 48, 35, 255];
         byte[] payload = useCheckerboard

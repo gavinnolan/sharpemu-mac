@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Images;
 using Silk.NET.Vulkan;
 using Xunit;
@@ -40,13 +41,13 @@ public sealed class GuestPixelFormatsTests
         Assert.Equal(TextureNumericClass.Unsupported, GuestPixelFormats.SampledNumericClass(GuestPixelFormat.Bits8SNorm));
         Assert.Equal(GuestPixelFormat.Bits32UInt, GuestPixelFormats.RemapTextureFormat(GuestPixelFormat.Bits11_11_10UInt));
         Assert.Equal(GuestPixelFormat.Bc7Srgb, GuestPixelFormats.RemapTextureFormat(GuestPixelFormat.Bc7Srgb));
-        Assert.Equal(Format.R8G8B8A8Unorm, GuestPixelFormats.HostFormat(GuestPixelFormat.Bits8_8_8_8UNorm));
-        Assert.Equal(Format.R8G8Uscaled, GuestPixelFormats.HostFormat(GuestPixelFormat.Bits8_8UScaled));
-        Assert.Equal(Format.B10G11R11UfloatPack32, GuestPixelFormats.HostFormat(GuestPixelFormat.Bits11_11_10UNorm));
-        Assert.Equal(Format.R8G8B8A8Srgb, GuestPixelFormats.HostFormat(GuestPixelFormat.Bits8_8_8_8Srgb));
-        Assert.Equal(Format.BC1RgbaUnormBlock, GuestPixelFormats.HostFormat(GuestPixelFormat.Bc1UNorm));
-        Assert.Equal(Format.Undefined, GuestPixelFormats.HostFormat(GuestPixelFormat.Invalid));
-        Assert.Equal(Format.Undefined, GuestPixelFormats.HostFormat((GuestPixelFormat)0xFFFF_FFFF));
+        Assert.Equal(GpuFormat.R8G8B8A8Unorm, GuestPixelFormats.HostFormat(GuestPixelFormat.Bits8_8_8_8UNorm));
+        Assert.Equal(GpuFormat.R8G8Uscaled, GuestPixelFormats.HostFormat(GuestPixelFormat.Bits8_8UScaled));
+        Assert.Equal(GpuFormat.B10G11R11UfloatPack32, GuestPixelFormats.HostFormat(GuestPixelFormat.Bits11_11_10UNorm));
+        Assert.Equal(GpuFormat.R8G8B8A8Srgb, GuestPixelFormats.HostFormat(GuestPixelFormat.Bits8_8_8_8Srgb));
+        Assert.Equal(GpuFormat.BC1RgbaUnormBlock, GuestPixelFormats.HostFormat(GuestPixelFormat.Bc1UNorm));
+        Assert.Equal(GpuFormat.Undefined, GuestPixelFormats.HostFormat(GuestPixelFormat.Invalid));
+        Assert.Equal(GpuFormat.Undefined, GuestPixelFormats.HostFormat((GuestPixelFormat)0xFFFF_FFFF));
     }
 
     [Fact]

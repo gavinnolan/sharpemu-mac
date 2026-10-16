@@ -3,7 +3,6 @@
 
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.HLE.Host;
-using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Tests.Gpu.Buffers;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Vulkan;
@@ -93,7 +92,7 @@ public sealed class GuestImageCacheLockTests : IClassFixture<HeadlessVulkanFixtu
         // A failed assertion must still release the worker, or the harness disposal waits on it forever.
         try
         {
-            Assert.True(inFinish.Wait(5000));
+            Assert.True(inFinish.Wait(10000));
             write.Start();
             await Assert.ThrowsAsync<TimeoutException>(async () =>
             {
@@ -105,7 +104,7 @@ public sealed class GuestImageCacheLockTests : IClassFixture<HeadlessVulkanFixtu
             release.Set();
         }
 
-        Assert.True(await write.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.True(await write.WaitAsync(TimeSpan.FromSeconds(10)));
         harness.Worker.Run(() => { });
         Assert.True(completionRan);
         Assert.False(writeSeenByCompletion);

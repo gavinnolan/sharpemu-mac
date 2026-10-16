@@ -3,26 +3,26 @@
 
 namespace SharpEmu.Libs.Gpu.Images;
 
-internal readonly record struct MetadataAccessEntry(
+public readonly record struct MetadataAccessEntry(
     ulong Sequence, ulong Tick, int QueueId, ulong SubmissionId, string Operation,
     ulong Address, ulong Size, ulong TrackedImageBaseAddress, string Kind, uint Value);
 
 // The image-cache lock protects this bounded diagnostic history.
-internal sealed class MetadataAccessHistory
+public sealed class MetadataAccessHistory
 {
-    internal const int AddressCapacity = 256;
-    internal const int EventCapacity = 32;
+    public const int AddressCapacity = 256;
+    public const int EventCapacity = 32;
     private readonly SortedDictionary<ulong, History> _histories = new();
     private readonly Queue<ulong> _insertionOrder = new();
 
     private sealed class History
     {
-        internal ulong Size;
-        internal readonly MetadataAccessEntry[] Entries = new MetadataAccessEntry[EventCapacity];
-        internal int Next;
-        internal int Count;
+        public ulong Size;
+        public readonly MetadataAccessEntry[] Entries = new MetadataAccessEntry[EventCapacity];
+        public int Next;
+        public int Count;
 
-        internal void Add(in MetadataAccessEntry entry)
+        public void Add(in MetadataAccessEntry entry)
         {
             if (Count != 0)
             {
@@ -43,7 +43,7 @@ internal sealed class MetadataAccessHistory
         }
     }
 
-    internal void Record(ulong metadataAddress, ulong metadataSize, in MetadataAccessEntry entry)
+    public void Record(ulong metadataAddress, ulong metadataSize, in MetadataAccessEntry entry)
     {
         if (!_histories.TryGetValue(metadataAddress, out var history))
         {
@@ -61,7 +61,7 @@ internal sealed class MetadataAccessHistory
         history.Add(entry);
     }
 
-    internal void RecordRange(in MetadataAccessEntry entry)
+    public void RecordRange(in MetadataAccessEntry entry)
     {
         if (_histories.Count == 0) return;
         if (entry.Size == 0 || entry.Size > ulong.MaxValue - entry.Address)
@@ -80,7 +80,7 @@ internal sealed class MetadataAccessHistory
         }
     }
 
-    internal IEnumerable<MetadataAccessEntry> Read(ulong address)
+    public IEnumerable<MetadataAccessEntry> Read(ulong address)
     {
         if (!_histories.TryGetValue(address, out var history)) yield break;
         for (var index = 0; index < history.Count; index++)

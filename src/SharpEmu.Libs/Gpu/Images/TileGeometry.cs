@@ -23,7 +23,7 @@ public readonly record struct TilePaddedSize(uint Width, uint Height);
 
 // The per-level output arrays of the layout queries, kept per thread: every draw that resolves a
 // target or a texture needs them for a moment and reads them before the next query.
-internal static class MipLayoutScratch
+public static class MipLayoutScratch
 {
     [ThreadStatic] private static TileLevelSpan[]? _spans;
     [ThreadStatic] private static TilePaddedSize[]? _padded;
@@ -198,7 +198,7 @@ public static partial class TileGeometry
         var size = (ulong)paddedWidth * Math.Max(levelHeight, 1) * bytesPerElement;
         if (size > uint.MaxValue)
         {
-            throw SubmissionScheduler.Fatal($"A linear mip level is too large: level={level} size={size}.");
+            throw GpuFatal.Fatal($"A linear mip level is too large: level={level} size={size}.");
         }
 
         paddedHeight = Math.Max(levelHeight, 1);
@@ -438,7 +438,7 @@ public static partial class TileGeometry
     {
         if (layout.BlockSliceSize > uint.MaxValue)
         {
-            throw SubmissionScheduler.Fatal($"A tiled block slice exceeds the 32-bit size limit: size={layout.BlockSliceSize}.");
+            throw GpuFatal.Fatal($"A tiled block slice exceeds the 32-bit size limit: size={layout.BlockSliceSize}.");
         }
 
         var block = layout.Texture.Block;
@@ -451,7 +451,7 @@ public static partial class TileGeometry
             var tail = level >= layout.FirstTailLevel;
             if (mip.Offset > uint.MaxValue || mip.Size > uint.MaxValue)
             {
-                throw SubmissionScheduler.Fatal($"A tiled mip level exceeds the 32-bit offset or size limit: level={level} offset={mip.Offset} size={mip.Size}.");
+                throw GpuFatal.Fatal($"A tiled mip level exceeds the 32-bit offset or size limit: level={level} offset={mip.Offset} size={mip.Size}.");
             }
 
             if (levelSpans != null)
@@ -461,7 +461,7 @@ public static partial class TileGeometry
                     var linearSize = (ulong)mip.Width * mip.Height * block.BytesPerElement;
                     if (linearSize > uint.MaxValue || linearTailOffset > uint.MaxValue)
                     {
-                        throw SubmissionScheduler.Fatal($"A mip-tail level exceeds the 32-bit offset or size limit: level={level} size={linearSize} offset={linearTailOffset}.");
+                        throw GpuFatal.Fatal($"A mip-tail level exceeds the 32-bit offset or size limit: level={level} size={linearSize} offset={linearTailOffset}.");
                     }
 
                     levelSpans[level] = new TileLevelSpan
@@ -556,7 +556,7 @@ public static partial class TileGeometry
     {
         if (pitch != 0)
         {
-            throw SubmissionScheduler.Fatal($"A depth surface size query must not carry a pitch: pitch={pitch}.");
+            throw GpuFatal.Fatal($"A depth surface size query must not carry a pitch: pitch={pitch}.");
         }
 
         depthSize = htileSize = stencilSize = default;
@@ -703,7 +703,7 @@ public static partial class TileGeometry
     {
         if (levels == 0 || levels > TiledSurfaceLayout.MaxLevels)
         {
-            throw SubmissionScheduler.Fatal($"The mip level count is out of range: levels={levels}.");
+            throw GpuFatal.Fatal($"The mip level count is out of range: levels={levels}.");
         }
 
         totalSize = default;
@@ -746,7 +746,7 @@ public static partial class TileGeometry
     {
         if (depth == 0)
         {
-            throw SubmissionScheduler.Fatal("A texture size query needs a depth of at least one.");
+            throw GpuFatal.Fatal("A texture size query needs a depth of at least one.");
         }
 
         if (volume && tile != GuestTileMode.Linear)
@@ -754,12 +754,12 @@ public static partial class TileGeometry
             var description = new TiledSurfaceDescription(format, tile, TileSurfaceDimension.Volume3D, width, height, depth, levels, 1);
             if (!TryGetTiledTextureLayout(description, out var layout))
             {
-                throw SubmissionScheduler.Fatal($"The 3D texture layout is not supported: format={(uint)format} tile={(uint)tile} extent={width}x{height}x{depth} levels={levels}.");
+                throw GpuFatal.Fatal($"The 3D texture layout is not supported: format={(uint)format} tile={(uint)tile} extent={width}x{height}x{depth} levels={levels}.");
             }
 
             if (layout.TotalSize > uint.MaxValue)
             {
-                throw SubmissionScheduler.Fatal($"The 3D texture is too large: size={layout.TotalSize}.");
+                throw GpuFatal.Fatal($"The 3D texture is too large: size={layout.TotalSize}.");
             }
 
             return new TileSizeAndAlignment((uint)layout.TotalSize, layout.Texture.Block.BlockSize);
@@ -767,13 +767,13 @@ public static partial class TileGeometry
 
         if (!TryGetTextureSize(format, width, height, levels, tile, out var sliceSize, null, null))
         {
-            throw SubmissionScheduler.Fatal($"The texture layout is not supported: format={(uint)format} width={width} height={height} levels={levels} tile={(uint)tile}.");
+            throw GpuFatal.Fatal($"The texture layout is not supported: format={(uint)format} width={width} height={height} levels={levels} tile={(uint)tile}.");
         }
 
         var total = (ulong)sliceSize.Size * depth;
         if (total > uint.MaxValue)
         {
-            throw SubmissionScheduler.Fatal($"The layered texture is too large: size={total}.");
+            throw GpuFatal.Fatal($"The layered texture is too large: size={total}.");
         }
 
         return new TileSizeAndAlignment((uint)total, sliceSize.Align);

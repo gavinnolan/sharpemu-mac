@@ -3,8 +3,8 @@
 
 using System.Runtime.CompilerServices;
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Scheduling;
-using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Images;
 
@@ -38,7 +38,7 @@ public struct MetadataDescription
     public bool ColorAlphaOnLeastSignificantBits;
     public uint ColorMetadataBaseLayer;
     public bool PackedColorClearSupported;
-    public ClearColorValue PackedColorClear;
+    public GpuClearColor PackedColorClear;
 }
 
 public readonly record struct SubresourceCount(uint Levels, uint Layers) : IComparable<SubresourceCount>
@@ -83,10 +83,10 @@ public struct ImageDescription
     public GuestSpan Stencil;
     public MetadataDescription Metadata;
     public uint HtileClearMask;
-    public Format PixelFormat;
+    public GpuFormat PixelFormat;
     public GuestPixelFormat GuestFormat;
     public GuestImageType Type;
-    public Extent3D Extent;
+    public GpuExtent3D Extent;
     public SubresourceCount Resources;
     public uint Pitch;
     public uint BytesPerBlock;
@@ -99,7 +99,7 @@ public struct ImageDescription
     {
         HtileClearMask = uint.MaxValue,
         Type = GuestImageType.Color2D,
-        Extent = new Extent3D(1, 1, 1),
+        Extent = new GpuExtent3D(1, 1, 1),
         Resources = SubresourceCount.Single,
         Samples = 1,
     };
@@ -113,7 +113,7 @@ public struct ImageDescription
 
     public readonly bool HasMetadata => Metadata.Kind != MetadataKind.None;
 
-    public readonly bool IsDepth => DepthFormatRule.AspectTransferFormat(PixelFormat) != Format.Undefined;
+    public readonly bool IsDepth => DepthFormatRule.AspectTransferFormat(PixelFormat) != GpuFormat.Undefined;
 
     public readonly bool IsBlock => GuestPixelFormats.BlockCompressedBytes(GuestFormat) != 0;
 
@@ -125,12 +125,12 @@ public struct ImageDescription
 
     public readonly uint TransferLayers => IsVolume ? Extent.Depth : Resources.Layers;
 
-    public readonly Extent2D BlockExtent
+    public readonly GpuExtent2D BlockExtent
     {
         get
         {
             var shift = IsBlock ? 2 : 0;
-            return new Extent2D(Pitch >> shift, Extent.Height >> shift);
+            return new GpuExtent2D(Pitch >> shift, Extent.Height >> shift);
         }
     }
 
@@ -307,7 +307,7 @@ public struct ImageDescription
         4 => GuestPixelFormat.Bits32Float,
         8 => GuestPixelFormat.Bits16_16_16_16Float,
         16 => GuestPixelFormat.Bits32_32_32_32Float,
-        _ => throw SubmissionScheduler.Fatal($"No transfer format exists for this render-target element size: bytes={bytesPerElement}."),
+        _ => throw GpuFatal.Fatal($"No transfer format exists for this render-target element size: bytes={bytesPerElement}."),
     };
 
     private static bool IsValidOptionalRange(GuestSpan range) => IsEmptyRange(range) || IsValidRange(range);
@@ -317,22 +317,22 @@ public struct ImageDescription
     {
         if (!IsValidOptionalRange(Data))
         {
-            throw SubmissionScheduler.Fatal($"The image data range is invalid: address=0x{Data.Address:X16} size=0x{Data.Size:X16}.");
+            throw GpuFatal.Fatal($"The image data range is invalid: address=0x{Data.Address:X16} size=0x{Data.Size:X16}.");
         }
 
         if (!IsValidOptionalRange(Stencil))
         {
-            throw SubmissionScheduler.Fatal($"The image stencil range is invalid: address=0x{Stencil.Address:X16} size=0x{Stencil.Size:X16}.");
+            throw GpuFatal.Fatal($"The image stencil range is invalid: address=0x{Stencil.Address:X16} size=0x{Stencil.Size:X16}.");
         }
 
-        if (PixelFormat == Format.Undefined)
+        if (PixelFormat == GpuFormat.Undefined)
         {
             if (IsEmptyRange(Data) || HasStencil || Metadata.Kind != MetadataKind.None || !IsEmptyRange(Metadata.Range) ||
                 Metadata.Control != 0 || Metadata.Compression != DisplayCompression.Uncompressed || Metadata.StencilCompressed ||
                 Extent.Width == 0 || Extent.Height == 0 || Extent.Depth == 0 ||
                 Resources.Levels != 1 || Resources.Layers != 1 || Samples != 1 || Pitch != 0 || BytesPerBlock != 0)
             {
-                throw SubmissionScheduler.Fatal("A stencil-association image must carry only a data range and an extent.");
+                throw GpuFatal.Fatal("A stencil-association image must carry only a data range and an extent.");
             }
 
             return;
@@ -342,33 +342,33 @@ public struct ImageDescription
             Resources.Levels > MaxLevels || Resources.Layers == 0 || VulkanSampleCount(Samples) == 0 ||
             BytesPerBlock == 0 || (Data.Address != 0 && Pitch == 0))
         {
-            throw SubmissionScheduler.Fatal($"The image geometry or format is invalid: extent={Extent.Width}x{Extent.Height}x{Extent.Depth} levels={Resources.Levels} layers={Resources.Layers} samples={Samples} bytesPerBlock={BytesPerBlock} pitch={Pitch}.");
+            throw GpuFatal.Fatal($"The image geometry or format is invalid: extent={Extent.Width}x{Extent.Height}x{Extent.Depth} levels={Resources.Levels} layers={Resources.Layers} samples={Samples} bytesPerBlock={BytesPerBlock} pitch={Pitch}.");
         }
 
         switch (Type)
         {
             case GuestImageType.Color1D when Extent.Height != 1 || Extent.Depth != 1:
-                throw SubmissionScheduler.Fatal($"A 1D image must have a height and depth of one: extent={Extent.Width}x{Extent.Height}x{Extent.Depth}.");
+                throw GpuFatal.Fatal($"A 1D image must have a height and depth of one: extent={Extent.Width}x{Extent.Height}x{Extent.Depth}.");
             case GuestImageType.Color3D when Resources.Layers != 1:
-                throw SubmissionScheduler.Fatal($"A 3D image cannot have array layers: layers={Resources.Layers}.");
+                throw GpuFatal.Fatal($"A 3D image cannot have array layers: layers={Resources.Layers}.");
             case GuestImageType.Color2D when Extent.Depth != 1:
-                throw SubmissionScheduler.Fatal($"A 2D image must have a depth of one: extent={Extent.Width}x{Extent.Height}x{Extent.Depth}.");
+                throw GpuFatal.Fatal($"A 2D image must have a depth of one: extent={Extent.Width}x{Extent.Height}x{Extent.Depth}.");
             case GuestImageType.Color1D:
             case GuestImageType.Color2D:
             case GuestImageType.Color3D:
                 break;
             default:
-                throw SubmissionScheduler.Fatal($"The image type is not a base type: type={(uint)Type}.");
+                throw GpuFatal.Fatal($"The image type is not a base type: type={(uint)Type}.");
         }
 
         if (Samples > 1 && Resources.Levels != 1)
         {
-            throw SubmissionScheduler.Fatal($"A multisampled image cannot have mip levels: samples={Samples} levels={Resources.Levels}.");
+            throw GpuFatal.Fatal($"A multisampled image cannot have mip levels: samples={Samples} levels={Resources.Levels}.");
         }
 
         if (Metadata.StencilCompressed && !HasStencil)
         {
-            throw SubmissionScheduler.Fatal("Compressed stencil metadata needs a stencil plane.");
+            throw GpuFatal.Fatal("Compressed stencil metadata needs a stencil plane.");
         }
 
         switch (Metadata.Kind)
@@ -378,19 +378,19 @@ public struct ImageDescription
                     Metadata.DccClearWord != 0 || Metadata.Compression != DisplayCompression.Uncompressed || Metadata.StencilCompressed ||
                     Metadata.DccClearRegisterValid || Metadata.DccAlphaMsb)
                 {
-                    throw SubmissionScheduler.Fatal("An image without metadata carries metadata state.");
+                    throw GpuFatal.Fatal("An image without metadata carries metadata state.");
                 }
 
                 break;
             case MetadataKind.Htile:
                 if (!IsValidRange(Metadata.Range) || Metadata.Compression != DisplayCompression.Uncompressed)
                 {
-                    throw SubmissionScheduler.Fatal($"The HTile metadata is invalid: address=0x{Metadata.Range.Address:X16} size=0x{Metadata.Range.Size:X16}.");
+                    throw GpuFatal.Fatal($"The HTile metadata is invalid: address=0x{Metadata.Range.Address:X16} size=0x{Metadata.Range.Size:X16}.");
                 }
 
                 if (Metadata.DccClearWord != 0 || Metadata.DccClearRegisterValid || Metadata.DccAlphaMsb)
                 {
-                    throw SubmissionScheduler.Fatal("HTile metadata carries DCC clear state.");
+                    throw GpuFatal.Fatal("HTile metadata carries DCC clear state.");
                 }
 
                 break;
@@ -399,69 +399,69 @@ public struct ImageDescription
                     Metadata.Range.Size > TrackerLayout.SpaceBytes - Metadata.Range.Address ||
                     Metadata.Compression == DisplayCompression.Unsupported)
                 {
-                    throw SubmissionScheduler.Fatal($"The DCC metadata is invalid: address=0x{Metadata.Range.Address:X16} size=0x{Metadata.Range.Size:X16} compression={Metadata.Compression}.");
+                    throw GpuFatal.Fatal($"The DCC metadata is invalid: address=0x{Metadata.Range.Address:X16} size=0x{Metadata.Range.Size:X16} compression={Metadata.Compression}.");
                 }
 
                 break;
         }
     }
 
-    public static SampleCountFlags VulkanSampleCount(uint samples) => samples switch
+    public static GpuSampleCount VulkanSampleCount(uint samples) => samples switch
     {
-        1 => SampleCountFlags.Count1Bit,
-        2 => SampleCountFlags.Count2Bit,
-        4 => SampleCountFlags.Count4Bit,
-        8 => SampleCountFlags.Count8Bit,
+        1 => GpuSampleCount.Count1Bit,
+        2 => GpuSampleCount.Count2Bit,
+        4 => GpuSampleCount.Count4Bit,
+        8 => GpuSampleCount.Count8Bit,
         _ => 0,
     };
 }
 
 // The host depth and stencil attachment formats of each guest depth format.
-public sealed record DepthFormatRule(GuestDepthFormat DepthFormat, GuestPixelFormat GuestFormat, uint BytesPerElement, Format DepthAttachmentFormat, Format[] StencilAttachmentFormats)
+public sealed record DepthFormatRule(GuestDepthFormat DepthFormat, GuestPixelFormat GuestFormat, uint BytesPerElement, GpuFormat DepthAttachmentFormat, GpuFormat[] StencilAttachmentFormats)
 {
     public static readonly DepthFormatRule[] Table =
     [
-        new(GuestDepthFormat.Z16, GuestPixelFormat.Bits16UNorm, 2, Format.D16Unorm, [Format.D16UnormS8Uint, Format.D24UnormS8Uint, Format.D32SfloatS8Uint]),
-        new(GuestDepthFormat.Z32Float, GuestPixelFormat.Bits32Float, 4, Format.D32Sfloat, [Format.D32SfloatS8Uint, Format.Undefined, Format.Undefined]),
+        new(GuestDepthFormat.Z16, GuestPixelFormat.Bits16UNorm, 2, GpuFormat.D16Unorm, [GpuFormat.D16UnormS8Uint, GpuFormat.D24UnormS8Uint, GpuFormat.D32SfloatS8Uint]),
+        new(GuestDepthFormat.Z32Float, GuestPixelFormat.Bits32Float, 4, GpuFormat.D32Sfloat, [GpuFormat.D32SfloatS8Uint, GpuFormat.Undefined, GpuFormat.Undefined]),
     ];
 
     public static DepthFormatRule? Find(GuestDepthFormat depthFormat) => Array.Find(Table, rule => rule.DepthFormat == depthFormat);
 
     public static DepthFormatRule? FindByGuestFormat(GuestPixelFormat guestFormat) => Array.Find(Table, rule => rule.GuestFormat == guestFormat);
 
-    public bool IsStencilAttachmentFormat(Format format) =>
-        format != Format.Undefined && Array.IndexOf(StencilAttachmentFormats, format) >= 0;
+    public bool IsStencilAttachmentFormat(GpuFormat format) =>
+        format != GpuFormat.Undefined && Array.IndexOf(StencilAttachmentFormats, format) >= 0;
 
-    public Format AttachmentFormat(bool hasStencil) => hasStencil ? StencilAttachmentFormats[0] : DepthAttachmentFormat;
+    public GpuFormat AttachmentFormat(bool hasStencil) => hasStencil ? StencilAttachmentFormats[0] : DepthAttachmentFormat;
 
-    public static Format AttachmentFormat(GuestDepthFormat depthFormat, GuestStencilFormat stencilFormat)
+    public static GpuFormat AttachmentFormat(GuestDepthFormat depthFormat, GuestStencilFormat stencilFormat)
     {
         bool hasStencil;
         switch (stencilFormat)
         {
             case GuestStencilFormat.Invalid: hasStencil = false; break;
             case GuestStencilFormat.Stencil8UInt: hasStencil = true; break;
-            default: return Format.Undefined;
+            default: return GpuFormat.Undefined;
         }
 
-        return Find(depthFormat)?.AttachmentFormat(hasStencil) ?? Format.Undefined;
+        return Find(depthFormat)?.AttachmentFormat(hasStencil) ?? GpuFormat.Undefined;
     }
 
-    public const ImageUsageFlags DepthTargetUsage =
-        ImageUsageFlags.DepthStencilAttachmentBit | ImageUsageFlags.SampledBit | ImageUsageFlags.TransferSrcBit | ImageUsageFlags.TransferDstBit;
+    public const GpuImageUsage DepthTargetUsage =
+        GpuImageUsage.DepthStencilAttachmentBit | GpuImageUsage.SampledBit | GpuImageUsage.TransferSrcBit | GpuImageUsage.TransferDstBit;
 
-    public static Format AspectTransferFormat(Format format) => format switch
+    public static GpuFormat AspectTransferFormat(GpuFormat format) => format switch
     {
-        Format.D16Unorm or Format.D16UnormS8Uint => Format.D16Unorm,
-        Format.D24UnormS8Uint => Format.X8D24UnormPack32,
-        Format.D32Sfloat or Format.D32SfloatS8Uint => Format.D32Sfloat,
-        _ => Format.Undefined,
+        GpuFormat.D16Unorm or GpuFormat.D16UnormS8Uint => GpuFormat.D16Unorm,
+        GpuFormat.D24UnormS8Uint => GpuFormat.X8D24UnormPack32,
+        GpuFormat.D32Sfloat or GpuFormat.D32SfloatS8Uint => GpuFormat.D32Sfloat,
+        _ => GpuFormat.Undefined,
     };
 
-    public static uint AspectTransferBytes(Format format) => AspectTransferFormat(format) switch
+    public static uint AspectTransferBytes(GpuFormat format) => AspectTransferFormat(format) switch
     {
-        Format.D16Unorm => 2,
-        Format.X8D24UnormPack32 or Format.D32Sfloat => 4,
+        GpuFormat.D16Unorm => 2,
+        GpuFormat.X8D24UnormPack32 or GpuFormat.D32Sfloat => 4,
         _ => 0,
     };
 
@@ -470,23 +470,23 @@ public sealed record DepthFormatRule(GuestDepthFormat DepthFormat, GuestPixelFor
     public static uint EncodeD16AsD32(ushort value) => BitConverter.SingleToUInt32Bits(value / 65535.0f);
 }
 
-public readonly record struct DisplayPixelFormat(Format HostFormat, GuestPixelFormat GuestFormat, uint BytesPerElement, bool Bgra16);
+public readonly record struct DisplayPixelFormat(GpuFormat HostFormat, GuestPixelFormat GuestFormat, uint BytesPerElement, bool Bgra16);
 
 // Display formats retain their encoded values; presentation applies the transfer function.
 public static class DisplayFormatRule
 {
     public static readonly (ulong PixelFormat, DisplayPixelFormat Info)[] Table =
     [
-        (0x8000000022000000, new DisplayPixelFormat(Format.R8G8B8A8Srgb, GuestPixelFormat.Bits8_8_8_8Srgb, 4, false)),
-        (0x8000000000000000, new DisplayPixelFormat(Format.B8G8R8A8Srgb, GuestPixelFormat.Bits8_8_8_8Srgb, 4, false)),
-        (0x8100000022000000, new DisplayPixelFormat(Format.A2B10G10R10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
-        (0x8100000000000000, new DisplayPixelFormat(Format.A2R10G10B10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
-        (0x8100000622000000, new DisplayPixelFormat(Format.A2B10G10R10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
-        (0x8100000600000000, new DisplayPixelFormat(Format.A2R10G10B10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
-        (0x8100070422000000, new DisplayPixelFormat(Format.A2B10G10R10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
-        (0x8100070400000000, new DisplayPixelFormat(Format.A2R10G10B10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
-        (0xc001000622000000, new DisplayPixelFormat(Format.R16G16B16A16Sfloat, GuestPixelFormat.Bits16_16_16_16Float, 8, false)),
-        (0xc001000600000000, new DisplayPixelFormat(Format.R16G16B16A16Sfloat, GuestPixelFormat.Bits16_16_16_16Float, 8, true)),
+        (0x8000000022000000, new DisplayPixelFormat(GpuFormat.R8G8B8A8Srgb, GuestPixelFormat.Bits8_8_8_8Srgb, 4, false)),
+        (0x8000000000000000, new DisplayPixelFormat(GpuFormat.B8G8R8A8Srgb, GuestPixelFormat.Bits8_8_8_8Srgb, 4, false)),
+        (0x8100000022000000, new DisplayPixelFormat(GpuFormat.A2B10G10R10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
+        (0x8100000000000000, new DisplayPixelFormat(GpuFormat.A2R10G10B10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
+        (0x8100000622000000, new DisplayPixelFormat(GpuFormat.A2B10G10R10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
+        (0x8100000600000000, new DisplayPixelFormat(GpuFormat.A2R10G10B10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
+        (0x8100070422000000, new DisplayPixelFormat(GpuFormat.A2B10G10R10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
+        (0x8100070400000000, new DisplayPixelFormat(GpuFormat.A2R10G10B10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
+        (0xc001000622000000, new DisplayPixelFormat(GpuFormat.R16G16B16A16Sfloat, GuestPixelFormat.Bits16_16_16_16Float, 8, false)),
+        (0xc001000600000000, new DisplayPixelFormat(GpuFormat.R16G16B16A16Sfloat, GuestPixelFormat.Bits16_16_16_16Float, 8, true)),
     ];
 
     public static bool TryDecode(ulong pixelFormat, out DisplayPixelFormat info)
@@ -522,14 +522,14 @@ public static class DisplayFormatRule
 // Decoders for the packed 32-bit clear values guest compute fills carry.
 public static class PackedClearValue
 {
-    public static bool SupportsDccFixedColor(Format format) => DccComponentCount(format) != 0;
+    public static bool SupportsDccFixedColor(GpuFormat format) => DccComponentCount(format) != 0;
 
     public static bool TryDecodeDccColor(
-        Format format,
+        GpuFormat format,
         uint metadataFill,
         in MetadataDescription metadata,
         bool allowClearToRegister,
-        out ClearColorValue clear)
+        out GpuClearColor clear)
     {
         clear = default;
         var code = (byte)metadataFill;
@@ -574,43 +574,47 @@ public static class PackedClearValue
 
         switch (format)
         {
-            case Format.B8G8R8A8Unorm:
-            case Format.B8G8R8A8Srgb:
-            case Format.A2R10G10B10UnormPack32:
-            case Format.A1R5G5B5UnormPack16:
-            case Format.R5G6B5UnormPack16:
+            case GpuFormat.B8G8R8A8Unorm:
+            case GpuFormat.B8G8R8A8Srgb:
+            case GpuFormat.A2R10G10B10UnormPack32:
+            case GpuFormat.A1R5G5B5UnormPack16:
+            case GpuFormat.R5G6B5UnormPack16:
                 (channels[0], channels[2]) = (channels[2], channels[0]);
                 break;
-            case Format.R4G4B4A4UnormPack16:
+            case GpuFormat.R4G4B4A4UnormPack16:
                 (channels[0], channels[3]) = (channels[3], channels[0]);
                 (channels[1], channels[2]) = (channels[2], channels[1]);
                 break;
         }
 
-        clear = new ClearColorValue(channels[0], channels[1], channels[2], channels[3]);
+        clear = default;
+        clear.Float32_0 = channels[0];
+        clear.Float32_1 = channels[1];
+        clear.Float32_2 = channels[2];
+        clear.Float32_3 = channels[3];
         return true;
     }
 
-    private static uint DccComponentCount(Format format) => format switch
+    private static uint DccComponentCount(GpuFormat format) => format switch
     {
-        Format.R8Unorm or Format.R16Unorm or Format.R16Sfloat or Format.R32Sfloat => 1,
-        Format.R8G8Unorm or Format.R16G16Unorm or Format.R16G16Sfloat or Format.R32G32Sfloat => 2,
-        Format.R5G6B5UnormPack16 or Format.B10G11R11UfloatPack32 => 3,
-        Format.R8G8B8A8Unorm or Format.R8G8B8A8Srgb or Format.B8G8R8A8Unorm or Format.B8G8R8A8Srgb or
-        Format.A2B10G10R10UnormPack32 or Format.A2R10G10B10UnormPack32 or Format.A1R5G5B5UnormPack16 or
-        Format.R4G4B4A4UnormPack16 or Format.R16G16B16A16Unorm or Format.R16G16B16A16Sfloat or
-        Format.R32G32B32A32Sfloat => 4,
+        GpuFormat.R8Unorm or GpuFormat.R16Unorm or GpuFormat.R16Sfloat or GpuFormat.R32Sfloat => 1,
+        GpuFormat.R8G8Unorm or GpuFormat.R16G16Unorm or GpuFormat.R16G16Sfloat or GpuFormat.R32G32Sfloat => 2,
+        GpuFormat.R5G6B5UnormPack16 or GpuFormat.B10G11R11UfloatPack32 => 3,
+        GpuFormat.R8G8B8A8Unorm or GpuFormat.R8G8B8A8Srgb or GpuFormat.B8G8R8A8Unorm or GpuFormat.B8G8R8A8Srgb or
+        GpuFormat.A2B10G10R10UnormPack32 or GpuFormat.A2R10G10B10UnormPack32 or GpuFormat.A1R5G5B5UnormPack16 or
+        GpuFormat.R4G4B4A4UnormPack16 or GpuFormat.R16G16B16A16Unorm or GpuFormat.R16G16B16A16Sfloat or
+        GpuFormat.R32G32B32A32Sfloat => 4,
         _ => 0,
     };
 
     // A buffer fill repeats the word in every texel, unlike a DCC clear register.
-    public static bool TryDecodeBufferColor(Format format, uint packed, out ClearColorValue clear)
+    public static bool TryDecodeBufferColor(GpuFormat format, uint packed, out GpuClearColor clear)
     {
         clear = default;
         switch (format)
         {
-            case Format.R16G16Sfloat:
-            case Format.R16G16B16A16Sfloat:
+            case GpuFormat.R16G16Sfloat:
+            case GpuFormat.R16G16B16A16Sfloat:
                 var low = BitConverter.UInt16BitsToHalf((ushort)packed);
                 var high = BitConverter.UInt16BitsToHalf((ushort)(packed >> 16));
                 // A float conversion may change a NaN payload; keep the raw fill in that case.
@@ -618,8 +622,8 @@ public static class PackedClearValue
                 clear.Float32_0 = clear.Float32_2 = (float)low;
                 clear.Float32_1 = clear.Float32_3 = (float)high;
                 return true;
-            case Format.R32G32Uint:
-            case Format.R32G32B32A32Uint:
+            case GpuFormat.R32G32Uint:
+            case GpuFormat.R32G32B32A32Uint:
                 clear.Uint32_0 = clear.Uint32_1 = clear.Uint32_2 = clear.Uint32_3 = packed;
                 return true;
             default:
@@ -627,7 +631,7 @@ public static class PackedClearValue
         }
     }
 
-    public static bool TryDecodeColor(Format format, uint packed, out ClearColorValue clear)
+    public static bool TryDecodeColor(GpuFormat format, uint packed, out GpuClearColor clear)
     {
         static float Unorm8(uint value) => (value & 0xff) / 255.0f;
         static float Srgb8(uint value)
@@ -640,46 +644,46 @@ public static class PackedClearValue
         switch (format)
         {
             // A single-plane float target carries its clear as raw float bits.
-            case Format.R32Sfloat:
+            case GpuFormat.R32Sfloat:
                 clear.Float32_0 = BitConverter.UInt32BitsToSingle(packed);
                 return true;
-            case Format.R32Uint:
+            case GpuFormat.R32Uint:
                 clear.Uint32_0 = packed;
                 return true;
-            case Format.R32Sint:
+            case GpuFormat.R32Sint:
                 clear.Int32_0 = (int)packed;
                 return true;
-            case Format.R8G8B8A8Srgb:
+            case GpuFormat.R8G8B8A8Srgb:
                 clear.Float32_0 = Srgb8(packed);
                 clear.Float32_1 = Srgb8(packed >> 8);
                 clear.Float32_2 = Srgb8(packed >> 16);
                 clear.Float32_3 = Unorm8(packed >> 24);
                 return true;
-            case Format.B8G8R8A8Srgb:
+            case GpuFormat.B8G8R8A8Srgb:
                 clear.Float32_0 = Srgb8(packed >> 16);
                 clear.Float32_1 = Srgb8(packed >> 8);
                 clear.Float32_2 = Srgb8(packed);
                 clear.Float32_3 = Unorm8(packed >> 24);
                 return true;
-            case Format.R8G8B8A8Unorm:
+            case GpuFormat.R8G8B8A8Unorm:
                 clear.Float32_0 = Unorm8(packed);
                 clear.Float32_1 = Unorm8(packed >> 8);
                 clear.Float32_2 = Unorm8(packed >> 16);
                 clear.Float32_3 = Unorm8(packed >> 24);
                 return true;
-            case Format.B8G8R8A8Unorm:
+            case GpuFormat.B8G8R8A8Unorm:
                 clear.Float32_0 = Unorm8(packed >> 16);
                 clear.Float32_1 = Unorm8(packed >> 8);
                 clear.Float32_2 = Unorm8(packed);
                 clear.Float32_3 = Unorm8(packed >> 24);
                 return true;
-            case Format.A2B10G10R10UnormPack32:
+            case GpuFormat.A2B10G10R10UnormPack32:
                 clear.Float32_0 = (packed & 0x3ff) / 1023.0f;
                 clear.Float32_1 = ((packed >> 10) & 0x3ff) / 1023.0f;
                 clear.Float32_2 = ((packed >> 20) & 0x3ff) / 1023.0f;
                 clear.Float32_3 = ((packed >> 30) & 0x3) / 3.0f;
                 return true;
-            case Format.A2R10G10B10UnormPack32:
+            case GpuFormat.A2R10G10B10UnormPack32:
                 clear.Float32_0 = ((packed >> 20) & 0x3ff) / 1023.0f;
                 clear.Float32_1 = ((packed >> 10) & 0x3ff) / 1023.0f;
                 clear.Float32_2 = (packed & 0x3ff) / 1023.0f;
@@ -696,10 +700,10 @@ public static class PackedClearValue
         return packed == clear * 0x01010101u;
     }
 
-    public static bool TryDecodeDepth(Format format, uint packed, out float clear)
+    public static bool TryDecodeDepth(GpuFormat format, uint packed, out float clear)
     {
         clear = 0;
-        if (format is not (Format.D32Sfloat or Format.D32SfloatS8Uint))
+        if (format is not (GpuFormat.D32Sfloat or GpuFormat.D32SfloatS8Uint))
         {
             return false;
         }
@@ -722,7 +726,7 @@ public static class GuestRangeOverlap
     {
         if (leftSize == 0 || rightSize == 0 || left > ulong.MaxValue - leftSize || right > ulong.MaxValue - rightSize)
         {
-            throw SubmissionScheduler.Fatal($"An image overlap range is invalid: left=0x{left:X16}+0x{leftSize:X} right=0x{right:X16}+0x{rightSize:X}.");
+            throw GpuFatal.Fatal($"An image overlap range is invalid: left=0x{left:X16}+0x{leftSize:X} right=0x{right:X16}+0x{rightSize:X}.");
         }
     }
 

@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.GpuMemory;
-using SharpEmu.Libs.Gpu.Buffers;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Gpu.Vulkan.Images;
+using SharpEmu.Gpu.Vulkan;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Vulkan;
 using Silk.NET.Vulkan;
@@ -18,18 +20,18 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
 
     public CachedImageTests(HeadlessVulkanFixture fixture) => _vulkan = fixture.Vulkan;
 
-    internal static ImageDescription Color2D(uint width, uint height, uint levels = 1, uint layers = 1, ulong address = ArrayBackedSpace.Base, Format format = Format.R8G8B8A8Unorm)
+    internal static ImageDescription Color2D(uint width, uint height, uint levels = 1, uint layers = 1, ulong address = ArrayBackedSpace.Base, GpuFormat format = GpuFormat.R8G8B8A8Unorm)
     {
         var description = ImageDescription.Create();
         description.Data = new GuestSpan(address, ImageTestHarness.WholeImageBytes(description with
         {
-            Extent = new Extent3D(width, height, 1),
+            Extent = new GpuExtent3D(width, height, 1),
             Resources = new SubresourceCount(levels, layers),
             BytesPerBlock = 4,
         }));
         description.PixelFormat = format;
         description.GuestFormat = GuestPixelFormat.Bits8_8_8_8UNorm;
-        description.Extent = new Extent3D(width, height, 1);
+        description.Extent = new GpuExtent3D(width, height, 1);
         description.Resources = new SubresourceCount(levels, layers);
         description.Pitch = width;
         description.BytesPerBlock = 4;
@@ -40,7 +42,7 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
     {
         var description = Color2D(width, height);
         description.Type = GuestImageType.Color3D;
-        description.Extent = new Extent3D(width, height, depth);
+        description.Extent = new GpuExtent3D(width, height, depth);
         description.Data = new GuestSpan(ArrayBackedSpace.Base, (ulong)width * height * depth * 4);
         return description;
     }
@@ -174,9 +176,9 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
 
         var (initial, initialStages) = image.GetBarriers(ImageLayout.General, AccessFlags.ShaderReadBit, PipelineStageFlags.ComputeShaderBit, null);
         var only = Assert.Single(initial);
-        Assert.Equal(ImageLayout.Undefined, only.OldLayout);
+        Assert.Equal(GpuImageLayout.Undefined, only.OldLayout.ToNeutral());
         Assert.Equal(Vk.RemainingMipLevels, only.SubresourceRange.LevelCount);
-        Assert.Equal(PipelineStageFlags.AllCommandsBit, initialStages);
+        Assert.Equal(GpuPipelineStage.AllCommandsBit, initialStages.ToNeutral());
         Assert.Null(image.Backing.SubresourceStates);
 
         var (unchanged, _) = image.GetBarriers(ImageLayout.General, AccessFlags.ShaderReadBit, PipelineStageFlags.ComputeShaderBit, null);
@@ -186,7 +188,7 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
         var (partialBarriers, partialStages) = image.GetBarriers(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, PipelineStageFlags.TransferBit, partial);
         var one = Assert.Single(partialBarriers);
         Assert.Equal((1u, 1u, 1u, 1u), (one.SubresourceRange.BaseMipLevel, one.SubresourceRange.LevelCount, one.SubresourceRange.BaseArrayLayer, one.SubresourceRange.LayerCount));
-        Assert.Equal(PipelineStageFlags.ComputeShaderBit, partialStages);
+        Assert.Equal(GpuPipelineStage.ComputeShaderBit, partialStages.ToNeutral());
         Assert.NotNull(image.Backing.SubresourceStates);
         Assert.Equal(6, image.Backing.SubresourceStates!.Count);
 
@@ -197,7 +199,7 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
         var (whole, wholeStages) = image.GetBarriers(ImageLayout.General, AccessFlags.ShaderReadBit, PipelineStageFlags.ComputeShaderBit, null);
         var collapsed = Assert.Single(whole);
         Assert.Equal((1u, 1u), (collapsed.SubresourceRange.BaseMipLevel, collapsed.SubresourceRange.BaseArrayLayer));
-        Assert.Equal(PipelineStageFlags.TransferBit, wholeStages);
+        Assert.Equal(GpuPipelineStage.TransferBit, wholeStages.ToNeutral());
         Assert.Null(image.Backing.SubresourceStates);
         Assert.Equal(new ImageAccessState(PipelineStageFlags.ComputeShaderBit, AccessFlags.ShaderReadBit, ImageLayout.General), image.Backing.State);
         harness.AssertNoValidationMessages();
@@ -253,13 +255,13 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
         Assert.Equal(5u, image.Backing.MipLevels);
 
         // A view of a guest level past the host chain views the last host level.
-        var view = image.GetOrCreateView(ImageViewDescription.Default with { Format = Format.R8G8B8A8Unorm, BaseLevel = 6 });
+        var view = image.GetOrCreateView(ImageViewDescription.Default with { Format = GpuFormat.R8G8B8A8Unorm, BaseLevel = 6 });
         Assert.NotEqual(0UL, view.Handle);
-        Assert.Equal(view, image.GetOrCreateView(ImageViewDescription.Default with { Format = Format.R8G8B8A8Unorm, BaseLevel = 4 }));
+        Assert.Equal(view, image.GetOrCreateView(ImageViewDescription.Default with { Format = GpuFormat.R8G8B8A8Unorm, BaseLevel = 4 }));
         var all = image.GetOrCreateView(ImageViewDescription.Default with
         {
-            Format = Format.R8G8B8A8Unorm,
-            Type = ImageViewType.Type2DArray,
+            Format = GpuFormat.R8G8B8A8Unorm,
+            Type = GpuImageViewType.Type2DArray,
             LevelCount = 7,
             LayerCount = 2,
         });
@@ -268,10 +270,10 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
     }
 
     [Theory]
-    [InlineData(GuestPixelFormat.Bc1UNorm, Format.BC1RgbaUnormBlock, Format.R32G32Uint, 8u)]
-    [InlineData(GuestPixelFormat.Bc7UNorm, Format.BC7UnormBlock, Format.R32G32B32A32Uint, 16u)]
+    [InlineData(GuestPixelFormat.Bc1UNorm, GpuFormat.BC1RgbaUnormBlock, GpuFormat.R32G32Uint, 8u)]
+    [InlineData(GuestPixelFormat.Bc7UNorm, GpuFormat.BC7UnormBlock, GpuFormat.R32G32B32A32Uint, 16u)]
     public void GetOrCreateView_CompressedImageSupportsIntegerStorageView(
-        GuestPixelFormat guestFormat, Format imageFormat, Format storageFormat, uint blockBytes)
+        GuestPixelFormat guestFormat, GpuFormat imageFormat, GpuFormat storageFormat, uint blockBytes)
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
         using var harness = new ImageTestHarness(_vulkan);
@@ -290,18 +292,18 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
             harness.AssertNoValidationMessages();
             return;
         }
-        var storageFeatures = _vulkan.DeviceInfo.GetFormatProperties(storageFormat).OptimalTilingFeatures;
+        var storageFeatures = _vulkan.DeviceInfo.GetFormatProperties(storageFormat.ToVk()).OptimalTilingFeatures;
         var supportsStorage = (storageFeatures & FormatFeatureFlags.StorageImageBit) != 0 &&
-            _vulkan.DeviceInfo.TryGetImageFormatProperties(imageFormat, ImageType.Type2D, ImageTiling.Optimal,
-                image.Backing.Usage | ImageUsageFlags.StorageBit, image.Backing.Flags, out var properties) &&
-            (properties.SampleCounts & SampleCountFlags.Count1Bit) != 0;
+            _vulkan.DeviceInfo.TryGetImageFormatProperties(imageFormat, GpuImageType.Type2D, GpuImageTiling.Optimal,
+                (GpuImageUsage)image.Backing.Usage | GpuImageUsage.StorageBit, (GpuImageCreateFlags)image.Backing.Flags, out var properties) &&
+            (properties.SampleCounts & GpuSampleCount.Count1Bit) != 0;
         Assert.Equal(supportsStorage, (image.Backing.Usage & ImageUsageFlags.StorageBit) != 0);
         var sampled = image.GetOrCreateView(ImageViewDescription.Default with { Format = imageFormat });
         Assert.NotEqual(0UL, sampled.Handle);
         var storageRequest = ImageViewDescription.Default with
         {
             Format = storageFormat,
-            Usage = ImageUsageFlags.StorageBit,
+            Usage = GpuImageUsage.StorageBit,
         };
         if (!supportsStorage)
         {
@@ -323,21 +325,21 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
         using var fatal = new FatalScope();
         using var harness = new ImageTestHarness(_vulkan);
         var image = harness.CreateImage(Color2D(64, 64, levels: 2, layers: 2));
-        var request = ImageViewDescription.Default with { Format = Format.R8G8B8A8Unorm, Type = ImageViewType.Type2DArray, LayerCount = 2 };
+        var request = ImageViewDescription.Default with { Format = GpuFormat.R8G8B8A8Unorm, Type = GpuImageViewType.Type2DArray, LayerCount = 2 };
         var view = image.GetOrCreateView(request);
         Assert.NotEqual(0UL, view.Handle);
         Assert.Equal(view, image.GetOrCreateView(request));
-        Assert.Equal(view, image.GetOrCreateView(request with { Usage = ImageUsageFlags.SampledBit | ImageUsageFlags.TransferSrcBit }));
+        Assert.Equal(view, image.GetOrCreateView(request with { Usage = GpuImageUsage.SampledBit | GpuImageUsage.TransferSrcBit }));
         Assert.Single(image.Views);
-        Assert.NotEqual(view, image.GetOrCreateView(request with { Usage = ImageUsageFlags.StorageBit }));
-        Assert.NotEqual(view, image.GetOrCreateView(request with { Format = Format.B8G8R8A8Srgb }));
+        Assert.NotEqual(view, image.GetOrCreateView(request with { Usage = GpuImageUsage.StorageBit }));
+        Assert.NotEqual(view, image.GetOrCreateView(request with { Format = GpuFormat.B8G8R8A8Srgb }));
         Assert.Equal(3, image.Views.Count);
 
-        Assert.Throws<SchedulerFatalException>(() => image.GetOrCreateView(request with { Format = Format.R16G16B16A16Sfloat }));
+        Assert.Throws<SchedulerFatalException>(() => image.GetOrCreateView(request with { Format = GpuFormat.R16G16B16A16Sfloat }));
         Assert.Throws<SchedulerFatalException>(() => image.GetOrCreateView(request with { LevelCount = 3 }));
         Assert.Throws<SchedulerFatalException>(() => image.GetOrCreateView(request with { BaseLayer = 2 }));
-        Assert.Throws<SchedulerFatalException>(() => image.GetOrCreateView(request with { Aspect = ImageAspectFlags.DepthBit }));
-        var typeFailure = Assert.Throws<SchedulerFatalException>(() => image.GetOrCreateView(request with { Type = ImageViewType.Type3D }));
+        Assert.Throws<SchedulerFatalException>(() => image.GetOrCreateView(request with { Aspect = GpuImageAspect.DepthBit }));
+        var typeFailure = Assert.Throws<SchedulerFatalException>(() => image.GetOrCreateView(request with { Type = GpuImageViewType.Type3D }));
         Assert.Contains("typeValid=False", typeFailure.Message);
         Assert.Contains("exists=True", typeFailure.Message);
         Assert.Contains($"address=0x{image.Description.Data.Address:X16}", typeFailure.Message);
@@ -345,23 +347,23 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
         Assert.Contains($"imageType={(int)image.Backing.ImageType}", typeFailure.Message);
         var mappingFailure = Assert.Throws<SchedulerFatalException>(() => image.GetOrCreateView(request with
         {
-            Mapping = new ComponentMapping((ComponentSwizzle)255, ComponentSwizzle.Identity, ComponentSwizzle.Identity, ComponentSwizzle.Identity),
+            Mapping = new GpuComponentMapping((GpuComponentSwizzle)255, GpuComponentSwizzle.Identity, GpuComponentSwizzle.Identity, GpuComponentSwizzle.Identity),
         }));
         Assert.Contains("mapping=255,0,0,0", mappingFailure.Message);
         Assert.Contains("mappingValid=False", mappingFailure.Message);
         Assert.Contains("usageValid=True", mappingFailure.Message);
         Assert.All(fatal.Messages, message => Assert.Contains("image view is invalid", message));
 
-        var depth = harness.CreateImage(Color2D(16, 16, format: Format.D32Sfloat));
-        var depthView = depth.GetOrCreateView(ImageViewDescription.Default with { Format = Format.R32Sfloat, Aspect = ImageAspectFlags.ColorBit });
+        var depth = harness.CreateImage(Color2D(16, 16, format: GpuFormat.D32Sfloat));
+        var depthView = depth.GetOrCreateView(ImageViewDescription.Default with { Format = GpuFormat.R32Sfloat, Aspect = GpuImageAspect.ColorBit });
         var cached = Assert.Single(depth.Views);
-        Assert.Equal((Format.D32Sfloat, ImageAspectFlags.DepthBit), (cached.Description.Format, cached.Description.Aspect));
+        Assert.Equal((GpuFormat.D32Sfloat, GpuImageAspect.DepthBit), (cached.Description.Format, cached.Description.Aspect));
         Assert.Equal(depthView, cached.View);
 
         var volume = harness.CreateImage(Volume(16, 16, 8));
-        var slice = volume.GetOrCreateView(ImageViewDescription.Default with { Format = Format.R8G8B8A8Unorm, Type = ImageViewType.Type2DArray, BaseLayer = 2, LayerCount = 4 });
+        var slice = volume.GetOrCreateView(ImageViewDescription.Default with { Format = GpuFormat.R8G8B8A8Unorm, Type = GpuImageViewType.Type2DArray, BaseLayer = 2, LayerCount = 4 });
         Assert.NotEqual(0UL, slice.Handle);
-        Assert.Throws<SchedulerFatalException>(() => volume.GetOrCreateView(ImageViewDescription.Default with { Format = Format.R8G8B8A8Unorm, Type = ImageViewType.Type2DArray, BaseLayer = 2, LayerCount = 8 }));
+        Assert.Throws<SchedulerFatalException>(() => volume.GetOrCreateView(ImageViewDescription.Default with { Format = GpuFormat.R8G8B8A8Unorm, Type = GpuImageViewType.Type2DArray, BaseLayer = 2, LayerCount = 8 }));
         harness.AssertNoValidationMessages();
     }
 
@@ -413,7 +415,7 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
         var backCopies = ImageTestHarness.WholeImageCopies(back.Description, 0);
         Assert.Equal(pattern[..(16 * 16 * 4 * 4)], harness.ReadImage(back, backCopies, 16 * 16 * 4 * 4));
 
-        var uintDescription = Color2D(16, 16, levels: 2, layers: 4, format: Format.R32Uint);
+        var uintDescription = Color2D(16, 16, levels: 2, layers: 4, format: GpuFormat.R32Uint);
         var reinterpreted = harness.CreateImage(uintDescription);
         harness.Run(() => reinterpreted.CopyThroughBuffer(source, harness.CreateDeviceLocalBuffer(16 * 4 * 3)));
         Assert.Equal(pattern, harness.ReadImage(reinterpreted, arrayCopies, arrayBytes));
@@ -439,7 +441,7 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
         var pattern = ImageTestHarness.Pattern(8 * 8 * 4, 9);
         var copies = ImageTestHarness.WholeImageCopies(description, 0);
         harness.UploadImage(source, pattern, copies);
-        var destination = harness.CreateImage(description with { PixelFormat = Format.B8G8R8A8Unorm });
+        var destination = harness.CreateImage(description with { PixelFormat = GpuFormat.B8G8R8A8Unorm });
         harness.Run(() => destination.ResolveFrom(source, SubresourceRange.First, SubresourceRange.First));
         Assert.Equal(pattern, harness.ReadImage(destination, copies, 8 * 8 * 4));
 

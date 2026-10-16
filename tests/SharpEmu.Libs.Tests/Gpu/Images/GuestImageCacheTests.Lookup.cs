@@ -1,12 +1,14 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
-using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Buffers;
 using Silk.NET.Vulkan;
 using Xunit;
 using static SharpEmu.Libs.Tests.Gpu.Images.ImageCacheTestSupport;
+
+using SharpEmu.Libs.Gpu.Images;
 
 namespace SharpEmu.Libs.Tests.Gpu.Images;
 
@@ -65,9 +67,9 @@ public sealed partial class GuestImageCacheTests
         var baseline = harness.Images.LookupMemoCounters;
 
         var swizzled = Sampled(address);
-        swizzled.View = swizzled.View with { Mapping = new ComponentMapping(ComponentSwizzle.B, ComponentSwizzle.G, ComponentSwizzle.R, ComponentSwizzle.A) };
+        swizzled.View = swizzled.View with { Mapping = new GpuComponentMapping(GpuComponentSwizzle.B, GpuComponentSwizzle.G, GpuComponentSwizzle.R, GpuComponentSwizzle.A) };
         Assert.Equal(firstId, harness.Find(ref swizzled));
-        Assert.Equal(ComponentSwizzle.B, swizzled.View.Mapping.R);
+        Assert.Equal(GpuComponentSwizzle.B, swizzled.View.Mapping.R);
         Assert.Equal(baseline.Hits, harness.Images.LookupMemoCounters.Hits);
     }
 
@@ -85,14 +87,14 @@ public sealed partial class GuestImageCacheTests
         const uint width = 128;
         const uint deviceValue = 0x11223344;
         var address = harness.MapBacked(0x20000, ReadWrite);
-        var written = LinearRequest(address, width * width * 4, Format.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D,
-            new Extent3D(width, width, 1), 1, 4, 1);
+        var written = LinearRequest(address, width * width * 4, GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D,
+            new GpuExtent3D(width, width, 1), 1, 4, 1);
         var writtenId = harness.Acquire(ref written);
         Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(address, width * width * 4, deviceValue)));
         AgeBeyondTheRemovalWindow(harness, writtenId, endFrame: frameEnded);
 
-        var inside = LinearRequest(address + 0x8000, 0x4000, Format.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D,
-            new Extent3D(64, 64, 1), 1, 4, 1);
+        var inside = LinearRequest(address + 0x8000, 0x4000, GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D,
+            new GpuExtent3D(64, 64, 1), 1, 4, 1);
         harness.Acquire(ref inside);
 
         Assert.Equal(!frameEnded, harness.Images.Contains(writtenId));

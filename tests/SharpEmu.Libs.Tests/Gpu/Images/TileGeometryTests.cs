@@ -69,10 +69,9 @@ public sealed class TileGeometryTests
         Assert.True(TileGeometry.TryGetBlockLayout(TileBlockKind.RenderTarget64KBGen5, bytes, out var layout));
         Assert.True(TileGeometry.TryGetBlockOffset(layout, x, y, 0, out var offset));
         Assert.Equal(expected, offset);
-
-        var detile = GnmTiling.GetDetileParams(27, (int)bytes, (int)layout.BlockWidth, (int)layout.BlockHeight);
-        Assert.True(detile.IsSupported);
-        Assert.Equal(expected, (uint)(detile.XByteTerm[x & detile.XMask] ^ detile.YByteTerm[y & detile.YMask]));
+        // The fork keeps GnmTiling's mode-27 CPU equation qualified against the pinned PAL
+        // AddrLib fixture (tests/Fixtures/Bgra1024Array); upstream's switch of that table to
+        // these Gen5 bits is not taken until it is validated on the Metal path.
     }
 
     [Theory]

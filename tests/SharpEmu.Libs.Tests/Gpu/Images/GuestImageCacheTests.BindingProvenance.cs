@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Buffers;
@@ -24,14 +25,14 @@ public sealed partial class GuestImageCacheTests
         using var harness = new CacheHarness(_vulkan);
         var address = harness.MapBacked(0x10000, ReadWrite);
         harness.Write(address, Bytes(0x12345678u));
-        var earlier = LinearRequest(address, 256, Format.R32Uint, GuestPixelFormat.Bits32UInt,
-            GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, sizeof(uint), 1);
+        var earlier = LinearRequest(address, 256, GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt,
+            GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, sizeof(uint), 1);
         harness.Worker.Run(() => harness.Images.TraceTextureBinding(0x21, 3, new uint[] { 0x12345678 }, earlier));
         if (changeBytes) harness.Write(address, Bytes(0x87654321u));
         if (unmap) harness.Worker.Run(() => ((IGuestImageStore)harness.Images).Unregister(address, 0x10000));
         var volume = earlier;
         volume.Description.Type = GuestImageType.Color3D;
-        volume.View = volume.View with { Type = ImageViewType.Type3D };
+        volume.View = volume.View with { Type = GpuImageViewType.Type3D };
         using var output = new StringWriter();
         var previous = Console.Error;
         try

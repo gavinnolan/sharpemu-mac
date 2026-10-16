@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Scheduling;
-using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Images;
 
@@ -12,14 +12,14 @@ public readonly record struct ColorTargetResolution(
     ImageRequest Request,
     ulong BaseAddress,
     ulong BackingSize,
-    Extent2D Extent,
+    GpuExtent2D Extent,
     uint BaseMipLevel,
     uint BaseArrayLayer,
     uint Samples,
     ColorComponentMap ExportMapping,
     bool MetadataClearSupported,
     bool MetadataFixedClearSupported,
-    ClearColorValue ColorClearValue);
+    GpuClearColor ColorClearValue);
 
 // One layer window of a target view; the whole image has LastLayer + 1 layers.
 public readonly record struct TargetViewRange(uint BaseLayer, uint LayerCount, uint ImageLayers)
@@ -40,6 +40,14 @@ public readonly record struct TargetViewRange(uint BaseLayer, uint LayerCount, u
 public static partial class ImageRequestBuilders
 {
     private static long _normalizedSliceRanges;
+
+    /// <summary>
+    /// Whether colour targets and textures carry the native colour-clear metadata: the
+    /// DCC flags of a native clear and a CMASK description for a fast-cleared target.
+    /// Process-wide. The Metal backend turns it off: it implements neither and keeps its
+    /// own DCC clear tracking (see MetalGpuBackend.ConfigureSharedGpuCode).
+    /// </summary>
+    public static bool NativeColorClearMetadata { get; set; } = true;
 
     public static uint SampleCount(uint encodedLog2) => encodedLog2 <= 3 ? 1u << (int)encodedLog2 : 0;
 
@@ -66,15 +74,15 @@ public static partial class ImageRequestBuilders
     }
 
     // DCC clears use the target's packed clear word; the fixed-clear set is a format allow-list.
-    private static (bool Supported, bool FixedSupported, ClearColorValue Value) DccClearInfo(Format format, bool hasDcc, uint packedClear)
+    private static (bool Supported, bool FixedSupported, GpuClearColor Value) DccClearInfo(GpuFormat format, bool hasDcc, uint packedClear)
     {
-        ClearColorValue value = default;
+        GpuClearColor value = default;
         var supported = hasDcc && PackedClearValue.TryDecodeColor(format, packedClear, out value);
         var fixedSupported = hasDcc && PackedClearValue.SupportsDccFixedColor(format);
         return (supported, fixedSupported, supported ? value : default);
     }
 
-    public static bool SupportsDccFixedClear(Format format) => PackedClearValue.SupportsDccFixedColor(format);
+    public static bool SupportsDccFixedClear(GpuFormat format) => PackedClearValue.SupportsDccFixedColor(format);
 
     // Every draw rebuilds its targets' requests (a whole mip layout) from the same register words,
     // twice: once for the attachments and once for the pixel outputs. The build reads nothing but
@@ -145,23 +153,23 @@ public static partial class ImageRequestBuilders
         var samples = SampleCount(words.FragmentsLog2);
         if (samples == 0 || words.SamplesLog2 < words.FragmentsLog2)
         {
-            throw SubmissionScheduler.Fatal($"The render-target sample configuration is not supported: samples={words.SamplesLog2} fragments={words.FragmentsLog2}.");
+            throw GpuFatal.Fatal($"The render-target sample configuration is not supported: samples={words.SamplesLog2} fragments={words.FragmentsLog2}.");
         }
 
         if (!TargetViewRange.TryResolve(words.SliceStart, words.SliceMax, drawLayerOffset, out var view))
         {
-            throw SubmissionScheduler.Fatal($"The render-target view is invalid: base={words.SliceStart} last={words.SliceMax} drawOffset={drawLayerOffset}.");
+            throw GpuFatal.Fatal($"The render-target view is invalid: base={words.SliceStart} last={words.SliceMax} drawOffset={drawLayerOffset}.");
         }
 
         var levels = words.MaxMip + 1;
         if (levels > ImageDescription.MaxLevels || words.MipLevel >= levels)
         {
-            throw SubmissionScheduler.Fatal($"The render-target mip range is not supported: current={words.MipLevel} levels={levels}.");
+            throw GpuFatal.Fatal($"The render-target mip range is not supported: current={words.MipLevel} levels={levels}.");
         }
 
         if (words.Dimension > 2)
         {
-            throw SubmissionScheduler.Fatal($"The render-target dimension is not supported: dimension={words.Dimension}.");
+            throw GpuFatal.Fatal($"The render-target dimension is not supported: dimension={words.Dimension}.");
         }
 
         var imageType = words.Dimension switch { 0 => GuestImageType.Color1D, 1 => GuestImageType.Color2D, _ => GuestImageType.Color3D };
@@ -169,22 +177,22 @@ public static partial class ImageRequestBuilders
         var volume = imageType == GuestImageType.Color3D;
         if (is1D && words.Height != 0)
         {
-            throw SubmissionScheduler.Fatal($"A 1D render target has a nonzero height: height={words.Height}.");
+            throw GpuFatal.Fatal($"A 1D render target has a nonzero height: height={words.Height}.");
         }
 
         if (!volume && words.Depth != 0)
         {
-            throw SubmissionScheduler.Fatal($"A render target that is not 3D has a nonzero depth: depth={words.Depth}.");
+            throw GpuFatal.Fatal($"A render target that is not 3D has a nonzero depth: depth={words.Depth}.");
         }
 
         if (is1D && samples != 1)
         {
-            throw SubmissionScheduler.Fatal("A multisampled 1D render target is not supported.");
+            throw GpuFatal.Fatal("A multisampled 1D render target is not supported.");
         }
 
         if (volume && samples != 1)
         {
-            throw SubmissionScheduler.Fatal("A multisampled 3D render target is not supported.");
+            throw GpuFatal.Fatal("A multisampled 3D render target is not supported.");
         }
 
         var depth = volume ? words.Depth + 1 : 1;
@@ -219,31 +227,31 @@ public static partial class ImageRequestBuilders
                 tiled = tileMode != GuestTileMode.Linear;
                 break;
             default:
-                throw SubmissionScheduler.Fatal($"The render-target tile mode is unknown: tile={(uint)tileMode}.");
+                throw GpuFatal.Fatal($"The render-target tile mode is unknown: tile={(uint)tileMode}.");
         }
 
         if (!tiled && levels > 1)
         {
-            throw SubmissionScheduler.Fatal("A linear mipmapped render target is not supported.");
+            throw GpuFatal.Fatal("A linear mipmapped render target is not supported.");
         }
 
         if (samples > 1 && (!tiled || levels != 1))
         {
-            throw SubmissionScheduler.Fatal("A multisampled render target needs a single-mip tiled surface.");
+            throw GpuFatal.Fatal("A multisampled render target needs a single-mip tiled surface.");
         }
 
         if (textureTile && samples != 1)
         {
-            throw SubmissionScheduler.Fatal("A texture-tiled color render target does not support multisampling.");
+            throw GpuFatal.Fatal("A texture-tiled color render target does not support multisampling.");
         }
 
         var width = words.Width + 1;
         var height = words.Height + 1;
-        var targetFormat = TextureTransferLayout.RenderTargetFormat(words.Layout, words.NumberType, words.Order);
+        var targetFormat = GuestSurfaceFormats.RenderTargetFormat(words.Layout, words.NumberType, words.Order);
         var bytesPerElement = targetFormat.BytesPerElement;
         if (bytesPerElement == 0)
         {
-            throw SubmissionScheduler.Fatal("The render-target format has no valid element size.");
+            throw GpuFatal.Fatal("The render-target format has no valid element size.");
         }
 
         var transferFormat = ImageDescription.RenderTargetTransferFormat(bytesPerElement);
@@ -254,14 +262,14 @@ public static partial class ImageRequestBuilders
              words.FmaskCompression || words.FmaskCompressionDisabled || words.FmaskOneFragment || words.FastClear || words.DccEnabled ||
              words.CmaskAddress != 0 || words.FmaskAddress != 0 || words.DccAddress != 0 || words.DataWriteOnDccClearToRegister))
         {
-            throw SubmissionScheduler.Fatal(
+            throw GpuFatal.Fatal(
                 $"The texture-tiled render target is not supported: address=0x{words.BaseAddress:X16} tile={(uint)tileMode} info=0x{words.Info:X8} " +
                 $"cmask=0x{words.CmaskAddress:X16} fmask=0x{words.FmaskAddress:X16} dcc=0x{words.DccAddress:X16} dccControl=0x{words.DccControl:X8}.");
         }
 
         if ((standard64 || depthTile) && (words.Dimension != 1 || words.Depth != 0 || (depthTile && (view.BaseLayer != 0 || view.ImageLayers != 1))))
         {
-            throw SubmissionScheduler.Fatal(
+            throw GpuFatal.Fatal(
                 $"The 64 KiB texture-tiled render-target view is not supported: dimension={words.Dimension} depth={words.Depth} baseLayer={view.BaseLayer} layers={view.ImageLayers}.");
         }
 
@@ -273,7 +281,7 @@ public static partial class ImageRequestBuilders
                 : TileGeometry.RenderTargetPitch(width, bytesPerElement, words.FragmentsLog2);
             if (pitch == 0)
             {
-                throw SubmissionScheduler.Fatal($"The render-target pitch is not supported: width={width} bytes={bytesPerElement}.");
+                throw GpuFatal.Fatal($"The render-target pitch is not supported: width={width} bytes={bytesPerElement}.");
             }
         }
         else
@@ -292,7 +300,7 @@ public static partial class ImageRequestBuilders
             var surfaceDescription = new TiledSurfaceDescription(transferFormat, tileMode, TileSurfaceDimension.Volume3D, width, height, depth, levels, 1);
             if (!tiled || !TileGeometry.TryGetTiledTextureLayout(surfaceDescription, out volumeLayout))
             {
-                throw SubmissionScheduler.Fatal($"The 3D render-target layout is not supported: extent={width}x{height}x{depth} levels={levels} tile={(uint)tileMode}.");
+                throw GpuFatal.Fatal($"The 3D render-target layout is not supported: extent={width}x{height}x{depth} levels={levels} tile={(uint)tileMode}.");
             }
 
             size = volumeLayout.BlockSliceSize;
@@ -316,7 +324,7 @@ public static partial class ImageRequestBuilders
 
             if (!validLayout)
             {
-                throw SubmissionScheduler.Fatal($"The render-target layout is not supported: extent={width}x{height} pitch={pitch} bytes={bytesPerElement} levels={levels}.");
+                throw GpuFatal.Fatal($"The render-target layout is not supported: extent={width}x{height} pitch={pitch} bytes={bytesPerElement} levels={levels}.");
             }
 
             size = layout.Size;
@@ -331,7 +339,7 @@ public static partial class ImageRequestBuilders
             size = (ulong)pitch * height * bytesPerElement * samples;
             if (size > uint.MaxValue)
             {
-                throw SubmissionScheduler.Fatal($"The linear render-target slice exceeds the supported layout size: size=0x{size:X}.");
+                throw GpuFatal.Fatal($"The linear render-target slice exceeds the supported layout size: size=0x{size:X}.");
             }
 
             mipSpans[0] = new TileLevelSpan { Size = (uint)size };
@@ -340,7 +348,7 @@ public static partial class ImageRequestBuilders
 
         if (size == 0 || (!volume && size > ulong.MaxValue / view.ImageLayers))
         {
-            throw SubmissionScheduler.Fatal($"The render-target memory footprint is invalid: size=0x{size:X} layers={view.ImageLayers}.");
+            throw GpuFatal.Fatal($"The render-target memory footprint is invalid: size=0x{size:X} layers={view.ImageLayers}.");
         }
 
         if (!volume)
@@ -350,15 +358,15 @@ public static partial class ImageRequestBuilders
 
         if (backingSize == 0)
         {
-            throw SubmissionScheduler.Fatal($"The render-target backing is empty: address=0x{words.BaseAddress:X16}.");
+            throw GpuFatal.Fatal($"The render-target backing is empty: address=0x{words.BaseAddress:X16}.");
         }
 
         if (!new GuestSpan(words.BaseAddress, backingSize).IsValid)
         {
-            throw SubmissionScheduler.Fatal($"The render-target backing range is invalid: address=0x{words.BaseAddress:X16} size=0x{backingSize:X}.");
+            throw GpuFatal.Fatal($"The render-target backing range is invalid: address=0x{words.BaseAddress:X16} size=0x{backingSize:X}.");
         }
 
-        var viewExtent = new Extent2D(Math.Max(width >> (int)words.MipLevel, 1), Math.Max(height >> (int)words.MipLevel, 1));
+        var viewExtent = new GpuExtent2D(Math.Max(width >> (int)words.MipLevel, 1), Math.Max(height >> (int)words.MipLevel, 1));
         var viewDepth = Math.Max(depth >> (int)words.MipLevel, 1);
         if (volume && view.BaseLayer < viewDepth && view.LayerCount > viewDepth - view.BaseLayer)
         {
@@ -369,7 +377,12 @@ public static partial class ImageRequestBuilders
 
         if (volume && view.BaseLayer >= viewDepth)
         {
-            throw SubmissionScheduler.Fatal($"The 3D render-target view starts past the mip depth: base={view.BaseLayer} count={view.LayerCount} depth={viewDepth} mip={words.MipLevel}.");
+            throw GpuFatal.Fatal($"The 3D render-target view starts past the mip depth: base={view.BaseLayer} count={view.LayerCount} depth={viewDepth} mip={words.MipLevel}.");
+        }
+        if (volume)
+        {
+            // The slice window does not increase the storage depth of a volume.
+            view = view with { LayerCount = Math.Min(view.LayerCount, viewDepth - view.BaseLayer) };
         }
         if (volume)
         {
@@ -382,7 +395,7 @@ public static partial class ImageRequestBuilders
         description.PixelFormat = targetFormat.HostFormat;
         description.GuestFormat = transferFormat;
         description.Type = imageType;
-        description.Extent = new Extent3D(width, height, depth);
+        description.Extent = new GpuExtent3D(width, height, depth);
         description.Resources = new SubresourceCount(levels, volume ? 1 : view.ImageLayers);
         description.Pitch = pitch;
         description.BytesPerBlock = bytesPerElement;
@@ -418,13 +431,13 @@ public static partial class ImageRequestBuilders
         }
 
         var viewType = is1D
-            ? view.LayerCount == 1 ? ImageViewType.Type1D : ImageViewType.Type1DArray
-            : view.LayerCount == 1 ? ImageViewType.Type2D : ImageViewType.Type2DArray;
+            ? view.LayerCount == 1 ? GpuImageViewType.Type1D : GpuImageViewType.Type1DArray
+            : view.LayerCount == 1 ? GpuImageViewType.Type2D : GpuImageViewType.Type2DArray;
         var viewDescription = new ImageViewDescription(
-            targetFormat.HostFormat, viewType, ImageAspectFlags.ColorBit, words.MipLevel, 1, view.BaseLayer, view.LayerCount, default, ImageUsageFlags.ColorAttachmentBit);
+            targetFormat.HostFormat, viewType, GpuImageAspect.ColorBit, words.MipLevel, 1, view.BaseLayer, view.LayerCount, default, GpuImageUsage.ColorAttachmentBit);
         var request = new ImageRequest(description, viewDescription, ImageRole.ColorTarget);
         var (clearSupported, fixedClearSupported, clearValue) = DccClearInfo(targetFormat.HostFormat, hasDcc, words.ClearWord0);
-        if (hasDcc && fixedClearSupported && words.Order == ChannelOrder.Standard &&
+        if (NativeColorClearMetadata && hasDcc && fixedClearSupported && words.Order == ChannelOrder.Standard &&
             !is1D && levels == 1 && samples == 1 && tileMode == GuestTileMode.RenderTarget)
         {
             var sliceSize = NativeColorClear.SliceSize(width, height, bytesPerElement);
@@ -444,7 +457,7 @@ public static partial class ImageRequestBuilders
             }
         }
         // DCC takes precedence. CMASK register clears apply only to single-sample color targets.
-        if (!words.DccEnabled && words.FastClear && words.CmaskAddress != 0 &&
+        if (NativeColorClearMetadata && !words.DccEnabled && words.FastClear && words.CmaskAddress != 0 &&
             !words.FmaskCompression && !words.WriteVrsRateHintToCmask &&
             !is1D && levels == 1 && samples == 1 && tileMode == GuestTileMode.RenderTarget &&
             PackedClearValue.TryDecodeColor(targetFormat.HostFormat, words.ClearWord0, out var cmaskClear))

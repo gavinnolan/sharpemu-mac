@@ -1,7 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using Silk.NET.Vulkan;
+using SharpEmu.Libs.Gpu.Abstractions;
 
 namespace SharpEmu.Libs.Gpu.Images;
 
@@ -427,80 +427,80 @@ public static class GuestPixelFormats
         new(ChannelLayout.Bits10_10_10_2Float, GuestPixelFormat.Invalid, 0, 4, GuestPixelFormat.Bits10_10_10_2Float, ChannelType.Float, ChannelOrderSupport.StandardOnly),
     ];
 
-    private static readonly (GuestPixelFormat Guest, Format Host)[] HostFormats =
+    private static readonly (GuestPixelFormat Guest, GpuFormat Host)[] HostFormats =
     [
-        (GuestPixelFormat.Bits8UNorm, Format.R8Unorm),
-        (GuestPixelFormat.Bits8UInt, Format.R8Uint),
-        (GuestPixelFormat.Bits16UNorm, Format.R16Unorm),
-        (GuestPixelFormat.Bits16SNorm, Format.R16SNorm),
-        (GuestPixelFormat.Bits16UInt, Format.R16Uint),
-        (GuestPixelFormat.Bits16SInt, Format.R16Sint),
-        (GuestPixelFormat.Bits16Float, Format.R16Sfloat),
-        (GuestPixelFormat.Bits8_8UNorm, Format.R8G8Unorm),
-        (GuestPixelFormat.Bits8_8SNorm, Format.R8G8SNorm),
-        (GuestPixelFormat.Bits8_8UScaled, Format.R8G8Uscaled),
-        (GuestPixelFormat.Bits8_8UInt, Format.R8G8Uint),
-        (GuestPixelFormat.Bits8_8SInt, Format.R8G8Sint),
-        (GuestPixelFormat.Bits32UInt, Format.R32Uint),
-        (GuestPixelFormat.Bits32SInt, Format.R32Sint),
-        (GuestPixelFormat.Bits32Float, Format.R32Sfloat),
-        (GuestPixelFormat.Bits16_16UNorm, Format.R16G16Unorm),
-        (GuestPixelFormat.Bits16_16SNorm, Format.R16G16SNorm),
-        (GuestPixelFormat.Bits16_16UInt, Format.R16G16Uint),
-        (GuestPixelFormat.Bits16_16SInt, Format.R16G16Sint),
-        (GuestPixelFormat.Bits16_16Float, Format.R16G16Sfloat),
-        (GuestPixelFormat.Bits11_11_10UNorm, Format.B10G11R11UfloatPack32),
-        (GuestPixelFormat.Bits11_11_10Float, Format.B10G11R11UfloatPack32),
-        (GuestPixelFormat.Bits10_11_11Float, Format.B10G11R11UfloatPack32),
-        (GuestPixelFormat.Bits10_10_10_2UNorm, Format.A2B10G10R10UnormPack32),
-        (GuestPixelFormat.Bits10_10_10_2UInt, Format.A2B10G10R10UintPack32),
-        (GuestPixelFormat.Bits8_8_8_8UNorm, Format.R8G8B8A8Unorm),
-        (GuestPixelFormat.Bits8_8_8_8SNorm, Format.R8G8B8A8SNorm),
-        (GuestPixelFormat.Bits8_8_8_8UInt, Format.R8G8B8A8Uint),
-        (GuestPixelFormat.Bits8_8_8_8SInt, Format.R8G8B8A8Sint),
-        (GuestPixelFormat.Bits32_32UInt, Format.R32G32Uint),
-        (GuestPixelFormat.Bits32_32SInt, Format.R32G32Sint),
-        (GuestPixelFormat.Bits32_32Float, Format.R32G32Sfloat),
-        (GuestPixelFormat.Bits16_16_16_16UNorm, Format.R16G16B16A16Unorm),
-        (GuestPixelFormat.Bits16_16_16_16SNorm, Format.R16G16B16A16SNorm),
-        (GuestPixelFormat.Bits16_16_16_16UInt, Format.R16G16B16A16Uint),
-        (GuestPixelFormat.Bits16_16_16_16SInt, Format.R16G16B16A16Sint),
-        (GuestPixelFormat.Bits16_16_16_16Float, Format.R16G16B16A16Sfloat),
-        (GuestPixelFormat.Bits32_32_32UInt, Format.R32G32B32Uint),
-        (GuestPixelFormat.Bits32_32_32SInt, Format.R32G32B32Sint),
-        (GuestPixelFormat.Bits32_32_32Float, Format.R32G32B32Sfloat),
-        (GuestPixelFormat.Bits32_32_32_32UInt, Format.R32G32B32A32Uint),
-        (GuestPixelFormat.Bits32_32_32_32SInt, Format.R32G32B32A32Sint),
-        (GuestPixelFormat.Bits32_32_32_32Float, Format.R32G32B32A32Sfloat),
+        (GuestPixelFormat.Bits8UNorm, GpuFormat.R8Unorm),
+        (GuestPixelFormat.Bits8UInt, GpuFormat.R8Uint),
+        (GuestPixelFormat.Bits16UNorm, GpuFormat.R16Unorm),
+        (GuestPixelFormat.Bits16SNorm, GpuFormat.R16SNorm),
+        (GuestPixelFormat.Bits16UInt, GpuFormat.R16Uint),
+        (GuestPixelFormat.Bits16SInt, GpuFormat.R16Sint),
+        (GuestPixelFormat.Bits16Float, GpuFormat.R16Sfloat),
+        (GuestPixelFormat.Bits8_8UNorm, GpuFormat.R8G8Unorm),
+        (GuestPixelFormat.Bits8_8SNorm, GpuFormat.R8G8SNorm),
+        (GuestPixelFormat.Bits8_8UScaled, GpuFormat.R8G8Uscaled),
+        (GuestPixelFormat.Bits8_8UInt, GpuFormat.R8G8Uint),
+        (GuestPixelFormat.Bits8_8SInt, GpuFormat.R8G8Sint),
+        (GuestPixelFormat.Bits32UInt, GpuFormat.R32Uint),
+        (GuestPixelFormat.Bits32SInt, GpuFormat.R32Sint),
+        (GuestPixelFormat.Bits32Float, GpuFormat.R32Sfloat),
+        (GuestPixelFormat.Bits16_16UNorm, GpuFormat.R16G16Unorm),
+        (GuestPixelFormat.Bits16_16SNorm, GpuFormat.R16G16SNorm),
+        (GuestPixelFormat.Bits16_16UInt, GpuFormat.R16G16Uint),
+        (GuestPixelFormat.Bits16_16SInt, GpuFormat.R16G16Sint),
+        (GuestPixelFormat.Bits16_16Float, GpuFormat.R16G16Sfloat),
+        (GuestPixelFormat.Bits11_11_10UNorm, GpuFormat.B10G11R11UfloatPack32),
+        (GuestPixelFormat.Bits11_11_10Float, GpuFormat.B10G11R11UfloatPack32),
+        (GuestPixelFormat.Bits10_11_11Float, GpuFormat.B10G11R11UfloatPack32),
+        (GuestPixelFormat.Bits10_10_10_2UNorm, GpuFormat.A2B10G10R10UnormPack32),
+        (GuestPixelFormat.Bits10_10_10_2UInt, GpuFormat.A2B10G10R10UintPack32),
+        (GuestPixelFormat.Bits8_8_8_8UNorm, GpuFormat.R8G8B8A8Unorm),
+        (GuestPixelFormat.Bits8_8_8_8SNorm, GpuFormat.R8G8B8A8SNorm),
+        (GuestPixelFormat.Bits8_8_8_8UInt, GpuFormat.R8G8B8A8Uint),
+        (GuestPixelFormat.Bits8_8_8_8SInt, GpuFormat.R8G8B8A8Sint),
+        (GuestPixelFormat.Bits32_32UInt, GpuFormat.R32G32Uint),
+        (GuestPixelFormat.Bits32_32SInt, GpuFormat.R32G32Sint),
+        (GuestPixelFormat.Bits32_32Float, GpuFormat.R32G32Sfloat),
+        (GuestPixelFormat.Bits16_16_16_16UNorm, GpuFormat.R16G16B16A16Unorm),
+        (GuestPixelFormat.Bits16_16_16_16SNorm, GpuFormat.R16G16B16A16SNorm),
+        (GuestPixelFormat.Bits16_16_16_16UInt, GpuFormat.R16G16B16A16Uint),
+        (GuestPixelFormat.Bits16_16_16_16SInt, GpuFormat.R16G16B16A16Sint),
+        (GuestPixelFormat.Bits16_16_16_16Float, GpuFormat.R16G16B16A16Sfloat),
+        (GuestPixelFormat.Bits32_32_32UInt, GpuFormat.R32G32B32Uint),
+        (GuestPixelFormat.Bits32_32_32SInt, GpuFormat.R32G32B32Sint),
+        (GuestPixelFormat.Bits32_32_32Float, GpuFormat.R32G32B32Sfloat),
+        (GuestPixelFormat.Bits32_32_32_32UInt, GpuFormat.R32G32B32A32Uint),
+        (GuestPixelFormat.Bits32_32_32_32SInt, GpuFormat.R32G32B32A32Sint),
+        (GuestPixelFormat.Bits32_32_32_32Float, GpuFormat.R32G32B32A32Sfloat),
         // Narrow sRGB formats are optional in Vulkan; a same-width UNORM format stands in.
-        (GuestPixelFormat.Bits8Srgb, Format.R8Unorm),
-        (GuestPixelFormat.Bits8_8Srgb, Format.R8G8Unorm),
-        (GuestPixelFormat.Bits8_8_8_8Srgb, Format.R8G8B8A8Srgb),
-        (GuestPixelFormat.Bits9_9_9_5Float, Format.E5B9G9R9UfloatPack32),
-        (GuestPixelFormat.Bits5_6_5UNorm, Format.B5G6R5UnormPack16),
-        (GuestPixelFormat.Bits5_5_5_1UNorm, Format.R5G5B5A1UnormPack16),
-        (GuestPixelFormat.Bits4_4_4_4UNorm, Format.R4G4B4A4UnormPack16),
-        (GuestPixelFormat.Fmask8S4F4, Format.R32Sfloat),
-        (GuestPixelFormat.Bc1UNorm, Format.BC1RgbaUnormBlock),
-        (GuestPixelFormat.Bc1Srgb, Format.BC1RgbaSrgbBlock),
-        (GuestPixelFormat.Bc2UNorm, Format.BC2UnormBlock),
-        (GuestPixelFormat.Bc2Srgb, Format.BC2SrgbBlock),
-        (GuestPixelFormat.Bc3UNorm, Format.BC3UnormBlock),
-        (GuestPixelFormat.Bc3Srgb, Format.BC3SrgbBlock),
-        (GuestPixelFormat.Bc4UNorm, Format.BC4UnormBlock),
-        (GuestPixelFormat.Bc4SNorm, Format.BC4SNormBlock),
-        (GuestPixelFormat.Bc5UNorm, Format.BC5UnormBlock),
-        (GuestPixelFormat.Bc5SNorm, Format.BC5SNormBlock),
-        (GuestPixelFormat.Bc6UFloat, Format.BC6HUfloatBlock),
-        (GuestPixelFormat.Bc6SFloat, Format.BC6HSfloatBlock),
-        (GuestPixelFormat.Bc7UNorm, Format.BC7UnormBlock),
-        (GuestPixelFormat.Bc7Srgb, Format.BC7SrgbBlock),
+        (GuestPixelFormat.Bits8Srgb, GpuFormat.R8Unorm),
+        (GuestPixelFormat.Bits8_8Srgb, GpuFormat.R8G8Unorm),
+        (GuestPixelFormat.Bits8_8_8_8Srgb, GpuFormat.R8G8B8A8Srgb),
+        (GuestPixelFormat.Bits9_9_9_5Float, GpuFormat.E5B9G9R9UfloatPack32),
+        (GuestPixelFormat.Bits5_6_5UNorm, GpuFormat.B5G6R5UnormPack16),
+        (GuestPixelFormat.Bits5_5_5_1UNorm, GpuFormat.R5G5B5A1UnormPack16),
+        (GuestPixelFormat.Bits4_4_4_4UNorm, GpuFormat.R4G4B4A4UnormPack16),
+        (GuestPixelFormat.Fmask8S4F4, GpuFormat.R32Sfloat),
+        (GuestPixelFormat.Bc1UNorm, GpuFormat.BC1RgbaUnormBlock),
+        (GuestPixelFormat.Bc1Srgb, GpuFormat.BC1RgbaSrgbBlock),
+        (GuestPixelFormat.Bc2UNorm, GpuFormat.BC2UnormBlock),
+        (GuestPixelFormat.Bc2Srgb, GpuFormat.BC2SrgbBlock),
+        (GuestPixelFormat.Bc3UNorm, GpuFormat.BC3UnormBlock),
+        (GuestPixelFormat.Bc3Srgb, GpuFormat.BC3SrgbBlock),
+        (GuestPixelFormat.Bc4UNorm, GpuFormat.BC4UnormBlock),
+        (GuestPixelFormat.Bc4SNorm, GpuFormat.BC4SNormBlock),
+        (GuestPixelFormat.Bc5UNorm, GpuFormat.BC5UnormBlock),
+        (GuestPixelFormat.Bc5SNorm, GpuFormat.BC5SNormBlock),
+        (GuestPixelFormat.Bc6UFloat, GpuFormat.BC6HUfloatBlock),
+        (GuestPixelFormat.Bc6SFloat, GpuFormat.BC6HSfloatBlock),
+        (GuestPixelFormat.Bc7UNorm, GpuFormat.BC7UnormBlock),
+        (GuestPixelFormat.Bc7Srgb, GpuFormat.BC7SrgbBlock),
     ];
 
     private const int LookupSize = (int)GuestPixelFormat.Bc7Srgb + 1;
 
     private static readonly FormatFacts?[] FactsLookup = BuildFactsLookup();
-    private static readonly Format[] HostLookup = BuildHostLookup();
+    private static readonly GpuFormat[] HostLookup = BuildHostLookup();
 
     private static FormatFacts?[] BuildFactsLookup()
     {
@@ -513,9 +513,9 @@ public static class GuestPixelFormats
         return lookup;
     }
 
-    private static Format[] BuildHostLookup()
+    private static GpuFormat[] BuildHostLookup()
     {
-        var lookup = new Format[LookupSize];
+        var lookup = new GpuFormat[LookupSize];
         foreach (var (guest, host) in HostFormats)
         {
             lookup[(int)guest] = host;
@@ -560,8 +560,8 @@ public static class GuestPixelFormats
             _ => format,
         };
 
-    public static Format HostFormat(GuestPixelFormat format) =>
-        (uint)format < LookupSize ? HostLookup[(int)format] : Format.Undefined;
+    public static GpuFormat HostFormat(GuestPixelFormat format) =>
+        (uint)format < LookupSize ? HostLookup[(int)format] : GpuFormat.Undefined;
 
     public static RenderTargetEncoding ResolveRenderTargetEncoding(ChannelLayout layout, ChannelType type)
     {

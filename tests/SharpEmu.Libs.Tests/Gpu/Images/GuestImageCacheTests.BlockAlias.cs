@@ -8,6 +8,8 @@ using Silk.NET.Vulkan;
 using Xunit;
 using static SharpEmu.Libs.Tests.Gpu.Images.ImageCacheTestSupport;
 
+using SharpEmu.Libs.Gpu.Abstractions;
+
 namespace SharpEmu.Libs.Tests.Gpu.Images;
 
 public sealed partial class GuestImageCacheTests
@@ -16,23 +18,23 @@ public sealed partial class GuestImageCacheTests
     private const ulong BlockImageBytes = 64 * 64 / 2;
 
     private static ImageRequest CompressedTexture(ulong address) =>
-        LinearRequest(address, BlockImageBytes, Format.BC1RgbaSrgbBlock, GuestPixelFormat.Bc1Srgb, GuestImageType.Color2D, new Extent3D(64, 64, 1), 1, 8, 1);
+        LinearRequest(address, BlockImageBytes, GpuFormat.BC1RgbaSrgbBlock, GuestPixelFormat.Bc1Srgb, GuestImageType.Color2D, new GpuExtent3D(64, 64, 1), 1, 8, 1);
 
     private static ImageRequest BlockAliasStorage(ulong address) =>
-        AsStorage(LinearRequest(address, BlockImageBytes, Format.R16G16B16A16Uint, GuestPixelFormat.Bits16_16_16_16UInt, GuestImageType.Color2D, new Extent3D(16, 16, 1), 1, 8, 1));
+        AsStorage(LinearRequest(address, BlockImageBytes, GpuFormat.R16G16B16A16Uint, GuestPixelFormat.Bits16_16_16_16UInt, GuestImageType.Color2D, new GpuExtent3D(16, 16, 1), 1, 8, 1));
 
     private const uint BlockArrayLayers = 4;
 
     private static ImageRequest CompressedArray(ulong address) =>
-        LinearRequest(address, BlockImageBytes * BlockArrayLayers, Format.BC1RgbaSrgbBlock, GuestPixelFormat.Bc1Srgb, GuestImageType.Color2D,
-            new Extent3D(64, 64, 1), BlockArrayLayers, 8, 1);
+        LinearRequest(address, BlockImageBytes * BlockArrayLayers, GpuFormat.BC1RgbaSrgbBlock, GuestPixelFormat.Bc1Srgb, GuestImageType.Color2D,
+            new GpuExtent3D(64, 64, 1), BlockArrayLayers, 8, 1);
 
     // A shader reads the blocks of the array through an uncompressed view of the given layers (a copy of streamed mips).
     private static ImageRequest BlockAliasArray(ulong address, uint viewLayers)
     {
-        var request = LinearRequest(address, BlockImageBytes * BlockArrayLayers, Format.R16G16B16A16Uint, GuestPixelFormat.Bits16_16_16_16UInt,
-            GuestImageType.Color2D, new Extent3D(16, 16, 1), BlockArrayLayers, 8, 1);
-        request.View = request.View with { LayerCount = viewLayers, Type = viewLayers > 1 ? ImageViewType.Type2DArray : ImageViewType.Type2D };
+        var request = LinearRequest(address, BlockImageBytes * BlockArrayLayers, GpuFormat.R16G16B16A16Uint, GuestPixelFormat.Bits16_16_16_16UInt,
+            GuestImageType.Color2D, new GpuExtent3D(16, 16, 1), BlockArrayLayers, 8, 1);
+        request.View = request.View with { LayerCount = viewLayers, Type = viewLayers > 1 ? GpuImageViewType.Type2DArray : GpuImageViewType.Type2D };
         return request;
     }
 
@@ -126,13 +128,13 @@ public sealed partial class GuestImageCacheTests
         var address = harness.MapBacked(0x20000, ReadWrite);
         // Linear rows are 256 bytes: 32 pixels of the 16x16 target, 32 blocks of the 64x64 texture (16 used).
         const ulong paddedBytes = 0x1000;
-        var target = AsColorTarget(LinearRequest(address, paddedBytes, Format.R16G16B16A16Uint, GuestPixelFormat.Bits16_16_16_16UInt,
-            GuestImageType.Color2D, new Extent3D(16, 16, 1), 1, 8, 1));
+        var target = AsColorTarget(LinearRequest(address, paddedBytes, GpuFormat.R16G16B16A16Uint, GuestPixelFormat.Bits16_16_16_16UInt,
+            GuestImageType.Color2D, new GpuExtent3D(16, 16, 1), 1, 8, 1));
         var targetId = harness.Acquire(ref target);
         Assert.True(harness.Image(targetId).Uses.RenderTarget);
 
-        var texture = LinearRequest(address, paddedBytes, Format.BC1RgbaSrgbBlock, GuestPixelFormat.Bc1Srgb, GuestImageType.Color2D,
-            new Extent3D(64, 64, 1), 1, 8, 1);
+        var texture = LinearRequest(address, paddedBytes, GpuFormat.BC1RgbaSrgbBlock, GuestPixelFormat.Bc1Srgb, GuestImageType.Color2D,
+            new GpuExtent3D(64, 64, 1), 1, 8, 1);
         var textureId = harness.Acquire(ref texture);
 
         Assert.Equal(new[] { textureId }, harness.Images.FindImagesInRangeForTest(address, paddedBytes, pageOverlap: false));

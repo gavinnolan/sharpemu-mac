@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.ShaderCompiler.Resources;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Gpu.Images;
@@ -150,6 +151,30 @@ public sealed class MipStatisticsTests
     }
 
     [Fact]
+    public void ImageFields_OfAnEligibleImageFollowItsBoundTexture()
+    {
+        // The program is the same whether the T# counts: the field alone turns recording off.
+        var layout = new BindingLayout { MipStatisticsCount = 3 };
+        var info = new ShaderResourceInfo
+        {
+            Images = [new() { MipStatistics = true }, new() { MipStatistics = true }, new() { MipStatistics = false }],
+        };
+        uint[][] images =
+        [
+            [0, 0, 0, 0, 0, CounterEnabled, 0x2A, 0],
+            [0, 0, 0, 0, 0, 0, 0x2B, 0],
+            [0, 0, 0, 0, 0, CounterEnabled, 0x2C, 0],
+        ];
+        var shaderData = new uint[layout.ShaderDataDwordCount];
+
+        MipStatistics.WriteImageFields(shaderData, layout, info, images);
+
+        Assert.Equal(0x2Au, shaderData[layout.MipStatisticsDword]);
+        Assert.Equal(MipStatistics.NoCounterField, shaderData[layout.MipStatisticsDword + 1]);
+        Assert.Equal(MipStatistics.NoCounterField, shaderData[layout.MipStatisticsDword + 2]);
+    }
+
+    [Fact]
     public void PackedGpuReport_ReportsTheFinestMipAndTheClampedSamples()
     {
         var words = new uint[2 * MipStatistics.CounterWords];
@@ -165,5 +190,24 @@ public sealed class MipStatisticsTests
         Assert.Equal((40u, 5u, 0u, 2u), Counter(report, 5));
         Assert.Equal((0u, 9u, 0u, 0u), Counter(report, 9));
         Assert.Equal((0u, 6u, 0u, MipStatistics.NoMipSampled), Counter(report, 6));
+    }
+
+    [Fact]
+    public void PackedGpuReport_OfTheWholeBankCarriesTheUnclampedSamplesSaturated()
+    {
+        var words = new uint[MipStatistics.CounterBufferBytes / sizeof(uint)];
+        Array.Fill(words, uint.MaxValue, 0, (int)MipStatistics.CounterWords);
+        words[5] = 3;
+        words[MipStatistics.CounterWords + 5] = 40;
+        words[2 * MipStatistics.CounterWords + 5] = 0x123;
+        words[7] = 20;
+        words[2 * MipStatistics.CounterWords + 7] = 0x1000000;
+        var report = new byte[MipStatistics.ReportBytes];
+
+        MipStatistics.PackReport(words, report);
+
+        Assert.Equal((40u, 5u, 0x123u, 3u), Counter(report, 5));
+        Assert.Equal((0u, 7u, 0xFFFFFFu, 14u), Counter(report, 7));
+        Assert.Equal((0u, 8u, 0u, MipStatistics.NoMipSampled), Counter(report, 8));
     }
 }

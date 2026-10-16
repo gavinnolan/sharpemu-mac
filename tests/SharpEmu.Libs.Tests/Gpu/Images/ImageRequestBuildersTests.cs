@@ -1,10 +1,10 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Images;
-using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
-using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.ShaderCompiler;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Vulkan;
 using Silk.NET.Vulkan;
@@ -42,13 +42,13 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         var request = ImageRequestBuilders.Texture(
             RegisterWords.Texture(Base, GuestPixelFormat.Bits8UScaled, 32, 32),
             new ShaderImageShape(false, false, false, false, TextureNumericClass.Float));
-        Assert.Equal(Format.R8Unorm, request.Request.Description.PixelFormat);
+        Assert.Equal(GpuFormat.R8Unorm, request.Request.Description.PixelFormat);
         Assert.True(request.ExactFormat);
 
         var twoChannel = ImageRequestBuilders.Texture(
             RegisterWords.Texture(Base, GuestPixelFormat.Bits8_8UScaled, 32, 32),
             new ShaderImageShape(false, false, false, false, TextureNumericClass.Float));
-        Assert.Equal(Format.R8G8Unorm, twoChannel.Request.Description.PixelFormat);
+        Assert.Equal(GpuFormat.R8G8Unorm, twoChannel.Request.Description.PixelFormat);
         Assert.True(twoChannel.ExactFormat);
     }
 
@@ -68,10 +68,10 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
     private static readonly ShaderImageShape Sampled2D = new(false, false, false, false, TextureNumericClass.Float);
 
     [Theory]
-    [InlineData(GuestPixelFormat.Bits16UNorm, Format.D16Unorm, Format.R16Unorm)]
-    [InlineData(GuestPixelFormat.Bits32Float, Format.D32Sfloat, Format.R32Sfloat)]
+    [InlineData(GuestPixelFormat.Bits16UNorm, GpuFormat.D16Unorm, GpuFormat.R16Unorm)]
+    [InlineData(GuestPixelFormat.Bits32Float, GpuFormat.D32Sfloat, GpuFormat.R32Sfloat)]
     public void ComparisonTexture_SelectsDepthWithoutChangingTheGuestLayout(
-        GuestPixelFormat guestFormat, Format depthFormat, Format colorFormat)
+        GuestPixelFormat guestFormat, GpuFormat depthFormat, GpuFormat colorFormat)
     {
         var words = RegisterWords.Texture(Base, guestFormat, 48, 24);
         var ordinary = ImageRequestBuilders.Texture(words, Sampled2D);
@@ -117,8 +117,8 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         var description = ImageRequestBuilders.Texture(words, Sampled2D with { Volume = true }).Request.Description;
 
         Assert.Equal(GuestImageType.Color3D, description.Type);
-        Assert.Equal(new Extent3D(32, 32, 32), description.Extent);
-        Assert.Equal(Format.A2B10G10R10UnormPack32, description.PixelFormat);
+        Assert.Equal(new GpuExtent3D(32, 32, 32), description.Extent);
+        Assert.Equal(GpuFormat.A2B10G10R10UnormPack32, description.PixelFormat);
         Assert.Equal(MetadataKind.Dcc, description.Metadata.Kind);
         Assert.Equal(0x606D6E0000UL, description.Metadata.Range.Address);
         Assert.Equal(0x20000UL, description.Metadata.Range.Size);
@@ -166,18 +166,18 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         Assert.Equal(ImageRole.ColorTarget, request.Role);
         Assert.Equal(Base, request.Description.Data.Address);
         Assert.Equal(16384UL, request.Description.Data.Size);
-        Assert.Equal(Format.R8G8B8A8Unorm, request.Description.PixelFormat);
+        Assert.Equal(GpuFormat.R8G8B8A8Unorm, request.Description.PixelFormat);
         Assert.Equal(GuestImageType.Color2D, request.Description.Type);
-        Assert.Equal(new Extent3D(64, 64, 1), request.Description.Extent);
+        Assert.Equal(new GpuExtent3D(64, 64, 1), request.Description.Extent);
         Assert.Equal(new SubresourceCount(1, 1), request.Description.Resources);
         Assert.Equal(64u, request.Description.Pitch);
         Assert.Equal(4u, request.Description.BytesPerBlock);
         Assert.Equal(1u, request.Description.Samples);
         Assert.Equal(GuestTileMode.Linear, request.Description.TileMode);
         Assert.Equal(16384UL, request.Description.MipLayout[0].Size);
-        Assert.Equal(ImageViewType.Type2D, request.View.Type);
-        Assert.Equal(ImageUsageFlags.ColorAttachmentBit, request.View.Usage);
-        Assert.Equal(new Extent2D(64, 64), resolution.Value.Extent);
+        Assert.Equal(GpuImageViewType.Type2D, request.View.Type);
+        Assert.Equal(GpuImageUsage.ColorAttachmentBit, request.View.Usage);
+        Assert.Equal(new GpuExtent2D(64, 64), resolution.Value.Extent);
         Assert.Equal(16384UL, resolution.Value.BackingSize);
         Assert.Equal(1u, resolution.Value.Samples);
         Assert.Equal(0u, resolution.Value.BaseMipLevel);
@@ -205,7 +205,7 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         Assert.True(request.Description.MipLayout[1].Size > 0);
         Assert.Equal(1u, request.View.BaseLevel);
         Assert.Equal(1u, request.View.LevelCount);
-        Assert.Equal(new Extent2D(32, 32), resolution.Value.Extent);
+        Assert.Equal(new GpuExtent2D(32, 32), resolution.Value.Extent);
         Assert.Equal(1u, resolution.Value.BaseMipLevel);
         Assert.Equal(request.Description.Data.Size, resolution.Value.BackingSize);
     }
@@ -219,7 +219,7 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         var request = resolution.Value.Request;
         Assert.Equal(new SubresourceCount(1, 4), request.Description.Resources);
         Assert.Equal(4 * 16384UL, request.Description.Data.Size);
-        Assert.Equal(ImageViewType.Type2DArray, request.View.Type);
+        Assert.Equal(GpuImageViewType.Type2DArray, request.View.Type);
         Assert.Equal(0u, request.View.BaseLayer);
         Assert.Equal(4u, request.View.LayerCount);
         Assert.Equal(4 * 16384UL, resolution.Value.BackingSize);
@@ -299,7 +299,7 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         var resolution = ImageRequestBuilders.ColorTarget(words, 0xF, 0, false);
 
         Assert.NotNull(resolution);
-        Assert.Equal(new Extent3D(64, 64, 64), resolution.Value.Request.Description.Extent);
+        Assert.Equal(new GpuExtent3D(64, 64, 64), resolution.Value.Request.Description.Extent);
         Assert.Equal(new SubresourceCount(2, 1), resolution.Value.Request.Description.Resources);
         Assert.Equal(firstSlice, resolution.Value.Request.View.BaseLayer);
         Assert.Equal(expectedLayers, resolution.Value.Request.View.LayerCount);
@@ -331,7 +331,7 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
 
         Assert.NotNull(target);
         var description = target.Value.Request.Description;
-        Assert.Equal(new Extent3D(816, 604, 1), description.Extent);
+        Assert.Equal(new GpuExtent3D(816, 604, 1), description.Extent);
         Assert.Equal(832u, description.Pitch);
         Assert.Equal(832UL * 604 * 4, description.Data.Size);
         Assert.Equal(texture.Request.Description.Pitch, description.Pitch);
@@ -348,19 +348,19 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         Assert.Equal(ImageRole.Texture, request.Role);
         Assert.Equal(Base, request.Description.Data.Address);
         Assert.True(request.Description.Data.Size >= 16384UL);
-        Assert.Equal(Format.R8G8B8A8Unorm, request.Description.PixelFormat);
+        Assert.Equal(GpuFormat.R8G8B8A8Unorm, request.Description.PixelFormat);
         Assert.Equal(GuestPixelFormat.Bits8_8_8_8UNorm, request.Description.GuestFormat);
         Assert.Equal(GuestImageType.Color2D, request.Description.Type);
-        Assert.Equal(new Extent3D(64, 64, 1), request.Description.Extent);
+        Assert.Equal(new GpuExtent3D(64, 64, 1), request.Description.Extent);
         Assert.Equal(new SubresourceCount(1, 1), request.Description.Resources);
         Assert.Equal(4u, request.Description.BytesPerBlock);
         Assert.Equal(1u, request.Description.Samples);
         Assert.Equal(request.Description.Data.Size, request.Description.MipLayout[0].Size);
-        Assert.Equal(ImageViewType.Type2D, request.View.Type);
-        Assert.Equal(ImageUsageFlags.SampledBit, request.View.Usage);
-        Assert.Equal(Format.R8G8B8A8Unorm, request.View.Format);
+        Assert.Equal(GpuImageViewType.Type2D, request.View.Type);
+        Assert.Equal(GpuImageUsage.SampledBit, request.View.Usage);
+        Assert.Equal(GpuFormat.R8G8B8A8Unorm, request.View.Format);
         Assert.False(resolution.ExactFormat);
-        Assert.Equal(Format.R8G8B8A8Unorm, resolution.ViewFormat);
+        Assert.Equal(GpuFormat.R8G8B8A8Unorm, resolution.ViewFormat);
         Assert.Equal(ImageRequestBuilders.DestinationSwizzle(new TextureDescriptorWords(words)), resolution.Swizzle);
     }
 
@@ -386,10 +386,10 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
 
         Assert.Equal(GuestImageType.Color2D, arrayed.Description.Type);
         Assert.Equal(new SubresourceCount(1, 6), arrayed.Description.Resources);
-        Assert.Equal(ImageViewType.Type2DArray, arrayed.View.Type);
+        Assert.Equal(GpuImageViewType.Type2DArray, arrayed.View.Type);
         Assert.Equal(2u, arrayed.View.BaseLayer);
         Assert.Equal(4u, arrayed.View.LayerCount);
-        Assert.Equal(ImageViewType.Type2D, single.View.Type);
+        Assert.Equal(GpuImageViewType.Type2D, single.View.Type);
         Assert.Equal(2u, single.View.BaseLayer);
         Assert.Equal(1u, single.View.LayerCount);
     }
@@ -410,10 +410,10 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         var request = ImageRequestBuilders.Texture(words, shape).Request;
 
         Assert.Equal(new SubresourceCount(1, layers), request.Description.Resources);
-        Assert.Equal(ImageViewType.Type2DArray, request.View.Type);
+        Assert.Equal(GpuImageViewType.Type2DArray, request.View.Type);
         Assert.Equal(baseArray, request.View.BaseLayer);
         Assert.Equal(layers - baseArray, request.View.LayerCount);
-        Assert.Equal(storage ? ImageUsageFlags.StorageBit : ImageUsageFlags.SampledBit, request.View.Usage);
+        Assert.Equal(storage ? GpuImageUsage.StorageBit : GpuImageUsage.SampledBit, request.View.Usage);
         Assert.Empty(fatal.Messages);
 
         if (!GatePrerequisites.Ready(_vulkan)) return;
@@ -431,10 +431,10 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         var request = ImageRequestBuilders.Texture(words,
             Sampled2D with { Cube = true, Arrayed = true }, 0x393A86CB7E41375C, 0).Request;
 
-        Assert.Equal(new Extent3D(8, 8, 1), request.Description.Extent);
+        Assert.Equal(new GpuExtent3D(8, 8, 1), request.Description.Extent);
         Assert.Equal(new SubresourceCount(1, 1), request.Description.Resources);
-        Assert.Equal(Format.R16G16B16A16Sfloat, request.View.Format);
-        Assert.Equal(ImageViewType.Type2DArray, request.View.Type);
+        Assert.Equal(GpuFormat.R16G16B16A16Sfloat, request.View.Format);
+        Assert.Equal(GpuImageViewType.Type2DArray, request.View.Type);
         Assert.Equal(1u, request.View.LayerCount);
     }
 
@@ -458,41 +458,41 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         var storage = ImageRequestBuilders.Texture(words, Sampled2D with { Storage = true, NumericClass = TextureNumericClass.Uint });
 
         Assert.Equal(ImageRole.Texture, sampled.Request.Role);
-        Assert.Equal(new Extent3D(1, 1, 1), sampled.Request.Description.Extent);
-        Assert.Equal(Format.R32Sfloat, sampled.Request.Description.PixelFormat);
-        Assert.Equal(ImageUsageFlags.SampledBit, sampled.Request.View.Usage);
+        Assert.Equal(new GpuExtent3D(1, 1, 1), sampled.Request.Description.Extent);
+        Assert.Equal(GpuFormat.R32Sfloat, sampled.Request.Description.PixelFormat);
+        Assert.Equal(GpuImageUsage.SampledBit, sampled.Request.View.Usage);
         Assert.Equal(ImageRole.StorageImage, storage.Request.Role);
-        Assert.Equal(Format.R32Uint, storage.Request.Description.PixelFormat);
-        Assert.Equal(ImageUsageFlags.StorageBit, storage.Request.View.Usage);
+        Assert.Equal(GpuFormat.R32Uint, storage.Request.Description.PixelFormat);
+        Assert.Equal(GpuImageUsage.StorageBit, storage.Request.View.Usage);
     }
 
     [Fact]
     public void Texture_AnAtomicOnA64BitTexelViewsTheImageAsR64()
     {
         var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits32_32UInt, 64, 64);
-        var shape = Sampled2D with { Storage = true, NumericClass = TextureNumericClass.Uint, Atomic = true, Atomic64 = true };
+        var shape = Sampled2D with { Storage = true, NumericClass = TextureNumericClass.Uint, Atomic = true, Atomic64 = true, NativeInt64Atomics = true };
         var wide = ImageRequestBuilders.Texture(words, shape);
         var narrow = ImageRequestBuilders.Texture(words, shape with { Atomic64 = false });
 
         // The image keeps its two-dword texels; the shader sees each as one 64-bit integer.
         Assert.Equal(ImageRole.StorageImage, wide.Request.Role);
-        Assert.Equal(Format.R32G32Uint, wide.Request.Description.PixelFormat);
-        Assert.Equal(Format.R64Uint, wide.Request.View.Format);
-        Assert.Equal(ImageUsageFlags.StorageBit, wide.Request.View.Usage);
-        Assert.Equal(Format.R32Uint, narrow.Request.View.Format);
+        Assert.Equal(GpuFormat.R32G32Uint, wide.Request.Description.PixelFormat);
+        Assert.Equal(GpuFormat.R64Uint, wide.Request.View.Format);
+        Assert.Equal(GpuImageUsage.StorageBit, wide.Request.View.Usage);
+        Assert.Equal(GpuFormat.R32Uint, narrow.Request.View.Format);
     }
 
     [Fact]
     public void Texture_NullDescriptorOfA64BitAtomicBindsAnR64Image()
     {
         var storage = ImageRequestBuilders.Texture(
-            new uint[8], Sampled2D with { Storage = true, NumericClass = TextureNumericClass.Uint, Atomic = true, Atomic64 = true });
+            new uint[8], Sampled2D with { Storage = true, NumericClass = TextureNumericClass.Uint, Atomic = true, Atomic64 = true, NativeInt64Atomics = true });
 
         Assert.Equal(ImageRole.StorageImage, storage.Request.Role);
-        Assert.Equal(Format.R64Uint, storage.Request.Description.PixelFormat);
-        Assert.Equal(Format.R64Uint, storage.Request.View.Format);
+        Assert.Equal(GpuFormat.R64Uint, storage.Request.Description.PixelFormat);
+        Assert.Equal(GpuFormat.R64Uint, storage.Request.View.Format);
         Assert.Equal(8u, storage.Request.Description.BytesPerBlock);
-        Assert.Equal(ImageUsageFlags.StorageBit, storage.Request.View.Usage);
+        Assert.Equal(GpuImageUsage.StorageBit, storage.Request.View.Usage);
     }
 
     [Fact]
@@ -502,10 +502,10 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         var resolution = ImageRequestBuilders.Texture(words, Sampled2D with { Storage = true });
 
         Assert.Equal(ImageRole.StorageImage, resolution.Request.Role);
-        Assert.Equal(Format.R8G8B8A8Srgb, resolution.Request.Description.PixelFormat);
-        Assert.Equal(Format.R8G8B8A8Unorm, resolution.Request.View.Format);
-        Assert.Equal(ImageUsageFlags.StorageBit, resolution.Request.View.Usage);
-        Assert.Equal(Format.R8G8B8A8Srgb, resolution.ViewFormat);
+        Assert.Equal(GpuFormat.R8G8B8A8Srgb, resolution.Request.Description.PixelFormat);
+        Assert.Equal(GpuFormat.R8G8B8A8Unorm, resolution.Request.View.Format);
+        Assert.Equal(GpuImageUsage.StorageBit, resolution.Request.View.Usage);
+        Assert.Equal(GpuFormat.R8G8B8A8Srgb, resolution.ViewFormat);
     }
 
     [Fact]
@@ -525,7 +525,7 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
 
         Assert.NotNull(resolution);
         var value = resolution.Value;
-        Assert.Equal(Format.D32Sfloat, value.Format);
+        Assert.Equal(GpuFormat.D32Sfloat, value.Format);
         Assert.Equal(64u, value.Width);
         Assert.Equal(64u, value.Height);
         Assert.Equal(1u, value.Samples);
@@ -541,8 +541,8 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         Assert.Equal(new GuestSpanCheck(Base, value.DepthSize), new GuestSpanCheck(request.Description.Data.Address, request.Description.Data.Size));
         Assert.Equal(GuestTileMode.Depth, request.Description.TileMode);
         Assert.Equal(value.DepthSize, request.Description.MipLayout[0].Size);
-        Assert.Equal(ImageAspectFlags.DepthBit, request.View.Aspect);
-        Assert.Equal(ImageUsageFlags.DepthStencilAttachmentBit, request.View.Usage);
+        Assert.Equal(GpuImageAspect.DepthBit, request.View.Aspect);
+        Assert.Equal(GpuImageUsage.DepthStencilAttachmentBit, request.View.Usage);
     }
 
     [Fact]
@@ -554,12 +554,12 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
 
         Assert.NotNull(resolution);
         var value = resolution.Value;
-        Assert.Equal(Format.D32SfloatS8Uint, value.Format);
+        Assert.Equal(GpuFormat.D32SfloatS8Uint, value.Format);
         Assert.True(value.HasStencil);
         Assert.Equal(Base + 0x80000, value.StencilAddress);
         Assert.True(value.StencilSize > 0);
         Assert.Equal(value.StencilSize, value.Request.Description.Stencil.Size);
-        Assert.Equal(ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit, value.Request.View.Aspect);
+        Assert.Equal(GpuImageAspect.DepthBit | GpuImageAspect.StencilBit, value.Request.View.Aspect);
         Assert.False(value.StencilClearEnabled);
     }
 
@@ -648,22 +648,22 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         Assert.Equal(ImageRole.DisplaySurface, request.Role);
         Assert.Equal(Base, request.Description.Data.Address);
         Assert.Equal(request.Description.MipLayout[0].Size, request.Description.Data.Size);
-        Assert.Equal(Format.R8G8B8A8Srgb, request.Description.PixelFormat);
+        Assert.Equal(GpuFormat.R8G8B8A8Srgb, request.Description.PixelFormat);
         Assert.Equal(GuestPixelFormat.Bits8_8_8_8Srgb, request.Description.GuestFormat);
-        Assert.Equal(new Extent3D(1920, 1080, 1), request.Description.Extent);
+        Assert.Equal(new GpuExtent3D(1920, 1080, 1), request.Description.Extent);
         Assert.Equal(GuestTileMode.RenderTarget, request.Description.TileMode);
         Assert.Equal(4u, request.Description.BytesPerBlock);
         Assert.Equal(MetadataKind.None, request.Description.Metadata.Kind);
-        Assert.Equal(ImageViewType.Type2D, request.View.Type);
-        Assert.Equal(ImageUsageFlags.TransferSrcBit, request.View.Usage);
+        Assert.Equal(GpuImageViewType.Type2D, request.View.Type);
+        Assert.Equal(GpuImageUsage.TransferSrcBit, request.View.Usage);
     }
 
     [Theory]
-    [InlineData(0x8100070422000000UL, Format.A2B10G10R10UnormPack32, 8UL)]
-    [InlineData(0x8100070400000000UL, Format.A2R10G10B10UnormPack32, 40UL)]
-    [InlineData(0x8100000622000000UL, Format.A2B10G10R10UnormPack32, 32UL)]
-    [InlineData(0x8100000600000000UL, Format.A2R10G10B10UnormPack32, 0UL)]
-    public void DisplaySurface_Packed10BitFormatsPreserveEncodedValues(ulong pixelFormat, Format expectedFormat, ulong option)
+    [InlineData(0x8100070422000000UL, GpuFormat.A2B10G10R10UnormPack32, 8UL)]
+    [InlineData(0x8100070400000000UL, GpuFormat.A2R10G10B10UnormPack32, 40UL)]
+    [InlineData(0x8100000622000000UL, GpuFormat.A2B10G10R10UnormPack32, 32UL)]
+    [InlineData(0x8100000600000000UL, GpuFormat.A2R10G10B10UnormPack32, 0UL)]
+    public void DisplaySurface_Packed10BitFormatsPreserveEncodedValues(ulong pixelFormat, GpuFormat expectedFormat, ulong option)
     {
         var surface = new DisplaySurfaceWords(Base, 0, pixelFormat, 3840, 2160, 0, option, 0, 0, false);
         var request = ImageRequestBuilders.DisplaySurface(surface);

@@ -8,9 +8,9 @@ namespace SharpEmu.Libs.Gpu.Images;
 
 // Narrows the image-clear trace to guest address ranges. See docs/image-clear-tracing.md.
 // Ranges come from SHARPEMU_TRACE_IMAGE_RANGE or from images that followed shaders use.
-internal static class ImageTraceRange
+public static class ImageTraceRange
 {
-    internal const int MaximumRanges = 16;
+    public const int MaximumRanges = 16;
 
     private static readonly object _gate = new();
     private static readonly IReadOnlyList<(ulong ShaderHash, int ImageIndex)> _followTargets =
@@ -18,19 +18,19 @@ internal static class ImageTraceRange
     private static readonly HashSet<ulong> _pendingAddresses = new();
     private static GuestSpan[] _ranges = Load();
 
-    internal static IReadOnlyList<GuestSpan> Ranges => Volatile.Read(ref _ranges);
+    public static IReadOnlyList<GuestSpan> Ranges => Volatile.Read(ref _ranges);
 
-    internal static bool IsSet => Ranges.Count != 0;
+    public static bool IsSet => Ranges.Count != 0;
 
     // History stays unfiltered until a range is known, so a follow keeps earlier producers.
-    internal static IReadOnlyList<GuestSpan>? ActiveFilter => SelectActiveFilter(Ranges);
+    public static IReadOnlyList<GuestSpan>? ActiveFilter => SelectActiveFilter(Ranges);
 
-    internal static IReadOnlyList<GuestSpan>? SelectActiveFilter(IReadOnlyList<GuestSpan> ranges) =>
+    public static IReadOnlyList<GuestSpan>? SelectActiveFilter(IReadOnlyList<GuestSpan> ranges) =>
         ranges.Count == 0 ? null : ranges;
 
-    internal static bool Overlaps(ulong address, ulong size) => Overlaps(Ranges, address, size);
+    public static bool Overlaps(ulong address, ulong size) => Overlaps(Ranges, address, size);
 
-    internal static bool Overlaps(IReadOnlyList<GuestSpan> ranges, ulong address, ulong size)
+    public static bool Overlaps(IReadOnlyList<GuestSpan> ranges, ulong address, ulong size)
     {
         if (size == 0 || size > ulong.MaxValue - address) return false;
         foreach (var range in ranges)
@@ -41,7 +41,7 @@ internal static class ImageTraceRange
     }
 
     // The descriptor gives the base address; the image lookup supplies the footprint.
-    internal static void NoteDescriptor(ulong shaderHash, int imageIndex, ulong address)
+    public static void NoteDescriptor(ulong shaderHash, int imageIndex, ulong address)
     {
         if (address == 0 || !IsFollowTarget(_followTargets, shaderHash, imageIndex)) return;
         lock (_gate)
@@ -50,7 +50,7 @@ internal static class ImageTraceRange
         }
     }
 
-    internal static void NoteImageLookup(ulong address, ulong size)
+    public static void NoteImageLookup(ulong address, ulong size)
     {
         if (_followTargets.Count == 0 || size == 0) return;
         lock (_gate)
@@ -60,7 +60,7 @@ internal static class ImageTraceRange
     }
 
     // A binding knows its shader, index, and footprint, so the range exists before the first lookup.
-    internal static void NoteFollowedImage(ulong shaderHash, int imageIndex, ulong address, ulong size)
+    public static void NoteFollowedImage(ulong shaderHash, int imageIndex, ulong address, ulong size)
     {
         if (address == 0 || size == 0 || !IsFollowTarget(_followTargets, shaderHash, imageIndex)) return;
         lock (_gate)
@@ -83,7 +83,7 @@ internal static class ImageTraceRange
         Console.Error.WriteLine($"[GPU][TRACE] ImageTraceRange follow address=0x{address:X16} size=0x{size:X}");
     }
 
-    internal static GuestSpan[]? IncludeFootprint(GuestSpan[] ranges, ulong address, ulong size)
+    public static GuestSpan[]? IncludeFootprint(GuestSpan[] ranges, ulong address, ulong size)
     {
         if (size == 0 || size > ulong.MaxValue - address) return ranges;
         var end = address + size;
@@ -107,7 +107,7 @@ internal static class ImageTraceRange
         return merged.Count <= MaximumRanges ? merged.ToArray() : null;
     }
 
-    internal static bool IsFollowTarget(IReadOnlyList<(ulong ShaderHash, int ImageIndex)> targets, ulong shaderHash, int imageIndex)
+    public static bool IsFollowTarget(IReadOnlyList<(ulong ShaderHash, int ImageIndex)> targets, ulong shaderHash, int imageIndex)
     {
         foreach (var target in targets)
         {
@@ -125,7 +125,7 @@ internal static class ImageTraceRange
     }
 
     // Entries are "start+size" or "start-end" in hexadecimal, separated by commas or semicolons.
-    internal static IReadOnlyList<GuestSpan> Parse(string? value, TextWriter? errors)
+    public static IReadOnlyList<GuestSpan> Parse(string? value, TextWriter? errors)
     {
         if (string.IsNullOrWhiteSpace(value)) return Array.Empty<GuestSpan>();
         var ranges = new List<GuestSpan>();
@@ -143,7 +143,7 @@ internal static class ImageTraceRange
     }
 
     // Entries are "shaderHash:imageIndex"; the hash is hexadecimal and the index is decimal.
-    internal static IReadOnlyList<(ulong ShaderHash, int ImageIndex)> ParseFollowTargets(string? value, TextWriter? errors)
+    public static IReadOnlyList<(ulong ShaderHash, int ImageIndex)> ParseFollowTargets(string? value, TextWriter? errors)
     {
         if (string.IsNullOrWhiteSpace(value)) return Array.Empty<(ulong, int)>();
         var targets = new List<(ulong, int)>();

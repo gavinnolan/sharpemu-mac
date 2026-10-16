@@ -20,7 +20,7 @@ public sealed class SurfaceMetadata
     private uint _clearMask;
     private bool _upperSlicesClear;
     private readonly HashSet<uint> _upperSliceExceptions = new();
-    internal uint DccSliceCount = 32;
+    public uint DccSliceCount = 32;
 
     public uint ClearMask
     {
@@ -33,11 +33,11 @@ public sealed class SurfaceMetadata
         }
     }
 
-    internal bool IsSliceClear(uint slice) => slice < 32
+    public bool IsSliceClear(uint slice) => slice < 32
         ? (_clearMask & (1u << (int)slice)) != 0
         : _upperSlicesClear != _upperSliceExceptions.Contains(slice);
 
-    internal void SetSliceClear(uint slice, bool clear)
+    public void SetSliceClear(uint slice, bool clear)
     {
         if (slice < 32)
         {

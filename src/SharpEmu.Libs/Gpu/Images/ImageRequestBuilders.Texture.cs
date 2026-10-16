@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
-using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Images;
 
 // A texture request built from the descriptor words and the shape the shader was compiled with.
-public readonly record struct TextureRequestResolution(ImageRequest Request, bool ExactFormat, Format ViewFormat, uint Swizzle);
+public readonly record struct TextureRequestResolution(ImageRequest Request, bool ExactFormat, GpuFormat ViewFormat, uint Swizzle);
 
 public static partial class ImageRequestBuilders
 {
@@ -18,21 +18,23 @@ public static partial class ImageRequestBuilders
     {
         var numericClass = shape.NumericClass;
         var storage = shape.Storage;
-        // An atomic on 64-bit texels declares an R64 image, which a 32-bit placeholder cannot stand in for.
-        var (format, guestFormat) = shape.Atomic64
-            ? (Format.R64Uint, GuestPixelFormat.Bits32_32UInt)
-            : numericClass switch
-            {
-                TextureNumericClass.Float => (Format.R32Sfloat, GuestPixelFormat.Bits32Float),
-                TextureNumericClass.Uint => (Format.R32Uint, GuestPixelFormat.Bits32UInt),
-                TextureNumericClass.Sint => (Format.R32Sint, GuestPixelFormat.Bits32SInt),
-                _ => throw SubmissionScheduler.Fatal($"A null image needs a supported numeric class: class={numericClass}."),
-            };
+        var (format, guestFormat) = numericClass switch
+        {
+            TextureNumericClass.Float => (GpuFormat.R32Sfloat, GuestPixelFormat.Bits32Float),
+            TextureNumericClass.Uint => (GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt),
+            TextureNumericClass.Sint => (GpuFormat.R32Sint, GuestPixelFormat.Bits32SInt),
+            _ => throw GpuFatal.Fatal($"A null image needs a supported numeric class: class={numericClass}."),
+        };
+        // A 64-bit atomic binding is typed over RG32Uint texels, so its placeholder is too.
+        if (shape.Atomic64)
+        {
+            (format, guestFormat) = (shape.NativeInt64Atomics ? GpuFormat.R64Uint : GpuFormat.R32G32Uint, GuestPixelFormat.Bits32_32UInt);
+        }
         // Depth-reference sampling needs a depth view even for the placeholder.
         var depthCompare = shape.DepthCompare && numericClass == TextureNumericClass.Float && !storage;
         if (depthCompare)
         {
-            format = Format.D32Sfloat;
+            format = GpuFormat.D32Sfloat;
         }
 
         var description = ImageDescription.Create();
@@ -41,21 +43,21 @@ public static partial class ImageRequestBuilders
         description.Type = shape.Volume
             ? GuestImageType.Color3D
             : shape.OneDimensional ? GuestImageType.Color1D : GuestImageType.Color2D;
-        description.Extent = new Extent3D(1, 1, 1);
+        description.Extent = new GpuExtent3D(1, 1, 1);
         description.Resources = SubresourceCount.Single;
-        description.BytesPerBlock = shape.Atomic64 ? 8u : 4u;
+        description.BytesPerBlock = 4;
         description.Samples = shape.Multisampled ? 4u : 1u;
         description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = 0, Pitch = 1, Height = 1 };
         var view = ImageViewDescription.Default with
         {
             Format = format,
             Type = shape.Volume
-                ? ImageViewType.Type3D
+                ? GpuImageViewType.Type3D
                 : shape.OneDimensional
-                    ? shape.Arrayed ? ImageViewType.Type1DArray : ImageViewType.Type1D
-                    : shape.Arrayed ? ImageViewType.Type2DArray : ImageViewType.Type2D,
-            Aspect = depthCompare ? ImageAspectFlags.DepthBit : ImageAspectFlags.ColorBit,
-            Usage = storage ? ImageUsageFlags.StorageBit : ImageUsageFlags.SampledBit,
+                    ? shape.Arrayed ? GpuImageViewType.Type1DArray : GpuImageViewType.Type1D
+                    : shape.Arrayed ? GpuImageViewType.Type2DArray : GpuImageViewType.Type2D,
+            Aspect = depthCompare ? GpuImageAspect.DepthBit : GpuImageAspect.ColorBit,
+            Usage = storage ? GpuImageUsage.StorageBit : GpuImageUsage.SampledBit,
         };
         return new ImageRequest(description, view, storage ? ImageRole.StorageImage : ImageRole.Texture);
     }
@@ -78,7 +80,7 @@ public static partial class ImageRequestBuilders
                 description.Extent.Width, description.Extent.Height, description.Extent.Depth, description.Resources.Levels, 1);
             if (!TileGeometry.TryGetTiledTextureLayout(surfaceDescription, out var surface))
             {
-                throw SubmissionScheduler.Fatal(
+                throw GpuFatal.Fatal(
                     $"The volume texture layout is not supported: format={(uint)description.GuestFormat} tile={(uint)description.TileMode} " +
                     $"extent={description.Extent.Width}x{description.Extent.Height}x{description.Extent.Depth} levels={description.Resources.Levels}.");
             }
@@ -114,14 +116,14 @@ public static partial class ImageRequestBuilders
 
     // The view follows the compiled module: a volume, a layer window to the last layer, or one layer.
     private static ImageViewDescription TextureView(
-        in TextureDescriptorWords descriptor, in ShaderImageShape shape, Format format, bool shaderConversion, uint viewLevels, uint imageLayers,
+        in TextureDescriptorWords descriptor, in ShaderImageShape shape, GpuFormat format, bool shaderConversion, uint viewLevels, uint imageLayers,
         ulong shaderHash, int imageIndex)
     {
         var mapping = shape.Storage || shaderConversion ? default : ViewFormatRules.ComponentMapping(DestinationSwizzle(descriptor));
-        var usage = shape.Storage ? ImageUsageFlags.StorageBit : ImageUsageFlags.SampledBit;
+        var usage = shape.Storage ? GpuImageUsage.StorageBit : GpuImageUsage.SampledBit;
         if (shape.Volume)
         {
-            return WithMinLod(new ImageViewDescription(format, ImageViewType.Type3D, ImageAspectFlags.ColorBit, descriptor.BaseLevel, viewLevels, 0, 1, mapping, usage), descriptor, shape);
+            return WithMinLod(new ImageViewDescription(format, GpuImageViewType.Type3D, GpuImageAspect.ColorBit, descriptor.BaseLevel, viewLevels, 0, 1, mapping, usage), descriptor, shape);
         }
 
         var baseLayer = descriptor.BaseArray;
@@ -129,16 +131,16 @@ public static partial class ImageRequestBuilders
         {
             var words = new uint[8];
             for (var index = 0; index < words.Length; index++) words[index] = descriptor[index];
-            throw SubmissionScheduler.Fatal($"The texture base layer is outside the image: baseLayer={baseLayer} layers={imageLayers} address=0x{descriptor.BaseAddress:X16}. " +
+            throw GpuFatal.Fatal($"The texture base layer is outside the image: baseLayer={baseLayer} layers={imageLayers} address=0x{descriptor.BaseAddress:X16}. " +
                 $"shaderHash=0x{shaderHash:X16} image={imageIndex} type={descriptor.Type} depth={descriptor.Depth} " +
                 $"shape={shape} words={string.Join(',', words.Select(word => word.ToString("X8")))}");
         }
 
         var layerCount = shape.Arrayed ? imageLayers - baseLayer : 1;
         var type = shape.OneDimensional
-            ? shape.Arrayed ? ImageViewType.Type1DArray : ImageViewType.Type1D
-            : shape.Arrayed ? ImageViewType.Type2DArray : ImageViewType.Type2D;
-        return WithMinLod(new ImageViewDescription(format, type, ImageAspectFlags.ColorBit, descriptor.BaseLevel, viewLevels, baseLayer, layerCount, mapping, usage), descriptor, shape);
+            ? shape.Arrayed ? GpuImageViewType.Type1DArray : GpuImageViewType.Type1D
+            : shape.Arrayed ? GpuImageViewType.Type2DArray : GpuImageViewType.Type2D;
+        return WithMinLod(new ImageViewDescription(format, type, GpuImageAspect.ColorBit, descriptor.BaseLevel, viewLevels, baseLayer, layerCount, mapping, usage), descriptor, shape);
     }
 
     // MIN_LOD (4.8 fixed point, absolute mip levels) keeps sampling off mips a streamed texture has not
@@ -243,7 +245,7 @@ public static partial class ImageRequestBuilders
              (baseLevel != 0 || lastLevel == 0 || lastLevel > 3 || maxMip != lastLevel || !msaaTile || (descriptor.MsaaDepth && !depthTile) ||
               (!msaaArray && (descriptor.Depth != 0 || descriptor.BaseArray != 0)))))
         {
-            throw SubmissionScheduler.Fatal(
+            throw GpuFatal.Fatal(
                 $"The texture mip view is not supported: address=0x{address:X16} type={(uint)type} baseLevel={baseLevel} lastLevel={lastLevel} maxMip={maxMip} " +
                 $"levels={levels} tile={(uint)tile} depth={descriptor.Depth} baseArray={descriptor.BaseArray} msaaDepth={descriptor.MsaaDepth} storage={storage}.");
         }
@@ -252,7 +254,7 @@ public static partial class ImageRequestBuilders
         var viewLevels = multisampled ? 1 : viewLastLevel - baseLevel + 1;
         var depth = descriptor.Depth + 1;
         var format = descriptor.Format;
-        var surfaceFormat = TextureTransferLayout.SurfaceFormat(format);
+        var surfaceFormat = GuestSurfaceFormats.SurfaceFormat(format);
         var shaderConversion = surfaceFormat.ConversionFormat != GuestPixelFormat.Invalid;
         var volume = type == GuestImageType.Color3D;
         var layered = type is GuestImageType.Color1DArray or GuestImageType.Color2DArray or GuestImageType.Color2DMsaaArray;
@@ -262,7 +264,7 @@ public static partial class ImageRequestBuilders
         if (shape.Cube &&
             (volume || multisampled || width != height || descriptor.BaseArray > descriptor.Depth))
         {
-            throw SubmissionScheduler.Fatal(
+            throw GpuFatal.Fatal(
                 $"The cubemap view is invalid: address=0x{address:X16} extent={width}x{height} layers={imageLayers} baseArray={descriptor.BaseArray} samples={samples} " +
                 $"type={descriptor.Type} shape={shape} shaderHash=0x{shaderHash:X16} image={imageIndex} words={Convert.ToHexString(System.Runtime.InteropServices.MemoryMarshal.AsBytes(padded))}.");
         }
@@ -274,7 +276,7 @@ public static partial class ImageRequestBuilders
             pitch = depthTile ? TileGeometry.DepthPitch(width, bytes, lastLevel) : TileGeometry.RenderTargetPitch(width, bytes, lastLevel);
             if (pitch == 0 || !TileGeometry.TryGetRenderTargetSize(width, height, pitch, bytes, out size, lastLevel) || size.Size > uint.MaxValue / imageLayers)
             {
-                throw SubmissionScheduler.Fatal(
+                throw GpuFatal.Fatal(
                     $"The multisample texture layout is not supported: address=0x{address:X16} extent={width}x{height} bytes={bytes} pitch={pitch} samplesLog2={lastLevel} layers={imageLayers}.");
             }
 
@@ -288,7 +290,7 @@ public static partial class ImageRequestBuilders
 
         if (size.Size == 0 || size.Align == 0 || (address & (size.Align - 1UL)) != 0)
         {
-            throw SubmissionScheduler.Fatal(
+            throw GpuFatal.Fatal(
                 $"The texture footprint or alignment is invalid: address=0x{address:X16} size=0x{size.Size:X} align=0x{size.Align:X} format={(uint)format} tile={(uint)tile}.");
         }
 
@@ -298,19 +300,19 @@ public static partial class ImageRequestBuilders
         {
             pixelFormat = depthFormat.DepthAttachmentFormat;
         }
-        // Atomic storage images are declared as UINT in SPIR-V, including float atomics; an atomic on a
-        // 64-bit texel (32_32 UINT) is declared R64 and views the same texels as one 64-bit integer.
+        // Atomic storage images are declared as UINT in SPIR-V, including float atomics.
+        // A 64-bit atomic keeps its 32_32_UINT texels whole: MSL types it ulong over RG32Uint.
         var storageViewFormat = storage && shape.Atomic64
-            ? Format.R64Uint
-            : storage && (shape.Atomic || format == GuestPixelFormat.Bits32SInt) ? Format.R32Uint : ViewFormatRules.SrgbStorageFormat(pixelFormat);
-        var viewFormat = storage && storageViewFormat != Format.Undefined ? storageViewFormat : pixelFormat;
+            ? shape.NativeInt64Atomics ? GpuFormat.R64Uint : GpuFormat.R32G32Uint
+            : storage && (shape.Atomic || format == GuestPixelFormat.Bits32SInt) ? GpuFormat.R32Uint : ViewFormatRules.SrgbStorageFormat(pixelFormat);
+        var viewFormat = storage && storageViewFormat != GpuFormat.Undefined ? storageViewFormat : pixelFormat;
         var blockBytes = GuestPixelFormats.BlockCompressedBytes(format);
         var description = ImageDescription.Create();
         description.Data = new GuestSpan(address, size.Size);
         description.PixelFormat = pixelFormat;
         description.GuestFormat = format;
         description.Type = TextureBaseType(type);
-        description.Extent = new Extent3D(width, height, volume ? depth : 1);
+        description.Extent = new GpuExtent3D(width, height, volume ? depth : 1);
         description.Resources = new SubresourceCount(levels, imageLayers);
         description.Pitch = pitch;
         description.BytesPerBlock = blockBytes != 0 ? blockBytes : GuestPixelFormats.BytesPerElement(format);
@@ -338,7 +340,7 @@ public static partial class ImageRequestBuilders
 
         var view = TextureView(descriptor, shape, viewFormat, shaderConversion, viewLevels, description.Resources.Layers,
             shaderHash, imageIndex);
-        if (!shape.R128 && descriptor.MetadataCompress && !description.IsDepth && !shaderConversion &&
+        if (NativeColorClearMetadata && !shape.R128 && descriptor.MetadataCompress && !description.IsDepth && !shaderConversion &&
             tile == GuestTileMode.RenderTarget && levels == 1 && samples == 1 &&
             type is GuestImageType.Color2D or GuestImageType.Color2DArray or GuestImageType.Color3D &&
             NativeColorClear.TryDecode(0x40, viewFormat, !descriptor.DccAlphaOnMostSignificantBits, out _))
@@ -367,32 +369,38 @@ public static partial class ImageRequestBuilders
         return new TextureRequestResolution(request, shaderConversion, pixelFormat, DestinationSwizzle(descriptor));
     }
 
-    // After the lookup: a stencil association redirects to its depth owner; the view rules run on the owner.
-    public static ResourceSlotIdentifier ValidateTextureOwner(GuestImageCache cache, ResourceSlotIdentifier imageIdentifier, in TextureRequestResolution resolution)
+    // After the lookup: a stencil association redirects to its depth owner; the view rules run
+    // on the owner. The found image is passed in as its description plus depth owner rather than
+    // as a cache handle, so the view rules stay in the shared engine while the image cache that
+    // resolved the handle stays in the graphics backend.
+    public static ResourceSlotIdentifier ValidateTextureOwner(
+        in ImageDescription description,
+        ResourceSlotIdentifier depthOwner,
+        ResourceSlotIdentifier imageIdentifier,
+        in TextureRequestResolution resolution)
     {
-        var image = cache.GetImage(imageIdentifier);
-        if (image.DepthOwner.IsValid)
+        if (depthOwner.IsValid)
         {
-            return image.DepthOwner;
+            return depthOwner;
         }
 
         var storage = resolution.Request.Role == ImageRole.StorageImage;
-        if (image.Description.IsDepth)
+        if (description.IsDepth)
         {
             if (storage)
             {
-                throw SubmissionScheduler.Fatal($"A depth target cannot be bound as a storage image: address=0x{image.Description.Data.Address:X16}.");
+                throw GpuFatal.Fatal($"A depth target cannot be bound as a storage image: address=0x{description.Data.Address:X16}.");
             }
 
-            _ = ViewFormatRules.SelectSampledDepthView(image.Description.PixelFormat, resolution.ViewFormat, resolution.Swizzle);
+            _ = ViewFormatRules.SelectSampledDepthView(description.PixelFormat, resolution.ViewFormat, resolution.Swizzle);
         }
         else if (storage)
         {
-            ViewFormatRules.ValidateStorageColorView(image.Description.PixelFormat, resolution.Request.View.Format, resolution.Swizzle);
+            ViewFormatRules.ValidateStorageColorView(description.PixelFormat, resolution.Request.View.Format, resolution.Swizzle);
         }
         else
         {
-            _ = ViewFormatRules.SelectSampledColorView(image.Description.PixelFormat, resolution.ViewFormat, resolution.Swizzle);
+            _ = ViewFormatRules.SelectSampledColorView(description.PixelFormat, resolution.ViewFormat, resolution.Swizzle);
         }
 
         return imageIdentifier;

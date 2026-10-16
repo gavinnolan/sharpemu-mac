@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Buffers;
@@ -21,13 +22,13 @@ public sealed partial class GuestImageCacheTests
         using var harness = new CacheHarness(_vulkan);
         var address = harness.MapBacked(0x30000, ReadWrite);
         var metadataAddress = address + 0x20000;
-        var previous = AsColorTarget(LinearRequest(address, 8, Format.R16G16B16A16Sfloat,
-            GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 8, 1));
+        var previous = AsColorTarget(LinearRequest(address, 8, GpuFormat.R16G16B16A16Sfloat,
+            GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, 8, 1));
         previous.Description.Metadata.Kind = previousKind;
         previous.Description.Metadata.Range = new GuestSpan(metadataAddress, 4096);
         previous.Description.Metadata.NativeColorClear = true;
         previous.Description.Metadata.PackedColorClearSupported = true;
-        previous.Description.Metadata.PackedColorClear = new ClearColorValue(1f, 0f, 0f, 1f);
+        previous.Description.Metadata.PackedColorClear = new GpuClearColor { Float32_0 = 1f, Float32_1 = 0f, Float32_2 = 0f, Float32_3 = 1f };
         harness.Write(metadataAddress, new byte[4096]);
         var previousIdentifier = harness.Find(ref previous);
         harness.Worker.Run(() => harness.Images.ApplyNativeColorClear(previousIdentifier, previous));
@@ -36,7 +37,7 @@ public sealed partial class GuestImageCacheTests
         var next = previous;
         next.Description.Data = new GuestSpan(address + 0x10000, 8);
         next.Description.Metadata.Kind = nextKind;
-        next.Description.Metadata.PackedColorClear = new ClearColorValue(0f, 0f, 1f, 1f);
+        next.Description.Metadata.PackedColorClear = new GpuClearColor { Float32_0 = 0f, Float32_1 = 0f, Float32_2 = 1f, Float32_3 = 1f };
         var nextIdentifier = harness.Find(ref next);
         harness.Worker.Run(() =>
         {
@@ -66,13 +67,13 @@ public sealed partial class GuestImageCacheTests
         using var harness = new CacheHarness(_vulkan);
         var address = harness.MapBacked(0x20000, ReadWrite);
         var metadataAddress = address + 0x10000;
-        var target = AsColorTarget(LinearRequest(address, 8, Format.R16G16B16A16Sfloat,
-            GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 8, 1));
+        var target = AsColorTarget(LinearRequest(address, 8, GpuFormat.R16G16B16A16Sfloat,
+            GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, 8, 1));
         target.Description.Metadata.Kind = MetadataKind.Cmask;
         target.Description.Metadata.Range = new GuestSpan(metadataAddress, 4096);
         target.Description.Metadata.NativeColorClear = true;
         target.Description.Metadata.PackedColorClearSupported = true;
-        target.Description.Metadata.PackedColorClear = new ClearColorValue(0f, 0f, 1f, 1f);
+        target.Description.Metadata.PackedColorClear = new GpuClearColor { Float32_0 = 0f, Float32_1 = 0f, Float32_2 = 1f, Float32_3 = 1f };
         harness.Worker.Run(() =>
         {
             var (buffer, offset) = harness.Cache.ObtainBuffer(metadataAddress, 4096, isWritten: true);
@@ -106,8 +107,8 @@ public sealed partial class GuestImageCacheTests
         using var harness = new CacheHarness(_vulkan);
         var address = harness.MapBacked(0x80000, ReadWrite);
         var metadataAddress = address + 0x40000;
-        var request = LinearRequest(address, 0x4000, Format.R16G16B16A16Sfloat,
-            GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color3D, new Extent3D(1, 1, 64), 1, 8, 1);
+        var request = LinearRequest(address, 0x4000, GpuFormat.R16G16B16A16Sfloat,
+            GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color3D, new GpuExtent3D(1, 1, 64), 1, 8, 1);
         if (storage) request = AsStorage(request);
         request.Description.Metadata.Kind = MetadataKind.Dcc;
         request.Description.Metadata.Range = new GuestSpan(metadataAddress, 64 * 4096);
@@ -159,9 +160,9 @@ public sealed partial class GuestImageCacheTests
         var address = harness.MapBacked(0x80000, ReadWrite);
         var metadataAddress = address + 0x40000;
         harness.Write(metadataAddress, Enumerable.Repeat((byte)0x40, 64 * 4096).ToArray());
-        var request = AsColorTarget(LinearRequest(address, 0x4000, Format.R16G16B16A16Sfloat,
-            GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color3D, new Extent3D(1, 1, 64), 1, 8, 1));
-        request.View = request.View with { Type = ImageViewType.Type2DArray, BaseLayer = 31, LayerCount = 2 };
+        var request = AsColorTarget(LinearRequest(address, 0x4000, GpuFormat.R16G16B16A16Sfloat,
+            GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color3D, new GpuExtent3D(1, 1, 64), 1, 8, 1));
+        request.View = request.View with { Type = GpuImageViewType.Type2DArray, BaseLayer = 31, LayerCount = 2 };
         request.Description.Metadata.Kind = MetadataKind.Dcc;
         request.Description.Metadata.Range = new GuestSpan(metadataAddress, 64 * 4096);
         request.Description.Metadata.NativeColorClear = true;
@@ -188,8 +189,8 @@ public sealed partial class GuestImageCacheTests
         var address = harness.MapBacked(0x210000, ReadWrite);
         var metadataAddress = address + 0x200000;
         harness.Write(metadataAddress, Enumerable.Repeat((byte)0x10, 4096).ToArray());
-        var target = AsColorTarget(LinearRequest(address, 8, Format.R16G16B16A16Sfloat,
-            GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 8, 1));
+        var target = AsColorTarget(LinearRequest(address, 8, GpuFormat.R16G16B16A16Sfloat,
+            GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, 8, 1));
         target.Description.Metadata.Kind = MetadataKind.Dcc;
         target.Description.Metadata.Range = new GuestSpan(metadataAddress, 4096);
         target.Description.Metadata.NativeColorClear = true;
@@ -214,8 +215,8 @@ public sealed partial class GuestImageCacheTests
         var metadataAddress = address + 0x10000;
         harness.Write(address, Bytes((ushort)0, (ushort)0, (ushort)0, (ushort)0));
         harness.Write(metadataAddress, Enumerable.Repeat((byte)0x40, 4096).ToArray());
-        var target = AsColorTarget(LinearRequest(address, 8, Format.R16G16B16A16Sfloat,
-            GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 8, 1));
+        var target = AsColorTarget(LinearRequest(address, 8, GpuFormat.R16G16B16A16Sfloat,
+            GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, 8, 1));
         target.Description.Metadata.Kind = MetadataKind.Dcc;
         target.Description.Metadata.Range = new GuestSpan(metadataAddress, 4096);
         target.Description.Metadata.NativeColorClear = true;
@@ -261,15 +262,15 @@ public sealed partial class GuestImageCacheTests
         harness.Write(address + 256, original[8..]);
         harness.Write(metadataAddress, Enumerable.Repeat((byte)0x40, 4096).ToArray());
         harness.Write(metadataAddress + 4096, Enumerable.Repeat((byte)code, 4096).ToArray());
-        var target = AsColorTarget(LinearRequest(address, 512, Format.R16G16B16A16Sfloat,
-            GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color2D, new Extent3D(1, 1, 1), 2, 8, 1));
-        target.View = target.View with { BaseLayer = 1, LayerCount = 1, Type = ImageViewType.Type2D };
+        var target = AsColorTarget(LinearRequest(address, 512, GpuFormat.R16G16B16A16Sfloat,
+            GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 2, 8, 1));
+        target.View = target.View with { BaseLayer = 1, LayerCount = 1, Type = GpuImageViewType.Type2D };
         target.Description.Metadata.Kind = MetadataKind.Dcc;
         target.Description.Metadata.Range = new GuestSpan(metadataAddress, 8192);
         target.Description.Metadata.NativeColorClear = true;
         target.Description.Metadata.ColorMetadataBaseLayer = 1;
         target.Description.Metadata.PackedColorClearSupported = true;
-        target.Description.Metadata.PackedColorClear = new ClearColorValue(0f, 0f, 1f, 1f);
+        target.Description.Metadata.PackedColorClear = new GpuClearColor { Float32_0 = 0f, Float32_1 = 0f, Float32_2 = 1f, Float32_3 = 1f };
         harness.Worker.Run(() => harness.Images.SynchronizeColorMetadata(target));
         var identifier = harness.Find(ref target);
         harness.Worker.Run(() => harness.Images.ApplyNativeColorClear(identifier, target));
@@ -292,8 +293,8 @@ public sealed partial class GuestImageCacheTests
         var address = harness.MapBacked(0x20000, ReadWrite);
         var metadataAddress = address + 0x3000;
         harness.Write(metadataAddress, Enumerable.Repeat((byte)0x40, 4096).ToArray());
-        var chain = LinearRequest(address, 0x4008, Format.R16G16B16A16Sfloat,
-            GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color2D, new Extent3D(2, 2, 1), 1, 8, 1);
+        var chain = LinearRequest(address, 0x4008, GpuFormat.R16G16B16A16Sfloat,
+            GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color2D, new GpuExtent3D(2, 2, 1), 1, 8, 1);
         chain.Description.Resources = new SubresourceCount(2, 1);
         chain.Description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = 32, Pitch = 2, Height = 2 };
         chain.Description.MipLayout[1] = new MipLevelLayout { Offset = 0x4000, Size = 8, Pitch = 1, Height = 1 };

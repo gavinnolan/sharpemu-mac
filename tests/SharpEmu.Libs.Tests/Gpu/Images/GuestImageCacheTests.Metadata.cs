@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Buffers;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
@@ -45,8 +46,8 @@ public sealed partial class GuestImageCacheTests
         using var harness = new CacheHarness(_vulkan);
         var address = harness.MapBacked(metadataOffset + 0x10000, ReadWrite);
         var metadataAddress = address + metadataOffset;
-        var color = AsColorTarget(LinearRequest(address + 0x4000, 4, Format.R8G8B8A8Srgb,
-            GuestPixelFormat.Bits8_8_8_8Srgb, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1));
+        var color = AsColorTarget(LinearRequest(address + 0x4000, 4, GpuFormat.R8G8B8A8Srgb,
+            GuestPixelFormat.Bits8_8_8_8Srgb, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, 4, 1));
         color.Description.Metadata.Kind = MetadataKind.Dcc;
         color.Description.Metadata.Range = new GuestSpan(metadataAddress, 0);
         color.Description.TileMode = GuestTileMode.RenderTarget;
@@ -70,9 +71,9 @@ public sealed partial class GuestImageCacheTests
         using var harness = new CacheHarness(_vulkan);
         var address = harness.MapBacked(metadataOffset + 0x10000, ReadWrite);
         var metadataAddress = address + metadataOffset;
-        var depth = LinearRequest(address + 0x4000, 4, Format.D32Sfloat,
-            GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
-        depth = AsDepthTarget(depth, Format.D32Sfloat);
+        var depth = LinearRequest(address + 0x4000, 4, GpuFormat.D32Sfloat,
+            GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, 4, 1);
+        depth = AsDepthTarget(depth, GpuFormat.D32Sfloat);
         depth.Description.Metadata.Kind = MetadataKind.Htile;
         depth.Description.Metadata.Range = new GuestSpan(metadataAddress, 0x100);
         var depthIdentifier = harness.Acquire(ref depth);
@@ -91,8 +92,8 @@ public sealed partial class GuestImageCacheTests
         Assert.False(harness.Images.IsMetadataCleared(metadataAddress, 0));
         harness.ImageStore.MarkCpuWrite(metadataAddress + 0x80, 8);
 
-        var color = LinearRequest(address + 0x8000, 4, Format.R8G8B8A8Srgb,
-            GuestPixelFormat.Bits8_8_8_8Srgb, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
+        var color = LinearRequest(address + 0x8000, 4, GpuFormat.R8G8B8A8Srgb,
+            GuestPixelFormat.Bits8_8_8_8Srgb, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, 4, 1);
         color = AsColorTarget(color);
         color.Description.Metadata.Kind = MetadataKind.Dcc;
         // A zero range size selects deferred metadata registration.
@@ -121,8 +122,8 @@ public sealed partial class GuestImageCacheTests
         using var harness = new CacheHarness(_vulkan);
         var address = harness.MapBacked(0x20000, ReadWrite);
         var metadataAddress = address + 0x10000;
-        var color = AsColorTarget(LinearRequest(address + 0x4000, 4, Format.R8G8B8A8Srgb,
-            GuestPixelFormat.Bits8_8_8_8Srgb, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1));
+        var color = AsColorTarget(LinearRequest(address + 0x4000, 4, GpuFormat.R8G8B8A8Srgb,
+            GuestPixelFormat.Bits8_8_8_8Srgb, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, 4, 1));
         color.Description.Metadata.Kind = MetadataKind.Dcc;
         // A zero range size selects deferred metadata registration.
         color.Description.Metadata.Range = new GuestSpan(metadataAddress, 0);
@@ -131,8 +132,8 @@ public sealed partial class GuestImageCacheTests
         var colorIdentifier = harness.Acquire(ref color);
         Assert.True(harness.Images.OverlapsDccMetadata(metadataAddress, 1));
 
-        var depth = AsDepthTarget(LinearRequest(address + 0x8000, 4, Format.D32Sfloat,
-            GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1), Format.D32Sfloat);
+        var depth = AsDepthTarget(LinearRequest(address + 0x8000, 4, GpuFormat.D32Sfloat,
+            GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, 4, 1), GpuFormat.D32Sfloat);
         depth.Description.Metadata.Kind = MetadataKind.Htile;
         depth.Description.Metadata.Range = new GuestSpan(metadataAddress, 0x100);
         harness.Acquire(ref depth);
@@ -163,8 +164,8 @@ public sealed partial class GuestImageCacheTests
         Assert.False(harness.Images.TryAbsorbDccFill(metadataAddress, 0x100, 0));
         Assert.False(harness.ImageStore.MarkCpuWrite(metadataAddress, 8));
 
-        var depth = AsDepthTarget(LinearRequest(address + 0x8000, 4, Format.D32Sfloat,
-            GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1), Format.D32Sfloat);
+        var depth = AsDepthTarget(LinearRequest(address + 0x8000, 4, GpuFormat.D32Sfloat,
+            GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, 4, 1), GpuFormat.D32Sfloat);
         depth.Description.Metadata.Kind = MetadataKind.Htile;
         depth.Description.Metadata.Range = new GuestSpan(metadataAddress, 0x100);
         harness.Acquire(ref depth);
@@ -181,15 +182,15 @@ public sealed partial class GuestImageCacheTests
         using var harness = new CacheHarness(_vulkan);
         var address = harness.MapBacked(0x20000, ReadWrite);
         var metadataAddress = address + 0x10000;
-        var depth = AsDepthTarget(LinearRequest(address + 0x8000, 4, Format.D32Sfloat,
-            GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1), Format.D32Sfloat);
+        var depth = AsDepthTarget(LinearRequest(address + 0x8000, 4, GpuFormat.D32Sfloat,
+            GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, 4, 1), GpuFormat.D32Sfloat);
         depth.Description.Metadata.Kind = MetadataKind.Htile;
         depth.Description.Metadata.Range = new GuestSpan(metadataAddress, 0x100);
         harness.Acquire(ref depth);
         Assert.True(harness.Images.ClearMetadata(metadataAddress));
 
-        var color = AsColorTarget(LinearRequest(address + 0x4000, 4, Format.R8G8B8A8Srgb,
-            GuestPixelFormat.Bits8_8_8_8Srgb, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1));
+        var color = AsColorTarget(LinearRequest(address + 0x4000, 4, GpuFormat.R8G8B8A8Srgb,
+            GuestPixelFormat.Bits8_8_8_8Srgb, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, 4, 1));
         color.Description.Metadata.Kind = MetadataKind.Dcc;
         // A zero range size selects deferred metadata registration.
         color.Description.Metadata.Range = new GuestSpan(metadataAddress, 0);
@@ -214,8 +215,8 @@ public sealed partial class GuestImageCacheTests
         Assert.False(harness.Images.TryAbsorbDccFill(metadataAddress, 0x300, 0xc0c0c0c0u));
         Assert.False(harness.ImageStore.MarkCpuWrite(metadataAddress + 0x200, 8));
 
-        var color = LinearRequest(address, 4, Format.R8G8B8A8Srgb,
-            GuestPixelFormat.Bits8_8_8_8Srgb, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
+        var color = LinearRequest(address, 4, GpuFormat.R8G8B8A8Srgb,
+            GuestPixelFormat.Bits8_8_8_8Srgb, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, 4, 1);
         color = AsColorTarget(color);
         color.Description.Metadata.Kind = MetadataKind.Dcc;
         // Keep this request on the deferred fill path.
@@ -263,8 +264,8 @@ public sealed partial class GuestImageCacheTests
 
         ImageRequest MetadataDepth(ulong data, ulong metadata)
         {
-            var request = LinearRequest(data, 4, Format.D32Sfloat, GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
-            request = AsDepthTarget(request, Format.D32Sfloat);
+            var request = LinearRequest(data, 4, GpuFormat.D32Sfloat, GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, 4, 1);
+            request = AsDepthTarget(request, GpuFormat.D32Sfloat);
             request.Description.Metadata.Kind = MetadataKind.Htile;
             request.Description.Metadata.Range = new GuestSpan(metadata, 0x80);
             return request;
@@ -289,7 +290,7 @@ public sealed partial class GuestImageCacheTests
         Assert.True(harness.Images.ClearMetadata(metadataA));
         Assert.True(harness.Images.ClearMetadata(metadataB));
 
-        var alias = LinearRequest(metadataA, 4, Format.R32Sfloat, GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
+        var alias = LinearRequest(metadataA, 4, GpuFormat.R32Sfloat, GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, 4, 1);
         alias = AsColorTarget(alias);
         var aliasId = harness.Acquire(ref alias, exactFormat: true);
         Assert.True(aliasId.IsValid);
@@ -343,7 +344,7 @@ public sealed partial class GuestImageCacheTests
         Assert.False(harness.Images.TryAbsorbDccFill(metadata, 0x1000, 0x40404040u));
 
         harness.Write(address + 0xc000, Bytes(0x55667788u));
-        var target = LinearRequest(address + 0xc000, 4, Format.R8G8B8A8Srgb, GuestPixelFormat.Bits8_8_8_8Srgb, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
+        var target = LinearRequest(address + 0xc000, 4, GpuFormat.R8G8B8A8Srgb, GuestPixelFormat.Bits8_8_8_8Srgb, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, 4, 1);
         target = AsColorTarget(target);
         target.Description.Metadata.Kind = MetadataKind.Dcc;
         target.Description.Metadata.Range = new GuestSpan(metadata, 0x1000);
@@ -366,7 +367,7 @@ public sealed partial class GuestImageCacheTests
         Assert.False(harness.Image(targetId).IsBufferModified);
         var video = target;
         video.Role = ImageRole.DisplaySurface;
-        video.View = video.View with { Usage = ImageUsageFlags.SampledBit };
+        video.View = video.View with { Usage = GpuImageUsage.SampledBit };
         var videoId = harness.Find(ref video);
         var videoImage = harness.Image(videoId);
         Assert.Equal(targetId, videoId);
@@ -375,8 +376,9 @@ public sealed partial class GuestImageCacheTests
         Assert.False(videoImage.Binding.NeedsRebind);
         Assert.False(videoImage.Uses.VideoOut);
 
-        var depth = LinearRequest(address + 0xe000, 4, Format.D32Sfloat, GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
-        depth = AsDepthTarget(depth, Format.D32Sfloat);
+        // A depth target must not reuse DCC metadata.
+        var depth = LinearRequest(address + 0xe000, 4, GpuFormat.D32Sfloat, GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, 4, 1);
+        depth = AsDepthTarget(depth, GpuFormat.D32Sfloat);
         depth.Description.Metadata.Kind = MetadataKind.Htile;
         depth.Description.Metadata.Range = new GuestSpan(metadata, 0x100);
         var depthId = harness.Find(ref depth);
@@ -408,17 +410,17 @@ public sealed partial class GuestImageCacheTests
         var target = LinearRequest(
             imageAddress,
             imageSize,
-            Format.R8G8B8A8Unorm,
+            GpuFormat.R8G8B8A8Unorm,
             GuestPixelFormat.Bits8_8_8_8UNorm,
             GuestImageType.Color3D,
-            new Extent3D(width, height, depth),
+            new GpuExtent3D(width, height, depth),
             1,
             4,
             1);
         target = AsColorTarget(target);
         target.View = target.View with
         {
-            Type = ImageViewType.Type2DArray,
+            Type = GpuImageViewType.Type2DArray,
             BaseLayer = 0,
             LayerCount = depth,
         };
@@ -470,10 +472,10 @@ public sealed partial class GuestImageCacheTests
         var texture = LinearRequest(
             imageAddress,
             imageSize,
-            Format.R16G16B16A16Sfloat,
+            GpuFormat.R16G16B16A16Sfloat,
             GuestPixelFormat.Bits16_16_16_16Float,
             GuestImageType.Color3D,
-            new Extent3D(width, height, depth),
+            new GpuExtent3D(width, height, depth),
             1,
             8,
             1);
@@ -518,10 +520,10 @@ public sealed partial class GuestImageCacheTests
         var texture = LinearRequest(
             imageAddress,
             (ulong)width * height * layers * 4,
-            Format.R8G8B8A8Unorm,
+            GpuFormat.R8G8B8A8Unorm,
             GuestPixelFormat.Bits8_8_8_8UNorm,
             GuestImageType.Color2D,
-            new Extent3D(width, height, 1),
+            new GpuExtent3D(width, height, 1),
             layers,
             4,
             1);
@@ -558,7 +560,7 @@ public sealed partial class GuestImageCacheTests
         // 0x40 is the fast-clear code of (0, 0, 0, 1).
         harness.Write(metadataAddress, Enumerable.Repeat((byte)0x40, (int)metadataSliceSize).ToArray());
 
-        var chain = LinearRequest(imageAddress, secondLevelOffset + 8, Format.R16G16B16A16Sfloat, GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color2D, new Extent3D(2, 2, 1), 1, 8, 1);
+        var chain = LinearRequest(imageAddress, secondLevelOffset + 8, GpuFormat.R16G16B16A16Sfloat, GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color2D, new GpuExtent3D(2, 2, 1), 1, 8, 1);
         chain.Description.Resources = new SubresourceCount(2, 1);
         chain.Description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = 32, Pitch = 2, Height = 2 };
         chain.Description.MipLayout[1] = new MipLevelLayout { Offset = secondLevelOffset, Size = 8, Pitch = 1, Height = 1 };
@@ -595,7 +597,7 @@ public sealed partial class GuestImageCacheTests
         const ulong SliceSize = 0x1000;
         var address = harness.MapBacked(0x20000, ReadWrite);
         var metadata = address + 0x10000;
-        var sampled = LinearRequest(address + 0xc000, 4, Format.R8G8B8A8Unorm, GuestPixelFormat.Bits8_8_8_8UNorm, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
+        var sampled = LinearRequest(address + 0xc000, 4, GpuFormat.R8G8B8A8Unorm, GuestPixelFormat.Bits8_8_8_8UNorm, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, 4, 1);
         var target = AsColorTarget(sampled);
         var targetId = harness.Find(ref target);
         var image = harness.Image(targetId);
@@ -635,9 +637,9 @@ public sealed partial class GuestImageCacheTests
         var address = harness.MapBacked(0x100000, ReadWrite);
         var metadata = address + 0x80000;
         Assert.False(harness.Images.TryAbsorbDccFill(metadata, depth * 4096ul, 0x40404040));
-        var target = AsColorTarget(LinearRequest(address, depth * 4ul, Format.R8G8B8A8Unorm,
-            GuestPixelFormat.Bits8_8_8_8UNorm, GuestImageType.Color3D, new Extent3D(1, 1, depth), 1, 4, 1));
-        target.View = target.View with { Type = ImageViewType.Type2DArray, LayerCount = depth };
+        var target = AsColorTarget(LinearRequest(address, depth * 4ul, GpuFormat.R8G8B8A8Unorm,
+            GuestPixelFormat.Bits8_8_8_8UNorm, GuestImageType.Color3D, new GpuExtent3D(1, 1, depth), 1, 4, 1));
+        target.View = target.View with { Type = GpuImageViewType.Type2DArray, LayerCount = depth };
         target.Description.Metadata.Kind = MetadataKind.Dcc;
         // Test deferred slice state without consuming native metadata bytes.
         target.Description.Metadata.Range = new GuestSpan(metadata, 0);
@@ -668,7 +670,7 @@ public sealed partial class GuestImageCacheTests
         const ulong SliceSize = 0x1000;
         var address = harness.MapBacked(0x20000, ReadWrite);
         var metadata = address + 0x10000;
-        var plain = LinearRequest(address + 0xc000, 4, Format.R8G8B8A8Unorm, GuestPixelFormat.Bits8_8_8_8UNorm, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
+        var plain = LinearRequest(address + 0xc000, 4, GpuFormat.R8G8B8A8Unorm, GuestPixelFormat.Bits8_8_8_8UNorm, GuestImageType.Color2D, new GpuExtent3D(1, 1, 1), 1, 4, 1);
         var imageId = harness.Find(ref plain);
         var image = harness.Image(imageId);
         image.Description.TileMode = GuestTileMode.RenderTarget;

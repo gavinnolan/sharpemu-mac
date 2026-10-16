@@ -3,6 +3,7 @@
 
 using SharpEmu.Libs.Gpu.Images;
 using Xunit;
+using SharpEmu.Gpu.Vulkan.Images;
 
 namespace SharpEmu.Libs.Tests.Gpu.Images;
 

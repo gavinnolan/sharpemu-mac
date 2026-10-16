@@ -5,6 +5,7 @@ using System.Reflection;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Buffers;
 using Xunit;
+using SharpEmu.Gpu.Vulkan.Images;
 using static SharpEmu.Libs.Tests.Gpu.Images.ImageCacheTestSupport;
 
 namespace SharpEmu.Libs.Tests.Gpu.Images;

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using Silk.NET.Vulkan;
@@ -18,9 +19,9 @@ public sealed class ImageDescriptionTests
     {
         var description = ImageDescription.Create();
         description.Data = new GuestSpan(address, size);
-        description.PixelFormat = Format.R8G8B8A8Unorm;
+        description.PixelFormat = GpuFormat.R8G8B8A8Unorm;
         description.GuestFormat = GuestPixelFormat.Bits8_8_8_8UNorm;
-        description.Extent = new Extent3D(width, height, 1);
+        description.Extent = new GpuExtent3D(width, height, 1);
         description.Resources = new SubresourceCount(levels, layers);
         description.Pitch = width;
         description.BytesPerBlock = 4;
@@ -69,7 +70,7 @@ public sealed class ImageDescriptionTests
 
         var volume = Color(Base, 32768, 32, 32);
         volume.Type = GuestImageType.Color3D;
-        volume.Extent = new Extent3D(32, 32, 8);
+        volume.Extent = new GpuExtent3D(32, 32, 8);
         volume.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = 32768, Pitch = 32, Height = 32 };
         Assert.Equal(-1, Color(Base, 32768, 32, 32, layers: 8).FindMatchingMipLevel(volume));
         Assert.Equal(-1, Color(Base, 32768, 32, 32, layers: 4).FindMatchingMipLevel(volume));
@@ -92,19 +93,19 @@ public sealed class ImageDescriptionTests
     [Fact]
     public void DepthRules_ResolveAttachmentAndTransferFormats()
     {
-        Assert.Equal(Format.D16Unorm, DepthFormatRule.Find(GuestDepthFormat.Z16)!.AttachmentFormat(false));
-        Assert.Equal(Format.D16UnormS8Uint, DepthFormatRule.Find(GuestDepthFormat.Z16)!.AttachmentFormat(true));
-        Assert.Equal(Format.D32SfloatS8Uint, DepthFormatRule.AttachmentFormat(GuestDepthFormat.Z32Float, GuestStencilFormat.Stencil8UInt));
-        Assert.Equal(Format.Undefined, DepthFormatRule.AttachmentFormat(GuestDepthFormat.Z16, (GuestStencilFormat)5));
-        Assert.Equal(Format.Undefined, DepthFormatRule.AttachmentFormat(GuestDepthFormat.Invalid, GuestStencilFormat.Invalid));
-        Assert.True(DepthFormatRule.Find(GuestDepthFormat.Z16)!.IsStencilAttachmentFormat(Format.D24UnormS8Uint));
-        Assert.False(DepthFormatRule.Find(GuestDepthFormat.Z32Float)!.IsStencilAttachmentFormat(Format.D24UnormS8Uint));
+        Assert.Equal(GpuFormat.D16Unorm, DepthFormatRule.Find(GuestDepthFormat.Z16)!.AttachmentFormat(false));
+        Assert.Equal(GpuFormat.D16UnormS8Uint, DepthFormatRule.Find(GuestDepthFormat.Z16)!.AttachmentFormat(true));
+        Assert.Equal(GpuFormat.D32SfloatS8Uint, DepthFormatRule.AttachmentFormat(GuestDepthFormat.Z32Float, GuestStencilFormat.Stencil8UInt));
+        Assert.Equal(GpuFormat.Undefined, DepthFormatRule.AttachmentFormat(GuestDepthFormat.Z16, (GuestStencilFormat)5));
+        Assert.Equal(GpuFormat.Undefined, DepthFormatRule.AttachmentFormat(GuestDepthFormat.Invalid, GuestStencilFormat.Invalid));
+        Assert.True(DepthFormatRule.Find(GuestDepthFormat.Z16)!.IsStencilAttachmentFormat(GpuFormat.D24UnormS8Uint));
+        Assert.False(DepthFormatRule.Find(GuestDepthFormat.Z32Float)!.IsStencilAttachmentFormat(GpuFormat.D24UnormS8Uint));
         Assert.Equal(GuestPixelFormat.Bits32Float, DepthFormatRule.FindByGuestFormat(GuestPixelFormat.Bits32Float)!.GuestFormat);
-        Assert.Equal(Format.X8D24UnormPack32, DepthFormatRule.AspectTransferFormat(Format.D24UnormS8Uint));
-        Assert.Equal(Format.Undefined, DepthFormatRule.AspectTransferFormat(Format.R32Sfloat));
-        Assert.Equal(2u, DepthFormatRule.AspectTransferBytes(Format.D16UnormS8Uint));
-        Assert.Equal(4u, DepthFormatRule.AspectTransferBytes(Format.D32Sfloat));
-        Assert.Equal(0u, DepthFormatRule.AspectTransferBytes(Format.R8Unorm));
+        Assert.Equal(GpuFormat.X8D24UnormPack32, DepthFormatRule.AspectTransferFormat(GpuFormat.D24UnormS8Uint));
+        Assert.Equal(GpuFormat.Undefined, DepthFormatRule.AspectTransferFormat(GpuFormat.R32Sfloat));
+        Assert.Equal(2u, DepthFormatRule.AspectTransferBytes(GpuFormat.D16UnormS8Uint));
+        Assert.Equal(4u, DepthFormatRule.AspectTransferBytes(GpuFormat.D32Sfloat));
+        Assert.Equal(0u, DepthFormatRule.AspectTransferBytes(GpuFormat.R8Unorm));
         Assert.Equal(0xffffffu, DepthFormatRule.EncodeD16AsD24(0xffff));
         Assert.Equal(0u, DepthFormatRule.EncodeD16AsD24(0));
         Assert.Equal(0x3f800000u, DepthFormatRule.EncodeD16AsD32(0xffff));
@@ -115,21 +116,21 @@ public sealed class ImageDescriptionTests
     public void DisplayFormats_DecodeSupportedPixelFormats()
     {
         Assert.True(DisplayFormatRule.TryDecode(0x8000000022000000, out var rgba));
-        Assert.Equal((Format.R8G8B8A8Srgb, GuestPixelFormat.Bits8_8_8_8Srgb, 4u, false), (rgba.HostFormat, rgba.GuestFormat, rgba.BytesPerElement, rgba.Bgra16));
+        Assert.Equal((GpuFormat.R8G8B8A8Srgb, GuestPixelFormat.Bits8_8_8_8Srgb, 4u, false), (rgba.HostFormat, rgba.GuestFormat, rgba.BytesPerElement, rgba.Bgra16));
         Assert.True(DisplayFormatRule.TryDecode(0xc001000600000000, out var bgra16));
         Assert.True(bgra16.Bgra16);
         Assert.Equal(8u, bgra16.BytesPerElement);
         Assert.False(DisplayFormatRule.TryDecode(1, out _));
 
         var description = ImageDescription.Create();
-        description.PixelFormat = Format.R16G16B16A16Sfloat;
+        description.PixelFormat = GpuFormat.R16G16B16A16Sfloat;
         description.GuestFormat = GuestPixelFormat.Bits16_16_16_16Float;
         description.BytesPerBlock = 8;
         description.Bgra16 = true;
         Assert.True(DisplayFormatRule.Supports(description));
         description.Bgra16 = false;
         Assert.True(DisplayFormatRule.Supports(description));
-        description.PixelFormat = Format.R8G8B8A8Unorm;
+        description.PixelFormat = GpuFormat.R8G8B8A8Unorm;
         Assert.False(DisplayFormatRule.Supports(description));
         Assert.True(ImageDescription.IsSupportedDisplayRenderTargetTileMode(GuestTileMode.RenderTarget));
         Assert.False(ImageDescription.IsSupportedDisplayRenderTargetTileMode(GuestTileMode.Linear));
@@ -161,40 +162,40 @@ public sealed class ImageDescriptionTests
     {
         var metadata = new MetadataDescription { DccAlphaMsb = alphaMsb };
         Assert.True(PackedClearValue.TryDecodeDccColor(
-            Format.A2B10G10R10UnormPack32, 0x40404040, metadata, false, out var clear));
+            GpuFormat.A2B10G10R10UnormPack32, 0x40404040, metadata, false, out var clear));
         Assert.Equal((red, 0.0f, 0.0f, alpha), (clear.Float32_0, clear.Float32_1, clear.Float32_2, clear.Float32_3));
         Assert.False(PackedClearValue.TryDecodeDccColor(
-            Format.A2B10G10R10UnormPack32, 0x40400040, metadata, false, out _));
+            GpuFormat.A2B10G10R10UnormPack32, 0x40400040, metadata, false, out _));
         Assert.False(PackedClearValue.TryDecodeDccColor(
-            Format.A2B10G10R10UnormPack32, 0xffffffff, metadata, false, out _));
+            GpuFormat.A2B10G10R10UnormPack32, 0xffffffff, metadata, false, out _));
     }
 
     [Fact]
     public void PackedClears_DecodePerFormat()
     {
-        Assert.True(PackedClearValue.TryDecodeColor(Format.R8G8B8A8Unorm, 0xff804000, out var rgba));
+        Assert.True(PackedClearValue.TryDecodeColor(GpuFormat.R8G8B8A8Unorm, 0xff804000, out var rgba));
         Assert.Equal((0.0f, 64 / 255.0f, 128 / 255.0f, 1.0f), (rgba.Float32_0, rgba.Float32_1, rgba.Float32_2, rgba.Float32_3));
-        Assert.True(PackedClearValue.TryDecodeColor(Format.B8G8R8A8Unorm, 0xff804000, out var bgra));
+        Assert.True(PackedClearValue.TryDecodeColor(GpuFormat.B8G8R8A8Unorm, 0xff804000, out var bgra));
         Assert.Equal((128 / 255.0f, 64 / 255.0f, 0.0f, 1.0f), (bgra.Float32_0, bgra.Float32_1, bgra.Float32_2, bgra.Float32_3));
-        Assert.True(PackedClearValue.TryDecodeColor(Format.R8G8B8A8Srgb, 0x000000ff, out var srgb));
+        Assert.True(PackedClearValue.TryDecodeColor(GpuFormat.R8G8B8A8Srgb, 0x000000ff, out var srgb));
         Assert.Equal(1.0f, srgb.Float32_0);
         Assert.Equal(0.0f, srgb.Float32_3);
-        Assert.True(PackedClearValue.TryDecodeColor(Format.R32Uint, 0xdeadbeef, out var raw));
+        Assert.True(PackedClearValue.TryDecodeColor(GpuFormat.R32Uint, 0xdeadbeef, out var raw));
         Assert.Equal(0xdeadbeefu, raw.Uint32_0);
-        Assert.True(PackedClearValue.TryDecodeColor(Format.R32Sfloat, BitConverter.SingleToUInt32Bits(0.25f), out var single));
+        Assert.True(PackedClearValue.TryDecodeColor(GpuFormat.R32Sfloat, BitConverter.SingleToUInt32Bits(0.25f), out var single));
         Assert.Equal(0.25f, single.Float32_0);
-        Assert.True(PackedClearValue.TryDecodeColor(Format.A2B10G10R10UnormPack32, 0xC00003ff, out var packed));
+        Assert.True(PackedClearValue.TryDecodeColor(GpuFormat.A2B10G10R10UnormPack32, 0xC00003ff, out var packed));
         Assert.Equal((1.0f, 0.0f, 0.0f, 1.0f), (packed.Float32_0, packed.Float32_1, packed.Float32_2, packed.Float32_3));
-        Assert.False(PackedClearValue.TryDecodeColor(Format.R16G16B16A16Sfloat, 0, out _));
+        Assert.False(PackedClearValue.TryDecodeColor(GpuFormat.R16G16B16A16Sfloat, 0, out _));
 
         Assert.True(PackedClearValue.TryDecodeStencil(0x05050505, out var stencil));
         Assert.Equal(5, stencil);
         Assert.False(PackedClearValue.TryDecodeStencil(0x00000005, out _));
-        Assert.True(PackedClearValue.TryDecodeDepth(Format.D32Sfloat, BitConverter.SingleToUInt32Bits(0.5f), out var depth));
+        Assert.True(PackedClearValue.TryDecodeDepth(GpuFormat.D32Sfloat, BitConverter.SingleToUInt32Bits(0.5f), out var depth));
         Assert.Equal(0.5f, depth);
-        Assert.False(PackedClearValue.TryDecodeDepth(Format.D16Unorm, 0, out _));
-        Assert.False(PackedClearValue.TryDecodeDepth(Format.D32Sfloat, BitConverter.SingleToUInt32Bits(2.0f), out _));
-        Assert.False(PackedClearValue.TryDecodeDepth(Format.D32SfloatS8Uint, BitConverter.SingleToUInt32Bits(float.NaN), out _));
+        Assert.False(PackedClearValue.TryDecodeDepth(GpuFormat.D16Unorm, 0, out _));
+        Assert.False(PackedClearValue.TryDecodeDepth(GpuFormat.D32Sfloat, BitConverter.SingleToUInt32Bits(2.0f), out _));
+        Assert.False(PackedClearValue.TryDecodeDepth(GpuFormat.D32SfloatS8Uint, BitConverter.SingleToUInt32Bits(float.NaN), out _));
     }
 
     [Fact]
@@ -213,9 +214,9 @@ public sealed class ImageDescriptionTests
     }
 
     [Theory]
-    [InlineData(Format.R16G16Sfloat)]
-    [InlineData(Format.R16G16B16A16Sfloat)]
-    public void BufferFillDecodesRepeatedHalfWordsWithoutChangingDccClears(Format format)
+    [InlineData(GpuFormat.R16G16Sfloat)]
+    [InlineData(GpuFormat.R16G16B16A16Sfloat)]
+    public void BufferFillDecodesRepeatedHalfWordsWithoutChangingDccClears(GpuFormat format)
     {
         Assert.True(PackedClearValue.TryDecodeBufferColor(format, 0x3c00bc00u, out var clear));
         Assert.Equal((-1f, 1f, -1f, 1f), (clear.Float32_0, clear.Float32_1, clear.Float32_2, clear.Float32_3));
@@ -225,9 +226,9 @@ public sealed class ImageDescriptionTests
     }
 
     [Theory]
-    [InlineData(Format.R32G32Uint)]
-    [InlineData(Format.R32G32B32A32Uint)]
-    public void BufferFillRepeatsTheEntireUintWordInEveryComponent(Format format)
+    [InlineData(GpuFormat.R32G32Uint)]
+    [InlineData(GpuFormat.R32G32B32A32Uint)]
+    public void BufferFillRepeatsTheEntireUintWordInEveryComponent(GpuFormat format)
     {
         Assert.True(PackedClearValue.TryDecodeBufferColor(format, 0xdeadbeefu, out var clear));
         Assert.Equal((0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu),
@@ -240,7 +241,7 @@ public sealed class ImageDescriptionTests
         for (var bits = 0; bits <= ushort.MaxValue; bits++)
         {
             var packed = (uint)bits | ((uint)bits << 16);
-            var decoded = PackedClearValue.TryDecodeBufferColor(Format.R16G16B16A16Sfloat, packed, out var clear);
+            var decoded = PackedClearValue.TryDecodeBufferColor(GpuFormat.R16G16B16A16Sfloat, packed, out var clear);
             if (Half.IsNaN(BitConverter.UInt16BitsToHalf((ushort)bits)))
             {
                 Assert.False(decoded);
@@ -271,7 +272,7 @@ public sealed class ImageDescriptionTests
         noBytes.BytesPerBlock = 0;
         Reject(noBytes, "geometry or format is invalid", fatal);
         var deep = image;
-        deep.Extent = new Extent3D(64, 64, 2);
+        deep.Extent = new GpuExtent3D(64, 64, 2);
         Reject(deep, "2D image must have a depth of one", fatal);
         var flat1D = image;
         flat1D.Type = GuestImageType.Color1D;
@@ -349,10 +350,10 @@ public sealed class ImageDescriptionTests
         Assert.Equal(1u, image.TransferLayers);
         image.Stencil = new GuestSpan(Base + 0x8000, 0x1000);
         Assert.True(image.HasStencil);
-        image.PixelFormat = Format.D32SfloatS8Uint;
+        image.PixelFormat = GpuFormat.D32SfloatS8Uint;
         Assert.True(image.IsDepth);
-        Assert.Equal(SampleCountFlags.Count4Bit, ImageDescription.VulkanSampleCount(4));
-        Assert.Equal((SampleCountFlags)0, ImageDescription.VulkanSampleCount(16));
+        Assert.Equal(GpuSampleCount.Count4Bit, ImageDescription.VulkanSampleCount(4));
+        Assert.Equal((GpuSampleCount)0, ImageDescription.VulkanSampleCount(16));
         Assert.Equal(GuestPixelFormat.Bits32Float, ImageDescription.RenderTargetTransferFormat(4));
         Assert.Equal(GuestPixelFormat.Bits32_32_32_32Float, ImageDescription.RenderTargetTransferFormat(16));
         using var fatal = new FatalScope();

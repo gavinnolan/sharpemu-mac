@@ -1,12 +1,15 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using System.Text.Json;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Buffers;
 using Silk.NET.Vulkan;
 using Xunit;
 using static SharpEmu.Libs.Tests.Gpu.Images.ImageCacheTestSupport;
+
+using SharpEmu.Logging;
 
 namespace SharpEmu.Libs.Tests.Gpu.Images;
 
@@ -26,8 +29,8 @@ public sealed partial class GuestImageCacheTests
         var address = harness.MapBacked(0x10000, ReadWrite);
         var bytes = Bytes(0x12345678u);
         harness.Write(address, bytes);
-        var request = LinearRequest(address, 256, Format.R32Uint, GuestPixelFormat.Bits32UInt,
-            GuestImageType.Color3D, new Extent3D(1, 1, 1), 1, sizeof(uint), 1);
+        var request = LinearRequest(address, 256, GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt,
+            GuestImageType.Color3D, new GpuExtent3D(1, 1, 1), 1, sizeof(uint), 1);
         var identifier = harness.Acquire(ref request);
         for (var upload = 1; upload < 5; upload++)
         {

@@ -1,12 +1,14 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using System.Reflection;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Buffers;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using Silk.NET.Vulkan;
 using Xunit;
+using SharpEmu.Gpu.Vulkan.Images;
 using static SharpEmu.Libs.Tests.Gpu.Images.ImageCacheTestSupport;
 
 namespace SharpEmu.Libs.Tests.Gpu.Images;
@@ -15,8 +17,8 @@ public sealed partial class GuestImageCacheTests
 {
     private static ImageRequest GrowthRequest(ulong address, uint layers, GuestTileMode tile)
     {
-        var request = LinearRequest(address, 65536UL * layers, Format.R32Uint, GuestPixelFormat.Bits32UInt,
-            GuestImageType.Color2D, new Extent3D(128, 128, 1), layers, 4, 1);
+        var request = LinearRequest(address, 65536UL * layers, GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt,
+            GuestImageType.Color2D, new GpuExtent3D(128, 128, 1), layers, 4, 1);
         request.Description.TileMode = tile;
         return request;
     }

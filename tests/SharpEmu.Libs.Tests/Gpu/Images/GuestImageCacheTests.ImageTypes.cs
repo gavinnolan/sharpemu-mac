@@ -1,7 +1,9 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Gpu.Vulkan;
 using SharpEmu.Libs.Tests.Gpu.Buffers;
 using Silk.NET.Vulkan;
 using Xunit;
@@ -88,7 +90,7 @@ public sealed partial class GuestImageCacheTests
         Assert.False(sourceImage.Registered);
         Assert.True(sourceImage.Binding.NeedsRebind);
         Assert.NotEqual(0ul, sourceImage.Backing.Handle.Handle);
-        Assert.Equal(startWithTwoDimensions ? ImageType.Type1D : ImageType.Type2D, destinationImage.Backing.ImageType);
+        Assert.Equal(startWithTwoDimensions ? GpuImageType.Type1D : GpuImageType.Type2D, destinationImage.Backing.ImageType.ToNeutral());
         Assert.True(destinationImage.SupportsViewType(destination.View));
         Assert.Equal(gpuModified, destinationImage.IsGpuModified);
         Assert.Equal(destinationIdentifier, harness.Find(ref destination));
@@ -142,26 +144,26 @@ public sealed partial class GuestImageCacheTests
         harness.Write(address, Bytes(0x10203040u));
         var volume = SingletonRequest(address, 1, true);
         volume.Description.Type = GuestImageType.Color3D;
-        volume.View = volume.View with { Type = ImageViewType.Type3D };
+        volume.View = volume.View with { Type = GpuImageViewType.Type3D };
         var volumeIdentifier = harness.Acquire(ref volume);
 
         var slice = SingletonRequest(address, 1, true);
         Assert.Equal(volumeIdentifier, harness.Acquire(ref slice));
-        Assert.Equal(ImageType.Type3D, harness.Image(volumeIdentifier).Backing.ImageType);
+        Assert.Equal(GpuImageType.Type3D, harness.Image(volumeIdentifier).Backing.ImageType.ToNeutral());
         Assert.Equal(Bytes(0x10203040u), harness.ReadImageBytes(harness.Image(volumeIdentifier)));
         harness.Shutdown();
     }
 
     private static ImageRequest SingletonRequest(ulong address, uint layers, bool twoDimensions)
     {
-        var request = LinearRequest(address, layers * 256ul, Format.R32Uint, GuestPixelFormat.Bits32UInt,
+        var request = LinearRequest(address, layers * 256ul, GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt,
             twoDimensions ? GuestImageType.Color2D : GuestImageType.Color1D,
-            new Extent3D(1, 1, 1), layers, sizeof(uint), 1);
+            new GpuExtent3D(1, 1, 1), layers, sizeof(uint), 1);
         request.View = request.View with
         {
             Type = twoDimensions
-                ? layers == 1 ? ImageViewType.Type2D : ImageViewType.Type2DArray
-                : layers == 1 ? ImageViewType.Type1D : ImageViewType.Type1DArray,
+                ? layers == 1 ? GpuImageViewType.Type2D : GpuImageViewType.Type2DArray
+                : layers == 1 ? GpuImageViewType.Type1D : GpuImageViewType.Type1DArray,
         };
         return request;
     }
