@@ -13,6 +13,7 @@ public sealed class ResourceSnapshot
     public uint[] FlattenedResourceTable { get; init; } = [];
     public uint[] UserData { get; init; } = [];
     public DeviceAddressRange[] DeviceAddressRanges { get; init; } = [];
+    public BindlessImageTable[] BindlessImages { get; init; } = [];
 
     /// <summary>
     /// The same snapshot carrying this draw's user data.
@@ -34,7 +35,33 @@ public sealed class ResourceSnapshot
                 FlattenedResourceTable = FlattenedResourceTable,
                 UserData = userData,
                 DeviceAddressRanges = DeviceAddressRanges,
+                BindlessImages = BindlessImages,
             };
+}
+
+// One guest image-descriptor table a V# describes, resolved for a draw: every distinct usable
+// T# it holds with the class variant that reads it, and per entry the T# it names (NullEntry for
+// a null, unusable or mismatched one). The host turns it into a device table of texture handles
+// the shader indexes by entry; a key past the entries reads the null entry after them.
+public sealed class BindlessImageTable
+{
+    public const int NullEntry = -1;
+
+    /// <summary>The table's slot in the stage's bindless image tables.</summary>
+    public required uint Slot { get; init; }
+
+    /// <summary>The image resources of the table's class variants; the first is the root.</summary>
+    public required uint[] VariantImages { get; init; }
+
+    public required uint[][] Descriptors { get; init; }
+
+    /// <summary>The variant (an index into VariantImages) each descriptor is read through.</summary>
+    public required byte[] DescriptorVariants { get; init; }
+
+    public required int[] Entries { get; init; }
+
+    /// <summary>The guest address of entry zero, for diagnostics.</summary>
+    public ulong Address { get; init; }
 }
 
 // One device-address handle's evaluated base and bounded extent for this draw.

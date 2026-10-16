@@ -348,6 +348,12 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 
     public uint MipStatisticsCount { get; init; }
 
+    /// <summary>
+    /// The V#-described image tables the program reads through device handle tables, one per
+    /// bindless slot. A Metal argument buffer gives each a pointer after every other field.
+    /// </summary>
+    public uint BindlessImageTableCount { get; init; }
+
     public uint MipStatisticsDword => DispatchThreadLimitsDword + (UsesDispatchThreadLimits ? 3u : 0u);
 
     public uint ShaderDataDwordCount => MipStatisticsDword + MipStatisticsCount;
@@ -594,6 +600,11 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         var memoryOffsetDword = (uint)userDataRegisters.Count + (usesShaderBase ? ShaderBaseDwordCount : 0);
         var memoryOffsetCount = (uint)info.Buffers.Count;
         var mipStatisticsCount = info.Images.Any(static image => image.MipStatistics) ? (uint)info.Images.Count : 0u;
+        var bindlessImageTableCount = info.Images
+            .Where(static image => image.BindlessSlot != DescriptorConstants.NoIndex)
+            .Select(static image => image.BindlessSlot + 1)
+            .DefaultIfEmpty(0u)
+            .Max();
         var shaderDataDwords = memoryOffsetDword + (memoryOffsetCount + 3) / 4 + (usesDispatchThreadLimits ? 3u : 0u) + mipStatisticsCount;
         var pushStart = PushData.StartFor(pushDataStartDword, shaderDataDwords);
         var descriptors = new List<DescriptorBinding>();
@@ -680,6 +691,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             MemoryOffsetCount = memoryOffsetCount,
             UsesDispatchThreadLimits = usesDispatchThreadLimits,
             MipStatisticsCount = mipStatisticsCount,
+            BindlessImageTableCount = bindlessImageTableCount,
             UserDataRegisters = userDataRegisters,
             Descriptors = descriptors,
         };
@@ -700,6 +712,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             MemoryOffsetCount != other.MemoryOffsetCount ||
             UsesDispatchThreadLimits != other.UsesDispatchThreadLimits ||
             MipStatisticsCount != other.MipStatisticsCount ||
+            BindlessImageTableCount != other.BindlessImageTableCount ||
             !SameValues(UserDataRegisters, other.UserDataRegisters))
         {
             return false;

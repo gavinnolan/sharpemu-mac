@@ -574,10 +574,11 @@ public sealed class DirectImageTableTests
     // waterfall loop: the lane's index is read first-lane, scaled by the T# size and used as the
     // dynamic offset of an S_BUFFER_LOAD_DWORDX8 through a V# that describes the descriptor table.
     // The index comes from vector memory, so only the V#'s record count bounds the table.
-    internal static Gen5ShaderProgram CreateBufferHeapWaterfallProgram() => Program(
+    internal static Gen5ShaderProgram CreateBufferHeapWaterfallProgram(
+        string keyLoad = "BufferLoadDword", string imageOpcode = "ImageSampleL") => Program(
         ScalarLoad(0, 0, 8, 4, immediateOffset: 0x10),
         ScalarLoad(8, 0, 16, 4, immediateOffset: 0x20),
-        BufferAccess(16, "BufferLoadDword", 16, vectorData: 2),
+        BufferAccess(16, keyLoad, 16, vectorData: 2),
         Vop2(24, "VLshrrevB32", 11, Operand(4), Gen5Operand.Vector(2)),
         MoveScalar(28, 24, 0), MoveScalar(32, 25, 0xFFF000), MoveScalar(36, 26, 0x6500000), MoveScalar(40, 27, 0),
         Sop1(44, "SMovB64", 6, Gen5Operand.Scalar(126)),
@@ -588,7 +589,7 @@ public sealed class DirectImageTableTests
         Sop2(64, "SLshlB32", 106, Gen5Operand.Scalar(106), Operand(5)),
         MoveVector(68, 19, 0),
         ScalarBufferLoad(72, 8, 12, 8, dynamicOffsetRegister: 106),
-        Image(80, "ImageSampleL", 12, samplerRegister: 24, vectorAddress: 0),
+        Image(80, imageOpcode, 12, samplerRegister: 24, vectorAddress: 0),
         Sop1(88, "SMovB64", 126, Gen5Operand.Scalar(20)),
         Vopc(92, "VCmpxNeU32", Operand(0), 19),
         Branch(96, "SCbranchExecnz", -12),
@@ -627,12 +628,13 @@ public sealed class DirectImageTableTests
     };
 
     [Fact]
-    public void BufferHeapWaterfallSelectsEveryDescriptorTheTableHolds()
+    public void BufferHeapWaterfallReadsEveryEntryThroughAHandleTable()
     {
         var program = CreateBufferHeapWaterfallProgram();
         var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 2);
         var selector = plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage!;
         Assert.True(selector.Dense, "dense");
+        Assert.True(selector.Bindless, "bindless");
         Assert.Equal(4u, plan.DescriptorSources[(int)selector.HeapSource].DwordCount);
         Assert.Equal(0u, selector.KeyBound);
         Assert.True(Assert.Single(plan.IndirectImages).KeyIsAddressOffset, "address-offset key");
@@ -642,20 +644,29 @@ public sealed class DirectImageTableTests
         var memory = BufferHeapMemory(4 * 32);
         Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readMemory: memory, readCleanMemory: memory),
             ref snapshot, ref specialization, out var failure), $"materialize {failure}");
-        // A key past the table reads a null descriptor, as the range-checked load returns zeros.
-        Assert.Equal(4, snapshot.Images.Length);
-        Assert.Single(snapshot.Images, image => image.All(word => word == 0));
+        // Entry 3 repeats entry 0, so three textures serve four entries; the root binds null.
+        var table = Assert.Single(snapshot.BindlessImages);
+        Assert.Equal([0, 1, 2, 0], table.Entries);
+        Assert.Equal(3, table.Descriptors.Length);
+        Assert.Equal([0u], table.VariantImages);
+        Assert.Equal(0x2000ul, table.Address);
+        Assert.All(table.DescriptorVariants, variant => Assert.Equal(0, variant));
+        Assert.All(Assert.Single(snapshot.Images), word => Assert.Equal(0u, word));
+        Assert.Equal(0u, Assert.Single(specialization.Images).BindlessSlot);
 
         var resources = ResourceMaterializer.ApplyTo(plan, specialization);
         var layout = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(program, 0, 2),
             false, ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
+        Assert.Equal(1u, layout.BindlessImageTableCount);
         var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 64, ThreadCountX = 64 };
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError), metalError);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var metal, out var metalError), metalError);
+        Assert.Contains("bindless_images[0u]", metal!.Source);
+        // Only the Metal backend binds a handle table; SPIR-V reads the null root, as it did before.
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var spirvError), spirvError);
     }
 
     [Fact]
-    public void BufferHeapWithoutRecordsSelectsOnlyTheNullDescriptor()
+    public void BufferHeapWithoutRecordsReadsOnlyTheNullEntry()
     {
         var plan = ShaderResourcePlan.Extract(CreateBufferHeapWaterfallProgram(), ShaderStage.Compute, Hash, 0, 2);
         var snapshot = new ResourceSnapshot();
@@ -663,6 +674,98 @@ public sealed class DirectImageTableTests
         var memory = BufferHeapMemory(0);
         Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readMemory: memory, readCleanMemory: memory),
             ref snapshot, ref specialization, out var failure), $"materialize {failure}");
+        var table = Assert.Single(snapshot.BindlessImages);
+        Assert.Empty(table.Entries);
+        Assert.Empty(table.Descriptors);
         Assert.All(snapshot.Images, image => Assert.All(image, word => Assert.Equal(0u, word)));
+    }
+
+    // A key loaded with a typed buffer load is the shape a dynamic descriptor used to resolve to
+    // null (ResourceTracker.GetHandleSource). Stores and atomics through a V# table still do:
+    // their plan, snapshot and both backends are what they were before sampled reads went bindless.
+    [Fact]
+    public void StorageThroughAVSharpTableKeepsTheNullDescriptor()
+    {
+        var program = CreateBufferHeapWaterfallProgram("BufferLoadFormatX", "ImageStore");
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 2);
+        var image = Assert.Single(plan.Info.Images);
+        Assert.Null(plan.DescriptorSources[(int)image.Source].IndirectImage);
+        Assert.Empty(plan.IndirectImages);
+
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        var memory = BufferHeapMemory(4 * 32);
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readMemory: memory, readCleanMemory: memory),
+            ref snapshot, ref specialization, out var failure), $"materialize {failure}");
+        Assert.Empty(snapshot.BindlessImages);
+        Assert.All(Assert.Single(snapshot.Images), word => Assert.Equal(0u, word));
+
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        var layout = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(program, 0, 2),
+            false, ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
+        Assert.Equal(0u, layout.BindlessImageTableCount);
+        var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 64, ThreadCountX = 64 };
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError), metalError);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var spirvError), spirvError);
+    }
+
+    // The same typed-load key under a sample used to read null; it now reads the table's textures.
+    [Fact]
+    public void SampleThroughAVSharpTableFormerlyNullReadsTheTable()
+    {
+        var program = CreateBufferHeapWaterfallProgram("BufferLoadFormatX");
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 2);
+        Assert.True(plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage!.Bindless, "bindless");
+
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        var memory = BufferHeapMemory(4 * 32);
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readMemory: memory, readCleanMemory: memory),
+            ref snapshot, ref specialization, out var failure), $"materialize {failure}");
+        Assert.Equal([0, 1, 2, 0], Assert.Single(snapshot.BindlessImages).Entries);
+    }
+
+    // A V# reaching guest memory the host cannot read, or further than a device table holds,
+    // reads null where it cannot be enumerated instead of failing the draw.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void BufferHeapEntriesTheHostCannotReadAreNull(bool unbounded)
+    {
+        var plan = ShaderResourcePlan.Extract(CreateBufferHeapWaterfallProgram(), ShaderStage.Compute, Hash, 0, 2);
+        var inner = BufferHeapMemory(4 * 32);
+        GuestWordReader memory = (ulong address, out uint word) =>
+        {
+            if (address == 0x1018)
+            {
+                word = unbounded ? uint.MaxValue : 4 * 32;
+                return true;
+            }
+
+            // Entry 1 lies on a page the guest has not mapped.
+            if (address is >= 0x2020 and < 0x2040)
+            {
+                word = 0;
+                return false;
+            }
+
+            return inner(address, out word);
+        };
+
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readMemory: memory, readCleanMemory: memory),
+            ref snapshot, ref specialization, out var failure), $"materialize {failure}");
+        var table = Assert.Single(snapshot.BindlessImages);
+        if (unbounded)
+        {
+            Assert.Empty(table.Entries);
+            Assert.Empty(table.Descriptors);
+        }
+        else
+        {
+            Assert.Equal([0, BindlessImageTable.NullEntry, 1, 0], table.Entries);
+            Assert.Equal(2, table.Descriptors.Length);
+        }
     }
 }

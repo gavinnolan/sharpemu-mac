@@ -29,7 +29,14 @@ public readonly record struct ImageSpecialization(
     bool Cube,
     int EmulatedCompareFunction = -1,
     bool MipStatistics = false,
-    uint PackedFormat = DescriptorConstants.InvalidFormat);
+    uint PackedFormat = DescriptorConstants.InvalidFormat,
+    uint BindlessTable = 0)
+{
+    // BindlessTable is the slot plus one, so a specialization recorded before the field
+    // existed (a corpus record, a persisted cache) reads as not bindless.
+    [System.Text.Json.Serialization.JsonIgnore]
+    public uint BindlessSlot => BindlessTable == 0 ? DescriptorConstants.NoIndex : BindlessTable - 1;
+}
 
 // The module-affecting resource state of one draw. Addresses and descriptor payloads
 // stay in the snapshot, so they never create a permutation.

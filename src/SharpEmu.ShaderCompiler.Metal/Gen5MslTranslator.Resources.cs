@@ -70,6 +70,9 @@ public static partial class Gen5MslTranslator
         private readonly Gen5MslArgumentLayout? _argumentLayout;
         private readonly Dictionary<DescriptorBindingKind, MslImageClass> _imageClasses = [];
         private readonly Dictionary<int, string> _indirectKeyScratch = [];
+        // The handle table and entry index of the bindless access being emitted, which its
+        // constant variant cases read their texture through.
+        private (string Table, string Index)? _bindlessAccess;
         private bool _hasGlobalDataShare;
         private bool _hasDeviceAddressTable;
         private bool _hasFlattenedTable;
@@ -293,6 +296,11 @@ public static partial class Gen5MslTranslator
             }
 
             source.AppendLine();
+            if (layout.Fields.Any(static field => field.FieldKind == MslArgumentFieldKind.BindlessImageTables))
+            {
+                EmitBindlessEntryStructs(source);
+            }
+
             source.AppendLine($"struct {Gen5MslArgumentLayout.StructName}");
             source.AppendLine("{");
             foreach (var field in layout.Fields)
@@ -312,6 +320,7 @@ public static partial class Gen5MslTranslator
                     MslArgumentFieldKind.Samplers => $"array<sampler, {field.Count}> {field.Name}",
                     MslArgumentFieldKind.Pointer => $"{PointerType(field.Kind)} {field.Name}",
                     MslArgumentFieldKind.StepReport or MslArgumentFieldKind.PairLocks => $"device atomic_uint* {field.Name}",
+                    MslArgumentFieldKind.BindlessImageTables => $"array<device const {BindlessEntryStruct}*, {field.Count}> {field.Name}",
                     _ => $"uint {field.Name}",
                 };
                 source.AppendLine($"    {declaration} [[id({field.FirstId})]];");
@@ -319,6 +328,44 @@ public static partial class Gen5MslTranslator
 
             source.AppendLine("};");
             source.AppendLine();
+        }
+
+        private const string BindlessEntryStruct = "sharpemu_bindless_entry";
+
+        // One bindless table entry is a texture handle and the variant that reads it; each
+        // texture type a variant uses gets the same layout with the handle typed, so a case
+        // reads its texture by reinterpreting the entry.
+        private void EmitBindlessEntryStructs(StringBuilder source)
+        {
+            source.AppendLine($"struct {BindlessEntryStruct} {{ ulong handle; uint variant; uint reserved; }};");
+            var info = _request.Resources.Info;
+            var declared = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var image in info.Images)
+            {
+                if (image.BindlessSlot == DescriptorConstants.NoIndex ||
+                    ImageDescriptorBinding.ForImage(image) is not { } kind ||
+                    !_imageClasses.TryGetValue(kind, out var imageClass) ||
+                    !declared.Add(imageClass.TextureType))
+                {
+                    continue;
+                }
+
+                source.AppendLine(
+                    $"struct {BindlessTypedStruct(imageClass.TextureType)} {{ {imageClass.TextureType} texture; uint variant; uint reserved; }};");
+            }
+
+            source.AppendLine();
+        }
+
+        private static string BindlessTypedStruct(string textureType)
+        {
+            var name = new StringBuilder("sharpemu_bindless_");
+            foreach (var character in textureType)
+            {
+                name.Append(char.IsAsciiLetterOrDigit(character) ? character : '_');
+            }
+
+            return name.ToString();
         }
 
         // The user-data words and the flattened resource table are read-only tables the
@@ -1733,6 +1780,11 @@ public static partial class Gen5MslTranslator
                 return true;
             }
 
+            if (imageInfo.BindlessSlot != DescriptorConstants.NoIndex)
+            {
+                return TryGetBindlessElementCases(memoryIndex, imageInfo, out selector, out elements, out error);
+            }
+
             if (request.IndirectRootByMemoryIndex.TryGetValue(memoryIndex, out var keyMemoryIndex) && imageInfo.IndirectSearchIterations != 0)
             {
                 if (!_hasFlattenedTable)
@@ -1852,7 +1904,22 @@ public static partial class Gen5MslTranslator
                 mipLevel = Temp("uint", ImageIntegerAddress(image, imageClass.CoordinateComponents));
             }
 
-            texture = Temp(imageClass.TextureType, $"{ResourcesName}.{imageClass.Field}[{fixedElement?.Element ?? (uint)element}u]");
+            if (imageInfo.BindlessSlot != DescriptorConstants.NoIndex)
+            {
+                if (fixedElement is null || _bindlessAccess is not { } bindless)
+                {
+                    error = "bindless image access needs its variant case";
+                    return false;
+                }
+
+                texture = Temp(imageClass.TextureType,
+                    $"((device const {BindlessTypedStruct(imageClass.TextureType)}*){bindless.Table})[{bindless.Index}].texture");
+            }
+            else
+            {
+                texture = Temp(imageClass.TextureType, $"{ResourcesName}.{imageClass.Field}[{fixedElement?.Element ?? (uint)element}u]");
+            }
+
             resolved = imageClass;
             if (UsesSampler(instruction.Opcode))
             {
@@ -1883,6 +1950,74 @@ public static partial class Gen5MslTranslator
             // shader with the paired S#'s function, which the materializer recorded.
             compareFunction = imageInfo.EmulatedCompareFunction;
             packedFormat = imageInfo.PackedFormat;
+            return true;
+        }
+
+        // A V#-described table read through its device handle table: the captured key is the
+        // scalar load's offset, which names entry (key - base) >> 5; one past the last entry
+        // is the null entry the host appends, so a key outside the table reads zero as the
+        // range-checked load would. The entry's variant selects the case.
+        private bool TryGetBindlessElementCases(int memoryIndex, ImageResource imageInfo, out string selector,
+            out IReadOnlyList<(uint Resource, uint Element)> elements, out string error)
+        {
+            selector = string.Empty;
+            elements = [];
+            error = string.Empty;
+            var request = _request;
+            var info = request.Resources.Info;
+            if (!_hasFlattenedTable ||
+                _argumentLayout?.Fields.Any(static field => field.FieldKind == MslArgumentFieldKind.BindlessImageTables) != true)
+            {
+                error = "bindless image access without a flattened table or handle table binding";
+                return false;
+            }
+
+            if (!request.IndirectRootByMemoryIndex.TryGetValue(memoryIndex, out var keyMemoryIndex) ||
+                !_indirectKeyScratch.TryGetValue(keyMemoryIndex, out var key))
+            {
+                error = "bindless image access has no captured key";
+                return false;
+            }
+
+            if (imageInfo.IndirectRoot >= (uint)info.Images.Count)
+            {
+                error = "bindless image access has an invalid root";
+                return false;
+            }
+
+            var variants = info.Images[(int)imageInfo.IndirectRoot].IndirectResources;
+            var variantElements = new List<(uint Resource, uint Element)>(variants.Count);
+            foreach (var variant in variants)
+            {
+                var variantInfo = info.Images[(int)variant];
+                var variantKind = ImageDescriptorBinding.ForImage(variantInfo);
+                if (variantInfo.BindlessSlot != imageInfo.BindlessSlot || variantKind is null ||
+                    !_imageClasses.TryGetValue(variantKind.Value, out var variantClass))
+                {
+                    error = $"bindless variant {variant} has no declared binding class";
+                    return false;
+                }
+
+                var variantElement = variantClass.Resources.ToList().IndexOf(info.GetCanonicalImageBinding(variant));
+                if (variantElement < 0)
+                {
+                    error = $"bindless variant {variant} is not an element of {variantKind.Value}";
+                    return false;
+                }
+
+                variantElements.Add((variant, (uint)variantElement));
+            }
+
+            var mapping = imageInfo.IndirectMappingOffset;
+            var count = Temp("uint", LoadFlattenedWord($"{mapping}u"));
+            var first = Temp("uint", LoadFlattenedWord($"{mapping + 1}u"));
+            var entry = Temp("uint", $"({key} - {first}) >> 5u");
+            var index = Temp("uint", $"{entry} < {count} ? {entry} : {count}");
+            var table = Temp($"device const {BindlessEntryStruct}*",
+                $"{ResourcesName}.{Gen5MslArgumentLayout.BindlessImagesName}[{imageInfo.BindlessSlot}u]");
+            selector = Temp("uint", $"{table}[{index}].variant");
+            _bindlessAccess = (table, index);
+            elements = variantElements;
             return true;
         }
 

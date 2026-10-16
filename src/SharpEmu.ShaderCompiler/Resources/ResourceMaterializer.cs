@@ -14,6 +14,12 @@ public static class ResourceMaterializer
     private const ulong AddressMask = 0x0000_FFFF_FFFF_FFFFul;
     private const ulong MaxIndirectImageProbes = 65536;
 
+    /// <summary>The most entries a V#-described image table is read through a device handle table with.</summary>
+    public const ulong MaxBindlessImageEntries = 1 << 20;
+
+    /// <summary>The most class variants one bindless access switches over.</summary>
+    public const int MaxBindlessImageVariants = 8;
+
     // Written to standard error like every specialization refusal; the host turns it
     // into its fatal.
     public static Action<string> SpecializationFailed { get; set; } = message => Console.Error.WriteLine($"shader resource specialization failed: {message}");
@@ -40,6 +46,21 @@ public static class ResourceMaterializer
         public uint[] UserData = [];
         public List<IndirectImageTable> IndirectImages = [];
         public List<BufferCandidateTable> BufferCandidateTables = [];
+        public List<BindlessImageEntries> BindlessImages = [];
+        public BindlessImageTable[] BindlessTables = [];
+    }
+
+    // A V#-described image table read for one draw: the distinct usable descriptors it holds
+    // and, per entry, the one it names (NullEntry for a null or unusable one).
+    private sealed class BindlessImageEntries
+    {
+        public uint Resource;
+        public ulong Address;
+        public uint DynamicOffsetBase;
+        public List<uint[]> Descriptors = [];
+        public int[] Entries = [];
+        // Entries read as null before classification, by reason.
+        public Dictionary<string, int> Nulls = [];
     }
 
     // One bounded runtime V# table resolved for this draw: the distinct candidate descriptors
@@ -105,6 +126,7 @@ public static class ResourceMaterializer
             FlattenedResourceTable = nextSnapshot.FlattenedTable,
             UserData = nextSnapshot.UserData,
             DeviceAddressRanges = ranges,
+            BindlessImages = nextSnapshot.BindlessTables,
         };
         specialization = nextSpecialization;
         failure = ResourceMaterializationFailure.None;
@@ -202,6 +224,17 @@ public static class ResourceMaterializer
                     if (!RuntimeValueEvaluator.EvaluateSources(plan, [indirect.HeapSource], cleanInputs, [], evaluateTable: false,
                         out var denseSources, out _))
                         return false;
+                    if (indirect.Bindless)
+                    {
+                        if (!MaterializeBindlessImage(indirect, denseSources[0], image.R128, inputs, out var bindless, out failure))
+                            return false;
+                        // The root binds a null texture of its class; the table names everything else.
+                        bindless.Resource = (uint)imageIndex;
+                        snapshot.Images[imageIndex] = new uint[8];
+                        snapshot.BindlessImages.Add(bindless);
+                        continue;
+                    }
+
                     if (!MaterializeDenseIndirectImage(indirect, denseSources[0], image, image.R128, inputs, out var denseTable, out failure))
                         return false;
                     // The first descriptor is the root: the first probed entry, or the null one a V# table leads with.
@@ -696,8 +729,6 @@ public static class ResourceMaterializer
     {
         failure = ResourceMaterializationFailure.Other;
         result = new IndirectImageTable();
-        if (heap.DwordCount == 4)
-            return MaterializeBufferHeapImage(indirect, heap, r128, inputs, out result, out failure);
         if (heap.DwordCount != 2 || indirect.KeyBound == 0 || indirect.KeyBound > MaxIndirectImageProbes || inputs.ReadCleanMemory is null)
             return false;
 
@@ -728,21 +759,21 @@ public static class ResourceMaterializer
             out failure);
     }
 
-    // A descriptor table a V# describes. The scalar buffer load that reads an entry is range
-    // checked against the V#'s size (stride * records, or records bytes without a stride), and a
-    // dword past it reads zero. The entries the V# reaches are the candidates, and the null
-    // descriptor leads them, answering every key past the table as the hardware does.
-    private static bool MaterializeBufferHeapImage(
+    // A V#-described table a sampled access reads through a device table of texture handles:
+    // every entry the V# reaches, each distinct usable descriptor once. Range checking is the
+    // scalar load's: a dword past the V#'s size reads zero, so a partly covered entry keeps
+    // only the dwords inside it, and a key past the last entry reads the null descriptor.
+    private static bool MaterializeBindlessImage(
         IndirectImageSelector indirect,
         DescriptorWords heap,
         bool r128,
         ResourceRuntimeInputs inputs,
-        out IndirectImageTable result,
+        out BindlessImageEntries result,
         out ResourceMaterializationFailure failure)
     {
         failure = ResourceMaterializationFailure.Other;
-        result = new IndirectImageTable();
-        if (inputs.ReadCleanMemory is null)
+        result = new BindlessImageEntries();
+        if (heap.DwordCount != 4 || inputs.ReadCleanMemory is null)
             return false;
 
         var words = heap.Dwords;
@@ -752,33 +783,86 @@ public static class ResourceMaterializer
         var entries = size > indirect.TableOffset ? (size - indirect.TableOffset + 31) >> 5 : 0;
         if (indirect.KeyBound != 0)
             entries = Math.Min(entries, indirect.KeyBound);
-        if (entries > MaxIndirectImageProbes)
-        {
-            SpecializationFailed($"image descriptor table at 0x{baseAddress:X} holds {entries} entries, more than the {MaxIndirectImageProbes} the host enumerates");
-            failure = ResourceMaterializationFailure.ImageCapacityExceeded;
+
+        if (baseAddress > AddressMask - indirect.TableOffset)
             return false;
+        var tableAddress = baseAddress + indirect.TableOffset;
+
+        result.Address = tableAddress;
+        result.DynamicOffsetBase = indirect.DynamicOffsetBase;
+        if (entries > MaxBindlessImageEntries)
+        {
+            // A V# reaching further than any device table (an unbounded one, say) names no
+            // entries the host can enumerate: every key reads the null descriptor.
+            result.Nulls[$"lie in a table larger than the {MaxBindlessImageEntries} entries a device handle table holds"] =
+                (int)Math.Min(entries, int.MaxValue);
+            return true;
         }
 
-        var probed = new List<uint[]>((int)entries);
-        var offsets = new List<uint>((int)entries);
-        for (ulong key = 0; key < entries; key++)
+        // Every dword the scalar load can return: those whose four bytes lie inside the V#.
+        var readableWords = entries == 0 ? 0 : (int)Math.Min((size - indirect.TableOffset) / sizeof(uint), int.MaxValue);
+        var table = new uint[entries * 8];
+        bool[]? unreadable = null;
+        readableWords = Math.Min(readableWords, table.Length);
+        if (readableWords != 0)
         {
-            var candidate = new uint[8];
-            var entry = indirect.TableOffset + (key << 5);
-            for (uint dword = 0; dword < candidate.Length; dword++)
+            var bytes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(table.AsSpan(0, readableWords));
+            if (inputs.ReadResidentMemory is null || !inputs.ReadResidentMemory(tableAddress, bytes, true))
             {
-                var offset = entry + dword * sizeof(uint);
-                if (offset + sizeof(uint) <= size && !TryReadCleanWord(baseAddress, offset, inputs, out candidate[dword]))
-                    return false;
+                // Not resident as one run: the same dwords, one clean read each. An entry with
+                // a dword the guest has not mapped, or the GPU has written, reads as null.
+                unreadable = new bool[entries];
+                for (var word = 0; word < readableWords; word++)
+                {
+                    if (!unreadable[word >> 3] &&
+                        !TryReadCleanWord(tableAddress, (ulong)word * sizeof(uint), inputs, out table[word]))
+                        unreadable[word >> 3] = true;
+                }
+            }
+        }
+
+        var distinct = new Dictionary<ImageDescriptorKey, int>();
+        var unreadableEntries = 0;
+        result.Entries = new int[entries];
+        for (var entry = 0; entry < result.Entries.Length; entry++)
+        {
+            var candidate = table.AsSpan(entry * 8, 8);
+            if (unreadable?[entry] == true)
+            {
+                unreadableEntries++;
+                result.Entries[entry] = BindlessImageTable.NullEntry;
+                continue;
             }
 
             if (!UsableImageCandidate(candidate, r128))
-                Array.Clear(candidate);
-            probed.Add(candidate);
-            offsets.Add(unchecked(indirect.DynamicOffsetBase + ((uint)key << 5)));
+            {
+                result.Entries[entry] = BindlessImageTable.NullEntry;
+                continue;
+            }
+
+            var key = new ImageDescriptorKey(candidate);
+            if (!distinct.TryGetValue(key, out var index))
+            {
+                index = result.Descriptors.Count;
+                distinct.Add(key, index);
+                result.Descriptors.Add(candidate.ToArray());
+            }
+
+            result.Entries[entry] = index;
         }
 
-        return FinishIndirectImage(probed, offsets, out result, out failure, nullFirst: true);
+        if (unreadableEntries != 0)
+            result.Nulls["could not be read from guest memory"] = unreadableEntries;
+        return true;
+    }
+
+    private readonly record struct ImageDescriptorKey(ulong W01, ulong W23, ulong W45, ulong W67)
+    {
+        public ImageDescriptorKey(ReadOnlySpan<uint> words)
+            : this(words[0] | ((ulong)words[1] << 32), words[2] | ((ulong)words[3] << 32),
+                words[4] | ((ulong)words[5] << 32), words[6] | ((ulong)words[7] << 32))
+        {
+        }
     }
 
     private static bool MaterializeWaveIndexedImage(
@@ -851,15 +935,11 @@ public static class ResourceMaterializer
         IReadOnlyList<uint[]> probed,
         IEnumerable<uint> keys,
         out IndirectImageTable result,
-        out ResourceMaterializationFailure failure,
-        bool nullFirst = false)
+        out ResourceMaterializationFailure failure)
     {
         failure = ResourceMaterializationFailure.Other;
         result = new IndirectImageTable();
         result.Keys.AddRange(keys);
-        // The emitted search maps a key it does not find to candidate 0.
-        if (nullFirst)
-            result.Descriptors.Add(DescriptorWords.Empty(8));
         foreach (var candidate in probed)
         {
             var words = new DescriptorWords(candidate);
@@ -868,7 +948,7 @@ public static class ResourceMaterializer
             {
                 if (result.Descriptors.Count >= ShaderResourceInfo.MaxIndirectImageCandidates)
                 {
-                    var distinct = probed.Select(words => string.Join(',', words)).Distinct().Count() + (nullFirst ? 1 : 0);
+                    var distinct = probed.Select(words => string.Join(',', words)).Distinct().Count();
                     SpecializationFailed($"indirect image table of {probed.Count} entries holds about {distinct} distinct descriptors, " +
                         $"more than the {ShaderResourceInfo.MaxIndirectImageCandidates} candidates an access selects among");
                     failure = ResourceMaterializationFailure.ImageCapacityExceeded;
@@ -991,6 +1071,20 @@ public static class ResourceMaterializer
             mappingWordCount = checked(mappingWordCount + 1 + table.Keys.Count * 2);
         }
 
+        var bindlessTables = new List<BindlessClassification>(snapshot.BindlessImages.Count);
+        foreach (var bindless in snapshot.BindlessImages)
+        {
+            if (bindless.Resource >= info.Images.Count)
+            {
+                return Fail("bindless image table has an invalid root");
+            }
+
+            var classified = ClassifyBindlessImages(plan, snapshot, bindless);
+            bindlessTables.Add(classified);
+            imageCount = checked(imageCount + classified.Variants.Count - 1);
+            mappingWordCount = checked(mappingWordCount + BindlessMappingWords);
+        }
+
         // Each draw owns these arrays. Only indirect candidates require a larger table.
         Array.Resize(ref snapshot.Images, imageCount);
         var mappingCursor = snapshot.FlattenedTable.Length;
@@ -1034,6 +1128,52 @@ public static class ResourceMaterializer
             snapshot.Images[(int)table.Resource] = table.Descriptors[0].Dwords;
         }
 
+        // A bindless table's variants follow the indirect candidates; each binds a null texture
+        // of its class, and the flattened table carries the entry count and the key base.
+        var bindlessOutputs = new BindlessImageTable[bindlessTables.Count];
+        for (var slot = 0; slot < bindlessTables.Count; slot++)
+        {
+            var classified = bindlessTables[slot];
+            var mappingOffset = (uint)mappingCursor;
+            mappingCursor += BindlessMappingWords;
+            snapshot.FlattenedTable[(int)mappingOffset] = (uint)classified.Entries.Length;
+            snapshot.FlattenedTable[(int)mappingOffset + 1] = classified.DynamicOffsetBase;
+            var variantImages = new uint[classified.Variants.Count];
+            for (var variant = 0; variant < classified.Variants.Count; variant++)
+            {
+                var specialized = classified.Variants[variant] with
+                {
+                    IndirectRoot = classified.Resource,
+                    IndirectMappingOffset = mappingOffset,
+                    IndirectSearchIterations = 1,
+                    BindlessTable = (uint)slot + 1,
+                };
+                if (variant == 0)
+                {
+                    variantImages[0] = classified.Resource;
+                    images[(int)classified.Resource] = specialized;
+                    snapshot.Images[(int)classified.Resource] = new uint[8];
+                    continue;
+                }
+
+                variantImages[variant] = (uint)imageCursor;
+                images.Add(specialized);
+                snapshot.Images[imageCursor++] = new uint[8];
+            }
+
+            bindlessOutputs[slot] = new BindlessImageTable
+            {
+                Slot = (uint)slot,
+                VariantImages = variantImages,
+                Descriptors = classified.Descriptors,
+                DescriptorVariants = classified.DescriptorVariants,
+                Entries = classified.Entries,
+                Address = classified.Address,
+            };
+        }
+
+        snapshot.BindlessTables = bindlessOutputs;
+
         var buffers = new List<BufferSpecialization>(info.Buffers.Count);
         for (var index = 0; index < info.Buffers.Count; index++)
         {
@@ -1075,6 +1215,12 @@ public static class ResourceMaterializer
         {
             var descriptor = snapshot.Images[index];
             var image = images[index];
+            if (image.BindlessSlot != DescriptorConstants.NoIndex)
+            {
+                // Classified with its table.
+                continue;
+            }
+
             var baseIndex = index < info.Images.Count ? (uint)index : image.IndirectRoot;
             if (baseIndex >= info.Images.Count)
             {
@@ -1202,7 +1348,7 @@ public static class ResourceMaterializer
         for (var rootIndex = 0; rootIndex < images.Count; rootIndex++)
         {
             var root = images[rootIndex];
-            if (root.IndirectRoot != rootIndex)
+            if (root.IndirectRoot != rootIndex || root.BindlessSlot != DescriptorConstants.NoIndex)
             {
                 continue;
             }
@@ -1407,6 +1553,194 @@ public static class ResourceMaterializer
         return true;
     }
 
+    // The flattened words a bindless table takes: its entry count and the key of entry zero.
+    private const int BindlessMappingWords = 2;
+
+    private sealed class BindlessClassification
+    {
+        public uint Resource;
+        public uint DynamicOffsetBase;
+        public ulong Address;
+        public List<ImageSpecialization> Variants = [];
+        public uint[][] Descriptors = [];
+        public byte[] DescriptorVariants = [];
+        public int[] Entries = [];
+    }
+
+    private static readonly HashSet<(ulong Plan, uint Resource, string Reason)> ReportedBindlessNulls = [];
+
+    // A descriptor the access cannot read reads as null, as it would through an unbound
+    // descriptor; the first time a program meets each kind it is said so.
+    private static void ReportBindlessNulls(ShaderResourcePlan plan, BindlessImageEntries table, string reason, int entries)
+    {
+        lock (ReportedBindlessNulls)
+        {
+            if (!ReportedBindlessNulls.Add((plan.Hash, table.Resource, reason)))
+                return;
+        }
+
+        Console.Error.WriteLine(
+            $"[GPU][WARN] Bindless image table at 0x{table.Address:X} (hash=0x{plan.Hash:X16} image={table.Resource} " +
+            $"pc=0x{plan.Info.Images[(int)table.Resource].FirstUsePc:X}): {entries} entries {reason}; they read as null.");
+    }
+
+    // Sorts a bindless table's descriptors into the classes the access reads them through.
+    // The class most entries use is variant 0 and the root; the others are variants a
+    // per-entry id selects. A class the access cannot read through (another coordinate
+    // shape, or one needing a different sampler) and classes past the variant limit become
+    // null entries, said so once per program.
+    private static BindlessClassification ClassifyBindlessImages(
+        ShaderResourcePlan plan, MaterializedSnapshot snapshot, BindlessImageEntries table)
+    {
+        var info = plan.Info;
+        var root = (int)table.Resource;
+        var baseImage = info.Images[root];
+        var accessDimension = baseImage.Dimension == ImageDimension.Unknown ? ImageDimension.Dim2D : baseImage.Dimension;
+        var rootSpecialization = new ImageSpecialization(
+            ImageNumericClass.Float, ImageDimension.Dim2D, 1, GuestImageFormat.Invalid, baseImage.ShaderSwizzle,
+            DescriptorConstants.NoIndex, 0, 0, false);
+
+        var uses = new int[table.Descriptors.Count];
+        foreach (var entry in table.Entries)
+        {
+            if (entry >= 0)
+                uses[entry]++;
+        }
+
+        var classes = new List<ImageSpecialization>();
+        var classOf = new int[table.Descriptors.Count];
+        var rejected = new Dictionary<string, int>(table.Nulls);
+        for (var index = 0; index < table.Descriptors.Count; index++)
+        {
+            var descriptor = table.Descriptors[index];
+            var dimension = DescriptorDimension(descriptor, accessDimension);
+            var format = GuestImageFormat.FormatOf(descriptor);
+            var numericClass = GuestImageFormat.SampledNumericClass(format);
+            var cube = GuestImageFormat.ImageTypeOf(descriptor) == GuestImageFormat.ImageTypeCube;
+            string? reason = null;
+            if (dimension == ImageDimension.Unknown)
+                reason = $"hold image type {GuestImageFormat.ImageTypeOf(descriptor)}";
+            else if (dimension != accessDimension &&
+                     (cube || dimension is not (ImageDimension.Dim2D or ImageDimension.Dim2DArray) ||
+                      accessDimension is not (ImageDimension.Dim2D or ImageDimension.Dim2DArray)))
+                reason = $"are {(cube ? "cube" : dimension.ToString())} images a {accessDimension} access does not address";
+            else if (baseImage.DepthCompare && numericClass != ImageNumericClass.Float)
+                reason = $"use format {format}, which depth comparison cannot read";
+
+            if (reason is not null)
+            {
+                classOf[index] = -1;
+                rejected[reason] = rejected.GetValueOrDefault(reason) + uses[index];
+                continue;
+            }
+
+            var conversionFormat = ImageConversionFormat(format);
+            var specialization = rootSpecialization with
+            {
+                NumericClass = numericClass,
+                Dimension = dimension,
+                ConversionFormat = conversionFormat,
+                ShaderSwizzle = conversionFormat != GuestImageFormat.Invalid ? descriptor[3] & 0xFFF : baseImage.ShaderSwizzle,
+                Cube = cube,
+                EmulatedCompareFunction = baseImage.DepthCompare && !GuestImageFormat.HasDepthEquivalent(format)
+                    ? SamplerCompareFunction(info, snapshot, (uint)root)
+                    : -1,
+            };
+            var found = classes.IndexOf(specialization);
+            if (found < 0)
+            {
+                found = classes.Count;
+                classes.Add(specialization);
+            }
+
+            classOf[index] = found;
+        }
+
+        // Weigh each class by the entries that name it.
+        var weights = new int[classes.Count];
+        for (var index = 0; index < classOf.Length; index++)
+        {
+            if (classOf[index] >= 0)
+                weights[classOf[index]] += uses[index];
+        }
+
+        var order = Enumerable.Range(0, classes.Count).OrderByDescending(index => weights[index]).ThenBy(index => index).ToList();
+        var variants = new List<ImageSpecialization>();
+        var variantOfClass = new int[classes.Count];
+        Array.Fill(variantOfClass, -1);
+        if (order.Count == 0)
+        {
+            // Nothing usable: the access reads the null texture an unbound descriptor binds.
+            variants.Add(rootSpecialization);
+        }
+
+        foreach (var index in order)
+        {
+            var candidate = classes[index];
+            if (variants.Count != 0)
+            {
+                var first = variants[0];
+                string? reason = null;
+                if (RequiresPointSampler(candidate.NumericClass, candidate.ConversionFormat) !=
+                    RequiresPointSampler(first.NumericClass, first.ConversionFormat) ||
+                    candidate.EmulatedCompareFunction != first.EmulatedCompareFunction)
+                    reason = "need a different sampler than the table's most used class";
+                else if (variants.Count == MaxBindlessImageVariants)
+                    reason = $"are of a class past the {MaxBindlessImageVariants} one access switches over";
+                if (reason is not null)
+                {
+                    rejected[reason] = rejected.GetValueOrDefault(reason) + weights[index];
+                    continue;
+                }
+            }
+
+            variantOfClass[index] = variants.Count;
+            variants.Add(candidate);
+        }
+
+        foreach (var (reason, count) in rejected)
+        {
+            if (count != 0)
+                ReportBindlessNulls(plan, table, reason, count);
+        }
+
+        // Keep the descriptors some variant reads, in their table order.
+        var kept = new int[table.Descriptors.Count];
+        var descriptors = new List<uint[]>();
+        var descriptorVariants = new List<byte>();
+        for (var index = 0; index < kept.Length; index++)
+        {
+            var variant = classOf[index] >= 0 ? variantOfClass[classOf[index]] : -1;
+            if (variant < 0)
+            {
+                kept[index] = BindlessImageTable.NullEntry;
+                continue;
+            }
+
+            kept[index] = descriptors.Count;
+            descriptors.Add(table.Descriptors[index]);
+            descriptorVariants.Add((byte)variant);
+        }
+
+        var entries = new int[table.Entries.Length];
+        for (var entry = 0; entry < entries.Length; entry++)
+        {
+            var descriptor = table.Entries[entry];
+            entries[entry] = descriptor >= 0 ? kept[descriptor] : BindlessImageTable.NullEntry;
+        }
+
+        return new BindlessClassification
+        {
+            Resource = table.Resource,
+            DynamicOffsetBase = table.DynamicOffsetBase,
+            Address = table.Address,
+            Variants = variants,
+            Descriptors = [.. descriptors],
+            DescriptorVariants = [.. descriptorVariants],
+            Entries = entries,
+        };
+    }
+
     private sealed class SamplerPlan
     {
         public uint[] PointSampler = [];
@@ -1527,6 +1861,7 @@ public static class ResourceMaterializer
             image.EmulatedCompareFunction = specialized.EmulatedCompareFunction;
             image.MipStatistics = specialized.MipStatistics;
             image.PackedFormat = specialized.PackedFormat;
+            image.BindlessSlot = specialized.BindlessSlot;
             if (specialized.EmulatedCompareFunction >= 0)
             {
                 // The shader compares instead; the host keeps a color view and a plain sampler.

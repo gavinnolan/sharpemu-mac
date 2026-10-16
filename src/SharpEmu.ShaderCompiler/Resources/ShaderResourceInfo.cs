@@ -86,6 +86,9 @@ public sealed class ImageResource
     public uint IndirectMappingOffset { get; set; }
     public uint IndirectSearchIterations { get; set; }
     public List<uint> IndirectResources { get; set; } = [];
+    // The bindless table this image is a class variant of (its slot in the stage's bindless
+    // image tables), or NoIndex. The root and its variants list the variants in IndirectResources.
+    public uint BindlessSlot { get; set; } = DescriptorConstants.NoIndex;
 
     public bool MipStatistics { get; set; }
 
@@ -227,6 +230,9 @@ public sealed record IndirectImageSelector(
     public uint DynamicOffsetBase { get; init; }
     public uint KeyBound { get; init; }
     public WaveIndexedImageSelector? WaveIndexed { get; init; }
+    // A dense table a V# describes, read through a per-entry handle table on the device
+    // instead of a bounded set of bound candidates.
+    public bool Bindless { get; init; }
 
     // The key read's immediate offset. The hardware adds it after the 32-bit selector offset, without wrapping.
     public uint MaterialImmediate { get; init; }

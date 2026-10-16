@@ -296,6 +296,7 @@ public sealed class ResourceMaterializationCache
                 FlattenedResourceTable = table ?? snapshot.FlattenedResourceTable,
                 UserData = snapshot.UserData,
                 DeviceAddressRanges = snapshot.DeviceAddressRanges,
+                BindlessImages = snapshot.BindlessImages,
             };
         }
 
@@ -491,6 +492,7 @@ public sealed class ResourceMaterializationCache
                     FlattenedResourceTable = snapshot.FlattenedResourceTable,
                     UserData = snapshot.UserData,
                     DeviceAddressRanges = snapshot.DeviceAddressRanges,
+                    BindlessImages = snapshot.BindlessImages,
                 };
         }
 
@@ -1252,6 +1254,7 @@ public sealed class ResourceMaterializationCache
                     FlattenedResourceTable = table,
                     UserData = previous.UserData,
                     DeviceAddressRanges = previous.DeviceAddressRanges,
+                    BindlessImages = previous.BindlessImages,
                 },
                 Specialization = cached.Specialization,
                 Next = cached.Next,
@@ -1398,6 +1401,7 @@ public sealed class ResourceMaterializationCache
             FlattenedResourceTable = cached.FlattenedResourceTable,
             UserData = current,
             DeviceAddressRanges = cached.DeviceAddressRanges,
+            BindlessImages = cached.BindlessImages,
         };
     }
 
@@ -1701,6 +1705,7 @@ public sealed class ResourceMaterializationCache
                     FlattenedResourceTable = table,
                     UserData = patched.UserData,
                     DeviceAddressRanges = patched.DeviceAddressRanges,
+                    BindlessImages = patched.BindlessImages,
                 };
                 patches = found;
                 return true;
@@ -1769,6 +1774,7 @@ public sealed class ResourceMaterializationCache
                     FlattenedResourceTable = table,
                     UserData = patched.UserData,
                     DeviceAddressRanges = patched.DeviceAddressRanges,
+                    BindlessImages = patched.BindlessImages,
                 };
             }
             finally

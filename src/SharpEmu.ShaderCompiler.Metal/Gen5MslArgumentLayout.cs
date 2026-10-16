@@ -26,6 +26,10 @@ public enum MslArgumentFieldKind
     // two programs touching the same pair take the same lock. A program declares the
     // field only when it takes a lock; the others leave the trailing bytes unread.
     PairLocks,
+    // The device handle tables of the program's V#-described image tables, one pointer per
+    // bindless slot (BindingLayout.BindlessImageTableCount). Each entry is 16 bytes: a
+    // texture's gpuResourceID and the class variant that reads it (sharpemu_bindless_entry).
+    BindlessImageTables,
 }
 
 // One field of the stage argument buffer: its binding kind, id range and byte range.
@@ -47,6 +51,10 @@ public sealed class Gen5MslArgumentLayout
     public const string StructName = "Gen5StageResources";
     public const string StepReportName = "step_report";
     public const string PairLocksName = "pair_locks";
+    public const string BindlessImagesName = "bindless_images";
+
+    /// <summary>The bytes of one bindless table entry: gpuResourceID, variant, reserved.</summary>
+    public const int BindlessEntryBytes = 16;
 
     /// <summary>The 32-bit sequence words in the pair-lock table; the shader picks one by
     /// bits 3..13 of a pair's address (sharpemu_pair_lock_slots).</summary>
@@ -108,6 +116,14 @@ public sealed class Gen5MslArgumentLayout
                     Add(binding.Kind, MslArgumentFieldKind.Textures, ImageClassName(binding.Kind), count, ResourceBytes);
                     break;
             }
+        }
+
+        // After the descriptors and before the trailing pointers: a program declares the
+        // pair-lock pointer only when it takes a lock, so nothing may follow it.
+        if (layout.BindlessImageTableCount != 0)
+        {
+            Add(DescriptorBindingKind.Buffers, MslArgumentFieldKind.BindlessImageTables, BindlessImagesName,
+                layout.BindlessImageTableCount, ResourceBytes);
         }
 
         // Always last, so adding them never moves a descriptor field.

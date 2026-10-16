@@ -34,6 +34,11 @@ public sealed partial class ResourceTracker
         if (bufferHeap && ValidateSource(MakeSource(handle, 8, false, false, pc), out _))
             return false;
 
+        // A V# table is read through texture handles, which only sampled reads take. Stores
+        // and atomics through one keep the descriptor resolution they had before.
+        if (bufferHeap && !OnlySampledReadsThrough(handle))
+            return false;
+
         for (var dword = 0; dword < 8; dword++)
         {
             var read = handle.Operands[dword];
@@ -164,6 +169,7 @@ public sealed partial class ResourceTracker
                 DynamicOffsetBase = unchecked(tableOffset - tableImmediate),
                 KeyBound = bound,
                 WaveIndexed = waveIndexed,
+                Bindless = bufferHeap,
             },
         };
 
@@ -178,6 +184,19 @@ public sealed partial class ResourceTracker
             Memory = memoryIndices,
             Reads = reads,
         };
+        return true;
+    }
+
+    private bool OnlySampledReadsThrough(ScalarValue handle)
+    {
+        for (var index = 0; index < _plan.Memory.Count; index++)
+        {
+            var memory = _plan.Memory[index];
+            if (memory.Kind == MemoryResourceKind.Image && ReferenceEquals(_plan.Accesses[index]?.Handle, handle) &&
+                (memory.ImageClass != ImageResourceClass.Sampled || memory.Access != MemoryAccess.Read))
+                return false;
+        }
+
         return true;
     }
 

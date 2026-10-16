@@ -1486,6 +1486,14 @@ public static partial class Gen5SpirvTranslator
                 return true;
             }
 
+            if (imageInfo.BindlessSlot != DescriptorConstants.NoIndex)
+            {
+                // A V#-described table is read through a device table of texture handles,
+                // which only the Metal backend binds. Here the access reads its root alone: the
+                // null descriptor, as such an access read before Metal bound these tables.
+                return false;
+            }
+
             if (request.IndirectRootByMemoryIndex.TryGetValue(memoryIndex, out var keyMemoryIndex) && imageInfo.IndirectSearchIterations != 0)
             {
                 if (!HasFlattenedTable)
@@ -1583,7 +1591,8 @@ public static partial class Gen5SpirvTranslator
             // Several descriptors (per-mip elements, indirect candidates) need the caller's constant case.
             var severalDescriptors =
                 (imageInfo.MipMode == ImageMipMode.DynamicStorage && instruction.Opcode is "ImageLoadMip" or "ImageStoreMip") ||
-                (request.IndirectRootByMemoryIndex.ContainsKey(memoryIndex) && imageInfo.IndirectSearchIterations != 0);
+                (request.IndirectRootByMemoryIndex.ContainsKey(memoryIndex) && imageInfo.IndirectSearchIterations != 0 &&
+                 imageInfo.BindlessSlot == DescriptorConstants.NoIndex);
             if (fixedElement is null && severalDescriptors)
             {
                 error = "image access over several descriptors needs a constant element case";

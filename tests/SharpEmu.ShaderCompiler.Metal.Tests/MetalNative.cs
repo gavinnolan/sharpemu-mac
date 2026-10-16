@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Runtime.InteropServices;
+using SharpEmu.ShaderCompiler.Resources;
 
 namespace SharpEmu.ShaderCompiler.Metal.Tests;
 
@@ -199,7 +200,9 @@ internal static partial class MetalNative
         nint texture = 0,
         nint sampler = 0,
         uint threadgroupCount = 1,
-        IReadOnlyList<DeviceTable>? tables = null)
+        IReadOnlyList<DeviceTable>? tables = null,
+        IReadOnlyList<DeviceTable>? bindlessTables = null,
+        Func<DescriptorBindingKind, nint>? textureOfClass = null)
     {
         result = [];
         stepCapHits = 0;
@@ -240,7 +243,12 @@ internal static partial class MetalNative
                         break;
                     case MslArgumentFieldKind.Textures:
                         BitConverter.TryWriteBytes(arguments.AsSpan((int)field.ByteOffset + (element * 8)),
-                            SendULong(texture, Selector("gpuResourceID")));
+                            SendULong(textureOfClass?.Invoke(field.Kind) ?? texture, Selector("gpuResourceID")));
+                        break;
+                    case MslArgumentFieldKind.BindlessImageTables:
+                        // One device handle table per slot, in slot order.
+                        BitConverter.TryWriteBytes(arguments.AsSpan((int)field.ByteOffset + (element * 8)),
+                            SendULong(bindlessTables![element].Buffer, Selector("gpuAddress")));
                         break;
                     case MslArgumentFieldKind.Samplers:
                         BitConverter.TryWriteBytes(arguments.AsSpan((int)field.ByteOffset + (element * 8)),
@@ -289,6 +297,10 @@ internal static partial class MetalNative
                     buffer, stepReport, pairLocks, SharedTable.Value,
                     .. texture == 0 ? Array.Empty<nint>() : [texture],
                     .. (tables ?? []).SelectMany(static table => (nint[])[table.Buffer, .. table.Residents]),
+                    .. (bindlessTables ?? []).SelectMany(static table => (nint[])[table.Buffer, .. table.Residents]),
+                    .. textureOfClass is null ? Array.Empty<nint>() : layout.Fields
+                        .Where(static field => field.FieldKind == MslArgumentFieldKind.Textures)
+                        .Select(field => textureOfClass(field.Kind)).Distinct(),
                 ],
                 threadsPerThreadgroup,
                 buffer,
