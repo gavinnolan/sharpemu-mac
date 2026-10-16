@@ -118,3 +118,8 @@ Each entry: **Name** — observable effect · chosen behaviour · pinning test.
   point to opaque zeroed FILE objects that are also exported as
   `_Stdin`/`_Stdout`/`_Stderr`. HLE stdio writes to `_Stderr` reach the
   host's stderr, and to any other FILE it does not own reach stdout.
+- **Module info** — `SceKernelModuleInfo(Ex)` lists up to four PT_LOAD
+  segments with their protections, plus the eh_frame fields and a ref_count
+  of 1. The SELF fingerprint, the TLS fields and eh_frame_hdr_size are zero.
+- **sceKernelDlclose** — checks the handle (ESRCH when unknown) but never
+  unmaps a module.

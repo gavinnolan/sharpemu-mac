@@ -1308,9 +1308,40 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         var imageBase = image.EntryPoint >= image.ElfHeader.EntryPoint ? image.EntryPoint - image.ElfHeader.EntryPoint : 0UL;
         GuestHostMappings.RegisterModuleSegments(_virtualMemory, image.ProgramHeaders, imageBase, Path.GetFileName(modulePath));
         KernelModuleRegistry.RegisterModuleDependencies(handle, image.ImportedModuleNames);
+        KernelModuleRegistry.RegisterModuleSegments(handle, ComputeModuleSegments(image));
         Console.Error.WriteLine(
             $"[RUNTIME] Registered module handle={handle} name={Path.GetFileName(modulePath)} base=0x{baseAddress:X16} size=0x{size:X16}");
         return handle;
+    }
+
+    /// <summary>
+    /// The PT_LOAD segments of a mapped image, as the module-info structs
+    /// report them (address, size, SCE_KERNEL_PROT_CPU_* bits).
+    /// </summary>
+    internal static List<KernelModuleRegistry.ModuleSegment> ComputeModuleSegments(SelfImage image)
+    {
+        var segments = new List<KernelModuleRegistry.ModuleSegment>();
+        var imageBase = image.EntryPoint >= image.ElfHeader.EntryPoint
+            ? image.EntryPoint - image.ElfHeader.EntryPoint
+            : 0UL;
+        foreach (var header in image.ProgramHeaders)
+        {
+            if (header.HeaderType != ProgramHeaderType.Load || header.MemorySize == 0)
+            {
+                continue;
+            }
+
+            var protection =
+                ((header.Flags & ProgramHeaderFlags.Read) != 0 ? 1 : 0) |
+                ((header.Flags & ProgramHeaderFlags.Write) != 0 ? 2 : 0) |
+                ((header.Flags & ProgramHeaderFlags.Execute) != 0 ? 4 : 0);
+            segments.Add(new KernelModuleRegistry.ModuleSegment(
+                unchecked(imageBase + header.VirtualAddress),
+                header.MemorySize,
+                protection));
+        }
+
+        return segments;
     }
 
     private static bool TryComputeImageRange(SelfImage image, out ulong baseAddress, out ulong size)

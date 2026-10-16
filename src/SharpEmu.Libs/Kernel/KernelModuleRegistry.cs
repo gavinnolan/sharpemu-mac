@@ -21,6 +21,13 @@ public static class KernelModuleRegistry
     private static readonly Dictionary<int, ModuleEntry> _modulesByHandle = new();
     private static readonly Dictionary<int, Dictionary<string, ulong>> _symbolsByHandle = new();
     private static readonly Dictionary<int, string[]> _neededByHandle = new();
+    private static readonly Dictionary<int, ModuleSegment[]> _segmentsByHandle = new();
+
+    /// <summary>
+    /// One mapped PT_LOAD segment of a module; <see cref="Protection"/> uses
+    /// the SCE_KERNEL_PROT_CPU_* bits (read 1, write 2, exec 4).
+    /// </summary>
+    public readonly record struct ModuleSegment(ulong Address, ulong Size, int Protection);
     private static readonly Dictionary<string, int> _handleByPath = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, int> _handleByName = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<int, int> _sysmoduleHandleById = new();
@@ -65,6 +72,7 @@ public static class KernelModuleRegistry
             _modulesByHandle.Clear();
             _symbolsByHandle.Clear();
             _neededByHandle.Clear();
+            _segmentsByHandle.Clear();
             _handleByPath.Clear();
             _handleByName.Clear();
             _sysmoduleHandleById.Clear();
@@ -356,6 +364,28 @@ public static class KernelModuleRegistry
             {
                 _neededByHandle[handle] = neededModuleNames.Where(name => !string.IsNullOrWhiteSpace(name)).ToArray();
             }
+        }
+    }
+
+    /// <summary>Records a module's mapped segments for the module-info structs.</summary>
+    public static void RegisterModuleSegments(int handle, IReadOnlyList<ModuleSegment> segments)
+    {
+        ArgumentNullException.ThrowIfNull(segments);
+        lock (_gate)
+        {
+            if (_modulesByHandle.ContainsKey(handle))
+            {
+                _segmentsByHandle[handle] = segments.Where(segment => segment.Size != 0).ToArray();
+            }
+        }
+    }
+
+    /// <summary>The module's segments in load order, or empty when unknown.</summary>
+    public static ModuleSegment[] GetModuleSegments(int handle)
+    {
+        lock (_gate)
+        {
+            return _segmentsByHandle.TryGetValue(handle, out var segments) ? segments : [];
         }
     }
 

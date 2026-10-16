@@ -613,6 +613,69 @@ public sealed class KernelRuntimeCompatExportsTests
     }
 
     [Fact]
+    public void ModuleInfo_ReportsEveryLoadSegmentAndDlcloseChecksTheHandle()
+    {
+        const ulong infoAddress = 0x1_0000;
+        KernelModuleRegistry.Reset();
+        try
+        {
+            var handle = KernelModuleRegistry.RegisterModule(
+                Path.Combine(Path.GetTempPath(), "sharpemu-info", "libSeg.prx"),
+                0x8800_0000,
+                0x30_0000,
+                0x8800_1000,
+                0,
+                0x8810_0000,
+                0x8810_0100,
+                0x400,
+                isMain: false);
+            KernelModuleRegistry.RegisterModuleSegments(handle,
+            [
+                new(0x8800_0000, 0x10_0000, 5),
+                new(0x8810_0000, 0x8_0000, 1),
+                new(0x8820_0000, 0x10_0000, 3),
+            ]);
+
+            var memory = new FakeCpuMemory(infoAddress, 0x1000);
+            var ctx = new CpuContext(memory, Generation.Gen5);
+            Assert.True(ctx.TryWriteUInt64(infoAddress, 0x160));
+            ctx[CpuRegister.Rdi] = unchecked((ulong)handle);
+            ctx[CpuRegister.Rsi] = infoAddress;
+            Assert.Equal(0, KernelRuntimeCompatExports.KernelGetModuleInfo(ctx));
+
+            var info = new byte[0x160];
+            Assert.True(memory.TryRead(infoAddress, info));
+            Assert.Equal(3u, BinaryPrimitives.ReadUInt32LittleEndian(info.AsSpan(0x148)));
+            Assert.Equal(0x8810_0000UL, BinaryPrimitives.ReadUInt64LittleEndian(info.AsSpan(0x108 + 16)));
+            Assert.Equal(0x8_0000u, BinaryPrimitives.ReadUInt32LittleEndian(info.AsSpan(0x108 + 24)));
+            Assert.Equal(1, BinaryPrimitives.ReadInt32LittleEndian(info.AsSpan(0x108 + 28)));
+            Assert.Equal(3, BinaryPrimitives.ReadInt32LittleEndian(info.AsSpan(0x108 + 32 + 12)));
+
+            var exInfo = new byte[0x1A8];
+            Assert.True(ctx.TryWriteUInt64(infoAddress, 0x1A8));
+            ctx[CpuRegister.Rdi] = 0x8820_0010;
+            ctx[CpuRegister.Rsi] = 0;
+            ctx[CpuRegister.Rdx] = infoAddress;
+            Assert.Equal(0, KernelRuntimeCompatExports.KernelGetModuleInfoFromAddr(ctx));
+            Assert.True(memory.TryRead(infoAddress, exInfo));
+            Assert.Equal(3u, BinaryPrimitives.ReadUInt32LittleEndian(exInfo.AsSpan(0x1A0)));
+            Assert.Equal(0x8810_0000UL, BinaryPrimitives.ReadUInt64LittleEndian(exInfo.AsSpan(0x148)));
+            Assert.Equal(0x8810_0100UL, BinaryPrimitives.ReadUInt64LittleEndian(exInfo.AsSpan(0x150)));
+            Assert.Equal(0x400u, BinaryPrimitives.ReadUInt32LittleEndian(exInfo.AsSpan(0x15C)));
+            Assert.Equal(1u, BinaryPrimitives.ReadUInt32LittleEndian(exInfo.AsSpan(0x1A4)));
+
+            ctx[CpuRegister.Rdi] = unchecked((ulong)handle);
+            Assert.Equal(0, KernelRuntimeCompatExports.KernelDlclose(ctx));
+            ctx[CpuRegister.Rdi] = 0x7777;
+            Assert.Equal(unchecked((int)0x80020003), KernelRuntimeCompatExports.KernelDlclose(ctx));
+        }
+        finally
+        {
+            KernelModuleRegistry.Reset();
+        }
+    }
+
+    [Fact]
     public void Sysmodule_LoadIsRefcountedAndReportsSdkErrors()
     {
         const ushort id = 0x7AB1; // not a real module id; ids are not table-checked
