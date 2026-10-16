@@ -270,7 +270,7 @@ public static partial class Gen5MslTranslator
                 "VCeilF32" => FloatResult(instruction, $"ceil({F(instruction, 0)})"),
                 "VTruncF32" => FloatResult(instruction, $"trunc({F(instruction, 0)})"),
                 "VRndneF32" => FloatResult(instruction, $"rint({F(instruction, 0)})"),
-                "VFractF32" => FloatResult(instruction, $"fract({F(instruction, 0)})"),
+                "VFractF32" => EmitFractF32(instruction),
                 "VSqrtF32" => InvalidNanF32Result(instruction, "sqrt"),
                 "VRsqF32" => InvalidNanF32Result(instruction, "rsqrt"),
                 "VRcpF16" => Float16Reciprocal(instruction, destination),
@@ -2873,6 +2873,15 @@ public static partial class Gen5MslTranslator
                 ? $"sharpemu_flush_f32_denorm({operand})"
                 : $"sharpemu_trig_cycle_f32({operand}, {cycle}) * {TauLiteral}";
             return FloatResult(instruction, $"sharpemu_invalid_nan_f32({function}({argument}), {operand})");
+        }
+
+        /// <summary>V_FRACT_F32: D = S0 + -floor(S0) (RDNA2 ISA 12.8), so an infinity gives inf + -inf, a
+        /// NaN (0xFFC00000 as V_SQRT_F32 and the other invalid results); Metal's fract(inf) is 0.
+        /// Metal's fract already stops short of 1.0 for a tiny negative operand.</summary>
+        private string EmitFractF32(Gen5ShaderInstruction instruction)
+        {
+            var operand = Temp("float", F(instruction, 0));
+            return FloatResult(instruction, $"(isinf({operand}) ? as_type<float>(0xFFC00000u) : fract({operand}))");
         }
 
         private bool OutputModifierApplies(bool halfOrDouble) =>
