@@ -50,10 +50,19 @@ public sealed partial class GpuCommandInterpreter
         _host.DrawAuto(SubmitId, new DrawAutoArguments(packetAddress, opcode, vertexCount, instanceCount, firstVertex, firstInstance, offsetSource));
     }
 
+    // VGT_DRAW_INITIATOR.SOURCE_SELECT: an indexed indirect draw fetches its indices by DMA (0),
+    // as PAL and radeonsi program it, or names auto-index (2); a non-indexed one is auto-index.
+    // NOT_EOP (bit 5) is the only other bit accepted.
+    private static bool IsSupportedIndirectInitiator(uint drawInitiator, bool indexed)
+    {
+        var initiator = drawInitiator & ~0x20u;
+        return initiator == 2u || (indexed && initiator == 0u);
+    }
+
     // Indirect arguments are read from guest memory now, as the packet executes.
     internal void DrawIndirect(ulong packetAddress, uint opcode, uint dataOffset, uint drawInitiator, bool indexed)
     {
-        if ((drawInitiator & ~0x20u) != 2u)
+        if (!IsSupportedIndirectInitiator(drawInitiator, indexed))
         {
             throw _host.Fatal($"The indirect draw initiator is not supported: initiator=0x{drawInitiator:X8} address=0x{packetAddress:X16}.");
         }
@@ -68,7 +77,7 @@ public sealed partial class GpuCommandInterpreter
 
     internal void DrawIndirectMulti(ulong packetAddress, uint opcode, uint dataOffset, uint maxCountOrCount, ulong countAddress, uint strideInBytes, uint drawInitiator, bool indexed)
     {
-        if ((drawInitiator & ~0x20u) != 2u)
+        if (!IsSupportedIndirectInitiator(drawInitiator, indexed))
         {
             throw _host.Fatal($"The indirect draw initiator is not supported: initiator=0x{drawInitiator:X8} address=0x{packetAddress:X16}.");
         }
