@@ -137,7 +137,7 @@ public static partial class Gen5MslTranslator
                     value = $"sharpemu_f64_from_u32({RawSource(instruction, 0)}, 0u)";
                     break;
                 case "VCvtF64F32":
-                    value = $"sharpemu_f64_from_f32({Float32Bits(instruction, 0)})";
+                    value = $"sharpemu_f64_from_f32({FlushInputDenormalF32(Float32Bits(instruction, 0))})";
                     break;
                 case "VRcpF64":
                 case "VRsqF64":
