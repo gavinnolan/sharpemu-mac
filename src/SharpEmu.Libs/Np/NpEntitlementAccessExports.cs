@@ -254,6 +254,115 @@ public static class NpEntitlementAccessExports
             : NpEntitlementAccessErrorNoEntitlement);
     }
 
+    // The service/unified entitlement requests and the consume requests are server round
+    // trips that need a PSN session. The offline profile is signed out, so every Request*
+    // call fails at the request stage with SCE_NP_ERROR_SIGNED_OUT (the code sceNpGetState
+    // and sceNpCheckNpReachability agree on), writes nothing and never creates a request.
+    // Because no request is ever created, there is nothing for Poll* to complete and it
+    // reports the same error. Neither reference knows the argument lists of these calls
+    // (anyps5 declares them without parameters), so no argument is read or validated.
+    // Whether a console fails at the request or at the poll when signed out is unverified.
+    private const int NpErrorSignedOut = unchecked((int)0x80550006);
+
+    private static int SignedOut(CpuContext ctx) => ctx.SetReturn(NpErrorSignedOut);
+
+    [SysAbiExport(
+        Nid = "HFcQl9TMcFQ",
+        ExportName = "sceNpEntitlementAccessAbortRequest",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessAbortRequest(CpuContext ctx) =>
+        ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+
+    [SysAbiExport(
+        Nid = "Z0eQj8m7XA8",
+        ExportName = "sceNpEntitlementAccessDeleteRequest",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessDeleteRequest(CpuContext ctx) =>
+        ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+
+    /// <summary>
+    /// One output pointer for the transaction id. A null pointer is the library's PARAMETER
+    /// error; otherwise the id would come from the server, so it fails SIGNED_OUT without
+    /// writing (anyps5).
+    /// </summary>
+    [SysAbiExport(
+        Nid = "IQtb-TaIjSM",
+        ExportName = "sceNpEntitlementAccessGenerateTransactionId",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessGenerateTransactionId(CpuContext ctx) =>
+        ctx[CpuRegister.Rdi] == 0
+            ? ctx.SetReturn(NpEntitlementAccessErrorParameter)
+            : SignedOut(ctx);
+
+    /// <summary>
+    /// Play First Trial flag. Reports a full game, not a trial, to match
+    /// sceNpEntitlementAccessGetGameTrialsFlag: writes 0 and returns OK; null is PARAMETER.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "eDXKe9FndlE",
+        ExportName = "sceNpEntitlementAccessGetPftFlag",
+        Target = Generation.Gen5,
+        LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessGetPftFlag(CpuContext ctx)
+    {
+        var flagAddress = ctx[CpuRegister.Rdi];
+        if (flagAddress == 0)
+        {
+            return ctx.SetReturn(NpEntitlementAccessErrorParameter);
+        }
+
+        return ctx.TryWriteUInt32(flagAddress, 0)
+            ? ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK)
+            : ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    [SysAbiExport(Nid = "69u+XqsoNd0", ExportName = "sceNpEntitlementAccessPollConsumeEntitlement",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessPollConsumeEntitlement(CpuContext ctx) => SignedOut(ctx);
+
+    [SysAbiExport(Nid = "eOxGbG3sPb0", ExportName = "sceNpEntitlementAccessRequestConsumeUnifiedEntitlement",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessRequestConsumeUnifiedEntitlement(CpuContext ctx) => SignedOut(ctx);
+
+    [SysAbiExport(Nid = "Aqae0TjLvQU", ExportName = "sceNpEntitlementAccessRequestConsumeServiceEntitlement",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessRequestConsumeServiceEntitlement(CpuContext ctx) => SignedOut(ctx);
+
+    [SysAbiExport(Nid = "M8icY9OwkKs", ExportName = "sceNpEntitlementAccessRequestServiceEntitlementInfo",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessRequestServiceEntitlementInfo(CpuContext ctx) => SignedOut(ctx);
+
+    [SysAbiExport(Nid = "brbRxzr7qyI", ExportName = "sceNpEntitlementAccessRequestServiceEntitlementInfoList",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessRequestServiceEntitlementInfoList(CpuContext ctx) => SignedOut(ctx);
+
+    [SysAbiExport(Nid = "jautSRs4OdQ", ExportName = "sceNpEntitlementAccessRequestUnifiedEntitlementInfo",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessRequestUnifiedEntitlementInfo(CpuContext ctx) => SignedOut(ctx);
+
+    [SysAbiExport(Nid = "uCZf2L27th8", ExportName = "sceNpEntitlementAccessRequestUnifiedEntitlementInfoList",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessRequestUnifiedEntitlementInfoList(CpuContext ctx) => SignedOut(ctx);
+
+    [SysAbiExport(Nid = "ShGBFuoSSsQ", ExportName = "sceNpEntitlementAccessPollServiceEntitlementInfo",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessPollServiceEntitlementInfo(CpuContext ctx) => SignedOut(ctx);
+
+    [SysAbiExport(Nid = "aFv8qms6XTM", ExportName = "sceNpEntitlementAccessPollServiceEntitlementInfoList",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessPollServiceEntitlementInfoList(CpuContext ctx) => SignedOut(ctx);
+
+    [SysAbiExport(Nid = "M4XlLFnzQaQ", ExportName = "sceNpEntitlementAccessPollUnifiedEntitlementInfo",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessPollUnifiedEntitlementInfo(CpuContext ctx) => SignedOut(ctx);
+
+    [SysAbiExport(Nid = "nAEqawEZG5s", ExportName = "sceNpEntitlementAccessPollUnifiedEntitlementInfoList",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessPollUnifiedEntitlementInfoList(CpuContext ctx) => SignedOut(ctx);
+
     private static bool TryWriteAddcontEntitlementInfo(
         CpuContext ctx,
         ulong address,

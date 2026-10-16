@@ -29,6 +29,14 @@ public static class NpManagerExports
     internal const uint NpReachabilityReachable = 2;
     private static int _nextNpRequestId;
     private static readonly ConcurrentDictionary<int, int> _requestResults = new();
+    private static readonly ConcurrentDictionary<int, byte> _liveRequests = new();
+    private static int _reachabilityCallbackRegistered;
+
+    private const int NpErrorUserNotFound = unchecked((int)0x80550007);
+    private const int NpErrorCallbackNotRegistered = unchecked((int)0x80550009);
+    private const int NpErrorRequestNotFound = unchecked((int)0x80550014);
+    private const int NpIdSize = 36; // SceNpId: online id (20), opt[8], reserved[8]
+    private const int NpOnlineIdSize = 20; // data[16], term, dummy[3]
 
     [SysAbiExport(
         Nid = "3Zl8BePTh9Y",
@@ -42,7 +50,7 @@ public static class NpManagerExports
     }
 
     [SysAbiExport(Nid = "eiqMCt9UshI", ExportName = "sceNpCreateAsyncRequest", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpManager")]
-    public static int NpCreateAsyncRequest(CpuContext ctx) => SetReturn(ctx, NextRequestId());
+    public static int NpCreateAsyncRequest(CpuContext ctx) => SetReturn(ctx, NextLiveRequestId());
 
     [SysAbiExport(Nid = "KfGZg2y73oM", ExportName = "sceNpCheckNpReachability", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpManager")]
     public static int NpCheckNpReachability(CpuContext ctx)
@@ -58,7 +66,7 @@ public static class NpManagerExports
     }
 
     [SysAbiExport(Nid = "GpLQDNKICac", ExportName = "sceNpCreateRequest", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpManager")]
-    public static int NpCreateRequest(CpuContext ctx) => SetReturn(ctx, NextRequestId());
+    public static int NpCreateRequest(CpuContext ctx) => SetReturn(ctx, NextLiveRequestId());
 
     [SysAbiExport(Nid = "OzKvTvg3ZYU", ExportName = "sceNpAbortRequest", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpManager")]
     public static int NpAbortRequest(CpuContext ctx) => SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_OK);
@@ -86,6 +94,13 @@ public static class NpManagerExports
         return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
+    private static int NextLiveRequestId()
+    {
+        var id = NextRequestId();
+        _liveRequests[id] = 0;
+        return id;
+    }
+
     private static int NextRequestId()
     {
         var id = Interlocked.Increment(ref _nextNpRequestId) & 0x7FFF_FFFF;
@@ -100,6 +115,7 @@ public static class NpManagerExports
     public static int NpDeleteRequest(CpuContext ctx)
     {
         _requestResults.TryRemove(unchecked((int)ctx[CpuRegister.Rdi]), out _);
+        _liveRequests.TryRemove(unchecked((int)ctx[CpuRegister.Rdi]), out _);
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -152,6 +168,7 @@ public static class NpManagerExports
         LibraryName = "libSceNpManager")]
     public static int NpRegisterNpReachabilityStateCallback(CpuContext ctx)
     {
+        Volatile.Write(ref _reachabilityCallbackRegistered, 1);
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -335,6 +352,225 @@ public static class NpManagerExports
         TraceNp($"set_np_title_id title='{ReadTitleId(titleId)}'");
         return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
+
+    internal static void ResetForTests()
+    {
+        _requestResults.Clear();
+        _liveRequests.Clear();
+        Volatile.Write(ref _reachabilityCallbackRegistered, 0);
+    }
+
+    /// <summary>
+    /// Gen5 ABI: request id, then the online id to look up. The only online id this
+    /// emulator knows is the local profile's, which has no PSN session behind it, so it
+    /// reports SIGNED_OUT (the answer sceNpCheckNpReachability gives); any other id matches
+    /// no user. Both references report USER_NOT_FOUND for every id, so the local-profile
+    /// case is the only deviation. As with sceNpCheckNpReachability the failure is returned
+    /// directly and also kept for sceNpPollAsync.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "2rsFmlGWleQ",
+        ExportName = "sceNpCheckNpAvailability",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpManager")]
+    public static int NpCheckNpAvailability(CpuContext ctx)
+    {
+        var requestId = unchecked((int)ctx[CpuRegister.Rdi]);
+        var onlineIdAddress = ctx[CpuRegister.Rsi];
+        if (requestId <= 0 || onlineIdAddress == 0)
+        {
+            return SetReturn(ctx, NpErrorInvalidArgument);
+        }
+
+        Span<byte> onlineId = stackalloc byte[NpOnlineIdSize];
+        if (!ctx.Memory.TryRead(onlineIdAddress, onlineId))
+        {
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        var result = onlineId[..OfflineOnlineId.Length].SequenceEqual(OfflineOnlineId) &&
+                     onlineId[OfflineOnlineId.Length] == 0
+            ? NpErrorSignedOut
+            : NpErrorUserNotFound;
+        _requestResults[requestId] = result;
+        return SetReturn(ctx, result);
+    }
+
+    /// <summary>
+    /// Gen5 ABI: user id, then a SceNpId output (36 bytes). Reports the local profile, the
+    /// same online id sceNpGetOnlineId writes, with the opt and reserved bytes zeroed.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "p-o74CnoNzY",
+        ExportName = "sceNpGetNpId",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpManager")]
+    public static int NpGetNpId(CpuContext ctx)
+    {
+        var userId = unchecked((int)ctx[CpuRegister.Rdi]);
+        var npIdAddress = ctx[CpuRegister.Rsi];
+        if (userId == -1 || npIdAddress == 0)
+        {
+            return SetReturn(ctx, NpErrorInvalidArgument);
+        }
+
+        Span<byte> npId = stackalloc byte[NpIdSize];
+        npId.Clear();
+        OfflineOnlineId.CopyTo(npId);
+        return ctx.Memory.TryWrite(npIdAddress, npId)
+            ? SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_OK)
+            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    /// <summary>
+    /// Gen5 ABI: request id, parameter, result output. A premium (PS Plus) check needs a PSN
+    /// session, so it fails SIGNED_OUT without writing the result, like the other online
+    /// queries. Null arguments are INVALID_ARGUMENT.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "O80NrhUOPGY",
+        ExportName = "sceNpCheckPremium",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpManager")]
+    public static int NpCheckPremium(CpuContext ctx)
+    {
+        var requestId = unchecked((int)ctx[CpuRegister.Rdi]);
+        if (requestId <= 0 || ctx[CpuRegister.Rsi] == 0 || ctx[CpuRegister.Rdx] == 0)
+        {
+            return SetReturn(ctx, NpErrorInvalidArgument);
+        }
+
+        _requestResults[requestId] = NpErrorSignedOut;
+        return SetReturn(ctx, NpErrorSignedOut);
+    }
+
+    /// <summary>
+    /// Gen5 ABI: request id, user id, language output. The account language comes from the
+    /// PSN account, which a signed-out profile does not have, so this fails SIGNED_OUT without
+    /// writing the output. (The output layout is not confirmed by either reference.)
+    /// </summary>
+    [SysAbiExport(
+        Nid = "3Tcz5bNCfZQ",
+        ExportName = "sceNpGetAccountLanguage2",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpManager")]
+    public static int NpGetAccountLanguage2(CpuContext ctx)
+    {
+        var requestId = unchecked((int)ctx[CpuRegister.Rdi]);
+        if (requestId <= 0 || unchecked((int)ctx[CpuRegister.Rsi]) == -1 || ctx[CpuRegister.Rdx] == 0)
+        {
+            return SetReturn(ctx, NpErrorInvalidArgument);
+        }
+
+        _requestResults[requestId] = NpErrorSignedOut;
+        return SetReturn(ctx, NpErrorSignedOut);
+    }
+
+    /// <summary>
+    /// Gen5 ABI: request id, resolve retry count, then resolve, connect, send and receive
+    /// timeouts in microseconds. The validation follows shadPS4 via the anyps5 notes and is
+    /// not checked on a console: a non-positive request id, a negative retry count, all five
+    /// values zero, a non-zero resolve timeout under 1 s or any other non-zero timeout under
+    /// 10 s is INVALID_ARGUMENT; a request that was never created or was deleted is
+    /// REQUEST_NOT_FOUND. There is no network, so the values are not stored.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "-QglDeRr8D8",
+        ExportName = "sceNpSetTimeout",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpManager")]
+    public static int NpSetTimeout(CpuContext ctx)
+    {
+        const uint minResolveTimeout = 1_000_000;
+        const uint minTransferTimeout = 10_000_000;
+        var requestId = unchecked((int)ctx[CpuRegister.Rdi]);
+        var resolveRetry = unchecked((int)ctx[CpuRegister.Rsi]);
+        var resolveTimeout = unchecked((uint)ctx[CpuRegister.Rdx]);
+        var connectTimeout = unchecked((uint)ctx[CpuRegister.Rcx]);
+        var sendTimeout = unchecked((uint)ctx[CpuRegister.R8]);
+        var receiveTimeout = unchecked((uint)ctx[CpuRegister.R9]);
+        static bool Below(uint timeout, uint minimum) => timeout != 0 && timeout < minimum;
+        if (requestId <= 0 ||
+            resolveRetry < 0 ||
+            (resolveRetry == 0 && resolveTimeout == 0 && connectTimeout == 0 && sendTimeout == 0 && receiveTimeout == 0) ||
+            Below(resolveTimeout, minResolveTimeout) ||
+            Below(connectTimeout, minTransferTimeout) ||
+            Below(sendTimeout, minTransferTimeout) ||
+            Below(receiveTimeout, minTransferTimeout))
+        {
+            return SetReturn(ctx, NpErrorInvalidArgument);
+        }
+
+        return SetReturn(ctx, _liveRequests.ContainsKey(requestId) ? 0 : NpErrorRequestNotFound);
+    }
+
+    /// <summary>Accepts the PS Plus event callback and never invokes it (no PS Plus offline).</summary>
+    [SysAbiExport(
+        Nid = "GImICnh+boA",
+        ExportName = "sceNpRegisterPlusEventCallback",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpManager")]
+    public static int NpRegisterPlusEventCallback(CpuContext ctx) =>
+        SetReturn(ctx, ctx[CpuRegister.Rdi] == 0 ? NpErrorInvalidArgument : 0);
+
+    /// <summary>
+    /// Gen5 ABI: account id, user id output. The local account id sceNpGetAccountIdA hands
+    /// out has no user mapping behind it here, so a valid id reports SIGNED_OUT without writing
+    /// the output (as shadPS4 and anyps5 do); account id 0 or a null output is INVALID_ARGUMENT.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "VgYczPGB5ss",
+        ExportName = "sceNpGetUserIdByAccountId",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpManager")]
+    public static int NpGetUserIdByAccountId(CpuContext ctx) =>
+        SetReturn(
+            ctx,
+            ctx[CpuRegister.Rdi] == 0 || ctx[CpuRegister.Rsi] == 0 ? NpErrorInvalidArgument : NpErrorSignedOut);
+
+    // The unregister calls take no arguments. Only the reachability callback is tracked;
+    // unregistering it when none is registered is CALLBACK_NOT_REGISTERED (both references).
+    // The other three return success either way (anyps5), since a title tearing down after a
+    // register that failed or never ran must not be failed for it.
+    [SysAbiExport(
+        Nid = "cRILAEvn+9M",
+        ExportName = "sceNpUnregisterNpReachabilityStateCallback",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpManager")]
+    public static int NpUnregisterNpReachabilityStateCallback(CpuContext ctx) =>
+        SetReturn(
+            ctx,
+            Interlocked.Exchange(ref _reachabilityCallbackRegistered, 0) == 0 ? NpErrorCallbackNotRegistered : 0);
+
+    [SysAbiExport(
+        Nid = "mjjTXh+NHWY",
+        ExportName = "sceNpUnregisterStateCallback",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpManager")]
+    public static int NpUnregisterStateCallback(CpuContext ctx) => SetReturn(ctx, 0);
+
+    [SysAbiExport(
+        Nid = "M3wFXbYQtAA",
+        ExportName = "sceNpUnregisterStateCallbackA",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpManager")]
+    public static int NpUnregisterStateCallbackA(CpuContext ctx) => SetReturn(ctx, 0);
+
+    [SysAbiExport(
+        Nid = "-Rjp3-YViXc",
+        ExportName = "sceNpUnregisterPremiumEventCallback",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpManager")]
+    public static int NpUnregisterPremiumEventCallback(CpuContext ctx) => SetReturn(ctx, 0);
+
+    [SysAbiExport(
+        Nid = "xViqJdDgKl0",
+        ExportName = "sceNpUnregisterPlusEventCallback",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpManager")]
+    public static int NpUnregisterPlusEventCallback(CpuContext ctx) => SetReturn(ctx, 0);
+
+    private static ReadOnlySpan<byte> OfflineOnlineId => "Player"u8;
 
     private static int SetReturn(CpuContext ctx, int result)
     {

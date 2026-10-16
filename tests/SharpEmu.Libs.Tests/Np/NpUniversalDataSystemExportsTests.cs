@@ -161,6 +161,65 @@ public sealed class NpUniversalDataSystemExportsTests : IDisposable
     }
 
     [Fact]
+    public void ArrayIntegerAndDoubleSetters_AppendTypedValuesAndEstimateSizeGrowsWithThem()
+    {
+        Initialize();
+        var array = CreateArray(MemoryBase + 0x1600);
+        var root = CreateObject(MemoryBase + 0x1608);
+        var name = _memory.WriteCString(MemoryBase + 0x1610, "arrays");
+        var eventOutput = MemoryBase + 0x1620;
+        var sizeOutput = MemoryBase + 0x1630;
+        SetRegisters(name, root, eventOutput, 0);
+        AssertSuccess(NpUniversalDataSystemExports.NpUniversalDataSystemCreateEvent(_context));
+        var eventHandle = ReadUInt64(eventOutput);
+
+        SetRegisters(eventHandle, sizeOutput);
+        AssertSuccess(NpUniversalDataSystemExports.NpUniversalDataSystemEventEstimateSize(_context));
+        var empty = ReadUInt64(sizeOutput);
+        Assert.True(empty >= (ulong)"arrays".Length + 1);
+
+        var key = WriteString(0x2000, "list");
+        SetRegisters(root, key, 0, MemoryBase + 0x1640);
+        AssertSuccess(NpUniversalDataSystemExports.NpUniversalDataSystemEventPropertyObjectSetArray(_context));
+        var list = ReadUInt64(MemoryBase + 0x1640);
+
+        SetRegisters(list, unchecked((ulong)(uint)-5));
+        AssertSuccess(NpUniversalDataSystemExports.NpUniversalDataSystemEventPropertyArraySetInt32(_context));
+        SetRegisters(list, 0xF123_4567);
+        AssertSuccess(NpUniversalDataSystemExports.NpUniversalDataSystemEventPropertyArraySetUInt32(_context));
+        SetRegisters(list, unchecked((ulong)-0x1234_5678_7654_321L));
+        AssertSuccess(NpUniversalDataSystemExports.NpUniversalDataSystemEventPropertyArraySetInt64(_context));
+        SetRegisters(list, 0xFEDC_BA98_7654_3210);
+        AssertSuccess(NpUniversalDataSystemExports.NpUniversalDataSystemEventPropertyArraySetUInt64(_context));
+        SetRegisters(list);
+        _context.SetXmmRegister(0, unchecked((ulong)BitConverter.DoubleToInt64Bits(2.5)), 0);
+        AssertSuccess(NpUniversalDataSystemExports.NpUniversalDataSystemEventPropertyArraySetFloat64(_context));
+
+        SetRegisters(eventHandle, sizeOutput);
+        AssertSuccess(NpUniversalDataSystemExports.NpUniversalDataSystemEventEstimateSize(_context));
+        Assert.True(ReadUInt64(sizeOutput) > empty);
+
+        var context = CreateContext();
+        var serviceHandle = CreateServiceHandle();
+        SetRegisters((ulong)(uint)context, (ulong)(uint)serviceHandle, 0);
+        AssertSuccess(NpUniversalDataSystemExports.NpUniversalDataSystemRegisterContext(_context));
+        SetRegisters((ulong)(uint)context, (ulong)(uint)serviceHandle, eventHandle, 0);
+        AssertSuccess(NpUniversalDataSystemExports.NpUniversalDataSystemPostEvent(_context));
+        var posted = Assert.IsType<UdsPostedEvent>(NpUniversalDataSystemState.LastPostedEventForTests);
+        var values = Assert.IsType<UdsArrayNode>(posted.Root.Values["list"].Value).Values;
+        Assert.Equal(
+            new object[] { -5, 0xF123_4567U, -0x1234_5678_7654_321L, 0xFEDC_BA98_7654_3210UL, 2.5 },
+            values.Select(v => v.Value).ToArray());
+
+        SetRegisters(0xDEAD, sizeOutput);
+        Assert.Equal(ErrorInvalidArgument, NpUniversalDataSystemExports.NpUniversalDataSystemEventEstimateSize(_context));
+        SetRegisters(eventHandle, 0);
+        Assert.Equal(ErrorInvalidArgument, NpUniversalDataSystemExports.NpUniversalDataSystemEventEstimateSize(_context));
+        SetRegisters(0xDEAD, 7);
+        Assert.Equal(ErrorInvalidArgument, NpUniversalDataSystemExports.NpUniversalDataSystemEventPropertyArraySetInt32(_context));
+    }
+
+    [Fact]
     public void GetMemoryStat_ReportsPoolCurrentAndHighWaterValues()
     {
         const ulong poolSize = 0x40_0000;
