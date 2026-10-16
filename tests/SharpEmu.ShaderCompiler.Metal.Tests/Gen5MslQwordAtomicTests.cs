@@ -95,8 +95,8 @@ public sealed class Gen5MslQwordAtomicTests(ITestOutputHelper output)
         BinaryPrimitives.WriteUInt32LittleEndian(initial.AsSpan(BufferBytes - 4), (uint)GuestBase);
         var guest = new byte[GuestBytes];
         // V# at the guest base: base GuestBase + GuestTargets, stride 0, num_records 256,
-        // FORMAT 32_UINT with the identity destination select.
-        var descriptor = new uint[] { (uint)(GuestBase + GuestTargets), 0, Lanes * 8, DescriptorConstants.IdentityDestinationSelect | (20u << 12) };
+        // FORMAT 32_UINT with the identity destination select, OOB_SELECT 3 (raw).
+        var descriptor = new uint[] { (uint)(GuestBase + GuestTargets), 0, Lanes * 8, DescriptorConstants.IdentityDestinationSelect | (20u << 12) | (3u << 28) };
         for (var word = 0; word < descriptor.Length; word++)
         {
             BinaryPrimitives.WriteUInt32LittleEndian(guest.AsSpan(word * 4), descriptor[word]);

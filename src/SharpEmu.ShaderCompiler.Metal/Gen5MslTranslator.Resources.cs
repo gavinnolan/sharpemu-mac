@@ -582,8 +582,62 @@ public static partial class Gen5MslTranslator
         private string DeviceDescriptorWordAddress((string Base, string Size, string Stride) descriptor, string byteOffset) =>
             Temp("ulong", $"({descriptor.Base} + (ulong){byteOffset}) & {FormatULong(DeviceAddressPaging.AddressMask & ~3ul)}");
 
-        private static string DeviceDescriptorWordInRange((string Base, string Size, string Stride) descriptor, string byteOffset) =>
-            $"((ulong){byteOffset} + 3ul) < {descriptor.Size}";
+        private string DeviceDescriptorWordInRange((string Base, string Size, string Stride) descriptor, string byteOffset) =>
+            DeviceBufferFits(descriptor, byteOffset, "4u");
+
+        // Whether bytes at a byte offset from a scalar-register V#'s base are in range: the
+        // OOB_SELECT check of the buffer access being emitted (_deviceBufferFits), or else the
+        // descriptor's byte size (a scalar load, which has no OOB_SELECT).
+        private Func<string, string, string>? _deviceBufferFits;
+
+        private string DeviceBufferFits((string Base, string Size, string Stride) descriptor, string byteOffset, string bytes) =>
+            _deviceBufferFits?.Invoke(byteOffset, bytes) ??
+            $"((ulong){bytes} <= {descriptor.Size} && (ulong){byteOffset} <= {descriptor.Size} - (ulong){bytes})";
+
+        // The range check of a MUBUF/MTBUF access through a V# in scalar registers (RDNA2 ISA
+        // 8.1.5, Table 35), per element of payload bytes at unswizzled offset o (the VGPR
+        // offset plus the instruction offset, no SGPR offset), by the OOB_SELECT of word 3
+        // bits 28-29:
+        //   0: index < NUM_RECORDS and o < stride (o + payload <= stride when formatted)
+        //   1: index < NUM_RECORDS
+        //   2: NUM_RECORDS != 0
+        //   3: NUM_RECORDS is reduced by SOFFSET (an SOFFSET past it is out of range);
+        //      swizzled, index < that and o + payload <= stride, else o + payload <= that.
+        // A V# whose FORMAT is 0 (invalid) is out of range in every mode. Mode 3's SOFFSET
+        // reduction follows the ISA's raw-buffer rule; Mesa and LLVM do not describe it.
+        private Func<string, string, string> DeviceBufferOutOfRangeCheck(
+            Dictionary<string, string> unswizzledOffsets,
+            string descriptorWord3,
+            string stride,
+            string records,
+            string soffset,
+            string index,
+            string swizzled,
+            bool formatted)
+        {
+            var mode = Temp("uint", $"({descriptorWord3} >> 28u) & 3u");
+            var formatValid = Temp("bool", $"(({descriptorWord3} >> 12u) & 0x7Fu) != 0u");
+            var indexInRange = Temp("bool", $"{index} < {records}");
+            var scalarInRange = Temp("bool", $"{soffset} <= {records}");
+            var rawRecords = Temp("ulong", $"{scalarInRange} ? (ulong)({records} - {soffset}) : 0ul");
+            return (byteOffset, bytes) =>
+            {
+                if (!unswizzledOffsets.TryGetValue(byteOffset, out var offset))
+                {
+                    throw new InvalidOperationException($"device buffer offset {byteOffset} was not placed by its access");
+                }
+
+                var payload = $"(ulong){bytes}";
+                var at = $"(ulong){offset}";
+                var structured = formatted
+                    ? $"({payload} <= (ulong){stride} && {at} <= (ulong){stride} - {payload})"
+                    : $"{at} < (ulong){stride}";
+                var raw = $"({swizzled} ? ((ulong){index} < {rawRecords} && {payload} <= (ulong){stride} && {at} <= (ulong){stride} - {payload}) : " +
+                    $"({payload} <= {rawRecords} && {at} <= {rawRecords} - {payload}))";
+                return $"({formatValid} && ({mode} == 0u ? ({indexInRange} && {structured}) : {mode} == 1u ? {indexInRange} : " +
+                    $"{mode} == 2u ? {records} != 0u : ({scalarInRange} && {raw})))";
+            };
+        }
 
         // A formatted load from a V# held in scalar registers: the element's bytes are read
         // through the device-address page table at an offset from the descriptor's base, and
@@ -593,9 +647,7 @@ public static partial class Gen5MslTranslator
         {
             _usesCoherentLoads |= glc;
             return new(
-                (byteOffset, bytes) => Temp(
-                    "bool",
-                    $"(ulong){bytes} <= {descriptor.Size} && (ulong){byteOffset} <= {descriptor.Size} - (ulong){bytes}"),
+                (byteOffset, bytes) => Temp("bool", DeviceBufferFits(descriptor, byteOffset, bytes)),
                 (byteOffset, bytes, inBounds) => Temp(
                     "uint",
                     $"({bytes} != 0u && {inBounds}) ? sharpemu_load_device_unaligned{(glc ? "_coherent" : string.Empty)}({DeviceArguments}, " +
@@ -636,7 +688,7 @@ public static partial class Gen5MslTranslator
                 var offset = byteOffset.At(componentByteOffset);
                 var componentBytes = Temp("uint", $"({bitOffset} + {bits} + 7u) >> 3u");
                 componentsInBounds.Add(
-                    $"({bits} == 0u || ((ulong){componentBytes} <= {descriptor.Size} && (ulong){offset} <= {descriptor.Size} - (ulong){componentBytes}))");
+                    $"({bits} == 0u || {DeviceBufferFits(descriptor, offset, componentBytes)})");
                 layouts[component] = (componentByteOffset, bitOffset, bits, offset);
                 elementBytes = Temp(
                     "uint",
@@ -686,6 +738,21 @@ public static partial class Gen5MslTranslator
         // destination swizzle) of the descriptor's word 3 on the device; a typed one
         // converts with its own format. Atomics run on the backing memory's words.
         private bool TryEmitDeviceDescriptorBufferMemory(
+            Gen5ShaderInstruction instruction,
+            Gen5BufferMemoryControl control,
+            out string error)
+        {
+            try
+            {
+                return TryEmitDeviceDescriptorBufferAccess(instruction, control, out error);
+            }
+            finally
+            {
+                _deviceBufferFits = null;
+            }
+        }
+
+        private bool TryEmitDeviceDescriptorBufferAccess(
             Gen5ShaderInstruction instruction,
             Gen5BufferMemoryControl control,
             out string error)
@@ -741,25 +808,44 @@ public static partial class Gen5MslTranslator
             // SWIZZLE_ENABLE (word 1 bit 31), INDEX_STRIDE (word 3 bits 21-22, 8 << n indices)
             // and ADD_TID_ENABLE (word 3 bit 23) are read from the V# when the access runs
             // (RDNA2 ISA Table 37). As on the bound path, a V# swizzles only with a nonzero
-            // stride; a swizzled one counts num_records in records of stride bytes (Table 33),
-            // so its reach is the swizzled footprint rather than stride * records.
+            // stride.
             var resource = instruction.Sources[1].Value;
             var word1 = Temp("uint", ScalarExpression(resource + 1));
             var descriptorWord3 = Temp("uint", ScalarExpression(resource + 3));
             var swizzled = Temp("bool", $"({word1} >> 31u) != 0u && {descriptor.Stride} != 0u");
             var indexStride = Temp("uint", $"{swizzled} ? (8u << (({descriptorWord3} >> 21u) & 3u)) : 0u");
             var records = Temp("uint", ScalarExpression(resource + 2));
-            descriptor = descriptor with
-            {
-                Size = Temp("ulong", $"{swizzled} ? sharpemu_swizzled_footprint({records}, {descriptor.Stride}, {indexStride}) : {descriptor.Size}"),
-            };
-            var byteOffset = PlacedBufferAddress(
-                scalarOffset,
-                BufferIndex(control, $"((({descriptorWord3} >> 23u) & 1u) != 0u)"),
+            var soffset = Temp("uint", scalarOffset);
+            var recordIndex = Temp("uint", BufferIndex(control, $"((({descriptorWord3} >> 23u) & 1u) != 0u)"));
+            var placedAddress = PlacedBufferAddress(
+                soffset,
+                recordIndex,
                 $"(0x{unchecked((uint)control.OffsetBytes):X}u + {vectorOffset})",
                 descriptor.Stride,
                 indexStride,
                 placed => placed);
+
+            // Each placed byte offset remembers the unswizzled offset it came from (the VGPR
+            // offset plus the instruction offset plus the distance into the access), which the
+            // OOB_SELECT checks test rather than the placed address.
+            var unswizzledOffsets = new Dictionary<string, string>(StringComparer.Ordinal);
+            var byteOffset = new BufferAddress(
+                placedAddress.Base,
+                distance =>
+                {
+                    var placed = placedAddress.Place!(distance);
+                    unswizzledOffsets[placed] = $"({placedAddress.Base} + {distance})";
+                    return placed;
+                });
+            _deviceBufferFits = DeviceBufferOutOfRangeCheck(
+                unswizzledOffsets,
+                descriptorWord3,
+                descriptor.Stride,
+                records,
+                soffset,
+                recordIndex,
+                swizzled,
+                isFormatLoad || isFormatStore);
 
             if (control.Tfe)
             {
@@ -774,7 +860,7 @@ public static partial class Gen5MslTranslator
                     var probeOffset = byteOffset.At(word * sizeof(uint));
                     var probeAddress = DeviceDescriptorWordAddress(descriptor, probeOffset);
                     var mapped = Temp("bool", "true");
-                    Line($"if ({ExecCondition($"(ulong){probeOffset} < {descriptor.Size}")})");
+                    Line($"if ({ExecCondition(DeviceBufferFits(descriptor, probeOffset, isSubwordLoad ? $"{loadBytes}u" : isFormatLoad ? "1u" : "4u"))})");
                     Line("{");
                     _indent++;
                     Line($"(void)sharpemu_resolve_device_address({DeviceArguments}, {probeAddress}, {mapped});");
@@ -848,7 +934,7 @@ public static partial class Gen5MslTranslator
                     var wordOffset = byteOffset.At(word * sizeof(uint));
                     wordAddresses[word] = Temp("ulong", $"({descriptor.Base} + (ulong){wordOffset}) & {FormatULong(mask)}");
                     wordsInRange[word] =
-                        $"4ul <= {descriptor.Size} && (ulong){wordOffset} <= {descriptor.Size} - 4ul && ({wordAddresses[word]} & 3ul) == 0ul";
+                        $"{DeviceBufferFits(descriptor, wordOffset, "4u")} && ({wordAddresses[word]} & 3ul) == 0ul";
                 }
 
                 var inRange = Temp("bool", string.Join(" && ", wordsInRange));
@@ -936,7 +1022,7 @@ public static partial class Gen5MslTranslator
             if (isSubwordLoad)
             {
                 var subwordOffset = byteOffset.At(0);
-                var inRange = Temp("bool", $"((ulong){subwordOffset} + {loadBytes - 1}ul) < {descriptor.Size}");
+                var inRange = Temp("bool", DeviceBufferFits(descriptor, subwordOffset, $"{loadBytes}u"));
                 var address = Temp("ulong", $"({descriptor.Base} + (ulong){subwordOffset}) & {FormatULong(mask)}");
                 _usesCoherentLoads |= control.Glc;
                 StoreSubdwordLoad(
@@ -976,7 +1062,7 @@ public static partial class Gen5MslTranslator
             if (isSubwordStore)
             {
                 var subwordOffset = byteOffset.At(0);
-                var inRange = Temp("bool", $"((ulong){subwordOffset} + {storeBytes - 1}ul) < {descriptor.Size}");
+                var inRange = Temp("bool", DeviceBufferFits(descriptor, subwordOffset, $"{storeBytes}u"));
                 var address = Temp("ulong", $"({descriptor.Base} + (ulong){subwordOffset}) & {FormatULong(mask)}");
                 var source = sourceShift == 0
                     ? $"v[{control.VectorData}]"
@@ -993,7 +1079,7 @@ public static partial class Gen5MslTranslator
             for (uint index = 0; index < control.DwordCount; index++)
             {
                 var componentOffset = byteOffset.At(index * sizeof(uint));
-                var inRange = Temp("bool", $"((ulong){componentOffset} + 3ul) < {descriptor.Size}");
+                var inRange = Temp("bool", DeviceBufferFits(descriptor, componentOffset, "4u"));
                 var address = Temp("ulong", $"({descriptor.Base} + (ulong){componentOffset}) & {FormatULong(mask & ~3ul)}");
                 Line($"if ({ExecCondition(inRange)})");
                 Line("{");

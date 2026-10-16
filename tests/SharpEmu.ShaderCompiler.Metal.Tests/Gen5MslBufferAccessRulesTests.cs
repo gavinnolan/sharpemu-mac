@@ -11,8 +11,10 @@ namespace SharpEmu.ShaderCompiler.Metal.Tests;
 // MUBUF/MTBUF loads with TFE write a status dword after their data (zero when resident,
 // nonzero for a dword on an unmapped page of a device-descriptor access), and MUBUF loads
 // with LDS=1 write their dword to LDS at M0[15:0] + inst_offset + lane * 4 instead of a
-// VGPR (Gen5MslTranslator.TryEmitBufferLoadWithStatus / TryEmitBufferLoadToLds).
-public sealed class Gen5MslBufferTfeLdsTests(ITestOutputHelper output)
+// VGPR (Gen5MslTranslator.TryEmitBufferLoadWithStatus / TryEmitBufferLoadToLds). A load
+// through a V# in scalar registers is in range by the OOB_SELECT rule of RDNA2 ISA Table 35
+// (Gen5MslTranslator.DeviceBufferOutOfRangeCheck).
+public sealed class Gen5MslBufferAccessRulesTests(ITestOutputHelper output)
 {
     private const int Lanes = 32;
     private const int OutputOffset = 512;
@@ -23,6 +25,9 @@ public sealed class Gen5MslBufferTfeLdsTests(ITestOutputHelper output)
     // bytes: dwords 0-15 are mapped, 16-27 in range but unmapped, 28 on out of range.
     private const int DeviceBufferOffset = GuestBytes - 64;
     private const uint DeviceRecords = 112;
+    // FORMAT 32_UINT, the identity destination select, OOB_SELECT 3 (raw).
+    private const uint RawWord3 = DescriptorConstants.IdentityDestinationSelect | (20u << 12) | (3u << 28);
+    private const int OobBufferOffset = 0x1000;
 
     private static bool DeviceRequired => Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") == "1";
 
@@ -59,7 +64,7 @@ public sealed class Gen5MslBufferTfeLdsTests(ITestOutputHelper output)
         var input = Input();
         BinaryPrimitives.WriteUInt32LittleEndian(input.AsSpan(BufferBytes - 4), (uint)GuestBase);
         var guest = new byte[GuestBytes];
-        var descriptor = new uint[] { (uint)(GuestBase + DeviceBufferOffset), 0, DeviceRecords, DescriptorConstants.IdentityDestinationSelect | (20u << 12) };
+        var descriptor = new uint[] { (uint)(GuestBase + DeviceBufferOffset), 0, DeviceRecords, RawWord3 };
         for (var word = 0; word < descriptor.Length; word++)
         {
             BinaryPrimitives.WriteUInt32LittleEndian(guest.AsSpan(word * 4), descriptor[word]);
@@ -137,6 +142,100 @@ public sealed class Gen5MslBufferTfeLdsTests(ITestOutputHelper output)
         var shader = CompileBound(Program(0xE0311000u, 0x80030001u));  // buffer_load_dword v1, s[12:15], 0 offen lds
         Assert.Contains("sharpemu_lds[", shader.Source, StringComparison.Ordinal);
     }
+
+    public static TheoryData<string, uint, uint, uint, uint, uint> OobCases() => new()
+    {
+        // name, word 1 (stride, swizzle), NUM_RECORDS, word 3, SOFFSET, instruction offset
+        { "raw, offset + 4 <= records", 0, 20, RawWord3, 0, 0 },
+        { "raw, SOFFSET reduces records", 0, 24, RawWord3, 8, 0 },
+        { "raw, SOFFSET past records", 0, 24, RawWord3, 28, 0 },
+        { "raw ignores the index", 16u << 16, 20, RawWord3, 0, 0 },
+        { "raw swizzled", 16u << 16 | 1u << 31, 3, RawWord3, 0, 4 },
+        { "raw swizzled, SOFFSET reduces the index range", 16u << 16 | 1u << 31, 3, RawWord3, 1, 0 },
+        { "structured", 16u << 16, 3, Mode(0), 0, 0 },
+        { "structured, offset past the stride", 16u << 16, 3, Mode(0), 0, 8 },
+        { "structured with stride 0", 0, 64, Mode(0), 0, 0 },
+        { "index only", 16u << 16, 3, Mode(1), 4, 8 },
+        { "records nonzero", 16u << 16, 1, Mode(2), 4, 8 },
+        { "records zero", 16u << 16, 0, Mode(2), 0, 0 },
+        { "format 0", 0, 64, RawWord3 & ~(0x7Fu << 12), 0, 0 },
+    };
+
+    // buffer_load_dword v4, v[1:2], s[12:15], s6 idxen offen offset:N with index lane / 8
+    // and offset (lane % 8) * 4 through a V# in guest memory whose dwords hold their own
+    // guest word index; every lane's result is checked against the Table 35 model below.
+    [Theory]
+    [MemberData(nameof(OobCases))]
+    public void ADeviceDescriptorLoadIsInRangeByItsOobSelect(string name, uint word1, uint records, uint word3, uint soffset, uint instructionOffset)
+    {
+        var shader = CompileBound(OobProgram(soffset, instructionOffset));
+        if (!RequireDevice())
+        {
+            return;
+        }
+
+        var input = Input();
+        BinaryPrimitives.WriteUInt32LittleEndian(input.AsSpan(BufferBytes - 4), (uint)GuestBase);
+        var guest = new byte[GuestBytes];
+        for (var word = 0; word < GuestBytes / 4; word++)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(guest.AsSpan(word * 4), 0xA000_0000u + (uint)word);
+        }
+
+        var descriptor = new uint[] { (uint)(GuestBase + OobBufferOffset), word1, records, word3 };
+        for (var word = 0; word < descriptor.Length; word++)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(guest.AsSpan(word * 4), descriptor[word]);
+        }
+
+        var (tables, _) = MetalNative.CreateGuestMapping(GuestBase, guest, 0x1000);
+        var result = Execute(shader, input, tables);
+        var stride = (word1 >> 16) & 0x3FFF;
+        var swizzled = (word1 >> 31) != 0 && stride != 0;
+        var mode = (word3 >> 28) & 3;
+        var formatValid = ((word3 >> 12) & 0x7F) != 0;
+        for (var lane = 0u; lane < Lanes; lane++)
+        {
+            var index = lane / 8;
+            var offset = lane % 8 * 4 + instructionOffset;
+            var rawRecords = soffset <= records ? records - soffset : 0u;
+            var inRange = formatValid && mode switch
+            {
+                0 => index < records && offset < stride,
+                1 => index < records,
+                2 => records != 0,
+                _ => soffset <= records && (swizzled ? index < rawRecords && offset + 4 <= stride : offset + 4 <= rawRecords),
+            };
+            // gfx10 swizzles in dwords: (index / 8 * stride + offset dword) * 8 + index % 8 * 4.
+            var placed = swizzled
+                ? soffset + ((index / 8 * stride + (offset & ~3u)) * 8 + index % 8 * 4 + (offset & 3))
+                : soffset + index * stride + offset;
+            var expected = inRange ? 0xA000_0000u + (uint)(OobBufferOffset / 4) + placed / 4 : 0u;
+            Assert.True(expected == Word(result, OutputOffset / 4 + (int)lane),
+                $"{name}: lane {lane} (index {index}, offset {offset}) read 0x{Word(result, OutputOffset / 4 + (int)lane):X8}, expected 0x{expected:X8}");
+        }
+    }
+
+    private static uint Mode(uint mode) => (RawWord3 & ~(3u << 28)) | mode << 28;
+
+    private static Gen5ComputeFixture OobProgram(uint soffset, uint instructionOffset) => new("buffer-oob",
+    [
+        0xE03003FC, 0x80020300,             // buffer_load_dword v3, off, s[8:11], 0 offset:1020
+        0xBF8C3F70,                         // s_waitcnt vmcnt(0)
+        0x7E080503,                         // v_readfirstlane_b32 s4, v3
+        0xBE850380,                         // s_mov_b32 s5, 0
+        0xF4080302, 0xFA000000,             // s_load_dwordx4 s[12:15], s[4:5], 0x0
+        0xBF8CC07F,                         // s_waitcnt lgkmcnt(0)
+        0xBE8603FF, soffset,                // s_mov_b32 s6, soffset
+        0x2C020083,                         // v_lshrrev_b32 v1, 3, v0
+        0x36040087,                         // v_and_b32 v2, 7, v0
+        0x34040482,                         // v_lshlrev_b32 v2, 2, v2
+        0xE0303000 | instructionOffset, 0x06030401,  // buffer_load_dword v4, v[1:2], s[12:15], s6 idxen offen offset:N
+        0xBF8C3F70,                         // s_waitcnt vmcnt(0)
+        0x34060082,                         // v_lshlrev_b32 v3, 2, v0
+        0xE0701200, 0x80020403,             // buffer_store_dword v4, v3, s[8:11], 0 offen offset:512
+        0xBF810000,                         // s_endpgm
+    ], 8, BufferBytes);
 
     private static Gen5ComputeFixture TfeProgram(uint resource) =>
         Program(0xE0341000u, 0x80000401u | resource / 4 << 16 | 1u << 23);  // buffer_load_dwordx2 v[4:6], v1, s[resource], 0 offen tfe
