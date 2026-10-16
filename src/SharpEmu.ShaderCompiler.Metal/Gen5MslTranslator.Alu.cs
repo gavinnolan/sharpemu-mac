@@ -271,8 +271,8 @@ public static partial class Gen5MslTranslator
                 "VTruncF32" => FloatResult(instruction, $"trunc({F(instruction, 0)})"),
                 "VRndneF32" => FloatResult(instruction, $"rint({F(instruction, 0)})"),
                 "VFractF32" => FloatResult(instruction, $"fract({F(instruction, 0)})"),
-                "VSqrtF32" => FloatResult(instruction, $"sqrt(sharpemu_flush_f32_denorm({F(instruction, 0)}))"),
-                "VRsqF32" => FloatResult(instruction, $"rsqrt(sharpemu_flush_f32_denorm({F(instruction, 0)}))"),
+                "VSqrtF32" => InvalidNanF32Result(instruction, "sqrt"),
+                "VRsqF32" => InvalidNanF32Result(instruction, "rsqrt"),
                 "VRcpF16" => Float16Reciprocal(instruction, destination),
                 "VSqrtF16" => Float16SquareRoot(instruction, destination),
                 "VLogF16" => Float16Logarithm(instruction, destination),
@@ -292,12 +292,12 @@ public static partial class Gen5MslTranslator
                 // on the guest; the IEEE-flag reciprocal keeps the unflushed input.
                 "VRcpF32" => FloatResult(instruction, $"(1.0f / sharpemu_flush_f32_denorm({F(instruction, 0)}))"),
                 "VRcpIflagF32" => FloatResult(instruction, $"(1.0f / {F(instruction, 0)})"),
-                "VLogF32" => FloatResult(instruction, $"fast::log2(sharpemu_flush_f32_denorm({F(instruction, 0)}))"),
+                "VLogF32" => InvalidNanF32Result(instruction, "fast::log2"),
                 "VExpF32" => FloatResult(instruction, $"fast::exp2(sharpemu_flush_f32_denorm({F(instruction, 0)}))"),
                 // GCN sin/cos take revolutions; reduce to one cycle first, then mirror
                 // the SPIR-V Tau prescale. Only sine keeps the sign of a zero input.
-                "VSinF32" => FloatResult(instruction, $"sin(sharpemu_trig_cycle_f32({F(instruction, 0)}, true) * {TauLiteral})"),
-                "VCosF32" => FloatResult(instruction, $"cos(sharpemu_trig_cycle_f32({F(instruction, 0)}, false) * {TauLiteral})"),
+                "VSinF32" => InvalidNanF32Result(instruction, "sin", cycle: "true"),
+                "VCosF32" => InvalidNanF32Result(instruction, "cos", cycle: "false"),
                 "VLdexpF32" =>
                     FloatResult(instruction, $"ldexp({F(instruction, 0)}, as_type<int>({RawSource(instruction, 1)}))"),
                 // D.f16 = S0.f16 * 2^S1.i16. Past +-100 the f16 result is already 0 or infinity, so
@@ -2860,6 +2860,19 @@ public static partial class Gen5MslTranslator
                 _ => (0u, false),
             };
             return (OutputModifierApplies(halfOrDouble) ? outputModifier : 0u, clamp);
+        }
+
+        /// <summary>V_SQRT/RSQ/LOG/SIN/COS_F32: a NaN made from a number (sqrt of a negative, sin of an
+        /// infinity) is 0xFFC00000, which RDNA2 ISA 12.8 gives in its functional examples
+        /// (V_SQRT_F32(0xff800000) => 0xffc00000, likewise V_RSQ, V_LOG, V_SIN, V_COS); Metal's NaN
+        /// is positive. A NaN operand passes through. Sin and cos reduce the operand to one cycle first.</summary>
+        private string InvalidNanF32Result(Gen5ShaderInstruction instruction, string function, string? cycle = null)
+        {
+            var operand = Temp("float", F(instruction, 0));
+            var argument = cycle is null
+                ? $"sharpemu_flush_f32_denorm({operand})"
+                : $"sharpemu_trig_cycle_f32({operand}, {cycle}) * {TauLiteral}";
+            return FloatResult(instruction, $"sharpemu_invalid_nan_f32({function}({argument}), {operand})");
         }
 
         private bool OutputModifierApplies(bool halfOrDouble) =>
