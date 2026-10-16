@@ -31,6 +31,12 @@
 32	s_mov_b32 s3, 0	BE830380
 32	s_mov_b32 vcc_hi, 0x3c3c3c3c	BEEB03FF 3C3C3C3C
 32	s_waitcnt vmcnt(0)	BF8C3F70
+32	v_add3_u32 v7, v1, v3, v5	D76D0007 04160701
+32	v_add_co_ci_u32_e32 v7, vcc_lo, v1, v3, vcc_lo	500E0701
+32	v_add_co_ci_u32_e64 v7, s24, v1, v3, vcc_lo	D5281807 01AA0701
+32	v_add_co_ci_u32_e64 v7, s24, v1, v3, vcc_lo clamp	D5289807 01AA0701
+32	v_add_co_u32 v7, s24, v1, v3	D70F1807 00020701
+32	v_add_co_u32 v7, s24, v1, v3 clamp	D70F9807 00020701
 32	v_add_f32_e32 v7, v1, v3	060E0701
 32	v_add_f32_e64 v7, -v1, |v3|	D5030207 20020701
 32	v_add_f32_e64 v7, -|v1|, -v3	D5030107 60020701
@@ -38,23 +44,169 @@
 32	v_add_f32_e64 v7, v1, v3 clamp	D5038007 00020701
 32	v_add_f32_e64 v7, v1, v3 clamp div:2	D5038007 18020701
 32	v_add_f32_e64 v7, v1, v3 mul:2	D5030007 08020701
+32	v_add_lshl_u32 v7, v1, v3, v5	D7470007 04160701
+32	v_add_nc_i16 v7, v1, v3	D70D0007 00020701
+32	v_add_nc_i16 v7, v1, v3 op_sel:[0,1,0]	D70D1007 00020701
+32	v_add_nc_i16 v7, v1, v3 op_sel:[1,0,1]	D70D4807 00020701
+32	v_add_nc_i32 v7, v1, v3	D77F0007 00020701
+32	v_add_nc_i32 v7, v1, v3 clamp	D77F8007 00020701
+32	v_add_nc_u16 v7, v1, v3	D7030007 00020701
+32	v_add_nc_u16 v7, v1, v3 op_sel:[0,1,0]	D7031007 00020701
+32	v_add_nc_u16 v7, v1, v3 op_sel:[1,0,1]	D7034807 00020701
 32	v_add_nc_u32_e32 v7, v1, v3	4A0E0701
 32	v_add_nc_u32_e64 v7, v1, v3	D5250007 00020701
 32	v_add_nc_u32_e64 v7, v1, v3 clamp	D5258007 00020701
+32	v_alignbit_b32 v7, v1, v3, v5	D54E0007 04160701
+32	v_alignbyte_b32 v7, v1, v3, v5	D54F0007 04160701
+32	v_and_b32_e32 v7, v1, v3	360E0701
+32	v_and_b32_e64 v7, v1, v3	D51B0007 00020701
+32	v_and_or_b32 v7, v1, v3, v5	D7710007 04160701
+32	v_ashrrev_i16 v7, v1, v3	D7080007 00020701
+32	v_ashrrev_i16 v7, v1, v3 op_sel:[0,1,0]	D7081007 00020701
+32	v_ashrrev_i16 v7, v1, v3 op_sel:[1,0,1]	D7084807 00020701
+32	v_ashrrev_i32_e32 v7, v1, v3	300E0701
+32	v_ashrrev_i32_e64 v7, v1, v3	D5180007 00020701
+32	v_ashrrev_i64 v[7:8], v1, v[3:4]	D7010007 00020701
+32	v_bcnt_u32_b32 v7, v1, v3	D7640007 00020701
+32	v_bfe_i32 v7, v1, v3, v5	D5490007 04160701
+32	v_bfe_u32 v7, v1, v3, v5	D5480007 04160701
+32	v_bfi_b32 v7, v1, v3, v5	D54A0007 04160701
+32	v_bfm_b32 v7, v1, v3	D7630007 00020701
+32	v_bfrev_b32_e32 v7, v1	7E0E7101
+32	v_bfrev_b32_e64 v7, v1	D5B80007 00000101
 32	v_cmp_lt_f32_e32 vcc_lo, v1, v3	7C020701
 32	v_cmp_lt_f32_e64 s24, -v1, |v3|	D4010218 20020701
 32	v_cmp_lt_f32_e64 s24, -|v1|, -v3	D4010118 60020701
 32	v_cmp_lt_f32_e64 s24, v1, v3	D4010018 00020701
 32	v_cmp_ne_u32_e32 vcc_lo, 0, v9	7D8A1280
 32	v_cmp_ne_u32_e64 s28, 0, v10	D4C5001C 00021480
+32	v_cndmask_b32_e32 v7, v1, v3, vcc_lo	020E0701
+32	v_cndmask_b32_e64 v7, -v1, |v3|, vcc_lo	D5010207 21AA0701
+32	v_cndmask_b32_e64 v7, v1, v3, vcc_lo	D5010007 01AA0701
+32	v_cndmask_b32_e64 v7, |v1|, -|v3|, vcc_lo	D5010307 41AA0701
+32	v_cvt_pk_i16_i32 v7, v1, v3	D76B0007 00020701
+32	v_cvt_pk_u16_u32 v7, v1, v3	D76A0007 00020701
+32	v_ffbh_i32_e32 v7, v1	7E0E7701
+32	v_ffbh_i32_e64 v7, v1	D5BB0007 00000101
+32	v_ffbh_u32_e32 v7, v1	7E0E7301
+32	v_ffbh_u32_e64 v7, v1	D5B90007 00000101
+32	v_ffbl_b32_e32 v7, v1	7E0E7501
+32	v_ffbl_b32_e64 v7, v1	D5BA0007 00000101
+32	v_lerp_u8 v7, v1, v3, v5	D54D0007 04160701
+32	v_lshl_add_u32 v7, v1, v3, v5	D7460007 04160701
+32	v_lshl_or_b32 v7, v1, v3, v5	D76F0007 04160701
+32	v_lshlrev_b16 v7, v1, v3	D7140007 00020701
+32	v_lshlrev_b16 v7, v1, v3 op_sel:[0,1,0]	D7141007 00020701
+32	v_lshlrev_b16 v7, v1, v3 op_sel:[1,0,1]	D7144807 00020701
 32	v_lshlrev_b32 v20, 7, v0	34280087
+32	v_lshlrev_b32_e32 v7, v1, v3	340E0701
+32	v_lshlrev_b32_e64 v7, v1, v3	D51A0007 00020701
+32	v_lshlrev_b64 v[7:8], v1, v[3:4]	D6FF0007 00020701
+32	v_lshrrev_b16 v7, v1, v3	D7070007 00020701
+32	v_lshrrev_b16 v7, v1, v3 op_sel:[0,1,0]	D7071007 00020701
+32	v_lshrrev_b16 v7, v1, v3 op_sel:[1,0,1]	D7074807 00020701
+32	v_lshrrev_b32_e32 v7, v1, v3	2C0E0701
+32	v_lshrrev_b32_e64 v7, v1, v3	D5160007 00020701
+32	v_lshrrev_b64 v[7:8], v1, v[3:4]	D7000007 00020701
+32	v_mad_i16 v7, v1, v3, v5	D75E0007 04160701
+32	v_mad_i16 v7, v1, v3, v5 clamp	D75E8007 04160701
+32	v_mad_i16 v7, v1, v3, v5 op_sel:[0,1,0,0]	D75E1007 04160701
+32	v_mad_i16 v7, v1, v3, v5 op_sel:[1,0,1,1]	D75E6807 04160701
+32	v_mad_i32_i16 v7, v1, v3, v5	D7750007 04160701
+32	v_mad_i32_i16 v7, v1, v3, v5 clamp	D7758007 04160701
+32	v_mad_i32_i16 v7, v1, v3, v5 op_sel:[0,1,0,0]	D7751007 04160701
+32	v_mad_i32_i16 v7, v1, v3, v5 op_sel:[1,0,0,0]	D7750807 04160701
+32	v_mad_i32_i24 v7, v1, v3, v5	D5420007 04160701
+32	v_mad_i64_i32 v[7:8], s24, v1, v3, v[5:6]	D5771807 04160701
+32	v_mad_u16 v7, v1, v3, v5	D7400007 04160701
+32	v_mad_u16 v7, v1, v3, v5 clamp	D7408007 04160701
+32	v_mad_u16 v7, v1, v3, v5 op_sel:[0,1,0,0]	D7401007 04160701
+32	v_mad_u16 v7, v1, v3, v5 op_sel:[1,0,1,1]	D7406807 04160701
+32	v_mad_u32_u16 v7, v1, v3, v5	D7730007 04160701
+32	v_mad_u32_u16 v7, v1, v3, v5 clamp	D7738007 04160701
+32	v_mad_u32_u16 v7, v1, v3, v5 op_sel:[0,1,0,0]	D7731007 04160701
+32	v_mad_u32_u16 v7, v1, v3, v5 op_sel:[1,0,0,0]	D7730807 04160701
+32	v_mad_u32_u24 v7, v1, v3, v5	D5430007 04160701
+32	v_mad_u64_u32 v[7:8], s24, v1, v3, v[5:6]	D5761807 04160701
+32	v_max3_i16 v7, v1, v3, v5	D7550007 04160701
+32	v_max3_i16 v7, v1, v3, v5 op_sel:[0,1,0,0]	D7551007 04160701
+32	v_max3_i16 v7, v1, v3, v5 op_sel:[1,0,1,1]	D7556807 04160701
+32	v_max3_i32 v7, v1, v3, v5	D5550007 04160701
+32	v_max3_u16 v7, v1, v3, v5	D7560007 04160701
+32	v_max3_u16 v7, v1, v3, v5 op_sel:[0,1,0,0]	D7561007 04160701
+32	v_max3_u16 v7, v1, v3, v5 op_sel:[1,0,1,1]	D7566807 04160701
+32	v_max3_u32 v7, v1, v3, v5	D5560007 04160701
+32	v_max_i16 v7, v1, v3	D70A0007 00020701
+32	v_max_i16 v7, v1, v3 op_sel:[0,1,0]	D70A1007 00020701
+32	v_max_i16 v7, v1, v3 op_sel:[1,0,1]	D70A4807 00020701
+32	v_max_i32_e32 v7, v1, v3	240E0701
+32	v_max_i32_e64 v7, v1, v3	D5120007 00020701
+32	v_max_u16 v7, v1, v3	D7090007 00020701
+32	v_max_u16 v7, v1, v3 op_sel:[0,1,0]	D7091007 00020701
+32	v_max_u16 v7, v1, v3 op_sel:[1,0,1]	D7094807 00020701
+32	v_max_u32_e32 v7, v1, v3	280E0701
+32	v_max_u32_e64 v7, v1, v3	D5140007 00020701
+32	v_mbcnt_hi_u32_b32 v7, v1, v3	D7660007 00020701
 32	v_mbcnt_lo_u32_b32 v0, -1, 0	D7650000 000100C1
+32	v_mbcnt_lo_u32_b32 v7, v1, v3	D7650007 00020701
+32	v_med3_i16 v7, v1, v3, v5	D7580007 04160701
+32	v_med3_i16 v7, v1, v3, v5 op_sel:[0,1,0,0]	D7581007 04160701
+32	v_med3_i16 v7, v1, v3, v5 op_sel:[1,0,1,1]	D7586807 04160701
+32	v_med3_i32 v7, v1, v3, v5	D5580007 04160701
+32	v_med3_u16 v7, v1, v3, v5	D7590007 04160701
+32	v_med3_u16 v7, v1, v3, v5 op_sel:[0,1,0,0]	D7591007 04160701
+32	v_med3_u16 v7, v1, v3, v5 op_sel:[1,0,1,1]	D7596807 04160701
+32	v_med3_u32 v7, v1, v3, v5	D5590007 04160701
+32	v_min3_i16 v7, v1, v3, v5	D7520007 04160701
+32	v_min3_i16 v7, v1, v3, v5 op_sel:[0,1,0,0]	D7521007 04160701
+32	v_min3_i16 v7, v1, v3, v5 op_sel:[1,0,1,1]	D7526807 04160701
+32	v_min3_i32 v7, v1, v3, v5	D5520007 04160701
+32	v_min3_u16 v7, v1, v3, v5	D7530007 04160701
+32	v_min3_u16 v7, v1, v3, v5 op_sel:[0,1,0,0]	D7531007 04160701
+32	v_min3_u16 v7, v1, v3, v5 op_sel:[1,0,1,1]	D7536807 04160701
+32	v_min3_u32 v7, v1, v3, v5	D5530007 04160701
+32	v_min_i16 v7, v1, v3	D70C0007 00020701
+32	v_min_i16 v7, v1, v3 op_sel:[0,1,0]	D70C1007 00020701
+32	v_min_i16 v7, v1, v3 op_sel:[1,0,1]	D70C4807 00020701
+32	v_min_i32_e32 v7, v1, v3	220E0701
+32	v_min_i32_e64 v7, v1, v3	D5110007 00020701
+32	v_min_u16 v7, v1, v3	D70B0007 00020701
+32	v_min_u16 v7, v1, v3 op_sel:[0,1,0]	D70B1007 00020701
+32	v_min_u16 v7, v1, v3 op_sel:[1,0,1]	D70B4807 00020701
+32	v_min_u32_e32 v7, v1, v3	260E0701
+32	v_min_u32_e64 v7, v1, v3	D5130007 00020701
 32	v_mov_b32 v11, vcc_lo	7E16026A
 32	v_mov_b32 v12, vcc_hi	7E18026B
 32	v_mov_b32 v13, s28	7E1A021C
 32	v_mov_b32 v14, s29	7E1C021D
 32	v_mov_b32 v15, s24	7E1E0218
 32	v_mov_b32 v16, s25	7E200219
+32	v_mov_b32_e32 v7, v1	7E0E0301
+32	v_mov_b32_e64 v7, v1	D5810007 00000101
+32	v_mqsad_pk_u16_u8 v[7:8], v[1:2], v3, v[5:6]	D5730007 04160701
+32	v_msad_u8 v7, v1, v3, v5	D5710007 04160701
+32	v_mul_hi_i32 v7, v1, v3	D56C0007 00020701
+32	v_mul_hi_i32_i24_e32 v7, v1, v3	140E0701
+32	v_mul_hi_i32_i24_e64 v7, v1, v3	D50A0007 00020701
+32	v_mul_hi_u32 v7, v1, v3	D56A0007 00020701
+32	v_mul_hi_u32_u24_e32 v7, v1, v3	180E0701
+32	v_mul_hi_u32_u24_e64 v7, v1, v3	D50C0007 00020701
+32	v_mul_i32_i24_e32 v7, v1, v3	120E0701
+32	v_mul_i32_i24_e64 v7, v1, v3	D5090007 00020701
+32	v_mul_lo_u16 v7, v1, v3	D7050007 00020701
+32	v_mul_lo_u16 v7, v1, v3 clamp	D7058007 00020701
+32	v_mul_lo_u16 v7, v1, v3 op_sel:[0,1,0]	D7051007 00020701
+32	v_mul_lo_u16 v7, v1, v3 op_sel:[1,0,1]	D7054807 00020701
+32	v_mul_lo_u32 v7, v1, v3	D5690007 00020701
+32	v_mul_u32_u24_e32 v7, v1, v3	160E0701
+32	v_mul_u32_u24_e64 v7, v1, v3	D50B0007 00020701
+32	v_not_b32_e32 v7, v1	7E0E6F01
+32	v_not_b32_e64 v7, v1	D5B70007 00000101
+32	v_or3_b32 v7, v1, v3, v5	D7720007 04160701
+32	v_or_b32_e32 v7, v1, v3	380E0701
+32	v_or_b32_e64 v7, v1, v3	D51C0007 00020701
+32	v_perm_b32 v7, v1, v3, v5	D7440007 04160701
+32	v_qsad_pk_u16_u8 v[7:8], v[1:2], v3, v[5:6]	D5720007 04160701
 32	v_readlane_b32 s0, v1, s3	D7600000 00000701
 32	v_readlane_b32 s1, v2, s3	D7600001 00000702
 32	v_readlane_b32 s14, v7, s3	D760000E 00000707
@@ -62,9 +214,42 @@
 32	v_readlane_b32 s4, v3, s3	D7600004 00000703
 32	v_readlane_b32 s5, v4, s3	D7600005 00000704
 32	v_readlane_b32 s6, v9, s3	D7600006 00000709
+32	v_sad_u32 v7, v1, v3, v5	D55D0007 04160701
+32	v_sat_pk_u8_i16_e32 v7, v1	7E0EC501
+32	v_sat_pk_u8_i16_e64 v7, v1	D5E20007 00000101
+32	v_sub_co_ci_u32_e32 v7, vcc_lo, v1, v3, vcc_lo	520E0701
+32	v_sub_co_ci_u32_e64 v7, s24, v1, v3, vcc_lo	D5291807 01AA0701
+32	v_sub_co_ci_u32_e64 v7, s24, v1, v3, vcc_lo clamp	D5299807 01AA0701
+32	v_sub_co_u32 v7, s24, v1, v3	D7101807 00020701
+32	v_sub_co_u32 v7, s24, v1, v3 clamp	D7109807 00020701
+32	v_sub_nc_i16 v7, v1, v3	D70E0007 00020701
+32	v_sub_nc_i16 v7, v1, v3 op_sel:[0,1,0]	D70E1007 00020701
+32	v_sub_nc_i16 v7, v1, v3 op_sel:[1,0,1]	D70E4807 00020701
+32	v_sub_nc_i32 v7, v1, v3	D7760007 00020701
+32	v_sub_nc_i32 v7, v1, v3 clamp	D7768007 00020701
+32	v_sub_nc_u16 v7, v1, v3	D7040007 00020701
+32	v_sub_nc_u16 v7, v1, v3 op_sel:[0,1,0]	D7041007 00020701
+32	v_sub_nc_u16 v7, v1, v3 op_sel:[1,0,1]	D7044807 00020701
+32	v_sub_nc_u32_e32 v7, v1, v3	4C0E0701
+32	v_sub_nc_u32_e64 v7, v1, v3	D5260007 00020701
+32	v_sub_nc_u32_e64 v7, v1, v3 clamp	D5268007 00020701
+32	v_subrev_co_ci_u32_e32 v7, vcc_lo, v1, v3, vcc_lo	540E0701
+32	v_subrev_co_ci_u32_e64 v7, s24, v1, v3, vcc_lo	D52A1807 01AA0701
+32	v_subrev_co_ci_u32_e64 v7, s24, v1, v3, vcc_lo clamp	D52A9807 01AA0701
+32	v_subrev_co_u32 v7, s24, v1, v3	D7191807 00020701
+32	v_subrev_co_u32 v7, s24, v1, v3 clamp	D7199807 00020701
+32	v_subrev_nc_u32_e32 v7, v1, v3	4E0E0701
+32	v_subrev_nc_u32_e64 v7, v1, v3	D5270007 00020701
+32	v_subrev_nc_u32_e64 v7, v1, v3 clamp	D5278007 00020701
 32	v_writelane_b32 v11, s7, s3	D761000B 00000607
 32	v_writelane_b32 v7, s14, s3	D7610007 0000060E
 32	v_writelane_b32 v8, s15, s3	D7610008 0000060F
+32	v_xad_u32 v7, v1, v3, v5	D7450007 04160701
+32	v_xnor_b32_e32 v7, v1, v3	3C0E0701
+32	v_xnor_b32_e64 v7, v1, v3	D51E0007 00020701
+32	v_xor3_b32 v7, v1, v3, v5	D5780007 04160701
+32	v_xor_b32_e32 v7, v1, v3	3A0E0701
+32	v_xor_b32_e64 v7, v1, v3	D51D0007 00020701
 64	buffer_load_dword v1, v20, s[8:11], 0 offen	E0301000 80020114
 64	buffer_load_dword v10, v20, s[8:11], 0 offen offset:36	E0301024 80020A14
 64	buffer_load_dword v2, v20, s[8:11], 0 offen offset:4	E0301004 80020214
@@ -96,21 +281,105 @@
 64	s_mov_b64 exec, s[28:29]	BEFE041C
 64	s_mov_b64 s[28:29], exec	BE9C047E
 64	s_waitcnt vmcnt(0)	BF8C3F70
+64	v_add3_u32 v7, v1, v3, v5	D76D0007 04160701
+64	v_add_co_ci_u32_e32 v7, vcc, v1, v3, vcc	500E0701
+64	v_add_co_ci_u32_e64 v7, s[24:25], v1, v3, vcc	D5281807 01AA0701
+64	v_add_co_u32 v7, s[24:25], v1, v3	D70F1807 00020701
 64	v_add_f32_e32 v7, v1, v3	060E0701
+64	v_add_lshl_u32 v7, v1, v3, v5	D7470007 04160701
+64	v_add_nc_i16 v7, v1, v3	D70D0007 00020701
+64	v_add_nc_i32 v7, v1, v3	D77F0007 00020701
+64	v_add_nc_u16 v7, v1, v3	D7030007 00020701
 64	v_add_nc_u32_e32 v7, v1, v3	4A0E0701
+64	v_alignbit_b32 v7, v1, v3, v5	D54E0007 04160701
+64	v_alignbyte_b32 v7, v1, v3, v5	D54F0007 04160701
+64	v_and_b32_e32 v7, v1, v3	360E0701
+64	v_and_or_b32 v7, v1, v3, v5	D7710007 04160701
+64	v_ashrrev_i16 v7, v1, v3	D7080007 00020701
+64	v_ashrrev_i32_e32 v7, v1, v3	300E0701
+64	v_ashrrev_i64 v[7:8], v1, v[3:4]	D7010007 00020701
+64	v_bcnt_u32_b32 v7, v1, v3	D7640007 00020701
+64	v_bfe_i32 v7, v1, v3, v5	D5490007 04160701
+64	v_bfe_u32 v7, v1, v3, v5	D5480007 04160701
+64	v_bfi_b32 v7, v1, v3, v5	D54A0007 04160701
+64	v_bfm_b32 v7, v1, v3	D7630007 00020701
+64	v_bfrev_b32_e32 v7, v1	7E0E7101
 64	v_cmp_lt_f32_e32 vcc, v1, v3	7C020701
 64	v_cmp_lt_f32_e64 s[24:25], v1, v3	D4010018 00020701
 64	v_cmp_ne_u32_e32 vcc, 0, v9	7D8A1280
 64	v_cmp_ne_u32_e64 s[28:29], 0, v10	D4C5001C 00021480
+64	v_cndmask_b32_e32 v7, v1, v3, vcc	020E0701
+64	v_cndmask_b32_e64 v7, -v1, |v3|, vcc	D5010207 21AA0701
+64	v_cndmask_b32_e64 v7, v1, v3, vcc	D5010007 01AA0701
+64	v_cvt_pk_i16_i32 v7, v1, v3	D76B0007 00020701
+64	v_cvt_pk_u16_u32 v7, v1, v3	D76A0007 00020701
+64	v_ffbh_i32_e32 v7, v1	7E0E7701
+64	v_ffbh_u32_e32 v7, v1	7E0E7301
+64	v_ffbl_b32_e32 v7, v1	7E0E7501
+64	v_lerp_u8 v7, v1, v3, v5	D54D0007 04160701
+64	v_lshl_add_u32 v7, v1, v3, v5	D7460007 04160701
+64	v_lshl_or_b32 v7, v1, v3, v5	D76F0007 04160701
+64	v_lshlrev_b16 v7, v1, v3	D7140007 00020701
 64	v_lshlrev_b32 v20, 7, v0	34280087
+64	v_lshlrev_b32_e32 v7, v1, v3	340E0701
+64	v_lshlrev_b64 v[7:8], v1, v[3:4]	D6FF0007 00020701
+64	v_lshrrev_b16 v7, v1, v3	D7070007 00020701
+64	v_lshrrev_b32_e32 v7, v1, v3	2C0E0701
+64	v_lshrrev_b64 v[7:8], v1, v[3:4]	D7000007 00020701
+64	v_mad_i16 v7, v1, v3, v5	D75E0007 04160701
+64	v_mad_i32_i16 v7, v1, v3, v5	D7750007 04160701
+64	v_mad_i32_i24 v7, v1, v3, v5	D5420007 04160701
+64	v_mad_i64_i32 v[7:8], s[24:25], v1, v3, v[5:6]	D5771807 04160701
+64	v_mad_u16 v7, v1, v3, v5	D7400007 04160701
+64	v_mad_u32_u16 v7, v1, v3, v5	D7730007 04160701
+64	v_mad_u32_u24 v7, v1, v3, v5	D5430007 04160701
+64	v_mad_u64_u32 v[7:8], s[24:25], v1, v3, v[5:6]	D5761807 04160701
+64	v_max3_i16 v7, v1, v3, v5	D7550007 04160701
+64	v_max3_i32 v7, v1, v3, v5	D5550007 04160701
+64	v_max3_u16 v7, v1, v3, v5	D7560007 04160701
+64	v_max3_u32 v7, v1, v3, v5	D5560007 04160701
+64	v_max_i16 v7, v1, v3	D70A0007 00020701
+64	v_max_i32_e32 v7, v1, v3	240E0701
+64	v_max_u16 v7, v1, v3	D7090007 00020701
+64	v_max_u32_e32 v7, v1, v3	280E0701
 64	v_mbcnt_hi_u32_b32 v0, -1, v0	D7660000 000200C1
+64	v_mbcnt_hi_u32_b32 v7, v1, v3	D7660007 00020701
 64	v_mbcnt_lo_u32_b32 v0, -1, 0	D7650000 000100C1
+64	v_mbcnt_lo_u32_b32 v7, v1, v3	D7650007 00020701
+64	v_med3_i16 v7, v1, v3, v5	D7580007 04160701
+64	v_med3_i32 v7, v1, v3, v5	D5580007 04160701
+64	v_med3_u16 v7, v1, v3, v5	D7590007 04160701
+64	v_med3_u32 v7, v1, v3, v5	D5590007 04160701
+64	v_min3_i16 v7, v1, v3, v5	D7520007 04160701
+64	v_min3_i32 v7, v1, v3, v5	D5520007 04160701
+64	v_min3_u16 v7, v1, v3, v5	D7530007 04160701
+64	v_min3_u32 v7, v1, v3, v5	D5530007 04160701
+64	v_min_i16 v7, v1, v3	D70C0007 00020701
+64	v_min_i32_e32 v7, v1, v3	220E0701
+64	v_min_u16 v7, v1, v3	D70B0007 00020701
+64	v_min_u32_e32 v7, v1, v3	260E0701
 64	v_mov_b32 v11, vcc_lo	7E16026A
 64	v_mov_b32 v12, vcc_hi	7E18026B
 64	v_mov_b32 v13, s28	7E1A021C
 64	v_mov_b32 v14, s29	7E1C021D
 64	v_mov_b32 v15, s24	7E1E0218
 64	v_mov_b32 v16, s25	7E200219
+64	v_mov_b32_e32 v7, v1	7E0E0301
+64	v_mqsad_pk_u16_u8 v[7:8], v[1:2], v3, v[5:6]	D5730007 04160701
+64	v_msad_u8 v7, v1, v3, v5	D5710007 04160701
+64	v_mul_hi_i32 v7, v1, v3	D56C0007 00020701
+64	v_mul_hi_i32_i24_e32 v7, v1, v3	140E0701
+64	v_mul_hi_u32 v7, v1, v3	D56A0007 00020701
+64	v_mul_hi_u32_u24_e32 v7, v1, v3	180E0701
+64	v_mul_i32_i24_e32 v7, v1, v3	120E0701
+64	v_mul_lo_u16 v7, v1, v3	D7050007 00020701
+64	v_mul_lo_u32 v7, v1, v3	D5690007 00020701
+64	v_mul_u32_u24_e32 v7, v1, v3	160E0701
+64	v_not_b32_e32 v7, v1	7E0E6F01
+64	v_or3_b32 v7, v1, v3, v5	D7720007 04160701
+64	v_or_b32_e32 v7, v1, v3	380E0701
+64	v_perm_b32 v7, v1, v3, v5	D7440007 04160701
+64	v_qsad_pk_u16_u8 v[7:8], v[1:2], v3, v[5:6]	D5720007 04160701
 64	v_readlane_b32 s0, v1, s3	D7600000 00000701
 64	v_readlane_b32 s1, v2, s3	D7600001 00000702
 64	v_readlane_b32 s14, v7, s3	D760000E 00000707
@@ -118,6 +387,23 @@
 64	v_readlane_b32 s4, v3, s3	D7600004 00000703
 64	v_readlane_b32 s5, v4, s3	D7600005 00000704
 64	v_readlane_b32 s6, v9, s3	D7600006 00000709
+64	v_sad_u32 v7, v1, v3, v5	D55D0007 04160701
+64	v_sat_pk_u8_i16_e32 v7, v1	7E0EC501
+64	v_sub_co_ci_u32_e32 v7, vcc, v1, v3, vcc	520E0701
+64	v_sub_co_ci_u32_e64 v7, s[24:25], v1, v3, vcc	D5291807 01AA0701
+64	v_sub_co_u32 v7, s[24:25], v1, v3	D7101807 00020701
+64	v_sub_nc_i16 v7, v1, v3	D70E0007 00020701
+64	v_sub_nc_i32 v7, v1, v3	D7760007 00020701
+64	v_sub_nc_u16 v7, v1, v3	D7040007 00020701
+64	v_sub_nc_u32_e32 v7, v1, v3	4C0E0701
+64	v_subrev_co_ci_u32_e32 v7, vcc, v1, v3, vcc	540E0701
+64	v_subrev_co_ci_u32_e64 v7, s[24:25], v1, v3, vcc	D52A1807 01AA0701
+64	v_subrev_co_u32 v7, s[24:25], v1, v3	D7191807 00020701
+64	v_subrev_nc_u32_e32 v7, v1, v3	4E0E0701
 64	v_writelane_b32 v11, s7, s3	D761000B 00000607
 64	v_writelane_b32 v7, s14, s3	D7610007 0000060E
 64	v_writelane_b32 v8, s15, s3	D7610008 0000060F
+64	v_xad_u32 v7, v1, v3, v5	D7450007 04160701
+64	v_xnor_b32_e32 v7, v1, v3	3C0E0701
+64	v_xor3_b32 v7, v1, v3, v5	D5780007 04160701
+64	v_xor_b32_e32 v7, v1, v3	3A0E0701
