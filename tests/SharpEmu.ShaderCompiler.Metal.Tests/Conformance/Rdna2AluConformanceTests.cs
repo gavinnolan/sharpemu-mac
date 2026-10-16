@@ -94,8 +94,8 @@ public sealed class Rdna2AluConformanceTests(ITestOutputHelper output)
 
         foreach (var form in ConformanceCatalog.ScalarForms(category))
         {
-            var tuples = OperandPools.Tuples(form.Op.Sources, null, CaseLimit, RandomCases, ++seed);
-            foreach (var wave in (int[])[32, 64])
+            var tuples = OperandPools.Tuples(form.Op.Sources, form.Op.Pool, CaseLimit, RandomCases, ++seed);
+            foreach (var wave in form.Op.Waves)
             {
                 var formSeed = ++seed;
                 work.Add(() => ConformanceRunner.RunScalar(form, wave, tuples, formSeed, execute));

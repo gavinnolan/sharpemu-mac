@@ -18,7 +18,8 @@ internal enum ScalarFlags
     WritesScc = 2,
     /// <summary>Reads and/or writes EXEC (the *_SAVEEXEC / *_WREXEC family).</summary>
     Exec = 4,
-    /// <summary>SOPK whose destination is also its first operand (S_ADDK, S_MULK, S_CMOVK).</summary>
+    /// <summary>SOPK whose destination is also its first operand (S_ADDK, S_MULK, S_CMOVK). The
+    /// runner puts the first source's operand values in the destination's low dword.</summary>
     DestinationIsSource = 8,
 }
 
@@ -51,6 +52,12 @@ internal sealed record ScalarOp(
 {
     /// <summary>SOPK immediates to test (one form per value).</summary>
     public ushort[] Immediates { get; init; } = [];
+
+    /// <summary>Operand pool per source index (null, or a null pool, = the type's edges).</summary>
+    public Func<int, IReadOnlyList<ulong>>? Pool { get; init; }
+
+    /// <summary>The wave sizes the op runs at (a wave32-only EXEC op, say, runs at 32 only).</summary>
+    public int[] Waves { get; init; } = [32, 64];
 
     public string Citation { get; init; } = "";
 

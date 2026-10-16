@@ -284,6 +284,8 @@ internal static class ConformanceRunner
             {
                 var tuple = tuples[(start + lane) % tuples.Count];
                 var old = (ulong)random.NextInt64() ^ ((ulong)random.Next() << 40);
+                // S_ADDK/S_MULK read their destination: its low dword takes the operand edges.
+                if (op.Has(ScalarFlags.DestinationIsSource)) old = (old & 0xFFFFFFFF00000000ul) | (uint)tuple[0];
                 var scc = random.Next(2) != 0;
                 var laneExec = random.Next(4) switch
                 {

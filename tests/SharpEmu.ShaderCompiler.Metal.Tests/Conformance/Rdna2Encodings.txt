@@ -19,18 +19,32 @@
 32	buffer_store_dword v8, v20, s[8:11], 0 offen offset:68	E0701044 80020814
 32	s_add_u32 s14, s0, s4	800E0400
 32	s_add_u32 s3, s3, 1	80038103
+32	s_and_saveexec_b32 s14, s0	BE8E3C00
+32	s_andn1_saveexec_b32 s14, s0	BE8E4400
+32	s_andn1_wrexec_b32 s14, s0	BE8E4600
+32	s_andn2_saveexec_b32 s14, s0	BE8E3F00
+32	s_andn2_wrexec_b32 s14, s0	BE8E4700
 32	s_cmp_lg_u32 s6, 0	BF078006
 32	s_cmp_lt_u32 s3, 32	BF0AA003
 32	s_cselect_b32 s7, 1, 0	85078081
 32	s_endpgm	BF810000
 32	s_mov_b32 exec_lo, -1	BEFE03C1
+32	s_mov_b32 exec_lo, s16	BEFE0310
 32	s_mov_b32 exec_lo, s28	BEFE031C
+32	s_mov_b32 s16, exec_lo	BE90037E
 32	s_mov_b32 s24, 0xa5a5a5a5	BE9803FF A5A5A5A5
 32	s_mov_b32 s25, 0x5a5a5a5a	BE9903FF 5A5A5A5A
 32	s_mov_b32 s28, exec_lo	BE9C037E
 32	s_mov_b32 s3, 0	BE830380
 32	s_mov_b32 vcc_hi, 0x3c3c3c3c	BEEB03FF 3C3C3C3C
+32	s_nand_saveexec_b32 s14, s0	BE8E4100
+32	s_nor_saveexec_b32 s14, s0	BE8E4200
+32	s_or_saveexec_b32 s14, s0	BE8E3D00
+32	s_orn1_saveexec_b32 s14, s0	BE8E4500
+32	s_orn2_saveexec_b32 s14, s0	BE8E4000
 32	s_waitcnt vmcnt(0)	BF8C3F70
+32	s_xnor_saveexec_b32 s14, s0	BE8E4300
+32	s_xor_saveexec_b32 s14, s0	BE8E3E00
 32	v_add_f32_e32 v7, v1, v3	060E0701
 32	v_add_f32_e64 v7, -v1, |v3|	D5030207 20020701
 32	v_add_f32_e64 v7, -|v1|, -v3	D5030107 60020701
@@ -59,10 +73,14 @@
 32	v_readlane_b32 s1, v2, s3	D7600001 00000702
 32	v_readlane_b32 s14, v7, s3	D760000E 00000707
 32	v_readlane_b32 s15, v8, s3	D760000F 00000708
+32	v_readlane_b32 s16, v10, s3	D7600010 0000070A
+32	v_readlane_b32 s17, v5, s3	D7600011 00000705
 32	v_readlane_b32 s4, v3, s3	D7600004 00000703
 32	v_readlane_b32 s5, v4, s3	D7600005 00000704
 32	v_readlane_b32 s6, v9, s3	D7600006 00000709
 32	v_writelane_b32 v11, s7, s3	D761000B 00000607
+32	v_writelane_b32 v12, s16, s3	D761000C 00000610
+32	v_writelane_b32 v13, s17, s3	D761000D 00000611
 32	v_writelane_b32 v7, s14, s3	D7610007 0000060E
 32	v_writelane_b32 v8, s15, s3	D7610008 0000060F
 64	buffer_load_dword v1, v20, s[8:11], 0 offen	E0301000 80020114
@@ -83,19 +101,201 @@
 64	buffer_store_dword v16, v20, s[8:11], 0 offen offset:92	E070105C 80021014
 64	buffer_store_dword v7, v20, s[8:11], 0 offen offset:64	E0701040 80020714
 64	buffer_store_dword v8, v20, s[8:11], 0 offen offset:68	E0701044 80020814
+64	s_abs_i32 s14, s0	BE8E3400
+64	s_absdiff_i32 s14, s0, s4	960E0400
+64	s_add_i32 s14, s0, s4	810E0400
 64	s_add_u32 s14, s0, s4	800E0400
 64	s_add_u32 s3, s3, 1	80038103
+64	s_addc_u32 s14, s0, s4	820E0400
+64	s_addk_i32 s14, 0x0	B78E0000
+64	s_addk_i32 s14, 0x1	B78E0001
+64	s_addk_i32 s14, 0x7fff	B78E7FFF
+64	s_addk_i32 s14, 0x8000	B78E8000
+64	s_addk_i32 s14, 0xffff	B78EFFFF
+64	s_and_b32 s14, s0, s4	870E0400
+64	s_and_b64 s[14:15], s[0:1], s[4:5]	878E0400
+64	s_and_saveexec_b64 s[14:15], s[0:1]	BE8E2400
+64	s_andn1_saveexec_b64 s[14:15], s[0:1]	BE8E3700
+64	s_andn1_wrexec_b64 s[14:15], s[0:1]	BE8E3900
+64	s_andn2_b32 s14, s0, s4	8A0E0400
+64	s_andn2_b64 s[14:15], s[0:1], s[4:5]	8A8E0400
+64	s_andn2_saveexec_b64 s[14:15], s[0:1]	BE8E2700
+64	s_andn2_wrexec_b64 s[14:15], s[0:1]	BE8E3A00
+64	s_ashr_i32 s14, s0, s4	910E0400
+64	s_ashr_i64 s[14:15], s[0:1], s4	918E0400
+64	s_bcnt0_i32_b32 s14, s0	BE8E0D00
+64	s_bcnt0_i32_b64 s14, s[0:1]	BE8E0E00
+64	s_bcnt1_i32_b32 s14, s0	BE8E0F00
+64	s_bcnt1_i32_b64 s14, s[0:1]	BE8E1000
+64	s_bfe_i32 s14, s0, s4	940E0400
+64	s_bfe_i64 s[14:15], s[0:1], s4	950E0400
+64	s_bfe_u32 s14, s0, s4	938E0400
+64	s_bfe_u64 s[14:15], s[0:1], s4	948E0400
+64	s_bfm_b32 s14, s0, s4	920E0400
+64	s_bfm_b64 s[14:15], s0, s4	928E0400
+64	s_bitcmp0_b32 s0, s4	BF0C0400
+64	s_bitcmp0_b64 s[0:1], s4	BF0E0400
+64	s_bitcmp1_b32 s0, s4	BF0D0400
+64	s_bitcmp1_b64 s[0:1], s4	BF0F0400
+64	s_bitreplicate_b64_b32 s[14:15], s0	BE8E3B00
+64	s_bitset0_b32 s14, s0	BE8E1B00
+64	s_bitset0_b64 s[14:15], s0	BE8E1C00
+64	s_bitset1_b32 s14, s0	BE8E1D00
+64	s_bitset1_b64 s[14:15], s0	BE8E1E00
+64	s_brev_b32 s14, s0	BE8E0B00
+64	s_brev_b64 s[14:15], s[0:1]	BE8E0C00
+64	s_cmov_b32 s14, s0	BE8E0500
+64	s_cmov_b64 s[14:15], s[0:1]	BE8E0600
+64	s_cmovk_i32 s14, 0x0	B10E0000
+64	s_cmovk_i32 s14, 0x1	B10E0001
+64	s_cmovk_i32 s14, 0x7fff	B10E7FFF
+64	s_cmovk_i32 s14, 0x8000	B10E8000
+64	s_cmovk_i32 s14, 0xffff	B10EFFFF
+64	s_cmp_eq_i32 s0, s4	BF000400
+64	s_cmp_eq_u32 s0, s4	BF060400
+64	s_cmp_eq_u64 s[0:1], s[4:5]	BF120400
+64	s_cmp_ge_i32 s0, s4	BF030400
+64	s_cmp_ge_u32 s0, s4	BF090400
+64	s_cmp_gt_i32 s0, s4	BF020400
+64	s_cmp_gt_u32 s0, s4	BF080400
+64	s_cmp_le_i32 s0, s4	BF050400
+64	s_cmp_le_u32 s0, s4	BF0B0400
+64	s_cmp_lg_i32 s0, s4	BF010400
+64	s_cmp_lg_u32 s0, s4	BF070400
 64	s_cmp_lg_u32 s6, 0	BF078006
+64	s_cmp_lg_u64 s[0:1], s[4:5]	BF130400
+64	s_cmp_lt_i32 s0, s4	BF040400
+64	s_cmp_lt_u32 s0, s4	BF0A0400
 64	s_cmp_lt_u32 s3, 64	BF0AC003
+64	s_cmpk_eq_i32 s0, 0x0	B1800000
+64	s_cmpk_eq_i32 s0, 0x7fff	B1807FFF
+64	s_cmpk_eq_i32 s0, 0x8000	B1808000
+64	s_cmpk_eq_i32 s0, 0xffff	B180FFFF
+64	s_cmpk_eq_u32 s0, 0x0	B4800000
+64	s_cmpk_eq_u32 s0, 0x7fff	B4807FFF
+64	s_cmpk_eq_u32 s0, 0x8000	B4808000
+64	s_cmpk_eq_u32 s0, 0xffff	B480FFFF
+64	s_cmpk_ge_i32 s0, 0x0	B3000000
+64	s_cmpk_ge_i32 s0, 0x7fff	B3007FFF
+64	s_cmpk_ge_i32 s0, 0x8000	B3008000
+64	s_cmpk_ge_i32 s0, 0xffff	B300FFFF
+64	s_cmpk_ge_u32 s0, 0x0	B6000000
+64	s_cmpk_ge_u32 s0, 0x7fff	B6007FFF
+64	s_cmpk_ge_u32 s0, 0x8000	B6008000
+64	s_cmpk_ge_u32 s0, 0xffff	B600FFFF
+64	s_cmpk_gt_i32 s0, 0x0	B2800000
+64	s_cmpk_gt_i32 s0, 0x7fff	B2807FFF
+64	s_cmpk_gt_i32 s0, 0x8000	B2808000
+64	s_cmpk_gt_i32 s0, 0xffff	B280FFFF
+64	s_cmpk_gt_u32 s0, 0x0	B5800000
+64	s_cmpk_gt_u32 s0, 0x7fff	B5807FFF
+64	s_cmpk_gt_u32 s0, 0x8000	B5808000
+64	s_cmpk_gt_u32 s0, 0xffff	B580FFFF
+64	s_cmpk_le_i32 s0, 0x0	B4000000
+64	s_cmpk_le_i32 s0, 0x7fff	B4007FFF
+64	s_cmpk_le_i32 s0, 0x8000	B4008000
+64	s_cmpk_le_i32 s0, 0xffff	B400FFFF
+64	s_cmpk_le_u32 s0, 0x0	B7000000
+64	s_cmpk_le_u32 s0, 0x7fff	B7007FFF
+64	s_cmpk_le_u32 s0, 0x8000	B7008000
+64	s_cmpk_le_u32 s0, 0xffff	B700FFFF
+64	s_cmpk_lg_i32 s0, 0x0	B2000000
+64	s_cmpk_lg_i32 s0, 0x7fff	B2007FFF
+64	s_cmpk_lg_i32 s0, 0x8000	B2008000
+64	s_cmpk_lg_i32 s0, 0xffff	B200FFFF
+64	s_cmpk_lg_u32 s0, 0x0	B5000000
+64	s_cmpk_lg_u32 s0, 0x7fff	B5007FFF
+64	s_cmpk_lg_u32 s0, 0x8000	B5008000
+64	s_cmpk_lg_u32 s0, 0xffff	B500FFFF
+64	s_cmpk_lt_i32 s0, 0x0	B3800000
+64	s_cmpk_lt_i32 s0, 0x7fff	B3807FFF
+64	s_cmpk_lt_i32 s0, 0x8000	B3808000
+64	s_cmpk_lt_i32 s0, 0xffff	B380FFFF
+64	s_cmpk_lt_u32 s0, 0x0	B6800000
+64	s_cmpk_lt_u32 s0, 0x7fff	B6807FFF
+64	s_cmpk_lt_u32 s0, 0x8000	B6808000
+64	s_cmpk_lt_u32 s0, 0xffff	B680FFFF
+64	s_cselect_b32 s14, s0, s4	850E0400
 64	s_cselect_b32 s7, 1, 0	85078081
+64	s_cselect_b64 s[14:15], s[0:1], s[4:5]	858E0400
 64	s_endpgm	BF810000
+64	s_ff0_i32_b32 s14, s0	BE8E1100
+64	s_ff0_i32_b64 s14, s[0:1]	BE8E1200
+64	s_ff1_i32_b32 s14, s0	BE8E1300
+64	s_ff1_i32_b64 s14, s[0:1]	BE8E1400
+64	s_flbit_i32 s14, s0	BE8E1700
+64	s_flbit_i32_b32 s14, s0	BE8E1500
+64	s_flbit_i32_b64 s14, s[0:1]	BE8E1600
+64	s_flbit_i32_i64 s14, s[0:1]	BE8E1800
+64	s_lshl1_add_u32 s14, s0, s4	970E0400
+64	s_lshl2_add_u32 s14, s0, s4	978E0400
+64	s_lshl3_add_u32 s14, s0, s4	980E0400
+64	s_lshl4_add_u32 s14, s0, s4	988E0400
+64	s_lshl_b32 s14, s0, s4	8F0E0400
+64	s_lshl_b64 s[14:15], s[0:1], s4	8F8E0400
+64	s_lshr_b32 s14, s0, s4	900E0400
+64	s_lshr_b64 s[14:15], s[0:1], s4	908E0400
+64	s_max_i32 s14, s0, s4	840E0400
+64	s_max_u32 s14, s0, s4	848E0400
+64	s_min_i32 s14, s0, s4	830E0400
+64	s_min_u32 s14, s0, s4	838E0400
+64	s_mov_b32 s14, s0	BE8E0300
 64	s_mov_b32 s24, 0xa5a5a5a5	BE9803FF A5A5A5A5
 64	s_mov_b32 s25, 0x5a5a5a5a	BE9903FF 5A5A5A5A
 64	s_mov_b32 s3, 0	BE830380
 64	s_mov_b64 exec, -1	BEFE04C1
+64	s_mov_b64 exec, s[16:17]	BEFE0410
 64	s_mov_b64 exec, s[28:29]	BEFE041C
+64	s_mov_b64 s[14:15], s[0:1]	BE8E0400
+64	s_mov_b64 s[16:17], exec	BE90047E
 64	s_mov_b64 s[28:29], exec	BE9C047E
+64	s_movk_i32 s14, 0x0	B00E0000
+64	s_movk_i32 s14, 0x1	B00E0001
+64	s_movk_i32 s14, 0x7fff	B00E7FFF
+64	s_movk_i32 s14, 0x8000	B00E8000
+64	s_movk_i32 s14, 0xffff	B00EFFFF
+64	s_mul_hi_i32 s14, s0, s4	9B0E0400
+64	s_mul_hi_u32 s14, s0, s4	9A8E0400
+64	s_mul_i32 s14, s0, s4	930E0400
+64	s_mulk_i32 s14, 0x0	B80E0000
+64	s_mulk_i32 s14, 0x1	B80E0001
+64	s_mulk_i32 s14, 0x7fff	B80E7FFF
+64	s_mulk_i32 s14, 0x8000	B80E8000
+64	s_mulk_i32 s14, 0xffff	B80EFFFF
+64	s_nand_b32 s14, s0, s4	8C0E0400
+64	s_nand_b64 s[14:15], s[0:1], s[4:5]	8C8E0400
+64	s_nand_saveexec_b64 s[14:15], s[0:1]	BE8E2900
+64	s_nor_b32 s14, s0, s4	8D0E0400
+64	s_nor_b64 s[14:15], s[0:1], s[4:5]	8D8E0400
+64	s_nor_saveexec_b64 s[14:15], s[0:1]	BE8E2A00
+64	s_not_b32 s14, s0	BE8E0700
+64	s_not_b64 s[14:15], s[0:1]	BE8E0800
+64	s_or_b32 s14, s0, s4	880E0400
+64	s_or_b64 s[14:15], s[0:1], s[4:5]	888E0400
+64	s_or_saveexec_b64 s[14:15], s[0:1]	BE8E2500
+64	s_orn1_saveexec_b64 s[14:15], s[0:1]	BE8E3800
+64	s_orn2_b32 s14, s0, s4	8B0E0400
+64	s_orn2_b64 s[14:15], s[0:1], s[4:5]	8B8E0400
+64	s_orn2_saveexec_b64 s[14:15], s[0:1]	BE8E2800
+64	s_pack_hh_b32_b16 s14, s0, s4	9A0E0400
+64	s_pack_lh_b32_b16 s14, s0, s4	998E0400
+64	s_pack_ll_b32_b16 s14, s0, s4	990E0400
+64	s_quadmask_b32 s14, s0	BE8E2C00
+64	s_quadmask_b64 s[14:15], s[0:1]	BE8E2D00
+64	s_sext_i32_i16 s14, s0	BE8E1A00
+64	s_sext_i32_i8 s14, s0	BE8E1900
+64	s_sub_i32 s14, s0, s4	818E0400
+64	s_sub_u32 s14, s0, s4	808E0400
+64	s_subb_u32 s14, s0, s4	828E0400
 64	s_waitcnt vmcnt(0)	BF8C3F70
+64	s_wqm_b32 s14, s0	BE8E0900
+64	s_wqm_b64 s[14:15], s[0:1]	BE8E0A00
+64	s_xnor_b32 s14, s0, s4	8E0E0400
+64	s_xnor_b64 s[14:15], s[0:1], s[4:5]	8E8E0400
+64	s_xnor_saveexec_b64 s[14:15], s[0:1]	BE8E2B00
+64	s_xor_b32 s14, s0, s4	890E0400
+64	s_xor_b64 s[14:15], s[0:1], s[4:5]	898E0400
+64	s_xor_saveexec_b64 s[14:15], s[0:1]	BE8E2600
 64	v_add_f32_e32 v7, v1, v3	060E0701
 64	v_add_nc_u32_e32 v7, v1, v3	4A0E0701
 64	v_cmp_lt_f32_e32 vcc, v1, v3	7C020701
@@ -115,9 +315,13 @@
 64	v_readlane_b32 s1, v2, s3	D7600001 00000702
 64	v_readlane_b32 s14, v7, s3	D760000E 00000707
 64	v_readlane_b32 s15, v8, s3	D760000F 00000708
+64	v_readlane_b32 s16, v10, s3	D7600010 0000070A
+64	v_readlane_b32 s17, v5, s3	D7600011 00000705
 64	v_readlane_b32 s4, v3, s3	D7600004 00000703
 64	v_readlane_b32 s5, v4, s3	D7600005 00000704
 64	v_readlane_b32 s6, v9, s3	D7600006 00000709
 64	v_writelane_b32 v11, s7, s3	D761000B 00000607
+64	v_writelane_b32 v12, s16, s3	D761000C 00000610
+64	v_writelane_b32 v13, s17, s3	D761000D 00000611
 64	v_writelane_b32 v7, s14, s3	D7610007 0000060E
 64	v_writelane_b32 v8, s15, s3	D7610008 0000060F

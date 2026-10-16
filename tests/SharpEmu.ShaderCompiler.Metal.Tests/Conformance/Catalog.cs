@@ -79,7 +79,7 @@ internal static class ConformanceCatalog
 
             foreach (var form in ScalarForms(category))
             {
-                foreach (var wave in (int[])[32, 64])
+                foreach (var wave in form.Op.Waves)
                 {
                     foreach (var line in ConformancePrograms.Lines(ConformancePrograms.Scalar(form.Asm(wave), wave, form.Op.Has(ScalarFlags.Exec))))
                     {
