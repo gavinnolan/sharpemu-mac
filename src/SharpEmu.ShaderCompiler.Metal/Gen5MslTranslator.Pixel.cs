@@ -203,6 +203,17 @@ public static partial class Gen5MslTranslator
 
                 sampled = Temp($"vec<{kind}, 4>", $"{texture}.read({arguments})");
             }
+            else if (instruction.Opcode == "ImageMsaaLoad")
+            {
+                if (!imageClass.Multisampled)
+                {
+                    error = "image_msaa_load reads a multisampled image";
+                    return false;
+                }
+
+                sampled = EmitImageMsaaLoad(image, texture, imageClass);
+                writeAllComponents = true;
+            }
             else if (instruction.Opcode.StartsWith("ImageSample", StringComparison.Ordinal))
             {
                 if (!TryEmitImageSample(instruction, image, texture, samplerName, imageClass, compareFunction, out sampled, out error))
@@ -257,6 +268,36 @@ public static partial class Gen5MslTranslator
             }
 
             return true;
+        }
+
+        // IMAGE_MSAA_LOAD: the one DMASK component of four consecutive fragments starting at
+        // the address's fragment ID, in four registers (two under D16). The host keeps an MSAA
+        // surface as its samples with no FMASK, so a fragment ID is the sample index; a fragment
+        // past the texture's sample count reads zero, as Metal leaves that read undefined.
+        private string EmitImageMsaaLoad(Gen5ImageControl image, string texture, MslImageClass imageClass)
+        {
+            var kind = imageClass.ComponentKind;
+            var spatial = Enumerable.Range(0, imageClass.SpatialComponents)
+                .Select(component => Temp("uint", ImageIntegerAddress(image, component)))
+                .ToArray();
+            var arguments = $"{imageClass.IntegerCoordinateType}({string.Join(", ", spatial)})";
+            if (imageClass.Arrayed)
+            {
+                arguments += $", {BuildIntegerLayer(image, imageClass.SpatialComponents, texture)}";
+            }
+
+            var fragment = Temp("uint", ImageIntegerAddress(image, imageClass.CoordinateComponents));
+            var samples = Temp("uint", $"{texture}.get_num_samples()");
+            var component = "xyzw"[(int)GatherComponent(image.Dmask)];
+            var zero = $"vec<{kind}, 4>(0)";
+            var texels = new string[4];
+            for (var index = 0; index < texels.Length; index++)
+            {
+                var sample = Temp("uint", $"{fragment} + {index}u");
+                texels[index] = Temp(kind, $"({sample} < {samples} ? {texture}.read({arguments}, {sample}) : {zero}).{component}");
+            }
+
+            return Temp($"vec<{kind}, 4>", $"{VectorLiteral(kind)}({string.Join(", ", texels)})");
         }
 
         // The size query reports the spatial extent, then the layer count for an arrayed

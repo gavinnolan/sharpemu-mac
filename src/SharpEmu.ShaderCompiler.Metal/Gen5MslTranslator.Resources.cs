@@ -1819,7 +1819,7 @@ public static partial class Gen5MslTranslator
             // Metal multisampled textures expose read() with a sample index and nothing
             // else: no sampling, no writes. The binding layout already refuses storage
             // MSAA classes, so only the sampled fetch paths can reach one.
-            if (imageClass.Multisampled && instruction.Opcode is not ("ImageLoad" or "ImageLoadMip" or "ImageGetResinfo"))
+            if (imageClass.Multisampled && instruction.Opcode is not ("ImageLoad" or "ImageLoadMip" or "ImageMsaaLoad" or "ImageGetResinfo"))
             {
                 error = $"multisampled image opcode {instruction.Opcode} is not supported on Metal";
                 return false;

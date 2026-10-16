@@ -94,6 +94,9 @@ internal static partial class MetalNative
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     private static partial ulong SendULong(nint receiver, nint selector);
 
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    private static partial void SendDraw(nint receiver, nint selector, nuint primitive, nuint start, nuint count);
+
     // MTLResourceUsageRead | MTLResourceUsageWrite for buffers reached through an argument buffer.
     private const nuint ReadWriteUsage = 3;
 
@@ -430,6 +433,85 @@ internal static partial class MetalNative
             }
         }
         return data;
+    }
+
+    /// <summary>
+    /// A private RGBA32Float multisampled texture (2D, or a 2D array when
+    /// <paramref name="layers"/> exceeds one) whose sample s of texel (x, y) in layer l holds
+    /// l * 1000 + s * 100 + y * 10 + x plus the channel index. A multisampled texture cannot
+    /// be uploaded, so each layer is drawn by a per-sample fragment shader.
+    /// </summary>
+    public static nint CreateMultisampleFloatTexture(uint width, uint height, uint samples, uint layers)
+    {
+        const string source = """
+            #include <metal_stdlib>
+            using namespace metal;
+            struct Fill { float4 position [[position]]; };
+            vertex Fill fill_vertex(uint id [[vertex_id]])
+            {
+                float2 corner = float2((id << 1) & 2u, id & 2u);
+                return { float4(corner * 2.0f - 1.0f, 0.0f, 1.0f) };
+            }
+            fragment float4 fill_fragment(Fill in [[stage_in]], uint sample [[sample_id]], constant uint& layer [[buffer(0)]])
+            {
+                float2 texel = floor(in.position.xy);
+                float value = float(layer) * 1000.0f + float(sample) * 100.0f + texel.y * 10.0f + texel.x;
+                return float4(value, value + 1.0f, value + 2.0f, value + 3.0f);
+            }
+            """;
+        if (!TryCompileLibrary(source, out var library, out var error))
+        {
+            throw new InvalidOperationException($"MSAA fill shader: {error}");
+        }
+
+        var descriptor = Send(Send(objc_getClass("MTLTextureDescriptor"), Selector("alloc")), Selector("init"));
+        SendInteger(descriptor, Selector("setPixelFormat:"), 125); // RGBA32Float
+        SendInteger(descriptor, Selector("setTextureType:"), layers > 1 ? 8u : 4u); // 2DMultisample(Array)
+        SendInteger(descriptor, Selector("setWidth:"), width);
+        SendInteger(descriptor, Selector("setHeight:"), height);
+        SendInteger(descriptor, Selector("setDepth:"), 1);
+        SendInteger(descriptor, Selector("setArrayLength:"), layers);
+        SendInteger(descriptor, Selector("setSampleCount:"), samples);
+        SendInteger(descriptor, Selector("setStorageMode:"), 2); // private
+        SendInteger(descriptor, Selector("setUsage:"), 1 | 4); // shader read, render target
+        var texture = Send(Device.Value, Selector("newTextureWithDescriptor:"), descriptor);
+        if (texture == 0) throw new InvalidOperationException("Failed to create the multisampled fixture texture.");
+
+        var pipelineDescriptor = Send(Send(objc_getClass("MTLRenderPipelineDescriptor"), Selector("alloc")), Selector("init"));
+        SendVoid(pipelineDescriptor, Selector("setVertexFunction:"), Send(library, Selector("newFunctionWithName:"), NsString("fill_vertex")));
+        SendVoid(pipelineDescriptor, Selector("setFragmentFunction:"), Send(library, Selector("newFunctionWithName:"), NsString("fill_fragment")));
+        SendInteger(pipelineDescriptor, Selector("setRasterSampleCount:"), samples);
+        var colorDescriptor = Send(Send(pipelineDescriptor, Selector("colorAttachments")), Selector("objectAtIndexedSubscript:"), 0);
+        SendInteger(colorDescriptor, Selector("setPixelFormat:"), 125);
+        nint pipelineError = 0;
+        var pipeline = Send(Device.Value, Selector("newRenderPipelineStateWithDescriptor:error:"), pipelineDescriptor, ref pipelineError);
+        if (pipeline == 0) throw new InvalidOperationException($"MSAA fill pipeline: {DescribeError(pipelineError)}");
+
+        var queue = Send(Device.Value, Selector("newCommandQueue"));
+        var commandBuffer = Send(queue, Selector("commandBuffer"));
+        for (uint layer = 0; layer < layers; layer++)
+        {
+            var pass = Send(objc_getClass("MTLRenderPassDescriptor"), Selector("renderPassDescriptor"));
+            var attachment = Send(Send(pass, Selector("colorAttachments")), Selector("objectAtIndexedSubscript:"), 0);
+            SendVoid(attachment, Selector("setTexture:"), texture);
+            SendInteger(attachment, Selector("setSlice:"), layer);
+            SendInteger(attachment, Selector("setLoadAction:"), 0); // don't care: every sample is drawn
+            SendInteger(attachment, Selector("setStoreAction:"), 1); // store
+            var encoder = Send(commandBuffer, Selector("renderCommandEncoderWithDescriptor:"), pass);
+            SendVoid(encoder, Selector("setRenderPipelineState:"), pipeline);
+            unsafe
+            {
+                var value = layer;
+                SendSetBuffer(encoder, Selector("setFragmentBytes:length:atIndex:"), (nint)(&value), sizeof(uint), 0);
+            }
+
+            SendDraw(encoder, Selector("drawPrimitives:vertexStart:vertexCount:"), 3, 0, 3); // triangles
+            SendVoid(encoder, Selector("endEncoding"));
+        }
+
+        SendVoid(commandBuffer, Selector("commit"));
+        SendVoid(commandBuffer, Selector("waitUntilCompleted"));
+        return texture;
     }
 
     public static nint CreatePointSampler()
