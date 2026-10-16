@@ -48,6 +48,32 @@ public sealed class CommandStreamQueue
             : 1;
     }
 
+    /// <summary>
+    /// How often a worker with nothing to run re-reads the labels its parked heads wait on.
+    /// </summary>
+    /// <remarks>
+    /// A label the guest's CPU writes reaches no notification: the queue hears of GPU
+    /// completions and of its own writes, not of a store from a game thread, so such a
+    /// wait used to sleep out the 100 ms blocked-retry timer. A watched wait is re-read on
+    /// this interval instead and woken once its bytes change (and, for a compare, pass).
+    /// SHARPEMU_CP_WATCH_INTERVAL_MS sets it; 0 turns the watch off.
+    /// </remarks>
+    public static readonly int WatchIntervalMilliseconds = ReadWatchInterval();
+
+    private static int ReadWatchInterval()
+    {
+        var text = Environment.GetEnvironmentVariable("SHARPEMU_CP_WATCH_INTERVAL_MS");
+        return !string.IsNullOrWhiteSpace(text) && int.TryParse(text, out var value) && value >= 0
+            ? Math.Min(value, AllBlockedRetryMilliseconds)
+            : 1;
+    }
+
+    /// <summary>Watched waits re-read since startup.</summary>
+    public ulong WatchRechecks { get; private set; }
+
+    /// <summary>Watched waits a re-read found changed and passing, and so woke.</summary>
+    public ulong WatchWakes { get; private set; }
+
     private readonly ICommandStreamHost _host;
     private readonly object _gate = new();
     private readonly LinkedList<CommandSubmission>[] _queues = new LinkedList<CommandSubmission>[QueueCount];
@@ -515,9 +541,109 @@ public sealed class CommandStreamQueue
                 return HasRunnableWorkLocked();
             }
 
-            Monitor.Wait(_gate, timeoutMilliseconds);
+            WaitWatchingLocked(timeoutMilliseconds);
             return HasRunnableWorkLocked();
         }
+    }
+
+    // Caller holds the gate. Sleeps up to the timeout, cut into watch intervals while a
+    // parked head waits on a watched label, and returns early once a re-read woke one.
+    private void WaitWatchingLocked(int timeoutMilliseconds)
+    {
+        if (WatchIntervalMilliseconds == 0 || !HasWatchedHeadLocked())
+        {
+            Monitor.Wait(_gate, timeoutMilliseconds);
+            return;
+        }
+
+        var deadline = Environment.TickCount64 + timeoutMilliseconds;
+        while (!HasRunnableWorkLocked() && !_stopping)
+        {
+            var remaining = deadline - Environment.TickCount64;
+            if (remaining <= 0)
+            {
+                return;
+            }
+
+            Monitor.Wait(_gate, (int)Math.Min(remaining, WatchIntervalMilliseconds));
+            if (RecheckWatchedLocked())
+            {
+                return;
+            }
+        }
+    }
+
+    private bool HasWatchedHeadLocked()
+    {
+        foreach (var queue in _queues)
+        {
+            if (queue.First is { } head && head.Value.Blocked && head.Value.Wait.Watched)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Re-reads every parked watched wait once and wakes those whose bytes changed and pass.</summary>
+    public bool RecheckWatched()
+    {
+        lock (_gate)
+        {
+            return RecheckWatchedLocked();
+        }
+    }
+
+    // Caller holds the gate. The read is the raw bytes, without waiting for the GPU: a
+    // value that changed is only a reason to run the packet again, which reads it properly.
+    private bool RecheckWatchedLocked()
+    {
+        var woke = false;
+        Span<byte> bytes = stackalloc byte[sizeof(ulong)];
+        foreach (var queue in _queues)
+        {
+            if (queue.First is not { } node || !node.Value.Blocked || !node.Value.Wait.Watched)
+            {
+                continue;
+            }
+
+            var head = node.Value;
+            var wait = head.Wait;
+            var size = wait.Size == sizeof(ulong) ? sizeof(ulong) : sizeof(uint);
+            WatchRechecks++;
+            if (!_host.Memory.TryRead(wait.Address, bytes[..size]))
+            {
+                continue;
+            }
+
+            var value = size == sizeof(ulong)
+                ? System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(bytes)
+                : System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+            if (value == head.WatchedValue)
+            {
+                continue;
+            }
+
+            head.WatchedValue = value;
+            if (wait.Compares &&
+                (!Packets.WaitOperation.TryCompare(value, wait.Reference, wait.Mask, wait.Function, out var satisfied) || !satisfied))
+            {
+                continue;
+            }
+
+            head.Blocked = false;
+            WatchWakes++;
+            woke = true;
+        }
+
+        if (woke)
+        {
+            _wakeGeneration++;
+            Monitor.PulseAll(_gate);
+        }
+
+        return woke;
     }
 
     // Waits the whole interval unless a submission becomes runnable; stopping does not cut it short.
@@ -534,7 +660,15 @@ public sealed class CommandStreamQueue
                     return false;
                 }
 
-                Monitor.Wait(_gate, (int)remaining);
+                if (WatchIntervalMilliseconds != 0 && HasWatchedHeadLocked())
+                {
+                    Monitor.Wait(_gate, (int)Math.Min(remaining, WatchIntervalMilliseconds));
+                    _ = RecheckWatchedLocked();
+                }
+                else
+                {
+                    Monitor.Wait(_gate, (int)remaining);
+                }
             }
 
             return true;
@@ -665,8 +799,10 @@ public sealed class CommandStreamQueue
                 }
             }
 
-            WakeMatchingLocked(wait => wait.Kind is CommandWaitKind.GuestMemory or
-                CommandWaitKind.EngineCounter or CommandWaitKind.Unknown, DsWakeSource.GpuTick);
+            // A completion lands GPU writes; engine counters only move when their own
+            // queue runs a packet, so a counter wait has nothing to re-check here.
+            WakeMatchingLocked(wait => wait.Kind is CommandWaitKind.GuestMemory or CommandWaitKind.Unknown,
+                DsWakeSource.GpuTick);
         }
     }
 
@@ -1020,6 +1156,12 @@ public sealed class CommandStreamQueue
 
                 submission.BlockedPacketAddress = packetAddress;
                 submission.Wait = submission.Commands.SuspendCondition;
+                if (submission.Wait.Watched)
+                {
+                    // What the packet saw, not what memory holds now: a store that landed
+                    // between its read and this park is then a change the watch catches.
+                    submission.WatchedValue = submission.Wait.Observed;
+                }
                 _queues[submission.QueueId].AddFirst(submission);
                 _submissionCount++;
                 result = submission.Commands.MadeProgress ? SliceResult.Progressed : SliceResult.BlockedWithoutProgress;
@@ -1036,8 +1178,10 @@ public sealed class CommandStreamQueue
                 // counters of its own queue, and anything it wrote into guest memory
                 // has already been reported through NotifyGuestMemoryWritten. Waking
                 // every head here instead made each one re-run a slice, re-read its
-                // label and suspend again.
-                WakeMatchingLocked(wait => wait.Kind is not CommandWaitKind.GuestMemory, DsWakeSource.SliceCompleted);
+                // label and suspend again. A pipeline wait is not one of them either:
+                // only the compiler finishing it (NotifyPipelineReady) changes it.
+                WakeMatchingLocked(wait => wait.Kind is not (CommandWaitKind.GuestMemory or CommandWaitKind.Pipeline),
+                    DsWakeSource.SliceCompleted);
                 result = SliceResult.Completed;
             }
 

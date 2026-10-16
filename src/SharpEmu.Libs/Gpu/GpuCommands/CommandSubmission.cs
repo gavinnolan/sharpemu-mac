@@ -159,4 +159,7 @@ public sealed class CommandSubmission
     // one it was, a queue that is told of a completion every millisecond never parks at
     // all: Poppy Playtime spun forty thousand slices in two seconds and drew nothing.
     public ulong RacedWakeGeneration { get; internal set; }
+
+    // The value a watched wait last saw at its address; a re-read that differs wakes it.
+    internal ulong WatchedValue { get; set; }
 }

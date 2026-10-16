@@ -39,12 +39,34 @@ public readonly record struct CommandWaitCondition(
     ulong Address = 0,
     ulong Size = 0,
     int Handle = 0,
-    int Index = 0)
+    int Index = 0,
+    bool Watched = false,
+    ulong Observed = 0,
+    bool Compares = false,
+    ulong Reference = 0,
+    ulong Mask = 0,
+    uint Function = 0)
 {
     public static readonly CommandWaitCondition Unknown = new(CommandWaitKind.Unknown);
 
     public static CommandWaitCondition Memory(ulong address, ulong size) =>
         new(CommandWaitKind.GuestMemory, address, Math.Max(size, 1));
+
+    /// <summary>
+    /// A wait on a dword or qword whose value the packet saw as <paramref name="observed"/>.
+    /// The guest's CPU writes such a label without anything telling the queue, so while it
+    /// is parked the queue re-reads it now and then and wakes the head once it changed.
+    /// </summary>
+    public static CommandWaitCondition WatchedMemory(ulong address, bool is64Bit, ulong observed) =>
+        new(CommandWaitKind.GuestMemory, address, is64Bit ? sizeof(ulong) : (ulong)sizeof(uint), Watched: true, Observed: observed);
+
+    /// <summary>
+    /// A watched wait that passes when <c>(value &amp; mask)</c> compares to the reference
+    /// with a WAIT_REG_MEM function; a change that still fails it wakes nothing.
+    /// </summary>
+    public static CommandWaitCondition WatchedCompare(ulong address, bool is64Bit, ulong observed, ulong reference, ulong mask, uint function) =>
+        new(CommandWaitKind.GuestMemory, address, is64Bit ? sizeof(ulong) : (ulong)sizeof(uint), Watched: true, Observed: observed,
+            Compares: true, Reference: reference, Mask: mask, Function: function);
 
     public static CommandWaitCondition Flip(int handle, int index) =>
         new(CommandWaitKind.FlipDone, Handle: handle, Index: index);

@@ -46,7 +46,7 @@ public sealed class CommandStreamWorkerTests
     }
 
     [Fact]
-    public void Worker_RetriesABlockedHeadAfterTheTimedWait()
+    public void Worker_WakesABlockedHeadOnceTheCpuWritesItsLabel()
     {
         var (host, queue, worker) = NewWorker(cancelBlockedAtStop: false);
         host.WriteDword(Label, 0);
@@ -57,7 +57,8 @@ public sealed class CommandStreamWorkerTests
 
         Assert.Equal(IdleOutcome.Completed, queue.WaitForIdle());
         Assert.Equal(6u, queue.GetInterpreter(0).InstanceCount);
-        Assert.True(queue.BlockedRetries >= 1);
+        // Nothing reports a store from the guest's CPU; the parked wait's watch saw it.
+        Assert.True(queue.WatchWakes >= 1);
         worker.Stop();
     }
 

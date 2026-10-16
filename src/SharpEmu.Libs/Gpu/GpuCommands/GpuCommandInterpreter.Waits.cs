@@ -65,7 +65,7 @@ public sealed partial class GpuCommandInterpreter
                 DsNoteWaitOperands(reference, mask, compareFunction, value);
             }
 
-            SuspendOn(CommandWaitCondition.Memory(address, is64Bit ? sizeof(ulong) : (ulong)sizeof(uint)));
+            SuspendOn(CommandWaitCondition.WatchedCompare(address, is64Bit, value, reference, mask, compareFunction));
         }
     }
 

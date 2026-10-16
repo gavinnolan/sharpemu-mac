@@ -54,7 +54,12 @@ public sealed partial class GpuCommandInterpreter
 
         if (atomic.Command == 1 && !comparePassed)
         {
-            SuspendOn(CommandWaitCondition.Memory(atomic.Address, sizeof(ulong)));
+            // A compare-swap loop passes once the bytes equal the compare value; any other
+            // looping operation is retried whenever the bytes change.
+            SuspendOn(atomic.IsCompareSwap
+                ? CommandWaitCondition.WatchedCompare(atomic.Address, atomic.Is64Bit, priorValue, atomic.LoopReferenceValue,
+                    atomic.Is64Bit ? ulong.MaxValue : uint.MaxValue, 3)
+                : CommandWaitCondition.WatchedMemory(atomic.Address, atomic.Is64Bit, priorValue));
         }
 
         return 8;
@@ -91,7 +96,8 @@ public sealed partial class GpuCommandInterpreter
         // two waiters on one semaphore spun against each other until a signal came.
         if (priorValue == 0)
         {
-            SuspendOn(CommandWaitCondition.Memory(semaphore.Address, sizeof(ulong)));
+            // A token is a nonzero count, which a signal from the guest's CPU adds unseen.
+            SuspendOn(CommandWaitCondition.WatchedCompare(semaphore.Address, is64Bit: true, 0, 0, ulong.MaxValue, 4));
         }
         else
         {
