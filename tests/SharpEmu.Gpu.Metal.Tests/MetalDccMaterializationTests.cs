@@ -110,7 +110,13 @@ public sealed unsafe partial class MetalDccMaterializationTests(ITestOutputHelpe
         public void NoteGuestWrite(ulong address, ulong size) { }
         public void WaitForGpu() { }
 
-        public void ClearTextureColor(nint texture, ulong pixelFormat, in SubresourceRange range, uint width, uint height, in GpuClearColor color) => Clears++;
+        public readonly List<SubresourceRange> ClearRanges = [];
+
+        public void ClearTextureColor(nint texture, ulong pixelFormat, in SubresourceRange range, uint width, uint height, in GpuClearColor color)
+        {
+            Clears++;
+            ClearRanges.Add(range);
+        }
 
         public void ClearTextureDepthStencil(nint texture, ulong pixelFormat, in SubresourceRange range, uint width, uint height,
             float depth, byte stencil, bool clearDepth, bool clearStencil)
