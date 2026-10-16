@@ -26,7 +26,7 @@ public sealed class SceneSmokeTests(ITestOutputHelper output) : SceneTestBase(ou
             SceneVertex.At(-1, 1, 0.5f, 1, 0, 0),
         ]);
         rig.Submit(pm4);
-        var pixels = rig.Read(target, (int)(Size * Size * 4));
+        var pixels = rig.ReadImage(target, Size, Size);
         // Bottom-left texel is inside, top-right is outside.
         Assert.Equal(0xFF0000FFu, SceneDraws.Pixel(pixels, Size, 2, Size - 3));
         Assert.Equal(0u, SceneDraws.Pixel(pixels, Size, Size - 3, 2));
@@ -48,7 +48,7 @@ public sealed class SceneSmokeTests(ITestOutputHelper output) : SceneTestBase(ou
         var state = new SceneState(Size, Size).ColorTarget(0, target, Size, Size);
         uint[] userData = [.. Descriptors.Texture(image, 56, Size, Size), .. Descriptors.Sampler()];
         rig.Submit(rig.DrawMesh(new ScenePm4(), state, SceneDraws.TexturedQuad(), ScenePrograms.SampledTexture, userData));
-        var pixels = rig.Read(target, (int)(Size * Size * 4));
+        var pixels = rig.ReadImage(target, Size, Size);
         Assert.Equal(texels, pixels);
     }
 
@@ -67,7 +67,7 @@ public sealed class SceneSmokeTests(ITestOutputHelper output) : SceneTestBase(ou
         uint[] userData = [.. Descriptors.Texture(depth, 22, Size, Size, tileMode: 24), .. Descriptors.Sampler()];
         rig.DrawMesh(pm4, copy, SceneDraws.TexturedQuad(), ScenePrograms.SampledTexture, userData);
         rig.Submit(pm4);
-        var values = rig.Read<float>(readback, (int)(Size * Size));
+        var values = rig.ReadImage<float>(readback, Size, Size);
         Assert.Equal(0.25f, values[5 * Size + 3]);
         Assert.Equal(0f, values[5 * Size + Size - 3]);
     }

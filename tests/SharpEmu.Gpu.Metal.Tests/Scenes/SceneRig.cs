@@ -24,6 +24,7 @@ internal sealed unsafe class SceneRig : IDisposable
     private const BindingFlags Statics = BindingFlags.Static | BindingFlags.NonPublic;
 
     private static readonly FieldInfo HeaderTable = typeof(AgcExports).GetField("_shaderHeadersByCode", Statics)!;
+    private static readonly FieldInfo FatalHook = typeof(SharpEmu.Libs.Gpu.Scheduling.GpuFatal).GetField("OnFatal", Statics)!;
     private static readonly FieldInfo[] BackendFields =
         new[] { "_factory", "_backendName", "_instance" }.Select(name => typeof(GuestGpu).GetField(name, Statics)!).ToArray();
 
@@ -32,6 +33,7 @@ internal sealed unsafe class SceneRig : IDisposable
     private readonly PageGuard _pages;
     private readonly MetalGpuWorkerRelay _relay = new(static () => { });
     private readonly object?[] _savedBackend;
+    private readonly object? _savedFatal;
     private readonly List<ulong> _registeredShaders = [];
     private readonly Dictionary<uint[], ulong> _programs = new(ReferenceEqualityComparer.Instance);
     private ulong _submissionId = 1;
@@ -51,6 +53,17 @@ internal sealed unsafe class SceneRig : IDisposable
     public SceneRig(nint device)
     {
         _savedBackend = BackendFields.Select(field => field.GetValue(null)).ToArray();
+        // A loud refusal ends the process in the emulator; here it fails the scene instead.
+        _savedFatal = FatalHook.GetValue(null);
+        FatalHook.SetValue(null, (Action<string>)(message =>
+        {
+            lock (Fatals)
+            {
+                Fatals.Add(message);
+            }
+
+            throw new SceneFatalException(message);
+        }));
         BackendFields[0].SetValue(null, (Func<IGuestGpuBackend>)(() => new MetalV2Backend()));
         BackendFields[1].SetValue(null, "Metal");
         BackendFields[2].SetValue(null, new MetalV2Backend());
@@ -62,6 +75,9 @@ internal sealed unsafe class SceneRig : IDisposable
     }
 
     public SceneMemory Memory { get; } = new();
+
+    /// <summary>Every GPU fatal raised while this rig ran (each also threw <see cref="SceneFatalException"/>).</summary>
+    public List<string> Fatals { get; } = [];
 
     public MetalRenderHost Host { get; }
 
@@ -169,6 +185,7 @@ internal sealed unsafe class SceneRig : IDisposable
                 Headers.TryRemove(code, out _);
             }
 
+            FatalHook.SetValue(null, _savedFatal);
             for (var index = 0; index < BackendFields.Length; index++)
             {
                 BackendFields[index].SetValue(null, _savedBackend[index]);
@@ -189,3 +206,6 @@ internal sealed unsafe class SceneRig : IDisposable
         }
     }
 }
+
+/// <summary>A GPU fatal (a loud refusal) raised by the emulated GPU while a scene ran.</summary>
+internal sealed class SceneFatalException(string message) : Exception(message);

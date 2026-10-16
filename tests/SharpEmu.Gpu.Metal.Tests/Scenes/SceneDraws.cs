@@ -17,10 +17,13 @@ internal readonly record struct SceneVertex(float X, float Y, float Z, float W, 
 /// <summary>The draws every scene repeats: a colour target, a mesh and its fetch programs.</summary>
 internal static class SceneDraws
 {
-    /// <summary>A linear colour target in guest memory, cleared to <paramref name="fill"/> bytes.</summary>
+    /// <summary>
+    /// A linear colour target in guest memory, cleared to <paramref name="fill"/> bytes. Rows
+    /// sit at the 256-byte linear pitch; read it back with <see cref="ReadImage"/>.
+    /// </summary>
     public static ulong ColorTarget(this SceneRig rig, uint width, uint height, uint bytesPerPixel = 4, byte fill = 0)
     {
-        var size = (ulong)width * height * bytesPerPixel;
+        var size = (ulong)LinearPitchBytes(width, bytesPerPixel) * height;
         var address = rig.Memory.Allocate(size, 0x10000);
         if (fill != 0)
         {
@@ -105,6 +108,25 @@ internal static class SceneDraws
         rig.Memory.Write(address, bytes);
         return address;
     }
+
+    /// <summary>A linear image's texels as tightly packed rows (the 256-byte pitch padding removed).</summary>
+    public static byte[] ReadImage(this SceneRig rig, ulong address, uint width, uint height, uint bytesPerTexel = 4)
+    {
+        var pitch = LinearPitchBytes(width, bytesPerTexel);
+        var padded = rig.Read(address, (int)(pitch * height));
+        var rowBytes = (int)(width * bytesPerTexel);
+        var packed = new byte[rowBytes * height];
+        for (var y = 0; y < height; y++)
+        {
+            padded.AsSpan((int)(y * pitch), rowBytes).CopyTo(packed.AsSpan(y * rowBytes));
+        }
+
+        return packed;
+    }
+
+    public static T[] ReadImage<T>(this SceneRig rig, ulong address, uint width, uint height) where T : unmanaged =>
+        System.Runtime.InteropServices.MemoryMarshal.Cast<byte, T>(
+            rig.ReadImage(address, width, height, (uint)System.Runtime.CompilerServices.Unsafe.SizeOf<T>())).ToArray();
 
     public static uint LinearPitchBytes(uint width, uint bytesPerTexel) =>
         (width * bytesPerTexel + 255) / 256 * 256;
