@@ -369,6 +369,88 @@ static inline float sharpemu_flush_f32_denorm(float value)
     return magnitude != 0u && magnitude < 0x00800000u ? as_type<float>(bits & 0x80000000u) : value;
 }
 
+// V_MIN/V_MAX/V_MIN3/V_MAX3/V_MED3 on f32 and f16 bits (RDNA2 ISA 12.7, 12.12): with
+// MODE.IEEE a signalling NaN operand (src0 first) is returned quieted; otherwise a NaN
+// operand yields the other one, and -0 orders below +0. Metal's fmin/fmax pick either
+// zero and read f32 denormals as zero, so the order is taken on the bits.
+static inline uint sharpemu_order_f32(uint bits)
+{
+    return (bits & 0x80000000u) != 0u ? ~bits : (bits | 0x80000000u);
+}
+
+static inline bool sharpemu_is_nan_f32(uint bits)
+{
+    return (bits & 0x7FFFFFFFu) > 0x7F800000u;
+}
+
+static inline uint sharpemu_min_f32(uint a, uint b, bool ieee)
+{
+    if (ieee && sharpemu_is_nan_f32(a) && (a & 0x00400000u) == 0u) return a | 0x00400000u;
+    if (ieee && sharpemu_is_nan_f32(b) && (b & 0x00400000u) == 0u) return b | 0x00400000u;
+    if (sharpemu_is_nan_f32(a)) return b;
+    if (sharpemu_is_nan_f32(b)) return a;
+    return sharpemu_order_f32(a) < sharpemu_order_f32(b) ? a : b;
+}
+
+static inline uint sharpemu_max_f32(uint a, uint b, bool ieee)
+{
+    if (ieee && sharpemu_is_nan_f32(a) && (a & 0x00400000u) == 0u) return a | 0x00400000u;
+    if (ieee && sharpemu_is_nan_f32(b) && (b & 0x00400000u) == 0u) return b | 0x00400000u;
+    if (sharpemu_is_nan_f32(a)) return b;
+    if (sharpemu_is_nan_f32(b)) return a;
+    return sharpemu_order_f32(a) > sharpemu_order_f32(b) ? a : b;
+}
+
+// V_MED3: MIN3 when any operand is NaN, else the max of the two operands other than the
+// one MAX3 equals (a float equality, so +0 and -0 match).
+static inline uint sharpemu_med3_f32(uint a, uint b, uint c, bool ieee)
+{
+    if (sharpemu_is_nan_f32(a) || sharpemu_is_nan_f32(b) || sharpemu_is_nan_f32(c))
+        return sharpemu_min_f32(sharpemu_min_f32(a, b, ieee), c, ieee);
+    uint top = sharpemu_max_f32(sharpemu_max_f32(a, b, ieee), c, ieee);
+    if (top == a || ((top | a) & 0x7FFFFFFFu) == 0u) return sharpemu_max_f32(b, c, ieee);
+    if (top == b || ((top | b) & 0x7FFFFFFFu) == 0u) return sharpemu_max_f32(a, c, ieee);
+    return sharpemu_max_f32(a, b, ieee);
+}
+
+static inline uint sharpemu_order_f16(uint bits)
+{
+    return (bits & 0x8000u) != 0u ? (~bits & 0xFFFFu) : (bits | 0x8000u);
+}
+
+static inline bool sharpemu_is_nan_f16(uint bits)
+{
+    return (bits & 0x7FFFu) > 0x7C00u;
+}
+
+static inline uint sharpemu_min_f16(uint a, uint b, bool ieee)
+{
+    if (ieee && sharpemu_is_nan_f16(a) && (a & 0x0200u) == 0u) return a | 0x0200u;
+    if (ieee && sharpemu_is_nan_f16(b) && (b & 0x0200u) == 0u) return b | 0x0200u;
+    if (sharpemu_is_nan_f16(a)) return b;
+    if (sharpemu_is_nan_f16(b)) return a;
+    return sharpemu_order_f16(a) < sharpemu_order_f16(b) ? a : b;
+}
+
+static inline uint sharpemu_max_f16(uint a, uint b, bool ieee)
+{
+    if (ieee && sharpemu_is_nan_f16(a) && (a & 0x0200u) == 0u) return a | 0x0200u;
+    if (ieee && sharpemu_is_nan_f16(b) && (b & 0x0200u) == 0u) return b | 0x0200u;
+    if (sharpemu_is_nan_f16(a)) return b;
+    if (sharpemu_is_nan_f16(b)) return a;
+    return sharpemu_order_f16(a) > sharpemu_order_f16(b) ? a : b;
+}
+
+static inline uint sharpemu_med3_f16(uint a, uint b, uint c, bool ieee)
+{
+    if (sharpemu_is_nan_f16(a) || sharpemu_is_nan_f16(b) || sharpemu_is_nan_f16(c))
+        return sharpemu_min_f16(sharpemu_min_f16(a, b, ieee), c, ieee);
+    uint top = sharpemu_max_f16(sharpemu_max_f16(a, b, ieee), c, ieee);
+    if (top == a || ((top | a) & 0x7FFFu) == 0u) return sharpemu_max_f16(b, c, ieee);
+    if (top == b || ((top | b) & 0x7FFFu) == 0u) return sharpemu_max_f16(a, c, ieee);
+    return sharpemu_max_f16(a, b, ieee);
+}
+
 // Guest sin/cos take revolutions and reduce them to one cycle as x - floor(x), the
 // SPIR-V translator's Fract (MSL fract clamps just below 1.0, so it is not used).
 // A finite magnitude of 2^23 or more has no fraction and reduces to exactly zero;
