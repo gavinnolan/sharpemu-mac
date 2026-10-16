@@ -102,21 +102,21 @@ public static partial class Gen5MslTranslator
                     var flag = Temp("bool", "false");
                     var scaled = Temp(
                         "uint",
-                        $"sharpemu_f32_div_scale({Float32Bits(instruction, 0)}, {Float32Bits(instruction, 1)}, " +
-                        $"{Float32Bits(instruction, 2)}, {flag})");
+                        $"sharpemu_f32_div_scale({FlushedFloat32Bits(instruction, 0)}, {FlushedFloat32Bits(instruction, 1)}, " +
+                        $"{FlushedFloat32Bits(instruction, 2)}, {flag})");
                     StoreCarryOut(instruction, flag);
-                    StoreVector(destination, FloatResult(instruction, AsFloat(scaled)));
+                    StoreVector(destination, FloatResult(instruction, AsFloat(FlushOutputDenormalF32(scaled))));
                     return true;
                 }
                 case "VDivFmasF32":
-                    StoreVector(destination, FloatResult(instruction, AsFloat(
-                        $"sharpemu_f32_div_fmas({Float32Bits(instruction, 0)}, {Float32Bits(instruction, 1)}, " +
-                        $"{Float32Bits(instruction, 2)}, vcc)")));
+                    StoreVector(destination, FloatResult(instruction, AsFloat(FlushOutputDenormalF32(
+                        $"sharpemu_f32_div_fmas({FlushedFloat32Bits(instruction, 0)}, {FlushedFloat32Bits(instruction, 1)}, " +
+                        $"{FlushedFloat32Bits(instruction, 2)}, vcc)"))));
                     return true;
                 case "VDivFixupF32":
                     StoreVector(destination, FloatResult(instruction, AsFloat(
-                        $"(uint)sharpemu_div_fixup({Float32Bits(instruction, 0)}, {Float32Bits(instruction, 1)}, " +
-                        $"{Float32Bits(instruction, 2)}, 32u, 23u, -150, 128)")));
+                        $"(uint)sharpemu_div_fixup({FlushedFloat32Bits(instruction, 0)}, {FlushedFloat32Bits(instruction, 1)}, " +
+                        $"{FlushedFloat32Bits(instruction, 2)}, 32u, 23u, -150, 0)")));
                     return true;
                 case "VDivFixupF16":
                     StoreVector(destination, Float16Result(
@@ -137,7 +137,7 @@ public static partial class Gen5MslTranslator
                     value = $"sharpemu_f64_from_u32({RawSource(instruction, 0)}, 0u)";
                     break;
                 case "VCvtF64F32":
-                    value = $"sharpemu_f64_from_f32({Float32Bits(instruction, 0)})";
+                    value = $"sharpemu_f64_from_f32({FlushInputDenormalF32(Float32Bits(instruction, 0))})";
                     break;
                 case "VRcpF64":
                 case "VRsqF64":
@@ -227,7 +227,7 @@ public static partial class Gen5MslTranslator
                             value = $"sharpemu_f64_div_fmas({first}, {second}, {third}, vcc)";
                             break;
                         case "VDivFixupF64":
-                            value = $"sharpemu_div_fixup({first}, {second}, {third}, 64u, 52u, -1075, 1024)";
+                            value = $"sharpemu_div_fixup({first}, {second}, {third}, 64u, 52u, -1075, 0)";
                             break;
                         default:
                         {
@@ -358,6 +358,11 @@ public static partial class Gen5MslTranslator
         /// <summary>An F32 operand's bits with its abs/neg modifiers applied.</summary>
         private string Float32Bits(Gen5ShaderInstruction instruction, int sourceIndex) =>
             Temp("uint", AsUInt(F(instruction, sourceIndex)));
+
+        /// <summary>An F32 operand's bits with a denormal flushed to a zero of its sign when FP_DENORM
+        /// flushes f32 inputs (RDNA2 ISA 6.4), for the helpers that read the bits.</summary>
+        private string FlushedFloat32Bits(Gen5ShaderInstruction instruction, int sourceIndex) =>
+            FlushInputDenormalF32(Float32Bits(instruction, sourceIndex));
 
         /// <summary>An F16 operand's bits (its op_sel half, abs/neg applied), zero-extended.</summary>
         private string Float16Bits(Gen5ShaderInstruction instruction, int sourceIndex) =>

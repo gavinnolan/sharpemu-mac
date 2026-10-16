@@ -57,11 +57,21 @@ internal readonly record struct AluMode(uint FloatMode = 0xC0, bool Ieee = false
     /// <summary>Input denormals of the format are kept: the requested mode, less the documented
     /// deviation that f32 denormals are always flushed (<see cref="Deviations.F32DenormalsFlushed"/>).</summary>
     public bool KeepsInputDenormals(FloatFormat format) =>
-        RequestsInputDenormals(format) && !(format == FloatFormat.F32 && Deviations.F32DenormalsFlushed);
+        format == FloatFormat.F32 ? RequestsInputDenormals(format) && !Deviations.F32DenormalsFlushed
+            : RequestsInputDenormals(format) || Deviations.F64F16DenormalsKept;
 
     /// <summary>Output denormals of the format are kept, less the same deviation.</summary>
     public bool KeepsOutputDenormals(FloatFormat format) =>
-        RequestsOutputDenormals(format) && !(format == FloatFormat.F32 && Deviations.F32DenormalsFlushed);
+        format == FloatFormat.F32 ? RequestsOutputDenormals(format) && !Deviations.F32DenormalsFlushed
+            : RequestsOutputDenormals(format) || Deviations.F64F16DenormalsKept;
+
+    /// <summary>FlushIn as the program asked: for the ops the translator evaluates on the bits
+    /// (min/max, med3, frexp), which keep f32 denormals when FP_DENORM says so.</summary>
+    public ulong FlushInAsRequested(ulong bits, FloatFormat format) =>
+        RequestsInputDenormals(format) ? bits : SoftFloat.FlushDenormal(bits, format);
+
+    public ulong FlushOutAsRequested(ulong bits, FloatFormat format) =>
+        RequestsOutputDenormals(format) ? bits : SoftFloat.FlushDenormal(bits, format);
 
     public ulong FlushIn(ulong bits, FloatFormat format) =>
         KeepsInputDenormals(format) ? bits : SoftFloat.FlushDenormal(bits, format);
@@ -146,11 +156,23 @@ internal sealed record VectorOp(
     /// <summary>Allowed distance in units in the last place for approximate ops.</summary>
     public int UlpTolerance { get; init; }
 
+    /// <summary>Allowed absolute error for approximate ops whose accuracy is absolute rather than
+    /// relative (V_SIN/V_COS near their zeros); used instead of <see cref="UlpTolerance"/> when set.</summary>
+    public double AbsoluteTolerance { get; init; }
+
     /// <summary>The reference citation (ISA section) recorded with mismatches.</summary>
     public string Citation { get; init; } = "";
 
     /// <summary>Operand pools override per source (otherwise chosen by type).</summary>
     public Func<int, IReadOnlyList<ulong>>? Pool { get; init; }
+
+    /// <summary>Cross-lane ops the per-lane path cannot express (V_PERMLANE*, V_READLANE and the
+    /// like): the instruction text per wave size, replacing the generated assembly.</summary>
+    public Func<int, string>? Assembly { get; init; }
+
+    /// <summary>Whole-wave semantics replacing the per-lane path. The outcome arrives holding the
+    /// state before the instruction (destinations, VCC, EXEC, the scalar destination).</summary>
+    public Action<VectorWave, VectorOutcome>? WaveSemantics { get; init; }
 
     public bool Has(VectorFlags flag) => (Flags & flag) != 0;
 
@@ -166,4 +188,17 @@ internal static class Deviations
     /// <summary>Metal flushes f32 denormals (inputs and results) whatever FP_DENORM says, so a
     /// program asking to keep them gets them flushed: docs/deviations.md, "f32 denormals".</summary>
     public const bool F32DenormalsFlushed = true;
+
+    /// <summary>The translator keeps f64 and f16 denormals (inputs and results) whatever FP_DENORM
+    /// asks, the mode titles run with: docs/deviations.md, "f64 and f16 denormals".</summary>
+    public const bool F64F16DenormalsKept = true;
+
+    /// <summary>V_LOG_F32 error in ULPs the translator delivers (Metal's fast::log2): the ISA says 1,
+    /// the result for 1 + 2^-23 is 2 ULP off. docs/deviations.md, "V_LOG_F32 accuracy".</summary>
+    public const int LogUlps = 2;
+
+    /// <summary>Metal detects f32 tininess before rounding: an exact result below the smallest normal
+    /// is flushed to a zero of its sign even where rounding would carry it up to 2^-126. The ISA does
+    /// not say which; docs/deviations.md, "f32 tininess".</summary>
+    public const bool F32FlushesBeforeRounding = true;
 }

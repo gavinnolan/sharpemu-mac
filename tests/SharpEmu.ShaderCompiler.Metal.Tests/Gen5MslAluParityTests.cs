@@ -101,7 +101,7 @@ public sealed class Gen5MslAluParityTests(ITestOutputHelper output)
         new object[] { "VCvtPkU8F32", Bits(-5f), 0u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0u },
         new object[] { "VCvtPkU8F32", Bits(float.NaN), 0u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0u },
         new object[] { "VCvtPkU8F32", Bits(float.PositiveInfinity), 1u, 0u, 0u, 0u, 0u, 0u, 0u, false, 0xFF00u },
-        new object[] { "VCvtPkU8F32", Bits(3.7f), 1u, 0xAABBCCDDu, 0u, 0u, 0u, 0u, 0u, false, 0xAABB03DDu },
+        new object[] { "VCvtPkU8F32", Bits(3.7f), 1u, 0xAABBCCDDu, 0u, 0u, 0u, 0u, 0u, false, 0xAABB04DDu },
         // V_BFE: offset + width may pass 32, a zero width gives 0 (ISA 12.12).
         new object[] { "VBfeU32", 0xFFFFFFFFu, 28u, 8u, 0u, 0u, 0u, 0u, 0u, false, 0xFu },
         new object[] { "VBfeU32", 0xFFFFFFFFu, 31u, 31u, 0u, 0u, 0u, 0u, 0u, false, 1u },

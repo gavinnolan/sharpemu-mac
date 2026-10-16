@@ -11,7 +11,8 @@ namespace SharpEmu.ShaderCompiler.Metal.Tests.Conformance;
 
 /// <summary>
 /// Machine encodings of the conformance programs, produced by LLVM's gfx1030 assembler
-/// (<c>llvm-mc -triple=amdgcn -mcpu=gfx1030 -show-encoding</c>) and checked in as
+/// (<c>llvm-mc -triple=amdgcn -mcpu=gfx1030 -show-encoding</c>; gfx1013 for the few gfx10.1
+/// opcodes the PS5 keeps, <see cref="Gfx1013Mnemonics"/>) and checked in as
 /// <c>Rdna2Encodings.txt</c>, so the encodings come from an assembler that shares nothing
 /// with our decoder and the suite needs no LLVM to run. Each line is
 /// <c>wave&lt;TAB&gt;assembly&lt;TAB&gt;hex words</c>. Regenerate with
@@ -56,24 +57,27 @@ internal static partial class LlvmMcEncodings
         var output = new SortedDictionary<string, string>(StringComparer.Ordinal);
         foreach (var group in lines.Select(static line => (line.Wave, Asm: Normalize(line.Asm))).Distinct().GroupBy(static line => line.Wave))
         {
-            var pending = group.Select(static line => line.Asm).ToList();
-            while (pending.Count > 0)
+            foreach (var gfx1013 in (bool[])[false, true])
             {
-                var (encodings, failedLines) = Assemble(llvmMc, group.Key, pending);
-                if (failedLines.Count == 0)
+                var pending = group.Select(static line => line.Asm).Where(asm => IsGfx1013Only(asm) == gfx1013).ToList();
+                while (pending.Count > 0)
                 {
-                    for (var index = 0; index < pending.Count; index++)
+                    var (encodings, failedLines) = Assemble(llvmMc, group.Key, pending, gfx1013 ? "gfx1013" : "gfx1030");
+                    if (failedLines.Count == 0)
                     {
-                        output[$"{group.Key}\t{pending[index]}"] = encodings[index];
+                        for (var index = 0; index < pending.Count; index++)
+                        {
+                            output[$"{group.Key}\t{pending[index]}"] = encodings[index];
+                        }
+
+                        break;
                     }
 
-                    break;
-                }
-
-                foreach (var failed in failedLines.OrderDescending())
-                {
-                    rejected.Add($"w{group.Key}: {pending[failed]}");
-                    pending.RemoveAt(failed);
+                    foreach (var failed in failedLines.OrderDescending())
+                    {
+                        rejected.Add($"w{group.Key}: {pending[failed]}");
+                        pending.RemoveAt(failed);
+                    }
                 }
             }
         }
@@ -89,7 +93,25 @@ internal static partial class LlvmMcEncodings
         return rejected;
     }
 
-    private static (List<string> Encodings, List<int> FailedLines) Assemble(string llvmMc, int wave, List<string> lines)
+    /// <summary>gfx10.1 opcodes that gfx10.3 removed but the PS5's gfx1013 still executes (RDNA2 ISA
+    /// "Instruction Changes"; RDNA1 ISA 12.7, 12.12). Their VOP3 0x140 / VOP2 0x06 encodings are the
+    /// gfx1030 V_FMA_LEGACY_F32 / V_FMAC_LEGACY_F32 ones; the rest have no gfx1030 encoding.
+    /// llvm-mc assembles these with -mcpu=gfx1013.</summary>
+    private static readonly string[] Gfx1013Mnemonics =
+        ["v_mad_f32", "v_mac_f32", "v_madak_f32", "v_madmk_f32", "v_mad_legacy_f32", "v_mac_legacy_f32"];
+
+    private static bool IsGfx1013Only(string asm)
+    {
+        var mnemonic = asm.Split(' ')[0];
+        foreach (var suffix in (string[])["_e32", "_e64"])
+        {
+            if (mnemonic.EndsWith(suffix, StringComparison.Ordinal)) mnemonic = mnemonic[..^suffix.Length];
+        }
+
+        return Gfx1013Mnemonics.Contains(mnemonic);
+    }
+
+    private static (List<string> Encodings, List<int> FailedLines) Assemble(string llvmMc, int wave, List<string> lines, string cpu)
     {
         var start = new ProcessStartInfo(llvmMc)
         {
@@ -97,7 +119,7 @@ internal static partial class LlvmMcEncodings
             RedirectStandardOutput = true,
             RedirectStandardError = true,
         };
-        foreach (var argument in (string[])["-triple=amdgcn", "-mcpu=gfx1030", "-show-encoding",
+        foreach (var argument in (string[])["-triple=amdgcn", $"-mcpu={cpu}", "-show-encoding",
                      wave == 64 ? "-mattr=-wavefrontsize32,+wavefrontsize64" : "-mattr=+wavefrontsize32,-wavefrontsize64"])
         {
             start.ArgumentList.Add(argument);

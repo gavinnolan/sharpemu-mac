@@ -227,7 +227,8 @@ internal static class ConformanceRunner
             var shift = System.Numerics.BitOperations.TrailingZeroCount(loose);
             var width = System.Numerics.BitOperations.PopCount(loose);
             var format = width switch { 16 => FloatFormat.F16, 32 => FloatFormat.F32, _ => FloatFormat.F64 };
-            if (width is 32 or 64 && (loose >> shift) == format.ValueMask)
+            if (width is 32 or 64 && (loose >> shift) == format.ValueMask &&
+                (width == 64 || form.Op.Result == OpType.F32))
             {
                 return SoftFloat.IsNaN((actual >> shift) & format.ValueMask, format);
             }
@@ -251,11 +252,19 @@ internal static class ConformanceRunner
             if ((expected & keep) != (actual & keep)) return false;
             var e = expected & mask;
             var a = actual & mask;
-            if (SoftFloat.IsNaN(e, format) || SoftFloat.IsInfinity(e, format) || SoftFloat.IsZero(e, format) ||
+            if (SoftFloat.IsNaN(e, format) || SoftFloat.IsInfinity(e, format) ||
                 SoftFloat.IsNaN(a, format) || SoftFloat.IsInfinity(a, format))
             {
                 return e == a;
             }
+
+            if (SoftFloat.IsZero(e, format) && SoftFloat.IsZero(a, format)) return e == a;
+            if (form.Op.AbsoluteTolerance > 0)
+            {
+                return Math.Abs(ToDouble(e, format) - ToDouble(a, format)) <= form.Op.AbsoluteTolerance;
+            }
+
+            if (SoftFloat.IsZero(e, format)) return e == a;
 
             if (SoftFloat.IsNegative(e, format) != SoftFloat.IsNegative(a, format)) return false;
             var distance = Math.Abs((long)(e & ~format.SignMask) - (long)(a & ~format.SignMask));
@@ -264,6 +273,11 @@ internal static class ConformanceRunner
 
         return false;
     }
+
+    private static double ToDouble(ulong bits, FloatFormat format) =>
+        format.Width == 64 ? BitConverter.UInt64BitsToDouble(bits)
+        : format.Width == 32 ? BitConverter.UInt32BitsToSingle((uint)bits)
+        : (double)BitConverter.UInt16BitsToHalf((ushort)bits);
 
     /// <summary>Runs a scalar form: one case per lane through the program's lane loop.</summary>
     public static FormReport RunScalar(ScalarForm form, int wave, IReadOnlyList<ulong[]> tuples, int seed, bool execute)

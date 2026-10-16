@@ -160,10 +160,34 @@ model asserts each deviation below rather than the ISA behaviour.
   of their sign whatever MODE.FP_DENORM asks, so a program that keeps f32
   denormals (FP_DENORM[5:4] != 0) sees them flushed; titles run with 0xC0,
   which flushes them anyway. OMOD still follows the requested output-denormal
-  bit (ignored when it is set, ISA 6.2.2). f16 and f64 denormals follow the
-  mode. Pinned by `Rdna2AluConformanceTests` (mode 0xF0 forms, model
-  `Deviations.F32DenormalsFlushed`).
+  bit (ignored when it is set, ISA 6.2.2). Pinned by `Rdna2AluConformanceTests`
+  (mode 0xF0 forms, model `Deviations.F32DenormalsFlushed`).
+- **f64 and f16 denormals** — the translator keeps f64 and f16 denormal inputs
+  and results whatever MODE.FP_DENORM[7:6] asks (the f64 arithmetic is
+  emulated on integers, and the denormal bits of FLOAT_MODE are read only for
+  f32 and OMOD), so a program that flushes them (FP_DENORM[7:6] != 3) sees
+  them kept; titles run with 0xC0, which keeps them. Pinned by
+  `Rdna2AluConformanceTests` (mode 0x00 and 0xF0 f64/f16 forms, model
+  `Deviations.F64F16DenormalsKept`).
+- **f32 tininess** — Metal decides an f32 result is tiny before rounding, so
+  an exact result just below 2^-126 that rounds up to the smallest normal is
+  flushed to a zero of its sign instead (for example
+  -(1 - 2^-24) * 2^-126 gives -0, not -2^-126). The ISA does not say whether
+  tininess is detected before or after rounding. Pinned by
+  `Rdna2AluConformanceTests` (model `Deviations.F32FlushesBeforeRounding`).
 - **NaN payloads** — the ISA does not define the payload or sign of a NaN an
   arithmetic op produces; the harness requires a NaN there, not particular
   bits. Ops whose pseudo-code names the NaN (moves, abs/neg, min/max returning
   an operand, quieting) are compared bit-exactly.
+- **V_MULLIT_F32** — the RDNA2 ISA says only "0.0 * x = 0.0; specific INF, NaN,
+  overflow rules" and never states the rules, so the translator gives the
+  DX9 product of V_MUL_LEGACY_F32 and the harness asserts only that.
+- **V_LOG_F32 accuracy** — the ISA states 1 ULP (12.8); the translator uses
+  Metal's `fast::log2`, which is 2 ULP off just above 1.0 (log2(1 + 2^-23)).
+  The harness allows 2 ULP for V_LOG_F32 (model `Deviations.LogUlps`).
+- **Division sequence overflow (unverified)** — with V_DIV_SCALE scaling only the
+  denominator and V_DIV_FIXUP passing the quotient through (hardware rows, ISA
+  12.12), an LLVM `fdiv` whose true quotient overflows with the operand exponents
+  96 (F32) or 768 (F64) or more apart gives a NaN from the refinement's
+  inf - inf rather than IEEE's infinity. Whether the hardware gives infinity
+  there is not established. `Gen5MslDivisionTests` leaves those inputs out.

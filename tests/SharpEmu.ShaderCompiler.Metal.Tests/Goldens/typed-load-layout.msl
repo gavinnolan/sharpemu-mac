@@ -657,9 +657,10 @@ static inline uint sharpemu_med3_f16(uint a, uint b, uint c, bool ieee)
 static inline float sharpemu_trig_cycle_f32(float value, bool preserveSignedZero)
 {
     uint magnitude = as_type<uint>(value) & 0x7FFFFFFFu;
-    if (preserveSignedZero && magnitude == 0u)
+    if (preserveSignedZero && magnitude < 0x00800000u)
     {
-        return value;
+        // A zero, or a denormal flushed to a zero of its sign: sin(-0) is -0.
+        return as_type<float>(as_type<uint>(value) & 0x80000000u);
     }
 
     if (magnitude >= 0x4B000000u && magnitude < 0x7F800000u)
@@ -668,6 +669,13 @@ static inline float sharpemu_trig_cycle_f32(float value, bool preserveSignedZero
     }
 
     return value - floor(value);
+}
+
+// A NaN a function made from a non-NaN operand is the ISA's 0xFFC00000 (RDNA2 ISA 12.8
+// V_SQRT/RSQ/LOG/SIN/COS_F32 examples), not Metal's positive NaN; a NaN operand passes through.
+static inline float sharpemu_invalid_nan_f32(float result, float operand)
+{
+    return (isnan(result) && !isnan(operand)) ? as_type<float>(0xFFC00000u) : result;
 }
 
 static constant float sharpemu_off_i4_table[16] =

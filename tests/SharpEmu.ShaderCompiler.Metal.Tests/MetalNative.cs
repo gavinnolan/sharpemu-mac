@@ -499,7 +499,7 @@ internal static partial class MetalNative
         var pipeline = Send(Device.Value, Selector("newRenderPipelineStateWithDescriptor:error:"), pipelineDescriptor, ref pipelineError);
         if (pipeline == 0) throw new InvalidOperationException($"MSAA fill pipeline: {DescribeError(pipelineError)}");
 
-        var queue = Send(Device.Value, Selector("newCommandQueue"));
+        var queue = SharedQueue.Value;
         var commandBuffer = Send(queue, Selector("commandBuffer"));
         for (uint layer = 0; layer < layers; layer++)
         {
@@ -579,6 +579,10 @@ internal static partial class MetalNative
 
     // A zero-filled table for every read-only pointer field of an argument buffer, kept
     // for the process so one allocation serves every execution.
+    // One command queue for the process: a queue per execution runs the device out of queues
+    // partway through a large conformance category.
+    private static readonly Lazy<nint> SharedQueue = new(() => Send(Device.Value, Selector("newCommandQueue")));
+
     private const uint SharedTableDwords = 256;
 
     private static readonly Lazy<nint> SharedTable =
@@ -638,7 +642,7 @@ internal static partial class MetalNative
             return false;
         }
 
-        var queue = Send(Device.Value, Selector("newCommandQueue"));
+        var queue = SharedQueue.Value;
         if (queue == 0)
         {
             error = "failed to create the command queue";

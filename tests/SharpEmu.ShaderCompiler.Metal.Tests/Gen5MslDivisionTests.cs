@@ -171,10 +171,22 @@ public sealed class Gen5MslDivisionTests(ITestOutputHelper output)
         return double.IsNaN(quotient) ? 0xFFF8000000000000 : BitConverter.DoubleToUInt64Bits(quotient);
     }
 
+    // F32 denormals are flushed (docs/deviations.md): an operand is the zero of its sign and a
+    // denormal quotient is a signed zero.
     private static uint Float32Quotient(uint n, uint d)
     {
         var x = BitConverter.UInt32BitsToSingle(n);
         var y = BitConverter.UInt32BitsToSingle(d);
+        if (!float.IsNaN(x) && float.IsSubnormal(x))
+        {
+            x = BitConverter.UInt32BitsToSingle(n & 0x80000000);
+        }
+
+        if (!float.IsNaN(y) && float.IsSubnormal(y))
+        {
+            y = BitConverter.UInt32BitsToSingle(d & 0x80000000);
+        }
+
         if (float.IsNaN(x))
         {
             return n | 0x00400000;
@@ -186,6 +198,11 @@ public sealed class Gen5MslDivisionTests(ITestOutputHelper output)
         }
 
         var quotient = x / y;
+        if (float.IsSubnormal(quotient))
+        {
+            quotient = BitConverter.UInt32BitsToSingle(BitConverter.SingleToUInt32Bits(quotient) & 0x80000000);
+        }
+
         return float.IsNaN(quotient) ? 0xFFC00000 : BitConverter.SingleToUInt32Bits(quotient);
     }
 
@@ -251,6 +268,19 @@ public sealed class Gen5MslDivisionTests(ITestOutputHelper output)
             inputs.Add((n, d));
         }
 
+        // A quotient that overflows from a wide exponent difference (n/d exponents differ by 768
+        // or more) is left out: V_DIV_SCALE scales only d (by 2^128) and V_DIV_FIXUP passes the
+        // quotient through (RDNA2 ISA 12.12, hardware rows), so the refinement's own overflow
+        // (inf - inf) is the sequence's NaN, not the infinity IEEE division gives. The hardware's
+        // F64 behaviour there is unverified.
+        inputs.RemoveAll(pair =>
+        {
+            var exponentN = (int)((pair.Item1 >> 52) & 0x7FF);
+            var exponentD = (int)((pair.Item2 >> 52) & 0x7FF);
+            return exponentN is > 0 and < 2047 && exponentD < 2047 &&
+                (pair.Item2 << 1) != 0 && exponentN - exponentD >= 768 &&
+                double.IsInfinity(BitConverter.UInt64BitsToDouble(pair.Item1) / BitConverter.UInt64BitsToDouble(pair.Item2));
+        });
         return inputs;
     }
 
@@ -297,6 +327,17 @@ public sealed class Gen5MslDivisionTests(ITestOutputHelper output)
         // Metal's F32 FMA, which the translator's V_FMA_F32 is, flushes it and the last
         // correction is lost, a 1-ulp miss that is not the division steps' doing.
         inputs.RemoveAll(pair => ((pair.Item1 >> 23) & 0xFF) is >= 24 and <= 27);
+
+        // The F32 twin of the F64 exclusion above: n/d overflowing with the exponents 96 or more
+        // apart (d a normal number; a flushed denormal d is a zero and divides to the fixup's
+        // infinity) is the refinement's NaN, not IEEE's infinity.
+        inputs.RemoveAll(pair =>
+        {
+            var exponentN = (int)((pair.Item1 >> 23) & 0xFF);
+            var exponentD = (int)((pair.Item2 >> 23) & 0xFF);
+            return exponentN is > 0 and < 255 && exponentD is > 0 and < 255 && exponentN - exponentD >= 96 &&
+                float.IsInfinity(BitConverter.UInt32BitsToSingle(pair.Item1) / BitConverter.UInt32BitsToSingle(pair.Item2));
+        });
         return inputs;
     }
 

@@ -53,6 +53,16 @@ internal static class WaveModel
     {
         var op = form.Op;
         var outcome = new VectorOutcome(wave.Size);
+        if (op.WaveSemantics is { } semantics)
+        {
+            Array.Copy(wave.Old, outcome.Destination, wave.Size);
+            outcome.Vcc = wave.VccBefore;
+            outcome.Exec = wave.Exec;
+            outcome.ScalarDestination = wave.ScalarDestinationBefore;
+            semantics(wave, outcome);
+            return outcome;
+        }
+
         ulong maskResult = 0;
         var maskWritten = false;
         for (var lane = 0; lane < wave.Size; lane++)
@@ -150,7 +160,7 @@ internal static class WaveModel
                 outcome.Exec = maskResult | (wave.Exec & keepHigh);
             }
             else if (form.Kind is FormKind.E32 or FormKind.Dpp16 or FormKind.Dpp8 ||
-                     (form.Kind == FormKind.Sdwa && !op.Has(VectorFlags.Compare)))
+                     (form.Kind == FormKind.Sdwa && (!op.Has(VectorFlags.Compare) || form.Sdwa is { VccDestination: true })))
             {
                 outcome.Vcc = maskResult | (wave.VccBefore & keepHigh);
             }
@@ -204,7 +214,13 @@ internal static class WaveModel
     {
         var value = result.Value & format.ValueMask;
         var loose = result.Loose;
-        if (form.Omod != 0 && !mode.Ieee && !mode.RequestsOutputDenormals(format) && !SoftFloat.IsNaN(value, format))
+        var omodApplies = form.Omod != 0 && !mode.Ieee && !mode.RequestsOutputDenormals(format);
+        if (omodApplies && SoftFloat.IsNaN(value, format))
+        {
+            // The scaling multiply gives a NaN of unspecified sign and payload (docs/deviations.md, "NaN payloads").
+            loose = format.ValueMask;
+        }
+        else if (omodApplies)
         {
             var scale = form.Omod switch
             {
@@ -367,9 +383,13 @@ internal static class Dpp
         }
     }
 
-    /// <summary>An invalid fetch (out of range, or an inactive lane without FI) reads zero when
-    /// BOUND_CTRL is set; otherwise the lane does not write (ISA 13.3.9 BC, FI).</summary>
-    public static bool UsesZero(DppControl dpp, bool valid) => dpp.BoundCtrl;
+    /// <summary>An invalid DPP16 fetch (out of range, or an inactive lane without FI) reads zero
+    /// when BOUND_CTRL is set; otherwise the lane does not write (ISA 13.3.9 BC; for an inactive
+    /// source the ISA's FI text says "read zero", LLVM's AMDGPUModifierSyntax fi16 says FI=0
+    /// leaves it to bound_ctrl, which is the reading taken here). DPP8 has no BOUND_CTRL and every
+    /// lane select is in range: an inactive source without FI reads zero (ISA 13.3.9 FI; LLVM fi8
+    /// "Fetch zero when accessing data from inactive lanes").</summary>
+    public static bool UsesZero(DppControl dpp, bool valid) => dpp.Lanes8 is not null || dpp.BoundCtrl;
 
     /// <summary>ROW_MASK and BANK_MASK disable destination writes of whole rows / banks.</summary>
     public static bool LaneWriteEnabled(DppControl dpp, int lane)

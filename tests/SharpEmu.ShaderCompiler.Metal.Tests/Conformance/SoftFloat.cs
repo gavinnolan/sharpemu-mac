@@ -79,12 +79,18 @@ internal static class SoftFloat
     /// A result that is denormal after rounding becomes a zero of its sign unless
     /// <paramref name="keepDenormal"/>.</summary>
     public static ulong Round(bool negative, BigInteger mantissa, int exponent, FloatFormat f,
-        bool keepDenormal = true, int mode = 0)
+        bool keepDenormal = true, int mode = 0, bool metalTininess = true)
     {
         if (mantissa.IsZero) return Zero(negative, f);
         var precision = f.MantissaBits + 1;
         var length = (int)mantissa.GetBitLength();
         var top = exponent + length - 1;
+        if (metalTininess && !keepDenormal && top < f.MinExponent && f == FloatFormat.F32 && Deviations.F32FlushesBeforeRounding)
+        {
+            // Tiny before rounding: flushed even when it would round up to the smallest normal.
+            return Zero(negative, f);
+        }
+
         // The weight of the result's last mantissa bit.
         var lsb = Math.Max(top - precision + 1, f.MinExponent - f.MantissaBits);
         BigInteger rounded;
@@ -217,7 +223,8 @@ internal static class SoftFloat
         if (IsInfinity(bits, from)) return Inf(negative, to);
         if (IsZero(bits, from)) return Zero(negative, to);
         var (n, m, e) = Decompose(bits, from);
-        return Round(n, m, e, to, keepDenormal, mode);
+        // The f64 narrowing is the translator's own integer code, not a Metal f32 operation.
+        return Round(n, m, e, to, keepDenormal, mode, metalTininess: from != FloatFormat.F64);
     }
 
     /// <summary>Exact value of a finite float as a rational m * 2^e (for comparisons and

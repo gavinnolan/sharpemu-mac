@@ -208,15 +208,9 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
-                if (instruction.Control is Gen5SdwaControl { DestinationSelect: < 6 } &&
-                    instruction.Opcode is "VAddU32" or "VAddI32" or "VSubU32" or "VSubI32" or "VSubrevU32" or
-                        "VSubrevI32" or "VAddCoU32" or "VSubCoU32" or "VSubrevCoU32" or "VAddcU32" or
-                        "VAddCoCiU32" or "VSubbU32" or "VSubbrevU32" or "VSubCoCiU32" or "VSubrevCoCiU32" or
-                        "VMadU32U16")
-                {
-                    error = $"{instruction.Opcode}: clamped results into a partial SDWA destination are not supported";
-                    return false;
-                }
+                // An SDWA destination select takes its field from the clamped 32-bit result
+                // (ISA 6.5 clamps to the op's type; 13.3.7 DST_SEL then places the low bits),
+                // which the common write-back below does.
             }
 
             string? expression = instruction.Opcode switch
@@ -270,9 +264,9 @@ public static partial class Gen5MslTranslator
                 "VCeilF32" => FloatResult(instruction, $"ceil({F(instruction, 0)})"),
                 "VTruncF32" => FloatResult(instruction, $"trunc({F(instruction, 0)})"),
                 "VRndneF32" => FloatResult(instruction, $"rint({F(instruction, 0)})"),
-                "VFractF32" => FloatResult(instruction, $"fract({F(instruction, 0)})"),
-                "VSqrtF32" => FloatResult(instruction, $"sqrt(sharpemu_flush_f32_denorm({F(instruction, 0)}))"),
-                "VRsqF32" => FloatResult(instruction, $"rsqrt(sharpemu_flush_f32_denorm({F(instruction, 0)}))"),
+                "VFractF32" => EmitFractF32(instruction),
+                "VSqrtF32" => InvalidNanF32Result(instruction, "sqrt"),
+                "VRsqF32" => InvalidNanF32Result(instruction, "rsqrt"),
                 "VRcpF16" => Float16Reciprocal(instruction, destination),
                 "VSqrtF16" => Float16SquareRoot(instruction, destination),
                 "VLogF16" => Float16Logarithm(instruction, destination),
@@ -292,12 +286,12 @@ public static partial class Gen5MslTranslator
                 // on the guest; the IEEE-flag reciprocal keeps the unflushed input.
                 "VRcpF32" => FloatResult(instruction, $"(1.0f / sharpemu_flush_f32_denorm({F(instruction, 0)}))"),
                 "VRcpIflagF32" => FloatResult(instruction, $"(1.0f / {F(instruction, 0)})"),
-                "VLogF32" => FloatResult(instruction, $"fast::log2(sharpemu_flush_f32_denorm({F(instruction, 0)}))"),
+                "VLogF32" => InvalidNanF32Result(instruction, "fast::log2"),
                 "VExpF32" => FloatResult(instruction, $"fast::exp2(sharpemu_flush_f32_denorm({F(instruction, 0)}))"),
                 // GCN sin/cos take revolutions; reduce to one cycle first, then mirror
                 // the SPIR-V Tau prescale. Only sine keeps the sign of a zero input.
-                "VSinF32" => FloatResult(instruction, $"sin(sharpemu_trig_cycle_f32({F(instruction, 0)}, true) * {TauLiteral})"),
-                "VCosF32" => FloatResult(instruction, $"cos(sharpemu_trig_cycle_f32({F(instruction, 0)}, false) * {TauLiteral})"),
+                "VSinF32" => InvalidNanF32Result(instruction, "sin", cycle: "true"),
+                "VCosF32" => InvalidNanF32Result(instruction, "cos", cycle: "false"),
                 "VLdexpF32" =>
                     FloatResult(instruction, $"ldexp({F(instruction, 0)}, as_type<int>({RawSource(instruction, 1)}))"),
                 // D.f16 = S0.f16 * 2^S1.i16. Past +-100 the f16 result is already 0 or infinity, so
@@ -352,7 +346,7 @@ public static partial class Gen5MslTranslator
                 // bit 31 of the register, and VOP3 op_sel can pick the high half.
                 "VCvtF32F16" => FloatResult(instruction, F16(instruction, 0)),
                 "VCvtOffF32I4" =>
-                    AsUInt($"sharpemu_off_i4_table[({RawSource(instruction, 0)}) & 15u]"),
+                    FloatResult(instruction, $"sharpemu_off_i4_table[({RawSource(instruction, 0)}) & 15u]"),
                 "VCvtPkU8F32" =>
                     EmitCvtPkU8F32(instruction),
                 "VCvtPkrtzF16F32" =>
@@ -1013,9 +1007,9 @@ public static partial class Gen5MslTranslator
 
         private string EmitCvtPkU8F32(Gen5ShaderInstruction instruction)
         {
-            // flt32_to_uint8 saturates to 0..255 and maps NaN to 0.
+            // flt32_to_uint8 saturates to 0..255, maps NaN to 0 and rounds to nearest even.
             var source = Temp("float", F(instruction, 0));
-            var converted = Temp("uint", $"(uint)clamp(isnan({source}) ? 0.0f : {source}, 0.0f, 255.0f)");
+            var converted = Temp("uint", $"(uint)rint(clamp(isnan({source}) ? 0.0f : {source}, 0.0f, 255.0f))");
             var offset = Temp("uint", $"(({RawSource(instruction, 1)}) & 3u) << 3");
             var baseValue = Temp("uint", RawSource(instruction, 2));
             return $"(({baseValue} & ~(0xFFu << {offset})) | (({converted} & 0xFFu) << {offset}))";
@@ -1535,7 +1529,7 @@ public static partial class Gen5MslTranslator
             else if (opcode is
                      "VCmpTruF32" or "VCmpxTruF32" or
                      "VCmpTruF16" or "VCmpxTruF16" or
-                     "VCmpTI32" or "VCmpTU32" or
+                     "VCmpTI32" or "VCmpTU32" or "VCmpxTI32" or "VCmpxTU32" or
                      // The 64-bit F/T forms are constant compares like their 32-bit
                      // siblings; without them TrimCompare hands "F"/"T" to the
                      // integer operator table and the opcode reads as unsupported.
@@ -1546,7 +1540,7 @@ public static partial class Gen5MslTranslator
             else if (opcode is
                      "VCmpFF32" or "VCmpxFF32" or
                      "VCmpFF16" or "VCmpxFF16" or
-                     "VCmpFI32" or "VCmpFU32" or
+                     "VCmpFI32" or "VCmpFU32" or "VCmpxFI32" or "VCmpxFU32" or
                      "VCmpFI64" or "VCmpxFI64" or "VCmpFU64" or "VCmpxFU64")
             {
                 condition = "false";
@@ -1586,14 +1580,15 @@ public static partial class Gen5MslTranslator
                     "Eq" => ("==", false),
                     "Le" => ("<=", false),
                     "Gt" => (">", false),
-                    "Lg" => ("!=", false),
+                    // Less-or-greater: ordered, so false on NaN (C's != is true there).
+                    "Lg" => ("<>", false),
                     "Ge" => (">=", false),
                     "Neq" => ("==", true),
                     "Nlt" => ("<", true),
                     "Nle" => ("<=", true),
                     "Ngt" => (">", true),
                     "Nge" => (">=", true),
-                    "Nlg" => ("!=", true),
+                    "Nlg" => ("<>", true),
                     _ => (string.Empty, false),
                 };
                 if (op.Length == 0)
@@ -1608,7 +1603,9 @@ public static partial class Gen5MslTranslator
                 var right = opcode.EndsWith("F16", StringComparison.Ordinal)
                     ? F16(instruction, 1)
                     : F(instruction, 1);
-                var comparison = $"({left} {op} {right})";
+                var comparison = op == "<>"
+                    ? $"({left} < {right} || {left} > {right})"
+                    : $"({left} {op} {right})";
                 condition = unordered ? $"(!{comparison})" : comparison;
             }
             else
@@ -1899,18 +1896,20 @@ public static partial class Gen5MslTranslator
             Gen5ShaderInstruction instruction,
             CubeCoordinate coordinate)
         {
-            var x = Temp("float", F(instruction, 0));
-            var y = Temp("float", F(instruction, 1));
-            var z = Temp("float", F(instruction, 2));
-            var amaxXY = Temp("float", $"fmax(fabs({x}), fabs({y}))");
-            var amax = Temp("float", $"fmax(fabs({z}), {amaxXY})");
+            // The coordinates are f32 operands, so a denormal is a zero of its sign.
+            var x = Temp("float", $"sharpemu_flush_f32_denorm({F(instruction, 0)})");
+            var y = Temp("float", $"sharpemu_flush_f32_denorm({F(instruction, 1)})");
+            var z = Temp("float", $"sharpemu_flush_f32_denorm({F(instruction, 2)})");
+            // The conditions are the ISA's pseudo-code, ordered compares included: with a NaN
+            // coordinate they are false, where fmax would skip the NaN.
+            var isZMax = Temp("bool", $"fabs({z}) >= fabs({x}) && fabs({z}) >= fabs({y})");
+            var yGeX = Temp("bool", $"fabs({y}) >= fabs({x})");
             if (coordinate == CubeCoordinate.Ma)
             {
-                return FloatResult(instruction, $"2.0f * {amax}");
+                // 2.0 * the major axis coordinate itself, sign included (ISA 12.12 V_CUBEMA_F32).
+                return FloatResult(instruction, $"2.0f * ({isZMax} ? {z} : ({yGeX} ? {y} : {x}))");
             }
 
-            var isZMax = Temp("bool", $"fabs({z}) >= {amaxXY}");
-            var yGeX = Temp("bool", $"fabs({y}) >= fabs({x})");
             var isYMax = Temp("bool", $"!{isZMax} && {yGeX}");
             switch (coordinate)
             {
@@ -2862,6 +2861,28 @@ public static partial class Gen5MslTranslator
             return (OutputModifierApplies(halfOrDouble) ? outputModifier : 0u, clamp);
         }
 
+        /// <summary>V_SQRT/RSQ/LOG/SIN/COS_F32: a NaN made from a number (sqrt of a negative, sin of an
+        /// infinity) is 0xFFC00000, which RDNA2 ISA 12.8 gives in its functional examples
+        /// (V_SQRT_F32(0xff800000) => 0xffc00000, likewise V_RSQ, V_LOG, V_SIN, V_COS); Metal's NaN
+        /// is positive. A NaN operand passes through. Sin and cos reduce the operand to one cycle first.</summary>
+        private string InvalidNanF32Result(Gen5ShaderInstruction instruction, string function, string? cycle = null)
+        {
+            var operand = Temp("float", F(instruction, 0));
+            var argument = cycle is null
+                ? $"sharpemu_flush_f32_denorm({operand})"
+                : $"sharpemu_trig_cycle_f32({operand}, {cycle}) * {TauLiteral}";
+            return FloatResult(instruction, $"sharpemu_invalid_nan_f32({function}({argument}), {operand})");
+        }
+
+        /// <summary>V_FRACT_F32: D = S0 + -floor(S0) (RDNA2 ISA 12.8), so an infinity gives inf + -inf, a
+        /// NaN (0xFFC00000 as V_SQRT_F32 and the other invalid results); Metal's fract(inf) is 0.
+        /// Metal's fract already stops short of 1.0 for a tiny negative operand.</summary>
+        private string EmitFractF32(Gen5ShaderInstruction instruction)
+        {
+            var operand = Temp("float", F(instruction, 0));
+            return FloatResult(instruction, $"(isinf({operand}) ? as_type<float>(0xFFC00000u) : fract({operand}))");
+        }
+
         private bool OutputModifierApplies(bool halfOrDouble) =>
             !_request.IeeeMode && (_request.FloatMode & (halfOrDouble ? 0x80u : 0x20u)) == 0;
 
@@ -2957,6 +2978,16 @@ public static partial class Gen5MslTranslator
         /// <summary>The f32 bits of an operand read by a bit-exact path, with a denormal flushed
         /// to a zero of its sign when FLOAT_MODE flushes f32 input denormals (bit 4 clear), as
         /// the float paths get from Metal.</summary>
+        /// <summary>The f32 bits of a result of a bit-exact path, with a denormal flushed to a zero of
+        /// its sign when FLOAT_MODE flushes f32 output denormals (bit 5 clear; RDNA2 ISA 6.4).</summary>
+        private string FlushOutputDenormalF32(string bits)
+        {
+            var value = Temp("uint", bits);
+            return (_request.FloatMode & 0x20u) != 0
+                ? value
+                : Temp("uint", $"(({value} & 0x7F800000u) == 0u) ? ({value} & 0x80000000u) : {value}");
+        }
+
         private string FlushInputDenormalF32(string bits)
         {
             var value = Temp("uint", bits);
