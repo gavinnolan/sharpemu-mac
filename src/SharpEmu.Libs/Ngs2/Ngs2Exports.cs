@@ -10,7 +10,7 @@ using System.Threading;
 
 namespace SharpEmu.Libs.Ngs2;
 
-public static class Ngs2Exports
+public static partial class Ngs2Exports
 {
     private const int OrbisNgs2ErrorInvalidOutAddress = unchecked((int)0x804A0053);
     private const int OrbisNgs2ErrorInvalidSystemHandle = unchecked((int)0x804A0230);
@@ -55,9 +55,16 @@ public static class Ngs2Exports
         public uint Uid { get; }
         public int GrainSamples { get; set; } = DefaultGrainSamples;
         public int SampleRate { get; set; } = DefaultSampleRate;
+        public SystemDescription Description { get; init; } = SystemDescription.Default;
+        public ulong UserData { get; set; }
+        public long RenderCount { get; set; }
     }
 
-    private sealed record RackState(ulong SystemHandle, uint RackId);
+    private sealed record RackState(ulong SystemHandle, uint RackId)
+    {
+        public RackDescription Description { get; init; } = RackDescription.Default;
+        public ulong UserData { get; set; }
+    }
 
     private sealed class VoiceState
     {
@@ -88,7 +95,10 @@ public static class Ngs2Exports
         ExportName = "sceNgs2SystemCreateWithAllocator",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceNgs2")]
-    public static int Ngs2SystemCreateWithAllocator(CpuContext ctx)
+    public static int Ngs2SystemCreateWithAllocator(CpuContext ctx) =>
+        CreateSystem(ctx, bufferInfoAddress: 0);
+
+    private static int CreateSystem(CpuContext ctx, ulong bufferInfoAddress)
     {
         var outHandleAddress = ctx[CpuRegister.Rdx];
         if (outHandleAddress == 0)
@@ -104,7 +114,10 @@ public static class Ngs2Exports
 
         lock (StateGate)
         {
-            Systems[handle] = new SystemState(unchecked((uint)Interlocked.Increment(ref _nextUid)));
+            Systems[handle] = new SystemState(unchecked((uint)Interlocked.Increment(ref _nextUid)))
+            {
+                Description = ReadSystemDescription(ctx, ctx[CpuRegister.Rdi], bufferInfoAddress),
+            };
         }
 
         return SetReturn(ctx, 0);
@@ -122,7 +135,7 @@ public static class Ngs2Exports
         ExportName = "sceNgs2SystemCreate",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceNgs2")]
-    public static int Ngs2SystemCreate(CpuContext ctx) => Ngs2SystemCreateWithAllocator(ctx);
+    public static int Ngs2SystemCreate(CpuContext ctx) => CreateSystem(ctx, ctx[CpuRegister.Rsi]);
 
     [SysAbiExport(
         Nid = "u-WrYDaJA3k",
@@ -157,7 +170,10 @@ public static class Ngs2Exports
         ExportName = "sceNgs2RackCreateWithAllocator",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceNgs2")]
-    public static int Ngs2RackCreateWithAllocator(CpuContext ctx)
+    public static int Ngs2RackCreateWithAllocator(CpuContext ctx) =>
+        CreateRack(ctx, bufferInfoAddress: 0);
+
+    private static int CreateRack(CpuContext ctx, ulong bufferInfoAddress)
     {
         var systemHandle = ctx[CpuRegister.Rdi];
         var rackId = unchecked((uint)ctx[CpuRegister.Rsi]);
@@ -202,7 +218,15 @@ public static class Ngs2Exports
                 _rackZeroBootstrapAvailable = false;
             }
 
-            Racks[handle] = new RackState(systemHandle, rackId);
+            Racks[handle] = new RackState(systemHandle, rackId)
+            {
+                Description = ReadRackDescription(
+                    ctx,
+                    rackId,
+                    ctx[CpuRegister.Rdx],
+                    bufferInfoAddress,
+                    unchecked((uint)Interlocked.Increment(ref _nextUid))),
+            };
         }
 
         return SetReturn(ctx, 0);
@@ -215,7 +239,7 @@ public static class Ngs2Exports
         ExportName = "sceNgs2RackCreate",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceNgs2")]
-    public static int Ngs2RackCreate(CpuContext ctx) => Ngs2RackCreateWithAllocator(ctx);
+    public static int Ngs2RackCreate(CpuContext ctx) => CreateRack(ctx, ctx[CpuRegister.Rcx]);
 
     [SysAbiExport(
         Nid = "lCqD7oycmIM",
@@ -581,6 +605,14 @@ public static class Ngs2Exports
         }
 
         var count = Interlocked.Increment(ref _renderCount);
+        lock (StateGate)
+        {
+            if (Systems.TryGetValue(systemHandle, out var renderedSystem))
+            {
+                renderedSystem.RenderCount++;
+            }
+        }
+
         if (ShouldTrace() && (count <= 4 || count % 200 == 0))
         {
             Console.Error.WriteLine(
@@ -1161,31 +1193,4 @@ public static class Ngs2Exports
         ctx[CpuRegister.Rax] = unchecked((ulong)result);
         return result;
     }
-    [SysAbiExport(
-        Nid = "xa8oL9dmXkM",
-        ExportName = "sceNgs2PanInit",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceNgs2")]
-    public static int Ngs2PanInit(CpuContext ctx) => ctx.SetReturn(0);
-
-    [SysAbiExport(
-        Nid = "1WsleK-MTkE",
-        ExportName = "sceNgs2GeomCalcListener",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceNgs2")]
-    public static int Ngs2GeomCalcListener(CpuContext ctx) => ctx.SetReturn(0);
-
-    [SysAbiExport(
-        Nid = "0lbbayqDNoE",
-        ExportName = "sceNgs2GeomResetSourceParam",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceNgs2")]
-    public static int Ngs2GeomResetSourceParam(CpuContext ctx) => ctx.SetReturn(0);
-
-    [SysAbiExport(
-        Nid = "7Lcfo8SmpsU",
-        ExportName = "sceNgs2GeomResetListenerParam",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceNgs2")]
-    public static int Ngs2GeomResetListenerParam(CpuContext ctx) => ctx.SetReturn(0);
 }
