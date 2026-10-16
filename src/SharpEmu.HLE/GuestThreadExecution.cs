@@ -312,6 +312,26 @@ public static class GuestThreadExecution
     }
 
     /// <summary>
+    /// Raised on a scheduler guest thread whose start routine returned (including through
+    /// pthread_exit), before the thread is marked exited, with the thread still current and
+    /// no scheduler lock held. Libs run TLS-key and thread_atexit destructors here, as
+    /// libthr does at thread exit.
+    /// </summary>
+    public static event Action<CpuContext>? GuestThreadEntryReturned;
+
+    public static void NotifyGuestThreadEntryReturned(CpuContext context)
+    {
+        try
+        {
+            GuestThreadEntryReturned?.Invoke(context);
+        }
+        catch (Exception error)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] thread-exit destructors failed: {error.Message}");
+        }
+    }
+
+    /// <summary>
     /// Fired by an HLE call that is doing real, progressing work synchronously
     /// on the guest thread but can legitimately take longer than the native
     /// backend's stall-watchdog window (e.g. a first-boot asset-tree index).

@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE;
 using System.Threading;
+using SharpEmu.Libs.Threading;
 
 namespace SharpEmu.Libs.Kernel;
 
@@ -257,7 +258,8 @@ public static class KernelExports
             threadHandle,
             name,
             priority,
-            affinityMask);
+            affinityMask,
+            KernelPthreadExtendedCompatExports.GetThreadStartDetachState(ctx, attrAddress));
         if (threadIdAddress != 0 && !ctx.TryWriteUInt64(threadIdAddress, threadHandle))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
@@ -325,8 +327,7 @@ public static class KernelExports
     {
         var value = ctx[CpuRegister.Rdi];
         // Run cleanup on the still-executable thread before unwinding it.
-        KernelPthreadExtendedCompatExports.RunThreadLocalDestructors(ctx);
-        KernelMemoryCompatExports.RunThreadDtors(ctx);
+        KernelPthreadBarrierCancelCompatExports.RunThreadExitDestructors(ctx);
         GuestThreadExecution.RequestCurrentEntryExit("scePthreadExit", value);
         ctx[CpuRegister.Rax] = value;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -340,8 +341,7 @@ public static class KernelExports
     public static int PosixPthreadExit(CpuContext ctx)
     {
         var value = ctx[CpuRegister.Rdi];
-        KernelPthreadExtendedCompatExports.RunThreadLocalDestructors(ctx);
-        KernelMemoryCompatExports.RunThreadDtors(ctx);
+        KernelPthreadBarrierCancelCompatExports.RunThreadExitDestructors(ctx);
         GuestThreadExecution.RequestCurrentEntryExit("pthread_exit", value);
         ctx[CpuRegister.Rax] = value;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -354,6 +354,21 @@ public static class KernelExports
         LibraryName = "libKernel")]
     public static int PthreadJoin(CpuContext ctx)
     {
+        var errno = PthreadJoinCore(ctx);
+        return errno == 0 ? ctx.SetReturn(0) : GuestErrno.ReturnSce(ctx, errno);
+    }
+
+    [SysAbiExport(
+        Nid = "h9CcP3J0oVM",
+        ExportName = "pthread_join",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixPthreadJoin(CpuContext ctx) => GuestErrno.ReturnPosix(ctx, PthreadJoinCore(ctx));
+
+    // libthr: joining yourself is EDEADLK, a detached thread EINVAL, an unknown or
+    // already-joined thread ESRCH. Returns the errno.
+    private static int PthreadJoinCore(CpuContext ctx)
+    {
         var threadId = ctx[CpuRegister.Rdi];
         var returnValueAddress = ctx[CpuRegister.Rsi];
 
@@ -363,42 +378,36 @@ public static class KernelExports
                 $"[LOADER][TRACE] pthread_join: thread=0x{threadId:X16} retval_out=0x{returnValueAddress:X16}");
         }
 
+        if (threadId != 0 && threadId == KernelPthreadState.GetCurrentThreadHandle())
+        {
+            return GuestErrno.EDEADLK;
+        }
+
+        var joinCheck = threadId == 0 ? GuestErrno.ESRCH : KernelPthreadExtendedCompatExports.BeginJoin(threadId);
+        if (joinCheck != 0)
+        {
+            return joinCheck;
+        }
+
         var returnValue = 0UL;
         if (GuestThreadExecution.Scheduler is { } scheduler &&
             !scheduler.TryJoinThread(ctx, threadId, out returnValue, out var error))
         {
+            KernelPthreadExtendedCompatExports.AbortJoin(threadId);
             Console.Error.WriteLine(
                 $"[LOADER][ERROR] pthread_join: thread=0x{threadId:X16}: {error}");
-            var result = string.Equals(
-                error,
-                "thread cannot join itself",
-                StringComparison.Ordinal)
-                ? OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT
-                : OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
-            ctx[CpuRegister.Rax] = unchecked((ulong)(int)result);
-            return (int)result;
+            return string.Equals(error, "thread cannot join itself", StringComparison.Ordinal)
+                ? GuestErrno.EDEADLK
+                : GuestErrno.ESRCH;
         }
 
         if (returnValueAddress != 0 &&
             !ctx.TryWriteUInt64(returnValueAddress, returnValue))
         {
-            ctx[CpuRegister.Rax] =
-                unchecked((ulong)(int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            return GuestErrno.EFAULT;
         }
 
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    [SysAbiExport(
-        Nid = "h9CcP3J0oVM",
-        ExportName = "pthread_join",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libKernel")]
-    public static int PosixPthreadJoin(CpuContext ctx)
-    {
-        return PthreadJoin(ctx);
+        return 0;
     }
 
     [SysAbiExport(

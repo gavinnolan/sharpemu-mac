@@ -6153,6 +6153,14 @@ public sealed unsafe partial class DirectExecutionBackend :
 			var exitReason = resumeContinuation
 				? ExecuteBlockedGuestThreadContinuation(thread.Context, continuation, thread.Name, out var blockReason)
 				: ExecuteGuestThreadEntry(thread.Context, thread.EntryPoint, thread.Name, out blockReason);
+			if (exitReason == GuestNativeCallExitReason.Returned && thread.Recycler is null)
+			{
+				// Thread exit runs TLS-key and thread_atexit destructors (pthread_exit already
+				// ran them; the hook skips those). Keep the start routine's return value.
+				var returnedRax = thread.Context[CpuRegister.Rax];
+				GuestThreadExecution.NotifyGuestThreadEntryReturned(thread.Context);
+				thread.Context[CpuRegister.Rax] = returnedRax;
+			}
 			using (LockGate("RunGuestThread.exit"))
 			{
 				RecordGuestThreadFlow(thread, GuestThreadFlowProfile.EventKind.RunStopped, blockReason);
