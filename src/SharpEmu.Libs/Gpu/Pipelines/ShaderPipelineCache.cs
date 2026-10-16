@@ -463,8 +463,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
     // CB_COLOR_INFO.BLEND_CLAMP on a FLOAT target clamps the colour to [0, 1]; normalized
     // targets clamp by their encoding. Without blending the program saturates its output.
-    // With blending the CB clamps the blend inputs and the blend result, which the host's
-    // fixed-function blend cannot do, so that combination is refused.
+    // With blending the CB also clamps the destination and the blend result, which the host's
+    // fixed-function blend cannot do: documented deviation, only the source is clamped.
     private static bool ClampsFloatOutput(ContextRegisters context, uint slot)
     {
         const uint BlendClamp = 1u << 15, BlendBypass = 1u << 16, NumberTypeFloat = 7;
@@ -476,8 +476,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         if (context.BlendControls[slot].Enable && (words.Info & BlendBypass) == 0)
         {
-            throw GpuFatal.Fatal(
-                $"BLEND_CLAMP on a blended float color target is not supported: slot={slot} layout={(uint)words.Layout}.");
+            ShaderCompilerWarnings.WarnOnce(
+                "blend-clamp-blended-float",
+                $"BLEND_CLAMP on a blended float color target clamps the source only, not the blend result: " +
+                $"slot={slot} layout={(uint)words.Layout}.");
         }
 
         return true;
@@ -872,7 +874,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
     // DB_ALPHA_TO_MASK turns the alpha of MRT0's export into sample coverage unless the pixel
     // program opts out (DB_SHADER_CONTROL.ALPHA_TO_MASK_DISABLE). The host takes the alpha of
-    // its first color output, so that output has to be the one export 0 feeds.
+    // its first color output, so that output has to be the one export 0 feeds; otherwise the
+    // draw runs without alpha to coverage (documented deviation, warned once).
     private static bool AlphaToCoverageEnabled(ReadOnlySpan<ColorTargetState> colors, ContextRegisters context, bool pixelActive)
     {
         if (!pixelActive || (context.AlphaToMask & 1u) == 0 || context.ShaderInterface.DepthShaderControl.AlphaToMaskDisable)
@@ -882,9 +885,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         if (colors.Length == 0 || PixelExportRouting.ExportForSlot(context.ShaderInterface, colors[0].Slot) != 0)
         {
-            throw GpuFatal.Fatal(
-                $"Alpha to coverage needs MRT0's export at the first color attachment: attachments={colors.Length} " +
-                $"firstSlot={(colors.Length == 0 ? -1 : (int)colors[0].Slot)} dbAlphaToMask=0x{context.AlphaToMask:X8}.");
+            ShaderCompilerWarnings.WarnOnce(
+                "alpha-to-coverage-without-mrt0",
+                $"Alpha to coverage without MRT0's export at the first color attachment runs without coverage: " +
+                $"attachments={colors.Length} firstSlot={(colors.Length == 0 ? -1 : (int)colors[0].Slot)} " +
+                $"dbAlphaToMask=0x{context.AlphaToMask:X8}.");
+            return false;
         }
 
         return true;

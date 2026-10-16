@@ -222,9 +222,25 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        if (sourceImage.Shape.SampleCount <= 1)
+        var sameSize =
+            Math.Max(sourceImage.Shape.Width >> (int)sourceMip, 1) == Math.Max(destinationImage.Shape.Width >> (int)destinationMip, 1) &&
+            Math.Max(sourceImage.Shape.Height >> (int)sourceMip, 1) == Math.Max(destinationImage.Shape.Height >> (int)destinationMip, 1);
+        var averages = sourceImage.Shape.SampleCount > 1 && sameSize &&
+            sourceImage.Shape.PixelFormat == destinationImage.Shape.PixelFormat && !IsIntegerFormat(sourceImage.Shape.PixelFormat);
+        if (sourceImage.Shape.SampleCount > 1 && !averages && !IsIntegerFormat(sourceImage.Shape.PixelFormat))
         {
-            // One sample per pixel: the resolve is a copy.
+            // Documented deviation: a resolve between formats or sizes the resolve pass cannot
+            // take copies sample zero, as this host did before it averaged.
+            MetalV2Diagnostics.WarnOnce(
+                "resolve-sample-zero",
+                $"A multisample resolve between these images copies sample 0 instead of averaging: " +
+                $"source={sourceImage.Shape.PixelFormat} destination={destinationImage.Shape.PixelFormat} sameSize={sameSize}.");
+        }
+
+        if (!averages)
+        {
+            // One sample per pixel: the resolve is a copy. An integer format resolves to
+            // sample 0 on the CB, which the same copy gives.
             CopyTextureSubresource(
                 sourceImage,
                 destinationImage,
@@ -242,7 +258,7 @@ internal sealed partial class MetalRenderHost
 
     // The CB resolve (CB_COLOR_CONTROL MODE = RESOLVE) averages the samples of each pixel:
     // a pass with no draws whose attachment stores and resolves into the destination.
-    // Integer formats take sample 0 on the GPU, which a Metal resolve cannot express.
+    // The caller sends only equal-format, equal-size, non-integer subresources here.
     private void EncodeResolvePass(
         MetalCachedImage source,
         uint sourceMip,
@@ -251,22 +267,8 @@ internal sealed partial class MetalRenderHost
         uint destinationMip,
         uint destinationLayer)
     {
-        if (source.Shape.PixelFormat != destination.Shape.PixelFormat || IsIntegerFormat(source.Shape.PixelFormat))
-        {
-            throw Fatal(
-                $"A multisample resolve between these formats is not supported: source={source.Shape.PixelFormat} " +
-                $"destination={destination.Shape.PixelFormat} samples={source.Shape.SampleCount}.");
-        }
-
         var width = Math.Max(source.Shape.Width >> (int)sourceMip, 1);
         var height = Math.Max(source.Shape.Height >> (int)sourceMip, 1);
-        if (width != Math.Max(destination.Shape.Width >> (int)destinationMip, 1) ||
-            height != Math.Max(destination.Shape.Height >> (int)destinationMip, 1))
-        {
-            throw Fatal(
-                $"A multisample resolve between subresources of different sizes is not supported: source={width}x{height} " +
-                $"destination={destination.Shape.Width >> (int)destinationMip}x{destination.Shape.Height >> (int)destinationMip}.");
-        }
 
         _imageCache.PrepareImageWrite(destination);
         var context = ((IMetalImageCacheOwner)this).BeginTransfer(
