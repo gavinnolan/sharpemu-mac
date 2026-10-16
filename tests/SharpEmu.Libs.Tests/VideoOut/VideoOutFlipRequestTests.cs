@@ -297,6 +297,56 @@ public sealed class VideoOutFlipRequestTests : IDisposable
     }
 
     [Fact]
+    public void PreVblankStartIsRaisedAheadOfTheVblankOfItsTick()
+    {
+        _context[CpuRegister.Rdi] = StatusAddress;
+        Assert.Equal(0, KernelEventQueueCompatExports.KernelCreateEqueue(_context));
+        var bytes = new byte[8];
+        Assert.True(_memory.TryRead(StatusAddress, bytes));
+        var queue = BinaryPrimitives.ReadUInt64LittleEndian(bytes);
+        try
+        {
+            _context[CpuRegister.Rdi] = queue;
+            _context[CpuRegister.Rsi] = (ulong)_handle;
+            _context[CpuRegister.Rdx] = 0xA1;
+            Assert.Equal(0, VideoOutExports.VideoOutAddPreVblankStartEvent(_context));
+            _context[CpuRegister.Rdi] = queue;
+            _context[CpuRegister.Rsi] = (ulong)_handle;
+            _context[CpuRegister.Rdx] = 0xB2;
+            Assert.Equal(0, VideoOutExports.VideoOutAddVblankEvent(_context));
+
+            Assert.True(_memory.TryWrite(MemoryBase + 0x400, BitConverter.GetBytes(1_000_000u)));
+            _context[CpuRegister.Rdi] = queue;
+            _context[CpuRegister.Rsi] = MemoryBase + 0x200;
+            _context[CpuRegister.Rdx] = 2;
+            _context[CpuRegister.Rcx] = MemoryBase + 0x300;
+            _context[CpuRegister.R8] = MemoryBase + 0x400;
+            Assert.Equal(0, KernelEventQueueCompatExports.KernelWaitEqueue(_context));
+
+            _context[CpuRegister.Rdi] = MemoryBase + 0x200;
+            Assert.Equal(2, VideoOutExports.VideoOutGetEventId(_context));
+            Assert.True(_memory.TryRead(MemoryBase + 0x218, bytes));
+            Assert.Equal(0xA1UL, BinaryPrimitives.ReadUInt64LittleEndian(bytes));
+            _context[CpuRegister.Rdi] = MemoryBase + 0x200;
+            _context[CpuRegister.Rsi] = StatusAddress;
+            Assert.Equal(0, VideoOutExports.VideoOutGetEventData(_context));
+            Assert.True(_memory.TryRead(StatusAddress, bytes));
+            Assert.True(BinaryPrimitives.ReadUInt64LittleEndian(bytes) >= 1);
+        }
+        finally
+        {
+            _context[CpuRegister.Rdi] = queue;
+            _context[CpuRegister.Rsi] = (ulong)_handle;
+            Assert.Equal(0, VideoOutExports.VideoOutDeletePreVblankStartEvent(_context));
+            _context[CpuRegister.Rdi] = queue;
+            _context[CpuRegister.Rsi] = (ulong)_handle;
+            Assert.Equal(0, VideoOutExports.VideoOutDeleteVblankEvent(_context));
+            _context[CpuRegister.Rdi] = queue;
+            Assert.Equal(0, KernelEventQueueCompatExports.KernelDeleteEqueue(_context));
+        }
+    }
+
+    [Fact]
     public void OutputModeEventIsImmediatelyAvailableAndTracksConfiguration()
     {
         _context[CpuRegister.Rdi] = StatusAddress;

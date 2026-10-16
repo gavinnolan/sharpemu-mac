@@ -187,7 +187,7 @@ public static partial class VideoOutExports
             if (_flipPacingDisabled || !request.GpuQueued) return true;
             if (request.FlipMode == VideoOutDisplayClock.FlipModeVsyncMultiple && request.ReadyTimestamp is null)
                 return false;
-            return VideoOutDisplayClock.NextFlipTimestamp(port.OpenTimestamp, port.LastPresentationTimestamp,
+            return VideoOutDisplayClock.NextFlipTimestamp(port.DisplayClock.AnchorTimestamp, port.LastPresentationTimestamp,
                     timestamp, port.RefreshRate, port.FlipRate, request.FlipMode, port.OutputHeight,
                     port.WindowTop, port.WindowBottom, request.ReadyTimestamp ?? timestamp) <= timestamp;
         }
@@ -211,7 +211,7 @@ public static partial class VideoOutExports
             if (_flipPacingDisabled || !request.GpuQueued) return timestamp;
             if (request.FlipMode == VideoOutDisplayClock.FlipModeVsyncMultiple && request.ReadyTimestamp is null)
                 return long.MaxValue;
-            return VideoOutDisplayClock.NextFlipTimestamp(port.OpenTimestamp, port.LastPresentationTimestamp,
+            return VideoOutDisplayClock.NextFlipTimestamp(port.DisplayClock.AnchorTimestamp, port.LastPresentationTimestamp,
                 timestamp, port.RefreshRate, port.FlipRate, request.FlipMode, port.OutputHeight,
                 port.WindowTop, port.WindowBottom, request.ReadyTimestamp ?? timestamp);
         }

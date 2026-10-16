@@ -53,8 +53,9 @@ public static partial class VideoOutExports
     // SHARPEMU_GUEST_REFRESH_RATE=<Hz> paces the emulated display (vblanks and flips) at
     // that rate instead of 60 Hz. A game that flips every vblank then runs faster than 60 fps;
     // one whose logic counts frames also runs faster.
+    // Fractional rates ("59.94", "119.88") select the console's NTSC-style modes.
     private static readonly uint GuestRefreshRate =
-        uint.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_GUEST_REFRESH_RATE"), out var rate) && rate is >= 30 and <= 1000
+        VideoOutDisplayClock.TryParseRefreshRate(Environment.GetEnvironmentVariable("SHARPEMU_GUEST_REFRESH_RATE"), out var rate)
             ? rate
             : 60;
 
@@ -82,6 +83,7 @@ public static partial class VideoOutExports
     // its distinctness from the flip ident matters for GetEventId/GetEventData.
     private const ulong SceVideoOutInternalEventVblank = 0x40;
     private const ulong SceVideoOutInternalEventOutputMode = 0x8;
+    private const ulong SceVideoOutInternalEventPreVblankStart = 0x42;
     private const short OrbisKernelEventFilterVideoOut = -13;
 
     private static readonly object _stateGate = new();
@@ -281,6 +283,7 @@ public static partial class VideoOutExports
         public VideoOutBufferSlot[] BufferSlots { get; } = CreateBufferSlots();
         public List<FlipEventRegistration> FlipEvents { get; } = new();
         public List<FlipEventRegistration> VblankEvents { get; } = new();
+        public List<FlipEventRegistration> PreVblankEvents { get; } = new();
         public List<FlipEventRegistration> OutputModeEvents { get; } = new();
         public long OpenTimestamp;
         public long LastCpuFlipTimestamp = -1;
@@ -408,7 +411,7 @@ public static partial class VideoOutExports
             return OrbisVideoOutErrorUnsupportedOutputMode;
         }
 
-        return mode == SceVideoOutOutputModeDefault || port.RefreshRate >= 119 ? 1 : 0;
+        return mode == SceVideoOutOutputModeDefault || VideoOutDisplayClock.NominalHz(port.RefreshRate) >= 119 ? 1 : 0;
     }
 
     [SysAbiExport(
@@ -465,7 +468,7 @@ public static partial class VideoOutExports
         {
             // The flip rate is the title's frame-rate target (0 = every vblank, 1 = every
             // second, 2 = every third): a 30 fps mode and a 60 fps mode differ here.
-            Console.Error.WriteLine($"[VIDEOOUT][INFO] flip rate set: handle={handle} rate={rate} target_fps={port.RefreshRate / (rate + 1)}");
+            Console.Error.WriteLine($"[VIDEOOUT][INFO] flip rate set: handle={handle} rate={rate} target_fps={VideoOutDisplayClock.NominalHz(port.RefreshRate) / (rate + 1)}");
         }
 
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -593,7 +596,7 @@ public static partial class VideoOutExports
         BinaryPrimitives.WriteInt32LittleEndian(status[0x00..0x04], resolutionClass);
         BinaryPrimitives.WriteInt32LittleEndian(status[0x04..0x08], hdrOutputSupported ? 2 : 1);
         // The status uses a refresh-rate code, not the frequency used for pacing.
-        var refreshRateCode = refreshRate >= 119
+        var refreshRateCode = VideoOutDisplayClock.NominalHz(refreshRate) >= 119
             ? SceVideoOutRefreshRate119_88Hz
             : SceVideoOutRefreshRate59_94Hz;
         BinaryPrimitives.WriteUInt64LittleEndian(status[0x08..0x10], refreshRateCode);
@@ -986,7 +989,7 @@ public static partial class VideoOutExports
 
         lock (_stateGate)
         {
-            if (port.VblankEvents.Count == 0)
+            if (port.VblankEvents.Count == 0 && port.PreVblankEvents.Count == 0)
             {
                 port.DisplayClock.Advance(Stopwatch.GetTimestamp(), port.RefreshRate);
                 port.PublishedVblankCount = port.DisplayClock.Count;
@@ -1075,7 +1078,85 @@ public static partial class VideoOutExports
             port.VblankEvents.RemoveAll(registration => registration.Equeue == equeue);
         }
 
+        // Vblanks already raised on the queue go with the registration.
+        _ = KernelEventQueueCompatExports.DeleteRegisteredEvent(
+            equeue, SceVideoOutInternalEventVblank, OrbisKernelEventFilterVideoOut);
         TraceVideoOut($"videoout.delete_vblank_event eq=0x{equeue:X16} handle={handle}");
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    /// <summary>
+    /// sceVideoOutAddPreVblankStartEvent(eq, handle, udata): raised on every
+    /// emulated vblank tick just before the vblank event, with its count as data.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "keipklF0pMY",
+        ExportName = "sceVideoOutAddPreVblankStartEvent",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceVideoOut")]
+    public static int VideoOutAddPreVblankStartEvent(CpuContext ctx)
+    {
+        var equeue = ctx[CpuRegister.Rdi];
+        var handle = unchecked((int)ctx[CpuRegister.Rsi]);
+        var userData = ctx[CpuRegister.Rdx];
+        if (!TryGetPort(handle, out var port))
+        {
+            return OrbisVideoOutErrorInvalidHandle;
+        }
+
+        if (!KernelEventQueueCompatExports.IsValidEqueue(equeue))
+        {
+            return OrbisVideoOutErrorInvalidEventQueue;
+        }
+
+        lock (_stateGate)
+        {
+            if (port.VblankEvents.Count == 0 && port.PreVblankEvents.Count == 0)
+            {
+                port.DisplayClock.Advance(Stopwatch.GetTimestamp(), port.RefreshRate);
+                port.PublishedVblankCount = port.DisplayClock.Count;
+            }
+
+            var existingIndex = port.PreVblankEvents.FindIndex(registration => registration.Equeue == equeue);
+            if (existingIndex >= 0)
+            {
+                port.PreVblankEvents[existingIndex] = new FlipEventRegistration(equeue, userData);
+            }
+            else
+            {
+                port.PreVblankEvents.Add(new FlipEventRegistration(equeue, userData));
+            }
+
+            Monitor.PulseAll(_stateGate);
+        }
+
+        StartVblankThreadOnce();
+        TraceVideoOut($"videoout.add_prevblank_event eq=0x{equeue:X16} handle={handle} udata=0x{userData:X16}");
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "elWQ9vERF-Q",
+        ExportName = "sceVideoOutDeletePreVblankStartEvent",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceVideoOut")]
+    public static int VideoOutDeletePreVblankStartEvent(CpuContext ctx)
+    {
+        var equeue = ctx[CpuRegister.Rdi];
+        var handle = unchecked((int)ctx[CpuRegister.Rsi]);
+        if (!TryGetPort(handle, out var port))
+        {
+            return OrbisVideoOutErrorInvalidHandle;
+        }
+
+        lock (_stateGate)
+        {
+            port.PreVblankEvents.RemoveAll(registration => registration.Equeue == equeue);
+        }
+
+        _ = KernelEventQueueCompatExports.DeleteRegisteredEvent(
+            equeue, SceVideoOutInternalEventPreVblankStart, OrbisKernelEventFilterVideoOut);
+        TraceVideoOut($"videoout.delete_prevblank_event eq=0x{equeue:X16} handle={handle}");
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -1197,6 +1278,11 @@ public static partial class VideoOutExports
             return 1;
         }
 
+        if (ident == SceVideoOutInternalEventPreVblankStart)
+        {
+            return 2;
+        }
+
         if (ident == SceVideoOutInternalEventOutputMode)
         {
             return 8;
@@ -1229,6 +1315,7 @@ public static partial class VideoOutExports
         if (filter != OrbisKernelEventFilterVideoOut ||
             (ident != SceVideoOutInternalEventFlip &&
              ident != SceVideoOutInternalEventVblank &&
+             ident != SceVideoOutInternalEventPreVblankStart &&
              ident != SceVideoOutInternalEventOutputMode))
         {
             return OrbisVideoOutErrorInvalidEvent;
@@ -1756,7 +1843,7 @@ public static partial class VideoOutExports
         // for the one QoS class macOS exempts from coalescing.
         SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(
             SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
-        var pending = new List<(ulong Equeue, ulong DataHint, ulong UserData)>();
+        var pending = new List<(ulong Equeue, ulong Ident, ulong DataHint, ulong UserData)>();
         while (Volatile.Read(ref _vblankStopRequested) == 0)
         {
             var next = long.MaxValue;
@@ -1766,7 +1853,7 @@ public static partial class VideoOutExports
                 var now = Stopwatch.GetTimestamp();
                 foreach (var port in _ports.Values)
                 {
-                    if (port.VblankEvents.Count == 0)
+                    if (port.VblankEvents.Count == 0 && port.PreVblankEvents.Count == 0)
                     {
                         continue;
                     }
@@ -1776,9 +1863,15 @@ public static partial class VideoOutExports
                     if (port.DisplayClock.Count <= port.PublishedVblankCount) continue;
                     port.PublishedVblankCount = port.DisplayClock.Count;
                     var dataHint = (port.DisplayClock.Count & 0x0000_FFFF_FFFF_FFFFUL) << 16;
+                    // Pre-vblank start is raised ahead of the vblank of the same tick.
+                    foreach (var registration in port.PreVblankEvents)
+                    {
+                        pending.Add((registration.Equeue, SceVideoOutInternalEventPreVblankStart, dataHint, registration.UserData));
+                    }
+
                     foreach (var registration in port.VblankEvents)
                     {
-                        pending.Add((registration.Equeue, dataHint, registration.UserData));
+                        pending.Add((registration.Equeue, SceVideoOutInternalEventVblank, dataHint, registration.UserData));
                     }
                 }
                 if (next == long.MaxValue)
@@ -1789,11 +1882,11 @@ public static partial class VideoOutExports
                 }
             }
 
-            foreach (var (equeue, dataHint, userData) in pending)
+            foreach (var (equeue, ident, dataHint, userData) in pending)
             {
                 _ = KernelEventQueueCompatExports.TriggerDisplayEvent(
                     equeue,
-                    SceVideoOutInternalEventVblank,
+                    ident,
                     OrbisKernelEventFilterVideoOut,
                     dataHint,
                     userData);
@@ -1815,7 +1908,7 @@ public static partial class VideoOutExports
                 if (!_ports.TryGetValue(handle, out var port)) return false;
                 var now = Stopwatch.GetTimestamp();
                 readyAt ??= now;
-                target = VideoOutDisplayClock.NextFlipTimestamp(port.OpenTimestamp, port.LastCpuFlipTimestamp,
+                target = VideoOutDisplayClock.NextFlipTimestamp(port.DisplayClock.AnchorTimestamp, port.LastCpuFlipTimestamp,
                     now, port.RefreshRate, port.FlipRate, flipMode, port.OutputHeight, port.WindowTop, port.WindowBottom, readyAt.Value);
                 if (_flipPacingDisabled || target <= now)
                 {
