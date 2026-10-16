@@ -1,0 +1,89 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+using Xunit;
+using Xunit.Abstractions;
+
+namespace SharpEmu.Gpu.Metal.Tests.Scenes;
+
+/// <summary>The scene harness itself: one PM4 draw reaches the target through every layer.</summary>
+public sealed class SceneSmokeTests(ITestOutputHelper output) : SceneTestBase(output)
+{
+    private const uint Size = 64;
+
+    [Fact]
+    public void ATriangleFromThePacketStreamLandsOnItsPixels()
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        var target = rig.ColorTarget(Size, Size);
+        var state = new SceneState(Size, Size).ColorTarget(0, target, Size, Size);
+        // Lower-left half of the target (NDC y up): (-1,-1), (1,-1), (-1,1).
+        var pm4 = rig.DrawMesh(new ScenePm4(), state,
+        [
+            SceneVertex.At(-1, -1, 0.5f, 1, 0, 0),
+            SceneVertex.At(1, -1, 0.5f, 1, 0, 0),
+            SceneVertex.At(-1, 1, 0.5f, 1, 0, 0),
+        ]);
+        rig.Submit(pm4);
+        var pixels = rig.Read(target, (int)(Size * Size * 4));
+        // Bottom-left texel is inside, top-right is outside.
+        Assert.Equal(0xFF0000FFu, SceneDraws.Pixel(pixels, Size, 2, Size - 3));
+        Assert.Equal(0u, SceneDraws.Pixel(pixels, Size, Size - 3, 2));
+    }
+
+    [Fact]
+    public void ASampledLinearTextureLandsTexelForPixel()
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        var texels = new byte[Size * Size * 4];
+        for (var index = 0; index < Size * Size; index++)
+        {
+            BitConverter.TryWriteBytes(texels.AsSpan(index * 4), 0xFF000000u | (uint)(index * 2654435761u >> 8 & 0xFFFFFF));
+        }
+
+        var image = rig.LinearImage(Size, Size, 4, texels);
+        var target = rig.ColorTarget(Size, Size);
+        var state = new SceneState(Size, Size).ColorTarget(0, target, Size, Size);
+        uint[] userData = [.. Descriptors.Texture(image, 56, Size, Size), .. Descriptors.Sampler()];
+        rig.Submit(rig.DrawMesh(new ScenePm4(), state, SceneDraws.TexturedQuad(), ScenePrograms.SampledTexture, userData));
+        var pixels = rig.Read(target, (int)(Size * Size * 4));
+        Assert.Equal(texels, pixels);
+    }
+
+    [Fact]
+    public void DepthWrittenByTheDepthBlockReadsBackThroughATexture()
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        var depth = rig.Memory.Allocate(Size * Size * 4 + 0x10000, 0x10000);
+        var state = new SceneState(Size, Size).ColorTarget(0, rig.ColorTarget(Size, Size), Size, Size)
+            .DepthTarget(depth, Size, Size, zFormat: 3).DepthControl(test: true, write: true, CompareFunc.Always);
+        var pm4 = rig.DrawMesh(new ScenePm4(), state, SceneDraws.Quad(0.25f, 1, 1, 1, right: 0f));
+
+        var readback = rig.ColorTarget(Size, Size);
+        var copy = new SceneState(Size, Size).ColorTarget(0, readback, Size, Size, format: 4, numberType: 7);
+        uint[] userData = [.. Descriptors.Texture(depth, 22, Size, Size, tileMode: 24), .. Descriptors.Sampler()];
+        rig.DrawMesh(pm4, copy, SceneDraws.TexturedQuad(), ScenePrograms.SampledTexture, userData);
+        rig.Submit(pm4);
+        var values = rig.Read<float>(readback, (int)(Size * Size));
+        Assert.Equal(0.25f, values[5 * Size + 3]);
+        Assert.Equal(0f, values[5 * Size + Size - 3]);
+    }
+
+    [Fact]
+    public void AComputeDispatchStoresEveryThread()
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        const uint groups = 4;
+        var buffer = rig.Memory.Allocate(groups * 64 * 4, 256);
+        rig.Submit(rig.Dispatch(new ScenePm4(), ScenePrograms.StoreGlobalId, Descriptors.Buffer(buffer, 4, groups * 64, format: 20), groups));
+        var values = rig.Read<uint>(buffer, (int)(groups * 64));
+        for (var index = 0u; index < values.Length; index++)
+        {
+            Assert.Equal(index ^ 0x5A5Au, values[index]);
+        }
+    }
+}
