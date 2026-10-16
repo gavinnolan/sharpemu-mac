@@ -1893,6 +1893,16 @@ public static class KernelPthreadExtendedCompatExports
         return baseAddress + (id << 4);
     }
 
+    /// <summary>The calling thread's guest priority (wait-queue ordering for PRIO objects).</summary>
+    internal static int GetCurrentThreadPriority()
+    {
+        var thread = KernelPthreadState.GetCurrentThreadHandle();
+        lock (_stateGate)
+        {
+            return _threadStates.TryGetValue(thread, out var state) ? state.Priority : DefaultThreadPriority;
+        }
+    }
+
     private static ThreadState GetOrCreateThreadStateLocked(ulong thread)
     {
         if (_threadStates.TryGetValue(thread, out var state))
