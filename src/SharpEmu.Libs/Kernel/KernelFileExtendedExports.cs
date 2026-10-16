@@ -382,13 +382,23 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
-        try
-        {
-            stream.SetLength(length);
-        }
-        catch (IOException)
+        // FreeBSD kern_ftruncate: EINVAL when the fd is not open for writing
+        // (every /app0 descriptor, archive-backed files).
+        if (!stream.CanWrite)
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        try
+        {
+            lock (stream)
+            {
+                stream.SetLength(length);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or NotSupportedException or UnauthorizedAccessException)
+        {
+            return KernelErrno.Sce(HostExceptionToErrno(ex));
         }
 
         ctx[CpuRegister.Rax] = 0;
@@ -420,7 +430,7 @@ public static partial class KernelMemoryCompatExports
 
         if (IsReadOnlyGuestMutationPath(guestPath))
         {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_EROFS;
         }
 
         var hostPath = ResolveGuestPath(guestPath);
@@ -429,18 +439,19 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
+        if (Directory.Exists(hostPath))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_EISDIR;
+        }
+
         try
         {
             using var stream = new FileStream(hostPath, FileMode.Open, FileAccess.Write, GuestFileShare);
             stream.SetLength(length);
         }
-        catch (FileNotFoundException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
-        }
-        catch (IOException)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            return KernelErrno.Sce(HostExceptionToErrno(ex));
         }
 
         ctx[CpuRegister.Rax] = 0;
@@ -473,7 +484,7 @@ public static partial class KernelMemoryCompatExports
 
         if (IsReadOnlyGuestMutationPath(fromGuest) || IsReadOnlyGuestMutationPath(toGuest))
         {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_EROFS;
         }
 
         var fromHost = ResolveGuestPath(fromGuest);
@@ -483,28 +494,10 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
-        try
+        var errno = RenameHostPath(fromHost, toHost);
+        if (errno != 0)
         {
-            if (Directory.Exists(fromHost))
-            {
-                Directory.Move(fromHost, toHost);
-            }
-            else
-            {
-                File.Move(fromHost, toHost, overwrite: true);
-            }
-        }
-        catch (FileNotFoundException)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
-        }
-        catch (DirectoryNotFoundException)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
-        }
-        catch (IOException)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            return KernelErrno.Sce(errno);
         }
 
         InvalidateNegativeStatCacheForPathAndAncestors(toGuest);
@@ -513,6 +506,67 @@ public static partial class KernelMemoryCompatExports
         InvalidateAprFileSizeCache(toHost);
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    /// <summary>
+    /// rename(2) on host paths with FreeBSD semantics: a file replaces a file,
+    /// a directory replaces an empty directory, a file over a directory is
+    /// EISDIR, a directory over a file ENOTDIR, over a non-empty directory
+    /// ENOTEMPTY. Returns 0 or the errno.
+    /// </summary>
+    internal static int RenameHostPath(string fromHost, string toHost)
+    {
+        try
+        {
+            var fromIsDirectory = Directory.Exists(fromHost);
+            if (!fromIsDirectory && !File.Exists(fromHost))
+            {
+                return OrbisErrno.ENOENT;
+            }
+
+            if (string.Equals(
+                    Path.GetFullPath(fromHost),
+                    Path.GetFullPath(toHost),
+                    StringComparison.Ordinal))
+            {
+                return 0;
+            }
+
+            var toIsDirectory = Directory.Exists(toHost);
+            var toIsFile = !toIsDirectory && File.Exists(toHost);
+            if (fromIsDirectory)
+            {
+                if (toIsFile)
+                {
+                    return OrbisErrno.ENOTDIR;
+                }
+
+                if (toIsDirectory)
+                {
+                    if (Directory.EnumerateFileSystemEntries(toHost).Any())
+                    {
+                        return OrbisErrno.ENOTEMPTY;
+                    }
+
+                    Directory.Delete(toHost);
+                }
+
+                Directory.Move(fromHost, toHost);
+                return 0;
+            }
+
+            if (toIsDirectory)
+            {
+                return OrbisErrno.EISDIR;
+            }
+
+            File.Move(fromHost, toHost, overwrite: true);
+            return 0;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return HostExceptionToErrno(ex);
+        }
     }
 
     // ---- Descriptor duplication ----
@@ -534,7 +588,12 @@ public static partial class KernelMemoryCompatExports
 
             // POSIX dup shares the open file description (and offset), which is
             // exactly the shared FileStream reference.
-            var newFd = (int)Interlocked.Increment(ref _nextFileDescriptor);
+            var newFd = AllocateGuestFileDescriptor();
+            if (newFd < 0)
+            {
+                return KernelErrno.Posix(ctx, OrbisErrno.EMFILE);
+            }
+
             _openFiles[newFd] = stream;
             ctx[CpuRegister.Rax] = unchecked((ulong)newFd);
         }
@@ -558,18 +617,27 @@ public static partial class KernelMemoryCompatExports
                     notFoundErrno: Ebadf);
             }
 
+            if (newFd < 0 || newFd >= GuestDescriptors.Limit)
+            {
+                return KernelErrno.Posix(ctx, OrbisErrno.EBADF);
+            }
+
             if (oldFd == newFd)
             {
                 ctx[CpuRegister.Rax] = unchecked((ulong)newFd);
                 return (int)OrbisGen2Result.ORBIS_GEN2_OK;
             }
 
-            // If newFd names an open file, dup2 closes it first.
-            if (_openFiles.TryGetValue(newFd, out var existing) && !ReferenceEquals(existing, stream))
+            // If newFd names an open file, dup2 closes it first; the stream
+            // itself survives while another descriptor still shares it.
+            if (_openFiles.TryGetValue(newFd, out var existing) &&
+                !ReferenceEquals(existing, stream) &&
+                !IsStreamSharedLocked(existing, newFd))
             {
                 try { existing.Dispose(); } catch (IOException) { }
             }
 
+            GuestDescriptors.TryClaim(newFd);
             _openFiles[newFd] = stream;
             ctx[CpuRegister.Rax] = unchecked((ulong)newFd);
         }
@@ -609,7 +677,18 @@ public static partial class KernelMemoryCompatExports
                         return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
                     }
 
-                    var newFd = Math.Max((int)Interlocked.Increment(ref _nextFileDescriptor), argument);
+                    // F_DUPFD: the lowest free descriptor >= argument.
+                    if (argument < 0 || argument >= GuestDescriptors.Limit)
+                    {
+                        return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+                    }
+
+                    var newFd = AllocateGuestFileDescriptor(argument);
+                    if (newFd < 0)
+                    {
+                        return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_EMFILE;
+                    }
+
                     _openFiles[newFd] = stream;
                     ctx[CpuRegister.Rax] = unchecked((ulong)newFd);
                 }

@@ -130,6 +130,7 @@ internal static class KernelSocketCompatExports
             }
 
             DisposeEmulatedSocket(state);
+            KernelMemoryCompatExports.ReleaseGuestFileDescriptor(fd);
             return true;
         }
     }
@@ -561,6 +562,12 @@ internal static class KernelSocketCompatExports
         }
 
         var fd = KernelMemoryCompatExports.AllocateGuestFileDescriptor();
+        if (fd < 0)
+        {
+            datagramSocket?.Dispose();
+            return PosixSocketFailure(ctx, OrbisErrno.EMFILE);
+        }
+
         lock (Gate)
         {
             Sockets[fd] = new EmulatedSocketState

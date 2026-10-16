@@ -53,4 +53,35 @@ Each entry: **Name** — observable effect · chosen behaviour · pinning test.
 
 ## Filesystem
 
+- **Permission bits** — stat reports synthetic modes: directories 0755,
+  files 0644, symlinks 0755, device nodes 0666 and pipes 0600, all owned by
+  uid/gid 0. Host permissions are not consulted. `access(X_OK)` follows these
+  bits, so it is EACCES for a regular file.
+- **Inode and device numbers** — `st_ino`/`d_fileno` are a 32-bit hash of the
+  host path, and `st_dev` is a hash of the mount root. They are stable and
+  never 0, but two paths can collide.
+- **Descriptor limit** — the guest fd table holds 4096 descriptors
+  (lowest free first, from 3). EMFILE comes from that table, not from the host
+  limit.
+- **"$/" app-root alias** — a path beginning "$/" resolves under /app0,
+  because AMPR/APR asset tables use that spelling. "$\\" is not an alias:
+  '\\' is an ordinary filename character on the console.
+- **Mount names are case-sensitive** — "/app0" matches, "/APP0" does not.
+  Below the mount, case follows the host filesystem, which is
+  case-insensitive on default macOS and Windows volumes.
+- **Symlinks** — a host symlink inside a mount resolves only when its target
+  stays inside that mount. One that leaves the mount makes the path resolve to
+  nothing (ENOENT), as a sandbox guard.
+- **Negative stat cache** — misses are cached only for the read-only game
+  image (/app0, when it is a plain read-only directory). Writable mounts are
+  always re-probed.
+- **getcwd** — reports "/app0", the directory relative paths resolve
+  against. `getcwd(NULL, 0)` is EINVAL because no guest allocator backs it.
+- **pipe** — pipes have an unbounded buffer, so writes never block. A write
+  with no reader is EPIPE without SIGPIPE. Both ends are one-way, whereas
+  FreeBSD pipes are bidirectional.
+- **statfs** — the file-system type names ("pfs" for the game image,
+  "exfatfs" elsewhere, "devfs") and the 64 KiB block size are synthetic. Block
+  counts come from the host volume; the game image reports no free space.
+
 ## Modules and libc
