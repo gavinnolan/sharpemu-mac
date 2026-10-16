@@ -930,8 +930,12 @@ internal sealed partial class MetalRenderHost
             return _deviceAddressTable;
         }
 
-        var gpuMemory = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.Current;
-        var spanVersion = gpuMemory?.SpanVersion ?? -1;
+        // The table is the registry's mapped spans. Without a registry it would be empty,
+        // and every load through a raw guest pointer would read zero and every store and
+        // atomic would be dropped without a word.
+        var gpuMemory = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.Current ??
+            throw Fatal("A device-address program needs the guest GPU memory registry to build its page table.");
+        var spanVersion = gpuMemory.SpanVersion;
         if (spanVersion != _deviceAddressSpanVersion)
         {
             RebuildDeviceAddressEntries(gpuMemory);
@@ -966,7 +970,7 @@ internal sealed partial class MetalRenderHost
     // backing is not contiguous (fragmented flexible memory) or crosses a window splits
     // into several entries; pages with no window are left out, never copied, because a
     // shader store through a copied page would not reach guest memory.
-    private void RebuildDeviceAddressEntries(SharpEmu.HLE.GpuMemory.GuestGpuMemory? gpuMemory)
+    private void RebuildDeviceAddressEntries(SharpEmu.HLE.GpuMemory.GuestGpuMemory gpuMemory)
     {
         _deviceAddressEntries.Clear();
         // The scan resolves every mapped span, which marks windows this submission may
@@ -974,7 +978,7 @@ internal sealed partial class MetalRenderHost
         var touchedBefore = _guestMemory.TouchedWindows;
         _guestMemory.ClearTouchedWindows();
         var spanCount = 0;
-        gpuMemory?.ForEachSpan((address, size) =>
+        gpuMemory.ForEachSpan((address, size) =>
         {
             spanCount++;
             var page = DeviceAddressPaging.PageSize;
