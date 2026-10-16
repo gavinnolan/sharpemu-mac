@@ -41,7 +41,7 @@ public sealed class MslClipSpaceTests(ITestOutputHelper output)
     {
         var shader = CompileVertex(Triangle(1, 0, 1, 0, 0, 1), ScreenSpace);
         Assert.Matches(
-            @"t\d+\.x = \(t\d+\.x \* as_type<float>\(0x3F000000u\) \+ as_type<float>\(0x41800000u\)\) / as_type<float>\(0x46000000u\) - 1\.0f;",
+            @"t\d+\.x = \(t\d+\.x \* as_type<float>\(0x3F000000u\) \+ as_type<float>\(0x41800000u\) \* t\d+\.w\) / as_type<float>\(0x46000000u\) - t\d+\.w;",
             shader.Source);
         Assert.Matches(@"t\d+\.y = -t\d+\.y;", shader.Source);
         AssertCompiles(shader);

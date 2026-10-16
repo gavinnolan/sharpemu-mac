@@ -229,9 +229,10 @@ public static partial class Gen5MslTranslator
 
         /// <summary>
         /// Brings the guest position in <paramref name="position"/> to Metal's clip space in
-        /// place. A clip-disabled draw's window coordinates first go through the viewport
-        /// transform the SPIR-V translator applies (ConvertPositionToClipSpace), against the
-        /// same maximum-size viewport the draw state then sets. Vulkan's NDC is y-down and
+        /// place. A clip-disabled draw's position still divides by w: its window coordinates
+        /// go through the viewport transform the SPIR-V translator applies
+        /// (ConvertPositionToClipSpace), against the same maximum-size viewport the draw state
+        /// then sets, scaled by w so the host's divide lands on them. Vulkan's NDC is y-down and
         /// Metal's y-up, and Metal takes no negative viewport height: where the host viewport
         /// is y-down — the clip-disabled one always, else a positive guest y scale — y is
         /// negated so the position lands on Vulkan's pixels. Metal's clip volume is z in
@@ -243,12 +244,14 @@ public static partial class Gen5MslTranslator
             var clip = _request.ClipSpace;
             if (clip.Enabled)
             {
+                // Window x = x / w * scale + offset, so x' / w = window / half - 1 keeps w
+                // for the host's divide and for perspective-correct interpolation.
                 yield return
-                    $"{position}.x = ({position}.x * {FloatBits(clip.ScaleX)} + {FloatBits(clip.OffsetX)}) / " +
-                    $"{FloatBits(clip.HalfExtentX)} - 1.0f;";
+                    $"{position}.x = ({position}.x * {FloatBits(clip.ScaleX)} + {FloatBits(clip.OffsetX)} * {position}.w) / " +
+                    $"{FloatBits(clip.HalfExtentX)} - {position}.w;";
                 yield return
-                    $"{position}.y = ({position}.y * {FloatBits(clip.ScaleY)} + {FloatBits(clip.OffsetY)}) / " +
-                    $"{FloatBits(clip.HalfExtentY)} - 1.0f;";
+                    $"{position}.y = ({position}.y * {FloatBits(clip.ScaleY)} + {FloatBits(clip.OffsetY)} * {position}.w) / " +
+                    $"{FloatBits(clip.HalfExtentY)} - {position}.w;";
             }
 
             if (clip.PositionYDown)
