@@ -51,6 +51,32 @@ Each entry: **Name** — observable effect · chosen behaviour · pinning test.
 
 ## Syscalls
 
+- **nosys slots do not raise SIGSYS** — FreeBSD `nosys` sends SIGSYS to the
+  thread and then returns ENOSYS; with SIGSYS at its default action the
+  console kills the process. Guest signal delivery has no SIGSYS path today
+  (`sceKernelInstallExceptionHandler` accepts no SIGSYS and guest `sigaction`
+  handlers are not delivered), so a raw syscall to an unimplemented slot
+  (`sys_obsolete*`, `sys_number*`, `sys_obs_*`, `sys_lkmnosys`, a number past
+  0x2D2, a nested indirect syscall) returns ENOSYS with CF set, as if SIGSYS
+  were ignored, and logs the slot once · `KernelSyscallDispatchTests.UnservicedSlotsFailWithEnosys`.
+- **Syscalls with no HLE equivalent return ENOSYS** — the console runs them;
+  here a real syscall that no registered libkernel export serves (the `thr_*`,
+  `_umtx_op`, `dynlib_*` and other libkernel-internal calls until an export
+  exists, PS5-private calls, FreeBSD `sys_compat*` shims, and `pipe`/`fork`/
+  context calls whose libc wrapper has a different ABI) fails with ENOSYS and
+  no SIGSYS, logged once per number with its name · same test.
+- **Raw syscall detection is idiom-based** — the loader patches a raw
+  `syscall` only where the FreeBSD stub idiom loads its number (see
+  `GuestSyscallScanner`). On macOS an unpatched one reaches XNU as a classless
+  syscall, which raises SIGSYS and is serviced through the same trap; on Linux
+  and Windows hosts it reaches the host kernel with a Prospero number ·
+  `GuestSyscallPatcherTests`.
+- **AVX upper halves across a trapped syscall** — the FreeBSD kernel
+  preserves all vector state across `syscall`. The trap thunk saves and
+  restores the SSE state (`fxsave64`: x87, MXCSR, XMM0-15) but not the upper
+  YMM halves, which host code run for the syscall may change ·
+  `GuestSyscallTrapTests.ThunkPreservesTheSseStateAroundTheCall`.
+
 ## Filesystem
 
 - **Permission bits** — stat reports synthetic modes: directories 0755,

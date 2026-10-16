@@ -22,6 +22,7 @@ namespace SharpEmu.Cpu.DirectExecution.MacOS.X64;
 internal static unsafe class PosixSignalLayout
 {
     internal const int SigBus = 10;
+    internal const int SigSys = 12;
 
     // struct sigaction: the handler pointer leads, then { mask(4), flags(4) }.
     internal const int SigactionSize = 16;

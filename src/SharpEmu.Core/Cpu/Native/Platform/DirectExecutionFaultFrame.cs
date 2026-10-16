@@ -19,6 +19,13 @@ public static unsafe class DirectExecutionFaultFrame
     public const int RipOffset = 248;
     public const int Xmm0Offset = 0x1A0;
 
+    /// <summary>
+    /// Exception code a POSIX bridge reports for SIGSYS: the host kernel
+    /// refused a syscall (on macOS, a raw guest syscall with no class bits).
+    /// RIP is past the instruction. Windows has no equivalent.
+    /// </summary>
+    public const uint HostSyscallTrapCode = 0xE0535953u;
+
     [StructLayout(LayoutKind.Sequential)]
     public struct Pointers
     {

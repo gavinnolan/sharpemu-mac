@@ -117,6 +117,11 @@ public sealed partial class DirectExecutionBackend
 			{
 				return -1;
 			}
+			if (exceptionCode == DirectExecutionFaultFrame.HostSyscallTrapCode &&
+				TryRecoverUnpatchedSyscall(contextRecord, rip))
+			{
+				return -1;
+			}
 			if (exceptionCode == StatusIllegalInstruction &&
 				TryRecoverAmdCompatInstruction(contextRecord, rip))
 			{

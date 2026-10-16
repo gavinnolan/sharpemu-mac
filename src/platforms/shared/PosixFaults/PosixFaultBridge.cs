@@ -138,13 +138,14 @@ internal static unsafe class PosixFaultBridge
             !InstallSignalHandler(PosixSigIll) ||
             !InstallSignalHandler(PosixSigTrap) ||
             !InstallSignalHandler(PosixSigAbort) ||
-            !InstallSignalHandler(PosixSigFpe))
+            !InstallSignalHandler(PosixSigFpe) ||
+            !InstallSignalHandler(PosixSignalLayout.SigSys))
         {
             throw new InvalidOperationException("Failed to install POSIX fault signal handlers");
         }
 
         _handlersInstalled = true;
-        Console.Error.WriteLine("[LOADER][INFO] POSIX signal exception bridge installed (SIGSEGV/SIGBUS/SIGILL/SIGFPE)");
+        Console.Error.WriteLine("[LOADER][INFO] POSIX signal exception bridge installed (SIGSEGV/SIGBUS/SIGILL/SIGFPE/SIGSYS)");
     }
 
     /// <summary>
@@ -493,6 +494,11 @@ internal static unsafe class PosixFaultBridge
         else if (signal == PosixSigAbort)
         {
             record.ExceptionCode = 1073741845u;
+        }
+        else if (signal == PosixSignalLayout.SigSys)
+        {
+            // A raw guest syscall the host kernel refused; RIP is past it.
+            record.ExceptionCode = DirectExecutionFaultFrame.HostSyscallTrapCode;
         }
         else if (signal == PosixSigFpe)
         {

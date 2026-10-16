@@ -19,6 +19,7 @@ namespace SharpEmu.Cpu.DirectExecution.Linux.X64;
 internal static unsafe class PosixSignalLayout
 {
     internal const int SigBus = 7;
+    internal const int SigSys = 31;
 
     // struct sigaction: the handler pointer leads, then glibc/musl pack
     // { mask(128), flags(4), restorer(8) }.
