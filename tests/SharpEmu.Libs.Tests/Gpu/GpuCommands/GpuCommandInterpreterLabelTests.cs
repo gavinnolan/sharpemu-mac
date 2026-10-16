@@ -82,9 +82,9 @@ public sealed class GpuCommandInterpreterLabelTests
     }
 
     [Theory]
-    [InlineData(0x2Fu, 5u, 0x00u, 2u)]
-    [InlineData(0x04u, 0u, 0x00u, 0u)]
-    [InlineData(0x2Fu, 6u, 0x38u, 2u)]
+    [InlineData(0x05u, 5u, 0x00u, 2u)]
+    [InlineData(0x16u, 0u, 0x00u, 0u)]
+    [InlineData(0x3Fu, 6u, 0x38u, 2u)]
     public void EndOfPipeWrite64_RejectedCombinations(uint eventType, uint eventIndex, uint cacheAction, uint interruptSelector)
     {
         var runner = new StreamRunner();
@@ -137,8 +137,47 @@ public sealed class GpuCommandInterpreterLabelTests
     {
         var runner = new StreamRunner();
 
-        Assert.Contains("cache policy", runner.RunExpectingFatal(EventWriteEop(0x28, 0, 0, 2, 0, Label, 1, 1)).Message);
         Assert.Contains("interrupt selector is unknown", runner.RunExpectingFatal(EventWriteEop(0x28, 0, 0, 2, 5, Label, 1, 0)).Message);
+    }
+
+    [Theory]
+    [InlineData(0x2Fu, 5u, 0x00u)]
+    [InlineData(0x04u, 0u, 0x00u)]
+    [InlineData(0x2Fu, 6u, 0x38u)]
+    [InlineData(0x14u, 1u, 0x01u)]
+    [InlineData(0x2Bu, 7u, 0x10u)]
+    public void EndOfPipe_DecodesEventIndexAndCacheActionIndependently(uint eventType, uint eventIndex, uint cacheAction)
+    {
+        var runner = new StreamRunner();
+
+        runner.Run(EventWriteEop(eventType, eventIndex, cacheAction, 2, 0, Label, 0x77, 0));
+
+        Assert.Equal(0x77UL, runner.Host.ReadQword(Label));
+        var expected = cacheAction != 0 ? EndOfPipeWriteKind.WriteBack64 : EndOfPipeWriteKind.Write64;
+        Assert.Equal(expected, Assert.Single(runner.Host.EndOfPipeWrites).Kind);
+    }
+
+    [Fact]
+    public void EndOfPipe_CachePolicyDoesNotChangeTheWrite()
+    {
+        var runner = new StreamRunner();
+
+        runner.Run(EventWriteEop(0x28, 0, 0, 2, 0, Label, 1, 1));
+
+        Assert.Equal(1UL, runner.Host.ReadQword(Label));
+        Assert.Equal(EndOfPipeWriteKind.Write64, Assert.Single(runner.Host.EndOfPipeWrites).Kind);
+    }
+
+    [Fact]
+    public void EndOfPipe_InterruptSelectorThreeWritesWithoutAnInterrupt()
+    {
+        var runner = new StreamRunner();
+
+        runner.Run(EventWriteEop(0x28, 0, 0, 2, 3, Label, 0x55, 0));
+
+        Assert.Equal(0x55UL, runner.Host.ReadQword(Label));
+        Assert.Equal(EndOfPipeWriteKind.Write64, Assert.Single(runner.Host.EndOfPipeWrites).Kind);
+        Assert.DoesNotContain(runner.Host.Calls, call => call.StartsWith("interrupt", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -186,7 +225,7 @@ public sealed class GpuCommandInterpreterLabelTests
     }
 
     [Fact]
-    public void ReleaseMemoryNative_NoDataOrSelectorFour_OnlyInterrupts()
+    public void ReleaseMemoryNative_NoDataInterruptsAndSelectorFourWritesThenInterrupts()
     {
         var runner = new StreamRunner();
         runner.Host.WriteDword(Label, 5);
@@ -194,10 +233,12 @@ public sealed class GpuCommandInterpreterLabelTests
         runner.Run(ReleaseMemoryNative(0x28, 5, 0, 0, 0, 2, Label, 1, 0));
         Assert.Equal(new[] { "eop InterruptOnly" }, runner.Host.Calls);
 
+        // Selector 4 interrupts once the write is confirmed, so the data lands first.
         runner.Host.Calls.Clear();
         runner.Run(ReleaseMemoryNative(0x04, 5, 0, 0, 1, 4, Label, 1, 0));
-        Assert.Equal(new[] { "barrier", "eop InterruptOnly" }, runner.Host.Calls);
-        Assert.Equal(5u, runner.Host.ReadDword(Label));
+        Assert.Equal(new[] { "barrier", "eop Interrupt32" }, runner.Host.Calls);
+        Assert.Equal(1u, runner.Host.ReadDword(Label));
+        runner.Host.WriteDword(Label, 5);
 
         runner.Host.Calls.Clear();
         runner.Run(ReleaseMemoryNative(0x28, 5, 0, 0, 1, 3, Label, 1, 0));
@@ -264,7 +305,7 @@ public sealed class GpuCommandInterpreterLabelTests
     {
         var runner = new StreamRunner();
 
-        Assert.Contains("data selection", runner.RunExpectingFatal(ReleaseMemoryNative(0x28, 5, 0, 0, 4, 0, Label, 1, 0)).Message);
+        Assert.Contains("data selection", runner.RunExpectingFatal(ReleaseMemoryNative(0x28, 5, 0, 0, 6, 0, Label, 1, 0)).Message);
         Assert.Contains("destination is not supported", runner.RunExpectingFatal(ReleaseMemoryNative(0x28, 5, 0, 2, 1, 0, Label, 1, 0)).Message);
         Assert.Contains("interrupt selector is unknown", runner.RunExpectingFatal(ReleaseMemoryNative(0x28, 5, 0, 0, 0, 7, Label, 1, 0)).Message);
     }

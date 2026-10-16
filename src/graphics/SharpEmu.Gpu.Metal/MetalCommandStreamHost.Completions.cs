@@ -9,6 +9,13 @@ internal sealed partial class MetalCommandStreamHost
 {
     private void WriteDeferredEndOfPipeLabel(in EndOfPipeWrite write)
     {
+        if (write.Kind == EndOfPipeWriteKind.AtomicAdd32)
+        {
+            if (!SharpEmu.Libs.Gpu.GpuCommands.Packets.AtomicMemoryPacket.TryAdd32(Memory, write.Destination, (uint)write.Value))
+                throw new InvalidOperationException($"Metal end-of-pipe atomic add cannot update guest memory: address=0x{write.Destination:X16}.");
+            return;
+        }
+
         var bytes = write.Kind switch
         {
             EndOfPipeWriteKind.Write32 or EndOfPipeWriteKind.WriteBack32 or

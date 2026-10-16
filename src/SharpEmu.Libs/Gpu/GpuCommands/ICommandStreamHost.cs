@@ -61,6 +61,10 @@ public enum EndOfPipeWriteKind
     Flip,
     FlipWithWrite32,
     FlipWithInterruptWriteBack32,
+
+    // RELEASE_MEM data select 7: Value's low 32 bits are added to the dword at Destination
+    // once the work before it has finished.
+    AtomicAdd32,
 }
 
 // A completion the host records on the current command buffer. The label itself is
@@ -113,6 +117,26 @@ public interface ICommandStreamHost
     /// </remarks>
     bool TryReadGuestWaitOperand(ulong address, Span<byte> destination, bool commitPendingWrite) =>
         TryReadGuestOperand(address, destination);
+
+    /// <summary>
+    /// Whether recorded work still owes these bytes and will land them on its own, so that
+    /// a packet reading them (a predicate, a COND_EXEC flag, a COND_WRITE compare, a branch)
+    /// should suspend on them instead of stalling the worker until the GPU has finished.
+    /// </summary>
+    /// <remarks>
+    /// A host that answers true has already made sure the owing work is on its way (it
+    /// committed the buffer that carries it) and will wake guest-memory waits when it
+    /// completes. False means the bytes can be read now: they are final, or only the
+    /// host's ordinary operand read can produce them (an image writeback), which then waits.
+    /// </remarks>
+    bool CommitPendingOperandWrite(ulong address, ulong size) => false;
+
+    /// <summary>
+    /// Whether an end-of-pipe GDS store (<see cref="EndOfPipeWriteKind.GdsWrite32"/>) is
+    /// copied out of the data share by this host in stream order, after the work before it.
+    /// Otherwise the interpreter synchronizes with the GPU and writes the words itself.
+    /// </summary>
+    bool WritesGdsAtEndOfPipe => false;
 
     // Immediate hosts retain their ordinary memory effects. An ordered host
     // must finish this owned operation before interpreter results are consumed.

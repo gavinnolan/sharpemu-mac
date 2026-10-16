@@ -339,6 +339,12 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                     TriggerInterrupt(eventId, 0);
                 });
                 break;
+            case EndOfPipeWriteKind.GdsWrite32:
+                RecordEndOfPipeGdsWrite(in write);
+                break;
+            case EndOfPipeWriteKind.AtomicAdd32:
+                RecordEndOfPipeAtomicAdd(in write);
+                break;
             default:
                 // A plain label or clock write has no interrupt behind it, but it is
                 // still an end-of-pipe write: the guest polls it to learn that the work
@@ -353,6 +359,103 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
                 break;
         }
+    }
+
+    /// <summary>The interpreter leaves end-of-pipe GDS stores to this host (RecordEndOfPipeGdsWrite).</summary>
+    public bool WritesGdsAtEndOfPipe => true;
+
+    /// <summary>
+    /// An end-of-pipe GDS store: the words are copied out of the data share where the packet
+    /// sits in the stream, after the work that wrote them, instead of the worker waiting for
+    /// the GPU and copying them itself. Where the GPU cannot write the destination, or an
+    /// older label is still owed by a completion, a completion copies them in order instead.
+    /// </summary>
+    private void RecordEndOfPipeGdsWrite(in EndOfPipeWrite write)
+    {
+        var bytes = (ulong)write.GdsWordCount * sizeof(uint);
+        var source = (ulong)write.GdsWordOffset * sizeof(uint);
+        if (bytes == 0)
+        {
+            return;
+        }
+
+        if (source > MetalGuestMemory.GdsBytes || bytes > MetalGuestMemory.GdsBytes - source ||
+            write.Destination == 0 || bytes > ulong.MaxValue - write.Destination)
+        {
+            throw Fatal(
+                $"An end-of-pipe GDS store is out of range: gds=0x{source:X}+0x{bytes:X} address=0x{write.Destination:X16}.");
+        }
+
+        if (GpuTimedLabels && MayEncodeLabelOnGpu(OrderedEndOfPipe, Volatile.Read(ref _owedHostLabels)))
+        {
+            var destination = _guestMemory.ResolveWritable(write.Destination, bytes);
+            if (destination.IsValid)
+            {
+                var copy = new DeferredLabelCopy(
+                    _guestMemory.GdsBuffer, source, destination.Buffer, destination.Offset, (int)bytes, write.Destination);
+                _ = EncodeOrderedCopy(in copy, write.Destination, null, 0,
+                    MetalGpuWriteOrigin.EndOfPipeLabel, $"eop gds bytes={bytes}", sourceIsFinal: false);
+                Interlocked.Increment(ref _gpuTimedLabels);
+                return;
+            }
+        }
+
+        var destinationAddress = write.Destination;
+        var wordOffset = write.GdsWordOffset;
+        var wordCount = write.GdsWordCount;
+        Interlocked.Increment(ref _owedHostLabels);
+        QueueCompletion(() =>
+        {
+            try
+            {
+                var words = new uint[wordCount];
+                GlobalDataShare.ReadWords(_guestMemory.GdsWords(), words, wordOffset, wordCount);
+                if (!_memory.TryWrite(destinationAddress, System.Runtime.InteropServices.MemoryMarshal.AsBytes<uint>(words)))
+                {
+                    throw Fatal(
+                        $"An end-of-pipe GDS store cannot write guest memory: address=0x{destinationAddress:X16} bytes={bytes}.");
+                }
+
+                _commandStream?.NotifyGuestMemoryWritten(destinationAddress, bytes);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _owedHostLabels);
+            }
+        });
+    }
+
+    /// <summary>
+    /// RELEASE_MEM data select 7: the add happens once the work before it has finished, from
+    /// that work's completion, and like an owed label it keeps later labels behind it.
+    /// </summary>
+    private void RecordEndOfPipeAtomicAdd(in EndOfPipeWrite write)
+    {
+        if (!DefersEndOfPipeLabel(EndOfPipeWriteKind.AtomicAdd32))
+        {
+            // The interpreter added as it parsed the packet.
+            return;
+        }
+
+        var address = write.Destination;
+        var addend = (uint)write.Value;
+        Interlocked.Increment(ref _owedHostLabels);
+        QueueCompletion(() =>
+        {
+            try
+            {
+                if (!SharpEmu.Libs.Gpu.GpuCommands.Packets.AtomicMemoryPacket.TryAdd32(_memory, address, addend))
+                {
+                    throw Fatal($"An end-of-pipe atomic add cannot update guest memory: address=0x{address:X16}.");
+                }
+
+                _commandStream?.NotifyGuestMemoryWritten(address, sizeof(uint));
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _owedHostLabels);
+            }
+        });
     }
 
     /// <summary>
@@ -480,11 +583,16 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         string? landedKind,
         ulong landedValue,
         MetalGpuWriteOrigin origin,
-        string profile)
+        string profile,
+        bool sourceIsFinal = true)
     {
         ulong serial;
-        if ((MetalV2Diagnostics.DeferLabelWrites && _renderEncoder != 0) ||
-            (DefersCopiesInCompute && _computeEncoder != 0))
+        // A copy whose source later work in the same encoder may still change (the GDS a
+        // pixel or compute shader appends to) cannot wait for the boundary: it would copy
+        // what that later work left there.
+        if (sourceIsFinal &&
+            ((MetalV2Diagnostics.DeferLabelWrites && _renderEncoder != 0) ||
+             (DefersCopiesInCompute && _computeEncoder != 0)))
         {
             // Four bytes are not worth a framebuffer. Ending the open pass to copy them
             // stores and reloads every attachment, which at 3840x2160 is tens of

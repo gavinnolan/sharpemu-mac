@@ -669,6 +669,9 @@ internal static unsafe partial class VulkanVideoPresenter
                 case EndOfPipeWriteKind.ClockWriteBack:
                     _endOfPipe.RecordClockWriteWithWriteBack(write.SubmitId, buffer, write.Destination);
                     break;
+                case EndOfPipeWriteKind.AtomicAdd32:
+                    // This host publishes labels as parsed, so the interpreter already added.
+                    break;
                 case EndOfPipeWriteKind.Flip:
                     _endOfPipe.RecordFlipCompletion(write.SubmitId, buffer, write.FlipHandle, write.FlipIndex, write.FlipMode, write.FlipArgument, write.FlipRequestId);
                     break;

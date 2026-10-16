@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.GpuCommands.Packets;
 using SharpEmu.Libs.Gpu.Scheduling;
 
 namespace SharpEmu.Libs.Gpu.GpuCommands;
@@ -20,7 +21,40 @@ public sealed partial class GpuCommandInterpreter
 
     private static int _unknownGcrWarnings;
 
-    // Immediate hosts write the label now; deferred hosts receive its owned scalar payload.
+    // What an end-of-pipe or release write stores, decoded from the packet's data select.
+    internal enum EndOfPipeData : byte
+    {
+        None,
+        Value32,
+        Value64,
+        Clock,
+        Gds,
+        AtomicAdd32,
+    }
+
+    // The VGT event types that complete as a timestamp event (end of pipe or end of shader).
+    private static bool IsTimestampEvent(uint eventType) =>
+        eventType is 0x04 or 0x14 or 0x28 or 0x29 or 0x2B or 0x2D or 0x2F or 0x30;
+
+    // EVENT_WRITE_EOP cache action bits 12-17: TCL1_VOL, TC_VOL, (reserved), TC_WB, TCL1, TC.
+    private const uint EndOfPipeCacheActionKnownMask = 0x3Bu;
+
+    private static int _unknownCacheActionWarnings;
+
+    private static void WarnUnknownEndOfPipeCacheAction(uint cacheAction)
+    {
+        var unknown = cacheAction & ~EndOfPipeCacheActionKnownMask;
+        if (unknown != 0 && Interlocked.Increment(ref _unknownCacheActionWarnings) <= 16)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] command_stream.eop_unknown_cache_action bits=0x{unknown:X2}");
+        }
+    }
+
+    // EVENT_WRITE_EOP and EVENT_WRITE_EOS. Each field is decoded on its own: the event type
+    // says the write is a timestamp event, the data select what is written, the interrupt
+    // select whether the host is told, and the cache action only whether it is a write-back.
+    // The cache policy is an L2 residency hint and the event index follows the event type;
+    // neither changes what lands.
     internal void WriteEndOfPipe(
         bool is64Bit,
         uint cachePolicy,
@@ -34,16 +68,49 @@ public sealed partial class GpuCommandInterpreter
         uint interruptSelector,
         uint interruptContextId)
     {
-        if (cachePolicy != 0)
-        {
-            throw _host.Fatal($"The end-of-pipe cache policy is not supported: policy={cachePolicy} destination=0x{destination:X16}.");
-        }
-
-        if (eventWriteDestination != 0)
+        _ = cachePolicy;
+        if (eventWriteDestination > 1)
         {
             throw _host.Fatal($"The end-of-pipe write destination is not supported: destination={eventWriteDestination} address=0x{destination:X16}.");
         }
 
+        if (!IsTimestampEvent(eopEventType))
+        {
+            throw _host.Fatal(
+                $"The end-of-pipe event type is unknown: source={eventWriteSource} type=0x{eopEventType:X2} action=0x{cacheAction:X2} " +
+                $"index={eventIndex} bits={(is64Bit ? 64 : 32)} interrupt={interruptSelector} destination=0x{destination:X16}.");
+        }
+
+        // EOP: 0 discard, 1 low 32 bits, 2 64 bits, 3 GPU clock, 4 system clock, 5 GDS.
+        // EOS: 1 GDS, 2 32 bits (0 is the append count, which nothing here keeps).
+        var data = is64Bit
+            ? eventWriteSource switch
+            {
+                0 => EndOfPipeData.None,
+                1 => EndOfPipeData.Value32,
+                2 => EndOfPipeData.Value64,
+                3 or 4 => EndOfPipeData.Clock,
+                5 => EndOfPipeData.Gds,
+                _ => throw _host.Fatal($"The end-of-pipe data selection is not supported: selection={eventWriteSource} address=0x{destination:X16}."),
+            }
+            : eventWriteSource switch
+            {
+                1 => EndOfPipeData.Gds,
+                2 => EndOfPipeData.Value32,
+                _ => throw _host.Fatal($"The end-of-shader data selection is not supported: selection={eventWriteSource} address=0x{destination:X16}."),
+            };
+
+        WarnUnknownEndOfPipeCacheAction(cacheAction);
+        CompleteEndOfPipe(data, writeBack: cacheAction != 0, destination, value, interruptSelector, interruptContextId);
+    }
+
+    // Records one end-of-pipe completion: the data it stores and the interrupt it raises.
+    // Interrupt select 0 is none, and 3 sends the data with a write confirm, which every
+    // label here already has (it lands in order behind the work): neither raises one.
+    // 1 on the graphics queue is the interrupt alone; 2, and 4 (with its context id),
+    // interrupt once the data is written.
+    private void CompleteEndOfPipe(EndOfPipeData data, bool writeBack, ulong destination, ulong value, uint interruptSelector, uint interruptContextId)
+    {
         var withInterrupt = false;
         switch (interruptSelector)
         {
@@ -60,164 +127,51 @@ public sealed partial class GpuCommandInterpreter
                 withInterrupt = true;
                 break;
             case 2:
+            case 4:
                 withInterrupt = true;
                 break;
             default:
                 throw _host.Fatal($"The end-of-pipe interrupt selector is unknown: selector={interruptSelector} destination=0x{destination:X16}.");
         }
 
-        var eventId = InterruptEventId;
-        switch (eventWriteSource)
+        if (data != EndOfPipeData.None && destination == 0)
         {
-            case 1:
-                if (!is64Bit)
-                {
-                    if (eopEventType == 0x2F && cacheAction == 0x00 && eventIndex == 0x06)
-                    {
-                        WriteGdsWords(destination, value, withInterrupt, interruptContextId);
-                        return;
-                    }
-                }
-                else if (eopEventType == 0x04 && cacheAction == 0x00 && eventIndex == 0x05)
-                {
-                    Write32(destination, (uint)value, withWriteBack: false, withInterrupt, eventId, interruptContextId);
-                    return;
-                }
-
-                break;
-            case 2:
-                if (!is64Bit)
-                {
-                    if (eopEventType == 0x2F && eventIndex == 0x06)
-                    {
-                        switch (cacheAction)
-                        {
-                            case 0x00:
-                                Write32(destination, (uint)value, withWriteBack: false, withInterrupt, eventId, interruptContextId);
-                                return;
-                            case 0x38:
-                                Write32(destination, (uint)value, withWriteBack: true, withInterrupt, eventId, interruptContextId);
-                                return;
-                        }
-                    }
-                }
-                else
-                {
-                    switch (cacheAction)
-                    {
-                        case 0x00:
-                            switch (eopEventType)
-                            {
-                                case 0x04:
-                                    if (eventIndex == 0x05)
-                                    {
-                                        Write64(destination, value, withWriteBack: false, withInterrupt, eventId, interruptContextId);
-                                        return;
-                                    }
-
-                                    break;
-                                case 0x14:
-                                case 0x28:
-                                case 0x2F:
-                                    if (eventIndex == 0x00)
-                                    {
-                                        Write64(destination, value, withWriteBack: false, withInterrupt, eventId, interruptContextId);
-                                        return;
-                                    }
-
-                                    break;
-                                case 0x2B:
-                                case 0x2D:
-                                case 0x30:
-                                    if (eventIndex == 0x00 && !withInterrupt)
-                                    {
-                                        Write64(destination, value, withWriteBack: false, withInterrupt, eventId, interruptContextId);
-                                        return;
-                                    }
-
-                                    break;
-                            }
-
-                            break;
-                        case 0x38:
-                            switch (eopEventType)
-                            {
-                                case 0x04:
-                                case 0x14:
-                                case 0x28:
-                                    if (((eopEventType is 0x04 or 0x28) && eventIndex == 0x05 && !withInterrupt) || eventIndex == 0x00)
-                                    {
-                                        Write64(destination, value, withWriteBack: true, withInterrupt, eventId, interruptContextId);
-                                        return;
-                                    }
-
-                                    break;
-                                case 0x2B:
-                                case 0x2D:
-                                    if (eventIndex == 0x00 && !withInterrupt)
-                                    {
-                                        Write64(destination, value, withWriteBack: true, withInterrupt, eventId, interruptContextId);
-                                        return;
-                                    }
-
-                                    break;
-                                case 0x2F:
-                                    if (eventIndex == 0x06 && !withInterrupt)
-                                    {
-                                        Write64(destination, value, withWriteBack: true, withInterrupt, eventId, interruptContextId);
-                                        return;
-                                    }
-
-                                    break;
-                            }
-
-                            break;
-                        case 0x3B:
-                            if (eopEventType == 0x04 && eventIndex == 0x05 && withInterrupt)
-                            {
-                                Write64(destination, value, withWriteBack: true, withInterrupt, eventId, interruptContextId);
-                                return;
-                            }
-
-                            break;
-                    }
-                }
-
-                break;
-            case 4:
-                if (is64Bit)
-                {
-                    var clock = GpuReferenceClock.Read();
-                    WriteEndOfPipeQword(destination, clock, withInterrupt
-                        ? EndOfPipeWriteKind.Interrupt64
-                        : (cacheAction == 0x38 ? EndOfPipeWriteKind.ClockWriteBack : EndOfPipeWriteKind.ClockWrite));
-                    switch (cacheAction)
-                    {
-                        case 0x00:
-                            if ((eopEventType == 0x04 && eventIndex == 0x05) || (eopEventType == 0x28 && eventIndex == 0x00))
-                            {
-                                RecordClock(destination, clock, withWriteBack: false, withInterrupt, eventId, interruptContextId);
-                                return;
-                            }
-
-                            break;
-                        case 0x38:
-                            if ((eopEventType == 0x04 && eventIndex is 0x00 or 0x05) || (eopEventType == 0x28 && eventIndex == 0x00))
-                            {
-                                RecordClock(destination, clock, withWriteBack: true, withInterrupt, eventId, interruptContextId);
-                                return;
-                            }
-
-                            break;
-                    }
-                }
-
-                break;
+            throw _host.Fatal($"The end-of-pipe destination is zero: data={data} interrupt={interruptSelector}.");
         }
 
-        throw _host.Fatal(
-            $"The end-of-pipe event type is unknown: source={eventWriteSource} type=0x{eopEventType:X2} action=0x{cacheAction:X2} " +
-            $"index={eventIndex} bits={(is64Bit ? 64 : 32)} interrupt={interruptSelector} destination=0x{destination:X16}.");
+        var eventId = InterruptEventId;
+        switch (data)
+        {
+            case EndOfPipeData.None:
+                if (withInterrupt)
+                {
+                    QueueInterrupt(interruptContextId);
+                }
+
+                return;
+            case EndOfPipeData.Value32:
+                Write32(destination, (uint)value, writeBack, withInterrupt, eventId, interruptContextId);
+                return;
+            case EndOfPipeData.Value64:
+                Write64(destination, value, writeBack, withInterrupt, eventId, interruptContextId);
+                return;
+            case EndOfPipeData.Clock:
+            {
+                var clock = GpuReferenceClock.Read();
+                var kind = withInterrupt
+                    ? (writeBack ? EndOfPipeWriteKind.InterruptWriteBack64 : EndOfPipeWriteKind.Interrupt64)
+                    : (writeBack ? EndOfPipeWriteKind.ClockWriteBack : EndOfPipeWriteKind.ClockWrite);
+                WriteEndOfPipeQword(destination, clock, kind);
+                _host.RecordEndOfPipe(new EndOfPipeWrite(kind, SubmitId, destination, clock, eventId, interruptContextId, ReferenceClock: true));
+                return;
+            }
+            case EndOfPipeData.Gds:
+                WriteGdsWords(destination, value, withInterrupt, interruptContextId);
+                return;
+            case EndOfPipeData.AtomicAdd32:
+                AtomicAddAtEndOfPipe(destination, (uint)value, withInterrupt, eventId, interruptContextId);
+                return;
+        }
     }
 
     private void WriteEndOfPipeDword(ulong destination, uint value, EndOfPipeWriteKind kind)
@@ -260,27 +214,59 @@ public sealed partial class GpuCommandInterpreter
         _host.RecordEndOfPipe(new EndOfPipeWrite(kind, SubmitId, destination, value, eventId, contextId));
     }
 
-    private void RecordClock(ulong destination, ulong clock, bool withWriteBack, bool withInterrupt, int eventId, uint contextId)
-    {
-        var kind = withInterrupt
-            ? (withWriteBack ? EndOfPipeWriteKind.InterruptWriteBack64 : EndOfPipeWriteKind.Interrupt64)
-            : (withWriteBack ? EndOfPipeWriteKind.ClockWriteBack : EndOfPipeWriteKind.ClockWrite);
-        _host.RecordEndOfPipe(new EndOfPipeWrite(kind, SubmitId, destination, clock, eventId, contextId, ReferenceClock: true));
-    }
-
-    // GDS contents are only valid after the GPU finished, so this variant waits first.
+    // GDS words land after the work before them, which on the hardware is what makes them
+    // final. A host that copies them out of its GDS in stream order takes the write as it
+    // is; any other host reads the GDS once the GPU has finished.
     private void WriteGdsWords(ulong destination, ulong value, bool withInterrupt, uint contextId)
     {
         var wordOffset = (uint)(value & 0xFFFFu);
         var wordCount = (uint)(value >> 16);
+        var write = new EndOfPipeWrite(EndOfPipeWriteKind.GdsWrite32, SubmitId, destination, GdsWordOffset: wordOffset, GdsWordCount: wordCount);
+        if (_host.WritesGdsAtEndOfPipe)
+        {
+            _host.RecordEndOfPipe(in write);
+            _lastWriteLength = 0;
+            if (withInterrupt)
+            {
+                QueueInterrupt(contextId);
+            }
+
+            return;
+        }
+
         _host.SynchronizeGpu();
         var words = new uint[wordCount];
         _host.ReadGds(words, wordOffset, wordCount);
         WriteBytes(destination, System.Runtime.InteropServices.MemoryMarshal.AsBytes<uint>(words));
-        _host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.GdsWrite32, SubmitId, destination, GdsWordOffset: wordOffset, GdsWordCount: wordCount));
+        _host.RecordEndOfPipe(in write);
         if (withInterrupt)
         {
             _host.TriggerInterrupt(InterruptEventId, contextId);
+        }
+    }
+
+    // RELEASE_MEM data select 7 adds the low 32 bits of the data to the dword at the
+    // destination once the work before it has finished. A host that defers labels does the
+    // add from the completion of that work; an immediate host has already finished it.
+    private void AtomicAddAtEndOfPipe(ulong destination, uint addend, bool withInterrupt, int eventId, uint contextId)
+    {
+        if ((destination & 0x3u) != 0)
+        {
+            throw _host.Fatal($"The end-of-pipe atomic add is not dword aligned: address=0x{destination:X16}.");
+        }
+
+        var kind = EndOfPipeWriteKind.AtomicAdd32;
+        if (!_host.DefersEndOfPipeLabel(kind))
+        {
+            _host.ExecuteCommandMemoryOperation(CommandMemoryOperation.Atomic(Packets.AtomicMemoryPacket.Add32(destination, addend)));
+            GuestMemoryWritten?.Invoke(destination, sizeof(uint));
+        }
+
+        _lastWriteLength = 0;
+        _host.RecordEndOfPipe(new EndOfPipeWrite(kind, SubmitId, destination, addend, eventId, contextId));
+        if (withInterrupt)
+        {
+            QueueInterrupt(contextId);
         }
     }
 
@@ -308,9 +294,6 @@ public sealed partial class GpuCommandInterpreter
         eopEventType != 0x28 ||
         (gcrControl & (GcrGl2MetadataInvalidate | GcrGl0VectorInvalidate | GcrGl1Invalidate | GcrGl2Invalidate | GcrGl2Writeback)) != 0;
 
-    private static uint ReleaseMemCacheActionFromGcr(uint gcrControl) =>
-        (gcrControl & GcrGl2Writeback) != 0 ? 0x38u : 0x00u;
-
     private static void WarnUnknownReleaseMemGcr(uint gcrControl)
     {
         var unknown = gcrControl & ~GcrKnownMask;
@@ -320,7 +303,9 @@ public sealed partial class GpuCommandInterpreter
         }
     }
 
-    // Native and wrapped packets use the same release-memory operation.
+    // Native and wrapped packets use the same release-memory operation. The fields are
+    // decoded independently: the event type and GCR bits decide the barrier, the data
+    // select what is written, and the interrupt select what the host is told.
     internal void ReleaseMemory(
         uint cachePolicy,
         uint eopEventType,
@@ -333,20 +318,45 @@ public sealed partial class GpuCommandInterpreter
         ulong value,
         uint interruptContextId)
     {
+        _ = cachePolicy;
+        _ = eventIndex;
         if (releaseDestination > 1)
         {
             throw _host.Fatal($"The release-memory destination is not supported: destination={releaseDestination} address=0x{destination:X16}.");
         }
 
-        if (dataSelection is not (0 or 1 or 2 or 3 or 5))
+        // 0 none, 1 low 32 bits, 2 64 bits, 3 GPU clock, 4 system clock (both the reference
+        // clock here), 5 GDS words, 7 atomic add of the low 32 bits.
+        var data = dataSelection switch
         {
-            throw _host.Fatal($"The release-memory data selection is not supported: selection={dataSelection} address=0x{destination:X16}.");
-        }
+            0 => EndOfPipeData.None,
+            1 => EndOfPipeData.Value32,
+            2 => EndOfPipeData.Value64,
+            3 or 4 => EndOfPipeData.Clock,
+            5 => EndOfPipeData.Gds,
+            7 => EndOfPipeData.AtomicAdd32,
+            _ => throw _host.Fatal($"The release-memory data selection is not supported: selection={dataSelection} address=0x{destination:X16}."),
+        };
 
         WarnUnknownReleaseMemGcr(gcrControl);
-        var gl2WriteBack = (gcrControl & GcrGl2Writeback) != 0;
 
-        if (dataSelection == 0 || interruptSelector == 4 || (releaseDestination == 0 && destination == 0))
+        // Selectors 5 and 6 raise the context-id interrupt only when the label at the
+        // destination is at or below the data (a 32- or 64-bit compare), and write nothing.
+        if (interruptSelector is 5 or 6)
+        {
+            var conditionReadable = destination != 0;
+            var conditionValue = 0UL;
+            if (conditionReadable)
+            {
+                conditionValue = interruptSelector == 5 ? ReadDword(destination) : ReadQword(destination);
+            }
+
+            var decision = InterruptDecision.Evaluate(interruptSelector, IsComputeQueue, dataSelection, conditionReadable, conditionValue, value);
+            data = EndOfPipeData.None;
+            interruptSelector = decision.RaisesInterrupt ? 4u : 0u;
+        }
+
+        if (data == EndOfPipeData.None || (releaseDestination == 0 && destination == 0))
         {
             if (eopEventType != 0x28 || gcrControl != 0)
             {
@@ -364,43 +374,13 @@ public sealed partial class GpuCommandInterpreter
             _host.ReleaseShaderWrites();
         }
 
-        var cacheAction = ReleaseMemCacheActionFromGcr(gcrControl);
-        cachePolicy = 0;
-
-        if (dataSelection == 1)
+        // A GL2 write-back makes the label a write-back write, as the EOP cache action does.
+        var writeBack = (gcrControl & GcrGl2Writeback) != 0 && data != EndOfPipeData.Gds;
+        CompleteEndOfPipe(data, writeBack, destination, value, interruptSelector, interruptContextId);
+        if (data == EndOfPipeData.Value32 || (data == EndOfPipeData.Gds && interruptSelector == 1))
         {
-            WriteEndOfPipe(false, cachePolicy, 0, 0x2F, cacheAction, 6, 2, destination, (uint)value, interruptSelector, interruptContextId);
             FlushReleaseMemory();
-            return;
         }
-
-        if (dataSelection == 5)
-        {
-            if (gl2WriteBack)
-            {
-                cacheAction = 0;
-            }
-
-            WriteEndOfPipe(false, cachePolicy, 0, 0x2F, cacheAction, 6, 1, destination, (uint)value, interruptSelector, interruptContextId);
-            if (interruptSelector == 1)
-            {
-                FlushReleaseMemory();
-            }
-
-            return;
-        }
-
-        var keepNativeEventIndex =
-            (eopEventType == 0x04 && cacheAction == 0x00) ||
-            (eopEventType == 0x2F && eventIndex == 0x06 && cacheAction == 0x38);
-        if (!keepNativeEventIndex)
-        {
-            eventIndex = 0;
-        }
-
-        // Data selection 3 samples the reference clock at the release point.
-        var source = dataSelection == 3 ? 4u : 2u;
-        WriteEndOfPipe(true, cachePolicy, 0, eopEventType, cacheAction, eventIndex, source, destination, value, interruptSelector, interruptContextId);
     }
 
     private void TriggerReleaseInterrupt(uint interruptSelector, uint interruptContextId)
