@@ -10,7 +10,8 @@ namespace SharpEmu.Libs.Gpu.Pipelines;
 public static class StageStaticKey
 {
     // The nine trailing words are the NGG primitive-shader state (see the vertex key).
-    public const int MaxWords = 16 + 9 + VertexInputInfo.MaxBuffers * 13;
+    // The clip-space part adds up to two depth-remap words and the user clip planes.
+    public const int MaxWords = 16 + 2 + 1 + (SharpEmu.Libs.Gpu.GpuCommands.Registers.ContextRegisters.UserClipPlaneCount * 4) + 9 + VertexInputInfo.MaxBuffers * 13;
 
     private static uint Bits(float value) => BitConverter.SingleToUInt32Bits(value);
 
@@ -50,7 +51,24 @@ public static class StageStaticKey
             key.Add(Bits(info.ClipSpace.HalfExtentY));
         }
 
-        key.Add(Bit(info.ClipSpace.DepthNegativeOneToOne) | (Bit(info.ClipSpace.PositionYDown) << 1));
+        key.Add(Bit(info.ClipSpace.DepthNegativeOneToOne) | (Bit(info.ClipSpace.PositionYDown) << 1) |
+            (Bit(info.ClipSpace.PositionXMirror) << 2) | ((uint)info.ClipSpace.DepthPlanes << 3) |
+            (Bit(info.ClipSpace.XyPreDivided) << 6) | (Bit(info.ClipSpace.ZPreDivided) << 7) |
+            (Bit(info.ClipSpace.WReciprocal) << 8) | (Bit(info.ClipSpace.DepthRemap) << 9));
+        if (info.ClipSpace.DepthRemap)
+        {
+            key.Add(Bits(info.ClipSpace.DepthScale));
+            key.Add(Bits(info.ClipSpace.DepthOffset));
+        }
+
+        if (info.ClipSpace.UserClipPlanes is { Length: > 0 } userClipPlanes)
+        {
+            key.Add(((uint)userClipPlanes.Length << 1) | Bit(info.ClipSpace.UserClipPlanesCullOnly));
+            foreach (var coefficient in userClipPlanes)
+            {
+                key.Add(Bits(coefficient));
+            }
+        }
 
         key.Add((uint)requiredOutputCount);
         key.Add(Bit(primitiveShader.HasValue));

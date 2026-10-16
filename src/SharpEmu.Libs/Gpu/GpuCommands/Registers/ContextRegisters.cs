@@ -206,9 +206,11 @@ public struct DepthRenderOverrideRegisters
     public bool ForceZDirty;
     public bool ForceStencilValid;
     public bool ForceStencilDirty;
+    public bool DisableViewportClamp;
 
     public static DepthRenderOverrideRegisters Decode(uint value) => new()
     {
+        DisableViewportClamp = (value & 0x0001_0000u) != 0,
         ForceZValid = (value & 0x2000_0000u) != 0,
         ForceZDirty = (value & 0x0800_0000u) != 0,
         ForceStencilValid = (value & 0x4000_0000u) != 0,
@@ -370,6 +372,7 @@ public sealed class ScreenViewportRegisters
 public sealed class ContextRegisters
 {
     public const int ColorTargetCount = 8;
+    public const int UserClipPlaneCount = 6;
 
     public float LineWidth = 1f;
     public uint PrimitiveResetIndex = 0xFFFF_FFFFu;
@@ -377,7 +380,12 @@ public sealed class ContextRegisters
     public BlendColorRegisters BlendColor;
     public ColorTargetWords[] ColorTargets = new ColorTargetWords[ColorTargetCount];
     public uint[] ColorClearWord1 = new uint[ColorTargetCount];
+    // PA_CL_UCP_n_{X,Y,Z,W}, four floats per plane.
+    public float[] UserClipPlanes = new float[UserClipPlaneCount * 4];
     public uint RenderTargetMask;
+
+    // DB_ALPHA_TO_MASK: bit 0 enables alpha to coverage, the offsets and OFFSET_ROUND set its dither.
+    public uint AlphaToMask;
     public ScreenViewportRegisters ScreenViewport = new();
     public ClipControlRegisters Clip;
     public ColorControlRegisters ColorControl = new();
@@ -410,12 +418,17 @@ public sealed class ContextRegisters
 
     public uint RenderTargetMaskForSlot(uint slot) => (RenderTargetMask >> (int)(slot * 4)) & 0xFu;
 
+    // The channels the CB writes to the slot: CB_TARGET_MASK and CB_SHADER_MASK nibbles combined.
+    public uint ColorWriteMaskForSlot(uint slot) =>
+        RenderTargetMaskForSlot(slot) & (ShaderInterface.ColorShaderMask >> (int)(slot * 4)) & 0xFu;
+
     public ContextRegisters Copy()
     {
         var copy = (ContextRegisters)MemberwiseClone();
         copy.BlendControls = (BlendRegisters[])BlendControls.Clone();
         copy.ColorTargets = (ColorTargetWords[])ColorTargets.Clone();
         copy.ColorClearWord1 = (uint[])ColorClearWord1.Clone();
+        copy.UserClipPlanes = (float[])UserClipPlanes.Clone();
         copy.ScreenViewport = ScreenViewport.Copy();
         copy.SampleLocations = SampleLocations.Copy();
         copy.ShaderInterface = ShaderInterface.Copy();

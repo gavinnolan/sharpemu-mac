@@ -15,7 +15,6 @@ public static class RenderTrace
     private static int _framebufferSkips;
     private static int _scissorDefaults;
     private static int _clipRuleWarnings;
-    private static int _lineWidthClamps;
     private static int _unknownInitiators;
     private static int _threadDimensionConversions;
     private static int _zeroDispatches;
@@ -38,7 +37,6 @@ public static class RenderTrace
 
     public static bool ClipRuleWarning() => Interlocked.Increment(ref _clipRuleWarnings) <= 32;
 
-    public static bool LineWidthClamp() => Interlocked.Increment(ref _lineWidthClamps) <= 1;
 
     public static bool UnknownInitiator() => Interlocked.Increment(ref _unknownInitiators) <= 32;
 

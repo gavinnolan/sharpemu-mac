@@ -7,10 +7,10 @@ using SharpEmu.Libs.Gpu.Rendering;
 
 namespace SharpEmu.Libs.Gpu.Pipelines;
 
-// The fixed pipeline state packed into 166 bytes; two draws with equal bytes share a pipeline.
+// The fixed pipeline state packed into 167 bytes; two draws with equal bytes share a pipeline.
 public sealed class PipelineStaticParameters : IEquatable<PipelineStaticParameters>
 {
-    public const int ByteSize = 166;
+    public const int ByteSize = 167;
     public const int ColorAttachmentCount = 8;
 
     private const int NegativeOneToOneOffset = 0;
@@ -40,6 +40,7 @@ public sealed class PipelineStaticParameters : IEquatable<PipelineStaticParamete
     private const int SeparateAlphaBlendOffset = 142;
     private const int BlendEnableOffset = 150;
     private const int BlendBypassOffset = 158;
+    private const int AlphaToCoverageOffset = 166;
 
     private readonly byte[] _bytes = new byte[ByteSize];
 
@@ -111,6 +112,7 @@ public sealed class PipelineStaticParameters : IEquatable<PipelineStaticParamete
     public bool CullFront { get => GetBool(CullFrontOffset); set => SetBool(CullFrontOffset, value); }
     public bool CullBack { get => GetBool(CullBackOffset); set => SetBool(CullBackOffset, value); }
     public bool FrontFaceClockwise { get => GetBool(FaceOffset); set => SetBool(FaceOffset, value); }
+    public bool AlphaToCoverageEnable { get => GetBool(AlphaToCoverageOffset); set => SetBool(AlphaToCoverageOffset, value); }
 
     public uint GetColorMask(int index) => GetUInt(ColorMaskOffset + index * 4);
     public void SetColorMask(int index, uint value) => SetUInt(ColorMaskOffset + index * 4, value);

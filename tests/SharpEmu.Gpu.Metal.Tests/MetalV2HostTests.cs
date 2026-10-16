@@ -228,11 +228,17 @@ public sealed class MetalV2HostTests
     [InlineData(GpuPrimitiveTopology.LineStrip, 2u)]
     [InlineData(GpuPrimitiveTopology.TriangleList, 3u)]
     [InlineData(GpuPrimitiveTopology.TriangleStrip, 3u)]
-    [InlineData(GpuPrimitiveTopology.TriangleFan, 3u)]
     public void LayeredPipelinesDeclareTheClassOfTheDrawnPrimitive(GpuPrimitiveTopology topology, uint expected)
     {
         // A layered pipeline's input topology class has to match every draw's primitive type.
         Assert.Equal((nuint)expected, MetalV2Formats.TopologyClass(topology));
+    }
+
+    [Fact]
+    public void ATriangleFanPipelineIsRefused()
+    {
+        // The executor draws fans as triangle lists for this host; a fan pipeline is a bug.
+        Assert.Throws<InvalidOperationException>(() => MetalV2Formats.Topology(GpuPrimitiveTopology.TriangleFan));
     }
 
     [Fact]

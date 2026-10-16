@@ -26,6 +26,13 @@ public sealed class RasterSceneTests(ITestOutputHelper output) : SceneTestBase(o
     private const uint ZClipNearDisable = 1u << 26;
     private const uint ZClipFarDisable = 1u << 27;
 
+    // VGT_PRIMITIVE_TYPE values beyond Prim's, and the primitive restart registers:
+    // GE_MULTI_PRIM_IB_RESET_EN (uconfig) and VGT_MULTI_PRIM_IB_RESET_INDX (context).
+    private const uint PrimQuadList = 19;
+    private const uint PrimPolygon = 21;
+    private const uint GeMultiPrimIbResetEn = 0x24B;
+    private const uint VgtMultiPrimIbResetIndx = 0x103;
+
     // ---------------------------------------------------------------- programs
 
     // Instance id (v8) shifts the position's x by 0.5 per instance.
@@ -871,7 +878,7 @@ public sealed class RasterSceneTests(ITestOutputHelper output) : SceneTestBase(o
 
     [Theory]
     [InlineData(8u, 1)]
-    [InlineData(24u, 3)]
+    [InlineData(24u, 3, Skip = "Wide lines: Metal has no wide lines, so a PA_SU_LINE_CNTL width above one pixel is drawn one pixel wide with a one-time warning.")]
     public void ALineListDrawsLinesOfThePaSuLineCntlWidth(uint widthRegister, int widthPixels)
     {
         using var rig = CreateRig();
@@ -990,6 +997,89 @@ public sealed class RasterSceneTests(ITestOutputHelper output) : SceneTestBase(o
         AssertCoverage(pixels, Rect(20, 18, 28, 28), "one rectangle from a RECTLIST draw");
     }
 
+    /// <summary>
+    /// DI_PT_QUADLIST: every four vertices are one quad, (q0, q1, q2) and (q0, q2, q3). Two
+    /// quads in one draw, the second not a rectangle, so a fan of all eight vertices or one
+    /// triangle per quad is caught.
+    /// </summary>
+    [Fact]
+    public void AQuadListFillsEveryQuadCompletely()
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        var vp = Vp.Default;
+        (double X, double Y)[] points = [(4, 4), (14, 4), (14, 14), (4, 14), (18, 18), (28, 20), (26, 28), (18, 26)];
+        var pixels = Render(rig, Vertices(vp, 0.5f, points), s => s.Uconfig[Uc.VgtPrimitiveType] = PrimQuadList);
+        var expected = Coverage(
+        [
+            [points[0], points[1], points[2]],
+            [points[0], points[2], points[3]],
+            [points[4], points[5], points[6]],
+            [points[4], points[6], points[7]],
+        ]);
+        AssertCoverage(pixels, expected, "two quads from a QUADLIST draw");
+    }
+
+    /// <summary>DI_PT_POLYGON: one fan around the first vertex.</summary>
+    [Fact]
+    public void APolygonIsOneFanAroundItsFirstVertex()
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        var vp = Vp.Default;
+        (double X, double Y)[] points = [(16, 3), (28, 12), (23, 28), (9, 28), (4, 12)];
+        var pixels = Render(rig, Vertices(vp, 0.5f, points), s => s.Uconfig[Uc.VgtPrimitiveType] = PrimPolygon);
+        var expected = Coverage(
+        [
+            [points[0], points[1], points[2]],
+            [points[0], points[2], points[3]],
+            [points[0], points[3], points[4]],
+        ]);
+        AssertCoverage(pixels, expected, "pentagon from a POLYGON draw");
+    }
+
+    // Two squares of four vertices each, for indexed fans.
+    private static readonly (double X, double Y)[] FanSquares =
+        [(4, 4), (14, 4), (14, 14), (4, 14), (18, 18), (28, 18), (28, 28), (18, 28)];
+
+    /// <summary>
+    /// A restart index ends an indexed fan and the next index is the hub of a new one: two
+    /// squares, where one fan of all eight indices would cover the space between them.
+    /// </summary>
+    [Theory]
+    [InlineData(false, 0xFFFFu)]
+    [InlineData(true, 0xFFFFFFFFu)]
+    [InlineData(true, 0x1234u)] // a reset index other than all ones
+    public void AnIndexedFanRestartsAtTheResetIndex(bool wideIndices, uint resetIndex)
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        var vp = Vp.Default;
+        uint[] indices = [0, 1, 2, 3, resetIndex, 4, 5, 6, 7];
+        var address = wideIndices
+            ? rig.Memory.Upload<uint>(indices)
+            : rig.Memory.Upload<ushort>([.. indices.Select(i => (ushort)i)]);
+        var pixels = Render(rig, Vertices(vp, 0.5f, FanSquares), s =>
+        {
+            s.Uconfig[Uc.VgtPrimitiveType] = Prim.TriangleFan;
+            s.Uconfig[GeMultiPrimIbResetEn] = 1;
+            s.Context[VgtMultiPrimIbResetIndx] = resetIndex;
+        }, draw: pm4 =>
+        {
+            pm4.NumInstances(1);
+            pm4.IndexType(wideIndices ? 1u : 0u);
+            pm4.DrawIndexed(address, (uint)indices.Length, (uint)indices.Length);
+        });
+        var expected = Rect(4, 4, 14, 14);
+        var second = Rect(18, 18, 28, 28);
+        for (var index = 0; index < expected.Length; index++)
+        {
+            expected[index] |= second[index];
+        }
+
+        AssertCoverage(pixels, expected, $"two indexed fans split by reset index 0x{resetIndex:X}, {(wideIndices ? 32 : 16)}-bit indices");
+    }
+
     // ---------------------------------------------------------------- 7. instancing and indexed draws
 
     // A triangle at the left edge, translated by 8 pixels per instance by InstancedVertex.
@@ -1083,5 +1173,39 @@ public sealed class RasterSceneTests(ITestOutputHelper output) : SceneTestBase(o
         }, vertexProgram: InstancedVertex);
         var triangles = Enumerable.Range(0, 3).Select(i => InstanceTriangle.Select(p => (p.X + (8 * i), p.Y)).ToArray());
         AssertCoverage(pixels, Coverage(triangles), "indexed draw, three instances");
+    }
+
+    // A fan of two triangles at the left edge (a square), translated by 8 pixels per instance.
+    private static readonly (double X, double Y)[] InstanceFan = [(2, 4), (8, 4), (8, 12), (2, 12)];
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void EveryInstanceDrawsTheWholeFan(bool indexed)
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        var vp = Vp.Default;
+        var address = rig.Memory.Upload<ushort>([0, 1, 2, 3]);
+        var pixels = Render(rig, Vertices(vp, 0.5f, InstanceFan), s => s.Uconfig[Uc.VgtPrimitiveType] = Prim.TriangleFan,
+            draw: pm4 =>
+            {
+                pm4.NumInstances(3);
+                if (indexed)
+                {
+                    pm4.IndexType(0);
+                    pm4.DrawIndexed(address, 4, 4);
+                }
+                else
+                {
+                    pm4.DrawAuto(4);
+                }
+            }, vertexProgram: InstancedVertex);
+        var triangles = Enumerable.Range(0, 3).SelectMany(i => new[]
+        {
+            new[] { InstanceFan[0], InstanceFan[1], InstanceFan[2] }.Select(p => (p.X + (8 * i), p.Y)).ToArray(),
+            new[] { InstanceFan[0], InstanceFan[2], InstanceFan[3] }.Select(p => (p.X + (8 * i), p.Y)).ToArray(),
+        });
+        AssertCoverage(pixels, Coverage(triangles), $"{(indexed ? "indexed" : "auto")} fan, three instances");
     }
 }

@@ -47,6 +47,12 @@ public static partial class Gen5MslTranslator
             IReadOnlyList<Gen5ShaderInstruction> instructions,
             ShaderClipSpaceTransform clip)
         {
+            if (clip.DepthPlanes != ShaderDepthPlanes.None || clip.UserClipPlanes is { Length: > 0 })
+            {
+                // The program clips planes these positions do not describe.
+                return null;
+            }
+
             var positions = new float[ConstantPositionVertices * 4];
             for (uint vertex = 0; vertex < ConstantPositionVertices; vertex++)
             {
@@ -60,10 +66,31 @@ public static partial class Gen5MslTranslator
                 var y = position[1];
                 var z = position[2];
                 var w = position[3];
+                if (clip.WReciprocal)
+                {
+                    w = 1.0f / w;
+                }
+
+                if (clip.XyPreDivided)
+                {
+                    x *= w;
+                    y *= w;
+                }
+
+                if (clip.ZPreDivided)
+                {
+                    z *= w;
+                }
+
                 if (clip.Enabled)
                 {
-                    x = ((x * clip.ScaleX) + clip.OffsetX) / clip.HalfExtentX - 1.0f;
-                    y = ((y * clip.ScaleY) + clip.OffsetY) / clip.HalfExtentY - 1.0f;
+                    x = ((x * clip.ScaleX) + (clip.OffsetX * w)) / clip.HalfExtentX - w;
+                    y = ((y * clip.ScaleY) + (clip.OffsetY * w)) / clip.HalfExtentY - w;
+                }
+
+                if (clip.PositionXMirror)
+                {
+                    x = -x;
                 }
 
                 if (clip.PositionYDown)
@@ -71,7 +98,11 @@ public static partial class Gen5MslTranslator
                     y = -y;
                 }
 
-                if (clip.DepthNegativeOneToOne)
+                if (clip.DepthRemap)
+                {
+                    z = (z * clip.DepthScale) + (w * clip.DepthOffset);
+                }
+                else if (clip.DepthNegativeOneToOne)
                 {
                     z = (z + w) * 0.5f;
                 }

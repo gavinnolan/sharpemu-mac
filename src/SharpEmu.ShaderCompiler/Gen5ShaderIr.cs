@@ -163,6 +163,10 @@ public readonly record struct Gen5PixelOutputBinding(
     // then the export's own layout (COMPR or not) decides.
     public Gen5ColorExportFormat? ExportFormat { get; init; }
 
+    // CB_COLOR_INFO.BLEND_CLAMP on a float target written without blending: the CB clamps
+    // the exported colour to [0, 1], so the program saturates the output.
+    public bool ClampToUnit { get; init; }
+
     // The EXP MRT target that feeds this slot. It differs from the slot when the pixel
     // program skips targets, because the hardware packs color exports into the slots
     // that CB_SHADER_MASK enables.

@@ -17,6 +17,11 @@ public readonly record struct BufferCandidateTableSpecialization(
     uint MappingOffset,
     uint SearchIterations);
 
+// The module-affecting state of one guest S# that a host sampler state cannot carry.
+// MirrorOnceBorderAxes has bit 0, 1, 2 set for a CLAMP_X, _Y, _Z of MIRROR_ONCE_BORDER;
+// BorderColorType is the S# BORDER_COLOR_TYPE when any is set.
+public readonly record struct SamplerSpecialization(int LodBias, uint MirrorOnceBorderAxes = 0, uint BorderColorType = 0);
+
 public readonly record struct ImageSpecialization(
     ImageNumericClass NumericClass,
     ImageDimension Dimension,
@@ -50,11 +55,17 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
     public List<uint> ImageDescriptorGroups { get; init; } = [];
     public List<uint> SamplerDescriptorGroups { get; init; } = [];
 
+    // One entry per plan sampler, or none when every entry would be the default, so the
+    // common case keeps the specialization (and the cache keys built from it) it had
+    // before samplers were specialized.
+    public List<SamplerSpecialization> Samplers { get; init; } = [];
+
     public bool Equals(ResourceSpecialization? other) =>
         other is not null && BaseBufferCount == other.BaseBufferCount && Buffers.SequenceEqual(other.Buffers) &&
         Images.SequenceEqual(other.Images) && BufferCandidateTables.SequenceEqual(other.BufferCandidateTables) &&
         ImageDescriptorGroups.SequenceEqual(other.ImageDescriptorGroups) &&
-        SamplerDescriptorGroups.SequenceEqual(other.SamplerDescriptorGroups);
+        SamplerDescriptorGroups.SequenceEqual(other.SamplerDescriptorGroups) &&
+        Samplers.SequenceEqual(other.Samplers);
 
     public override bool Equals(object? obj) => Equals(obj as ResourceSpecialization);
 
@@ -79,6 +90,7 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
 
         foreach (var group in ImageDescriptorGroups) hash.Add(group);
         foreach (var group in SamplerDescriptorGroups) hash.Add(group);
+        foreach (var sampler in Samplers) hash.Add(sampler);
         return hash.ToHashCode();
     }
 
@@ -90,6 +102,7 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
         BufferCandidateTables = [.. BufferCandidateTables],
         ImageDescriptorGroups = [.. ImageDescriptorGroups],
         SamplerDescriptorGroups = [.. SamplerDescriptorGroups],
+        Samplers = [.. Samplers],
     };
 
     // The specialization of a plan before any draw: raw buffers and the tracked image classes.

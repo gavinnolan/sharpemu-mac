@@ -492,7 +492,7 @@ internal sealed class ShaderProgramCache
                     _staticState.Add(output.GuestSlot);
                     _staticState.Add(output.HostLocation);
                     _staticState.Add(output.ExportTarget);
-                    _staticState.Add(output.BlendSourceIndex);
+                    _staticState.Add(output.BlendSourceIndex | (output.ClampToUnit ? 0x100u : 0u));
                     _staticState.Add(output.ExportFormat is { } format ? (uint)format : uint.MaxValue);
                 }
                 break;
@@ -809,6 +809,16 @@ internal sealed class ShaderProgramCache
                     {
                         DepthNegativeOneToOne = info.ClipSpace.DepthNegativeOneToOne,
                         PositionYDown = info.ClipSpace.PositionYDown,
+                        PositionXMirror = info.ClipSpace.PositionXMirror,
+                        DepthPlanes = info.ClipSpace.DepthPlanes,
+                        UserClipPlanes = info.ClipSpace.UserClipPlanes,
+                        UserClipPlanesCullOnly = info.ClipSpace.UserClipPlanesCullOnly,
+                        XyPreDivided = info.ClipSpace.XyPreDivided,
+                        ZPreDivided = info.ClipSpace.ZPreDivided,
+                        WReciprocal = info.ClipSpace.WReciprocal,
+                        DepthRemap = info.ClipSpace.DepthRemap,
+                        DepthScale = info.ClipSpace.DepthScale,
+                        DepthOffset = info.ClipSpace.DepthOffset,
                     },
                 };
             }

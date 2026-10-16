@@ -288,12 +288,12 @@ public sealed class ShaderPipelineCacheTests : IDisposable
     }
 
     [Fact]
-    public void GraphicsPipelineKey_FoldsAll166StaticBytes()
+    public void GraphicsPipelineKey_FoldsAll167StaticBytes()
     {
         var description = Describe();
         var key = ShaderPipelineCache.KeyOf(description);
         Assert.Equal(key, ShaderPipelineCache.KeyOf(With(description, PipelineStaticParameters.FromBytes(description.StaticParameters.Bytes))));
-        Assert.Equal(166, description.StaticParameters.Bytes.Length);
+        Assert.Equal(167, description.StaticParameters.Bytes.Length);
 
         for (var index = 0; index < description.StaticParameters.Bytes.Length; index++)
         {

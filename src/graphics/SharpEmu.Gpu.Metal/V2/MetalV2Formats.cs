@@ -172,10 +172,10 @@ internal static class MetalV2Formats
         GpuPrimitiveTopology.LineList => Mtl.PrimitiveLine,
         GpuPrimitiveTopology.LineStrip => Mtl.PrimitiveLineStrip,
         GpuPrimitiveTopology.TriangleStrip => Mtl.PrimitiveTriangleStrip,
-        // A triangle fan has no Metal primitive; the executor's fan draws are small
-        // and the vertex order of the first triangle matches, which is what the
-        // metadata-clear and legacy quad paths rely on.
-        GpuPrimitiveTopology.TriangleFan => Mtl.PrimitiveTriangle,
+        // Metal has no fan primitive; the host answers DrawsTriangleFans false, so the
+        // executor draws every fan as a triangle list and none may reach a pipeline.
+        GpuPrimitiveTopology.TriangleFan => throw new InvalidOperationException(
+            "A triangle-fan pipeline reached Metal, which has no fan primitive; the executor converts fans to triangle lists."),
         // A guest rectangle list draws as tessellated patches, whose output is triangles;
         // see MetalRenderHost.DrawRectangles.
         GpuPrimitiveTopology.PatchList => Mtl.PrimitiveTriangle,
@@ -383,7 +383,9 @@ internal static class MetalV2Formats
         };
     }
 
-    // Guest sampler clamp codes to MTLSamplerAddressMode, matching the Vulkan mapping.
+    // Guest sampler clamp codes to MTLSamplerAddressMode. MIRROR_ONCE_BORDER (7) samples
+    // mirror-once-to-edge and the shader substitutes the border past the mirrored copy; the
+    // half-border modes take their nearest host mode, a deviation the sampler reports.
     public static nint SamplerAddressMode(uint mode) => mode switch
     {
         0 => Mtl.SamplerAddressRepeat,

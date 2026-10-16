@@ -44,6 +44,7 @@ internal static class Mtl
     public const nuint LoadActionClear = 2;
     public const nuint StoreActionDontCare = 0;
     public const nuint StoreActionStore = 1;
+    public const nuint StoreActionStoreAndMultisampleResolve = 3;
 
     // A descriptor that asks for Unknown promises to name the real action on the
     // encoder before encoding ends, which is how a store can be discarded once the
@@ -438,6 +439,10 @@ internal static partial class MetalV2Native
         float depthBias,
         float slopeScale,
         float clamp);
+
+    // -setDepthTestMinBound:maxBound:
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendDepthTestBounds(nint receiver, nint selector, float minBound, float maxBound);
 
     // -setStencilFrontReferenceValue:backReferenceValue:
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]

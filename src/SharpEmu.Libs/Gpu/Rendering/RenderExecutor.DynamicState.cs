@@ -9,9 +9,15 @@ namespace SharpEmu.Libs.Gpu.Rendering;
 
 public sealed partial class RenderExecutor
 {
-    private const uint MaxViewportDimension = 16384;
 
     // A guest bias for a fixed-point depth format scales by the host depth bits.
+    //
+    // A fixed-point guest depth (a Z24 surface the host keeps as D32 float) has a constant unit
+    // of 2^NEG_NUM_DB_BITS, while the host's float unit is 2^(exponent(max z) - 23). The two are
+    // equal for primitives whose depth lies in [0.5, 1) once the factor is scaled to 2^-24 units;
+    // deeper below 0.5 the host offset is smaller by 2^(-1 - exponent). This is a documented
+    // deviation: the host has no constant-unit bias on a float attachment, and refusing would
+    // stop every title whose Z24 targets land on D32 float.
     public static float DepthBiasConstantFactor(float guestFactor, in PolygonOffsetRegisters offset, GpuFormat hostDepthFormat)
     {
         if (offset.DepthIsFloat)
@@ -23,10 +29,13 @@ public sealed partial class RenderExecutor
         {
             GpuFormat.D16Unorm or GpuFormat.D16UnormS8Uint => 16,
             GpuFormat.D24UnormS8Uint => 24,
-            _ => 0,
+            _ => FloatHostUnitBits,
         };
-        return hostDepthBits == 0 ? guestFactor : MathF.ScaleB(guestFactor, hostDepthBits + offset.NegativeDepthBits);
+        return MathF.ScaleB(guestFactor, hostDepthBits + offset.NegativeDepthBits);
     }
+
+    // The float host unit that equals a 24-bit fixed-point one: 2^(exponent - 23) for z in [0.5, 1).
+    private const int FloatHostUnitBits = 24;
 
     // The dynamic state of a draw from the context bank and the resolved targets.
     private DynamicDrawState BuildDynamicState(ContextRegisters context, in DrawState state)
@@ -53,36 +62,11 @@ public sealed partial class RenderExecutor
         }
 
         var scissor = ResolveScissor(viewportRegisters, context.ScanMode, framebufferWidth, framebufferHeight);
-        ref readonly var viewport = ref viewportRegisters.Viewports[0];
-        float viewportX;
-        float viewportY;
-        float viewportWidth;
-        float viewportHeight;
-        if (context.Clip.ClipDisable)
-        {
-            viewportX = 0;
-            viewportY = 0;
-            viewportWidth = Math.Min(limits.MaxViewportWidth, MaxViewportDimension);
-            viewportHeight = Math.Min(limits.MaxViewportHeight, MaxViewportDimension);
-        }
-        else
-        {
-            viewportX = viewport.XOffset - viewport.XScale;
-            viewportY = viewport.YOffset - viewport.YScale;
-            viewportWidth = viewport.XScale * 2f;
-            viewportHeight = viewport.YScale * 2f;
-        }
+        // The pipeline cache keyed the vertex program on the other half of this transform.
+        var viewport = HostViewportTransform.Resolve(context, limits.MaxViewportWidth, limits.MaxViewportHeight);
 
-        var lineWidth = context.LineWidth;
-        if (lineWidth != 1f)
-        {
-            if (RenderTrace.Enabled && RenderTrace.LineWidthClamp())
-            {
-                RenderTrace.Write($"Clamping the line width to 1.0 because wide lines are not enabled: lineWidth={lineWidth}");
-            }
-
-            lineWidth = 1f;
-        }
+        // The host draws lines one pixel wide; validation warned once about a wider guest line.
+        const float lineWidth = 1f;
 
         var depthTarget = state.Depth.HasTarget ? state.Depth.Target : default;
         var depthState = depthTarget.State;
@@ -120,12 +104,12 @@ public sealed partial class RenderExecutor
 
         var blend = context.BlendColor;
         return new DynamicDrawState(
-            viewportX,
-            viewportY,
-            viewportWidth,
-            viewportHeight,
-            viewport.ZOffset - (context.Clip.DirectXClipSpace ? 0f : viewport.ZScale),
-            viewport.ZScale + viewport.ZOffset,
+            viewport.X,
+            viewport.Y,
+            viewport.Width,
+            viewport.Height,
+            viewport.MinDepth,
+            viewport.MaxDepth,
             scissor,
             lineWidth,
             blend.Red,
@@ -142,6 +126,11 @@ public sealed partial class RenderExecutor
             depthBiasConstant,
             depthBiasEnabled ? polygonOffset.Clamp : 0f,
             depthBiasSlope,
+            // The bounds test reads the stored depth, so without a depth target there is
+            // nothing to test (depthState is the default then).
+            depthState.DepthBoundsTestEnabled,
+            depthState.DepthMinBounds,
+            depthState.DepthMaxBounds,
             depthState.StencilTestEnabled,
             depthState.FrontMasks,
             depthState.BackMasks,

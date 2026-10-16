@@ -134,6 +134,29 @@ public readonly record struct ClipSpaceTransform(
     // The host viewport maps +y down the target: the clip-disabled viewport always, else a
     // positive guest y scale. A host whose clip space is y-up negates the position's y then.
     public bool PositionYDown { get; init; }
+
+    // A negative guest x scale: the host viewport keeps a positive width and the program
+    // negates the position's x.
+    public bool PositionXMirror { get; init; }
+
+    // The guest depth planes the host clamps instead of clipping, which the program clips.
+    public SharpEmu.ShaderCompiler.ShaderDepthPlanes DepthPlanes { get; init; }
+
+    // PA_CL_VTE_CNTL.VTX_XY_FMT / VTX_Z_FMT: the exported x and y, or z, are already divided
+    // by w. VTX_W0_FMT clear: the exported w is 1 / w.
+    public bool XyPreDivided { get; init; }
+    public bool ZPreDivided { get; init; }
+    public bool WReciprocal { get; init; }
+
+    // The enabled user clip planes (PA_CL_UCP_n, four floats each), clipped in the program;
+    // UCP_CULL_ONLY_ENA culls with them instead.
+    public float[]? UserClipPlanes { get; init; }
+    public bool UserClipPlanesCullOnly { get; init; }
+
+    // The program maps depth onto the host's viewport range: z' = z * DepthScale + w * DepthOffset.
+    public bool DepthRemap { get; init; }
+    public float DepthScale { get; init; }
+    public float DepthOffset { get; init; }
 }
 
 public sealed class VertexInputInfo

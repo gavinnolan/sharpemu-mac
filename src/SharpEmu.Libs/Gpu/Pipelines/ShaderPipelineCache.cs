@@ -18,7 +18,6 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 {
     private const uint VertexUserDataBase = 8;
     private const uint MaxPixelInputs = 32;
-    private const uint MaxViewportDimension = 16384;
 
     // The geometry stage programs its LDS allocation in 128-dword granules, like compute.
     private const uint LocalDataShareGranuleDwords = 128;
@@ -300,31 +299,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             pixelInfo.Stage = pixelStage;
         }
 
-        SolidColorClear? solidClear = null;
-        var disableBlending = false;
-        if (pixelInfo is not null)
-        {
-            var vertexProgramWords = _programs.Decode(vertexSource);
-            var pixelProgramWords = _programs.Decode(pixelSource!);
-            if (IsProceduralFullscreenClearPair(vertexProgramWords, vertexInfo, vertexStage, pixelProgramWords, pixelStage))
-            {
-                var color = DecodeSolidClearColor(pixelStage.Resources.UserData);
-                solidClear = new SolidColorClear(color.Red, color.Green, color.Blue, color.Alpha);
-            }
-            else
-            {
-                disableBlending = IsTransparentPremultipliedFill(context, pixelOutputs, vertexInfo, vertexStage, pixelStage);
-            }
-        }
-
         return new GraphicsPrograms
         {
             Vertex = vertexProgram,
             Pixel = pixelProgramHandle,
             VertexInput = vertexInfo,
             PixelInput = pixelInfo ?? new PixelInputInfo(),
-            SolidClear = solidClear,
-            DisableBlending = disableBlending,
             DropUnwrittenColorTargets = dropUnwritten,
             PositionStream = FindPositionStream(vertexInfo),
         };
@@ -335,30 +315,16 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private VertexInputInfo PrepareVertexInput(ShaderSource source, ShaderInterfaceRegisters shaderInterface, ContextRegisters context)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VertexInputResolution);
-        var clipSpace = default(ClipSpaceTransform);
-        if (context.Clip.ClipDisable)
-        {
-            ref readonly var viewport = ref context.ScreenViewport.Viewports[0];
-            var limits = _host.Limits;
-            clipSpace = new ClipSpaceTransform(
-                true,
-                viewport.XScale,
-                viewport.YScale,
-                viewport.XOffset,
-                viewport.YOffset,
-                Math.Min(limits.MaxViewportWidth, MaxViewportDimension) * 0.5f,
-                Math.Min(limits.MaxViewportHeight, MaxViewportDimension) * 0.5f);
-        }
-
-        // The host viewport the draw state builds: the clip-disabled one is y-down, any
-        // other follows the sign of the guest's y scale.
-        clipSpace = clipSpace with
-        {
-            DepthNegativeOneToOne = !context.Clip.DirectXClipSpace,
-            PositionYDown = context.Clip.ClipDisable || context.ScreenViewport.Viewports[0].YScale > 0f,
-        };
+        // The program's half of the viewport transform the draw state sets the rest of.
+        var clipSpace = HostViewport(context).ClipSpace;
         return VertexInputResolver.ResolveVertexInputs(_context, source.Registered, source.UserData,
             shaderInterface.VertexOutputControl, clipSpace, _vertexTables, source.Hash);
+    }
+
+    private HostViewportTransform HostViewport(ContextRegisters context)
+    {
+        var limits = _host.Limits;
+        return HostViewportTransform.Resolve(context, limits.MaxViewportWidth, limits.MaxViewportHeight);
     }
 
     // The interpolated attributes a pixel program reads, ascending. A program never changes, and this
@@ -454,6 +420,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             {
                 ExportTarget = exportTarget >= 0 ? (uint)exportTarget : ContextRegisters.ColorTargetCount + slot,
                 ExportFormat = ExportFormatOf(context.ShaderInterface, exportTarget),
+                ClampToUnit = ClampsFloatOutput(context, slot),
             });
         }
 
@@ -477,6 +444,30 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         return outputs.ToArray();
+    }
+
+    // CB_COLOR_INFO.BLEND_CLAMP on a FLOAT target clamps the colour to [0, 1]; normalized
+    // targets clamp by their encoding. Without blending the program saturates its output.
+    // With blending the CB also clamps the destination and the blend result, which the host's
+    // fixed-function blend cannot do: documented deviation, only the source is clamped.
+    private static bool ClampsFloatOutput(ContextRegisters context, uint slot)
+    {
+        const uint BlendClamp = 1u << 15, BlendBypass = 1u << 16, NumberTypeFloat = 7;
+        ref readonly var words = ref context.ColorTargets[slot];
+        if ((words.Info & BlendClamp) == 0 || (uint)words.NumberType != NumberTypeFloat)
+        {
+            return false;
+        }
+
+        if (context.BlendControls[slot].Enable && (words.Info & BlendBypass) == 0)
+        {
+            ShaderCompilerWarnings.WarnOnce(
+                "blend-clamp-blended-float",
+                $"BLEND_CLAMP on a blended float color target clamps the source only, not the blend result: " +
+                $"slot={slot} layout={(uint)words.Layout}.");
+        }
+
+        return true;
     }
 
     // SPI_SHADER_COL_FORMAT of one export. With no format written for any export, the
@@ -792,13 +783,13 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             var exportTarget = PixelExportRouting.ExportForSlot(context.ShaderInterface, color.Slot);
             var exported = pixelStage is not null &&
                 (exportTarget >= 0 && ((pixelStage.PixelColorExportMasks >> (exportTarget * 4)) & 0xFu) != 0);
-            var colorMask = exported ? color.Resolution.ExportMapping.ApplyMask(context.RenderTargetMaskForSlot(color.Slot)) : 0;
+            var colorMask = exported ? color.Resolution.ExportMapping.ApplyMask(context.ColorWriteMaskForSlot(color.Slot)) : 0;
             parameters.SetColorMask(index, colorMask);
             if (RenderTrace.Enabled && RenderTrace.Pipeline())
             {
                 RenderTrace.Write(
                     $"PipelineCache output slot={color.Slot} export={exportTarget} " +
-                    $"guestMask=0x{context.RenderTargetMaskForSlot(color.Slot):X} " +
+                    $"guestMask=0x{context.ColorWriteMaskForSlot(color.Slot):X} " +
                     $"exported={(exported ? 1 : 0)} shaderMask=0x{pixelStage?.PixelColorExportMasks ?? 0:X8} " +
                     $"mapping=0x{color.Resolution.ExportMapping.Packed:X2} hostMask=0x{colorMask:X} format={(int)format}");
             }
@@ -831,7 +822,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var rectangleList = topology == GpuPrimitiveTopology.PatchList;
         var mode = context.RasterMode;
         parameters.NegativeOneToOne = !context.Clip.DirectXClipSpace;
-        parameters.DepthClipEnable = context.Clip.IsZClipEnabled;
+        parameters.DepthClipEnable = HostViewportTransform.DepthClipOf(context);
         parameters.Topology = topology;
         parameters.PrimitiveRestartEnable = primitiveRestartEnabled;
         parameters.Samples = samples;
@@ -846,6 +837,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         parameters.CullBack = !rectangleList && mode.CullBack;
         parameters.CullFront = !rectangleList && mode.CullFront;
         parameters.FrontFaceClockwise = mode.FrontFaceClockwise;
+        parameters.AlphaToCoverageEnable = AlphaToCoverageEnabled(colors, context, pixelActive);
         for (var index = 0; index < colors.Length; index++)
         {
             var slot = colors[index].Slot;
@@ -863,6 +855,30 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         FillVertexInputState(vertexInput, vertexState);
         return (vertexStage, pixelStage);
+    }
+
+    // DB_ALPHA_TO_MASK turns the alpha of MRT0's export into sample coverage unless the pixel
+    // program opts out (DB_SHADER_CONTROL.ALPHA_TO_MASK_DISABLE). The host takes the alpha of
+    // its first color output, so that output has to be the one export 0 feeds; otherwise the
+    // draw runs without alpha to coverage (documented deviation, warned once).
+    private static bool AlphaToCoverageEnabled(ReadOnlySpan<ColorTargetState> colors, ContextRegisters context, bool pixelActive)
+    {
+        if (!pixelActive || (context.AlphaToMask & 1u) == 0 || context.ShaderInterface.DepthShaderControl.AlphaToMaskDisable)
+        {
+            return false;
+        }
+
+        if (colors.Length == 0 || PixelExportRouting.ExportForSlot(context.ShaderInterface, colors[0].Slot) != 0)
+        {
+            ShaderCompilerWarnings.WarnOnce(
+                "alpha-to-coverage-without-mrt0",
+                $"Alpha to coverage without MRT0's export at the first color attachment runs without coverage: " +
+                $"attachments={colors.Length} firstSlot={(colors.Length == 0 ? -1 : (int)colors[0].Slot)} " +
+                $"dbAlphaToMask=0x{context.AlphaToMask:X8}.");
+            return false;
+        }
+
+        return true;
     }
 
     internal static GraphicsPipelineKey KeyOf(GraphicsPipelineDescription description) => new()

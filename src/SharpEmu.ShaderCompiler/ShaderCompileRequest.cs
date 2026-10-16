@@ -45,6 +45,17 @@ public sealed record ShaderVertexInput(
     }
 }
 
+/// <summary>The guest's depth clip planes a program emulates with clip distances, in the
+/// guest's clip space: near at z = 0 (or z = -w for a [-w, w] depth) and far at z = w.</summary>
+[Flags]
+public enum ShaderDepthPlanes : byte
+{
+    None = 0,
+    NearAtZero = 1,
+    NearAtNegativeW = 2,
+    Far = 4,
+}
+
 public readonly record struct ShaderClipSpaceTransform(
     bool Enabled,
     float ScaleX,
@@ -61,6 +72,41 @@ public readonly record struct ShaderClipSpaceTransform(
     // The host viewport maps +y down the target, as Vulkan's NDC does. A host whose clip
     // space is y-up and which cannot set a negative viewport height negates y instead.
     public bool PositionYDown { get; init; }
+
+    // The guest viewport is mirrored in x (a negative x scale) and the host viewport, which
+    // takes no negative width, is not: the program negates x.
+    public bool PositionXMirror { get; init; }
+
+    // The guest depth planes the host does not clip (it clamps depth instead) and the program
+    // clips with clip distances computed from the exported position.
+    public ShaderDepthPlanes DepthPlanes { get; init; }
+
+    // The enabled user clip planes (PA_CL_UCP_n_{X,Y,Z,W}, four floats each): the guest keeps
+    // the side where dot(plane, position) >= 0 of its clip-space position. The program
+    // clips with clip distances, or with UserClipPlanesCullOnly (UCP_CULL_ONLY_ENA) culls a
+    // primitive whose vertices are all outside one plane.
+    public float[]? UserClipPlanes { get; init; }
+    public bool UserClipPlanesCullOnly { get; init; }
+
+    // The exported x and y (PA_CL_VTE_CNTL.VTX_XY_FMT), or z (VTX_Z_FMT), are already
+    // divided by w; the exported w is 1 / w (VTX_W0_FMT clear). The host divides by w and
+    // interpolates with it, so the program multiplies the divided ones back and takes the
+    // reciprocal of the reciprocal.
+    public bool XyPreDivided { get; init; }
+    public bool ZPreDivided { get; init; }
+    public bool WReciprocal { get; init; }
+
+    // The program puts the guest's depth on the host's viewport range itself:
+    // z' = z * DepthScale + w * DepthOffset after the above. It replaces
+    // DepthNegativeOneToOne, which is the remap's (0.5, 0.5) case.
+    public bool DepthRemap { get; init; }
+    public float DepthScale { get; init; }
+    public float DepthOffset { get; init; }
+
+    // Conventions only the program can apply: no Vulkan pipeline state carries them.
+    public bool HasProgramOnlyConventions =>
+        PositionXMirror || DepthPlanes != ShaderDepthPlanes.None || UserClipPlanes is { Length: > 0 } ||
+        XyPreDivided || ZPreDivided || WReciprocal || DepthRemap;
 }
 
 // One bounded runtime V# table as the emitter sees it: a contiguous run of native buffer

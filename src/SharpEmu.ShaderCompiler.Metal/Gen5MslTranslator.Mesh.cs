@@ -757,7 +757,13 @@ public static partial class Gen5MslTranslator
             source.AppendLine("    {");
 
             // A partial POS0 export keeps the components already written, so the position
-            // reaches Metal's clip space once, when it is final.
+            // reaches Metal's clip space once, when it is final; the plane distances are
+            // taken from the guest's position first.
+            foreach (var statement in HostPlaneStatements("sharpemu_out.sharpemu_position", "sharpemu_out"))
+            {
+                source.AppendLine($"        {statement}");
+            }
+
             foreach (var statement in HostClipSpaceStatements("sharpemu_out.sharpemu_position"))
             {
                 source.AppendLine($"        {statement}");

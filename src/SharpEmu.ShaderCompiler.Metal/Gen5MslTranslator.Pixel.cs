@@ -37,6 +37,7 @@ public static partial class Gen5MslTranslator
             string mipLevel;
             int compareFunction;
             uint packedFormat;
+            SamplerResource? samplerInfo;
             {
                 if (TryGetImageElementCases(instruction, image, out var selector, out var elements, out error))
                 {
@@ -47,8 +48,8 @@ public static partial class Gen5MslTranslator
                         Line("{");
                         _indent++;
                         var emitted =
-                            TryResolveLayoutImage(instruction, image, out texture, out samplerName, out imageClass, out dstSelect, out mipLevel, out compareFunction, out packedFormat, out error, elements[index]) &&
-                            EmitImageOperation(instruction, image, texture, samplerName, imageClass, dstSelect, mipLevel, compareFunction, packedFormat, out error);
+                            TryResolveLayoutImage(instruction, image, out texture, out samplerName, out imageClass, out dstSelect, out mipLevel, out compareFunction, out packedFormat, out samplerInfo, out error, elements[index]) &&
+                            EmitImageOperation(instruction, image, texture, samplerName, imageClass, dstSelect, mipLevel, compareFunction, packedFormat, samplerInfo, out error);
                         _indent--;
                         Line("}");
                         if (!emitted)
@@ -65,13 +66,13 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
-                if (!TryResolveLayoutImage(instruction, image, out texture, out samplerName, out imageClass, out dstSelect, out mipLevel, out compareFunction, out packedFormat, out error))
+                if (!TryResolveLayoutImage(instruction, image, out texture, out samplerName, out imageClass, out dstSelect, out mipLevel, out compareFunction, out packedFormat, out samplerInfo, out error))
                 {
                     return false;
                 }
             }
 
-            return EmitImageOperation(instruction, image, texture, samplerName, imageClass, dstSelect, mipLevel, compareFunction, packedFormat, out error);
+            return EmitImageOperation(instruction, image, texture, samplerName, imageClass, dstSelect, mipLevel, compareFunction, packedFormat, samplerInfo, out error);
         }
 
         // One image operation over a resolved texture; its results are register writes.
@@ -85,6 +86,7 @@ public static partial class Gen5MslTranslator
             string mipLevel,
             int compareFunction,
             uint packedFormat,
+            SamplerResource? samplerInfo,
             out string error)
         {
             error = string.Empty;
@@ -246,14 +248,14 @@ public static partial class Gen5MslTranslator
             }
             else if (instruction.Opcode.StartsWith("ImageSample", StringComparison.Ordinal))
             {
-                if (!TryEmitImageSample(instruction, image, texture, samplerName, imageClass, compareFunction, out sampled, out error))
+                if (!TryEmitImageSample(instruction, image, texture, samplerName, imageClass, compareFunction, samplerInfo, out sampled, out error))
                 {
                     return false;
                 }
             }
             else if (instruction.Opcode.StartsWith("ImageGather4", StringComparison.Ordinal))
             {
-                if (!TryEmitImageGather(instruction, image, texture, samplerName, imageClass, compareFunction, out sampled, out error))
+                if (!TryEmitImageGather(instruction, image, texture, samplerName, imageClass, compareFunction, samplerInfo, out sampled, out error))
                 {
                     return false;
                 }
@@ -842,7 +844,13 @@ public static partial class Gen5MslTranslator
 
             // A lane removed from EXEC keeps the previous output value; killed
             // fragments are discarded in the epilogue.
-            Line($"{field} = {ExecSelect($"vec<{componentType}, 4>({values[0]}, {values[1]}, {values[2]}, {values[3]})", field)};");
+            var value = $"vec<{componentType}, 4>({values[0]}, {values[1]}, {values[2]}, {values[3]})";
+            if (binding.Value.ClampToUnit && binding.Value.Kind == Gen5PixelOutputKind.Float)
+            {
+                value = $"saturate({value})";
+            }
+
+            Line($"{field} = {ExecSelect(value, field)};");
             return true;
         }
 

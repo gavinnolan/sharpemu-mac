@@ -360,10 +360,29 @@ public sealed class DepthSceneTests(ITestOutputHelper output) : SceneTestBase(ou
         Assert.Equal(0.5f, biased);
     }
 
-    [Fact]
-    public void ConstantBiasOnAFixedPointViewOfAFloatTargetUsesTwoToTheMinusTwentyFour()
+    [Theory]
+    [InlineData(0.75f, -24)]
+    [InlineData(0.5f, -24)]
+    [InlineData(0.75f, -16)]
+    public void ConstantBiasOnAFixedPointViewOfAFloatTargetIsInFixedPointUnitsAboveOneHalf(float z, int negativeBits)
     {
-        // POLY_OFFSET_DB_IS_FLOAT_FMT = 0, NEG_NUM_DB_BITS = -24 (the Vulkan FORCE_UNORM representation): r = 2^-24 flat.
+        // POLY_OFFSET_DB_IS_FLOAT_FMT = 0 on a D32F target (a Z24 surface the host keeps as float):
+        // r = 2^NEG_NUM_DB_BITS flat. The host's float unit matches it for depths in [0.5, 1).
+        using var rig = CreateRig();
+        if (rig is null) return;
+        var biased = BiasedDepth(rig, 3, SceneDraws.Quad(z, 1, 1, 1), s =>
+        {
+            BiasRegisters(s, FrontOffsetEnable, 100, 100);
+            s.Context[Cx.PaSuPolyOffsetDbFmtCntl] = unchecked((uint)negativeBits) & 0xFF;
+        });
+        Assert.Equal(z + (100 * MathF.ScaleB(1f, negativeBits)), biased, 1e-6f);
+    }
+
+    [Fact]
+    public void ConstantFixedPointBiasOnAFloatTargetBelowOneHalfIsTheDocumentedFloatUnit()
+    {
+        // Documented deviation (RenderExecutor.DepthBiasConstantFactor): hardware would add
+        // 1000 * 2^-24 at any depth; the host's float bias unit at z = 0.25 is 2^-25.
         using var rig = CreateRig();
         if (rig is null) return;
         const float z = 0.25f;
@@ -372,7 +391,7 @@ public sealed class DepthSceneTests(ITestOutputHelper output) : SceneTestBase(ou
             BiasRegisters(s, FrontOffsetEnable, 1000, 1000);
             s.Context[Cx.PaSuPolyOffsetDbFmtCntl] = unchecked((uint)-24) & 0xFF;
         });
-        Assert.Equal(z + (1000 * MathF.ScaleB(1f, -24)), biased, 1e-6f);
+        Assert.Equal(z + (1000 * MathF.ScaleB(1f, -25)), biased, 1e-7f);
     }
 
     [Theory]
@@ -513,9 +532,19 @@ public sealed class DepthSceneTests(ITestOutputHelper output) : SceneTestBase(ou
     // 6. Depth bounds -----------------------------------------------------------------------------------------
 
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void DepthBoundsDiscardPixelsWhoseStoredDepthIsOutside(bool boundsEnable)
+    [InlineData(true, 0.5f, 1f)]
+    [InlineData(false, 0.5f, 1f)]
+    // Both ends are inclusive: a stored depth exactly at a bound passes.
+    [InlineData(true, 0.2f, 0.6f)]
+    [InlineData(true, 0.2f, 0.5f)]
+    [InlineData(true, 0.3f, 0.6f)]
+    // Bounds beyond [0, 1] hold every stored depth.
+    [InlineData(true, -1f, 2f)]
+    // An empty range (inverted, or wholly beyond [0, 1]) holds no stored depth: every pixel is discarded.
+    [InlineData(true, 0.7f, 0.3f)]
+    [InlineData(true, 1.5f, 2f)]
+    [InlineData(true, -1f, -0.5f)]
+    public void DepthBoundsDiscardPixelsWhoseStoredDepthIsOutside(bool boundsEnable, float min, float max)
     {
         using var rig = CreateRig();
         if (rig is null) return;
@@ -523,19 +552,26 @@ public sealed class DepthSceneTests(ITestOutputHelper output) : SceneTestBase(ou
         d.Draw(d.State().DepthControl(true, true, CompareFunc.Always), d.Rect(0.2f, 1, 0, 0, 0, 0, 32, 64));
         d.Draw(d.State().DepthControl(true, true, CompareFunc.Always), d.Rect(0.6f, 1, 0, 0, 32, 0, 64, 64));
         var state = d.State().DepthControl(true, true, CompareFunc.Always, bounds: boundsEnable);
-        state.Context[Cx.DbDepthBoundsMin] = SceneState.F(0.5f);
-        state.Context[Cx.DbDepthBoundsMax] = SceneState.F(1f);
+        state.Context[Cx.DbDepthBoundsMin] = SceneState.F(min);
+        state.Context[Cx.DbDepthBoundsMax] = SceneState.F(max);
         d.Draw(state, d.Full(0.1f, 0, 1, 0));
         var depth = d.QueueDepthReadback();
         var colour = d.QueueColorReadback();
+        // A range the host test has to take (anything but [0, 1] or empty once clamped to it)
+        // needs Metal's depth bounds test. A device without it (before Apple10) runs the draw
+        // unbounded: the documented deviation in MetalRenderHost.ApplyDepthBounds.
+        var needsHostTest = boundsEnable && Math.Max(min, 0f) <= Math.Min(max, 1f) &&
+            (Math.Max(min, 0f) != 0f || Math.Min(max, 1f) != 1f);
+        var unbounded = needsHostTest && !rig.Host.DepthBoundsTestSupported;
         rig.Submit(d.Pm4);
         var depths = depth();
         var colours = colour();
-        // Left stored 0.2 is outside [0.5, 1] (discarded when enabled); right stored 0.6 is inside.
-        Assert.Equal(boundsEnable ? Red : Green, colours[(32 * Size) + 8]);
-        Assert.Equal(boundsEnable ? 0.2f : 0.1f, depths[(32 * Size) + 8]);
-        Assert.Equal(Green, colours[(32 * Size) + 56]);
-        Assert.Equal(0.1f, depths[(32 * Size) + 56]);
+        // Left stored 0.2 and right stored 0.6 (both drawn red) each pass when inside [min, max] or the test is off.
+        bool Passes(float stored) => !boundsEnable || unbounded || (min <= stored && stored <= max);
+        Assert.Equal(Passes(0.2f) ? Green : Red, colours[(32 * Size) + 8]);
+        Assert.Equal(Passes(0.2f) ? 0.1f : 0.2f, depths[(32 * Size) + 8]);
+        Assert.Equal(Passes(0.6f) ? Green : Red, colours[(32 * Size) + 56]);
+        Assert.Equal(Passes(0.6f) ? 0.1f : 0.6f, depths[(32 * Size) + 56]);
     }
 
     // 7. Stencil ----------------------------------------------------------------------------------------------

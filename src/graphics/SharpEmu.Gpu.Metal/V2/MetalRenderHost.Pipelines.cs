@@ -264,6 +264,9 @@ internal sealed partial class MetalRenderHost
     /// front; see <see cref="DrawRectangles"/>.</summary>
     public bool TakesIndirectRectangleListArguments => false;
 
+    /// <summary>Metal has no fan primitive; the executor hands fans over as triangle lists.</summary>
+    public bool DrawsTriangleFans => false;
+
     private MetalPipelineEntry RequirePipelineEntry(in PipelineHandle pipeline) =>
         _pipelineEntries.TryGetValue(pipeline.Pipeline, out var entry)
             ? entry
@@ -445,6 +448,12 @@ internal sealed partial class MetalRenderHost
             {
                 MetalNative.SendVoid(descriptor, MetalNative.Selector("setFragmentFunction:"), pixelModule.Function);
             }
+
+            if (parameters.AlphaToCoverageEnable)
+            {
+                MetalNative.SendVoidBool(descriptor, MetalNative.Selector("setAlphaToCoverageEnabled:"), true);
+            }
+
             var colorAttachments = MetalNative.Send(descriptor, SelColorAttachments);
             for (var index = 0; index < description.Rendering.ColorCount; index++)
             {

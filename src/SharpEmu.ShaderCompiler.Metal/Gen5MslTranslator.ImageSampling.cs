@@ -180,6 +180,67 @@ public static partial class Gen5MslTranslator
         }
 
         // A mip index from a float level: nearest, inside the view's levels.
+        // MIRROR_ONCE_BORDER (S# clamp 7) has no host address mode. The host samples
+        // mirror-once-to-edge, which matches it inside the mirrored copy, and texel index
+        // floor(u * size) leaves that copy, [-size, size - 1], exactly when the normalized
+        // coordinate is below -1 or at least 1, at every level; the S# border colour is
+        // substituted there. That is exact only where each result is one texel: the host
+        // sampler refuses filtering across the edge, and offsets (which move the edge per
+        // level), compares, cubes and register-table border colours are refused here.
+        private bool TryMirrorOnceBorderTest(
+            string opcode, SamplerResource? samplerInfo, MslImageClass imageClass, string coordinates, bool offsetOrCompare,
+            out string? pastMirror, out string error)
+        {
+            pastMirror = null;
+            error = string.Empty;
+            var spatialComponents = imageClass.SpatialComponents;
+            var axes = (samplerInfo?.MirrorOnceBorderAxes ?? 0) & ((1u << spatialComponents) - 1);
+            if (axes == 0)
+            {
+                return true;
+            }
+
+            if (imageClass.Cube || offsetOrCompare || imageClass.DepthCompare || samplerInfo!.BorderColorType == 3)
+            {
+                // Documented deviation: past the mirrored copy these read the edge texel
+                // (mirror-once-to-edge) instead of the border colour.
+                ShaderCompilerWarnings.WarnOnce(
+                    "mirror-once-border-shape",
+                    $"{opcode} through a MIRROR_ONCE_BORDER sampler with a cube, an offset, a compare or a border colour " +
+                    "table reads the edge texel past the mirrored copy instead of the border colour.");
+                return true;
+            }
+
+            var tests = new List<string>(3);
+            for (var axis = 0; axis < spatialComponents; axis++)
+            {
+                if ((axes & (1u << axis)) != 0)
+                {
+                    var component = spatialComponents == 1 ? coordinates : $"{coordinates}.{"xyz"[axis]}";
+                    tests.Add($"{component} < -1.0f || {component} >= 1.0f");
+                }
+            }
+
+            pastMirror = Temp("bool", string.Join(" || ", tests));
+            return true;
+        }
+
+        // The S# BORDER_COLOR_TYPE constant colours: transparent black, opaque black, opaque white.
+        private static string BorderColour(string kind, uint type)
+        {
+            var one = kind == "float" ? "1.0f" : "1";
+            var zero = kind == "float" ? "0.0f" : "0";
+            return type switch
+            {
+                0 => $"{VectorLiteral(kind)}({zero}, {zero}, {zero}, {zero})",
+                1 => $"{VectorLiteral(kind)}({zero}, {zero}, {zero}, {one})",
+                _ => $"{VectorLiteral(kind)}({one}, {one}, {one}, {one})",
+            };
+        }
+
+        // An S# LOD_BIAS (signed 6.8 fixed point) as an exact float expression.
+        private static string SamplerLodBiasLiteral(int bias) => $"({bias}.0f / 256.0f)";
+
         private string NearestMip(string level, string texture) =>
             Temp("uint", $"min((uint)max(rint({level}), 0.0f), {texture}.get_num_mip_levels() - 1u)");
 
@@ -218,6 +279,7 @@ public static partial class Gen5MslTranslator
             string samplerName,
             MslImageClass imageClass,
             int compareFunction,
+            SamplerResource? samplerInfo,
             out string sampled,
             out string error)
         {
@@ -253,6 +315,17 @@ public static partial class Gen5MslTranslator
             var bias = hasBias ? Temp("float", SampleBias(image, address)) : "0.0f";
             var reference = hasCompare ? Temp("float", SampleReference(image, address)) : "0.0f";
 
+            // The S# LOD_BIAS adds to every LOD the sampler computes or is given (_L), before the
+            // _CL and MIN/MAX_LOD clamps; _LZ forces level 0 and unnormalized coordinates force
+            // mip 0, so neither is biased.
+            var samplerLodBias = samplerInfo?.LodBias ?? 0;
+            var samplerBias = samplerLodBias != 0 && !unorm && !hasZeroLod ? SamplerLodBiasLiteral(samplerLodBias) : null;
+            if (samplerBias is not null && !hasGradients && !hasLod && _stage == Gen5MslStage.Pixel)
+            {
+                bias = hasBias ? Temp("float", $"{bias} + {samplerBias}") : samplerBias;
+                hasBias = true;
+            }
+
             // Derivatives are one host-spatial vector per screen axis, with no array layer and
             // no cube bias: they have no coordinate origin.
             var gradientType = spatialComponents == 3 ? "gradient3d" : "gradient2d";
@@ -272,6 +345,14 @@ public static partial class Gen5MslTranslator
 
                 gradientX = Gradients(0);
                 gradientY = Gradients(1);
+                if (samplerBias is not null)
+                {
+                    // Scaling both derivatives by 2^bias raises the LOD they give by the bias
+                    // and leaves the anisotropy ratio alone; a gradient sample takes no bias.
+                    var scale = Temp("float", $"metal::exp2({samplerBias})");
+                    gradientX = Temp(spatialComponents == 1 ? "float" : imageClass.FloatCoordinateType, $"{gradientX} * {scale}");
+                    gradientY = Temp(spatialComponents == 1 ? "float" : imageClass.FloatCoordinateType, $"{gradientY} * {scale}");
+                }
             }
 
             var coordinates = SampleCoordinates(image, address, imageClass);
@@ -285,7 +366,9 @@ public static partial class Gen5MslTranslator
             var lod = hasZeroLod || unorm
                 ? "0.0f"
                 : hasLod
-                    ? Temp("float", ImageFloatAddress(image, address.Trailing))
+                    ? Temp("float", samplerBias is null
+                        ? ImageFloatAddress(image, address.Trailing)
+                        : $"{ImageFloatAddress(image, address.Trailing)} + {samplerBias}")
                     : explicitLod
                         ? "0.0f"
                         : bias;
@@ -302,6 +385,11 @@ public static partial class Gen5MslTranslator
             if (unorm)
             {
                 coordinates = NormalizeUnnormalizedCoordinates(coordinates, texture, imageClass);
+            }
+
+            if (!TryMirrorOnceBorderTest(opcode, samplerInfo, imageClass, coordinates, offset is not null || hasCompare, out var pastMirror, out error))
+            {
+                return false;
             }
 
             var offsetArgument = string.Empty;
@@ -355,6 +443,11 @@ public static partial class Gen5MslTranslator
             sampled = Temp(
                 $"vec<{kind}, 4>",
                 $"{texture}.sample({samplerName}, {coordinates}{layerArgument}{samplerArguments}{offsetArgument})");
+            if (pastMirror is not null)
+            {
+                sampled = Temp($"vec<{kind}, 4>", $"{pastMirror} ? {BorderColour(kind, samplerInfo!.BorderColorType)} : {sampled}");
+            }
+
             if (hasCompare)
             {
                 // A color format has no host depth view: its first channel is compared with
@@ -386,6 +479,7 @@ public static partial class Gen5MslTranslator
             string samplerName,
             MslImageClass imageClass,
             int compareFunction,
+            SamplerResource? samplerInfo,
             out string sampled,
             out string error)
         {
@@ -440,6 +534,14 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
+            if ((samplerInfo?.MirrorOnceBorderAxes ?? 0) != 0)
+            {
+                // Documented deviation: a gather past the mirrored copy reads edge texels.
+                ShaderCompilerWarnings.WarnOnce(
+                    "mirror-once-border-gather",
+                    $"{opcode} through a MIRROR_ONCE_BORDER sampler reads edge texels past the mirrored copy instead of the border colour.");
+            }
+
             var offset = SampleOffsets(image, address, imageClass);
             var bias = (flags & Gen5ImageOp.Bias) != 0 ? Temp("float", SampleBias(image, address)) : "0.0f";
             var reference = hasCompare ? Temp("float", SampleReference(image, address)) : "0.0f";
@@ -460,6 +562,12 @@ public static partial class Gen5MslTranslator
                 else if (_stage == Gen5MslStage.Pixel)
                 {
                     level = Temp("float", $"{texture}.calculate_unclamped_lod({samplerName}, {planar}) + {bias}");
+                }
+
+                // The S# LOD_BIAS raises the given or computed LOD, as for a sample.
+                if (level is not null && samplerInfo is { LodBias: not 0 } biased)
+                {
+                    level = Temp("float", $"{level} + {SamplerLodBiasLiteral(biased.LodBias)}");
                 }
 
                 if ((flags & Gen5ImageOp.Clamp) != 0)

@@ -39,9 +39,11 @@ public static partial class Gen5MslTranslator
         private uint _clipDistanceCount;
         private uint _cullDistanceCount;
         private uint _invalidPositionClipDistance = uint.MaxValue;
+        private uint _hostPlaneClipDistance = uint.MaxValue;
 
         /// <summary>The host clip-distance planes this program writes: guest clip planes,
-        /// the zero-position plane, then the emulated cull planes.</summary>
+        /// the zero-position plane, the fixed-function planes the host does not clip, then
+        /// the emulated cull planes.</summary>
         private uint HostClipDistanceCount =>
             Math.Min(_clipDistanceCount + _cullDistanceCount, MaxHostClipDistances);
 
@@ -162,8 +164,74 @@ public static partial class Gen5MslTranslator
                 _invalidPositionClipDistance = clipCount++;
             }
 
+            var hostPlanes = (uint)HostPlaneDistances("p").Count;
+            if (hostPlanes != 0)
+            {
+                // The guest clips these planes in fixed function; the host only through clip
+                // distances, which a program that exports no position cannot write.
+                if (!_request.SupportsClipDistance ||
+                    !_request.Program.Instructions.Any(static instruction =>
+                        instruction.Control is Gen5ExportControl { Target: 12, EnableMask: not 0 }) ||
+                    clipCount + hostPlanes + cullCount > MaxHostClipDistances)
+                {
+                    throw new NotSupportedException(
+                        $"the guest clip planes ({_request.ClipSpace}) need {hostPlanes} host clip distances beside " +
+                        $"{clipCount} clip and {cullCount} cull distances: clip distances " +
+                        $"{(_request.SupportsClipDistance ? "available" : "unsupported")}, at most {MaxHostClipDistances}");
+                }
+
+                _hostPlaneClipDistance = clipCount;
+                clipCount += hostPlanes;
+            }
+
             _clipDistanceCount = clipCount;
             _cullDistanceCount = cullCount;
+        }
+
+        /// <summary>The clip distance of every fixed-function plane the program clips, from
+        /// the guest's exported position <paramref name="position"/> in its own clip space.</summary>
+        private List<string> HostPlaneDistances(string position)
+        {
+            var planes = _request.ClipSpace.DepthPlanes;
+            var distances = new List<string>();
+            if ((planes & ShaderDepthPlanes.NearAtZero) != 0)
+            {
+                distances.Add($"{position}.z");
+            }
+
+            if ((planes & ShaderDepthPlanes.NearAtNegativeW) != 0)
+            {
+                distances.Add($"{position}.z + {position}.w");
+            }
+
+            if ((planes & ShaderDepthPlanes.Far) != 0)
+            {
+                distances.Add($"{position}.w - {position}.z");
+            }
+
+            var user = _request.ClipSpace.UserClipPlanes ?? [];
+            for (var plane = 0; plane + 3 < user.Length; plane += 4)
+            {
+                var distance =
+                    $"dot({position}, float4({FloatBits(user[plane])}, {FloatBits(user[plane + 1])}, " +
+                    $"{FloatBits(user[plane + 2])}, {FloatBits(user[plane + 3])}))";
+                distances.Add(_request.ClipSpace.UserClipPlanesCullOnly
+                    ? $"{distance} < 0.0f ? -1.0f : {CullPassDistance}"
+                    : distance);
+            }
+
+            return distances;
+        }
+
+        /// <summary>The fixed-function plane distances of the guest position in
+        /// <paramref name="position"/>, written into the output <paramref name="output"/>.</summary>
+        private IEnumerable<string> HostPlaneStatements(string position, string output)
+        {
+            var distances = HostPlaneDistances(position);
+            for (var index = 0; index < distances.Count; index++)
+            {
+                yield return $"{output}.sharpemu_clip_distance[{_hostPlaneClipDistance + (uint)index}] = {distances[index]};";
+            }
         }
 
         /// <summary>The auxiliary fields of the vertex output struct (the vertex stage's
@@ -207,18 +275,30 @@ public static partial class Gen5MslTranslator
         private bool ConvertsPositionToHostClipSpace =>
             _request.ClipSpace.Enabled ||
             _request.ClipSpace.PositionYDown ||
-            _request.ClipSpace.DepthNegativeOneToOne;
+            _request.ClipSpace.PositionXMirror ||
+            _request.ClipSpace.DepthNegativeOneToOne ||
+            _request.ClipSpace.XyPreDivided ||
+            _request.ClipSpace.ZPreDivided ||
+            _request.ClipSpace.WReciprocal ||
+            _request.ClipSpace.DepthRemap;
 
         /// <summary>The exported POS0 <paramref name="position"/> in Metal's clip space, held in
-        /// a temporary when anything changes.</summary>
+        /// a temporary when anything changes, after the fixed-function plane distances are
+        /// taken from the guest's position.</summary>
         private string ToHostClipSpace(string position)
         {
-            if (!ConvertsPositionToHostClipSpace)
+            var planes = _hostPlaneClipDistance != uint.MaxValue;
+            if (!ConvertsPositionToHostClipSpace && !planes)
             {
                 return position;
             }
 
             var converted = Temp("float4", position);
+            foreach (var statement in HostPlaneStatements(converted, "sharpemu_out"))
+            {
+                Line(ExecGuarded(statement));
+            }
+
             foreach (var statement in HostClipSpaceStatements(converted))
             {
                 Line(statement);
@@ -229,26 +309,57 @@ public static partial class Gen5MslTranslator
 
         /// <summary>
         /// Brings the guest position in <paramref name="position"/> to Metal's clip space in
-        /// place. A clip-disabled draw's window coordinates first go through the viewport
-        /// transform the SPIR-V translator applies (ConvertPositionToClipSpace), against the
-        /// same maximum-size viewport the draw state then sets. Vulkan's NDC is y-down and
+        /// place. A clip-disabled draw's position still divides by w: its window coordinates
+        /// go through the viewport transform the SPIR-V translator applies
+        /// (ConvertPositionToClipSpace), against the same maximum-size viewport the draw state
+        /// then sets, scaled by w so the host's divide lands on them. Vulkan's NDC is y-down and
         /// Metal's y-up, and Metal takes no negative viewport height: where the host viewport
         /// is y-down — the clip-disabled one always, else a positive guest y scale — y is
-        /// negated so the position lands on Vulkan's pixels. Metal's clip volume is z in
+        /// negated so the position lands on Vulkan's pixels. Neither host takes a negative
+        /// viewport width, so a mirrored guest x scale negates x. Metal's clip volume is z in
         /// [0, w] with no negative-one-to-one control, so a guest [-w, w] depth becomes
         /// (z + w) / 2, which the viewport's near and far then map exactly as Vulkan maps z.
+        /// PA_CL_VTE_CNTL's formats come first; a depth the host viewport cannot map (a
+        /// disabled z scale or offset, or a depth clamp narrower than the transform) is
+        /// remapped onto the host's viewport range instead.
         /// </summary>
         private IEnumerable<string> HostClipSpaceStatements(string position)
         {
             var clip = _request.ClipSpace;
+
+            // PA_CL_VTE_CNTL's formats: the host divides by w and interpolates with 1 / w, so
+            // a reciprocal w is inverted and coordinates already divided are multiplied back.
+            if (clip.WReciprocal)
+            {
+                yield return $"{position}.w = 1.0f / {position}.w;";
+            }
+
+            if (clip.XyPreDivided)
+            {
+                yield return $"{position}.x = {position}.x * {position}.w;";
+                yield return $"{position}.y = {position}.y * {position}.w;";
+            }
+
+            if (clip.ZPreDivided)
+            {
+                yield return $"{position}.z = {position}.z * {position}.w;";
+            }
+
             if (clip.Enabled)
             {
+                // Window x = x / w * scale + offset, so x' / w = window / half - 1 keeps w
+                // for the host's divide and for perspective-correct interpolation.
                 yield return
-                    $"{position}.x = ({position}.x * {FloatBits(clip.ScaleX)} + {FloatBits(clip.OffsetX)}) / " +
-                    $"{FloatBits(clip.HalfExtentX)} - 1.0f;";
+                    $"{position}.x = ({position}.x * {FloatBits(clip.ScaleX)} + {FloatBits(clip.OffsetX)} * {position}.w) / " +
+                    $"{FloatBits(clip.HalfExtentX)} - {position}.w;";
                 yield return
-                    $"{position}.y = ({position}.y * {FloatBits(clip.ScaleY)} + {FloatBits(clip.OffsetY)}) / " +
-                    $"{FloatBits(clip.HalfExtentY)} - 1.0f;";
+                    $"{position}.y = ({position}.y * {FloatBits(clip.ScaleY)} + {FloatBits(clip.OffsetY)} * {position}.w) / " +
+                    $"{FloatBits(clip.HalfExtentY)} - {position}.w;";
+            }
+
+            if (clip.PositionXMirror)
+            {
+                yield return $"{position}.x = -{position}.x;";
             }
 
             if (clip.PositionYDown)
@@ -256,7 +367,12 @@ public static partial class Gen5MslTranslator
                 yield return $"{position}.y = -{position}.y;";
             }
 
-            if (clip.DepthNegativeOneToOne)
+            if (clip.DepthRemap)
+            {
+                yield return
+                    $"{position}.z = {position}.z * {FloatBits(clip.DepthScale)} + {position}.w * {FloatBits(clip.DepthOffset)};";
+            }
+            else if (clip.DepthNegativeOneToOne)
             {
                 yield return $"{position}.z = ({position}.z + {position}.w) * 0.5f;";
             }

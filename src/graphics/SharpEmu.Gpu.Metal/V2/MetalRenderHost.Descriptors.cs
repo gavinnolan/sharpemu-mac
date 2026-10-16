@@ -930,8 +930,12 @@ internal sealed partial class MetalRenderHost
             return _deviceAddressTable;
         }
 
-        var gpuMemory = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.Current;
-        var spanVersion = gpuMemory?.SpanVersion ?? -1;
+        // The table is the registry's mapped spans. Without a registry it would be empty,
+        // and every load through a raw guest pointer would read zero and every store and
+        // atomic would be dropped without a word.
+        var gpuMemory = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.Current ??
+            throw Fatal("A device-address program needs the guest GPU memory registry to build its page table.");
+        var spanVersion = gpuMemory.SpanVersion;
         if (spanVersion != _deviceAddressSpanVersion)
         {
             RebuildDeviceAddressEntries(gpuMemory);
@@ -966,7 +970,7 @@ internal sealed partial class MetalRenderHost
     // backing is not contiguous (fragmented flexible memory) or crosses a window splits
     // into several entries; pages with no window are left out, never copied, because a
     // shader store through a copied page would not reach guest memory.
-    private void RebuildDeviceAddressEntries(SharpEmu.HLE.GpuMemory.GuestGpuMemory? gpuMemory)
+    private void RebuildDeviceAddressEntries(SharpEmu.HLE.GpuMemory.GuestGpuMemory gpuMemory)
     {
         _deviceAddressEntries.Clear();
         // The scan resolves every mapped span, which marks windows this submission may
@@ -974,7 +978,7 @@ internal sealed partial class MetalRenderHost
         var touchedBefore = _guestMemory.TouchedWindows;
         _guestMemory.ClearTouchedWindows();
         var spanCount = 0;
-        gpuMemory?.ForEachSpan((address, size) =>
+        gpuMemory.ForEachSpan((address, size) =>
         {
             spanCount++;
             var page = DeviceAddressPaging.PageSize;
@@ -1304,6 +1308,8 @@ internal sealed partial class MetalRenderHost
                 mipFilter = 1;
             }
 
+            RequireExactAddressModes(in words, magnify, minify);
+
             MetalV2Native.SendVoidValue(
                 descriptor,
                 MetalNative.Selector("setMinFilter:"),
@@ -1371,6 +1377,37 @@ internal sealed partial class MetalRenderHost
         finally
         {
             MetalNative.SendVoid(descriptor, SelRelease);
+        }
+    }
+
+    // CLAMP_HALF_BORDER and MIRROR_ONCE_HALF_BORDER have no host address mode and no
+    // exactly derivable edge behaviour; they sample clamp-to-border and mirror-once-to-edge,
+    // a documented deviation within half a texel of the edge. MIRROR_ONCE_BORDER samples
+    // mirror-once-to-edge and the shader substitutes the border colour past the mirrored
+    // copy, which is exact only while no filter blends a texel with the border; a filtering
+    // one blends with the edge texel there. Each deviation is reported once.
+    private static void RequireExactAddressModes(in SamplerDescriptorWords words, uint magnify, uint minify)
+    {
+        foreach (var (axis, mode) in new[] { ('X', words.ClampX), ('Y', words.ClampY), ('Z', words.ClampZ) })
+        {
+            if (mode is 4 or 5)
+            {
+                MetalV2Diagnostics.WarnOnce(
+                    $"half-border-{mode}",
+                    $"The sampler address mode has no exact host form and samples {(mode == 4 ? "clamp-to-border" : "mirror-once-to-edge")}: " +
+                    $"clamp{axis}={mode} words={words[0]:X8},{words[1]:X8},{words[2]:X8},{words[3]:X8}.");
+            }
+        }
+
+        var pointXy = magnify == 0 && minify == 0;
+        var zFilter = (words[2] >> 24) & 0x3;
+        var pointZ = zFilter == 1 || (zFilter == 0 && pointXy);
+        if (((words.ClampX == 7 || words.ClampY == 7) && !pointXy) || (words.ClampZ == 7 && !pointZ))
+        {
+            MetalV2Diagnostics.WarnOnce(
+                "mirror-once-border-filter",
+                $"A MIRROR_ONCE_BORDER sampler filters across the border and blends with the edge texel there: " +
+                $"words={words[0]:X8},{words[1]:X8},{words[2]:X8},{words[3]:X8}.");
         }
     }
 
