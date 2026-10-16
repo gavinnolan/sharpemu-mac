@@ -216,6 +216,12 @@ public interface IRenderHost
     // read in the guest's argument layout, so the executor resolves such a draw first.
     bool TakesIndirectRectangleListArguments => true;
 
+    // True when the host draws a GpuPrimitiveTopology.TriangleFan pipeline as fans. A host
+    // without fans answers false: the executor then draws triangle fans, polygons and quad
+    // lists as indexed triangle lists it builds from the draw's vertices or indices, which
+    // needs their counts, so such an indirect draw is resolved on the CPU first.
+    bool DrawsTriangleFans => true;
+
     // The same for a non-indexed rectangle list with this vertex input; a host may build
     // its patch draw on the GPU in PrepareIndirectDraw.
     bool TakesIndirectAutoRectangleListArguments(VertexInputInfo vertexInput, ulong argumentsAddress, ulong argumentsSize) =>

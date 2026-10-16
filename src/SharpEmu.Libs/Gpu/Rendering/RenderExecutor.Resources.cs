@@ -451,6 +451,12 @@ public sealed partial class RenderExecutor
 
     private void EmitDraw(UserConfigRegisters userConfig, VertexInputInfo vertexInput, in DrawCall draw, in DrawEmission emission)
     {
+        if (emission.TriangleListIndices != 0)
+        {
+            _host.DrawIndexed(emission.TriangleListIndices, draw.InstanceCount, 0, emission.VertexOffset, emission.FirstInstance);
+            return;
+        }
+
         switch ((GuestPrimitiveType)userConfig.PrimitiveType)
         {
             case GuestPrimitiveType.PointList:

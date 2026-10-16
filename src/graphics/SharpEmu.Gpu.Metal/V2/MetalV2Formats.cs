@@ -172,10 +172,10 @@ internal static class MetalV2Formats
         GpuPrimitiveTopology.LineList => Mtl.PrimitiveLine,
         GpuPrimitiveTopology.LineStrip => Mtl.PrimitiveLineStrip,
         GpuPrimitiveTopology.TriangleStrip => Mtl.PrimitiveTriangleStrip,
-        // A triangle fan has no Metal primitive; the executor's fan draws are small
-        // and the vertex order of the first triangle matches, which is what the
-        // metadata-clear and legacy quad paths rely on.
-        GpuPrimitiveTopology.TriangleFan => Mtl.PrimitiveTriangle,
+        // Metal has no fan primitive; the host answers DrawsTriangleFans false, so the
+        // executor draws every fan as a triangle list and none may reach a pipeline.
+        GpuPrimitiveTopology.TriangleFan => throw new InvalidOperationException(
+            "A triangle-fan pipeline reached Metal, which has no fan primitive; the executor converts fans to triangle lists."),
         // A guest rectangle list draws as tessellated patches, whose output is triangles;
         // see MetalRenderHost.DrawRectangles.
         GpuPrimitiveTopology.PatchList => Mtl.PrimitiveTriangle,

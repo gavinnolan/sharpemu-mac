@@ -67,8 +67,10 @@ public sealed partial class RenderExecutor
 
     // IndirectArgumentsAddress: the GPU reads the draw's counts from guest memory there, and
     // IndirectIndexLimit bounds an indexed draw's count as the bound index range does.
+    // TriangleListIndices: nonzero when the draw was converted to an indexed triangle list of
+    // that many indices (TriangulateFans), which EmitDraw then draws whatever the guest type.
     private readonly record struct DrawEmission(bool Indexed, int VertexOffset, uint FirstVertex, uint FirstInstance,
-        ulong IndirectArgumentsAddress = 0, uint IndirectIndexLimit = uint.MaxValue);
+        ulong IndirectArgumentsAddress = 0, uint IndirectIndexLimit = uint.MaxValue, uint TriangleListIndices = 0);
 
     private readonly record struct IndexSource(bool Enabled, ulong Address, byte[]? HostData, ulong Size, GpuIndexType Type);
 
@@ -128,7 +130,8 @@ public sealed partial class RenderExecutor
 
     public void DrawIndexed(ulong submitId, RegisterBanks banks, in DrawIndexedArguments arguments)
     {
-        if (arguments.IndirectArgumentsAddress != 0 && !CanDrawIndirectOnGpu(banks, in arguments))
+        if (arguments.IndirectArgumentsAddress != 0 &&
+            (!CanDrawIndirectOnGpu(banks, in arguments) || TriangulatesFans(banks.UserConfig)))
         {
             DrawIndexedWithCpuArguments(submitId, banks, in arguments);
             return;
@@ -288,7 +291,28 @@ public sealed partial class RenderExecutor
 
         var draw = new DrawCall("DrawIndexed", RecordedOperation.DrawIndex, arguments.IndexCount, arguments.InstanceCount, arguments.FirstInstance);
         byte[]? expandedIndices = null;
-        if (expandIndex8)
+        var triangleListIndices = 0u;
+        if (TriangulatesFans(userConfig))
+        {
+            // Every index is read so restarts split the fans where the hardware does; the
+            // list's indices are the guest's own, so the vertex offset applies unchanged.
+            var restartIndex = primitiveRestart
+                ? banks.Context.PrimitiveResetIndex & IndexMask((GuestIndexType)arguments.IndexTypeAndSize)
+                : (uint?)null;
+            var vertices = ReadGuestIndices(arguments.IndexAddress, arguments.IndexCount, (GuestIndexType)arguments.IndexTypeAndSize);
+            var list = TriangulateFans((GuestPrimitiveType)userConfig.PrimitiveType, vertices, restartIndex);
+            if (list.Length == 0)
+            {
+                return;
+            }
+
+            expandedIndices = ListIndexBytes(list, wide: true);
+            triangleListIndices = (uint)list.Length;
+            indexType = GpuIndexType.Uint32;
+            topology = GpuPrimitiveTopology.TriangleList;
+            primitiveRestart = false;
+        }
+        else if (expandIndex8)
         {
             expandedIndices = ExpandIndex8(arguments.IndexAddress, arguments.IndexCount, primitiveRestart, banks.Context.PrimitiveResetIndex);
         }
@@ -363,14 +387,16 @@ public sealed partial class RenderExecutor
             0,
             indirect ? arguments.FirstInstance : ResolveInstanceOffset(state.Programs.VertexInput),
             arguments.IndirectArgumentsAddress,
-            arguments.UnboundedIndexBuffer ? uint.MaxValue : arguments.IndexCount);
+            arguments.UnboundedIndexBuffer ? uint.MaxValue : arguments.IndexCount,
+            triangleListIndices);
         RecordDraw(submitId, banks, in draw, ref state, topology, in emission, in indexSource, primitiveRestart, setBindDebug: true, setAutoDebug: false);
         _host.ResetBindings();
     }
 
     public void DrawAuto(ulong submitId, RegisterBanks banks, in DrawAutoArguments arguments)
     {
-        if (arguments.IndirectArgumentsAddress != 0 && !CanDrawAutoIndirectOnGpu(banks, in arguments))
+        if (arguments.IndirectArgumentsAddress != 0 &&
+            (!CanDrawAutoIndirectOnGpu(banks, in arguments) || TriangulatesFans(banks.UserConfig)))
         {
             DrawAutoWithCpuArguments(submitId, banks, in arguments);
             return;
@@ -541,14 +567,166 @@ public sealed partial class RenderExecutor
         var vertexOffset = indirect
             ? (int)arguments.FirstVertex
             : ResolveVertexOffset(userConfig.IndexOffset, vertexInput) + (int)arguments.FirstVertex;
+        var firstInstance = indirect ? arguments.FirstInstance : ResolveInstanceOffset(vertexInput);
+        if (TriangulatesFans(userConfig))
+        {
+            // The vertices are numbered from zero and the first vertex becomes the indexed
+            // draw's vertex offset, so every vertex keeps its vertex id.
+            if (arguments.IndirectArgumentsAddress != 0)
+            {
+                throw _host.Fatal("A triangle fan to convert to a triangle list still has its counts in guest memory.");
+            }
+
+            var vertices = new uint[arguments.VertexCount];
+            for (var index = 0u; index < arguments.VertexCount; index++)
+            {
+                vertices[index] = index;
+            }
+
+            var list = TriangulateFans((GuestPrimitiveType)userConfig.PrimitiveType, vertices, restartIndex: null);
+            if (list.Length == 0)
+            {
+                _host.ResetBindings();
+                return;
+            }
+
+            var wide = arguments.VertexCount > ushort.MaxValue;
+            var bytes = ListIndexBytes(list, wide);
+            var listSource = new IndexSource(true, 0, bytes, (ulong)bytes.Length, wide ? GpuIndexType.Uint32 : GpuIndexType.Uint16);
+            var listEmission = new DrawEmission(true, vertexOffset, 0, firstInstance, TriangleListIndices: (uint)list.Length);
+            RecordDraw(submitId, banks, in draw, ref state, GpuPrimitiveTopology.TriangleList, in listEmission, in listSource,
+                primitiveRestart: false, setBindDebug: false, setAutoDebug: true);
+            _host.ResetBindings();
+            return;
+        }
+
         var emission = new DrawEmission(
             false,
             0,
             (uint)vertexOffset,
-            indirect ? arguments.FirstInstance : ResolveInstanceOffset(vertexInput),
+            firstInstance,
             arguments.IndirectArgumentsAddress);
         RecordDraw(submitId, banks, in draw, ref state, topology, in emission, default, primitiveRestart: false, setBindDebug: false, setAutoDebug: true);
         _host.ResetBindings();
+    }
+
+    // Triangle fans, polygons and legacy quad lists, which a host without fans draws as
+    // triangle lists (IRenderHost.DrawsTriangleFans).
+    private bool TriangulatesFans(UserConfigRegisters userConfig) =>
+        !_host.DrawsTriangleFans &&
+        (GuestPrimitiveType)userConfig.PrimitiveType is
+            GuestPrimitiveType.TriangleFan or GuestPrimitiveType.Polygon or GuestPrimitiveType.QuadListLegacy;
+
+    // The triangle list the primitive assembler makes of these vertices, in its vertex order:
+    // fan triangle i is (v[i+1], v[i+2], v[0]), the order DI_PT_TRIFAN assembles (the
+    // first-vertex provoking vertex is v[i+1], as radv's VK fans report it), and a restart
+    // index ends the fan, the next index starting a new one. A polygon is one fan. Each
+    // quad of a quad list is (q0, q1, q2) and (q0, q2, q3), both taking q0 as their
+    // provoking vertex; a count that is not a whole number of quads is refused.
+    private uint[] TriangulateFans(GuestPrimitiveType type, uint[] vertices, uint? restartIndex)
+    {
+        if (type == GuestPrimitiveType.QuadListLegacy)
+        {
+            if ((vertices.Length & 0x3) != 0)
+            {
+                throw _host.Fatal($"A legacy quad list count is not a multiple of four: count={vertices.Length}.");
+            }
+
+            var quads = new uint[checked((vertices.Length / 4) * 6)];
+            for (int quad = 0, output = 0; quad < vertices.Length; quad += 4, output += 6)
+            {
+                quads[output] = vertices[quad];
+                quads[output + 1] = vertices[quad + 1];
+                quads[output + 2] = vertices[quad + 2];
+                quads[output + 3] = vertices[quad];
+                quads[output + 4] = vertices[quad + 2];
+                quads[output + 5] = vertices[quad + 3];
+            }
+
+            return quads;
+        }
+
+        var triangles = new List<uint>(Math.Max(0, (vertices.Length - 2) * 3));
+        var hub = 0;
+        for (var index = 0; index < vertices.Length; index++)
+        {
+            if (restartIndex is { } restart && vertices[index] == restart)
+            {
+                hub = index + 1;
+                continue;
+            }
+
+            if (index - hub >= 2)
+            {
+                triangles.Add(vertices[index - 1]);
+                triangles.Add(vertices[index]);
+                triangles.Add(vertices[hub]);
+            }
+        }
+
+        return [.. triangles];
+    }
+
+    private byte[] ListIndexBytes(uint[] list, bool wide)
+    {
+        var bytes = new byte[checked(list.Length * (wide ? sizeof(uint) : sizeof(ushort)))];
+        for (var index = 0; index < list.Length; index++)
+        {
+            var value = list[index];
+            if (wide)
+            {
+                // Metal reserves the all-ones index for primitive restart.
+                if (value == uint.MaxValue)
+                {
+                    throw _host.Fatal("A triangle fan converted to a triangle list has a 32-bit vertex index of 0xFFFFFFFF.");
+                }
+
+                BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(index * sizeof(uint)), value);
+            }
+            else
+            {
+                BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(index * sizeof(ushort)), checked((ushort)value));
+            }
+        }
+
+        return bytes;
+    }
+
+    private static uint IndexMask(GuestIndexType type) => type switch
+    {
+        GuestIndexType.Index8 => 0xFFu,
+        GuestIndexType.Index16 => 0xFFFFu,
+        _ => uint.MaxValue,
+    };
+
+    // The draw's guest indices, widened to 32 bits.
+    private uint[] ReadGuestIndices(ulong indexAddress, uint indexCount, GuestIndexType type)
+    {
+        var stride = type switch
+        {
+            GuestIndexType.Index8 => 1,
+            GuestIndexType.Index16 => 2,
+            GuestIndexType.Index32 => 4,
+            _ => throw _host.Fatal($"The index type and size is unknown: indexTypeAndSize={(uint)type}."),
+        };
+        var source = new byte[checked((int)indexCount * stride)];
+        if (indexAddress == 0 || !_host.TryReadGuest(indexAddress, source))
+        {
+            throw _host.Fatal($"The fan index data is unreadable: address=0x{indexAddress:X16} count={indexCount}.");
+        }
+
+        var indices = new uint[indexCount];
+        for (var index = 0; index < indices.Length; index++)
+        {
+            indices[index] = stride switch
+            {
+                1 => source[index],
+                2 => BinaryPrimitives.ReadUInt16LittleEndian(source.AsSpan(index * 2)),
+                _ => BinaryPrimitives.ReadUInt32LittleEndian(source.AsSpan(index * 4)),
+            };
+        }
+
+        return indices;
     }
 
     private byte[] ConvertRestartIndices(ulong indexAddress, uint indexCount, GpuIndexType indexType, uint restartIndex)
