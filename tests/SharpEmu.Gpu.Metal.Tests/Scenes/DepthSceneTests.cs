@@ -558,20 +558,16 @@ public sealed class DepthSceneTests(ITestOutputHelper output) : SceneTestBase(ou
         var depth = d.QueueDepthReadback();
         var colour = d.QueueColorReadback();
         // A range the host test has to take (anything but [0, 1] or empty once clamped to it)
-        // needs Metal's depth bounds test; a device without it must refuse loudly.
+        // needs Metal's depth bounds test. A device without it (before Apple10) runs the draw
+        // unbounded: the documented deviation in MetalRenderHost.ApplyDepthBounds.
         var needsHostTest = boundsEnable && Math.Max(min, 0f) <= Math.Min(max, 1f) &&
             (Math.Max(min, 0f) != 0f || Math.Min(max, 1f) != 1f);
-        if (needsHostTest && !rig.Host.DepthBoundsTestSupported)
-        {
-            Assert.Throws<SceneFatalException>(() => rig.Submit(d.Pm4));
-            return;
-        }
-
+        var unbounded = needsHostTest && !rig.Host.DepthBoundsTestSupported;
         rig.Submit(d.Pm4);
         var depths = depth();
         var colours = colour();
         // Left stored 0.2 and right stored 0.6 (both drawn red) each pass when inside [min, max] or the test is off.
-        bool Passes(float stored) => !boundsEnable || (min <= stored && stored <= max);
+        bool Passes(float stored) => !boundsEnable || unbounded || (min <= stored && stored <= max);
         Assert.Equal(Passes(0.2f) ? Green : Red, colours[(32 * Size) + 8]);
         Assert.Equal(Passes(0.2f) ? 0.1f : 0.2f, depths[(32 * Size) + 8]);
         Assert.Equal(Passes(0.6f) ? Green : Red, colours[(32 * Size) + 56]);

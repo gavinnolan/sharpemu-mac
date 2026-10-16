@@ -2530,9 +2530,15 @@ internal sealed partial class MetalRenderHost
 
         if (!DepthBoundsTestSupported)
         {
-            throw Fatal(
-                $"A draw tests depth bounds, but this Metal device has no depth bounds test " +
-                $"(setDepthTestMinBound:maxBound:, GPU family Apple10): min={minBound} max={maxBound}.");
+            // Documented deviation: before Apple10 the device has no depth bounds test, and
+            // refusing would stop every title that bounds its light and shadow passes (UE4).
+            // Such a draw shades every fragment its other tests pass, a superset of the
+            // hardware's; an empty range was already dropped exactly by the executor.
+            MetalV2Diagnostics.WarnOnce(
+                "depth-bounds-unsupported",
+                $"This Metal device has no depth bounds test (GPU family Apple10); depth-bounded draws run " +
+                $"without it: first min={minBound} max={maxBound}.");
+            return;
         }
 
         MetalV2Native.SendDepthTestBounds(_renderEncoder, SelSetDepthTestBounds, minBound, maxBound);
