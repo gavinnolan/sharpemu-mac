@@ -2474,6 +2474,16 @@ public static partial class Gen5MslTranslator
                 return true;
             }
 
+            if (instruction.Opcode is "SBitcmp0B64" or "SBitcmp1B64")
+            {
+                // SCC = (S0.u64[S1.u[5:0]] == 0/1) (ISA 12.4).
+                var wideValue = Temp("ulong", RawSource64(instruction, 0));
+                var bitIndex = Temp("uint", RawSource(instruction, 1));
+                var bitSet = $"(({wideValue} >> ({bitIndex} & 63u)) & 1ul) != 0ul";
+                Line(instruction.Opcode == "SBitcmp1B64" ? $"scc = {bitSet};" : $"scc = !({bitSet});");
+                return true;
+            }
+
             var left = Temp("uint", RawSource(instruction, 0));
             var right = Temp("uint", RawSource(instruction, 1));
             if (instruction.Opcode is "SBitcmp0B32" or "SBitcmp1B32")
@@ -2646,6 +2656,8 @@ public static partial class Gen5MslTranslator
                     var width = Temp("ulong", $"(ulong)(({RawSource(instruction, 0)}) & 63u)");
                     var offset = Temp("ulong", $"(ulong)(({RawSource(instruction, 1)}) & 63u)");
                     value = $"((((1ul << {width}) - 1ul)) << {offset})";
+                    // S_BFM_B64 has no SCC result (ISA 12.1), like S_BFM_B32.
+                    setsScc = false;
                     break;
                 }
                 case "SBfeU64" or "SBfeI64":
