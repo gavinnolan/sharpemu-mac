@@ -843,6 +843,29 @@ public static class KernelRuntimeCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    // sceKernelGetPrtAperture(id, *base, *size): the aperture SetPrtAperture stored, zero when unset.
+    [SysAbiExport(
+        Nid = "L0v2Go5jOuM",
+        ExportName = "sceKernelGetPrtAperture",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelGetPrtAperture(CpuContext ctx)
+    {
+        var apertureId = unchecked((int)ctx[CpuRegister.Rdi]);
+        var baseAddress = ctx[CpuRegister.Rsi];
+        var sizeAddress = ctx[CpuRegister.Rdx];
+        if (apertureId < 0 || apertureId >= _prtApertures.Length)
+            return unchecked((int)0x80020016);
+        if (baseAddress == 0 || sizeAddress == 0)
+            return unchecked((int)0x8002000E);
+        (ulong Base, ulong Size) aperture;
+        lock (_prtApertureGate)
+            aperture = _prtApertures[apertureId];
+        return ctx.TryWriteUInt64(baseAddress, aperture.Base) && ctx.TryWriteUInt64(sizeAddress, aperture.Size)
+            ? 0
+            : unchecked((int)0x8002000E);
+    }
+
     internal static bool OverlapsPrtAperture(ulong address, ulong size)
     {
         if (size == 0)

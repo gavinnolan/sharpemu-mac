@@ -139,6 +139,43 @@ internal sealed class FlexibleBackingPool
         return true;
     }
 
+    // Backing owned by an object rather than by one mapping (JIT shared memory, which every
+    // view of the object maps): one contiguous run, cleared, handed back with ReleaseRun.
+    public bool TryAllocateRun(IGuestBackedSpace space, ulong size, out ulong offset)
+    {
+        offset = 0;
+        if (size == 0 || size > Available)
+            return false;
+        var best = -1;
+        for (var index = 0; index < _free.Count; index++)
+        {
+            if (_free.Values[index] < size || (best >= 0 && _free.Values[index] >= _free.Values[best]))
+                continue;
+            best = index;
+        }
+        if (best < 0)
+            return false;
+        var start = _free.Keys[best];
+        var freeSize = _free.Values[best];
+        if (!ClearUsedBacking(space, start, size))
+            return false;
+        _free.RemoveAt(best);
+        if (size < freeSize)
+            _free.Add(start + size, freeSize - size);
+        RemovePristine(start, size);
+        Used += size;
+        offset = start;
+        return true;
+    }
+
+    public void ReleaseRun(ulong offset, ulong size)
+    {
+        if (size == 0 || size > Used)
+            throw new InvalidOperationException("Flexible backing ownership is incomplete.");
+        AddFree(offset, size);
+        Used -= size;
+    }
+
     private int FindFreeIndex(ulong offset)
     {
         for (var index = _free.Count - 1; index >= 0; index--)

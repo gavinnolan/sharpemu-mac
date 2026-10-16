@@ -2484,7 +2484,7 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        if (KernelSocketCompatExports.TryCloseSocketFd(fd))
+        if (KernelSocketCompatExports.TryCloseSocketFd(fd) || TryCloseJitSharedMemory(fd))
         {
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -3537,7 +3537,8 @@ public static partial class KernelMemoryCompatExports
     {
         // The name is the 7th argument, the first stack slot above the return address.
         string? name = null;
-        if (!ctx.TryReadUInt64(ctx[CpuRegister.Rsp] + sizeof(ulong), out var nameAddress))
+        if (!ctx.TryGetImportStackArgument(0, out var nameAddress) &&
+            !ctx.TryReadUInt64(ctx[CpuRegister.Rsp] + sizeof(ulong), out nameAddress))
             return MemoryFault;
         if (nameAddress != 0)
         {
@@ -3596,13 +3597,15 @@ public static partial class KernelMemoryCompatExports
         if (!ctx.TryWriteUInt64(pointer, requested))
             return MemoryFault;
         lock (_memoryGate)
-            return MapFlexibleLocked(ctx, pointer, requested, length, protection, mode, flags, alignment, name);
+            return MapFlexibleLocked(ctx, pointer, requested, length, protection, mode, flags, alignment, name, out _);
     }
 
     // Maps flexible memory and writes the address to *pointer before publishing the mapping.
     private static int MapFlexibleLocked(CpuContext ctx, ulong pointer, ulong requested, ulong length, int protection,
-        GuestPageProtection mode, ulong flags, ulong alignment, string? name, MappingTraits extraTraits = MappingTraits.None)
+        GuestPageProtection mode, ulong flags, ulong alignment, string? name, out ulong mappedAddress,
+        MappingTraits extraTraits = MappingTraits.None)
     {
+        mappedAddress = 0;
         // A fixed request may reuse the flexible memory it replaces.
         var replacedFlexible = (flags & OrbisKernelMapFixed) == 0 ? 0UL
             : GetMappingSlices(requested, length).Where(region => region.IsFlexible).Aggregate(0UL, (sum, region) => sum + region.Length);
@@ -3635,6 +3638,7 @@ public static partial class KernelMemoryCompatExports
             ReplaceMappedRegionRangeLocked(new MappedRegion(block.Address, block.Size, protection,
                 true, false, 0, block.Offset, Name: name, Traits: TraitsFromMapFlags(flags) | extraTraits));
         GuestGpuMemoryHook.NoteMapped(address, length, mode);
+        mappedAddress = address;
         return 0;
     }
 
@@ -3711,6 +3715,8 @@ public static partial class KernelMemoryCompatExports
                 ReleaseBackingOwnershipLocked(region);
                 RemoveMappingLocked(region.Address, region.Length);
             }
+            if (regions.Any(region => region.IsJit))
+                ReleaseUnreferencedJitObjectsLocked();
             return 0;
         }
     }

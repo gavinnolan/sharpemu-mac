@@ -89,6 +89,8 @@ public static partial class KernelMemoryCompatExports
             _mappedRegions.Clear();
             _directAllocations.Reset();
             _flexibleBacking.Reset();
+            ResetMemoryPoolLocked();
+            ResetJitSharedMemoryLocked();
             _nextVirtualAddress = 0;
             _backingOwner = null;
         }
@@ -280,6 +282,8 @@ public static partial class KernelMemoryCompatExports
             return;
         if (region.IsFlexible)
             _flexibleBacking.Release(region.Address, region.Length);
+        else if (region.IsPooled)
+            ReturnPoolPagesLocked(region.BackingOffset, region.Length);
     }
 
     // Undoes TryReplaceWithHole after the new mapping failed: the views, GPU registration,
@@ -309,6 +313,8 @@ public static partial class KernelMemoryCompatExports
     {
         if (region.IsFlexible && !_flexibleBacking.TryReclaim(region.Address, region.Length, region.BackingOffset))
             Environment.FailFast("Cannot restore flexible backing ownership.");
+        if (region.IsPooled && !region.IsReserved && !TryTakePoolPagesLocked(region.BackingOffset, region.Length))
+            Environment.FailFast("Cannot restore memory pool ownership.");
     }
 
     // Free and reserved ranges are never registered with the GPU, and unregistering hands the GPU
@@ -490,11 +496,14 @@ public static partial class KernelMemoryCompatExports
         return result;
     }
 
-    private static int ReserveBackingRangeCore(CpuContext ctx, ulong pointer, ulong length, ulong flags, ulong alignment)
+    // A memory pool passes the requested address by value and tags the reservation as pooled.
+    private static int ReserveBackingRangeCore(CpuContext ctx, ulong pointer, ulong length, ulong flags, ulong alignment,
+        ulong? requestedAddress = null, MappingTraits traits = MappingTraits.None)
     {
         if (pointer == 0 || !IsValidMapRange(length, alignment))
             return MemoryInvalidArgument;
-        if (!ctx.TryReadUInt64(pointer, out var requested))
+        var requested = requestedAddress ?? 0;
+        if (requestedAddress is null && !ctx.TryReadUInt64(pointer, out requested))
         {
             Console.Error.WriteLine($"[LOADER][WARN] reserve_virtual pointer read failed pointer=0x{pointer:X16} size=0x{length:X}");
             return MemoryFault;
@@ -538,7 +547,8 @@ public static partial class KernelMemoryCompatExports
                 return MemoryFault;
             }
             CommitReplacedLocked(replaced);
-            ReplaceMappedRegionRangeLocked(new MappedRegion(address, length, 0, false, false, 0, IsReserved: true));
+            ReplaceMappedRegionRangeLocked(new MappedRegion(address, length, 0, false, false, 0, IsReserved: true,
+                Traits: traits));
             if (ShouldTraceDirectMemory())
                 Console.Error.WriteLine($"[LOADER][TRACE] reserve_virtual address=0x{address:X} requested=0x{requested:X} size=0x{length:X} flags=0x{flags:X}");
             return 0;
