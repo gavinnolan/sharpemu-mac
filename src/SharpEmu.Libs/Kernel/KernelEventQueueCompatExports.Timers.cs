@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.Libs.Threading;
 using System.Diagnostics;
 using System.Threading;
 
@@ -9,9 +10,9 @@ namespace SharpEmu.Libs.Kernel;
 
 /// <summary>
 /// Schedules a callback at a host <see cref="Stopwatch"/> timestamp. Timer
-/// knotes (EVFILT_TIMER, HR timers) only depend on this seam, so the shared
-/// guest timer service can replace <see cref="HostEqueueTimerScheduler"/>
-/// through <see cref="KernelEventQueueCompatExports.TimerScheduler"/>.
+/// knotes (EVFILT_TIMER, HR timers) only depend on this seam, so tests can
+/// replace the guest timer service through
+/// <see cref="KernelEventQueueCompatExports.TimerScheduler"/>.
 /// </summary>
 internal interface IEqueueTimerScheduler
 {
@@ -23,77 +24,20 @@ internal interface IEqueueTimerScheduler
 }
 
 /// <summary>
-/// Host timers: a precise sleep on a pool thread for sub-1.2 ms deadlines
-/// (System.Threading.Timer cannot resolve them), a threading timer otherwise.
+/// Timer knotes on the shared guest timer service: one precise min-heap thread
+/// serves every deadline, so equeue timers order with the other guest timers.
 /// </summary>
-internal sealed class HostEqueueTimerScheduler : IEqueueTimerScheduler
+internal sealed class GuestTimerServiceEqueueScheduler : IEqueueTimerScheduler
 {
-    private static readonly long PreciseThresholdTicks = Stopwatch.Frequency * 12 / 10_000;
+    public static GuestTimerServiceEqueueScheduler Instance { get; } = new();
 
-    public static HostEqueueTimerScheduler Instance { get; } = new();
-
-    private sealed class Entry : IDisposable
+    private sealed class Handle(GuestTimer timer) : IDisposable
     {
-        public required Action<object?> Callback { get; init; }
-        public required object? State { get; init; }
-        public required long DueTimestamp { get; init; }
-        public Timer? Timer;
-        private int _state;
-
-        public void Fire()
-        {
-            if (Interlocked.CompareExchange(ref _state, 1, 0) == 0)
-            {
-                Timer?.Dispose();
-                Callback(State);
-            }
-        }
-
-        public void Dispose()
-        {
-            if (Interlocked.Exchange(ref _state, 1) == 0)
-            {
-                Timer?.Dispose();
-            }
-        }
+        public void Dispose() => GuestTimerService.Shared.Cancel(timer);
     }
 
-    public IDisposable Schedule(long dueTimestamp, Action<object?> callback, object? state)
-    {
-        var entry = new Entry { Callback = callback, State = state, DueTimestamp = dueTimestamp };
-        var remaining = dueTimestamp - Stopwatch.GetTimestamp();
-        if (remaining < PreciseThresholdTicks)
-        {
-            ThreadPool.UnsafeQueueUserWorkItem(
-                static entry =>
-                {
-                    HostTiming.SleepUntil(entry.DueTimestamp);
-                    entry.Fire();
-                },
-                entry,
-                preferLocal: false);
-            return entry;
-        }
-
-        var dueTime = TimeSpan.FromSeconds((double)remaining / Stopwatch.Frequency);
-        lock (entry)
-        {
-            entry.Timer = new Timer(
-                static state =>
-                {
-                    var entry = (Entry)state!;
-                    // The threading timer may fire early by a fraction of a tick.
-                    HostTiming.SleepUntil(entry.DueTimestamp);
-                    entry.Fire();
-                },
-                entry,
-                Timeout.InfiniteTimeSpan,
-                Timeout.InfiniteTimeSpan);
-            entry.Timer.Change(dueTime, Timeout.InfiniteTimeSpan);
-        }
-
-        return entry;
-    }
+    public IDisposable Schedule(long dueTimestamp, Action<object?> callback, object? state) =>
+        new Handle(GuestTimerService.Shared.Schedule(dueTimestamp, callback, state));
 }
 
 public static partial class KernelEventQueueCompatExports
@@ -103,7 +47,7 @@ public static partial class KernelEventQueueCompatExports
     private const uint NoteMicroseconds = 0x04;
     private const uint NoteNanoseconds = 0x08;
 
-    private static IEqueueTimerScheduler _timerScheduler = HostEqueueTimerScheduler.Instance;
+    private static IEqueueTimerScheduler _timerScheduler = GuestTimerServiceEqueueScheduler.Instance;
 
     /// <summary>
     /// The scheduler every timer knote arms. Integration point for the guest
@@ -112,7 +56,7 @@ public static partial class KernelEventQueueCompatExports
     internal static IEqueueTimerScheduler TimerScheduler
     {
         get => Volatile.Read(ref _timerScheduler);
-        set => Volatile.Write(ref _timerScheduler, value ?? HostEqueueTimerScheduler.Instance);
+        set => Volatile.Write(ref _timerScheduler, value ?? GuestTimerServiceEqueueScheduler.Instance);
     }
 
     // One armed expiry of a timer knote. The knote holds the current arm in
