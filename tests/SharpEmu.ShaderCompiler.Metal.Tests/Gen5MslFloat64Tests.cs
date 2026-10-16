@@ -573,13 +573,13 @@ public sealed class Gen5MslFloat64Tests(ITestOutputHelper output)
     {
         var exponent = (int)((a >> 52) & 0x7FF);
         var shift = (int)(segment & 31) * 53 + (exponent > 1077 ? exponent - 1077 : 0);
-        if ((shift >> 5) + 2 >= 37)
+        if (shift >= 1201)
         {
             return 0;
         }
 
-        // Bits [shift, shift + 53) of the 1184-bit table, as an integer.
-        var value = (ulong)((TwoOverPiBits >> (1184 - shift - 53)) & ((System.Numerics.BigInteger.One << 53) - 1));
+        // Bits [shift, shift + 53) of the 1201-bit table, as an integer; bits past it read 0.
+        var value = (ulong)(((TwoOverPiBits << 53) >> (1201 - shift)) & ((System.Numerics.BigInteger.One << 53) - 1));
         if (value == 0)
         {
             return 0;
@@ -602,8 +602,8 @@ public sealed class Gen5MslFloat64Tests(ITestOutputHelper output)
         return -(scale + 1074) >= 64 ? 0 : value >> -(scale + 1074);
     }
 
-    // 2/pi * 2^1184, truncated: 37 words of the fraction.
-    private static readonly System.Numerics.BigInteger TwoOverPiBits = ComputeTwoOverPi(1184);
+    // 2/pi * 2^1201, truncated: the ISA's 1201 fraction bits (12.12 V_TRIG_PREOP_F64).
+    private static readonly System.Numerics.BigInteger TwoOverPiBits = ComputeTwoOverPi(1201);
 
     private static System.Numerics.BigInteger ComputeTwoOverPi(int bits)
     {

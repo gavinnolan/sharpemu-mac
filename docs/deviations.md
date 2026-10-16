@@ -185,3 +185,9 @@ model asserts each deviation below rather than the ISA behaviour.
 - **V_LOG_F32 accuracy** — the ISA states 1 ULP (12.8); the translator uses
   Metal's `fast::log2`, which is 2 ULP off just above 1.0 (log2(1 + 2^-23)).
   The harness allows 2 ULP for V_LOG_F32 (model `Deviations.LogUlps`).
+- **Division sequence overflow (unverified)** — with V_DIV_SCALE scaling only the
+  denominator and V_DIV_FIXUP passing the quotient through (hardware rows, ISA
+  12.12), an LLVM `fdiv` whose true quotient overflows with the operand exponents
+  96 (F32) or 768 (F64) or more apart gives a NaN from the refinement's
+  inf - inf rather than IEEE's infinity. Whether the hardware gives infinity
+  there is not established. `Gen5MslDivisionTests` leaves those inputs out.
