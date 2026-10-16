@@ -461,13 +461,20 @@ public sealed class ShadowSceneTests(ITestOutputHelper output) : SceneTestBase(o
         using var rig = CreateRig();
         if (rig is null) return;
         var scene = BuildDepth(rig, d16: false, RightHalf);
-        // Hardware applies any DST_SEL to a depth texture's (depth, 0, 0, 1) result.
+        // Hardware applies any DST_SEL to a depth texture's (depth, 0, 0, 1) result: the
+        // identity select reads the missing channels as 0, 0, 1.
         var target = Sample(scene, SampleC, Descriptors.Sampler(depthCompare: CompareFunc.Less), 0.5f,
             dstSelect: Descriptors.IdentitySelect);
+        var plain = Sample(scene, SamplePlain, Descriptors.Sampler(), 0.5f, rgba: true, dstSelect: Descriptors.IdentitySelect);
         rig.Submit(scene.Pm4);
         var failures = new List<string>();
         Check(failures, "identity dst_sel", ReadFloats(rig, target, 1), 1, 0,
             (x, y) => Compare(1, 0.5f, scene.Texel(x, y)) ? 1f : 0f);
+        var texels = ReadFloats(rig, plain, 4);
+        Check(failures, "identity x", texels, 4, 0, (x, y) => scene.Texel(x, y));
+        Check(failures, "identity y", texels, 4, 1, (x, y) => 0f);
+        Check(failures, "identity z", texels, 4, 2, (x, y) => 0f);
+        Check(failures, "identity w", texels, 4, 3, (x, y) => 1f);
         AssertNone(failures);
     }
 
