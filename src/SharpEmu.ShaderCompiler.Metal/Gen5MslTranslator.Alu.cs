@@ -208,15 +208,9 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
-                if (instruction.Control is Gen5SdwaControl { DestinationSelect: < 6 } &&
-                    instruction.Opcode is "VAddU32" or "VAddI32" or "VSubU32" or "VSubI32" or "VSubrevU32" or
-                        "VSubrevI32" or "VAddCoU32" or "VSubCoU32" or "VSubrevCoU32" or "VAddcU32" or
-                        "VAddCoCiU32" or "VSubbU32" or "VSubbrevU32" or "VSubCoCiU32" or "VSubrevCoCiU32" or
-                        "VMadU32U16")
-                {
-                    error = $"{instruction.Opcode}: clamped results into a partial SDWA destination are not supported";
-                    return false;
-                }
+                // An SDWA destination select takes its field from the clamped 32-bit result
+                // (ISA 6.5 clamps to the op's type; 13.3.7 DST_SEL then places the low bits),
+                // which the common write-back below does.
             }
 
             string? expression = instruction.Opcode switch
