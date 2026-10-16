@@ -878,7 +878,7 @@ public sealed class RasterSceneTests(ITestOutputHelper output) : SceneTestBase(o
 
     [Theory]
     [InlineData(8u, 1)]
-    [InlineData(24u, 3)]
+    [InlineData(24u, 3, Skip = "Wide lines: Metal has no wide lines, so a PA_SU_LINE_CNTL width above one pixel is drawn one pixel wide with a one-time warning.")]
     public void ALineListDrawsLinesOfThePaSuLineCntlWidth(uint widthRegister, int widthPixels)
     {
         using var rig = CreateRig();
