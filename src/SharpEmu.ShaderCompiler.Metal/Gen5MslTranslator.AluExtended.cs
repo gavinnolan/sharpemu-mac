@@ -63,7 +63,7 @@ public static partial class Gen5MslTranslator
         /// so does a zero (frexp(0) = 0 * 2^0).</summary>
         private string EmitFrexpF32(Gen5ShaderInstruction instruction, bool mantissa)
         {
-            var bits = Temp("uint", AsUInt(F(instruction, 0)));
+            var bits = FlushInputDenormalF32(AsUInt(F(instruction, 0)));
             var biased = Temp("uint", $"({bits} >> 23) & 0xFFu");
             var fraction = Temp("uint", $"{bits} & 0x7FFFFFu");
             var special = Temp("bool", $"{biased} == 0xFFu || ({bits} & 0x7FFFFFFFu) == 0u");

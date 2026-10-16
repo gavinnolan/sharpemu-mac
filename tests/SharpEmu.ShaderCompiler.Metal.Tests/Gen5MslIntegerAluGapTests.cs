@@ -293,7 +293,9 @@ public sealed class Gen5MslIntegerAluGapTests(ITestOutputHelper output)
             cases.Add(Vector($"frexp_mant_f16_e64 {x:X4}", mantF16E64, [input], mantissa, 0xFFFF));
         }
 
-        Run("frexp", cases);
+        // FLOAT_MODE 0xF0 keeps f32 denormals, so a denormal input is normalized; the flushing
+        // mode is covered by Gen5MslFloatSemanticsTests.
+        Run("frexp", cases, floatMode: 0xF0);
     }
 
     [Fact]
@@ -935,7 +937,7 @@ public sealed class Gen5MslIntegerAluGapTests(ITestOutputHelper output)
         return result;
     }
 
-    private void Run(string name, List<Case> cases)
+    private void Run(string name, List<Case> cases, uint floatMode = ShaderCompileRequest.DefaultFloatMode)
     {
         var words = new List<uint>();
         var slot = 0u;
@@ -953,7 +955,8 @@ public sealed class Gen5MslIntegerAluGapTests(ITestOutputHelper output)
 
         words.Add(EndProgram);
         var shader = Gen5ComputeFixtures.CompileRequestOrThrow(
-            new Gen5ComputeFixture(name, [.. words], StoreScalarResourceBase: 8, StoreBackingBytes: (int)slot * 4));
+            new Gen5ComputeFixture(name, [.. words], StoreScalarResourceBase: 8, StoreBackingBytes: (int)slot * 4),
+            floatMode: floatMode);
         if (!RequireDevice())
         {
             return;

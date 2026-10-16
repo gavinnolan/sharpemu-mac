@@ -225,6 +225,23 @@ public sealed class Gen5MslFloatSemanticsTests(ITestOutputHelper output)
         Assert.Equal(expectedHigh, Execute(shader));
     }
 
+    // The bit-exact min/max and frexp paths flush an f32 input denormal to a zero of its sign
+    // while FLOAT_MODE flushes f32 input denormals (bit 4 clear), and keep it otherwise.
+    [Theory]
+    [InlineData("VMinF32", 0x00000001u, 0x3F800000u, 0xC0u, 0x00000000u)]
+    [InlineData("VMinF32", 0x00000001u, 0x3F800000u, 0xF0u, 0x00000001u)]
+    [InlineData("VMaxF32", 0x80000001u, 0xBF800000u, 0xC0u, 0x80000000u)]
+    [InlineData("VFrexpMantF32", 0x00400000u, 0u, 0xC0u, 0x00000000u)]
+    [InlineData("VFrexpMantF32", 0x00400000u, 0u, 0xF0u, 0x3F000000u)]
+    [InlineData("VFrexpExpI32F32", 0x00400000u, 0u, 0xC0u, 0x00000000u)]
+    [InlineData("VFrexpExpI32F32", 0x00400000u, 0u, 0xF0u, 0xFFFFFF82u)]
+    public void BitExactPathsFlushF32InputDenormalsPerFloatMode(string opcode, uint a, uint b, uint floatMode, uint expected)
+    {
+        var shader = Compile([Vop3(opcode, [Gen5Operand.Vector(0), Gen5Operand.Vector(1)])], a, b, floatMode: floatMode);
+        if (!RequireDevice()) return;
+        Assert.Equal(expected, Execute(shader));
+    }
+
     // v3 = VCC ? 1 : 0
     private static Gen5ShaderInstruction CndmaskVcc() =>
         new(28, Gen5ShaderEncoding.Vop2, "VCndmaskB32", [], [Gen5Operand.Source(128), Gen5Operand.Source(129)], [Gen5Operand.Vector(3)], null);

@@ -2929,7 +2929,7 @@ public static partial class Gen5MslTranslator
         private string MinMaxF32Result(Gen5ShaderInstruction instruction)
         {
             var ieee = _request.IeeeMode ? "true" : "false";
-            string Bits(int index) => Temp("uint", AsUInt(F(instruction, index)));
+            string Bits(int index) => FlushInputDenormalF32(AsUInt(F(instruction, index)));
             var bits = instruction.Opcode switch
             {
                 "VMinF32" => $"sharpemu_min_f32({Bits(0)}, {Bits(1)}, {ieee})",
@@ -2940,6 +2940,17 @@ public static partial class Gen5MslTranslator
             };
             var result = Temp("uint", bits);
             return HasFloatOutputModifiers(instruction) ? FloatResult(instruction, AsFloat(result)) : result;
+        }
+
+        /// <summary>The f32 bits of an operand read by a bit-exact path, with a denormal flushed
+        /// to a zero of its sign when FLOAT_MODE flushes f32 input denormals (bit 4 clear), as
+        /// the float paths get from Metal.</summary>
+        private string FlushInputDenormalF32(string bits)
+        {
+            var value = Temp("uint", bits);
+            return (_request.FloatMode & 0x10u) != 0
+                ? value
+                : Temp("uint", $"(({value} & 0x7F800000u) == 0u) ? ({value} & 0x80000000u) : {value}");
         }
 
         private string F(Gen5ShaderInstruction instruction, int sourceIndex)
