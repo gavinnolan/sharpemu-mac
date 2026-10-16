@@ -139804,6 +139804,7 @@ sceSaveDataMountInternal
 sceSaveDataMountSys
 sceSaveDataNotifySaveDataDownload
 sceSaveDataPrepare
+sceSaveDataPrepareForTransferring
 sceSaveDataPromote5
 sceSaveDataRebuildDatabase
 sceSaveDataRegisterEventCallback
