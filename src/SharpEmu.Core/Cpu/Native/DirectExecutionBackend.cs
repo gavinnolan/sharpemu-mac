@@ -644,6 +644,10 @@ public sealed unsafe partial class DirectExecutionBackend :
 
 		public long BlockDeadlineTimestamp { get; set; }
 
+		// The timer-service entry serving BlockDeadlineTimestamp for waits that pass a
+		// deadline to the scheduler instead of arming their own (legacy waiters).
+		public SharpEmu.Libs.Threading.GuestTimer? BlockDeadlineTimer { get; set; }
+
 		public long ImportCount;
 
 		public string? LastImportNid;
@@ -4071,15 +4075,11 @@ public sealed unsafe partial class DirectExecutionBackend :
 			return false;
 		}
 
-		// Joins regularly park here for minutes (a game main thread joining a
-		// streamer); polling at a fixed 1ms burns half a host core for the
-		// whole wait, so back off toward a 10ms cadence once the join is
-		// clearly long-lived.
-		var joinPollMilliseconds = 1;
-		while (!ActiveForcedGuestExit)
+		// Event-driven: the exit path pulses the scheduler gate when a thread exits or
+		// faults; the bound only re-checks a forced guest exit.
+		lock (_guestThreadGate)
 		{
-			Thread? hostThread;
-			using (LockGate("TryJoinThread"))
+			while (!ActiveForcedGuestExit)
 			{
 				if (!_guestThreads.TryGetValue(threadHandle, out var thread))
 				{
@@ -4101,22 +4101,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 					return false;
 				}
 
-				hostThread = thread.HostThread;
-			}
-
-			if (hostThread is not null &&
-				!ReferenceEquals(hostThread, Thread.CurrentThread))
-			{
-				hostThread.Join(1);
-			}
-			else
-			{
-				Thread.Sleep(joinPollMilliseconds);
-			}
-
-			if (joinPollMilliseconds < 10)
-			{
-				joinPollMilliseconds++;
+				Monitor.Wait(_guestThreadGate, 100);
 			}
 		}
 
@@ -4129,11 +4114,9 @@ public sealed unsafe partial class DirectExecutionBackend :
 		_ = callerContext;
 		var runSynchronously = string.Equals(reason, "entry_return", StringComparison.Ordinal);
 		var dsPump = DsTrace.Sched && DsTrace.Armed;
-		var dsWakeExpiredStarted = dsPump ? Stopwatch.GetTimestamp() : 0;
-		WakeExpiredBlockedGuestThreads();
 		if (dsPump)
 		{
-			DsSched.PumpCall(Stopwatch.GetTimestamp() - dsWakeExpiredStarted);
+			DsSched.PumpCall(0);
 		}
 		if (Volatile.Read(ref _readyGuestThreadCount) == 0)
 		{
@@ -4230,6 +4213,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 				thread.State = GuestThreadRunState.Ready;
 				thread.BlockReason = null;
 				thread.BlockDeadlineTimestamp = 0;
+				CancelBlockDeadlineTimerLocked(thread);
 				EnqueueReadyGuestThreadLocked(thread, GuestThreadExecution.IsGuestThread ? "signal" : "host_signal");
 				if (dsWake && wakeCount == 0)
 				{
@@ -4334,6 +4318,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 			thread.BlockWakeKey = wakeKey;
 			thread.BlockWaiter = waiter;
 			thread.BlockDeadlineTimestamp = blockDeadlineTimestamp;
+			ArmBlockDeadlineTimerLocked(thread);
 			TraceFocusedContinuation(
 				"register",
 				guestThreadHandle,
@@ -4342,36 +4327,93 @@ public sealed unsafe partial class DirectExecutionBackend :
 		}
 	}
 
-	private int WakeExpiredBlockedGuestThreads()
+	public bool WakeBlockedWaiter(ulong threadHandle, IGuestThreadBlockWaiter waiter, string wakeKey)
 	{
-		var now = Stopwatch.GetTimestamp();
-		var wakeCount = 0;
-		using (LockGate("WakeExpiredBlockedGuestThreads"))
+		using (LockGate("WakeBlockedWaiter"))
 		{
-			foreach (var thread in _guestThreads.Values)
+			if (!_guestThreads.TryGetValue(threadHandle, out var thread) ||
+				thread.State != GuestThreadRunState.Blocked ||
+				!thread.HasBlockedContinuation ||
+				!ReferenceEquals(thread.BlockWaiter, waiter) ||
+				!waiter.TryWake())
 			{
-				if (thread.State != GuestThreadRunState.Blocked ||
-					!thread.HasBlockedContinuation ||
-					thread.BlockDeadlineTimestamp == 0 ||
-					thread.BlockDeadlineTimestamp > now)
-				{
-					continue;
-				}
-
-				thread.State = GuestThreadRunState.Ready;
-				thread.BlockReason = null;
-				thread.BlockDeadlineTimestamp = 0;
-				EnqueueReadyGuestThreadLocked(thread, "timeout");
-				wakeCount++;
+				// Not parked on this waiter yet: the exit path re-checks TryWake when it parks.
+				return false;
 			}
+
+			thread.State = GuestThreadRunState.Ready;
+			thread.BlockReason = null;
+			thread.BlockDeadlineTimestamp = 0;
+			CancelBlockDeadlineTimerLocked(thread);
+			EnqueueReadyGuestThreadLocked(thread, GuestThreadExecution.IsGuestThread ? "signal" : "host_signal");
 		}
 
-		if (wakeCount != 0 && _logGuestThreads)
+		if (_logGuestThreads)
 		{
-			Console.Error.WriteLine($"[LOADER][INFO] guest_threads.timeout_wake count={wakeCount}");
+			Console.Error.WriteLine($"[LOADER][INFO] guest_threads.wake_waiter handle=0x{threadHandle:X16} key={wakeKey}");
 		}
 
-		return wakeCount;
+		// Same hand-off as the key-based wake: dispatch from the waker right away.
+		if (_cpuContext is { } wakeContext)
+		{
+			Pump(wakeContext, "wake");
+		}
+
+		return true;
+	}
+
+	// Deadlines given to RequestCurrentThreadBlock are served by the shared timer service
+	// (one precise heap thread) instead of a polling scan.
+	private void ArmBlockDeadlineTimerLocked(GuestThreadState thread)
+	{
+		CancelBlockDeadlineTimerLocked(thread);
+		if (thread.BlockDeadlineTimestamp == 0)
+		{
+			return;
+		}
+
+		thread.BlockDeadlineTimer = SharpEmu.Libs.Threading.GuestTimerService.Shared.Schedule(
+			thread.BlockDeadlineTimestamp,
+			static state =>
+			{
+				var (backend, target) = ((DirectExecutionBackend, GuestThreadState))state!;
+				backend.WakeExpiredBlockedGuestThread(target);
+			},
+			(this, thread));
+	}
+
+	private static void CancelBlockDeadlineTimerLocked(GuestThreadState thread)
+	{
+		if (thread.BlockDeadlineTimer is { } timer)
+		{
+			_ = timer.Owner.Cancel(timer);
+			thread.BlockDeadlineTimer = null;
+		}
+	}
+
+	private void WakeExpiredBlockedGuestThread(GuestThreadState thread)
+	{
+		using (LockGate("WakeExpiredBlockedGuestThread"))
+		{
+			if (thread.State != GuestThreadRunState.Blocked ||
+				!thread.HasBlockedContinuation ||
+				thread.BlockDeadlineTimestamp == 0 ||
+				thread.BlockDeadlineTimestamp > Stopwatch.GetTimestamp())
+			{
+				return;
+			}
+
+			thread.BlockDeadlineTimer = null;
+			thread.State = GuestThreadRunState.Ready;
+			thread.BlockReason = null;
+			thread.BlockDeadlineTimestamp = 0;
+			EnqueueReadyGuestThreadLocked(thread, "timeout");
+		}
+
+		if (_logGuestThreads)
+		{
+			Console.Error.WriteLine($"[LOADER][INFO] guest_threads.timeout_wake handle=0x{thread.ThreadHandle:X16}");
+		}
 	}
 
 	private void PumpUntilGuestThreadsIdle(CpuContext callerContext, string reason)
@@ -4695,7 +4737,6 @@ public sealed unsafe partial class DirectExecutionBackend :
 			IGuestThreadBlockWaiter? blockWaiter = null;
 			while (!ActiveForcedGuestExit)
 			{
-				WakeExpiredBlockedGuestThreads();
 				var ready = false;
 				lock (_guestThreadGate)
 				{
@@ -4718,8 +4759,14 @@ public sealed unsafe partial class DirectExecutionBackend :
 						owner.BlockDeadlineTimestamp = 0;
 						owner.BlockReason = null;
 						owner.State = GuestThreadRunState.Running;
+						CancelBlockDeadlineTimerLocked(owner);
 						RecordGuestThreadFlow(owner, GuestThreadFlowProfile.EventKind.CallbackResumed);
 						ready = true;
+					}
+					else
+					{
+						// Every ready transition pulses this gate; the bound only re-checks forced exit.
+						Monitor.Wait(_guestThreadGate, 100);
 					}
 				}
 
@@ -4727,8 +4774,6 @@ public sealed unsafe partial class DirectExecutionBackend :
 				{
 					break;
 				}
-
-				Thread.Sleep(1);
 			}
 
 			if (ActiveForcedGuestExit)
@@ -5163,7 +5208,15 @@ public sealed unsafe partial class DirectExecutionBackend :
 				target.State = GuestThreadRunState.Ready;
 				target.BlockReason = null;
 				target.BlockDeadlineTimestamp = 0;
+				CancelBlockDeadlineTimerLocked(target);
 				EnqueueReadyGuestThreadLocked(target);
+			}
+			else if (target.State == GuestThreadRunState.Blocked &&
+				target.HasBlockedContinuation &&
+				target.BlockDeadlineTimestamp != 0)
+			{
+				// The deadline timer may have fired while delivery held the thread.
+				ArmBlockDeadlineTimerLocked(target);
 			}
 		}
 
@@ -5432,6 +5485,8 @@ public sealed unsafe partial class DirectExecutionBackend :
 	{
 		_pendingGuestExceptions[threadHandle] = pending;
 		Volatile.Write(ref _pendingGuestExceptionCount, _pendingGuestExceptions.Count);
+		// Host-thread waits sleep on their own events; wake them to deliver at a safe point.
+		SharpEmu.Libs.Threading.GuestWait.InterruptHostWaiters();
 	}
 
 	private bool TryRemovePendingGuestExceptionLocked(
@@ -6078,6 +6133,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 					blockWaiter = thread.BlockWaiter;
 					thread.BlockWaiter = null;
 					thread.BlockDeadlineTimestamp = 0;
+					CancelBlockDeadlineTimerLocked(thread);
 					resumeContinuation = true;
 				}
 			}
@@ -6129,6 +6185,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 							thread.State = GuestThreadRunState.Ready;
 							thread.BlockReason = null;
 							thread.BlockDeadlineTimestamp = 0;
+							CancelBlockDeadlineTimerLocked(thread);
 							EnqueueReadyGuestThreadLocked(thread, "block_recheck");
 						}
 						break;
@@ -6136,6 +6193,11 @@ public sealed unsafe partial class DirectExecutionBackend :
 						thread.State = GuestThreadRunState.Faulted;
 						thread.BlockReason = blockReason;
 						break;
+				}
+				if (thread.State is GuestThreadRunState.Exited or GuestThreadRunState.Faulted)
+				{
+					// Joiners wait on the gate.
+					Monitor.PulseAll(_guestThreadGate);
 				}
 			}
 			if (_logGuestThreads)
@@ -7104,24 +7166,8 @@ public sealed unsafe partial class DirectExecutionBackend :
 		// checks, instead of only ever being reset by import dispatch.
 		GuestThreadExecution.HostWorkProgressObserved += MarkExecutionProgress;
 
-		// Drives woken threads when every guest thread is parked (nothing dispatches then).
-		var dispatcherThread = new Thread(new ThreadStart(delegate
-		{
-			while (!_stallWatchdogStop)
-			{
-				Thread.Sleep(1);
-				WakeExpiredBlockedGuestThreads();
-				if (Volatile.Read(ref _readyGuestThreadCount) > 0 && _cpuContext is { } dispatchContext)
-				{
-					Pump(dispatchContext, "dispatcher");
-				}
-			}
-		}))
-		{
-			IsBackground = true,
-			Name = "SharpEmu-GuestThreadDispatcher"
-		};
-		dispatcherThread.Start();
+		// Woken threads are driven by SharpEmu-ReadyDispatch (gate pulses) and deadlines by
+		// the guest timer service, so no polling dispatcher runs here.
 
 		long num = (long)((double)stallWatchdogSeconds * Stopwatch.Frequency);
 		int periodicSnapshotSeconds =
@@ -7205,7 +7251,6 @@ public sealed unsafe partial class DirectExecutionBackend :
 
 	private bool HasReadyGuestThread()
 	{
-		WakeExpiredBlockedGuestThreads();
 		using (LockGate("HasReadyGuestThread"))
 		{
 			foreach (var thread in _guestThreads.Values)

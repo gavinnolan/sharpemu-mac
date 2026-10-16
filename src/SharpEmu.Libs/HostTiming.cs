@@ -2,15 +2,18 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Diagnostics;
+using SharpEmu.HLE.Host;
 
 namespace SharpEmu.Libs;
 
 /// <summary>
 /// High-resolution host sleeps for guest pacing. <see cref="Thread.Sleep(int)"/>
 /// routinely overshoots by a scheduler quantum, which turns per-frame waits
-/// (flip pacing, usleep-based game loops) into a hard frame-rate cap; these
-/// helpers sleep coarsely for the bulk of the interval and yield-spin the
-/// remainder so wakeups land within tens of microseconds of the target.
+/// (flip pacing, usleep-based game loops) into a hard frame-rate cap. On macOS
+/// these are absolute-deadline <c>mach_wait_until</c> waits
+/// (<see cref="HostPreciseClock"/>) that burn no CPU; elsewhere they sleep coarsely
+/// for the bulk of the interval and yield-spin the remainder so wakeups land
+/// within tens of microseconds of the target.
 /// </summary>
 internal static class HostTiming
 {
@@ -20,6 +23,12 @@ internal static class HostTiming
     /// </summary>
     public static void SleepUntil(long targetTimestamp)
     {
+        if (HostPreciseClock.IsPrecise)
+        {
+            HostPreciseClock.SleepUntil(targetTimestamp);
+            return;
+        }
+
         while (true)
         {
             var remainingTicks = targetTimestamp - Stopwatch.GetTimestamp();
