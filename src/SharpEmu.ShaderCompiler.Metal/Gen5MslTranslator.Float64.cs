@@ -105,13 +105,13 @@ public static partial class Gen5MslTranslator
                         $"sharpemu_f32_div_scale({FlushedFloat32Bits(instruction, 0)}, {FlushedFloat32Bits(instruction, 1)}, " +
                         $"{FlushedFloat32Bits(instruction, 2)}, {flag})");
                     StoreCarryOut(instruction, flag);
-                    StoreVector(destination, FloatResult(instruction, AsFloat(scaled)));
+                    StoreVector(destination, FloatResult(instruction, AsFloat(FlushOutputDenormalF32(scaled))));
                     return true;
                 }
                 case "VDivFmasF32":
-                    StoreVector(destination, FloatResult(instruction, AsFloat(
+                    StoreVector(destination, FloatResult(instruction, AsFloat(FlushOutputDenormalF32(
                         $"sharpemu_f32_div_fmas({FlushedFloat32Bits(instruction, 0)}, {FlushedFloat32Bits(instruction, 1)}, " +
-                        $"{FlushedFloat32Bits(instruction, 2)}, vcc)")));
+                        $"{FlushedFloat32Bits(instruction, 2)}, vcc)"))));
                     return true;
                 case "VDivFixupF32":
                     StoreVector(destination, FloatResult(instruction, AsFloat(

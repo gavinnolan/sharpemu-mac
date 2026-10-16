@@ -2981,6 +2981,16 @@ public static partial class Gen5MslTranslator
         /// <summary>The f32 bits of an operand read by a bit-exact path, with a denormal flushed
         /// to a zero of its sign when FLOAT_MODE flushes f32 input denormals (bit 4 clear), as
         /// the float paths get from Metal.</summary>
+        /// <summary>The f32 bits of a result of a bit-exact path, with a denormal flushed to a zero of
+        /// its sign when FLOAT_MODE flushes f32 output denormals (bit 5 clear; RDNA2 ISA 6.4).</summary>
+        private string FlushOutputDenormalF32(string bits)
+        {
+            var value = Temp("uint", bits);
+            return (_request.FloatMode & 0x20u) != 0
+                ? value
+                : Temp("uint", $"(({value} & 0x7F800000u) == 0u) ? ({value} & 0x80000000u) : {value}");
+        }
+
         private string FlushInputDenormalF32(string bits)
         {
             var value = Temp("uint", bits);
