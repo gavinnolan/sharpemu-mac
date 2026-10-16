@@ -85,3 +85,14 @@ Each entry: **Name** — observable effect · chosen behaviour · pinning test.
   counts come from the host volume; the game image reports no free space.
 
 ## Modules and libc
+
+- **libc routing** — by default libc imports bind to HLE, except for a short
+  allowlist (mem*, the allocator family, sprintf and FILE functions when the
+  module's copies are usable) that goes to the title's libc.prx.
+  `SHARPEMU_LIBC_LLE_FIRST=1` makes the loaded libc.prx win for every export
+  it provides; HLE then serves only symbols the module lacks and these named
+  deviations (`LibcRoutingPolicy.HleDeviations`):
+  - `memset` — the shipped body has a PS5-specific `int 45h` path.
+  - `memcpy` — the same mem* family; the bounds-aware HLE copy is kept.
+  - `fputs` — HLE only in the default routing, where HLE stdio owns FILE
+    objects. Under LLE-first the module's FILE layout is used throughout.

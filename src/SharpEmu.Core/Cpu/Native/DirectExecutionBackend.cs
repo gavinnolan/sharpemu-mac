@@ -2177,15 +2177,8 @@ public sealed unsafe partial class DirectExecutionBackend :
 		return !IsKernelLibrary(export.LibraryName) && (export.PreferLle || preferLleForLibc);
 	}
 
-	private static bool IsHlePreferredNid(string nid)
-	{
-		// The shipped libc memset body contains a PS5-specific int 45h path
-		// which is not a Windows host instruction. Use the bounds-aware HLE
-		// implementation instead of redirecting this import to LLE.
-		return string.Equals(nid, "8zTFvBIAIN8", StringComparison.Ordinal) ||
-			string.Equals(nid, "QrZZdJ8XsX0", StringComparison.Ordinal) ||
-			string.Equals(nid, "Q3VBxCXhUHs", StringComparison.Ordinal);
-	}
+	// The named libc deviations that stay on HLE (LibcRoutingPolicy).
+	private static bool IsHlePreferredNid(string nid) => LibcRoutingPolicy.IsHleDeviation(nid);
 
 	private static bool IsLibcLibrary(string libraryName)
 	{
@@ -2212,6 +2205,13 @@ public sealed unsafe partial class DirectExecutionBackend :
 		if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_LLE_LIBC"), "1", StringComparison.Ordinal))
 		{
 			return false;
+		}
+		if (LibcRoutingPolicy.LleFirst)
+		{
+			// The loaded libc.prx wins; TryResolveDirectImportTarget still falls
+			// back to HLE when the module does not provide a usable symbol.
+			LibcRoutingPolicy.LogOnce();
+			return true;
 		}
 		var value = Environment.GetEnvironmentVariable("SHARPEMU_LLE_LIBC_SAFE_ONLY");
 		if (string.Equals(value, "off", StringComparison.OrdinalIgnoreCase) ||

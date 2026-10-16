@@ -37,6 +37,14 @@ public sealed partial class DirectExecutionBackend
 	private const ulong StackCheckGuardValue = 0xC0DEC0DECAFEBA00UL;
 	private static long _canaryReturnRecoveries;
 
+	/// <summary>
+	/// The symbol name of an import NID from the aerolib catalog
+	/// (scripts/ps5_names.txt), for the unresolved-import log; "?" when the
+	/// catalog does not know it.
+	/// </summary>
+	internal static string DescribeUnresolvedImport(string nid) =>
+		Aerolib.Instance.TryGetName(nid, out var name) ? name : "?";
+
 	private readonly object _importResultLogSampleGate = new();
 	private readonly Dictionary<string, int> _importResultLogSamples = new(StringComparer.Ordinal);
 	private int _il2CppExceptionDiagnosticCount;
@@ -821,7 +829,7 @@ public sealed partial class DirectExecutionBackend
 					DumpIl2CppExceptionDiagnostic(cpuContext, value, num7);
 				}
 				Console.Error.WriteLine(
-					$"[LOADER][WARN] Import#{num} unresolved: nid={importStubEntry.Nid} ret=0x{num7:X16} " +
+					$"[LOADER][WARN] Import#{num} unresolved: nid={importStubEntry.Nid} name={DescribeUnresolvedImport(importStubEntry.Nid)} ret=0x{num7:X16} " +
 					$"rdi=0x{value:X16} rsi=0x{value2:X16} rdx=0x{num3:X16} rcx=0x{num4:X16} r8=0x{num5:X16} r9=0x{num6:X16}");
 				if ((importStubEntry.Traits & ImportTraits.MapDirectDiagnostic) != 0)
 				{
