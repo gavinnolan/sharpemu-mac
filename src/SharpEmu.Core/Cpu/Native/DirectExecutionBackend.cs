@@ -807,13 +807,15 @@ public sealed unsafe partial class DirectExecutionBackend :
 		// it is touched.
 		private const int GuestExecutionStackBytes = 64 * 1024 * 1024;
 
-		public GuestExecutionRunner(ulong guestThreadHandle, string name, ThreadPriority priority)
+		public GuestExecutionRunner(ulong guestThreadHandle, string name, ThreadPriority priority, int guestPriority)
 		{
 			_hostName = $"SharpEmu-{name}";
 			// A matched QoS rule wins over the explicit host priority: CoreCLR-created
 			// threads can never take a QoS class afterwards (EPERM), so such a thread is
 			// created natively with the class in its attributes and gets no priority.
-			if (SharpEmu.HLE.Host.GuestThreadQosPolicy.TryGetClassForNewThread(name, out var qosClass))
+			// Without a name rule a high guest priority picks the class.
+			if (SharpEmu.HLE.Host.GuestThreadQosPolicy.TryGetClassForNewThread(name, out var qosClass) ||
+				SharpEmu.HLE.Host.GuestThreadQosPolicy.TryGetClassForGuestPriority(guestPriority, out qosClass))
 			{
 				_qosClass = qosClass;
 				_qosThread = SharpEmu.HLE.Host.HostQosThread.TryStart(
@@ -5313,7 +5315,8 @@ public sealed unsafe partial class DirectExecutionBackend :
 			deliveryRunner = target.ExecutionRunner ??= new GuestExecutionRunner(
 				target.ThreadHandle,
 				target.Name,
-				MapGuestThreadPriority(target.Priority));
+				MapGuestThreadPriority(target.Priority),
+				target.Priority);
 		}
 		deliveryRunner.Schedule(DeliverException);
 		return true;
@@ -7488,7 +7491,8 @@ public sealed unsafe partial class DirectExecutionBackend :
 			runner = thread.ExecutionRunner ??= new GuestExecutionRunner(
 				thread.ThreadHandle,
 				thread.Name,
-				MapGuestThreadPriority(thread.Priority));
+				MapGuestThreadPriority(thread.Priority),
+				thread.Priority);
 		}
 		ProfileGuestThreadScheduled(thread);
 		runner.Schedule(() =>

@@ -144,6 +144,41 @@ public static class GuestThreadQosPolicy
             $"[SCHED][QOS] thread={name} class={qos} ok={ok}{(ok ? string.Empty : $" errno={errno}")}{suffix}");
     }
 
+    private static readonly bool s_priorityQos =
+        Environment.GetEnvironmentVariable("SHARPEMU_GUEST_PRIORITY_QOS") != "0";
+
+    /// <summary>
+    /// The class a new guest thread executor gets from its guest priority when no name rule
+    /// matches (Orbis: 256 highest .. 767 lowest, 700 is the usual default). High-priority
+    /// threads (audio, render, input; priority 256-300) start USER_INTERACTIVE, priorities
+    /// 301-599 USER_INITIATED; everything else keeps the runtime's class. Only ever raises,
+    /// never demotes a thread below the runtime's default. The class is fixed
+    /// at thread creation (a CoreCLR-created thread cannot change class later), so a later
+    /// scePthreadSetprio does not move it. SHARPEMU_GUEST_PRIORITY_QOS=0 disables.
+    /// </summary>
+    public static bool TryGetClassForGuestPriority(int priority, out HostThreadQos qos)
+    {
+        qos = default;
+        if (!s_priorityQos || priority < 256)
+        {
+            return false;
+        }
+
+        if (priority <= 300)
+        {
+            qos = HostThreadQos.UserInteractive;
+            return true;
+        }
+
+        if (priority < 600)
+        {
+            qos = HostThreadQos.UserInitiated;
+            return true;
+        }
+
+        return false;
+    }
+
     /// <summary>The class a thread with this name should be created at, if any rule matches.</summary>
     public static bool TryGetClassForNewThread(string? name, out HostThreadQos qos)
     {

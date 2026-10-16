@@ -95,6 +95,63 @@ public static class KernelRuntimeCompatExports
     [ThreadStatic]
     private static int _shortUsleepCount;
 
+    // Adaptive nap for usleep(<1 ms) polling loops (a worker pool waiting for jobs). The
+    // first short sleeps of a streak only yield, so a wait that ends quickly stays fast;
+    // once one thread has been polling for SHARPEMU_USLEEP_NAP_AFTER_US (default 500 us)
+    // its short sleeps really sleep, for max(requested, SHARPEMU_USLEEP_NAP_US) (default
+    // 250 us; 0 turns naps off). A streak ends when the thread spends more than 2 ms
+    // between short sleeps or sleeps for 1 ms or more. Per thread, not per title.
+    internal static readonly long UsleepNapMicroseconds =
+        ReadNonNegativeEnvironmentInteger("SHARPEMU_USLEEP_NAP_US", 250);
+    private static readonly long _usleepNapAfterTicks =
+        ReadNonNegativeEnvironmentInteger("SHARPEMU_USLEEP_NAP_AFTER_US", 500) * Stopwatch.Frequency / 1_000_000;
+    private static readonly long _usleepStreakGapTicks = Stopwatch.Frequency * 2 / 1000;
+
+    [ThreadStatic]
+    private static long _shortUsleepStreakStart;
+
+    [ThreadStatic]
+    private static long _lastShortUsleep;
+
+    private static long ReadNonNegativeEnvironmentInteger(string name, long fallback) =>
+        long.TryParse(Environment.GetEnvironmentVariable(name), out var value) && value >= 0
+            ? value
+            : fallback;
+
+    /// <summary>
+    /// The sub-millisecond usleep policy (see <see cref="UsleepNapMicroseconds"/>): returns
+    /// true when this call napped, false when it only yielded.
+    /// </summary>
+    internal static bool ShortUsleep(ulong micros)
+    {
+        var now = Stopwatch.GetTimestamp();
+        if (_lastShortUsleep == 0 || now - _lastShortUsleep > _usleepStreakGapTicks)
+        {
+            _shortUsleepStreakStart = now;
+        }
+
+        _lastShortUsleep = now;
+        if (UsleepNapMicroseconds > 0 && now - _shortUsleepStreakStart >= _usleepNapAfterTicks)
+        {
+            HostTiming.SleepMicroseconds(Math.Max((long)micros, UsleepNapMicroseconds));
+            _lastShortUsleep = Stopwatch.GetTimestamp();
+            return true;
+        }
+
+        // Guest worker pools use usleep(1) as a polling backoff. Do not turn
+        // PS microsecond waits into millisecond sleeps on hot paths.
+        if ((++_shortUsleepCount & 255) == 0)
+        {
+            Thread.Sleep(0);
+        }
+        else
+        {
+            Thread.Yield();
+        }
+
+        return false;
+    }
+
     private static readonly bool _stopwatchTicksAreNanoseconds =
         Stopwatch.Frequency == 1_000_000_000L;
 
@@ -148,22 +205,12 @@ public static class KernelRuntimeCompatExports
         var dsBranch = 2;
         if (micros < 1000)
         {
-            // Guest worker pools use usleep(1) as a polling backoff. Do not turn
-            // PS microsecond waits into Windows millisecond sleeps on hot paths.
-            if ((++_shortUsleepCount & 255) == 0)
-            {
-                Thread.Sleep(0);
-                dsBranch = 1;
-            }
-            else
-            {
-                Thread.Yield();
-                dsBranch = 0;
-            }
+            dsBranch = ShortUsleep(micros) ? 1 : 0;
         }
         else
         {
             _shortUsleepCount = 0;
+            _lastShortUsleep = 0;
             // Precise sleep: rounding microseconds up to Thread.Sleep
             // milliseconds (which itself overshoots by a scheduler quantum)
             // hard-caps games that pace their frame loop with usleep.
@@ -2368,15 +2415,17 @@ public static class KernelRuntimeCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        GuestThreadExecution.Scheduler?.Pump(ctx, posix ? "nanosleep" : "sceKernelNanosleep");
-        var totalTicks = tvSec * TimeSpan.TicksPerSecond + Math.Max(tvNsec / 100L, 1L);
-        try
+        // Same policy as usleep: a sub-millisecond sleep neither pumps the scheduler (its
+        // gate) nor rounds to a millisecond; longer sleeps wait for an absolute deadline
+        // (mach_wait_until on macOS) instead of Thread.Sleep's millisecond granularity.
+        if (tvSec == 0 && tvNsec < 1_000_000L)
         {
-            Thread.Sleep(TimeSpan.FromTicks(totalTicks));
+            _ = ShortUsleep((ulong)((tvNsec + 999) / 1000));
         }
-        catch (ArgumentOutOfRangeException)
+        else
         {
-            Thread.Sleep(TimeSpan.FromMilliseconds(int.MaxValue));
+            GuestThreadExecution.Scheduler?.Pump(ctx, posix ? "nanosleep" : "sceKernelNanosleep");
+            HostTiming.SleepUntil(SharpEmu.Libs.Threading.GuestTime.DeadlineFromRelativeNanoseconds(tvSec, tvNsec));
         }
 
         WriteRemainingTime(ctx, remainAddress, 0, 0);
@@ -2397,7 +2446,9 @@ public static class KernelRuntimeCompatExports
         }
         else
         {
-            ctx[CpuRegister.Rax] = unchecked((ulong)errnoValue);
+            // sceKernelNanosleep reports the sce code, not the bare errno.
+            _ = sceResult;
+            return SharpEmu.Libs.Threading.GuestErrno.ReturnSce(ctx, errnoValue);
         }
 
         return (int)sceResult;
