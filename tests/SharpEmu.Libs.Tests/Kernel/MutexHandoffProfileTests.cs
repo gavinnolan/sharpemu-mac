@@ -58,8 +58,8 @@ public sealed class MutexHandoffProfileTests
         {
             GuestThreadExecution.Scheduler = scheduler;
             owner.SetValue(state, 0x10UL);
-            var first = enqueue.Invoke(null, [state, 0x20UL, true, "mutex-test:first"])!;
-            var second = enqueue.Invoke(null, [state, 0x30UL, true, "mutex-test:second"])!;
+            var first = enqueue.Invoke(null, [state, 0x20UL, true, "mutex-test:first", 0UL, null])!;
+            var second = enqueue.Invoke(null, [state, 0x30UL, true, "mutex-test:second", 0UL, null])!;
             Assert.False((bool)grant.Invoke(null, [state, first])!);
             owner.SetValue(state, 0UL);
             Assert.False((bool)grant.Invoke(null, [state, second])!);

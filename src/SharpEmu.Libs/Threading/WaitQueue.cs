@@ -493,7 +493,7 @@ public class GuestWaiter : IGuestThreadBlockWaiter
     public GuestWaitStatus WaitOnHost(CpuContext? ctx)
     {
         var hostEvent = _hostEvent ??= new ManualResetEventSlim(false, spinCount: 0);
-        GuestWait.RegisterHostWaiter(this);
+        GuestWait.RegisterHostEvent(hostEvent);
         try
         {
             while (Status == GuestWaitStatus.Pending)
@@ -518,7 +518,7 @@ public class GuestWaiter : IGuestThreadBlockWaiter
         }
         finally
         {
-            GuestWait.UnregisterHostWaiter(this);
+            GuestWait.UnregisterHostEvent(hostEvent);
         }
 
         return Status;
@@ -567,8 +567,6 @@ public class GuestWaiter : IGuestThreadBlockWaiter
         return completed;
     }
 
-    internal void InterruptHostWait() => _hostEvent?.Set();
-
     bool IGuestThreadBlockWaiter.TryWake() => Status != GuestWaitStatus.Pending;
 
     int IGuestThreadBlockWaiter.Resume()
@@ -593,7 +591,7 @@ public static class GuestWait
     /// </summary>
     public const int HostWaitSafetySliceMilliseconds = 250;
 
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<GuestWaiter, byte> HostWaiters = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<ManualResetEventSlim, byte> HostEvents = new();
 
     /// <summary>
     /// True when the calling thread is a scheduler-owned guest thread inside an import call,
@@ -611,16 +609,28 @@ public static class GuestWait
     /// </summary>
     public static void InterruptHostWaiters()
     {
-        foreach (var waiter in HostWaiters.Keys)
+        foreach (var hostEvent in HostEvents.Keys)
         {
-            waiter.InterruptHostWait();
+            try
+            {
+                hostEvent.Set();
+            }
+            catch (ObjectDisposedException)
+            {
+                // Unregistered and disposed concurrently.
+            }
         }
     }
 
-    internal static void RegisterHostWaiter(GuestWaiter waiter) => HostWaiters[waiter] = 0;
+    /// <summary>
+    /// Registers the event a host thread sleeps on while it waits, so
+    /// <see cref="InterruptHostWaiters"/> can wake it; the sleeper must treat a wake as
+    /// possibly spurious and re-check its condition.
+    /// </summary>
+    public static void RegisterHostEvent(ManualResetEventSlim hostEvent) => HostEvents[hostEvent] = 0;
 
-    internal static void UnregisterHostWaiter(GuestWaiter waiter) => HostWaiters.TryRemove(waiter, out _);
+    public static void UnregisterHostEvent(ManualResetEventSlim hostEvent) => HostEvents.TryRemove(hostEvent, out _);
 
     /// <summary>Host waiters currently parked (diagnostics, tests).</summary>
-    public static int HostWaiterCount => HostWaiters.Count;
+    public static int HostWaiterCount => HostEvents.Count;
 }

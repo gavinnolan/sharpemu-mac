@@ -392,6 +392,24 @@ public sealed class PthreadMutexReleaseAndWakeTests
 
         protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
         {
+            if (targetMethod?.Name == nameof(IGuestThreadScheduler.WakeBlockedWaiter))
+            {
+                // Direct wake of the thread parked on that waiter: record it by its key.
+                var key = (string)args![2]!;
+                lock (_gate)
+                {
+                    _wakeKeys.Add(key);
+                }
+
+                if (OnWake?.Invoke(key) == true)
+                {
+                    WakesGranted++;
+                    return true;
+                }
+
+                return false;
+            }
+
             if (targetMethod?.Name == nameof(IGuestThreadScheduler.WakeBlockedThreads))
             {
                 var key = (string)args![0]!;

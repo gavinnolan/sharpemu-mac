@@ -98,7 +98,7 @@ public sealed class PthreadMutexExceptionTests
 public sealed class PthreadMutexSemanticsTests
 {
     [Fact]
-    public void AdaptiveMutex_SelfLockIsIdempotent()
+    public void AdaptiveMutex_SelfLockReturnsDeadlockAndOneUnlockReleases()
     {
         const ulong memoryBase = 0x1_0000_0000;
         const ulong mutexAddress = memoryBase + 0x100;
@@ -107,10 +107,12 @@ public sealed class PthreadMutexSemanticsTests
         Assert.True(context.TryWriteUInt64(mutexAddress, 1)); // Static adaptive initializer.
         context[CpuRegister.Rdi] = mutexAddress;
 
+        // libthr mutex_self_lock: EDEADLK for a non-recursive relock, ownership unchanged.
         Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexLock(context));
-        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexLock(context));
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK, KernelPthreadCompatExports.PthreadMutexLock(context));
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY, KernelPthreadCompatExports.PthreadMutexTrylock(context));
         Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(context));
-        Assert.NotEqual(0, KernelPthreadCompatExports.PthreadMutexUnlock(context));
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED, KernelPthreadCompatExports.PthreadMutexUnlock(context));
     }
 
     [Fact]
