@@ -149,3 +149,21 @@ Each entry: **Name** — observable effect · chosen behaviour · pinning test.
   of 1. The SELF fingerprint, the TLS fields and eh_frame_hdr_size are zero.
 - **sceKernelDlclose** — checks the handle (ESRCH when unknown) but never
   unmaps a module.
+
+## Shader ALU
+
+Checked by the RDNA2 ALU conformance harness
+(`tests/SharpEmu.ShaderCompiler.Metal.Tests/Conformance`), whose reference
+model asserts each deviation below rather than the ISA behaviour.
+
+- **f32 denormals** — Metal flushes f32 denormal inputs and results to a zero
+  of their sign whatever MODE.FP_DENORM asks, so a program that keeps f32
+  denormals (FP_DENORM[5:4] != 0) sees them flushed; titles run with 0xC0,
+  which flushes them anyway. OMOD still follows the requested output-denormal
+  bit (ignored when it is set, ISA 6.2.2). f16 and f64 denormals follow the
+  mode. Pinned by `Rdna2AluConformanceTests` (mode 0xF0 forms, model
+  `Deviations.F32DenormalsFlushed`).
+- **NaN payloads** — the ISA does not define the payload or sign of a NaN an
+  arithmetic op produces; the harness requires a NaN there, not particular
+  bits. Ops whose pseudo-code names the NaN (moves, abs/neg, min/max returning
+  an operand, quieting) are compared bit-exactly.

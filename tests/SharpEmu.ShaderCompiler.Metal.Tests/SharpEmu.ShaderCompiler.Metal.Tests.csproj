@@ -31,6 +31,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
   <ItemGroup>
     <None Include="Goldens\**" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Conformance\Rdna2Encodings.txt" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
