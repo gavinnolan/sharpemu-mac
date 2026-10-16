@@ -55,16 +55,8 @@ public sealed partial class RenderExecutor
         // The pipeline cache keyed the vertex program on the other half of this transform.
         var viewport = HostViewportTransform.Resolve(context, limits.MaxViewportWidth, limits.MaxViewportHeight);
 
-        var lineWidth = context.LineWidth;
-        if (lineWidth != 1f)
-        {
-            if (RenderTrace.Enabled && RenderTrace.LineWidthClamp())
-            {
-                RenderTrace.Write($"Clamping the line width to 1.0 because wide lines are not enabled: lineWidth={lineWidth}");
-            }
-
-            lineWidth = 1f;
-        }
+        // A line draw of any other width was refused; no other primitive reads the width.
+        const float lineWidth = 1f;
 
         var depthTarget = state.Depth.HasTarget ? state.Depth.Target : default;
         var depthState = depthTarget.State;

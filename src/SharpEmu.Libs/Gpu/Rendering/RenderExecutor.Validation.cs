@@ -29,6 +29,13 @@ public sealed partial class RenderExecutor
             throw _host.Fatal("Line stipple is not supported.");
         }
 
+        // Metal rasterises lines one pixel wide. (A polygon mode drawing lines is refused below.)
+        if ((GuestPrimitiveType)banks.UserConfig.PrimitiveType is GuestPrimitiveType.LineList or GuestPrimitiveType.LineStrip &&
+            context.LineWidth != 1f)
+        {
+            throw _host.Fatal($"Wide lines are not supported: PA_SU_LINE_CNTL width={context.LineWidth:R} pixels.");
+        }
+
         var clip = context.Clip;
         if (clip.VertexKillAny || clip.CullOnClippingErrorDisable || clip.ForceViewportIndexFromVertexShader)
         {

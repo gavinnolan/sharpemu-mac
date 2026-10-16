@@ -879,11 +879,21 @@ public sealed class RasterSceneTests(ITestOutputHelper output) : SceneTestBase(o
         var vp = Vp.Default;
         // A horizontal line through the centre of row 16 (y = 16.5) from x 4 to x 28.
         var vertices = Vertices(vp, 0.5f, (4, 16.5), (28, 16.5));
-        var pixels = Render(rig, vertices, s =>
+        void Configure(SceneState s)
         {
             s.Uconfig[Uc.VgtPrimitiveType] = Prim.LineList;
             s.Context[Cx.PaSuLineCntl] = widthRegister; // half width in 1/16 pixel: 8 = one pixel
-        });
+        }
+
+        if (widthPixels != 1)
+        {
+            // Metal has no wide lines: the emulator refuses a line draw wider than one
+            // pixel instead of drawing it one pixel wide.
+            Assert.Throws<SceneFatalException>(() => Render(rig, vertices, Configure));
+            return;
+        }
+
+        var pixels = Render(rig, vertices, Configure);
         var firstRow = 16 - ((widthPixels - 1) / 2);
         var lit = Enumerable.Range(firstRow, widthPixels).SelectMany(y => Enumerable.Range(6, 20).Select(x => (x, y)));
         var dark = new[] { firstRow - 1, firstRow + widthPixels }.SelectMany(y => Enumerable.Range(6, 20).Select(x => (x, y)));
