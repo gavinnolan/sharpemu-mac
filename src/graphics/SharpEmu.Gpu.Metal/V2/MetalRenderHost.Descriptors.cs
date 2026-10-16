@@ -46,6 +46,7 @@ internal sealed partial class MetalRenderHost
         public MetalGuestRange[] Buffers = [];
         public uint[] BufferLengths = [];
         public uint[] ShaderData = [];
+        public ulong[] BindlessTableAddresses = [];
         public int ImageCount;
         public int SamplerCount;
         public int BufferCount;
@@ -154,6 +155,7 @@ internal sealed partial class MetalRenderHost
         _preparation ??= new MetalResourcePreparation(this);
         _preparedStageMask = 0;
         _usedResourceCount = 0;
+        _bindlessDeclarations.Clear();
         Array.Clear(_stageArgumentValid);
         _hasPushData = false;
         // The attachment subresources are recorded as the draw acquires them, which
@@ -474,6 +476,10 @@ internal sealed partial class MetalRenderHost
         }
 
         BindDeviceAddressRanges(stage, info, snapshot);
+        if (snapshot.BindlessImages.Length != 0 || stage.Program.Bindings!.BindlessImageTableCount != 0)
+        {
+            BindBindlessImages(stage, info, snapshot);
+        }
     }
 
     /// <summary>
@@ -796,6 +802,20 @@ internal sealed partial class MetalRenderHost
                     // One table for every program, resident with the windows, so two programs
                     // reaching the same guest qword take the same lock.
                     BinaryPrimitives.WriteUInt64LittleEndian(span, _guestMemory.PairLockTableGpuAddress);
+                    break;
+                case MslArgumentFieldKind.BindlessImageTables:
+                    for (var index = 0; index < field.Count; index++)
+                    {
+                        if (index >= stage.BindlessTableAddresses.Length || stage.BindlessTableAddresses[index] == 0)
+                        {
+                            throw Fatal(
+                                $"A bindless image table was not bound: slot={index} hash=0x{stage.Program.Hash:X16}.");
+                        }
+
+                        BinaryPrimitives.WriteUInt64LittleEndian(
+                            span[(index * sizeof(ulong))..], stage.BindlessTableAddresses[index]);
+                    }
+
                     break;
                 default:
                     BinaryPrimitives.WriteUInt32LittleEndian(span, WordFieldValue(stage, field.Kind));
@@ -1138,6 +1158,7 @@ internal sealed partial class MetalRenderHost
                 }
             }
 
+            DeclareBindlessImages(_renderEncoder, graphics: true, stages);
             return;
         }
 
@@ -1159,6 +1180,8 @@ internal sealed partial class MetalRenderHost
                     _computeEncoder, SelUseResourceUsage, _usedResources[index], _usedResourceUsage[index]);
             }
         }
+
+        DeclareBindlessImages(_computeEncoder, graphics: false, stages: 0);
     }
 
     // -useResource: is encoder state, not draw state: a resource named once stays
@@ -1173,6 +1196,7 @@ internal sealed partial class MetalRenderHost
 
     private void ForgetResidentResources()
     {
+        _encoderEpoch++;
         if (_encoderResidentCount != 0)
         {
             _encoderResidentIndex.Clear();

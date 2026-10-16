@@ -227,6 +227,9 @@ internal static partial class MetalVideoPresenter
                         used.Add(pairLocks);
                         BinaryPrimitives.WriteUInt64LittleEndian(span, MetalNative.SendGpuAddress(pairLocks, selGpuAddress));
                         break;
+                    case MslArgumentFieldKind.BindlessImageTables:
+                        throw new InvalidOperationException(
+                            "A V#-described image table read through texture handles needs the Metal v2 renderer.");
                     default:
                         BinaryPrimitives.WriteUInt32LittleEndian(span, WordFieldValue(field.Kind, bindings));
                         break;

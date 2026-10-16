@@ -125,6 +125,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     private ulong _frameStartTick;
     private ulong _previousFrameStartTick;
     private uint _queryEpoch;
+    private long _imageSetVersion;
     private long _createdImages;
     private long _uploads;
     private long _writebacks;
@@ -306,6 +307,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     }
 
     public MetalCachedImage GetImage(ResourceSlotIdentifier imageIdentifier) => _slots[imageIdentifier];
+
+    /// <summary>Changes whenever an image is added to or dropped from the cache.</summary>
+    public long ImageSetVersion => Volatile.Read(ref _imageSetVersion);
 
     public bool TryGetImage(ResourceSlotIdentifier imageIdentifier, out MetalCachedImage image)
     {
@@ -1395,6 +1399,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         var imageIdentifier = _slots.Insert(image);
+        Interlocked.Increment(ref _imageSetVersion);
         if (!ImageDescription.IsEmptyRange(description.Data))
         {
             AddToIndex(imageIdentifier);

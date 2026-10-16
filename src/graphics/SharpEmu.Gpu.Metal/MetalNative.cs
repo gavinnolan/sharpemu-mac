@@ -365,6 +365,15 @@ internal static partial class MetalNative
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendUseResourceUsage(nint receiver, nint selector, nint resource, nuint usage);
 
+    // useResources:count:usage: — a C array of resources in one message.
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static unsafe partial void SendUseResources(nint receiver, nint selector, nint* resources, nuint count, nuint usage);
+
+    // useResources:count:usage:stages:
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static unsafe partial void SendUseResourcesStages(
+        nint receiver, nint selector, nint* resources, nuint count, nuint usage, nuint stages);
+
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial ulong SendGpuAddress(nint receiver, nint selector);
 
