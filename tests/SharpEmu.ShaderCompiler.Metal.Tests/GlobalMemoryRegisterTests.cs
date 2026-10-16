@@ -70,15 +70,17 @@ public sealed class GlobalMemoryRegisterTests
     }
 
     [Theory]
-    // The unsigned 64-bit min/max are native device atomic_ulong operations (Apple8+).
-    [InlineData(0x58u, "atomic_max_explicit((device atomic_ulong*)")]
-    [InlineData(0x56u, "atomic_min_explicit((device atomic_ulong*)")]
-    public void Atomics64_UnsignedMinMaxUseANativeUlongAtomic(uint opcode, string operation)
+    // Every X2 form is one read-modify-write of the qword under the pair lock; the unsigned
+    // min/max compute on the loaded ulong instead of a native atomic_ulong (which returns nothing).
+    [InlineData(0x58u, "max(")]
+    [InlineData(0x56u, "min(")]
+    public void Atomics64_UnsignedMinMaxComputeTheQwordUnderThePairLock(uint opcode, string operation)
     {
         var source = CompileOnDevice(opcode, returnsValue: false);
         Assert.Contains(operation, source);
+        Assert.Contains("sharpemu_pair_try_lock(", source);
         // v[3:4] is the 64-bit operand, low dword first.
-        Assert.Matches(@"\(ulong\)t\d+ \| \(\(ulong\)t\d+ << 32\)", source);
+        Assert.Matches(@"\(ulong\)v3 \| \(\(ulong\)v4 << 32\)", source);
         Assert.DoesNotMatch(@"(?m)^\s*(if \(exec\) \{ )?v[89] = ", source);
     }
 
@@ -92,23 +94,6 @@ public sealed class GlobalMemoryRegisterTests
         var source = CompileOnDevice(opcode, returnsValue: false);
         Assert.Equal(2, Regex.Matches(source, Regex.Escape(operation) + @"\(device atomic_uint\*\)\(t\d+( \+ 1)?\)").Count);
         Assert.Matches(Regex.Escape(operation) + @"\(device atomic_uint\*\)\(t\d+ \+ 1\)", source);
-    }
-
-    [Theory]
-    // A returned 64-bit value cannot be a snapshot of two 32-bit atomics, and Metal has no
-    // 64-bit exchange, compare-exchange, signed min/max or wrapping step: refused, not split.
-    [InlineData(0x52u, true, "GlobalAtomicAddX2")]
-    [InlineData(0x58u, true, "GlobalAtomicUmaxX2")]
-    [InlineData(0x50u, false, "GlobalAtomicSwapX2")]
-    [InlineData(0x51u, false, "GlobalAtomicCmpswapX2")]
-    [InlineData(0x55u, false, "GlobalAtomicSminX2")]
-    [InlineData(0x5Cu, false, "GlobalAtomicIncX2")]
-    [InlineData(0x60u, false, "GlobalAtomicFmaxX2")]
-    public void Atomics64_InexpressibleFormsAreRefused(uint opcode, bool returnsValue, string name)
-    {
-        var fixture = new Gen5ComputeFixture("global-atomic64", [Word(opcode, returnsValue), 0x0810_0309, 0xBF81_0000], 16, 64);
-        Assert.False(Gen5MslTranslator.TryCompileProgram(Gen5ComputeFixtures.CreateComputeRequest(fixture), out _, out var error));
-        Assert.Contains(name, error);
     }
 
     [Theory]

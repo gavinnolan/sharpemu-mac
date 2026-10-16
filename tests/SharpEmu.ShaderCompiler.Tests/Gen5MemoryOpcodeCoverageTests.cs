@@ -68,7 +68,8 @@ public sealed class Gen5MemoryOpcodeCoverageTests
     {
         var instruction = DecodeFirst(asm, word0, word1);
         Assert.Equal(opcode, instruction.Opcode);
-        Assert.Equal(0u, Assert.IsType<Gen5BufferMemoryControl>(instruction.Control).DwordCount);
+        Assert.Null(instruction.Control);
+        Assert.Empty(instruction.Sources);
         Assert.Empty(instruction.Destinations);
     }
 

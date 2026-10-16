@@ -30,6 +30,12 @@ public static partial class Gen5MslTranslator
 
         private void EmitFloat64PreludeIfUsed(StringBuilder source)
         {
+            if (_usesFloat64Atomics)
+            {
+                source.Append(MslTemplates.Render("float64_prelude"));
+                return;
+            }
+
             foreach (var instruction in _request.Program.Instructions)
             {
                 if (IsFloat64Opcode(instruction.Opcode))

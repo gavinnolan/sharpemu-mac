@@ -3230,6 +3230,15 @@ public static partial class Gen5ShaderTranslator
             case Gen5ShaderEncoding.Mubuf:
             {
                 var extra = words[1];
+                if (opcode is "BufferGl0Inv" or "BufferGl1Inv")
+                {
+                    // Cache invalidations: the encoding's address, data and resource fields
+                    // are unused (LLVM prints no operand), so no memory access is planned.
+                    sources = [];
+                    destinations = [];
+                    break;
+                }
+
                 var vectorAddress = extra & 0xFF;
                 var vectorData = (extra >> 8) & 0xFF;
                 var scalarResource = ((extra >> 16) & 0x1F) * 4;

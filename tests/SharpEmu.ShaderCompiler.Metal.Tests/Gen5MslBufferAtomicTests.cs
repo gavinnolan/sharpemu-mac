@@ -41,9 +41,9 @@ public sealed class Gen5MslBufferAtomicTests(ITestOutputHelper output)
     }
 
     [Theory]
-    // An unnamed MUBUF opcode still fails loudly rather than emitting nothing.
-    [InlineData(0x34u, "MubufRaw34")]
-    [InlineData(0x5Bu, "MubufRaw5B")]
+    // An unnamed MUBUF opcode still fails loudly rather than emitting nothing (0x4D-0x4F
+    // are unassigned on gfx10.3).
+    [InlineData(0x4Du, "MubufRaw4D")]
     public void UndecodedBufferOpcodesRemainExplicitlyUnsupported(uint opcode, string name)
     {
         var fixture = Fixture(true, 0, 0, 0, indexed: false, opcode);
@@ -116,17 +116,6 @@ public sealed class Gen5MslBufferAtomicTests(ITestOutputHelper output)
         BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(48), Before);
         BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(52), Sentinel);
         Assert.Equal(expected, Execute(shader, SentinelBuffer(32)));
-    }
-
-    [Fact]
-    public void Op3EIsRefusedBecauseGfx10DefinesItAsFloatCompareSwap()
-    {
-        // gfx10 op 0x3E is buffer_atomic_fcmpswap (BUFFER_WBINVL1 is gfx6-gfx9 only). The
-        // translator has no float compare-swap, so the shader must be refused, not no-op'd.
-        var fixture = new Gen5ComputeFixture("buffer-op3e",
-            [0xE0F80000, 0x00000000, 0xBF810000], 8, 0);
-        var exception = Assert.Throws<InvalidOperationException>(() => Gen5ComputeFixtures.DecodeOrThrow(fixture));
-        Assert.Contains("fcmpswap", exception.Message);
     }
 
     [Fact]

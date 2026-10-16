@@ -176,6 +176,37 @@ static inline uint sharpemu_atomic_float_minmax(device atomic_uint* word, uint v
     return observed;
 }
 
+// BUFFER/GLOBAL_ATOMIC_CSUB (RDNA2 ISA 12.14): the word becomes old - DATA, clamped at
+// zero when DATA exceeds it. Returns the value observed.
+static inline uint sharpemu_atomic_clamped_sub(device atomic_uint* word, uint value)
+{
+    uint observed = atomic_load_explicit(word, memory_order_relaxed);
+    while (!atomic_compare_exchange_weak_explicit(word, &observed, observed < value ? 0u : observed - value, memory_order_relaxed, memory_order_relaxed))
+    {
+    }
+    return observed;
+}
+
+// BUFFER/GLOBAL_ATOMIC_FCMPSWAP: the word becomes "value" when it equals "compare" as a
+// float - a NaN equals nothing and -0 equals +0 - so the swap succeeds on a word whose
+// bits differ from the comparator's. The ISA's compare "handles NaN/INF/denorm", so it is
+// made on the bits: a float compare on the GPU flushes denormals, and would call two
+// different denormals equal. Returns the value observed.
+static inline bool sharpemu_f32_bits_equal(uint a, uint b)
+{
+    return ((a | b) << 1) == 0u || (a == b && (a & 0x7FFFFFFFu) <= 0x7F800000u);
+}
+
+static inline uint sharpemu_atomic_float_compare_swap(device atomic_uint* word, uint compare, uint value)
+{
+    uint observed = atomic_load_explicit(word, memory_order_relaxed);
+    while (sharpemu_f32_bits_equal(observed, compare) &&
+           !atomic_compare_exchange_weak_explicit(word, &observed, value, memory_order_relaxed, memory_order_relaxed))
+    {
+    }
+    return observed;
+}
+
 // Compare-and-swap that retries only spurious failures; returns the value observed.
 static inline uint sharpemu_atomic_compare_swap(device atomic_uint* word, uint compare, uint value)
 {

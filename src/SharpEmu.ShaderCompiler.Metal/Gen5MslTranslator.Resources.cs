@@ -534,6 +534,8 @@ public static partial class Gen5MslTranslator
                 "Xor" => pointer => $"atomic_fetch_xor_explicit((device atomic_uint*)({pointer}), {value}, memory_order_relaxed)",
                 "Swap" => pointer => $"atomic_exchange_explicit((device atomic_uint*)({pointer}), {value}, memory_order_relaxed)",
                 "Cmpswap" => pointer => $"sharpemu_atomic_compare_swap((device atomic_uint*)({pointer}), {comparator}, {value})",
+                "Fcmpswap" => pointer => $"sharpemu_atomic_float_compare_swap((device atomic_uint*)({pointer}), {comparator}, {value})",
+                "Csub" => pointer => $"sharpemu_atomic_clamped_sub((device atomic_uint*)({pointer}), {value})",
                 "Inc" => pointer => $"sharpemu_atomic_step((device atomic_uint*)({pointer}), {value}, true)",
                 "Dec" => pointer => $"sharpemu_atomic_step((device atomic_uint*)({pointer}), {value}, false)",
                 "Fmin" => pointer => $"sharpemu_atomic_float_minmax((device atomic_uint*)({pointer}), {value}, false)",
@@ -708,11 +710,11 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
-            // The X2 forms run the operation over a dword pair, as the bound path does.
+            // The X2 forms are one 64-bit atomic on a dword pair, as on the bound path.
             var atomic = isAtomic ? opcode["BufferAtomic".Length..] : string.Empty;
             var atomicWords = atomic.EndsWith("X2", StringComparison.Ordinal) ? 2u : 1u;
             atomic = atomicWords == 2 ? atomic[..^2] : atomic;
-            if (isAtomic && !TryGetAtomicExpression(atomic, "0u", "0u", out _))
+            if (isAtomic && (atomicWords == 2 ? !IsQwordAtomic(atomic) : !TryGetAtomicExpression(atomic, "0u", "0u", out _)))
             {
                 error = $"unsupported device buffer descriptor opcode {opcode}";
                 return false;
@@ -827,6 +829,15 @@ public static partial class Gen5MslTranslator
                 }
 
                 var inRange = Temp("bool", string.Join(" && ", wordsInRange));
+                // An X2 atomic's operands are read before any destination register is written.
+                string? qwordSource = null;
+                string? qwordComparator = null;
+                if (atomicWords == 2)
+                {
+                    qwordSource = QwordSource(control.VectorData);
+                    qwordComparator = atomic is "Cmpswap" or "Fcmpswap" ? QwordSource(control.VectorData + 2) : "0ul";
+                }
+
                 var originals = new string[atomicWords];
                 for (uint word = 0; word < atomicWords; word++)
                 {
@@ -863,18 +874,20 @@ public static partial class Gen5MslTranslator
 
                 if (atomicWords == 2)
                 {
-                    // Both dwords change under the pair's lock (see EmitPairLocked). The access
-                    // is in range, so a dword is only skipped where the page table maps none;
-                    // the lock is then the one the mapped dword picks.
-                    var lockWord = Temp("device uint*", $"{valids[0]} ? {pointers[0]} : {pointers[1]}");
-                    Line($"if ({valids[0]} || {valids[1]})");
+                    // One 64-bit atomic (EmitQwordAtomic). The access is in range; a qword
+                    // the page table does not map whole is not performed and returns zero,
+                    // as an unmapped dword does.
+                    Line($"if ({valids[0]} && {valids[1]})");
                     Line("{");
                     _indent++;
-                    EmitPairLocked(lockWord, () =>
-                    {
-                        Operate(0);
-                        Operate(1);
-                    });
+                    EmitQwordAtomic(
+                        atomic,
+                        pointers[0],
+                        pointers[1],
+                        qwordSource!,
+                        qwordComparator!,
+                        originals[0],
+                        originals[1]);
                     _indent--;
                     Line("}");
                 }
@@ -1241,9 +1254,27 @@ public static partial class Gen5MslTranslator
             }
 
             var memoryOpcode = control.UsesFlatAddress ? "Global" + instruction.Opcode["Flat".Length..] : instruction.Opcode;
-            var address = control.UsesFlatAddress || control.ScalarAddress >= 125
-                ? $"(ulong)v[{control.VectorAddress}] | ((ulong)v[{control.VectorAddress + 1}] << 32)"
-                : $"{Scalar64Expression(control.ScalarAddress)} + (ulong)v[{control.VectorAddress}]";
+            string address;
+            if (control.AddThreadId)
+            {
+                // GLOBAL_LOAD/STORE_DWORD_ADDTID: SADDR + offset + the lane's index * 4, with
+                // no VADDR (RDNA2 ISA 9.1, 12.18). The lane index needs real wave lanes, and
+                // SADDR must name a register pair.
+                if (!HasRealWaveLanes || control.ScalarAddress >= 125)
+                {
+                    error = $"{instruction.Opcode} needs {(HasRealWaveLanes ? "a SADDR register pair" : "wave lanes")}";
+                    return false;
+                }
+
+                address = $"{Scalar64Expression(control.ScalarAddress)} + (ulong)(sharpemu_lane * 4u)";
+            }
+            else
+            {
+                address = control.UsesFlatAddress || control.ScalarAddress >= 125
+                    ? $"(ulong)v[{control.VectorAddress}] | ((ulong)v[{control.VectorAddress + 1}] << 32)"
+                    : $"{Scalar64Expression(control.ScalarAddress)} + (ulong)v[{control.VectorAddress}]";
+            }
+
             address = Temp("ulong", $"({address}) + {SignedOffset64(control.OffsetBytes)}");
             var entry = request.Memory[memoryIndex];
             if (control.UsesFlatAddress && entry.AddressSpace != FlatAddressSpace.Global)
@@ -1253,7 +1284,10 @@ public static partial class Gen5MslTranslator
             }
 
             var writes = entry.Access is MemoryAccess.Write or MemoryAccess.Atomic;
-            var accessBytes = Math.Max((entry.DataBits + 7) / 8, 1u) * Math.Max(entry.DataDwords, 1u);
+            // An ADDTID lane reaches its own dword; the entry plans the wave's 64.
+            var accessBytes = control.AddThreadId
+                ? sizeof(uint)
+                : Math.Max((entry.DataBits + 7) / 8, 1u) * Math.Max(entry.DataDwords, 1u);
             var allowed = writes ? IsWrittenAccessAllowed(memoryIndex, address, accessBytes) : "true";
 
             if (memoryOpcode.StartsWith("GlobalAtomic", StringComparison.Ordinal) &&
@@ -1362,23 +1396,11 @@ public static partial class Gen5MslTranslator
             return true;
         }
 
-        // GLOBAL_ATOMIC_*_X2: a 64-bit atomic on the qword at the address. Metal's only 64-bit
-        // atomics are atomic_max_explicit / atomic_min_explicit on a device atomic_ulong (MSL
-        // 2.4, Apple8 and later), and they return nothing: there is no 64-bit exchange,
-        // compare-exchange or fetch operation to build a compare-and-swap loop from. So:
-        // - UMIN/UMAX without GLC are that native 64-bit atomic.
-        // - ADD/SUB/AND/OR/XOR without GLC run as a 32-bit atomic on each half. Each lane's
-        //   operation reaches memory whole (ADD/SUB fold the carry or borrow out of the low
-        //   half into the high one), so memory ends at the value the 64-bit atomics would
-        //   leave however the lanes interleave - the split the LDS 64-bit atomics use.
-        // - Every GLC form (its returned pair would not be one snapshot), SWAP, CMPSWAP,
-        //   SMIN/SMAX, INC/DEC and FMIN/FMAX need a 64-bit read-modify-write Metal cannot
-        //   express, and are refused.
-        // Both forms run under the pair's sequence lock (EmitPairLocked), which is what makes
-        // the qword one access to a GLC LOAD_DWORDX2 reading it.
-        // The hardware requires a naturally aligned qword; one that is not, or that the page
-        // table does not map in one piece, is not performed, like the bound path's unaligned
-        // atomics.
+        // GLOBAL_ATOMIC_*_X2: one 64-bit atomic on the qword at the address (EmitQwordAtomic),
+        // with GLC returning the pre-operation qword in VDST[0:1]. The hardware requires a
+        // naturally aligned qword; one that is not, or that the page table does not map in
+        // one piece, is not performed, like the bound path's unaligned atomics, and a GLC
+        // form then returns zero.
         private bool TryEmitGlobalAtomic64(
             Gen5ShaderInstruction instruction,
             Gen5GlobalMemoryControl control,
@@ -1388,18 +1410,17 @@ public static partial class Gen5MslTranslator
             out string error)
         {
             error = string.Empty;
-            var native = atomic is "Umin" or "Umax" && !control.Glc;
-            var split = atomic is "Add" or "Sub" or "And" or "Or" or "Xor" && !control.Glc;
-            if (!native && !split)
+            if (!IsQwordAtomic(atomic))
             {
-                error = $"unsupported global opcode {instruction.Opcode}{(control.Glc ? " with GLC" : string.Empty)}: " +
-                    "Metal has no 64-bit atomic that performs it";
+                error = $"unsupported global opcode {instruction.Opcode}";
                 return false;
             }
 
-            // Both source halves are read before any destination register is written.
-            var low = Temp("uint", $"v[{control.SourceVectorRegister}]");
-            var high = Temp("uint", $"v[{control.SourceVectorRegister + 1}]");
+            // Every source register is read before a destination register is written.
+            var source = QwordSource(control.SourceVectorRegister);
+            var comparator = atomic is "Cmpswap" or "Fcmpswap" ? QwordSource(control.SourceVectorRegister + 2) : "0ul";
+            var originalLow = Temp("uint", "0u");
+            var originalHigh = Temp("uint", "0u");
             Line($"if ({ExecCondition(allowed)})");
             Line("{");
             _indent++;
@@ -1408,50 +1429,17 @@ public static partial class Gen5MslTranslator
             Line($"if ({valid} && ({address} & 7ul) == 0ul)");
             Line("{");
             _indent++;
-            // The qword changes under its pair lock, so a GLC LOAD_DWORDX2 sees it whole
-            // (see EmitPairLocked): the split halves land together, and a native 64-bit
-            // min/max cannot land between a locked reader's two dword loads.
-            EmitPairLocked(pointer, () =>
+            EmitQwordAtomic(atomic, pointer, $"{pointer} + 1", source, comparator, originalLow, originalHigh);
+            _indent--;
+            Line("}");
+            _indent--;
+            Line("}");
+            if (control.Glc)
             {
-                if (native)
-                {
-                    var function = atomic == "Umax" ? "atomic_max_explicit" : "atomic_min_explicit";
-                    Line($"{function}((device atomic_ulong*)({pointer}), (ulong){low} | ((ulong){high} << 32), memory_order_relaxed);");
-                    return;
-                }
+                StoreVector(control.DestinationVectorRegister, originalLow);
+                StoreVector(control.DestinationVectorRegister + 1, originalHigh);
+            }
 
-                var lowWord = $"(device atomic_uint*)({pointer})";
-                var highWord = $"(device atomic_uint*)({pointer} + 1)";
-                switch (atomic)
-                {
-                    case "Add":
-                    {
-                        var originalLow = Temp("uint", $"atomic_fetch_add_explicit({lowWord}, {low}, memory_order_relaxed)");
-                        var carry = Temp("uint", $"({originalLow} + {low}) < {originalLow} ? 1u : 0u");
-                        Line($"atomic_fetch_add_explicit({highWord}, {high} + {carry}, memory_order_relaxed);");
-                        break;
-                    }
-                    case "Sub":
-                    {
-                        var originalLow = Temp("uint", $"atomic_fetch_sub_explicit({lowWord}, {low}, memory_order_relaxed)");
-                        var borrow = Temp("uint", $"{originalLow} < {low} ? 1u : 0u");
-                        Line($"atomic_fetch_sub_explicit({highWord}, {high} + {borrow}, memory_order_relaxed);");
-                        break;
-                    }
-                    default:
-                    {
-                        var function = $"atomic_fetch_{atomic.ToLowerInvariant()}_explicit";
-                        Line($"{function}({lowWord}, {low}, memory_order_relaxed);");
-                        Line($"{function}({highWord}, {high}, memory_order_relaxed);");
-                        break;
-                    }
-                }
-            });
-
-            _indent--;
-            Line("}");
-            _indent--;
-            Line("}");
             return true;
         }
 

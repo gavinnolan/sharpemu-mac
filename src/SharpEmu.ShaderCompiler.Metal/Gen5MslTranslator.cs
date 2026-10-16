@@ -245,6 +245,9 @@ public static partial class Gen5MslTranslator
         private bool _usesBufferOffset;
         private bool _usesCoherentLoads;
         private bool _usesPairLocks;
+        // An F64 atomic (FCMPSWAP_X2, FMIN/FMAX_X2, the DS F64 forms) compares on the
+        // software binary64 helpers, so the program carries float64_prelude.
+        private bool _usesFloat64Atomics;
         private bool _usesShaderClock;
         private bool _usesWaveScratch;
 
@@ -1462,6 +1465,11 @@ public static partial class Gen5MslTranslator
                 case "SDcacheWb":
                 case "SAtcProbe":
                 case "SAtcProbeBuffer":
+                // BUFFER_GL0_INV / BUFFER_GL1_INV drop the per-CU and shader-array caches for the
+                // same reason S_GL1_INV does; device memory here has no such cache, and a GLC
+                // access already reads coherently (coherent_load_prelude).
+                case "BufferGl0Inv":
+                case "BufferGl1Inv":
                     return true;
                 case "SMemtime":
                 case "SMemrealtime":
@@ -3181,9 +3189,7 @@ public static partial class Gen5MslTranslator
             {
                 var atomic = opcode.StartsWith("BufferAtomic", StringComparison.Ordinal)
                     ? opcode["BufferAtomic".Length..] : opcode["GlobalAtomic".Length..];
-                // The X2 forms run the operation over a dword pair. SWAP and OR
-                // are the only ones the guest shaders use and the only ones that
-                // survive the split: each dword is independent of the other.
+                // The X2 forms are one 64-bit atomic on a dword pair (EmitQwordAtomic).
                 var words = atomic.EndsWith("X2", StringComparison.Ordinal) ? 2u : 1u;
                 if (words == 2)
                 {
@@ -3194,7 +3200,9 @@ public static partial class Gen5MslTranslator
                 // from the register after it; SWAP reads VDATA and, with GLC,
                 // replaces that same register with the pre-operation word
                 // (RDNA2 sections 8.1/12.14).
-                if (!TryGetAtomicExpression(atomic, $"v[{sourceVectorRegister}]", $"v[{sourceVectorRegister + 1}]", out _))
+                if (words == 2
+                        ? !IsQwordAtomic(atomic)
+                        : !TryGetAtomicExpression(atomic, $"v[{sourceVectorRegister}]", $"v[{sourceVectorRegister + 1}]", out _))
                 {
                     error = $"unsupported memory opcode {opcode}";
                     return false;
@@ -3232,17 +3240,19 @@ public static partial class Gen5MslTranslator
 
                 if (words == 2)
                 {
-                    // Both dwords change under the pair's lock, so the qword atomic is one
-                    // access to a GLC LOAD_DWORDX2 (see EmitPairLocked). Every source register
-                    // is read before a destination, which shares VDATA, is written.
+                    // Every source register is read before a destination, which shares
+                    // VDATA, is written.
                     var originals = new[] { Temp("uint", "0u"), Temp("uint", "0u") };
                     var first = Temp("device uint*", WordPointer(0));
                     var second = Temp("device uint*", WordPointer(1));
-                    EmitPairLocked(first, () =>
-                    {
-                        Line($"{originals[0]} = {Operate(0, first)};");
-                        Line($"{originals[1]} = {Operate(1, second)};");
-                    });
+                    EmitQwordAtomic(
+                        atomic,
+                        first,
+                        second,
+                        QwordSource(sourceVectorRegister),
+                        atomic is "Cmpswap" or "Fcmpswap" ? QwordSource(sourceVectorRegister + 2) : "0ul",
+                        originals[0],
+                        originals[1]);
                     if (glc)
                     {
                         Line($"v[{destinationVectorRegister}] = {originals[0]};");
