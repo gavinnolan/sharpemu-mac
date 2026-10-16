@@ -761,6 +761,31 @@ public static partial class Gen5MslTranslator
                 indexStride,
                 placed => placed);
 
+            if (control.Tfe)
+            {
+                // A TFE load's status (TryEmitBufferLoadWithStatus): nonzero when a dword the
+                // access reaches inside the descriptor is on a page the table does not map; the
+                // load returns zero for it. A formatted or sub-dword element is probed at its
+                // first dword. The probe runs before the load writes any register.
+                var probes = isFormatLoad || isSubwordLoad ? 1u : control.DwordCount;
+                var status = Temp("uint", "0u");
+                for (uint word = 0; word < probes; word++)
+                {
+                    var probeOffset = byteOffset.At(word * sizeof(uint));
+                    var probeAddress = DeviceDescriptorWordAddress(descriptor, probeOffset);
+                    var mapped = Temp("bool", "true");
+                    Line($"if ({ExecCondition($"(ulong){probeOffset} < {descriptor.Size}")})");
+                    Line("{");
+                    _indent++;
+                    Line($"(void)sharpemu_resolve_device_address({DeviceArguments}, {probeAddress}, {mapped});");
+                    _indent--;
+                    Line("}");
+                    Line($"{status} |= {mapped} ? 0u : 1u;");
+                }
+
+                _bufferTfeStatus = status;
+            }
+
             if (isFormatLoad)
             {
                 // Word 3 carries the unified format and dst_sel, the same layout the bound

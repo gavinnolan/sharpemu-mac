@@ -335,6 +335,7 @@ public static partial class Gen5MslTranslator
                 {
                     _usesLds |= instruction.Control is Gen5DataShareControl { Gds: false } &&
                         instruction.Opcode is not ("DsSwizzleB32" or "DsBpermuteB32" or "DsPermuteB32" or "DsNop");
+                    _usesLds |= instruction.Control is Gen5BufferMemoryControl { Lds: true };
                     if (instruction.Opcode.StartsWith("Scratch", StringComparison.Ordinal))
                     {
                         _scratchDwordCount = Math.Max(_request.ScratchDwords, 1u);
@@ -1693,12 +1694,98 @@ public static partial class Gen5MslTranslator
                 return true;
             }
 
-            if (control.Tfe || control.Lds)
+            if (control.Lds)
             {
-                error = $"unsupported buffer {(control.Tfe ? "TFE" : "LDS")} access {instruction.Opcode}";
+                return TryEmitBufferLoadToLds(instruction, control, out error);
+            }
+
+            if (control.Tfe)
+            {
+                return TryEmitBufferLoadWithStatus(instruction, control, out error);
+            }
+
+            return TryEmitBufferMemoryAccess(instruction, control, out error);
+        }
+
+        // TFE on a MUBUF/MTBUF load writes a status dword to the VGPR after the data (RDNA2
+        // ISA 8.1.3, "TFE"): zero when every page the access touched was resident, nonzero
+        // after a fault, whose data then reads zero. A bound buffer is resident whole; the
+        // device-descriptor path reports a dword the page table does not map
+        // (_bufferTfeStatus). TFE has no meaning on a store or an atomic.
+        private bool TryEmitBufferLoadWithStatus(
+            Gen5ShaderInstruction instruction,
+            Gen5BufferMemoryControl control,
+            out string error)
+        {
+            if (!instruction.Opcode.StartsWith("BufferLoad", StringComparison.Ordinal) &&
+                !instruction.Opcode.StartsWith("TBufferLoad", StringComparison.Ordinal))
+            {
+                error = $"TFE on the non-load buffer opcode {instruction.Opcode}";
                 return false;
             }
 
+            _bufferTfeStatus = null;
+            if (!TryEmitBufferMemoryAccess(instruction, control, out error))
+            {
+                return false;
+            }
+
+            StoreVector(control.VectorData + control.DwordCount, _bufferTfeStatus ?? "0u");
+            _bufferTfeStatus = null;
+            return true;
+        }
+
+        // A MUBUF load with LDS=1 writes its one dword per lane to LDS instead of VDATA, at
+        // M0[15:0] + inst_offset + lane * 4 (RDNA2 ISA 8.1.9; LLVM applies the instruction
+        // offset to both addresses). gfx10 allows it on LOAD_FORMAT_X, (S|U)BYTE,
+        // (S|U)SHORT and DWORD. The dword is the value the same load would put in a VGPR: it
+        // is loaded into VDATA as usual, copied to LDS, and VDATA is restored, since the
+        // instruction leaves it untouched.
+        private bool TryEmitBufferLoadToLds(
+            Gen5ShaderInstruction instruction,
+            Gen5BufferMemoryControl control,
+            out string error)
+        {
+            if (instruction.Opcode is not ("BufferLoadFormatX" or "BufferLoadUbyte" or "BufferLoadSbyte" or
+                "BufferLoadUshort" or "BufferLoadSshort" or "BufferLoadDword") || control.Tfe)
+            {
+                error = $"buffer {instruction.Opcode} cannot return its data to LDS";
+                return false;
+            }
+
+            if (!HasSharedLds || !HasRealWaveLanes)
+            {
+                error = $"buffer {instruction.Opcode} to LDS in a stage without shared LDS and wave lanes";
+                return false;
+            }
+
+            if (control.VectorData >= VectorRegisterFileCount || instruction.Sources.Count < 4)
+            {
+                error = $"buffer {instruction.Opcode} to LDS has no staging register or M0 source";
+                return false;
+            }
+
+            // M0 and the VDATA value to restore are read before the load runs.
+            var ldsAddress = Temp(
+                "uint",
+                $"({SourceExpression(instruction.Sources[3], instruction)} & 0xFFFFu) + 0x{unchecked((uint)control.OffsetBytes):X}u + (sharpemu_lane << 2u)");
+            var staged = Temp("uint", $"v[{control.VectorData}]");
+            if (!TryEmitBufferMemoryAccess(instruction, control with { Lds = false }, out error))
+            {
+                return false;
+            }
+
+            Line(ExecGuarded($"sharpemu_lds[{LdsIndex(ldsAddress, 0)}] = v[{control.VectorData}];"));
+            Line($"v[{control.VectorData}] = {staged};");
+            return true;
+        }
+
+        private bool TryEmitBufferMemoryAccess(
+            Gen5ShaderInstruction instruction,
+            Gen5BufferMemoryControl control,
+            out string error)
+        {
+            error = string.Empty;
             if (FormatComponentCount(instruction.Opcode, control, out var formatD16) == 0 && formatD16.Enabled)
             {
                 error = $"unsupported buffer opcode {instruction.Opcode}";
@@ -3291,6 +3378,10 @@ public static partial class Gen5MslTranslator
                  DataShareQwordOperation(instruction.Opcode) is not ("Add" or "Sub" or "And" or "Or" or "Xor")));
 
         private bool? _usesLdsQwordLocks;
+
+        // The status a TFE buffer load writes after its data, when the access path computed
+        // one (see TryEmitBufferLoadWithStatus); null is resident.
+        private string? _bufferTfeStatus;
 
         private bool TryEmitResolvedMemoryAccess(
             string opcode,
