@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Runtime.Versioning;
+using SharpEmu.Libs.ImageCodec;
 using SharpEmu.Libs.Pad;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.Platform.MacOS.Display;
+using SharpEmu.Platform.MacOS.Imaging;
 using SharpEmu.Platform.MacOS.Input;
 
 namespace SharpEmu.Platform.MacOS;
@@ -32,5 +34,6 @@ public static class MacPlatform
 
         HostDisplayCatalog.RegisterProvider("CoreGraphics", MacDisplayCatalog.TryQuery);
         LauncherGamepad.RegisterProvider(MacLauncherGamepadProvider.Instance);
+        HostImageCodec.RegisterProvider("ImageIO", MacImageIOCodec.Instance);
     }
 }
