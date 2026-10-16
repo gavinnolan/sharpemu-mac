@@ -102,8 +102,8 @@ public static partial class Gen5MslTranslator
                     var flag = Temp("bool", "false");
                     var scaled = Temp(
                         "uint",
-                        $"sharpemu_f32_div_scale({Float32Bits(instruction, 0)}, {Float32Bits(instruction, 1)}, " +
-                        $"{Float32Bits(instruction, 2)}, {flag})");
+                        $"sharpemu_f32_div_scale({FlushedFloat32Bits(instruction, 0)}, {FlushedFloat32Bits(instruction, 1)}, " +
+                        $"{FlushedFloat32Bits(instruction, 2)}, {flag})");
                     StoreCarryOut(instruction, flag);
                     StoreVector(destination, FloatResult(instruction, AsFloat(scaled)));
                     return true;
@@ -358,6 +358,11 @@ public static partial class Gen5MslTranslator
         /// <summary>An F32 operand's bits with its abs/neg modifiers applied.</summary>
         private string Float32Bits(Gen5ShaderInstruction instruction, int sourceIndex) =>
             Temp("uint", AsUInt(F(instruction, sourceIndex)));
+
+        /// <summary>An F32 operand's bits with a denormal flushed to a zero of its sign when FP_DENORM
+        /// flushes f32 inputs (RDNA2 ISA 6.4), for the helpers that read the bits.</summary>
+        private string FlushedFloat32Bits(Gen5ShaderInstruction instruction, int sourceIndex) =>
+            FlushInputDenormalF32(Float32Bits(instruction, sourceIndex));
 
         /// <summary>An F16 operand's bits (its op_sel half, abs/neg applied), zero-extended.</summary>
         private string Float16Bits(Gen5ShaderInstruction instruction, int sourceIndex) =>
