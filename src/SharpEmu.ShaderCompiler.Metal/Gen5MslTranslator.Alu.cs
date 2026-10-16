@@ -1903,14 +1903,14 @@ public static partial class Gen5MslTranslator
             var y = Temp("float", F(instruction, 1));
             var z = Temp("float", F(instruction, 2));
             var amaxXY = Temp("float", $"fmax(fabs({x}), fabs({y}))");
-            var amax = Temp("float", $"fmax(fabs({z}), {amaxXY})");
-            if (coordinate == CubeCoordinate.Ma)
-            {
-                return FloatResult(instruction, $"2.0f * {amax}");
-            }
-
             var isZMax = Temp("bool", $"fabs({z}) >= {amaxXY}");
             var yGeX = Temp("bool", $"fabs({y}) >= fabs({x})");
+            if (coordinate == CubeCoordinate.Ma)
+            {
+                // 2.0 * the major axis coordinate itself, sign included (ISA 12.12 V_CUBEMA_F32).
+                return FloatResult(instruction, $"2.0f * ({isZMax} ? {z} : ({yGeX} ? {y} : {x}))");
+            }
+
             var isYMax = Temp("bool", $"!{isZMax} && {yGeX}");
             switch (coordinate)
             {
