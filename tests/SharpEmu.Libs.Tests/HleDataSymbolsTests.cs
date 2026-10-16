@@ -40,4 +40,17 @@ public sealed class HleDataSymbolsTests
         Assert.Equal(3, addresses.Distinct().Count());
         Assert.Equal(0UL, HleDataSymbols.StandardStreamAddress(3));
     }
+
+    [Fact]
+    public void EachStdioObjectHoldsTheGuestLibcFileImage()
+    {
+        // libc.prx copies a 0x1C8-byte FILE image into _Stdin, _Stdout and _Stderr;
+        // a smaller object lets the copy overwrite the next object or host heap memory.
+        Assert.True(HleDataSymbols.StdioObjectSize >= HleDataSymbols.MinimumGuestFileSize);
+        var addresses = Enumerable.Range(0, 3).Select(HleDataSymbols.StandardStreamAddress).Order().ToArray();
+        for (var index = 1; index < addresses.Length; index++)
+        {
+            Assert.True(addresses[index] - addresses[index - 1] >= HleDataSymbols.MinimumGuestFileSize);
+        }
+    }
 }

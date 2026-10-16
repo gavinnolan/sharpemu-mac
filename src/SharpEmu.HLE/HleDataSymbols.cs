@@ -23,9 +23,15 @@ public static class HleDataSymbols
     private const string StdinObjectNid = "1TDo-ImqkJc";    // _Stdin
     private const string StdoutObjectNid = "2sWzhYqFH4E";   // _Stdout
     private const string StderrObjectNid = "H8AprKeZtNg";   // _Stderr
-    // Opaque, zeroed FILE storage: larger than any libc FILE layout, so
-    // inline accessors read zeros rather than unmapped memory.
-    internal const int StdioObjectSize = 0x100;
+    // Opaque, zeroed FILE storage. The guest owns the layout and writes it:
+    // the PS5 libc.prx copies a whole 0x1C8-byte FILE image into each of these
+    // at startup (Quake), so every object must hold at least that much. They
+    // sit in the host malloc heap; an object smaller than the guest's FILE lets
+    // that copy run into the next host allocation (CoreCLR's string-literal
+    // table, its hash maps), which aborts the process seconds later from an
+    // unrelated thread. Twice the observed size leaves room for other layouts.
+    internal const int MinimumGuestFileSize = 0x1C8;
+    internal const int StdioObjectSize = 0x400;
     private const int ProgNameMaxBytes = 511;
     // Terminator canaries reserve the low byte as NUL. Keep the process data
     // symbol and every per-thread TLS copy byte-for-byte identical.
