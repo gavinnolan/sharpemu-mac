@@ -26,10 +26,6 @@ public static partial class KernelMemoryCompatExports
     private const int F_GETFL = 3;
     private const int F_SETFL = 4;
 
-    // poll event bits.
-    private const short POLLIN = 0x0001;
-    private const short POLLOUT = 0x0004;
-
     private static Stream? GetOpenFile(int fd)
     {
         lock (_fdGate)
@@ -635,58 +631,5 @@ public static partial class KernelMemoryCompatExports
                 ctx[CpuRegister.Rax] = 0;
                 return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
-    }
-
-    // ---- poll / select ----
-    // Regular files are always ready for both read and write, so report every
-    // requested descriptor as immediately ready.
-
-    [SysAbiExport(Nid = "ku7D4q1Y9PI", ExportName = "poll",
-        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
-    public static int PosixPoll(CpuContext ctx)
-    {
-        var fdsAddress = ctx[CpuRegister.Rdi];
-        var count = unchecked((uint)ctx[CpuRegister.Rsi]);
-        if (fdsAddress == 0 || count == 0)
-        {
-            ctx[CpuRegister.Rax] = 0;
-            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-        }
-
-        // struct pollfd { int fd; short events; short revents; } == 8 bytes.
-        var ready = 0;
-        Span<byte> buffer = stackalloc byte[8];
-        for (uint i = 0; i < count && i < 4096; i++)
-        {
-            var entry = fdsAddress + i * 8;
-            if (!ctx.Memory.TryRead(entry, buffer))
-            {
-                break;
-            }
-
-            var events = BinaryPrimitives.ReadInt16LittleEndian(buffer[4..]);
-            var revents = (short)(events & (POLLIN | POLLOUT));
-            BinaryPrimitives.WriteInt16LittleEndian(buffer[6..], revents);
-            if (revents != 0)
-            {
-                ready++;
-            }
-
-            _ = ctx.Memory.TryWrite(entry, buffer);
-        }
-
-        ctx[CpuRegister.Rax] = unchecked((ulong)ready);
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    [SysAbiExport(Nid = "T8fER+tIGgk", ExportName = "select",
-        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
-    public static int PosixSelect(CpuContext ctx)
-    {
-        // nfds in Rdi; the fd_sets are left as-is (all reported ready) and the
-        // ready count returned is nfds so callers proceed without blocking.
-        var nfds = unchecked((int)ctx[CpuRegister.Rdi]);
-        ctx[CpuRegister.Rax] = unchecked((ulong)Math.Max(nfds, 0));
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 }
