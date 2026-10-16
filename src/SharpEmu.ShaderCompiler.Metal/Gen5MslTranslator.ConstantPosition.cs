@@ -66,6 +66,11 @@ public static partial class Gen5MslTranslator
                     y = ((y * clip.ScaleY) + (clip.OffsetY * w)) / clip.HalfExtentY - w;
                 }
 
+                if (clip.PositionXMirror)
+                {
+                    x = -x;
+                }
+
                 if (clip.PositionYDown)
                 {
                     y = -y;

@@ -207,6 +207,7 @@ public static partial class Gen5MslTranslator
         private bool ConvertsPositionToHostClipSpace =>
             _request.ClipSpace.Enabled ||
             _request.ClipSpace.PositionYDown ||
+            _request.ClipSpace.PositionXMirror ||
             _request.ClipSpace.DepthNegativeOneToOne;
 
         /// <summary>The exported POS0 <paramref name="position"/> in Metal's clip space, held in
@@ -235,7 +236,8 @@ public static partial class Gen5MslTranslator
         /// then sets, scaled by w so the host's divide lands on them. Vulkan's NDC is y-down and
         /// Metal's y-up, and Metal takes no negative viewport height: where the host viewport
         /// is y-down — the clip-disabled one always, else a positive guest y scale — y is
-        /// negated so the position lands on Vulkan's pixels. Metal's clip volume is z in
+        /// negated so the position lands on Vulkan's pixels. Neither host takes a negative
+        /// viewport width, so a mirrored guest x scale negates x. Metal's clip volume is z in
         /// [0, w] with no negative-one-to-one control, so a guest [-w, w] depth becomes
         /// (z + w) / 2, which the viewport's near and far then map exactly as Vulkan maps z.
         /// </summary>
@@ -252,6 +254,11 @@ public static partial class Gen5MslTranslator
                 yield return
                     $"{position}.y = ({position}.y * {FloatBits(clip.ScaleY)} + {FloatBits(clip.OffsetY)} * {position}.w) / " +
                     $"{FloatBits(clip.HalfExtentY)} - {position}.w;";
+            }
+
+            if (clip.PositionXMirror)
+            {
+                yield return $"{position}.x = -{position}.x;";
             }
 
             if (clip.PositionYDown)

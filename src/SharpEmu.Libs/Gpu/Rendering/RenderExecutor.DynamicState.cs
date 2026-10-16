@@ -9,7 +9,6 @@ namespace SharpEmu.Libs.Gpu.Rendering;
 
 public sealed partial class RenderExecutor
 {
-    private const uint MaxViewportDimension = 16384;
 
     // A guest bias for a fixed-point depth format scales by the host depth bits.
     //
@@ -63,25 +62,8 @@ public sealed partial class RenderExecutor
         }
 
         var scissor = ResolveScissor(viewportRegisters, context.ScanMode, framebufferWidth, framebufferHeight);
-        ref readonly var viewport = ref viewportRegisters.Viewports[0];
-        float viewportX;
-        float viewportY;
-        float viewportWidth;
-        float viewportHeight;
-        if (context.Clip.ClipDisable)
-        {
-            viewportX = 0;
-            viewportY = 0;
-            viewportWidth = Math.Min(limits.MaxViewportWidth, MaxViewportDimension);
-            viewportHeight = Math.Min(limits.MaxViewportHeight, MaxViewportDimension);
-        }
-        else
-        {
-            viewportX = viewport.XOffset - viewport.XScale;
-            viewportY = viewport.YOffset - viewport.YScale;
-            viewportWidth = viewport.XScale * 2f;
-            viewportHeight = viewport.YScale * 2f;
-        }
+        // The pipeline cache keyed the vertex program on the other half of this transform.
+        var viewport = HostViewportTransform.Resolve(context, limits.MaxViewportWidth, limits.MaxViewportHeight);
 
         var lineWidth = context.LineWidth;
         if (lineWidth != 1f)
@@ -130,12 +112,12 @@ public sealed partial class RenderExecutor
 
         var blend = context.BlendColor;
         return new DynamicDrawState(
-            viewportX,
-            viewportY,
-            viewportWidth,
-            viewportHeight,
-            viewport.ZOffset - (context.Clip.DirectXClipSpace ? 0f : viewport.ZScale),
-            viewport.ZScale + viewport.ZOffset,
+            viewport.X,
+            viewport.Y,
+            viewport.Width,
+            viewport.Height,
+            viewport.MinDepth,
+            viewport.MaxDepth,
             scissor,
             lineWidth,
             blend.Red,

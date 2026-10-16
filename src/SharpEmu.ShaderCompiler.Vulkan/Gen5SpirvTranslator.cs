@@ -254,6 +254,12 @@ public static partial class Gen5SpirvTranslator
                     }
                 }
 
+                if (_request.ClipSpace.HasProgramOnlyConventions)
+                {
+                    error = $"the SPIR-V translator does not apply these clip-space conventions: {_request.ClipSpace}";
+                    return false;
+                }
+
                 var blocks = BuildBasicBlocks(_request.Program.Instructions);
                 // The fallback when the full structurer declines: blocks in program order behind a
                 // next-block guard, with natural loops as structured loops.
