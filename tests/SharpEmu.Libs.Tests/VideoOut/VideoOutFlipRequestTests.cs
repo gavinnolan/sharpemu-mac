@@ -502,4 +502,73 @@ public sealed class VideoOutFlipRequestTests : IDisposable
         Assert.True(VideoOutExports.IsFlipDone(_handle, -1));
         Assert.Null(VideoOutExports.GetFlipOutcomeForTests(request));
     }
+
+    // A presenter that reports presentation: the GPU finishing the flip's work releases the
+    // GPU side only; the guest's flip count moves when the frame is shown.
+    [Fact]
+    public void GpuCompletionPublishesTheFlipOnlyAtPresentation()
+    {
+        var before = FlipCount();
+        var request = Reserve(31);
+
+        VideoOutExports.CompleteFlipOnGpu(request);
+        Assert.Equal(before, FlipCount());
+        Assert.Equal(VideoOutExports.FlipOutcome.Pending, VideoOutExports.GetFlipOutcomeForTests(request));
+        // A second completion is not a second flip.
+        VideoOutExports.CompleteFlipOnGpu(request);
+        VideoOutExports.CompleteFlip(request);
+        Assert.Equal(before, FlipCount());
+
+        VideoOutExports.MarkFlipPresented(request);
+        Assert.Equal(before + 1, FlipCount());
+        Assert.Null(VideoOutExports.GetFlipOutcomeForTests(request));
+    }
+
+    [Fact]
+    public void PresentationBeforeGpuCompletionPublishesAtGpuCompletion()
+    {
+        var before = FlipCount();
+        var request = Reserve(32);
+
+        VideoOutExports.MarkFlipPresented(request);
+        Assert.Equal(before, FlipCount());
+        VideoOutExports.CompleteFlipOnGpu(request);
+        Assert.Equal(before + 1, FlipCount());
+        Assert.Null(VideoOutExports.GetFlipOutcomeForTests(request));
+    }
+
+    [Fact]
+    public void ADroppedFrameStillPublishesItsFlip()
+    {
+        var before = FlipCount();
+        var request = Reserve(33);
+
+        VideoOutExports.CompleteFlipOnGpu(request);
+        VideoOutExports.DiscardFlip(request);
+        Assert.Equal(before + 1, FlipCount());
+        Assert.Null(VideoOutExports.GetFlipOutcomeForTests(request));
+    }
+
+    [Fact]
+    public void CancellingAGpuDoneFlipPublishesNothing()
+    {
+        var before = FlipCount();
+        var request = Reserve(34);
+
+        VideoOutExports.CompleteFlipOnGpu(request);
+        VideoOutExports.CancelFlip(request);
+        VideoOutExports.MarkFlipPresented(request);
+        Assert.Equal(before, FlipCount());
+        Assert.Null(VideoOutExports.GetFlipOutcomeForTests(request));
+    }
+
+    [Fact]
+    public void AVsyncMultipleFlipBecomesEligibleAtGpuCompletion()
+    {
+        Assert.Equal(0, VideoOutExports.TryReserveFlipRequest(_handle, -1, 4, 35, true, out var request));
+        Assert.Equal(long.MaxValue, VideoOutExports.NextFlipPresentTimestamp(request, Stopwatch.GetTimestamp()));
+        VideoOutExports.CompleteFlipOnGpu(request);
+        Assert.NotEqual(long.MaxValue, VideoOutExports.NextFlipPresentTimestamp(request, Stopwatch.GetTimestamp()));
+        VideoOutExports.MarkFlipPresented(request);
+    }
 }

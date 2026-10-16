@@ -733,9 +733,10 @@ internal static partial class MetalV2Presenter
 
             if (waitingForGpu)
             {
-                // The completion thread signals flips; the short timeout covers frames
-                // whose submission carries no flip completion.
-                _flipPacerSignal.WaitOne(1);
+                // Every finished command buffer signals the pacer (OnGpuCompleted), so
+                // the wait ends when the GPU does. Without the completion handler the
+                // shared event is polled, and so is this.
+                _flipPacerSignal.WaitOne(host.Completions.WantsCompletionHandler ? GpuWaitBackstopMilliseconds : 1);
             }
             else if (wakeAt == long.MaxValue)
             {
@@ -748,28 +749,68 @@ internal static partial class MetalV2Presenter
         }
     }
 
-    // Coarse sleep for the bulk (macOS overshoots by up to ~1.5 ms), then a spin.
+    // A finished command buffer the pacer was not told about is caught by this backstop.
+    private const int GpuWaitBackstopMilliseconds = 8;
+
+    // Coarse sleep for the bulk (macOS overshoots by up to ~1.5 ms, and a signal ends it
+    // early), then mach_wait_until for the tail: the kernel wakes the thread at the
+    // deadline, where the spin it replaces held a core for the last two milliseconds of
+    // every refresh.
     private static void SleepUntil(long target)
     {
         var frequency = System.Diagnostics.Stopwatch.Frequency;
-        while (true)
+        var remaining = target - System.Diagnostics.Stopwatch.GetTimestamp();
+        if (remaining <= 0)
         {
-            var remaining = target - System.Diagnostics.Stopwatch.GetTimestamp();
-            if (remaining <= 0)
-            {
-                return;
-            }
-
-            var microseconds = remaining * 1_000_000 / frequency;
-            if (microseconds > 2000)
-            {
-                _flipPacerSignal.WaitOne((int)((microseconds - 1500) / 1000));
-                return;
-            }
-
-            Thread.SpinWait(64);
+            return;
         }
+
+        var microseconds = remaining * 1_000_000 / frequency;
+        if (microseconds > 2000)
+        {
+            _flipPacerSignal.WaitOne((int)((microseconds - 1500) / 1000));
+            return;
+        }
+
+        MachWaitFor(remaining * 1_000_000_000 / frequency);
     }
+
+    private static void MachWaitFor(long nanoseconds)
+    {
+        if (MachTimebase.Numer == 0 || MachTimebase.Denom == 0)
+        {
+            throw new InvalidOperationException("mach_timebase_info returned no timebase.");
+        }
+
+        var ticks = (ulong)nanoseconds * MachTimebase.Denom / MachTimebase.Numer;
+        _ = mach_wait_until(mach_absolute_time() + ticks);
+        Interlocked.Increment(ref _pacerTimedWaits);
+    }
+
+    private static long _pacerTimedWaits;
+
+    private struct MachTimebaseInfo
+    {
+        public uint Numer;
+        public uint Denom;
+    }
+
+    private static readonly MachTimebaseInfo MachTimebase = ReadMachTimebase();
+
+    private static MachTimebaseInfo ReadMachTimebase()
+    {
+        _ = mach_timebase_info(out var info);
+        return info;
+    }
+
+    [System.Runtime.InteropServices.DllImport("/usr/lib/libSystem.dylib")]
+    private static extern int mach_timebase_info(out MachTimebaseInfo info);
+
+    [System.Runtime.InteropServices.DllImport("/usr/lib/libSystem.dylib")]
+    private static extern ulong mach_absolute_time();
+
+    [System.Runtime.InteropServices.DllImport("/usr/lib/libSystem.dylib")]
+    private static extern int mach_wait_until(ulong deadline);
 
     // Caller holds the frame gate. Moves the oldest pending frame into the presented
     // slot once the GPU finished the submission that drew it and video-out lets it

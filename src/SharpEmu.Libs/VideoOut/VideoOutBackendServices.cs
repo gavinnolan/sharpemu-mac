@@ -27,6 +27,11 @@ public static class VideoOutBackendServices
     public static void CompleteFlip(ulong requestId) =>
         VideoOutExports.CompleteFlip(requestId);
 
+    // A presenter that reports presentation: the GPU side of the flip only; the guest's
+    // flip count and event follow MarkFlipPresented or DiscardFlip.
+    public static void CompleteFlipOnGpu(ulong requestId) =>
+        VideoOutExports.CompleteFlipOnGpu(requestId);
+
     public static void DiscardFlip(ulong requestId) =>
         VideoOutExports.DiscardFlip(requestId);
 

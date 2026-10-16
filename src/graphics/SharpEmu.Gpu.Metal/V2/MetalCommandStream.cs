@@ -326,7 +326,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 QueueCompletion(() =>
                 {
                     if (!encoded) PublishHostLabel(in label, owed);
-                    VideoOutBackendServices.CompleteFlip(requestId);
+                    VideoOutBackendServices.CompleteFlipOnGpu(requestId);
                     MetalV2Presenter.SignalFlipPacer();
                 });
                 break;
@@ -334,7 +334,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 QueueCompletion(() =>
                 {
                     if (!encoded) PublishHostLabel(in label, owed);
-                    VideoOutBackendServices.CompleteFlip(requestId);
+                    VideoOutBackendServices.CompleteFlipOnGpu(requestId);
                     MetalV2Presenter.SignalFlipPacer();
                     TriggerInterrupt(eventId, 0);
                 });

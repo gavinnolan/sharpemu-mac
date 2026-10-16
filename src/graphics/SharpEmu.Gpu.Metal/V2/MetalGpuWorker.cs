@@ -238,6 +238,10 @@ internal sealed class MetalCompletionQueue : IDisposable
         {
             Monitor.PulseAll(_wakeGate);
         }
+
+        // A frame waiting for this submission can be promoted now; the pacer used to
+        // find out by polling every millisecond.
+        MetalV2Presenter.SignalFlipPacer();
     }
 
     public ulong SignaledValue => MetalV2Native.SendValue64(_sharedEvent, SelSignaledValue);
