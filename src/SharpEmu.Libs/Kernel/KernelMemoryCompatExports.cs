@@ -117,6 +117,9 @@ public static partial class KernelMemoryCompatExports
     private static readonly MappedRegionTable _mappedRegions = new();
     private static readonly Dictionary<ulong, string> _mappedRegionNames = new();
     private static readonly Dictionary<string, string> _guestMounts = new(StringComparer.OrdinalIgnoreCase);
+    // Registered mounts that reject mutation (e.g. a save data mount opened with
+    // SCE_SAVE_DATA_MOUNT_MODE_RDONLY). Guarded by _guestMountGate.
+    private static readonly HashSet<string> _readOnlyGuestMounts = new(StringComparer.OrdinalIgnoreCase);
     private static readonly HashSet<string> _tracedStatResults = new(StringComparer.Ordinal);
     // Both caches memoize host filesystem probe outcomes, so their key
     // equivalence must match the host filesystem's — see HostFsPath. On a
@@ -220,7 +223,14 @@ public static partial class KernelMemoryCompatExports
         bool IsDirect, ulong DirectStart, ulong BackingOffset = 0, bool IsReserved = false);
     private readonly record struct BatchMapEntry(ulong Start, ulong Offset, ulong Length, byte Protection, byte Type, int Operation);
 
-    public static void RegisterGuestPathMount(string guestMountPoint, string hostRoot)
+    public static void RegisterGuestPathMount(string guestMountPoint, string hostRoot) =>
+        RegisterGuestPathMount(guestMountPoint, hostRoot, readOnly: false);
+
+    /// <summary>
+    /// Registers a guest mount; a <paramref name="readOnly"/> mount makes every path under it
+    /// fail <see cref="IsReadOnlyGuestMutationPath"/> so writes and creation are refused.
+    /// </summary>
+    public static void RegisterGuestPathMount(string guestMountPoint, string hostRoot, bool readOnly)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(guestMountPoint);
         ArgumentException.ThrowIfNullOrWhiteSpace(hostRoot);
@@ -236,6 +246,14 @@ public static partial class KernelMemoryCompatExports
         lock (_guestMountGate)
         {
             _guestMounts[normalizedMountPoint] = normalizedHostRoot;
+            if (readOnly)
+            {
+                _readOnlyGuestMounts.Add(normalizedMountPoint);
+            }
+            else
+            {
+                _readOnlyGuestMounts.Remove(normalizedMountPoint);
+            }
         }
 
         InvalidateResolvedGuestPaths();
@@ -261,6 +279,7 @@ public static partial class KernelMemoryCompatExports
         lock (_guestMountGate)
         {
             removed = _guestMounts.Remove(normalizedMountPoint);
+            _readOnlyGuestMounts.Remove(normalizedMountPoint);
         }
 
         if (removed)
@@ -5782,15 +5801,41 @@ public static partial class KernelMemoryCompatExports
 
     public static bool IsReadOnlyGuestMutationPath(string guestPath)
     {
+        var normalized = NormalizeGuestStatCachePath(guestPath);
+        if (normalized is null)
+        {
+            return false;
+        }
+
+        if (IsUnderReadOnlyGuestMount(normalized))
+        {
+            return true;
+        }
+
         if (_writableApp0)
         {
             return false;
         }
 
-        var normalized = NormalizeGuestStatCachePath(guestPath);
-        return normalized is not null &&
-               (string.Equals(normalized, "/app0", StringComparison.OrdinalIgnoreCase) ||
-                normalized.StartsWith("/app0/", StringComparison.OrdinalIgnoreCase));
+        return string.Equals(normalized, "/app0", StringComparison.OrdinalIgnoreCase) ||
+               normalized.StartsWith("/app0/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsUnderReadOnlyGuestMount(string normalizedGuestPath)
+    {
+        lock (_guestMountGate)
+        {
+            foreach (var mountPoint in _readOnlyGuestMounts)
+            {
+                if (string.Equals(normalizedGuestPath, mountPoint, StringComparison.OrdinalIgnoreCase) ||
+                    normalizedGuestPath.StartsWith(mountPoint + "/", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     private static bool TryReadCString(CpuContext ctx, ulong address, ulong maxLength, out byte[] bytes)

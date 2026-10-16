@@ -104,13 +104,16 @@ public sealed class SaveDataExportsTests : IDisposable
         string dirName = DirName,
         ulong mountParam = MountParam,
         ulong mountResult = MountResult,
-        ulong dirNamePointer = DirNamePtr)
+        ulong dirNamePointer = DirNamePtr,
+        ulong blocks = 48,
+        int userId = UserId)
     {
         WriteAscii(dirNamePointer, dirName);
         Span<byte> param = stackalloc byte[0x30];
         param.Clear();
-        BinaryPrimitives.WriteInt32LittleEndian(param, UserId);
+        BinaryPrimitives.WriteInt32LittleEndian(param, userId);
         BinaryPrimitives.WriteUInt64LittleEndian(param[0x08..], dirNamePointer);
+        BinaryPrimitives.WriteUInt64LittleEndian(param[0x10..], blocks);
         BinaryPrimitives.WriteUInt32LittleEndian(param[0x20..], mountMode);
         Assert.True(_memory.TryWrite(mountParam, param));
         return SaveDataExports.SaveDataMount3(Reg(rdi: mountParam, rsi: mountResult));
@@ -359,12 +362,12 @@ public sealed class SaveDataExportsTests : IDisposable
     }
 
     [Fact]
-    public void SetParam_WithoutMount_ReturnsBadMounted()
+    public void SetParam_WithoutMount_ReturnsNotMounted()
     {
         WriteAscii(MountPointStr, "/notmounted");
         Assert.True(_memory.TryWrite(ParamStruct, new byte[0x530]));
         Assert.Equal(
-            unchecked((int)0x809F0013),
+            unchecked((int)0x809F0004),
             SaveDataExports.SaveDataSetParam(Reg(rdi: MountPointStr, rdx: ParamStruct)));
     }
 
