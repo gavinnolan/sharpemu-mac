@@ -31,6 +31,11 @@ internal sealed unsafe class SceneRig : IDisposable
     private readonly nint _queue;
     private readonly SceneAddressSpace _space = new();
     private readonly PageGuard _pages;
+    // One registry for every live rig: a scene may hold two rigs at once, the hook takes
+    // one manager, and every rig's memory sits at the same guest span.
+    private static readonly object RegistryGate = new();
+    private static GuestGpuMemory? _registry;
+    private static int _registryUsers;
     private readonly MetalGpuWorkerRelay _relay = new(static () => { });
     private readonly object?[] _savedBackend;
     private readonly object? _savedFatal;
@@ -69,6 +74,18 @@ internal sealed unsafe class SceneRig : IDisposable
         BackendFields[2].SetValue(null, new MetalV2Backend());
         _queue = MetalNative.Send(device, MetalNative.Selector("newCommandQueue"));
         _pages = new PageGuard(_space);
+        // The guest GPU memory registry the emulator attaches at boot: the device-address
+        // page table a shader dereferences raw guest pointers through is built from its
+        // spans, so the scene's block is registered as the guest's mapped memory.
+        lock (RegistryGate)
+        {
+            if (_registryUsers++ == 0)
+            {
+                _registry = new GuestGpuMemory(new SceneAddressSpace());
+                _registry.Register(SceneMemory.Base, SceneMemory.Size, SharpEmu.HLE.GuestPageProtection.Read | SharpEmu.HLE.GuestPageProtection.Write);
+                GuestGpuMemoryHook.Attach(_registry);
+            }
+        }
         Host = new MetalRenderHost(device, _queue, Memory, Memory, _pages, _relay);
         _relay.BindCurrentThread();
         Host.InitializeCommandStream(new FlipTarget());
@@ -190,6 +207,16 @@ internal sealed unsafe class SceneRig : IDisposable
             for (var index = 0; index < BackendFields.Length; index++)
             {
                 BackendFields[index].SetValue(null, _savedBackend[index]);
+            }
+
+            lock (RegistryGate)
+            {
+                if (--_registryUsers == 0)
+                {
+                    GuestGpuMemoryHook.Attach(null);
+                    _registry!.Dispose();
+                    _registry = null;
+                }
             }
 
             _pages.Dispose();
