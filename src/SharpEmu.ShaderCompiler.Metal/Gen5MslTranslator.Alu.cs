@@ -1450,7 +1450,7 @@ public static partial class Gen5MslTranslator
 
         private string EmitDppWriteEnabled(Gen5DppControl control)
         {
-            var (_, inRange) = EmitDppSourceLane(control);
+            var (targetLane, inRange) = EmitDppSourceLane(control);
             // A wave64 in a workgroup wider than one wave runs as 32-wide simdgroups whose
             // lane index is 0..31; the thread's position in the workgroup tells which half
             // of its guest wave it is, and the upper half is rows 2 and 3.
@@ -1461,7 +1461,16 @@ public static partial class Gen5MslTranslator
             var rowEnabled = $"(({control.RowMask}u >> {row}) & 1u) != 0u";
             // Each BANK_MASK bit gates four consecutive lanes (bit 24: lanes 0-3, 16-19...).
             var bankEnabled = $"(({control.BankMask}u >> ((sharpemu_lane >> 2) & 3u)) & 1u) != 0u";
-            var sourceAllows = control.BoundControl ? "true" : inRange;
+            // An invalid source lane (out of the row, or EXEC-inactive without FI) reads 0 with
+            // BOUND_CTRL and otherwise leaves the destination lane unwritten: with FI clear,
+            // "interaction with inactive lanes is controlled by bound_ctrl" (LLVM's DPP syntax;
+            // llvm.amdgcn.update.dpp keeps `old` for those lanes).
+            var sourceAllows = control.BoundControl
+                ? "true"
+                : control.FetchInactive
+                    ? inRange
+                    // The ballot sits in its own statement: under the && only some lanes would run it.
+                    : $"({inRange}) && {Temp("bool", LaneActiveExpression(Temp("uint", $"(({inRange}) ? {targetLane} : sharpemu_lane) & 31u")))}";
             return Temp("bool", $"({rowEnabled}) && ({bankEnabled}) && ({sourceAllows})");
         }
 
@@ -1867,8 +1876,11 @@ public static partial class Gen5MslTranslator
                 return shuffled;
             }
 
+            // op_sel[1] is the DPP BOUND_CTRL bit: an EXEC-inactive source lane (FI clear) gives
+            // 0 with it and otherwise leaves the destination lane as it was.
             var sourceActive = Temp("bool", LaneActiveExpression(targetLane));
-            return Temp("uint", $"{sourceActive} ? {shuffled} : 0u");
+            var invalid = (control.OperandSelect & 2) != 0 ? "0u" : $"v[{DestinationVector(instruction)}]";
+            return Temp("uint", $"{sourceActive} ? {shuffled} : {invalid}");
         }
 
         private enum CubeCoordinate
