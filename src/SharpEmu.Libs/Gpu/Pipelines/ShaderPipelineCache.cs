@@ -300,21 +300,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             pixelInfo.Stage = pixelStage;
         }
 
-        SolidColorClear? solidClear = null;
         var disableBlending = false;
         if (pixelInfo is not null)
         {
-            var vertexProgramWords = _programs.Decode(vertexSource);
-            var pixelProgramWords = _programs.Decode(pixelSource!);
-            if (IsProceduralFullscreenClearPair(vertexProgramWords, vertexInfo, vertexStage, pixelProgramWords, pixelStage))
-            {
-                var color = DecodeSolidClearColor(pixelStage.Resources.UserData);
-                solidClear = new SolidColorClear(color.Red, color.Green, color.Blue, color.Alpha);
-            }
-            else
-            {
-                disableBlending = IsTransparentPremultipliedFill(context, pixelOutputs, vertexInfo, vertexStage, pixelStage);
-            }
+            disableBlending = IsTransparentPremultipliedFill(context, pixelOutputs, vertexInfo, vertexStage, pixelStage);
         }
 
         return new GraphicsPrograms
@@ -323,7 +312,6 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             Pixel = pixelProgramHandle,
             VertexInput = vertexInfo,
             PixelInput = pixelInfo ?? new PixelInputInfo(),
-            SolidClear = solidClear,
             DisableBlending = disableBlending,
             DropUnwrittenColorTargets = dropUnwritten,
             PositionStream = FindPositionStream(vertexInfo),
