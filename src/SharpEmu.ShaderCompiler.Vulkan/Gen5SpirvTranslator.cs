@@ -6907,13 +6907,17 @@ public static partial class Gen5SpirvTranslator
                     component);
             }
 
+            // Window x = x / w * scale + offset, so x' = (x * scale + offset * w) / half - w
+            // keeps w for the divide and for perspective-correct interpolation.
             components[0] = ConvertClipCoordinate(
                 components[0],
+                components[3],
                 transform.ScaleX,
                 transform.OffsetX,
                 transform.HalfExtentX);
             components[1] = ConvertClipCoordinate(
                 components[1],
+                components[3],
                 transform.ScaleY,
                 transform.OffsetY,
                 transform.HalfExtentY);
@@ -6925,6 +6929,7 @@ public static partial class Gen5SpirvTranslator
 
         private uint ConvertClipCoordinate(
             uint coordinate,
+            uint w,
             float scale,
             float offset,
             float halfExtent)
@@ -6934,11 +6939,16 @@ public static partial class Gen5SpirvTranslator
                 _floatType,
                 coordinate,
                 Float(scale));
+            var scaledOffset = _module.AddInstruction(
+                SpirvOp.FMul,
+                _floatType,
+                Float(offset),
+                w);
             var biased = _module.AddInstruction(
                 SpirvOp.FAdd,
                 _floatType,
                 window,
-                Float(offset));
+                scaledOffset);
             var divided = _module.AddInstruction(
                 SpirvOp.FDiv,
                 _floatType,
@@ -6948,7 +6958,7 @@ public static partial class Gen5SpirvTranslator
                 SpirvOp.FSub,
                 _floatType,
                 divided,
-                Float(1f));
+                w);
         }
 
         private bool PixelExportDebugAddressMatches()

@@ -62,8 +62,8 @@ public static partial class Gen5MslTranslator
                 var w = position[3];
                 if (clip.Enabled)
                 {
-                    x = ((x * clip.ScaleX) + clip.OffsetX) / clip.HalfExtentX - 1.0f;
-                    y = ((y * clip.ScaleY) + clip.OffsetY) / clip.HalfExtentY - 1.0f;
+                    x = ((x * clip.ScaleX) + (clip.OffsetX * w)) / clip.HalfExtentX - w;
+                    y = ((y * clip.ScaleY) + (clip.OffsetY * w)) / clip.HalfExtentY - w;
                 }
 
                 if (clip.PositionYDown)
