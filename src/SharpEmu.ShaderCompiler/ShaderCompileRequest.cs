@@ -185,6 +185,9 @@ public sealed class ShaderCompileRequest
     // RSRC1 DX10_CLAMP: a clamped NaN becomes 0 when set and stays NaN when clear.
     public bool Dx10Clamp { get; init; } = true;
     public const uint DefaultFloatMode = 0xC0;
+    // SPI_PS_IN_CONTROL.PS_W32_EN: the guest pixel wave is wave32, so its VCC_HI is an
+    // ordinary SGPR rather than the mask of lanes 32..63.
+    public bool PixelGuestWave32 { get; init; }
     public uint ScratchDwords { get; init; }
     public bool EnableGraphicsSubgroupOperations { get; init; } = true;
 

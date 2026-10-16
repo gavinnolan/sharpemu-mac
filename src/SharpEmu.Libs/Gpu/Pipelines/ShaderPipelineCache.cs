@@ -241,6 +241,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             pixelInfo.IeeeMode = pixel.Resource1.IeeeMode;
             pixelInfo.FloatMode = pixel.Resource1.FloatMode;
             pixelInfo.Dx10Clamp = pixel.Resource1.Dx10Clamp;
+            pixelInfo.GuestWave32 = (shaderInterface.PixelInputControl & (1u << 15)) != 0;
         }
 
         var primitiveShader = PrimitiveShaderStageInfo(vertex, shaderInterface, context.ShaderStages);

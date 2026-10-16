@@ -825,6 +825,7 @@ internal sealed class ShaderProgramCache
                     IeeeMode = info.IeeeMode,
                     FloatMode = info.FloatMode,
                     Dx10Clamp = info.Dx10Clamp,
+                    PixelGuestWave32 = info.GuestWave32,
                     ScratchDwords = info.ScratchDwords,
                     EnableGraphicsSubgroupOperations = enableGraphicsSubgroups,
                     SupportsSharedInt64Atomics = sharedInt64Atomics,

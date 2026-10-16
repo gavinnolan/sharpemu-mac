@@ -57,6 +57,8 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         StageStaticKey.Build(new PixelInputInfo { Dx10Clamp = false }, clamp);
         Assert.False(ordinary.SequenceEqual(mode));
         Assert.False(ordinary.SequenceEqual(clamp));
+        StageStaticKey.Build(new PixelInputInfo { GuestWave32 = true }, mode);
+        Assert.False(ordinary.SequenceEqual(mode));
         StageStaticKey.Build(new ComputeInputInfo(), ordinary);
         StageStaticKey.Build(new ComputeInputInfo { FloatMode = 0xF0 }, mode);
         StageStaticKey.Build(new ComputeInputInfo { Dx10Clamp = false }, clamp);

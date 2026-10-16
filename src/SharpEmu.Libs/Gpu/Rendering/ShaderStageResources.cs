@@ -167,6 +167,8 @@ public sealed class PixelInputInfo
     public uint[] InterpolatorSettings { get; init; } = new uint[InterpolatorCount];
     public byte[] TargetOutputModes { get; init; } = new byte[TargetCount];
     public ColorComponentMap[] TargetExportMappings { get; init; } = new ColorComponentMap[TargetCount];
+    // SPI_PS_IN_CONTROL.PS_W32_EN (bit 15).
+    public bool GuestWave32 { get; set; }
     public bool IeeeMode { get; set; }
     public uint FloatMode { get; set; } = SharpEmu.ShaderCompiler.ShaderCompileRequest.DefaultFloatMode;
     public bool Dx10Clamp { get; set; } = true;

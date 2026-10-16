@@ -473,7 +473,7 @@ internal static class Gen5ComputeFixtures
         ShaderClipSpaceTransform clipSpace = default, bool pixelDepthExportEnable = false,
         ulong excludedUserDataRegisters = 0, bool ieeeMode = false, Gen5ColorExportFormat? pixelDepthExportFormat = null,
         bool pixelStencilExportEnable = false, bool pixelSampleMaskExportEnable = false,
-        uint floatMode = ShaderCompileRequest.DefaultFloatMode, bool dx10Clamp = true)
+        uint floatMode = ShaderCompileRequest.DefaultFloatMode, bool dx10Clamp = true, bool pixelGuestWave32 = false)
     {
         var plan = ShaderResourcePlan.Extract(program, stage, RequestHash, userDataBase, UserDataCount,
             excludedUserDataRegisters: excludedUserDataRegisters);
@@ -498,6 +498,7 @@ internal static class Gen5ComputeFixtures
             IeeeMode = ieeeMode,
             FloatMode = floatMode,
             Dx10Clamp = dx10Clamp,
+            PixelGuestWave32 = pixelGuestWave32,
             LocalSizeX = stage == ShaderStage.Compute ? localSizeX : 1,
             PixelOutputs = pixelOutputs ?? (stage == ShaderStage.Pixel ? [new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float)] : []),
             RequiredVertexOutputCount = requiredVertexOutputCount,

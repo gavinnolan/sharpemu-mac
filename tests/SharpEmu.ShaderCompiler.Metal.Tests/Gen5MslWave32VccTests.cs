@@ -61,6 +61,46 @@ public sealed class Gen5MslWave32VccTests(ITestOutputHelper output)
         }
     }
 
+    // A guest wave32 NGG primitive shader (GS_W32_EN) or pixel shader (PS_W32_EN) keeps VCC_HI
+    // across a VCC write too; wave64 clears it, its upper lanes having no hardware lanes here.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AGraphicsWave32VccWriteKeepsVccHi(bool wave64)
+    {
+        var mesh = Gen5NggFixtures.CullingTriangle();
+        var compare = new Gen5ShaderInstruction(mesh.Instructions[0].Pc, Gen5ShaderEncoding.Vopc, "VCmpGtU32", [],
+            [Gen5Operand.Source(128), Gen5Operand.Vector(0)], [], null);
+        var meshShader = CompileGraphics(
+            mesh with { Instructions = [compare, .. mesh.Instructions] },
+            ShaderStage.Vertex,
+            primitiveShader: wave64 ? Gen5NggFixtures.Wave64StageInfo : Gen5NggFixtures.StageInfo);
+        Assert.Equal(Gen5MslStage.Mesh, meshShader.Stage);
+        Assert.Equal(wave64, ClearsVccHi(meshShader.Source));
+
+        var pixelShader = CompileGraphics(
+            Gen5ComputeFixtures.DecodeOrThrow(new Gen5ComputeFixture("pixel-vcc-hi", Words, 0, 0)),
+            ShaderStage.Pixel,
+            pixelGuestWave32: !wave64);
+        Assert.Equal(wave64, ClearsVccHi(pixelShader.Source));
+        // S_CBRANCH_VCCZ reads VCC_LO alone in wave32.
+        Assert.Equal(wave64, pixelShader.Source.Contains("(s106 | s107) == 0u", StringComparison.Ordinal));
+    }
+
+    // The VCC ballot store and a VCC_HI clear right after it (the entry's register
+    // initialization also zeroes s107, so a bare match would not tell).
+    private static bool ClearsVccHi(string source) =>
+        System.Text.RegularExpressions.Regex.IsMatch(source, @"s106 = sharpemu_ballot\(vcc\);\s*s107 = 0u;");
+
+    private static Gen5MslShader CompileGraphics(Gen5ShaderProgram program, ShaderStage stage,
+        Gen5NggStageInfo? primitiveShader = null, bool pixelGuestWave32 = false)
+    {
+        var request = Gen5ComputeFixtures.RequestOrThrow(program, stage, primitiveShader: primitiveShader,
+            pixelGuestWave32: pixelGuestWave32);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        return shader!;
+    }
+
     private static Gen5MslShader Compile(Gen5ShaderProgram program)
     {
         var userData = new uint[16];

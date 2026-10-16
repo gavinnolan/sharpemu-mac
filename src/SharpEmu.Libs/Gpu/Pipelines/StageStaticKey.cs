@@ -89,6 +89,7 @@ public static class StageStaticKey
     public static void Build(PixelInputInfo info, List<uint> key)
     {
         key.Clear();
+        key.Add(Bit(info.GuestWave32));
         key.Add(Bit(info.IeeeMode));
         key.Add(info.FloatMode);
         key.Add(Bit(info.Dx10Clamp));

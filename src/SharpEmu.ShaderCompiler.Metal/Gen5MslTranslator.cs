@@ -264,15 +264,22 @@ public static partial class Gen5MslTranslator
             _waveLaneCount == 64 && _stage == Gen5MslStage.Compute &&
             (ulong)_localSizeX * _localSizeY * _localSizeZ == 64;
 
-        /// <summary>A wave32 compute program: VCC is VCC_LO alone, so a mask write (V_CMP,
-        /// a carry-out) leaves s107 untouched and VCCZ reads s106 only. In wave32, VCC_HI is
-        /// an ordinary SGPR the compiler allocates: GTA V's BVH rotation pass parks
-        /// `s_movk_i32 s107, 0x204` before a V_CMP to VCC and reads it after (and keeps a
-        /// saved EXEC there), and zeroing it there broke the tree it rotates. Only
-        /// compute knows its guest wave size (the dispatch initiator's wave32 bit); the
-        /// graphics stages request wave32 for any guest wave, whose high VCC half has no
-        /// lanes and stays clear.</summary>
-        private bool VccIsLowHalfOnly => _stage == Gen5MslStage.Compute && _waveLaneCount == 32;
+        /// <summary>A guest wave32 program: VCC is VCC_LO alone, so a mask write (V_CMP,
+        /// a carry-out) leaves s107 untouched and VCCZ reads s106 only (EXECZ likewise reads
+        /// EXEC_LO only). In wave32, VCC_HI is an ordinary SGPR the compiler allocates: GTA V's
+        /// BVH rotation pass parks `s_movk_i32 s107, 0x204` before a V_CMP to VCC and reads it
+        /// after (and keeps a saved EXEC there), and zeroing it there broke the tree it rotates.
+        /// The guest wave size comes from the dispatch initiator's wave32 bit for compute,
+        /// VGT_SHADER_STAGES_EN.GS_W32_EN for an NGG primitive shader and SPI_PS_IN_CONTROL.
+        /// PS_W32_EN for a pixel shader; a legacy vertex shader's is not carried, and its high
+        /// VCC half, which has no lanes, stays clear.</summary>
+        private bool VccIsLowHalfOnly => _stage switch
+        {
+            Gen5MslStage.Compute => _waveLaneCount == 32,
+            Gen5MslStage.Mesh or Gen5MslStage.Vertex => _request.PrimitiveShader is { IsWave64: false },
+            Gen5MslStage.Pixel => _request.PixelGuestWave32,
+            _ => false,
+        };
 
         /// <summary>The VCCZ status bit: the whole pair, or VCC_LO alone in wave32.</summary>
         private string VccZeroCondition => VccIsLowHalfOnly
@@ -1390,8 +1397,12 @@ public static partial class Gen5MslTranslator
                 "SCbranchVccnz" => VccIsLowHalfOnly
                     ? $"s[{VccLoRegister}] != 0u"
                     : $"(s[{VccLoRegister}] | s[{VccHiRegister}]) != 0u",
-                "SCbranchExecz" => IsSingleLaneStage ? "!exec" : $"(s[{ExecLoRegister}] | s[{ExecHiRegister}]) == 0u",
-                "SCbranchExecnz" => IsSingleLaneStage ? "exec" : $"(s[{ExecLoRegister}] | s[{ExecHiRegister}]) != 0u",
+                "SCbranchExecz" => IsSingleLaneStage ? "!exec"
+                    : VccIsLowHalfOnly ? $"s[{ExecLoRegister}] == 0u"
+                    : $"(s[{ExecLoRegister}] | s[{ExecHiRegister}]) == 0u",
+                "SCbranchExecnz" => IsSingleLaneStage ? "exec"
+                    : VccIsLowHalfOnly ? $"s[{ExecLoRegister}] != 0u"
+                    : $"(s[{ExecLoRegister}] | s[{ExecHiRegister}]) != 0u",
                 // The emulator does not expose a shader debug session.
                 "SCbranchCdbgsys" or
                 "SCbranchCdbguser" or
