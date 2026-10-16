@@ -1919,7 +1919,6 @@ public sealed partial class DirectExecutionBackend
 			"mPpPxv5CZt4" or // sceSystemServiceGetHdrToneMapLuminance
 			"1FZBKy8HeNU" or // sceVideoOutGetVblankStatus
 			"ASoW5WE-UPo" or // sceKernelAprSubmitCommandBufferAndGetResult
-			"rqwFKI4PAiM" or // sceKernelAprWaitCommandBuffer
 			"eE4Szl8sil8" or // sceKernelAprSubmitCommandBuffer
 			"qvMUCyyaCSI" or // sceKernelAprSubmitCommandBufferAndGetId
 			"Q2V+iqvjgC0" or // vsnprintf
@@ -2058,7 +2057,6 @@ public sealed partial class DirectExecutionBackend
 			"mPpPxv5CZt4" or
 			"1FZBKy8HeNU" or
 			"ASoW5WE-UPo" or
-			"rqwFKI4PAiM" or
 			"eE4Szl8sil8" or
 			"qvMUCyyaCSI" or
 			"Vo5V8KAwCmk" or // sceSystemServiceHideSplashScreen

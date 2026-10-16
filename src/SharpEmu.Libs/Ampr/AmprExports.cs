@@ -35,7 +35,7 @@ internal static class DsAprAcc
     }
 }
 
-public static class AmprExports
+public static partial class AmprExports
 {
     private const int CommandBufferHeaderSize = 0x18;
     private const ulong CommandBufferTypeOffset = 0x00;
@@ -983,7 +983,36 @@ public static class AmprExports
     {
         executionResult = (int)OrbisGen2Result.ORBIS_GEN2_OK;
         errorOffset = 0;
+        var captureResult = CaptureCommandBuffer(ctx, commandBuffer, out var captured);
+        if (captureResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
+        {
+            return captureResult;
+        }
 
+        ExecuteCapturedCommandBuffer(ctx, captured!, out executionResult, out errorOffset);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    /// <summary>
+    /// The commands of a command buffer at submission, in record order. The
+    /// guest may reset or rewrite a submitted buffer while the submission
+    /// runs, so execution only uses this snapshot.
+    /// </summary>
+    private sealed class CapturedCommandBuffer
+    {
+        public required ulong CommandBuffer { get; init; }
+        public required ulong Buffer { get; init; }
+        public required ulong WriteOffset { get; init; }
+        public required ReadFileCommand[] ReadCommands { get; init; }
+        public required KernelEventCommand[] KernelEventCommands { get; init; }
+        public required WriteAddressCommand[] WriteAddressCommands { get; init; }
+        public required WaitAddressCommand[] WaitAddressCommands { get; init; }
+        public required (ulong Offset, int Kind, int Index)[] Order { get; init; }
+    }
+
+    private static int CaptureCommandBuffer(CpuContext ctx, ulong commandBuffer, out CapturedCommandBuffer? captured)
+    {
+        captured = null;
         if (commandBuffer == 0)
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
@@ -1028,19 +1057,47 @@ public static class AmprExports
         }
         commands.Sort(static (left, right) => left.Offset.CompareTo(right.Offset));
 
+        captured = new CapturedCommandBuffer
+        {
+            CommandBuffer = commandBuffer,
+            Buffer = buffer,
+            WriteOffset = writeOffset,
+            ReadCommands = readCommands,
+            KernelEventCommands = kernelEventCommands,
+            WriteAddressCommands = writeAddressCommands,
+            WaitAddressCommands = waitAddressCommands,
+            Order = [.. commands],
+        };
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    /// <summary>
+    /// Runs the captured commands in record order. Each command publishes
+    /// before the next starts (read data, kernel event, address write), and
+    /// the first failing command stops the buffer and reports its offset.
+    /// </summary>
+    private static void ExecuteCapturedCommandBuffer(
+        CpuContext ctx,
+        CapturedCommandBuffer captured,
+        out int executionResult,
+        out uint errorOffset)
+    {
+        executionResult = (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        errorOffset = 0;
+        var commandBuffer = captured.CommandBuffer;
         var dsApr = DsTrace.Io && DsTrace.Armed;
         if (dsApr)
         {
-            DsAprAcc.Cmds = commands.Count;
+            DsAprAcc.Cmds = captured.Order.Length;
         }
 
-        foreach (var commandEntry in commands)
+        foreach (var commandEntry in captured.Order)
         {
             switch (commandEntry.Kind)
             {
                 case 0:
                     {
-                        var readCommand = readCommands[commandEntry.Index];
+                        var readCommand = captured.ReadCommands[commandEntry.Index];
                         var dsT0 = dsApr ? Stopwatch.GetTimestamp() : 0;
                         var readResult = CompleteReadFileRecord(ctx, commandBuffer, readCommand);
                         if (dsApr)
@@ -1053,13 +1110,13 @@ public static class AmprExports
                         {
                             executionResult = readResult;
                             errorOffset = checked((uint)commandEntry.Offset);
-                            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                            return;
                         }
                         break;
                     }
 
                 case 1:
-                    var eventCommand = kernelEventCommands[commandEntry.Index];
+                    var eventCommand = captured.KernelEventCommands[commandEntry.Index];
                     if (!KernelEventQueueCompatExports.TriggerAmprEvent(
                             eventCommand.Equeue,
                             unchecked((uint)eventCommand.Id),
@@ -1067,22 +1124,24 @@ public static class AmprExports
                     {
                         executionResult = (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
                         errorOffset = checked((uint)commandEntry.Offset);
-                        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                        return;
                     }
                     break;
 
                 case 2:
-                    var writeCommand = writeAddressCommands[commandEntry.Index];
+                    var writeCommand = captured.WriteAddressCommands[commandEntry.Index];
                     if (!ctx.TryWriteUInt64(writeCommand.Address, writeCommand.Value))
                     {
                         executionResult = (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
                         errorOffset = checked((uint)commandEntry.Offset);
-                        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                        return;
                     }
+
+                    GuestAddressWatch.NotifyWrite(writeCommand.Address, sizeof(ulong));
                     break;
 
                 case 3:
-                    var waitCommand = waitAddressCommands[commandEntry.Index];
+                    var waitCommand = captured.WaitAddressCommands[commandEntry.Index];
                     var dsW0 = dsApr ? Stopwatch.GetTimestamp() : 0;
                     var waitResult = WaitForAddress(ctx, waitCommand);
                     if (dsApr)
@@ -1094,14 +1153,13 @@ public static class AmprExports
                     {
                         executionResult = waitResult;
                         errorOffset = checked((uint)commandEntry.Offset);
-                        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                        return;
                     }
                     break;
             }
         }
 
-        TraceAmpr(ctx, "complete", commandBuffer, buffer, writeOffset);
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        TraceAmpr(ctx, "complete", commandBuffer, captured.Buffer, captured.WriteOffset);
     }
 
     private static int _unknownReadFileIdWarnings;
@@ -1929,11 +1987,19 @@ public static class AmprExports
         return true;
     }
 
+    /// <summary>
+    /// A wait-on-address command. It runs on the APR worker, never on the
+    /// submitting guest thread: after a short spin it parks on the address
+    /// watch, which AMPR address writes signal, and re-reads the value at
+    /// least every millisecond for stores the emulator does not observe
+    /// (plain guest stores, GPU label writes).
+    /// </summary>
     private static int WaitForAddress(CpuContext ctx, WaitAddressCommand command)
     {
         var spinWait = new SpinWait();
         while (true)
         {
+            var observed = GuestAddressWatch.Version;
             if (DsTrace.Io)
             {
                 DsAprAcc.WaitIters += 1;
@@ -1954,7 +2020,13 @@ public static class AmprExports
                 return (int)OrbisGen2Result.ORBIS_GEN2_OK;
             }
 
-            spinWait.SpinOnce();
+            if (!spinWait.NextSpinWillYield)
+            {
+                spinWait.SpinOnce(sleep1Threshold: -1);
+                continue;
+            }
+
+            GuestAddressWatch.WaitForWrite(observed, GuestAddressWatch.RecheckInterval);
         }
     }
 
@@ -2041,53 +2113,6 @@ public static class AmprExports
                state.CommandCount <= uint.MaxValue &&
                ctx.TryWriteUInt32(commandBuffer + CommandBufferOffsetOffset, (uint)state.WriteOffset) &&
                ctx.TryWriteUInt32(commandBuffer + CommandBufferNumOffset, (uint)state.CommandCount);
-    }
-
-    private static bool CompleteKernelEventQueueRecord(CpuContext ctx, ulong recordAddress)
-    {
-        Span<byte> record = stackalloc byte[(int)KernelEventQueueRecordSize];
-        if (!ctx.Memory.TryRead(recordAddress, record))
-        {
-            return false;
-        }
-
-        var filter = unchecked((short)BinaryPrimitives.ReadUInt32LittleEndian(record[0x04..]));
-        var equeue = BinaryPrimitives.ReadUInt64LittleEndian(record[0x08..]);
-        var ident = BinaryPrimitives.ReadUInt64LittleEndian(record[0x10..]);
-        var userData = BinaryPrimitives.ReadUInt64LittleEndian(record[0x18..]);
-        var data = BinaryPrimitives.ReadUInt64LittleEndian(record[0x20..]);
-        var extra = BinaryPrimitives.ReadUInt64LittleEndian(record[0x28..]);
-
-        var queuedEvent = new KernelEventQueueCompatExports.KernelQueuedEvent(
-            ident,
-            filter,
-            0x20,
-            unchecked((uint)extra),
-            data,
-            userData);
-
-        _ = KernelEventQueueCompatExports.EnqueueEvent(equeue, queuedEvent);
-        TraceAmpr(ctx, "complete_equeue", equeue, ident, data);
-        return true;
-    }
-
-    private static bool CompleteWriteAddressRecord(CpuContext ctx, ulong recordAddress)
-    {
-        Span<byte> record = stackalloc byte[(int)WriteAddressRecordSize];
-        if (!ctx.Memory.TryRead(recordAddress, record))
-        {
-            return false;
-        }
-
-        var address = BinaryPrimitives.ReadUInt64LittleEndian(record[0x08..]);
-        var value = BinaryPrimitives.ReadUInt64LittleEndian(record[0x10..]);
-        if (!ctx.TryWriteUInt64(address, value))
-        {
-            return false;
-        }
-
-        TraceAmpr(ctx, "complete_write_address", address, value, 0);
-        return true;
     }
 
     private static bool TryReadUInt32(CpuContext ctx, ulong address, out uint value)
